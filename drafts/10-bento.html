@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeleFlock · Draft 10 · Bento</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#0b0b10;--t1:#15151d;--t2:#1b1b25;--t3:#232330;--t4:#2c2c3b;
+  --tx:#f5f5f7;--mu:#9a9aad;--mu2:#6e6e82;--line:rgba(255,255,255,.06);--line2:rgba(255,255,255,.1);
+  --s1:#ff7a18;--s2:#ff3d77;--sun:linear-gradient(135deg,#ff7a18 0%,#ff3d77 100%);
+  --r1:#3b82f6;--r2:#8b5cf6;--run:linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);
+  --cy:#22d3ee;--li:#a3e635;--amber:#fbbf24;
+  --R:28px;
+  --d1:inset 0 1px 0 rgba(255,255,255,.05),0 1px 2px rgba(0,0,0,.5),0 8px 18px -6px rgba(0,0,0,.5);
+  --d2:inset 0 1px 0 rgba(255,255,255,.06),0 2px 4px rgba(0,0,0,.35),0 14px 30px -8px rgba(0,0,0,.55),0 34px 64px -24px rgba(0,0,0,.6);
+  --d3:inset 0 1px 0 rgba(255,255,255,.09),0 4px 10px rgba(0,0,0,.35),0 26px 50px -10px rgba(0,0,0,.65),0 70px 120px -30px rgba(0,0,0,.75);
+  --sunglow:0 18px 50px -12px rgba(255,61,119,.6),0 6px 24px -8px rgba(255,122,24,.45);
+  --fd:'Sora','Segoe UI',system-ui,sans-serif;--fu:'Manrope','Segoe UI',system-ui,sans-serif;--fm:'JetBrains Mono',ui-monospace,Consolas,monospace;
+  --spring:cubic-bezier(.34,1.56,.64,1);
+  --noise:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .045 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg);color:var(--tx)}
+body{font-family:var(--fu);font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased;background-image:var(--noise);overflow-x:hidden;font-feature-settings:"tnum" 1,"cv11" 1}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+input,textarea{font:inherit;color:inherit}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--fm)}
+.page{width:1800px;margin:0 auto;padding:28px 0 64px;transform-origin:top center}
+
+/* ===== presentation header ===== */
+.ph{display:flex;align-items:center;gap:28px;padding:18px 26px;border-radius:var(--R);background:linear-gradient(180deg,var(--t2),var(--t1));box-shadow:var(--d2)}
+.ph-logo{display:flex;align-items:center;gap:14px}
+.ph-logo svg{width:44px;height:44px}
+.ph h1{font-family:var(--fd);font-size:22px;font-weight:700;letter-spacing:-.02em}
+.ph h1 span{color:var(--mu);font-weight:500}
+.ph p{color:var(--mu);font-size:13px;max-width:560px}
+.ph .sw{display:flex;gap:8px;margin-left:auto}
+.ph .sw i{width:34px;height:34px;border-radius:11px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.1),0 4px 12px rgba(0,0,0,.4)}
+.ph .fonts{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--mu);text-align:right;min-width:150px}
+.ph .fonts b{color:var(--tx);font-weight:600}
+
+/* ===== stage ===== */
+.stage{position:relative;margin-top:40px;display:flex;flex-direction:column;align-items:center}
+.stage:before{content:"";position:absolute;inset:60px 120px -40px;background:radial-gradient(40% 50% at 25% 40%,rgba(255,61,119,.16),transparent 70%),radial-gradient(45% 55% at 78% 55%,rgba(91,103,246,.2),transparent 70%);filter:blur(30px);z-index:0;pointer-events:none}
+.sec-label{font-family:var(--fd);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--mu2);margin-bottom:14px;z-index:1}
+.pills{position:relative;z-index:2;display:flex;gap:4px;padding:5px;border-radius:999px;background:rgba(27,27,37,.8);backdrop-filter:blur(20px);box-shadow:var(--d2),inset 0 0 0 1px var(--line);margin-bottom:22px}
+.pills button{display:flex;align-items:center;gap:8px;padding:9px 18px;border-radius:999px;font-weight:600;color:var(--mu);transition:background .25s,color .25s}
+.pills button:hover{color:var(--tx);background:rgba(255,255,255,.05)}
+.pills button.on{background:var(--tx);color:#0b0b10;box-shadow:0 4px 14px rgba(255,255,255,.15)}
+.pills kbd{font:600 10px var(--fm);opacity:.5}
+
+/* ===== window ===== */
+.win{position:relative;z-index:1;width:1440px;height:900px;border-radius:10px;overflow:hidden;display:grid;grid-template-rows:40px 1fr;background:#0d0d13 var(--noise);box-shadow:0 0 0 1px rgba(255,255,255,.09),0 30px 80px -10px rgba(0,0,0,.8),0 80px 160px -40px rgba(0,0,0,.8)}
+.win:after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(900px 420px at 72% -8%,rgba(139,92,246,.09),transparent 70%),radial-gradient(700px 380px at 30% -10%,rgba(255,61,119,.05),transparent 70%)}
+.tb{display:flex;align-items:center;padding-left:14px;gap:10px;border-bottom:1px solid var(--line);background:rgba(10,10,15,.6);position:relative;z-index:3}
+.tb .mk{width:18px;height:18px}
+.tb b{font-family:var(--fd);font-size:12.5px;font-weight:600}
+.tb .tsub{color:var(--mu2);font-size:12px}
+.tb .tsub em{font-style:normal;color:var(--li)}
+.wc{margin-left:auto;display:flex;height:100%}
+.wc button{width:46px;height:40px;display:grid;place-items:center;color:#cfcfd8;transition:background .12s}
+.wc button:hover{background:rgba(255,255,255,.07)}
+.wc button.x:hover{background:#c42b1c;color:#fff}
+.wc svg{width:10px;height:10px;stroke:currentColor;stroke-width:1;fill:none}
+.wbody{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:0;position:relative;z-index:1}
+
+/* sidebar */
+.side{display:flex;flex-direction:column;gap:14px;padding:14px 12px;border-right:1px solid var(--line);min-height:0;background:rgba(10,10,15,.35)}
+.mach{padding:12px;border-radius:20px;background:linear-gradient(180deg,var(--t2),var(--t1));box-shadow:var(--d1)}
+.mach-top{display:flex;align-items:center;gap:10px}
+.mach-av{width:34px;height:34px;border-radius:11px;background:var(--run);display:grid;place-items:center;font:700 15px var(--fd);box-shadow:0 6px 16px -4px rgba(91,103,246,.6)}
+.mach-top b{font-family:var(--fd);font-size:14px;font-weight:600;display:block}
+.mach-top small{display:flex;align-items:center;gap:5px;color:var(--mu);font-size:11.5px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
+.dot.ok{background:var(--li);box-shadow:0 0 0 3px rgba(163,230,53,.15)}
+.dot.off{background:#4a4a5a}
+.mach-meta{margin-top:10px;display:flex;justify-content:space-between;font:500 10.5px var(--fm);color:var(--mu2)}
+.mach-alt{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--mu2)}
+.mach-alt span{margin-left:auto;font-size:10.5px}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav button{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:12px;color:var(--mu);font-weight:600;text-align:left;transition:background .2s,color .2s}
+.nav button:hover{background:rgba(255,255,255,.04);color:var(--tx)}
+.nav button.on{background:rgba(255,255,255,.07);color:var(--tx);box-shadow:inset 0 0 0 1px var(--line)}
+.nav button .n{margin-left:auto;font-size:11px;color:var(--mu2)}
+.nav button .sb{margin-left:auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--sun);color:#fff;font-size:10.5px;font-weight:800;display:grid;place-items:center}
+.sh{display:flex;align-items:center;justify-content:space-between;font:600 10.5px var(--fd);letter-spacing:.14em;text-transform:uppercase;color:var(--mu2);padding:0 10px}
+.tree{flex:1;overflow:auto;min-height:0;scrollbar-width:none;display:flex;flex-direction:column;gap:6px}
+.repo{display:flex;align-items:baseline;gap:7px;padding:5px 10px;font-weight:700;font-size:12.5px;white-space:nowrap;min-width:0}
+.repo .ic{width:13px;height:13px;color:var(--mu);align-self:center}
+.repo small{font:400 10px var(--fm);color:var(--mu2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wt{display:flex;align-items:center;gap:8px;padding:4px 10px 4px 30px;font-size:12px;color:var(--mu);border-radius:10px;position:relative}
+.wt:before{content:"";position:absolute;left:16px;top:-4px;bottom:50%;width:8px;border-left:1px solid var(--line2);border-bottom:1px solid var(--line2);border-bottom-left-radius:6px}
+.wt span{font-family:var(--fm);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wt b{margin-left:auto;font-weight:600;font-size:11px;color:var(--tx)}
+.wt:hover{background:rgba(255,255,255,.04)}
+.wt.cur{background:rgba(255,61,119,.09);box-shadow:inset 0 0 0 1px rgba(255,61,119,.22)}
+.sd{width:8px;height:8px;border-radius:50%;flex:none}
+.sd.run{background:var(--run);box-shadow:0 0 8px rgba(110,110,250,.8);animation:pulse 2s ease-in-out infinite}
+.sd.need{background:var(--sun);box-shadow:0 0 10px rgba(255,61,119,.9)}
+.sd.rev{background:var(--cy)}
+.sd.done{background:var(--li)}
+@keyframes pulse{50%{opacity:.45}}
+.side-acts{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.side-acts button{display:flex;align-items:center;justify-content:center;gap:6px;padding:9px 6px;border-radius:14px;background:var(--t1);box-shadow:var(--d1);font-weight:600;font-size:11.5px;white-space:nowrap;color:var(--mu);transition:color .2s,transform .3s var(--spring)}
+.side-acts button:hover{color:var(--tx);transform:translateY(-1px)}
+.side-acts .ic{width:14px;height:14px}
+
+/* main / topbar */
+.main{display:grid;grid-template-rows:60px 1fr;min-width:0;min-height:0;position:relative}
+.top{display:flex;align-items:center;gap:12px;padding:0 24px;border-bottom:1px solid var(--line)}
+.crumb{display:flex;align-items:center;gap:8px;color:var(--mu);font-weight:600}
+.crumb .ic{width:12px;height:12px;color:var(--mu2)}
+.crumb b{font-family:var(--fd);font-size:16px;color:var(--tx);font-weight:600}
+.search{margin-left:auto;display:flex;align-items:center;gap:10px;width:300px;padding:9px 12px;border-radius:14px;background:var(--t1);box-shadow:inset 0 0 0 1px var(--line);color:var(--mu2)}
+.search kbd,.kbd{margin-left:auto;font:600 10.5px var(--fm);padding:2px 6px;border-radius:6px;background:var(--t3);color:var(--mu)}
+.bell{position:relative;width:38px;height:38px;border-radius:14px;display:grid;place-items:center;background:var(--t1);box-shadow:inset 0 0 0 1px var(--line)}
+.bell i{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:var(--sun);font:800 10.5px var(--fu);font-style:normal;display:grid;place-items:center;box-shadow:0 0 0 3px #0d0d13,0 4px 14px rgba(255,61,119,.6)}
+.btn-p{display:flex;align-items:center;gap:8px;padding:10px 16px;border-radius:14px;background:var(--tx);color:#0b0b10;font-weight:700;box-shadow:0 6px 20px -6px rgba(255,255,255,.35);transition:transform .3s var(--spring)}
+.btn-p:hover{transform:translateY(-1px) scale(1.02)}
+.views{position:relative;min-height:0}
+.view{position:absolute;inset:0;padding:20px 24px 24px;display:none}
+.view.on{display:block;animation:vin .5s var(--spring)}
+@keyframes vin{from{opacity:0;transform:scale(.985) translateY(6px)}}
+
+/* ===== tiles & tilt ===== */
+.tile{position:relative;border-radius:var(--R);background:linear-gradient(180deg,var(--t2),var(--t1));box-shadow:var(--d2);padding:18px 20px;overflow:hidden}
+.tilt{transform:perspective(900px) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg)) translateY(var(--ty,0)) scale(var(--sc,1));transition:transform .7s var(--spring),box-shadow .35s ease;will-change:transform}
+.tilt.tilting{--ty:-3px;--sc:1.012;transition:transform .45s var(--spring),box-shadow .35s ease;box-shadow:var(--d3);z-index:2}
+.tilt>.spec{position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .35s;background:radial-gradient(320px circle at var(--mx,50%) var(--my,50%),rgba(255,255,255,.13),rgba(255,255,255,.03) 35%,transparent 60%);mix-blend-mode:plus-lighter;z-index:5}
+.tilt.tilting>.spec{opacity:1}
+.kick{font:600 10.5px var(--fd);letter-spacing:.14em;text-transform:uppercase;color:var(--mu)}
+
+/* ===== board ===== */
+.board{height:100%;display:grid;grid-template-rows:228px minmax(0,1fr);gap:16px}
+.bento{display:grid;grid-template-columns:minmax(0,2.05fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.32fr);gap:16px}
+.hero{background:radial-gradient(120% 130% at 100% 0%,rgba(255,61,119,.95) 0%,transparent 60%),radial-gradient(90% 120% at 0% 100%,#ff7a18 0%,transparent 70%),linear-gradient(135deg,#ff7a18,#ff3d77);box-shadow:var(--sunglow),inset 0 1px 0 rgba(255,255,255,.35);color:#fff;padding:18px 20px;display:flex;flex-direction:column;animation:glow 3.2s ease-in-out infinite}
+.hero.tilting{box-shadow:0 30px 70px -14px rgba(255,61,119,.75),0 10px 30px -8px rgba(255,122,24,.5),inset 0 1px 0 rgba(255,255,255,.35)}
+@keyframes glow{50%{box-shadow:0 22px 64px -10px rgba(255,61,119,.8),0 6px 28px -6px rgba(255,122,24,.55),inset 0 1px 0 rgba(255,255,255,.35)}}
+.hero:before{content:"";position:absolute;right:-70px;top:-70px;width:240px;height:240px;border-radius:50%;border:38px solid rgba(255,255,255,.08)}
+.hero-top{display:flex;align-items:center;gap:8px;position:relative}
+.live-pill{display:flex;align-items:center;gap:6px;padding:4px 10px 4px 8px;border-radius:999px;background:rgba(40,0,20,.28);font:700 10.5px var(--fd);letter-spacing:.12em;text-transform:uppercase}
+.live-pill i{width:7px;height:7px;border-radius:50%;background:#fff;box-shadow:0 0 0 0 rgba(255,255,255,.7);animation:ping 1.6s infinite}
+@keyframes ping{70%{box-shadow:0 0 0 7px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
+.hero-top .w{margin-left:auto;font-weight:700;font-size:12px;opacity:.9}
+.hero h2{position:relative;font-family:var(--fd);font-weight:700;font-size:24px;line-height:1.15;letter-spacing:-.025em;margin:10px 0 4px;max-width:420px}
+.hero .m{position:relative;font-size:12px;opacity:.85;font-weight:600}
+.hero .m code{font:500 11px var(--fm)}
+.hero-ans{position:relative;margin-top:auto;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.ans{display:flex;align-items:center;gap:6px;padding:9px 10px;border-radius:14px;background:rgba(40,0,20,.24);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);font-weight:700;font-size:11.5px;white-space:nowrap;overflow:hidden;color:#fff;text-align:left;transition:background .2s,transform .35s var(--spring),color .2s}
+.ans:hover{background:rgba(40,0,20,.36);transform:translateY(-1px)}
+.ans small{margin-left:auto;font-size:0}
+.ans small:after{content:"★";font-size:12px}
+.ans.sel{background:#fff;color:#d21a5a;box-shadow:0 8px 20px -6px rgba(80,0,30,.5)}
+.st-big{font-family:var(--fd);font-weight:700;font-size:40px;letter-spacing:-.04em;line-height:1;margin-top:12px}
+.st-sub{color:var(--mu);font-weight:600;margin-top:6px}
+.st-sub b{color:var(--tx)}
+.segbar{position:absolute;left:20px;right:20px;bottom:18px}
+.segbar .bar{display:flex;gap:3px;height:8px}
+.segbar .bar i{border-radius:4px}
+.segbar .lg{display:flex;justify-content:space-between;margin-top:8px;font-size:10.5px;color:var(--mu);font-weight:600}
+.segbar .lg b{color:var(--tx);font-weight:800;margin-right:4px}
+.meter{margin-top:12px}
+.meter .r{display:flex;justify-content:space-between;font-size:11.5px;color:var(--mu);font-weight:600;margin-bottom:6px}
+.meter .r b{color:var(--tx)}
+.meter .t{height:6px;border-radius:3px;background:rgba(255,255,255,.07);overflow:hidden}
+.meter .t i{display:block;height:100%;border-radius:3px}
+.health-hd{display:flex;align-items:center;justify-content:space-between}
+.health-hd span{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--li)}
+.mterm{background:#07070b;padding:14px 16px;display:flex;flex-direction:column}
+.mterm-hd{display:flex;align-items:center;gap:8px;font-size:11.5px;font-weight:700}
+.mterm-hd small{color:var(--mu2);font:500 10.5px var(--fm)}
+.mterm-hd .rec{margin-left:auto;display:flex;align-items:center;gap:5px;color:var(--mu);font:600 10px var(--fd);letter-spacing:.12em;text-transform:uppercase}
+.mterm-hd .rec i{width:6px;height:6px;border-radius:50%;background:#ff3d77;animation:pulse 1.2s infinite}
+.mterm pre{flex:1;margin-top:10px;font:400 11px/1.6 var(--fm);color:#c9c9d6;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;-webkit-mask-image:linear-gradient(transparent,#000 40%)}
+.mterm pre .ln{animation:lnin .35s ease-out}
+@keyframes lnin{from{opacity:0;transform:translateY(6px)}}
+.g{color:#4ade80}.c{color:var(--cy)}.mg{color:#e879f9}.am{color:var(--amber)}.bl{color:#7aa2ff}.dm{color:var(--mu2)}.wh{color:#fff}.rd{color:#ff6b8b}
+.caret{display:inline-block;width:7px;height:13px;background:#e6e6ee;vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+.lanes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;min-height:0}
+.lane{display:flex;flex-direction:column;min-height:0;border-radius:var(--R);background:rgba(255,255,255,.018);box-shadow:inset 0 0 0 1px var(--line);padding:12px 6px 0;transition:background .2s,box-shadow .2s}
+.lane.over{background:rgba(255,255,255,.045);box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.18)}
+.lane.l-need{background:radial-gradient(120% 60% at 50% 0%,rgba(255,61,119,.09),transparent 70%),rgba(255,255,255,.018)}
+.lane-hd{display:flex;align-items:center;gap:9px;padding:2px 10px 10px}
+.lane-hd h3{font-family:var(--fd);font-size:14px;font-weight:600;letter-spacing:-.01em}
+.lane-hd .cnt{min-width:22px;height:20px;padding:0 7px;border-radius:10px;background:var(--t3);font-size:11px;font-weight:800;display:grid;place-items:center;color:var(--mu)}
+.l-need .lane-hd .cnt{background:var(--sun);color:#fff}
+.lane-hd .lx{margin-left:auto;font-size:11px;color:var(--mu2);font-weight:600}
+.list{flex:1;overflow-y:auto;overflow-x:hidden;padding:4px 6px 14px;display:flex;flex-direction:column;gap:10px;scrollbar-width:none}
+.list::-webkit-scrollbar{display:none}
+
+.card{position:relative;border-radius:22px;background:linear-gradient(180deg,var(--t3),var(--t2));box-shadow:var(--d1);padding:12px 13px;cursor:grab;flex:none}
+.card.dragging{opacity:.35}
+.c-top{display:flex;gap:11px;align-items:flex-start}
+.c-meta{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mu);white-space:nowrap;overflow:hidden}
+.c-meta b{color:var(--tx);font-weight:800;font-size:11.5px}
+.c-meta span{overflow:hidden;text-overflow:ellipsis}
+.c-meta .tmr{margin-left:auto;font-weight:700;color:var(--mu)}
+.card h4{font-size:13px;font-weight:700;line-height:1.3;margin-top:3px;letter-spacing:-.005em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.c-who{min-width:0;flex:1}
+.c-live{margin-top:10px;display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:11px;background:rgba(0,0,0,.28);font:500 10.5px var(--fm);color:#c7c7d4;white-space:nowrap;overflow:hidden}
+.c-live .ln{overflow:hidden;text-overflow:ellipsis}
+.tool{font:600 10px var(--fm);padding:1px 6px;border-radius:6px;background:rgba(122,140,255,.16);color:#a9b4ff;flex:none}
+.spin{margin-left:auto;width:11px;height:11px;border-radius:50%;border:1.6px solid rgba(255,255,255,.12);border-top-color:#8b9cff;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.c-foot{margin-top:9px;display:flex;align-items:center;gap:9px;font-size:10.5px;font-weight:600;color:var(--mu);white-space:nowrap;transition:opacity .2s}
+.c-foot .ctx{display:flex;align-items:center;gap:5px}
+.c-foot .ctx i{width:22px;height:4px;border-radius:2px;background:rgba(255,255,255,.1);position:relative;overflow:hidden}
+.c-foot .ctx i:after{content:"";position:absolute;inset:0;width:var(--v);background:var(--mu)}
+.c-foot .mdl{margin-left:auto;overflow:hidden;text-overflow:ellipsis;color:var(--mu2)}
+.add{color:var(--li)}.del{color:#ff6b8b}
+.c-acts{position:absolute;left:8px;right:8px;bottom:8px;display:flex;gap:6px;opacity:0;transform:translateY(6px);transition:opacity .2s,transform .35s var(--spring);pointer-events:none}
+.card:hover .c-acts{opacity:1;transform:none;pointer-events:auto}
+.card.c-run:hover .c-foot{opacity:0}
+.cb{flex:1;display:flex;align-items:center;justify-content:center;gap:5px;padding:6px 8px;border-radius:11px;background:var(--t4);box-shadow:inset 0 0 0 1px var(--line2);font-size:11.5px;font-weight:700;transition:background .2s}
+.cb:hover{background:#383849}
+.cb .ic{width:12px;height:12px}
+.cb.stop:hover{background:#4a1f2b;color:#ff8aa5}
+.ring{position:relative;flex:none;display:grid;place-items:center}
+.ring svg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.ring .rt{fill:none;stroke:rgba(255,255,255,.08);stroke-width:4}
+.ring .rp{fill:none;stroke-width:4;stroke-linecap:round;filter:drop-shadow(0 0 3px rgba(139,92,246,.8));animation:ringin 1.2s var(--spring) both}
+@keyframes ringin{from{stroke-dasharray:0 200}}
+.ring b{font-size:10px;font-weight:800;letter-spacing:-.02em}
+.ring .orb{position:absolute;inset:-3px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0 75%,rgba(139,92,246,.35),transparent);animation:spin 2.4s linear infinite;-webkit-mask:radial-gradient(circle,transparent 58%,#000 60%)}
+/* need cards */
+.c-need{background:linear-gradient(180deg,#25202b,#1f1a24) padding-box,var(--sun) border-box;border:1.5px solid transparent;box-shadow:0 14px 34px -14px rgba(255,61,119,.55),var(--d1)}
+.c-need.tilting{box-shadow:0 24px 50px -14px rgba(255,61,119,.7),var(--d3)}
+.c-hd{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.badge{font:800 9.5px var(--fu);letter-spacing:.09em;text-transform:uppercase;padding:3px 8px;border-radius:999px}
+.badge.sun{background:var(--sun);color:#fff;box-shadow:0 4px 12px -2px rgba(255,61,119,.6)}
+.badge.cy{background:rgba(34,211,238,.14);color:var(--cy)}
+.c-hd .wait{margin-left:auto;font-size:11px;font-weight:700;color:#ffb38a}
+.c-q{margin-top:8px;font-family:var(--fd);font-size:13.5px;font-weight:600;line-height:1.3;color:#fff;letter-spacing:-.01em}
+.qa{margin-top:10px;display:flex;flex-wrap:wrap;gap:6px}
+.qa button{padding:6px 10px;border-radius:11px;font-size:11.5px;font-weight:700;background:rgba(255,255,255,.07);box-shadow:inset 0 0 0 1px rgba(255,255,255,.1);transition:all .25s var(--spring)}
+.qa button:hover{background:rgba(255,255,255,.12);transform:translateY(-1px)}
+.qa button.rec,.qa button.sel{background:var(--sun);box-shadow:0 6px 16px -6px rgba(255,61,119,.7);color:#fff}
+.qa button.rec:not(.sel){background:rgba(255,122,24,.16);box-shadow:inset 0 0 0 1px rgba(255,122,24,.5);color:#ffc29a}
+.cmd{margin-top:8px;padding:8px 10px;border-radius:12px;background:rgba(0,0,0,.35);font:500 11px var(--fm);color:#ffd2b8;box-shadow:inset 0 0 0 1px rgba(255,122,24,.2)}
+.cmd .dm{color:var(--mu2)}
+.appr{margin-top:10px;display:grid;grid-template-columns:1fr 1.2fr .7fr;gap:6px}
+.appr button{padding:7px 4px;border-radius:11px;font-size:11px;font-weight:700;background:rgba(255,255,255,.07);box-shadow:inset 0 0 0 1px rgba(255,255,255,.1);white-space:nowrap;transition:transform .3s var(--spring),background .2s}
+.appr button:hover{transform:translateY(-1px);background:rgba(255,255,255,.12)}
+.appr .yes{background:var(--sun);box-shadow:0 6px 16px -6px rgba(255,61,119,.7)}
+.appr .no:hover{color:#ff8aa5}
+/* review & done */
+.c-rev:before{content:"";position:absolute;left:18px;right:18px;top:0;height:2px;border-radius:2px;background:var(--cy);box-shadow:0 0 12px var(--cy)}
+.c-line{margin-top:8px;font-size:11.5px;font-weight:600;color:#a5f3fc}
+.thumb{margin-top:10px;height:66px;border-radius:12px;overflow:hidden;box-shadow:inset 0 0 0 1px var(--line2)}
+.thumb svg{width:100%;height:100%;display:block}
+.revb{margin-top:10px;display:flex;gap:6px}
+.revb .cb{background:rgba(34,211,238,.08);box-shadow:inset 0 0 0 1px rgba(34,211,238,.22);white-space:nowrap}
+.revb .cb .ic{display:none}
+.revb .cb.pri{background:var(--cy);color:#04262c;box-shadow:0 6px 16px -6px rgba(34,211,238,.6)}
+.c-done{padding:11px 13px;display:flex;gap:10px;align-items:flex-start;background:linear-gradient(180deg,var(--t2),#181821)}
+.c-done .ck{width:22px;height:22px;border-radius:50%;background:rgba(163,230,53,.14);color:var(--li);display:grid;place-items:center;flex:none}
+.c-done .ck .ic{width:12px;height:12px;stroke-width:2.6}
+.c-done h4{margin-top:0;font-size:12.5px;color:#d9d9e2}
+.c-done .c-meta{margin-top:4px}
+
+/* ===== session (visionOS depth) ===== */
+.v-session{perspective:1800px;overflow:hidden}
+.v-session:before{content:"";position:absolute;inset:0;background:radial-gradient(40% 45% at 34% 86%,rgba(255,61,119,.22),transparent 70%),radial-gradient(35% 40% at 85% 10%,rgba(59,130,246,.16),transparent 70%),radial-gradient(30% 40% at 10% 15%,rgba(139,92,246,.12),transparent 70%);filter:blur(10px)}
+.ses{position:relative;height:100%;display:grid;grid-template-columns:minmax(0,1fr) 336px;gap:22px;transform-style:preserve-3d}
+.ses-l{display:flex;flex-direction:column;gap:12px;min-height:0;transform-style:preserve-3d}
+.pane{position:relative;border-radius:var(--R);background:rgba(27,27,37,.72);backdrop-filter:blur(24px) saturate(150%);box-shadow:var(--d2),inset 0 0 0 1px rgba(255,255,255,.07)}
+.z-back{transform:translateZ(-60px);filter:saturate(.9)}
+.z-mid{transform:translateZ(-20px)}
+.z-front{transform:translateZ(36px)}
+.s-head{display:flex;align-items:center;gap:12px;padding:10px 12px 10px 14px;border-radius:22px}
+.s-av{width:36px;height:36px;border-radius:12px;background:var(--sun);display:grid;place-items:center;box-shadow:var(--sunglow)}
+.s-av .ic{width:18px;height:18px;color:#fff}
+.s-head h2{font-family:var(--fd);font-size:19px;font-weight:700;letter-spacing:-.02em}
+.s-head .loc{font:500 11px var(--fm);color:var(--mu)}
+.s-head .chips{margin-left:auto;display:flex;gap:6px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:rgba(255,255,255,.06);box-shadow:inset 0 0 0 1px var(--line);font-size:11.5px;font-weight:700;color:#d6d6e0;white-space:nowrap}
+.chip .ic{width:12px;height:12px}
+.chip.sun{background:var(--sun);color:#fff;box-shadow:0 6px 18px -6px rgba(255,61,119,.7)}
+.chip.ghost{color:var(--mu)}
+.tr{flex:1;min-height:0;overflow:auto;padding:16px 18px 30px;display:flex;flex-direction:column;gap:10px;scrollbar-width:none;-webkit-mask-image:linear-gradient(transparent,#000 40px)}
+.msg{display:flex;gap:10px}
+.av{width:28px;height:28px;border-radius:10px;flex:none;display:grid;place-items:center;font-size:10px;font-weight:800}
+.av.you{background:var(--t4);color:var(--mu)}
+.av.omp{background:var(--run);box-shadow:0 4px 14px -4px rgba(91,103,246,.7)}
+.av.omp svg{width:16px;height:16px}
+.bub .who{font-size:11.5px;font-weight:800}
+.bub .who span{color:var(--mu2);font-weight:600;margin-left:6px}
+.bub p{color:#dcdce4;font-size:13px;margin-top:2px;max-width:640px}
+.think{align-self:flex-start;margin-left:38px;display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;background:rgba(255,255,255,.04);color:var(--mu);font-size:11.5px;font-weight:600;box-shadow:inset 0 0 0 1px var(--line)}
+.think .ic{width:12px;height:12px}
+.tc{margin-left:38px;border-radius:16px;background:rgba(10,10,16,.5);box-shadow:inset 0 0 0 1px var(--line)}
+.tc-h{display:flex;align-items:center;gap:9px;padding:8px 12px;font-size:12px}
+.tc-h .ti{width:22px;height:22px;border-radius:8px;display:grid;place-items:center;background:rgba(255,255,255,.06);color:var(--mu)}
+.tc-h .ti .ic{width:12px;height:12px}
+.tc-h .tn{font:600 11.5px var(--fm);color:#b9c2ff}
+.tc-h .tp{font:500 11.5px var(--fm);color:#e2e2ea;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tc-h .tm{margin-left:auto;color:var(--mu);font-size:11.5px;font-weight:600;white-space:nowrap}
+.tc-b{border-top:1px solid var(--line);padding:8px 12px}
+.sub{display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0}
+.sub b{font-weight:800}
+.sub span{color:var(--mu)}
+.sub em{margin-left:auto;font-style:normal;color:var(--li);font-weight:700;font-size:11.5px}
+.diff{font:400 11px/1.65 var(--fm);padding:6px 0;border-top:1px solid var(--line)}
+.diff div{padding:0 12px;white-space:pre}
+.diff .a{background:rgba(163,230,53,.07);color:#d6f5a8}
+.diff .d{background:rgba(255,61,119,.08);color:#ffa3b8}
+.out{font:400 11px/1.6 var(--fm);color:#c4c4d0}
+.todo{margin-left:38px;padding:10px 12px;border-radius:16px;background:rgba(10,10,16,.5);box-shadow:inset 0 0 0 1px var(--line)}
+.todo-h{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:800;margin-bottom:4px}
+.todo-h span{margin-left:auto;color:var(--mu);font-weight:600}
+.td{display:flex;align-items:center;gap:9px;font-size:12px;padding:2.5px 0;color:#d4d4de}
+.td i{width:14px;height:14px;border-radius:50%;flex:none;display:grid;place-items:center;font-style:normal;font-size:9px}
+.td.ok{color:var(--mu)}.td.ok i{background:rgba(163,230,53,.18);color:var(--li)}
+.td.prog i{background:conic-gradient(#ff7a18 0 50%,rgba(255,255,255,.1) 0);box-shadow:0 0 8px rgba(255,122,24,.5)}
+.td.prog{color:#ffd0b0;font-weight:700}
+.td.pe i{box-shadow:inset 0 0 0 1.5px var(--mu2)}
+.td small{margin-left:auto;color:#ff9a6a;font-weight:700;font-size:10.5px}
+/* ask */
+.ask{padding:16px 18px 18px;border-radius:var(--R);color:#fff;background:radial-gradient(90% 140% at 100% 0%,rgba(255,61,119,1),transparent 65%),linear-gradient(125deg,#ff7a18,#ff3d77);box-shadow:0 30px 70px -18px rgba(255,61,119,.75),0 10px 30px -10px rgba(255,122,24,.6),inset 0 1px 0 rgba(255,255,255,.35);overflow:hidden}
+.ask:before{content:"";position:absolute;left:-60px;bottom:-120px;width:300px;height:300px;border-radius:50%;border:44px solid rgba(255,255,255,.07)}
+.ask-top{position:relative;display:flex;align-items:center;gap:10px}
+.ask-top .hint{margin-left:auto;font-size:11.5px;font-weight:700;opacity:.85}
+.ask h3{position:relative;font-family:var(--fd);font-size:25px;font-weight:700;letter-spacing:-.03em;margin:8px 0 12px}
+.opts{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.opt{display:flex;gap:10px;align-items:flex-start;text-align:left;padding:10px 12px;border-radius:18px;background:rgba(45,0,22,.22);box-shadow:inset 0 0 0 1px rgba(255,255,255,.2);transition:background .2s,transform .35s var(--spring),box-shadow .2s;color:#fff}
+.opt:hover{background:rgba(45,0,22,.34);transform:translateY(-2px)}
+.opt .rad{width:18px;height:18px;border-radius:50%;box-shadow:inset 0 0 0 2px rgba(255,255,255,.7);flex:none;margin-top:1px;display:grid;place-items:center}
+.opt b{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:800}
+.opt b small{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:999px;background:rgba(255,255,255,.25)}
+.opt span{display:block;font-size:11.5px;line-height:1.35;opacity:.88;margin-top:2px}
+.opt.sel{background:#fff;color:#2a0b16;box-shadow:0 12px 26px -8px rgba(80,0,30,.55)}
+.opt.sel .rad{box-shadow:inset 0 0 0 5px #ff3d77}
+.opt.sel b small{background:var(--sun);color:#fff}
+.opt.sel span{opacity:.7}
+.opt .oth{margin-top:4px;width:100%;padding:4px 0;background:none;border:0;border-bottom:1px dashed rgba(255,255,255,.5);outline:none;font-size:12px;color:inherit}
+.opt .oth::placeholder{color:rgba(255,255,255,.7)}
+.opt.sel .oth::placeholder{color:#8a5a6a}
+.send-a{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:#fff;color:#d21a5a;font-weight:800;font-size:12px}
+.comp{padding:10px 12px 10px 16px}
+.comp-r1{display:flex;align-items:center;gap:10px}
+.comp-r1 input{flex:1;background:none;border:0;outline:none;font-size:14px;padding:6px 0}
+.comp-r1 input::placeholder{color:var(--mu2)}
+.ib{width:34px;height:34px;border-radius:12px;display:grid;place-items:center;color:var(--mu);transition:background .2s,color .2s}
+.ib:hover{background:rgba(255,255,255,.07);color:var(--tx)}
+.ib.send{background:var(--tx);color:#0b0b10}
+.comp-r2{display:flex;align-items:center;gap:6px;margin-top:6px}
+.comp-r2 .hints{margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--mu2);font-weight:600}
+.comp-r2 .hints code{font:600 10.5px var(--fm);color:var(--mu);padding:1px 5px;border-radius:5px;background:var(--t3)}
+.ses-r{display:flex;flex-direction:column;gap:12px;min-height:0;transform:rotateY(-7deg) translateZ(-10px);transform-origin:0% 50%;transform-style:preserve-3d}
+.ip{padding:14px 16px}
+.ip-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.ip-h span{font-size:11px;color:var(--mu);font-weight:700}
+.minis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.mini{padding:10px 12px;border-radius:18px;background:rgba(10,10,16,.45);box-shadow:inset 0 0 0 1px var(--line)}
+.mini .k{font-size:10.5px;color:var(--mu);font-weight:700}
+.mini .v{font-family:var(--fd);font-size:20px;font-weight:700;letter-spacing:-.03em;margin-top:2px}
+.mini .s{font-size:10.5px;color:var(--mu2);font-weight:600}
+.mini.ctxm{display:flex;gap:10px;align-items:center}
+.files{display:flex;flex-direction:column;gap:2px}
+.fr{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:10px;font-size:12px}
+.fr:hover{background:rgba(255,255,255,.04)}
+.fr .ic{width:13px;height:13px;color:var(--mu2)}
+.fr span{font:500 11.5px var(--fm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fr em{margin-left:auto;font-style:normal;font:600 11px var(--fm);white-space:nowrap}
+.fr.tot{border-top:1px solid var(--line);margin-top:4px;padding-top:8px;font-weight:800}
+.fbtn{display:flex;gap:6px;margin-top:10px}
+.agrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.agrid button{display:flex;flex-direction:column;align-items:center;gap:5px;padding:9px 0 8px;border-radius:16px;background:rgba(10,10,16,.45);box-shadow:inset 0 0 0 1px var(--line);font-size:10.5px;font-weight:700;color:var(--mu);transition:color .2s,transform .35s var(--spring)}
+.agrid button:hover{color:var(--tx);transform:translateY(-2px)}
+.stree{width:100%;height:84px;display:block;margin-top:4px}
+
+/* ===== worktree modal ===== */
+.v-wt{padding:0}
+.wt-bg{position:absolute;inset:0;padding:20px 24px 24px;filter:blur(3px) saturate(.7);opacity:.35;pointer-events:none}
+.scrim{position:absolute;inset:0;background:radial-gradient(60% 60% at 50% 45%,rgba(11,11,16,.3),rgba(11,11,16,.75))}
+.modal{position:absolute;left:50%;top:50%;width:920px;transform:translate(-50%,-52%);border-radius:32px;background:linear-gradient(180deg,#1f1f2b,#17171f);box-shadow:var(--d3),0 0 0 1px rgba(255,255,255,.08);padding:22px 24px;animation:pop .55s var(--spring)}
+@keyframes pop{from{opacity:0;transform:translate(-50%,-48%) scale(.96)}}
+.md-h{display:flex;align-items:center;gap:14px}
+.md-h .mi{width:42px;height:42px;border-radius:14px;background:var(--run);display:grid;place-items:center;box-shadow:0 8px 22px -6px rgba(91,103,246,.7)}
+.md-h .mi .ic{width:20px;height:20px}
+.md-h h2{font-family:var(--fd);font-size:22px;font-weight:700;letter-spacing:-.025em}
+.md-h p{color:var(--mu);font-size:12.5px}
+.md-h .x{margin-left:auto}
+.md-grid{display:grid;grid-template-columns:310px 1fr;gap:16px;margin-top:18px}
+.fb{border-radius:24px;background:rgba(10,10,16,.55);box-shadow:inset 0 0 0 1px var(--line);padding:12px;display:flex;flex-direction:column}
+.fb-path{display:flex;align-items:center;gap:6px;font:500 11.5px var(--fm);color:var(--mu);padding:4px 6px 10px;border-bottom:1px solid var(--line);margin-bottom:6px}
+.fb-path b{color:var(--tx);font-weight:600}
+.fb-path .ic{width:12px;height:12px}
+.fo{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:14px;font-size:12.5px;font-weight:700;cursor:pointer;transition:background .2s}
+.fo:hover{background:rgba(255,255,255,.04)}
+.fo .fi{width:28px;height:28px;border-radius:9px;background:var(--t3);display:grid;place-items:center;color:var(--mu)}
+.fo .fi .ic{width:14px;height:14px}
+.fo small{display:block;font:500 10.5px var(--fm);color:var(--mu2);margin-top:1px}
+.fo .st{margin-left:auto;font-size:10.5px;font-weight:700}
+.fo.sel{background:rgba(59,130,246,.12);box-shadow:inset 0 0 0 1.5px rgba(122,140,255,.55)}
+.fo.sel .fi{background:var(--run);color:#fff}
+.fo.dim{opacity:.35;cursor:default}
+.fb-foot{margin-top:auto;padding:10px 6px 2px;font-size:11px;color:var(--mu2);display:flex;align-items:center;gap:6px}
+.form{display:flex;flex-direction:column;gap:10px}
+.seg{display:grid;grid-template-columns:1fr 1fr;padding:4px;border-radius:14px;background:rgba(10,10,16,.55);box-shadow:inset 0 0 0 1px var(--line)}
+.seg button{padding:8px;border-radius:10px;font-weight:700;color:var(--mu)}
+.seg button.on{background:var(--t4);color:var(--tx);box-shadow:var(--d1)}
+.fg{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fld{padding:8px 12px;border-radius:16px;background:rgba(10,10,16,.55);box-shadow:inset 0 0 0 1px var(--line)}
+.fld label{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;color:var(--mu);letter-spacing:.02em}
+.fld label em{margin-left:auto;font-style:normal;color:var(--li);font-size:10px}
+.fld label em.au{color:var(--mu2)}
+.fld div{font:500 12.5px var(--fm);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fld.focus{box-shadow:inset 0 0 0 1.5px #7a8cff,0 0 0 4px rgba(122,140,255,.15)}
+.fld.ui div{font-family:var(--fu);font-weight:600}
+.agent-row{padding:10px 12px;border-radius:18px;background:rgba(10,10,16,.55);box-shadow:inset 0 0 0 1px var(--line);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tog{width:34px;height:20px;border-radius:10px;background:var(--run);position:relative;flex:none;box-shadow:0 4px 12px -4px rgba(91,103,246,.8)}
+.tog:after{content:"";position:absolute;right:2px;top:2px;width:16px;height:16px;border-radius:50%;background:#fff}
+.agent-row b{font-weight:800;margin-right:4px}
+.prompt{padding:10px 12px;border-radius:16px;background:rgba(10,10,16,.55);box-shadow:inset 0 0 0 1px var(--line);font-size:12.5px;color:#dcdce4;line-height:1.5}
+.prompt label{display:block;font-size:10.5px;font-weight:700;color:var(--mu);margin-bottom:3px}
+.md-f{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.md-f code{font:500 11px var(--fm);color:var(--mu2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.md-f code b{color:var(--mu);font-weight:500}
+.btn-g{padding:10px 16px;border-radius:14px;font-weight:700;color:var(--mu);background:var(--t3)}
+.btn-g:hover{color:var(--tx)}
+.btn-run{display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:14px;background:var(--run);font-weight:800;box-shadow:0 10px 26px -8px rgba(91,103,246,.8);transition:transform .3s var(--spring)}
+.btn-run:hover{transform:translateY(-1px) scale(1.02)}
+.btn-run kbd{font:600 10.5px var(--fm);padding:2px 6px;border-radius:6px;background:rgba(255,255,255,.2)}
+
+/* ===== terminal view ===== */
+.term-v{height:100%;display:grid;grid-template-columns:minmax(0,1fr) 272px;gap:16px}
+.term-l{display:flex;flex-direction:column;gap:12px;min-height:0}
+.ttb{display:flex;align-items:center;gap:10px;padding:8px 10px 8px 14px;border-radius:22px}
+.ttb .att{display:flex;align-items:center;gap:8px;font-weight:700}
+.ttb .att code{font:600 11.5px var(--fm);padding:2px 7px;border-radius:7px;background:var(--t3);color:#b9c2ff}
+.tabs{display:flex;padding:3px;border-radius:12px;background:rgba(10,10,16,.55);margin-left:6px}
+.tabs button{padding:5px 12px;border-radius:9px;font:600 11.5px var(--fm);color:var(--mu)}
+.tabs button.on{background:var(--t4);color:var(--tx)}
+.ttb .r{margin-left:auto;display:flex;gap:6px;align-items:center}
+.key{padding:6px 10px;border-radius:10px;background:var(--t3);font:600 11px var(--fm);box-shadow:inset 0 -2px 0 rgba(0,0,0,.35),inset 0 0 0 1px var(--line)}
+.key:hover{background:var(--t4)}
+.take{padding:6px 12px;border-radius:10px;background:var(--sun);font-weight:800;font-size:12px;box-shadow:0 6px 16px -6px rgba(255,61,119,.7)}
+.fs{display:flex;align-items:center;gap:2px;padding:2px;border-radius:10px;background:var(--t3);font:600 11px var(--fm)}
+.fs button{width:24px;height:24px;border-radius:8px}
+.fs button:hover{background:var(--t4)}
+.fs span{padding:0 4px;color:var(--mu)}
+.term{flex:1;min-height:0;border-radius:var(--R);background:#07070b;box-shadow:var(--d2),inset 0 0 0 1px rgba(255,255,255,.06);padding:18px 22px;font:400 13px/1.62 var(--fm);color:#d4d4de;overflow:hidden;position:relative}
+.term:after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.025),transparent 30%)}
+.term pre{font:inherit;white-space:pre}
+.trr{display:flex;flex-direction:column;gap:12px;min-height:0}
+.trr .tile{padding:16px}
+.al{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;border-bottom:1px solid var(--line)}
+.al:last-child{border:0}
+.al b{font-weight:800;width:72px}
+.al span{font:500 10.5px var(--fm);color:var(--mu2)}
+.al em{margin-left:auto;font-style:normal;font-size:11px;font-weight:700}
+.kv{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:var(--mu)}
+.kv b{color:var(--tx);font:600 11.5px var(--fm)}
+
+/* ===== phones ===== */
+.phones-sec{margin-top:80px;position:relative;display:flex;flex-direction:column;align-items:center}
+.phones{display:flex;gap:24px;justify-content:center;flex-wrap:wrap}
+.pwrap{display:flex;flex-direction:column;align-items:center;gap:16px}
+.plabel{font-family:var(--fd);font-weight:600;font-size:14px;letter-spacing:-.01em}
+.plabel span{color:var(--mu2);margin-right:8px}
+.phone{width:432px;height:912px;padding:10px;border-radius:58px;background:linear-gradient(145deg,#2c2c37,#111117);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 0 0 2px rgba(255,255,255,.04),0 50px 90px -24px rgba(0,0,0,.85),0 20px 40px -10px rgba(0,0,0,.6)}
+.scr{position:relative;width:412px;height:892px;border-radius:48px;overflow:hidden;background:#0b0b10 var(--noise);display:flex;flex-direction:column}
+.p-sb{height:40px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 28px 0 34px;font-weight:700;font-size:14px;position:relative;z-index:9}
+.p-sb .ics{display:flex;gap:5px}.p-sb .ic{width:15px;height:15px}
+.p-cam{position:absolute;left:50%;top:13px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:#000;box-shadow:0 0 0 2px #1b1b23}
+.p-gb{position:absolute;left:50%;bottom:8px;width:120px;height:4px;margin-left:-60px;border-radius:2px;background:rgba(255,255,255,.55);z-index:20}
+.p-body{flex:1;min-height:0;overflow:hidden;padding:4px 18px 16px;display:flex;flex-direction:column;gap:12px;-webkit-mask-image:linear-gradient(#000 88%,transparent)}
+.p-hd{display:flex;align-items:flex-end;justify-content:space-between;padding-top:4px}
+.p-hd h2{font-family:var(--fd);font-size:34px;font-weight:700;letter-spacing:-.045em;line-height:1.05}
+.conn{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:999px;background:var(--t2);box-shadow:var(--d1);font-weight:700;font-size:12px;margin-bottom:4px}
+.wg{display:grid;grid-template-columns:1fr 1fr 1.25fr;gap:10px}
+.wd{border-radius:24px;padding:12px 14px;background:linear-gradient(180deg,var(--t2),var(--t1));box-shadow:var(--d2);position:relative;overflow:hidden;height:86px}
+.wd .big{font-family:var(--fd);font-size:40px;font-weight:800;letter-spacing:-.05em;line-height:1}
+.wd .lb{font-size:11.5px;font-weight:700;color:var(--mu);margin-top:6px}
+.wd.sun{background:radial-gradient(100% 120% at 100% 0%,#ff3d77,transparent 70%),var(--sun);box-shadow:var(--sunglow)}
+.wd.sun .lb{color:rgba(255,255,255,.9)}
+.wd.runw .big{background:linear-gradient(135deg,#6ea0ff,#a78bfa);-webkit-background-clip:text;background-clip:text;color:transparent}
+.wd.runw:after{content:"";position:absolute;right:-18px;bottom:-18px;width:60px;height:60px;border-radius:50%;border:8px solid rgba(139,92,246,.18)}
+.p-sec{display:flex;align-items:center;gap:8px;font-family:var(--fd);font-size:15px;font-weight:600;margin-top:2px}
+.p-sec span{margin-left:auto;font:700 12px var(--fu);color:var(--mu)}
+.p-ask{position:relative;border-radius:28px;padding:16px;color:#fff;overflow:hidden;flex:none;background:radial-gradient(100% 130% at 100% 0%,#ff3d77,transparent 65%),linear-gradient(135deg,#ff7a18,#ff3d77);box-shadow:0 24px 50px -14px rgba(255,61,119,.75),0 8px 24px -8px rgba(255,122,24,.5),inset 0 1px 0 rgba(255,255,255,.35);animation:glow 3.2s ease-in-out infinite}
+.p-ask:before{content:"";position:absolute;right:-50px;top:-50px;width:170px;height:170px;border-radius:50%;border:28px solid rgba(255,255,255,.08)}
+.p-ask .m{position:relative;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:space-between;opacity:.95}
+.p-ask h3{position:relative;font-family:var(--fd);font-size:21px;font-weight:700;letter-spacing:-.03em;line-height:1.2;margin:8px 0 12px}
+.pchips{position:relative;display:flex;flex-wrap:wrap;gap:6px}
+.pchips button{padding:10px 13px;border-radius:14px;background:rgba(45,0,22,.25);box-shadow:inset 0 0 0 1px rgba(255,255,255,.22);font-weight:700;font-size:12.5px;color:#fff}
+.pchips button.sel{background:#fff;color:#d21a5a}
+.p-appr{flex:none;border-radius:24px;padding:14px;background:linear-gradient(#25202b,#1f1a24) padding-box,var(--sun) border-box;border:1.5px solid transparent;box-shadow:0 14px 34px -14px rgba(255,61,119,.55)}
+.p-appr .appr button{padding:11px 4px;font-size:12px}
+.prow{flex:none;display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:20px;background:linear-gradient(180deg,var(--t2),var(--t1));box-shadow:var(--d1)}
+.prow>div{min-width:0;flex:1}
+.prow b{font-weight:800;font-size:13.5px}
+.prow .s{font-size:11.5px;color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow .r{font-size:11.5px;font-weight:700;color:var(--mu);flex:none}
+.prow.rv{box-shadow:var(--d1),inset 3px 0 0 var(--cy)}
+.p-nav{flex:none;height:86px;padding:8px 14px 26px;display:grid;grid-template-columns:repeat(4,1fr);background:rgba(15,15,21,.92);backdrop-filter:blur(20px);border-top:1px solid var(--line);position:relative;z-index:3}
+.p-nav button{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11px;font-weight:700;color:var(--mu2)}
+.p-nav .pil{position:relative;width:58px;height:30px;border-radius:15px;display:grid;place-items:center}
+.p-nav .pil i{position:absolute;top:0;right:10px;min-width:16px;height:16px;border-radius:8px;background:var(--sun);color:#fff;font:800 9.5px var(--fu);font-style:normal;display:grid;place-items:center}
+.p-nav button.on{color:var(--tx)}
+.p-nav button.on .pil{background:rgba(255,255,255,.1)}
+.p-nav .ic{width:20px;height:20px}
+.p-app{flex:none;display:flex;align-items:center;gap:10px;padding:4px 14px 12px;border-bottom:1px solid var(--line)}
+.p-app .t{flex:1;min-width:0}
+.p-app .t>div:first-child{display:flex;align-items:center;gap:8px}
+.p-app .t b{font-family:var(--fd);font-size:18px;font-weight:700;letter-spacing:-.02em}
+.p-app .t .l{font:500 11px var(--fm);color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.p-app .ib{width:38px;height:38px}
+.p-body.end{justify-content:flex-end;-webkit-mask-image:linear-gradient(transparent,#000 60px)}
+.pbub{align-self:flex-end;max-width:88%;padding:10px 14px;border-radius:20px 20px 6px 20px;background:var(--t3);font-size:13px;line-height:1.45;box-shadow:var(--d1)}
+.tchips{display:flex;flex-wrap:wrap;gap:6px}
+.tchip{display:flex;align-items:center;gap:5px;padding:5px 9px;border-radius:10px;background:var(--t2);box-shadow:inset 0 0 0 1px var(--line);font:500 11px var(--fm);color:#c9c9d6}
+.tchip b{color:#b9c2ff;font-weight:600}
+.pomp{display:flex;gap:10px;font-size:13px;color:#dcdce4;line-height:1.45}
+.p-opts{position:relative;display:flex;flex-direction:column;gap:8px}
+.p-opt{display:flex;align-items:center;gap:12px;padding:11px 14px;min-height:56px;border-radius:18px;background:rgba(45,0,22,.24);box-shadow:inset 0 0 0 1px rgba(255,255,255,.22);text-align:left;color:#fff}
+.p-opt b{font-size:14px;font-weight:800;display:flex;align-items:center;gap:6px}
+.p-opt b small{font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:2px 6px;border-radius:999px;background:rgba(255,255,255,.25)}
+.p-opt span{display:block;font-size:11.5px;opacity:.88;line-height:1.35}
+.p-opt .rad{width:20px;height:20px;border-radius:50%;box-shadow:inset 0 0 0 2px rgba(255,255,255,.7);flex:none}
+.p-opt.sel{background:#fff;color:#2a0b16;box-shadow:0 12px 26px -8px rgba(80,0,30,.55)}
+.p-opt.sel .rad{box-shadow:inset 0 0 0 6px #ff3d77}
+.p-opt.sel b small{background:var(--sun);color:#fff}
+.p-comp{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px 30px;border-top:1px solid var(--line)}
+.p-in{flex:1;display:flex;align-items:center;gap:8px;padding:13px 16px;border-radius:22px;background:var(--t2);box-shadow:inset 0 0 0 1px var(--line);color:var(--mu2);font-size:13.5px}
+.p-in .ic{margin-left:auto}
+.p-mic{width:50px;height:50px;border-radius:50%;background:var(--run);display:grid;place-items:center;box-shadow:0 10px 24px -8px rgba(91,103,246,.8);flex:none}
+.p-mic .ic{width:22px;height:22px}
+.hun{position:absolute;left:10px;right:10px;top:42px;z-index:10;padding:12px 14px;border-radius:26px;background:rgba(38,33,46,.94);backdrop-filter:blur(20px);box-shadow:var(--d3),0 0 0 1px rgba(255,61,119,.35),0 16px 40px -10px rgba(255,61,119,.45);animation:hun 4s var(--spring) infinite}
+@keyframes hun{0%{transform:translateY(-130%)}12%,88%{transform:none}100%{transform:translateY(-130%)}}
+.hun .a{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mu);font-weight:700}
+.hun .a svg{width:16px;height:16px}
+.hun .tx{margin-top:5px;font-size:13.5px;line-height:1.35}
+.hun .tx b{font-weight:800}
+.hun .acts{display:flex;gap:8px;margin-top:10px}
+.hun .acts button{flex:1;padding:9px;border-radius:13px;font-weight:800;font-size:12.5px;background:var(--t4)}
+.hun .acts button:first-child{background:var(--sun)}
+.p-tabs{flex:none;display:flex;gap:4px;margin:10px 14px;padding:3px;border-radius:13px;background:var(--t1);box-shadow:inset 0 0 0 1px var(--line)}
+.p-tabs button{flex:1;padding:7px;border-radius:10px;font:600 12px var(--fm);color:var(--mu)}
+.p-tabs button.on{background:var(--t4);color:var(--tx)}
+.p-term{flex:1;min-height:0;background:#07070b;padding:10px 14px;font:400 10.5px/1.6 var(--fm);color:#d4d4de;overflow:hidden;white-space:pre-wrap;word-break:break-all;display:flex;flex-direction:column;justify-content:flex-end}
+.xk{flex:none;display:grid;grid-template-columns:repeat(6,1fr);gap:6px;padding:8px 10px 30px;background:#121219;border-top:1px solid var(--line)}
+.xk button{height:40px;border-radius:11px;background:var(--t3);font:600 12.5px var(--fm);box-shadow:inset 0 -2px 0 rgba(0,0,0,.4),inset 0 0 0 1px var(--line)}
+.xk button.on{background:var(--run);box-shadow:0 6px 14px -6px rgba(91,103,246,.8)}
+.dimbg{position:absolute;left:0;right:0;top:40px;bottom:0;display:flex;flex-direction:column;filter:brightness(.32) blur(1.5px) saturate(.7);pointer-events:none}
+.dimbg *{animation:none!important}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:8;border-radius:34px 34px 0 0;background:linear-gradient(180deg,#21212d,#16161e);box-shadow:0 -24px 60px rgba(0,0,0,.65),inset 0 1px 0 rgba(255,255,255,.09);padding:10px 18px 34px;display:flex;flex-direction:column;gap:10px;animation:sheet .7s var(--spring)}
+@keyframes sheet{from{transform:translateY(40%)}}
+.sheet .hdl{width:42px;height:4px;border-radius:2px;background:rgba(255,255,255,.25);margin:0 auto 4px}
+.sheet h3{font-family:var(--fd);font-size:22px;font-weight:700;letter-spacing:-.03em}
+.sheet .sub2{font-size:12px;color:var(--mu);margin-top:-6px}
+.prepo{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:18px;background:rgba(59,130,246,.1);box-shadow:inset 0 0 0 1.5px rgba(122,140,255,.5)}
+.prepo .fi{width:34px;height:34px;border-radius:11px;background:var(--run);display:grid;place-items:center}
+.prepo b{font-weight:800}
+.prepo small{display:block;font:500 11px var(--fm);color:var(--mu)}
+.prepo span{margin-left:auto;font-size:12px;font-weight:700;color:#b9c2ff;display:flex;align-items:center;gap:2px}
+.btn-big{display:flex;align-items:center;justify-content:center;gap:10px;padding:15px;border-radius:20px;background:var(--run);font-weight:800;font-size:15px;box-shadow:0 14px 30px -10px rgba(91,103,246,.9)}
+@media (prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="gRun" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/><animateTransform attributeName="gradientTransform" type="rotate" from="0 .5 .5" to="360 .5 .5" dur="3s" repeatCount="indefinite"/></linearGradient>
+    <linearGradient id="gSun" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff7a18"/><stop offset="1" stop-color="#ff3d77"/></linearGradient>
+    <linearGradient id="gStatic" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+  </defs>
+  <symbol id="logo" viewBox="0 0 48 48"><rect x="2" y="2" width="26" height="44" rx="10" fill="url(#gSun)"/><rect x="32" y="2" width="14" height="20" rx="7" fill="url(#gStatic)"/><rect x="32" y="26" width="14" height="9" rx="4.5" fill="#22d3ee"/><rect x="32" y="38" width="14" height="8" rx="4" fill="#a3e635"/><path d="M8 17l4 3.5 4-3.5M12 25l3 2.6 3-2.6M9 31l2.4 2 2.4-2" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-board" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 20 12z"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 4-4 5-8 6l-2 1"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3.5"/><path d="M7.5 9.5l3 2.5-3 2.5M13 15h3.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16v-5a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 21h4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="3"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M7 17L17 7M9 7h8v8"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="M20 11.5l-8.3 8.3a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-chevd" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-pr" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6 8v8M18 16V9a3 3 0 0 0-3-3h-4M13 3.5L10.5 6 13 8.5"/></symbol>
+  <symbol id="i-merge" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 7c0 4 4 5 10 5"/></symbol>
+  <symbol id="i-diff" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M12 7v6M9 10h6M9 17h6"/></symbol>
+  <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6 7v1a4 4 0 0 0 4 4h4a4 4 0 0 0 4-4V7M12 12v5"/></symbol>
+  <symbol id="i-compact" viewBox="0 0 24 24"><path d="M4 12h16M12 3v5M9.5 5.5L12 8l2.5-2.5M12 21v-5M9.5 18.5L12 16l2.5 2.5"/></symbol>
+  <symbol id="i-handoff" viewBox="0 0 24 24"><path d="M4 12h13M12 6l6 6-6 6"/><path d="M20 5v14"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 14v4.5A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V14"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9.5 2.5v3M14.5 2.5v3M9.5 18.5v3M14.5 18.5v3M2.5 9.5h3M2.5 14.5h3M18.5 9.5h3M18.5 14.5h3"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2.5"/><rect x="3" y="13" width="18" height="7" rx="2.5"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.8 5.6L19.5 10l-5.7 1.6L12 17l-1.8-5.4L4.5 10l5.7-1.4z"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></symbol>
+  <symbol id="i-task" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="5.5" r="2"/><circle cx="19" cy="5.5" r="2"/><circle cx="12" cy="20" r="1.8"/><path d="M6.6 7.1l3.2 3M17.4 7.1l-3.2 3M12 15v3.2"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M10 6h10M10 12h10M10 18h10M4 6l1.2 1.2L7.5 5M4 12l1.2 1.2L7.5 11"/><circle cx="5.5" cy="18" r="1"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/></symbol>
+  <symbol id="i-ts" viewBox="0 0 24 24"><g fill="currentColor" stroke="none"><circle cx="5" cy="5" r="2"/><circle cx="12" cy="5" r="2" opacity=".4"/><circle cx="19" cy="5" r="2" opacity=".4"/><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="5" cy="19" r="2" opacity=".4"/><circle cx="12" cy="19" r="2"/><circle cx="19" cy="19" r="2" opacity=".4"/></g></symbol>
+  <symbol id="i-sig" viewBox="0 0 24 24"><path d="M3 19h3v-4H3zM8.5 19h3v-7h-3zM14 19h3V8h-3zM19.5 19h3V4h-3z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.2" r="1.3" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-bat" viewBox="0 0 24 24"><rect x="2" y="7" width="18" height="10" rx="3"/><rect x="4.2" y="9.2" width="11" height="5.6" rx="1.4" fill="currentColor" stroke="none"/><path d="M22.5 10.5v3"/></symbol>
+</svg>
+
+<div class="page" id="page">
+  <header class="ph">
+    <div class="ph-logo"><svg><use href="#logo"/></svg><div><h1>TeleFlock <span>· Draft 10 · Bento</span></h1><p>Spatial bento, alive with depth: keynote-grade tiles, gradient status, 3D-tilting cards and floating visionOS panes. Your agents, herded.</p></div></div>
+    <div class="sw">
+      <i style="background:#0b0b10" title="#0b0b10"></i><i style="background:#1b1b25" title="#1b1b25"></i><i style="background:var(--sun)" title="Needs you"></i><i style="background:var(--run)" title="Running"></i><i style="background:#22d3ee" title="In review"></i><i style="background:#a3e635" title="Done"></i>
+    </div>
+    <div class="fonts"><span><b>Sora</b> display</span><span><b>Manrope</b> UI</span><span><b>JetBrains Mono</b> code</span></div>
+  </header>
+
+  <section class="stage">
+    <div class="sec-label">Desktop · Windows 11 · 1440 × 900</div>
+    <nav class="pills" id="pills">
+      <button data-view="board" class="on"><svg class="ic"><use href="#i-board"/></svg>Board</button>
+      <button data-view="session"><svg class="ic"><use href="#i-chat"/></svg>Session</button>
+      <button data-view="worktree"><svg class="ic"><use href="#i-branch"/></svg>New worktree</button>
+      <button data-view="terminal"><svg class="ic"><use href="#i-term"/></svg>Terminal</button>
+    </nav>
+
+    <div class="win" id="win">
+      <div class="tb">
+        <svg class="mk"><use href="#logo"/></svg><b>TeleFlock</b><span class="tsub">forge · default · <em>●</em> Tailscale</span>
+        <div class="wc">
+          <button title="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></button>
+          <button title="Maximize"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" rx="1.5"/></svg></button>
+          <button class="x" title="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+        </div>
+      </div>
+      <div class="wbody">
+        <aside class="side">
+          <div class="mach">
+            <div class="mach-top"><div class="mach-av">f</div><div><b>forge</b><small><i class="dot ok"></i>Tailscale · 14 ms</small></div><svg class="ic" style="margin-left:auto;color:var(--mu2)"><use href="#i-chevd"/></svg></div>
+            <div class="mach-meta"><span>100.86.14.7</span><span>herdr 0.9.2</span></div>
+            <div class="mach-alt"><i class="dot off"></i>studio-pc<span>offline · 2h ago</span></div>
+          </div>
+          <div class="nav" id="nav">
+            <button data-view="board" class="on"><svg class="ic"><use href="#i-board"/></svg>Board<span class="n">10</span></button>
+            <button data-view="session"><svg class="ic"><use href="#i-chat"/></svg>Session · push<span class="sb">2</span></button>
+            <button data-view="worktree"><svg class="ic"><use href="#i-branch"/></svg>New worktree</button>
+            <button data-view="terminal"><svg class="ic"><use href="#i-term"/></svg>Terminal<span class="n mono">w5:p2</span></button>
+          </div>
+          <div class="sh">Workspaces<span>4</span></div>
+          <div class="tree">
+            <div><div class="repo"><svg class="ic"><use href="#i-folder"/></svg>teleflock<small>~/code/teleflock</small></div>
+              <div class="wt"><i class="sd run"></i><span>feat/kanban-board</span><b>kanban</b></div>
+              <div class="wt cur"><i class="sd need"></i><span>feat/android-push</span><b>push</b></div>
+              <div class="wt"><i class="sd rev"></i><span>fix/ssh-reconnect</span><b>reconnect</b></div>
+              <div class="wt"><i class="sd done"></i><span>main</span><b>docs</b></div></div>
+            <div><div class="repo"><svg class="ic"><use href="#i-folder"/></svg>api-gateway<small>~/code/api-gateway</small></div>
+              <div class="wt"><i class="sd run"></i><span>perf/connection-pool</span><b>pool</b></div>
+              <div class="wt"><i class="sd need"></i><span>feat/rate-limits</span><b>limits</b></div>
+              <div class="wt"><i class="sd done"></i><span>main</span><b>flaky</b></div></div>
+            <div><div class="repo"><svg class="ic"><use href="#i-folder"/></svg>marketing-site<small>~/code/marketing-site</small></div>
+              <div class="wt"><i class="sd rev"></i><span>redesign/hero</span><b>hero</b></div></div>
+            <div><div class="repo"><svg class="ic"><use href="#i-folder"/></svg>infra<small>~/code/infra</small></div>
+              <div class="wt"><i class="sd run"></i><span>ci/bun-cache</span><b>ci</b></div>
+              <div class="wt"><i class="sd done"></i><span>main</span><b>deps</b></div></div>
+          </div>
+          <div class="side-acts"><button data-view="worktree"><svg class="ic"><use href="#i-branch"/></svg>New worktree</button><button><svg class="ic"><use href="#i-folder"/></svg>Open folder</button></div>
+        </aside>
+
+        <div class="main">
+          <div class="top">
+            <div class="crumb"><span>forge</span><svg class="ic"><use href="#i-chev"/></svg><span>default</span><svg class="ic"><use href="#i-chev"/></svg><b id="crumb">Board</b></div>
+            <div class="search"><svg class="ic"><use href="#i-search"/></svg>Search agents, run a command<kbd>Ctrl K</kbd></div>
+            <button class="bell" title="2 agents need you"><svg class="ic"><use href="#i-bell"/></svg><i>2</i></button>
+            <button class="btn-p" data-view="worktree"><svg class="ic"><use href="#i-plus"/></svg>New worktree</button>
+          </div>
+          <div class="views">
+            <!-- BOARD -->
+            <section class="view on" id="v-board" data-name="Board">
+              <div class="board" id="boardInner">
+                <div class="bento">
+                  <div class="tile hero tilt">
+                    <div class="hero-top"><span class="live-pill"><i></i>Needs you · 1 of 2</span><span class="w">push · waiting <span class="num" data-wait="372">6:12</span></span></div>
+                    <h2>How should notifications reach your phone?</h2>
+                    <div class="m">teleflock / <code>feat/android-push</code> · opus-5 · high</div>
+                    <div class="hero-ans" data-ask>
+                      <button class="ans sel">ntfy on your tailnet<small>Recommended</small></button>
+                      <button class="ans">Firebase Cloud Messaging</button>
+                      <button class="ans">UnifiedPush</button>
+                      <button class="ans">Other…</button>
+                    </div>
+                  </div>
+                  <div class="tile tilt">
+                    <div class="kick">Today · 10 agents</div>
+                    <div class="st-big num">$14.62</div>
+                    <div class="st-sub"><b class="num">2.41M</b> tokens</div>
+                    <div class="segbar">
+                      <div class="bar"><i style="flex:3;background:var(--run)"></i><i style="flex:2;background:var(--sun)"></i><i style="flex:2;background:var(--cy)"></i><i style="flex:3;background:var(--li)"></i></div>
+                      <div class="lg"><span><b>3</b>run</span><span><b>2</b>you</span><span><b>2</b>rev</span><span><b>3</b>done</span></div>
+                    </div>
+                  </div>
+                  <div class="tile tilt">
+                    <div class="health-hd"><div class="kick">forge</div><span><i class="dot ok"></i>14 ms</span></div>
+                    <div class="st-big num" style="font-size:36px">37<span style="font-size:20px;color:var(--mu)">% cpu</span></div>
+                    <div class="meter"><div class="r"><span>CPU</span><b class="num">37%</b></div><div class="t"><i style="width:37%;background:var(--run)"></i></div></div>
+                    <div class="meter"><div class="r"><span>RAM</span><b class="num">11.2 / 32 GB</b></div><div class="t"><i style="width:35%;background:var(--cy)"></i></div></div>
+                  </div>
+                  <div class="tile mterm tilt">
+                    <div class="mterm-hd"><svg class="ic" style="width:14px;height:14px;color:#8b9cff"><use href="#i-term"/></svg>kanban<small>w4:p1</small><span class="rec"><i></i>Live</span></div>
+                    <pre id="mterm"></pre>
+                  </div>
+                </div>
+                <div class="lanes" id="lanes">
+                  <div class="lane l-run" data-col="run"><div class="lane-hd"><i class="sd run"></i><h3>Running</h3><span class="cnt">3</span><span class="lx">working</span></div><div class="list"></div></div>
+                  <div class="lane l-need" data-col="need"><div class="lane-hd"><i class="sd need"></i><h3>Needs you</h3><span class="cnt">2</span><span class="lx">blocked</span></div><div class="list"></div></div>
+                  <div class="lane l-rev" data-col="rev"><div class="lane-hd"><i class="sd rev"></i><h3>In review</h3><span class="cnt">2</span><span class="lx">done</span></div><div class="list"></div></div>
+                  <div class="lane l-done" data-col="done"><div class="lane-hd"><i class="sd done"></i><h3>Done</h3><span class="cnt">3</span><span class="lx">merged</span></div><div class="list"></div></div>
+                </div>
+              </div>
+            </section>
+
+            <!-- SESSION -->
+            <section class="view v-session" id="v-session" data-name="push">
+              <div class="ses">
+                <div class="ses-l">
+                  <div class="pane s-head z-mid">
+                    <div class="s-av"><svg class="ic"><use href="#i-bell"/></svg></div>
+                    <div><h2>push</h2><div class="loc">teleflock / feat/android-push · pane w5:p1</div></div>
+                    <div class="chips"><span class="chip sun">● Needs you</span><span class="chip">opus-5 · high</span><span class="chip ghost num">18m</span><span class="chip ghost num">$1.84</span><button class="cb stop" style="flex:none;padding:6px 10px"><svg class="ic"><use href="#i-stop"/></svg>Stop<span class="kbd" style="margin-left:4px">Esc</span></button></div>
+                  </div>
+                  <div class="pane z-back" style="flex:1;min-height:0;display:flex;flex-direction:column">
+                    <div class="tr" id="tr">
+                      <div class="msg"><div class="av you">You</div><div class="bub"><div class="who">You<span>18m ago</span></div><p>Add push notifications to the Android app so I get pinged the moment an agent goes blocked. Tailnet only, no public endpoints.</p></div></div>
+                      <div class="think"><svg class="ic"><use href="#i-spark"/></svg>Thought for 12s<svg class="ic"><use href="#i-chev"/></svg></div>
+                      <div class="tc"><div class="tc-h"><span class="ti"><svg class="ic"><use href="#i-eye"/></svg></span><span class="tn">read</span><span class="tp">android/app/build.gradle.kts</span><span class="tm">88 lines</span></div></div>
+                      <div class="tc"><div class="tc-h"><span class="ti"><svg class="ic"><use href="#i-search"/></svg></span><span class="tn">grep</span><span class="tp">NotificationCompat|AgentState</span><span class="tm">14 matches · 6 files</span></div></div>
+                      <div class="tc"><div class="tc-h"><span class="ti"><svg class="ic"><use href="#i-task"/></svg></span><span class="tn">task</span><span class="tp" style="font-family:var(--fu)">2 subagents</span><span class="tm" style="color:var(--li)">✓ all done</span></div>
+                        <div class="tc-b"><div class="sub"><i class="sd done"></i><b>FcmScout</b><span>Map FCM setup cost for a tailnet-only app</span><em>✓ 41s</em></div><div class="sub"><i class="sd done"></i><b>NtfyScout</b><span>Evaluate self-hosted ntfy on forge</span><em>✓ 37s</em></div></div></div>
+                      <div class="tc"><div class="tc-h"><span class="ti"><svg class="ic"><use href="#i-edit"/></svg></span><span class="tn">edit</span><span class="tp">android/app/src/main/java/dev/teleflock/notify/AgentStateWatcher.kt</span><span class="tm mono"><span class="add">+46</span> <span class="del">−3</span></span></div>
+                        <div class="diff"><div class="a">+class AgentStateWatcher(private val herdr: HerdrClient) {</div><div class="a">+    fun blocked(): Flow&lt;AgentEvent&gt; = herdr.events()</div><div class="a">+        .filter { it.state == AgentState.Blocked }</div><div class="a">+        .distinctUntilChangedBy { it.paneId to it.since }</div><div class="a">+}</div><div class="d">-// TODO: poll herdr every 30s</div></div></div>
+                      <div class="tc"><div class="tc-h"><span class="ti"><svg class="ic"><use href="#i-term"/></svg></span><span class="tn">bash</span><span class="tp">./gradlew :app:testDebugUnitTest</span><span class="tm"><span style="color:var(--li)">exit 0</span> · 18.2s</span></div>
+                        <div class="tc-b out">34 tests completed, 0 failed</div></div>
+                      <div class="todo"><div class="todo-h"><svg class="ic" style="width:13px;height:13px"><use href="#i-list"/></svg>Push notifications<span>2/5</span></div>
+                        <div class="td ok"><i>✓</i>Watch the herdr agent-state stream</div>
+                        <div class="td ok"><i>✓</i>Debounce blocked transitions per pane</div>
+                        <div class="td prog"><i></i>Pick a delivery transport<small>blocked on you</small></div>
+                        <div class="td pe"><i></i>Notification actions: Answer, Open terminal</div>
+                        <div class="td pe"><i></i>Deep-link into the agent session</div></div>
+                      <div class="msg"><div class="av omp"><svg><use href="#logo"/></svg></div><div class="bub"><div class="who">omp<span>just now</span></div><p>The watcher is in and tested (34/34). Delivery is the open decision. Both options work; they trade setup effort against independence from Google.</p></div></div>
+                    </div>
+                  </div>
+                  <div class="pane ask z-front">
+                    <div class="ask-top"><span class="live-pill"><i></i>omp asks · blocking</span><span class="hint">Pick one · <span class="mono">1–4</span></span><button class="send-a">Send answer<svg class="ic" style="width:13px;height:13px"><use href="#i-send"/></svg></button></div>
+                    <h3>How should notifications reach your phone?</h3>
+                    <div class="opts" data-ask>
+                      <button class="opt sel"><i class="rad"></i><div><b>ntfy on your tailnet<small>Recommended</small></b><span>Self-hosted on forge. No Google account, and it never leaves Tailscale.</span></div></button>
+                      <button class="opt"><i class="rad"></i><div><b>Firebase Cloud Messaging</b><span>Best battery life, but needs a Google project and a public push path.</span></div></button>
+                      <button class="opt"><i class="rad"></i><div><b>UnifiedPush</b><span>Pick a distributor per device. More moving parts.</span></div></button>
+                      <button class="opt"><i class="rad"></i><div style="flex:1"><b>Other…</b><input class="oth" placeholder="Type your own answer"></div></button>
+                    </div>
+                  </div>
+                  <div class="pane comp z-mid">
+                    <div class="comp-r1"><input placeholder="Answer, steer, or type / for commands"><button class="ib" title="Attach"><svg class="ic"><use href="#i-clip"/></svg></button><button class="ib" title="Voice"><svg class="ic"><use href="#i-mic"/></svg></button><button class="ib send" title="Send"><svg class="ic"><use href="#i-send"/></svg></button></div>
+                    <div class="comp-r2"><span class="chip"><svg class="ic"><use href="#i-spark"/></svg>opus-5 · high</span><span class="chip ghost">Plan off</span><span class="chip ghost"><svg class="ic"><use href="#i-bolt"/></svg>Fast off</span>
+                      <div class="hints"><span><code>/</code> commands: /model /plan /goal /btw</span><span><code>@</code> files</span></div></div>
+                  </div>
+                </div>
+                <div class="ses-r">
+                  <div class="pane ip">
+                    <div class="ip-h"><div class="kick">Session</div><span class="num">64 tok/s</span></div>
+                    <div class="minis">
+                      <div class="mini ctxm" style="grid-column:span 2"><span class="ring" style="width:46px;height:46px"><svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16" class="rt"/><circle cx="20" cy="20" r="16" class="rp" stroke="url(#gStatic)" stroke-dasharray="41.2 100.5"/></svg><b>41%</b></span><div><div class="k">Context</div><div class="v num">82.4k <span style="font-size:13px;color:var(--mu)">/ 200k</span></div></div></div>
+                      <div class="mini"><div class="k">Cost</div><div class="v num">$1.84</div><div class="s num">412k in / 38k out</div></div>
+                      <div class="mini"><div class="k">Todos</div><div class="v num">2/5</div><div class="s">1 blocked on you</div></div>
+                    </div>
+                  </div>
+                  <div class="pane ip">
+                    <div class="ip-h"><div class="kick">Changed files</div><span class="mono"><span class="add">+212</span> <span class="del">−17</span></span></div>
+                    <div class="files">
+                      <div class="fr"><svg class="ic"><use href="#i-file"/></svg><span>AgentStateWatcher.kt</span><em><span class="add">+46</span> <span class="del">−3</span></em></div>
+                      <div class="fr"><svg class="ic"><use href="#i-file"/></svg><span>NotifyModule.kt</span><em><span class="add">+38</span> <span class="del">−0</span></em></div>
+                      <div class="fr"><svg class="ic"><use href="#i-file"/></svg><span>build.gradle.kts</span><em><span class="add">+6</span> <span class="del">−1</span></em></div>
+                      <div class="fr"><svg class="ic"><use href="#i-file"/></svg><span>AgentStateWatcherTest.kt</span><em><span class="add">+118</span> <span class="del">−0</span></em></div>
+                      <div class="fr"><svg class="ic"><use href="#i-file"/></svg><span>HerdrClient.kt</span><em><span class="add">+4</span> <span class="del">−13</span></em></div>
+                    </div>
+                    <div class="fbtn"><button class="cb"><svg class="ic"><use href="#i-diff"/></svg>Open diff</button><button class="cb"><svg class="ic"><use href="#i-check"/></svg>Commit</button><button class="cb"><svg class="ic"><use href="#i-pr"/></svg>Open PR</button></div>
+                  </div>
+                  <div class="pane ip">
+                    <div class="ip-h"><div class="kick">Subagents</div><span>2 done</span></div>
+                    <div class="sub"><i class="sd done"></i><b>FcmScout</b><em>✓ 41s</em></div>
+                    <div class="sub"><i class="sd done"></i><b>NtfyScout</b><em>✓ 37s</em></div>
+                    <div class="ip-h" style="margin:10px 0 0"><div class="kick">Session tree</div><span>1 fork</span></div>
+                    <svg class="stree" viewBox="0 0 330 84">
+                      <path d="M10 24H230" stroke="rgba(255,255,255,.18)" stroke-width="2"/>
+                      <path d="M100 24c0 26 20 34 46 34H200" stroke="#22d3ee" stroke-width="2" fill="none" stroke-dasharray="3 4"/>
+                      <g fill="#9a9aad"><circle cx="10" cy="24" r="4"/><circle cx="55" cy="24" r="4"/><circle cx="100" cy="24" r="4"/><circle cx="145" cy="24" r="4"/><circle cx="190" cy="24" r="4"/></g>
+                      <circle cx="230" cy="24" r="6" fill="url(#gSun)"/><circle cx="230" cy="24" r="10" fill="none" stroke="#ff3d77" stroke-opacity=".4" stroke-width="2"/>
+                      <g fill="#22d3ee"><circle cx="160" cy="58" r="4"/><circle cx="200" cy="58" r="4"/></g>
+                      <text x="244" y="28" fill="#f5f5f7" font-family="Manrope" font-size="11" font-weight="700">main</text>
+                      <text x="212" y="62" fill="#22d3ee" font-family="JetBrains Mono" font-size="10.5">try-unifiedpush</text>
+                      <text x="10" y="80" fill="#6e6e82" font-family="Manrope" font-size="10">fork or branch from any message</text>
+                    </svg>
+                  </div>
+                  <div class="pane ip" style="padding:10px">
+                    <div class="agrid">
+                      <button data-view="terminal"><svg class="ic"><use href="#i-term"/></svg>Terminal</button>
+                      <button><svg class="ic"><use href="#i-fork"/></svg>Fork</button>
+                      <button><svg class="ic"><use href="#i-compact"/></svg>Compact</button>
+                      <button><svg class="ic"><use href="#i-handoff"/></svg>Handoff</button>
+                      <button><svg class="ic"><use href="#i-export"/></svg>Export</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- NEW WORKTREE -->
+            <section class="view v-wt" id="v-worktree" data-name="New worktree">
+              <div class="wt-bg" id="wtBg"></div>
+              <div class="scrim"></div>
+              <div class="modal">
+                <div class="md-h"><div class="mi"><svg class="ic"><use href="#i-branch"/></svg></div><div><h2>New worktree</h2><p>Creates a workspace on forge at <span class="mono">~/worktrees/&lt;repo&gt;/&lt;branch-slug&gt;</span></p></div><button class="ib x" data-view="board" title="Close"><svg class="ic"><use href="#i-x"/></svg></button></div>
+                <div class="md-grid">
+                  <div class="fb">
+                    <div class="kick" style="padding:2px 6px 8px">Repository</div>
+                    <div class="fb-path"><svg class="ic"><use href="#i-server"/></svg>forge<svg class="ic"><use href="#i-chev"/></svg><b>~/code</b></div>
+                    <div class="fo" data-fo><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div>api-gateway<small>main</small></div><span class="st" style="color:var(--li)">✓ clean</span></div>
+                    <div class="fo" data-fo><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div>infra<small>main</small></div><span class="st" style="color:var(--amber)">● 2 changed</span></div>
+                    <div class="fo" data-fo><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div>marketing-site<small>main</small></div><span class="st" style="color:var(--li)">✓</span></div>
+                    <div class="fo sel" data-fo><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div>teleflock<small>main · ~/code/teleflock</small></div><span class="st" style="color:var(--li)">✓</span></div>
+                    <div class="fo dim"><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div>sandbox/<small>not a git repo</small></div></div>
+                    <div class="fo dim"><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div>notes/<small>not a git repo</small></div></div>
+                    <div class="fb-foot"><svg class="ic" style="width:12px;height:12px"><use href="#i-ts"/></svg>Browsing forge over Tailscale SSH</div>
+                  </div>
+                  <div class="form">
+                    <div class="seg" id="seg"><button class="on">New branch</button><button>Existing branch</button></div>
+                    <div class="fg">
+                      <div class="fld focus"><label>Branch</label><div>feat/offline-cache</div></div>
+                      <div class="fld"><label>Base<em>up to date</em></label><div>origin/main</div></div>
+                      <div class="fld"><label>Path<em class="au">auto</em></label><div>~/worktrees/teleflock/feat-offline-cache</div></div>
+                      <div class="fld ui"><label>Label</label><div>Offline cache</div></div>
+                    </div>
+                    <div class="agent-row"><span class="tog"></span><b>Start agent</b><span class="chip">omp</span><span class="chip mono">offline</span><span class="chip">opus-5</span><span class="chip">thinking high</span><span class="chip" style="background:rgba(59,130,246,.18);color:#b9c2ff;box-shadow:inset 0 0 0 1px rgba(122,140,255,.4)">Plan mode ON</span></div>
+                    <div class="prompt"><label>Initial prompt</label>Cache the last herdr snapshot per workspace so TeleFlock opens instantly, even before Tailscale reconnects. Mark stale data visibly.</div>
+                  </div>
+                </div>
+                <div class="md-f"><code><b>$</b> herdr worktree create --cwd ~/code/teleflock --branch feat/offline-cache --base origin/main</code><button class="btn-g" data-view="board">Cancel</button><button class="btn-run">Create &amp; start agent<kbd>Ctrl ↵</kbd></button></div>
+              </div>
+            </section>
+
+            <!-- TERMINAL -->
+            <section class="view" id="v-terminal" data-name="Terminal · w5:p2">
+              <div class="term-v">
+                <div class="term-l">
+                  <div class="pane ttb">
+                    <div class="att"><i class="dot ok"></i>Attached to forge<code>w5:p2</code></div>
+                    <div class="tabs"><button>agent</button><button class="on">shell</button><button>logs</button></div>
+                    <div class="r"><span style="font-size:11px;color:var(--mu2);font-weight:700">Send keys</span><button class="key">Esc</button><button class="key">Ctrl+C</button><button class="take">Takeover</button><div class="fs"><button>−</button><span>13</span><button>+</button></div></div>
+                  </div>
+                  <div class="term"><pre><span class="c">~/worktrees/teleflock/feat-android-push</span>  <span class="mg">feat/android-push ↑3</span>
+<span class="g">❯</span> git log --oneline -5
+<span class="am">a41c9e2</span> feat(notify): AgentStateWatcher debounces blocked transitions
+<span class="am">7be03d1</span> test(notify): cover per-pane dedupe
+<span class="am">19f0c55</span> chore: add kotlinx-coroutines-test
+<span class="am">e2d8a10</span> <span class="mg">(origin/main, main)</span> fix: tailnet hostname resolution on Android 14
+<span class="am">c0ffee1</span> docs: architecture overview (#139)
+<span class="g">❯</span> ./gradlew :app:testDebugUnitTest
+<span class="dm">&gt; Task :app:compileDebugKotlin</span>
+<span class="dm">&gt; Task :app:testDebugUnitTest</span>
+AgentStateWatcherTest &gt; emits once per blocked transition <span class="g">PASSED</span>
+AgentStateWatcherTest &gt; ignores working→idle flaps <span class="g">PASSED</span>
+AgentStateWatcherTest &gt; survives reconnect mid-stream <span class="g">PASSED</span>
+<span class="g">BUILD SUCCESSFUL</span> in 18s
+34 tests completed, 0 failed
+<span class="g">❯</span> herdr agent list
+<span class="dm">NAME       STATE    WORKSPACE                      PANE</span>
+kanban     <span class="bl">working</span>  teleflock/feat-kanban-board    w4:p1
+push       <span class="am">blocked</span>  teleflock/feat-android-push    w5:p1
+reconnect  <span class="c">done</span>     teleflock/fix-ssh-reconnect    w6:p1
+pool       <span class="bl">working</span>  api-gateway/perf-conn-pool     w7:p1
+limits     <span class="am">blocked</span>  api-gateway/feat-rate-limits   w8:p1
+<span class="g">❯</span> <span class="caret"></span></pre></div>
+                </div>
+                <div class="trr">
+                  <div class="tile tilt">
+                    <div class="kick">Pane</div>
+                    <div class="st-big mono" style="font-size:30px;letter-spacing:-.02em">w5:p2</div>
+                    <div style="margin-top:10px"><div class="kv"><span>Tab</span><b>shell</b></div><div class="kv"><span>Workspace</span><b>feat-android-push</b></div><div class="kv"><span>Session</span><b>default</b></div><div class="kv"><span>Size</span><b>132 × 40</b></div></div>
+                  </div>
+                  <div class="tile tilt" style="background:radial-gradient(120% 90% at 100% 0%,rgba(255,61,119,.28),transparent 60%),linear-gradient(180deg,var(--t2),var(--t1))">
+                    <div class="kick" style="color:#ffb38a">Same workspace</div>
+                    <div style="font-family:var(--fd);font-size:17px;font-weight:700;margin-top:8px;letter-spacing:-.02em">push is waiting on you</div>
+                    <div style="font-size:12px;color:var(--mu);margin-top:4px">w5:p1 · agent tab · 6m</div>
+                    <button class="cb" data-view="session" style="margin-top:12px;width:100%;background:var(--sun);box-shadow:0 6px 16px -6px rgba(255,61,119,.7)">Answer in session<svg class="ic"><use href="#i-open"/></svg></button>
+                  </div>
+                  <div class="tile" style="flex:1">
+                    <div class="kick">herdr agents</div>
+                    <div style="margin-top:8px">
+                      <div class="al"><i class="sd run"></i><b>kanban</b><span>w4:p1</span><em style="color:#8b9cff">working</em></div>
+                      <div class="al"><i class="sd need"></i><b>push</b><span>w5:p1</span><em style="color:var(--amber)">blocked</em></div>
+                      <div class="al"><i class="sd rev"></i><b>reconnect</b><span>w6:p1</span><em style="color:var(--cy)">done</em></div>
+                      <div class="al"><i class="sd run"></i><b>pool</b><span>w7:p1</span><em style="color:#8b9cff">working</em></div>
+                      <div class="al"><i class="sd need"></i><b>limits</b><span>w8:p1</span><em style="color:var(--amber)">blocked</em></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section class="phones-sec">
+    <div class="sec-label">Android · 412 × 892</div>
+    <div class="phones">
+      <!-- 01 FLOCK -->
+      <div class="pwrap"><div class="phone"><div class="scr" id="pHome">
+        <div class="p-sb"><span>9:41</span><i class="p-cam"></i><span class="ics"><svg class="ic"><use href="#i-sig"/></svg><svg class="ic"><use href="#i-wifi"/></svg><svg class="ic"><use href="#i-bat"/></svg></span></div>
+        <div class="p-body" id="pHomeBody">
+          <div class="p-hd"><div><div class="kick" style="font-size:10px">Your agents, herded</div><h2>Flock</h2></div><span class="conn"><i class="dot ok"></i>forge · 14 ms</span></div>
+          <div class="wg">
+            <div class="wd sun"><div class="big num">2</div><div class="lb">need you</div></div>
+            <div class="wd runw"><div class="big num">3</div><div class="lb">running</div></div>
+            <div class="wd"><div class="big num" style="font-size:27px;margin-top:6px">$14.62</div><div class="lb">today · 2.41M tok</div></div>
+          </div>
+          <div class="p-sec"><i class="sd need"></i>Needs you<span>2</span></div>
+          <div class="p-ask"><div class="m"><span class="live-pill"><i></i>push · question</span><span>waiting 6m</span></div><h3>How should notifications reach your phone?</h3>
+            <div class="pchips" data-ask><button class="sel">ntfy on your tailnet</button><button>Firebase (FCM)</button><button>UnifiedPush</button><button>Other…</button></div></div>
+          <div class="p-appr"><div class="c-hd" style="margin:0"><span class="badge sun">Approval</span><b style="font-size:13.5px">limits</b><span class="wait">waiting 2m</span></div><div class="cmd"><span class="dm">Allow</span> bun run db:migrate --env staging<span class="dm">?</span></div><div class="appr"><button class="yes">Allow once</button><button>For session</button><button class="no">Deny</button></div></div>
+          <div class="p-sec"><i class="sd run"></i>Running<span>3</span></div>
+          <div id="pRun" style="display:flex;flex-direction:column;gap:8px"></div>
+          <div class="p-sec"><i class="sd rev"></i>In review<span>2</span></div>
+          <div id="pRev" style="display:flex;flex-direction:column;gap:8px"></div>
+          <div class="prow"><i class="sd done"></i><div><b>Done</b></div><span class="r">3 ›</span></div>
+        </div>
+        <div class="p-nav"><button class="on"><span class="pil"><svg class="ic"><use href="#i-board"/></svg><i>2</i></span>Flock</button><button><span class="pil"><svg class="ic"><use href="#i-chat"/></svg></span>Sessions</button><button><span class="pil"><svg class="ic"><use href="#i-term"/></svg></span>Terminal</button><button><span class="pil"><svg class="ic"><use href="#i-server"/></svg></span>Machines</button></div>
+        <i class="p-gb"></i>
+      </div></div><div class="plabel"><span>01</span>Flock · home</div></div>
+
+      <!-- 02 SESSION -->
+      <div class="pwrap"><div class="phone"><div class="scr">
+        <div class="p-sb"><span>9:41</span><i class="p-cam"></i><span class="ics"><svg class="ic"><use href="#i-sig"/></svg><svg class="ic"><use href="#i-wifi"/></svg><svg class="ic"><use href="#i-bat"/></svg></span></div>
+        <div class="p-app"><button class="ib"><svg class="ic"><use href="#i-back"/></svg></button><div class="t"><div><b>push</b><span class="chip sun" style="padding:3px 8px;font-size:10.5px">Needs you</span></div><div class="l">teleflock / feat/android-push · w5:p1</div></div><button class="ib"><svg class="ic"><use href="#i-more"/></svg></button></div>
+        <div class="p-body end" style="padding-top:12px">
+          <div class="pbub">Add push notifications to the Android app so I get pinged the moment an agent goes blocked. Tailnet only, no public endpoints.</div>
+          <div class="tchips"><span class="tchip"><svg class="ic" style="width:11px;height:11px"><use href="#i-spark"/></svg>Thought 12s</span><span class="tchip"><b>read</b>build.gradle.kts</span><span class="tchip"><b>grep</b>14 matches</span><span class="tchip"><b>task</b>2 subagents <span class="add">✓</span></span><span class="tchip"><b>edit</b>AgentStateWatcher.kt <span class="add">+46</span><span class="del">−3</span></span><span class="tchip"><b>bash</b>exit 0 · 18.2s</span><span class="tchip" style="color:#ffc29a"><b style="color:#ffc29a">todos</b>2/5</span></div>
+          <div class="pomp"><span class="av omp"><svg><use href="#logo"/></svg></span><span>The watcher is in and tested (34/34). Delivery is the open decision. Both options work; they trade setup effort against independence from Google.</span></div>
+          <div class="p-ask"><div class="m"><span class="live-pill"><i></i>omp asks · blocking</span><span>6m</span></div><h3>How should notifications reach your phone?</h3>
+            <div class="p-opts" data-ask>
+              <button class="p-opt sel"><i class="rad"></i><div><b>ntfy on your tailnet<small>Recommended</small></b><span>Self-hosted on forge. Never leaves Tailscale.</span></div></button>
+              <button class="p-opt"><i class="rad"></i><div><b>Firebase Cloud Messaging</b><span>Best battery life, needs a Google project.</span></div></button>
+              <button class="p-opt"><i class="rad"></i><div><b>UnifiedPush</b><span>Pick a distributor per device.</span></div></button>
+              <button class="p-opt" style="min-height:46px"><i class="rad"></i><div><b>Other…</b></div></button>
+            </div></div>
+        </div>
+        <div class="p-comp"><div class="p-in">Answer, steer, or type /<svg class="ic"><use href="#i-clip"/></svg></div><button class="p-mic"><svg class="ic"><use href="#i-mic"/></svg></button></div>
+        <i class="p-gb"></i>
+      </div></div><div class="plabel"><span>02</span>Session · push · ask</div></div>
+
+      <!-- 03 TERMINAL -->
+      <div class="pwrap"><div class="phone"><div class="scr">
+        <div class="p-sb"><span>9:41</span><i class="p-cam"></i><span class="ics"><svg class="ic"><use href="#i-sig"/></svg><svg class="ic"><use href="#i-wifi"/></svg><svg class="ic"><use href="#i-bat"/></svg></span></div>
+        <div class="hun"><div class="a"><svg><use href="#logo"/></svg>TeleFlock · now</div><div class="tx"><b>push</b> needs you · How should notifications reach your phone?</div><div class="acts"><button>ntfy on tailnet</button><button>Open</button></div></div>
+        <div class="p-app"><button class="ib"><svg class="ic"><use href="#i-back"/></svg></button><div class="t"><div><b class="mono" style="font-family:var(--fm);font-size:16px">w5:p2</b><span class="chip" style="padding:3px 8px;font-size:10.5px"><i class="dot ok"></i>attached</span></div><div class="l">forge · teleflock/feat-android-push</div></div><button class="take" style="padding:8px 12px">Takeover</button></div>
+        <div class="p-tabs"><button>agent</button><button class="on">shell</button><button>logs</button></div>
+        <div class="p-term"><div><span class="c">~/worktrees/teleflock/feat-android-push</span> <span class="mg">feat/android-push ↑3</span>
+<span class="g">❯</span> ./gradlew :app:testDebugUnitTest
+<span class="dm">&gt; Task :app:compileDebugKotlin
+&gt; Task :app:testDebugUnitTest</span>
+AgentStateWatcherTest &gt; emits once per blocked transition <span class="g">PASSED</span>
+AgentStateWatcherTest &gt; ignores working→idle flaps <span class="g">PASSED</span>
+AgentStateWatcherTest &gt; survives reconnect mid-stream <span class="g">PASSED</span>
+<span class="g">BUILD SUCCESSFUL</span> in 18s
+34 tests completed, 0 failed
+<span class="g">❯</span> herdr agent list
+<span class="dm">NAME       STATE    PANE</span>
+kanban     <span class="bl">working</span>  w4:p1
+push       <span class="am">blocked</span>  w5:p1
+reconnect  <span class="c">done</span>     w6:p1
+pool       <span class="bl">working</span>  w7:p1
+limits     <span class="am">blocked</span>  w8:p1
+<span class="g">❯</span> <span class="caret"></span></div></div>
+        <div class="xk"><button>ESC</button><button>TAB</button><button class="on">CTRL</button><button>ALT</button><button>|</button><button>~</button><button>←</button><button>↑</button><button>↓</button><button>→</button><button>/</button><button>-</button></div>
+        <i class="p-gb"></i>
+      </div></div><div class="plabel"><span>03</span>Terminal · extra keys · heads-up</div></div>
+
+      <!-- 04 NEW WORKTREE SHEET -->
+      <div class="pwrap"><div class="phone"><div class="scr">
+        <div class="p-sb"><span>9:41</span><i class="p-cam"></i><span class="ics"><svg class="ic"><use href="#i-sig"/></svg><svg class="ic"><use href="#i-wifi"/></svg><svg class="ic"><use href="#i-bat"/></svg></span></div>
+        <div class="dimbg" id="pDim"></div>
+        <div class="sheet">
+          <i class="hdl"></i>
+          <h3>New worktree</h3><div class="sub2">on forge · herdr worktree create</div>
+          <div class="prepo"><span class="fi"><svg class="ic"><use href="#i-folder"/></svg></span><div><b>teleflock</b><small>~/code/teleflock · main ✓</small></div><span>Browse<svg class="ic" style="width:13px;height:13px"><use href="#i-chev"/></svg></span></div>
+          <div class="seg"><button class="on">New branch</button><button>Existing branch</button></div>
+          <div class="fg"><div class="fld focus"><label>Branch</label><div>feat/offline-cache</div></div><div class="fld"><label>Base<em>up to date</em></label><div>origin/main</div></div></div>
+          <div class="fld"><label>Path<em class="au">auto</em></label><div>~/worktrees/teleflock/feat-offline-cache</div></div>
+          <div class="fld ui"><label>Label</label><div>Offline cache</div></div>
+          <div class="agent-row"><span class="tog"></span><b>omp</b><span class="chip mono">offline</span><span class="chip">opus-5 · high</span><span class="chip" style="background:rgba(59,130,246,.18);color:#b9c2ff">Plan ON</span></div>
+          <div class="prompt"><label>Initial prompt</label>Cache the last herdr snapshot per workspace so TeleFlock opens instantly, even before Tailscale reconnects. Mark stale data visibly.</div>
+          <button class="btn-big">Create &amp; start agent<svg class="ic"><use href="#i-send"/></svg></button>
+        </div>
+        <i class="p-gb"></i>
+      </div></div><div class="plabel"><span>04</span>New worktree · bottom sheet</div></div>
+    </div>
+  </section>
+</div>
+<script>
+(()=>{
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
+const RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const AG=[
+ {id:'kanban',repo:'teleflock',br:'feat/kanban-board',col:'run',title:'Drag-and-drop kanban board with column persistence',live:['bash','bun test src/board · 31/40 passing…'],todo:[4,7],ctx:38,t:724,diff:['+412','−38',9],model:'opus-5 · high'},
+ {id:'pool',repo:'api-gateway',br:'perf/connection-pool',col:'run',title:'Replace per-request Postgres connections with a pooled client',live:['task','3 subagents exploring query hot paths'],todo:[2,6],ctx:61,t:1631,diff:['+188','−74',6],model:'gpt-5.5 · xhigh'},
+ {id:'ci',repo:'infra',br:'ci/bun-cache',col:'run',title:'Cache bun install + turbo artifacts in CI',live:['edit','.github/workflows/ci.yml'],todo:[3,4],ctx:22,t:392,diff:['+34','−9',2],model:'sonnet-5 · medium'},
+ {id:'push',repo:'teleflock',br:'feat/android-push',col:'need',kind:'q',title:'Android push notifications when an agent gets blocked',q:'How should notifications reach your phone?',wait:'6m',todo:[2,5],ctx:41,t:'18m',diff:['+212','−17',5],model:'opus-5 · high'},
+ {id:'limits',repo:'api-gateway',br:'feat/rate-limits',col:'need',kind:'a',title:'Per-tenant rate limits with a sliding window',cmd:'bun run db:migrate --env staging',wait:'2m',todo:[5,6],ctx:54,t:'33m',diff:['+296','−12',8],model:'gpt-5.5 · high'},
+ {id:'reconnect',repo:'teleflock',br:'fix/ssh-reconnect',col:'rev',title:'Auto-reconnect SSH and resume herdr attach after network change',line:'✓ 48 tests passed · PR #142 (draft)',todo:[6,6],ctx:47,t:'41m',diff:['+126','−41',4],model:'opus-5 · high'},
+ {id:'hero',repo:'marketing-site',br:'redesign/hero',col:'rev',title:'New hero with an animated flock illustration',line:'✓ Lighthouse 98 · preview screenshot',thumb:1,todo:[5,5],ctx:58,t:'52m',diff:['+880','−212',14],model:'sonnet-5 · medium'},
+ {id:'docs',repo:'teleflock',br:'main',col:'done',title:'README and architecture overview',line:'merged #139 · 2h ago',diff:['+340','−12']},
+ {id:'flaky',repo:'api-gateway',br:'main',col:'done',title:'Fix flaky auth token refresh test',line:'merged #87 · 5h ago',diff:['+22','−9']},
+ {id:'deps',repo:'infra',br:'main',col:'done',title:'Bump tailscale and herdr in Ansible roles',line:'merged #61 · yesterday',diff:['+8','−8']}
+];
+const C=2*Math.PI*16;
+const ic=n=>`<svg class="ic"><use href="#i-${n}"/></svg>`;
+const fmt=s=>`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+const ring=(a,b,s=40,g='gRun')=>`<span class="ring" style="width:${s}px;height:${s}px">${g==='gRun'?'<i class="orb"></i>':''}<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16" class="rt"/><circle cx="20" cy="20" r="16" class="rp" stroke="url(#${g})" stroke-dasharray="${(a/b*C).toFixed(1)} ${C.toFixed(1)}"/></svg><b class="num">${a}/${b}</b></span>`;
+const dif=d=>`<span class="num"><span class="add">${d[0]}</span> <span class="del">${d[1]}</span>${d[2]?` · ${d[2]}f`:''}</span>`;
+const THUMB=`<svg viewBox="0 0 240 66" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="th" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e1b4b"/><stop offset="1" stop-color="#0e7490"/></linearGradient></defs><rect width="240" height="66" fill="url(#th)"/><rect x="14" y="16" width="70" height="7" rx="3.5" fill="#fff" opacity=".9"/><rect x="14" y="28" width="96" height="5" rx="2.5" fill="#fff" opacity=".35"/><rect x="14" y="42" width="34" height="11" rx="5.5" fill="#22d3ee"/><g fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".9"><path d="M150 22l6 5 6-5"/><path d="M172 14l5 4 5-4"/><path d="M168 34l7 6 7-6"/><path d="M192 26l5 4 5-4"/><path d="M206 42l6 5 6-5"/><path d="M186 50l4 3 4-3" opacity=".6"/></g></svg>`;
+function card(a){
+  const meta=`<div class="c-meta"><b>${a.id}</b><span>${a.repo} · ${a.br}</span>${a.col==='run'?`<span class="tmr num" data-t="${a.t}">${fmt(a.t)}</span>`:''}</div>`;
+  const foot=`<div class="c-foot"><span class="ctx"><i style="--v:${a.ctx}%"></i>${a.ctx}%</span>${dif(a.diff)}${a.col!=='run'?`<span class="num">${a.t}</span>`:''}<span class="mdl">${a.model}</span></div>`;
+  const o=`<article class="card tilt c-${a.col}" draggable="true" data-id="${a.id}">`;
+  if(a.col==='run')return o+`<div class="c-top">${ring(a.todo[0],a.todo[1])}<div class="c-who">${meta}<h4>${a.title}</h4></div></div><div class="c-live"><span class="tool">${a.live[0]}</span><span class="ln">${a.live[1]}</span><i class="spin"></i></div>${foot}<div class="c-acts"><button class="cb" data-view="session">${ic('open')}Open</button><button class="cb" data-view="terminal">${ic('term')}Terminal</button><button class="cb stop">${ic('stop')}Stop</button></div></article>`;
+  if(a.col==='need'){
+    const body=a.kind==='q'?`<div class="c-q">“${a.q}”</div><div class="qa" data-ask><button class="rec sel">ntfy on tailnet</button><button>FCM</button><button>UnifiedPush</button><button>Other…</button></div>`
+      :`<div class="cmd"><span class="dm">Allow</span> ${a.cmd}<span class="dm">?</span></div><div class="appr"><button class="yes">Allow once</button><button>Allow for session</button><button class="no">Deny</button></div>`;
+    return o+`<div class="c-hd"><span class="badge sun">${a.kind==='q'?'Question':'Approval'}</span><span class="num" style="font-size:10.5px;color:var(--mu);font-weight:700">${a.todo[0]}/${a.todo[1]} todos</span><span class="wait">waiting ${a.wait}</span></div>${meta}<h4>${a.title}</h4>${body}${foot}</article>`;
+  }
+  if(a.col==='rev')return o+`<div class="c-hd"><span class="badge cy">Ready to review</span><span class="num" style="margin-left:auto;font-size:10.5px;color:var(--mu);font-weight:700">${a.todo[0]}/${a.todo[1]} todos</span></div>${meta}<h4>${a.title}</h4><div class="c-line">${a.line}</div>${a.thumb?`<div class="thumb">${THUMB}</div>`:''}<div class="revb"><button class="cb pri">${ic('diff')}Review diff</button><button class="cb">${ic('merge')}Merge</button><button class="cb">${ic('pr')}PR</button></div>${foot}</article>`;
+  return `<article class="card tilt c-done" draggable="true" data-id="${a.id}"><span class="ck">${ic('check')}</span><div style="min-width:0;flex:1"><h4>${a.title}</h4><div class="c-meta"><b>${a.id}</b><span>${a.line}</span><span style="margin-left:auto">${dif(a.diff)}</span></div></div></article>`;
+}
+$$('#lanes .lane').forEach(l=>{l.querySelector('.list').innerHTML=AG.filter(a=>a.col===l.dataset.col).map(card).join('')});
+// phone lists
+$('#pRun').innerHTML=AG.filter(a=>a.col==='run').map(a=>`<div class="prow">${ring(a.todo[0],a.todo[1],38)}<div><b>${a.id}</b> <span style="color:var(--mu2);font-size:11px">${a.repo}</span><div class="s"><span class="tool">${a.live[0]}</span> ${a.live[1]}</div></div><span class="r num tmr" data-t="${a.t}">${fmt(a.t)}</span></div>`).join('');
+$('#pRev').innerHTML=AG.filter(a=>a.col==='rev').map(a=>`<div class="prow rv"><div><b>${a.id}</b> <span style="color:var(--mu2);font-size:11px">${a.repo}</span><div class="s" style="color:#a5f3fc">${a.line}</div></div><span class="r">${dif(a.diff.slice(0,2))}</span></div>`).join('');
+// mini live terminal
+const LV=['<span class="g">❯</span> bun test src/board','<span class="g">✓</span> columns.test.ts <span class="dm">(6)</span>','<span class="g">✓</span> persist.test.ts <span class="dm">(9)</span>','<span class="g">✓</span> drag-drop.test.ts <span class="dm">(12)</span>','<span class="rd">✗</span> keyboard-move.test.ts <span class="dm">(2/6)</span>','<span class="g">✓</span> lane-order.test.ts <span class="dm">(4)</span>','<span class="am">●</span> a11y.test.ts <span class="dm">running…</span>','<span class="wh">31/40 passing…</span>'];
+const mt=$('#mterm');mt.innerHTML=LV.map(l=>`<div>${l}</div>`).join('');
+let li=0;
+if(!RM)setInterval(()=>{const d=document.createElement('div');d.className='ln';d.innerHTML=LV[li++%LV.length];mt.appendChild(d);while(mt.children.length>9)mt.firstChild.remove()},1500);
+// clones: dimmed board behind modal, dimmed home behind sheet
+const bc=$('#boardInner').cloneNode(true);bc.removeAttribute('id');$$('[id]',bc).forEach(e=>e.removeAttribute('id'));$('#wtBg').appendChild(bc);
+const hc=$('#pHomeBody').cloneNode(true);hc.removeAttribute('id');$$('[id]',hc).forEach(e=>e.removeAttribute('id'));$('#pDim').appendChild(hc);$('#pDim').appendChild($('#pHome .p-nav').cloneNode(true));
+// views
+function setView(v){
+  $$('.view').forEach(s=>s.classList.toggle('on',s.id==='v-'+v));
+  $$('#pills button,#nav button').forEach(b=>b.classList.toggle('on',b.dataset.view===v));
+  $('#crumb').textContent=$('#v-'+v).dataset.name;
+  if(v==='session'){const t=$('#tr');requestAnimationFrame(()=>t.scrollTop=t.scrollHeight)}
+}
+window.setView=setView;
+document.addEventListener('click',e=>{
+  const v=e.target.closest('[data-view]');if(v){setView(v.dataset.view);return}
+  const b=e.target.closest('[data-ask] > button');if(b){$$(':scope > button',b.parentElement).forEach(x=>x.classList.toggle('sel',x===b))}
+  const f=e.target.closest('[data-fo]');if(f){$$('[data-fo]').forEach(x=>x.classList.toggle('sel',x===f))}
+  const s=e.target.closest('.seg button');if(s){$$('button',s.parentElement).forEach(x=>x.classList.toggle('on',x===s))}
+  const t=e.target.closest('.tabs button,.p-tabs button');if(t){$$('button',t.parentElement).forEach(x=>x.classList.toggle('on',x===t))}
+});
+// 3D tilt with spring + specular
+$$('.tilt').forEach(el=>{
+  el.insertAdjacentHTML('beforeend','<i class="spec"></i>');
+  if(RM)return;
+  const max=el.classList.contains('card')?9:6;
+  el.addEventListener('pointermove',e=>{
+    const r=el.getBoundingClientRect(),x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;
+    el.style.setProperty('--rx',((.5-y)*max).toFixed(2)+'deg');
+    el.style.setProperty('--ry',((x-.5)*max*1.2).toFixed(2)+'deg');
+    el.style.setProperty('--mx',(x*100).toFixed(1)+'%');el.style.setProperty('--my',(y*100).toFixed(1)+'%');
+    el.classList.add('tilting');
+  });
+  el.addEventListener('pointerleave',()=>{el.style.setProperty('--rx','0deg');el.style.setProperty('--ry','0deg');el.classList.remove('tilting')});
+});
+// drag & drop between lanes
+let drag=null;
+const counts=()=>$$('#lanes .lane').forEach(l=>l.querySelector('.cnt').textContent=l.querySelector('.list').children.length);
+document.addEventListener('dragstart',e=>{const c=e.target.closest&&e.target.closest('#lanes .card');if(!c)return;drag=c;c.classList.remove('tilting');c.classList.add('dragging');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',c.dataset.id)});
+document.addEventListener('dragend',()=>{if(drag)drag.classList.remove('dragging');drag=null;$$('.lane').forEach(l=>l.classList.remove('over'));counts()});
+$$('#lanes .lane').forEach(l=>{
+  const list=l.querySelector('.list');
+  l.addEventListener('dragover',e=>{if(!drag)return;e.preventDefault();$$('#lanes .lane').forEach(x=>x.classList.toggle('over',x===l));
+    const after=[...list.children].find(c=>{if(c===drag)return false;const r=c.getBoundingClientRect();return e.clientY<r.top+r.height/2});
+    if(after!==drag.nextSibling||drag.parentElement!==list)list.insertBefore(drag,after||null)});
+  l.addEventListener('drop',e=>e.preventDefault());
+});
+// ticking timers
+setInterval(()=>{
+  $$('[data-t]').forEach(el=>{const t=+el.dataset.t+1;el.dataset.t=t;el.textContent=fmt(t)});
+  $$('[data-wait]').forEach(el=>{const t=+el.dataset.wait+1;el.dataset.wait=t;el.textContent=fmt(t)});
+},1000);
+if(RM)$$('svg').forEach(s=>s.pauseAnimations&&s.pauseAnimations());
+// fit
+const fit=()=>{$('#page').style.zoom=Math.min(1,(document.documentElement.clientWidth-48)/1800)};
+addEventListener('resize',fit);fit();
+})();
+</script>
+</body>
+</html>

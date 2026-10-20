@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+.research/omp-src/
+.research/herdr-src/
+*.tgz
+.DS_Store
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/build/

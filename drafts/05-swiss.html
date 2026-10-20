@@ -1,0 +1,1318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeleFlock · Draft 05 · Swiss</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --w:#ffffff;--p:#f2f2ef;--k:#0b0b0b;--g:#8c8c8c;--o:#ff4f00;
+  --g2:#5b5b57;--l:#dcdcd6;--l2:#ebebe6;
+  --t:120ms cubic-bezier(.2,0,0,1);
+  --sans:"Inter Tight","Inter",system-ui,"Segoe UI",Arial,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,"Courier New",monospace;
+}
+html,body{background:var(--p)}
+body{font-family:var(--sans);color:var(--k);-webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1,"cv11" 1;overflow-x:hidden}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;border-radius:0;text-align:left}
+input,textarea{font:inherit;color:inherit;border-radius:0;border:0;background:none;outline:none}
+:focus-visible{outline:2px solid var(--k);outline-offset:2px}
+.ico{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:square;stroke-linejoin:miter;flex:none;display:block}
+.mono{font-family:var(--mono)}
+.up{text-transform:uppercase;letter-spacing:.08em}
+.lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--g)}
+.dim{color:var(--g)}
+.plus{font-weight:700}
+.minus{color:var(--g)}
+
+/* state markers: shape, not colour */
+.m{width:10px;height:10px;display:inline-block;flex:none;vertical-align:middle}
+.m-run{background:var(--k);animation:pulse 1.8s ease-in-out infinite}
+.m-need{background:var(--o)}
+.m-rev{box-shadow:inset 0 0 0 2px var(--k)}
+.m-done{width:12px;height:12px;color:var(--g);fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:square}
+@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(.7);opacity:.55}}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ───────── presentation page ───────── */
+.page{width:1776px;margin:0 auto;padding:40px 0 96px;transform-origin:top left}
+.ruler{display:grid;grid-template-columns:repeat(12,1fr);column-gap:24px;margin-bottom:8px}
+.ruler span{font:500 10px/1 var(--mono);color:var(--g);border-left:1px solid var(--g);padding:0 0 6px 5px}
+.hdr{display:grid;grid-template-columns:repeat(12,1fr);column-gap:24px;border-top:4px solid var(--k);padding-top:20px;align-items:end}
+.hdr .brand{grid-column:1/6;display:flex;align-items:flex-end;gap:20px}
+.hdr h1{font-size:104px;font-weight:900;letter-spacing:-.06em;line-height:.82}
+.hdr .draft{font-size:15px;font-weight:800;line-height:1.2;padding-bottom:4px}
+.hdr .draft b{display:block;font-size:44px;letter-spacing:-.04em;line-height:.9}
+.hdr .concept{grid-column:6/10;font-size:21px;font-weight:600;line-height:1.22;letter-spacing:-.015em}
+.hdr .concept em{font-style:normal;background:var(--o);padding:0 4px}
+.hdr .spec{grid-column:10/13}
+.sw{display:grid;grid-template-columns:repeat(6,1fr);gap:0;border:2px solid var(--k);margin-bottom:10px}
+.sw div{height:56px;position:relative;border-right:1px solid var(--k)}
+.sw div:last-child{border-right:0}
+.sw span{position:absolute;left:5px;bottom:4px;font:500 9px/1 var(--mono)}
+.fonts{font-size:12px;font-weight:600;display:flex;justify-content:space-between}
+.fonts .mono{font-weight:500}
+
+.sec{display:grid;grid-template-columns:repeat(12,1fr);column-gap:24px;margin:56px 0 20px;border-top:2px solid var(--k);padding-top:10px}
+.sec b{grid-column:1/2;font-size:13px;font-weight:900}
+.sec span{grid-column:2/8;font-size:13px;font-weight:700}
+.sec i{grid-column:8/13;font-style:normal;font-size:13px;color:var(--g2);text-align:right}
+
+.stage{display:grid;grid-template-columns:1440px 1fr;column-gap:32px}
+.switch{display:inline-flex;border:2px solid var(--k);margin-bottom:16px;background:var(--w)}
+.switch button{padding:10px 22px 11px 14px;font-size:15px;font-weight:800;letter-spacing:-.01em;display:flex;gap:10px;align-items:baseline;border-right:2px solid var(--k);transition:background var(--t),color var(--t)}
+.switch button:last-child{border-right:0}
+.switch button small{font:500 11px var(--mono);color:var(--g)}
+.switch button:hover,.switch button.on{background:var(--k);color:var(--w)}
+.switch button:hover small,.switch button.on small{color:var(--w)}
+.note{padding-top:60px}
+.note .n{font-size:168px;font-weight:900;letter-spacing:-.07em;line-height:.78;margin-left:-8px}
+.note h3{font-size:30px;font-weight:900;letter-spacing:-.035em;margin:24px 0 10px;border-top:4px solid var(--k);padding-top:12px}
+.note p{font-size:15px;line-height:1.45;font-weight:500;color:var(--g2)}
+.legend{margin-top:36px;border-top:2px solid var(--k)}
+.legend div{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--l);font-size:14px;font-weight:700}
+.legend div span{margin-left:auto;font:500 11px var(--mono);color:var(--g)}
+.legend .m{width:14px;height:14px}
+.legend .m-done{width:15px;height:15px}
+
+/* ───────── window ───────── */
+.win{width:1440px;height:900px;background:var(--w);border:1px solid var(--k);display:flex;flex-direction:column;box-shadow:0 30px 80px -30px rgba(11,11,11,.35);position:relative;overflow:hidden}
+.tb{height:32px;display:flex;align-items:center;background:var(--w);border-bottom:1px solid var(--l);flex:none;user-select:none}
+.tb .t{display:flex;align-items:center;gap:10px;padding-left:12px;font-size:12px;font-weight:700;flex:1}
+.tb .t span{font-weight:500;color:var(--g)}
+.tb .wc{display:flex;height:100%}
+.tb .wc button{width:46px;height:32px;display:grid;place-items:center;transition:background var(--t),color var(--t)}
+.tb .wc button:hover{background:var(--l2)}
+.tb .wc button.x:hover{background:#c42b1c;color:#fff}
+.tb .wc svg{width:10px;height:10px;stroke:currentColor;stroke-width:1;fill:none}
+.app{flex:1;display:grid;grid-template-columns:240px 1fr;min-height:0}
+
+/* sidebar */
+.side{border-right:2px solid var(--k);display:flex;flex-direction:column;min-height:0}
+.mach{padding:16px 20px 14px}
+.mach .host{display:flex;align-items:baseline;justify-content:space-between;margin-top:6px}
+.mach .host b{font-size:34px;font-weight:900;letter-spacing:-.05em;line-height:.9}
+.mach .host span{font-size:11px;font-weight:800;display:flex;align-items:center;gap:6px}
+.mach .host .m{width:8px;height:8px}
+.mach .meta{font:500 10.5px/1.5 var(--mono);color:var(--g2);margin-top:8px}
+.mach .other{display:flex;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--l);font-size:11.5px;font-weight:600;color:var(--g)}
+.nav{border-top:3px solid var(--k);border-bottom:3px solid var(--k);padding:6px 0}
+.nav button{display:flex;width:100%;align-items:baseline;gap:10px;padding:7px 20px;font-size:15px;font-weight:800;letter-spacing:-.01em;transition:background var(--t),color var(--t)}
+.nav button small{font:500 10px var(--mono);color:var(--g);width:16px}
+.nav button em{margin-left:auto;font-style:normal;font-size:11px;font-weight:700;color:var(--g)}
+.nav button em.need{background:var(--o);color:var(--k);padding:1px 5px}
+.nav button:hover,.nav button.on{background:var(--k);color:var(--w)}
+.nav button:hover small,.nav button.on small,.nav button:hover em,.nav button.on em{color:var(--w)}
+.nav button.on em.need,.nav button:hover em.need{color:var(--k)}
+.tree{flex:1;overflow:auto;padding:12px 0 8px;scrollbar-width:none}
+.tree .th{display:flex;justify-content:space-between;padding:0 20px 8px}
+.repo{padding:6px 20px 2px}
+.repo .rn{display:flex;align-items:baseline;gap:8px;font-size:14px;font-weight:900;letter-spacing:-.02em;white-space:nowrap}
+.repo .rn span{font:500 9.5px var(--mono);color:var(--g);margin-left:auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.wt{display:flex;align-items:center;gap:8px;margin-left:4px;padding:4px 0 4px 10px;border-left:1px solid var(--k);font-size:11px;cursor:pointer;transition:background var(--t),color var(--t)}
+.wt .br{font-family:var(--mono);font-size:10.5px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--g2)}
+.wt b{font-weight:800;font-size:11.5px}
+.wt:hover{background:var(--k);color:var(--w)}
+.wt:hover .br{color:var(--w)}
+.wt:hover .m-run{background:var(--w)}
+.wt:hover .m-rev{box-shadow:inset 0 0 0 2px var(--w)}
+.wt.done b{color:var(--g);font-weight:600}
+.wt.need b{background:var(--o);color:var(--k);padding:0 4px}
+.sact{padding:12px 20px 16px;display:grid;gap:6px;border-top:1px solid var(--l)}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;font-size:13px;font-weight:800;border:2px solid var(--k);transition:background var(--t),color var(--t),border-color var(--t);white-space:nowrap}
+.btn:hover{background:var(--k);color:var(--w)}
+.btn.blk{background:var(--k);color:var(--w)}
+.btn.blk:hover{background:var(--w);color:var(--k)}
+.btn.sm{height:28px;font-size:11.5px;padding:0 9px;border-width:1.5px}
+.btn.ghost{border-color:transparent}
+.btn.ghost:hover{border-color:var(--k)}
+kbd{font:500 10px var(--mono);padding:1px 4px;border:1px solid currentColor;opacity:.7}
+
+/* main + topbar */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;position:relative}
+.top{height:56px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px 0 32px;border-bottom:2px solid var(--k)}
+.crumb{font-size:13px;font-weight:600;color:var(--g);display:flex;gap:8px;align-items:center;flex:1}
+.crumb b{color:var(--k);font-weight:900;font-size:15px;letter-spacing:-.01em}
+.search{width:340px;height:34px;border:1.5px solid var(--k);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:13px;color:var(--g);transition:background var(--t),color var(--t)}
+.search kbd{margin-left:auto}
+.search:hover{background:var(--k);color:var(--w)}
+.bell{position:relative;width:34px;height:34px;display:grid;place-items:center;transition:background var(--t),color var(--t)}
+.bell:hover{background:var(--k);color:var(--w)}
+.bell i{position:absolute;top:2px;right:0;background:var(--o);color:var(--k);font:900 10px/14px var(--sans);font-style:normal;width:14px;text-align:center}
+.bell .ico{width:18px;height:18px}
+
+.views{flex:1;position:relative;min-height:0}
+.view{position:absolute;inset:0;display:none}
+.win[data-view=board] .v-board,.win[data-view=worktree] .v-board{display:flex}
+.win[data-view=session] .v-session{display:flex}
+.win[data-view=terminal] .v-term{display:flex}
+.modal-wrap{position:absolute;inset:32px 0 0 0;display:none;background:rgba(11,11,11,.58);z-index:20;align-items:center;justify-content:center}
+.win[data-view=worktree] .modal-wrap{display:flex}
+
+/* ───────── board ───────── */
+.v-board{flex-direction:column;padding:20px 32px 0}
+.bhead{display:grid;grid-template-columns:repeat(12,1fr);column-gap:16px;align-items:end;padding-bottom:16px}
+.bhead h2{grid-column:1/4;font-size:76px;font-weight:900;letter-spacing:-.06em;line-height:.8}
+.stats{grid-column:4/13;display:grid;grid-template-columns:1.1fr 1fr 1fr 1fr 1.2fr;border-left:1px solid var(--k)}
+.cols,.bhead{grid-template-columns:repeat(12,minmax(0,1fr))!important}
+.col{min-width:0}
+.stats div{padding:0 12px;border-right:1px solid var(--l)}
+.stats div:last-child{border-right:0}
+.stats b{display:block;font-size:24px;font-weight:900;letter-spacing:-.03em;line-height:1;margin-top:6px}
+.stats b small{font-size:13px;font-weight:700;letter-spacing:0;color:var(--g2)}
+.stats .lbl{display:block}
+.cols{flex:1;min-height:0;display:grid;grid-template-columns:repeat(12,1fr);column-gap:16px;
+  background:repeating-linear-gradient(90deg,rgba(11,11,11,.028) 0 calc((100% - 176px)/12),transparent calc((100% - 176px)/12) calc((100% - 176px)/12 + 16px))}
+.col{display:flex;flex-direction:column;min-height:0;border-top:4px solid var(--k)}
+.col.c-run{grid-column:span 3}.col.c-need{grid-column:span 4}.col.c-rev{grid-column:span 3}.col.c-done{grid-column:span 2}
+.col.c-need{border-top-color:var(--o)}
+.chd{display:flex;align-items:flex-end;gap:12px;padding:8px 0 12px}
+.chd .big{font-size:112px;font-weight:900;letter-spacing:-.07em;line-height:.76;margin-left:-5px;min-width:60px}
+.c-need .chd .big{color:var(--o)}
+.chd .cl{padding-bottom:2px}
+.chd .cl b{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:900;letter-spacing:-.02em}
+.chd .cl span{font:500 10px var(--mono);color:var(--g);display:block;margin-top:3px}
+.cbody{flex:1;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:10px;padding-bottom:20px;scrollbar-width:none;transition:background var(--t)}
+.cbody::-webkit-scrollbar{display:none}
+.cbody.over{background:rgba(11,11,11,.07);outline:2px dashed var(--k);outline-offset:-2px}
+
+.card{border-top:2px solid var(--k);padding:10px 12px 12px;background:var(--w);cursor:grab;position:relative;transition:background var(--t),color var(--t)}
+.card.dragging{opacity:.35}
+.card .r1{display:flex;align-items:center;gap:8px}
+.card .nm{font-size:19px;font-weight:900;letter-spacing:-.03em;line-height:1}
+.card .tm{margin-left:auto;font:500 11px var(--mono);color:var(--g2)}
+.card .br{font:500 10.5px var(--mono);color:var(--g);margin:5px 0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .ti{font-size:14px;font-weight:700;line-height:1.22;letter-spacing:-.01em}
+.card .live{font:500 10.5px/1.45 var(--mono);margin-top:8px;padding:6px 8px;background:var(--p);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .live i{font-style:normal;background:var(--k);color:var(--w);padding:0 4px;margin-right:6px}
+.card .mt{display:grid;grid-template-columns:auto auto 1fr;gap:12px;align-items:end;margin-top:9px;font-size:11px;font-weight:700}
+.card .mt .lbl{display:block;font-size:9px;margin-bottom:2px}
+.card .mt .md{text-align:right;font-weight:600;color:var(--g2)}
+.todo{display:flex;gap:2px;margin-top:3px}
+.todo i{width:7px;height:7px;box-shadow:inset 0 0 0 1px currentColor}
+.todo i.f{background:currentColor}
+.card .acts{display:none;gap:6px;margin-top:10px}
+.card .acts .btn{flex:1;border-color:var(--w);color:var(--w)}
+.card .acts .btn:hover{background:var(--w);color:var(--k)}
+.card.run:hover,.card.rev:hover{background:var(--k);color:var(--w)}
+.card.run:hover .acts{display:flex}
+.card.run:hover .br,.card.rev:hover .br,.card.run:hover .tm,.card.run:hover .mt .md,.card.rev:hover .mt .md{color:#a9a9a4}
+.card.run:hover .live{background:#222}
+.card.run:hover .live i{background:var(--w);color:var(--k)}
+.card.run:hover .m-run{background:var(--w)}
+.card.rev:hover .m-rev{box-shadow:inset 0 0 0 2px var(--w)}
+.card.rev:hover .live{background:#222}
+.card.rev:hover .btn{border-color:var(--w)}
+.card.rev:hover .btn:hover{background:var(--w);color:var(--k)}
+.card.rev .live{background:none;padding:0;font-weight:700}
+.card.rev .racts{display:flex;gap:6px;margin-top:10px}
+.card.rev .racts .btn{flex:1;padding:0 4px}
+.thumb{margin-top:8px;height:58px;background:var(--p);display:block;width:100%}
+.card.rev:hover .thumb{background:#222}
+.card.need{background:var(--o);border-top-color:var(--k);padding:12px 14px 14px}
+.card.need .br,.card.need .tm{color:var(--k);opacity:.7}
+.card.need .tag{font-size:10px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;background:var(--k);color:var(--o);padding:2px 6px;margin-left:auto}
+.card.need .q{font-size:21px;font-weight:900;letter-spacing:-.03em;line-height:1.05;margin:10px 0 4px}
+.card.need .wait{font-size:11px;font-weight:700;display:flex;justify-content:space-between;margin-bottom:10px}
+.card.need .cmd{font:700 12px/1.4 var(--mono);background:var(--k);color:var(--w);padding:8px 10px;margin:10px 0 4px}
+.card.need .cmd span{color:var(--o)}
+.qa{display:grid;gap:4px}
+.qa button,.ap button{background:var(--k);color:var(--w);height:32px;padding:0 10px;font-size:12.5px;font-weight:800;display:flex;align-items:center;gap:8px;transition:background var(--t),color var(--t)}
+.qa button small{font-size:10px;font-weight:700;opacity:.6;margin-left:auto}
+.qa button:hover,.ap button:hover,.qa button.sel,.ap button.sel{background:var(--w);color:var(--k)}
+.qa button.oth{background:none;color:var(--k);box-shadow:inset 0 0 0 1.5px var(--k)}
+.qa button.oth:hover{background:var(--k);color:var(--w)}
+.ap{display:grid;grid-template-columns:1fr 1.25fr .7fr;gap:4px}
+.ap button{justify-content:center;padding:0 4px}
+.card.need .ft{display:flex;justify-content:space-between;margin-top:10px;font-size:10.5px;font-weight:700}
+.card.done{cursor:grab;padding:9px 12px 10px 0;background:none}
+.card.done .nm{font-size:15px;color:var(--g)}
+.card.done .ti{font-size:12.5px;font-weight:600;color:var(--g2);margin-top:4px}
+.card.done .ml{font:500 10px var(--mono);color:var(--g);margin-top:6px;display:flex;flex-wrap:wrap;justify-content:space-between;column-gap:8px}
+.card.done:hover{background:var(--k);color:var(--w);padding-left:8px;padding-right:8px}
+
+/* ───────── session ───────── */
+.v-session{flex-direction:row}
+.sx{flex:1;display:flex;flex-direction:column;min-width:0}
+.shead{padding:18px 32px 14px 32px;border-bottom:2px solid var(--k);display:grid;grid-template-columns:auto 1fr auto;column-gap:24px;align-items:end}
+.shead h2{font-size:80px;font-weight:900;letter-spacing:-.065em;line-height:.76;margin-left:-4px}
+.shead .st{display:inline-flex;align-items:center;gap:8px;background:var(--o);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;padding:5px 8px}
+.shead .meta{font-size:12.5px;font-weight:600;color:var(--g2);margin-top:9px;line-height:1.5}
+.shead .meta b{color:var(--k);font-weight:800}
+.shead .nums{display:flex;gap:20px;text-align:right}
+.shead .nums b{display:block;font-size:30px;font-weight:900;letter-spacing:-.04em;line-height:.9}
+.tx{flex:1;overflow:auto;min-height:0;scrollbar-width:thin;scrollbar-color:var(--k) transparent}
+.ent{display:grid;grid-template-columns:72px 1fr;padding:12px 32px 12px 0;border-bottom:1px solid var(--l)}
+.ix{font:500 10.5px var(--mono);color:var(--g);padding:3px 0 0 32px}
+.who{font-size:10px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;margin-bottom:5px;display:flex;gap:10px}
+.who span{color:var(--g);font-weight:600;letter-spacing:.04em}
+.msg{font-size:17px;font-weight:500;line-height:1.38;letter-spacing:-.012em;max-width:660px}
+.msg.omp{font-weight:600}
+.think{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:var(--g2)}
+.think .ico{width:12px;height:12px}
+.tool{display:flex;align-items:baseline;gap:12px;font-size:13px;font-weight:600;min-width:0}
+.tn{font:700 10.5px var(--mono);background:var(--k);color:var(--w);padding:2px 0;width:46px;text-align:center;flex:none}
+.tool .p{font:500 12px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tool .r{margin-left:auto;font-size:12px;font-weight:700;white-space:nowrap}
+.tool .r.dim{font-weight:600}
+.subs{margin:8px 0 0 58px;border-left:2px solid var(--k)}
+.subs div{display:grid;grid-template-columns:96px 1fr auto;gap:12px;padding:5px 0 5px 12px;font-size:12.5px;font-weight:600;align-items:baseline}
+.subs b{font-weight:900}
+.subs span{color:var(--g2)}
+.subs em{font-style:normal;font:500 11px var(--mono)}
+.diff{font:500 12px/1.65 var(--mono);background:var(--p);margin:8px 0 0 58px;padding:6px 0;overflow:hidden}
+.diff div{padding:0 12px;white-space:pre}
+.diff .a{box-shadow:inset 3px 0 0 var(--k)}
+.diff .d{box-shadow:inset 3px 0 0 var(--g);color:var(--g);text-decoration:line-through}
+.out{font:500 11.5px var(--mono);color:var(--g2);margin:6px 0 0 58px}
+.todos{margin:8px 0 0 58px}
+.todos .ph{font-size:12px;font-weight:900;margin-bottom:4px}
+.todos div{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600;padding:3px 0}
+.todos .c{color:var(--g);text-decoration:line-through}
+.todos .bk{font-weight:800}
+.todos .bk em{font-style:normal;background:var(--o);font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;padding:1px 5px}
+.tsq{width:10px;height:10px;flex:none;box-shadow:inset 0 0 0 1.5px var(--k)}
+.tsq.half{background:linear-gradient(90deg,var(--o) 50%,transparent 50%);box-shadow:inset 0 0 0 1.5px var(--k)}
+.ask{background:var(--o);display:grid;grid-template-columns:72px 1fr;padding:22px 32px 24px 0}
+.ask .ix{color:var(--k);font-weight:700}
+.al{font-size:11px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;display:flex;gap:14px;align-items:center}
+.al span{font-weight:700;letter-spacing:.04em;text-transform:none;font-size:12px}
+.al .blk{margin-left:auto;background:var(--k);color:var(--o);padding:3px 7px}
+.ask h3{font-size:42px;font-weight:900;letter-spacing:-.045em;line-height:.98;margin:12px 0 18px;max-width:620px}
+.opts{display:grid;gap:4px}
+.opt{width:100%;background:var(--k);color:var(--w);display:grid;grid-template-columns:44px 1fr auto;align-items:center;padding:12px 16px 12px 0;transition:background var(--t),color var(--t)}
+.opt .k{font:700 12px var(--mono);text-align:center;color:var(--o);transition:color var(--t)}
+.opt b{font-size:17px;font-weight:800;letter-spacing:-.015em}
+.opt b em{font-style:normal;font-size:9.5px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;border:1.5px solid currentColor;padding:1px 5px;margin-left:10px;vertical-align:2px}
+.opt p{font-size:13px;font-weight:500;color:#b3b3ae;margin-top:3px;transition:color var(--t)}
+.opt .ck{width:22px;height:22px;box-shadow:inset 0 0 0 2px currentColor;display:grid;place-items:center}
+.opt .ck svg{width:14px;height:14px;stroke:transparent;fill:none;stroke-width:2.5}
+.opt:hover,.opt.sel{background:var(--w);color:var(--k)}
+.opt:hover p,.opt.sel p{color:var(--g2)}
+.opt:hover .k,.opt.sel .k{color:var(--k)}
+.opt.sel .ck{background:var(--k)}
+.opt.sel .ck svg{stroke:var(--w)}
+.opt.other input{width:100%;font-size:16px;font-weight:700}
+.opt.other input::placeholder{color:#b3b3ae;font-weight:600}
+.opt.other:hover input::placeholder,.opt.other.sel input::placeholder{color:var(--g2)}
+.askf{display:flex;align-items:center;gap:16px;margin-top:14px;font-size:12px;font-weight:700}
+.askf .sp{flex:1}
+.askf .btn{border-color:var(--k)}
+.comp{border-top:2px solid var(--k);padding:12px 24px 12px 72px;flex:none}
+.cin{display:flex;align-items:center;gap:6px}
+.cin input{flex:1;font-size:17px;font-weight:500;height:40px;letter-spacing:-.01em}
+.cin input::placeholder{color:var(--g)}
+.ib{width:40px;height:40px;display:grid;place-items:center;transition:background var(--t),color var(--t)}
+.ib .ico{width:18px;height:18px}
+.ib:hover{background:var(--k);color:var(--w)}
+.ib.send{background:var(--k);color:var(--w)}
+.ib.send:hover{background:var(--o);color:var(--k)}
+.crow{display:flex;gap:6px;margin-top:6px;align-items:center}
+.chip{height:24px;padding:0 8px;font-size:11.5px;font-weight:800;border:1.5px solid var(--k);display:inline-flex;align-items:center;gap:6px;transition:background var(--t),color var(--t)}
+.chip:hover{background:var(--k);color:var(--w)}
+.chip.off{border-color:var(--l);color:var(--g2)}
+.chip.off:hover{border-color:var(--k)}
+.hint{margin-left:auto;font-size:11.5px;color:var(--g2);font-weight:600;display:flex;gap:14px}
+.hint kbd{margin-right:4px}
+.insp{width:360px;flex:none;border-left:2px solid var(--k);overflow:auto;scrollbar-width:none}
+.insp::-webkit-scrollbar{display:none}
+.is{padding:14px 20px 16px;border-bottom:1px solid var(--l)}
+.is .h{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
+.ctxrow{display:flex;align-items:flex-end;justify-content:space-between}
+.ctxbig{font-size:88px;font-weight:900;letter-spacing:-.07em;line-height:.76;margin-left:-4px}
+.ctxbig small{font-size:36px;letter-spacing:-.04em}
+.ctxrow .r{text-align:right;font:500 11px/1.5 var(--mono);color:var(--g2)}
+.ctxrow .r b{font:900 18px var(--sans);color:var(--k);letter-spacing:-.02em;display:block}
+.bar{height:14px;box-shadow:inset 0 0 0 1.5px var(--k);position:relative;margin-top:14px;background:repeating-linear-gradient(90deg,transparent 0 calc(10% - 1px),var(--l) calc(10% - 1px) 10%)}
+.bar i{position:absolute;left:0;top:0;bottom:0;width:41%;background:var(--k)}
+.trio{display:grid;grid-template-columns:1.2fr 1fr 1fr;border-bottom:1px solid var(--l)}
+.trio div{padding:12px 0 12px 20px;border-right:1px solid var(--l)}
+.trio div:last-child{border-right:0}
+.trio b{display:block;font-size:28px;font-weight:900;letter-spacing:-.045em;line-height:1;margin:5px 0 3px}
+.trio span.s{font:500 10px var(--mono);color:var(--g2)}
+.files div{display:flex;gap:8px;font:500 11.5px/1 var(--mono);padding:6px 0;border-bottom:1px solid var(--l2)}
+.files div span{margin-left:auto;white-space:nowrap}
+.files div.tot{font:900 13px var(--sans);border-bottom:0;border-top:2px solid var(--k);padding-top:8px}
+.fbtn{display:flex;gap:6px;margin-top:10px}
+.fbtn .btn{flex:1}
+.sublist div{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:800;padding:3px 0}
+.sublist div span{margin-left:auto;font:500 11px var(--mono);color:var(--g2)}
+.acts2{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.acts2 .btn{justify-content:flex-start}
+.acts2 .btn:first-child{grid-column:1/3;background:var(--k);color:var(--w)}
+.acts2 .btn:first-child:hover{background:var(--w);color:var(--k)}
+
+/* ───────── terminal ───────── */
+.v-term{flex-direction:column}
+.ttool{height:52px;flex:none;display:flex;align-items:center;gap:14px;padding:0 24px 0 32px;border-bottom:2px solid var(--k)}
+.att{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:800}
+.att .mono{font-weight:700}
+.tabs{display:flex;border:1.5px solid var(--k)}
+.tabs button{padding:5px 14px;font:700 12px var(--mono);border-right:1.5px solid var(--k);transition:background var(--t),color var(--t)}
+.tabs button:last-child{border-right:0}
+.tabs button:hover,.tabs button.on{background:var(--k);color:var(--w)}
+.ttool .grp{display:flex;align-items:center;gap:6px}
+.ttool .sp{flex:1}
+.fs{display:flex;align-items:center;border:1.5px solid var(--k);height:28px}
+.fs button{width:28px;height:100%;font-weight:900;font-size:12px;text-align:center;transition:background var(--t),color var(--t)}
+.fs button:hover{background:var(--k);color:var(--w)}
+.fs span{font:500 11px var(--mono);padding:0 6px;border-left:1.5px solid var(--k);border-right:1.5px solid var(--k);line-height:25px}
+.tbody{flex:1;display:flex;min-height:0}
+.termw{flex:1;background:var(--k);color:#e6e6e1;font:400 13px/1.6 var(--mono);padding:20px 28px;overflow:hidden;white-space:pre}
+.a-g{color:#5fd38a}.a-m{color:#d98cff}.a-c{color:#62cde0}.a-b{color:var(--o);font-weight:700}.a-d{color:#7a7a75}.a-w{color:#fff;font-weight:700}
+.cur{display:inline-block;width:.6em;background:#e6e6e1;animation:blink 1s steps(1) infinite}
+.trail{width:300px;flex:none;border-left:2px solid var(--k);display:flex;flex-direction:column}
+.trail .is{padding:16px 20px}
+.pbig{font-size:68px;font-weight:900;letter-spacing:-.06em;line-height:.8;margin-top:10px}
+.kv{display:flex;justify-content:space-between;font-size:12.5px;font-weight:600;padding:5px 0;border-bottom:1px solid var(--l2)}
+.kv span:last-child{font:500 11.5px var(--mono)}
+.panes button{display:flex;width:100%;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--l2);font-size:13px;font-weight:800;transition:background var(--t),color var(--t)}
+.panes button span{font:500 11px var(--mono);color:var(--g2)}
+.panes button em{margin-left:auto;font-style:normal;font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+.panes button em.need{background:var(--o);padding:1px 5px}
+.panes button:hover,.panes button.on{background:var(--k);color:var(--w);padding-left:8px;padding-right:8px}
+.panes button:hover span,.panes button.on span{color:#b3b3ae}
+.panes button.on .m-run{background:var(--w)}
+.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.keys .btn{padding:0}
+
+/* ───────── modal ───────── */
+.modal{width:1060px;background:var(--w);border-top:6px solid var(--k);display:grid;grid-template-columns:400px 1fr;box-shadow:0 40px 120px rgba(0,0,0,.45)}
+.mh{grid-column:1/3;display:flex;align-items:flex-end;gap:20px;padding:22px 24px 16px 28px;border-bottom:2px solid var(--k)}
+.mh h2{font-size:60px;font-weight:900;letter-spacing:-.06em;line-height:.8}
+.mh p{font-size:13px;font-weight:600;color:var(--g2);padding-bottom:2px;flex:1}
+.mh .ib{align-self:flex-start}
+.fb{background:var(--p);border-right:2px solid var(--k);padding:16px 0 0;display:flex;flex-direction:column}
+.fbp{padding:0 24px 10px;display:flex;align-items:center;justify-content:space-between}
+.fbp b{font:700 13px var(--mono)}
+.fbp b span{color:var(--g)}
+.fr{display:grid;grid-template-columns:18px 1fr auto;gap:10px;align-items:center;padding:11px 24px;font-size:15px;font-weight:800;letter-spacing:-.01em;border-top:1px solid var(--l);transition:background var(--t),color var(--t);cursor:pointer}
+.fr span{font:500 11px var(--mono);color:var(--g2)}
+.fr:hover,.fr.sel{background:var(--k);color:var(--w)}
+.fr:hover span,.fr.sel span{color:#c9c9c4}
+.fr.dis{color:var(--g);cursor:not-allowed;font-weight:600}
+.fr.dis:hover{background:none;color:var(--g)}
+.fr.dis:hover span{color:var(--g2)}
+.fb .fbf{margin-top:auto;padding:14px 24px;border-top:2px solid var(--k);display:flex;gap:6px}
+.form{padding:18px 28px 16px}
+.fld{margin-bottom:14px}
+.fld>.lbl{display:block;margin-bottom:2px}
+.fld .v{border-bottom:2px solid var(--k);padding:6px 0 7px;font-size:16px;font-weight:800;display:flex;align-items:center;gap:10px;letter-spacing:-.01em}
+.fld .v .mono{font-size:13.5px;font-weight:500;letter-spacing:0}
+.fld .v small{margin-left:auto;font-size:11px;color:var(--g2);font-weight:700;display:flex;align-items:center;gap:6px}
+.fld .v.auto{border-bottom-style:dotted;border-bottom-width:2px;color:var(--g2)}
+.two{display:grid;grid-template-columns:1fr 1fr;column-gap:24px}
+.seg{display:inline-flex;border:2px solid var(--k);margin-top:4px}
+.seg button{padding:7px 18px;font-size:13px;font-weight:800;transition:background var(--t),color var(--t)}
+.seg button:hover,.seg button.on{background:var(--k);color:var(--w)}
+.agentbox{border:2px solid var(--k);display:grid;grid-template-columns:auto repeat(4,1fr) auto;align-items:stretch;margin-top:4px}
+.agentbox>div{padding:8px 12px;border-right:1px solid var(--l);font-size:14px;font-weight:800}
+.agentbox>div:last-child{border-right:0}
+.agentbox .lbl{display:block;font-size:9px;margin-bottom:2px}
+.agentbox .cb{display:flex;align-items:center;gap:8px;background:var(--k);color:var(--w);border-right:0}
+.cbx{width:16px;height:16px;background:var(--w);display:grid;place-items:center}
+.cbx svg{width:12px;height:12px;stroke:var(--k);fill:none;stroke-width:3}
+.tog{width:38px;height:20px;box-shadow:inset 0 0 0 2px var(--k);position:relative;display:inline-block;vertical-align:middle}
+.tog i{position:absolute;top:4px;left:4px;width:12px;height:12px;background:var(--k);transition:left var(--t)}
+.tog.on{background:var(--k)}
+.tog.on i{left:22px;background:var(--w)}
+.prompt{width:100%;height:68px;border:2px solid var(--k);padding:9px 12px;font-size:14px;font-weight:500;line-height:1.42;resize:none;margin-top:4px;display:block}
+.cmdp{font:500 11px var(--mono);color:var(--g);margin-top:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cmdp b{color:var(--k);font-weight:700}
+.mf{grid-column:1/3;display:flex;align-items:center;gap:10px;padding:14px 24px 14px 28px;border-top:2px solid var(--k)}
+.mf .sp{flex:1;font-size:12px;font-weight:600;color:var(--g2)}
+.mf .btn.blk{height:42px;padding:0 20px;font-size:14px}
+
+/* ───────── phones ───────── */
+.phones{display:flex;justify-content:space-between;align-items:flex-start}
+.dev{background:var(--k);padding:6px}
+.ph{width:412px;height:892px;background:var(--w);position:relative;overflow:hidden;display:flex;flex-direction:column}
+.sb{height:34px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 20px 0 22px;font-size:14px;font-weight:800;position:relative;z-index:3}
+.sb::after{content:"";position:absolute;left:50%;top:9px;width:16px;height:16px;margin-left:-8px;border-radius:50%;background:var(--k)}
+.sbi{display:flex;gap:6px;align-items:center}
+.sbi svg{height:12px;width:auto;display:block}
+.gb{height:22px;flex:none;display:grid;place-items:center}
+.gb i{width:112px;height:4px;background:var(--k)}
+.pbody{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+.ptop{display:flex;align-items:flex-end;justify-content:space-between;padding:12px 16px 14px}
+.ptop h2{font-size:60px;font-weight:900;letter-spacing:-.065em;line-height:.78;margin-left:-3px}
+.conn{display:flex;align-items:center;gap:6px;border:2px solid var(--k);height:30px;padding:0 10px;font-size:12px;font-weight:800}
+.conn .m{width:8px;height:8px}
+.cnt{display:grid;grid-template-columns:1.7fr 1fr 1fr 1fr;border-top:4px solid var(--k);margin:0 16px;align-items:end}
+.cnt div{padding:8px 0 10px 8px;border-left:1px solid var(--l)}
+.cnt div:first-child{border-left:0;padding-left:0}
+.cnt b{display:block;font-size:50px;font-weight:900;letter-spacing:-.06em;line-height:.8}
+.cnt .n1 b{font-size:100px;color:var(--o);line-height:.74;margin-left:-5px}
+.cnt span{font-size:10.5px;font-weight:800;display:flex;align-items:center;gap:5px;margin-top:8px;white-space:nowrap}
+.cnt .m{width:8px;height:8px}
+.cnt .m-done{width:10px;height:10px}
+.psec{display:flex;align-items:center;gap:8px;padding:10px 16px 6px;font-size:11px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;border-top:2px solid var(--k)}
+.psec span{margin-left:auto;font-weight:700;letter-spacing:0;color:var(--g2);text-transform:none;font-size:12px}
+.psec .m{width:9px;height:9px}
+.psec.nb{border-top:0}
+.pneed{background:var(--o);padding:10px 16px 12px;border-top:2px solid var(--k)}
+.pneed+.pneed{margin-top:0}
+.pneed .r1{display:flex;align-items:center;gap:8px}
+.pneed .r1 b{font-size:20px;font-weight:900;letter-spacing:-.03em}
+.pneed .r1 em{font-style:normal;font-size:9.5px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;background:var(--k);color:var(--o);padding:2px 5px}
+.pneed .r1 span{margin-left:auto;font-size:11px;font-weight:700}
+.pneed .q{font-size:23px;font-weight:900;letter-spacing:-.04em;line-height:1;margin:8px 0 10px}
+.pneed .cm{font:700 12px var(--mono);background:var(--k);color:var(--w);padding:8px 10px;margin:8px 0 8px}
+.pneed .cm span{color:var(--o)}
+.pchips{display:flex;flex-wrap:wrap;gap:4px}
+.pchips button{background:var(--k);color:var(--w);height:38px;padding:0 12px;font-size:13px;font-weight:800;transition:background var(--t),color var(--t)}
+.pchips button:hover,.pchips button.sel{background:var(--w);color:var(--k)}
+.pchips button.oth{background:none;color:var(--k);box-shadow:inset 0 0 0 1.5px var(--k)}
+.pchips.g3{display:grid;grid-template-columns:1fr 1.3fr .7fr}
+.pchips.g3 button{padding:0;text-align:center}
+.prow{display:flex;align-items:center;gap:10px;padding:0 16px;height:39px;border-top:1px solid var(--l);flex:none}
+.prow b{font-size:17px;font-weight:900;letter-spacing:-.025em;width:82px;flex:none}
+.prow span{font-size:12.5px;font-weight:600;color:var(--g2);flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.prow em{font-style:normal;font:500 11px var(--mono);flex:none}
+.prow.dn b,.prow.dn em{color:var(--g)}
+.prow.dn{border-top:2px solid var(--k);height:42px}
+.prow.dn b{width:auto;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--k)}
+.prow.dn .big3{font-size:24px;font-weight:900;letter-spacing:-.05em;color:var(--g);flex:none;line-height:1}
+.pbody.flock{padding-bottom:12px}
+.pbody.flock .prow:not(.dn){height:36px}
+.pbody.flock .ptop{padding:10px 16px 12px}
+.bnav{height:66px;flex:none;display:grid;grid-template-columns:repeat(4,1fr);border-top:2px solid var(--k)}
+.bnav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;font-size:11px;font-weight:700;position:relative;color:var(--g2)}
+.bnav button .ico{width:20px;height:20px}
+.bnav button.on{font-weight:900;color:var(--k)}
+.bnav button.on::before{content:"";position:absolute;top:-2px;left:22%;right:22%;height:5px;background:var(--k)}
+.bnav button i{position:absolute;top:8px;left:56%;background:var(--o);color:var(--k);font:900 10px/15px var(--sans);font-style:normal;width:15px;text-align:center}
+/* phone session */
+.shd{padding:6px 16px 12px;border-bottom:2px solid var(--k);flex:none}
+.shd .rw{display:flex;align-items:center;gap:10px;font-size:12px;font-weight:700;color:var(--g2)}
+.shd .rw b{margin-left:auto;color:var(--k);font-size:14px;font-weight:900}
+.shd .hh{display:flex;align-items:flex-end;gap:12px;margin-top:8px}
+.shd h2{font-size:60px;font-weight:900;letter-spacing:-.065em;line-height:.78;margin-left:-3px}
+.shd .st{background:var(--o);font-size:10px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;padding:4px 7px;margin-bottom:2px}
+.shd .sm{font:500 10.5px var(--mono);color:var(--g2);margin-top:8px}
+.stx{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:12px;padding:12px 16px 14px}
+.stx .who{margin-bottom:3px}
+.pmsg{font-size:14.5px;font-weight:500;line-height:1.36;letter-spacing:-.01em}
+.pmsg.o{font-weight:600}
+.tchips{display:flex;flex-wrap:wrap;gap:4px}
+.tchips span{box-shadow:inset 0 0 0 1.5px var(--k);font:500 10.5px/1 var(--mono);padding:6px 7px;white-space:nowrap}
+.tchips b{font-weight:700;margin-right:5px}
+.tchips span.t{box-shadow:none;background:var(--p);color:var(--g2)}
+.pask{background:var(--o);padding:14px 16px 16px;flex:none}
+.pask h3{font-size:31px;font-weight:900;letter-spacing:-.045em;line-height:.98;margin:8px 0 12px}
+.pask .opt{grid-template-columns:34px 1fr auto;padding:11px 12px 11px 0;min-height:52px}
+.pask .opt b{font-size:15.5px}
+.pask .opt p{font-size:11.5px;margin-top:2px}
+.pask .opt .ck{width:20px;height:20px}
+.pask .opt.other input{font-size:15px}
+.pcomp{display:flex;gap:6px;padding:10px 12px 8px 16px;border-top:2px solid var(--k);align-items:center;flex:none}
+.pcomp input{flex:1;font-size:15px;font-weight:500;height:44px;min-width:0}
+.pcomp input::placeholder{color:var(--g)}
+.pcomp .ib{width:44px;height:44px}
+.pcomp .ib.mic{background:var(--k);color:var(--w)}
+/* phone terminal */
+.thd{padding:6px 16px 12px;border-bottom:2px solid var(--k);flex:none}
+.thd .hh{display:flex;align-items:flex-end;justify-content:space-between;margin-top:6px}
+.thd h2{font-size:58px;font-weight:900;letter-spacing:-.06em;line-height:.78;margin-left:-3px}
+.thd .tabs button{padding:6px 10px;font-size:11px}
+.thd .tr{display:flex;gap:6px;margin-top:12px;align-items:center}
+.thd .tr .sp{flex:1;font-size:11.5px;font-weight:700;color:var(--g2)}
+.pterm{flex:1;min-height:0;background:var(--k);color:#e6e6e1;font:400 11px/1.6 var(--mono);padding:12px 12px 8px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}
+.pterm div{white-space:pre-wrap}
+.xkeys{display:grid;grid-template-columns:repeat(12,1fr);background:var(--k);border-top:1px solid #333;flex:none}
+.xkeys button{height:46px;color:#fff;font:700 10.5px var(--mono);text-align:center;border-right:1px solid #2a2a2a;transition:background var(--t),color var(--t)}
+.xkeys button:last-child{border-right:0}
+.xkeys button:hover,.xkeys button.on{background:var(--w);color:var(--k)}
+.tin{display:flex;align-items:center;gap:8px;background:var(--k);color:#e6e6e1;padding:0 8px 0 14px;height:50px;border-top:1px solid #333;flex:none;font:500 13px var(--mono)}
+.tin span{flex:1;color:#7a7a75}
+.tin .ib{background:var(--w);color:var(--k);width:38px;height:38px}
+.ph.dark .gb{background:var(--k)}
+.ph.dark .gb i{background:var(--w)}
+/* phone sheet */
+.under{position:absolute;inset:0;display:flex;flex-direction:column;pointer-events:none}
+.scrim{position:absolute;inset:0;background:rgba(11,11,11,.62);z-index:2}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:4;background:var(--w);border-top:4px solid var(--k);display:flex;flex-direction:column;padding:0 16px}
+.hdl{width:48px;height:4px;background:var(--k);margin:10px auto 10px}
+.sheet .hh{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:14px}
+.sheet h2{font-size:42px;font-weight:900;letter-spacing:-.055em;line-height:.82}
+.srepo{display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:10px;border:2px solid var(--k);padding:10px 12px;margin-bottom:12px;transition:background var(--t),color var(--t);cursor:pointer}
+.srepo b{display:block;font-size:18px;font-weight:900;letter-spacing:-.02em}
+.srepo span{font:500 11px var(--mono);color:var(--g2)}
+.srepo em{font-style:normal;font-size:12px;font-weight:800}
+.srepo:hover{background:var(--k);color:var(--w)}
+.srepo:hover span{color:#c9c9c4}
+.sheet .seg{display:grid;grid-template-columns:1fr 1fr;margin:0 0 14px}
+.sheet .seg button{text-align:center;padding:10px 0}
+.sheet .fld{margin-bottom:12px}
+.sheet .fld .v{font-size:15px}
+.sheet .two{column-gap:16px}
+.sagent{display:flex;align-items:center;gap:10px;border-top:2px solid var(--k);border-bottom:1px solid var(--l);padding:10px 0;margin-bottom:12px;font-size:13.5px;font-weight:800}
+.sagent .cbx{background:var(--k)}
+.sagent .cbx svg{stroke:var(--w)}
+.sagent span.d{color:var(--g2);font-weight:600}
+.sagent .pl{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px}
+.sheet .prompt{height:76px;font-size:13.5px}
+.sheet .go{height:56px;width:100%;background:var(--k);color:var(--w);font-size:16px;font-weight:900;display:flex;align-items:center;justify-content:space-between;padding:0 18px;margin-top:12px;transition:background var(--t),color var(--t);box-shadow:inset 0 0 0 2px var(--k)}
+.sheet .go:hover{background:var(--w);color:var(--k)}
+.plab{margin-top:16px;display:flex;gap:12px;align-items:baseline;border-top:2px solid var(--k);padding-top:8px;width:424px}
+.plab b{font-size:30px;font-weight:900;letter-spacing:-.05em}
+.plab span{font-size:13px;font-weight:600;color:var(--g2);line-height:1.35}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 5h6l2 2h10v12H3z"/></symbol>
+    <symbol id="i-term" viewBox="0 0 24 24"><path d="M3 4h18v16H3z"/><path d="M7 9l3 3-3 3M12 15h5"/></symbol>
+    <symbol id="i-attach" viewBox="0 0 24 24"><path d="M20 11l-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7L9.3 17a1.6 1.6 0 0 1-2.3-2.3l7.6-7.6"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><path d="M9 3h6v11H9z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12h15M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-12 3-12 8"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+    <symbol id="i-chevd" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-board" viewBox="0 0 24 24"><path d="M3 4h5v16H3zM10 4h5v10h-5zM17 4h4v13h-4z"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 4h16v12H9l-5 4z"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><path d="M3 4h18v7H3zM3 13h18v7H3z"/><path d="M7 7.5h2M7 16.5h2"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 12H5M11 6l-6 6 6 6"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5"/></symbol>
+    <symbol id="i-flock" viewBox="0 0 24 24"><path d="M2 2h6v6H2zM2 16h6v6H2zM9 9h6v6H9z" fill="currentColor" stroke="none"/><path d="M16 9h6v6h-6z" fill="#ff4f00" stroke="none"/></symbol>
+    <symbol id="tick" viewBox="0 0 12 12"><path d="M1.5 6.5l3 3 6-7"/></symbol>
+  </defs>
+</svg>
+
+<div class="page" id="page">
+  <div class="ruler"><span>01</span><span>02</span><span>03</span><span>04</span><span>05</span><span>06</span><span>07</span><span>08</span><span>09</span><span>10</span><span>11</span><span>12</span></div>
+  <header class="hdr">
+    <div class="brand">
+      <h1>TeleFlock</h1>
+      <div class="draft">Draft 05<b>Swiss</b></div>
+    </div>
+    <p class="concept">International Typographic Style. The type carries everything; states are shapes. Exactly one signal colour, and it is reserved for the agents that <em>need you</em>.</p>
+    <div class="spec">
+      <div class="sw">
+        <div style="background:#ffffff"><span>#ffffff</span></div>
+        <div style="background:#f2f2ef"><span>#f2f2ef</span></div>
+        <div style="background:#dcdcd6"><span>#dcdcd6</span></div>
+        <div style="background:#8c8c8c"><span>#8c8c8c</span></div>
+        <div style="background:#0b0b0b"><span style="color:#fff">#0b0b0b</span></div>
+        <div style="background:#ff4f00"><span>#ff4f00</span></div>
+      </div>
+      <div class="fonts"><span>Inter Tight 400–900</span><span class="mono">JetBrains Mono</span></div>
+    </div>
+  </header>
+
+  <div class="sec"><b>A</b><span>Desktop · Windows 11 · 1440 × 900</span><i>Your agents, herded.</i></div>
+
+  <div class="stage">
+    <div>
+      <div class="switch" role="tablist">
+        <button data-go="board" class="on"><small>01</small>Board</button>
+        <button data-go="session"><small>02</small>Session</button>
+        <button data-go="worktree"><small>03</small>New worktree</button>
+        <button data-go="terminal"><small>04</small>Terminal</button>
+      </div>
+
+      <div class="win" id="win" data-view="board">
+        <div class="tb">
+          <div class="t"><svg class="ico" style="width:14px;height:14px"><use href="#i-flock"/></svg>TeleFlock <span>forge.tail8c2e1.ts.net · session default</span></div>
+          <div class="wc">
+            <button aria-label="Minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+            <button aria-label="Maximize"><svg viewBox="0 0 10 10"><path d="M.5.5h9v9h-9z"/></svg></button>
+            <button class="x" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+          </div>
+        </div>
+        <div class="app">
+          <aside class="side">
+            <div class="mach">
+              <div class="lbl">Machine · Tailscale SSH</div>
+              <div class="host"><b>forge</b><span><i class="m m-run"></i>14 ms</span></div>
+              <div class="meta">forge.tail8c2e1.ts.net<br>100.86.14.7 · herdr 0.9.2</div>
+              <div class="other"><span>studio-pc</span><span>offline · 2h ago</span></div>
+            </div>
+            <nav class="nav">
+              <button data-go="board" class="on"><small>01</small>Board<em>10</em></button>
+              <button data-go="session"><small>02</small>Session<em class="need">push</em></button>
+              <button data-go="worktree"><small>03</small>New worktree</button>
+              <button data-go="terminal"><small>04</small>Terminal<em>w5:p2</em></button>
+            </nav>
+            <div class="tree">
+              <div class="th"><span class="lbl">Workspaces</span><span class="lbl">default</span></div>
+              <div class="repo"><div class="rn">teleflock<span>~/code/teleflock</span></div>
+                <div class="wt"><i class="m m-run"></i><span class="br">feat/kanban-board</span><b>kanban</b></div>
+                <div class="wt need" data-go="session"><i class="m m-need"></i><span class="br">feat/android-push</span><b>push</b></div>
+                <div class="wt"><i class="m m-rev"></i><span class="br">fix/ssh-reconnect</span><b>reconnect</b></div>
+                <div class="wt done"><svg class="m m-done"><use href="#tick"/></svg><span class="br">main</span><b>docs</b></div>
+              </div>
+              <div class="repo"><div class="rn">api-gateway<span>~/code/api-gateway</span></div>
+                <div class="wt"><i class="m m-run"></i><span class="br">perf/connection-pool</span><b>pool</b></div>
+                <div class="wt need"><i class="m m-need"></i><span class="br">feat/rate-limits</span><b>limits</b></div>
+                <div class="wt done"><svg class="m m-done"><use href="#tick"/></svg><span class="br">main</span><b>flaky</b></div>
+              </div>
+              <div class="repo"><div class="rn">marketing-site<span>~/code/marketing-site</span></div>
+                <div class="wt"><i class="m m-rev"></i><span class="br">redesign/hero</span><b>hero</b></div>
+              </div>
+              <div class="repo"><div class="rn">infra<span>~/code/infra</span></div>
+                <div class="wt"><i class="m m-run"></i><span class="br">ci/bun-cache</span><b>ci</b></div>
+                <div class="wt done"><svg class="m m-done"><use href="#tick"/></svg><span class="br">main</span><b>deps</b></div>
+              </div>
+            </div>
+            <div class="sact">
+              <button class="btn" data-go="worktree"><svg class="ico"><use href="#i-branch"/></svg>New worktree</button>
+              <button class="btn ghost"><svg class="ico"><use href="#i-folder"/></svg>Open folder</button>
+            </div>
+          </aside>
+
+          <section class="main">
+            <div class="top">
+              <div class="crumb">forge <span>/</span> default <span>/</span> <b id="crumb">Board</b></div>
+              <button class="search"><svg class="ico"><use href="#i-search"/></svg>Search agents, workspaces, commands<kbd>Ctrl K</kbd></button>
+              <button class="bell" aria-label="2 agents need you"><svg class="ico"><use href="#i-bell"/></svg><i>2</i></button>
+              <button class="btn blk" data-go="worktree"><svg class="ico"><use href="#i-plus"/></svg>New worktree</button>
+            </div>
+            <div class="views">
+
+              <!-- BOARD -->
+              <div class="view v-board">
+                <div class="bhead">
+                  <h2>Board</h2>
+                  <div class="stats">
+                    <div><span class="lbl">Agents</span><b>10 <small>in the flock</small></b></div>
+                    <div><span class="lbl">Today</span><b>$14.62</b></div>
+                    <div><span class="lbl">Tokens</span><b>2.41M</b></div>
+                    <div><span class="lbl">forge CPU</span><b>37%</b></div>
+                    <div><span class="lbl">forge RAM</span><b>11.2 <small>/ 32 GB</small></b></div>
+                  </div>
+                </div>
+                <div class="cols">
+                  <div class="col c-run" data-col="run">
+                    <div class="chd"><div class="big">3</div><div class="cl"><b><i class="m m-run"></i>Running</b><span>herdr working</span></div></div>
+                    <div class="cbody">
+                      <article class="card run" draggable="true">
+                        <div class="r1"><i class="m m-run"></i><span class="nm">kanban</span><span class="tm" data-t="724">12m</span></div>
+                        <div class="br">teleflock · feat/kanban-board</div>
+                        <div class="ti">Drag-and-drop kanban board with column persistence</div>
+                        <div class="live"><i>bash</i>bun test src/board · 31/40 passing…</div>
+                        <div class="mt">
+                          <div><span class="lbl">Todos 4/7</span><div class="todo"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i></i><i></i><i></i></div></div>
+                          <div><span class="lbl">Ctx</span>38%</div>
+                          <div class="md"><span class="plus">+412</span> <span class="minus">−38</span> · 9 files<br>opus-5 · high</div>
+                        </div>
+                        <div class="acts"><button class="btn sm" data-go="session">Open</button><button class="btn sm" data-go="terminal">Terminal</button><button class="btn sm">Stop <kbd>Esc</kbd></button></div>
+                      </article>
+                      <article class="card run" draggable="true">
+                        <div class="r1"><i class="m m-run"></i><span class="nm">pool</span><span class="tm" data-t="1622">27m</span></div>
+                        <div class="br">api-gateway · perf/connection-pool</div>
+                        <div class="ti">Replace per-request Postgres connections with a pooled client</div>
+                        <div class="live"><i>task</i>3 subagents exploring query hot paths</div>
+                        <div class="mt">
+                          <div><span class="lbl">Todos 2/6</span><div class="todo"><i class="f"></i><i class="f"></i><i></i><i></i><i></i><i></i></div></div>
+                          <div><span class="lbl">Ctx</span>61%</div>
+                          <div class="md"><span class="plus">+188</span> <span class="minus">−74</span> · 6 files<br>gpt-5.5 · xhigh</div>
+                        </div>
+                        <div class="acts"><button class="btn sm" data-go="session">Open</button><button class="btn sm" data-go="terminal">Terminal</button><button class="btn sm">Stop <kbd>Esc</kbd></button></div>
+                      </article>
+                      <article class="card run" draggable="true">
+                        <div class="r1"><i class="m m-run"></i><span class="nm">ci</span><span class="tm" data-t="371">6m</span></div>
+                        <div class="br">infra · ci/bun-cache</div>
+                        <div class="ti">Cache bun install + turbo artifacts in CI</div>
+                        <div class="live"><i>edit</i>.github/workflows/ci.yml</div>
+                        <div class="mt">
+                          <div><span class="lbl">Todos 3/4</span><div class="todo"><i class="f"></i><i class="f"></i><i class="f"></i><i></i></div></div>
+                          <div><span class="lbl">Ctx</span>22%</div>
+                          <div class="md"><span class="plus">+34</span> <span class="minus">−9</span> · 2 files<br>sonnet-5 · medium</div>
+                        </div>
+                        <div class="acts"><button class="btn sm" data-go="session">Open</button><button class="btn sm" data-go="terminal">Terminal</button><button class="btn sm">Stop <kbd>Esc</kbd></button></div>
+                      </article>
+                    </div>
+                  </div>
+
+                  <div class="col c-need" data-col="need">
+                    <div class="chd"><div class="big">2</div><div class="cl"><b><i class="m m-need"></i>Needs you</b><span>herdr blocked · question / approval</span></div></div>
+                    <div class="cbody">
+                      <article class="card need" draggable="true">
+                        <div class="r1"><span class="nm">push</span><span class="tag">Question</span></div>
+                        <div class="br">teleflock · feat/android-push · w5:p1</div>
+                        <div class="ti">Android push notifications when an agent gets blocked</div>
+                        <div class="q">How should notifications reach your phone?</div>
+                        <div class="wait"><span>waiting <span data-w="360">6m</span></span><span>2/5 todos · 41% ctx · 18m · +212 −17</span></div>
+                        <div class="qa">
+                          <button>ntfy on your tailnet<small>Recommended</small></button>
+                          <button>Firebase Cloud Messaging</button>
+                          <button>UnifiedPush</button>
+                          <button class="oth" data-go="session">Other… · open session<small>opus-5 · high</small></button>
+                        </div>
+                      </article>
+                      <article class="card need" draggable="true">
+                        <div class="r1"><span class="nm">limits</span><span class="tag">Approval</span></div>
+                        <div class="br">api-gateway · feat/rate-limits · w8:p1</div>
+                        <div class="ti">Per-tenant rate limits with a sliding window</div>
+                        <div class="cmd"><span>$</span> bun run db:migrate --env staging</div>
+                        <div class="wait"><span>Allow this command? · waiting <span data-w="120">2m</span></span><span>5/6 · 54% · 33m</span></div>
+                        <div class="ap"><button>Allow once</button><button>Allow for session</button><button>Deny</button></div>
+                      </article>
+                    </div>
+                  </div>
+
+                  <div class="col c-rev" data-col="rev">
+                    <div class="chd"><div class="big">2</div><div class="cl"><b><i class="m m-rev"></i>In review</b><span>herdr done · awaiting you</span></div></div>
+                    <div class="cbody">
+                      <article class="card rev" draggable="true">
+                        <div class="r1"><i class="m m-rev"></i><span class="nm">reconnect</span><span class="tm">41m</span></div>
+                        <div class="br">teleflock · fix/ssh-reconnect</div>
+                        <div class="ti">Auto-reconnect SSH and resume herdr attach after network change</div>
+                        <div class="live">✓ 48 tests passed · PR #142 (draft)</div>
+                        <div class="mt">
+                          <div><span class="lbl">Todos 6/6</span><div class="todo"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i></div></div>
+                          <div><span class="lbl">Ctx</span>47%</div>
+                          <div class="md"><span class="plus">+126</span> <span class="minus">−41</span> · 4 files<br>opus-5 · high</div>
+                        </div>
+                        <div class="racts"><button class="btn sm">Review diff</button><button class="btn sm">Merge</button><button class="btn sm">Open PR</button></div>
+                      </article>
+                      <article class="card rev" draggable="true">
+                        <div class="r1"><i class="m m-rev"></i><span class="nm">hero</span><span class="tm">52m</span></div>
+                        <div class="br">marketing-site · redesign/hero</div>
+                        <div class="ti">New hero with an animated flock illustration</div>
+                        <svg class="thumb" viewBox="0 0 260 58" preserveAspectRatio="xMidYMid slice" aria-label="preview screenshot">
+                          <rect x="14" y="14" width="74" height="8" fill="currentColor"/><rect x="14" y="27" width="52" height="8" fill="currentColor"/><rect x="14" y="42" width="30" height="6" fill="#ff4f00"/>
+                          <g fill="currentColor"><rect x="150" y="10" width="7" height="7"/><rect x="162" y="18" width="7" height="7"/><rect x="174" y="26" width="7" height="7"/><rect x="186" y="18" width="7" height="7"/><rect x="198" y="10" width="7" height="7"/><rect x="214" y="30" width="5" height="5"/><rect x="226" y="36" width="5" height="5"/><rect x="138" y="36" width="5" height="5"/></g>
+                        </svg>
+                        <div class="live">✓ Lighthouse 98 · preview screenshot</div>
+                        <div class="mt">
+                          <div><span class="lbl">Todos 5/5</span><div class="todo"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i></div></div>
+                          <div><span class="lbl">Ctx</span>58%</div>
+                          <div class="md"><span class="plus">+880</span> <span class="minus">−212</span> · 14 files<br>sonnet-5 · medium</div>
+                        </div>
+                        <div class="racts"><button class="btn sm">Review diff</button><button class="btn sm">Merge</button><button class="btn sm">Open PR</button></div>
+                      </article>
+                    </div>
+                  </div>
+
+                  <div class="col c-done" data-col="done">
+                    <div class="chd"><div class="big" style="color:var(--g)">3</div><div class="cl"><b><svg class="m m-done"><use href="#tick"/></svg>Done</b><span>merged · archived</span></div></div>
+                    <div class="cbody">
+                      <article class="card done" draggable="true">
+                        <div class="r1"><svg class="m m-done"><use href="#tick"/></svg><span class="nm">docs</span></div>
+                        <div class="ti">README and architecture overview</div>
+                        <div class="ml"><span>merged #139 · 2h ago</span></div>
+                        <div class="ml"><span>teleflock · main</span><span>+340 −12</span></div>
+                      </article>
+                      <article class="card done" draggable="true">
+                        <div class="r1"><svg class="m m-done"><use href="#tick"/></svg><span class="nm">flaky</span></div>
+                        <div class="ti">Fix flaky auth token refresh test</div>
+                        <div class="ml"><span>merged #87 · 5h ago</span></div>
+                        <div class="ml"><span>api-gateway · main</span><span>+22 −9</span></div>
+                      </article>
+                      <article class="card done" draggable="true">
+                        <div class="r1"><svg class="m m-done"><use href="#tick"/></svg><span class="nm">deps</span></div>
+                        <div class="ti">Bump tailscale and herdr in Ansible roles</div>
+                        <div class="ml"><span>merged #61 · yesterday</span></div>
+                        <div class="ml"><span>infra · main</span><span>+8 −8</span></div>
+                      </article>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- SESSION -->
+              <div class="view v-session">
+                <div class="sx">
+                  <div class="shead">
+                    <h2>push</h2>
+                    <div>
+                      <span class="st"><i class="m" style="background:var(--k);width:8px;height:8px"></i>Needs you · question</span>
+                      <div class="meta"><b>teleflock / feat/android-push</b> · pane <span class="mono">w5:p1</span> · opus-5 · high</div>
+                    </div>
+                    <div class="nums">
+                      <div><span class="lbl">Elapsed</span><b>18m</b></div>
+                      <div><span class="lbl">Cost</span><b>$1.84</b></div>
+                    </div>
+                  </div>
+                  <div class="tx" id="tx">
+                    <div class="ent"><div class="ix">01</div><div><div class="who">You <span>18m ago</span></div><div class="msg">Add push notifications to the Android app so I get pinged the moment an agent goes blocked. Tailnet only, no public endpoints.</div></div></div>
+                    <div class="ent"><div class="ix">02</div><div><button class="think"><svg class="ico"><use href="#i-chev"/></svg>Thought for 12s</button></div></div>
+                    <div class="ent"><div class="ix">03</div><div class="tool"><span class="tn">read</span><span class="p">android/app/build.gradle.kts</span><span class="r dim">88 lines</span></div></div>
+                    <div class="ent"><div class="ix">04</div><div class="tool"><span class="tn">grep</span><span class="p">NotificationCompat|AgentState</span><span class="r">14 matches <span class="dim">in 6 files</span></span></div></div>
+                    <div class="ent"><div class="ix">05</div><div>
+                      <div class="tool"><span class="tn">task</span><span>2 subagents</span><span class="r">✓ both done</span></div>
+                      <div class="subs">
+                        <div><b>FcmScout</b><span>Map FCM setup cost for a tailnet-only app</span><em>✓ 41s</em></div>
+                        <div><b>NtfyScout</b><span>Evaluate self-hosted ntfy on forge</span><em>✓ 37s</em></div>
+                      </div></div></div>
+                    <div class="ent"><div class="ix">06</div><div>
+                      <div class="tool"><span class="tn">edit</span><span class="p">android/app/src/main/java/dev/teleflock/notify/AgentStateWatcher.kt</span><span class="r"><span class="plus">+46</span> <span class="minus">−3</span></span></div>
+                      <div class="diff"><div class="a">+class AgentStateWatcher(private val herdr: HerdrClient) {</div><div class="a">+    fun blocked(): Flow&lt;AgentEvent&gt; = herdr.events()</div><div class="a">+        .filter { it.state == AgentState.Blocked }</div><div class="a">+        .distinctUntilChangedBy { it.paneId to it.since }</div><div class="a">+}</div><div class="d">-// TODO: poll herdr every 30s</div></div>
+                    </div></div>
+                    <div class="ent"><div class="ix">07</div><div>
+                      <div class="tool"><span class="tn">bash</span><span class="p">./gradlew :app:testDebugUnitTest</span><span class="r">exit 0 <span class="dim">· 18.2s</span></span></div>
+                      <div class="out">34 tests completed, 0 failed</div>
+                    </div></div>
+                    <div class="ent"><div class="ix">08</div><div>
+                      <div class="tool"><span class="tn">todo</span><span>Push notifications</span><span class="r">2 / 5</span></div>
+                      <div class="todos">
+                        <div class="c"><svg class="m m-done"><use href="#tick"/></svg>Watch the herdr agent-state stream</div>
+                        <div class="c"><svg class="m m-done"><use href="#tick"/></svg>Debounce blocked transitions per pane</div>
+                        <div class="bk"><i class="tsq half"></i>Pick a delivery transport <em>blocked on you</em></div>
+                        <div><i class="tsq"></i>Notification actions: Answer, Open terminal</div>
+                        <div><i class="tsq"></i>Deep-link into the agent session</div>
+                      </div>
+                    </div></div>
+                    <div class="ent"><div class="ix">09</div><div><div class="who">omp <span>opus-5 · high</span></div><div class="msg omp">The watcher is in and tested (34/34). Delivery is the open decision. Both options work; they trade setup effort against independence from Google.</div></div></div>
+                    <div class="ask" id="ask">
+                      <div class="ix">10</div>
+                      <div>
+                        <div class="al">Ask · single select <span>waiting <span data-w="360">6m</span></span><span class="blk">Blocking</span></div>
+                        <h3>How should notifications reach your phone?</h3>
+                        <div class="opts">
+                          <button class="opt sel"><span class="k">A</span><span><b>ntfy on your tailnet<em>Recommended</em></b><p>Self-hosted on forge. No Google account, and it never leaves Tailscale.</p></span><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></button>
+                          <button class="opt"><span class="k">B</span><span><b>Firebase Cloud Messaging</b><p>Best battery life, but needs a Google project and a public push path.</p></span><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></button>
+                          <button class="opt"><span class="k">C</span><span><b>UnifiedPush</b><p>Pick a distributor per device. More moving parts.</p></span><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></button>
+                          <div class="opt other" role="button" tabindex="0"><span class="k">D</span><input placeholder="Other… type your own answer"><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></div>
+                        </div>
+                        <div class="askf"><span>↑ ↓ to move · 1–4 to pick</span><span class="sp"></span><span>Esc stops the agent</span><button class="btn blk">Send answer <kbd>↵</kbd></button></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="comp">
+                    <div class="cin">
+                      <input placeholder="Answer, steer, or type / for commands">
+                      <button class="ib" aria-label="Attach"><svg class="ico"><use href="#i-attach"/></svg></button>
+                      <button class="ib" aria-label="Voice"><svg class="ico"><use href="#i-mic"/></svg></button>
+                      <button class="ib send" aria-label="Send"><svg class="ico"><use href="#i-send"/></svg></button>
+                    </div>
+                    <div class="crow">
+                      <button class="chip">opus-5 · high<svg class="ico" style="width:10px;height:10px"><use href="#i-chevd"/></svg></button>
+                      <button class="chip off">Plan off</button>
+                      <button class="chip off">Fast off</button>
+                      <span class="hint"><span><kbd>/</kbd>model plan goal compact fork btw</span><span><kbd>@</kbd>files</span><span><kbd>Esc</kbd>stop</span></span>
+                    </div>
+                  </div>
+                </div>
+                <aside class="insp">
+                  <div class="is">
+                    <div class="h"><span class="lbl">Context</span><span class="lbl">opus-5 · 200k</span></div>
+                    <div class="ctxrow"><div class="ctxbig">41<small>%</small></div><div class="r"><b>82.4k</b>/ 200k tokens</div></div>
+                    <div class="bar"><i></i></div>
+                  </div>
+                  <div class="trio">
+                    <div><span class="lbl">Cost</span><b>$1.84</b><span class="s">412k in / 38k out</span></div>
+                    <div><span class="lbl">Speed</span><b>64</b><span class="s">tok/s</span></div>
+                    <div><span class="lbl">Todos</span><b>2/5</b><span class="s">1 blocked</span></div>
+                  </div>
+                  <div class="is">
+                    <div class="h"><span class="lbl">Changed files · 5</span><span class="lbl">feat/android-push</span></div>
+                    <div class="files">
+                      <div>AgentStateWatcher.kt<span><span class="plus">+46</span> <span class="minus">−3</span></span></div>
+                      <div>NotifyModule.kt<span><span class="plus">+38</span> <span class="minus">−0</span></span></div>
+                      <div>build.gradle.kts<span><span class="plus">+6</span> <span class="minus">−1</span></span></div>
+                      <div>AgentStateWatcherTest.kt<span><span class="plus">+118</span> <span class="minus">−0</span></span></div>
+                      <div>HerdrClient.kt<span><span class="plus">+4</span> <span class="minus">−13</span></span></div>
+                      <div class="tot">Total<span>+212 −17</span></div>
+                    </div>
+                    <div class="fbtn"><button class="btn sm">Open diff</button><button class="btn sm">Commit</button><button class="btn sm">Open PR</button></div>
+                  </div>
+                  <div class="is">
+                    <div class="h"><span class="lbl">Subagents</span><span class="lbl">2 / 2 done</span></div>
+                    <div class="sublist"><div><svg class="m m-done"><use href="#tick"/></svg>FcmScout<span>41s</span></div><div><svg class="m m-done"><use href="#tick"/></svg>NtfyScout<span>37s</span></div></div>
+                  </div>
+                  <div class="is">
+                    <div class="h"><span class="lbl">Session tree</span><span class="lbl">2 branches</span></div>
+                    <svg viewBox="0 0 320 64" width="320" height="64" aria-label="session tree">
+                      <path d="M6 20H300" stroke="#0b0b0b" stroke-width="3"/>
+                      <path d="M102 20V44H190" stroke="#0b0b0b" stroke-width="1.5" fill="none"/>
+                      <g fill="#0b0b0b"><rect x="2" y="16" width="8" height="8"/><rect x="50" y="16" width="8" height="8"/><rect x="98" y="16" width="8" height="8"/><rect x="146" y="16" width="8" height="8"/><rect x="194" y="16" width="8" height="8"/><rect x="242" y="16" width="8" height="8"/></g>
+                      <rect x="294" y="14" width="12" height="12" fill="#ff4f00"/>
+                      <rect x="187" y="40.5" width="7" height="7" fill="#fff" stroke="#0b0b0b" stroke-width="1.5"/>
+                      <text x="2" y="8" font-family="Inter Tight,sans-serif" font-size="10" font-weight="800" fill="#0b0b0b">main</text>
+                      <text x="202" y="48" font-family="JetBrains Mono,monospace" font-size="10" fill="#5b5b57">try-unifiedpush</text>
+                    </svg>
+                  </div>
+                  <div class="is" style="border-bottom:0">
+                    <div class="h"><span class="lbl">Actions</span></div>
+                    <div class="acts2">
+                      <button class="btn sm" data-go="terminal"><svg class="ico"><use href="#i-term"/></svg>Open terminal · w5:p2</button>
+                      <button class="btn sm"><svg class="ico"><use href="#i-fork"/></svg>Fork</button>
+                      <button class="btn sm">Compact</button>
+                      <button class="btn sm">Handoff</button>
+                      <button class="btn sm">Export</button>
+                    </div>
+                  </div>
+                </aside>
+              </div>
+
+              <!-- TERMINAL -->
+              <div class="view v-term">
+                <div class="ttool">
+                  <span class="att"><i class="m m-run"></i>Attached to forge · <span class="mono">w5:p2</span></span>
+                  <div class="tabs"><button>agent</button><button class="on">shell</button><button>logs</button></div>
+                  <span class="sp"></span>
+                  <span class="lbl">Send keys</span>
+                  <div class="grp"><button class="btn sm">Esc</button><button class="btn sm">Ctrl+C</button></div>
+                  <button class="btn sm blk">Takeover</button>
+                  <div class="fs"><button aria-label="Smaller">A−</button><span>13px</span><button aria-label="Larger">A+</button></div>
+                </div>
+                <div class="tbody">
+<div class="termw"><span class="a-c">~/worktrees/teleflock/feat-android-push</span>  <span class="a-m">feat/android-push ↑3</span>
+<span class="a-g">❯</span> git log --oneline -5
+<span class="a-w">a41c9e2</span> feat(notify): AgentStateWatcher debounces blocked transitions
+<span class="a-w">7be03d1</span> test(notify): cover per-pane dedupe
+<span class="a-w">19f0c55</span> chore: add kotlinx-coroutines-test
+<span class="a-w">e2d8a10</span> <span class="a-m">(origin/main, main)</span> fix: tailnet hostname resolution on Android 14
+<span class="a-w">c0ffee1</span> docs: architecture overview (#139)
+<span class="a-g">❯</span> ./gradlew :app:testDebugUnitTest
+<span class="a-d">&gt; Task :app:compileDebugKotlin</span>
+<span class="a-d">&gt; Task :app:testDebugUnitTest</span>
+AgentStateWatcherTest &gt; emits once per blocked transition <span class="a-g">PASSED</span>
+AgentStateWatcherTest &gt; ignores working→idle flaps <span class="a-g">PASSED</span>
+AgentStateWatcherTest &gt; survives reconnect mid-stream <span class="a-g">PASSED</span>
+<span class="a-g">BUILD SUCCESSFUL</span> in 18s
+34 tests completed, 0 failed
+<span class="a-g">❯</span> herdr agent list
+<span class="a-d">NAME       STATE    WORKSPACE                      PANE</span>
+kanban     working  teleflock/feat-kanban-board    w4:p1
+push       <span class="a-b">blocked</span>  teleflock/feat-android-push    w5:p1
+reconnect  done     teleflock/fix-ssh-reconnect    w6:p1
+pool       working  api-gateway/perf-conn-pool     w7:p1
+limits     <span class="a-b">blocked</span>  api-gateway/feat-rate-limits   w8:p1
+<span class="a-g">❯</span> <span class="cur">&nbsp;</span></div>
+                  <aside class="trail">
+                    <div class="is">
+                      <span class="lbl">herdr pane</span>
+                      <div class="pbig">w5:p2</div>
+                    </div>
+                    <div class="is">
+                      <div class="kv"><span>Workspace</span><span>feat-android-push</span></div>
+                      <div class="kv"><span>Tab</span><span>shell</span></div>
+                      <div class="kv"><span>Session</span><span>default</span></div>
+                      <div class="kv"><span>Size</span><span>112 × 38</span></div>
+                      <div class="kv"><span>Link</span><span>tailscale · 14 ms</span></div>
+                    </div>
+                    <div class="is panes">
+                      <div class="h"><span class="lbl">Panes in workspace</span></div>
+                      <button data-go="session"><i class="m m-need"></i>push<span>w5:p1</span><em class="need">blocked</em></button>
+                      <button class="on"><i class="m m-run"></i>shell<span>w5:p2</span><em>attached</em></button>
+                      <button><i class="m m-rev"></i>logs<span>w5:p3</span><em>idle</em></button>
+                    </div>
+                    <div class="is" style="border-bottom:0">
+                      <div class="h"><span class="lbl">Keys</span></div>
+                      <div class="keys"><button class="btn sm">Tab</button><button class="btn sm">Ctrl+D</button><button class="btn sm">Ctrl+Z</button><button class="btn sm">↑</button><button class="btn sm">Ctrl+L</button><button class="btn sm">Ctrl+R</button></div>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+
+            </div>
+          </section>
+        </div>
+        <div class="modal-wrap">
+          <div class="modal" role="dialog" aria-label="New worktree">
+            <div class="mh">
+              <h2>New worktree</h2>
+              <p>herdr creates a workspace at ~/worktrees/&lt;repo&gt;/&lt;branch-slug&gt; and can start an agent in it.</p>
+              <button class="ib" data-go="board" aria-label="Close"><svg class="ico"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="fb">
+              <div class="fbp"><b>forge<span>:</span>~/code</b><button class="ib" style="width:28px;height:28px" aria-label="Up"><svg class="ico"><use href="#i-up"/></svg></button></div>
+              <div class="fr"><svg class="ico"><use href="#i-folder"/></svg>api-gateway<span>main ✓ clean</span></div>
+              <div class="fr"><svg class="ico"><use href="#i-folder"/></svg>infra<span>main ● 2 changed</span></div>
+              <div class="fr"><svg class="ico"><use href="#i-folder"/></svg>marketing-site<span>main ✓</span></div>
+              <div class="fr sel"><svg class="ico"><use href="#i-folder"/></svg>teleflock<span>main ✓</span></div>
+              <div class="fr dis"><svg class="ico"><use href="#i-folder"/></svg>sandbox/<span>not a git repo</span></div>
+              <div class="fr dis"><svg class="ico"><use href="#i-folder"/></svg>notes/<span>not a git repo</span></div>
+              <div class="fbf"><button class="btn sm"><svg class="ico"><use href="#i-folder"/></svg>Open folder…</button><button class="btn sm ghost">Show hidden</button></div>
+            </div>
+            <div class="form">
+              <div class="fld"><span class="lbl">Repository</span><div class="v">teleflock <span class="mono">~/code/teleflock</span><small>main ✓ clean</small></div></div>
+              <div class="fld"><span class="lbl">Mode</span><div class="seg"><button class="on">New branch</button><button>Existing branch</button></div></div>
+              <div class="two">
+                <div class="fld"><span class="lbl">Branch</span><div class="v"><span class="mono" style="font-weight:700">feat/offline-cache</span></div></div>
+                <div class="fld"><span class="lbl">Base</span><div class="v"><span class="mono">origin/main</span><small><svg class="m m-done"><use href="#tick"/></svg>up to date</small></div></div>
+                <div class="fld"><span class="lbl">Path · auto</span><div class="v auto"><span class="mono">~/worktrees/teleflock/feat-offline-cache</span></div></div>
+                <div class="fld"><span class="lbl">Label</span><div class="v">Offline cache</div></div>
+              </div>
+              <div class="fld"><span class="lbl">Start agent</span>
+                <div class="agentbox">
+                  <div class="cb"><span class="cbx"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span>omp</div>
+                  <div><span class="lbl">Name</span>offline</div>
+                  <div><span class="lbl">Model</span>opus-5</div>
+                  <div><span class="lbl">Thinking</span>high</div>
+                  <div><span class="lbl">Plan mode</span>ON</div>
+                  <div style="display:flex;align-items:center"><span class="tog on"><i></i></span></div>
+                </div>
+              </div>
+              <div class="fld" style="margin-bottom:0"><span class="lbl">Initial prompt</span>
+                <textarea class="prompt">Cache the last herdr snapshot per workspace so TeleFlock opens instantly, even before Tailscale reconnects. Mark stale data visibly.</textarea>
+                <div class="cmdp"><b>$</b> herdr worktree create --cwd ~/code/teleflock --branch feat/offline-cache --base origin/main</div>
+              </div>
+            </div>
+            <div class="mf">
+              <span class="sp">Runs on forge over Tailscale SSH · omp starts in tab agent</span>
+              <button class="btn ghost" data-go="board">Cancel</button>
+              <button class="btn blk">Create &amp; start agent <kbd>Ctrl ↵</kbd></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="note">
+      <div class="n" id="noteN">01</div>
+      <h3 id="noteH">Board</h3>
+      <p id="noteP">Four columns, one signal. Only Needs you is orange. Running pulses as a solid square, In review is an outlined square, Done drops to grey with a tick. Drag cards between columns; hover a running card to Open, attach a Terminal, or Stop.</p>
+      <div class="legend">
+        <div><i class="m m-need"></i>Needs you<span>blocked</span></div>
+        <div><i class="m m-run"></i>Running<span>working</span></div>
+        <div><i class="m m-rev"></i>In review<span>done</span></div>
+        <div><svg class="m m-done"><use href="#tick"/></svg>Done<span>merged</span></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="sec"><b>B</b><span>Mobile · Android · 412 × 892</span><i>The whole flock, anywhere.</i></div>
+  <div class="phones">
+
+    <!-- PHONE 1: FLOCK -->
+    <div>
+      <div class="dev"><div class="ph">
+        <div class="sb"><span>9:41</span><span class="sbi"><svg viewBox="0 0 18 12"><path d="M1 12h3V8H1zM6 12h3V5H6zM11 12h3V2h-3z" fill="#0b0b0b"/><path d="M16 12h2V0h-2z" fill="#0b0b0b" opacity=".3"/></svg><svg viewBox="0 0 16 12"><path d="M8 12L5.3 8.8a4.2 4.2 0 0 1 5.4 0zM2.6 5.6a8.2 8.2 0 0 1 10.8 0l-1.4 1.7a6 6 0 0 0-8 0zM0 2.6a12 12 0 0 1 16 0l-1.4 1.7a9.8 9.8 0 0 0-13.2 0z" fill="#0b0b0b"/></svg><svg viewBox="0 0 25 12"><path d="M.75.75h20.5v10.5H.75z" fill="none" stroke="#0b0b0b" stroke-width="1.5"/><path d="M3 3h13v6H3zM22.5 4H24v4h-1.5z" fill="#0b0b0b"/></svg></span></div>
+        <div class="pbody flock">
+          <div class="ptop"><h2>Flock</h2><span class="conn"><i class="m m-run"></i>forge · 14 ms</span></div>
+          <div class="cnt">
+            <div class="n1"><b>2</b><span><i class="m m-need"></i>Need you</span></div>
+            <div><b>3</b><span><i class="m m-run"></i>Running</span></div>
+            <div><b>2</b><span><i class="m m-rev"></i>Review</span></div>
+            <div><b style="color:var(--g)">3</b><span><svg class="m m-done"><use href="#tick"/></svg>Done</span></div>
+          </div>
+          <div class="pneed">
+            <div class="r1"><b>push</b><em>Question</em><span>waiting <span data-w="360">6m</span></span></div>
+            <div class="q">How should notifications reach your phone?</div>
+            <div class="pchips"><button class="sel">ntfy on tailnet</button><button>FCM</button><button>UnifiedPush</button><button class="oth">Other…</button></div>
+          </div>
+          <div class="pneed">
+            <div class="r1"><b>limits</b><em>Approval</em><span>waiting <span data-w="120">2m</span></span></div>
+            <div class="cm"><span>$</span> bun run db:migrate --env staging</div>
+            <div class="pchips g3"><button>Allow once</button><button>Allow for session</button><button>Deny</button></div>
+          </div>
+          <div class="psec"><i class="m m-run"></i>Running<span>3</span></div>
+          <div class="prow"><b>kanban</b><span>31/40 passing · 4/7</span><em data-t="724">12m</em></div>
+          <div class="prow"><b>pool</b><span>3 subagents exploring</span><em data-t="1622">27m</em></div>
+          <div class="prow"><b>ci</b><span>edit ci.yml · 3/4</span><em data-t="371">6m</em></div>
+          <div class="psec"><i class="m m-rev"></i>In review<span>2</span></div>
+          <div class="prow"><b>reconnect</b><span>✓ 48 tests · PR #142</span><em>+126 −41</em></div>
+          <div class="prow"><b>hero</b><span>✓ Lighthouse 98</span><em>+880 −212</em></div>
+          <div class="prow dn"><svg class="m m-done"><use href="#tick"/></svg><b>Done</b><span>docs · flaky · deps</span><span class="big3">3</span><svg class="ico"><use href="#i-chevd"/></svg></div>
+        </div>
+        <nav class="bnav">
+          <button class="on"><svg class="ico"><use href="#i-flock"/></svg>Flock<i>2</i></button>
+          <button><svg class="ico"><use href="#i-board"/></svg>Board</button>
+          <button><svg class="ico"><use href="#i-term"/></svg>Terminal</button>
+          <button><svg class="ico"><use href="#i-server"/></svg>Machines</button>
+        </nav>
+        <div class="gb"><i></i></div>
+      </div></div>
+      <div class="plab"><b>01</b><span><strong>Flock.</strong> Needs you first, answered inline. Then running, review; done folds away.</span></div>
+    </div>
+
+    <!-- PHONE 2: SESSION -->
+    <div>
+      <div class="dev"><div class="ph">
+        <div class="sb"><span>9:41</span><span class="sbi"><svg viewBox="0 0 18 12"><path d="M1 12h3V8H1zM6 12h3V5H6zM11 12h3V2h-3z" fill="#0b0b0b"/><path d="M16 12h2V0h-2z" fill="#0b0b0b" opacity=".3"/></svg><svg viewBox="0 0 16 12"><path d="M8 12L5.3 8.8a4.2 4.2 0 0 1 5.4 0zM2.6 5.6a8.2 8.2 0 0 1 10.8 0l-1.4 1.7a6 6 0 0 0-8 0zM0 2.6a12 12 0 0 1 16 0l-1.4 1.7a9.8 9.8 0 0 0-13.2 0z" fill="#0b0b0b"/></svg><svg viewBox="0 0 25 12"><path d="M.75.75h20.5v10.5H.75z" fill="none" stroke="#0b0b0b" stroke-width="1.5"/><path d="M3 3h13v6H3zM22.5 4H24v4h-1.5z" fill="#0b0b0b"/></svg></span></div>
+        <div class="shd">
+          <div class="rw"><svg class="ico"><use href="#i-back"/></svg>teleflock / feat/android-push<b>$1.84</b></div>
+          <div class="hh"><h2>push</h2><span class="st">Needs you</span></div>
+          <div class="sm">w5:p1 · opus-5 · high · 18m · ctx 41%</div>
+        </div>
+        <div class="stx">
+          <div><div class="who">You <span>18m ago</span></div><div class="pmsg">Add push notifications to the Android app so I get pinged the moment an agent goes blocked. Tailnet only, no public endpoints.</div></div>
+          <div class="tchips">
+            <span class="t">Thought 12s</span>
+            <span><b>read</b>build.gradle.kts</span>
+            <span><b>grep</b>14 matches</span>
+            <span><b>task</b>2 ✓</span>
+            <span><b>edit</b>+46 −3</span>
+            <span><b>bash</b>exit 0 · 18.2s</span>
+            <span><b>todos</b>2/5</span>
+          </div>
+          <div><div class="who">omp</div><div class="pmsg o">The watcher is in and tested (34/34). Delivery is the open decision. Both options work; they trade setup effort against independence from Google.</div></div>
+        </div>
+        <div class="pask">
+          <div class="al">Ask · blocking <span>waiting <span data-w="360">6m</span></span></div>
+          <h3>How should notifications reach your phone?</h3>
+          <div class="opts">
+            <button class="opt sel"><span class="k">A</span><span><b>ntfy on your tailnet<em>Rec.</em></b><p>Self-hosted on forge. Never leaves Tailscale.</p></span><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></button>
+            <button class="opt"><span class="k">B</span><span><b>Firebase Cloud Messaging</b><p>Needs a Google project + public push path.</p></span><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></button>
+            <button class="opt"><span class="k">C</span><span><b>UnifiedPush</b><p>Distributor per device. More moving parts.</p></span><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></button>
+            <div class="opt other" role="button" tabindex="0"><span class="k">D</span><input placeholder="Other…"><span class="ck"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span></div>
+          </div>
+        </div>
+        <div class="pcomp">
+          <input placeholder="Answer, steer, or type /">
+          <button class="ib" aria-label="Attach"><svg class="ico"><use href="#i-attach"/></svg></button>
+          <button class="ib mic" aria-label="Voice"><svg class="ico"><use href="#i-mic"/></svg></button>
+        </div>
+        <div class="gb"><i></i></div>
+      </div></div>
+      <div class="plab"><b>02</b><span><strong>Session · push.</strong> Tool calls collapse to chips; the ask is a full-bleed orange block with big tap bars.</span></div>
+    </div>
+
+    <!-- PHONE 3: TERMINAL -->
+    <div>
+      <div class="dev"><div class="ph dark">
+        <div class="sb"><span>9:41</span><span class="sbi"><svg viewBox="0 0 18 12"><path d="M1 12h3V8H1zM6 12h3V5H6zM11 12h3V2h-3z" fill="#0b0b0b"/><path d="M16 12h2V0h-2z" fill="#0b0b0b" opacity=".3"/></svg><svg viewBox="0 0 16 12"><path d="M8 12L5.3 8.8a4.2 4.2 0 0 1 5.4 0zM2.6 5.6a8.2 8.2 0 0 1 10.8 0l-1.4 1.7a6 6 0 0 0-8 0zM0 2.6a12 12 0 0 1 16 0l-1.4 1.7a9.8 9.8 0 0 0-13.2 0z" fill="#0b0b0b"/></svg><svg viewBox="0 0 25 12"><path d="M.75.75h20.5v10.5H.75z" fill="none" stroke="#0b0b0b" stroke-width="1.5"/><path d="M3 3h13v6H3zM22.5 4H24v4h-1.5z" fill="#0b0b0b"/></svg></span></div>
+        <div class="thd">
+          <div class="shd" style="padding:0;border:0"><div class="rw"><svg class="ico"><use href="#i-back"/></svg>Attached to forge · feat-android-push<b>14 ms</b></div></div>
+          <div class="hh"><h2>w5:p2</h2><div class="tabs"><button>agent</button><button class="on">shell</button><button>logs</button></div></div>
+          <div class="tr"><span class="sp">shell tab · 61 × 38</span><button class="btn sm">Esc</button><button class="btn sm">Ctrl+C</button><button class="btn sm blk">Takeover</button></div>
+        </div>
+        <div class="pterm">
+<div><span class="a-g">❯</span> git log --oneline -5
+<span class="a-w">a41c9e2</span> feat(notify): AgentStateWatcher debounces blocked transitions
+<span class="a-w">7be03d1</span> test(notify): cover per-pane dedupe
+<span class="a-w">e2d8a10</span> <span class="a-m">(origin/main, main)</span> fix: tailnet hostname resolution on Android 14
+<span class="a-g">❯</span> ./gradlew :app:testDebugUnitTest
+<span class="a-d">&gt; Task :app:compileDebugKotlin</span>
+<span class="a-d">&gt; Task :app:testDebugUnitTest</span>
+AgentStateWatcherTest &gt; emits once per blocked transition <span class="a-g">PASSED</span>
+AgentStateWatcherTest &gt; ignores working→idle flaps <span class="a-g">PASSED</span>
+AgentStateWatcherTest &gt; survives reconnect mid-stream <span class="a-g">PASSED</span>
+<span class="a-g">BUILD SUCCESSFUL</span> in 18s
+34 tests completed, 0 failed
+<span class="a-c">~/worktrees/teleflock/feat-android-push</span> <span class="a-m">feat/android-push ↑3</span>
+<span class="a-g">❯</span> herdr agent list
+<span class="a-d">NAME       STATE    WORKSPACE                      PANE</span>
+kanban     working  teleflock/feat-kanban-board    w4:p1
+push       <span class="a-b">blocked</span>  teleflock/feat-android-push    w5:p1
+reconnect  done     teleflock/fix-ssh-reconnect    w6:p1
+pool       working  api-gateway/perf-conn-pool     w7:p1
+limits     <span class="a-b">blocked</span>  api-gateway/feat-rate-limits   w8:p1
+<span class="a-g">❯</span> <span class="cur">&nbsp;</span></div>
+        </div>
+        <div class="xkeys"><button>ESC</button><button>TAB</button><button class="on">CTRL</button><button>ALT</button><button>←</button><button>↑</button><button>↓</button><button>→</button><button>|</button><button>~</button><button>/</button><button>-</button></div>
+        <div class="tin"><span>❯ type to send keys to w5:p2</span><button class="ib" aria-label="Send"><svg class="ico"><use href="#i-send"/></svg></button></div>
+        <div class="gb"><i></i></div>
+      </div></div>
+      <div class="plab"><b>03</b><span><strong>Terminal.</strong> The real pane, w5:p2. One row of extra keys; CTRL latches.</span></div>
+    </div>
+
+    <!-- PHONE 4: NEW WORKTREE SHEET -->
+    <div>
+      <div class="dev"><div class="ph">
+        <div class="under">
+          <div class="sb"><span>9:41</span><span class="sbi"><svg viewBox="0 0 18 12"><path d="M1 12h3V8H1zM6 12h3V5H6zM11 12h3V2h-3z" fill="#0b0b0b"/><path d="M16 12h2V0h-2z" fill="#0b0b0b" opacity=".3"/></svg><svg viewBox="0 0 16 12"><path d="M8 12L5.3 8.8a4.2 4.2 0 0 1 5.4 0zM2.6 5.6a8.2 8.2 0 0 1 10.8 0l-1.4 1.7a6 6 0 0 0-8 0zM0 2.6a12 12 0 0 1 16 0l-1.4 1.7a9.8 9.8 0 0 0-13.2 0z" fill="#0b0b0b"/></svg><svg viewBox="0 0 25 12"><path d="M.75.75h20.5v10.5H.75z" fill="none" stroke="#0b0b0b" stroke-width="1.5"/><path d="M3 3h13v6H3zM22.5 4H24v4h-1.5z" fill="#0b0b0b"/></svg></span></div>
+          <div class="ptop"><h2>Flock</h2><span class="conn"><i class="m m-run"></i>forge · 14 ms</span></div>
+          <div class="cnt">
+            <div class="n1"><b>2</b><span><i class="m m-need"></i>Need you</span></div>
+            <div><b>3</b><span><i class="m m-run"></i>Running</span></div>
+            <div><b>2</b><span><i class="m m-rev"></i>Review</span></div>
+            <div><b style="color:var(--g)">3</b><span><svg class="m m-done"><use href="#tick"/></svg>Done</span></div>
+          </div>
+          <div class="pneed"><div class="r1"><b>push</b><em>Question</em><span>waiting 6m</span></div><div class="q">How should notifications reach your phone?</div></div>
+        </div>
+        <div class="scrim"></div>
+        <div class="sheet">
+          <div class="hdl"></div>
+          <div class="hh"><h2>New<br>worktree</h2><button class="ib" aria-label="Close"><svg class="ico"><use href="#i-x"/></svg></button></div>
+          <div class="srepo"><svg class="ico"><use href="#i-folder"/></svg><div><b>teleflock</b><span>forge:~/code/teleflock · main ✓</span></div><em>Browse</em></div>
+          <div class="seg"><button class="on">New branch</button><button>Existing branch</button></div>
+          <div class="two">
+            <div class="fld"><span class="lbl">Branch</span><div class="v"><span class="mono" style="font-weight:700">feat/offline-cache</span></div></div>
+            <div class="fld"><span class="lbl">Base · up to date</span><div class="v"><span class="mono">origin/main</span></div></div>
+          </div>
+          <div class="fld"><span class="lbl">Path · auto · label “Offline cache”</span><div class="v auto"><span class="mono">~/worktrees/teleflock/feat-offline-cache</span></div></div>
+          <div class="sagent"><span class="cbx"><svg viewBox="0 0 24 24"><use href="#i-check"/></svg></span>omp <span class="d">offline · opus-5 · high</span><span class="pl">Plan <span class="tog on"><i></i></span></span></div>
+          <textarea class="prompt">Cache the last herdr snapshot per workspace so TeleFlock opens instantly, even before Tailscale reconnects. Mark stale data visibly.</textarea>
+          <button class="go">Create &amp; start agent<svg class="ico" style="width:20px;height:20px"><use href="#i-send"/></svg></button>
+          <div class="gb" style="margin:6px -16px 0"><i></i></div>
+        </div>
+      </div></div>
+      <div class="plab"><b>04</b><span><strong>New worktree.</strong> Bottom sheet over the dimmed flock. One thumb, one black bar.</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const win = document.getElementById('win');
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const notes = {
+    board: ['01', 'Board', 'Four columns, one signal. Only Needs you is orange. Running pulses as a solid square, In review is an outlined square, Done drops to grey with a tick. Drag cards between columns; hover a running card to Open, attach a Terminal, or Stop.'],
+    session: ['02', 'Session', 'Agent push, blocked on a question. Every transcript entry sits on a numbered grid row. The ask is a full-bleed orange block; options are black bars that invert on hover. Click to select; Other… takes free text.'],
+    worktree: ['03', 'New worktree', 'A modal over the dimmed board. Left: a remote folder browser of forge:~/code, non-git folders dimmed. Right: branch, base, auto path, and an omp agent with plan mode on. The herdr command is previewed underneath.'],
+    terminal: ['04', 'Terminal', 'The escape hatch: a real terminal attached to herdr pane w5:p2, the shell tab of the push workspace. ANSI colour lives only inside the black rectangle; blocked rows reuse the signal orange.']
+  };
+  const crumbs = { board: 'Board', session: 'push', worktree: 'Board · New worktree', terminal: 'push · Terminal w5:p2' };
+  function setView(v) {
+    win.dataset.view = v;
+    $$('.switch [data-go], .nav [data-go]').forEach(b => b.classList.toggle('on', b.dataset.go === v));
+    document.getElementById('crumb').textContent = crumbs[v];
+    const [n, h, p] = notes[v];
+    document.getElementById('noteN').textContent = n;
+    document.getElementById('noteH').textContent = h;
+    document.getElementById('noteP').textContent = p;
+    if (v === 'session') { const tx = document.getElementById('tx'); tx.scrollTop = tx.scrollHeight; }
+  }
+  document.addEventListener('click', e => {
+    const go = e.target.closest('[data-go]');
+    if (go) { setView(go.dataset.go); return; }
+    const opt = e.target.closest('.opt');
+    if (opt) {
+      $$('.opt', opt.parentElement).forEach(o => o.classList.toggle('sel', o === opt));
+      if (opt.classList.contains('other')) opt.querySelector('input').focus();
+      return;
+    }
+    const pick = e.target.closest('.qa button, .ap button, .pchips button, .tabs button, .seg button');
+    if (pick) { $$('button', pick.parentElement).forEach(b => b.classList.toggle(pick.closest('.tabs, .seg') ? 'on' : 'sel', b === pick)); return; }
+    const fr = e.target.closest('.fr:not(.dis)');
+    if (fr) { $$('.fr', fr.parentElement).forEach(r => r.classList.toggle('sel', r === fr)); return; }
+    const tog = e.target.closest('.tog');
+    if (tog) { tog.classList.toggle('on'); return; }
+    const key = e.target.closest('.xkeys button');
+    if (key && /CTRL|ALT/.test(key.textContent)) key.classList.toggle('on');
+  });
+
+  /* drag & drop between board columns */
+  let drag = null;
+  const recount = () => $$('.col').forEach(c => { c.querySelector('.big').textContent = c.querySelector('.cbody').children.length; });
+  $$('.card').forEach(c => {
+    c.addEventListener('dragstart', e => { drag = c; c.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', c.querySelector('.nm').textContent); });
+    c.addEventListener('dragend', () => { c.classList.remove('dragging'); drag = null; $$('.cbody.over').forEach(b => b.classList.remove('over')); recount(); });
+  });
+  $$('.cbody').forEach(body => {
+    body.addEventListener('dragover', e => {
+      if (!drag) return;
+      e.preventDefault();
+      body.classList.add('over');
+      const next = $$('.card:not(.dragging)', body).find(x => { const r = x.getBoundingClientRect(); return e.clientY < r.top + r.height / 2; });
+      if (next) { if (next.previousElementSibling !== drag) body.insertBefore(drag, next); }
+      else if (body.lastElementChild !== drag) body.appendChild(drag);
+    });
+    body.addEventListener('dragleave', e => { if (!body.contains(e.relatedTarget)) body.classList.remove('over'); });
+    body.addEventListener('drop', e => { e.preventDefault(); body.classList.remove('over'); recount(); });
+  });
+
+  /* ticking timers */
+  const pad = n => String(n).padStart(2, '0');
+  const fmt = s => `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
+  const timers = $$('[data-t],[data-w]').map(el => ({ el, s: +(el.dataset.t || el.dataset.w) }));
+  const tick = () => timers.forEach(t => { t.s++; t.el.textContent = fmt(t.s); });
+  tick();
+  setInterval(tick, 1000);
+
+  /* fit to viewport */
+  const page = document.getElementById('page');
+  const fit = () => { page.style.zoom = Math.min(1, (window.innerWidth - 48) / 1776); };
+  addEventListener('resize', fit);
+  fit();
+})();
+</script>
+</body>
+</html>

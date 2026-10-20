@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeleFlock · 10 directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0b0d; --card: #131316; --line: #24242a; --fg: #f2f2f4; --muted: #8d8d97; --accent: #8b7bff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: radial-gradient(1200px 600px at 15% -10%, #1b1730 0%, transparent 60%),
+                radial-gradient(900px 500px at 100% 0%, #10222a 0%, transparent 55%), var(--bg);
+    color: var(--fg); font: 15px/1.5 Inter, system-ui, sans-serif; min-height: 100vh;
+    padding: 56px clamp(20px, 4vw, 72px) 80px;
+  }
+  header { display: flex; align-items: end; justify-content: space-between; gap: 32px; flex-wrap: wrap; margin-bottom: 40px; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand svg { width: 40px; height: 40px; }
+  h1 { font-size: 34px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .sub { color: var(--muted); max-width: 640px; margin-top: 10px; }
+  .hint { font: 12px/1.4 "JetBrains Mono", monospace; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  kbd { font: 11px "JetBrains Mono", monospace; padding: 2px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; color: var(--fg); background: #18181c; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 28px; }
+  a.card {
+    display: block; color: inherit; text-decoration: none; background: var(--card); border: 1px solid var(--line);
+    border-radius: 18px; overflow: hidden; transition: transform .25s cubic-bezier(.2,.8,.2,1), border-color .25s, box-shadow .25s;
+  }
+  a.card:hover, a.card:focus-visible { transform: translateY(-4px); border-color: #3a3a46; box-shadow: 0 24px 60px -24px rgba(0,0,0,.8), 0 0 0 1px rgba(139,123,255,.25); outline: none; }
+  .stage { position: relative; aspect-ratio: 16 / 9.4; background: #0e0e11; overflow: hidden; border-bottom: 1px solid var(--line); }
+  .stage .desk { position: absolute; inset: 16px 72px 16px 16px; width: calc(100% - 88px); height: calc(100% - 32px); object-fit: cover; object-position: top left; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.55); }
+  .stage .phone { position: absolute; right: 14px; bottom: 14px; height: 74%; aspect-ratio: 412 / 892; object-fit: cover; border-radius: 14px; box-shadow: 0 16px 40px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.08); transition: transform .35s cubic-bezier(.2,.8,.2,1); }
+  a.card:hover .phone { transform: translateY(-6px) rotate(-1.5deg); }
+  .stage .missing { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font: 13px "JetBrains Mono", monospace; }
+  .meta { padding: 18px 20px 20px; display: grid; grid-template-columns: auto 1fr auto; gap: 4px 14px; align-items: baseline; }
+  .num { font: 600 13px "JetBrains Mono", monospace; color: var(--accent); }
+  .name { font-size: 19px; font-weight: 700; letter-spacing: -0.02em; }
+  .tags { display: flex; gap: 6px; }
+  .tag { font: 500 11px "JetBrains Mono", monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+  .concept { grid-column: 2 / 4; color: var(--muted); font-size: 14px; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="brand">
+      <svg viewBox="0 0 40 40" fill="none" aria-hidden="true">
+        <rect x="1" y="1" width="38" height="38" rx="11" fill="#17151f" stroke="#3b3550"/>
+        <circle cx="14" cy="17" r="4.5" fill="#8b7bff"/><circle cx="26" cy="17" r="4.5" fill="#22d3ee"/>
+        <circle cx="20" cy="26" r="4.5" fill="#fbbf24"/>
+      </svg>
+      <h1>TeleFlock <span>· 10 directions</span></h1>
+    </div>
+    <p class="sub">Same product, same data, ten visual directions. Every draft has four desktop views (Board, Session, New worktree, Terminal) and the Android screens. Open one and use the pill switcher above the window. Mixing works too, e.g. the board from 04 with the session from 03.</p>
+  </div>
+  <div class="hint"><kbd>1</kbd>–<kbd>0</kbd> open a draft</div>
+</header>
+
+<main class="grid" id="grid"></main>
+
+<footer>Pure HTML. Each draft is one self-contained file. Fonts come from Google Fonts.</footer>
+
+<script>
+const drafts = [
+  ["01", "aurora", "Aurora", "Frosted glass over a living aurora", ["dark", "glass"]],
+  ["02", "precision", "Precision", "Linear-grade, keyboard-first instrument", ["dark", "dense"]],
+  ["03", "editorial", "Editorial", "A broadsheet for your agents", ["light", "serif"]],
+  ["04", "mission-control", "Mission Control", "Ops-center telemetry for your agents", ["dark", "data"]],
+  ["05", "swiss", "Swiss", "International Typographic Style", ["light", "bold"]],
+  ["06", "native", "Native", "Fluent 2 on Windows, Material 3 on Android", ["light", "platform"]],
+  ["07", "phosphor", "Phosphor", "A GUI made of terminal light", ["dark", "retro"]],
+  ["08", "flock", "Flock", "A friendly flock: clay + sheep", ["light", "playful"]],
+  ["09", "instrument", "Instrument", "Teenage Engineering-grade hardware UI", ["light", "tactile"]],
+  ["10", "bento", "Bento", "Spatial bento, alive with depth", ["dark", "vivid"]],
+];
+const grid = document.getElementById("grid");
+for (const [n, slug, name, concept, tags] of drafts) {
+  const a = document.createElement("a");
+  a.className = "card"; a.href = `${n}-${slug}.html`;
+  a.innerHTML = `
+    <div class="stage">
+      <div class="missing">screenshot pending</div>
+      <img class="desk" src="shots/${n}-desktop.png" alt="${name} desktop" loading="lazy" onerror="this.remove()">
+      <img class="phone" src="shots/${n}-phone.png" alt="${name} mobile" loading="lazy" onerror="this.remove()">
+    </div>
+    <div class="meta">
+      <span class="num">${n}</span><span class="name">${name}</span>
+      <span class="tags">${tags.map(t => `<span class="tag">${t}</span>`).join("")}</span>
+      <span class="concept">${concept}</span>
+    </div>`;
+  grid.append(a);
+}
+addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const i = "1234567890".indexOf(e.key);
+  if (i >= 0) location.href = grid.children[i].href;
+});
+</script>
+</body>
+</html>
