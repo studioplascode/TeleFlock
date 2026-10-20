@@ -31,7 +31,7 @@ pub struct Cmd { pub argv: Vec<String>, pub env: Vec<(String, String)>, pub cwd:
 pub struct Output { pub status: ExitStatus, pub stdout: Vec<u8>, pub stderr: Vec<u8> }  // + stdout_str()/stderr_str()
 pub struct ExitStatus { pub code: Option<i32>, pub signal: Option<String> }           // + success()
 pub struct Child { pub stdin: Option<BoxedWrite>, pub stdout: Option<BoxedRead>, pub stderr: Option<BoxedRead>, .. }
-// child.wait().await -> Result<ExitStatus, TransportError> (repeatable); child.kill().await
+// child.wait().await -> Result<ExitStatus, TransportError> (repeatable, cancel-safe in select!); child.kill().await (cancel-safe)
 pub type BoxedRead = Box<dyn AsyncRead + Send + Unpin>;
 pub type BoxedWrite = Box<dyn AsyncWrite + Send + Unpin>;
 pub type BoxedStream = Box<dyn AsyncStream>;   // AsyncRead + AsyncWrite + Send + Unpin

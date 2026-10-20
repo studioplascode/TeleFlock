@@ -3,7 +3,6 @@
 //! differs. Remote hosts (SSH, WSL) are driven with `sh` over `exec` (+stdin); local hosts
 //! are written directly.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -16,6 +15,15 @@ use tf_transport::{Cmd, Transport};
 use crate::util::{io_err, sh_quote, write_atomic};
 
 mod embedded {
+    /// One embedded tf-hostd (see `build.rs`).
+    pub struct EmbeddedHostd {
+        pub triple: &'static str,
+        /// SHA-256 of the uncompressed binary (the deploy stamp).
+        pub sha256: &'static str,
+        /// Uncompressed size in bytes.
+        pub len: usize,
+        pub zstd: &'static [u8],
+    }
     include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 }
 
@@ -60,8 +68,41 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// A tf-hostd binary ready to upload.
 pub struct HostdBin {
     pub triple: String,
-    pub bytes: Cow<'static, [u8]>,
     pub sha: String,
+    /// Uncompressed size in bytes.
+    pub len: usize,
+    payload: Payload,
+}
+
+enum Payload {
+    /// Embedded, zstd-compressed.
+    Zstd(&'static [u8]),
+    /// Dev override read from disk.
+    Raw(Vec<u8>),
+}
+
+impl HostdBin {
+    /// The binary itself (decompressed off the async runtime when embedded).
+    pub async fn into_bytes(self) -> Result<Vec<u8>, ApiError> {
+        match self.payload {
+            Payload::Raw(b) => Ok(b),
+            Payload::Zstd(z) => {
+                let len = self.len;
+                tokio::task::spawn_blocking(move || {
+                    use std::io::Read;
+                    let mut src = z;
+                    let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut src)
+                        .map_err(|e| ApiError::new("internal", format!("embedded tf-hostd: {e}")))?;
+                    let mut out = Vec::with_capacity(len);
+                    dec.read_to_end(&mut out)
+                        .map_err(|e| ApiError::new("internal", format!("embedded tf-hostd: {e}")))?;
+                    Ok(out)
+                })
+                .await
+                .map_err(|e| ApiError::new("internal", e.to_string()))?
+            }
+        }
+    }
 }
 
 /// Source of deployable artifacts: the embedded tables, or a dev override.
@@ -71,13 +112,14 @@ pub struct Artifacts {
     pub hostd_override: Option<PathBuf>,
 }
 
-static SHA_CACHE: LazyLock<Mutex<HashMap<&'static str, String>>> = LazyLock::new(Default::default);
+type FileId = (PathBuf, u64, Option<std::time::SystemTime>);
+static OVERRIDE_SHA: LazyLock<Mutex<HashMap<FileId, String>>> = LazyLock::new(Default::default);
 
 impl Artifacts {
     /// Triples embedded in this build.
     #[cfg(test)]
     pub fn embedded_triples() -> Vec<&'static str> {
-        embedded::HOSTD_BINS.iter().map(|(t, _)| *t).collect()
+        embedded::HOSTD_BINS.iter().map(|b| b.triple).collect()
     }
 
     pub async fn hostd(&self, os: &str, arch: &str) -> Result<HostdBin, ApiError> {
@@ -101,23 +143,39 @@ impl Artifacts {
                 path.clone()
             };
             let bytes = tokio::fs::read(&file).await.map_err(|e| io_err(&format!("read {}", file.display()), e))?;
-            let sha = sha256_hex(&bytes);
-            return Ok(HostdBin { triple: candidates[0].to_string(), bytes: Cow::Owned(bytes), sha });
+            // Dev binaries are large; hash once per (path, size, mtime).
+            let id = std::fs::metadata(&file).ok().map(|m| (file.clone(), m.len(), m.modified().ok()));
+            let cached = id.as_ref().and_then(|id| OVERRIDE_SHA.lock().unwrap().get(id).cloned());
+            let (bytes, sha) = match cached {
+                Some(sha) => (bytes, sha),
+                None => {
+                    let (bytes, sha) = tokio::task::spawn_blocking(move || {
+                        let sha = sha256_hex(&bytes);
+                        (bytes, sha)
+                    })
+                    .await
+                    .map_err(|e| ApiError::new("internal", e.to_string()))?;
+                    if let Some(id) = id {
+                        OVERRIDE_SHA.lock().unwrap().insert(id, sha.clone());
+                    }
+                    (bytes, sha)
+                }
+            };
+            return Ok(HostdBin {
+                triple: candidates[0].to_string(),
+                sha,
+                len: bytes.len(),
+                payload: Payload::Raw(bytes),
+            });
         }
         for t in candidates {
-            if let Some((triple, bytes)) = embedded::HOSTD_BINS.iter().find(|(x, _)| x == t) {
-                let sha = {
-                    let cached = SHA_CACHE.lock().unwrap().get(triple).cloned();
-                    match cached {
-                        Some(s) => s,
-                        None => {
-                            let s = tokio::task::spawn_blocking(move || sha256_hex(bytes)).await.unwrap_or_default();
-                            SHA_CACHE.lock().unwrap().insert(triple, s.clone());
-                            s
-                        }
-                    }
-                };
-                return Ok(HostdBin { triple: triple.to_string(), bytes: Cow::Borrowed(bytes), sha });
+            if let Some(b) = embedded::HOSTD_BINS.iter().find(|b| b.triple == *t) {
+                return Ok(HostdBin {
+                    triple: b.triple.to_string(),
+                    sha: b.sha256.to_string(),
+                    len: b.len,
+                    payload: Payload::Zstd(b.zstd),
+                });
             }
         }
         Err(ApiError::new(
@@ -306,12 +364,14 @@ pub async fn deploy(
     };
 
     if need_hostd {
-        let mb = bin.bytes.len() as f64 / 1_048_576.0;
+        let mb = bin.len as f64 / 1_048_576.0;
         progress(format!("Uploading tf-hostd {HOSTD_VERSION} ({mb:.1} MB, {})…", bin.triple));
+        let sha = bin.sha.clone();
+        let bytes = bin.into_bytes().await?;
         if local {
-            install_local(t, Path::new(&hostd_path), &bin.bytes, &bin.sha).await?;
+            install_local(t, Path::new(&hostd_path), &bytes, &sha).await?;
         } else {
-            upload_remote(t, &p.home, "bin/tf-hostd", &bin.bytes, &bin.sha, true).await?;
+            upload_remote(t, &p.home, "bin/tf-hostd", bytes, &sha, true).await?;
         }
         let v = version_of(t, &hostd_path).await;
         if v != expected {
@@ -346,7 +406,7 @@ async fn put_file(
         let stamp = path.with_file_name(format!("{}.sha256", path.file_name().unwrap().to_string_lossy()));
         write_atomic(&stamp, sha.as_bytes()).await.map_err(|e| io_err(&format!("write {}", stamp.display()), e))
     } else {
-        upload_remote(t, home, rel, bytes, sha, false).await
+        upload_remote(t, home, rel, bytes.to_vec(), sha, false).await
     }
 }
 
@@ -367,7 +427,7 @@ async fn upload_remote(
     t: &dyn Transport,
     home: &str,
     rel: &str,
-    bytes: &[u8],
+    bytes: Vec<u8>,
     sha: &str,
     executable: bool,
 ) -> Result<(), ApiError> {
@@ -375,7 +435,7 @@ async fn upload_remote(
     let out = t
         .exec(
             &Cmd::new(["sh".to_string(), "-c".to_string(), script])
-                .stdin(bytes.to_vec())
+                .stdin(bytes)
                 .timeout(Duration::from_secs(600)),
         )
         .await?;
@@ -465,6 +525,37 @@ mod tests {
         let base = Path::new(&home).join("ext");
         assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts")).unwrap(), "export default 1;\n");
         assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts.sha256")).unwrap(), "s1");
+    }
+
+    /// Every embedded binary decompresses to exactly the bytes its stamp describes.
+    #[tokio::test]
+    async fn embedded_bins_roundtrip() {
+        for b in embedded::HOSTD_BINS {
+            let bin = HostdBin {
+                triple: b.triple.into(),
+                sha: b.sha256.into(),
+                len: b.len,
+                payload: Payload::Zstd(b.zstd),
+            };
+            let bytes = bin.into_bytes().await.unwrap();
+            assert_eq!(bytes.len(), b.len, "{}", b.triple);
+            assert_eq!(sha256_hex(&bytes), b.sha256, "{}", b.triple);
+            assert!(b.zstd.len() < b.len, "{} is compressed", b.triple);
+        }
+    }
+
+    /// `(raw, zstd(raw))`, static like the embedded tables.
+    static SAMPLE: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
+        let raw: Vec<u8> = (0..200_000u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
+        let z = ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+        (raw, z)
+    });
+
+    #[tokio::test]
+    async fn zstd_payload_decodes() {
+        let (raw, z) = &*SAMPLE;
+        let bin = HostdBin { triple: "t".into(), sha: sha256_hex(raw), len: raw.len(), payload: Payload::Zstd(z) };
+        assert_eq!(&bin.into_bytes().await.unwrap(), raw);
     }
 
     #[tokio::test]

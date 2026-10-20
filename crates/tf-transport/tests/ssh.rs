@@ -211,7 +211,7 @@ async fn dial_errors_are_friendly() {
     assert!(matches!(err, TransportError::Resolve { .. }), "{err:?}");
     assert!(err.hint().unwrap().contains("100.x"));
 
-    let port = dead_port().await;
+    let (_guard, port) = dead_port();
     let err = connect(&profile(format!("127.0.0.1:{port}").parse().unwrap()), &opts(&dir), Events::new().tx).await.err().unwrap();
     match &err {
         TransportError::Connect { hint: Some(h), .. } => assert!(h.contains("tailscale set --ssh"), "{h}"),
@@ -244,8 +244,23 @@ async fn forward_tcp_direct_tcpip() {
 
     let err = t.forward_tcp("forbidden.invalid", 80).await.err().unwrap();
     assert!(matches!(err, TransportError::ForwardDenied { .. }), "{err:?}");
-    let err = t.forward_tcp("127.0.0.1", dead_port().await).await.err().unwrap();
+    let (_guard, port) = dead_port();
+    let err = t.forward_tcp("127.0.0.1", port).await.err().unwrap();
     assert!(matches!(err, TransportError::ForwardFailed { .. }), "{err:?}");
+    t.close().await;
+
+    // wait()/kill() are cancel-safe under select! for SSH children too.
+    let t = connect(&profile(srv.addr), &opts(&dir), Events::new().tx).await.unwrap();
+    let mut c = t.spawn(&Cmd::new(["sleep", "30"])).await.unwrap();
+    for _ in 0..3 {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(30)) => {}
+            _ = c.wait() => panic!("sleep 30 cannot have exited"),
+        }
+    }
+    let _ = tokio::time::timeout(Duration::from_millis(1), c.kill()).await;
+    tokio::time::timeout(T, c.kill()).await.unwrap();
+    assert_eq!(c.wait().await.unwrap().code, Some(128 + 9));
     t.close().await;
 }
 

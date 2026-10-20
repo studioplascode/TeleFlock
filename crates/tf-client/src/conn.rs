@@ -231,17 +231,29 @@ pub(crate) async fn run(inner: Weak<Inner>, rt: Arc<HostRt>, mut rx: mpsc::Unbou
         let Some(eng) = inner.upgrade() else { break };
         let Some(profile) = eng.profile(&rt.id) else { break };
         let online_at: Arc<Mutex<Option<Instant>>> = Arc::default();
-        let outcome = {
-            let attempt_fut = connect_and_serve(&eng, &rt, &profile, attempt, online_at.clone());
-            tokio::pin!(attempt_fut);
-            loop {
-                tokio::select! {
-                    r = &mut attempt_fut => break Outcome::Ended(r, *online_at.lock().unwrap()),
-                    c = rx.recv() => match c {
-                        Some(ConnCmd::Connect) => continue,
-                        other => break Outcome::Cmd(other),
-                    },
+        // The attempt runs in its own task so a panic in a lower layer becomes a retryable
+        // error instead of killing this state machine.
+        let mut task = {
+            let (eng, rt, online_at) = (eng.clone(), rt.clone(), online_at.clone());
+            tokio::spawn(async move { connect_and_serve(&eng, &rt, &profile, attempt, online_at).await })
+        };
+        let outcome = loop {
+            tokio::select! {
+                r = &mut task => {
+                    let r = r.unwrap_or_else(|e| {
+                        log::error!("host {}: connection task failed: {e}", rt.id);
+                        Err(ApiError::new("internal", format!("connection task failed: {e}")).retryable())
+                    });
+                    break Outcome::Ended(r, *online_at.lock().unwrap());
                 }
+                c = rx.recv() => match c {
+                    Some(ConnCmd::Connect) => continue,
+                    other => {
+                        task.abort();
+                        let _ = (&mut task).await;
+                        break Outcome::Cmd(other);
+                    }
+                },
             }
         };
         teardown(&eng, &rt).await;
@@ -353,7 +365,7 @@ async fn connect_and_serve(
     }
     eng.update_status(rt, |s| {
         s.phase = ConnPhase::Connecting;
-        s.message = Some(if attempt > 0 { format!("Reconnecting (attempt {})…", attempt + 1) } else { "Connecting…".into() });
+        s.message = Some(if attempt > 0 { format!("Reconnecting (retry {attempt})…") } else { "Connecting…".into() });
         s.attempt = attempt;
         s.next_retry_at = None;
         s.auth_url = None;
@@ -470,7 +482,8 @@ async fn connect_and_serve(
         }
     };
     link.close(&reason);
-    child.kill().await;
+    // Dropping the child kills `attach` if it is still running.
+    drop(child);
     Ok(reason)
 }
 

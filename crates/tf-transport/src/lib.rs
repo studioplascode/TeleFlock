@@ -150,7 +150,7 @@ pub struct Child {
     pub stdin: Option<BoxedWrite>,
     pub stdout: Option<BoxedRead>,
     pub stderr: Option<BoxedRead>,
-    exit: Option<oneshot::Receiver<Result<ExitStatus, TransportError>>>,
+    exit: oneshot::Receiver<Result<ExitStatus, TransportError>>,
     done: Option<Result<ExitStatus, TransportError>>,
     kill: Option<oneshot::Sender<()>>,
 }
@@ -163,22 +163,22 @@ impl Child {
         exit: oneshot::Receiver<Result<ExitStatus, TransportError>>,
         kill: oneshot::Sender<()>,
     ) -> Self {
-        Self { stdin: Some(stdin), stdout: Some(stdout), stderr: Some(stderr), exit: Some(exit), done: None, kill: Some(kill) }
+        Self { stdin: Some(stdin), stdout: Some(stdout), stderr: Some(stderr), exit, done: None, kill: Some(kill) }
     }
 
     /// Wait for the command to end. Returns `Err(Closed(..))` if the connection died first.
-    /// Can be called again after it returned.
+    /// Cancel-safe (usable in `select!`) and repeatable after it returned.
     pub async fn wait(&mut self) -> Result<ExitStatus, TransportError> {
         if let Some(done) = &self.done {
             return done.clone();
         }
-        let rx = self.exit.take().expect("exit receiver present until done");
-        let res = rx.await.unwrap_or_else(|_| Err(TransportError::Closed(Some("process driver ended".into()))));
+        // Polling `&mut` keeps the receiver in `self` if this future is dropped mid-await.
+        let res = (&mut self.exit).await.unwrap_or_else(|_| Err(TransportError::Closed(Some("process driver ended".into()))));
         self.done = Some(res.clone());
         res
     }
 
-    /// Kill the command and wait until it is gone.
+    /// Kill the command and wait until it is gone. Cancel-safe.
     pub async fn kill(&mut self) {
         if let Some(k) = self.kill.take() {
             let _ = k.send(());

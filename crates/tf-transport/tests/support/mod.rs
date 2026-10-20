@@ -323,10 +323,13 @@ pub async fn echo_server() -> SocketAddr {
     addr
 }
 
-/// A port with nothing listening.
-pub async fn dead_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    l.local_addr().unwrap().port()
+/// A port with nothing listening. The returned socket is bound but never listens, so
+/// connects are refused and parallel tests can't grab the port while it is held.
+pub fn dead_port() -> (tokio::net::TcpSocket, u16) {
+    let s = tokio::net::TcpSocket::new_v4().unwrap();
+    s.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = s.local_addr().unwrap().port();
+    (s, port)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

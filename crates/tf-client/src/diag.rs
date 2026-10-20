@@ -279,8 +279,9 @@ async fn after_connect(eng: &Arc<Inner>, profile: &HostProfile, t: &dyn Transpor
                 sink.0.lock().unwrap().unwrap_or(0)
             )
         });
+        // Let attach exit after `bye`; dropping the child kills it otherwise.
         let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
-        child.kill().await;
+        drop(child);
         res
     }
     .await;

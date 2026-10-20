@@ -13,10 +13,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "net", "fs", "process"] }
-async-trait = "0.1"
 sha2 = "0.10"
 rand = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ruzstd = "0.8"
+
+[build-dependencies]
+sha2 = "0.10"
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile = "3"

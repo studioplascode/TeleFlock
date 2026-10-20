@@ -65,8 +65,10 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
 ## Embedded artifacts
 `build.rs` embeds `$TF_HOSTD_DIST/<triple>/tf-hostd[.exe]` (default `<workspace>/target/hostd-dist`)
 for each triple present (`x86_64|aarch64-unknown-linux-musl`, `…-linux-gnu`, `x86_64|aarch64-pc-windows-msvc`,
-`…-apple-darwin`) and `host/teleflock-bridge/teleflock-bridge.ts`. Missing ones fail at deploy time
-with an error naming the triple / file.
+`…-apple-darwin`), **zstd -19 compressed** (≈ 8.6 → 3.3 MB) with the SHA-256 and size of the raw binary
+computed at build time; deploy decompresses only when it actually uploads. Android builds skip the
+Windows triples. It also embeds `host/teleflock-bridge/teleflock-bridge.ts`. Missing ones fail at
+deploy time with an error naming the triple / file.
 
 # tf-devserver
 `tf-devserver --bind 127.0.0.1:7420 --data-dir <dir> [--static dist] [--hostd-bin <path>]`

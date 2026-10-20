@@ -56,7 +56,7 @@ if [ ! -f "$APK" ]; then
   exit 1
 fi
 log "verifying signature"
-"$BT/apksigner" verify --print-certs "$APK" | grep -E "Signer #1 certificate (DN|SHA-256)"
+"$BT/apksigner" verify --print-certs "$APK" | grep -E "Signer.*certificate (DN|SHA-256)"
 "$BT/zipalign" -c -P 16 4 "$APK"
 
 VERSION="$(bun -e 'console.log(require("./src-tauri/tauri.conf.json").version)')"

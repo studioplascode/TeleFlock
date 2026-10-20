@@ -109,7 +109,8 @@ impl Core {
         let generation = self.generation.load(Ordering::Acquire);
         // Subscribe before counting as live, so an intent emitted in between is not lost.
         let (replay, mut rx) = self.engine.subscribe_with_replay();
-        self.live.fetch_add(1, Ordering::AcqRel);
+        let live = self.live.fetch_add(1, Ordering::AcqRel) + 1;
+        log::info!("webview subscribed to core events (replay {} events, {live} live)", replay.len());
         tauri::async_runtime::spawn(async move {
             let alive = || self.generation.load(Ordering::Acquire) == generation;
             let mut ok = replay.into_iter().all(|ev| channel.send(ev).is_ok());

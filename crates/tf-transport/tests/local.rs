@@ -96,6 +96,24 @@ async fn spawn_stream_kill_and_close() {
     assert!(matches!(t.exec(&Cmd::new(["true"])).await.unwrap_err(), TransportError::Closed(None)));
 }
 
+/// `wait()` dropped mid-await inside `select!` must not break later `wait()`/`kill()`.
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_is_cancel_safe() {
+    let ev = Events::new();
+    let t = local(&ev).await;
+    let mut c = t.spawn(&Cmd::new(["sleep", "30"])).await.unwrap();
+    for _ in 0..3 {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(30)) => {}
+            _ = c.wait() => panic!("sleep 30 cannot have exited"),
+        }
+    }
+    // A kill() cancelled mid-await (it may or may not finish in 1 ms) must also be safe.
+    let _ = tokio::time::timeout(Duration::from_millis(1), c.kill()).await;
+    tokio::time::timeout(T, c.kill()).await.unwrap();
+    assert_eq!(c.wait().await.unwrap().signal.as_deref(), Some("KILL"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn forward_tcp_localhost() {
     let ev = Events::new();
@@ -106,7 +124,8 @@ async fn forward_tcp_localhost() {
     let mut buf = [0u8; 5];
     tokio::time::timeout(T, s.read_exact(&mut buf)).await.unwrap().unwrap();
     assert_eq!(&buf, b"local");
-    let err = t.forward_tcp("127.0.0.1", support::dead_port().await).await.err().unwrap();
+    let (_guard, port) = support::dead_port();
+    let err = t.forward_tcp("127.0.0.1", port).await.err().unwrap();
     assert!(matches!(err, TransportError::Connect { .. }), "{err:?}");
 }
 
