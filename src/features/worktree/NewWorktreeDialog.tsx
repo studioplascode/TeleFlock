@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { core, navigate, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
 import { Button, Chip, EmptyState, Kbd, SegmentedControl, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
@@ -138,13 +138,19 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   };
 
   // Ctrl/⌘+Enter anywhere advances / creates (otherwise the folder browser uses it to pick + continue).
-  const onKeyDownCapture = (e: KeyboardEvent) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && valid[step]) {
-      e.preventDefault();
-      e.stopPropagation();
-      next();
-    }
-  };
+  // Window-level so it still works when the focused field unmounts between steps.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && valid[step]) {
+        e.preventDefault();
+        e.stopPropagation();
+        next();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
 
   const session = host?.info.herdrSession;
   const preview: PreviewLine[] = params
@@ -221,7 +227,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
       maxHeight="94dvh"
       footer={footer}
     >
-      <div onKeyDownCapture={onKeyDownCapture} className="flex flex-col gap-5 md:min-h-[520px]">
+      <div className="flex flex-col gap-5 md:min-h-[520px]">
         {hostIds.length === 0 ? (
           <EmptyState
             compact

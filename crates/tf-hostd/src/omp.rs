@@ -55,6 +55,8 @@ pub struct OmpView {
     pub needs: Option<NeedsYou>,
     pub streaming: bool,
     pub first_prompt: Option<String>,
+    /// The replica is inside a turn (`agent_start` … `agent_end`).
+    pub turn_active: bool,
 }
 
 struct SessionState {
@@ -177,6 +179,7 @@ impl OmpSession {
             needs: st.replica.needs(),
             streaming: st.replica.is_streaming(),
             first_prompt: st.first_prompt.clone(),
+            turn_active: st.replica.turn_started_at().is_some(),
         }
     }
 

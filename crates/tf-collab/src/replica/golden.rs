@@ -612,3 +612,58 @@ fn bandwidth_all_scenarios() {
         assert!(ratio > min, "{name}: {ratio:.1}");
     }
 }
+
+fn ui_events(r: &Run) -> Vec<Option<String>> {
+    r.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            SessionEvent::Ui { request } => Some(request.as_ref().map(|q| q.id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `ui-request` opens a dialog (`Ui{Some}`), `ui-request-end` closes it (`Ui{None}`), for asks,
+/// wrong-label asks and approvals; while pending, `SessionSnapshot.ui` carries it.
+#[test]
+fn ui_events_open_and_close() {
+    for (name, id) in [("05-ask-ui-response", "2"), ("05a-ask-wrong-label", "1"), ("16-tool-approval", "1")] {
+        let r = run(name);
+        assert_eq!(ui_events(&r), [Some(id.to_owned()), None], "{name}");
+        assert!(r.replica.snapshot(10).ui.is_none(), "{name}: closed");
+        assert!(r.mirror.ui.is_none());
+
+        // Replay up to (and including) the ui-request: snapshot.ui is filled.
+        let base = load("00-join");
+        let (at0, snap) = snapshot_from(&base, false).unwrap();
+        let mut rep = Replica::new("x");
+        rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+        let rows = load(name);
+        let mut opened = None;
+        for row in rows.iter().filter(|r| r.dir == "h2g") {
+            let up = rep.apply(&GuestEvent::Frame(HostFrame::from_value(row.frame.clone())), row.at);
+            if row.frame["t"] == "ui-request" {
+                opened = up.events.iter().find_map(|e| match e {
+                    SessionEvent::Ui { request } => request.clone(),
+                    _ => None,
+                });
+                break;
+            }
+        }
+        let opened = opened.unwrap_or_else(|| panic!("{name}: no Ui event on ui-request"));
+        assert_eq!(opened.id, id);
+        let s = rep.snapshot(10);
+        assert_eq!(s.ui.as_ref(), Some(&opened), "{name}: snapshot.ui");
+
+        // Resync while pending: Reset clears it (snapshot.ui = None), the host re-sends the
+        // ui-request after the snapshot → Ui{Some} again.
+        let up = rep.apply(&GuestEvent::Snapshot(Snapshot { resync: true, ..snap }), at0);
+        assert!(matches!(&up.events[..], [SessionEvent::Reset { snapshot }] if snapshot.ui.is_none()));
+        let req = rows.iter().find(|r| r.frame["t"] == "ui-request").unwrap();
+        let up = rep.apply(&GuestEvent::Frame(HostFrame::from_value(req.frame.clone())), req.at);
+        assert!(up.events.iter().any(|e| matches!(e, SessionEvent::Ui { request: Some(q) } if q.id == id)), "{name}: resync re-open");
+        let end = rows.iter().find(|r| r.frame["t"] == "ui-request-end").unwrap();
+        let up = rep.apply(&GuestEvent::Frame(HostFrame::from_value(end.frame.clone())), end.at);
+        assert!(up.events.iter().any(|e| matches!(e, SessionEvent::Ui { request: None })), "{name}: close");
+    }
+}

@@ -1,4 +1,4 @@
-import type { AppEvent, AppMethods, HostMethods, HostProfile, HostsListResult, TunnelInfo } from "@/core/gen";
+import type { AppEvent, AppMethods, HostMethods, HostProfile, TunnelInfo } from "@/core/gen";
 import { pulseBus, termBus } from "./buses";
 import type { DemoClock } from "./demo/clock";
 import { DemoEngine } from "./demo/engine";
@@ -337,9 +337,10 @@ export async function loadActivity(hostId: string, older: boolean): Promise<void
 let started = false;
 
 async function bootstrap(t: CoreTransport): Promise<void> {
+  // Transport results are untyped JSON; AppMethods is the contract the backend implements.
+  const appCall = <M extends keyof AppMethods>(m: M, p: AppMethods[M]["params"]) => t.call(null, m, p) as Promise<AppMethods[M]["result"]>;
   const tasks: Promise<void>[] = [
-    t.call(null, "hosts.list", {}).then((r) => {
-      const result = r as HostsListResult;
+    appCall("hosts.list", {}).then((result) => {
       syncDemoProfiles(result.profiles);
       // Demo-kind hosts report their own status through the demo engine.
       pushInternal({ type: "$hostsList", result: { ...result, statuses: result.statuses.filter((s) => !demoHostIds.has(s.hostId)) } });
@@ -351,9 +352,9 @@ async function bootstrap(t: CoreTransport): Promise<void> {
         }
       }, 1500);
     }),
-    t.call(null, "settings.get", {}).then((settings) => pushInternal({ type: "settings", settings: settings as never })),
-    t.call(null, "tunnel.list", {}).then((r) => {
-      realTunnels = (r as { tunnels: TunnelInfo[] }).tunnels;
+    appCall("settings.get", {}).then((settings) => pushInternal({ type: "settings", settings })),
+    appCall("tunnel.list", {}).then((r) => {
+      realTunnels = r.tunnels;
       pushInternal({ type: "tunnels", tunnels: t.kind === "demo" ? realTunnels : [...realTunnels, ...demoTunnels] });
     }),
   ];

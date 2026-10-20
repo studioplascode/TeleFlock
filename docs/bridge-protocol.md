@@ -7,10 +7,14 @@ The wire between **tf-hostd** (`crates/tf-hostd/src/bridge.rs`) and the omp comp
 
 | Platform | Endpoint | Notes |
 |---|---|---|
-| Linux / macOS / WSL | `$TF_HOSTD_HOME/run/bridge.sock`, default `~/.teleflock/run/bridge.sock` | Unix socket, mode `0600`, dir `0700`. hostd replaces a stale file on start. |
-| Windows | `\\.\pipe\teleflock-bridge-<USERNAME>` | With `TF_HOSTD_HOME` set: `…-<USERNAME>-<fnv1a32(home) as 8 hex>`. Remote clients rejected. |
+| Linux / macOS / WSL | `<home>/run/bridge.sock` | Unix socket, mode `0600`, dir `0700`. hostd replaces a stale file on start. |
+| Windows | `\\.\pipe\teleflock-bridge-<USERNAME>` | For a home other than `%USERPROFILE%\.teleflock`: `…-<USERNAME>-<fnv1a32(home) as 8 hex>`. Remote clients rejected. |
 
-`TF_BRIDGE_SOCK` (extension side only) overrides the endpoint verbatim.
+The extension resolves `<home>` in this order:
+1. `TF_BRIDGE_SOCK`, which overrides the whole endpoint verbatim.
+2. Its own location, when deployed as `<home>/ext/teleflock-bridge.ts`. omp inherits the herdr pane's env, which usually lacks `TF_HOSTD_HOME`, so this is what makes app-deployed lab and real homes work.
+3. `TF_HOSTD_HOME`.
+4. `~/.teleflock`.
 
 - hostd is the **server**; every omp process running the extension is a **client** (one connection per process).
 - Framing: **JSON lines**: one UTF-8 JSON object per `\n`-terminated line. Lines over 64 MiB close the connection.

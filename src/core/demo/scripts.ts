@@ -517,10 +517,33 @@ export function injectedAsk(kind: number, agentName: string): Step {
   }
 }
 
+/** "Write a commit message": inspect the diff, answer with one ```text block, no dialogs. */
+function commitMessageTurn(ctx: { repo: string; title?: string; branch?: string; changed?: ChangedFile[] }): Step[] {
+  const changed = ctx.changed ?? [];
+  const kind = ctx.branch?.startsWith("fix/") ? "fix" : ctx.branch?.startsWith("ci/") ? "ci" : ctx.branch?.startsWith("perf/") ? "perf" : ctx.branch?.startsWith("docs") ? "docs" : "feat";
+  const scope = (ctx.branch?.split("/").pop() ?? ctx.repo).split("-")[0] ?? ctx.repo;
+  const title = (ctx.title ?? "update").replace(/\.$/, "");
+  const subject = `${kind}(${scope}): ${title.charAt(0).toLowerCase()}${title.slice(1)}`.slice(0, 72);
+  const bullets = changed.length
+    ? changed.slice(0, 6).map((f) => `- ${f.status === "added" || f.status === "untracked" ? "add" : f.status === "deleted" ? "remove" : f.status === "renamed" ? "rename" : "update"} ${f.path} (+${f.added} −${f.removed})`)
+    : ["- no functional changes"];
+  if (changed.length > 6) bullets.push(`- plus ${changed.length - 6} more file${changed.length - 6 > 1 ? "s" : ""}`);
+  const files = changed.length;
+  return [
+    bash("git diff --stat HEAD", [...changed.slice(0, 8).map((f) => ` ${f.path} | ${f.added + f.removed} ${"+".repeat(Math.min(20, Math.ceil(f.added / 20)))}${"-".repeat(Math.min(10, Math.ceil(f.removed / 20)))}`), ` ${files} file${files === 1 ? "" : "s"} changed`], 1200),
+    think("Summarising the diff into a conventional commit: type and scope from the branch, subject from the task, one bullet per notable file.", 2200),
+    say(`Here's a commit message for the current changes:\n\n\`\`\`text\n${subject}\n\n${bullets.join("\n")}\n\`\`\``),
+  ];
+}
+
 /** A scripted reply to a user prompt: keyword-aware, always streams and uses a few tools. */
-export function replyTurn(text: string, ctx: { repo: string; files: string[]; rng: Rng; plan: boolean }): Step[] {
+export function replyTurn(
+  text: string,
+  ctx: { repo: string; files: string[]; rng: Rng; plan: boolean; title?: string; branch?: string; changed?: ChangedFile[] },
+): Step[] {
   const t = text.toLowerCase();
   const file = ctx.rng.pick(ctx.files.length ? ctx.files : ["README.md"]);
+  if (/commit message/i.test(text)) return commitMessageTurn(ctx);
   if (ctx.plan) return [think("Drafting a plan before touching code.", 3000), say("Here's how I'd approach it."), injectedAsk(0, ctx.repo)];
   if (/\b(why|what|how|explain)\b|\?$/.test(t)) {
     return [
@@ -592,6 +615,16 @@ export function replyTurn(text: string, ctx: { repo: string; files: string[]; rn
     edit({ path: file, added: rng.int(4, 40), removed: rng.int(0, 12), status: "modified" }, text.slice(0, 60)),
     bash("bun test --bail", [`bun test v1.4.3`, ``, `${G}✓${X} ${rng.int(30, 220)} pass`, `${D}0 fail · ${rng.int(1, 4)}.${rng.int(0, 9)}s${X}`], 6000 + rng.int(0, 4000)),
     say(`Done: updated \`${file}\` for "${text.length > 70 ? `${text.slice(0, 70)}…` : text}". Tests pass.`),
+  ];
+}
+
+/** studio-pc: a long render job with progress output. */
+export function renderTurn(): Step[] {
+  const frames = Array.from({ length: 12 }, (_, i) => `Fra:${(i + 1) * 120} Mem:2.1G | Time:00:${String(8 + i * 3).padStart(2, "0")}.4 | Remaining:${String(Math.max(0, 33 - i * 3)).padStart(2, "0")}s | Rendering ${Math.round(((i + 1) / 12) * 100)}%`);
+  return [
+    bash("blender -b onboarding.blend -E CYCLES -a", frames, 60_000, 0, "Render frames 1–1440 at 4K"),
+    bash("ffmpeg -framerate 60 -i out/%04d.png -c:v libx265 -crf 20 onboarding.mp4", [`frame= 1440 fps=212 q=-0.0 Lsize=   38412kB time=00:00:24.00 bitrate=13110.9kbits/s`, `${G}done${X}`], 12_000),
+    say("Rendered all 1440 frames at 4K and encoded `onboarding.mp4` (24 s, 38 MB)."),
   ];
 }
 

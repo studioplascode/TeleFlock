@@ -82,12 +82,22 @@ export class TermSession {
     }, FIRST_FRAME_NUDGE_MS);
   }
 
+  /**
+   * herdr frames address the visible grid absolutely, so xterm must always show its bottom page.
+   * Shrinking the grid (resize) can leave lines above it even with `scrollback: 0`; snap back after
+   * each write so the viewport never shows a stale line on top.
+   */
+  private readonly pinViewport = () => {
+    const buf = this.o.term.buffer.active;
+    if (buf.viewportY !== buf.baseY) this.o.term.scrollToBottom();
+  };
+
   private onEvent(gen: number, ev: TermEvent) {
     if (gen !== this.gen) return;
     switch (ev.k) {
       case "frame":
         this.gotFrame = true;
-        this.o.term.write(decodeBase64(ev.data));
+        this.o.term.write(decodeBase64(ev.data), this.pinViewport);
         this.o.onFrame(ev);
         break;
       case "title":

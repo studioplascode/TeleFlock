@@ -28,6 +28,8 @@ import type {
   UiRequest,
   UsageTotals,
   Workspace,
+  WorktreeEntry,
+  WorktreeList,
 } from "@/core/gen";
 import { apiError } from "../errors";
 import { AgentSim, type SimHost } from "./agent";
@@ -37,6 +39,7 @@ import {
   AGENTS,
   type AgentDef,
   HOME,
+  WORKTREES,
   MODELS,
   modelByRef,
   REPOS,
@@ -60,6 +63,7 @@ import {
   poolTurn,
   PUSH_ASK,
   pushAfter,
+  renderTurn,
 } from "./scripts";
 import { historyFor } from "./seeds";
 import { DemoTerm } from "./term";
@@ -206,6 +210,7 @@ export class DemoHost implements SimHost {
       this.usageTotals = { costUsd: 18.42, tokens: 2_310_000, input: 2_080_000, output: 230_000 };
     } else {
       this.usageTotals = { costUsd: 1.31, tokens: 160_000, input: 140_000, output: 20_000 };
+      this.sims.get("render")?.resume(renderTurn());
     }
     for (const id of this.sims.keys()) this.dirtyAgents.delete(id);
     this.dirtyMeta.clear();
@@ -214,7 +219,7 @@ export class DemoHost implements SimHost {
   private addWorkspace(repoName: string | undefined, branch: string | undefined, worktree: boolean, order: number, id?: string, shellPane = false, cwdOverride?: string, label?: string): WsModel {
     const repo = repoName ? repoByName(repoName) : undefined;
     const wsId = id ?? `w${this.nextWs++}`;
-    const path = cwdOverride ?? (repo ? (worktree ? `${HOME}/worktrees/${repo.name}/${slug(branch ?? "main")}` : repo.root) : `${HOME}`);
+    const path = cwdOverride ?? (repo ? (worktree ? `${WORKTREES}/${repo.name}/${slug(branch ?? "main")}` : repo.root) : `${HOME}`);
     const primary = worktree && repo ? [...this.wss.values()].find((m) => m.repo === repo && !m.ws.worktree) : undefined;
     const panes = [`${wsId}:p1`];
     const shellPanes: string[] = [];
@@ -235,9 +240,17 @@ export class DemoHost implements SimHost {
     };
     const model: WsModel = { ws, repo, path, shellPanes };
     this.wss.set(wsId, model);
-    if (repo && branch && !repo.branches.includes(branch)) repo.branches.push(branch);
+    if (repo && branch && !this.branchesOf(repo).includes(branch)) this.newBranches.push(`${repo.name}\u0000${branch}`);
     this.dirtyWs.add(wsId);
     return model;
+  }
+
+  /** Branches created on this host (the static repo data is shared and never mutated). */
+  private readonly newBranches: string[] = [];
+
+  private branchesOf(repo: RepoDef): string[] {
+    const extra = this.newBranches.filter((b) => b.startsWith(`${repo.name}\u0000`)).map((b) => b.slice(repo.name.length + 1));
+    return [...repo.branches, ...extra];
   }
 
   private addAgent(def: AgentDef, wsId: string, paneId?: string): AgentSim {
@@ -491,7 +504,8 @@ export class DemoHost implements SimHost {
   }
 
   connect(): void {
-    if (this.online) return;
+    // Already online or mid-handshake: a repeated connect must not restart the sequence.
+    if (this.online || ["connecting", "authenticating", "deploying", "starting"].includes(this.status.phase)) return;
     this.connectSequence(this.status.phase === "authRequired");
   }
 
@@ -624,7 +638,7 @@ export class DemoHost implements SimHost {
       if (idle) idle.startTurn(DIRECTOR_PROMPTS[this.promptIdx++ % DIRECTOR_PROMPTS.length] as string, { author: OTHER_DEVICE });
     }
     if (!needs.length && now - this.noNeedsSince > 40_000) {
-      const target = running.find((s) => !s.hasQueuedUi && !s.pending);
+      const target = running.find((s) => s.acceptsInjection);
       if (target) {
         target.injectNext(injectedAsk(this.askKind++, target.agent.name));
         this.noNeedsSince = now;
@@ -1202,14 +1216,19 @@ export class DemoHost implements SimHost {
     return {};
   }
 
-  private worktreeList(cwd: string): unknown {
+  private wsDirty(wsId: string): number {
+    return [...this.sims.values()].filter((s) => s.agent.workspaceId === wsId).reduce((n, s) => n + s.files.length, 0);
+  }
+
+  private worktreeList(cwd: string): WorktreeList {
     const repo = repoForPath(this.resolve(cwd));
     if (!repo) throw apiError("git_error", `fatal: not a git repository: ${cwd}`);
-    const entries = [...this.wss.values()]
+    const worktrees: WorktreeEntry[] = [...this.wss.values()]
       .filter((m) => m.repo === repo)
-      .map((m) => ({ path: m.path, branch: m.ws.repo?.branch, head: m.ws.repo?.head, primary: !m.ws.worktree, workspaceId: m.ws.id, dirty: [...this.sims.values()].filter((s) => s.agent.workspaceId === m.ws.id).reduce((n, s) => n + s.files.length, 0) }));
-    if (repo.name === "teleflock") entries.push({ path: `${HOME}/worktrees/teleflock/spike-collab-relay`, branch: "spike/collab-relay", head: "9d0e4c1", primary: false, workspaceId: undefined as unknown as string, dirty: 0 });
-    return { worktrees: entries.map((e) => (e.workspaceId ? e : { path: e.path, branch: e.branch, head: e.head, primary: e.primary, dirty: e.dirty })) };
+      .map((m) => ({ path: m.path, branch: m.ws.repo?.branch, head: m.ws.repo?.head, primary: !m.ws.worktree, workspaceId: m.ws.id, dirty: this.wsDirty(m.ws.id) }));
+    // A linked worktree on disk that no herdr workspace shows.
+    if (repo.name === "teleflock") worktrees.push({ path: `${WORKTREES}/teleflock/spike-collab-relay`, branch: "spike/collab-relay", head: "9d0e4c1", primary: false, dirty: 0 });
+    return { worktrees };
   }
 
   private worktreeCreate(p: Record<string, unknown>): unknown {
@@ -1223,9 +1242,10 @@ export class DemoHost implements SimHost {
     if (!/^[\w./-]+$/.test(branch) || branch.endsWith("/") || branch.includes("..")) throw apiError("git_error", `fatal: '${branch}' is not a valid branch name`);
     const inUse = [...this.wss.values()].find((m) => m.repo === repo && m.ws.repo?.branch === branch);
     if (inUse) throw apiError("git_error", `fatal: '${branch}' is already used by worktree at '${inUse.path}'`, { hint: "Pick another branch, or open the existing workspace" });
-    if (p.existing && !repo.branches.includes(branch)) throw apiError("git_error", `fatal: invalid reference: ${branch}`);
-    if (!p.existing && repo.branches.includes(branch)) throw apiError("git_error", `fatal: a branch named '${branch}' already exists`, { hint: "Use the existing branch instead" });
-    const path = typeof p.path === "string" && p.path ? this.resolve(p.path) : `${HOME}/worktrees/${repo.name}/${slug(branch)}`;
+    const known = this.branchesOf(repo);
+    if (p.existing && !known.includes(branch)) throw apiError("git_error", `fatal: invalid reference: ${branch}`);
+    if (!p.existing && known.includes(branch)) throw apiError("git_error", `fatal: a branch named '${branch}' already exists`, { hint: "Use the existing branch instead" });
+    const path = typeof p.path === "string" && p.path ? this.resolve(p.path) : `${WORKTREES}/${repo.name}/${slug(branch)}`;
     if (this.isDir(path)) throw apiError("git_error", `fatal: '${path}' already exists`);
     const primary = [...this.wss.values()].find((m) => m.repo === repo && !m.ws.worktree);
     const order = primary ? primary.ws.order + 0.5 + this.linkedOf(primary).length * 0.01 : this.wss.size;
@@ -1283,8 +1303,8 @@ export class DemoHost implements SimHost {
       }
       if (isDir && !t.has(cur)) t.set(cur, new Set());
     };
-    for (const d of ["code/dotfiles", "code/sandbox", "code/untrusted-fork", "notes", ".config/herdr", ".omp/agent/sessions", ".teleflock/bin", "Downloads"]) addPath(`${HOME}/${d}`, true);
-    for (const f of ["notes/ideas.md", "notes/todo.md", "code/dotfiles/.zshrc", "code/dotfiles/install.sh", "code/sandbox/scratch.ts", "code/untrusted-fork/README.md", ".config/herdr/config.toml", ".zshrc", ".gitconfig"]) addPath(`${HOME}/${f}`, false);
+    for (const d of ["code/dotfiles", "code/sandbox", "notes", ".config/herdr", ".omp/agent/sessions", ".teleflock/bin", "Downloads"]) addPath(`${HOME}/${d}`, true);
+    for (const f of ["notes/ideas.md", "notes/todo.md", "code/dotfiles/.zshrc", "code/dotfiles/install.sh", "code/sandbox/scratch.ts", ".config/herdr/config.toml", ".zshrc", ".gitconfig"]) addPath(`${HOME}/${f}`, false);
     for (const r of REPOS) {
       addPath(r.root, true);
       for (const f of r.files) addPath(`${r.root}/${f}`, false);
@@ -1302,10 +1322,9 @@ export class DemoHost implements SimHost {
 
   private badge(path: string): GitBadge | undefined {
     const ws = [...this.wss.values()].find((m) => m.path === path);
+    if (ws?.repo) return { repoRoot: true, worktree: Boolean(ws.ws.worktree), branch: ws.ws.repo?.branch, dirty: this.wsDirty(ws.ws.id) };
     const repo = REPOS.find((r) => r.root === path);
-    if (ws?.ws.worktree) return { repoRoot: true, worktree: true, branch: ws.ws.repo?.branch, dirty: [...this.sims.values()].filter((s) => s.agent.workspaceId === ws.ws.id).reduce((n, s) => n + s.files.length, 0) };
     if (repo) return { repoRoot: true, worktree: false, branch: "main", dirty: repo.name === "infra" ? 2 : 0 };
-    if (path === `${HOME}/code/untrusted-fork`) return { repoRoot: true, worktree: false, branch: "main", dirty: 0 };
     return undefined;
   }
 
@@ -1330,7 +1349,7 @@ export class DemoHost implements SimHost {
       .sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "dir" ? -1 : 1));
     const containing = [...this.wss.values()].find((m) => abs === m.path || abs.startsWith(`${m.path}/`));
     const repo = repoForPath(abs);
-    const git = containing ? this.badge(containing.path) : repo ? this.badge(repo.root) : abs.startsWith(`${HOME}/code/untrusted-fork`) ? this.badge(`${HOME}/code/untrusted-fork`) : undefined;
+    const git = containing?.repo ? this.badge(containing.path) : repo ? this.badge(repo.root) : undefined;
     return { path: abs, parent: abs === "/" ? undefined : abs.slice(0, abs.lastIndexOf("/")) || "/", entries, git };
   }
 
@@ -1398,18 +1417,20 @@ export class DemoHost implements SimHost {
     const rng = new Rng(hash(repo.name));
     const current = this.wsForCwd(cwd).ws.repo?.branch;
     const branches: BranchInfo[] = [];
-    for (const b of repo.branches) {
+    const all = this.branchesOf(repo);
+    for (const b of all) {
       const ws = [...this.wss.values()].find((m) => m.repo === repo && m.ws.repo?.branch === b);
       branches.push({ name: b, current: b === current, remote: false, upstream: `origin/${b}`, worktreePath: ws?.path, lastCommitAt: now - rng.int(5, 3000) * 60_000 });
     }
-    for (const b of repo.branches.slice(0, 4)) branches.push({ name: `origin/${b}`, current: false, remote: true, lastCommitAt: now - rng.int(5, 3000) * 60_000 });
+    for (const b of all.slice(0, 4)) branches.push({ name: `origin/${b}`, current: false, remote: true, lastCommitAt: now - rng.int(5, 3000) * 60_000 });
     branches.push({ name: "origin/release/1.0", current: false, remote: true, lastCommitAt: now - 9 * 86400_000 });
     return { branches, defaultBranch: "main" };
   }
 
   private gitDiff(cwd: string, path?: string): unknown {
     const m = this.wsForCwd(cwd);
-    const files = this.wsFiles(m).filter((f) => !path || f.path === path);
+    // Like real hostd: merge-base with the default branch, committed work included.
+    const files = [...this.sims.values()].filter((s) => s.agent.workspaceId === m.ws.id).flatMap((s) => s.branchFiles()).filter((f) => !path || f.path === path);
     const patch = files.map((f) => fileDiff(f).patch).join("\n");
     return { base: `origin/main (${new Rng(hash(`${m.path}base`)).hex(7)})`, patch, files, truncated: false };
   }
@@ -1420,8 +1441,7 @@ export class DemoHost implements SimHost {
     const count = sims.reduce((n, s) => n + s.files.length, 0);
     if (!count) throw apiError("git_error", "nothing to commit, working tree clean");
     for (const s of sims) {
-      s.files = [];
-      s.refreshDerived();
+      s.commit();
       this.agentChanged(s.agent.id);
       this.metaChanged(s.agent.id);
     }

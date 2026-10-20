@@ -125,7 +125,9 @@ function summary(item: ToolItem): ReactNode {
         <>
           {v.background && <Chip className="h-5 px-1.5 text-[10px]">bg</Chip>}
           {v.timedOut && <span className="text-warn">timed out</span>}
-          {v.exitCode != null && <span className={cn("font-mono", v.exitCode === 0 ? "text-done" : "text-error")}>exit {v.exitCode}</span>}
+          {v.exitCode != null && item.status !== "running" && item.status !== "pending" && (
+            <span className={cn("font-mono", v.exitCode === 0 ? "text-done" : "text-error")}>exit {v.exitCode}</span>
+          )}
         </>
       );
     case "read":

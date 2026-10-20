@@ -28,7 +28,7 @@ export interface Mods {
   alt: boolean;
 }
 
-export const NO_MODS: Mods = { ctrl: false, alt: false };
+const NO_MODS: Mods = { ctrl: false, alt: false };
 
 /** Bytes for a named key with optional modifiers (xterm conventions). */
 export function encodeKey(key: NamedKey, mods: Mods = NO_MODS): string {
@@ -75,13 +75,4 @@ export function applyMods(data: string, mods: Mods): string {
   if (mods.ctrl) out = ctrlChar(data) ?? data;
   if (mods.alt) out = `\x1b${out}`;
   return out;
-}
-
-/** Human label for a byte sequence sent through a toolbar (toast / aria-live). */
-export function describeKey(key: NamedKey | string, mods: Mods = NO_MODS): string {
-  const parts: string[] = [];
-  if (mods.ctrl) parts.push("Ctrl");
-  if (mods.alt) parts.push("Alt");
-  parts.push(key.length === 1 ? key.toUpperCase() : key[0]!.toUpperCase() + key.slice(1));
-  return parts.join("+");
 }

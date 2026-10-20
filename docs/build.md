@@ -268,6 +268,10 @@ cd src-tauri && CARGO_TARGET_DIR=/root/TeleFlock/target/<Agent> cargo check
 
 On the hello app this finished in 34 s `[observed]`. The Linux deps from §3 are enough for `cargo check`/`cargo build` of the desktop crate on Linux, which other agents use for fast iteration. TeleFlock does not ship a Linux bundle.
 
+For the real app: `CARGO_TARGET_DIR=target/<Agent> cargo check -p teleflock` and `cargo test -p teleflock` (unit tests + the core bridge against the real engine). Windows-only code: `cargo xwin check -p teleflock --target x86_64-pc-windows-msvc`. `[observed]`
+
+`Cargo.lock` pins `rust-ini` to **0.21.1**: 0.21.3 added fields to `ParseOption` that `tauri-plugin-deep-link` 2.6.2 does not set, which breaks its Linux build (`E0063`). Do not `cargo update` it past 0.21.1 until deep-link is fixed upstream. `[observed]`
+
 ## 8. CI drafts (`.github/workflows/`)
 
 Both workflows assume this layout:
@@ -277,8 +281,9 @@ Both workflows assume this layout:
 
 | Workflow | Runner | Produces | Notes |
 |---|---|---|---|
+| `hostd.yml` (reusable, also manual) | `ubuntu-latest` | artifact `tf-hostd-dist` = `target/hostd-dist/<triple>/tf-hostd[.exe]` | runs `scripts/build-hostd.sh` (installs zig, cargo-zigbuild, cargo-xwin). Both app workflows `needs:` it and download it to `target/hostd-dist` with `TF_HOSTD_DIST` set, so the app embeds the daemon. |
 | `windows.yml` | `windows-latest` | `target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe` → artifact `teleflock-windows-nsis` | `bun tauri build --target x86_64-pc-windows-msvc --bundles nsis`; native MSVC, no xwin. Authenticode signing is not wired up yet (`bundle.windows.signCommand`). |
-| `android.yml` | `ubuntu-latest` | `src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk` → artifact `teleflock-android-apk` | Temurin 17, `sdkmanager` installs `ndk;29.0.14206865`, `platforms;android-37.0`, `build-tools;37.0.0`; runs `tauri android init --ci` only if `gen/android` is missing; signs via `TELEFLOCK_KEYSTORE_PROPERTIES` (Gradle) or falls back to zipalign + apksigner. |
+| `android.yml` | `ubuntu-latest` | `src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk` → artifact `teleflock-android-apk` | Temurin 17, `sdkmanager` installs `ndk;29.0.14206865`, `platforms;android-37.0`, `build-tools;37.0.0`; uses the committed `gen/android` (runs `tauri android init --ci` only if missing); signs via `TELEFLOCK_KEYSTORE_PROPERTIES` (Gradle) or falls back to zipalign + apksigner. |
 
 Android secrets, from the local keystore:
 - `ANDROID_KEY_BASE64`: `base64 -w0 /root/.teleflock-keys/teleflock-release.jks`

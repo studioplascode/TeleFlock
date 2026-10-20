@@ -158,6 +158,7 @@ pub struct Replica {
     /// Streamed chars this turn (for the per-turn average `SessionMeta.tps`).
     turn_chars: u64,
     turn_tps: Option<f32>,
+    turn_ended_at: Option<Millis>,
     last_line: Option<String>,
     status_line: Option<String>,
     rate: VecDeque<(Millis, u32)>,
@@ -195,6 +196,7 @@ impl Replica {
             turn_started_at: None,
             turn_chars: 0,
             turn_tps: None,
+            turn_ended_at: None,
             last_line: None,
             status_line: None,
             rate: VecDeque::new(),
@@ -445,8 +447,10 @@ impl Replica {
             HostFrame::Entry { entry } => self.entry(entry, out),
             HostFrame::State { state } => {
                 out.pulse(PulseKind::State, 1);
-                // Adopt the host's activity only when events have gone quiet (states are debounced).
-                if state.is_streaming && !self.running {
+                // `state` is debounced (100 ms): a stale `isStreaming: true` can trail `agent_end`.
+                // Adopt it only for mid-turn joins, never right after a turn ended.
+                let quiet = self.turn_ended_at.is_none_or(|t| self.now - t > 2000);
+                if state.is_streaming && !self.running && quiet {
                     self.running = true;
                     self.phase = Phase::Waiting;
                     self.turn_started_at.get_or_insert(self.now);
@@ -634,6 +638,7 @@ impl Replica {
         }
         self.active_tools.clear();
         let was = self.running;
+        self.turn_ended_at = Some(self.now);
         if let (true, Some(start)) = (was, self.turn_started_at) {
             let secs = (self.now - start) as f32 / 1000.0;
             if secs > 0.2 && self.turn_chars > 0 {

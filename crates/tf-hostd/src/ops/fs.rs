@@ -132,13 +132,13 @@ pub async fn list(p: &FsListParams) -> Result<FsListing, ApiError> {
             jobs.spawn(async move {
                 let _permit = sem.acquire_owned().await;
                 let left = deadline.saturating_duration_since(Instant::now());
-                (idx, badge_with_budget(&path, left).await)
+                (idx, git::badge_for_dir(&path, left).await)
             });
         }
     }
     let self_badge = async {
         if dir.join(".git").exists() {
-            badge_with_budget(&dir, BADGE_BUDGET).await
+            git::badge_for_dir(&dir, BADGE_BUDGET).await
         } else {
             enclosing_badge(&dir).await
         }
@@ -161,14 +161,6 @@ pub async fn list(p: &FsListParams) -> Result<FsListing, ApiError> {
         entries,
         git: self_badge,
     })
-}
-
-async fn badge_with_budget(dir: &Path, left: Duration) -> Option<GitBadge> {
-    let dot_git = dir.join(".git");
-    let worktree = std::fs::symlink_metadata(&dot_git).map(|m| m.is_file()).unwrap_or(false);
-    let branch = git::read_head_branch(&dot_git);
-    let dirty = if left.is_zero() { None } else { git::dirty_count(dir, left).await };
-    Some(GitBadge { repo_root: true, worktree, branch, dirty })
 }
 
 /// Badge for a directory *inside* a repository (not its root).

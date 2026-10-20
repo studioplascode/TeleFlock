@@ -113,6 +113,20 @@ describe("demo engine", () => {
     expect(r.state.agents[agentKey("forge", "reconnect")]?.column).toBe("running");
   });
 
+  test("commit-message prompts answer with one ```text block and go idle without dialogs", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    await r.call("forge", "agent.prompt", { agentId: "hero", text: "Write a git commit message for the current uncommitted changes. Reply with only the message.", images: [], delivery: "auto" });
+    r.clock.advance(30_000);
+    const hero = r.state.agents[agentKey("forge", "hero")];
+    expect(hero?.column).toBe("review");
+    expect(hero?.title).toBe("New hero with an animated flock illustration");
+    const snap = await r.call<{ items: { kind: string; text?: string }[]; ui?: unknown }>("forge", "session.open", { agentId: "hero" });
+    expect(snap.ui).toBeUndefined();
+    const last = [...snap.items].reverse().find((i) => i.kind === "assistant");
+    expect(last?.text).toMatch(/```text\nfeat\(hero\): new hero with an animated flock illustration\n\n- /);
+  });
+
   test("non-omp and unshared agents reject session.open with actionable errors", async () => {
     const r = rig();
     r.clock.advance(2000);
@@ -158,6 +172,8 @@ describe("demo engine", () => {
     expect(res.agent?.agentId).toBeDefined();
     expect(r.state.agents[agentKey("forge", res.agent?.agentId as string)]?.column).toBe("running");
     await expect(r.call("forge", "worktree.create", { cwd: "/home/demo/code/untrusted-fork", branch: "x", existing: false, trust: false })).rejects.toMatchObject({ code: "herdr_error" });
+    const trusted = await r.call<{ path: string }>("forge", "worktree.create", { cwd: "/home/demo/code/untrusted-fork", branch: "x", existing: false, trust: true });
+    expect(trusted.path).toBe("/home/demo/.herdr/worktrees/untrusted-fork/x");
     await expect(r.call("forge", "worktree.create", { cwd: "/home/demo/code/teleflock", branch: "feat/kanban-board", existing: true, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("already used by worktree") });
     await expect(r.call("forge", "workspace.close", { workspaceId: "w1", group: false })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
     await expect(r.call("forge", "worktree.remove", { workspaceId: "w4", force: false, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("dirty_worktree_requires_force") });
@@ -172,17 +188,23 @@ describe("demo engine", () => {
     expect(code.entries.find((e) => e.name === "teleflock")?.git?.repoRoot).toBe(true);
     expect(code.entries.find((e) => e.name === "dotfiles")?.git).toBeUndefined();
     await expect(r.call("forge", "fs.list", { path: "/nope", hidden: false })).rejects.toMatchObject({ code: "not_found" });
-    const diff = await r.call<{ patch: string; files: unknown[] }>("forge", "git.diff", { cwd: "/home/demo/worktrees/marketing-site/redesign-hero" });
+    const diff = await r.call<{ patch: string; files: unknown[] }>("forge", "git.diff", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero" });
     expect(diff.files.length).toBeGreaterThan(5);
     expect(diff.patch.split("\n").length).toBeGreaterThan(3000);
-    expect(await r.call("forge", "gh.prStatus", { cwd: "/home/demo/worktrees/marketing-site/redesign-hero" })).toEqual({});
-    const pr = await r.call<{ number: number; checks?: { pending: number } }>("forge", "gh.prCreate", { cwd: "/home/demo/worktrees/marketing-site/redesign-hero", title: "Hero", body: "", draft: false });
+    expect(await r.call("forge", "gh.prStatus", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero" })).toEqual({});
+    const pr = await r.call<{ number: number; checks?: { pending: number } }>("forge", "gh.prCreate", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero", title: "Hero", body: "", draft: false });
     expect(pr.checks?.pending).toBeGreaterThan(0);
     r.clock.advance(11_000);
-    const st = await r.call<{ pr?: { checks?: { passed: number; pending: number } } }>("forge", "gh.prStatus", { cwd: "/home/demo/worktrees/marketing-site/redesign-hero" });
+    const st = await r.call<{ pr?: { checks?: { passed: number; pending: number } } }>("forge", "gh.prStatus", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero" });
     expect(st.pr?.checks?.pending).toBe(0);
-    const commit = await r.call<{ sha: string }>("forge", "git.commit", { cwd: "/home/demo/worktrees/marketing-site/redesign-hero", message: "hero", all: true });
+    const commit = await r.call<{ sha: string }>("forge", "git.commit", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero", message: "hero", all: true });
     expect(commit.sha).toHaveLength(40);
+    // Committed work stays in the branch diff; only the working tree is clean.
+    const status = await r.call<{ files: unknown[] }>("forge", "git.status", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero" });
+    expect(status.files).toHaveLength(0);
+    const after = await r.call<{ files: unknown[] }>("forge", "git.diff", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero" });
+    expect(after.files.length).toBe(diff.files.length);
+    await expect(r.call("forge", "git.commit", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero", message: "again", all: true })).rejects.toMatchObject({ code: "git_error" });
   });
 
   test("studio-pc cycles through reconnecting and authRequired; opening the link brings it online", async () => {

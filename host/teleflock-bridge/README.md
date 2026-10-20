@@ -9,7 +9,7 @@ omp -e /path/to/teleflock-bridge.ts            # per process (TeleFlock's launch
 cp teleflock-bridge.ts ~/.omp/agent/extensions/ # global install (needs the user's consent)
 ```
 
-- **Socket.** The extension connects to `$TF_HOSTD_HOME/run/bridge.sock`, default `~/.teleflock/run/bridge.sock`. On Windows it uses `\\.\pipe\teleflock-bridge-<USERNAME>[-<hash>]`. `TF_BRIDGE_SOCK` overrides the endpoint.
+- **Socket.** The extension connects to `<home>/run/bridge.sock` (Windows: `\\.\pipe\teleflock-bridge-<USERNAME>[-<hash>]`). It resolves `<home>` from `TF_BRIDGE_SOCK` (which overrides the whole endpoint), then from its own location when deployed as `<home>/ext/teleflock-bridge.ts`, then `TF_HOSTD_HOME`, then `~/.teleflock`.
 - **Retry.** It retries every 5 s while hostd is absent.
 - **TUI footprint.** Its only output is a dim `⇄ teleflock` status notice while connected.
 - **Scope.** Only the main session is bridged; subagents are ignored.

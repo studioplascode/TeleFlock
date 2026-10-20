@@ -86,7 +86,14 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   useEffect(() => {
     if (!hotkeys) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || isEditable(e.target)) return;
+      // Digits pass through from an empty composer so the card answers without leaving the keyboard.
+      const fromEmptyComposer = e.target instanceof HTMLTextAreaElement && e.target.hasAttribute("data-composer") && e.target.value === "";
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || (isEditable(e.target) && !fromEmptyComposer)) return;
+      if (fromEmptyComposer && e.key === "Enter") {
+        e.preventDefault();
+        if (canSubmit && !editor) void submit();
+        return;
+      }
       if (/^[1-9]$/.test(e.key)) {
         const o = options[Number(e.key) - 1];
         if (o) {

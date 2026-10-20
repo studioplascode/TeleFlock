@@ -11,6 +11,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -93,19 +94,37 @@ const isGoalLike = (g: unknown): g is GoalLike =>
 	!!g && typeof g === "object" && "objective" in g && typeof g.objective === "string";
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
 
-/** Where hostd listens. `TF_BRIDGE_SOCK` overrides (socket path or pipe name). Must match tf-hostd `Paths`. */
+/**
+ * Where hostd listens; must match tf-hostd `Paths`. The hostd home is resolved, in order:
+ * 1. `TF_BRIDGE_SOCK` (socket path or pipe name, verbatim);
+ * 2. this file's own location when deployed by the app as `<home>/ext/teleflock-bridge.ts`
+ *    (omp runs with the herdr pane's env, which usually lacks `TF_HOSTD_HOME`);
+ * 3. `TF_HOSTD_HOME`; 4. `~/.teleflock`.
+ * A home other than `~/.teleflock` is "custom": its Windows pipe name gets the FNV-1a suffix.
+ */
 function bridgeEndpoint(): string {
 	const explicit = process.env.TF_BRIDGE_SOCK;
 	if (explicit) return explicit;
-	const custom = process.env.TF_HOSTD_HOME;
+	const defaultHome = path.join(os.homedir(), ".teleflock");
+	const home = deployedHome() ?? (process.env.TF_HOSTD_HOME || defaultHome);
 	if (process.platform === "win32") {
 		const raw = process.env.USERNAME || process.env.USER || "user";
 		const user = raw.replace(/[^A-Za-z0-9_-]/g, "_");
-		const suffix = custom ? `-${fnv1a(custom).toString(16).padStart(8, "0")}` : "";
+		const custom = path.resolve(home).toLowerCase() !== path.resolve(defaultHome).toLowerCase();
+		const suffix = custom ? `-${fnv1a(home).toString(16).padStart(8, "0")}` : "";
 		return `\\\\.\\pipe\\teleflock-bridge-${user}${suffix}`;
 	}
-	const home = custom || path.join(os.homedir(), ".teleflock");
 	return path.join(home, "run", "bridge.sock");
+}
+
+/** `<home>` when this file lives at `<home>/ext/<file>` (the app's deploy layout), else undefined. */
+function deployedHome(): string | undefined {
+	try {
+		const dir = path.dirname(fileURLToPath(import.meta.url));
+		return path.basename(dir) === "ext" ? path.dirname(dir) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** FNV-1a over UTF-8 bytes, identical to tf-hostd `paths::fnv1a` (lab pipe-name suffix). */

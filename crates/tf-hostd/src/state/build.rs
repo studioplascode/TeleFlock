@@ -65,6 +65,9 @@ pub struct AgentInputs<'a> {
     pub repo: Option<&'a RepoInfo>,
     pub turn_started_at: Option<Millis>,
     pub last_turn_ended_at: Option<Millis>,
+    /// herdr says `blocked` but the dialog is not visible yet (or herdr lags after an
+    /// answer): keep the agent in Running instead of a terminal-only Needs.
+    pub blocked_grace: bool,
 }
 
 pub fn is_omp(a: &AgentInfo) -> bool {
@@ -75,7 +78,8 @@ pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
     let a = i.herdr;
     let state = herdr_state(a.agent_status);
     let needs = needs_for(i, state);
-    let col = column(state, needs.is_some(), i.archived);
+    let col_state = if i.blocked_grace { HerdrState::Working } else { state };
+    let col = column(col_state, needs.is_some(), i.archived);
     let kind = a.agent.clone().unwrap_or_else(|| "unknown".into());
     let name = a.name.clone().or_else(|| a.display_agent.clone()).unwrap_or_else(|| kind.clone());
     let cwd = a.foreground_cwd.clone().or_else(|| a.cwd.clone()).filter(|c| !c.is_empty());
@@ -205,7 +209,7 @@ fn needs_for(i: &AgentInputs<'_>, state: HerdrState) -> Option<NeedsYou> {
     if let Some(review) = i.bridge.and_then(|b| b.state.plan_review.as_ref()) {
         return Some(plan_review_needs(review, i.needs_since));
     }
-    if state == HerdrState::Blocked {
+    if state == HerdrState::Blocked && !i.blocked_grace {
         return Some(NeedsYou {
             kind: NeedsKind::Blocked,
             request_id: None,
@@ -517,6 +521,7 @@ mod tests {
             repo: None,
             turn_started_at: None,
             last_turn_ended_at: None,
+            blocked_grace: false,
         }
     }
 

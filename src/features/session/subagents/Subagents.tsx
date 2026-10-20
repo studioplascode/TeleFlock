@@ -18,7 +18,7 @@ import {
   type Status,
   StatusOrb,
 } from "@/design";
-import { core } from "@/core";
+import { core, parseAgentKey } from "@/core";
 import { errorText, hostCall, usePending } from "../api";
 import { SessionCtx } from "../context";
 import { ItemView } from "../transcript/rows";
@@ -164,6 +164,7 @@ export function SubagentDialog({ agentKey, sub, open, onOpenChange }: { agentKey
           </div>
         }
       >
+        <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
         <ScrollArea className="h-[min(56vh,560px)]" viewportClassName="pr-3" fade>
           {error ? (
             <EmptyState compact title="Transcript unavailable" description={error} />
@@ -183,6 +184,7 @@ export function SubagentDialog({ agentKey, sub, open, onOpenChange }: { agentKey
             </div>
           )}
         </ScrollArea>
+        </SessionCtx.Provider>
       </DialogContent>
     </Dialog>
   );

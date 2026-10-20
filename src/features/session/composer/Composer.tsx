@@ -29,7 +29,7 @@ const MENTION_RE = /(^|\s)@([^\s@]*)$/;
 export function Composer({ agentKey, mobile = false, className, autoFocus = false }: ComposerProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
-  const { meta } = useSession(agentKey);
+  const { meta, ui } = useSession(agentKey);
   const draft = useSessionUi((s) => s.draft[agentKey]);
   const [text, setText] = useState("");
   const [images, setImages] = useState<PendingImage[]>([]);
@@ -218,6 +218,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !mobile) {
+      // Empty composer + pending ask: let Enter bubble so the ask card sends its selection.
+      if (ui && !text.trim() && images.length === 0) return;
       e.preventDefault();
       void send(e.altKey);
     } else if (e.key === "Enter" && mobile && (e.ctrlKey || e.metaKey)) {
@@ -275,7 +277,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
             initial={{ opacity: 0, y: 8, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.snappy }}
             exit={{ opacity: 0, y: 4, transition: { duration: 0.12 } }}
-            className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg glass"
+            className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,#22222e,#181820)] shadow-[var(--shadow-d3),inset_0_0_0_1px_rgb(255_255_255/0.09)]"
             role="listbox"
             aria-label={popup.kind === "slash" ? "Commands" : "Files"}
           >
@@ -402,6 +404,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           onPaste={onPaste}
           placeholder={placeholder}
           aria-label="Message"
+          data-composer=""
           autoFocus={autoFocus}
           enterKeyHint={mobile ? "send" : undefined}
           maxHeight={mobile ? 160 : 260}

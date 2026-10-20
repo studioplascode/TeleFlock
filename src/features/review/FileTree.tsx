@@ -127,7 +127,7 @@ export function FileTree({ files, active, collapsed, onSelect, className }: File
       <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter files" leading={<Search />} boxClassName="h-8" aria-label="Filter changed files" />
       <ul className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5" aria-label="Changed files">
         {renderDir(tree, 0)}
-        {shown.length === 0 && <li className="px-2 py-4 text-center text-xs text-mute">No file matches</li>}
+        {shown.length === 0 && <li className="px-2 py-4 text-center text-xs text-mute">{files.length === 0 ? "No changes" : "No file matches"}</li>}
       </ul>
     </div>
   );

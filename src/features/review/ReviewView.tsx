@@ -65,6 +65,8 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   const [tab, setTab] = useState<"changes" | "ship">("changes");
   const [filesOpen, setFilesOpen] = useState(false);
   const effectiveLayout = mobile ? "unified" : layout;
+  // Side-by-side halves can't share one horizontal scroll, so split view always wraps.
+  const effectiveWrap = wrap || effectiveLayout === "split";
 
   const totals = useMemo(() => files.reduce((t, f) => ({ a: t.a + f.added, r: t.r + f.removed }), { a: 0, r: 0 }), [files]);
   const allCollapsed = files.length > 0 && files.every((f) => collapsed.has(f.path));
@@ -118,8 +120,15 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
           aria-label="Diff layout"
         />
       )}
-      <Tooltip content={wrap ? "Don't wrap lines" : "Wrap long lines"}>
-        <IconButton label="Wrap lines" size="sm" variant={wrap ? "secondary" : "ghost"} aria-pressed={wrap} onClick={() => setWrap((w) => !w)}>
+      <Tooltip content={effectiveLayout === "split" ? "Split view always wraps" : wrap ? "Don't wrap lines" : "Wrap long lines"}>
+        <IconButton
+          label="Wrap lines"
+          size="sm"
+          variant={effectiveWrap ? "secondary" : "ghost"}
+          aria-pressed={effectiveWrap}
+          disabled={effectiveLayout === "split"}
+          onClick={() => setWrap((w) => !w)}
+        >
           <WrapText />
         </IconButton>
       </Tooltip>
@@ -147,7 +156,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   ) : files.length === 0 ? (
     <EmptyState icon={<FileDiff />} title="Nothing to review" description={`No changes against ${base ?? "the base branch"}.`} />
   ) : (
-    <DiffViewer files={files} layout={effectiveLayout} wrap={wrap} collapsed={collapsed} onToggle={toggle} scrollTo={scrollTo} onTopFile={setTopFile} className="h-full" />
+    <DiffViewer files={files} layout={effectiveLayout} wrap={effectiveWrap} collapsed={collapsed} onToggle={toggle} scrollTo={scrollTo} onTopFile={setTopFile} className="h-full" />
   );
 
   const ship = status.data && cwd ? (

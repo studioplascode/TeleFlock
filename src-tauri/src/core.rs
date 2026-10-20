@@ -303,4 +303,70 @@ mod tests {
         let got2 = wait_for(&seen2, |v| types(v).contains(&"answerNext"));
         assert!(types(&got2).contains(&"answerNext"), "{:?}", types(&got2));
     }
+
+    /// Real run against a lab herdr session through the Local transport and a real tf-hostd.
+    /// `scripts`-free recipe (isolated HOME so ~/.teleflock and herdr state are private):
+    /// ```sh
+    /// export HOME=/tmp/tf-lab-tauri-home; mkdir -p $HOME
+    /// setsid -f herdr --session tf-lab-tauri server </dev/null >/tmp/tf-lab-tauri.out 2>&1
+    /// TF_LAB_SESSION=tf-lab-tauri TF_HOSTD_BIN=$PWD/target/<dir>/debug/tf-hostd \
+    ///   cargo test -p teleflock lab_local_host -- --ignored --nocapture
+    /// herdr session stop tf-lab-tauri
+    /// ```
+    #[test]
+    #[ignore = "needs a lab herdr session + tf-hostd binary (see doc comment)"]
+    fn lab_local_host() {
+        let session = std::env::var("TF_LAB_SESSION").expect("TF_LAB_SESSION");
+        let hostd = std::env::var("TF_HOSTD_BIN").expect("TF_HOSTD_BIN");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = EngineConfig {
+            data_dir: dir.path().to_path_buf(),
+            platform_name: "linux".into(),
+            client_app: "teleflock-test".into(),
+            version: "0.1.0".into(),
+            hostd_bins_override: Some(hostd.into()),
+        };
+        let (engine, rx) = tauri::async_runtime::block_on(Engine::start(cfg, Arc::new(NullPlatform)));
+        let core = Core::new(engine, rx);
+        let (ch, seen) = recorder();
+        Arc::clone(&core).subscribe_page(ch);
+
+        let call = |host: Option<&str>, m: &str, p: Value| tauri::async_runtime::block_on(core.engine.call(host, m, p));
+        let profile = json!({
+            "id": "lab", "name": "lab", "kind": "local", "herdrSession": session,
+            "autoConnect": false, "relayPort": 47498
+        });
+        call(None, "hosts.save", profile).unwrap();
+        call(None, "hosts.connect", json!({ "hostId": "lab" })).unwrap();
+
+        let t0 = Instant::now();
+        let got = loop {
+            let v = seen.lock().unwrap().clone();
+            let online = v.iter().any(|e| e["type"] == "hostStatus" && e["status"]["phase"] == "online");
+            let snap = v.iter().any(|e| e["type"] == "hostSnapshot" && e["hostId"] == "lab");
+            if (online && snap) || t0.elapsed() > Duration::from_secs(60) {
+                break v;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let phases: Vec<&str> = got
+            .iter()
+            .filter(|e| e["type"] == "hostStatus")
+            .filter_map(|e| e["status"]["phase"].as_str())
+            .collect();
+        println!("phases via core_events: {phases:?}");
+        let snap = got.iter().rev().find(|e| e["type"] == "hostSnapshot").expect("hostSnapshot via core_events");
+        println!(
+            "snapshot rev {} · {} workspaces · {} agents",
+            snap["rev"],
+            snap["state"]["workspaces"].as_array().map_or(0, |a| a.len()),
+            snap["state"]["agents"].as_array().map_or(0, |a| a.len())
+        );
+        assert!(phases.contains(&"online"), "{phases:?}");
+
+        let health = call(Some("lab"), "host.health", json!({})).unwrap();
+        println!("host.health via core_call: {health}");
+        call(None, "hosts.disconnect", json!({ "hostId": "lab" })).unwrap();
+        tauri::async_runtime::block_on(core.engine.shutdown());
+    }
 }

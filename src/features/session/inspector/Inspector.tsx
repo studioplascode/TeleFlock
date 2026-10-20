@@ -1,6 +1,7 @@
 import { Bot, Coins, FileCode2, GitBranch, GitFork, GitMerge, ListTodo, MessageCircleQuestion, Navigation, Send, Workflow } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { navigate, parseAgentKey, useAgent, useBtw, useSession } from "@/core";
+import { SessionCtx } from "../context";
 import type { Subagent, TreeInfo, TreeNode } from "@/core/gen";
 import {
   cn,
@@ -241,7 +242,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
               />
               <span className={cn("min-w-0 flex-1 truncate text-[11.5px]", node.onPath ? "font-semibold text-ink-2" : "text-mute", node.kind === "user" && "font-bold")}>
                 {node.kind === "user" ? "› " : node.kind === "compaction" || node.kind === "summary" ? "≡ " : ""}
-                {node.label}
+                {node.label.replace(/\*\*|__|`/g, "")}
               </span>
               {node.children > 1 && <span className="shrink-0 font-mono text-[10px] text-review">⑂{node.children}</span>}
               <span className="hidden shrink-0 items-center gap-0.5 group-focus-within/node:flex group-hover/node:flex">
@@ -347,6 +348,7 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
     el.querySelector<HTMLInputElement>("input")?.focus();
   }, [tab]);
   return (
+    <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
     <aside ref={ref} aria-label="Inspector" className={cn("flex min-h-0 flex-col gap-3 overflow-y-auto pb-4 no-scrollbar", className)}>
       <OverviewPanel agentKey={agentKey} />
       <TodosPanel agentKey={agentKey} />
@@ -355,6 +357,7 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
       <BtwPanel agentKey={agentKey} />
       <TreePanel agentKey={agentKey} />
     </aside>
+    </SessionCtx.Provider>
   );
 }
 
@@ -375,6 +378,7 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
   const empty =
     (tab === "todos" && !meta?.todos.length) || (tab === "agents" && !meta?.subagents.length) || (tab === "files" && !meta?.files.length);
   return (
+    <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
     <div className="flex flex-col gap-3 pb-2">
       <SegmentedControl value={tab} onValueChange={setTab} options={TABS} fill size="sm" />
       {tab === "overview" && <OverviewPanel agentKey={agentKey} />}
@@ -385,5 +389,6 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
       {tab === "btw" && <BtwPanel agentKey={agentKey} />}
       {empty && <EmptyState compact title={tab === "todos" ? "No todos" : tab === "agents" ? "No subagents" : "No changed files"} />}
     </div>
+    </SessionCtx.Provider>
   );
 }

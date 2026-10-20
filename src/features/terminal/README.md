@@ -43,3 +43,5 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - `closed` events show a banner with the reason and **Reattach** / **Take over** actions.
 - Reopens automatically when the host goes back to `online`.
 - Font size comes from `useSettings().terminalFontSize`; pinch-zoom (mobile) and Ctrl +/−/0 (desktop) persist it.
+- Renderer: WebGL by default; the context menu switches to xterm's DOM renderer (per device, `localStorage["tf.terminal.renderer"]`). Board tiles (`compact`) always use the DOM renderer.
+- Keys inside the terminal go to the pane, except Ctrl+K, Ctrl+1…6 and Ctrl+Shift+(not C/V), which bubble to the app shell.

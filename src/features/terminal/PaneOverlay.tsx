@@ -3,6 +3,7 @@ import { CloudOff, PlugZap, RotateCcw, Unplug, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import type { ConnStatus, TermMode } from "@/core/gen";
 import { Button, Shimmer, Skeleton, Spinner, cn, spring, tween, useNow } from "@/design";
+import { PHASE_LABEL, phaseBusy } from "@/features/shell/status";
 import type { TermPhase } from "./session";
 
 export interface PaneOverlayProps {
@@ -40,15 +41,31 @@ export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onR
   let view: { key: string; node: ReactNode } | null = null;
 
   if (offline) {
+    const reconnecting = phaseBusy(conn?.phase);
     view = {
       key: "offline",
-      node: compact ? (
-        <CompactNote icon={<CloudOff />} text="Host offline" />
-      ) : (
-        <Banner tone="warn" icon={<Spinner size={16} label="Reconnecting" />} title="Host offline · reconnecting">
-          {conn?.message ?? (conn?.nextRetryAt ? <RetryIn at={conn.nextRetryAt} /> : "Waiting for the connection to come back.")}
-          {" "}The terminal reattaches automatically.
-        </Banner>
+      node: (
+        <>
+          {/* stale screen: a slow shimmer sweeps it while a reconnect is in flight */}
+          {reconnecting && <div aria-hidden className="tf-skeleton tf-loop pointer-events-none absolute inset-0 bg-transparent" />}
+          {compact ? (
+            <CompactNote icon={<CloudOff />} text={conn ? PHASE_LABEL[conn.phase] : "Host offline"} />
+          ) : (
+            <Banner
+              tone="warn"
+              icon={reconnecting ? <Spinner size={16} label="Reconnecting" /> : <CloudOff />}
+              title={conn ? `${PHASE_LABEL[conn.phase]} · terminal paused` : "Host offline · terminal paused"}
+            >
+              {conn?.message && <span className="block">{conn.message}</span>}
+              {conn?.nextRetryAt && !conn.message && (
+                <span className="block">
+                  <RetryIn at={conn.nextRetryAt} />
+                </span>
+              )}
+              <span className="block text-mute-2">The terminal reattaches automatically when the host is back.</span>
+            </Banner>
+          )}
+        </>
       ),
     };
   } else if (phase.k === "closed") {
@@ -173,7 +190,7 @@ function Banner({
       exit={{ opacity: 0, y: -8, scale: 0.98, transition: tween.fast }}
       transition={spring.bouncy}
       className={cn(
-        "absolute inset-x-3 top-3 z-raised mx-auto flex max-w-xl flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-[linear-gradient(180deg,rgb(34_34_46/0.96),rgb(25_25_33/0.96))] p-3 pr-3.5 backdrop-blur-xl",
+        "absolute inset-x-3 top-10 z-raised mx-auto flex max-w-xl flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-[linear-gradient(180deg,rgb(34_34_46/0.96),rgb(25_25_33/0.96))] p-3 pr-3.5 backdrop-blur-xl",
         TONE[tone],
       )}
     >

@@ -38,7 +38,7 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
           <div className="flex min-w-0 items-center gap-2 font-mono text-[11px] text-mute">
             {agent.title && agent.title !== agent.name && <span className="min-w-0 truncate font-sans text-xs font-semibold text-ink-2">{agent.title}</span>}
             {(agent.repo || agent.branch) && (
-              <span className="flex shrink-0 items-center gap-1">
+              <span className="flex min-w-[80px] shrink-[3] items-center gap-1 truncate">
                 <GitBranch className="size-3" />
                 {agent.repo}
                 {agent.repo && agent.branch && " · "}

@@ -23,6 +23,7 @@ import {
   useMediaQuery,
 } from "@/design";
 import { haptic } from "@/features/shell/haptics";
+import { PHASE_LABEL } from "@/features/shell/status";
 import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraKeys";
 import { applyMods, encodeKey } from "./keys";
 import { PaneOverlay, closedCopy } from "./PaneOverlay";
@@ -319,9 +320,10 @@ export function TerminalPane({
     }
     const p = s.phase;
     // Don't fight a client that explicitly took the terminal from us.
-    if (p.k === "closed" || (p.k === "error" && p.error.code === "busy")) return;
-    // We owned the lease before the drop: reclaim it (hostd may still hold the stale one).
-    void s.open(mode === "control" && (p.k === "live" || p.k === "opening"));
+    if ((p.k === "closed" && p.takenOver) || (p.k === "error" && p.error.code === "busy")) return;
+    // We held the lease before the drop (a `closed` here is the drop itself, e.g. "connection lost"):
+    // reclaim it, in case hostd still holds the stale attachment.
+    void s.open(mode === "control" && (p.k === "live" || p.k === "opening" || p.k === "closed"));
   }, [hostOnline, mode]);
 
   /* ---------- sizing ---------- */
@@ -623,7 +625,7 @@ export function TerminalPane({
   const showExtraKeys = interactive && touchUi;
   const busy = phase.k === "error" && phase.error.code === "busy";
   const chip: { status: Status; label: string } = offline
-    ? { status: "idle", label: "Reconnecting" }
+    ? { status: "idle", label: conn ? PHASE_LABEL[conn.phase] : "Reconnecting" }
     : phase.k === "live"
       ? { status: "running", label: mode === "observe" ? "Observing" : "Live" }
       : phase.k === "opening"

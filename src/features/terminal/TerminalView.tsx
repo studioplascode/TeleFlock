@@ -197,8 +197,10 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
 
   const online = !conn || conn.phase === "online";
   const live = phase.k === "live" && online;
-  const paneLabel = currentEntry ? entryLabel(currentEntry) : effective?.kind === "shell" ? "New shell" : (agent?.name ?? highlighted ?? "Terminal");
   const sessionAgentId = currentEntry?.pane.agentId ?? agentId;
+  const paneAgent = useAgent(agentKey(hostId, currentEntry?.pane.agentId ?? ""));
+  const paneLabel =
+    paneAgent?.name ?? (currentEntry ? entryLabel(currentEntry) : effective?.kind === "shell" ? "New shell" : (agent?.name ?? highlighted ?? "Terminal"));
 
   const tabs = (
     <PaneTabs
@@ -312,8 +314,9 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
             <span className="truncate">{workspace?.label ?? hostId}</span>
             {workspace?.repo && (
               <span className="truncate text-mute-2">
-                {workspace.repo.name}
-                {workspace.worktree?.branch ? ` · ${workspace.worktree.branch}` : ""}
+                {[workspace.repo.name !== workspace.label ? workspace.repo.name : null, workspace.worktree?.branch ?? workspace.repo.branch]
+                  .filter(Boolean)
+                  .join(" · ")}
               </span>
             )}
             {!online && <ReconnectingLabel phase={conn?.phase} />}

@@ -1,6 +1,8 @@
 import type { ChangedFile, Column, ModelInfo, ModelRef, RoleBinding, ThinkingLevel, TodoPhase } from "@/core/gen";
 
 export const HOME = "/home/demo";
+/** herdr's default linked-worktree directory. */
+export const WORKTREES = `${HOME}/.herdr/worktrees`;
 
 export const MODELS: (ModelInfo & { label: string; inPerM: number; outPerM: number })[] = [
   { provider: "anthropic", id: "claude-opus-5", label: "opus-5", thinking: ["off", "low", "medium", "high", "xhigh", "max"], contextWindow: 200_000, inPerM: 5, outPerM: 25 },
@@ -96,6 +98,14 @@ export const REPOS: RepoDef[] = [
     branches: ["main", "feat/linear"],
     files: ["package.json", "src/linear.ts", "src/jira.ts", "README.md"],
   },
+  {
+    // Cloned from someone else: git reports dubious ownership until the user trusts it.
+    name: "untrusted-fork",
+    root: `${HOME}/code/untrusted-fork`,
+    remote: "git@github.com:stranger/untrusted-fork.git",
+    branches: ["main", "dev"],
+    files: ["README.md", "package.json", "src/index.ts"],
+  },
 ];
 
 export function repoByName(name: string): RepoDef | undefined {
@@ -104,7 +114,7 @@ export function repoByName(name: string): RepoDef | undefined {
 
 /** Repo that contains `path` (root or linked worktree), if any. */
 export function repoForPath(path: string): RepoDef | undefined {
-  return REPOS.find((r) => path === r.root || path.startsWith(`${r.root}/`) || path.startsWith(`${HOME}/worktrees/${r.name}/`));
+  return REPOS.find((r) => path === r.root || path.startsWith(`${r.root}/`) || path.startsWith(`${WORKTREES}/${r.name}/`));
 }
 
 export function slug(branch: string): string {

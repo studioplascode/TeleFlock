@@ -53,7 +53,7 @@ function SplitBody({ split }: { split: SplitState }) {
   if (split.kind === "session") return <SessionPane agentKey={split.key} compact />;
   const target: TermTarget | null = split.paneId ? { kind: "pane", paneId: split.paneId } : split.agentId ? { kind: "agent", agentId: split.agentId } : null;
   if (!target) return <div className="grid h-full place-items-center p-6 text-sm text-mute">Pick an agent to open its terminal here.</div>;
-  return <TerminalPane hostId={split.hostId} target={target} />;
+  return <TerminalPane hostId={split.hostId} target={target} mode="control" autoFocus />;
 }
 
 /**

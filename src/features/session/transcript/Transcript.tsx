@@ -62,14 +62,17 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     else el.scrollTop = el.scrollHeight;
   };
 
-  // Follow growth (new rows, streaming text, rows measuring) while stuck to the bottom.
+  // Follow growth (new rows, streaming text, rows measuring) and viewport shrink (ask card,
+  // queue chips, keyboard) while stuck to the bottom.
   useEffect(() => {
     const content = contentRef.current;
-    if (!content) return;
+    const viewport = scrollRef.current;
+    if (!content || !viewport) return;
     const ro = new ResizeObserver(() => {
       if (stick.current) toBottom();
     });
     ro.observe(content);
+    ro.observe(viewport);
     return () => ro.disconnect();
   }, []);
 

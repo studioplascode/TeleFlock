@@ -36,7 +36,8 @@ Rejections are `CoreError` (`extends Error implements ApiError`: `code`, `messag
 
 Other entry points: `onAppEvent(cb)` (raw AppEvents as they arrive, before the store flush —
 toasts, `openAgent`), `refreshHost(hostId)` / `refreshAll()` (`state.get`, applied in order),
-`flushCoreEvents()` (test seam).
+`flushCoreEvents()` (test seam), and `startCoreWith(transport, { demoClock? })` (DI/test seam,
+import from `@/core/client`).
 
 ## Stores & hooks
 

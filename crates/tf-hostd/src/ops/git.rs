@@ -625,13 +625,14 @@ pub(crate) async fn dirty_count(cwd: &Path, timeout: Duration) -> Option<u32> {
     o.ok().then(|| count_porcelain_v1_z(&o.stdout))
 }
 
-/// Cheap badge for a directory that has a `.git` entry (directory listing).
+/// Cheap badge for a directory that has a `.git` entry (directory listing): branch from
+/// `.git/HEAD` (no process); dirty count only while `dirty_budget` lasts.
 pub(crate) async fn badge_for_dir(dir: &Path, dirty_budget: Duration) -> Option<GitBadge> {
     let dot_git = dir.join(".git");
     let meta = std::fs::symlink_metadata(&dot_git).ok()?;
     let worktree = meta.is_file();
     let branch = read_head_branch(&dot_git);
-    let dirty = dirty_count(dir, dirty_budget).await;
+    let dirty = if dirty_budget.is_zero() { None } else { dirty_count(dir, dirty_budget).await };
     Some(GitBadge { repo_root: true, worktree, branch, dirty })
 }
 

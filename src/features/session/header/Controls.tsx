@@ -80,8 +80,11 @@ function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void 
   const { catalog, error, loading } = useModels(hostId);
   const [busy, run] = usePending();
   const current = meta?.model ? `${meta.model.provider}/${meta.model.id}` : "";
-  const pick = async (model: string) => {
-    const res = await run(hostCall(hostId, "agent.setModel", { agentId, model }, { success: `Model → ${model}`, failure: "Model change failed" }));
+  /** `provider/id[:level]` (role bindings carry a level). */
+  const pick = async (selector: string) => {
+    const [model = selector, level] = selector.split(":");
+    const thinking = THINKING_LEVELS.find((l) => l === level);
+    const res = await run(hostCall(hostId, "agent.setModel", { agentId, model, thinking }, { success: `Model → ${selector}`, failure: "Model change failed" }));
     if (res.ok) onDone();
   };
   const byProvider = new Map<string, ModelInfo[]>();
@@ -100,7 +103,7 @@ function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void 
         {catalog && catalog.roles.length > 0 && (
           <CommandGroup heading="Roles">
             {catalog.roles.map((r) => (
-              <CommandItem key={r.role} value={`@${r.role} ${r.model}`} onSelect={() => void pick(r.model.split(":")[0] ?? r.model)} disabled={busy} icon={<Sparkles />}>
+              <CommandItem key={r.role} value={`@${r.role} ${r.model}`} onSelect={() => void pick(r.model)} disabled={busy} icon={<Sparkles />}>
                 <span className="font-bold">@{r.role}</span>
                 <span className="ml-2 font-mono text-2xs text-mute">{r.model}</span>
               </CommandItem>

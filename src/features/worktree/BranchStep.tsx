@@ -264,19 +264,22 @@ export function BranchStep({ branches, loading, error, draft, onChange, branch, 
 
 /** The path with the branch slug highlighted; it re-renders live as the branch is typed. */
 function PathPreview({ path, branch }: { path: string; branch: string }) {
+  if (!branch) {
+    return (
+      <span className="min-w-0 truncate font-mono text-xs text-mute" title={path}>
+        {path.replace(/\/$/, "")}/<span className="text-mute-2 italic">&lt;branch&gt;</span>
+      </span>
+    );
+  }
   const i = path.lastIndexOf("/");
   const head = i >= 0 ? path.slice(0, i + 1) : "";
   const tail = i >= 0 ? path.slice(i + 1) : path;
   return (
     <span className="min-w-0 truncate font-mono text-xs text-mute" title={path}>
       {head}
-      {branch ? (
-        <motion.span key={tail} initial={{ opacity: 0.4 }} animate={{ opacity: 1 }} className="font-bold text-accent-ink">
-          {tail}
-        </motion.span>
-      ) : (
-        <span className="text-mute-2 italic">&lt;branch&gt;</span>
-      )}
+      <motion.span key={tail} initial={{ opacity: 0.4 }} animate={{ opacity: 1 }} className="font-bold text-accent-ink">
+        {tail}
+      </motion.span>
     </span>
   );
 }

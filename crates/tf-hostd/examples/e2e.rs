@@ -68,6 +68,7 @@ struct Client {
     log: Vec<Value>,
     state: Value,
     rev: u64,
+    last_sent: Instant,
 }
 
 impl Client {
@@ -92,7 +93,7 @@ impl Client {
                 }
             }
         });
-        let mut c = Client { name, child, stdin, rx, next_id: 1, log: vec![], state: Value::Null, rev: 0 };
+        let mut c = Client { name, child, stdin, rx, next_id: 1, log: vec![], state: Value::Null, rev: 0, last_sent: Instant::now() };
         c.send(json!({
             "t": "hello", "protocol": tf_proto::PROTOCOL_VERSION,
             "client": {"app": "tf-hostd-e2e", "version": "0", "platform": "linux", "device": name},
@@ -109,6 +110,20 @@ impl Client {
         s.push('\n');
         self.stdin.write_all(s.as_bytes()).expect("write");
         self.stdin.flush().unwrap();
+        self.last_sent = Instant::now();
+    }
+
+    /// Receives one message within `max`, pinging every 15 s like the real client
+    /// (the daemon drops clients after 45 s of silence).
+    fn recv(&mut self, max: Duration) -> Option<Value> {
+        if self.last_sent.elapsed() > Duration::from_secs(15) {
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+            self.send(json!({"t": "ping", "ts": ts}));
+        }
+        let m = self.rx.recv_timeout(max.min(Duration::from_secs(1))).ok()?;
+        self.apply(&m);
+        self.log.push(m.clone());
+        Some(m)
     }
 
     fn apply(&mut self, m: &Value) {
@@ -154,19 +169,14 @@ impl Client {
     /// Waits for a message matching `pred` (applying state messages on the way).
     fn wait(&mut self, what: &str, secs: u64, pred: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(secs);
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(left) {
-                Ok(m) => {
-                    self.apply(&m);
-                    self.log.push(m.clone());
-                    if pred(&m) {
-                        return m;
-                    }
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            if let Some(m) = self.recv(left) {
+                if pred(&m) {
+                    return m;
                 }
-                Err(_) => panic!("[{}] timed out after {secs}s waiting for {what}", self.name),
             }
         }
+        panic!("[{}] timed out after {secs}s waiting for {what}", self.name)
     }
 
     /// Waits until the mirrored state satisfies `pred`.
@@ -175,13 +185,9 @@ impl Client {
             return;
         }
         let deadline = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < deadline {
-            if let Ok(m) = self.rx.recv_timeout(Duration::from_millis(200)) {
-                self.apply(&m);
-                self.log.push(m);
-                if pred(&self.state) {
-                    return;
-                }
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            if self.recv(left).is_some() && pred(&self.state) {
+                return;
             }
         }
         panic!("[{}] timed out after {secs}s waiting for state: {what}", self.name);
@@ -203,13 +209,7 @@ impl Client {
     fn drain(&mut self, ms: u64) {
         let deadline = Instant::now() + Duration::from_millis(ms);
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            match self.rx.recv_timeout(left) {
-                Ok(m) => {
-                    self.apply(&m);
-                    self.log.push(m);
-                }
-                Err(_) => break,
-            }
+            self.recv(left);
         }
     }
 
@@ -290,7 +290,7 @@ fn main() {
 
     println!("== 4. prompt → append deltas");
     let mark = c1.log.len();
-    c1.call("agent.prompt", json!({"agentId": id, "text": "Reply with one short sentence about kites.", "images": [], "delivery": "auto"}))
+    c1.call("agent.prompt", json!({"agentId": id, "text": "Write four short sentences about kites.", "images": [], "delivery": "auto"}))
         .expect("agent.prompt");
     c1.wait_state("turn started", 60, |s| {
         s["agents"].as_array().into_iter().flatten().any(|x| x["id"] == id.as_str() && x["state"] == "working")
@@ -303,6 +303,11 @@ fn main() {
     let appends: Vec<&Value> = session_msgs.iter().copied().filter(|m| m["ev"]["k"] == "append").collect();
     let pulses = c1.log[mark..].iter().filter(|m| m["t"] == "pulse").count();
     println!("[desktop] session events: {} ({} append deltas), pulses: {}", session_msgs.len(), appends.len(), pulses);
+    let mut kinds: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for m in &session_msgs {
+        *kinds.entry(m["ev"]["k"].as_str().unwrap_or("?").to_string()).or_default() += 1;
+    }
+    println!("  by kind: {kinds:?}");
     for m in appends.iter().take(4) {
         println!("  append: {}", short(&m["ev"], 160));
     }

@@ -41,6 +41,9 @@ const RESNAP_DEBOUNCE: Duration = Duration::from_millis(120);
 const REPO_TTL: Duration = Duration::from_secs(20);
 const HEALTH_EVERY: Duration = Duration::from_secs(5);
 const INFO_EVERY: Duration = Duration::from_secs(60);
+/// How long a linked omp agent may show herdr `blocked` without a visible request
+/// before it counts as "needs you (terminal only)".
+const BLOCKED_GRACE_MS: Millis = 2_000;
 
 /// Per-agent bookkeeping that is not part of the wire model.
 #[derive(Debug, Clone)]
@@ -58,6 +61,8 @@ struct Track {
     model: Option<String>,
     /// Needs-you notification sent for the current episode (`Some(answerable)`).
     needs_notified: Option<bool>,
+    /// Last collab `TurnStarted` (exact turn boundaries for linked omp agents).
+    turn_signal_at: Option<Millis>,
 }
 
 #[derive(Default)]
@@ -348,6 +353,7 @@ impl StateHandle {
         let mut new_turns: Vec<String> = Vec::new();
         let mut started: Vec<(String, String)> = Vec::new();
         let mut model_changes: Vec<(String, String, String)> = Vec::new();
+        let mut recheck = false;
 
         for a in &m.mirror.agents {
             let id = build::agent_id(a);
@@ -375,27 +381,61 @@ impl StateHandle {
                 omp_session: sid.clone(),
                 model: None,
                 needs_notified: None,
+                turn_signal_at: None,
             });
             track.name = name;
             track.omp_session = sid.clone();
+            // A structured link makes turn boundaries exact: a turn ends once the replica
+            // left its turn (`agent_end`) and herdr left `working`. herdr alone also flips to
+            // `working` for omp's background work (titles), so without a link only episodes
+            // ≥ 1.5 s count as turns.
+            let linked = view.as_ref().is_some_and(|v| v.link == tf_proto::model::LinkState::Live);
+            let turn_active = view.as_ref().is_some_and(|v| v.turn_active);
+            let mut turn_ended = false;
             if track.state != state {
                 if state == HerdrState::Working && track.working_since.is_none() {
                     track.working_since = Some(now);
                     track.quiet_notified = false;
                 }
                 if track.state == HerdrState::Working && state != HerdrState::Working && state != HerdrState::Blocked {
+                    turn_ended = !linked && track.working_since.is_some_and(|w| now - w >= 1_500);
                     track.working_since = None;
-                    track.last_turn_ended_at = Some(now);
-                    new_turns.push(id.clone());
                 }
                 track.state = state;
                 track.state_since = now;
             }
-            let mut archived = persisted.archived.contains_key(&id)
-                || sid.as_deref().is_some_and(|s| persisted.archived_sessions.contains_key(s));
-            if archived && state == HerdrState::Working {
-                archived = false;
-                unarchive.push(id.clone());
+            if linked
+                && !matches!(state, HerdrState::Working | HerdrState::Blocked)
+                && !turn_active
+                && track.turn_signal_at.take().is_some()
+            {
+                turn_ended = true;
+            }
+            if turn_ended {
+                track.last_turn_ended_at = Some(now);
+                new_turns.push(id.clone());
+            }
+            let archived_at = persisted
+                .archived
+                .get(&id)
+                .copied()
+                .or_else(|| sid.as_deref().and_then(|s| persisted.archived_sessions.get(s).copied()));
+            let mut archived = archived_at.is_some();
+            if let Some(at) = archived_at.filter(|_| state == HerdrState::Working) {
+                let new_turn = linked && track.turn_signal_at.is_some_and(|t| t > at);
+                let long_work = !linked && track.working_since.is_some_and(|w| now - w >= 3_000);
+                if new_turn || long_work {
+                    archived = false;
+                    unarchive.push(id.clone());
+                }
+            }
+            // herdr `blocked` without a request TeleFlock can see: for linked omp agents give
+            // the collab dialog (or herdr's catch-up after an answer) a moment to settle.
+            let has_request = view.as_ref().is_some_and(|v| v.needs.is_some())
+                || bridge.as_ref().is_some_and(|b| b.state.plan_review.is_some());
+            let blocked_grace = linked && state == HerdrState::Blocked && !has_request && now - track.state_since < BLOCKED_GRACE_MS;
+            if blocked_grace {
+                recheck = true;
             }
             if fresh && m.built_once {
                 started.push((id.clone(), track.name.clone()));
@@ -407,7 +447,7 @@ impl StateHandle {
                 .as_ref()
                 .and_then(|v| v.needs.as_ref().map(build::needs_key))
                 .or_else(|| bridge.as_ref().and_then(|b| b.state.plan_review.as_ref().map(|r| format!("plan:{}", r.review_id))))
-                .or_else(|| (state == HerdrState::Blocked).then(|| "blocked".to_string()));
+                .or_else(|| (state == HerdrState::Blocked && !blocked_grace).then(|| "blocked".to_string()));
             if pre_needs_key != track.needs_key {
                 track.needs_key = pre_needs_key;
                 track.needs_since = now;
@@ -428,6 +468,7 @@ impl StateHandle {
                 repo,
                 turn_started_at: track.working_since,
                 last_turn_ended_at: track.last_turn_ended_at,
+                blocked_grace,
             };
             let agent = build::build_agent(&inputs);
             let model = agent.omp.as_ref().and_then(|o| o.model.as_ref()).map(|m| format!("{}/{}", m.provider, m.id));
@@ -524,7 +565,7 @@ impl StateHandle {
         m.built_once = true;
         let mut notes = Vec::new();
         let mut acts: Vec<(String, String, ActivityKind, String, Option<String>)> = Vec::new();
-        for (prev, agent, quiet, needs_note) in transitions {
+        for (_prev, agent, quiet, needs_note) in transitions {
             if first {
                 continue;
             }
@@ -539,7 +580,7 @@ impl StateHandle {
                     .unwrap_or_else(|| ("Needs you".into(), None));
                 acts.push((agent.id.clone(), agent.name.clone(), ActivityKind::Asked, title, detail));
             }
-            if prev == Some(Column::Running) && matches!(agent.column, Column::Review | Column::Done) {
+            if new_turns.contains(&agent.id) && matches!(agent.column, Column::Review | Column::Done) {
                 notes.push(build::finished_notification(&agent, now));
                 acts.push((agent.id.clone(), agent.name.clone(), ActivityKind::Finished, agent.title.clone(), agent.live.line.clone()));
             }
@@ -572,17 +613,33 @@ impl StateHandle {
             store.repo_kick.notify_one();
         }
         drop(guard);
+        if recheck {
+            let h = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(BLOCKED_GRACE_MS as u64 + 100)).await;
+                h.mark_dirty();
+            });
+        }
         record_acts(acts, self);
     }
 
     /// Applies omp signals (turn errors, compactions, …) to activity and notifications.
     fn on_signals(&self, session_id: &str, signals: &[Signal]) {
         let agents: Vec<(String, String)> = {
-            let m = self.lock();
-            m.omp_of
-                .iter()
-                .filter(|(_, s)| s.as_str() == session_id)
-                .map(|(a, _)| (a.clone(), m.tracks.get(a).map(|t| t.name.clone()).unwrap_or_else(|| a.clone())))
+            let mut m = self.lock();
+            let ids: Vec<String> =
+                m.omp_of.iter().filter(|(_, s)| s.as_str() == session_id).map(|(a, _)| a.clone()).collect();
+            let started = signals.iter().any(|s| matches!(s, Signal::TurnStarted));
+            let now = now_ms();
+            ids.into_iter()
+                .map(|a| {
+                    let track = m.tracks.get_mut(&a);
+                    let name = track.as_ref().map(|t| t.name.clone()).unwrap_or_else(|| a.clone());
+                    if let (true, Some(t)) = (started, track) {
+                        t.turn_signal_at = Some(now);
+                    }
+                    (a, name)
+                })
                 .collect()
         };
         for (agent_id, name) in agents {
@@ -752,6 +809,10 @@ async fn herdr_loop(ctx: Arc<Ctx>) {
     let mut stream = ctx.herdr.subscribe(SubscribeOptions::default());
     let mut resnap_at: Option<tokio::time::Instant> = None;
     let mut status_panes: Vec<String> = Vec::new();
+    // Safety net: herdr's per-pane and global streams can interleave out of order, and an
+    // idle pane is quiet afterwards; a periodic snapshot heals any drift.
+    let mut heal = tokio::time::interval(Duration::from_secs(15));
+    heal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let sleep = async {
             match resnap_at {
@@ -763,6 +824,9 @@ async fn herdr_loop(ctx: Arc<Ctx>) {
             _ = ctx.cancel.cancelled() => return,
             _ = h.inner.resnap.notified() => {
                 resnap_at.get_or_insert_with(|| tokio::time::Instant::now() + RESNAP_DEBOUNCE);
+            }
+            _ = heal.tick() => {
+                resnap_at.get_or_insert_with(tokio::time::Instant::now);
             }
             _ = sleep => {
                 resnap_at = None;
@@ -848,6 +912,7 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                     }
                 }
             }
+            let pulse_agent_status_changed = pulse_agent.as_ref().is_some_and(|(_, _, s)| *s);
             if let Some((id, linked, status_changed)) = pulse_agent {
                 if status_changed {
                     h.add_pulse(&id, PulseKind::State, 1);
@@ -856,7 +921,9 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                 }
             }
             h.mark_dirty();
-            return resnap;
+            // Status changes are applied at once (fast UI) and confirmed by a snapshot: a
+            // coalesced `pane_updated` may carry an older status than a per-pane event.
+            return resnap || pulse_agent_status_changed;
         }
         E::AgentStatusChanged { pane_id, agent_status, .. } => {
             let id = {
@@ -873,6 +940,7 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                 Some(id) => {
                     h.add_pulse(&id, PulseKind::State, 1);
                     h.mark_dirty();
+                    return true;
                 }
                 None => return true,
             }
@@ -1159,6 +1227,7 @@ mod tests {
             repo: None,
             turn_started_at: None,
             last_turn_ended_at: None,
+            blocked_grace: false,
         })
     }
 }

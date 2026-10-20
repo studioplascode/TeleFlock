@@ -106,7 +106,8 @@ export class AgentSim {
     this.window = m?.contextWindow ?? 200_000;
     this.ctxTokens = Math.round(((def.ctxPct ?? 10) / 100) * this.window);
     this.costUsd = def.cost ?? 0;
-    this.files = (def.files ?? []).map((f) => ({ ...f }));
+    // Changed files accumulate from the seeded history's edit calls (see seeds.ts), not from the def.
+    this.files = [];
     this.todos = structuredClone(def.todos ?? []);
     const state = def.column === "running" ? "working" : def.column === "needs" ? "blocked" : def.column === "review" ? "done" : "idle";
     this.caps = capsFor(this.omp && def.link !== "notShared", def.id === "deps");
@@ -153,9 +154,10 @@ export class AgentSim {
 
   refreshDerived(): void {
     const a = this.agent;
-    const added = this.files.reduce((n, f) => n + f.added, 0);
-    const removed = this.files.reduce((n, f) => n + f.removed, 0);
-    a.diff = this.files.length ? { added, removed, files: this.files.length } : undefined;
+    const branch = this.branchFiles();
+    const added = branch.reduce((n, f) => n + f.added, 0);
+    const removed = branch.reduce((n, f) => n + f.removed, 0);
+    a.diff = branch.length ? { added, removed, files: branch.length } : undefined;
     if (!a.omp) return;
     const tasks = this.todos.flatMap((p) => p.tasks);
     const live = this.subagents.filter((s) => s.status === "running").length;
@@ -193,7 +195,7 @@ export class AgentSim {
       tps: a.live.tps,
       todos: this.todos,
       subagents: this.subagents,
-      files: this.files,
+      files: this.branchFiles(),
       queue: { steering: [...this.queueSteer], followUp: [...this.queueFollow] },
       tree: this.tree(),
       caps: this.caps,
@@ -370,9 +372,12 @@ export class AgentSim {
     return this.state === "working" || this.state === "blocked";
   }
 
-  get hasQueuedUi(): boolean {
-    return this.queue.some((s) => s.t === "ui");
+  /** Whether the director may inject a question into the current turn. */
+  get acceptsInjection(): boolean {
+    return !this.noInject && !this.pending && !this.queue.some((s) => s.t === "ui");
   }
+
+  private noInject = false;
 
   /** Starts a new turn: user row + scripted work. */
   startTurn(text: string, opts: { author?: string; steps?: Step[] } = {}): void {
@@ -384,9 +389,13 @@ export class AgentSim {
       this.host.activity(this.agent.id, "unarchived", `${this.agent.name} started working again`);
     }
     this.host.activity(this.agent.id, "prompted", `${this.agent.name} prompted${opts.author ? ` from ${opts.author}` : ""}`, text);
-    if (this.agent.title === "" || this.agent.title === this.agent.name) this.agent.title = text.slice(0, 80);
+    // Single-answer turns (commit messages) must not get director-injected dialogs or retitle the task.
+    this.noInject = /commit message/i.test(text);
+    if (!this.noInject && (this.agent.title === "" || this.agent.title === this.agent.name)) this.agent.title = text.slice(0, 80);
     const { repo, files } = this.host.repoFiles(this.agent.id);
-    this.queue = opts.steps ?? replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan" });
+    this.queue =
+      opts.steps ??
+      replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan", title: this.agent.title, branch: this.agent.branch, changed: this.files });
     this.cur = null;
     this.setState("working");
     if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now };
@@ -600,6 +609,7 @@ export class AgentSim {
     if (!this.omp) return;
     if (this.state !== "working") return;
     const now = this.host.now();
+    const costBefore = this.costUsd;
     let budget = 4; // steps that may complete within one tick
     while (budget-- > 0) {
       if (!this.cur) {
@@ -616,6 +626,11 @@ export class AgentSim {
       }
       if (!this.advance(now, dt)) break; // still running
       this.cur = null;
+    }
+    if (Math.round(this.costUsd * 1000) !== Math.round(costBefore * 1000)) {
+      // Cost/context tick visibly on the card (rounded to a tenth of a cent).
+      this.refreshDerived();
+      this.host.agentChanged(this.agent.id);
     }
     const live = this.agent.live;
     const tps = this.tps(now);
@@ -785,6 +800,8 @@ export class AgentSim {
       }
     }
     if (spec.subagents) {
+      // Subagents burn tokens too: keep the cost ticker moving while they work.
+      if (this.subagents.some((s) => c.subIds.includes(s.id) && s.status === "running")) this.inputTokens(400);
       let changed = false;
       spec.subagents.forEach((sub, i) => {
         const sid = c.subIds[i] as string;
@@ -864,6 +881,31 @@ export class AgentSim {
       view,
       error: spec.error,
     };
+  }
+
+  /** Committed on the branch since the merge-base (git.commit moves uncommitted files here). */
+  private committed: ChangedFile[] = [];
+
+  /** Branch changes vs the merge-base: committed + uncommitted, merged per path. */
+  branchFiles(): ChangedFile[] {
+    if (!this.committed.length) return this.files;
+    const out = this.committed.map((f) => ({ ...f }));
+    for (const f of this.files) {
+      const prev = out.find((x) => x.path === f.path);
+      if (prev) {
+        prev.added += f.added;
+        prev.removed += f.removed;
+      } else out.push({ ...f });
+    }
+    return out;
+  }
+
+  /** `git commit -a`: uncommitted files become part of the branch history. */
+  commit(): void {
+    const merged = this.branchFiles();
+    this.committed = merged === this.files ? this.files.map((f) => ({ ...f })) : merged;
+    this.files = [];
+    this.refreshDerived();
   }
 
   addFile(f: ChangedFile): void {

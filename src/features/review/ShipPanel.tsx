@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Archive, ArrowUpFromLine, Check, CircleDot, ExternalLink, GitCommitHorizontal, GitMerge, GitPullRequest, GitPullRequestArrow, Sparkles, Trash2, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { agentKey, core, openSession, useAgent, useSession, useSessionItem } from "@/core";
+import { agentKey, core, navigate, openSession, useAgent, useCore, useSession } from "@/core";
 import type { Agent, GitStatusResult, MergeMethod, PrInfo, Workspace } from "@/core/gen";
 import { Badge, Button, Input, SegmentedControl, Shimmer, Spinner, Switch, Textarea, cn, spring, toast } from "@/design";
 import { removeWorktree } from "../workspace/workspaceActions";
@@ -33,6 +33,7 @@ export interface ShipPanelProps {
 /** Commit → push → PR → checks → merge → archive, as one pipeline whose current stage glows. */
 export function ShipPanel({ hostId, workspace, cwd, status, agents, onChanged }: ShipPanelProps) {
   const pr = useHostQuery(hostId, "gh.prStatus", { cwd });
+  const [lastCommit, setLastCommit] = useState<string>();
   const info = pr.data?.pr;
   const dirty = status.files.length > 0;
   const unpushed = status.ahead > 0 || (!status.upstream && !!status.branch && status.branch !== status.defaultBranch);
@@ -46,7 +47,8 @@ export function ShipPanel({ hostId, workspace, cwd, status, agents, onChanged }:
     return () => window.clearInterval(id);
   }, [info, pending, pr.reload]);
 
-  const stage = merged ? 4 : info ? 3 : dirty ? 0 : unpushed ? 1 : 2;
+  // Current stage = first step not yet satisfied (an open PR with new local commits still needs commit/push).
+  const stage = merged ? 4 : dirty ? 0 : unpushed ? 1 : !info ? 2 : 3;
   const stages = [
     { icon: GitCommitHorizontal, label: "Commit" },
     { icon: ArrowUpFromLine, label: "Push" },
@@ -81,12 +83,23 @@ export function ShipPanel({ hostId, workspace, cwd, status, agents, onChanged }:
         ))}
       </ol>
 
-      <CommitCard hostId={hostId} cwd={cwd} dirty={dirty} fileCount={status.files.length} agents={agents} onCommitted={onChanged} active={stage === 0} />
+      <CommitCard
+        hostId={hostId}
+        cwd={cwd}
+        dirty={dirty}
+        fileCount={status.files.length}
+        agents={agents}
+        onCommitted={(summary) => {
+          setLastCommit(summary);
+          onChanged();
+        }}
+        active={stage === 0}
+      />
       <PushCard hostId={hostId} cwd={cwd} status={status} unpushed={unpushed} dirty={dirty} onPushed={() => (onChanged(), pr.reload())} active={stage === 1} />
       {info ? (
         <PrCard hostId={hostId} cwd={cwd} pr={info} loading={pr.loading} onMerged={() => (pr.reload(), onChanged())} active={stage === 3} />
       ) : (
-        <CreatePrCard hostId={hostId} cwd={cwd} status={status} disabled={dirty || unpushed} error={pr.error?.message} onCreated={pr.reload} active={stage === 2} />
+        <CreatePrCard key={lastCommit} hostId={hostId} cwd={cwd} status={status} lastCommit={lastCommit} disabled={dirty || unpushed} error={pr.error?.message} onCreated={pr.reload} active={stage === 2} />
       )}
       <AnimatePresence>{merged && <WrapUpCard hostId={hostId} workspace={workspace} agents={agents} />}</AnimatePresence>
     </div>
@@ -113,11 +126,11 @@ function Section({ icon, title, meta, active, done, children }: { icon: ReactNod
   );
 }
 
-function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active }: { hostId: string; cwd: string; dirty: boolean; fileCount: number; agents: Agent[]; onCommitted: () => void; active: boolean }) {
+function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active }: { hostId: string; cwd: string; dirty: boolean; fileCount: number; agents: Agent[]; onCommitted: (summary: string) => void; active: boolean }) {
   const [message, setMessage] = useState("");
   const [all, setAll] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [asking, setAsking] = useState<{ agentId: string; baseline: number } | null>(null);
+  const [asking, setAsking] = useState<{ agentId: string; afterId: string | null } | null>(null);
   const omp = agents.find((a) => a.kind === "omp");
 
   const commit = async () => {
@@ -126,7 +139,7 @@ function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active
       const r = await core.host(hostId).call("git.commit", { cwd, message: message.trim(), all });
       toast({ title: `Committed ${r.sha.slice(0, 7)}`, description: r.summary, status: "done", duration: 3500 });
       setMessage("");
-      onCommitted();
+      onCommitted(r.summary);
     } catch (e) {
       const d = describeError(e);
       toast({ title: "Commit failed", description: d.hint ?? d.title, status: "error" });
@@ -157,7 +170,7 @@ function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active
               }
             }}
           />
-          {asking && <AgentWriter hostId={hostId} agentId={asking.agentId} baseline={asking.baseline} onDone={(m) => (setMessage(m), setAsking(null))} onCancel={() => setAsking(null)} />}
+          {asking && <AgentWriter hostId={hostId} agentId={asking.agentId} afterId={asking.afterId} onDone={(m) => (setMessage(m), setAsking(null))} onCancel={() => setAsking(null)} />}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-2 text-xs font-semibold text-mute">
@@ -170,7 +183,7 @@ function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active
               hostId={hostId}
               agent={omp}
               disabled={!!asking}
-              onAsked={(baseline) => setAsking({ agentId: omp.id, baseline })}
+              onAsked={(afterId) => setAsking({ agentId: omp.id, afterId })}
             />
           )}
           <Button variant="primary" size="sm" icon={<GitCommitHorizontal />} onClick={() => void commit()} loading={busy} disabled={!message.trim() || !!asking}>
@@ -182,8 +195,8 @@ function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active
   );
 }
 
-/** Sends the commit-message prompt; reports the transcript length at send time as the baseline. */
-function AskAgentButton({ hostId, agent, disabled, onAsked }: { hostId: string; agent: Agent; disabled: boolean; onAsked: (baseline: number) => void }) {
+/** Sends the commit-message prompt; reports the last transcript row at send time (replies come after it). */
+function AskAgentButton({ hostId, agent, disabled, onAsked }: { hostId: string; agent: Agent; disabled: boolean; onAsked: (afterId: string | null) => void }) {
   const key = agentKey(hostId, agent.id);
   const session = useSession(key);
   const [busy, setBusy] = useState(false);
@@ -198,9 +211,9 @@ function AskAgentButton({ hostId, agent, disabled, onAsked }: { hostId: string; 
       onClick={async () => {
         setBusy(true);
         try {
-          const baseline = session.itemIds.length;
+          const afterId = session.itemIds[session.itemIds.length - 1] ?? null;
           await core.host(hostId).call("agent.prompt", { agentId: agent.id, text: COMMIT_PROMPT, images: [], delivery: "auto" });
-          onAsked(baseline);
+          onAsked(afterId);
         } catch (e) {
           toast({ title: `Couldn't ask ${agent.name}`, description: describeError(e).title, status: "error" });
         } finally {
@@ -214,16 +227,23 @@ function AskAgentButton({ hostId, agent, disabled, onAsked }: { hostId: string; 
 }
 
 /** Overlay on the message box while the agent writes; fills the box when its reply settles. */
-function AgentWriter({ hostId, agentId, baseline, onDone, onCancel }: { hostId: string; agentId: string; baseline: number; onDone: (msg: string) => void; onCancel: () => void }) {
+function AgentWriter({ hostId, agentId, afterId, onDone, onCancel }: { hostId: string; agentId: string; afterId: string | null; onDone: (msg: string) => void; onCancel: () => void }) {
   const key = agentKey(hostId, agentId);
-  const session = useSession(key);
   const agent = useAgent(key);
   useEffect(() => openSession(key), [key]);
-  const fresh = session.itemIds.slice(baseline);
-  const lastId = fresh[fresh.length - 1];
-  const last = useSessionItem(key, lastId ?? "");
-  const reply = last?.kind === "assistant" ? last : undefined;
-  const finished = !!reply && !reply.streaming && agent?.column !== "running";
+  // Latest assistant row after the prompt (a turn may end on a tool row, so don't just take the last row).
+  const reply = useCore((s) => {
+    const e = s.sessions[key];
+    if (!e) return undefined;
+    const start = afterId ? e.itemIds.indexOf(afterId) + 1 : 0;
+    for (let i = e.itemIds.length - 1; i >= start; i--) {
+      const it = e.items[e.itemIds[i] ?? ""];
+      if (it?.kind === "assistant") return it;
+    }
+    return undefined;
+  });
+  const idle = agent?.column === "review" || agent?.column === "done";
+  const finished = !!reply && !reply.streaming && idle;
   const doneRef = useRef(false);
   useEffect(() => {
     if (finished && reply && !doneRef.current) {
@@ -231,6 +251,7 @@ function AgentWriter({ hostId, agentId, baseline, onDone, onCancel }: { hostId: 
       onDone(extractMessage(reply.text));
     }
   }, [finished, reply, onDone]);
+  const asking = agent?.column === "needs";
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -244,7 +265,14 @@ function AgentWriter({ hostId, agentId, baseline, onDone, onCancel }: { hostId: 
       <pre className="min-h-0 overflow-hidden font-mono text-xs whitespace-pre-wrap text-ink-2">{reply ? extractMessage(reply.text) : ""}</pre>
       <div className="flex items-center gap-2">
         <Spinner size={13} />
-        <Shimmer className="flex-1 truncate text-xs font-semibold">{agent?.live.line ?? (reply ? "Writing…" : `${agent?.name ?? "Agent"} is reading the diff…`)}</Shimmer>
+        <Shimmer className="flex-1 truncate text-xs font-semibold">
+          {asking ? `${agent?.name} is asking you something` : (agent?.live.line ?? (reply ? "Writing…" : `${agent?.name ?? "Agent"} is reading the diff…`))}
+        </Shimmer>
+        {asking && (
+          <Button size="sm" variant="sunset" onClick={() => navigate({ name: "agent", hostId, agentId })}>
+            Answer
+          </Button>
+        )}
         <Button size="sm" variant="ghost" icon={<X />} onClick={onCancel}>
           Stop waiting
         </Button>
@@ -295,9 +323,9 @@ function PushCard({ hostId, cwd, status, unpushed, dirty, onPushed, active }: { 
   );
 }
 
-function CreatePrCard({ hostId, cwd, status, disabled, error, onCreated, active }: { hostId: string; cwd: string; status: GitStatusResult; disabled: boolean; error?: string; onCreated: () => void; active: boolean }) {
+function CreatePrCard({ hostId, cwd, status, lastCommit, disabled, error, onCreated, active }: { hostId: string; cwd: string; status: GitStatusResult; lastCommit?: string; disabled: boolean; error?: string; onCreated: () => void; active: boolean }) {
   const humanBranch = (status.branch ?? "").replace(/^[\w-]+\//, "").replace(/[-_]+/g, " ");
-  const [title, setTitle] = useState(humanBranch ? humanBranch[0]?.toUpperCase() + humanBranch.slice(1) : "");
+  const [title, setTitle] = useState(lastCommit ?? (humanBranch ? humanBranch[0]?.toUpperCase() + humanBranch.slice(1) : ""));
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -423,7 +451,15 @@ function PrCard({ hostId, cwd, pr, loading, onMerged, active }: { hostId: string
             </div>
             <div className="flex items-center gap-2">
               <span className="flex-1 text-2xs text-mute-2">
-                {failing ? "Checks are failing — merge anyway?" : (pr.checks?.pending ?? 0) > 0 ? "Checks still running" : pr.mergeable === false ? "GitHub reports conflicts" : "Ready to merge"}
+                {pr.draft
+                  ? "Draft — mark it ready for review on GitHub to merge"
+                  : failing
+                    ? "Checks are failing — merge anyway?"
+                    : (pr.checks?.pending ?? 0) > 0
+                      ? "Checks still running"
+                      : pr.mergeable === false
+                        ? "GitHub reports conflicts"
+                        : "Ready to merge"}
               </span>
               <Button size="sm" variant={failing ? "danger" : "primary"} icon={<GitMerge />} onClick={() => void merge()} loading={busy} disabled={pr.mergeable === false || pr.draft}>
                 {method === "squash" ? "Squash & merge" : method === "rebase" ? "Rebase & merge" : "Merge"}
