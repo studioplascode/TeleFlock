@@ -1,0 +1,49 @@
+{
+  "name": "15-tui-typed-prompt-mirrored",
+  "sent": null,
+  "sentAt": 1792533698234,
+  "latencyMsFromSend": {
+    "firstFrame": 1314,
+    "first_agent_start": 1314,
+    "first_turn_start": 1338,
+    "first_message_start": 1338,
+    "first_message_end": 1338,
+    "first_entry": 1338,
+    "first_state": 1414,
+    "first_message_update": 2820,
+    "firstAssistantUpdate": 2820,
+    "first_turn_end": 2902,
+    "first_agent_end": 2902
+  },
+  "frameCounts": {
+    "event:agent_start": 1,
+    "event:turn_start": 1,
+    "event:message_start": 2,
+    "event:message_end": 2,
+    "h2g:entry": 2,
+    "h2g:state": 2,
+    "event:message_update": 6,
+    "event:turn_end": 1,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 21919,
+  "decryptMs": {
+    "n": 18,
+    "max": 0.13695799999914016,
+    "avg": 0.06468883333349772
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 1540,
+      "status": "working"
+    },
+    {
+      "tMs": 3230,
+      "status": "idle"
+    }
+  ]
+}

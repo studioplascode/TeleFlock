@@ -1,0 +1,425 @@
+{
+  "generatedAt": 1792533588158,
+  "reports": [
+    {
+      "provider": "openai-codex",
+      "fetchedAt": 1792533283060,
+      "limits": [
+        {
+          "id": "openai-codex:primary",
+          "label": "7 days",
+          "scope": {
+            "provider": "openai-codex",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 days",
+            "durationMs": 604800000,
+            "resetsAt": 1793102764000
+          },
+          "amount": {
+            "used": 8,
+            "limit": 100,
+            "remaining": 92,
+            "usedFraction": 0.08,
+            "remainingFraction": 0.92,
+            "unit": "percent"
+          },
+          "status": "ok"
+        }
+      ],
+      "resetCredits": {
+        "availableCount": 0
+      },
+      "metadata": {
+        "planType": "prolite",
+        "allowed": true,
+        "limitReached": false,
+        "email": "in*",
+        "accountId": "0d*",
+        "meterStates": {
+          "chat": {
+            "allowed": true,
+            "limitReached": false
+          }
+        },
+        "orgId": "0d*",
+        "orgName": "pl*"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "fetchedAt": 1792533564431,
+      "limits": [
+        {
+          "id": "anthropic:5h",
+          "label": "Claude 5 Hour",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "5h",
+            "shared": true
+          },
+          "window": {
+            "id": "5h",
+            "label": "5 Hour",
+            "durationMs": 18000000,
+            "resetsAt": 1792547400000
+          },
+          "amount": {
+            "used": 9,
+            "limit": 100,
+            "remaining": 91,
+            "usedFraction": 0.09,
+            "remainingFraction": 0.91,
+            "unit": "percent"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "anthropic:7d",
+          "label": "Claude 7 Day",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 Day",
+            "durationMs": 604800000,
+            "resetsAt": 1793012400000
+          },
+          "amount": {
+            "used": 8,
+            "limit": 100,
+            "remaining": 92,
+            "usedFraction": 0.08,
+            "remainingFraction": 0.92,
+            "unit": "percent"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "anthropic:7d:fable",
+          "label": "Claude 7 Day (Fable)",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "7d",
+            "tier": "fable"
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 Day",
+            "durationMs": 604800000,
+            "resetsAt": 1793012400000
+          },
+          "amount": {
+            "used": 0,
+            "limit": 100,
+            "remaining": 100,
+            "usedFraction": 0,
+            "remainingFraction": 1,
+            "unit": "percent"
+          },
+          "status": "ok"
+        }
+      ],
+      "metadata": {
+        "accountId": "59*",
+        "email": "po*",
+        "orgId": "d3*",
+        "orgName": "po*'*",
+        "endpoint": "https://api.anthropic.com/api/oauth/usage",
+        "headersUpdatedAt": 1792533564431
+      },
+      "resetCredits": {
+        "availableCount": 0,
+        "redeemableCount": 0,
+        "eligible": false,
+        "reason": "not_at_wall",
+        "credits": []
+      }
+    },
+    {
+      "provider": "anthropic",
+      "fetchedAt": 1792533584259,
+      "limits": [
+        {
+          "id": "anthropic:5h",
+          "label": "Claude 5 Hour",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "5h",
+            "shared": true
+          },
+          "window": {
+            "id": "5h",
+            "label": "5 Hour",
+            "durationMs": 18000000
+          },
+          "amount": {
+            "used": 0,
+            "limit": 100,
+            "remaining": 100,
+            "usedFraction": 0,
+            "remainingFraction": 1,
+            "unit": "percent"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "anthropic:7d",
+          "label": "Claude 7 Day",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 Day",
+            "durationMs": 604800000,
+            "resetsAt": 1793095200000
+          },
+          "amount": {
+            "used": 0,
+            "limit": 100,
+            "remaining": 100,
+            "usedFraction": 0,
+            "remainingFraction": 1,
+            "unit": "percent"
+          },
+          "status": "ok"
+        },
+        {
+          "id": "anthropic:7d:fable",
+          "label": "Claude 7 Day (Fable)",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "7d",
+            "tier": "fable"
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 Day",
+            "durationMs": 604800000,
+            "resetsAt": 1793095200000
+          },
+          "amount": {
+            "used": 0,
+            "limit": 100,
+            "remaining": 100,
+            "usedFraction": 0,
+            "remainingFraction": 1,
+            "unit": "percent"
+          },
+          "status": "ok"
+        }
+      ],
+      "metadata": {
+        "endpoint": "https://api.anthropic.com/api/oauth/usage",
+        "accountId": "57*",
+        "email": "aa*",
+        "orgId": "9e*",
+        "orgName": "aa*'*"
+      },
+      "resetCredits": {
+        "availableCount": 1,
+        "redeemableCount": 1,
+        "nextCreditId": "opus55-launch-promax-20260921",
+        "eligible": true,
+        "credits": [
+          {
+            "id": "opus55-launch-promax-20260921",
+            "title": "Claude Opus 5.5 launch: one usage-limit reset for Pro and Max",
+            "program": "cedar_ember",
+            "remainingCount": 1,
+            "usable": true,
+            "requiresLimit": false,
+            "clears": [
+              "anthropic:5h",
+              "anthropic:7d",
+              "anthropic:reset:seven_day_overage_included"
+            ],
+            "blocking": [],
+            "usedFractions": {
+              "anthropic:5h": 0,
+              "anthropic:7d": 0,
+              "anthropic:reset:seven_day_overage_included": 0
+            },
+            "grantedAt": "2026-09-22T16:00:00.000Z",
+            "expiresAt": "2026-10-22T16:00:00.000Z",
+            "status": "available"
+          }
+        ]
+      }
+    },
+    {
+      "provider": "anthropic",
+      "fetchedAt": 1792533454998,
+      "limits": [
+        {
+          "id": "anthropic:5h",
+          "label": "Claude 5 Hour",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "5h",
+            "shared": true
+          },
+          "window": {
+            "id": "5h",
+            "label": "5 Hour",
+            "durationMs": 18000000,
+            "resetsAt": 1792541999889
+          },
+          "amount": {
+            "used": 98,
+            "limit": 100,
+            "remaining": 2,
+            "usedFraction": 0.98,
+            "remainingFraction": 0.020000000000000018,
+            "unit": "percent"
+          },
+          "status": "warning"
+        },
+        {
+          "id": "anthropic:7d",
+          "label": "Claude 7 Day",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 Day",
+            "durationMs": 604800000,
+            "resetsAt": 1792976399889
+          },
+          "amount": {
+            "used": 94,
+            "limit": 100,
+            "remaining": 6,
+            "usedFraction": 0.94,
+            "remainingFraction": 0.06000000000000005,
+            "unit": "percent"
+          },
+          "status": "warning"
+        },
+        {
+          "id": "anthropic:7d:fable",
+          "label": "Claude 7 Day (Fable)",
+          "scope": {
+            "provider": "anthropic",
+            "windowId": "7d",
+            "tier": "fable"
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 Day",
+            "durationMs": 604800000,
+            "resetsAt": 1792976399889
+          },
+          "amount": {
+            "used": 9,
+            "limit": 100,
+            "remaining": 91,
+            "usedFraction": 0.09,
+            "remainingFraction": 0.91,
+            "unit": "percent"
+          },
+          "status": "ok"
+        }
+      ],
+      "metadata": {
+        "endpoint": "https://api.anthropic.com/api/oauth/usage",
+        "accountId": "af*",
+        "email": "sh*",
+        "orgId": "dc*",
+        "orgName": "sh*'*"
+      },
+      "resetCredits": {
+        "availableCount": 1,
+        "redeemableCount": 1,
+        "nextCreditId": "opus55-launch-promax-20260921",
+        "eligible": true,
+        "credits": [
+          {
+            "id": "opus55-launch-promax-20260921",
+            "title": "Claude Opus 5.5 launch: one usage-limit reset for Pro and Max",
+            "program": "cedar_ember",
+            "remainingCount": 1,
+            "usable": true,
+            "requiresLimit": false,
+            "clears": [
+              "anthropic:5h",
+              "anthropic:7d",
+              "anthropic:reset:seven_day_overage_included"
+            ],
+            "blocking": [],
+            "usedFractions": {
+              "anthropic:5h": 0.98,
+              "anthropic:7d": 0.94,
+              "anthropic:reset:seven_day_overage_included": 0.09
+            },
+            "grantedAt": "2026-09-22T16:00:00.000Z",
+            "expiresAt": "2026-10-22T16:00:00.000Z",
+            "status": "available"
+          }
+        ]
+      }
+    }
+  ],
+  "accountsWithoutUsage": [],
+  "disabledCredentials": [
+    {
+      "id": 1,
+      "provider": "anthropic",
+      "type": "oauth",
+      "cause": "oauth refresh failed: OAuthError: anthropic token refresh failed: 400 {\"error\": \"invalid_grant\", \"error_description\": \"Refresh token expired\"}",
+      "email": "ar*",
+      "accountId": "54*",
+      "orgId": "f9*",
+      "orgName": "ar*'*",
+      "disabledAtMs": 1790186468000
+    }
+  ],
+  "capacity": {
+    "openai-codex": [
+      {
+        "window": "7d",
+        "durationMs": 604800000,
+        "meter": "chat",
+        "accounts": 1,
+        "usedAccounts": 0.08,
+        "remainingAccounts": 0.92
+      }
+    ],
+    "anthropic": [
+      {
+        "window": "5h",
+        "durationMs": 18000000,
+        "accounts": 3,
+        "usedAccounts": 1.07,
+        "remainingAccounts": 1.93
+      },
+      {
+        "window": "7d",
+        "durationMs": 604800000,
+        "accounts": 3,
+        "usedAccounts": 1.02,
+        "remainingAccounts": 1.98
+      },
+      {
+        "window": "7d",
+        "durationMs": 604800000,
+        "meter": "fable",
+        "accounts": 3,
+        "usedAccounts": 0.09,
+        "remainingAccounts": 2.91
+      }
+    ]
+  }
+}

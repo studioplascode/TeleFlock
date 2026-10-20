@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# herdr against the isolated lab session only (never the user's default session).
+exec env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+  herdr --session "${TF_LAB_SESSION:-tf-lab-collab}" "$@"

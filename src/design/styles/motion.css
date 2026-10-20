@@ -1,0 +1,422 @@
+/*
+ * Liveness & motion system. Everything that loops forever is transform/opacity only (compositor),
+ * except a few tiny background-position shimmers on text. Every infinite loop is tagged `tf-loop`
+ * so the reduced-motion switch (html[data-motion="reduced"]) can stop it in one place.
+ */
+
+@keyframes tf-spin { to { transform: rotate(360deg); } }
+@keyframes tf-breathe {
+  0%, 100% { transform: scale(0.8); opacity: 0.25; }
+  50% { transform: scale(1.55); opacity: 0.85; }
+}
+@keyframes tf-ping {
+  0% { transform: scale(1); opacity: 0.85; }
+  75%, 100% { transform: scale(2.6); opacity: 0; }
+}
+@keyframes tf-blink { 50% { opacity: 0; } }
+@keyframes tf-caret {
+  0%, 45% { opacity: 1; }
+  55%, 100% { opacity: 0.15; }
+}
+@keyframes tf-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@keyframes tf-text-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+@keyframes tf-pan {
+  from { background-position: 0% 50%; }
+  to { background-position: 200% 50%; }
+}
+@keyframes tf-sun-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.985); }
+  50% { opacity: 1; transform: scale(1.01); }
+}
+@keyframes tf-rise-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+}
+@keyframes tf-token-in {
+  from { opacity: 0; color: var(--color-accent-hi); }
+}
+@keyframes tf-drift-a {
+  0%, 100% { transform: translate3d(-6%, -4%, 0) scale(1); }
+  50% { transform: translate3d(8%, 6%, 0) scale(1.15); }
+}
+@keyframes tf-drift-b {
+  0%, 100% { transform: translate3d(5%, 6%, 0) scale(1.1); }
+  50% { transform: translate3d(-8%, -5%, 0) scale(0.92); }
+}
+@keyframes tf-drift-c {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  33% { transform: translate3d(6%, -7%, 0) scale(1.12); }
+  66% { transform: translate3d(-7%, 4%, 0) scale(0.95); }
+}
+@keyframes tf-flash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ---------- reduced motion ---------- */
+html[data-motion="reduced"] .tf-loop,
+html[data-motion="reduced"] .tf-loop::before,
+html[data-motion="reduced"] .tf-loop::after,
+html[data-motion="reduced"] [class*="animate-"]:not(.tf-keep) {
+  animation: none !important;
+}
+html[data-motion="reduced"] * {
+  transition-duration: 0.01ms !important;
+}
+html[data-motion="reduced"] .tf-fade-ok,
+html[data-motion="reduced"] .tf-fade-ok * {
+  transition-duration: 0.2s !important; /* opacity-only fades are fine with reduced motion */
+}
+
+@layer components {
+/* ---------- StatusOrb ---------- */
+.tf-orb {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--orb-size, 10px);
+  height: var(--orb-size, 10px);
+}
+.tf-orb__core {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: var(--st-grad);
+  box-shadow: 0 0 calc(var(--orb-size, 10px) * 0.9) rgb(var(--st-rgb) / 0.7);
+  transition: box-shadow 0.4s, background 0.4s;
+}
+.tf-orb__halo,
+.tf-orb__ping {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.tf-orb__halo {
+  background: radial-gradient(circle, rgb(var(--st-rgb) / 0.7) 0%, rgb(var(--st-rgb) / 0) 70%);
+  animation: tf-breathe var(--tf-breath, 2.4s) var(--ease-in-out-sine) infinite;
+  will-change: transform, opacity;
+}
+.tf-orb__ping {
+  box-shadow: 0 0 0 1.5px rgb(var(--st-rgb) / 0.9);
+  animation: tf-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.tf-orb[data-status="running"] .tf-orb__core {
+  background: conic-gradient(from 0deg, var(--st-1), var(--st-2), var(--st-1));
+  animation: tf-spin 2.6s linear infinite;
+}
+.tf-orb[data-status="idle"] .tf-orb__core { box-shadow: none; opacity: 0.75; }
+.tf-orb[data-status="done"] .tf-orb__core { box-shadow: 0 0 calc(var(--orb-size, 10px) * 0.6) rgb(var(--st-rgb) / 0.45); }
+
+/* ---------- ProgressRing ---------- */
+.tf-ring {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+.tf-ring > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  overflow: visible;
+}
+.tf-ring__comet {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 68%, rgb(var(--st-rgb) / 0.55) 92%, transparent 100%);
+  -webkit-mask: radial-gradient(circle, transparent 57%, #000 60%, #000 69%, transparent 72%);
+  mask: radial-gradient(circle, transparent 57%, #000 60%, #000 69%, transparent 72%);
+  animation: tf-spin 2.2s linear infinite;
+  will-change: transform;
+}
+
+/* ---------- GlowBorder ---------- */
+.tf-glow-border {
+  position: relative;
+  isolation: isolate;
+}
+.tf-glow-border__ring,
+.tf-glow-border__bloom {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  overflow: hidden;
+  container-type: size;
+}
+.tf-glow-border__ring {
+  z-index: 2;
+  padding: var(--gb-width, 1.5px);
+  -webkit-mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+}
+.tf-glow-border__bloom {
+  z-index: -1;
+  inset: -10px;
+  border-radius: calc(var(--gb-radius, 22px) + 10px);
+  filter: blur(14px);
+  opacity: var(--gb-bloom, 0.55);
+}
+.tf-glow-border__ring::before,
+.tf-glow-border__bloom::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(max(100cqw, 100cqh) * 1.5);
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(from 0deg, var(--st-1), var(--st-2) 25%, transparent 42%, transparent 58%, var(--st-1) 75%, var(--st-2) 92%, var(--st-1));
+  animation: tf-spin var(--gb-speed, 3.6s) linear infinite;
+  will-change: transform;
+}
+.tf-glow-border__bloom::before {
+  background: conic-gradient(from 0deg, rgb(var(--st-rgb) / 0.9), transparent 30%, transparent 55%, rgb(var(--st-rgb) / 0.8) 80%, rgb(var(--st-rgb) / 0.9));
+}
+
+/* ---------- TiltCard ---------- */
+.tf-tilt {
+  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(var(--ty, 0px)) scale(var(--sc, 1));
+  transition: transform 0.7s var(--ease-spring), box-shadow 0.35s ease;
+  will-change: transform;
+}
+.tf-tilt[data-tilting="true"] {
+  --ty: -3px;
+  --sc: 1.012;
+  transition: transform 0.45s var(--ease-spring), box-shadow 0.35s ease;
+  z-index: 2;
+}
+.tf-tilt__spec {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.35s;
+  background: radial-gradient(320px circle at var(--mx, 50%) var(--my, 50%), rgb(255 255 255 / 0.13), rgb(255 255 255 / 0.03) 35%, transparent 60%);
+  mix-blend-mode: plus-lighter;
+  z-index: 5;
+}
+.tf-tilt[data-tilting="true"] > .tf-tilt__spec { opacity: 1; }
+
+/* ---------- Swarm ---------- */
+.tf-swarm {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+.tf-swarm__orbit {
+  position: absolute;
+  inset: 0;
+  animation: tf-spin var(--orbit-speed, 6s) linear infinite;
+  animation-delay: var(--orbit-delay, 0s);
+  will-change: transform;
+}
+.tf-swarm__arm {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+}
+.tf-swarm__dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--dot, 5px);
+  height: var(--dot, 5px);
+  margin: calc(var(--dot, 5px) / -2) 0 0 calc(var(--dot, 5px) / -2);
+  border-radius: 50%;
+  background: var(--st-grad);
+  box-shadow: 0 0 6px rgb(var(--st-rgb) / 0.9);
+}
+.tf-swarm__arm { transition: transform 0.6s var(--ease-spring); }
+
+/* ---------- Skeleton ---------- */
+.tf-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgb(255 255 255 / 0.05);
+}
+.tf-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.07) 45%, rgb(163 92 240 / 0.08) 55%, transparent);
+  transform: translateX(-100%);
+  animation: tf-shimmer 1.6s ease-in-out infinite;
+}
+
+/* ---------- StreamText ---------- */
+.tf-shimmer-text {
+  background-image: linear-gradient(90deg, var(--shim-base, var(--color-mute)) 0%, var(--shim-base, var(--color-mute)) 35%, var(--shim-hi, #ffffff) 50%, var(--shim-base, var(--color-mute)) 65%, var(--shim-base, var(--color-mute)) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: tf-text-shimmer 2.2s linear infinite;
+}
+html[data-motion="reduced"] .tf-shimmer-text { color: var(--shim-base, var(--color-mute)); background: none; }
+.tf-token { animation: tf-token-in 0.5s ease-out both; }
+.tf-caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.17em;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--color-accent-hi), var(--color-accent));
+  box-shadow: 0 0 10px rgb(163 92 240 / 0.8);
+  animation: tf-caret 1s steps(1) infinite;
+}
+
+/* ---------- NumberTicker ---------- */
+.tf-ticker {
+  display: inline-flex;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.tf-ticker__col {
+  position: relative;
+  display: inline-block;
+  height: 1.1em;
+  overflow: hidden;
+  /* soft top/bottom edges so a digit mid-roll reads as an odometer, not a glitch */
+  -webkit-mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
+  mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
+}
+.tf-ticker__strip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(calc(var(--d, 0) * -10%));
+  transition: transform 0.6s cubic-bezier(0.25, 1.22, 0.4, 1);
+}
+.tf-ticker__strip > span { height: 1.1em; line-height: 1.1; display: block; text-align: center; }
+.tf-ticker__ghost { visibility: hidden; }
+
+/* ---------- AmbientGlow ---------- */
+.tf-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-ambient);
+  pointer-events: none;
+  overflow: hidden;
+  background-color: var(--color-bg);
+}
+.tf-ambient::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: var(--tf-noise);
+}
+.tf-ambient__blob {
+  position: absolute;
+  width: 70vmax;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 1.4s ease;
+  will-change: transform, opacity;
+}
+.tf-ambient__blob[data-on="true"] { opacity: var(--blob-o, 1); }
+
+} /* @layer components */
+
+/* ---------- needs-you sunset pulse (glow lives on a pseudo layer: opacity/transform only) ---------- */
+@utility sun-pulse {
+  position: relative;
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    box-shadow: 0 22px 64px -10px rgb(255 61 119 / 0.85), 0 6px 28px -6px rgb(255 122 24 / 0.6);
+    animation: tf-sun-pulse 3.2s ease-in-out infinite;
+    pointer-events: none;
+  }
+}
+html[data-motion="reduced"] .sun-pulse::after { animation: none; opacity: 0.8; }
+
+/* ---------- live gradient text/fills for running ---------- */
+@utility live-gradient {
+  background-image: linear-gradient(90deg, var(--st-1), var(--st-2), var(--st-1));
+  background-size: 200% 100%;
+  animation: tf-pan 3.6s linear infinite;
+}
+html[data-motion="reduced"] .live-gradient { animation: none; }
+
+/* ---------- overlay enter/exit (Radix sets data-state and waits for animationend on close) ---------- */
+@keyframes tf-pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.96); }
+}
+@keyframes tf-pop-out {
+  to { opacity: 0; transform: translateY(2px) scale(0.97); }
+}
+@keyframes tf-fade-in { from { opacity: 0; } }
+@keyframes tf-fade-out { to { opacity: 0; } }
+/* dialogs are centred with the `translate` property, so these only touch `transform` */
+@keyframes tf-dialog-in {
+  from { opacity: 0; transform: translateY(18px) scale(0.96); }
+}
+@keyframes tf-dialog-out {
+  to { opacity: 0; transform: translateY(6px) scale(0.98); }
+}
+@keyframes tf-toast-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.96); }
+}
+@keyframes tf-toast-in-top {
+  from { opacity: 0; transform: translateY(-120%); }
+}
+@keyframes tf-toast-out {
+  to { opacity: 0; transform: scale(0.95); }
+}
+@keyframes tf-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@keyframes tf-flap {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  50% { transform: translateY(-1.2px) scaleY(0.82); }
+}
+@layer components {
+
+.tf-pop[data-state="open"], .tf-pop[data-state="delayed-open"], .tf-pop[data-state="instant-open"] { animation: tf-pop-in 0.3s var(--ease-spring); transform-origin: var(--radix-popper-transform-origin, center); }
+.tf-pop[data-state="closed"] { animation: tf-pop-out 0.14s ease-in forwards; }
+.tf-fade[data-state="open"] { animation: tf-fade-in 0.25s ease-out; }
+.tf-fade[data-state="closed"] { animation: tf-fade-out 0.18s ease-in forwards; }
+.tf-dialog[data-state="open"] { animation: tf-dialog-in 0.42s var(--ease-spring); }
+.tf-dialog[data-state="closed"] { animation: tf-dialog-out 0.16s ease-in forwards; }
+.tf-toast[data-state="open"] { animation: tf-toast-in 0.45s var(--ease-spring); }
+@media (max-width: 767px) {
+  .tf-toast[data-state="open"] { animation-name: tf-toast-in-top; }
+}
+.tf-toast[data-state="closed"] { animation: tf-toast-out 0.18s ease-in forwards; }
+.tf-toast[data-swipe="move"] { transform: translate(var(--radix-toast-swipe-move-x, 0), var(--radix-toast-swipe-move-y, 0)); }
+.tf-toast[data-swipe="cancel"] { transform: translate(0, 0); transition: transform 0.3s var(--ease-spring); }
+.tf-toast[data-swipe="end"] { animation: tf-fade-out 0.15s ease-out forwards; }
+html[data-motion="reduced"] .tf-pop,
+html[data-motion="reduced"] .tf-dialog,
+html[data-motion="reduced"] .tf-toast { animation-name: tf-fade-in; }
+html[data-motion="reduced"] .tf-pop[data-state="closed"],
+html[data-motion="reduced"] .tf-dialog[data-state="closed"],
+html[data-motion="reduced"] .tf-toast[data-state="closed"] { animation-name: tf-fade-out; }
+} /* @layer components */

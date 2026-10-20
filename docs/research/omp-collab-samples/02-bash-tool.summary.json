@@ -1,0 +1,59 @@
+{
+  "name": "02-bash-tool",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the bash tool to run: echo hello-from-collab && uname -s. Then reply done."
+  },
+  "sentAt": 1792533299926,
+  "latencyMsFromSend": {
+    "firstFrame": 3,
+    "first_agent_start": 3,
+    "first_turn_start": 29,
+    "first_message_start": 29,
+    "first_message_end": 29,
+    "first_entry": 29,
+    "first_state": 102,
+    "first_message_update": 844,
+    "firstAssistantUpdate": 844,
+    "first_tool_execution_start": 1198,
+    "first_tool_execution_update": 1223,
+    "first_tool_execution_end": 1234,
+    "first_turn_end": 1234,
+    "first_agent_end": 1931
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 1,
+    "event:turn_start": 2,
+    "event:message_start": 4,
+    "event:message_end": 4,
+    "h2g:entry": 4,
+    "h2g:state": 3,
+    "event:message_update": 50,
+    "event:tool_execution_start": 1,
+    "event:tool_execution_update": 3,
+    "event:tool_execution_end": 1,
+    "event:turn_end": 2,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 85239,
+  "decryptMs": {
+    "n": 76,
+    "max": 0.11922500000218861,
+    "avg": 0.05330051315870246
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 311,
+      "status": "working"
+    },
+    {
+      "tMs": 2312,
+      "status": "idle"
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+# TeleFlock Android APK (universal, signed) on ubuntu-latest.
+# Layout assumed: Cargo workspace root = repo root (target/ at repo root), Tauri app in src-tauri/,
+# src-tauri/gen/android committed (it is regenerated with `tauri android init --ci` if absent).
+# Secrets (all optional; without them the APK is unsigned and not installable):
+#   ANDROID_KEY_BASE64   base64 of /root/.teleflock-keys/teleflock-release.jks
+#   ANDROID_KEY_PASSWORD store+key password
+#   ANDROID_KEY_ALIAS    key alias (teleflock)
+# Draft: see docs/build.md ("CI").
+name: android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in sync with docs/build.md and /root/.teleflock-android-env.
+  NDK_VERSION: 29.0.14206865
+  ANDROID_PLATFORM: platforms;android-37.0
+  ANDROID_BUILD_TOOLS: '37.0.0'
+  # Step-level env is not visible to that step's `if:`, so gate on a workflow-level flag.
+  HAS_KEY: ${{ secrets.ANDROID_KEY_BASE64 != '' }}
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Android SDK packages + NDK
+        # ubuntu-latest ships an SDK at $ANDROID_HOME with cmdline-tools; pin what Tauri's template needs.
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" "$ANDROID_PLATFORM" "build-tools;$ANDROID_BUILD_TOOLS" "ndk;$NDK_VERSION"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: Install frontend deps
+        run: bun install --frozen-lockfile
+
+      - name: Generate Android project if missing
+        run: test -d src-tauri/gen/android || bun tauri android init --ci
+
+      - name: Release signing config
+        if: ${{ env.HAS_KEY == 'true' }}
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          umask 077
+          base64 -d <<< "$ANDROID_KEY_BASE64" > "$RUNNER_TEMP/release.jks"
+          {
+            echo "password=$ANDROID_KEY_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "storeFile=$RUNNER_TEMP/release.jks"
+          } > "$RUNNER_TEMP/keystore.properties"
+          # Read by the signingConfigs block in src-tauri/gen/android/app/build.gradle.kts.
+          echo "TELEFLOCK_KEYSTORE_PROPERTIES=$RUNNER_TEMP/keystore.properties" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: bun tauri android build --apk --ci
+
+      - name: Sign with apksigner if Gradle left it unsigned
+        if: ${{ env.TELEFLOCK_KEYSTORE_PROPERTIES != '' }}
+        run: |
+          set -euo pipefail
+          out=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          if [ -f "$out/app-universal-release-unsigned.apk" ]; then
+            bt="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS"
+            pw=$(sed -n 's/^password=//p' "$TELEFLOCK_KEYSTORE_PROPERTIES")
+            alias=$(sed -n 's/^keyAlias=//p' "$TELEFLOCK_KEYSTORE_PROPERTIES")
+            "$bt/zipalign" -f -p 4 "$out/app-universal-release-unsigned.apk" "$out/app-universal-release.apk"
+            "$bt/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-key-alias "$alias" \
+              --ks-pass "pass:$pw" --key-pass "pass:$pw" "$out/app-universal-release.apk"
+          fi
+          "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/apksigner" verify --print-certs "$out/app-universal-release.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teleflock-android-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+          if-no-files-found: error

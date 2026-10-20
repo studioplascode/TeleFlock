@@ -1,0 +1,1182 @@
+=================== herdr status server --help
+Show running server status
+
+Usage: herdr status server [OPTIONS]
+
+Options:
+      --json
+
+=================== herdr status client --help
+Show local client status
+
+Usage: herdr status client [OPTIONS]
+
+Options:
+      --json
+
+=================== herdr api snapshot --help
+Print the live session snapshot
+
+Usage: herdr api snapshot
+
+=================== herdr api schema --help
+Print or write the bundled API schema
+
+Usage: herdr api schema [OPTIONS]
+
+Options:
+      --json
+          
+
+      --output <PATH>
+
+=================== herdr workspace list --help
+List workspaces
+
+Usage: herdr workspace list
+
+=================== herdr workspace create --help
+Create a workspace
+
+Usage: herdr workspace create [OPTIONS]
+
+Options:
+      --cwd <PATH>
+          
+
+      --label <TEXT>
+          
+
+      --env <KEY=VALUE>
+          Set an environment variable for the launched process
+
+      --focus
+          
+
+      --no-focus
+
+=================== herdr workspace get --help
+Show a workspace
+
+Usage: herdr workspace get <workspace_id>
+
+Arguments:
+  <workspace_id>
+
+=================== herdr workspace focus --help
+Focus a workspace
+
+Usage: herdr workspace focus <workspace_id>
+
+Arguments:
+  <workspace_id>
+
+=================== herdr workspace rename --help
+Rename a workspace
+
+Usage: herdr workspace rename <WORKSPACE_ID> <LABEL>...
+
+Arguments:
+  <WORKSPACE_ID>
+          
+
+  <LABEL>...
+
+=================== herdr workspace report-metadata --help
+Report display-only workspace metadata
+
+Usage: herdr workspace report-metadata [OPTIONS] --source <ID> <WORKSPACE_ID>
+
+Arguments:
+  <WORKSPACE_ID>
+          
+
+Options:
+      --source <ID>
+          
+
+      --token <NAME=VALUE>
+          
+
+      --clear-token <NAME>
+          
+
+      --seq <N>
+          
+
+      --ttl-ms <N>
+
+=================== herdr workspace close --help
+Close a workspace
+
+Usage: herdr workspace close <workspace_id>
+
+Arguments:
+  <workspace_id>
+
+=================== herdr worktree list --help
+List worktree workspaces
+
+Usage: herdr worktree list [OPTIONS]
+
+Options:
+      --workspace <ID>
+          
+
+      --cwd <PATH>
+          
+
+      --trust-repository
+
+=================== herdr worktree create --help
+Create and open a Git worktree
+
+Usage: herdr worktree create [OPTIONS]
+
+Options:
+      --workspace <ID>
+          
+
+      --cwd <PATH>
+          
+
+      --branch <NAME>
+          
+
+      --base <REF>
+          
+
+      --path <PATH>
+          
+
+      --label <TEXT>
+          
+
+      --focus
+          
+
+      --no-focus
+          
+
+      --trust-repository
+
+=================== herdr worktree open --help
+Open an existing Git worktree
+
+Usage: herdr worktree open [OPTIONS]
+
+Options:
+      --workspace <ID>
+          
+
+      --cwd <PATH>
+          
+
+      --path <PATH>
+          
+
+      --branch <NAME>
+          
+
+      --label <TEXT>
+          
+
+      --focus
+          
+
+      --no-focus
+          
+
+      --trust-repository
+
+=================== herdr worktree remove --help
+Remove a worktree checkout
+
+Usage: herdr worktree remove [OPTIONS]
+
+Options:
+      --workspace <ID>
+          
+
+      --force
+          
+
+      --trust-repository
+
+=================== herdr tab list --help
+List tabs
+
+Usage: herdr tab list [OPTIONS]
+
+Options:
+      --workspace <WORKSPACE_ID>
+
+=================== herdr tab create --help
+Create a tab
+
+Usage: herdr tab create [OPTIONS]
+
+Options:
+      --workspace <WORKSPACE_ID>
+          
+
+      --cwd <PATH>
+          
+
+      --label <TEXT>
+          
+
+      --env <KEY=VALUE>
+          Set an environment variable for the launched process
+
+      --focus
+          
+
+      --no-focus
+
+=================== herdr tab get --help
+Show a tab
+
+Usage: herdr tab get <tab_id>
+
+Arguments:
+  <tab_id>
+
+=================== herdr tab focus --help
+Focus a tab
+
+Usage: herdr tab focus <tab_id>
+
+Arguments:
+  <tab_id>
+
+=================== herdr tab rename --help
+Rename a tab
+
+Usage: herdr tab rename <TAB_ID> <LABEL>...
+
+Arguments:
+  <TAB_ID>
+          
+
+  <LABEL>...
+
+=================== herdr tab close --help
+Close a tab
+
+Usage: herdr tab close <tab_id>
+
+Arguments:
+  <tab_id>
+
+=================== herdr pane list --help
+List panes
+
+Usage: herdr pane list [OPTIONS]
+
+Options:
+      --workspace <WORKSPACE_ID>
+
+=================== herdr pane current --help
+Show the current pane
+
+Usage: herdr pane current [OPTIONS]
+
+Options:
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane get --help
+Show a pane
+
+Usage: herdr pane get <pane_id>
+
+Arguments:
+  <pane_id>
+
+=================== herdr pane layout --help
+Show pane layout information
+
+Usage: herdr pane layout [OPTIONS]
+
+Options:
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane process-info --help
+Show pane process information
+
+Usage: herdr pane process-info [OPTIONS]
+
+Options:
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane neighbor --help
+Find a pane neighbor
+
+Usage: herdr pane neighbor [OPTIONS] --direction <DIRECTION>
+
+Options:
+      --direction <DIRECTION>
+          [possible values: left, right, up, down]
+
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane edges --help
+Show pane edge information
+
+Usage: herdr pane edges [OPTIONS]
+
+Options:
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane focus --help
+Focus a neighboring pane
+
+Usage: herdr pane focus [OPTIONS] --direction <DIRECTION>
+
+Options:
+      --direction <DIRECTION>
+          [possible values: left, right, up, down]
+
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane resize --help
+Resize a pane split
+
+Usage: herdr pane resize [OPTIONS] --direction <DIRECTION>
+
+Options:
+      --direction <DIRECTION>
+          [possible values: left, right, up, down]
+
+      --amount <FLOAT>
+          
+
+      --pane <ID>
+          
+
+      --current
+
+=================== herdr pane zoom --help
+Toggle or set pane zoom
+
+Usage: herdr pane zoom [OPTIONS] [PANE_ID]
+
+Arguments:
+  [PANE_ID]
+          
+
+Options:
+      --pane <ID>
+          
+
+      --current
+          
+
+      --toggle
+          
+
+      --on
+          
+
+      --off
+
+=================== herdr pane read --help
+Read pane terminal output
+
+Usage: herdr pane read [OPTIONS] <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --source <SOURCE>
+          Terminal snapshot source (default: recent)
+          
+          [possible values: visible, recent, recent-unwrapped, detection]
+
+      --lines <N>
+          
+
+      --format <FORMAT>
+          [possible values: text, ansi]
+
+      --ansi
+          
+
+      --raw
+
+=================== herdr pane rename --help
+Rename a pane
+
+Usage: herdr pane rename [OPTIONS] <PANE_ID> [LABEL]...
+
+Arguments:
+  <PANE_ID>
+          
+
+  [LABEL]...
+          
+
+Options:
+      --clear
+
+=================== herdr pane input --help
+Set pane input routing
+
+Usage: herdr pane input [OPTIONS] --right-click <TARGET> [PANE_ID]
+
+Arguments:
+  [PANE_ID]
+          
+
+Options:
+      --pane <ID>
+          
+
+      --current
+          
+
+      --right-click <TARGET>
+          [possible values: herdr, pane]
+
+=================== herdr pane split --help
+Split a pane
+
+Usage: herdr pane split [OPTIONS] [PANE_ID]
+
+Arguments:
+  [PANE_ID]
+          
+
+Options:
+      --pane <ID>
+          
+
+      --current
+          
+
+      --direction <DIRECTION>
+          [possible values: right, down]
+
+      --ratio <FLOAT>
+          
+
+      --cwd <PATH>
+          
+
+      --env <KEY=VALUE>
+          Set an environment variable for the launched process
+
+      --right-click <TARGET>
+          [possible values: herdr, pane]
+
+      --focus
+          
+
+      --no-focus
+
+=================== herdr pane swap --help
+Swap panes
+
+Usage: herdr pane swap [OPTIONS]
+
+Options:
+      --direction <DIRECTION>
+          [possible values: left, right, up, down]
+
+      --pane <ID>
+          
+
+      --current
+          
+
+      --source-pane <ID>
+          
+
+      --target-pane <ID>
+
+=================== herdr pane move --help
+Move a pane
+
+Usage: herdr pane move [OPTIONS] <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --tab <TAB_ID>
+          
+
+      --split <DIRECTION>
+          [possible values: right, down]
+
+      --target-pane <ID>
+          
+
+      --ratio <FLOAT>
+          
+
+      --new-tab
+          
+
+      --workspace <ID>
+          
+
+      --new-workspace
+          
+
+      --label <TEXT>
+          
+
+      --tab-label <TEXT>
+          
+
+      --focus
+          
+
+      --no-focus
+
+=================== herdr pane close --help
+Close a pane
+
+Usage: herdr pane close <pane_id>
+
+Arguments:
+  <pane_id>
+
+=================== herdr pane send-text --help
+Send literal text to a pane
+
+Usage: herdr pane send-text <PANE_ID> <TEXT>
+
+Arguments:
+  <PANE_ID>
+          
+
+  <TEXT>
+          
+
+next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call
+
+=================== herdr pane send-keys --help
+Send key presses to a pane
+
+Usage: herdr pane send-keys <PANE_ID> <KEY>...
+
+Arguments:
+  <PANE_ID>
+          
+
+  <KEY>...
+          
+
+Use esc as the canonical Escape key name; escape is also accepted.
+
+=================== herdr pane wait-output --help
+Wait for matching pane output
+
+Usage: herdr pane wait-output [OPTIONS] <--match <TEXT>|--regex <PATTERN>> <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --match <TEXT>
+          Match a literal substring
+
+      --regex <PATTERN>
+          Match a Rust regular expression
+
+      --source <SOURCE>
+          Terminal snapshot source (default: recent)
+          
+          [possible values: visible, recent, recent-unwrapped]
+
+      --lines <N>
+          Restrict the searched snapshot to N lines
+
+      --timeout <MS>
+          Fail after this many milliseconds
+
+      --raw
+          Keep ANSI escape sequences while matching
+
+The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely.
+
+=================== herdr pane run --help
+Run a command in a pane
+
+Usage: herdr pane run <PANE_ID> <COMMAND>...
+
+Arguments:
+  <PANE_ID>
+          
+
+  <COMMAND>...
+
+=================== herdr pane report-agent --help
+Report pane agent lifecycle state
+
+Usage: herdr pane report-agent [OPTIONS] --source <ID> --agent <LABEL> --state <STATUS> <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --source <ID>
+          
+
+      --agent <LABEL>
+          
+
+      --state <STATUS>
+          [possible values: idle, working, blocked, unknown]
+
+      --message <TEXT>
+          
+
+      --seq <N>
+          
+
+      --agent-session-id <ID>
+          
+
+      --agent-session-path <PATH>
+
+=================== herdr pane report-agent-session --help
+Report pane agent session identity
+
+Usage: herdr pane report-agent-session [OPTIONS] --source <ID> --agent <LABEL> <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --source <ID>
+          
+
+      --agent <LABEL>
+          
+
+      --seq <N>
+          
+
+      --agent-session-id <ID>
+          
+
+      --agent-session-path <PATH>
+          
+
+      --session-start-source <SOURCE>
+
+=================== herdr pane release-agent --help
+Release pane agent lifecycle authority
+
+Usage: herdr pane release-agent [OPTIONS] --source <ID> --agent <LABEL> <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --source <ID>
+          
+
+      --agent <LABEL>
+          
+
+      --seq <N>
+
+=================== herdr pane report-metadata --help
+Report display-only pane metadata
+
+Usage: herdr pane report-metadata [OPTIONS] --source <ID> <PANE_ID>
+
+Arguments:
+  <PANE_ID>
+          
+
+Options:
+      --source <ID>
+          
+
+      --agent <LABEL>
+          
+
+      --applies-to-source <ID>
+          
+
+      --title <TEXT>
+          
+
+      --clear-title
+          
+
+      --display-agent <TEXT>
+          
+
+      --clear-display-agent
+          
+
+      --state-label <STATUS=TEXT>
+          
+
+      --clear-state-labels
+          
+
+      --token <NAME=VALUE>
+          
+
+      --clear-token <NAME>
+          
+
+      --seq <N>
+          
+
+      --ttl-ms <N>
+
+=================== herdr agent list --help
+List agents
+
+Usage: herdr agent list
+
+=================== herdr agent get --help
+Show an agent
+
+Usage: herdr agent get <target>
+
+Arguments:
+  <target>
+
+=================== herdr agent read --help
+Read agent terminal output
+
+Usage: herdr agent read <TARGET> [OPTIONS]
+
+Arguments:
+  <TARGET>
+          
+
+Options:
+      --source <SOURCE>
+          Terminal snapshot source (default: recent)
+          
+          [possible values: visible, recent, recent-unwrapped, detection]
+
+      --lines <N>
+          
+
+      --format <FORMAT>
+          [possible values: text, ansi]
+
+      --ansi
+
+=================== herdr agent send-keys --help
+Send key presses to an agent
+
+Usage: herdr agent send-keys <TARGET> <KEY>...
+
+Arguments:
+  <TARGET>
+          
+
+  <KEY>...
+          
+
+Use esc as the canonical Escape key name; escape is also accepted.
+
+=================== herdr agent prompt --help
+Submit a prompt to an agent
+
+Usage: herdr agent prompt <TARGET> <TEXT> [OPTIONS]
+
+Arguments:
+  <TARGET>
+          
+
+  <TEXT>
+          
+
+Options:
+      --wait
+          Wait for the first matching state observed after submission
+
+      --until <STATUS>
+          State to match after --wait; repeat for more than one state
+          
+          [possible values: idle, working, blocked, done, unknown]
+
+      --timeout <MS>
+          Fail after this many milliseconds
+
+If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match.
+
+=================== herdr agent rename --help
+Rename an agent
+
+Usage: herdr agent rename <TARGET> <NAME>|--clear
+
+Arguments:
+  <TARGET>
+          
+
+  [NAME]
+          
+
+Options:
+      --clear
+
+=================== herdr agent focus --help
+Focus an agent
+
+Usage: herdr agent focus <target>
+
+Arguments:
+  <target>
+
+=================== herdr agent wait --help
+Wait until an agent reaches one of the requested states
+
+Usage: herdr agent wait <TARGET> [OPTIONS]
+
+Arguments:
+  <TARGET>
+          
+
+Options:
+      --until <STATUS>
+          State to match; repeat for more than one state
+          
+          [possible values: idle, working, blocked, done, unknown]
+
+      --timeout <MS>
+          Fail after this many milliseconds
+
+Without --until, matches idle, done, or blocked. Use --until unknown explicitly when needed. Without --timeout, waits indefinitely.
+
+=================== herdr agent attach --help
+Attach directly to an agent terminal
+
+Usage: herdr agent attach <TARGET> [OPTIONS]
+
+Arguments:
+  <TARGET>
+          
+
+Options:
+      --takeover
+
+=================== herdr agent start --help
+Start a supported interactive agent in an existing pane
+
+Usage: herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]
+
+Arguments:
+  <NAME>
+          
+
+  [AGENT_ARG]...
+          
+
+Options:
+      --kind <KIND>
+          Supported agent kind and canonical executable
+          
+          [possible values: pi, claude, codex, gemini, cursor, devin, agy, cline, omp, mastracode, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qwen, maki, muse]
+
+      --pane <ID>
+          Existing pane at an interactive shell prompt
+
+      --timeout <MS>
+          Wait for interactive readiness (default: 30000; max: 300000)
+
+The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.
+
+next: herdr agent prompt <TARGET> <TEXT> --wait
+
+=================== herdr agent explain --help
+Explain agent detection state
+
+Usage: herdr agent explain [OPTIONS] [TARGET]
+
+Arguments:
+  [TARGET]
+          
+
+Options:
+      --file <PATH>
+          
+
+      --agent <LABEL>
+          
+
+      --json
+          
+
+      --format <FORMAT>
+          [possible values: text, json]
+
+  -v, --verbose
+
+=================== herdr terminal attach --help
+Attach directly to a terminal stream
+
+Usage: herdr terminal attach [OPTIONS] <TERMINAL_ID>
+
+Arguments:
+  <TERMINAL_ID>
+          
+
+Options:
+      --takeover
+
+=================== herdr terminal session --help
+Work with terminal sessions
+
+Usage: herdr terminal session [COMMAND]
+
+Commands:
+  control  Control a terminal stream
+  observe  Observe a terminal stream
+
+=================== herdr terminal title --help
+Manage the outer terminal title
+
+Usage: herdr terminal title [COMMAND]
+
+Commands:
+  set    Set the outer terminal title
+  clear  Clear the outer terminal title
+
+=================== herdr notification show --help
+Show a notification
+
+Usage: herdr notification show [OPTIONS] <TITLE>
+
+Arguments:
+  <TITLE>
+          
+
+Options:
+      --body <TEXT>
+          
+
+      --position <POSITION>
+          [possible values: top-left, top-right, bottom-left, bottom-right]
+
+      --sound <SOUND>
+          [possible values: none, done, request]
+
+=================== herdr session list --help
+List sessions
+
+Usage: herdr session list [OPTIONS]
+
+Options:
+      --json
+
+=================== herdr session attach --help
+Attach to a session
+
+Usage: herdr session attach <NAME>
+
+Arguments:
+  <NAME>
+
+=================== herdr session stop --help
+Stop a session
+
+Usage: herdr session stop [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          
+
+Options:
+      --json
+
+=================== herdr session delete --help
+Delete a stopped session
+
+Usage: herdr session delete [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          
+
+Options:
+      --json
+
+=================== herdr machine list --help
+List saved SSH machines
+
+Usage: herdr machine list [OPTIONS]
+
+Options:
+      --json
+
+=================== herdr machine add --help
+Prepare the remote Herdr server and save an SSH machine
+
+Usage: herdr machine add [OPTIONS] --label <LABEL> <SSH_TARGET>
+
+Arguments:
+  <SSH_TARGET>
+          
+
+Options:
+      --label <LABEL>
+          Set the machine label shown in the sidebar
+
+      --remote-session <NAME>
+          Set the explicit Herdr session on the remote machine
+
+=================== herdr machine rename --help
+Rename a saved SSH machine
+
+Usage: herdr machine rename --label <LABEL> <PROFILE_ID>
+
+Arguments:
+  <PROFILE_ID>
+          
+
+Options:
+      --label <LABEL>
+          Set the machine label shown in the sidebar
+
+=================== herdr machine remove --help
+Remove a saved SSH machine
+
+Usage: herdr machine remove <PROFILE_ID>
+
+Arguments:
+  <PROFILE_ID>
+
+=================== herdr machine enable --help
+Enable a saved SSH machine
+
+Usage: herdr machine enable <PROFILE_ID>
+
+Arguments:
+  <PROFILE_ID>
+
+=================== herdr machine disable --help
+Disable a saved SSH machine
+
+Usage: herdr machine disable <PROFILE_ID>
+
+Arguments:
+  <PROFILE_ID>
+
+=================== herdr integration install --help
+Install an integration
+
+Usage: herdr integration install <TARGET>
+
+Arguments:
+  <TARGET>
+          [possible values: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, cursor, mastracode, antigravity-cli, grok]
+
+=================== herdr integration uninstall --help
+Uninstall an integration
+
+Usage: herdr integration uninstall <TARGET>
+
+Arguments:
+  <TARGET>
+          [possible values: pi, omp, claude, codex, copilot, devin, droid, kimi, opencode, kilo, hermes, qodercli, qwen, cursor, mastracode, antigravity-cli, grok]
+
+=================== herdr integration status --help
+Show integration status
+
+Usage: herdr integration status [OPTIONS]
+
+Options:
+      --outdated-only
+
+=================== herdr server stop --help
+Stop the running server
+
+Usage: herdr server stop
+
+=================== herdr server reload-config --help
+Reload config in the running server
+
+Usage: herdr server reload-config
+
+=================== herdr server agent-manifests --help
+Show active agent detection manifests
+
+Usage: herdr server agent-manifests [OPTIONS]
+
+Options:
+      --json
+
+=================== herdr server update-agent-manifests --help
+Fetch and reload agent detection manifests
+
+Usage: herdr server update-agent-manifests [OPTIONS]
+
+Options:
+      --json
+
+=================== herdr server reload-agent-manifests --help
+Reload local agent detection manifest overrides
+
+Usage: herdr server reload-agent-manifests
+
+=================== herdr config check --help
+Validate config.toml and print diagnostics
+
+Usage: herdr config check
+
+=================== herdr config reset-keys --help
+Reset custom keybindings
+
+Usage: herdr config reset-keys
+
+=================== herdr channel show --help
+Print the configured update channel
+
+Usage: herdr channel show
+
+=================== herdr channel set --help
+Choose the update channel
+
+Usage: herdr channel set <CHANNEL>
+
+Arguments:
+  <CHANNEL>
+          [possible values: stable, preview]
+
+Work with terminal sessions
+
+Usage: herdr terminal session [COMMAND]
+
+Commands:
+  control  Control a terminal stream
+  observe  Observe a terminal stream
+

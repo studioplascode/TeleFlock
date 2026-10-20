@@ -1,0 +1,1 @@
+{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":161248,"foreground_processes":[{"argv":["omp","--model","openai-codex/gpt-6-luna:low"],"cmdline":"omp --model openai-codex/gpt-6-luna:low","cwd":"/tmp","name":"omp","pid":161248}],"pane_id":"w1:p1","shell_pid":158520},"type":"pane_process_info"}}

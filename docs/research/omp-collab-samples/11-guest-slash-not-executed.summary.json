@@ -1,0 +1,53 @@
+{
+  "name": "11-guest-slash-not-executed",
+  "sent": {
+    "t": "prompt",
+    "text": "/switch :low"
+  },
+  "sentAt": 1792533536107,
+  "latencyMsFromSend": {
+    "firstFrame": 3,
+    "first_agent_start": 3,
+    "first_turn_start": 33,
+    "first_message_start": 34,
+    "first_message_end": 34,
+    "first_entry": 34,
+    "first_state": 103,
+    "first_message_update": 1439,
+    "firstAssistantUpdate": 1439,
+    "first_turn_end": 4900,
+    "first_agent_end": 8961
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 2,
+    "event:turn_start": 2,
+    "event:message_start": 3,
+    "event:message_end": 3,
+    "h2g:entry": 4,
+    "h2g:state": 3,
+    "event:message_update": 30,
+    "event:turn_end": 2,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 239552,
+  "decryptMs": {
+    "n": 50,
+    "max": 0.4237299999804236,
+    "avg": 0.07566168000223115
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 311,
+      "status": "working"
+    },
+    {
+      "tMs": 9386,
+      "status": "idle"
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "name": "01b-prompt-streaming-thinking",
+  "sent": {
+    "t": "prompt",
+    "text": "Reason carefully: what is 37*43? Show a 3-line working, then list the numbers one to twenty in words, one per line."
+  },
+  "sentAt": 1792533258511,
+  "latencyMsFromSend": {
+    "firstFrame": 3,
+    "first_agent_start": 3,
+    "first_turn_start": 27,
+    "first_message_start": 27,
+    "first_message_end": 27,
+    "first_entry": 27,
+    "first_state": 103,
+    "first_turn_end": 158,
+    "first_auto_retry_start": 158,
+    "first_message_update": 21831,
+    "firstAssistantUpdate": 21831,
+    "first_agent_end": 22399,
+    "first_auto_retry_end": 22403
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 7,
+    "event:turn_start": 7,
+    "event:message_start": 8,
+    "event:message_end": 8,
+    "h2g:entry": 8,
+    "h2g:state": 2,
+    "event:turn_end": 7,
+    "event:auto_retry_start": 6,
+    "event:message_update": 83,
+    "event:agent_end": 1,
+    "event:auto_retry_end": 1
+  },
+  "h2gBytes": 145655,
+  "decryptMs": {
+    "n": 138,
+    "max": 2.4304810000030557,
+    "avg": 0.14384399999972378
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 157,
+      "status": "working"
+    },
+    {
+      "tMs": 22764,
+      "status": "idle"
+    }
+  ]
+}

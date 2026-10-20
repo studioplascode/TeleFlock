@@ -1,0 +1,59 @@
+{
+  "name": "09-agent-cmd-chat",
+  "sent": {
+    "t": "agent-cmd",
+    "cmd": "chat",
+    "agentId": "ReplyOk",
+    "text": "Reply with the single word ok2."
+  },
+  "sentAt": 1792533492280,
+  "latencyMsFromSend": {
+    "firstFrame": 3,
+    "first_bus": 3,
+    "first_agents": 105,
+    "first_agent_start": 921,
+    "first_turn_start": 926,
+    "first_message_start": 926,
+    "first_message_end": 926,
+    "first_entry": 927,
+    "first_state": 1021,
+    "first_message_update": 1873,
+    "firstAssistantUpdate": 1873,
+    "first_turn_end": 2900,
+    "first_agent_end": 3891
+  },
+  "frameCounts": {
+    "g2h:agent-cmd": 1,
+    "h2g:bus": 7,
+    "h2g:agents": 2,
+    "event:agent_start": 2,
+    "event:turn_start": 2,
+    "event:message_start": 3,
+    "event:message_end": 3,
+    "h2g:entry": 3,
+    "h2g:state": 3,
+    "event:message_update": 7,
+    "event:turn_end": 2,
+    "event:agent_end": 2
+  },
+  "h2gBytes": 68726,
+  "decryptMs": {
+    "n": 36,
+    "max": 3.4314619999495335,
+    "avg": 0.1998455277789617
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 4,
+      "status": "idle"
+    },
+    {
+      "tMs": 1251,
+      "status": "working"
+    },
+    {
+      "tMs": 4263,
+      "status": "idle"
+    }
+  ]
+}

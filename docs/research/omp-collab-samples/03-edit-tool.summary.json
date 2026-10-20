@@ -1,0 +1,57 @@
+{
+  "name": "03-edit-tool",
+  "sent": {
+    "t": "prompt",
+    "text": "Edit notes.txt: replace the line beta with BETA-EDITED using your edit tool. Do not read other files. Reply done."
+  },
+  "sentAt": 1792533310042,
+  "latencyMsFromSend": {
+    "firstFrame": 3,
+    "first_agent_start": 3,
+    "first_turn_start": 27,
+    "first_message_start": 27,
+    "first_message_end": 27,
+    "first_entry": 27,
+    "first_state": 103,
+    "first_message_update": 875,
+    "firstAssistantUpdate": 875,
+    "first_tool_execution_start": 1098,
+    "first_tool_execution_end": 1099,
+    "first_turn_end": 1120,
+    "first_agent_end": 2695
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 1,
+    "event:turn_start": 3,
+    "event:message_start": 6,
+    "event:message_end": 6,
+    "h2g:entry": 6,
+    "h2g:state": 4,
+    "event:message_update": 49,
+    "event:tool_execution_start": 2,
+    "event:tool_execution_end": 2,
+    "event:turn_end": 3,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 102653,
+  "decryptMs": {
+    "n": 83,
+    "max": 0.4728130000003148,
+    "avg": 0.053403409637990465
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 157,
+      "status": "working"
+    },
+    {
+      "tMs": 3077,
+      "status": "idle"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "name": "05-ask-ui-response",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the ask tool to ask me one question: which color do I prefer, with options red and blue. Then reply with my answer in one word."
+  },
+  "sentAt": 1792533360794,
+  "latencyMsFromSend": {
+    "firstFrame": 4,
+    "first_agent_start": 4,
+    "first_turn_start": 29,
+    "first_message_start": 29,
+    "first_message_end": 29,
+    "first_entry": 29,
+    "first_state": 104,
+    "first_message_update": 884,
+    "firstAssistantUpdate": 884,
+    "first_ui-request": 1483,
+    "uiResponseSentAt": 1514,
+    "first_tool_execution_start": 1483,
+    "first_ui-request-end": 1516,
+    "first_tool_execution_end": 1516,
+    "first_turn_end": 1536,
+    "first_agent_end": 1543
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 1,
+    "event:turn_start": 2,
+    "event:message_start": 4,
+    "event:message_end": 4,
+    "h2g:entry": 4,
+    "h2g:state": 2,
+    "event:message_update": 67,
+    "h2g:ui-request": 1,
+    "event:tool_execution_start": 1,
+    "g2h:ui-response": 1,
+    "h2g:ui-request-end": 1,
+    "event:tool_execution_end": 1,
+    "event:turn_end": 2,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 99181,
+  "decryptMs": {
+    "n": 91,
+    "max": 0.2820519999950193,
+    "avg": 0.055949395605629046
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 6,
+      "status": "idle"
+    },
+    {
+      "tMs": 314,
+      "status": "working"
+    },
+    {
+      "tMs": 1599,
+      "status": "blocked"
+    },
+    {
+      "tMs": 1753,
+      "status": "working"
+    },
+    {
+      "tMs": 1909,
+      "status": "idle"
+    }
+  ]
+}

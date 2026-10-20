@@ -1,0 +1,30 @@
+{
+    "id": "cli:agent:get",
+    "result": {
+        "agent": {
+            "agent": "omp",
+            "agent_session": {
+                "agent": "omp",
+                "kind": "path",
+                "source": "herdr:omp",
+                "value": "/root/.omp/agent/sessions/-tmp-tf-lab-omp-work/2026-10-20T21-50-42-657Z_01a15b4b-95e1-752b-9e43-5b702d6126d4.jsonl"
+            },
+            "agent_status": "idle",
+            "cwd": "/tmp/tf-lab-omp/work",
+            "focused": true,
+            "foreground_cwd": "/tmp/tf-lab-omp/work",
+            "interactive_ready": true,
+            "name": "lab1",
+            "pane_id": "w1:p1",
+            "revision": 641,
+            "screen_detection_skipped": true,
+            "state_change_seq": 13,
+            "tab_id": "w1:t1",
+            "terminal_id": "term_65e4c9eaa412a1",
+            "terminal_title": "\u03c0 > TeleFlock lab",
+            "terminal_title_stripped": "\u03c0 > TeleFlock lab",
+            "workspace_id": "w1"
+        },
+        "type": "agent_info"
+    }
+}

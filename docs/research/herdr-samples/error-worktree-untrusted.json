@@ -1,0 +1,1 @@
+{"error":{"code":"worktree_list_failed","message":"fatal: detected dubious ownership in repository at '/tmp/tf-lab-repo2'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /tmp/tf-lab-repo2"},"id":"cli:worktree:list"}

@@ -1,0 +1,312 @@
+/*
+ * TeleFlock design tokens — Bento x omp purple, dark only.
+ * Everything here becomes a Tailwind v4 utility (bg-tile-2, text-display, rounded-tile, shadow-d2, ease-spring…).
+ * The TS mirror lives in src/design/tokens.ts; keep the two in sync.
+ */
+@theme {
+  /* ---------- color: surfaces & ink ---------- */
+  --color-*: initial;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-white: #ffffff;
+  --color-black: #000000;
+
+  --color-bg: #0b0b10;           /* app background (under the noise) */
+  --color-bg-deep: #07070b;      /* terminals, wells */
+  --color-chrome: #0d0d13;       /* window chrome / title bar base */
+  --color-tile-1: #15151d;       /* tile bottom */
+  --color-tile-2: #1b1b25;       /* tile top */
+  --color-tile-3: #232330;       /* card / raised control */
+  --color-tile-4: #2c2c3b;       /* pressed / selected control */
+  --color-tile-5: #383849;       /* hover on tile-4 */
+  --color-well: rgb(10 10 16 / 0.55); /* inset fields inside tiles */
+
+  --color-ink: #f5f5f7;          /* primary text */
+  --color-ink-2: #dcdce4;        /* body copy on tiles */
+  --color-mute: #9a9aad;         /* secondary text */
+  --color-mute-2: #6e6e82;       /* tertiary / meta */
+  --color-line: rgb(255 255 255 / 0.06);
+  --color-line-2: rgb(255 255 255 / 0.1);
+  --color-line-3: rgb(255 255 255 / 0.18);
+
+  /* ---------- color: brand ---------- */
+  --color-accent: #a35cf0;       /* omp purple: primary actions, selection, focus */
+  --color-accent-hi: #b97cf6;
+  --color-accent-lo: #7d3fd0;
+  --color-accent-ink: #e9dcff;   /* text on accent-tinted surfaces */
+  --color-omp-pink: #f053d0;
+  --color-omp-purple: #a15eef;
+  --color-omp-blue: #7fa2e7;
+
+  /* ---------- color: status ---------- */
+  --color-run-1: #a35cf0;
+  --color-run-2: #4f8bff;
+  --color-sun-1: #ff7a18;
+  --color-sun-2: #ff3d77;
+  --color-review: #22d3ee;
+  --color-done: #a3e635;
+  --color-idle: #8a94a6;
+  --color-error: #ff4d5e;
+  --color-warn: #fbbf24;
+
+  /* diff / code accents */
+  --color-add: #a3e635;
+  --color-del: #ff6b8b;
+  --color-tool: #b9c2ff;
+
+  /* ---------- type ---------- */
+  --font-*: initial;
+  --font-display: "Sora Variable", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Manrope Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --text-*: initial;
+  --text-2xs: 10.5px;  --text-2xs--line-height: 1.4;
+  --text-xs: 11.5px;   --text-xs--line-height: 1.4;
+  --text-sm: 12.5px;   --text-sm--line-height: 1.45;
+  --text-base: 13px;   --text-base--line-height: 1.5;
+  --text-md: 14px;     --text-md--line-height: 1.45;
+  --text-lg: 16px;     --text-lg--line-height: 1.35;  --text-lg--letter-spacing: -0.01em;
+  --text-xl: 19px;     --text-xl--line-height: 1.25;  --text-xl--letter-spacing: -0.02em;
+  --text-2xl: 22px;    --text-2xl--line-height: 1.2;  --text-2xl--letter-spacing: -0.025em;
+  --text-3xl: 25px;    --text-3xl--line-height: 1.15; --text-3xl--letter-spacing: -0.03em;
+  --text-display: 34px; --text-display--line-height: 1.05; --text-display--letter-spacing: -0.045em;
+  --text-hero: 40px;   --text-hero--line-height: 1;   --text-hero--letter-spacing: -0.04em;
+  --text-mega: 56px;   --text-mega--line-height: 0.95; --text-mega--letter-spacing: -0.05em;
+
+  --tracking-kicker: 0.14em;
+
+  /* ---------- space: 4px grid (p-1 = 4px, p-4 = 16px, gap-5 = 20px) ---------- */
+  --spacing: 4px;
+
+  /* ---------- radii ---------- */
+  --radius-*: initial;
+  --radius-xs: 6px;      /* kbd, tiny tags */
+  --radius-sm: 10px;     /* small controls */
+  --radius-md: 14px;     /* buttons, inputs */
+  --radius-lg: 18px;     /* option cards, minis */
+  --radius-xl: 22px;     /* kanban cards */
+  --radius-tile: 28px;   /* bento tiles */
+  --radius-sheet: 34px;  /* bottom sheets, modals */
+  --radius-full: 9999px;
+
+  /* ---------- elevation (layered depth from the Bento draft) ---------- */
+  --shadow-*: initial;
+  --shadow-none: 0 0 #0000;
+  --shadow-d1: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 18px -6px rgb(0 0 0 / 0.5);
+  --shadow-d2: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 2px 4px rgb(0 0 0 / 0.35), 0 14px 30px -8px rgb(0 0 0 / 0.55), 0 34px 64px -24px rgb(0 0 0 / 0.6);
+  --shadow-d3: inset 0 1px 0 rgb(255 255 255 / 0.09), 0 4px 10px rgb(0 0 0 / 0.35), 0 26px 50px -10px rgb(0 0 0 / 0.65), 0 70px 120px -30px rgb(0 0 0 / 0.75);
+  --shadow-key: inset 0 -2px 0 rgb(0 0 0 / 0.35), inset 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-hairline: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-glow-accent: 0 10px 28px -8px rgb(163 92 240 / 0.75), 0 2px 10px -4px rgb(240 83 208 / 0.4);
+  --shadow-glow-sun: 0 18px 50px -12px rgb(255 61 119 / 0.6), 0 6px 24px -8px rgb(255 122 24 / 0.45);
+  --shadow-glow-run: 0 10px 28px -8px rgb(124 108 248 / 0.75);
+  --shadow-glow-review: 0 8px 22px -8px rgb(34 211 238 / 0.6);
+  --shadow-glow-done: 0 8px 22px -8px rgb(163 230 53 / 0.5);
+  --shadow-glow-error: 0 10px 26px -8px rgb(255 77 94 / 0.6);
+
+  /* ---------- motion ---------- */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-sine: cubic-bezier(0.37, 0, 0.63, 1);
+
+  --animate-spin-slow: tf-spin 4s linear infinite;
+  --animate-breathe: tf-breathe var(--tf-breath, 2.4s) var(--ease-in-out-sine) infinite;
+  --animate-ping-soft: tf-ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+  --animate-blink: tf-blink 1s steps(1) infinite;
+  --animate-shimmer: tf-shimmer 2.2s linear infinite;
+  --animate-gradient-pan: tf-pan 3.6s linear infinite;
+  --animate-sun-pulse: tf-sun-pulse 3.2s ease-in-out infinite;
+  --animate-rise-in: tf-rise-in 0.5s var(--ease-spring) both;
+}
+
+/* z-layers: tokens + utilities (Tailwind has no z-index theme namespace) */
+@layer base {
+:root {
+  --z-ambient: -1;
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 20;
+  --z-titlebar: 30;
+  --z-drag: 40;
+  --z-overlay: 50;
+  --z-modal: 60;
+  --z-popover: 70;
+  --z-toast: 80;
+  --z-tooltip: 90;
+
+  --tf-noise: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .045 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  --tf-grad-omp: linear-gradient(135deg, #f053d0 0%, #a15eef 50%, #7fa2e7 100%);
+  --tf-grad-sun: linear-gradient(135deg, #ff7a18 0%, #ff3d77 100%);
+  --tf-grad-run: linear-gradient(135deg, #a35cf0 0%, #4f8bff 100%);
+}
+}
+
+@utility z-ambient { z-index: var(--z-ambient); }
+@utility z-base { z-index: var(--z-base); }
+@utility z-raised { z-index: var(--z-raised); }
+@utility z-sticky { z-index: var(--z-sticky); }
+@utility z-titlebar { z-index: var(--z-titlebar); }
+@utility z-drag { z-index: var(--z-drag); }
+@utility z-overlay { z-index: var(--z-overlay); }
+@utility z-modal { z-index: var(--z-modal); }
+@utility z-popover { z-index: var(--z-popover); }
+@utility z-toast { z-index: var(--z-toast); }
+@utility z-tooltip { z-index: var(--z-tooltip); }
+
+/*
+ * Status vars. Put data-status="running|needs-you|review|done|idle|error" on any element and
+ * every descendant can use --st-1/--st-2 (gradient stops), --st-solid, --st-rgb (for alpha),
+ * --st-grad and --st-glow — or the st-* utilities below.
+ */
+/* In @layer base so utilities (e.g. an arbitrary [--st-grad:…] class) can override per element. */
+@layer base {
+:root,
+[data-status="idle"] {
+  --st-1: #94a3b8;
+  --st-2: #64748b;
+  --st-solid: #8a94a6;
+  --st-rgb: 138 148 166;
+  --st-ink: #0b0b10;
+  --st-grad: linear-gradient(135deg, #94a3b8, #64748b);
+  --st-glow: 0 6px 18px -8px rgb(100 116 139 / 0.5);
+}
+[data-status="running"] {
+  --st-1: #a35cf0;
+  --st-2: #4f8bff;
+  --st-solid: #9b6cf7;
+  --st-rgb: 155 108 247;
+  --st-ink: #ffffff;
+  --st-grad: var(--tf-grad-run);
+  --st-glow: var(--shadow-glow-run);
+}
+[data-status="needs-you"] {
+  --st-1: #ff7a18;
+  --st-2: #ff3d77;
+  --st-solid: #ff3d77;
+  --st-rgb: 255 61 119;
+  --st-ink: #ffffff;
+  --st-grad: var(--tf-grad-sun);
+  --st-glow: var(--shadow-glow-sun);
+}
+[data-status="review"] {
+  --st-1: #22d3ee;
+  --st-2: #0ea5e9;
+  --st-solid: #22d3ee;
+  --st-rgb: 34 211 238;
+  --st-ink: #04262c;
+  --st-grad: linear-gradient(135deg, #22d3ee, #0ea5e9);
+  --st-glow: var(--shadow-glow-review);
+}
+[data-status="done"] {
+  --st-1: #a3e635;
+  --st-2: #4ade80;
+  --st-solid: #a3e635;
+  --st-rgb: 163 230 53;
+  --st-ink: #1a2e05;
+  --st-grad: linear-gradient(135deg, #a3e635, #4ade80);
+  --st-glow: var(--shadow-glow-done);
+}
+[data-status="error"] {
+  --st-1: #ff4d5e;
+  --st-2: #e11d48;
+  --st-solid: #ff4d5e;
+  --st-rgb: 255 77 94;
+  --st-ink: #ffffff;
+  --st-grad: linear-gradient(135deg, #ff4d5e, #e11d48);
+  --st-glow: var(--shadow-glow-error);
+}
+}
+
+@utility st-bg { background-image: var(--st-grad); color: var(--st-ink); }
+@utility st-text { color: var(--st-solid); }
+@utility st-fill { background-color: var(--st-solid); }
+@utility st-soft { background-color: rgb(var(--st-rgb) / 0.14); color: var(--st-solid); }
+@utility st-ring { box-shadow: inset 0 0 0 1px rgb(var(--st-rgb) / 0.4); }
+@utility st-glow { box-shadow: var(--st-glow); }
+@utility st-border-grad {
+  border: 1.5px solid transparent;
+  background:
+    linear-gradient(180deg, #25202b, #1f1a24) padding-box,
+    var(--st-grad) border-box;
+}
+@utility text-st-grad {
+  background-image: linear-gradient(135deg, var(--st-1), var(--st-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* brand gradients */
+@utility bg-omp { background-image: var(--tf-grad-omp); }
+@utility bg-sun { background-image: var(--tf-grad-sun); }
+@utility bg-run { background-image: var(--tf-grad-run); }
+@utility text-omp {
+  background-image: var(--tf-grad-omp);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@utility bg-noise { background-image: var(--tf-noise); }
+
+/* surfaces */
+@utility tile {
+  position: relative;
+  border-radius: var(--radius-tile);
+  background: linear-gradient(180deg, var(--color-tile-2), var(--color-tile-1));
+  box-shadow: var(--shadow-d2);
+}
+@utility card-surface {
+  position: relative;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(180deg, var(--color-tile-3), var(--color-tile-2));
+  box-shadow: var(--shadow-d1);
+}
+@utility glass {
+  background: rgb(27 27 37 / 0.72);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  box-shadow: var(--shadow-d2), inset 0 0 0 1px rgb(255 255 255 / 0.07);
+}
+@utility well {
+  background: var(--color-well);
+  box-shadow: inset 0 0 0 1px var(--color-line);
+}
+@utility kicker {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--color-mute);
+}
+@utility tabular { font-variant-numeric: tabular-nums; }
+
+/* accessible focus ring for custom controls */
+@utility focus-ring {
+  outline: none;
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent), 0 0 18px 2px rgb(163 92 240 / 0.45);
+  }
+}
+
+/* pressable: springy press feedback for anything clickable (CSS-only, compositor friendly) */
+@utility pressable {
+  transition: transform 0.35s var(--ease-spring), background-color 0.2s, color 0.2s, box-shadow 0.25s, opacity 0.2s;
+  -webkit-tap-highlight-color: transparent;
+  &:active:not(:disabled, [aria-disabled="true"]) {
+    transform: scale(0.96);
+    transition-duration: 0.08s;
+  }
+}
+@utility lift {
+  transition: transform 0.35s var(--ease-spring), box-shadow 0.3s;
+  @media (hover: hover) {
+    &:hover:not(:disabled) { transform: translateY(-1px); }
+  }
+}
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+@utility safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0px); }

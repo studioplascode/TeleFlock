@@ -1,0 +1,50 @@
+# TeleFlock Windows bundle (NSIS setup .exe) on a native Windows runner.
+# Layout assumed: Cargo workspace root = repo root (target/ at repo root), Tauri app in src-tauri/, bun.
+# Draft: see docs/build.md ("CI") for secrets and the Linux cross-compile alternative.
+name: windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nsis:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          # Workspace root is the repo root, so target/ lives there (not src-tauri/target).
+          workspaces: '. -> target'
+
+      - name: Install frontend deps
+        run: bun install --frozen-lockfile
+
+      - name: Build NSIS installer
+        # beforeBuildCommand (bun run build) builds the frontend.
+        run: bun tauri build --target x86_64-pc-windows-msvc --bundles nsis
+        # Optional Authenticode signing: configure bundle.windows.signCommand / certificateThumbprint
+        # and pass secrets here. Updater signing would use TAURI_SIGNING_PRIVATE_KEY(_PASSWORD).
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teleflock-windows-nsis
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

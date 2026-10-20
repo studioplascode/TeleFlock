@@ -1,0 +1,3 @@
+{"seq":1236,"recvAt":1792533643854,"dir":"h2g","bytes":153,"decryptMs":0.1066020000143908,"frame":{"t":"bye","reason":"session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them"}}
+{"seq":1237,"recvAt":1792533643854,"dir":"ctl","bytes":19,"frame":{"t":"room-closed"}}
+{"seq":1238,"recvAt":1792533643854,"dir":"ctl","bytes":0,"frame":{"t":"ws-close","code":4001,"reason":"room closed"}}

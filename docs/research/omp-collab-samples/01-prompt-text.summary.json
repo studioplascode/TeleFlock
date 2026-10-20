@@ -1,0 +1,53 @@
+{
+  "name": "01-prompt-text",
+  "sent": {
+    "t": "prompt",
+    "text": "Think briefly, then reply with exactly: pong"
+  },
+  "sentAt": 1792533246786,
+  "latencyMsFromSend": {
+    "firstFrame": 6,
+    "first_agent_start": 6,
+    "first_turn_start": 36,
+    "first_message_start": 36,
+    "first_message_end": 36,
+    "first_entry": 36,
+    "first_state": 106,
+    "first_message_update": 1310,
+    "firstAssistantUpdate": 1310,
+    "first_turn_end": 1370,
+    "first_agent_end": 1370
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 1,
+    "event:turn_start": 1,
+    "event:message_start": 2,
+    "event:message_end": 2,
+    "h2g:entry": 2,
+    "h2g:state": 2,
+    "event:message_update": 3,
+    "event:turn_end": 1,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 17316,
+  "decryptMs": {
+    "n": 15,
+    "max": 0.12313200000062352,
+    "avg": 0.0648110666666374
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 4,
+      "status": "idle"
+    },
+    {
+      "tMs": 311,
+      "status": "working"
+    },
+    {
+      "tMs": 1848,
+      "status": "idle"
+    }
+  ]
+}

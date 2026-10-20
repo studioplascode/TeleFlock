@@ -1,0 +1,1 @@
+{"id":"cli:workspace:list","error":{"code":"server_not_running","message":"no herdr server is running at /root/.config/herdr/sessions/tf-lab-nonexistent/herdr.sock; run `herdr session attach tf-lab-nonexistent` to start or attach it"}}

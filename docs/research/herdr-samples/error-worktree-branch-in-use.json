@@ -1,0 +1,1 @@
+{"error":{"code":"worktree_create_failed","message":"Preparing worktree (checking out 'main')\nfatal: 'main' is already used by worktree at '/tmp/tf-lab-repo'"},"id":"cli:worktree:create"}

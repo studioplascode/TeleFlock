@@ -1,0 +1,10 @@
+# Per-process omp settings overlay for the TeleFlock collab PoC.
+# Load with `omp --config /root/TeleFlock/.research/poc/collab-overlay.yml`
+# (or PI_CONFIG_FILES=<this file>). Never written into ~/.omp/agent/config.yml.
+collab:
+  autoStart: control
+  relayUrl: ws://127.0.0.1:7466
+  displayName: tf-lab-host
+modelRoles:
+  # keep task subagents on the cheap model in the lab
+  task: openai-codex/gpt-6-luna:low

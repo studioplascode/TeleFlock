@@ -1,0 +1,28 @@
+{
+  "name": "10-injected-switch-thinking",
+  "sent": null,
+  "sentAt": 1792533515859,
+  "latencyMsFromSend": {
+    "firstFrame": 5968,
+    "first_entry": 5968,
+    "first_thinking_level_changed": 5968,
+    "first_state": 6066
+  },
+  "frameCounts": {
+    "h2g:entry": 2,
+    "event:thinking_level_changed": 1,
+    "h2g:state": 1
+  },
+  "h2gBytes": 3935,
+  "decryptMs": {
+    "n": 4,
+    "max": 0.12483600003179163,
+    "avg": 0.0725195000122767
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 4,
+      "status": "idle"
+    }
+  ]
+}

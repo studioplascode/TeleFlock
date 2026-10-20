@@ -1,0 +1,12 @@
+[package]
+name = "tf-proto"
+description = "TeleFlock wire protocol: shared types for tf-hostd, tf-client, tf-devserver and (generated) TypeScript"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = "3"
+ts-rs = "12"

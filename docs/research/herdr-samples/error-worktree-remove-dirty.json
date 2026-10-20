@@ -1,0 +1,1 @@
+{"error":{"code":"dirty_worktree_requires_force","message":"fatal: '/root/.herdr/worktrees/tf-lab-repo/feat-y' contains modified or untracked files, use --force to delete it"},"id":"cli:worktree:remove"}

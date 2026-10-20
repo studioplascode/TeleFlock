@@ -1,0 +1,36 @@
+{
+ "id": "r1",
+ "result": {
+  "type": "agent_list",
+  "agents": [
+   {
+    "terminal_id": "term_65e4c9feaf5881",
+    "name": "labomp2",
+    "agent": "omp",
+    "terminal_title": "π > 󱜺 ASK: Ask Proceed yes or no",
+    "terminal_title_stripped": "π > 󱜺 ASK: Ask Proceed yes or no",
+    "agent_status": "idle",
+    "screen_detection_skipped": true,
+    "tokens": {
+     "ctx": "41%",
+     "todos": "3/7"
+    },
+    "agent_session": {
+     "source": "herdr:omp",
+     "agent": "omp",
+     "kind": "path",
+     "value": "/root/.omp/agent/sessions/-tmp/2026-10-20T21-52-05-658Z_01a15b4c-da1a-735a-94c6-af07601f04d1.jsonl"
+    },
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p1",
+    "focused": true,
+    "interactive_ready": true,
+    "state_change_seq": 9,
+    "cwd": "/tmp",
+    "foreground_cwd": "/tmp",
+    "revision": 794
+   }
+  ]
+ }
+}

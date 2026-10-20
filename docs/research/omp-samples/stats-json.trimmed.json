@@ -1,0 +1,206 @@
+{
+ "overall": {
+  "totalRequests": 4171,
+  "successfulRequests": 4119,
+  "failedRequests": 52,
+  "errorRate": 0.012467034284344283,
+  "totalInputTokens": 3513602,
+  "totalOutputTokens": 2957338,
+  "totalCacheReadTokens": 640985349,
+  "totalCacheWriteTokens": 8951182,
+  "cacheRate": 0.9945483200639065,
+  "cacheSavings": 0.9186523911906921,
+  "totalCost": 269.21205926000005,
+  "unpricedRequests": 0,
+  "totalPremiumRequests": 0,
+  "avgDuration": 9379.289691116224,
+  "avgTtft": 1923.4917691689348,
+  "avgTokensPerSecond": 61.70844836946483,
+  "firstTimestamp": 1792503624833,
+  "lastTimestamp": 1792533524786
+ },
+ "byModel": [
+  {
+   "model": "claude-opus-5-5",
+   "provider": "anthropic",
+   "totalRequests": 3522,
+   "successfulRequests": 3522,
+   "failedRequests": 0,
+   "errorRate": 0,
+   "totalInputTokens": 7332,
+   "totalOutputTokens": 2682821,
+   "totalCacheReadTokens": 606217349,
+   "totalCacheWriteTokens": 8951182,
+   "cacheRate": 0.9999879054742742,
+   "cacheSavings": 0.9216149944263987,
+   "totalCost": 246.53867380000003,
+   "unpricedRequests": 0,
+   "totalPremiumRequests": 0,
+   "avgDuration": 9800.63247859174,
+   "avgTtft": 1877.0474843297454,
+   "avgTokensPerSecond": 66.7599855361278,
+   "firstTimestamp": 1792503624833,
+   "lastTimestamp": 1792533524786
+  },
+  {
+   "model": "gpt-6-luna",
+   "provider": "openai-codex",
+   "totalRequests": 326,
+   "successfulRequests": 274,
+   "failedRequests": 52,
+   "errorRate": 0.15950920245398773,
+   "totalInputTokens": 3104663,
+   "totalOutputTokens": 265742,
+   "totalCacheReadTokens": 17164416,
+   "totalCacheWriteTokens": 0,
+   "cacheRate": 0.846827623494881,
+   "cacheSavings": 0.762144861145393,
+   "totalCost": 0.61498146,
+   "unpricedRequests": 0,
+   "totalPremiumRequests": 0,
+   "avgDuration": 9535.90907554231,
+   "avgTtft": 1325.2683815000123,
+   "avgTokensPerSecond": 63.250634409514646,
+   "firstTimestamp": 1792504244557,
+   "lastTimestamp": 1792533519774
+  }
+ ],
+ "byFolder": [
+  {
+   "folder": "-.herdr-worktrees-ordista-worktree-green-valley-fdfb",
+   "totalRequests": 1672,
+   "successfulRequests": 1672,
+   "failedRequests": 0,
+   "errorRate": 0,
+   "totalInputTokens": 705738,
+   "totalOutputTokens": 814571,
+   "totalCacheReadTokens": 354770211,
+   "totalCacheWriteTokens": 2836855,
+   "cacheRate": 0.9980146673720534,
+   "cacheSavings": 0.9306964016161283,
+   "totalCost": 117.48167412000001,
+   "unpricedRequests": 0,
+   "totalPremiumRequests": 0,
+   "avgDuration": 7292.431034294411,
+   "avgTtft": 2057.2521620012526,
+   "avgTokensPerSecond": 64.22020064631094,
+   "firstTimestamp": 1792503624833,
+   "lastTimestamp": 1792510775475
+  },
+  {
+   "folder": "-.herdr-worktrees-ordista-worktree-lucky-meadow-022c",
+   "totalRequests": 1275,
+   "successfulRequests": 1275,
+   "failedRequests": 0,
+   "errorRate": 0,
+   "totalInputTokens": 153210,
+   "totalOutputTokens": 608577,
+   "totalCacheReadTokens": 179662903,
+   "totalCacheWriteTokens": 3292410,
+   "cacheRate": 0.9991479628969624,
+   "cacheSavings": 0.9117850219764674,
+   "totalCost": 78.70667654,
+   "unpricedRequests": 0,
+   "totalPremiumRequests": 0,
+   "avgDuration": 7176.7839420032005,
+   "avgTtft": 2056.263450574401,
+   "avgTokensPerSecond": 57.19765070852915,
+   "firstTimestamp": 1792505909825,
+   "lastTimestamp": 1792507422654
+  }
+ ],
+ "byAgentType": [
+  {
+   "agentType": "advisor",
+   "totalRequests": 323,
+   "totalInputTokens": 401607,
+   "totalOutputTokens": 8775,
+   "totalCacheReadTokens": 17603584,
+   "totalCacheWriteTokens": 0,
+   "totalCost": 22.058404
+  },
+  {
+   "agentType": "main",
+   "totalRequests": 426,
+   "totalInputTokens": 191318,
+   "totalOutputTokens": 402479,
+   "totalCacheReadTokens": 58046522,
+   "totalCacheWriteTokens": 974950,
+   "totalCost": 27.2538677
+  }
+ ],
+ "timeSeries": [
+  {
+   "timestamp": 1792501200000,
+   "requests": 132,
+   "errors": 0,
+   "tokens": 9042555,
+   "cost": 10.25012124
+  },
+  {
+   "timestamp": 1792504800000,
+   "requests": 2634,
+   "errors": 0,
+   "tokens": 494625138,
+   "cost": 169.1480563
+  }
+ ],
+ "modelSeries": [
+  {
+   "timestamp": 1792501200000,
+   "model": "claude-opus-5-5",
+   "provider": "anthropic",
+   "requests": 91
+  },
+  {
+   "timestamp": 1792501200000,
+   "model": "gpt-6-astra",
+   "provider": "openai-codex",
+   "requests": 40
+  }
+ ],
+ "modelPerformanceSeries": [
+  {
+   "timestamp": 1792501200000,
+   "model": "claude-opus-5-5",
+   "provider": "anthropic",
+   "requests": 91,
+   "avgTtft": 2471.285703318708,
+   "avgTokensPerSecond": 61.15943434208085
+  },
+  {
+   "timestamp": 1792501200000,
+   "model": "gpt-6-astra",
+   "provider": "openai-codex",
+   "requests": 40,
+   "avgTtft": 2985.5474118500074,
+   "avgTokensPerSecond": 6.134048017340389
+  }
+ ],
+ "costSeries": [
+  {
+   "timestamp": 1792454400000,
+   "model": "claude-opus-5-5",
+   "provider": "anthropic",
+   "cost": 246.53867380000003,
+   "unpricedRequests": 0,
+   "costInput": 0.029327999999999996,
+   "costOutput": 53.656420000000004,
+   "costCacheRead": 121.24346980000001,
+   "costCacheWrite": 71.609456,
+   "requests": 3522
+  },
+  {
+   "timestamp": 1792454400000,
+   "model": "gpt-6-astra",
+   "provider": "openai-codex",
+   "cost": 22.058404,
+   "unpricedRequests": 0,
+   "costInput": 4.01607,
+   "costOutput": 0.43875000000000003,
+   "costCacheRead": 17.603583999999998,
+   "costCacheWrite": 0,
+   "requests": 323
+  }
+ ]
+}

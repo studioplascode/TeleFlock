@@ -1,0 +1,61 @@
+{
+  "name": "04-todo",
+  "sent": {
+    "t": "prompt",
+    "text": "Use your todo tool to create a todo list with three items: plan, build, ship. Mark plan as in progress. Then reply ok. Do nothing else."
+  },
+  "sentAt": 1792533320594,
+  "latencyMsFromSend": {
+    "firstFrame": 10,
+    "first_agent_start": 10,
+    "first_turn_start": 37,
+    "first_message_start": 37,
+    "first_message_end": 37,
+    "first_entry": 37,
+    "first_state": 110,
+    "first_turn_end": 176,
+    "first_auto_retry_start": 176,
+    "first_message_update": 23224,
+    "firstAssistantUpdate": 23224,
+    "first_tool_execution_start": 23526,
+    "first_auto_retry_end": 23526,
+    "first_tool_execution_end": 23526,
+    "first_agent_end": 33178
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 9,
+    "event:turn_start": 10,
+    "event:message_start": 12,
+    "event:message_end": 12,
+    "h2g:entry": 13,
+    "h2g:state": 5,
+    "event:turn_end": 10,
+    "event:auto_retry_start": 6,
+    "event:message_update": 59,
+    "event:tool_execution_start": 1,
+    "event:auto_retry_end": 1,
+    "event:tool_execution_end": 1,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 233750,
+  "decryptMs": {
+    "n": 140,
+    "max": 0.996251000004122,
+    "avg": 0.0931825500011785
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 6,
+      "status": "idle"
+    },
+    {
+      "tMs": 163,
+      "status": "working"
+    },
+    {
+      "tMs": 33677,
+      "status": "idle"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "default": "teleflock-icon.svg",
+  "bg_color": "#0b0b10",
+  "android_bg": "android-bg.svg",
+  "android_fg": "android-fg.svg",
+  "android_monochrome": "android-monochrome.svg"
+}

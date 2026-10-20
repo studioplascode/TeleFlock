@@ -1,0 +1,73 @@
+{
+  "name": "16-tool-approval",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the bash tool to run: echo approved-run. Then reply done."
+  },
+  "sentAt": 1792533868962,
+  "latencyMsFromSend": {
+    "firstFrame": 18,
+    "first_agent_start": 18,
+    "first_turn_start": 66,
+    "first_message_start": 67,
+    "first_message_end": 67,
+    "first_entry": 67,
+    "first_state": 117,
+    "first_message_update": 1236,
+    "firstAssistantUpdate": 1236,
+    "first_tool_execution_start": 1514,
+    "first_ui-request": 1515,
+    "uiResponseSentAt": 4603,
+    "first_ui-request-end": 4610,
+    "first_tool_execution_update": 4679,
+    "first_tool_execution_end": 4680,
+    "first_turn_end": 4710,
+    "first_agent_end": 5680
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 1,
+    "event:turn_start": 2,
+    "event:message_start": 4,
+    "event:message_end": 4,
+    "h2g:entry": 4,
+    "h2g:state": 4,
+    "event:message_update": 42,
+    "event:tool_execution_start": 1,
+    "h2g:ui-request": 1,
+    "g2h:ui-response": 1,
+    "h2g:ui-request-end": 1,
+    "event:tool_execution_update": 2,
+    "event:tool_execution_end": 1,
+    "event:turn_end": 2,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 80603,
+  "decryptMs": {
+    "n": 70,
+    "max": 3.6042189999971015,
+    "avg": 0.34297089999989633
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 15,
+      "status": "idle"
+    },
+    {
+      "tMs": 178,
+      "status": "working"
+    },
+    {
+      "tMs": 1619,
+      "status": "blocked"
+    },
+    {
+      "tMs": 4845,
+      "status": "working"
+    },
+    {
+      "tMs": 6159,
+      "status": "idle"
+    }
+  ]
+}

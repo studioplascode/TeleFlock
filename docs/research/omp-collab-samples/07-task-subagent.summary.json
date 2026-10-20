@@ -1,0 +1,63 @@
+{
+  "name": "07-task-subagent",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the task tool to spawn exactly one subagent whose assignment is: reply with the single word ok and do nothing else. Then reply done."
+  },
+  "sentAt": 1792533468522,
+  "latencyMsFromSend": {
+    "firstFrame": 4,
+    "first_agent_start": 4,
+    "first_turn_start": 30,
+    "first_message_start": 30,
+    "first_message_end": 30,
+    "first_entry": 30,
+    "first_state": 105,
+    "first_message_update": 1439,
+    "firstAssistantUpdate": 1439,
+    "first_tool_execution_start": 1912,
+    "first_tool_execution_update": 1917,
+    "first_tool_execution_end": 1918,
+    "first_turn_end": 1953,
+    "first_bus": 2024,
+    "first_agents": 2054,
+    "first_agent_end": 2793
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 3,
+    "event:turn_start": 4,
+    "event:message_start": 7,
+    "event:message_end": 7,
+    "h2g:entry": 8,
+    "h2g:state": 6,
+    "event:message_update": 77,
+    "event:tool_execution_start": 1,
+    "event:tool_execution_update": 8,
+    "event:tool_execution_end": 1,
+    "event:turn_end": 4,
+    "h2g:bus": 7,
+    "h2g:agents": 2,
+    "event:agent_end": 3
+  },
+  "h2gBytes": 164931,
+  "decryptMs": {
+    "n": 138,
+    "max": 1.565377000020817,
+    "avg": 0.138564057972542
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 5,
+      "status": "idle"
+    },
+    {
+      "tMs": 160,
+      "status": "working"
+    },
+    {
+      "tMs": 6040,
+      "status": "idle"
+    }
+  ]
+}

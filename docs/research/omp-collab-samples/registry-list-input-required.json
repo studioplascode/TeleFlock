@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "hosts": [
+    {
+      "instanceId": "7f57a8d35f9f4581",
+      "generation": 1,
+      "pid": 165963,
+      "sessionId": "01a15b4d-6996-774c-9851-97cfcee9bfcf",
+      "sessionName": null,
+      "cwd": "/tmp/tf-collab-work",
+      "model": {
+        "provider": "openai-codex",
+        "id": "gpt-6-luna"
+      },
+      "startedAt": 1792533162706,
+      "participants": 2,
+      "relayConnected": true,
+      "inputRequired": true,
+      "busy": true,
+      "access": "control"
+    }
+  ]
+}

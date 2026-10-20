@@ -8,3 +8,7 @@ target/
 src-tauri/gen/android/app/build/
 src-tauri/gen/android/.gradle/
 src-tauri/gen/android/build/
+.research/tauri-hello/
+**/gen/android/app/build/
+**/gen/android/.gradle/
+**/gen/android/build/

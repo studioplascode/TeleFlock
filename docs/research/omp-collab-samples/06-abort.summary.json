@@ -1,0 +1,57 @@
+{
+  "name": "06-abort",
+  "sent": {
+    "t": "prompt",
+    "text": "Write the numbers from 1 to 400 in English words, one per line. No tools."
+  },
+  "sentAt": 1792533453542,
+  "latencyMsFromSend": {
+    "firstFrame": 3,
+    "first_agent_start": 3,
+    "first_turn_start": 27,
+    "first_message_start": 27,
+    "first_message_end": 27,
+    "first_entry": 27,
+    "first_state": 103,
+    "first_message_update": 847,
+    "firstAssistantUpdate": 847,
+    "abortSentAt": 2433,
+    "first_turn_end": 2447,
+    "first_agent_end": 2447,
+    "first_notice": 2447
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 1,
+    "event:turn_start": 1,
+    "event:message_start": 2,
+    "event:message_end": 2,
+    "h2g:entry": 2,
+    "h2g:state": 2,
+    "event:message_update": 303,
+    "g2h:abort": 1,
+    "event:turn_end": 1,
+    "event:agent_end": 1,
+    "event:notice": 1
+  },
+  "h2gBytes": 630063,
+  "decryptMs": {
+    "n": 316,
+    "max": 0.48704999999608845,
+    "avg": 0.05269625316550101
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 157,
+      "status": "working"
+    },
+    {
+      "tMs": 2925,
+      "status": "idle"
+    }
+  ]
+}

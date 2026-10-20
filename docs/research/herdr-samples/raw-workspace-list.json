@@ -1,0 +1,45 @@
+{
+ "id": "r1",
+ "result": {
+  "type": "workspace_list",
+  "workspaces": [
+   {
+    "workspace_id": "w1",
+    "number": 1,
+    "label": "lab-env",
+    "focused": true,
+    "pane_count": 1,
+    "tab_count": 1,
+    "active_tab_id": "w1:t1",
+    "agent_status": "idle"
+   },
+   {
+    "workspace_id": "w2",
+    "number": 2,
+    "label": "lab-other",
+    "focused": false,
+    "pane_count": 3,
+    "tab_count": 2,
+    "active_tab_id": "w2:t1",
+    "agent_status": "unknown"
+   },
+   {
+    "workspace_id": "w3",
+    "number": 3,
+    "label": "tf-lab-repo",
+    "focused": false,
+    "pane_count": 1,
+    "tab_count": 1,
+    "active_tab_id": "w3:t1",
+    "agent_status": "unknown",
+    "worktree": {
+     "repo_key": "/tmp/tf-lab-repo/.git",
+     "repo_name": "tf-lab-repo",
+     "repo_root": "/tmp/tf-lab-repo",
+     "checkout_path": "/tmp/tf-lab-repo",
+     "is_linked_worktree": false
+    }
+   }
+  ]
+ }
+}
