@@ -1,6 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["src-tauri", "crates/*"]
+# Explicit list (a `crates/*` glob breaks every build while a crate dir exists without a manifest).
+# Owners: add your crate here yourself once its Cargo.toml and src/lib.rs|main.rs exist.
+members = [
+    "crates/tf-client",
+    "crates/tf-collab",
+    "crates/tf-devserver",
+    "crates/tf-herdr",
+    "crates/tf-hostd",
+    "crates/tf-proto",
+    "crates/tf-transport",
+    "src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"

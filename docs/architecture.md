@@ -239,7 +239,7 @@ The new agent appears through herdr events. The response returns `Started{paneId
     async fn close(&self);
 }
 pub struct Cmd { pub argv: Vec<String>, pub env: Vec<(String, String)>, pub cwd: Option<String>, pub stdin: Option<Vec<u8>>, pub timeout: Option<Duration> }
-pub async fn connect(profile: &HostProfile, ev: mpsc::Sender<TransportEvent>) -> Result<Arc<dyn Transport>, TransportError>;
+pub async fn connect(profile: &HostProfile, opts: &ConnectOptions, ev: mpsc::Sender<TransportEvent>) -> Result<Arc<dyn Transport>, TransportError>; // opts: known_hosts path (TOFU), timeouts
 pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Latency(u32), Closed(Option<String>) }
 ```
 
@@ -248,11 +248,11 @@ pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Lat
 - `none` auth first.
 - A banner containing a `login.tailscale.com` URL becomes `AuthUrl` and the `authRequired` phase; keep waiting up to 30 min.
 - Our own keepalive runs after login (avoid the russh `keepalive_interval` bug).
-- Remote argv is POSIX-quoted.
+- Remote argv is POSIX-quoted and run via `exec sh -c 'exec "${SHELL:-/bin/sh}" -lc "$1"' sh '<cmd>'` (login shell → PATH includes `~/.local/bin`).
 
 **Local:** `tokio::process`, no shell.
 
-**WSL:** `wsl.exe -d <distro> -- <argv>`. `wsl.exe -l -v` lists distros. Previews use plain localhost (WSL2 forwards it).
+**WSL:** `wsl.exe -d <distro> --exec sh -c <login wrapper> sh <cmd>` (`--exec`: no Windows-side shell layer; the same login wrapper as SSH). `wsl.exe -l -v` lists distros. Previews use plain localhost (WSL2 forwards it).
 
 ### 5.2 `tf-client` (owner: AppCore)
 - **Engine API:**

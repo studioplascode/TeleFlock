@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application>
+        <!-- Holds the process (and the in-process Rust core + SSH sessions) at foreground
+             priority while keepAlive is on. remoteMessaging has no runtime cap (dataSync: 6 h). -->
+        <service
+            android:name="dev.teleflock.android.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+        <!-- Notification buttons and inline replies; explicit intents only. -->
+        <receiver
+            android:name="dev.teleflock.android.ActionReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

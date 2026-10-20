@@ -1,0 +1,115 @@
+import { Bot } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { useEffect, useState } from "react";
+import { navigate, openSession, parseAgentKey, useAgent, useSession } from "@/core";
+import { Button, cn, EmptyState, spring } from "@/design";
+import { hostCall } from "./api";
+import { AskCard } from "./ask/AskCard";
+import { Composer } from "./composer/Composer";
+import { SessionCtx } from "./context";
+import { SessionDialogs } from "./header/Dialogs";
+import { SessionHeader } from "./header/SessionHeader";
+import { LinkGate } from "./LinkGate";
+import { NonOmpView } from "./NonOmpView";
+import { Transcript } from "./transcript/Transcript";
+
+function isEditable(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
+}
+
+/** Keeps the session subscribed while mounted; `retry` re-acquires it (reload after an error). */
+export function useOpenSession(agentKey: string): () => void {
+  const [nonce, setNonce] = useState(0);
+  useEffect(() => openSession(agentKey), [agentKey, nonce]);
+  return () => setNonce((n) => n + 1);
+}
+
+export interface SessionPaneProps {
+  agentKey: string;
+  /** Split view: compact header, no global hotkeys. */
+  compact?: boolean;
+  /** Hide the header (mobile renders its own top bar). */
+  header?: boolean;
+  /** Phone layout for the composer and ask card. */
+  mobile?: boolean;
+  className?: string;
+}
+
+/**
+ * One session: header, virtualised transcript, sticky ask card and composer. Used by the
+ * desktop SessionView, the mobile pager and the split view.
+ */
+export function SessionPane({ agentKey, compact = false, header = true, mobile = false, className }: SessionPaneProps) {
+  const { hostId, agentId } = parseAgentKey(agentKey);
+  const agent = useAgent(agentKey);
+  const retry = useOpenSession(agentKey);
+  const hotkeys = !compact;
+  const stoppable = agent?.column === "running" && agent.omp?.link === "live";
+
+  // Esc anywhere in the focused session (outside inputs and overlays) stops the turn.
+  useEffect(() => {
+    if (!hotkeys || !stoppable) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || isEditable(e.target)) return;
+      if (document.querySelector('[role="dialog"][data-state="open"], [role="menu"][data-state="open"], [cmdk-root]')) return;
+      e.preventDefault();
+      void hostCall(hostId, "agent.abort", { agentId }, { failure: "Stop failed" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hotkeys, stoppable, hostId, agentId]);
+
+  if (!agent)
+    return (
+      <EmptyState
+        className="flex-1"
+        icon={<Bot />}
+        title="Agent not found"
+        description="It may have exited, or its host isn't connected."
+        action={<Button onClick={() => navigate({ name: "board" })}>Back to board</Button>}
+      />
+    );
+
+  return (
+    <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
+      <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col gap-3", className)}>
+        {agent.omp == null ? (
+          <NonOmpView agentKey={agentKey} />
+        ) : (
+          <>
+            {header && <SessionHeader agentKey={agentKey} compact={compact} />}
+            <LinkGate agentKey={agentKey} onRetry={retry}>
+              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} />
+            </LinkGate>
+          </>
+        )}
+      </div>
+    </SessionCtx.Provider>
+  );
+}
+
+function SessionBody({ agentKey, hotkeys, mobile, compact }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean }) {
+  const { ui } = useSession(agentKey);
+  return (
+    <>
+      <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && "rounded-tile glass")}>
+        <Transcript agentKey={agentKey} padX={mobile ? 12 : compact ? 14 : 22} gutter={mobile ? 0 : 38} />
+      </div>
+      <AnimatePresence mode="popLayout">
+        {ui && (
+          <motion.div
+            key={ui.id}
+            initial={{ opacity: 0, y: 40, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
+            exit={{ opacity: 0, y: 24, scale: 0.97, transition: { duration: 0.2 } }}
+            className="relative z-raised max-h-[62%] shrink-0 overflow-y-auto rounded-tile"
+          >
+            <AskCard agentKey={agentKey} request={ui} hotkeys={hotkeys} compact={mobile || compact} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
+      <SessionDialogs agentKey={agentKey} />
+    </>
+  );
+}

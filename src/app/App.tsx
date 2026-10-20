@@ -1,39 +1,118 @@
-import { type ComponentType, lazy, Suspense, useEffect } from "react";
-import { DesignProvider, Spinner, TitleBar } from "@/design";
-import { navigate, useRoutePath } from "./router";
+import { Suspense, useEffect } from "react";
+import { AmbientGlow, DesignProvider, LogoMark, Shimmer, Spinner, TitleBar, useIsMobile, useMotionPreference } from "@/design";
+import { useHosts, useRoute, useSettings } from "@/core";
+import { NewAgentDialog } from "@/features/workspace/NewAgentDialog";
+import { NewWorktreeDialog } from "@/features/worktree/NewWorktreeDialog";
+import { PastSessionsDialog } from "@/features/history/PastSessionsDialog";
+import { AnswerNextHud } from "@/features/inbox/AnswerNextHud";
+import { HostEditor } from "@/features/hosts/HostEditor";
+import { Onboarding } from "@/features/hosts/Onboarding";
+import { useNotifyBridge } from "@/features/notify/useNotifyBridge";
+import { CommandPalette } from "@/features/palette/CommandPalette";
+import { DesktopShell } from "@/features/shell/DesktopShell";
+import { useGlobalShortcuts } from "@/features/shell/keyboard";
+import { useGlobalMood, useGlobalPulseFeed } from "@/features/shell/liveness";
+import { MobileShell } from "@/features/shell/MobileShell";
+import { SheetHost } from "@/features/shell/sheets";
+import { ShortcutsSheet } from "@/features/shell/ShortcutsSheet";
+import { RouteView } from "./routes";
 
-/** Route table. Feature agents add their screens here. */
-const routes: Record<string, ComponentType> = {
-  "/design": lazy(() => import("./routes/design/DesignGallery")),
-};
-
-/** Where "/" and unknown paths go. */
-const DEFAULT_ROUTE = "/design";
-
-export function App() {
-  const path = useRoutePath();
-  const Page = routes[path];
-
-  useEffect(() => {
-    if (!Page) navigate(DEFAULT_ROUTE, { replace: true });
-  }, [Page]);
-
+/** Overlays mounted exactly once, above every layout. */
+function GlobalOverlays() {
   return (
-    <DesignProvider>
+    <>
+      <CommandPalette />
+      <AnswerNextHud />
+      <NewWorktreeDialog />
+      <NewAgentDialog />
+      <PastSessionsDialog />
+      <HostEditor />
+      <ShortcutsSheet />
+      <SheetHost />
+    </>
+  );
+}
+
+/** Keep the design system's motion preference in sync with the saved `Settings.motion`. */
+function useMotionSettingSync(): void {
+  const motion = useSettings((s) => s.motion);
+  const loaded = useSettings((s) => s.loaded);
+  const setPreference = useMotionPreference((s) => s.setPreference);
+  useEffect(() => {
+    if (loaded) setPreference(motion);
+  }, [loaded, motion, setPreference]);
+}
+
+function Splash() {
+  return (
+    <div className="grid h-full place-items-center">
+      <div className="flex flex-col items-center gap-4">
+        <LogoMark size={56} animated />
+        <Shimmer className="text-sm font-bold">Gathering the flock…</Shimmer>
+      </div>
+    </div>
+  );
+}
+
+function Frame() {
+  const route = useRoute();
+  const mobile = useIsMobile();
+  const loaded = useHosts((h) => h.loaded);
+  const hostCount = useHosts((h) => h.profiles.length);
+  const mood = useGlobalMood();
+  useMotionSettingSync();
+  useNotifyBridge();
+  useGlobalPulseFeed();
+  useGlobalShortcuts();
+
+  if (route.name === "design") {
+    return (
       <div className="flex h-full flex-col">
         <TitleBar />
         <main className="relative min-h-0 flex-1">
-          <Suspense
-            fallback={
-              <div className="grid h-full place-items-center">
-                <Spinner size={22} />
-              </div>
-            }
-          >
-            {Page && <Page />}
+          <Suspense fallback={<div className="grid h-full place-items-center"><Spinner size={22} /></div>}>
+            <RouteView route={route} mobile={mobile} />
           </Suspense>
         </main>
       </div>
+    );
+  }
+
+  if (!loaded) {
+    return (
+      <div className="flex h-full flex-col">
+        <TitleBar />
+        <Splash />
+      </div>
+    );
+  }
+
+  if (hostCount === 0) {
+    return (
+      <div className="flex h-full flex-col">
+        <TitleBar />
+        <main className="relative min-h-0 flex-1">
+          <Onboarding />
+        </main>
+        <HostEditor />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <AmbientGlow mood={mood} />
+      {mobile ? <MobileShell /> : <DesktopShell />}
+      <GlobalOverlays />
+    </>
+  );
+}
+
+/** App root: design providers, then the shell for the current form factor. */
+export function App() {
+  return (
+    <DesignProvider>
+      <Frame />
     </DesignProvider>
   );
 }

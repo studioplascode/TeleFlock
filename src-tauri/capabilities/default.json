@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Baseline permissions for the main window on every platform.",
+  "description": "Baseline for the main window on every platform: core IPC/events (core_* commands are app commands and need no permission) and reading the launch deep link.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "deep-link:default"]
 }

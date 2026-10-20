@@ -20,6 +20,8 @@ export type * from "./AskQuestion";
 export type * from "./AskView";
 export type * from "./AssistantItem";
 export type * from "./BashView";
+export type * from "./BranchInfo";
+export type * from "./BranchList";
 export type * from "./BtwParams";
 export type * from "./BtwStarted";
 export type * from "./Capabilities";

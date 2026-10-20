@@ -6,6 +6,17 @@ Tauri 2 + React TS app at `.research/tauri-hello/`. Evidence tags: `[observed]` 
 
 ## 0. TL;DR from a fresh shell
 
+The real app is built with three scripts (§10). Each builds the frontend, then `tf-hostd` for every
+deploy target (embedded into the app), then the package, and copies it to `dist-release/`:
+
+```bash
+scripts/build-windows.sh     # -> dist-release/TeleFlock_<version>_x64-setup.exe
+scripts/build-android.sh     # -> dist-release/TeleFlock_<version>_universal.apk (signed)
+scripts/build-hostd.sh       # only tf-hostd -> target/hostd-dist/<triple>/tf-hostd[.exe]
+```
+
+The underlying commands (what the scripts run):
+
 ```bash
 . /root/.teleflock-android-env                       # JAVA_HOME, ANDROID_HOME, NDK_HOME, PATH
 export CARGO_TARGET_DIR=/root/TeleFlock/target/<YourAgentName>   # repo rule: private target dir per agent

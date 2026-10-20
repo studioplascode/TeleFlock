@@ -1,0 +1,23 @@
+[package]
+name = "tf-collab"
+description = "omp collab for tf-hostd: link, crypto, frames, loopback relay, registry, guest, and the replica normalizer (omp → tf-proto)"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+tf-proto = { path = "../tf-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+aes-gcm = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+httparse = "1"
+url = "2"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["fs", "net", "io-util", "process", "rt", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util", "process", "rt-multi-thread", "sync", "time", "macros"] }

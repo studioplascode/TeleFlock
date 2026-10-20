@@ -1,0 +1,565 @@
+//! Pure board mapping (architecture §3.5): herdr + replica + bridge → `Agent` /
+//! `Workspace`, columns, needs-you, notifications. No I/O here.
+
+use std::collections::HashMap;
+
+use tf_herdr::{AgentInfo, AgentStatus, PaneInfo, TabInfo, WorkspaceInfo};
+use tf_proto::model::{
+    Agent, Answer, Column, DiffStat, HerdrState, LinkState, Liveness, NeedsKind, NeedsOption, NeedsYou, Notification,
+    NotifyAction, NotifyKind, OmpInfo, OptionTone, PaneInfo as WirePane, RepoInfo, SubagentSummary, Tab, TodoSummary,
+    Workspace, WorktreeInfo,
+};
+use tf_proto::session::{Capabilities, PlanReview, SessionMeta, SubagentStatus, TodoStatus, UiKind, UiRequest};
+use tf_proto::Millis;
+
+use crate::bridge::{BridgeSession, PlanReviewInfo};
+use crate::omp::OmpView;
+use crate::util::{clip, new_id};
+
+/// Quiet notification threshold (no events while working).
+pub const QUIET_MS: Millis = 120_000;
+
+pub fn herdr_state(s: AgentStatus) -> HerdrState {
+    match s {
+        AgentStatus::Working => HerdrState::Working,
+        AgentStatus::Blocked => HerdrState::Blocked,
+        AgentStatus::Idle => HerdrState::Idle,
+        AgentStatus::Done => HerdrState::Done,
+        AgentStatus::Unknown => HerdrState::Unknown,
+    }
+}
+
+/// Column mapping (§3.5): needs > running > done (archived) > review.
+pub fn column(state: HerdrState, has_needs: bool, archived: bool) -> Column {
+    if state == HerdrState::Blocked || has_needs {
+        Column::Needs
+    } else if state == HerdrState::Working {
+        Column::Running
+    } else if archived {
+        Column::Done
+    } else {
+        Column::Review
+    }
+}
+
+/// Stable agent id: the herdr terminal id, falling back to the pane id.
+pub fn agent_id(a: &AgentInfo) -> String {
+    if a.terminal_id.is_empty() { a.pane_id.clone() } else { a.terminal_id.clone() }
+}
+
+/// Everything known about one herdr agent, gathered by the store.
+pub struct AgentInputs<'a> {
+    pub herdr: &'a AgentInfo,
+    pub omp: Option<&'a OmpView>,
+    /// Link state when no guest exists (`omp` is `None`).
+    pub link: (LinkState, Option<String>),
+    pub omp_session_id: Option<String>,
+    pub omp_pid: Option<u32>,
+    pub bridge: Option<&'a BridgeSession>,
+    pub archived: bool,
+    pub turns: u32,
+    pub first_seen: Option<Millis>,
+    pub state_since: Millis,
+    pub needs_since: Millis,
+    pub pane_activity: Option<Millis>,
+    pub repo: Option<&'a RepoInfo>,
+    pub turn_started_at: Option<Millis>,
+    pub last_turn_ended_at: Option<Millis>,
+}
+
+pub fn is_omp(a: &AgentInfo) -> bool {
+    a.agent.as_deref() == Some("omp")
+}
+
+pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
+    let a = i.herdr;
+    let state = herdr_state(a.agent_status);
+    let needs = needs_for(i, state);
+    let col = column(state, needs.is_some(), i.archived);
+    let kind = a.agent.clone().unwrap_or_else(|| "unknown".into());
+    let name = a.name.clone().or_else(|| a.display_agent.clone()).unwrap_or_else(|| kind.clone());
+    let cwd = a.foreground_cwd.clone().or_else(|| a.cwd.clone()).filter(|c| !c.is_empty());
+    let meta = i.omp.map(|v| &v.meta);
+    let ctl = i.bridge.map(|b| &b.state);
+
+    let title = meta
+        .and_then(|m| m.title.clone())
+        .or_else(|| ctl.and_then(|c| c.title.clone()))
+        .or_else(|| i.omp.and_then(|v| v.first_prompt.clone()))
+        .or_else(|| a.title.clone().filter(|t| !t.is_empty()))
+        .or_else(|| a.terminal_title_stripped.as_deref().map(strip_spinner).filter(|t| !t.is_empty()))
+        .unwrap_or_else(|| name.clone());
+
+    let omp = is_omp(a).then(|| omp_info(i, meta));
+    let mut live = match i.omp {
+        Some(v) => v.live.clone(),
+        None => Liveness { last_event_at: None, streaming: false, thinking: false, tool: None, tps: None, line: None },
+    };
+    if live.last_event_at.is_none() || i.omp.is_none() {
+        live.last_event_at = max_opt(live.last_event_at, i.pane_activity);
+    }
+    let diff = meta.and_then(|m| {
+        (!m.files.is_empty()).then(|| DiffStat {
+            added: m.files.iter().map(|f| f.added).sum(),
+            removed: m.files.iter().map(|f| f.removed).sum(),
+            files: m.files.len() as u32,
+        })
+    });
+    Agent {
+        id: agent_id(a),
+        name,
+        kind,
+        pane_id: a.pane_id.clone(),
+        tab_id: a.tab_id.clone(),
+        workspace_id: a.workspace_id.clone(),
+        state,
+        state_since: i.state_since,
+        column: col,
+        archived: i.archived && col == Column::Done,
+        turns: i.turns,
+        title: clip(&title, 120),
+        cwd,
+        repo: i.repo.map(|r| r.name.clone()),
+        branch: i.repo.and_then(|r| r.branch.clone()),
+        started_at: meta.and_then(|m| m.started_at).or(i.first_seen),
+        omp,
+        live,
+        needs,
+        diff,
+    }
+}
+
+fn max_opt(a: Option<Millis>, b: Option<Millis>) -> Option<Millis> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+/// omp puts a spinner glyph in its OSC title (`π ⠧ repo`); drop it.
+pub fn strip_spinner(t: &str) -> String {
+    t.split_whitespace()
+        .filter(|w| !w.chars().all(|c| ('\u{2800}'..='\u{28ff}').contains(&c) || c == 'π'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn omp_info(i: &AgentInputs<'_>, meta: Option<&SessionMeta>) -> OmpInfo {
+    let ctl = i.bridge.map(|b| &b.state);
+    let (link, link_error) = match i.omp {
+        Some(v) => (v.link, v.link_error.clone()),
+        None => i.link.clone(),
+    };
+    let todos = meta.and_then(|m| {
+        let tasks: Vec<_> = m.todos.iter().flat_map(|p| p.tasks.iter()).collect();
+        (!tasks.is_empty()).then(|| TodoSummary {
+            done: tasks.iter().filter(|t| t.status == TodoStatus::Completed).count() as u32,
+            total: tasks.len() as u32,
+            current: tasks.iter().find(|t| t.status == TodoStatus::InProgress).map(|t| t.content.clone()),
+        })
+    });
+    let subagents = meta.and_then(|m| {
+        (!m.subagents.is_empty()).then(|| SubagentSummary {
+            live: m.subagents.iter().filter(|s| s.status == SubagentStatus::Running).count() as u32,
+            total: m.subagents.len() as u32,
+        })
+    });
+    OmpInfo {
+        session_id: i.omp_session_id.clone().or_else(|| meta.and_then(|m| m.session_id.clone())),
+        session_file: i
+            .herdr
+            .agent_session
+            .as_ref()
+            .and_then(|s| s.path().map(str::to_string))
+            .or_else(|| meta.and_then(|m| m.session_file.clone()))
+            .or_else(|| i.bridge.and_then(|b| b.session_file.clone())),
+        pid: i.omp.map(|v| v.pid).or(i.omp_pid).or(i.bridge.map(|b| b.pid)),
+        version: i.bridge.and_then(|b| b.omp_version.clone()).filter(|v| !v.is_empty()),
+        link,
+        link_error,
+        bridge: i.bridge.is_some(),
+        model: ctl.and_then(|c| c.model.clone()).or_else(|| meta.and_then(|m| m.model.clone())),
+        thinking: ctl.and_then(|c| c.thinking).or_else(|| meta.and_then(|m| m.thinking)),
+        fast: ctl.map(|c| c.fast).or(meta.map(|m| m.fast)).unwrap_or(false),
+        mode: ctl.map(|c| c.mode).or(meta.map(|m| m.mode)).unwrap_or(tf_proto::model::OmpMode::Normal),
+        goal: meta.and_then(|m| m.goal.clone()),
+        context: ctl.and_then(|c| c.context.clone()).or_else(|| meta.and_then(|m| m.context.clone())),
+        cost: meta.and_then(|m| m.cost.clone()),
+        todos,
+        subagents,
+        queue: ctl
+            .map(|c| c.queue.clone())
+            .or_else(|| meta.map(|m| m.queue.clone()))
+            .unwrap_or(tf_proto::model::QueueInfo { steering: vec![], follow_up: vec![] }),
+        turn_started_at: i.turn_started_at,
+        last_turn_ended_at: i.last_turn_ended_at,
+    }
+}
+
+/// Needs-you (§3.5): replica dialog, then bridge plan review, then herdr `blocked`.
+fn needs_for(i: &AgentInputs<'_>, state: HerdrState) -> Option<NeedsYou> {
+    if let Some(mut n) = i.omp.and_then(|v| v.needs.clone()) {
+        n.since = i.needs_since;
+        return Some(n);
+    }
+    if let Some(review) = i.bridge.and_then(|b| b.state.plan_review.as_ref()) {
+        return Some(plan_review_needs(review, i.needs_since));
+    }
+    if state == HerdrState::Blocked {
+        return Some(NeedsYou {
+            kind: NeedsKind::Blocked,
+            request_id: None,
+            since: i.needs_since,
+            title: "Waiting in the terminal".into(),
+            question: "The agent shows a prompt TeleFlock cannot answer here.".into(),
+            detail: Some("Open the terminal to respond.".into()),
+            options: vec![],
+            multi: false,
+            allow_other: false,
+            allow_chat: false,
+            command: None,
+            answerable: false,
+        });
+    }
+    None
+}
+
+pub fn plan_review_options(review: &PlanReviewInfo) -> Vec<NeedsOption> {
+    review
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(n, c)| {
+            let lower = c.label.to_lowercase();
+            NeedsOption {
+                id: c.id.clone(),
+                label: c.label.clone(),
+                description: None,
+                recommended: n == 0,
+                tone: if n == 0 {
+                    OptionTone::Primary
+                } else if lower.contains("reject") || lower.contains("discard") || lower.contains("cancel") {
+                    OptionTone::Danger
+                } else {
+                    OptionTone::Neutral
+                },
+            }
+        })
+        .collect()
+}
+
+pub fn plan_review_needs(review: &PlanReviewInfo, since: Millis) -> NeedsYou {
+    NeedsYou {
+        kind: NeedsKind::PlanReview,
+        request_id: Some(review.review_id.clone()),
+        since,
+        title: "Review plan".into(),
+        question: review.title.clone().unwrap_or_else(|| "The plan is ready for review".into()),
+        detail: Some(clip(&review.content, 600)),
+        options: plan_review_options(review),
+        multi: false,
+        allow_other: true,
+        allow_chat: false,
+        command: None,
+        answerable: true,
+    }
+}
+
+/// The plan review as a session dialog (`SessionEvent::Ui`).
+pub fn plan_review_ui(review: &PlanReviewInfo) -> UiRequest {
+    UiRequest {
+        id: review.review_id.clone(),
+        kind: UiKind::PlanReview,
+        title: review.title.clone().unwrap_or_else(|| "Review plan".into()),
+        message: None,
+        options: plan_review_options(review),
+        allow_other: true,
+        allow_chat: false,
+        initial: None,
+        plan: Some(PlanReview { title: review.title.clone(), content: review.content.clone(), path: review.plan_path.clone() }),
+        call_id: None,
+    }
+}
+
+/// Key identifying a needs-you episode (a new key means a new notification).
+pub fn needs_key(n: &NeedsYou) -> String {
+    format!("{:?}:{}", n.kind, n.request_id.as_deref().unwrap_or(&n.question))
+}
+
+/// Session capabilities given the link and the bridge (§3.4: bridge first, collab second,
+/// injection last).
+pub fn capabilities(live: bool, bridge: bool) -> Capabilities {
+    Capabilities {
+        prompt: live,
+        steer: live,
+        follow_up: live,
+        abort: live,
+        answer: live,
+        model: true,
+        thinking: true,
+        fast: true,
+        plan: true,
+        goal: true,
+        compact: true,
+        rename: true,
+        fork: true,
+        branch: bridge,
+        tree: bridge,
+        btw: bridge,
+        export: true,
+        handoff: true,
+        subagents: live,
+        bridge,
+    }
+}
+
+// ───────────────────────────── workspaces ─────────────────────────────
+
+pub fn build_workspaces(
+    workspaces: &[WorkspaceInfo],
+    tabs: &[TabInfo],
+    panes: &[PaneInfo],
+    agent_by_pane: &HashMap<String, String>,
+    repos: &HashMap<String, Option<RepoInfo>>,
+) -> Vec<Workspace> {
+    let mut out: Vec<Workspace> = workspaces
+        .iter()
+        .map(|w| {
+            let mut ws_tabs: Vec<&TabInfo> = tabs.iter().filter(|t| t.workspace_id == w.workspace_id).collect();
+            ws_tabs.sort_by_key(|t| t.number);
+            let tabs: Vec<Tab> = ws_tabs
+                .iter()
+                .map(|t| Tab {
+                    id: t.tab_id.clone(),
+                    label: t.label.clone(),
+                    panes: panes
+                        .iter()
+                        .filter(|p| p.tab_id == t.tab_id)
+                        .map(|p| WirePane {
+                            id: p.pane_id.clone(),
+                            terminal_id: (!p.terminal_id.is_empty()).then(|| p.terminal_id.clone()),
+                            title: p
+                                .label
+                                .clone()
+                                .or_else(|| p.title.clone())
+                                .or_else(|| p.terminal_title_stripped.as_deref().map(strip_spinner))
+                                .filter(|s| !s.is_empty()),
+                            cwd: p.foreground_cwd.clone().or_else(|| p.cwd.clone()),
+                            agent_id: agent_by_pane.get(&p.pane_id).cloned(),
+                            focused: p.focused,
+                        })
+                        .collect(),
+                })
+                .collect();
+            let cwd = workspace_cwd(w, &ws_tabs, panes);
+            let repo = repos.get(&cwd).cloned().flatten();
+            let worktree = w.worktree.as_ref().filter(|wt| wt.is_linked_worktree).map(|wt| WorktreeInfo {
+                path: wt.checkout_path.clone(),
+                branch: repo.as_ref().and_then(|r| r.branch.clone()),
+                primary_workspace_id: workspaces
+                    .iter()
+                    .find(|o| {
+                        o.workspace_id != w.workspace_id
+                            && o.worktree.as_ref().is_some_and(|x| x.repo_key == wt.repo_key && !x.is_linked_worktree)
+                    })
+                    .map(|o| o.workspace_id.clone()),
+            });
+            Workspace {
+                id: w.workspace_id.clone(),
+                label: w.label.clone(),
+                cwd,
+                repo,
+                worktree,
+                tabs,
+                rollup: herdr_state(w.agent_status),
+                order: w.number,
+            }
+        })
+        .collect();
+    out.sort_by_key(|w| w.order);
+    out
+}
+
+/// Workspace folder: the checkout path, else the cwd of the first pane of its first tab.
+pub fn workspace_cwd(w: &WorkspaceInfo, ws_tabs: &[&TabInfo], panes: &[PaneInfo]) -> String {
+    if let Some(wt) = &w.worktree {
+        if !wt.checkout_path.is_empty() {
+            return wt.checkout_path.clone();
+        }
+    }
+    let first_tab = w.active_tab_id.as_deref().or(ws_tabs.first().map(|t| t.tab_id.as_str()));
+    panes
+        .iter()
+        .find(|p| Some(p.tab_id.as_str()) == first_tab)
+        .or_else(|| panes.iter().find(|p| p.workspace_id == w.workspace_id))
+        .and_then(|p| p.cwd.clone())
+        .unwrap_or_default()
+}
+
+// ───────────────────────────── notifications ─────────────────────────────
+
+pub fn needs_notification(agent: &Agent, at: Millis) -> Option<Notification> {
+    let n = agent.needs.as_ref()?;
+    let body = if n.question.is_empty() { n.title.clone() } else { clip(&n.question, 200) };
+    let actions = if n.answerable && !n.multi {
+        n.options
+            .iter()
+            .take(3)
+            .map(|o| NotifyAction {
+                id: o.id.clone(),
+                label: o.label.clone(),
+                answer: Some(Answer { choices: vec![o.id.clone()], text: None, cancel: false, chat: false }),
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    Some(Notification {
+        id: new_id("n"),
+        at,
+        kind: NotifyKind::Needs,
+        agent_id: agent.id.clone(),
+        title: format!("{} · {}", agent.name, n.title),
+        body,
+        request_id: n.request_id.clone(),
+        actions,
+    })
+}
+
+pub fn finished_notification(agent: &Agent, at: Millis) -> Notification {
+    let body = agent.live.line.clone().unwrap_or_else(|| agent.title.clone());
+    Notification {
+        id: new_id("n"),
+        at,
+        kind: NotifyKind::Finished,
+        agent_id: agent.id.clone(),
+        title: format!("{} finished", agent.name),
+        body: clip(&body, 200),
+        request_id: None,
+        actions: vec![],
+    }
+}
+
+pub fn quiet_notification(agent: &Agent, at: Millis, silent_ms: Millis) -> Notification {
+    Notification {
+        id: new_id("n"),
+        at,
+        kind: NotifyKind::Quiet,
+        agent_id: agent.id.clone(),
+        title: format!("{} has been quiet", agent.name),
+        body: format!("No activity for {} s while working.", silent_ms / 1000),
+        request_id: None,
+        actions: vec![],
+    }
+}
+
+pub fn error_notification(agent_id: &str, agent_name: &str, text: &str, at: Millis) -> Notification {
+    Notification {
+        id: new_id("n"),
+        at,
+        kind: NotifyKind::Error,
+        agent_id: agent_id.to_string(),
+        title: format!("{agent_name} hit an error"),
+        body: clip(text, 200),
+        request_id: None,
+        actions: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn columns() {
+        assert_eq!(column(HerdrState::Blocked, false, true), Column::Needs);
+        assert_eq!(column(HerdrState::Working, true, false), Column::Needs);
+        assert_eq!(column(HerdrState::Working, false, true), Column::Running);
+        assert_eq!(column(HerdrState::Idle, false, true), Column::Done);
+        assert_eq!(column(HerdrState::Idle, false, false), Column::Review);
+        assert_eq!(column(HerdrState::Done, false, false), Column::Review);
+        assert_eq!(column(HerdrState::Unknown, false, false), Column::Review);
+    }
+
+    #[test]
+    fn spinner_is_stripped() {
+        assert_eq!(strip_spinner("π ⠧ tmp"), "tmp");
+        assert_eq!(strip_spinner("omp: fix bug"), "omp: fix bug");
+    }
+
+    fn herdr_agent(status: AgentStatus) -> AgentInfo {
+        AgentInfo {
+            pane_id: "w1:p1".into(),
+            terminal_id: "term_1".into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            name: Some("lab".into()),
+            agent: Some("claude".into()),
+            agent_status: status,
+            ..Default::default()
+        }
+    }
+
+    fn inputs(a: &AgentInfo) -> AgentInputs<'_> {
+        AgentInputs {
+            herdr: a,
+            omp: None,
+            link: (LinkState::NotShared, None),
+            omp_session_id: None,
+            omp_pid: None,
+            bridge: None,
+            archived: false,
+            turns: 2,
+            first_seen: Some(1),
+            state_since: 5,
+            needs_since: 7,
+            pane_activity: Some(9),
+            repo: None,
+            turn_started_at: None,
+            last_turn_ended_at: None,
+        }
+    }
+
+    #[test]
+    fn non_omp_agent_maps_herdr_state() {
+        let a = herdr_agent(AgentStatus::Blocked);
+        let agent = build_agent(&inputs(&a));
+        assert_eq!(agent.id, "term_1");
+        assert_eq!(agent.column, Column::Needs);
+        assert!(agent.omp.is_none());
+        let needs = agent.needs.as_ref().unwrap();
+        assert_eq!(needs.kind, NeedsKind::Blocked);
+        assert!(!needs.answerable);
+        assert_eq!(needs.since, 7);
+        assert_eq!(agent.live.last_event_at, Some(9));
+
+        let a = herdr_agent(AgentStatus::Idle);
+        let mut i = inputs(&a);
+        i.archived = true;
+        let agent = build_agent(&i);
+        assert_eq!(agent.column, Column::Done);
+        assert!(agent.archived);
+    }
+
+    #[test]
+    fn needs_notification_has_three_actions() {
+        let a = herdr_agent(AgentStatus::Blocked);
+        let mut agent = build_agent(&inputs(&a));
+        let n = agent.needs.as_mut().unwrap();
+        n.answerable = true;
+        n.request_id = Some("r1".into());
+        n.options = (0..5)
+            .map(|k| NeedsOption {
+                id: format!("o{k}"),
+                label: format!("O{k}"),
+                description: None,
+                recommended: false,
+                tone: OptionTone::Neutral,
+            })
+            .collect();
+        let note = needs_notification(&agent, 1).unwrap();
+        assert_eq!(note.actions.len(), 3);
+        assert_eq!(note.actions[0].answer.as_ref().unwrap().choices, vec!["o0".to_string()]);
+        assert_eq!(note.request_id.as_deref(), Some("r1"));
+    }
+}

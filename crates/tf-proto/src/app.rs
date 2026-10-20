@@ -164,4 +164,6 @@ pub enum AppEvent {
     /// Activated a notification action outside the app UI (Android notification button,
     /// Windows toast). The frontend navigates to the agent.
     OpenAgent { host_id: String, agent_id: String },
+    /// Tray / notification "Answer next": the frontend opens the Answer-next HUD.
+    AnswerNext,
 }

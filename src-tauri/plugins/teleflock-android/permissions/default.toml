@@ -1,0 +1,11 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Webview access to haptics, the notification permission flow and battery-optimisation status."
+permissions = [
+  "allow-haptic",
+  "allow-notification-permission",
+  "allow-request-notification-permission",
+  "allow-battery-status",
+  "allow-request-ignore-battery-optimizations",
+]

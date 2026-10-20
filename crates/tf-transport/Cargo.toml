@@ -1,0 +1,18 @@
+[package]
+name = "tf-transport"
+description = "TeleFlock app-side transports: Tailscale SSH (russh), Local and WSL"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+tf-proto = { path = "../tf-proto" }
+async-trait = "0.1.89"
+bytes = "1"
+log = { workspace = true }
+russh = { version = "0.64.1", default-features = false, features = ["flate2", "rsa", "ring"] }
+thiserror = "2"
+tokio = { version = "1.54", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

@@ -17,13 +17,14 @@
         "title": "TeleFlock",
         "width": 1440,
         "height": 900,
-        "minWidth": 1100,
-        "minHeight": 700,
+        "minWidth": 420,
+        "minHeight": 560,
         "center": true,
         "resizable": true,
         "decorations": false,
         "shadow": true,
-        "backgroundColor": "#0b0b10"
+        "transparent": true,
+        "backgroundColor": "#0b0b1000"
       }
     ],
     "security": {
@@ -31,9 +32,20 @@
       "devCsp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:1420 ws://localhost:1421 http://127.0.0.1:1420"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["teleflock"] },
+      "mobile": [{ "scheme": ["teleflock"], "appLink": false }]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "TeleFlock",
+    "copyright": "© 2026 TeleFlock",
+    "category": "DeveloperTool",
+    "shortDescription": "A native GUI for omp agents running in herdr",
+    "longDescription": "TeleFlock shows every omp agent running inside herdr on a live board, lets you answer, steer and review them, and drops into a real terminal when you need it. Connects over Tailscale SSH, to herdr on this PC, or inside WSL.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,6 +53,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

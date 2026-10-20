@@ -1,0 +1,451 @@
+import {
+  Activity,
+  Archive,
+  ArchiveRestore,
+  ArrowLeft,
+  BarChart3,
+  Bot,
+  CornerDownLeft,
+  FolderGit2,
+  FolderOpen,
+  GitBranchPlus,
+  History,
+  Inbox,
+  Keyboard,
+  LayoutDashboard,
+  Columns2,
+  PanelLeft,
+  Plug,
+  PlugZap,
+  Server,
+  Settings2,
+  Sparkles,
+  SquareTerminal,
+  Zap,
+} from "lucide-react";
+import { motion } from "motion/react";
+import { type ReactNode, useEffect, useState } from "react";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  Kbd,
+  Spinner,
+  spring,
+  StatusOrb,
+  toast,
+  useMotionPreference,
+} from "@/design";
+import {
+  agentKey,
+  core,
+  getAgentViews,
+  getWorkspacesSnapshot,
+  navigate,
+  type Route,
+  useHosts,
+  useRoute,
+  useSettings,
+  useUi,
+} from "@/core";
+import type { MotionPref, ThinkingLevel } from "@/core/gen";
+import { connect } from "@/features/hosts/ConnStatusCard";
+import { openNewAgent } from "@/features/workspace/NewAgentDialog";
+import { toggleSplit } from "@/features/shell/keyboard";
+import { COLUMN_STATUS, PHASE_STATUS } from "@/features/shell/status";
+import { rankItem } from "./fuzzy";
+import { type PaletteCommand, useContributed, useRecents } from "./registry";
+import { hostCall, type PalettePage, sessionCommands } from "./sessionCommands";
+
+/** One row in the palette. */
+interface Entry {
+  id: string;
+  title: string;
+  group: string;
+  keywords: string[];
+  icon: ReactNode;
+  hint?: string;
+  shortcut?: string;
+  /** Runs and closes, or opens a sub-page. */
+  run?: () => void | Promise<unknown>;
+  page?: PalettePage;
+}
+
+const GROUP_ORDER = ["Recent", "This session", "Actions", "Views", "Agents", "Workspaces", "Hosts", "Contributed"];
+const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
+const MAX_RESULTS = 60;
+
+/** Build the full entry list once per open (agents/workspaces are a snapshot taken on open). */
+function useEntries(): Entry[] {
+  const ui = useUi();
+  const route = useRoute();
+  const { profiles, status, setFilter } = useHosts();
+  const settings = useSettings();
+  const setMotion = useMotionPreference((s) => s.setPreference);
+  const contributed = useContributed((s) => s.sources);
+  const [agents] = useState(getAgentViews);
+  const [workspaces] = useState(getWorkspacesSnapshot);
+
+  const ctxKey = route.name === "agent" ? agentKey(route.hostId, route.agentId) : ui.selectedKey;
+  const ctxAgent = ctxKey ? agents.find((a) => a.key === ctxKey) : undefined;
+  const hostName = (id: string) => profiles.find((p) => p.id === id)?.name ?? id;
+  const firstOnline = profiles.find((p) => status[p.id]?.phase === "online")?.id;
+  const defaultHost = ctxAgent?.hostId ?? firstOnline;
+
+  const entries: Entry[] = [];
+
+  if (ctxAgent) {
+    const name = ctxAgent.name;
+    for (const c of sessionCommands(ctxAgent.hostId, ctxAgent)) {
+      entries.push({ id: `session:${c.id}`, title: c.title, group: "This session", keywords: [...c.keywords, name], icon: c.icon, hint: c.hint, run: c.run, page: c.page });
+    }
+    entries.push(
+      {
+        id: "session:terminal",
+        title: `Open ${name}'s terminal`,
+        group: "This session",
+        keywords: ["terminal", "pane", "tty"],
+        icon: <SquareTerminal />,
+        shortcut: "T",
+        run: () => navigate({ name: "terminal", hostId: ctxAgent.hostId, agentId: ctxAgent.id }),
+      },
+      {
+        id: "session:archive",
+        title: ctxAgent.archived ? `Unarchive ${name}` : `Archive ${name}`,
+        group: "This session",
+        keywords: ["archive", "done", "hide"],
+        icon: ctxAgent.archived ? <ArchiveRestore /> : <Archive />,
+        run: () =>
+          hostCall(
+            ctxAgent.archived ? "Unarchived" : "Archived",
+            core.host(ctxAgent.hostId).call("agent.archive", { agentId: ctxAgent.id, archived: !ctxAgent.archived }),
+          ),
+      },
+    );
+  }
+
+  entries.push(
+    { id: "act:new-worktree", title: "New worktree…", group: "Actions", keywords: ["create", "branch", "git", "agent"], icon: <GitBranchPlus />, shortcut: "N", run: () => ui.openDialog({ kind: "newWorktree", hostId: defaultHost }) },
+    { id: "act:new-agent", title: "New agent…", group: "Actions", keywords: ["start", "omp", "spawn"], icon: <Bot />, run: () => ui.openDialog({ kind: "newAgent", hostId: defaultHost }) },
+    { id: "act:answer-next", title: "Answer next", group: "Actions", keywords: ["needs you", "reply", "unblock", "inbox"], icon: <Zap />, shortcut: "Ctrl J", run: () => ui.setAnswerNext(true) },
+    { id: "act:past", title: "Past sessions…", group: "Actions", keywords: ["history", "resume"], icon: <History />, run: () => ui.openDialog({ kind: "pastSessions", hostId: defaultHost }) },
+    { id: "act:open-folder", title: "Open folder as workspace…", group: "Actions", keywords: ["folder", "workspace", "directory", "browse"], icon: <FolderOpen />, run: () => openNewAgent({ hostId: defaultHost, openFolder: true }) },
+    { id: "act:split", title: ui.split ? "Close split view" : "Split view", group: "Actions", keywords: ["side by side", "terminal", "pane"], icon: <Columns2 />, shortcut: "Ctrl \\", run: () => toggleSplit(ui, route) },
+    { id: "act:sidebar", title: ui.sidebarCollapsed ? "Show sidebar" : "Hide sidebar", group: "Actions", keywords: ["panel"], icon: <PanelLeft />, shortcut: "Ctrl B", run: () => ui.toggleSidebar() },
+    { id: "act:add-host", title: "Add a host…", group: "Actions", keywords: ["connect", "tailscale", "ssh", "wsl", "local"], icon: <Server />, run: () => ui.openDialog({ kind: "hostEditor" }) },
+    { id: "act:shortcuts", title: "Keyboard shortcuts", group: "Actions", keywords: ["keys", "help", "?"], icon: <Keyboard />, shortcut: "?", run: () => ui.openDialog({ kind: "shortcuts" }) },
+  );
+  for (const m of ["full", "reduced", "system"] as const satisfies readonly MotionPref[]) {
+    if (m === settings.motion) continue;
+    entries.push({
+      id: `act:motion-${m}`,
+      title: m === "full" ? "Motion: full animation" : m === "reduced" ? "Motion: reduce animation" : "Motion: follow the system",
+      group: "Actions",
+      keywords: ["animation", "reduced motion", "accessibility", "settings"],
+      icon: <Sparkles />,
+      run: () => {
+        setMotion(m);
+        return settings.update({ motion: m });
+      },
+    });
+  }
+
+  const views: { title: string; route: Route; icon: ReactNode; keys: string[]; shortcut?: string }[] = [
+    { title: "Board", route: { name: "board" }, icon: <LayoutDashboard />, keys: ["home", "kanban", "flock"], shortcut: "Ctrl 1" },
+    { title: "Inbox", route: { name: "inbox" }, icon: <Inbox />, keys: ["needs you", "questions"], shortcut: "Ctrl 2" },
+    { title: "Activity", route: { name: "activity" }, icon: <Activity />, keys: ["timeline", "feed", "history"], shortcut: "Ctrl 3" },
+    { title: "Usage", route: { name: "usage" }, icon: <BarChart3 />, keys: ["cost", "tokens", "spend"], shortcut: "Ctrl 4" },
+    { title: "Hosts", route: { name: "hosts" }, icon: <Server />, keys: ["machines", "connections"], shortcut: "Ctrl 5" },
+    { title: "Settings", route: { name: "settings" }, icon: <Settings2 />, keys: ["preferences", "options"], shortcut: "Ctrl 6" },
+  ];
+  for (const v of views) entries.push({ id: `view:${v.route.name}`, title: v.title, group: "Views", keywords: v.keys, icon: v.icon, shortcut: v.shortcut, run: () => navigate(v.route) });
+  if (defaultHost) {
+    entries.push({ id: "view:terminal", title: "Terminal", group: "Views", keywords: ["shell", "tty", "herdr"], icon: <SquareTerminal />, run: () => navigate({ name: "terminal", hostId: defaultHost }) });
+  }
+
+  for (const a of agents) {
+    entries.push({
+      id: `agent:${a.key}`,
+      title: a.name,
+      group: "Agents",
+      keywords: [a.title, a.repo ?? "", a.branch ?? "", a.kind, hostName(a.hostId), a.column],
+      icon: <StatusOrb status={COLUMN_STATUS[a.column]} size={9} label={null} />,
+      hint: [a.title, a.repo && a.branch ? `${a.repo} · ${a.branch}` : a.repo].filter(Boolean).join(" — "),
+      run: () => navigate({ name: "agent", hostId: a.hostId, agentId: a.id }),
+    });
+  }
+
+  for (const { hostId, ws } of workspaces) {
+    const repo = ws.repo?.name;
+    const branch = ws.worktree?.branch ?? ws.repo?.branch;
+    entries.push({
+      id: `ws:${hostId}:${ws.id}`,
+      title: ws.label,
+      group: "Workspaces",
+      keywords: [repo ?? "", branch ?? "", ws.cwd, hostName(hostId)],
+      icon: ws.worktree ? <FolderGit2 /> : <FolderOpen />,
+      hint: [repo, branch].filter(Boolean).join(" · ") || ws.cwd,
+      run: () => (ws.repo ? navigate({ name: "review", hostId, workspaceId: ws.id }) : ui.openDialog({ kind: "newAgent", hostId, workspaceId: ws.id })),
+    });
+  }
+
+  for (const p of profiles) {
+    const phase = status[p.id]?.phase ?? "idle";
+    const online = phase === "online";
+    entries.push({
+      id: `host:${p.id}`,
+      title: online ? `Show only ${p.name}` : `Connect ${p.name}`,
+      group: "Hosts",
+      keywords: ["host", "filter", "connect", p.address ?? "", p.kind],
+      icon: online ? <StatusOrb status={PHASE_STATUS[phase]} size={9} label={null} /> : <Plug />,
+      hint: phase,
+      run: () => (online ? setFilter(p.id) : connect(p.id)),
+    });
+  }
+  if (profiles.length > 1) {
+    entries.push({ id: "host:all", title: "Show all hosts", group: "Hosts", keywords: ["filter", "everything"], icon: <PlugZap />, run: () => setFilter("all") });
+  }
+
+  for (const cmds of Object.values(contributed)) {
+    for (const c of cmds as PaletteCommand[]) {
+      entries.push({ id: `c:${c.id}`, title: c.title, group: c.group ?? "Contributed", keywords: c.keywords ?? [], icon: c.icon ?? <Sparkles />, hint: c.hint, shortcut: c.shortcut, run: c.run });
+    }
+  }
+  return entries;
+}
+
+/** Rank and group entries for a query. Empty query: recents first, then every group in order. */
+function arrange(entries: Entry[], query: string, recents: string[]): [string, Entry[]][] {
+  const q = query.trim();
+  if (!q) {
+    const byId = new Map(entries.map((e) => [e.id, e]));
+    const recent = recents.map((id) => byId.get(id)).filter((e): e is Entry => !!e);
+    const groups = new Map<string, Entry[]>();
+    if (recent.length) groups.set("Recent", recent);
+    for (const e of entries) {
+      if (recent.includes(e)) continue;
+      const list = groups.get(e.group) ?? [];
+      list.push(e);
+      groups.set(e.group, list);
+    }
+    const rank = (g: string) => {
+      const i = GROUP_ORDER.indexOf(g);
+      return i < 0 ? GROUP_ORDER.length - 1 : i;
+    };
+    return [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
+  }
+  const scored: { e: Entry; s: number }[] = [];
+  for (const e of entries) {
+    const s = rankItem(q, e.title, e.keywords);
+    if (s === null) continue;
+    // recently used entries float up a little
+    const r = recents.indexOf(e.id);
+    scored.push({ e, s: s + (r >= 0 ? 60 - r * 6 : 0) });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  const top = scored.slice(0, MAX_RESULTS);
+  const groups = new Map<string, { best: number; list: Entry[] }>();
+  for (const { e, s } of top) {
+    const g = groups.get(e.group) ?? { best: s, list: [] };
+    g.list.push(e);
+    groups.set(e.group, g);
+  }
+  return [...groups.entries()].sort((a, b) => b[1].best - a[1].best).map(([g, v]) => [g, v.list]);
+}
+
+function ModelPage({ hostId, agentId, query, done }: { hostId: string; agentId: string; query: string; done: () => void }) {
+  const [models, setModels] = useState<{ value: string; label: string; hint: string }[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    core
+      .host(hostId)
+      .call("host.models", {})
+      .then(
+        (c) => live && setModels(c.models.map((m) => ({ value: `${m.provider}/${m.id}`, label: m.label ?? m.id, hint: m.provider }))),
+        () => live && setModels([]),
+      );
+    return () => {
+      live = false;
+    };
+  }, [hostId]);
+  if (!models) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-8 text-sm text-mute">
+        <Spinner /> Loading models…
+      </div>
+    );
+  }
+  const ranked = models
+    .map((m) => ({ m, s: rankItem(query, m.label, [m.value, m.hint]) }))
+    .filter((x) => x.s !== null)
+    .sort((a, b) => (b.s ?? 0) - (a.s ?? 0));
+  return (
+    <CommandGroup heading="Models">
+      {ranked.map(({ m }) => (
+        <CommandItem
+          key={m.value}
+          value={m.value}
+          icon={<Bot />}
+          onSelect={() => {
+            done();
+            void hostCall(`Switched to ${m.label}`, core.host(hostId).call("agent.setModel", { agentId, model: m.value }));
+          }}
+        >
+          {m.label} <span className="ml-1 text-xs text-mute-2">{m.hint}</span>
+        </CommandItem>
+      ))}
+    </CommandGroup>
+  );
+}
+
+function ThinkingPage({ hostId, agentId, query, done }: { hostId: string; agentId: string; query: string; done: () => void }) {
+  return (
+    <CommandGroup heading="Thinking level">
+      {THINKING.filter((t) => rankItem(query, t) !== null).map((level) => (
+        <CommandItem
+          key={level}
+          value={level}
+          icon={<Sparkles />}
+          onSelect={() => {
+            done();
+            void hostCall(`Thinking: ${level}`, core.host(hostId).call("agent.setThinking", { agentId, level }));
+          }}
+        >
+          {level}
+        </CommandItem>
+      ))}
+    </CommandGroup>
+  );
+}
+
+/**
+ * The command palette (Ctrl+K): ranked fuzzy search over agents, workspaces, hosts, views and
+ * actions; slash commands for the current session with argument pages; recents first.
+ */
+export function CommandPalette() {
+  const { paletteOpen, setPalette } = useUi();
+  return (
+    <CommandDialog open={paletteOpen} onOpenChange={setPalette} commandProps={{ shouldFilter: false, loop: true }}>
+      {paletteOpen && <PaletteBody close={() => setPalette(false)} />}
+    </CommandDialog>
+  );
+}
+
+function PaletteBody({ close }: { close: () => void }) {
+  const entries = useEntries();
+  const recents = useRecents((s) => s.ids);
+  const pushRecent = useRecents((s) => s.push);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState<PalettePage | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const choose = (e: Entry) => {
+    pushRecent(e.id);
+    if (e.page) {
+      setPage(e.page);
+      setQuery("");
+      return;
+    }
+    close();
+    const r = e.run?.();
+    if (r instanceof Promise) r.catch((err: unknown) => toast({ title: `${e.title} failed`, description: String(err), status: "error" }));
+  };
+
+  const back = () => {
+    setPage(null);
+    setQuery("");
+  };
+
+  const placeholder = page
+    ? page.kind === "text"
+      ? page.placeholder
+      : page.kind === "model"
+        ? "Search models…"
+        : "Pick a thinking level…"
+    : "Search agents, workspaces, hosts, or run a command…";
+
+  return (
+    <>
+      <CommandInput
+        value={query}
+        onValueChange={setQuery}
+        placeholder={placeholder}
+        onKeyDown={(e) => {
+          if (page && e.key === "Backspace" && query === "") {
+            e.preventDefault();
+            back();
+          }
+          if (page && e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            back();
+          }
+        }}
+      />
+      {page && (
+        <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={spring.snappy} className="flex items-center gap-2 border-b border-line px-4 py-2 text-xs text-mute">
+          <button type="button" onClick={back} className="inline-flex items-center gap-1 rounded-xs font-bold text-ink-2 focus-ring hover:text-ink">
+            <ArrowLeft className="size-3.5" /> Back
+          </button>
+          <span className="kicker">{page.kind === "text" ? page.title : page.kind === "model" ? "Switch model" : "Thinking"}</span>
+          <span className="ml-auto flex items-center gap-1">
+            <Kbd>⌫</Kbd> to go back
+          </span>
+        </motion.div>
+      )}
+      <CommandList>
+        {page?.kind === "model" && <ModelPage hostId={page.hostId} agentId={page.agentId} query={query} done={close} />}
+        {page?.kind === "thinking" && <ThinkingPage hostId={page.hostId} agentId={page.agentId} query={query} done={close} />}
+        {page?.kind === "text" && (
+          <CommandGroup heading={page.title}>
+            <CommandItem
+              value="submit"
+              icon={busy ? <Spinner size={14} /> : <CornerDownLeft />}
+              disabled={busy || (!page.allowEmpty && !query.trim())}
+              onSelect={() => {
+                setBusy(true);
+                page.run(query.trim()).finally(() => {
+                  setBusy(false);
+                  close();
+                });
+              }}
+            >
+              {query.trim() ? `${page.submitLabel}: “${query.trim()}”` : page.allowEmpty ? page.submitLabel : `Type to ${page.submitLabel.toLowerCase()}`}
+            </CommandItem>
+          </CommandGroup>
+        )}
+        {!page && (
+          <>
+            <CommandEmpty>No matches. Try an agent name, a repo, or “new”.</CommandEmpty>
+            {arrange(entries, query, recents).map(([group, list]) => (
+              <CommandGroup key={group} heading={group}>
+                {list.map((e) => (
+                  <CommandItem key={`${group}:${e.id}`} value={`${group}:${e.id}`} icon={e.icon} shortcut={e.shortcut} onSelect={() => choose(e)}>
+                    {e.title}
+                    {e.hint && <span className="ml-2 text-xs font-medium text-mute-2">{e.hint}</span>}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            ))}
+          </>
+        )}
+      </CommandList>
+      <div className="flex items-center gap-3 border-t border-line px-4 py-2 text-2xs text-mute-2">
+        <span className="flex items-center gap-1">
+          <Kbd>↑</Kbd>
+          <Kbd>↓</Kbd> move
+        </span>
+        <span className="flex items-center gap-1">
+          <Kbd>↵</Kbd> run
+        </span>
+        <span className="flex items-center gap-1">
+          <Kbd>Esc</Kbd> close
+        </span>
+        <span className="ml-auto">fuzzy · recents first</span>
+      </div>
+    </>
+  );
+}

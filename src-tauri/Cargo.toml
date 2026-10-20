@@ -16,9 +16,40 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { workspace = true }
 
+[dev-dependencies]
+tauri = { workspace = true, features = ["test"] }
+tempfile = "3"
+
 [dependencies]
+tf-client = { path = "../crates/tf-client" }
+tf-proto = { path = "../crates/tf-proto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
-tauri = { workspace = true }
+tauri = { workspace = true, features = ["tray-icon", "image-png"] }
 tauri-plugin-log = { workspace = true }
+tauri-plugin-deep-link = "2.6.2"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+percent-encoding = "2"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
+# Windows 11 Snap Layouts over the custom maximize button (no-op on other desktops).
+tauri-plugin-snap-layout = "1.0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+# Same major as tauri/wry (no second copy of the windows crate).
+windows = { version = "0.62", features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "Foundation_Collections",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-teleflock-android = { path = "plugins/teleflock-android" }

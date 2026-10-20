@@ -1,0 +1,19 @@
+[package]
+name = "tf-herdr"
+description = "Host-side herdr client: socket/named-pipe API, typed calls, coalesced events, terminal sessions, server discovery"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+base64 = "0.22"
+tokio = { version = "1", features = ["net", "io-util", "process", "rt", "sync", "time", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util", "process", "rt-multi-thread", "sync", "time", "macros"] }

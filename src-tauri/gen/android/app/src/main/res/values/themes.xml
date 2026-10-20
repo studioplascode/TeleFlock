@@ -1,0 +1,12 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Always dark: the UI is dark-only, so the window, status and navigation bars match it
+         from the first frame (no white flash before the WebView paints). -->
+    <style name="Theme.teleflock" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/tf_bg</item>
+        <item name="colorPrimary">@color/tf_accent</item>
+        <item name="colorAccent">@color/tf_accent</item>
+        <item name="android:statusBarColor">@color/tf_bg</item>
+        <item name="android:navigationBarColor">@color/tf_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

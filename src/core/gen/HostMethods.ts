@@ -4,6 +4,7 @@ import type { ActivityParams } from "./ActivityParams";
 import type { AgentRef } from "./AgentRef";
 import type { AnswerParams } from "./AnswerParams";
 import type { ArchiveParams } from "./ArchiveParams";
+import type { BranchList } from "./BranchList";
 import type { BtwParams } from "./BtwParams";
 import type { BtwStarted } from "./BtwStarted";
 import type { CommandOutput } from "./CommandOutput";
@@ -113,6 +114,7 @@ export interface HostMethods {
   "fs.search": { params: FsSearchParams; result: FsSearchResult };
   "fs.read": { params: FsReadParams; result: FsReadResult };
   "git.status": { params: CwdParams; result: GitStatusResult };
+  "git.branches": { params: CwdParams; result: BranchList };
   "git.diff": { params: GitDiffParams; result: GitDiffResult };
   "git.commit": { params: GitCommitParams; result: GitCommitResult };
   "git.push": { params: CwdParams; result: CommandOutput };

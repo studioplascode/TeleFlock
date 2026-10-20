@@ -1,0 +1,478 @@
+//! Discovery of hosted omp sessions (`omp-collab.md` §8).
+//!
+//! Primary path: the registry IPC. Each host publishes `~/.omp/run/collab-hosts/<entry>.json`
+//! (`{version, instanceId, pid, endpoint, createdAt, token}`); the endpoint (unix socket / named
+//! pipe) answers one newline-delimited JSON request per connection:
+//!
+//! ```text
+//! → {"v":1,"token":"…","op":"snapshot"}                         ← {"ok":true,"v":1,"snapshot":{…}}
+//! → {"v":1,"token":"…","op":"link","access":"control","generation":N}  ← {"ok":true,"v":1,"url":"…"}
+//!                                                                ← {"ok":false,"v":1,"error":"stale_generation"}
+//! ```
+//!
+//! Fallback: `omp collab list --json` / `omp collab link <id> [--view] --json` (used when the
+//! directory cannot be read, or a host speaks another registry protocol version).
+//!
+//! [`Registry::poll`] returns the current hosts; the consumer diffs (key by
+//! `(instance_id, generation)`).
+
+use std::collections::HashMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use crate::link::CollabLink;
+
+pub const REGISTRY_VERSION: u32 = 1;
+const HOST_DEADLINE: Duration = Duration::from_millis(1500);
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+const LINK_ATTEMPTS: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelId {
+    pub provider: String,
+    pub id: String,
+}
+
+/// One live collab host (a `snapshot` reply / `omp collab list` row).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostEntry {
+    pub instance_id: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub session_name: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub model: Option<ModelId>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub participants: u32,
+    #[serde(default)]
+    pub relay_connected: bool,
+    #[serde(default)]
+    pub input_required: bool,
+    #[serde(default)]
+    pub busy: bool,
+    /// `control` | `view`.
+    #[serde(default)]
+    pub access: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Control,
+    View,
+}
+
+impl Access {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::Control => "control",
+            Access::View => "view",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkInfo {
+    pub instance_id: String,
+    /// Generation the link belongs to (may be newer than the one polled).
+    pub generation: u64,
+    /// Browser deep link as returned by omp (contains the room secret; keep on the host).
+    pub url: String,
+    pub link: CollabLink,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// No live host with that instance id / pid.
+    NotFound(String),
+    /// Registry error code from omp (`stale_generation`, `access_unavailable`, `snapshot_unavailable`, …).
+    Host(String),
+    /// Endpoint unreachable / timed out / malformed reply.
+    Unreachable(String),
+    Io(String),
+    /// The `omp` CLI fallback failed.
+    Cli(String),
+    /// omp returned a URL we cannot parse.
+    BadLink(String),
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(s) => write!(f, "collab host not found: {s}"),
+            Self::Host(s) => write!(f, "collab registry error: {s}"),
+            Self::Unreachable(s) => write!(f, "collab host unreachable: {s}"),
+            Self::Io(s) => write!(f, "collab registry io error: {s}"),
+            Self::Cli(s) => write!(f, "omp collab cli failed: {s}"),
+            Self::BadLink(s) => write!(f, "bad collab link from registry: {s}"),
+        }
+    }
+}
+impl std::error::Error for RegistryError {}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Meta {
+    version: u32,
+    instance_id: String,
+    #[serde(default)]
+    pid: u32,
+    endpoint: String,
+    token: String,
+}
+
+/// Registry client. Cheap; holds the last seen endpoint metadata.
+pub struct Registry {
+    dir: PathBuf,
+    omp_bin: PathBuf,
+    metas: Mutex<HashMap<String, Meta>>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `~/.omp/run/collab-hosts`.
+pub fn default_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".omp").join("run").join("collab-hosts")
+}
+
+enum Query {
+    Ok(Value),
+    Err(String),
+}
+
+impl Registry {
+    pub fn new() -> Registry {
+        Self::with_dir(default_dir())
+    }
+
+    pub fn with_dir(dir: PathBuf) -> Registry {
+        Registry { dir, omp_bin: PathBuf::from("omp"), metas: Mutex::new(HashMap::new()) }
+    }
+
+    /// `omp` binary for the CLI fallback (default: `omp` on PATH).
+    pub fn omp_bin(mut self, bin: impl Into<PathBuf>) -> Registry {
+        self.omp_bin = bin.into();
+        self
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Current hosts, sorted by `startedAt`, `pid`, `instanceId`.
+    pub async fn poll(&self) -> Result<Vec<HostEntry>, RegistryError> {
+        let metas = match self.read_metas().await {
+            Ok(m) => m,
+            Err(e) => {
+                log::debug!("registry dir unreadable ({e}); falling back to omp collab list");
+                return self.cli_list().await;
+            }
+        };
+        let queries = metas.iter().map(|m| async move { (m, query(m, json!({"op": "snapshot"})).await) });
+        let results = futures_util::future::join_all(queries).await;
+        let mut hosts = Vec::new();
+        let mut fallback = false;
+        let mut seen = HashMap::new();
+        for (meta, res) in results {
+            match res {
+                Ok(Query::Ok(v)) => match serde_json::from_value::<HostEntry>(v["snapshot"].clone()) {
+                    Ok(h) => {
+                        seen.insert(h.instance_id.clone(), meta.clone());
+                        hosts.push(h);
+                    }
+                    Err(e) => log::debug!("registry: bad snapshot from {}: {e}", meta.endpoint),
+                },
+                Ok(Query::Err(code)) if code == "unsupported_protocol" => fallback = true,
+                // snapshot_unavailable (ending / transitioning) and auth failures: skip this round.
+                Ok(Query::Err(code)) => log::debug!("registry: {} → {code}", meta.instance_id),
+                // ENOENT / ECONNREFUSED: crashed publication; omp's next lister prunes it.
+                Err(e) => log::debug!("registry: {} unreachable: {e}", meta.endpoint),
+            }
+        }
+        if fallback {
+            return self.cli_list().await;
+        }
+        *self.metas.lock().unwrap() = seen;
+        sort_hosts(&mut hosts);
+        Ok(hosts)
+    }
+
+    /// A join link for `instance_id` (or a pid). Handles `stale_generation` by re-reading the
+    /// current generation and retrying.
+    pub async fn link(&self, instance_id: &str, access: Access) -> Result<LinkInfo, RegistryError> {
+        let mut meta = self.metas.lock().unwrap().get(instance_id).cloned();
+        if meta.is_none() {
+            if let Ok(metas) = self.read_metas().await {
+                meta = metas.into_iter().find(|m| m.instance_id == instance_id || m.pid.to_string() == instance_id);
+            }
+        }
+        let Some(meta) = meta else { return self.cli_link(instance_id, access).await };
+        let mut last = RegistryError::NotFound(instance_id.to_owned());
+        for _ in 0..LINK_ATTEMPTS {
+            let snap = match query(&meta, json!({"op": "snapshot"})).await {
+                Ok(Query::Ok(v)) => v,
+                Ok(Query::Err(code)) if code == "unsupported_protocol" => return self.cli_link(instance_id, access).await,
+                Ok(Query::Err(code)) => return Err(RegistryError::Host(code)),
+                Err(e) => return Err(e),
+            };
+            let generation = snap["snapshot"]["generation"].as_u64().unwrap_or(0);
+            match query(&meta, json!({"op": "link", "access": access.as_str(), "generation": generation})).await? {
+                Query::Ok(v) => {
+                    let url = v["url"].as_str().unwrap_or_default().to_owned();
+                    let link = CollabLink::parse(&url).map_err(|e| RegistryError::BadLink(e.0))?;
+                    return Ok(LinkInfo { instance_id: meta.instance_id.clone(), generation, url, link });
+                }
+                Query::Err(code) if code == "stale_generation" => {
+                    last = RegistryError::Host(code);
+                    continue;
+                }
+                Query::Err(code) => return Err(RegistryError::Host(code)),
+            }
+        }
+        Err(last)
+    }
+
+    async fn read_metas(&self) -> std::io::Result<Vec<Meta>> {
+        let mut out = Vec::new();
+        let mut rd = match tokio::fs::read_dir(&self.dir).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e),
+        };
+        while let Some(entry) = rd.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            // Publications are 0600 regular files; skip symlinks like omp does.
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(md) if md.file_type().is_file() => {}
+                _ => continue,
+            }
+            let Ok(raw) = tokio::fs::read(&path).await else { continue };
+            match serde_json::from_slice::<Meta>(&raw) {
+                Ok(m) if m.version == REGISTRY_VERSION => out.push(m),
+                Ok(m) => log::debug!("registry: {} has version {}", path.display(), m.version),
+                Err(_) => {}
+            }
+        }
+        Ok(out)
+    }
+
+    async fn run_cli(&self, args: &[&str]) -> Result<Value, RegistryError> {
+        let mut cmd = tokio::process::Command::new(&self.omp_bin);
+        cmd.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        let out = tokio::time::timeout(CLI_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| RegistryError::Cli(format!("omp {} timed out", args.join(" "))))?
+            .map_err(|e| RegistryError::Cli(e.to_string()))?;
+        let parsed: Option<Value> = serde_json::from_slice(&out.stdout).ok();
+        if !out.status.success() {
+            let code = parsed.as_ref().and_then(|v| v["error"].as_str().map(str::to_owned));
+            return Err(match code {
+                Some(c) if c == "not_found" => RegistryError::NotFound(args.get(2).copied().unwrap_or("").to_owned()),
+                Some(c) => RegistryError::Host(c),
+                None => RegistryError::Cli(String::from_utf8_lossy(&out.stderr).trim().to_owned()),
+            });
+        }
+        parsed.ok_or_else(|| RegistryError::Cli("omp printed no JSON".into()))
+    }
+
+    async fn cli_list(&self) -> Result<Vec<HostEntry>, RegistryError> {
+        let v = self.run_cli(&["collab", "list", "--json"]).await?;
+        let mut hosts: Vec<HostEntry> =
+            serde_json::from_value(v["hosts"].clone()).map_err(|e| RegistryError::Cli(e.to_string()))?;
+        sort_hosts(&mut hosts);
+        Ok(hosts)
+    }
+
+    async fn cli_link(&self, selector: &str, access: Access) -> Result<LinkInfo, RegistryError> {
+        let mut args = vec!["collab", "link", selector, "--json"];
+        if access == Access::View {
+            args.push("--view");
+        }
+        let v = self.run_cli(&args).await?;
+        let url = v["url"].as_str().unwrap_or_default().to_owned();
+        let link = CollabLink::parse(&url).map_err(|e| RegistryError::BadLink(e.0))?;
+        Ok(LinkInfo {
+            instance_id: v["instanceId"].as_str().unwrap_or(selector).to_owned(),
+            generation: v["generation"].as_u64().unwrap_or(0),
+            url,
+            link,
+        })
+    }
+}
+
+fn sort_hosts(hosts: &mut [HostEntry]) {
+    hosts.sort_by(|a, b| {
+        (a.started_at.unwrap_or(0), a.pid, &a.instance_id).cmp(&(b.started_at.unwrap_or(0), b.pid, &b.instance_id))
+    });
+}
+
+/// One request on a fresh connection, bounded by the per-host deadline.
+async fn query(meta: &Meta, mut req: Value) -> Result<Query, RegistryError> {
+    req["v"] = json!(REGISTRY_VERSION);
+    req["token"] = json!(meta.token);
+    let mut line = serde_json::to_vec(&req).expect("json");
+    line.push(b'\n');
+    let reply = tokio::time::timeout(HOST_DEADLINE, exchange(&meta.endpoint, &line))
+        .await
+        .map_err(|_| RegistryError::Unreachable(format!("{}: timed out", meta.endpoint)))??;
+    let v: Value = serde_json::from_slice(&reply)
+        .map_err(|e| RegistryError::Unreachable(format!("{}: malformed reply: {e}", meta.endpoint)))?;
+    if v["ok"].as_bool() == Some(true) {
+        Ok(Query::Ok(v))
+    } else {
+        Ok(Query::Err(v["error"].as_str().unwrap_or("malformed_response").to_owned()))
+    }
+}
+
+async fn exchange(endpoint: &str, line: &[u8]) -> Result<Vec<u8>, RegistryError> {
+    let unreachable = |e: std::io::Error| RegistryError::Unreachable(format!("{endpoint}: {e}"));
+    #[cfg(unix)]
+    let stream = tokio::net::UnixStream::connect(endpoint).await.map_err(unreachable)?;
+    #[cfg(windows)]
+    let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint).map_err(unreachable)?;
+    let (rd, mut wr) = tokio::io::split(stream);
+    wr.write_all(line).await.map_err(unreachable)?;
+    let mut reader = BufReader::new(tokio::io::AsyncReadExt::take(rd, MAX_RESPONSE_BYTES as u64 + 1));
+    let mut buf = Vec::new();
+    reader.read_until(b'\n', &mut buf).await.map_err(unreachable)?;
+    if buf.len() > MAX_RESPONSE_BYTES {
+        return Err(RegistryError::Unreachable(format!("{endpoint}: oversized reply")));
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    Ok(buf)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    type Gen = std::sync::Arc<std::sync::atomic::AtomicU64>;
+    type Flag = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+    /// A fake omp registry endpoint speaking the observed protocol. When `rotate` is set, the
+    /// next snapshot reports the current generation and then rotates (generation + 1), so the
+    /// following `link` is stale exactly once — the race `omp collab link` also handles.
+    async fn fake_host(dir: &Path, instance: &str, generation: Gen, rotate: Flag) {
+        let sock = dir.join(format!("{instance}.sock"));
+        let listener = UnixListener::bind(&sock).unwrap();
+        let meta = json!({"version":1,"instanceId":instance,"pid":4242,"endpoint":sock,"createdAt":1,"token":"secret"});
+        std::fs::write(dir.join(format!("{instance}.json")), meta.to_string()).unwrap();
+        let instance = instance.to_owned();
+        tokio::spawn(async move {
+            loop {
+                let (s, _) = listener.accept().await.unwrap();
+                let generation = generation.clone();
+                let rotate = rotate.clone();
+                let instance = instance.clone();
+                tokio::spawn(async move {
+                    let (rd, mut wr) = tokio::io::split(s);
+                    let mut line = String::new();
+                    BufReader::new(rd).read_line(&mut line).await.unwrap();
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    let g = generation.load(std::sync::atomic::Ordering::SeqCst);
+                    let resp = if req["token"] != "secret" {
+                        json!({"ok":false,"v":1,"error":"authentication_failed"})
+                    } else if req["op"] == "snapshot" {
+                        let snap = json!({"ok":true,"v":1,"snapshot":{"instanceId":instance,"generation":g,"pid":4242,
+                            "sessionId":"s-1","sessionName":null,"cwd":"/tmp/x","model":{"provider":"p","id":"m"},
+                            "startedAt":10,"participants":1,"relayConnected":true,"inputRequired":false,"busy":false,"access":"control"}});
+                        if rotate.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        snap
+                    } else if req["op"] == "link" {
+                        if req["generation"].as_u64() != Some(g) {
+                            json!({"ok":false,"v":1,"error":"stale_generation"})
+                        } else {
+                            let secret = crate::link::b64url_encode(&[9u8; 48]);
+                            json!({"ok":true,"v":1,"url":format!("http://127.0.0.1:7466/#ws://127.0.0.1:7466/r/AAAAAAAAAAAAAAAAAAAAAA.{secret}")})
+                        }
+                    } else {
+                        json!({"ok":false,"v":1,"error":"invalid_operation"})
+                    };
+                    wr.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                });
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn poll_and_link_with_stale_generation() {
+        let dir = std::env::temp_dir().join(format!("tf-collab-reg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let generation = Gen::default();
+        generation.store(1, std::sync::atomic::Ordering::SeqCst);
+        let rotate = Flag::default();
+        fake_host(&dir, "abcd1234abcd1234", generation.clone(), rotate.clone()).await;
+        // A crashed publication (no socket) is skipped.
+        std::fs::write(
+            dir.join("dead.json"),
+            json!({"version":1,"instanceId":"dead","pid":1,"endpoint":dir.join("dead.sock"),"createdAt":1,"token":"x"}).to_string(),
+        )
+        .unwrap();
+        let reg = Registry::with_dir(dir.clone()).omp_bin("/nonexistent/omp");
+        let hosts = reg.poll().await.unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].instance_id, "abcd1234abcd1234");
+        assert_eq!(hosts[0].session_id.as_deref(), Some("s-1"));
+        assert_eq!(hosts[0].generation, 1);
+        // Rotation between snapshot and link: the first link is stale_generation, link()
+        // re-snapshots and returns the gen-2 link.
+        rotate.store(true, std::sync::atomic::Ordering::SeqCst);
+        let info = reg.link("abcd1234abcd1234", Access::Control).await.unwrap();
+        assert_eq!(info.generation, 2);
+        assert!(info.link.can_write());
+        assert_eq!(info.link.ws_url, "ws://127.0.0.1:7466/r/AAAAAAAAAAAAAAAAAAAAAA");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn missing_dir_is_empty() {
+        let reg = Registry::with_dir(PathBuf::from("/nonexistent/tf-collab-dir"));
+        assert_eq!(reg.poll().await.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn sample_rows_deserialize() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/research/omp-collab-samples/registry-list-input-required.json"
+        ))
+        .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let hosts: Vec<HostEntry> = serde_json::from_value(v["hosts"].clone()).unwrap();
+        assert!(hosts[0].input_required && hosts[0].busy);
+        assert_eq!(hosts[0].model.as_ref().unwrap().id, "gpt-6-luna");
+    }
+}

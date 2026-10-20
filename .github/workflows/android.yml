@@ -28,11 +28,22 @@ env:
   HAS_KEY: ${{ secrets.ANDROID_KEY_BASE64 != '' }}
 
 jobs:
+  hostd:
+    uses: ./.github/workflows/hostd.yml
+
   apk:
+    needs: hostd
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      TF_HOSTD_DIST: ${{ github.workspace }}/target/hostd-dist
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: tf-hostd-dist
+          path: target/hostd-dist
 
       - uses: actions/setup-java@v5
         with:

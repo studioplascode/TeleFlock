@@ -473,6 +473,26 @@ wire_struct! {
 }
 
 wire_struct! {
+    pub struct BranchInfo {
+        pub name: String,
+        /// Checked out in the worktree at `cwd`.
+        pub current: bool,
+        pub remote: bool,
+        pub upstream: Option<String>,
+        /// Path of the worktree that has this branch checked out, if any.
+        pub worktree_path: Option<String>,
+        pub last_commit_at: Option<Millis>,
+    }
+}
+
+wire_struct! {
+    pub struct BranchList {
+        pub branches: Vec<BranchInfo>,
+        pub default_branch: Option<String>,
+    }
+}
+
+wire_struct! {
     pub struct GitDiffParams {
         pub cwd: String,
         /// Compare against this ref (default: merge-base with the default branch, including
@@ -756,6 +776,7 @@ methods!(HostMethod, "HostMethods", {
     "fs.search" => FsSearch(FsSearchParams) -> FsSearchResult;
     "fs.read" => FsRead(FsReadParams) -> FsReadResult;
     "git.status" => GitStatus(CwdParams) -> GitStatusResult;
+    "git.branches" => GitBranches(CwdParams) -> BranchList;
     "git.diff" => GitDiff(GitDiffParams) -> GitDiffResult;
     "git.commit" => GitCommit(GitCommitParams) -> GitCommitResult;
     "git.push" => GitPush(CwdParams) -> CommandOutput;

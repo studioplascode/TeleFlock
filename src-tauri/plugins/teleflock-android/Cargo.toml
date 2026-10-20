@@ -1,0 +1,24 @@
+[package]
+name = "tauri-plugin-teleflock-android"
+description = "TeleFlock Android glue: keep-alive foreground service, agent notifications with actions + inline reply, haptics, network-change signal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+# Required by tauri-plugin's build helper; must equal the package name.
+links = "tauri-plugin-teleflock-android"
+
+[dependencies]
+tauri = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Must match the jni major used by tauri/wry on Android.
+jni = "0.21"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7.2", features = ["build"] }

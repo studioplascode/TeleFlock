@@ -74,8 +74,9 @@ export function TitleBar({ subtitle, actions, className }: TitleBarProps) {
             </svg>
           </button>
           <button
+            id="tf-max"
             type="button"
-            className={ctrl}
+            className={cn(ctrl, "[&.is-hovered]:bg-white/7")}
             aria-label={maximized ? "Restore" : "Maximize"}
             title={maximized ? "Restore" : "Maximize"}
             onClick={() => void getCurrentWindow().toggleMaximize()}
