@@ -9,7 +9,7 @@ export type { Status, StatusMeta } from "./tokens";
 export { cn } from "./lib/cn";
 export { useNow, onFrame } from "./lib/clock";
 export type { FrameCallback } from "./lib/clock";
-export { useMediaQuery, useIsMobile, useFinePointer, useInView, useMinWidth } from "./lib/hooks";
+export { useMediaQuery, useIsMobile, useFinePointer, useInView, useMinWidth, useIdleReady } from "./lib/hooks";
 export { isTauri, isAndroid, isWindows, hasCustomWindowChrome } from "./lib/platform";
 export { formatElapsed, formatAge, formatCompact, formatUsd, formatInt } from "./lib/format";
 export { hashString, seededRandom } from "./lib/hash";

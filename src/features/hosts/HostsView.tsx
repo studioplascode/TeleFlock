@@ -42,21 +42,21 @@ function Health({ hostId }: { hostId: string }) {
   const memPct = health.memTotal ? (health.memUsed / health.memTotal) * 100 : 0;
   const diskPct = health.diskTotal ? (1 - health.diskFree / health.diskTotal) * 100 : 0;
   return (
-    <div className="grid grid-cols-3 gap-2">
-      <div className="rounded-md well p-2.5">
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <div className="min-w-0 rounded-md well p-2.5">
         <div className="kicker">CPU</div>
         <div className="font-display text-lg font-bold tabular">{Math.round(health.cpuPct)}%</div>
         <Sparkline values={cpu.length > 1 ? cpu : [health.cpuPct, health.cpuPct]} height={22} status="running" aria-label="CPU history" />
       </div>
-      <div className="rounded-md well p-2.5">
+      <div className="min-w-0 rounded-md well p-2.5">
         <div className="kicker">Memory</div>
-        <div className="font-display text-lg font-bold tabular">
+        <div className="font-display text-lg font-bold whitespace-nowrap tabular">
           {gb(health.memUsed)}
           <span className="text-xs text-mute">/{gb(health.memTotal)} GB</span>
         </div>
         <Sparkline values={mem.length > 1 ? mem : [memPct, memPct]} height={22} status="review" aria-label="Memory history" />
       </div>
-      <div className="rounded-md well p-2.5">
+      <div className="col-span-2 min-w-0 rounded-md well p-2.5 sm:col-span-1">
         <div className="kicker">Disk · load</div>
         <div className="font-display text-lg font-bold tabular">
           {gb(health.diskFree)}
@@ -113,8 +113,8 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
   const Kind = KIND_META[profile.kind].icon;
   return (
     <motion.div {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }} layout className="min-w-0">
-      <Tile className="flex flex-col gap-4 p-5">
-        <div className="flex items-start gap-3.5">
+      <Tile className="flex flex-col gap-4 p-4 sm:p-5">
+        <div className="flex items-start gap-3">
           <span
             className="relative grid size-11 shrink-0 place-items-center rounded-lg text-white shadow-d1 [&_svg]:size-5"
             style={{ background: `linear-gradient(135deg, ${profile.color ?? "#a35cf0"}, rgb(255 255 255 / 0.08))` }}
@@ -123,13 +123,13 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
             <StatusOrb status={PHASE_STATUS[phase]} size={10} className="absolute -right-1 -bottom-1 rounded-full ring-3 ring-tile-2" label={PHASE_LABEL[phase]} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="truncate font-display text-xl font-bold">{profile.name}</h3>
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <h3 className="max-w-full min-w-0 truncate font-display text-xl font-bold">{profile.name}</h3>
               <Badge>{KIND_META[profile.kind].short}</Badge>
               {profile.autoConnect && <Badge tone="accent">Auto</Badge>}
             </div>
-            <div className="mt-0.5 flex items-center gap-2 text-xs text-mute">
-              <span className="truncate font-mono">{profileAddress(profile)}</span>
+            <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-xs text-mute">
+              <span className="max-w-full min-w-0 truncate font-mono">{profileAddress(profile)}</span>
               <span aria-hidden>·</span>
               <span className={cn("font-semibold", online ? "text-done" : phase === "error" ? "text-error" : phase === "authRequired" || phase === "hostKey" ? "text-sun-2" : "text-mute")}>{connSummary(status)}</span>
             </div>

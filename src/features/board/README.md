@@ -8,6 +8,9 @@ The home of the app: the "is everything alive?" surface.
 // src/features/board/BoardView.tsx — desktop home (#/board, #/). Mounts <WhileAwayToast/> itself.
 export function BoardView(): JSX.Element;
 // src/features/board/FlockHome.tsx — mobile home (same routes on mobile). Mounts <WhileAwayToast/> itself.
+// Header host chip (FlockActions.tsx: one host → Hosts; several → host-filter sheet driving useHosts().setFilter),
+// "+" FAB above the bottom nav → create sheet (new worktree / agent, fan out, open folder, past sessions),
+// running widget counts quiet agents (working, no events for QUIET_AFTER_MS).
 export function FlockHome(): JSX.Element;
 // src/features/inbox/InboxView.tsx — #/inbox (desktop + mobile)
 export function InboxView(): JSX.Element;

@@ -27,38 +27,58 @@ import { Templates } from "./Templates";
 
 type PermState = "granted" | "denied" | "prompt" | "prompt-with-rationale";
 
+const PERM_COPY: Record<PermState, string> = {
+  granted: "Granted. Needs-you alerts can reach you while the app is closed.",
+  prompt: "Not granted yet. Android needs your permission to show needs-you alerts.",
+  "prompt-with-rationale": "Not granted. Without it, agents that need you can't alert you.",
+  denied: "Blocked for TeleFlock. Grant opens Android's notification settings.",
+};
+
 function AndroidRows() {
   const [perm, setPerm] = useState<PermState | null>(null);
   const [battery, setBattery] = useState<boolean | null>(null);
   useEffect(() => {
-    invoke<{ postNotification: PermState }>("plugin:teleflock-android|notification_permission").then(
-      (r) => setPerm(r.postNotification),
-      () => setPerm(null),
-    );
-    invoke<{ ignoringOptimizations: boolean }>("plugin:teleflock-android|battery_status").then(
-      (r) => setBattery(r.ignoringOptimizations),
-      () => setBattery(null),
-    );
+    const refresh = () => {
+      invoke<{ postNotification: PermState }>("plugin:teleflock-android|notification_permission").then(
+        (r) => setPerm(r.postNotification),
+        () => setPerm(null),
+      );
+      invoke<{ ignoringOptimizations: boolean }>("plugin:teleflock-android|battery_status").then(
+        (r) => setBattery(r.ignoringOptimizations),
+        () => setBattery(null),
+      );
+    };
+    // Coming back from Android's settings screen: pick up what the user changed there.
+    const onVisible = () => document.visibilityState === "visible" && refresh();
+    refresh();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
   return (
     <>
       {perm !== null && (
-        <Row label="Notification permission" description={perm === "granted" ? "Granted." : "Android needs your permission to show needs-you alerts."}>
+        <Row label="Notification permission" description={PERM_COPY[perm]}>
           {perm === "granted" ? (
             <span className="text-sm font-bold text-done">Allowed</span>
           ) : (
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() =>
-                invoke<{ postNotification: PermState }>("plugin:teleflock-android|request_notification_permission").then(
-                  (r) => setPerm(r.postNotification),
-                  (err: unknown) => toast({ title: `Couldn't request permission: ${errorMessage(err)}`, status: "error" }),
-                )
-              }
-            >
-              Allow
-            </Button>
+            <span className="flex items-center gap-2.5">
+              <span className={cn("text-sm font-bold", perm === "denied" ? "text-error" : "text-sun-2")}>{perm === "denied" ? "Blocked" : "Off"}</span>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() =>
+                  invoke<{ postNotification: PermState }>("plugin:teleflock-android|request_notification_permission").then(
+                    (r) => {
+                      setPerm(r.postNotification);
+                      if (r.postNotification === "granted") haptic("success");
+                    },
+                    (err: unknown) => toast({ title: `Couldn't request permission: ${errorMessage(err)}`, status: "error" }),
+                  )
+                }
+              >
+                Grant
+              </Button>
+            </span>
           )}
         </Row>
       )}
@@ -115,7 +135,7 @@ export function SettingsView() {
   return (
     <div className="flex min-h-full flex-col">
       {mobile && <MobileHeader title="Settings" back />}
-      <div className={cn("mx-auto grid w-full max-w-[880px] content-start gap-4", mobile ? "px-3 pb-8" : "px-8 pt-7 pb-12")}>
+      <div className={cn("mx-auto grid w-full max-w-[880px] grid-cols-[minmax(0,1fr)] content-start gap-4", mobile ? "px-3 pb-8" : "px-8 pt-7 pb-12")}>
         {!mobile && <PageHeader kicker="Preferences" title="Settings" description="How TeleFlock moves, notifies and starts new agents on this device." className="mb-2" />}
         <Section index={0} icon={<Sparkles />} title="Motion" description="Animation is how TeleFlock shows that work is alive. Reduced keeps every meaning with calm, static colour.">
           <Row label="Animation" wide>

@@ -1,14 +1,18 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, MessageSquareDashed } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState, type WheelEvent } from "react";
-import { loadOlder, useAgent, useSession, useSessionItem } from "@/core";
-import { cn, Elapsed, EmptyState, Shimmer, Skeleton, spring, StatusOrb } from "@/design";
+import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { getTranscript, loadOlder, useAgent, useSession, useSessionItem } from "@/core";
+import type { TranscriptItem } from "@/core/gen";
+import { cn, Elapsed, EmptyState, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
 import { Row } from "./rows";
 
 const STICK_PX = 56;
 const LOAD_OLDER_PX = 480;
 const ROW_GAP = 12;
+/** Typical row heights before measurement (tool cards with output dominate). */
+const ROW_ESTIMATE: Partial<Record<TranscriptItem["kind"], number>> = { tool: 320, assistant: 140, user: 88, thinking: 56 };
+const ROW_ESTIMATE_DEFAULT = 48;
 /** Growth larger than this while following is a jump (session switch, big paste), not a glide. */
 const GLIDE_MAX_PX = 900;
 
@@ -21,6 +25,11 @@ export interface TranscriptProps {
   padBottom?: number;
   /** Avatar gutter for indented rows (px). */
   gutter?: number;
+  /**
+   * Rows rendered beyond each edge of the viewport once the transcript has settled (default 8).
+   * The first paint renders at most 2, so opening a session lays out little more than a screenful.
+   */
+  overscan?: number;
 }
 
 /**
@@ -28,7 +37,7 @@ export interface TranscriptProps {
  * re-renders when the id list changes. Sticks to the bottom while streaming, offers a
  * "jump to latest" pill when scrolled up, and pages older rows in at the top without a jump.
  */
-export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gutter = 38 }: TranscriptProps) {
+export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gutter = 38, overscan = 8 }: TranscriptProps) {
   const session = useSession(agentKey);
   const ids = session.itemIds;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -38,17 +47,34 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
   const [unseen, setUnseen] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const anchor = useRef<{ id: string; delta: number } | null>(null);
-  const lastCount = useRef(ids.length);
+  // 0, not ids.length: a transcript mounting with rows already loaded lands at the bottom instantly.
+  const lastCount = useRef(0);
   const glideRaf = useRef(0);
+  const settled = useIdleReady(400);
+  const settledRef = useRef(settled);
+  settledRef.current = settled;
 
+  // Per-kind estimates keep the first (pre-measure) render close to one screenful of rows.
+  const kinds = useMemo(() => {
+    const byId = new Map(getTranscript(agentKey).items.map((it) => [it.id, it.kind]));
+    return ids.map((id) => byId.get(id));
+  }, [agentKey, ids]);
+  const estimate = (i: number) => {
+    const kind = kinds[i];
+    return (kind && ROW_ESTIMATE[kind]) ?? ROW_ESTIMATE_DEFAULT;
+  };
   const virtualizer = useVirtualizer({
     count: ids.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 132,
+    estimateSize: estimate,
     getItemKey: (i) => ids[i] ?? i,
-    overscan: 8,
+    overscan: settled ? overscan : Math.min(overscan, 2),
     gap: ROW_GAP,
     paddingStart: 16,
+    // First render already sits at the bottom (where the layout effect scrolls to), so opening a
+    // session builds only the last screenful of rows instead of the top ones and then the bottom.
+    initialOffset: () => ids.reduce((sum, _, i) => sum + estimate(i) + ROW_GAP, 0),
+    initialRect: { width: 0, height: typeof window === "undefined" ? 800 : window.innerHeight },
   });
 
   const setStick = (v: boolean) => {
@@ -65,7 +91,8 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
   };
 
   // Follow the bottom with an eased glide instead of snapping on every streamed line, so text
-  // rolls up smoothly. Reduced motion (and big jumps) snap.
+  // rolls up smoothly. Reduced motion, big jumps and the first moments after opening (rows still
+  // measuring in) snap, so opening never plays a scroll animation.
   const glide = () => {
     if (glideRaf.current) return;
     const step = () => {
@@ -74,7 +101,7 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
       if (!el || !stick.current) return;
       const gap = el.scrollHeight - el.clientHeight - el.scrollTop;
       if (gap <= 0.5) return;
-      if (gap > GLIDE_MAX_PX || document.documentElement.dataset.motion === "reduced") {
+      if (gap > GLIDE_MAX_PX || !settledRef.current || document.documentElement.dataset.motion === "reduced") {
         el.scrollTop = el.scrollHeight;
         return;
       }
@@ -270,7 +297,8 @@ function WorkingFooter({ agentKey, lastId }: { agentKey: string; lastId: string 
   );
 }
 
-function TranscriptSkeleton() {
+/** Placeholder rows while the session loads (or while the phone defers mounting the transcript). */
+export function TranscriptSkeleton() {
   return (
     <div className="flex flex-col gap-4 pt-6">
       <Skeleton className="ml-auto h-12 w-2/5 rounded-[20px]" />

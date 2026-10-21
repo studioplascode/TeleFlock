@@ -119,7 +119,7 @@ function Advanced({ children }: { children: ReactNode }) {
   );
 }
 
-function EditorBody({ initial, onDone }: { initial: HostProfile; onDone: () => void }) {
+function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone: () => void; mobile: boolean }) {
   const info = useAppInfo();
   const kinds = availableKinds(info?.capabilities);
   const [p, setP] = useState<HostProfile>(initial);
@@ -209,7 +209,7 @@ function EditorBody({ initial, onDone }: { initial: HostProfile; onDone: () => v
 
       <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
         <Field label="Name" error={shown.name}>
-          {(id) => <Input id={id} value={p.name} onChange={(e) => set({ name: e.target.value })} placeholder={p.kind === "demo" ? "Demo flock" : "forge"} autoFocus invalid={!!shown.name} />}
+          {(id) => <Input id={id} value={p.name} onChange={(e) => set({ name: e.target.value })} placeholder={p.kind === "demo" ? "Demo flock" : "forge"} autoFocus={!mobile} invalid={!!shown.name} />}
         </Field>
         <Field label="Colour">
           {() => (
@@ -295,17 +295,23 @@ function EditorBody({ initial, onDone }: { initial: HostProfile; onDone: () => v
 
       <Diagnostics kind={p.kind} report={report} running={testing} />
 
-      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
+      {/* Phone: the actions stay pinned to the bottom of the sheet (which rides above the keyboard), primary full-width in the thumb zone. */}
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-2 border-t border-line pt-4",
+          mobile && "sticky bottom-0 z-raised -mx-5 -mb-4 bg-[#17171f] px-5 pt-3 pb-4 shadow-[0_-12px_24px_-12px_rgb(0_0_0/0.6)]",
+        )}
+      >
         {editing && (
-          <Button variant="danger" size="md" icon={<Trash2 />} onClick={remove}>
+          <Button variant="danger" size="md" icon={<Trash2 />} onClick={remove} className={cn(mobile && "flex-1")}>
             Remove
           </Button>
         )}
-        <div className="flex-1" />
-        <Button variant="secondary" icon={<Stethoscope />} onClick={test} loading={testing}>
+        {!mobile && <div className="flex-1" />}
+        <Button variant="secondary" icon={<Stethoscope />} onClick={test} loading={testing} className={cn(mobile && "flex-1")}>
           Test connection
         </Button>
-        <Button type="submit" variant="primary" loading={saving}>
+        <Button type="submit" variant="primary" loading={saving} size={mobile ? "lg" : undefined} className={cn(mobile && "w-full")}>
           {editing ? "Save" : "Add host"}
         </Button>
       </div>
@@ -328,11 +334,11 @@ export function HostEditor() {
   const onOpenChange = (o: boolean) => {
     if (!o) closeDialog();
   };
-  const body = open ? <EditorBody key={editId ?? "new"} initial={initial} onDone={closeDialog} /> : null;
+  const body = open ? <EditorBody key={editId ?? "new"} initial={initial} onDone={closeDialog} mobile={mobile} /> : null;
 
   if (mobile) {
     return (
-      <BottomSheet open={open} onOpenChange={onOpenChange} title={title} description={description}>
+      <BottomSheet open={open} onOpenChange={onOpenChange} title={title} description={description} autoFocus={false}>
         {body}
       </BottomSheet>
     );

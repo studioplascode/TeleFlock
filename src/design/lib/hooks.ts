@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useState, useSyncExternalStore } from "react";
+import { type RefObject, startTransition, useEffect, useState, useSyncExternalStore } from "react";
 import { MOBILE_MAX_WIDTH } from "../tokens";
 
 /** Live `window.matchMedia(query).matches`. */
@@ -57,4 +57,26 @@ export function useMinWidth(ref: RefObject<Element | null>, px: number): boolean
     return () => ro.disconnect();
   }, [ref, px]);
   return wide;
+}
+
+/**
+ * False on mount; true once `afterMs` have passed and the main thread is idle. The flip renders
+ * in a transition (time-sliced), so a heavy subtree gated on it mounts after an enter animation
+ * instead of stalling it. Pass 0 under reduced motion.
+ */
+export function useIdleReady(afterMs: number): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let idle = 0;
+    const flip = () => startTransition(() => setReady(true));
+    const timer = window.setTimeout(() => {
+      if (typeof requestIdleCallback === "function") idle = requestIdleCallback(flip, { timeout: 200 });
+      else flip();
+    }, afterMs);
+    return () => {
+      clearTimeout(timer);
+      if (idle) cancelIdleCallback(idle);
+    };
+  }, [afterMs]);
+  return ready;
 }

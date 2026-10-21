@@ -2,7 +2,7 @@ import { MoreVertical, PanelBottomOpen } from "lucide-react";
 import { animate, motion, useDragControls, useMotionValue, useTransform, type PanInfo } from "motion/react";
 import { useEffect, useRef } from "react";
 import { agentKey as makeKey, navigate, parseAgentKey, useAgent, useColumnKeys, useInbox, useSession } from "@/core";
-import { AgentGlyph, BottomSheet, cn, IconButton, StatusOrb, StatusPill, useActivity } from "@/design";
+import { AgentGlyph, BottomSheet, cn, IconButton, Skeleton, StatusOrb, StatusPill, useActivity, useCalmMotion, useIdleReady } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { haptic } from "@/features/shell/haptics";
 import { agentStatus, useBeat } from "../api";
@@ -13,6 +13,9 @@ import { useSessionUi } from "../state";
 
 const SWIPE_PX = 90;
 const SWIPE_VELOCITY = 520;
+
+/** Route slide-in (spring.sheet) and sheet rise: heavy subtrees mount after these. */
+const SLIDE_MS = 420;
 
 /** Pager order: needs-you first (oldest first), then running; the open agent always included. */
 function usePagerKeys(current: string): string[] {
@@ -75,6 +78,19 @@ function Dot({ k, on }: { k: string; on: boolean }) {
   );
 }
 
+/** Inspector tabs mount once the sheet has risen; skeleton bars until then. */
+function InspectorBody({ agentKey }: { agentKey: string }) {
+  const ready = useIdleReady(useCalmMotion() ? 0 : SLIDE_MS);
+  if (ready) return <InspectorTabs agentKey={agentKey} />;
+  return (
+    <div className="flex flex-col gap-3 pt-1" aria-busy>
+      <Skeleton className="h-9 rounded-full" />
+      <Skeleton className="h-24 rounded-[16px]" />
+      <Skeleton className="h-16 rounded-[16px]" />
+    </div>
+  );
+}
+
 /** Phone session: top bar, horizontal pager between agents with neighbour peeks, inspector sheet. */
 export function MobileSession({ hostId, agentId }: { hostId: string; agentId: string }) {
   const key = makeKey(hostId, agentId);
@@ -89,8 +105,10 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
   const { tier } = useActivity(beat);
   const x = useMotionValue(0);
   const fade = useTransform(x, [-220, 0, 220], [0.55, 1, 0.55]);
-  const controls = useDragControls();
   const width = useRef(0);
+  // The transcript rows mount after the slide-in (time-sliced), so the push animation stays smooth.
+  const ready = useIdleReady(useCalmMotion() ? 0 : SLIDE_MS);
+  const controls = useDragControls();
 
   // New agent slid in: settle at the centre.
   useEffect(() => {
@@ -155,7 +173,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
       {omp && (
         <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pr-8 pb-2 no-scrollbar [mask-image:linear-gradient(90deg,#000_calc(100%-40px),transparent)]">
           <ModelPicker agentKey={key} mobile />
-          <ThinkingPicker agentKey={key} />
+          <ThinkingPicker agentKey={key} mobile />
           <PlanToggle agentKey={key} />
           <FastToggle agentKey={key} />
           <GoalChip agentKey={key} compact={!meta?.goal} />
@@ -189,12 +207,12 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         >
           <Peek agentKey={prev} side="left" />
           <Peek agentKey={next} side="right" />
-          <SessionPane key={key} agentKey={key} header={false} mobile />
+          <SessionPane key={key} agentKey={key} header={false} mobile ready={ready} />
         </motion.div>
       </div>
       {omp && (
         <BottomSheet open={sheet} onOpenChange={(o) => useSessionUi.getState().setSheet(key, o)} title={agent?.name ?? "Session"} description="Context, todos, subagents, files, tree and btw">
-          <InspectorTabs agentKey={key} />
+          <InspectorBody agentKey={key} />
         </BottomSheet>
       )}
     </div>

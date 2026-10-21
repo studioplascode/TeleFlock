@@ -1,6 +1,6 @@
 import * as RadixDialog from "@radix-ui/react-dialog";
 import { AnimatePresence, motion, type PanInfo, useDragControls, useMotionValue, useTransform } from "motion/react";
-import type { ReactNode } from "react";
+import { type PointerEvent, type ReactNode, useRef } from "react";
 import { cn } from "../lib/cn";
 import { spring, tween } from "../motion/springs";
 
@@ -24,18 +24,50 @@ export interface BottomSheetProps {
 
 const DISMISS_OFFSET = 110;
 const DISMISS_VELOCITY = 550;
+/** Finger travel (px) before a press in the content is read as a scroll or a dismiss drag. */
+const DRAG_SLOP = 6;
+
+/** Whether every scroller from the touched element up to the sheet body sits at its top. */
+function scrolledToTop(target: EventTarget | null, body: HTMLElement): boolean {
+  for (let el = target instanceof Element ? target : null; el; el = el.parentElement) {
+    if (el.scrollTop > 0) return false;
+    if (el === body) return true;
+  }
+  return true;
+}
 
 /**
- * Mobile bottom sheet: springs up, drag the handle/header down to dismiss (velocity- or
- * distance-based), scrim fades with the drag. Built on Radix Dialog for focus trap + a11y.
+ * Mobile bottom sheet: springs up, drag down to dismiss (velocity- or distance-based) from the
+ * handle/header or from anywhere in the content while it's scrolled to the top (otherwise the
+ * content scrolls), scrim fades with the drag. Rides above the soft keyboard (`--kb-inset`).
+ * Built on Radix Dialog for focus trap + a11y.
  */
 export function BottomSheet({ open, onOpenChange, title, description, footer, children, className, maxHeight = "88dvh", autoFocus = true }: BottomSheetProps) {
   const controls = useDragControls();
   const y = useMotionValue(0);
   const scrim = useTransform(y, [0, 400], [1, 0]);
+  const press = useRef<{ id: number; x: number; y: number } | null>(null);
 
   const onDragEnd = (_: unknown, info: PanInfo) => {
     if (info.offset.y > DISMISS_OFFSET || info.velocity.y > DISMISS_VELOCITY) onOpenChange(false);
+  };
+
+  // Content drags: the first DRAG_SLOP px decide. Downward while every scroller under the finger is
+  // at its top → the sheet follows the finger; anything else is left to native scrolling. At the top
+  // the scrollers only allow native pans that scroll down (`pan-down`), so the browser doesn't claim
+  // the downward swipe first (pointercancel).
+  const onBodyPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    const t = e.target as Element;
+    press.current = t.closest("input, textarea, select, [contenteditable=true], [data-no-sheet-drag]") ? null : { id: e.pointerId, x: e.clientX, y: e.clientY };
+  };
+  const onBodyPointerMove = (e: PointerEvent<HTMLDivElement>) => {
+    const p = press.current;
+    if (!p || p.id !== e.pointerId) return;
+    const dx = e.clientX - p.x;
+    const dy = e.clientY - p.y;
+    if (Math.abs(dx) < DRAG_SLOP && Math.abs(dy) < DRAG_SLOP) return;
+    press.current = null;
+    if (dy > Math.abs(dx) && scrolledToTop(e.target, e.currentTarget)) controls.start(e);
   };
 
   return (
@@ -64,10 +96,10 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
             >
               <motion.div
                 className={cn(
-                  "fixed inset-x-0 bottom-0 z-modal mx-auto flex w-full max-w-[640px] flex-col rounded-t-sheet bg-[linear-gradient(180deg,#21212d,#16161e)] shadow-[0_-24px_60px_rgb(0_0_0/0.65),inset_0_1px_0_rgb(255_255_255/0.09)] outline-none",
+                  "fixed inset-x-0 bottom-[var(--kb-inset,0px)] z-modal mx-auto flex w-full max-w-[640px] flex-col rounded-t-sheet bg-[linear-gradient(180deg,#21212d,#16161e)] shadow-[0_-24px_60px_rgb(0_0_0/0.65),inset_0_1px_0_rgb(255_255_255/0.09)] outline-none",
                   className,
                 )}
-                style={{ y, maxHeight }}
+                style={{ y, maxHeight: `calc(${maxHeight} - var(--kb-inset, 0px))` }}
                 initial={{ y: "100%" }}
                 animate={{ y: 0 }}
                 exit={{ y: "100%" }}
@@ -91,7 +123,19 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
                     <RadixDialog.Description className="sr-only">{typeof title === "string" ? title : "Sheet"}</RadixDialog.Description>
                   )}
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-4">{children}</div>
+                <div
+                  className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-4 [touch-action:pan-down] [&_.overflow-y-auto]:[touch-action:pan-down]"
+                  onPointerDown={onBodyPointerDown}
+                  onPointerMove={onBodyPointerMove}
+                  onPointerUp={() => (press.current = null)}
+                  onPointerCancel={() => (press.current = null)}
+                  onScrollCapture={(e) => {
+                    const el = e.target as HTMLElement;
+                    el.style.touchAction = el.scrollTop > 0 ? "pan-y" : "pan-down";
+                  }}
+                >
+                  {children}
+                </div>
                 {footer && <div className="shrink-0 border-t border-line px-5 pt-3 pb-[max(20px,env(safe-area-inset-bottom))]">{footer}</div>}
                 {!footer && <div className="h-[max(12px,env(safe-area-inset-bottom))] shrink-0" />}
               </motion.div>

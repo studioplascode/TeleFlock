@@ -12,7 +12,7 @@ import { FocusHeader } from "./header/FocusHeader";
 import { SessionHeader } from "./header/SessionHeader";
 import { LinkGate } from "./LinkGate";
 import { NonOmpView } from "./NonOmpView";
-import { Transcript } from "./transcript/Transcript";
+import { Transcript, TranscriptSkeleton } from "./transcript/Transcript";
 
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
@@ -35,6 +35,11 @@ export interface SessionPaneProps {
   mobile?: boolean;
   /** Focus mode: minimal header, frameless transcript, floating composer. */
   focus?: boolean;
+  /**
+   * False renders a skeleton in place of the transcript (the session still subscribes), so the
+   * phone can mount the rows after its slide-in. Default true.
+   */
+  ready?: boolean;
   className?: string;
 }
 
@@ -42,7 +47,7 @@ export interface SessionPaneProps {
  * One session: header, virtualised transcript, sticky ask card and composer. Used by the
  * desktop SessionView, the mobile pager and the split view.
  */
-export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, className }: SessionPaneProps) {
+export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, ready = true, className }: SessionPaneProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const retry = useOpenSession(agentKey);
@@ -84,7 +89,7 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
           <>
             {header && (focus ? <FocusHeader agentKey={agentKey} /> : <SessionHeader agentKey={agentKey} compact={compact} />)}
             <LinkGate agentKey={agentKey} onRetry={retry}>
-              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} />
+              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} ready={ready} />
             </LinkGate>
           </>
         )}
@@ -93,12 +98,18 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
   );
 }
 
-function SessionBody({ agentKey, hotkeys, mobile, compact, focus }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean }) {
+function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean; ready: boolean }) {
   const { ui } = useSession(agentKey);
   return (
     <>
       <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && !focus && "rounded-tile glass")}>
-        <Transcript agentKey={agentKey} padX={mobile ? 12 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} />
+        {ready ? (
+          <Transcript agentKey={agentKey} padX={mobile ? 12 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} overscan={mobile ? 3 : 8} />
+        ) : (
+          <div className="px-3" aria-busy>
+            <TranscriptSkeleton />
+          </div>
+        )}
       </div>
       <AnimatePresence mode="popLayout">
         {ui && (

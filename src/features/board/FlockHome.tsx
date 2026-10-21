@@ -1,7 +1,7 @@
 import { BellOff } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useEffect } from "react";
-import { navigate, parseAgentKey, useAgent, useColumnKeys, useHostIds, useHostStale, useHosts } from "@/core";
+import { navigate, parseAgentKey, useAgent, useColumnKeys, useCore, useHostStale, useHosts } from "@/core";
 import type { Column } from "@/core/gen";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
 import {
@@ -29,7 +29,8 @@ import { FilterChip } from "./FilterChip";
 import { SelectionBar } from "./SelectionBar";
 import { useTodayUsage } from "./BentoRow";
 import { useBoard } from "./boardStore";
-import { LANE_BY_COLUMN, NEEDS_LABEL } from "./lanes";
+import { FlockFab, HostChip } from "./FlockActions";
+import { LANE_BY_COLUMN, NEEDS_LABEL, QUIET_AFTER_MS } from "./lanes";
 import { AgentHeartbeat, AgentOrb, LiveLine, QuietChip, useQuiet } from "./LiveBits";
 import { QuickAnswer } from "./QuickAnswer";
 import { type SwipeAction, SwipeRow } from "./SwipeRow";
@@ -78,6 +79,16 @@ function Widgets() {
   const running = useColumnKeys("running", { hostId });
   const { cost, tokens } = useTodayUsage(hostId);
   const { beat, lastAt } = useBeat(running);
+  // Board quiet heuristic: working, host online, no events for QUIET_AFTER_MS (possibly stuck).
+  const now = useNow(5000);
+  const quiet = useCore((s) =>
+    running.reduce((n, k) => {
+      const a = s.agents[k];
+      const at = a?.live.lastEventAt;
+      const online = a !== undefined && (s.hosts[a.hostId] === undefined || s.status[a.hostId]?.phase === "online");
+      return online && at !== undefined && now - at > QUIET_AFTER_MS ? n + 1 : n;
+    }, 0),
+  );
   return (
     <div className="grid grid-cols-[1fr_1fr_1.35fr] gap-2.5">
       <button
@@ -91,13 +102,25 @@ function Widgets() {
           <span className={cn("text-xs font-bold", needs.length > 0 ? "text-white/90" : "text-mute")}>need you</span>
         </Tile>
       </button>
-      <Tile className="flex h-28 flex-col justify-between overflow-hidden rounded-[22px] p-3.5">
+      <Tile
+        className="flex h-28 flex-col justify-between overflow-hidden rounded-[22px] p-3.5"
+        aria-label={`${running.length} running${quiet > 0 ? `, ${quiet} quiet (no events for over 90 seconds)` : ""}`}
+        role="group"
+      >
         <div className="flex items-start justify-between">
           <NumberTicker value={running.length} className="font-display text-hero leading-none font-bold text-ink" />
-          <StatusOrb status="running" size={8} activity={running.length > 0 ? "busy" : "silent"} label={null} />
+          <StatusOrb status="running" size={8} activity={running.length > quiet ? "busy" : "silent"} label={null} />
         </div>
         <div>
-          <Heartbeat beat={beat} lastEventAt={lastAt} status="running" height={18} showAge={false} />
+          <div className="flex items-center gap-1.5">
+            <Heartbeat beat={beat} lastEventAt={lastAt} status="running" height={18} showAge={false} className="min-w-0 flex-1" />
+            {quiet > 0 && (
+              <span className="flex shrink-0 items-center gap-1 text-2xs font-extrabold whitespace-nowrap text-warn" title="No events for over 90 s while working: possibly stuck">
+                <span className="size-1.5 rounded-full bg-warn shadow-[0_0_6px_rgb(251_191_36/0.7)]" aria-hidden />
+                {quiet} quiet
+              </span>
+            )}
+          </div>
           <span className="text-xs font-bold text-mute">running</span>
         </div>
       </Tile>
@@ -238,24 +261,6 @@ function Section({ title, column, count, children, action }: { title: string; co
   );
 }
 
-function HostPill() {
-  const ids = useHostIds();
-  const filter = useHosts((s) => s.filter);
-  const hostId = filter !== "all" ? filter : ids[0];
-  const name = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
-  const latency = useHosts((s) => (hostId ? s.status[hostId]?.latencyMs : undefined));
-  const stale = useHostStale(hostId ?? "");
-  if (!hostId) return null;
-  return (
-    <button type="button" onClick={() => navigate({ name: "hosts" })} className="flex items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring">
-      <StatusOrb status={stale ? "idle" : "done"} size={7} label={null} />
-      {name}
-      {ids.length > 1 && filter === "all" && <span className="text-mute">+{ids.length - 1}</span>}
-      <span className="text-mute">{stale ? "offline" : latency !== undefined ? `${latency} ms` : ""}</span>
-    </button>
-  );
-}
-
 /** Mobile home (spec §3 "Flock home"). */
 export function FlockHome() {
   const hostId = useHosts((s) => s.filter);
@@ -270,7 +275,7 @@ export function FlockHome() {
   useEffect(() => () => useBoard.getState().clearPicked(), []);
 
   return (
-    <div className="flex min-h-full flex-col gap-5 px-4 pt-[max(14px,env(safe-area-inset-top))] pb-6">
+    <div className="flex min-h-full flex-col gap-5 px-4 pt-[max(14px,env(safe-area-inset-top))] pb-24">
       <WhileAwayToast />
       <div className="contents">
         <header className="flex items-end justify-between">
@@ -278,7 +283,7 @@ export function FlockHome() {
             <span className="kicker">Your agents, herded</span>
             <h1 className="font-display text-display font-bold text-ink">Flock</h1>
           </div>
-          <HostPill />
+          <HostChip />
         </header>
         <StaleHosts />
         <FilterChip className="self-start" />
@@ -357,6 +362,7 @@ export function FlockHome() {
         </LayoutGroup>
       </div>
       <SelectionBar mobile />
+      <FlockFab />
       <ArchiveConfirmDialog />
     </div>
   );

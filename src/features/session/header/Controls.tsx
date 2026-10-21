@@ -114,7 +114,7 @@ interface ModelRow {
  * Searchable model list: fuzzy match on provider, id and label; with an empty query the current
  * model, recents and role bindings are pinned above the per-provider catalog.
  */
-function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void }) {
+function ModelList({ agentKey, onDone, mobile = false }: { agentKey: string; onDone: () => void; mobile?: boolean }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const { catalog, error, loading } = useModels(hostId);
@@ -193,7 +193,8 @@ function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void 
     <Command loop shouldFilter={false} value={active} onValueChange={setSel} className="max-h-[min(60vh,460px)]">
       <CommandInput
         placeholder={`Search ${models.length || ""} models · provider, id or name`}
-        autoFocus
+        // Phone: the list first; the keyboard only comes up when the search field is tapped.
+        autoFocus={!mobile}
         value={query}
         onValueChange={(v) => {
           setQuery(v);
@@ -219,7 +220,7 @@ function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void 
                   onSelect={() => void pick(r.selector)}
                   disabled={busy}
                   aria-current={isCurrent || undefined}
-                  className={cn(isCurrent && "bg-accent/10 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]")}
+                  className={cn(mobile && "min-h-12", isCurrent && "bg-accent/10 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]")}
                   icon={r.role ? <Sparkles /> : isCurrent ? <Check className="text-accent-hi" /> : <span className="size-4" />}
                 >
                   <span className="font-bold">{r.title}</span>
@@ -252,8 +253,8 @@ export function ModelPicker({ agentKey, mobile = false }: { agentKey: string; mo
     return (
       <>
         {trigger}
-        <BottomSheet open={open} onOpenChange={setOpen} title="Model" description="Session-only switch (omp /switch)">
-          <ModelList agentKey={agentKey} onDone={() => setOpen(false)} />
+        <BottomSheet open={open} onOpenChange={setOpen} title="Model" description="Session-only switch (omp /switch)" autoFocus={false}>
+          <ModelList agentKey={agentKey} onDone={() => setOpen(false)} mobile />
         </BottomSheet>
       </>
     );
@@ -271,23 +272,61 @@ export function ModelPicker({ agentKey, mobile = false }: { agentKey: string; mo
 
 const LEVEL_HINT: Partial<Record<ThinkingLevel, string>> = { off: "No reasoning", minimal: "Fastest", low: "Light", medium: "Balanced", high: "Deep", xhigh: "Deeper", max: "Maximum", auto: "Model decides" };
 
-export function ThinkingPicker({ agentKey }: { agentKey: string }) {
+export function ThinkingPicker({ agentKey, mobile = false }: { agentKey: string; mobile?: boolean }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const { catalog } = useModels(hostId, meta?.caps.thinking === true);
   const [busy, run] = usePending();
+  const [open, setOpen] = useState(false);
   const model = catalog?.models.find((m) => m.provider === meta?.model?.provider && m.id === meta?.model?.id);
   const levels = model && model.thinking.length > 0 ? model.thinking : THINKING_LEVELS;
   const set = (level: ThinkingLevel) => void run(hostCall(hostId, "agent.setThinking", { agentId, level }, { success: `Thinking → ${level}` }));
+  const chip = (
+    <ControlChip disabled={!meta?.caps.thinking || busy} aria-label="Thinking level" title="Thinking level (/effort)" onClick={mobile ? () => setOpen(true) : undefined}>
+      {busy ? <Spinner size={12} /> : <Brain className="size-3.5 text-omp-blue" />}
+      {meta?.thinking ?? "thinking"}
+      <ChevronDown className="size-3 text-mute" />
+    </ControlChip>
+  );
+  if (mobile)
+    return (
+      <>
+        {chip}
+        <BottomSheet open={open} onOpenChange={setOpen} title="Thinking" description="Reasoning effort for this session (/effort)">
+          <div role="radiogroup" aria-label="Thinking level" className="flex flex-col gap-1.5">
+            {levels.map((l) => {
+              const on = l === meta?.thinking;
+              return (
+                <button
+                  key={l}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  onClick={() => {
+                    if (!on) set(l);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex min-h-14 items-center gap-3 rounded-lg px-4 text-left pressable focus-ring",
+                    on ? "bg-accent/12 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.035]",
+                  )}
+                >
+                  <Brain className={cn("size-5 shrink-0", on ? "text-accent-hi" : "text-omp-blue")} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-md font-bold text-ink">{l}</span>
+                    <span className="block text-xs text-mute">{LEVEL_HINT[l]}</span>
+                  </span>
+                  {on && <Check className="size-5 shrink-0 text-accent-hi" aria-hidden />}
+                </button>
+              );
+            })}
+          </div>
+        </BottomSheet>
+      </>
+    );
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <ControlChip disabled={!meta?.caps.thinking || busy} aria-label="Thinking level" title="Thinking level (/effort)">
-          {busy ? <Spinner size={12} /> : <Brain className="size-3.5 text-omp-blue" />}
-          {meta?.thinking ?? "thinking"}
-          <ChevronDown className="size-3 text-mute" />
-        </ControlChip>
-      </DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild>{chip}</DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[200px]">
         <DropdownMenuLabel>Thinking</DropdownMenuLabel>
         {levels.map((l) => (
