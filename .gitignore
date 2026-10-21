@@ -13,3 +13,4 @@ src-tauri/gen/android/build/
 **/gen/android/.gradle/
 **/gen/android/build/
 dist-release/
+.site/

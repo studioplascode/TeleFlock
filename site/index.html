@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b10">
+<title>TeleFlock · your agents, herded</title>
+<style>
+  :root {
+    --bg: #0b0b10; --tile: #15151d; --tile2: #1b1b25; --line: rgb(255 255 255 / 0.07);
+    --fg: #f5f5f7; --muted: #9a9aad; --accent: #a35cf0;
+    --omp: linear-gradient(135deg, #f053d0, #a15eef 50%, #7fa2e7);
+    --sun: linear-gradient(135deg, #ff7a18, #ff3d77);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { color-scheme: dark; }
+  body {
+    min-height: 100vh; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(32px, env(safe-area-inset-top)) clamp(16px, 4vw, 56px) 64px;
+    overflow-x: hidden;
+  }
+  .bloom { position: fixed; inset: -20vmax; pointer-events: none; z-index: -1;
+    background: radial-gradient(40vmax 30vmax at 20% 10%, rgb(163 92 240 / 0.22), transparent 60%),
+                radial-gradient(35vmax 25vmax at 90% 0%, rgb(127 162 231 / 0.14), transparent 60%),
+                radial-gradient(30vmax 25vmax at 70% 100%, rgb(240 83 208 / 0.10), transparent 60%);
+    animation: drift 24s ease-in-out infinite alternate; }
+  @keyframes drift { to { transform: translate3d(2vmax, 3vmax, 0) scale(1.06); } }
+  @media (prefers-reduced-motion: reduce) { .bloom { animation: none; } }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 36px; }
+  header svg { width: 56px; height: 56px; flex: none; filter: drop-shadow(0 8px 24px rgb(163 92 240 / 0.45)); }
+  h1 { font-size: clamp(30px, 5vw, 44px); line-height: 1.05; letter-spacing: -0.03em; font-weight: 800; }
+  h1 span { background: var(--omp); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { color: var(--muted); margin-top: 6px; max-width: 640px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+  .tile { background: linear-gradient(180deg, var(--tile2), var(--tile)); border: 1px solid var(--line);
+    border-radius: 28px; padding: 24px; position: relative; overflow: hidden;
+    box-shadow: 0 24px 60px -30px rgb(0 0 0 / 0.8); transition: transform .25s cubic-bezier(.2,.8,.2,1), border-color .25s; }
+  .tile:hover { transform: translateY(-3px); border-color: rgb(255 255 255 / 0.14); }
+  .hero { grid-column: span 12; background: var(--omp); color: #fff; border: 0; display: flex; flex-wrap: wrap;
+    gap: 20px; align-items: center; justify-content: space-between; min-height: 200px; }
+  .hero h2 { font-size: clamp(24px, 3.4vw, 34px); letter-spacing: -0.02em; line-height: 1.1; max-width: 560px; }
+  .hero p { opacity: .9; margin-top: 8px; max-width: 560px; }
+  .dl { grid-column: span 6; display: flex; flex-direction: column; gap: 14px; }
+  .small { grid-column: span 4; }
+  @media (max-width: 860px) { .dl, .small { grid-column: span 12; } }
+  .kicker { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  .dl h3 { font-size: 24px; letter-spacing: -0.02em; }
+  .meta { font: 12px/1.6 ui-monospace, "JetBrains Mono", monospace; color: var(--muted); word-break: break-all; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; height: 48px; padding: 0 20px;
+    border-radius: 999px; font-weight: 700; text-decoration: none; color: #fff; background: var(--omp);
+    box-shadow: 0 10px 30px -10px rgb(163 92 240 / 0.8); transition: transform .15s, filter .15s; align-self: flex-start; }
+  .btn:hover { filter: brightness(1.08); } .btn:active { transform: scale(.97); }
+  .btn.glass { background: rgb(255 255 255 / 0.16); box-shadow: none; backdrop-filter: blur(8px); }
+  .btn.dark { background: #0b0b10; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  ol { color: var(--muted); padding-left: 20px; display: grid; gap: 6px; }
+  ol b { color: var(--fg); font-weight: 600; }
+  code { font: 13px ui-monospace, "JetBrains Mono", monospace; background: rgb(255 255 255 / 0.06); padding: 1px 6px; border-radius: 6px; color: var(--fg); }
+  .missing { color: #ff9a7a; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  .orb { width: 10px; height: 10px; border-radius: 50%; background: var(--sun); display: inline-block;
+    box-shadow: 0 0 0 0 rgb(255 61 119 / .6); animation: pulse 1.8s infinite; vertical-align: middle; margin-right: 8px; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 10px rgb(255 61 119 / 0); } 100% { box-shadow: 0 0 0 0 rgb(255 61 119 / 0); } }
+</style>
+</head>
+<body>
+<div class="bloom"></div>
+<div class="wrap">
+  <header>
+    <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <defs><linearGradient id="g" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#f053d0"/><stop offset=".5" stop-color="#a15eef"/><stop offset="1" stop-color="#7fa2e7"/></linearGradient></defs>
+      <g stroke="url(#g)" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 28 C13 20.5 19.5 19.5 25 23 L32 27.5 L39 23 C44.5 19.5 51 20.5 57 28" stroke-width="6.2"/>
+        <path d="M24.5 25.5 V48" stroke-width="6.2"/>
+        <path d="M39.5 25.5 V49 C39.5 53.5 42 56 47 55.5" stroke-width="6.2"/>
+        <path d="M33 13.2 C35.5 9.6 38 9.4 40.5 13.4 C43 9.4 45.5 9.6 48 13.2" stroke-width="3.4" opacity=".9"/>
+        <path d="M47.5 6.4 C49.2 4 50.8 3.9 52.4 6.6 C54 3.9 55.6 4 57.2 6.4" stroke-width="2.6" opacity=".65"/>
+      </g>
+    </svg>
+    <div>
+      <h1>Tele<span>Flock</span></h1>
+      <p class="sub">Your omp agents in herdr, herded: a live board, a native session GUI, one-tap answers, worktrees and a real terminal. Windows &amp; Android.</p>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="tile hero">
+      <div>
+        <h2><span class="orb"></span>Try it right now, no host needed</h2>
+        <p>The built-in demo host simulates ten agents streaming, asking and finishing. Open it on desktop, or on your phone for the Android layout.</p>
+      </div>
+      <div class="row">
+        <a class="btn dark" href="app/?demo#/board">Open the live demo</a>
+        <a class="btn glass" href="drafts/">Design drafts</a>
+      </div>
+    </section>
+
+    <section class="tile dl" id="win">
+      <span class="kicker">Windows 10/11 · x64</span>
+      <h3>Desktop app</h3>
+      <p class="meta" data-meta="exe">loading…</p>
+      <a class="btn" data-href="exe" href="#">Download installer</a>
+      <ol>
+        <li>Run the installer (WebView2 is built into Windows 11).</li>
+        <li><b>Add host</b>: Tailscale SSH, <b>Local</b>, or <b>WSL</b>.</li>
+        <li>Closing the window keeps TeleFlock in the tray. Quit from the tray menu.</li>
+      </ol>
+    </section>
+
+    <section class="tile dl" id="android">
+      <span class="kicker">Android 7+ · universal</span>
+      <h3>Phone app</h3>
+      <p class="meta" data-meta="apk">loading…</p>
+      <a class="btn" data-href="apk" href="#">Download APK</a>
+      <ol>
+        <li>Open this page on your phone (Tailscale on) and allow installs from your browser.</li>
+        <li>Grant notifications. For background alerts, allow the battery exemption in <b>Settings</b>.</li>
+        <li><b>Add host</b> → Tailscale SSH → MagicDNS name or 100.x IP, user.</li>
+      </ol>
+    </section>
+
+    <section class="tile small">
+      <span class="kicker">Host prerequisites</span>
+      <ol>
+        <li><code>sudo tailscale set --ssh</code> and a tailnet policy that lets your devices SSH here.</li>
+        <li>herdr and omp ≥ 18.12 installed.</li>
+        <li>TeleFlock deploys its daemon to <code>~/.teleflock</code> on first connect.</li>
+      </ol>
+    </section>
+    <section class="tile small">
+      <span class="kicker">Optional one-tap setup</span>
+      <ol>
+        <li>herdr omp integration (precise states)</li>
+        <li>Share every omp session with TeleFlock</li>
+        <li>Global bridge extension (precise controls)</li>
+      </ol>
+      <p class="meta" style="margin-top:10px">Hosts → Host setup. Each runs only with your consent.</p>
+    </section>
+    <section class="tile small">
+      <span class="kicker">Verify downloads</span>
+      <p class="meta" data-meta="sums">loading…</p>
+    </section>
+  </div>
+  <footer>TeleFlock v0.1.0 · served from this host over your tailnet.</footer>
+</div>
+<script>
+  const fmt = (n) => (n / 1048576).toFixed(1) + " MB";
+  fetch("downloads/manifest.json").then((r) => r.json()).then((m) => {
+    const sums = [];
+    for (const kind of ["exe", "apk"]) {
+      const f = m.files.find((x) => x.kind === kind);
+      const meta = document.querySelector(`[data-meta="${kind}"]`);
+      const link = document.querySelector(`[data-href="${kind}"]`);
+      if (!f) { meta.textContent = "not built yet"; meta.classList.add("missing"); link.remove(); continue; }
+      meta.textContent = `${f.name} · ${fmt(f.size)} · built ${f.built}`;
+      link.href = "downloads/" + encodeURIComponent(f.name);
+      link.setAttribute("download", f.name);
+      sums.push(`${f.name}\nsha256 ${f.sha256}`);
+    }
+    document.querySelector('[data-meta="sums"]').textContent = sums.join("\n\n") || "no artifacts";
+    document.querySelector('[data-meta="sums"]').style.whiteSpace = "pre-wrap";
+  }).catch(() => {
+    for (const el of document.querySelectorAll("[data-meta]")) { el.textContent = "manifest unavailable"; el.classList.add("missing"); }
+  });
+</script>
+</body>
+</html>
