@@ -29,6 +29,7 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import app.tauri.plugin.PluginManager
 import java.io.File
 import java.security.MessageDigest
 
@@ -93,7 +94,15 @@ class InstallApkArgs {
         Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "postNotification")
     ]
 )
-class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
+class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivity) {
+    /**
+     * The activity in front. Tauri creates plugins once, with the process's first activity, but
+     * the keep-alive service can keep the process running after that one is destroyed, and the
+     * launcher's next activity takes over (permission prompts, settings screens, haptics).
+     */
+    private val activity: Activity
+        get() = PluginManager.activity ?: firstActivity
+
     override fun load(webView: WebView) {
         Notifications.ensureChannels(activity)
         watchNetwork(activity.applicationContext)
@@ -276,7 +285,8 @@ class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
      * The archive must be this package, signed with exactly the installed app's certificates and
      * have a higher versionCode; otherwise it is deleted and the call rejects (`APK_REJECTED`).
      * Android 8+ needs the per-app "install unknown apps" grant first: without it, resolves
-     * `needsPermission` (opening that settings screen when `openSettings`); Rust retries on resume.
+     * `needsPermission` (opening that settings screen when `openSettings`); Rust retries whenever
+     * the app comes back to the front, without `openSettings`.
      */
     @Command
     fun installApk(invoke: Invoke) {
@@ -284,6 +294,14 @@ class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
         val file = File(a.path)
         if (!file.isFile) {
             invoke.reject("update file missing: ${a.path}", "NOT_FOUND")
+            return
+        }
+        val r = JSObject()
+        // A retry only checks the grant: inspecting the archive blocks this (UI) thread for a
+        // moment on every resume, and runs anyway once the grant is there.
+        if (!a.openSettings && needsInstallGrant()) {
+            r.put("status", "needsPermission")
+            invoke.resolve(r)
             return
         }
         val rejected = try {
@@ -296,8 +314,7 @@ class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject(rejected, "APK_REJECTED")
             return
         }
-        val r = JSObject()
-        if (Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()) {
+        if (needsInstallGrant()) {
             if (a.openSettings) {
                 try {
                     activity.startActivity(
@@ -322,6 +339,9 @@ class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject(e.message ?: "couldn't open the package installer", "INSTALL_FAILED", e)
         }
     }
+
+    private fun needsInstallGrant(): Boolean =
+        Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()
 
     /** Why `apk` must not replace this app, or null when it may. */
     @Suppress("DEPRECATION")

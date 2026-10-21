@@ -188,15 +188,33 @@ fn before_exit(app: &AppHandle<Wry>) {
     }
 }
 
-/// Android: notification buttons / replies and network changes arrive over JNI, independent of
-/// the WebView. Installed before the builder so a tap right after launch is not lost.
+/// Android: notification buttons / replies, network changes and activity lifecycle arrive over
+/// JNI, independent of the WebView. Installed before the builder so a tap right after launch is
+/// not lost.
 #[cfg(target_os = "android")]
 fn install_android_sink() -> Arc<std::sync::OnceLock<AppHandle<Wry>>> {
     use tauri_plugin_teleflock_android::NativeEvent;
     let cell: Arc<std::sync::OnceLock<AppHandle<Wry>>> = Arc::default();
     let sink_cell = Arc::clone(&cell);
     tauri_plugin_teleflock_android::set_sink(move |ev| {
-        let Some(core) = sink_cell.get().and_then(|app| app.try_state::<CoreState>()) else {
+        let Some(app) = sink_cell.get() else {
+            // Cold start: Tauri is about to create the window itself, and resumes don't matter yet.
+            if !matches!(ev, NativeEvent::ActivityResumed { .. }) {
+                log::warn!("native event before the core started: {ev:?}");
+            }
+            return;
+        };
+        if let NativeEvent::ActivityResumed { needs_window } = ev {
+            // We are on the Android main thread, which must not block: windows are built, and
+            // Kotlin commands wait for this thread, on the event loop (whose "main thread" this
+            // is not).
+            let handle = app.clone();
+            if let Err(e) = app.run_on_main_thread(move || activity_resumed(&handle, needs_window)) {
+                log::warn!("activity resume not handled: {e}");
+            }
+            return;
+        }
+        let Some(core) = app.try_state::<CoreState>() else {
             log::warn!("native event before the core started: {ev:?}");
             return;
         };
@@ -204,9 +222,51 @@ fn install_android_sink() -> Arc<std::sync::OnceLock<AppHandle<Wry>>> {
             NativeEvent::Action(a) => core.notification_action(a.host_id, a.notification_id, a.action_id, a.reply),
             NativeEvent::Dismissed(r) => core.engine.notification_dismissed(&r.host_id, &r.notification_id),
             NativeEvent::NetworkChanged => core.engine.resume(),
+            NativeEvent::ActivityResumed { .. } => {}
         }
     });
     cell
+}
+
+/// Android: the app came to the front (`MainActivity.onResume`; Tauri's `RunEvent::Resumed`
+/// never fires there). Verifies the links, retries a foreground-service start or stop refused
+/// earlier, resumes a pending update install, and gives a new activity its window back.
+/// Event loop thread.
+#[cfg(target_os = "android")]
+fn activity_resumed(app: &AppHandle<Wry>, needs_window: bool) {
+    if needs_window {
+        restore_main_window(app);
+    }
+    if let Some(core) = app.try_state::<CoreState>() {
+        core.engine.resume();
+    }
+    if let Some(p) = app.try_state::<Arc<TauriPlatform>>() {
+        p.sync_keep_alive();
+    }
+    if let Some(u) = app.try_state::<update::UpdaterState>() {
+        u.resumed();
+    }
+}
+
+/// Android: gives an activity without a window the main window back. Tauri creates the
+/// configured windows once per process, in `setup`, but the keep-alive service keeps the process
+/// running after its activity is destroyed (swiped away from recents): the next activity the
+/// launcher creates had no WebView and stayed blank until a force stop (tauri-apps/tauri#15671).
+/// The new window binds to that activity. Event loop thread only.
+#[cfg(target_os = "android")]
+fn restore_main_window(app: &AppHandle<Wry>) {
+    // No state yet: `setup` has not run, and creates the window itself.
+    if app.try_state::<CoreState>().is_none()
+        || !app.webview_windows().is_empty()
+        || !tauri_plugin_teleflock_android::has_activity()
+    {
+        return;
+    }
+    let Some(config) = app.config().app.windows.iter().find(|w| w.create).cloned() else { return };
+    match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+        Ok(_) => log::info!("window '{}' restored for a new activity", config.label),
+        Err(e) => log::error!("restoring window '{}' failed: {e}", config.label),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -277,19 +337,15 @@ pub fn run() {
         // macOS: closing hid the window to the tray; a Dock icon click brings it back.
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { has_visible_windows: false, .. } => tray::show_main(app),
-        #[cfg(mobile)]
-        RunEvent::Resumed => {
+        // Android: the activity is gone, and its page with it (`on_page_load` only sees new pages).
+        #[cfg(target_os = "android")]
+        RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } => {
             if let Some(core) = app.try_state::<CoreState>() {
-                core.engine.resume();
+                core.page_reset();
             }
-            #[cfg(target_os = "android")]
-            if let Some(p) = app.try_state::<Arc<TauriPlatform>>() {
-                p.sync_keep_alive();
-            }
-            #[cfg(target_os = "android")]
-            if let Some(u) = app.try_state::<update::UpdaterState>() {
-                u.resumed();
-            }
+            log::info!("window '{label}' destroyed with its activity");
+            // The launcher's next activity may already be up, waiting for a window.
+            restore_main_window(app);
         }
         _ => {}
     });

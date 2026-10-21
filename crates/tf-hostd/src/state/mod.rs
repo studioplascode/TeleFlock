@@ -828,6 +828,13 @@ fn apply_snapshot(h: &StateHandle, snap: tf_herdr::Snapshot) {
     m.mirror.tabs = snap.tabs;
     let live: HashSet<String> = snap.panes.iter().map(|p| p.pane_id.clone()).collect();
     m.mirror.panes = snap.panes;
+    // Status changes first seen by a snapshot (the per-pane stream pulses its own).
+    for a in &snap.agents {
+        let id = build::agent_id(a);
+        if m.mirror.agents.iter().any(|o| build::agent_id(o) == id && o.agent_status != a.agent_status) {
+            *m.pulses.entry((id, PulseKind::State)).or_default() += 1;
+        }
+    }
     m.mirror.agents = snap.agents;
     m.mirror.activity.retain(|k, _| live.contains(k));
     m.pane_pids.retain(|k, _| live.contains(k));
@@ -914,18 +921,39 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
             {
                 let mut m = h.lock();
                 m.mirror.activity.insert(p.pane_id.clone(), now);
-                if let Some(slot) = m.mirror.panes.iter_mut().find(|x| x.pane_id == p.pane_id) {
-                    *slot = p.clone();
-                } else {
-                    resnap = true;
+                // herdr's subscription hands out at most one event per poll (~10/s), so busy
+                // panes (omp's title spinner) make `pane_updated` lag tens of seconds behind.
+                // An update older than what a snapshot already showed is only activity.
+                let known_rev = m
+                    .mirror
+                    .panes
+                    .iter()
+                    .find(|x| x.pane_id == p.pane_id)
+                    .map(|x| (x.terminal_id.as_str(), x.revision))
+                    .or_else(|| m.mirror.agents.iter().find(|a| a.pane_id == p.pane_id).map(|a| (a.terminal_id.as_str(), a.revision)));
+                let stale = known_rev.is_some_and(|(t, rev)| t == p.terminal_id && p.revision < rev);
+                if !stale {
+                    if let Some(slot) = m.mirror.panes.iter_mut().find(|x| x.pane_id == p.pane_id) {
+                        *slot = p.clone();
+                    } else {
+                        resnap = true;
+                    }
                 }
                 match m.mirror.agents.iter_mut().find(|a| a.pane_id == p.pane_id) {
+                    Some(a) if stale => {
+                        let id = build::agent_id(a);
+                        let linked = m.omp_of.contains_key(&id);
+                        pulse_agent = Some((id, linked, false));
+                    }
                     Some(a) => {
                         if p.agent.is_none() || p.agent != a.agent {
                             resnap = true;
                         }
-                        let status_changed = a.agent_status != p.agent_status;
-                        a.agent_status = p.agent_status;
+                        // Even a fresh-looking `pane_updated` may predate a per-pane status
+                        // event (titles don't bump the revision on status changes), so its
+                        // status never overrides: a difference only asks for a snapshot.
+                        let status_differs = a.agent_status != p.agent_status;
+                        a.revision = p.revision;
                         a.agent_session = p.agent_session.clone();
                         a.cwd = p.cwd.clone();
                         a.foreground_cwd = p.foreground_cwd.clone();
@@ -936,27 +964,25 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                         a.tokens = p.tokens.clone();
                         let id = build::agent_id(a);
                         let linked = m.omp_of.contains_key(&id);
-                        pulse_agent = Some((id, linked, status_changed));
+                        pulse_agent = Some((id, linked, status_differs));
                     }
                     None => {
-                        if p.agent.is_some() {
+                        if p.agent.is_some() && !stale {
                             resnap = true;
                         }
                     }
                 }
             }
-            let pulse_agent_status_changed = pulse_agent.as_ref().is_some_and(|(_, _, s)| *s);
-            if let Some((id, linked, status_changed)) = pulse_agent {
-                if status_changed {
-                    h.add_pulse(&id, PulseKind::State, 1);
-                } else if !linked {
+            let status_differs = pulse_agent.as_ref().is_some_and(|(_, _, s)| *s);
+            if let Some((id, linked, _)) = pulse_agent {
+                if !linked {
                     h.add_pulse(&id, PulseKind::Event, 1);
                 }
             }
             h.mark_dirty();
-            // Status changes are applied at once (fast UI) and confirmed by a snapshot: a
-            // coalesced `pane_updated` may carry an older status than a per-pane event.
-            return resnap || pulse_agent_status_changed;
+            // Status comes from per-pane `pane.agent_status_changed` events (prompt and
+            // exact) and snapshots; a differing `pane_updated` status is confirmed by one.
+            return resnap || status_differs;
         }
         E::AgentStatusChanged { pane_id, agent_status, .. } => {
             let id = {
@@ -1217,6 +1243,107 @@ async fn host_loop(ctx: Arc<Ctx>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replays the lab capture (herdr 0.9.0, fake omp = hook `blocked` + a title spinner):
+    /// the per-pane `pane.agent_status_changed` arrives at once while global
+    /// `pane_updated` events trickle in seconds late, still carrying the status from when
+    /// they were emitted. Every flush happens between event and re-snapshot (worst case).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_pane_updates_keep_a_blocked_agent_in_needs() {
+        use tf_herdr::{AgentStatus as S, HerdrEvent as E, Snapshot};
+
+        fn pane(status: S, rev: u64) -> PaneInfo {
+            PaneInfo {
+                pane_id: "w4:p1".into(),
+                terminal_id: "term_lab".into(),
+                workspace_id: "w4".into(),
+                tab_id: "w4:t1".into(),
+                agent: Some("omp".into()),
+                agent_status: status,
+                revision: rev,
+                terminal_title_stripped: Some(format!("π ⠋ lab PERM: fake task {rev}")),
+                ..Default::default()
+            }
+        }
+        fn snap(status: S, rev: u64) -> Snapshot {
+            let p = pane(status, rev);
+            let a = AgentInfo {
+                pane_id: p.pane_id.clone(),
+                terminal_id: p.terminal_id.clone(),
+                workspace_id: p.workspace_id.clone(),
+                tab_id: p.tab_id.clone(),
+                agent: p.agent.clone(),
+                agent_status: status,
+                revision: rev,
+                ..Default::default()
+            };
+            Snapshot { panes: vec![p], agents: vec![a], ..Default::default() }
+        }
+        fn status_event(status: S) -> E {
+            E::AgentStatusChanged { pane_id: "w4:p1".into(), workspace_id: "w4".into(), agent: Some("omp".into()), agent_status: status }
+        }
+        fn column(h: &StateHandle) -> Column {
+            h.agent("term_lab").expect("agent on the board").column
+        }
+        /// hostd's loop: apply the event, flush, then re-snapshot herdr's truth if asked
+        /// (`None`: the debounced snapshot lands after the next event).
+        fn step(h: &StateHandle, ev: E, truth: Option<(S, u64)>) -> (bool, [Column; 2]) {
+            let resnap = handle_herdr_event(h, ev);
+            h.rebuild();
+            let flushed = column(h);
+            if let Some((status, rev)) = truth.filter(|_| resnap) {
+                apply_snapshot(h, snap(status, rev));
+            }
+            h.rebuild();
+            (resnap, [flushed, column(h)])
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let persist = Persist::load(dir.path().join("state.json"));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let omp = OmpHandle::start(0, persist.clone(), cancel).await;
+        let bridge = BridgeHandle::bind(crate::bridge::BridgeEndpoint::Unix(dir.path().join("bridge.sock")), "s".into()).unwrap();
+        let h = StateHandle::new("lab", persist, omp, bridge);
+
+        // Working with a spinner; the first updates are still current.
+        apply_snapshot(&h, snap(S::Working, 3));
+        h.rebuild();
+        for rev in 4..=5 {
+            assert_eq!(step(&h, E::PaneUpdated(pane(S::Working, rev)), Some((S::Working, rev))).1, [Column::Running; 2]);
+        }
+
+        // `ask` starts at rev 16: the per-pane event is prompt …
+        let (resnap, cols) = step(&h, status_event(S::Blocked), None);
+        assert!(resnap);
+        assert_eq!(cols, [Column::Needs; 2]);
+        // … while `working` updates emitted before it (rev 6..=15) and later `blocked` ones
+        // keep trickling in; the spinner moves on 2.5 frames per delivered event. The first
+        // lands before the re-snapshot and looks newer than anything seen so far.
+        let (resnap, cols) = step(&h, E::PaneUpdated(pane(S::Working, 6)), Some((S::Blocked, 16)));
+        assert!(resnap, "a differing status asks for a snapshot");
+        assert_eq!(cols, [Column::Needs; 2]);
+        let mut truth_rev = 16;
+        for rev in 7..=40 {
+            truth_rev += 2;
+            let emitted = if rev < 16 { S::Working } else { S::Blocked };
+            assert_eq!(step(&h, E::PaneUpdated(pane(emitted, rev)), Some((S::Blocked, truth_rev))).1, [Column::Needs; 2], "rev {rev}");
+        }
+
+        // Answered at rev 120: Needs clears on the per-pane event; stale `blocked` updates,
+        // even one newer than the last snapshot, don't bring it back.
+        assert_eq!(step(&h, status_event(S::Working), None).1, [Column::Running; 2]);
+        assert_eq!(step(&h, E::PaneUpdated(pane(S::Blocked, 41)), Some((S::Working, 120))).1, [Column::Running; 2]);
+        truth_rev = 120;
+        for rev in 42..=119 {
+            truth_rev += 2;
+            assert_eq!(step(&h, E::PaneUpdated(pane(S::Blocked, rev)), Some((S::Working, truth_rev))).1, [Column::Running; 2], "rev {rev}");
+        }
+
+        let asked = h.activity_page(None, 500, Some("term_lab")).0.iter().filter(|e| e.kind == ActivityKind::Asked).count();
+        assert_eq!(asked, 1, "one Needs notification for the whole question");
+    }
 
     #[test]
     fn diff_emits_replace_and_delete() {

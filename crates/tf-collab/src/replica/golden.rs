@@ -908,6 +908,57 @@ fn journal_goal_plan_and_todo_edits() {
     assert_eq!(rep.journal_offset(), 20);
 }
 
+/// Collab cuts a replicated entry over 1 MiB down to string prefixes, so a big pasted screenshot
+/// arrives as `<base64 prefix>\n…[N chars elided for collab session]`; the journal keeps the image
+/// as an omp blob. Whichever of the two arrives first, the row ends up with the blob, and history
+/// pages read from the journal carry it too.
+#[test]
+fn cut_images_take_the_journal_blob() {
+    let base = load("00-join");
+    let (at0, snap) = snapshot_from(&base, false).unwrap();
+    let hash = "69c53c63153a19ab8865c53aa3ff3f181aa4e4a7af7ab19308567f1569f97e75";
+    let row = |data: &str| {
+        serde_json::json!({
+            "type": "custom_message", "id": "e920858c", "customType": "collab-prompt", "display": true,
+            "details": { "from": "TeleFlock" }, "attribution": "user", "timestamp": "2026-10-21T17:11:08.264Z",
+            "content": [{ "type": "text", "text": "2 columns wide" }, { "type": "image", "mimeType": "image/png", "data": data }],
+        })
+    };
+    let cut = row("iVBORw0KGgoAAAANSUhEUgAACf4AAAVt\n…[1062044 chars elided for collab session]");
+    let journal = format!("{}\n", row(&format!("blob:sha256:{hash}")));
+    let chunk = crate::guest::TranscriptChunk { text: journal.clone(), new_size: journal.len() as u64, error: None };
+    let image = |rep: &Replica| match rep.item("u1792602668264") {
+        Some(TranscriptItem::User(u)) => u.images[0].clone(),
+        other => panic!("no user row: {other:?}"),
+    };
+
+    // Live entry first: no payload until the journal catches up, then the row is upserted with the blob.
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: cut.clone() }), at0);
+    let img = image(&rep);
+    assert!(img.data.is_none() && img.url.is_none() && img.blob.is_none(), "a cut payload is not an image: {img:?}");
+    let up = rep.apply_journal(&chunk);
+    assert!(
+        up.events.iter().any(|e| matches!(e, SessionEvent::Upsert { item: TranscriptItem::User(u) } if u.images[0].blob.as_deref() == Some(hash))),
+        "{:?}",
+        up.events
+    );
+    assert_eq!(image(&rep).mime, "image/png");
+
+    // Journal first: the entry takes the blob at once.
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap), at0);
+    rep.apply_journal(&chunk);
+    rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: cut }), at0);
+    assert_eq!(image(&rep).blob.as_deref(), Some(hash));
+
+    // History pages read the journal directly.
+    let page = super::transcript_page(&journal);
+    let Some(TranscriptItem::User(u)) = page.items.first() else { panic!("{:?}", page.items) };
+    assert_eq!((u.images[0].blob.as_deref(), u.images[0].data.as_deref()), (Some(hash), None));
+}
+
 fn irc_rows(rows: &[TranscriptItem]) -> Vec<(String, IrcMessage, Option<ToolStatus>)> {
     rows.iter()
         .filter_map(|i| match i {

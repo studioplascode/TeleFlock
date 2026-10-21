@@ -264,6 +264,7 @@ Request (one connection, held open):
   - omp puts a spinner in the *middle* of its OSC title (`π ⠧ tmp`). The spinner change survives `terminal_title_stripped`, so every frame emits `pane_updated`.
   - Measured: **10 events/s, about 600 B each, about 6 KB/s per working omp pane**. 796 `pane_updated` against 10 status changes in about 10 minutes.
   - Idle panes are quiet.
+- **`pane_updated` lags behind and carries stale status** [observed in a lab session + source `src/api/server.rs:746-761`, `src/api/subscriptions.rs:283-291`, `src/api/event_hub.rs:13-25`]. A subscription hands out at most one matching event per 100 ms poll from a 512-event ring, while omp's spinner emits more than that. A working omp pane's `pane_updated` stream falls tens of seconds behind, and each event still carries the `agent_status` from when it was emitted. The per-pane `pane.agent_status_changed` stream stays prompt. Taking status from `pane_updated` made a blocked agent flap Needs ↔ Running at about 4 Hz, so tf-hostd reads status only from per-pane events and snapshots, and ignores `pane_updated` revisions older than what it has already seen.
 
 **Bootstrap without a gap** [source `docs/socket-api.mdx:118-127`]:
 1. Open the subscription and wait for the ack.

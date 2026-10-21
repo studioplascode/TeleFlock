@@ -5,7 +5,8 @@ import type { AssistantItem, CompactionItem, ImageRef, ModeItem, NoticeItem, Thi
 import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, Lightbox, LightboxTrigger, LogoMark, Shimmer, Tooltip } from "@/design";
 import { IrcBubble } from "../irc/IrcBubble";
 import { Markdown } from "../markdown/Markdown";
-import { imageSrc, ToolCard } from "../tools/ToolCard";
+import { ImagePlaceholder, useImageSources } from "../lib/images";
+import { ToolCard } from "../tools/ToolCard";
 
 /** `in:<peer>` / `out:<peer>` for IRC rows (consecutive rows with the same key group), else null. */
 export function ircThreadKey(item: TranscriptItem | undefined): string | null {
@@ -163,21 +164,26 @@ function UserRow({ item }: { item: UserItem }) {
   );
 }
 
-/** A message's attachments; each opens the lightbox paging through the whole message. */
+/** A message's attachments; each opens the lightbox (full original) paging through the ones that loaded. */
 function UserImages({ images }: { images: ImageRef[] }) {
+  // The open attachment by its position in the message: the lightbox pages through loaded images only, so a
+  // group index would land on another attachment once an earlier one finishes loading.
   const [open, setOpen] = useState<number | null>(null);
-  const group = images.flatMap((img, i) => {
-    const src = imageSrc(img);
-    return src ? [{ src, alt: `attachment ${i + 1}`, width: img.width, height: img.height }] : [];
-  });
+  const sources = useImageSources(images);
+  const group = sources.flatMap((s, i) => (s.state === "ready" ? [{ src: s.src, alt: `attachment ${i + 1}`, width: images[i]?.width, height: images[i]?.height, at: i }] : []));
+  const shown = group.findIndex((g) => g.at === open);
   return (
     <div className="mt-2 flex flex-wrap gap-1.5">
-      {group.map((img, i) => (
-        <LightboxTrigger key={i} onClick={() => setOpen(i)}>
-          <img src={img.src} alt={img.alt} className="max-h-40 rounded-md object-cover shadow-hairline" />
-        </LightboxTrigger>
-      ))}
-      <Lightbox images={group} index={open} onIndexChange={setOpen} />
+      {sources.map((s, i) =>
+        s.state === "ready" ? (
+          <LightboxTrigger key={i} onClick={() => setOpen(i)}>
+            <img src={s.src} alt={`attachment ${i + 1}`} className="max-h-40 rounded-md object-cover shadow-hairline" />
+          </LightboxTrigger>
+        ) : (
+          <ImagePlaceholder key={i} state={s.state} />
+        ),
+      )}
+      <Lightbox images={group} index={shown < 0 ? null : shown} onIndexChange={(g) => setOpen(g == null ? null : (group[g]?.at ?? null))} />
     </div>
   );
 }

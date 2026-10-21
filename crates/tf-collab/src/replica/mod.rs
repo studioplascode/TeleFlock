@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use serde_json::Value;
 use tf_proto::{
     ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, CostSplit, FileStatus,
-    HistoryPage, Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
+    HistoryPage, ImageRef, Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
     SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase, TpsSplit,
     TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo, IrcItem,
 };
@@ -125,7 +125,7 @@ struct SubState {
 }
 
 /// What the main session journal says that collab does not mirror (`mode_change`, `custom`,
-/// `model_usage`).
+/// `model_usage`), plus the full images of user rows.
 #[derive(Debug, Clone)]
 struct Journal {
     /// Next byte offset of the main session JSONL to read.
@@ -136,11 +136,14 @@ struct Journal {
     todo_edit: Option<Vec<TodoPhase>>,
     /// The main agent's side calls (`model_usage`: judges, title, compaction helpers…).
     side: Spend,
+    /// User rows' images as the journal keeps them (omp blobs), by row id (`u<ts>`). They stand in
+    /// for payloads collab cut from entries over 1 MiB, whichever of the two arrives first.
+    images: HashMap<String, Vec<ImageRef>>,
 }
 
 impl Default for Journal {
     fn default() -> Self {
-        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None, side: Spend::default() }
+        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None, side: Spend::default(), images: HashMap::new() }
     }
 }
 
@@ -1048,7 +1051,10 @@ impl Replica {
             Some("advisor") => advisor_text(msg).unwrap_or_else(|| content_text(msg.get("content"))),
             _ => content_text(msg.get("content")),
         };
-        let images = content_images(msg.get("content"));
+        let mut images = content_images(msg.get("content"));
+        if let Some(full) = self.journal.images.get(&id) {
+            fill_cut_images(&mut images, full);
+        }
         if text.is_empty() && images.is_empty() {
             return;
         }
@@ -1444,6 +1450,13 @@ impl Replica {
                             self.journal.side.add_usage(usage);
                         }
                     }
+                    // Same timestamps as `entry` uses for the row id.
+                    Some("custom_message") => self.journal_images(&entry, ts(&entry), &mut out),
+                    Some("message") => {
+                        if let Some(msg) = entry.get("message").filter(|m| !matches!(s(m, "role"), Some("assistant" | "toolResult"))) {
+                            self.journal_images(msg, None, &mut out);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1488,6 +1501,23 @@ impl Replica {
         if let Some(t) = &self.journal.todo_edit {
             self.meta.todos = t.clone();
         }
+    }
+
+    /// A journal user row: remember its blobs and fill in a transcript row whose payloads collab cut.
+    fn journal_images(&mut self, msg: &Value, entry_ts: Option<Millis>, out: &mut Update) {
+        let Some(t) = entry_ts.or_else(|| ts(msg)) else { return };
+        let full = content_images(msg.get("content"));
+        if !full.iter().any(|i| i.blob.is_some()) {
+            return;
+        }
+        let id = format!("u{t}");
+        if let Some(TranscriptItem::User(u)) = self.items.get(&id) {
+            let mut item = u.clone();
+            if fill_cut_images(&mut item.images, &full) {
+                self.upsert(TranscriptItem::User(item), out);
+            }
+        }
+        self.journal.images.insert(id, full);
     }
 
     fn count_cost(&mut self, entry_id: &str, msg: &Value) {
@@ -1627,6 +1657,22 @@ impl Replica {
             }
         }
     }
+}
+
+/// Images collab cut (no payload, url or blob left) take the journal's copy of the same row.
+/// Returns whether anything changed.
+fn fill_cut_images(images: &mut [ImageRef], full: &[ImageRef]) -> bool {
+    if images.len() != full.len() {
+        return false;
+    }
+    let mut changed = false;
+    for (img, j) in images.iter_mut().zip(full) {
+        if img.data.is_none() && img.url.is_none() && img.blob.is_none() && j.blob.is_some() {
+            *img = j.clone();
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn out_now(now: Millis, snap: &Snapshot) -> Millis {

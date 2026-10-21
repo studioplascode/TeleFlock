@@ -9,10 +9,10 @@ const limits = zoomLimits(image, stage);
 const screen = (v: { scale: number; x: number; y: number }, p: { x: number; y: number }) => ({ x: v.x + p.x * v.scale, y: v.y + p.y * v.scale });
 
 describe("lightbox zoom math", () => {
-  test("fit contains the image and never upscales past the cap", () => {
+  test("fit contains the image and never upscales: small images open at actual size", () => {
     expect(fitScale(image, stage)).toBe(0.5);
     expect(fitScale(image, stage, 100)).toBe(0.4);
-    expect(fitScale({ w: 10, h: 10 }, stage)).toBe(2);
+    expect(fitScale({ w: 10, h: 10 }, stage)).toBe(1);
     expect(fitScale({ w: 0, h: 0 }, stage)).toBe(1);
   });
 
@@ -26,10 +26,10 @@ describe("lightbox zoom math", () => {
     expect(screen(next, under).y).toBeCloseTo(at.y);
   });
 
-  test("scale is clamped to [min, max]; small upscaled images can still go down to 1:1", () => {
+  test("scale is clamped to [min, max]; the floor is the fit", () => {
     expect(zoomTo({ scale: 1, x: 0, y: 0 }, 0.01, { x: 0, y: 0 }, image, stage, limits).scale).toBe(limits.fit);
     expect(zoomTo({ scale: 1, x: 0, y: 0 }, 1e6, { x: 0, y: 0 }, image, stage, limits).scale).toBe(limits.max);
-    expect(zoomLimits({ w: 100, h: 100 }, stage)).toMatchObject({ fit: 2, min: 1 });
+    expect(zoomLimits({ w: 100, h: 100 }, stage)).toMatchObject({ fit: 1, min: 1 });
   });
 
   test("pan can't push the image off-screen, and centers a smaller-than-stage axis", () => {

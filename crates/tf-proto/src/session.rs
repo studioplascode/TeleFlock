@@ -145,8 +145,12 @@ wire_struct! {
         pub mime: String,
         /// Base64 payload (inline images) …
         pub data: Option<String>,
-        /// … or a URL the client can load.
+        /// … or a URL the client can load …
         pub url: Option<String>,
+        /// … or an omp blob (sha256 hex) holding the full image: fetch it with `session.image`.
+        /// None of the three: the payload was cut from a collab frame (entries are capped at 1 MiB)
+        /// and the journal, which keeps it as a blob, has not caught up yet.
+        pub blob: Option<String>,
         pub width: Option<u32>,
         pub height: Option<u32>,
     }

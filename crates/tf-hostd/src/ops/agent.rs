@@ -38,6 +38,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         }
         M::SessionHistory(p) => to_value(session_history(ctx, p)?),
         M::SubagentTranscript(p) => to_value(subagent_transcript(ctx, p).await?),
+        M::SessionImage(p) => to_value(session_image(p).await?),
 
         M::AgentPrompt(p) => unit(prompt(ctx, p, client).await),
         M::AgentAbort(p) => unit(abort(ctx, &p.agent_id).await),
@@ -223,6 +224,24 @@ async fn subagent_transcript(ctx: &Ctx, p: SubagentRef) -> Result<HistoryPage, A
         }
     }
     Ok(tf_collab::replica::transcript_page(&text))
+}
+
+/// Largest image `session.image` sends (its base64 must fit a client line, 64 MiB).
+const IMAGE_MAX: u64 = 32 * 1024 * 1024;
+
+/// A transcript image's full bytes from omp's content-addressed blob store.
+async fn session_image(p: ImageParams) -> Result<ImageBlob, ApiError> {
+    use base64::Engine as _;
+    if p.blob.len() != 64 || !p.blob.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::new("invalid_params", "blob must be a sha256 hex digest"));
+    }
+    let path = crate::ops::host::omp_agent_dir().join("blobs").join(p.blob.to_ascii_lowercase());
+    let meta = tokio::fs::metadata(&path).await.map_err(|e| crate::ops::fs::io_error(e, &path))?;
+    if meta.len() > IMAGE_MAX {
+        return Err(ApiError::new("too_large", format!("image is {} MiB", meta.len() >> 20)));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|e| crate::ops::fs::io_error(e, &path))?;
+    Ok(ImageBlob { data: base64::engine::general_purpose::STANDARD.encode(bytes) })
 }
 
 // ───────────────────────────── collab-first ─────────────────────────────

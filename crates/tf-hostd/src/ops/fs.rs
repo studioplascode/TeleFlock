@@ -83,7 +83,7 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-fn io_error(e: std::io::Error, path: &Path) -> ApiError {
+pub(crate) fn io_error(e: std::io::Error, path: &Path) -> ApiError {
     match e.kind() {
         std::io::ErrorKind::NotFound => ApiError::new("not_found", format!("{} does not exist", path.display())),
         std::io::ErrorKind::PermissionDenied => ApiError::new("permission_denied", format!("permission denied: {}", path.display())),

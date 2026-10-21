@@ -85,10 +85,11 @@ impl TauriPlatform {
                 }
             });
         } else if !want && running {
-            if let Err(e) = plugin.stop_keep_alive() {
-                log::warn!("keep-alive service not stopped: {e}");
+            match plugin.stop_keep_alive() {
+                Ok(()) => self.keep_alive_running.store(false, Ordering::Release),
+                // No activity (the service holds the process alone): retried on the next resume.
+                Err(e) => log::warn!("keep-alive service not stopped: {e}"),
             }
-            self.keep_alive_running.store(false, Ordering::Release);
         }
     }
 

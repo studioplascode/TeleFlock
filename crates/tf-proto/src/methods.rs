@@ -316,6 +316,16 @@ wire_struct! {
     }
 }
 
+wire_struct! {
+    /// `ImageRef.blob` of a transcript image.
+    pub struct ImageParams { pub blob: String }
+}
+
+wire_struct! {
+    /// The full image, base64 (the client already has the mime from its `ImageRef`).
+    pub struct ImageBlob { pub data: String }
+}
+
 wire_struct! { pub struct ExportResult { pub path: String } }
 
 // ───────────────────────────── workspaces & worktrees ─────────────────────────────
@@ -864,6 +874,7 @@ methods!(HostMethod, "HostMethods", {
     "session.close" => SessionClose(AgentRef) -> Empty;
     "session.history" => SessionHistory(SessionHistoryParams) -> HistoryPage;
     "session.subagentTranscript" => SubagentTranscript(SubagentRef) -> HistoryPage;
+    "session.image" => SessionImage(ImageParams) -> ImageBlob;
 
     "agent.prompt" => AgentPrompt(PromptParams) -> Empty;
     "agent.abort" => AgentAbort(AgentRef) -> Empty;

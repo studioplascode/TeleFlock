@@ -6,6 +6,12 @@ export type ImageRef = { mime: string,
  */
 data?: string, 
 /**
- * … or a URL the client can load.
+ * … or a URL the client can load …
  */
-url?: string, width?: number, height?: number, };
+url?: string, 
+/**
+ * … or an omp blob (sha256 hex) holding the full image: fetch it with `session.image`.
+ * None of the three: the payload was cut from a collab frame (entries are capped at 1 MiB)
+ * and the journal, which keeps it as a blob, has not caught up yet.
+ */
+blob?: string, width?: number, height?: number, };

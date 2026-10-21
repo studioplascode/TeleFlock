@@ -21,11 +21,12 @@ import {
   Wrench,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { type ReactNode, useContext, useState } from "react";
+import { type ReactNode, useContext, useMemo, useState } from "react";
 import { linkProps, useAgent } from "@/core";
-import type { BashView, ImageRef, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
+import type { BashView, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
 import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner } from "@/design";
 import { languageFor } from "../lib/highlight";
+import { ImagePlaceholder, useImageSources } from "../lib/images";
 import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
 import { useSessionUi } from "../state";
 import { SubagentCard } from "../subagents/Subagents";
@@ -95,10 +96,6 @@ const OPEN_BY_DEFAULT: Record<ViewType, boolean> = {
   irc: true,
   generic: false,
 };
-
-export function imageSrc(img: ImageRef): string | undefined {
-  return img.data ? `data:${img.mime};base64,${img.data}` : img.url;
-}
 
 function bashOutput(item: ToolItem, view: BashView): string {
   // Streaming output arrives on `ToolItem.output` (append field "output"); the view carries the final text.
@@ -489,7 +486,9 @@ const IMAGE_MAX_H = 420;
 
 function ImageBody({ view: v, title }: { view: ImageView; title: string }) {
   const [open, setOpen] = useState<number | null>(null);
-  const src = imageSrc(v.image);
+  const images = useMemo(() => [v.image], [v.image]);
+  const [source] = useImageSources(images);
+  const src = source?.state === "ready" ? source.src : undefined;
   const urlLink = linkProps(v.url);
   const alt = v.alt ?? title;
   const { width: w, height: h } = v.image;
@@ -515,7 +514,7 @@ function ImageBody({ view: v, title }: { view: ImageView; title: string }) {
           <Lightbox images={[{ src, alt, width: w, height: h }]} index={open} onIndexChange={setOpen} />
         </>
       ) : (
-        <div className="px-1 py-2 text-xs text-mute-2">Image not available</div>
+        <ImagePlaceholder state={source?.state === "loading" ? "loading" : "unavailable"} />
       )}
       {(v.url || v.alt) && (
         <figcaption className="mt-1.5 flex items-center gap-2 px-1 text-2xs text-mute">

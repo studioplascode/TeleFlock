@@ -324,7 +324,7 @@ pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Lat
   - Tray icon with the needs-you count, taskbar overlay badge, single instance, deep link `teleflock://`.
   - Toast notifications with actions; retracted from Action Center (tag + group) when handled elsewhere, user dismissal reported to the engine.
 - **Android.** A Kotlin plugin provides:
-  - a foreground service (`remoteMessaging`) holding the core alive while `keepAlive`;
+  - a foreground service (`remoteMessaging`) holding the core alive while `keepAlive`, also after the activity is gone (closed from recents). `MainActivity` reports its lifecycle over JNI: without an activity, Kotlin commands (notifications included) are skipped, and the next activity gets the main window rebuilt, since Tauri creates windows once per process (`src-tauri/README.md`, "App closed from recents");
   - notifications with action buttons (≤ 3) and inline reply, routed back to `agent.answer` / `agent.prompt`; cancelled by tag + id when handled elsewhere (group summary follows), swipe-away reported over JNI;
   - `POST_NOTIFICATIONS` permission flow and haptics.
 - **Builds.** Windows NSIS via cargo-xwin; signed APK (`docs/build.md`). `scripts/build-hostd.sh` builds tf-hostd for `x86_64/aarch64-unknown-linux-musl` (zigbuild) and `x86_64-pc-windows-msvc` before the app.

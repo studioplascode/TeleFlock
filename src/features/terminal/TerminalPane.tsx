@@ -77,6 +77,21 @@ const RESIZE_DEBOUNCE_MS = 70;
 const SWIPE_SLOP_PX = 8;
 /** Longest the first paint waits for the terminal fonts (it re-measures when they land later). */
 const FONT_WAIT_MS = 120;
+/**
+ * Smallest grid a pane's box can mean. Less is the box collapsing, not a layout: a closing split
+ * squeezes its terminal to zero width for the exit animation. Applying that would resize the real
+ * PTY, and herdr keeps the size after we let go, so the agent would re-wrap at 2 columns for every
+ * later viewer (the board's live tile shows the pane at its driver's size).
+ */
+const MIN_COLS = 10;
+const MIN_ROWS = 2;
+
+/** The fit addon's grid for the current box; `null` while the box is collapsed or unmeasurable. */
+function proposeGrid(fit: FitAddon): { cols: number; rows: number } | null {
+  const dims = fit.proposeDimensions();
+  if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return null;
+  return dims.cols >= MIN_COLS && dims.rows >= MIN_ROWS ? dims : null;
+}
 
 /** Set once WebGL proved to draw nothing on this device; later panes go straight to the DOM renderer. */
 let webglBroken = false;
@@ -244,7 +259,8 @@ export function TerminalPane({
       clearTimeout(fontTimer);
       if (disposed) return;
       term.open(el);
-      fit.fit();
+      const grid = proposeGrid(fit);
+      if (grid) term.resize(grid.cols, grid.rows);
       setInst(term);
     });
 
@@ -468,10 +484,9 @@ export function TerminalPane({
     const term = termRef.current;
     const fit = fitRef.current;
     if (!term || !fit || !term.element) return;
-    const dims = fit.proposeDimensions();
-    if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
-    const cols = Math.max(2, dims.cols);
-    const rows = Math.max(1, dims.rows);
+    const grid = proposeGrid(fit);
+    if (!grid) return;
+    const { cols, rows } = grid;
     const s = sessionRef.current;
     if (mode === "observe" && s?.openedSize && s.phase.k === "live") {
       // Observers can't resize; their crop is fixed at open. Re-attach at the new size once it settles.

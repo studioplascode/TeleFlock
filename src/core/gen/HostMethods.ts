@@ -33,6 +33,8 @@ import type { HandleParams } from "./HandleParams";
 import type { HistoryPage } from "./HistoryPage";
 import type { HostHealth } from "./HostHealth";
 import type { HostState } from "./HostState";
+import type { ImageBlob } from "./ImageBlob";
+import type { ImageParams } from "./ImageParams";
 import type { KeysParams } from "./KeysParams";
 import type { LimitsParams } from "./LimitsParams";
 import type { ModelCatalog } from "./ModelCatalog";
@@ -85,6 +87,7 @@ export interface HostMethods {
   "session.close": { params: AgentRef; result: Empty };
   "session.history": { params: SessionHistoryParams; result: HistoryPage };
   "session.subagentTranscript": { params: SubagentRef; result: HistoryPage };
+  "session.image": { params: ImageParams; result: ImageBlob };
   "agent.prompt": { params: PromptParams; result: Empty };
   "agent.abort": { params: AgentRef; result: Empty };
   "agent.answer": { params: AnswerParams; result: Empty };

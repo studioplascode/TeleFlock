@@ -11,6 +11,11 @@
 //!   the app's FileProvider (`REQUEST_INSTALL_PACKAGES`, "install unknown apps" grant flow).
 //! * Default-network changes (Wi-Fi ↔ cellular, VPN up) are reported through the same sink so
 //!   the core can reconnect immediately.
+//! * Activity lifecycle ([`has_activity`], [`NativeEvent::ActivityResumed`]): the keep-alive
+//!   service can keep the process running after its activity is destroyed (swiped away from
+//!   recents). Kotlin commands are skipped while no activity is alive, and an activity created in
+//!   such a process asks for a window, which Tauri only creates once per process. Resumes are
+//!   reported too: Tauri's `RunEvent::Resumed` never fires on Android.
 //!
 //! On non-Android targets the plugin registers nothing; the types still compile so the app can
 //! share code paths.
@@ -24,7 +29,7 @@ use tauri::{
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub use android::{ApkInstall, Permission, TeleFlockAndroid, TeleFlockAndroidExt, set_sink};
+pub use android::{ApkInstall, Permission, TeleFlockAndroid, TeleFlockAndroidExt, has_activity, set_sink};
 
 /// A user action on one of our notifications, delivered from the Kotlin `ActionReceiver`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -54,6 +59,9 @@ pub enum NativeEvent {
     Dismissed(NotificationRef),
     /// The default network changed (became available or its capabilities changed).
     NetworkChanged,
+    /// `MainActivity.onResume`. `needs_window`: it has no WebView, e.g. the launcher created it
+    /// in a process that outlived the previous activity.
+    ActivityResumed { needs_window: bool },
 }
 
 /// One action button.

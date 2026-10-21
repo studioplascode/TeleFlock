@@ -100,20 +100,35 @@ pub(crate) fn content_text(content: Option<&Value>) -> String {
     }
 }
 
-/// Image blocks of a content field.
+/// How omp's journal (and history pages read from it) stores image payloads.
+const BLOB_PREFIX: &str = "blob:sha256:";
+
+/// Image blocks of a content field. An image payload is kept only if it is renderable base64:
+/// journal rows carry `blob:sha256:<hex>` instead (→ `ImageRef.blob`), and collab cuts payloads
+/// of entries over 1 MiB down to a prefix plus `…[N chars elided …]` (→ no payload; the journal
+/// row fills it in, see `Replica::apply_journal`).
 pub(crate) fn content_images(content: Option<&Value>) -> Vec<tf_proto::ImageRef> {
     let Some(Value::Array(blocks)) = content else { return Vec::new() };
     blocks
         .iter()
         .filter(|blk| s(blk, "type") == Some("image"))
-        .map(|blk| tf_proto::ImageRef {
-            mime: s(blk, "mimeType").unwrap_or("image/png").to_owned(),
-            data: s(blk, "data").map(str::to_owned),
-            url: None,
-            width: None,
-            height: None,
+        .map(|blk| {
+            let raw = s(blk, "data");
+            let blob = raw.and_then(|d| d.strip_prefix(BLOB_PREFIX)).filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()));
+            tf_proto::ImageRef {
+                mime: s(blk, "mimeType").unwrap_or("image/png").to_owned(),
+                data: raw.filter(|d| blob.is_none() && is_base64(d)).map(str::to_owned),
+                url: None,
+                blob: blob.map(str::to_ascii_lowercase),
+                width: None,
+                height: None,
+            }
         })
         .collect()
+}
+
+fn is_base64(d: &str) -> bool {
+    !d.is_empty() && d.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'\r' | b'\n'))
 }
 
 /// Truncate to at most `max` chars (by char), appending `…`.

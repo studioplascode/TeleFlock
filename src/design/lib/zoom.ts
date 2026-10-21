@@ -29,26 +29,27 @@ export interface ZoomLimits {
   max: number;
 }
 
-/** Fit never upscales beyond this, so tiny images don't fill the screen as a blur. */
-export const FIT_MAX_UPSCALE = 2;
 /** Zoom-in ceiling: at least 4× actual size, and at least 8× the fit scale. */
 export const MAX_ZOOM_ACTUAL = 4;
 export const MAX_ZOOM_FIT = 8;
 /** Scales within this ratio of `fit` count as "not zoomed" (gallery swipes and ←/→ apply). */
 const FIT_EPSILON = 1.01;
 
-/** Scale that fits `image` inside `stage` minus `pad` px on every side, capped at FIT_MAX_UPSCALE. */
+/**
+ * Scale that fits `image` inside `stage` minus `pad` px on every side, never above actual size: an
+ * image opens as the original pixels (an upscaled screenshot reads as a blurry, lossy copy); zoom goes further.
+ */
 export function fitScale(image: Size, stage: Size, pad = 0): number {
   if (image.w <= 0 || image.h <= 0) return 1;
   const w = Math.max(1, stage.w - pad * 2);
   const h = Math.max(1, stage.h - pad * 2);
-  return Math.min(w / image.w, h / image.h, FIT_MAX_UPSCALE);
+  return Math.min(w / image.w, h / image.h, 1);
 }
 
-/** Zoom floor is the fit scale, or actual size for images that fit upscaled (so 1:1 stays reachable). */
+/** Zoom floor is the fit scale. */
 export function zoomLimits(image: Size, stage: Size, pad = 0): ZoomLimits {
   const fit = fitScale(image, stage, pad);
-  return { fit, min: Math.min(fit, 1), max: Math.max(fit * MAX_ZOOM_FIT, MAX_ZOOM_ACTUAL) };
+  return { fit, min: fit, max: Math.max(fit * MAX_ZOOM_FIT, MAX_ZOOM_ACTUAL) };
 }
 
 export function clampScale(scale: number, limits: ZoomLimits): number {

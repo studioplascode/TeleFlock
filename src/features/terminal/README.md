@@ -44,6 +44,10 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - `closed` events show a banner with the reason and **Reattach** / **Take over** (+ **Watch** with `onModeChange`) actions;
   a busy lease offers **Take over** / **Watch** / **Retry**.
 - Reopens automatically when the host goes back to `online`.
+- A box too small for a usable grid (< 10 cols or < 2 rows: a closing split's exit animation squeezes it to zero
+  width) keeps the current grid and never resizes the pane. A control resize sizes the real PTY and herdr keeps it
+  after the client lets go, so a collapsed size would leave the agent re-wrapped at 2 columns for every later viewer
+  (observers, such as the board's live tile, show the pane at its driver's size).
 - Font size comes from `useSettings().terminalFontSize`; pinch-zoom (mobile) and Ctrl +/−/0 (desktop) persist it.
 - Font (every surface, `TERM_FONT_FAMILY` in `theme.ts`): bundled Fira Code (`@fontsource-variable/fira-code`, OFL,
   `src/assets/fonts/fira-code/LICENSE`), then bundled Symbols Nerd Font Mono (Nerd Fonts v3.5.1 symbols-only, MIT + icon-set
