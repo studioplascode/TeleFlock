@@ -55,3 +55,5 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - Mobile extra keys: Esc/Ctrl/Alt pinned, the rest scrolls with edge fades; Ctrl/Alt tap = next key, double-tap or
   long-press = lock (haptic tick/select/heavy). Dimmed while detached.
 - TerminalView shortcuts: Ctrl+Shift+M mode, Ctrl+Shift+T new shell, Ctrl+Shift+[ / ] previous/next pane, ←/→ in the pane tabs.
+- Search: Ctrl+F (or context menu / palette "Terminal: Find on screen" / `handle.openSearch()`) opens a find bar (`@xterm/addon-search`): Enter / Shift+Enter next/prev, match count, case toggle, Esc closes. It searches the visible screen (scrollback is 0); scroll to bring older output into view.
+- Tab strip: right-click / long-press a tab → Rename tab… (`tab.rename`), Close tab… (`tab.close`), Close pane… (`pane.close`, shell panes only), each destructive action confirmed.

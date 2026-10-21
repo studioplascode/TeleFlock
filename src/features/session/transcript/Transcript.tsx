@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, MessageSquareDashed } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useLayoutEffect, useRef, useState, type WheelEvent } from "react";
+import { type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState, type WheelEvent } from "react";
 import { loadOlder, useAgent, useSession, useSessionItem } from "@/core";
 import { cn, Elapsed, EmptyState, Shimmer, Skeleton, spring, StatusOrb } from "@/design";
 import { Row } from "./rows";
@@ -39,7 +39,6 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
   const [loadingOlder, setLoadingOlder] = useState(false);
   const anchor = useRef<{ id: string; delta: number } | null>(null);
   const lastCount = useRef(ids.length);
-  const lastTop = useRef(0);
   const glideRaf = useRef(0);
 
   const virtualizer = useVirtualizer({
@@ -125,15 +124,13 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     } else if (ids.length > prev) setUnseen((n) => n + (ids.length - prev));
   }, [ids]);
 
+  // Unsticking is driven by user input (wheel, touch, keys, scrollbar) only: the virtualizer moves
+  // scrollTop on its own while rows measure, which would read as the user scrolling up.
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const goingUp = el.scrollTop < lastTop.current - 2;
-    lastTop.current = el.scrollTop;
-    if (fromBottom <= STICK_PX) {
-      if (!stick.current) setStick(true);
-    } else if (goingUp && stick.current) setStick(false);
+    if (fromBottom <= STICK_PX && !stick.current) setStick(true);
 
     if (el.scrollTop < LOAD_OLDER_PX && session.hasMore && !loadingOlder && ids.length > 0) {
       const first = virtualizer.getVirtualItems().find((v) => v.end > el.scrollTop);
@@ -144,9 +141,12 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     }
   };
 
-  // Wheel/touch up while stuck: release immediately so the user wins against streaming.
+  // Wheel/touch/keys up while stuck: release immediately so the user wins against streaming.
   const release = (e: WheelEvent) => {
     if (e.deltaY < 0 && stick.current) setStick(false);
+  };
+  const releaseKey = (e: KeyboardEvent) => {
+    if (stick.current && (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home")) setStick(false);
   };
 
   const items = virtualizer.getVirtualItems();
@@ -158,6 +158,11 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
         ref={scrollRef}
         onScroll={onScroll}
         onWheel={release}
+        onKeyDown={releaseKey}
+        onPointerDown={(e) => {
+          // Grabbing the scrollbar (the scroller itself is the target).
+          if (e.target === e.currentTarget && stick.current) setStick(false);
+        }}
         onTouchMove={() => {
           const el = scrollRef.current;
           if (el && el.scrollHeight - el.scrollTop - el.clientHeight > STICK_PX && stick.current) setStick(false);

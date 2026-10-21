@@ -1,36 +1,36 @@
-import { afterEach, beforeEach, describe, expect, mock, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import type { TermEvent } from "@/core/gen";
+import { FIRST_FRAME_NUDGE_MS, type TermDeps, TermSession } from "./session";
 
-/* A fake core: records host calls, lets tests push termBus events. */
+/* A fake core: records host calls, lets tests push termBus events. Injected per session, so no
+ * global module mock leaks into other test files of the same bun process. */
 const calls: { method: string; params: Record<string, unknown> }[] = [];
 const listeners = new Map<string, (ev: TermEvent) => void>();
 let nextTerm = 0;
 
-mock.module("@/core", () => ({
-  core: {
-    host: () => ({
-      call: async (method: string, params: Record<string, unknown>) => {
-        calls.push({ method, params });
-        if (method === "term.open") return { termId: `t${++nextTerm}`, paneId: "w1:p1" };
-        return {};
-      },
-    }),
-    termInput: () => {},
+const fakeHost = {
+  call: async (method: string, params: Record<string, unknown>) => {
+    calls.push({ method, params });
+    if (method === "term.open") return { termId: `t${++nextTerm}`, paneId: "w1:p1" };
+    return {};
   },
+};
+
+const deps = {
+  core: { host: () => fakeHost, termInput: () => {} },
   termBus: {
     subscribe: (_host: string, termId: string, cb: (ev: TermEvent) => void) => {
       listeners.set(termId, cb);
-      return () => listeners.delete(termId);
+      return () => {
+        listeners.delete(termId);
+      };
     },
   },
   toApiError: (e: unknown) => ({ code: "internal", message: String(e), retryable: true }),
-}));
+} as unknown as TermDeps; // structural fake of the typed core client (method-name generics)
 
 // Browser globals the session touches.
 globalThis.window ??= globalThis as unknown as Window & typeof globalThis;
-
-// Dynamic: the module must load after `mock.module` replaced "@/core".
-const { FIRST_FRAME_NUDGE_MS, TermSession } = await import("./session");
 
 interface FakeTerm {
   cols: number;
@@ -65,6 +65,7 @@ function session(term: ReturnType<typeof fakeTerm>) {
     term: term as never,
     onPhase: (p) => phases.push(p.k),
     onFrame: () => {},
+    deps,
   });
   return { s, phases };
 }

@@ -70,10 +70,12 @@ impl Core {
         p.push(ev);
     }
 
-    /// The page is navigating / reloading: its channels are dead.
+    /// The page is navigating / reloading: its channels are dead, and the terminals and sessions
+    /// it opened must be released (otherwise the reloaded page sees its own lease as "In use").
     pub fn page_reset(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.live.store(0, Ordering::Release);
+        self.engine.page_closed();
     }
 
     /// Emits a UI intent (deep link, tray, toast). Reaches the page now or on its next subscribe.

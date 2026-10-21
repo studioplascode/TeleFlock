@@ -13,6 +13,13 @@ export type TermPhase =
 
 type FrameEvent = Extract<TermEvent, { k: "frame" }>;
 
+/** The core surface a session talks to. Injectable so tests never replace the `@/core` module. */
+export interface TermDeps {
+  core: Pick<typeof core, "host" | "termInput">;
+  termBus: Pick<typeof termBus, "subscribe">;
+  toApiError: typeof toApiError;
+}
+
 export interface TermSessionOpts {
   hostId: string;
   target: TermTarget;
@@ -21,6 +28,8 @@ export interface TermSessionOpts {
   onPhase(phase: TermPhase): void;
   /** Every frame after it has been written (liveness, observe-mode sizing). */
   onFrame(ev: FrameEvent): void;
+  /** Defaults to the real `@/core` exports. */
+  deps?: TermDeps;
 }
 
 const TAKEN_OVER_RE = /taken over|takeover/i;
@@ -49,7 +58,11 @@ export class TermSession {
   /** Grid size sent with the latest `term.open` (observers crop to it). */
   openedSize: { cols: number; rows: number } | null = null;
 
-  constructor(private readonly o: TermSessionOpts) {}
+  private readonly d: TermDeps;
+
+  constructor(private readonly o: TermSessionOpts) {
+    this.d = o.deps ?? { core, termBus, toApiError };
+  }
 
   get currentTermId(): string | null {
     return this.termId;
@@ -79,19 +92,19 @@ export class TermSession {
     this.openedSize = { cols, rows };
     let opened;
     try {
-      opened = await core.host(this.o.hostId).call("term.open", { target: this.o.target, cols, rows, mode: this.o.mode, takeover });
+      opened = await this.d.core.host(this.o.hostId).call("term.open", { target: this.o.target, cols, rows, mode: this.o.mode, takeover });
     } catch (e) {
-      if (gen === this.gen && !this.disposed) this.setPhase({ k: "error", error: toApiError(e) });
+      if (gen === this.gen && !this.disposed) this.setPhase({ k: "error", error: this.d.toApiError(e) });
       return;
     }
     if (gen !== this.gen || this.disposed) {
       // Superseded while opening: release the lease we just got.
-      void core.host(this.o.hostId).call("term.close", { termId: opened.termId }).catch(() => {});
+      void this.d.core.host(this.o.hostId).call("term.close", { termId: opened.termId }).catch(() => {});
       return;
     }
     this.termId = opened.termId;
     this.gotFrame = false;
-    this.unsub = termBus.subscribe(this.o.hostId, opened.termId, (ev) => this.onEvent(gen, ev));
+    this.unsub = this.d.termBus.subscribe(this.o.hostId, opened.termId, (ev) => this.onEvent(gen, ev));
     if (gen !== this.gen) return; // a replayed `closed` already ended it
     this.setPhase({ k: "live", termId: opened.termId, paneId: opened.paneId, title: opened.title });
     attached.add(this);
@@ -142,7 +155,7 @@ export class TermSession {
     attached.delete(this);
     const termId = this.termId;
     this.termId = null;
-    if (release && termId) void core.host(this.o.hostId).call("term.close", { termId }).catch(() => {});
+    if (release && termId) void this.d.core.host(this.o.hostId).call("term.close", { termId }).catch(() => {});
   }
 
   /** Host went away: the attachment is gone with it; keep the last screen, wait for reconnect. */
@@ -156,19 +169,19 @@ export class TermSession {
   }
 
   input(data: string) {
-    if (this.termId && this.o.mode === "control") core.termInput(this.o.hostId, this.termId, data);
+    if (this.termId && this.o.mode === "control") this.d.core.termInput(this.o.hostId, this.termId, data);
   }
 
   /** Control only: hostd answers `unsupported` for observers (their crop size is fixed at open). */
   resize(cols: number, rows: number) {
     if (!this.termId || this.o.mode !== "control") return;
-    void core.host(this.o.hostId).call("term.resize", { termId: this.termId, cols, rows }).catch(() => {});
+    void this.d.core.host(this.o.hostId).call("term.resize", { termId: this.termId, cols, rows }).catch(() => {});
   }
 
   /** Host scrollback (herdr `terminal.scroll`); control only, like resize. */
   scroll(direction: ScrollDirection, lines: number) {
     if (!this.termId || lines <= 0 || this.o.mode !== "control") return;
-    void core.host(this.o.hostId).call("term.scroll", { termId: this.termId, direction, lines }).catch(() => {});
+    void this.d.core.host(this.o.hostId).call("term.scroll", { termId: this.termId, direction, lines }).catch(() => {});
   }
 
   dispose() {

@@ -24,6 +24,7 @@ impl Engine {                                 // Clone (Arc inside)
     pub async fn notification_action(&self, host_id: &str, notification_id: &str,
                                      action_id: Option<&str>, reply: Option<String>) -> Result<(), ApiError>;
     pub fn resume(&self);                     // foreground / network change
+    pub fn page_closed(&self);                // Tauri: webview reload/navigation → close the page's terminals + sessions
     pub async fn shutdown(&self);
 }
 
@@ -85,6 +86,8 @@ deploy time with an error naming the triple / file.
 * `GET /ws?token=<t>` (or subprotocol `teleflock.<t>`, echoed): client → `{id, hostId?, method, params}`
   and `{termIn: {hostId, termId, data}}`; server → `{id, result}` | `{id, error}` | `{event: AppEvent}`.
   Each connection starts with the replay. Missing/wrong token → 401, foreign `Origin` → 403.
+* A tab that goes away (close frame, dropped TCP, or silent for 45 s: the server pings every 15 s)
+  gets `term.close` for every terminal it opened and `session.close` for sessions no other tab has open.
 * Every route: `Host` must be allow-listed (bind IP, `localhost`/loopback on the bound port, `--allow-host`) → else 421.
 * Everything else: static files from `--static` with `index.html` fallback; the index gets
   `<meta name="tf-token">` for loopback clients or a page URL with the right `?token=`.

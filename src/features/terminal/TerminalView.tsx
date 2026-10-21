@@ -15,6 +15,7 @@ import {
   PanelTop,
   Plus,
   RotateCcw,
+  Search,
   Server,
   SquareSplitHorizontal,
   SquareSplitVertical,
@@ -237,6 +238,7 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
   const paletteCmds = useMemo<PaletteCommand[]>(
     () => [
       { id: "terminal.takeover", title: "Terminal: Take over input", group: "Terminal", icon: <Zap />, run: takeOver },
+      { id: "terminal.find", title: "Terminal: Find on screen", group: "Terminal", icon: <Search />, shortcut: "Ctrl F", run: () => handle.current?.openSearch() },
       { id: "terminal.reattach", title: "Terminal: Reattach", group: "Terminal", icon: <RotateCcw />, run: () => handle.current?.reopen(false) },
       { id: "terminal.newShell", title: "Terminal: New shell", group: "Terminal", icon: <SquareTerminal />, shortcut: "Ctrl Shift T", run: () => newShell("tab") },
       {

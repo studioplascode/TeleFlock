@@ -64,6 +64,11 @@ pub(crate) struct Inner {
     keep_alive: Mutex<Option<bool>>,
     /// Serializes `hosts.json` / `settings.json` writes.
     io: tokio::sync::Mutex<()>,
+    /// Bumped by [`Engine::page_closed`]; opens that complete under an older epoch are released.
+    page_epoch: std::sync::atomic::AtomicU64,
+    /// For work started from sync entry points the embedder may call off the runtime
+    /// (`resume`, `page_closed` from Tauri window/page callbacks).
+    runtime: tokio::runtime::Handle,
 }
 
 /// Handle to the app core. Cheap to clone.
@@ -381,6 +386,8 @@ impl Engine {
             badge: Mutex::new(None),
             keep_alive: Mutex::new(None),
             io: tokio::sync::Mutex::new(()),
+            page_epoch: std::sync::atomic::AtomicU64::new(0),
+            runtime: tokio::runtime::Handle::current(),
         });
         let engine = Engine { inner: inner.clone() };
 
@@ -493,12 +500,43 @@ impl Engine {
             }
             match rt.link() {
                 Some(link) => {
-                    tokio::spawn(async move { link.check(Duration::from_secs(5)).await });
+                    self.inner.runtime.spawn(async move { link.check(Duration::from_secs(5)).await });
                 }
                 None => {
                     let _ = rt.cmd.send(ConnCmd::Connect);
                 }
             }
+        }
+    }
+
+    /// The (single) UI that opened terminals and sessions is gone — webview reload or navigation
+    /// in the Tauri shell. Closes every open terminal (releasing its control lease) and
+    /// unsubscribes every session on every host; opens still in flight are released when they
+    /// complete. Multi-client embedders (the devserver) track ownership per client instead.
+    pub fn page_closed(&self) {
+        self.inner.page_epoch.fetch_add(1, Ordering::SeqCst);
+        let hosts: Vec<Arc<HostRt>> = self.inner.hosts.lock().unwrap().values().cloned().collect();
+        for rt in hosts {
+            let (terms, sessions): (Vec<String>, Vec<String>) = {
+                let mut v = rt.view.lock().unwrap();
+                (v.terms.drain().collect(), v.sessions.drain().map(|(k, _)| k).collect())
+            };
+            let Some(link) = rt.link() else { continue };
+            if terms.is_empty() && sessions.is_empty() {
+                continue;
+            }
+            log::info!("host {}: page closed; releasing {} terminal(s), {} session(s)", rt.id, terms.len(), sessions.len());
+            self.inner.runtime.spawn(async move {
+                let calls = terms
+                    .into_iter()
+                    .map(|t| ("term.close", serde_json::json!({ "termId": t })))
+                    .chain(sessions.into_iter().map(|a| ("session.close", serde_json::json!({ "agentId": a }))));
+                for (method, params) in calls {
+                    if let Err(e) = link.request(method, params, timeout_for(method)).await {
+                        log::debug!("{method} on page close: {}", e.message);
+                    }
+                }
+            });
         }
     }
 
@@ -542,24 +580,48 @@ impl Engine {
                 }
             }
         };
+        let epoch = self.inner.page_epoch.load(Ordering::SeqCst);
         let result = link.request(method, params, timeout_for(method)).await?;
-        match req {
+        // Record what the page opened (checked under the view lock, like `page_closed`'s drain);
+        // if the page went away while the request was in flight, release it at once.
+        let stale = || self.inner.page_epoch.load(Ordering::SeqCst) != epoch;
+        let release = match req {
             HostMethod::SessionOpen(p) => {
                 let params = to_value(&p)?;
-                rt.view.lock().unwrap().sessions.insert(p.agent_id, params);
+                let mut v = rt.view.lock().unwrap();
+                if stale() {
+                    Some(("session.close", serde_json::json!({ "agentId": p.agent_id })))
+                } else {
+                    v.sessions.insert(p.agent_id, params);
+                    None
+                }
             }
             HostMethod::SessionClose(p) => {
                 rt.view.lock().unwrap().sessions.remove(&p.agent_id);
+                None
             }
-            HostMethod::TermOpen(_) => {
-                if let Some(id) = result.get("termId").and_then(Value::as_str) {
-                    rt.view.lock().unwrap().terms.insert(id.to_string());
+            HostMethod::TermOpen(_) => match result.get("termId").and_then(Value::as_str) {
+                Some(id) => {
+                    let mut v = rt.view.lock().unwrap();
+                    if stale() {
+                        Some(("term.close", serde_json::json!({ "termId": id })))
+                    } else {
+                        v.terms.insert(id.to_string());
+                        None
+                    }
                 }
-            }
+                None => None,
+            },
             HostMethod::TermClose(p) => {
                 rt.view.lock().unwrap().terms.remove(&p.term_id);
+                None
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some((method, params)) = release {
+            tokio::spawn(async move {
+                let _ = link.request(method, params, timeout_for(method)).await;
+            });
         }
         Ok(result)
     }
@@ -1113,6 +1175,24 @@ mod tests {
         .await;
         let log = std::fs::read_to_string(home.path().join("attach.log")).unwrap();
         assert_eq!(log.lines().count(), 2, "second attach without re-upload");
+
+        // Webview reload (Tauri): page_closed releases the page's terminals at tf-hostd.
+        let term = serde_json::json!({"target": {"kind": "pane", "paneId": "w1:p1"}, "cols": 80, "rows": 24, "mode": "control", "takeover": false});
+        let opened = engine.call(Some("lab"), "term.open", term).await.unwrap();
+        let tid = opened["termId"].as_str().unwrap().to_string();
+        engine.page_closed();
+        let closed = |home: &Path| {
+            std::fs::read_to_string(home.join("requests.log")).unwrap_or_default().lines().any(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                v["method"] == "term.close" && v["params"]["termId"] == tid.as_str()
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !closed(home.path()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(closed(home.path()), "page_closed sends term.close for {tid}");
+        assert!(engine.inner.host("lab").unwrap().view.lock().unwrap().terms.is_empty());
 
         engine.call(None, "hosts.disconnect", serde_json::json!({"hostId": "lab"})).await.unwrap();
         wait_event(&mut rx, &mut seen, |e| phase_is(e, ConnPhase::Offline)).await;
