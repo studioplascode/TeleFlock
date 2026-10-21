@@ -192,10 +192,15 @@ impl Link {
             }
         };
         if protocol != tf_proto::PROTOCOL_VERSION {
-            return Err(fail(ApiError::new(
+            let e = ApiError::new(
                 "version_mismatch",
-                format!("tf-hostd speaks protocol {protocol}, this app speaks {}", tf_proto::PROTOCOL_VERSION),
-            )));
+                format!("tf-hostd {hostd_version} speaks protocol {protocol}, this app speaks {}", tf_proto::PROTOCOL_VERSION),
+            );
+            return Err(fail(if protocol > tf_proto::PROTOCOL_VERSION {
+                e.with_hint("A newer TeleFlock on another device installed it. Update TeleFlock on this device.")
+            } else {
+                e
+            }));
         }
 
         let link = Arc::new(Link {

@@ -1,6 +1,6 @@
 import { Layers, Pause, Pencil, Play, Send, SquarePlus, Target, Trash2 } from "lucide-react";
-import { type KeyboardEvent, useState } from "react";
-import { parseAgentKey, useAgent, useSession } from "@/core";
+import type { KeyboardEvent } from "react";
+import { draftKey, drafts, parseAgentKey, useAgent, useDraft, useSession } from "@/core";
 import { Button, Dialog, DialogContent, Field, formatCompact, Input, ProgressRing, Textarea } from "@/design";
 import { hostCall, usePending } from "../api";
 import { useSessionUi } from "../state";
@@ -32,8 +32,11 @@ function GoalContent({ agentKey, close }: { agentKey: string; close: () => void 
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const goal = meta?.goal;
-  const [objective, setObjective] = useState(goal?.objective ?? "");
-  const [budget, setBudget] = useState(goal?.budget != null ? String(goal.budget) : "");
+  // Drafts default to the live goal: untouched fields follow it, edits persist until saved.
+  const objectiveKey = draftKey("dialog.goal.objective", agentKey);
+  const budgetKey = draftKey("dialog.goal.budget", agentKey);
+  const [objective, setObjective] = useDraft(objectiveKey, goal?.objective ?? "");
+  const [budget, setBudget] = useDraft(budgetKey, goal?.budget != null ? String(goal.budget) : "");
   const [busy, run] = usePending();
   const budgetN = budget.trim() === "" ? undefined : Number.parseInt(budget.replace(/[_,\s]/g, ""), 10);
   const budgetValid = budgetN === undefined || (Number.isFinite(budgetN) && budgetN > 0);
@@ -46,7 +49,13 @@ function GoalContent({ agentKey, close }: { agentKey: string; close: () => void 
         { success: op === "set" ? "Goal set" : op === "budget" ? "Budget updated" : `Goal ${op === "drop" ? "dropped" : `${op}d`}` },
       ),
     );
-    if (res.ok) close();
+    if (!res.ok) return;
+    // Pause/resume don't submit the fields: their edits stay.
+    if (op !== "pause" && op !== "resume") {
+      drafts.clear(objectiveKey);
+      drafts.clear(budgetKey);
+    }
+    close();
   };
   return (
     <DialogContent
@@ -110,8 +119,10 @@ function RenameContent({ agentKey, close }: { agentKey: string; close: () => voi
   const { meta } = useSession(agentKey);
   const initialTitle = meta?.title ?? agent?.title ?? "";
   const initialHandle = agent?.name ?? "";
-  const [title, setTitle] = useState(initialTitle);
-  const [handle, setHandle] = useState(initialHandle);
+  const titleKey = draftKey("dialog.rename.title", agentKey);
+  const handleKey = draftKey("dialog.rename.handle", agentKey);
+  const [title, setTitle] = useDraft(titleKey, initialTitle);
+  const [handle, setHandle] = useDraft(handleKey, initialHandle);
   const [busy, run] = usePending();
   const canTitle = meta?.caps.rename === true;
   const titleChanged = canTitle && title.trim() !== "" && title.trim() !== initialTitle;
@@ -124,10 +135,12 @@ function RenameContent({ agentKey, close }: { agentKey: string; close: () => voi
     if (handleChanged) {
       const res = await run(hostCall(hostId, "agent.renameHandle", { agentId, name: handle }, { success: `Handle → ${handle}`, failure: "Handle rename failed" }));
       if (!res.ok) return;
+      drafts.clear(handleKey);
     }
     if (titleChanged) {
       const res = await run(hostCall(hostId, "agent.rename", { agentId, title: title.trim() }, { success: "Session renamed" }));
       if (!res.ok) return;
+      drafts.clear(titleKey);
     }
     close();
   };
@@ -173,7 +186,8 @@ function RenameContent({ agentKey, close }: { agentKey: string; close: () => voi
 function CompactContent({ agentKey, handoff, close }: { agentKey: string; handoff: boolean; close: () => void }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
-  const [focus, setFocus] = useState("");
+  const focusKey = draftKey(handoff ? "dialog.handoff.focus" : "dialog.compact.focus", agentKey);
+  const [focus, setFocus] = useDraft(focusKey);
   const [busy, run] = usePending();
   const submit = async () => {
     const instructions = focus.trim() || undefined;
@@ -182,7 +196,9 @@ function CompactContent({ agentKey, handoff, close }: { agentKey: string; handof
         ? hostCall(hostId, "agent.handoff", { agentId, instructions }, { success: "Handoff started" })
         : hostCall(hostId, "agent.compact", { agentId, instructions }, { success: "Compacting…" }),
     );
-    if (res.ok) close();
+    if (!res.ok) return;
+    drafts.clear(focusKey);
+    close();
   };
   return (
     <DialogContent

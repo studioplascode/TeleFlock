@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { BookmarkPlus, Check, LayoutTemplate, X } from "lucide-react";
-import { useSettings } from "@/core";
+import { draftKey, drafts, useSettings } from "@/core";
 import type { AgentTemplate } from "@/core/gen";
 import { Button, IconButton, cn, spring, toast } from "@/design";
 import type { AgentDraft } from "./AgentFields";
@@ -39,10 +39,12 @@ async function persist(write: Promise<void>): Promise<boolean> {
 /** Ask for a name and store the draft's model/thinking/plan/prompt as a new template. */
 export async function saveDraftAsTemplate(d: Pick<AgentDraft, "model" | "thinking" | "plan" | "prompt">): Promise<AgentTemplate | null> {
   const existing = useSettings.getState().templates;
+  const key = draftKey("template.saveAs");
   const name = await promptText({
     title: "Save as template",
     body: "Saves the model, thinking level, plan mode and prompt so you can start agents like this in one tap.",
     label: "Template name",
+    draftKey: key,
     confirmLabel: "Save template",
     validate: (v) => (!v.trim() ? "Give it a name" : existing.some((t) => t.name.toLowerCase() === v.trim().toLowerCase()) ? "A template with that name exists" : null),
   });
@@ -56,6 +58,7 @@ export async function saveDraftAsTemplate(d: Pick<AgentDraft, "model" | "thinkin
     prompt: d.prompt.trim(),
   };
   if (!(await persist(useSettings.getState().saveTemplate(t)))) return null;
+  drafts.clear(key);
   toast({ title: `Saved template “${name}”`, description: templateSummary(t), status: "done", duration: 2500 });
   return t;
 }

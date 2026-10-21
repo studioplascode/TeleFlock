@@ -154,11 +154,13 @@ function Lane({
         </motion.p>
       )}
       {/* -mt/pt pair: headroom so a lifted (selected) card and its check badge aren't clipped by the scroller;
-          the edge fades soften glows cut by the scroll box. Very wide lanes (ultrawide) flow cards in two columns. */}
+          the edge fades soften glows cut by the scroll box, and the bottom radius matches the lane's so a card
+          scrolled past the end is clipped inside the rounded lane, not through its corners.
+          Very wide lanes (ultrawide) flow cards in two columns. */}
       <motion.div
         layoutScroll
         className={cn(
-          "no-scrollbar -mt-3 grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(min(100%,340px),1fr))] content-start items-start gap-2.5 overflow-y-auto px-2.5 pt-3 pb-3 [mask-image:linear-gradient(to_bottom,transparent,#000_8px,#000_calc(100%-10px),transparent)]",
+          "no-scrollbar -mt-3 grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(min(100%,340px),1fr))] content-start items-start gap-2.5 overflow-y-auto rounded-b-tile px-2.5 pt-3 pb-3 [mask-image:linear-gradient(to_bottom,transparent,#000_8px,#000_calc(100%-14px),transparent)]",
           selecting && "pb-[calc(var(--tf-selbar-h,48px)+24px)]",
         )}
       >

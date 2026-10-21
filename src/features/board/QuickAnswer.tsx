@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { type FormEvent, useState } from "react";
-import { useAgent } from "@/core";
+import { answerDraftKey, useAgent, useDraft } from "@/core";
 import type { NeedsOption, NeedsYou } from "@/core/gen";
 import { AnimatePresence, Kbd, Spinner, cn, popIn, spring } from "@/design";
 import { answerAgent, openAgent, openTerminal } from "./agentActions";
@@ -69,10 +69,12 @@ export function QuickAnswer({
   const needs = useAgent(agentKey)?.needs;
   const [sent, setSent] = useState<{ requestId: string; label: string } | null>(null);
   const [pending, setPending] = useState<string | null>(null);
-  const [otherOpen, setOtherOpen] = useState(false);
-  const [otherText, setOtherText] = useState("");
+  // null = untouched: the "Other…" field shows on its own when a typed answer is waiting
+  const [otherOpen, setOtherOpen] = useState<boolean | null>(null);
+  const [otherText, setOtherText, clearOther] = useDraft(answerDraftKey(agentKey, needs?.requestId ?? "", "other"));
   const [picked, setPicked] = useState<string[]>([]);
   if (!needs) return null;
+  const showOther = otherOpen ?? otherText !== "";
   const chip = CHIP[appearance];
   const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
 
@@ -115,6 +117,7 @@ export function QuickAnswer({
     try {
       await answerAgent(agentKey, requestId, { choices: answer.choices, text: answer.text, cancel: answer.cancel ?? false, chat: answer.chat ?? false });
       setSent({ requestId, label });
+      clearOther();
       onAnswered?.();
     } catch {
       // answerAgent already toasted the error; keep the controls so the user can retry.
@@ -163,7 +166,7 @@ export function QuickAnswer({
             </motion.button>
           );
         })}
-        {needs.allowOther && !otherOpen && (
+        {needs.allowOther && !showOther && (
           <button type="button" disabled={busy} onClick={() => setOtherOpen(true)} className={cn(chip.base, chip.neutral, "pressable focus-ring disabled:opacity-60")}>
             Other…
           </button>
@@ -190,7 +193,7 @@ export function QuickAnswer({
         )}
       </div>
       <AnimatePresence initial={false}>
-        {otherOpen && (
+        {showOther && (
           <motion.form
             key="other"
             onSubmit={submitOther}
@@ -201,7 +204,7 @@ export function QuickAnswer({
             className="flex gap-1.5 overflow-hidden"
           >
             <input
-              autoFocus
+              autoFocus={otherOpen === true}
               value={otherText}
               onChange={(e) => setOtherText(e.target.value)}
               onKeyDown={(e) => {

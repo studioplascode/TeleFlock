@@ -1,8 +1,8 @@
 import { AlertTriangle, Brain, ChevronDown, CircleAlert, CornerDownRight, Info, Layers, Repeat2, Sparkles } from "lucide-react";
 import { memo, useState } from "react";
 import { ircOf, useCore, useSessionItem, useSettings } from "@/core";
-import type { AssistantItem, CompactionItem, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
-import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, LogoMark, Shimmer, Tooltip } from "@/design";
+import type { AssistantItem, CompactionItem, ImageRef, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
+import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, Lightbox, LightboxTrigger, LogoMark, Shimmer, Tooltip } from "@/design";
 import { IrcBubble } from "../irc/IrcBubble";
 import { Markdown } from "../markdown/Markdown";
 import { imageSrc, ToolCard } from "../tools/ToolCard";
@@ -157,15 +157,27 @@ function UserRow({ item }: { item: UserItem }) {
         )}
       >
         {item.text}
-        {item.images.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {item.images.map((img, i) => {
-              const src = imageSrc(img);
-              return src ? <img key={i} src={src} alt={`attachment ${i + 1}`} className="max-h-40 rounded-md object-cover shadow-hairline" /> : null;
-            })}
-          </div>
-        )}
+        {item.images.length > 0 && <UserImages images={item.images} />}
       </div>
+    </div>
+  );
+}
+
+/** A message's attachments; each opens the lightbox paging through the whole message. */
+function UserImages({ images }: { images: ImageRef[] }) {
+  const [open, setOpen] = useState<number | null>(null);
+  const group = images.flatMap((img, i) => {
+    const src = imageSrc(img);
+    return src ? [{ src, alt: `attachment ${i + 1}`, width: img.width, height: img.height }] : [];
+  });
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {group.map((img, i) => (
+        <LightboxTrigger key={i} onClick={() => setOpen(i)}>
+          <img src={img.src} alt={img.alt} className="max-h-40 rounded-md object-cover shadow-hairline" />
+        </LightboxTrigger>
+      ))}
+      <Lightbox images={group} index={open} onIndexChange={setOpen} />
     </div>
   );
 }

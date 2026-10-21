@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, ArrowRight, Check, GitBranch, LayoutDashboard, Plus, RotateCcw, ShieldAlert, Sparkles, Split, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { core, navigate, useHostIds, useHostState, useHosts, useSettings } from "@/core";
+import { core, draftKey, navigate, useDraft, useDraftState, useHostIds, useHostState, useHosts, useSettings } from "@/core";
 import type { AgentSpec, AgentTemplate, Started, ThinkingLevel, WorktreeCreateParams } from "@/core/gen";
 import { Button, Chip, Field, IconButton, Input, Select, type SelectOption, SegmentedControl, Shimmer, Switch, Textarea, cn, spring, useIsMobile } from "@/design";
 import { useBoard } from "@/features/board/boardStore";
@@ -90,23 +90,34 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
 
   const [step, setStep] = useState(initialCwd ? 1 : 0);
   const [repo, setRepo] = useState<FolderPick | null>(initialCwd ? { path: initialCwd } : null);
-  const [prompt, setPrompt] = useState(initialPrompt ?? "");
-  const [slug, setSlug] = useState("");
-  const [slugTouched, setSlugTouched] = useState(false);
+  // task, name and variants persist per host + repository until every variant has launched
+  const scope = [hostId ?? "", repo?.path ?? ""] as const;
+  const [prompt, setPrompt, clearPrompt] = useDraft(draftKey("fanOut.prompt", ...scope));
+  const [slug, setSlug, clearSlug] = useDraft(draftKey("fanOut.slug", ...scope));
+  const slugTouched = slug !== "";
   const [base, setBase] = useState("");
   const [trust, setTrust] = useState(false);
-  const [variants, setVariants] = useState<Variant[]>([]);
+  const [variants, setVariants, clearVariants] = useDraftState<Variant[]>(draftKey("fanOut.variants", ...scope), []);
   const [rows, setRows] = useState<Row[] | null>(null);
   const [nextId, setNextId] = useState(1);
+  /** The fan-out name at launch: the rows and the board filter keep it after the drafts clear. */
+  const [launchedSlug, setLaunchedSlug] = useState("");
+
+  // A task handed over by the caller (New worktree's "Try N approaches") replaces the stored one.
+  useEffect(() => {
+    if (initialPrompt) setPrompt(initialPrompt);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!hostId && hostIds[0]) setHostId(hostIds[0]);
   }, [hostId, hostIds]);
 
-  // Seed 3 variants from the first templates, topped up with distinct catalog models.
+  // Seed 3 variants from the first templates, topped up with distinct catalog models (once a repo
+  // is picked, so the seed lands in its draft; never after launch, when the drafts get cleared).
   const seeded = variants.length > 0;
+  const canSeed = !!repo && rows === null;
   useEffect(() => {
-    if (seeded || (!templates.length && !catalog)) return;
+    if (seeded || !canSeed || (!templates.length && !catalog)) return;
     const vs: Variant[] = templates.slice(0, 3).map((t, i) => ({ id: i + 1, key: "", keyTouched: false, templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan }));
     for (const m of catalog?.models ?? []) {
       if (vs.length >= 3) break;
@@ -117,7 +128,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
     while (vs.length < MIN_VARIANTS) vs.push({ id: vs.length + 1, key: "", keyTouched: false, templateId: null, model: DEFAULT, thinking: DEFAULT, plan: false });
     setVariants(dedupeKeys(vs, templates));
     setNextId(vs.length + 1);
-  }, [seeded, templates, catalog]);
+  }, [seeded, canSeed, templates, catalog]);
 
   const branches = useHostQuery(hostId, "git.branches", repo ? { cwd: repo.path } : null);
   const baseRef = base || branches.data?.defaultBranch || "HEAD";
@@ -143,10 +154,12 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   const addVariant = () => {
     const used = new Set(variants.map((v) => v.templateId));
     const t = templates.find((x) => !used.has(x.id));
+    // restored variants may already use ids past the counter
+    const id = Math.max(nextId, ...variants.map((x) => x.id + 1));
     const v: Variant = t
-      ? { id: nextId, key: "", keyTouched: false, templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan }
-      : { id: nextId, key: "", keyTouched: false, templateId: null, model: DEFAULT, thinking: DEFAULT, plan: false };
-    setNextId((n) => n + 1);
+      ? { id, key: "", keyTouched: false, templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan }
+      : { id, key: "", keyTouched: false, templateId: null, model: DEFAULT, thinking: DEFAULT, plan: false };
+    setNextId(id + 1);
     setVariants((vs) => dedupeKeys([...vs, v], templates));
   };
 
@@ -194,6 +207,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   const launch = () => {
     if (!setupValid || launched) return;
     setStep(2);
+    setLaunchedSlug(effSlug);
     setRows(variants.map((v) => ({ key: v.key, phase: "queued" })));
     // Staggered so the rows visibly start one after another (and herdr isn't hit all at once).
     variants.forEach((v, i) => window.setTimeout(() => void createOne(v, trust), i * 180));
@@ -219,7 +233,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   const ok = rows?.filter((r) => r.phase === "running").length ?? 0;
   const failed = rows?.filter((r) => r.phase === "failed") ?? [];
   const openBoard = () => {
-    useBoard.getState().setQ(effSlug);
+    useBoard.getState().setQ(launchedSlug);
     onClose();
     navigate({ name: "board" });
   };
@@ -228,6 +242,9 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   const allRunning = done && failed.length === 0 && ok > 0;
   useEffect(() => {
     if (!allRunning) return;
+    clearPrompt();
+    clearSlug();
+    clearVariants();
     const t = window.setTimeout(openBoard, 1400);
     return () => window.clearTimeout(t);
   }, [allRunning]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -371,10 +388,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                         id={id}
                         value={slugTouched ? slug : effSlug}
                         placeholder="derived from the task"
-                        onChange={(e) => {
-                          setSlug(e.target.value);
-                          setSlugTouched(e.target.value !== "");
-                        }}
+                        onChange={(e) => setSlug(e.target.value)}
                         className="font-mono text-xs"
                         spellCheck={false}
                         autoCapitalize="off"
@@ -461,7 +475,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
             {step === 2 && rows && (
               <div className="flex flex-col gap-2" role="status" aria-live="polite">
                 {rows.map((r, i) => (
-                  <LaunchRow key={r.key} row={r} index={i} name={`${effSlug}-${r.key}`} home={home} />
+                  <LaunchRow key={r.key} row={r} index={i} name={`${launchedSlug}-${r.key}`} home={home} />
                 ))}
                 {failed.some((r) => r.error?.untrusted) && (
                   <div className="flex flex-wrap items-center gap-3 rounded-lg bg-warn/8 p-3 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]">

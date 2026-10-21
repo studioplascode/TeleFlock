@@ -23,8 +23,8 @@ import {
 import { motion } from "motion/react";
 import { type ReactNode, useContext, useState } from "react";
 import { linkProps, useAgent } from "@/core";
-import type { BashView, ImageRef, Subagent, ToolItem, ToolView } from "@/core/gen";
-import { Chip, cn, Elapsed, formatElapsed, Shimmer, spring, Spinner } from "@/design";
+import type { BashView, ImageRef, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
+import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner } from "@/design";
 import { languageFor } from "../lib/highlight";
 import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
 import { useSessionUi } from "../state";
@@ -430,39 +430,8 @@ function ToolBody({ item }: { item: ToolItem }) {
           </ol>
         </div>
       );
-    case "image": {
-      const src = imageSrc(v.image);
-      const urlLink = linkProps(v.url);
-      return (
-        <figure className="p-2">
-          {src ? (
-            <img
-              src={src}
-              alt={v.alt ?? item.title}
-              width={v.image.width}
-              height={v.image.height}
-              loading="lazy"
-              className="max-h-[420px] w-auto max-w-full rounded-md bg-bg-deep object-contain shadow-hairline"
-            />
-          ) : (
-            <div className="px-1 py-2 text-xs text-mute-2">Image not available</div>
-          )}
-          {(v.url || v.alt) && (
-            <figcaption className="mt-1.5 flex items-center gap-2 px-1 text-2xs text-mute">
-              {v.alt && <span className="truncate">{v.alt}</span>}
-              {v.url &&
-                (urlLink ? (
-                  <a {...urlLink} className="truncate font-mono text-accent-hi hover:underline">
-                    {v.url}
-                  </a>
-                ) : (
-                  <span className="truncate font-mono">{v.url}</span>
-                ))}
-            </figcaption>
-          )}
-        </figure>
-      );
-    }
+    case "image":
+      return <ImageBody view={v} title={item.title} />;
     case "ask":
       return (
         <div className="flex flex-col gap-3 px-3 py-2.5">
@@ -513,6 +482,56 @@ function ToolBody({ item }: { item: ToolItem }) {
     case "irc":
       return <Markdown text={v.text} className="px-3 py-2.5 text-[12.5px]" />;
   }
+}
+
+/** Max thumbnail height (px) of an image tool view. */
+const IMAGE_MAX_H = 420;
+
+function ImageBody({ view: v, title }: { view: ImageView; title: string }) {
+  const [open, setOpen] = useState<number | null>(null);
+  const src = imageSrc(v.image);
+  const urlLink = linkProps(v.url);
+  const alt = v.alt ?? title;
+  const { width: w, height: h } = v.image;
+  // The trigger button shrink-wraps the image, so it needs a definite width: from the reported size
+  // (scaled down to the height cap) when known; otherwise the button spans the card and the image fills it
+  // (an SVG with only a viewBox has no intrinsic width to shrink-wrap).
+  const thumbWidth = w && h ? Math.min(w, (IMAGE_MAX_H * w) / h) : undefined;
+  return (
+    <figure className="p-2">
+      {src ? (
+        <>
+          <LightboxTrigger className={thumbWidth ? "inline-block max-w-full align-top" : "w-full"} onClick={() => setOpen(0)}>
+            <img
+              src={src}
+              alt={alt}
+              width={w}
+              height={h}
+              loading="lazy"
+              style={{ width: thumbWidth, maxHeight: IMAGE_MAX_H }}
+              className={cn("max-w-full rounded-md bg-bg-deep object-contain shadow-hairline", thumbWidth ? "h-auto" : "w-auto")}
+            />
+          </LightboxTrigger>
+          <Lightbox images={[{ src, alt, width: w, height: h }]} index={open} onIndexChange={setOpen} />
+        </>
+      ) : (
+        <div className="px-1 py-2 text-xs text-mute-2">Image not available</div>
+      )}
+      {(v.url || v.alt) && (
+        <figcaption className="mt-1.5 flex items-center gap-2 px-1 text-2xs text-mute">
+          {v.alt && <span className="truncate">{v.alt}</span>}
+          {v.url &&
+            (urlLink ? (
+              <a {...urlLink} className="truncate font-mono text-accent-hi hover:underline">
+                {v.url}
+              </a>
+            ) : (
+              <span className="truncate font-mono">{v.url}</span>
+            ))}
+        </figcaption>
+      )}
+    </figure>
+  );
 }
 
 function TaskBody({ agents }: { agents: Subagent[] }) {

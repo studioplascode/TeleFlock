@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { Check, ChevronRight, Folder, FolderOpen, Search, X } from "lucide-react";
 import { type KeyboardEvent, type Ref, useEffect, useMemo, useRef, useState } from "react";
+import { useDraft } from "@/core";
 import { Input, cn, spring } from "@/design";
 import { DiffBar } from "./diff/DiffViewer";
 import type { DiffFile } from "./diff/parse";
@@ -53,6 +54,8 @@ export interface FileTreeProps {
   comfortable?: boolean;
   /** The filter input (the review view focuses it on `/`). */
   filterRef?: Ref<HTMLInputElement>;
+  /** Draft key of the filter text (per host + worktree), so it survives navigation and reload; plain local state without one. */
+  filterKey?: string;
   className?: string;
 }
 
@@ -61,8 +64,10 @@ export interface FileTreeProps {
  * Keyboard: ↑/↓ move, ←/→ fold/unfold folders (or jump to the parent), Home/End, Enter opens;
  * ↓ from the filter enters the tree.
  */
-export function FileTree({ files, active, collapsed, viewed, onSelect, comfortable = false, filterRef, className }: FileTreeProps) {
-  const [q, setQ] = useState("");
+export function FileTree({ files, active, collapsed, viewed, onSelect, comfortable = false, filterRef, filterKey, className }: FileTreeProps) {
+  const [localQ, setLocalQ] = useState("");
+  const [draftQ, setDraftQ] = useDraft(filterKey ?? "");
+  const [q, setQ] = filterKey ? [draftQ, setDraftQ] : [localQ, setLocalQ];
   const shown = useMemo(() => (q ? files.filter((f) => f.path.toLowerCase().includes(q.toLowerCase())) : files), [files, q]);
   const tree = useMemo(() => buildTree(shown), [shown]);
   const [closed, setClosed] = useState<ReadonlySet<string>>(new Set());
@@ -210,7 +215,8 @@ export function FileTree({ files, active, collapsed, viewed, onSelect, comfortab
 
   return (
     <div className={cn("flex min-h-0 flex-col gap-2", className)}>
-      {files.length > 6 && (
+      {/* a kept filter stays visible (and clearable) even when the diff shrinks to a few files */}
+      {(files.length > 6 || q) && (
         <Input
           ref={filterRef}
           value={q}

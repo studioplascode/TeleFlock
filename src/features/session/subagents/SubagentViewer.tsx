@@ -2,7 +2,7 @@ import * as RadixDialog from "@radix-ui/react-dialog";
 import { ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, Lock, MessageSquareDashed, RefreshCw, RotateCcw, Skull, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { core, parseAgentKey, useAgent, useSession } from "@/core";
+import { core, draftKey, drafts, parseAgentKey, useAgent, useDraft, useSession } from "@/core";
 import type { Subagent } from "@/core/gen";
 import {
   Button,
@@ -457,7 +457,8 @@ function WorkingFooter({ sub }: { sub: Subagent }) {
 
 function SteerComposer({ agentKey, sub, mobile, blocked, onSent }: { agentKey: string; sub: Subagent; mobile: boolean; blocked: string | null; onSent: () => void }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
-  const [text, setText] = useState("");
+  const key = draftKey("subagent.message", agentKey, sub.id);
+  const [text, setText] = useDraft(key);
   const [sending, run] = usePending();
   const [sent, setSent] = useState(0);
   const running = sub.status === "running";
@@ -474,7 +475,9 @@ function SteerComposer({ agentKey, sub, mobile, blocked, onSent }: { agentKey: s
     if (!message || sending || blocked) return;
     const res = await run(hostCall(hostId, "agent.subagent", { agentId, subagentId: sub.id, action: "chat", message }, { failure: `Couldn't message ${sub.name}` }));
     if (!res.ok) return;
-    setText("");
+    // Only what was sent: anything typed while sending stays in the draft.
+    const cur = drafts.get(key);
+    drafts.set(key, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
     setSent(Date.now());
     onSent();
   };

@@ -190,6 +190,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   const omp = agent.omp;
   const todos = omp?.todos;
   const subs = omp?.subagents?.live ?? 0;
+  const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
   const live = lane === "running" || lane === "needs";
 
   const avatar =
@@ -256,9 +257,10 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           >
             Archive
           </ArchiveButton>
+          {/* the card itself opens the session: on a narrow card the redundant button gives way so the row never wraps */}
           <button
             type="button"
-            className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink"
+            className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink @max-[12.5rem]/card:hidden"
             onClick={() => openAgent(agentKey)}
           >
             Open
@@ -315,7 +317,11 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           )}
           <span className="ml-auto shrink-0 text-2xs font-bold text-mute tabular">
             {stale ? (
-              <span className={cn(reconnecting && "tf-shimmer-text")}>last seen {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}</span>
+              <span className={cn(reconnecting && "tf-shimmer-text")} title="Last seen while the host was online">
+                {/* beside the "Ready to review" badge a narrow card only has room for the age */}
+                <span className="@max-[15rem]/card:hidden">last seen </span>
+                {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}
+              </span>
             ) : lane === "needs" && agent.needs ? (
               <span className="text-[#ffb08a]">
                 waiting <Elapsed since={agent.needs.since} />
@@ -350,7 +356,8 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           <div className="flex min-w-0 items-center gap-1.5 text-xs">
             {lane === "running" && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
             {multiHost && <HostDot hostId={agent.hostId} />}
-            {/* long names truncate too, but the repo/branch gives way first (shrinks 4× faster) */}
+            {/* long names truncate too, but the repo/branch gives way first: it only fills the room the name leaves
+                (zero basis), and it is hidden outright on narrow cards */}
             <span
               data-morph={floating ? undefined : "name"}
               data-morph-key={floating ? undefined : agentKey}
@@ -359,14 +366,16 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             >
               {agent.name}
             </span>
-            {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
+            {agent.kind !== "omp" && (
+              <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase @max-[11.5rem]/card:hidden">{agent.kind}</span>
+            )}
             {muted && (
               <span role="img" aria-label="Notifications muted" title="Notifications muted" className="shrink-0 text-mute-2">
                 <BellOff className="size-3" aria-hidden />
               </span>
             )}
             {(agent.repo || agent.branch) && (
-              <span className="min-w-0 shrink-[4] truncate font-mono text-2xs text-mute-2">
+              <span className="min-w-0 flex-[1_1_0] truncate font-mono text-2xs text-mute-2 @max-[13.5rem]/card:hidden">
                 {agent.repo}
                 {agent.branch && ` · ${agent.branch}`}
               </span>
@@ -374,7 +383,10 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             {(lane === "running" || lane === "done") && (
               <span className="ml-auto shrink-0 pl-1 text-2xs font-bold text-mute tabular">
                 {stale ? (
-                  <span className={cn(reconnecting && "tf-shimmer-text")}>seen {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}</span>
+                  <span className={cn(reconnecting && "tf-shimmer-text")} title="Last seen while the host was online">
+                    <span className="@max-[13.5rem]/card:hidden">seen </span>
+                    {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}
+                  </span>
                 ) : lane === "running" ? (
                   <Elapsed since={omp?.turnStartedAt ?? agent.stateSince} />
                 ) : (
@@ -393,7 +405,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
       {lane !== "done" ? (
         <div className="mt-2.5 flex min-w-0 items-center gap-2.5 border-t border-line pt-2">
           {omp?.context && <ContextMeter pct={omp.context.pct} />}
-          {omp?.subagents?.completionPct != null && omp.subagents.live > 0 && <SubagentsDone pct={omp.subagents.completionPct} live={omp.subagents.live} />}
+          {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
           {agent.diff && <DiffStat {...agent.diff} />}
           {omp?.link === "notShared" && (
             <button
@@ -409,7 +421,8 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             </button>
           )}
           {omp?.model && (
-            <span className="ml-auto min-w-0 truncate font-mono text-2xs text-mute">
+            // beside the subagent estimate and a diff stat a narrow card has no room for more than a letter of the model
+            <span className={cn("ml-auto min-w-0 truncate font-mono text-2xs text-mute", subPct != null && agent.diff && "@max-[13.5rem]/card:hidden")}>
               {omp.model.label ?? omp.model.id}
               {omp.thinking && omp.thinking !== "off" && ` · ${omp.thinking}`}
             </span>

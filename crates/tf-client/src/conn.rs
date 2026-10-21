@@ -484,6 +484,9 @@ async fn connect_and_serve(
         }
     };
     let deployed = deploy::deploy(&*transport, profile.kind, relay_port, eng.artifacts(), &progress).await?;
+    if let Some(newer) = &deployed.newer {
+        log::info!("host {}: {newer} is newer than this app's tf-hostd; using it", rt.id);
+    }
 
     eng.set_phase(rt, ConnPhase::Starting, Some("Starting tf-hostd…".into()));
     let mut argv = vec![deployed.hostd.clone(), "attach".into(), "--session".into(), profile.herdr_session.clone()];

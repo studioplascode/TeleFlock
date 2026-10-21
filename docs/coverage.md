@@ -36,6 +36,7 @@ What closed the ❌ and ⚠️ rows:
 | Demo host | HostEditor kind "Demo" | same | all host methods | `src/core/demo` | ✅ demo |
 | Multi-host aggregate + filter | Title-bar host pill, BoardToolbar host select | Flock host pill only navigates to Hosts | `useHosts().setFilter` | frontend | ⚠️ desktop ✅ demo; **mobile has no filter control** (handed to MobileUx) |
 | herdr session per host | HostEditor → Advanced "herdr session" | same sheet | `hosts.save` → attach `--session` | L `conn.rs`, hostd `daemon.rs` | ✅ (lab sessions use it) |
+| Several devices on one host (desktop + phone, apps on different versions) | automatic | automatic | — | L `deploy.rs` never replaces a newer tf-hostd; hostd `attach --replace` / `stop` only move the host forward (architecture §3.2) | ✅ real binaries: a 0.2.0 app reconnecting to a newer daemon attaches to it instead of restarting it; upgrades drop older clients once |
 | Phases + Open browser + host-key trust | ConnStatusCard (Open browser, Trust and connect) | More → inline card | `app.openExternal`, `hosts.trustKey` | L `conn.rs` | ✅ demo (simulated auth + fingerprint) |
 | Backoff countdown, Retry now, latency | ConnStatusCard, host pill | same | `hosts.connect` | L `conn.rs` | ✅ demo |
 | Resume on foreground/network | automatic | automatic (Android network callback) | `Engine::resume` | L `src-tauri/lib.rs` | ⚠️ needs a device |
@@ -78,6 +79,8 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | `/` palette | Composer | Composer | see the slash table below | | ✅ demo + test |
 | `@` mention | Composer | Composer | `fs.search` | G | ✅ demo |
 | Image paste/drop | Composer | attach button | `agent.prompt{images}` | C `prompt.images` | ⚠️ needs a collab link; follow-ups with images are rejected (omp's TUI queue has no remote image path) |
+| Drafts: every text field keeps its value (composers, answers, dialogs, filters) + composer images | everywhere | same | `drafts` / `useDraft` (localStorage `tf.drafts`), images in IndexedDB | — | ✅ demo (survives view switches and reloads; cleared on a successful send/submit) |
+| Image viewer: zoom (wheel, pinch, double-click/tap, 1:1), pan, gallery | click a transcript attachment, a tool image or a composer thumbnail | tap; pinch, swipe, swipe down to close | `Lightbox` (`@/design`) | — | ✅ demo. Markdown images are not rendered (the parser has no `![]()`) |
 | Voice dictation | — | mic (Web Speech) | text → `agent.prompt` | — | ⚠️ depends on the WebView's SpeechRecognition |
 | Header model/thinking/plan/fast | Controls | header chips | `agent.setModel/setThinking/setPlan/setFast` | B → I | ✅ demo |
 | Goal (objective + budget) | Goal chip → dialog | same | `agent.goal` | B `/goal …` | ⚠️ the call works; **the goal chip state is read from collab meta only**: the bridge `CtlState.goal` is not in `MetaOverlay` (`omp.rs`); HostdCore owns this |

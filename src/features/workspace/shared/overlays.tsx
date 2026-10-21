@@ -1,6 +1,7 @@
 import { AlertTriangle, PencilLine } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { create } from "zustand";
+import { useDraft } from "@/core";
 import { Button, Input } from "@/design";
 import { ResponsiveDialog } from "./ResponsiveDialog";
 
@@ -26,6 +27,8 @@ interface PromptRequest {
   body?: ReactNode;
   label: string;
   initial: string;
+  /** Draft key the typed text persists under until the caller clears it (after its action succeeds). */
+  draftKey: string;
   confirmLabel: string;
   validate?: (value: string) => string | null;
   resolve: (value: string | null) => void;
@@ -54,6 +57,8 @@ export function promptText(opts: {
   body?: ReactNode;
   label: string;
   initial?: string;
+  /** Where the typed text persists (`draftKey(...)` with the edited item's identity); clear it once the action succeeded. */
+  draftKey: string;
   confirmLabel?: string;
   validate?: (value: string) => string | null;
 }): Promise<string | null> {
@@ -97,7 +102,7 @@ function ConfirmOverlay({ req }: { req: ConfirmRequest }) {
 }
 
 function PromptOverlay({ req }: { req: PromptRequest }) {
-  const [value, setValue] = useState(req.initial);
+  const [value, setValue] = useDraft(req.draftKey, req.initial);
   const [touched, setTouched] = useState(false);
   const error = req.validate?.(value) ?? (value.trim() ? null : `${req.label} can't be empty`);
   const finish = (v: string | null) => {

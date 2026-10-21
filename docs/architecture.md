@@ -99,7 +99,11 @@ Every Rust crate is a workspace member (`crates/*`). Each agent compiles with it
   - Binds the relay port and the sockets; refuses to start if another instance holds the lock.
   - Logs to `~/.teleflock/hostd.log`.
 - `tf-hostd attach [--session <herdr-session>]`: connects stdio to `hostd.sock`, starting the daemon detached (`setsid -f`, `</dev/null`) if needed, and waits up to 10 s for the socket. This is the **only** thing the app runs for the data channel.
-- `tf-hostd stop`: graceful shutdown. A daemon that is replaced by a newer binary gets `stop` from `attach --replace`.
+- `tf-hostd stop [--force]`: graceful shutdown. A daemon that is replaced by a newer binary gets `stop` from `attach --replace`.
+- **Several devices, one daemon.** Every device of the user attaches to the same daemon, and their apps update at different times. A host therefore only moves forward (`tf_proto::version`: semver, then protocol):
+  - `attach --replace` replaces an older daemon (its clients reconnect to the new one), never a newer one, and another build of the same version only when no client is connected.
+  - While clients are connected, the daemon refuses `stop` from an older build, and from builds that predate this rule (they send no version with `stop`); that build's `attach` then connects to the running daemon. An idle daemon always stops.
+  - Without these rules two apps of different versions restart the daemon under each other on every reconnect, and both devices drop every few seconds.
 - `tf-hostd --version`: prints the version on one line (`tf-hostd 0.1.0 proto 1`).
 
 ### 3.3 Client protocol
@@ -281,10 +285,10 @@ pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Lat
 - **Per-host connection state machine.** Phases: connecting → authenticating → (authRequired) → deploying → starting → online. On failure: reconnecting with backoff 1, 2, 4 … 30 s plus jitter, reset after 60 s online. It resumes immediately on `hosts.connect`, network changes and foreground.
 - **Deploy:**
   1. Run `uname -sm` to pick the embedded hostd for that arch.
-  2. Compare `~/.teleflock/bin/tf-hostd --version`.
+  2. Compare `~/.teleflock/bin/tf-hostd --version`. If the host's tf-hostd is **newer** than this build (another device runs a newer app), stop here: upload nothing, attach to it as is. A protocol this app doesn't speak fails with `version_mismatch` and an "update TeleFlock on this device" hint.
   3. If it differs, upload through `exec` with stdin (`mkdir -p … && cat > tmp && chmod +x && mv`).
   4. Also upload the extension and the overlay (with the relay port).
-  5. Then `spawn tf-hostd attach --session S`.
+  5. Then `spawn tf-hostd attach --session S` (`--replace` after an upload, §3.2).
 - **Protocol client.**
   - Hello and welcome.
   - Relays snapshot/patch, session, term, pulse and notify messages as `AppEvent`s.

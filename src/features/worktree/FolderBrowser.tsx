@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowUp, ChevronRight, Clock, CornerDownLeft, Eye, EyeOff, Folder, FolderGit2, FolderOpen, GitBranch, Home, Search, TriangleAlert } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
-import { useHosts, useWorkspaces } from "@/core";
+import { draftKey, useDraft, useHosts, useWorkspaces } from "@/core";
 import type { FsEntry, GitBadge } from "@/core/gen";
 import { Button, Chip, IconButton, Input, Kbd, Skeleton, Spinner, cn, spring, tween, useIsMobile } from "@/design";
 import { basename, crumbs, expandTilde, tildify } from "../workspace/shared/paths";
@@ -49,7 +49,7 @@ export function FolderBrowser({ hostId, mode, value, onSelect, onConfirm, initia
   const homePath = home.data?.path;
   const [path, setPath] = useState<string | undefined>(initialPath);
   const [hidden, setHidden] = useState(false);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useDraft(draftKey("folderBrowser.filter", hostId, mode));
   const [active, setActive] = useState(0);
   const [direction, setDirection] = useState<1 | -1>(1);
   /** A path typed into the input: select it once it lists as a repository (repo mode). */

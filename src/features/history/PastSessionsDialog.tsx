@@ -2,7 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion } from "motion/react";
 import { ArrowUpRight, CalendarDays, FolderGit2, FolderOpen, History, MessagesSquare, RotateCcw, Search, TriangleAlert } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { core, navigate, useHostIds, useHostState, useHosts, useUi } from "@/core";
+import { core, draftKey, navigate, useDraft, useHostIds, useHostState, useHosts, useUi } from "@/core";
 import type { PastSession, Started, StartTarget, Workspace } from "@/core/gen";
 import { Button, EmptyState, Input, Kbd, SegmentedControl, Select, Skeleton, Spinner, StatusOrb, cn, formatAge, spring, useIsMobile, useNow } from "@/design";
 import { describeError } from "../workspace/shared/errors";
@@ -66,7 +66,8 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
   const host = useHostState(hostId ?? "");
   const home = host?.info.home;
   const [scoped, setScoped] = useState(!!scope?.cwd);
-  const [q, setQ] = useState("");
+  // the search is kept: one for the global list, one per folder the dialog was opened scoped to
+  const [q, setQ] = useDraft(scope?.cwd ? draftKey("history.search", initialHostId ?? "", scope.cwd) : draftKey("history.search"));
   const [groupBy, setGroupBy] = useState<GroupBy>("date");
   const [selected, setSelected] = useState<string | null>(null);
   const [active, setActive] = useState(0);

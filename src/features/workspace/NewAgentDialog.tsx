@@ -1,11 +1,11 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Bot, Columns2, FolderOpen, FolderPlus, Layers, PanelTop, Rows2, Sparkles, TriangleAlert, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { core, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
+import { core, draftKey, useDraft, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { Split, Started, StartTarget, Workspace } from "@/core/gen";
 import { Button, Chip, EmptyState, Field, IconButton, Input, Kbd, SegmentedControl, StatusOrb, type Status, Switch, cn, spring, toast, useIsMobile } from "@/design";
 import { FolderBrowser, type FolderPick } from "../worktree/FolderBrowser";
-import { AgentFields, type AgentDraft, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName } from "./shared/AgentFields";
+import { AgentFields, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName, useAgentDraft } from "./shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "./shared/CommandPreview";
 import { agentLaunchLines, herdrArgv } from "./shared/commands";
 import { describeError } from "./shared/errors";
@@ -62,8 +62,12 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
   const [workspaceId, setWorkspaceId] = useState<string | undefined>(initialWorkspaceId);
   const [split, setSplit] = useState<Split>("right");
   const [folder, setFolder] = useState<FolderPick | null>(null);
-  const [label, setLabel] = useState("");
-  const [agent, setAgent] = useState<AgentDraft>(() => ({ ...initialAgentDraft(settings), start: !intent?.openFolder }));
+  const [label, setLabel, clearLabel] = useDraft(draftKey("newAgent.label", hostId ?? ""));
+  // typed name/prompt persist per host and the workspace the dialog was opened for
+  const [agent, patchAgent, clearAgent] = useAgentDraft(draftKey("newAgent.agent", hostId ?? "", initialWorkspaceId ?? ""), () => ({
+    ...initialAgentDraft(settings),
+    start: !intent?.openFolder,
+  }));
   const [submit, setSubmit] = useState<Submit>({ phase: "idle" });
 
   useEffect(() => {
@@ -95,6 +99,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
     try {
       if (!startAgent && target.kind === "cwd") {
         const ref = await core.host(hostId).call("workspace.create", { cwd: target.cwd, label: target.label ?? undefined });
+        clearLabel();
         onClose();
         toast({
           title: `Opened ${basename(target.cwd)}`,
@@ -105,6 +110,8 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         return;
       }
       const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name }) });
+      if (target.kind === "cwd") clearLabel();
+      clearAgent();
       setSubmit({ phase: "done", started });
     } catch (e) {
       const d = describeError(e);
@@ -291,7 +298,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                       <label className="flex h-10 cursor-pointer items-center gap-3 rounded-md well px-3.5">
                         <Bot className="size-4 text-mute" />
                         <span className="flex-1 text-sm font-bold">Start an omp agent</span>
-                        <Switch checked={agent.start} onCheckedChange={(v) => setAgent((a) => ({ ...a, start: v }))} label="Start an omp agent" />
+                        <Switch checked={agent.start} onCheckedChange={(v) => patchAgent({ start: v })} label="Start an omp agent" />
                       </label>
                     </div>
                   </>
@@ -300,7 +307,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                 <AnimatePresence initial={false}>
                   {startAgent && hostId && (
                     <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="overflow-hidden">
-                      <AgentFields hostId={hostId} draft={agent} onChange={(p) => setAgent((a) => ({ ...a, ...p }))} derivedName={derived} takenNames={takenNames} />
+                      <AgentFields hostId={hostId} draft={agent} onChange={patchAgent} derivedName={derived} takenNames={takenNames} />
                     </motion.div>
                   )}
                 </AnimatePresence>

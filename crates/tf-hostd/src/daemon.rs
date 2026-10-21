@@ -1,10 +1,12 @@
 //! `tf-hostd daemon`: single-instance lock, client endpoint, relay + guests + bridge,
 //! per-herdr-session contexts, graceful shutdown (architecture §3.1–§3.2).
 
+use std::cmp::Ordering as VersionOrder;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -31,13 +33,15 @@ pub struct Daemon {
     pub started_at: i64,
     /// Identity of the binary this daemon runs (`attach --replace` compares it).
     pub exe_id: String,
+    /// Clients past hello, over every herdr session.
+    clients: AtomicUsize,
     ctxs: tokio::sync::Mutex<HashMap<String, Arc<Ctx>>>,
 }
 
 impl Daemon {
     /// Answers an internal control line (`{"ctl":"info"|"stop"}`) with one JSON object.
-    pub fn control(&self, op: &str) -> String {
-        let body = serde_json::json!({
+    pub fn control(&self, op: &str) -> serde_json::Value {
+        serde_json::json!({
             "ok": matches!(op, "info" | "stop"),
             "op": op,
             "pid": std::process::id(),
@@ -46,8 +50,28 @@ impl Daemon {
             "relayPort": self.relay_port,
             "home": self.paths.home.display().to_string(),
             "startedAt": self.started_at,
-        });
-        body.to_string()
+            "clients": self.clients(),
+        })
+    }
+
+    /// Connected clients (past hello) over every herdr session.
+    pub fn clients(&self) -> usize {
+        self.clients.load(Ordering::Relaxed)
+    }
+
+    /// Counts one connected client until the returned guard drops.
+    pub fn count_client(self: &Arc<Self>) -> ClientCount {
+        self.clients.fetch_add(1, Ordering::Relaxed);
+        ClientCount(self.clone())
+    }
+
+    /// Decides a `stop` control request ([`stop_policy`]). `requester` is the version line the
+    /// request carries; `force` (`tf-hostd stop --force`) always stops.
+    pub fn may_stop(&self, requester: Option<&str>, force: bool) -> Result<(), String> {
+        if force {
+            return Ok(());
+        }
+        stop_policy(requester, &crate::version_line(), self.clients())
     }
 
     /// The context of one herdr session, created on first use and shared by its clients.
@@ -67,6 +91,37 @@ impl Daemon {
 
     async fn all_ctxs(&self) -> Vec<Arc<Ctx>> {
         self.ctxs.lock().await.values().cloned().collect()
+    }
+}
+
+/// Keeps [`Daemon::clients`] counting one client while alive.
+pub struct ClientCount(Arc<Daemon>);
+
+impl Drop for ClientCount {
+    fn drop(&mut self) {
+        self.0.clients.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A host is shared by every device, and devices update at different times. An app that is
+/// behind installs its own tf-hostd and asks the running daemon to stop; obeying would drop every
+/// other client, whose apps then reinstall their build and stop that daemon in turn (each device
+/// drops every few seconds). So while clients are attached, the daemon refuses `stop` from:
+/// - builds that predate this rule: they send no version line (and always ask right after
+///   installing themselves over this daemon's binary);
+/// - builds older than `own`.
+///
+/// The refused `attach` connects to this daemon instead. An idle daemon always stops.
+pub fn stop_policy(requester: Option<&str>, own: &str, clients: usize) -> Result<(), String> {
+    if clients == 0 {
+        return Ok(());
+    }
+    match requester {
+        None => Err(format!("an older TeleFlock asked without a version while {clients} client(s) are connected")),
+        Some(r) if tf_proto::version::cmp_lines(r, own) == Some(VersionOrder::Less) => {
+            Err(format!("`{r}` is older than this daemon (`{own}`) and {clients} client(s) are connected"))
+        }
+        Some(_) => Ok(()),
     }
 }
 
@@ -188,6 +243,7 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
         shutdown: shutdown.clone(),
         started_at: now_ms(),
         exe_id: exe_identity(),
+        clients: AtomicUsize::new(0),
         ctxs: tokio::sync::Mutex::new(HashMap::new()),
     });
 
@@ -265,5 +321,20 @@ mod tests {
         drop(held);
         assert!(!InstanceLock::is_held(&paths));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn older_builds_cannot_stop_a_shared_daemon() {
+        let own = "tf-hostd 0.3.0 proto 1";
+        // An app that is behind would restart the host under the attached clients.
+        assert!(stop_policy(Some("tf-hostd 0.2.0 proto 1"), own, 1).is_err());
+        // Builds from before this rule send no version, whatever version they are.
+        assert!(stop_policy(None, own, 1).is_err());
+        // Nobody to drop: any build may take an idle daemon over.
+        assert!(stop_policy(Some("tf-hostd 0.2.0 proto 1"), own, 0).is_ok());
+        assert!(stop_policy(None, own, 0).is_ok());
+        // The same or a newer build replaces it (upgrade, or `tf-hostd stop` of this build).
+        assert!(stop_policy(Some(own), own, 2).is_ok());
+        assert!(stop_policy(Some("tf-hostd 0.4.0 proto 1"), own, 2).is_ok());
     }
 }

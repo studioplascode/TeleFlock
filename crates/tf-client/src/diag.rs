@@ -203,6 +203,11 @@ async fn after_connect(eng: &Arc<Inner>, profile: &HostProfile, t: &dyn Transpor
     let start = Instant::now();
     let artifact = eng.artifacts().hostd(&probe.os, &probe.arch).await;
     let up_to_date = match &artifact {
+        _ if deploy::host_is_newer(&probe.version) => {
+            let detail = format!("{} installed by a newer TeleFlock; used as is (this app ships {expected})", probe.version);
+            steps.push("hostd", "tf-hostd", DiagStatus::Warn, Some(detail), Some(start.elapsed()));
+            true
+        }
         Err(e) => {
             steps.push("hostd", "tf-hostd", DiagStatus::Fail, Some(e.message.clone()), Some(start.elapsed()));
             false

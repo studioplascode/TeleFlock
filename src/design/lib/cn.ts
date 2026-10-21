@@ -5,7 +5,7 @@ import { extendTailwindMerge } from "tailwind-merge";
 const twMerge = extendTailwindMerge({
   extend: {
     theme: {
-      text: ["display", "hero", "mega"],
+      text: ["display", "hero", "hero-fit", "mega"],
       radius: ["tile", "sheet"],
       shadow: ["d1", "d2", "d3", "key", "hairline", "glow-accent", "glow-sun", "glow-run", "glow-review", "glow-done", "glow-error"],
       ease: ["spring", "out-expo", "in-out-sine"],

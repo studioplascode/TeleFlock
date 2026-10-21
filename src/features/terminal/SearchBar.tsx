@@ -2,6 +2,7 @@ import type { SearchAddon } from "@xterm/addon-search";
 import { motion } from "motion/react";
 import { CaseSensitive, ChevronDown, ChevronUp, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useDraft } from "@/core";
 import { IconButton, cn, spring, tween } from "@/design";
 
 /** Search highlight colours (the addon wants #RRGGBB). */
@@ -19,15 +20,17 @@ export interface SearchBarProps {
   /** Bumps on every frame so matches follow the live screen. */
   frameTick: number;
   onClose(): void;
+  /** Draft key the query persists under (per host + terminal target). */
+  draftKey: string;
 }
 
 /**
  * Ctrl+F search over the terminal screen. herdr re-renders the viewport (scrollback 0), so this
  * searches what is on screen; scroll (wheel / PageUp) to bring older output into view.
  */
-export function SearchBar({ search, frameTick, onClose }: SearchBarProps) {
+export function SearchBar({ search, frameTick, onClose, draftKey }: SearchBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useDraft(draftKey);
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [result, setResult] = useState<{ index: number; count: number }>({ index: -1, count: 0 });
 

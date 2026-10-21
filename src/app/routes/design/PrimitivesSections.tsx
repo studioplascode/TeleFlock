@@ -58,6 +58,8 @@ import {
   IconButton,
   Input,
   Kbd,
+  Lightbox,
+  LightboxTrigger,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -86,6 +88,32 @@ const MODELS = [
   { value: "gpt-5.5", label: "gpt-5.5", hint: "openai" },
   { value: "tiny", label: "tiny", hint: "cheap role" },
 ];
+
+/** Gradient + grid SVG sample, so zoom and pan are easy to see. */
+function sampleShot(w: number, h: number, from: string, to: string, label: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="${from}"/><stop offset="1" stop-color="${to}"/></linearGradient><pattern id="p" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#fff" stroke-opacity=".16"/></pattern></defs><rect width="100%" height="100%" fill="url(#g)"/><rect width="100%" height="100%" fill="url(#p)"/><text x="50%" y="50%" fill="#fff" font-family="sans-serif" font-size="${Math.round(h / 8)}" font-weight="700" text-anchor="middle" dominant-baseline="middle">${label}</text></svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+const SAMPLE_SHOTS = [
+  { src: sampleShot(1600, 900, "#a35cf0", "#4f8bff", "1600×900"), alt: "Wide sample", width: 1600, height: 900 },
+  { src: sampleShot(900, 1400, "#ff3d77", "#ff9f43", "900×1400"), alt: "Tall sample", width: 900, height: 1400 },
+  { src: sampleShot(240, 160, "#2ad49a", "#1c8cff", "240×160"), alt: "Small sample", width: 240, height: 160 },
+];
+
+function LightboxDemo() {
+  const [open, setOpen] = useState<number | null>(null);
+  return (
+    <div className="flex gap-2">
+      {SAMPLE_SHOTS.map((s, i) => (
+        <LightboxTrigger key={s.alt} onClick={() => setOpen(i)}>
+          <img src={s.src} alt={s.alt} className="h-16 w-auto rounded-md object-cover shadow-hairline" />
+        </LightboxTrigger>
+      ))}
+      <Lightbox images={SAMPLE_SHOTS} index={open} onIndexChange={setOpen} />
+    </div>
+  );
+}
 
 export function ActionsSection() {
   const [loading, setLoading] = useState(false);
@@ -443,6 +471,9 @@ export function OverlaysSection() {
               </CommandGroup>
             </CommandList>
           </CommandDialog>
+        </Demo>
+        <Demo label="Lightbox (click · wheel/pinch zoom · drag · ←/→)">
+          <LightboxDemo />
         </Demo>
         <Demo label="Toast" className="md:col-span-2 xl:col-span-3">
           <Button

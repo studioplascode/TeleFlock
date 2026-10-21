@@ -23,7 +23,7 @@ import {
   Focus,
 } from "lucide-react";
 import { type ButtonHTMLAttributes, type ReactNode, useState } from "react";
-import { parseAgentKey, useAgent, useSession, useUi } from "@/core";
+import { draftKey, parseAgentKey, useAgent, useDraft, useSession, useUi } from "@/core";
 import type { ModelInfo, SessionMeta, ThinkingLevel } from "@/core/gen";
 import { fuzzyScore } from "@/features/palette/fuzzy";
 import type { SessionDialog } from "../state";
@@ -119,7 +119,7 @@ function ModelList({ agentKey, onDone, mobile = false }: { agentKey: string; onD
   const { meta } = useSession(agentKey);
   const { catalog, error, loading } = useModels(hostId);
   const [busy, run] = usePending();
-  const [query, setQuery] = useState("");
+  const [query, setQuery, clearQuery] = useDraft(draftKey("search.model", hostId));
   const [sel, setSel] = useState("");
   const current = meta?.model ? `${meta.model.provider}/${meta.model.id}` : "";
   const recents = readRecents(hostId);
@@ -131,6 +131,7 @@ function ModelList({ agentKey, onDone, mobile = false }: { agentKey: string; onD
     const res = await run(hostCall(hostId, "agent.setModel", { agentId, model, thinking }, { success: `Model → ${selector}`, failure: "Model change failed" }));
     if (res.ok) {
       pushRecent(hostId, model);
+      clearQuery();
       onDone();
     }
   };

@@ -3,6 +3,7 @@
 //!
 //! stdout carries protocol lines only; human diagnostics go to stderr prefixed `tf-hostd:`.
 
+use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -45,14 +46,22 @@ pub fn run(paths: Paths, session: &str, replace: bool, relay_port: u16) -> anyho
 }
 
 /// `tf-hostd stop`: asks the daemon to shut down and waits for the lock to be released.
-pub fn stop(paths: Paths) -> anyhow::Result<i32> {
+/// `force` stops it even when it refuses an older build (see [`crate::daemon::stop_policy`]).
+pub fn stop(paths: Paths, force: bool) -> anyhow::Result<i32> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
         if !InstanceLock::is_held(&paths) {
             eprintln!("tf-hostd: not running");
             return Ok(0);
         }
-        match control(&paths, "stop").await {
+        match control(&paths, "stop", force).await {
+            Some(reply) if reply["refused"].is_string() => {
+                eprintln!(
+                    "tf-hostd: the daemon refused to stop: {}; `tf-hostd stop --force` stops it anyway",
+                    reply["refused"].as_str().unwrap_or_default()
+                );
+                return Ok(1);
+            }
             Some(reply) => eprintln!("tf-hostd: stopping (pid {})", reply["pid"]),
             None => {
                 eprintln!("tf-hostd: daemon holds the lock but does not answer on {}", paths.endpoint());
@@ -69,10 +78,12 @@ pub fn stop(paths: Paths) -> anyhow::Result<i32> {
     })
 }
 
-/// Sends one control line (`info` / `stop`) and returns the JSON reply.
-pub async fn control(paths: &Paths, op: &str) -> Option<serde_json::Value> {
+/// Sends one control line (`info` / `stop`) and returns the JSON reply. Every line carries
+/// this build's version line: the daemon judges `stop` requests by it.
+pub async fn control(paths: &Paths, op: &str, force: bool) -> Option<serde_json::Value> {
     let (read, mut write) = ipc::connect(paths).await.ok()?;
-    write.write_all(format!("{{\"ctl\":\"{op}\"}}\n").as_bytes()).await.ok()?;
+    let line = serde_json::json!({ "ctl": op, "version": crate::version_line(), "force": force });
+    write.write_all(format!("{line}\n").as_bytes()).await.ok()?;
     write.flush().await.ok()?;
     let mut reader = BufReader::new(read);
     let mut line = String::new();
@@ -80,20 +91,49 @@ pub async fn control(paths: &Paths, op: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&line).ok()
 }
 
-/// `--replace`: stop a running daemon that runs a different binary than this one.
+/// `--replace` (the app just installed this build): stop a running daemon that runs another
+/// binary, unless [`replace_policy`] keeps it. A kept or refusing daemon is attached to as is.
 async fn replace_if_stale(paths: &Paths) {
     if !InstanceLock::is_held(paths) {
         return;
     }
     let ours = exe_identity();
-    let Some(info) = control(paths, "info").await else { return };
+    let Some(info) = control(paths, "info", false).await else { return };
     if info["exe"].as_str() == Some(ours.as_str()) {
         return;
     }
-    eprintln!("tf-hostd: replacing daemon pid {} ({})", info["pid"], info["version"].as_str().unwrap_or("?"));
-    let _ = control(paths, "stop").await;
+    let running = info["version"].as_str().unwrap_or("?");
+    if let Err(why) = replace_policy(running, &crate::version_line(), info["clients"].as_u64()) {
+        eprintln!("tf-hostd: keeping daemon pid {} ({running}): {why}", info["pid"]);
+        return;
+    }
+    eprintln!("tf-hostd: replacing daemon pid {} ({running})", info["pid"]);
+    if let Some(reply) = control(paths, "stop", false).await
+        && let Some(why) = reply["refused"].as_str()
+    {
+        eprintln!("tf-hostd: daemon pid {} refused to stop: {why}", info["pid"]);
+        return;
+    }
     if !wait_released(paths, START_WAIT).await {
         eprintln!("tf-hostd: old daemon did not stop within 10 s");
+    }
+}
+
+/// Whether `attach --replace` stops the running daemon (version line `running`) for this build
+/// (`ours`). Every device of the user shares the daemon, so the host only moves forward:
+/// - older (or unreadable): replace. Its clients reconnect to this build.
+/// - newer: keep. A newer app on another device installed it; downgrading it would drop that
+///   device, which would reinstall its build and drop this one in turn.
+/// - the same version (another build, or the same one uploaded again): replace only when no
+///   client is attached. `clients` is `None` for older daemons, which don't report it.
+pub fn replace_policy(running: &str, ours: &str, clients: Option<u64>) -> Result<(), String> {
+    match tf_proto::version::cmp_lines(running, ours) {
+        Some(Ordering::Greater) => Err(format!("it is newer than this build ({ours})")),
+        Some(Ordering::Equal) => match clients {
+            Some(n) if n > 0 => Err(format!("same version, {n} client(s) connected")),
+            _ => Ok(()),
+        },
+        Some(Ordering::Less) | None => Ok(()),
     }
 }
 
@@ -212,4 +252,27 @@ async fn pump(mut read: ipc::BoxRead, mut write: ipc::BoxWrite) {
     up.abort();
     // The blocking stdin reader thread cannot be cancelled; exit the process directly.
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_policy;
+
+    const OURS: &str = "tf-hostd 0.3.0 proto 1";
+
+    #[test]
+    fn the_host_only_moves_forward() {
+        // Upgrade: replaced even with clients attached (they reconnect to the new daemon).
+        assert!(replace_policy("tf-hostd 0.2.0 proto 1", OURS, Some(2)).is_ok());
+        assert!(replace_policy("tf-hostd 0.2.0 proto 1", OURS, None).is_ok());
+        // A newer daemon is never downgraded, attached clients or not.
+        assert!(replace_policy("tf-hostd 0.4.0 proto 1", OURS, Some(0)).is_err());
+        assert!(replace_policy("tf-hostd 0.3.0 proto 2", OURS, Some(0)).is_err());
+        // Another build of the same version only replaces an idle daemon.
+        assert!(replace_policy(OURS, OURS, Some(1)).is_err());
+        assert!(replace_policy(OURS, OURS, Some(0)).is_ok());
+        assert!(replace_policy(OURS, OURS, None).is_ok());
+        // A daemon whose version can't be read is replaced.
+        assert!(replace_policy("?", OURS, Some(3)).is_ok());
+    }
 }

@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Eraser, FolderGit2, MoreHorizontal, Send, Server } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { navigate, useHostIds, useHostState, useHosts, useSettings } from "@/core";
+import { draftKey, navigate, useHostIds, useHostState, useHosts, useSettings } from "@/core";
 import {
   Button,
   DropdownMenu,
@@ -218,6 +218,7 @@ export function DispatchView() {
     <DispatchComposer
       ref={composer}
       hostId={hostId}
+      draftKey={draftKey("dispatch.task", hostId ?? "", repo ?? "")}
       options={options}
       onOptionsChange={useDispatch.getState().setOptions}
       onSend={send}

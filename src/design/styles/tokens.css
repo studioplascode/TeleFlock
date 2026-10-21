@@ -281,6 +281,16 @@
   color: var(--color-mute);
 }
 @utility tabular { font-variant-numeric: tabular-nums; }
+/*
+ * Hero figure that shrinks to fit the nearest `@container` instead of clipping: hero size (or `--fit-max`)
+ * while it fits, smaller once the container is narrower. NumberTicker publishes `--fit-em`, the text's width in em.
+ */
+@utility text-hero-fit {
+  font-size: min(var(--fit-max, var(--text-hero)), calc(100cqi / var(--fit-em, 5)));
+  line-height: var(--text-hero--line-height);
+  letter-spacing: var(--text-hero--letter-spacing);
+  white-space: nowrap;
+}
 
 /* accessible focus ring for custom controls */
 @utility focus-ring {

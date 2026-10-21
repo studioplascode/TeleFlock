@@ -81,3 +81,8 @@ export { navigate, useRoute, getRoute, parseHash, routeToHash } from "./nav";
 export type { Route, RouteName } from "./nav";
 export { useUi } from "./ui";
 export type { UiDialog, SplitState, UiState } from "./ui";
+export { DRAFT_LIMITS, draftKey, draftKeyParts, drafts, flushDrafts, pruneDrafts, useDraft, useDraftState, useDrafts } from "./drafts";
+export type { DraftEntry, DraftLimits, DraftSetter } from "./drafts";
+export { useDraftImages } from "./draftImages";
+export type { DraftImage } from "./draftImages";
+export { ANSWER_SCOPE, answerDraftKey, startDraftSweep } from "./draftSweep";

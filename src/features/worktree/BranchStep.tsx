@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion } from "motion/react";
 import { Check, CloudDownload, FolderTree, GitBranch, GitBranchPlus, GitFork, Lock, Search, Tag, TriangleAlert, Wand2 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useDraft } from "@/core";
 import type { BranchInfo, BranchList } from "@/core/gen";
 import { Button, Chip, Field, Input, Select, type SelectOption, SegmentedControl, Skeleton, Switch, cn, formatAge, spring } from "@/design";
 import { branchNameError, tildify } from "../workspace/shared/paths";
@@ -25,6 +26,8 @@ export interface BranchStepProps {
   error?: string;
   draft: BranchDraft;
   onChange: (patch: Partial<BranchDraft>) => void;
+  /** Draft key of the "Filter branches" box (persists per host + repo). */
+  filterKey: string;
   /** Effective branch name (mode-dependent). */
   branch: string;
   /** Default checkout path herdr will use for `branch`. */
@@ -64,8 +67,8 @@ function nextFreeName(name: string, taken: ReadonlySet<string>): string {
   }
 }
 
-export function BranchStep({ branches, loading, error, draft, onChange, branch, defaultPath, nameError, home, onSubmit }: BranchStepProps) {
-  const [q, setQ] = useState("");
+export function BranchStep({ branches, loading, error, draft, onChange, filterKey, branch, defaultPath, nameError, home, onSubmit }: BranchStepProps) {
+  const [q, setQ] = useDraft(filterKey);
   const [active, setActive] = useState(0);
   const nameRef = useRef<HTMLInputElement>(null);
 

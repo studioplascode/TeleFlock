@@ -1,6 +1,6 @@
 import { Bot, Coins, FileCode2, GitBranch, GitFork, GitMerge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Send, Workflow } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { navigate, parseAgentKey, useAgent, useBtw, useIrcEntries, useSession } from "@/core";
+import { draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useDraft, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
 import type { TreeInfo, TreeNode } from "@/core/gen";
 import {
@@ -312,7 +312,8 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
   const { meta } = useSession(agentKey);
   const asked = useSessionUi((s) => s.btw[agentKey]) ?? [];
   const answers = useBtw(agentKey);
-  const [q, setQ] = useState("");
+  const key = draftKey("btw.question", agentKey);
+  const [q, setQ] = useDraft(key);
   const [busy, run] = usePending();
   const ask = async () => {
     const question = q.trim();
@@ -320,7 +321,9 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
     const res = await run(hostCall(hostId, "agent.btw", { agentId, question }, { failure: "btw failed" }));
     if (res.ok) {
       useSessionUi.getState().addBtw(agentKey, res.value.btwId, question);
-      setQ("");
+      // Only what was asked: anything typed while asking stays in the draft.
+      const cur = drafts.get(key);
+      drafts.set(key, cur.startsWith(q) ? cur.slice(q.length).trimStart() : cur);
     }
   };
   const disabled = meta ? !meta.caps.btw : true;

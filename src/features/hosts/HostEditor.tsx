@@ -16,7 +16,7 @@ import {
   toast,
   useIsMobile,
 } from "@/design";
-import { core, useHosts, useUi } from "@/core";
+import { core, draftKey, useDraftState, useHosts, useUi } from "@/core";
 import type { DiagReport, HostKind, HostProfile, WslDistro } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
@@ -122,7 +122,8 @@ function Advanced({ children }: { children: ReactNode }) {
 function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone: () => void; mobile: boolean }) {
   const info = useAppInfo();
   const kinds = availableKinds(info?.capabilities);
-  const [p, setP] = useState<HostProfile>(initial);
+  // persists per edited host ("new" for Add); untouched, it follows the saved profile
+  const [p, setP, clearDraft] = useDraftState<HostProfile>(draftKey("host.editor", initial.id || "new"), initial);
   const [touched, setTouched] = useState(false);
   const [report, setReport] = useState<DiagReport | null>(null);
   const [testing, setTesting] = useState(false);
@@ -164,6 +165,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
       .app("hosts.save", profile)
       .then((saved) => {
         haptic("success");
+        clearDraft();
         onDone();
         if (saved.autoConnect) connectAndFollow(saved.id, saved.name);
         else toast({ title: editing ? `Saved ${saved.name}` : `Added ${saved.name}`, status: "done" });
@@ -178,6 +180,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
   const remove = () => {
     core.app("hosts.remove", { hostId: initial.id }).then(
       () => {
+        clearDraft();
         onDone();
         toast({ title: `Removed ${initial.name}` });
       },
@@ -248,7 +251,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
                   <Input
                     id={id}
                     inputMode="numeric"
-                    value={p.port === undefined ? "" : String(p.port)}
+                    value={p.port == null ? "" : String(p.port)}
                     onChange={(e) => set({ port: e.target.value === "" ? undefined : Number(e.target.value) })}
                     placeholder="22"
                     invalid={!!shown.port}
@@ -283,7 +286,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
               <Input
                 id={id}
                 inputMode="numeric"
-                value={p.relayPort === undefined ? "" : String(p.relayPort)}
+                value={p.relayPort == null ? "" : String(p.relayPort)}
                 onChange={(e) => set({ relayPort: e.target.value === "" ? undefined : Number(e.target.value) })}
                 placeholder="47466"
                 invalid={!!shown.relayPort}

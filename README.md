@@ -47,7 +47,7 @@ Four lanes, **Running · Needs you · In review · Done**, with every omp agent 
 
 ### A native session for every agent
 
-A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. When the agent asks, its question becomes a card you answer with a click or `1`–`9`. The composer steers the running turn or queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, and images. Model, thinking, plan, goal and fast mode sit in the header. The inspector shows context, cost, throughput, todos, changed files, the session tree (branch, fork, navigate) and more.
+A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. Click any image to open it full screen, then zoom and pan (wheel, pinch, double-click) and page through the rest of the message. When the agent asks, its question becomes a card you answer with a click or `1`–`9`. The composer steers the running turn or queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, and images. Whatever you type, anywhere in the app, stays put: drafts and pasted images survive switching agents, closing dialogs and restarts until you send them. Model, thinking, plan, goal and fast mode sit in the header. The inspector shows context, cost, throughput, todos, changed files, the session tree (branch, fork, navigate) and more.
 
 | Ask cards | Approvals |
 |---|---|
@@ -182,6 +182,7 @@ flowchart LR
 
 - omp keeps running as its normal TUI inside herdr, so herdr's state tracking and the real terminal keep working.
 - The app's Rust core uploads and starts a small host daemon, `tf-hostd`, over SSH (or locally), and speaks one protocol to it whatever the transport.
+- All your devices share that daemon. When they run different app versions, the host keeps the newest `tf-hostd` and older apps attach to it instead of replacing it, so one device never knocks the other off.
 - `tf-hostd` joins each omp session as a private collab guest on a loopback relay. Room keys never leave the host.
 - A companion omp extension adds structured controls (model, thinking, tree, queue, …).
 - herdr is driven through its local API; git and `gh` run on the host for review and shipping.

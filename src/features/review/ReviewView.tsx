@@ -20,7 +20,7 @@ import {
   WrapText,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { navigate, useHostState, useUi, useWorkspaces } from "@/core";
+import { draftKey, navigate, useHostState, useUi, useWorkspaces } from "@/core";
 import type { Agent } from "@/core/gen";
 import { BottomSheet, Button, Chip, EmptyState, IconButton, SegmentedControl, Shimmer, Skeleton, StatusOrb, Tooltip, cn, spring, useIsMobile } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
@@ -180,6 +180,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   const host = useHostState(hostId);
   const ws = workspaces.find((w) => w.id === workspaceId);
   const cwd = ws ? (ws.worktree?.path ?? ws.cwd) : undefined;
+  const fileFilterKey = cwd ? draftKey("review.fileFilter", hostId, cwd) : undefined;
   const agents = useMemo(() => host?.agents.filter((a) => a.workspaceId === workspaceId) ?? [], [host?.agents, workspaceId]);
   const working = agents.filter((a) => a.column === "running");
 
@@ -497,7 +498,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
           <AnimatePresence>{working.length > 0 && <LiveBanner hostId={hostId} working={working} compact />}</AnimatePresence>
         </div>
         <div className="min-h-0 flex-1 px-3">
-          {diffArea ?? <FileTree files={files} collapsed={collapsed} viewed={viewed} onSelect={jump} comfortable className="h-full" />}
+          {diffArea ?? <FileTree files={files} collapsed={collapsed} viewed={viewed} onSelect={jump} filterKey={fileFilterKey} comfortable className="h-full" />}
         </div>
         <div className="shrink-0 px-3 pt-1.5 pb-2">
           <button
@@ -632,7 +633,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
                 <span className="kicker">Files</span>
                 <span className="text-2xs font-bold text-mute-2 tabular">{files.length}</span>
               </div>
-              <FileTree files={files} active={topFile} collapsed={collapsed} viewed={viewed} onSelect={jump} filterRef={filterRef} className="min-h-0 flex-1" />
+              <FileTree files={files} active={topFile} collapsed={collapsed} viewed={viewed} onSelect={jump} filterRef={filterRef} filterKey={fileFilterKey} className="min-h-0 flex-1" />
             </motion.aside>
           )}
         </AnimatePresence>

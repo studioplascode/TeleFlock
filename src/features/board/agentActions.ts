@@ -88,11 +88,11 @@ export function openAgent(key: string): void {
 }
 
 /**
- * Open the session with the composer focused (fresh agents waiting for their first prompt).
- * Uses the session's "push text into the composer" seam with empty text, which focuses it on mount.
+ * Open the session with the composer focused (fresh agents waiting for their first prompt). The
+ * composer's draft (text and images) is kept.
  */
 export function promptAgent(key: string): void {
-  useSessionUi.getState().setDraft(key, "");
+  useSessionUi.getState().focusComposer(key);
   openAgent(key);
 }
 

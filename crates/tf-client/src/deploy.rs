@@ -1,7 +1,8 @@
 //! Embedded artifacts (tf-hostd per target triple, companion extension, omp overlay) and
 //! deployment to a host: detect the arch, compare versions/content stamps, upload what
 //! differs. Remote hosts (SSH, WSL) are driven with `sh` over `exec` (+stdin); local hosts
-//! are written directly.
+//! are written directly. A host shared by several devices only moves forward: an app never
+//! replaces a newer tf-hostd (see [`host_is_newer`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,13 @@ pub const HOSTD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Exact `tf-hostd --version` line this build expects.
 pub fn expected_version_line() -> String {
     format!("tf-hostd {HOSTD_VERSION} proto {PROTOCOL_VERSION}")
+}
+
+/// The installed tf-hostd (`--version` line) is newer than this build: a newer app on another
+/// device deployed it. This app uses it as is and touches none of the host's files; replacing
+/// it would drop that device, whose app would reinstall its build and drop this one in turn.
+pub fn host_is_newer(installed: &str) -> bool {
+    tf_proto::version::cmp_lines(installed, &expected_version_line()) == Some(std::cmp::Ordering::Greater)
 }
 
 /// Candidate target triples for an OS/arch pair, best first.
@@ -214,6 +222,8 @@ pub struct Deployed {
     pub hostd: String,
     /// A new binary was uploaded (attach with `--replace`).
     pub replaced: bool,
+    /// The host runs a newer tf-hostd than this build (its `--version` line); nothing was uploaded.
+    pub newer: Option<String>,
 }
 
 /// What a probe found on the host.
@@ -348,13 +358,6 @@ pub async fn deploy(
 ) -> Result<Deployed, ApiError> {
     progress("Checking host…".into());
     let p = probe(t, kind).await?;
-    let bin = artifacts.hostd(&p.os, &p.arch).await?;
-    let ext = artifacts.bridge_ext()?;
-    let overlay = overlay_yaml(relay_port);
-    let ext_sha = sha256_hex(ext.as_bytes());
-    let overlay_sha = sha256_hex(overlay.as_bytes());
-    let expected = expected_version_line();
-    let need_hostd = p.hostd_sha != bin.sha || p.version != expected;
     let local = kind == HostKind::Local;
     let sep = if local && cfg!(windows) { '\\' } else { '/' };
     let hostd_path = if local {
@@ -362,6 +365,18 @@ pub async fn deploy(
     } else {
         format!("{}/bin/tf-hostd", p.home)
     };
+    if host_is_newer(&p.version) {
+        // Its extension and overlay belong to that newer build too.
+        progress(format!("Using the newer tf-hostd on this host ({})…", p.version));
+        return Ok(Deployed { hostd: hostd_path, replaced: false, newer: Some(p.version) });
+    }
+    let bin = artifacts.hostd(&p.os, &p.arch).await?;
+    let ext = artifacts.bridge_ext()?;
+    let overlay = overlay_yaml(relay_port);
+    let ext_sha = sha256_hex(ext.as_bytes());
+    let overlay_sha = sha256_hex(overlay.as_bytes());
+    let expected = expected_version_line();
+    let need_hostd = p.hostd_sha != bin.sha || p.version != expected;
 
     if need_hostd {
         let mb = bin.len as f64 / 1_048_576.0;
@@ -389,7 +404,7 @@ pub async fn deploy(
     if p.overlay_sha != overlay_sha {
         put_file(t, local, &p.home, "omp-overlay.yml", overlay.as_bytes(), &overlay_sha).await?;
     }
-    Ok(Deployed { hostd: hostd_path, replaced: need_hostd && !p.version.is_empty() })
+    Ok(Deployed { hostd: hostd_path, replaced: need_hostd && !p.version.is_empty(), newer: None })
 }
 
 async fn put_file(

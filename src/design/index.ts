@@ -98,3 +98,5 @@ export {
 export { TitleBar } from "./ui/TitleBar";
 export { PageHeader } from "./ui/PageHeader";
 export type { PageHeaderProps } from "./ui/PageHeader";
+export { Lightbox, LightboxTrigger } from "./ui/Lightbox";
+export type { LightboxImage, LightboxProps, LightboxTriggerProps } from "./ui/Lightbox";

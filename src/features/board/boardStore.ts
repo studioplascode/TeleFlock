@@ -1,5 +1,9 @@
 import { create } from "zustand";
+import { draftKey, drafts } from "@/core";
 import type { Column } from "@/core/gen";
+
+/** The board's "Filter agents…" text, kept as a draft so it survives navigation and reload. */
+const FILTER_DRAFT = draftKey("board.filter");
 
 export type GroupBy = "status" | "repo";
 
@@ -31,7 +35,7 @@ interface BoardState {
 
 export const useBoard = create<BoardState>()((set) => ({
   repo: null,
-  q: "",
+  q: drafts.get(FILTER_DRAFT),
   groupBy: "status",
   moves: {},
   doneOpen: false,
@@ -39,7 +43,10 @@ export const useBoard = create<BoardState>()((set) => ({
   anchor: null,
   order: [],
   setRepo: (repo) => set({ repo }),
-  setQ: (q) => set({ q }),
+  setQ: (q) => {
+    drafts.set(FILTER_DRAFT, q);
+    set({ q });
+  },
   setGroupBy: (groupBy) => set({ groupBy }),
   setMove: (key, column) =>
     set((s) => {

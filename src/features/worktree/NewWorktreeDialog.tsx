@@ -1,10 +1,10 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, Pencil, ShieldAlert, Sparkles, Split, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import { core, navigate, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
+import { core, draftKey, navigate, useDraftState, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
 import { Button, Chip, EmptyState, Kbd, SegmentedControl, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
-import { AgentFields, type AgentDraft, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName, useModelCatalog } from "../workspace/shared/AgentFields";
+import { AgentFields, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName, useAgentDraft, useModelCatalog } from "../workspace/shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "../workspace/shared/CommandPreview";
 import { agentLaunchLines, herdrArgv } from "../workspace/shared/commands";
 import { type HerdrFailure, classifyHerdrError } from "../workspace/shared/errors";
@@ -21,6 +21,8 @@ const STEPS = ["Repository", "Branch", "Agent", "Create"] as const;
 
 /** herdr's `[worktrees] directory` default (`docs/research/herdr.md` §8). */
 const HERDR_WORKTREES_DIR = ".herdr/worktrees";
+
+const NO_BRANCH: BranchDraft = { mode: "new", name: "", base: "", existing: "", customPath: false, path: "", label: "" };
 
 /** Mounted once by the shell; renders while `useUi().dialog.kind === "newWorktree"`. */
 export function NewWorktreeDialog() {
@@ -56,8 +58,9 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   const [step, setStep] = useState(initialCwd ? 1 : 0);
   const [dir, setDir] = useState<1 | -1>(1);
   const [repo, setRepo] = useState<FolderPick | null>(initialCwd ? { path: initialCwd } : null);
-  const [branch, setBranch] = useState<BranchDraft>({ mode: "new", name: "", base: "", existing: "", customPath: false, path: "", label: "" });
-  const [agent, setAgent] = useState<AgentDraft>(() => initialAgentDraft(settings));
+  // the branch and agent forms persist per host + repository until a worktree is created
+  const [branch, setBranch, clearBranch] = useDraftState<BranchDraft>(draftKey("worktree.branch", hostId ?? "", repo?.path ?? ""), NO_BRANCH);
+  const [agent, patchAgent, clearAgent] = useAgentDraft(draftKey("worktree.agent", hostId ?? "", repo?.path ?? ""), () => initialAgentDraft(settings));
   const [trust, setTrust] = useState(false);
   const [submit, setSubmit] = useState<Submit>({ phase: "idle" });
 
@@ -123,6 +126,8 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
     setSubmit({ phase: "working", since: Date.now() });
     try {
       const created = await core.host(hostId).call("worktree.create", p);
+      clearBranch();
+      clearAgent();
       setSubmit({ phase: "done", created });
       if (!created.agent) {
         onClose();
@@ -343,6 +348,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                     error={branches.waiting ? undefined : branches.error?.message}
                     draft={branch}
                     onChange={(patch) => setBranch((b) => ({ ...b, ...patch }))}
+                    filterKey={draftKey("worktree.branchFilter", hostId ?? "", repoRoot)}
                     branch={effectiveBranch}
                     defaultPath={defaultPath}
                     nameError={nameError}
@@ -356,7 +362,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                       hostId={hostId}
                       toggleable
                       draft={agent}
-                      onChange={(patch) => setAgent((a) => ({ ...a, ...patch }))}
+                      onChange={patchAgent}
                       derivedName={derivedName}
                       takenNames={takenNames}
                     />

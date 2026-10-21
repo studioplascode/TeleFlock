@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { core, pulseBus, toApiError, useIsMuted, useSettings } from "@/core";
+import { core, type DraftImage, pulseBus, toApiError, useIsMuted, useSettings } from "@/core";
 import type { Agent, HostMethods } from "@/core/gen";
 import { type Status, toast } from "@/design";
 
@@ -83,13 +83,8 @@ export function useBeat(key: string): number {
   return beat;
 }
 
-export interface PendingImage {
-  mime: string;
-  /** Base64 payload (no data: prefix). */
-  data: string;
-  /** data: URL for the thumbnail. */
-  preview: string;
-}
+/** A composer attachment (persisted with the composer draft). */
+export type PendingImage = DraftImage;
 
 export async function fileToImageInput(file: File): Promise<PendingImage> {
   const bytes = new Uint8Array(await file.arrayBuffer());

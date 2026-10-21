@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { agentKey, core, navigate, openSession, useAgent, useCore, useSession, useUi } from "@/core";
+import { agentKey, core, draftKey, navigate, openSession, useAgent, useCore, useDraft, useSession, useUi } from "@/core";
 import type { Agent, GitStatusResult, MergeMethod, PrInfo, PrStatusResult, Workspace } from "@/core/gen";
 import { Badge, Button, Input, Kbd, SegmentedControl, Shimmer, Spinner, Switch, Textarea, cn, spring, toast } from "@/design";
 import { removeWorktree } from "../workspace/workspaceActions";
@@ -266,7 +266,7 @@ function DefaultBranchCard({ hostId, cwd, reason }: { hostId: string; cwd: strin
 }
 
 function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active }: { hostId: string; cwd: string; dirty: boolean; fileCount: number; agents: Agent[]; onCommitted: (summary: string) => void; active: boolean }) {
-  const [message, setMessage] = useState("");
+  const [message, setMessage, clearMessage] = useDraft(draftKey("review.commit", hostId, cwd));
   const [all, setAll] = useState(true);
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState<{ agentId: string; afterId: string | null } | null>(null);
@@ -277,7 +277,7 @@ function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active
     try {
       const r = await core.host(hostId).call("git.commit", { cwd, message: message.trim(), all });
       toast({ title: `Committed ${r.sha.slice(0, 7)}`, description: r.summary, status: "done", duration: 3500 });
-      setMessage("");
+      clearMessage();
       onCommitted(r.summary);
     } catch (e) {
       const d = describeError(e);
@@ -476,8 +476,9 @@ function PushCard({ hostId, cwd, status, unpushed, dirty, onPushed, active }: { 
 
 function CreatePrCard({ hostId, cwd, status, lastCommit, blockedReason, error, onCreated, active }: { hostId: string; cwd: string; status: GitStatusResult; lastCommit?: string; blockedReason?: string; error?: string; onCreated: () => void; active: boolean }) {
   const humanBranch = (status.branch ?? "").replace(/^[\w-]+\//, "").replace(/[-_]+/g, " ");
-  const [title, setTitle] = useState(lastCommit ?? (humanBranch ? humanBranch[0]?.toUpperCase() + humanBranch.slice(1) : ""));
-  const [body, setBody] = useState("");
+  const branch = status.branch ?? "";
+  const [title, setTitle, clearTitle] = useDraft(draftKey("review.prTitle", hostId, cwd, branch), lastCommit ?? (humanBranch ? humanBranch[0]?.toUpperCase() + humanBranch.slice(1) : ""));
+  const [body, setBody, clearBody] = useDraft(draftKey("review.prBody", hostId, cwd, branch));
   const [draft, setDraft] = useState(false);
   const [busy, setBusy] = useState(false);
   const create = async () => {
@@ -485,6 +486,8 @@ function CreatePrCard({ hostId, cwd, status, lastCommit, blockedReason, error, o
     try {
       const info = await core.host(hostId).call("gh.prCreate", { cwd, title: title.trim(), body, draft, base: status.defaultBranch });
       toast({ title: `Opened PR #${info.number}`, description: info.title, status: "review", action: { label: "Open on GitHub", onClick: () => void core.app("app.openExternal", { url: info.url }) } });
+      clearTitle();
+      clearBody();
       onCreated();
     } catch (e) {
       const d = describeError(e);

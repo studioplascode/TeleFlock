@@ -57,7 +57,7 @@ function RepoColumn({ repo, filter, selectedKey }: { repo: string; filter: RepoF
       </header>
       <div
         className={cn(
-          "no-scrollbar -mt-2 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2.5 pt-2 pb-3 [mask-image:linear-gradient(to_bottom,transparent,#000_8px,#000_calc(100%-10px),transparent)]",
+          "no-scrollbar -mt-2 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto rounded-b-tile px-2.5 pt-2 pb-3 [mask-image:linear-gradient(to_bottom,transparent,#000_8px,#000_calc(100%-14px),transparent)]",
           selecting && "pb-[calc(var(--tf-selbar-h,48px)+24px)]",
         )}
       >

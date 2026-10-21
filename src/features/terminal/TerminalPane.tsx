@@ -6,7 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { AnimatePresence, motion } from "motion/react";
 import { ClipboardCopy, ClipboardPaste, Cpu, Search, Eye, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
 import { type CSSProperties, type Ref, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { openLink, useHosts, useSettings } from "@/core";
+import { draftKey, openLink, useHosts, useSettings } from "@/core";
 import type { TermMode, TermOpened, TermTarget, TunnelInfo } from "@/core/gen";
 import {
   Button,
@@ -815,6 +815,7 @@ export function TerminalPane({
           <SearchBar
             search={searchRef.current}
             frameTick={beat}
+            draftKey={draftKey("terminal.search", hostId, targetKey)}
             onClose={() => {
               setSearchOpen(false);
               termRef.current?.focus();

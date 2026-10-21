@@ -178,12 +178,13 @@ export function StatsTile({ className }: { className?: string }) {
   const total = counts.running + counts.needs + counts.review + counts.done;
   return (
     <TiltCard className={cn("rounded-tile", className)}>
-      <Tile className="flex h-(--bento-h) flex-col p-5 short:p-4">
-        <span className="kicker">
+      {/* @container: the cost figure shrinks to the tile and the lane legend drops its words when narrow */}
+      <Tile className="flex h-(--bento-h) flex-col p-5 @container short:p-4">
+        <span className="kicker truncate">
           Today · {total} agent{total === 1 ? "" : "s"}
         </span>
-        <NumberTicker value={cost} format={formatUsd} className="mt-3 font-display text-hero font-bold text-ink" />
-        <span className="mt-1.5 text-sm font-semibold text-mute">
+        <NumberTicker value={cost} format={formatUsd} className="mt-3 font-display text-hero-fit font-bold text-ink" />
+        <span className="mt-1.5 truncate text-sm font-semibold text-mute">
           <NumberTicker value={tokens} format={formatCompact} className="font-bold text-ink" /> tokens
         </span>
         <div className="mt-auto flex flex-col gap-2 pt-4">
@@ -199,11 +200,15 @@ export function StatsTile({ className }: { className?: string }) {
               />
             ))}
           </div>
-          <div className="flex justify-between text-2xs font-semibold text-mute">
+          <div className="flex justify-between gap-2 text-2xs font-semibold whitespace-nowrap text-mute">
             {LANES.map((l) => (
-              <span key={l.column}>
-                <b className="mr-1 text-ink tabular">{counts[l.column]}</b>
-                {l.column === "running" ? "run" : l.column === "needs" ? "you" : l.column === "review" ? "rev" : "done"}
+              <span key={l.column} className="inline-flex items-center gap-1" title={l.title}>
+                {/* narrow tile: a status dot (matching the bar) stands in for the word */}
+                <i data-status={l.status} aria-hidden className="hidden size-1.5 rounded-full st-bg @max-[10.5rem]:inline-block" />
+                <b className="text-ink tabular">{counts[l.column]}</b>
+                <span className="@max-[10.5rem]:hidden">
+                  {l.column === "running" ? "run" : l.column === "needs" ? "you" : l.column === "review" ? "rev" : "done"}
+                </span>
               </span>
             ))}
           </div>
@@ -236,7 +241,7 @@ export function HealthTile({ className }: { className?: string }) {
 
   return (
     <TiltCard className={cn("rounded-tile", className)}>
-      <Tile className={cn("flex h-(--bento-h) flex-col p-5 short:p-4", stale && "grayscale-[0.6]")}>
+      <Tile className={cn("flex h-(--bento-h) flex-col p-5 @container short:p-4", stale && "grayscale-[0.6]")}>
         <div className="flex items-center gap-2">
           <span className="kicker min-w-0 truncate">{profile?.name ?? state?.info.hostname ?? "No host"}</span>
           <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-bold text-mute">
@@ -247,15 +252,16 @@ export function HealthTile({ className }: { className?: string }) {
         {health ? (
           <>
             <div className="mt-3 flex items-baseline gap-1 font-display font-bold whitespace-nowrap text-ink short:mt-2">
-              <NumberTicker value={Math.round(health.cpuPct)} className="text-hero" />
+              <NumberTicker value={Math.round(health.cpuPct)} className="text-hero-fit" />
               <span className="text-md text-mute">% cpu</span>
-              <span className="ml-auto text-2xs font-semibold text-mute tabular">load {health.load1.toFixed(2)}</span>
+              {/* the load average steps aside before it would crowd the cpu figure */}
+              <span className="ml-auto pl-2 text-2xs font-semibold text-mute tabular @max-[9.5rem]:hidden">load {health.load1.toFixed(2)}</span>
             </div>
             <Sparkline values={cpu} status="running" height={28} className="mt-2" aria-label="CPU history" />
             <div className="mt-auto flex flex-col gap-1.5 pt-3">
-              <div className="flex justify-between text-2xs font-bold text-mute">
+              <div className="flex justify-between gap-2 text-2xs font-bold whitespace-nowrap text-mute">
                 <span>RAM</span>
-                <span className="text-ink tabular">
+                <span className="min-w-0 truncate text-ink tabular">
                   {fmtBytes(health.memUsed)} / {fmtBytes(health.memTotal)} GB
                 </span>
               </div>

@@ -2,7 +2,7 @@ import { ClipboardList, Copy, LayoutTemplate, Pencil, Plus, Trash2 } from "lucid
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { Badge, Button, Chip, Field, IconButton, Input, Select, spring, Switch, Textarea, toast } from "@/design";
-import { useSettings } from "@/core";
+import { draftKey as makeDraftKey, drafts, useDraftState, useSettings } from "@/core";
 import type { AgentTemplate, ThinkingLevel } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
@@ -15,9 +15,9 @@ function newId(): string {
   return `tpl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function TemplateForm({ initial, onSave }: { initial: AgentTemplate; onSave: (t: AgentTemplate) => Promise<void> }) {
+function TemplateForm({ initial, draftKey, onSave }: { initial: AgentTemplate; draftKey: string; onSave: (t: AgentTemplate) => Promise<void> }) {
   const models = useModels();
-  const [t, setT] = useState(initial);
+  const [t, setT] = useDraftState(draftKey, initial);
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const nameError = touched && !t.name.trim() ? "Give the template a name." : undefined;
@@ -105,14 +105,22 @@ export function Templates({ index }: { index: number }) {
     );
 
   const edit = (initial: AgentTemplate | null) => {
-    const base: AgentTemplate = initial ?? { id: newId(), name: "", plan: false, prompt: "" };
+    // a new template gets its id on save, so the persisted "new" draft doesn't pin one
+    const base: AgentTemplate = initial ?? { id: "", name: "", plan: false, prompt: "" };
+    const key = makeDraftKey("template.editor", initial?.id ?? "new");
     openSheet({
       title: initial ? `Edit ${initial.name}` : "New template",
       description: "A reusable preset: model, thinking, plan mode and a starting prompt.",
       content: (
         <TemplateForm
           initial={base}
-          onSave={(t) => run(saveTemplate(t), initial ? `Saved “${t.name}”` : `Added “${t.name}”`).then(closeSheet, () => {})}
+          draftKey={key}
+          onSave={(t) =>
+            run(saveTemplate({ ...t, id: t.id || newId() }), initial ? `Saved “${t.name}”` : `Added “${t.name}”`).then(() => {
+              drafts.clear(key);
+              closeSheet();
+            }, () => {})
+          }
         />
       ),
     });

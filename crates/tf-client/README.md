@@ -70,7 +70,11 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   land in a temp file whose sha256 (`sha256sum`/`shasum -a 256`) must match before the `mv`;
   `TF_HOSTD_BIN` (the embedder's `hostd_bins_override`) is honoured by debug app builds only;
   `<home>` = `$TF_HOSTD_HOME` or `~/.teleflock`. Attach: `tf-hostd attach --session S
-  [--relay-port P] [--replace]`.
+  [--relay-port P] [--replace]` (`--replace` after an upload).
+* Shared hosts never downgrade: when the installed tf-hostd is newer than this build
+  (`deploy::host_is_newer`; another device runs a newer app), nothing is uploaded and the app attaches
+  to it as is (`Deployed.newer`). A protocol it doesn't speak fails with `version_mismatch` and an
+  "update TeleFlock on this device" hint instead of a redeploy.
 
 ## Embedded artifacts
 `build.rs` embeds `$TF_HOSTD_DIST/<triple>/tf-hostd[.exe]` (default `<workspace>/target/hostd-dist`)

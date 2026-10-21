@@ -1,6 +1,6 @@
 import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Sparkles } from "lucide-react";
-import { forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { useSettings } from "@/core";
+import { forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef } from "react";
+import { useDraft, useSettings } from "@/core";
 import type { ThinkingLevel } from "@/core/gen";
 import { IconButton, Kbd, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn } from "@/design";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
@@ -16,6 +16,8 @@ export interface DispatchComposerHandle {
 
 export interface DispatchComposerProps {
   hostId?: string;
+  /** Draft key of the task text (per host + repo), so an unsent task survives navigation and reload. */
+  draftKey: string;
   options: DispatchOptions;
   onOptionsChange(options: DispatchOptions): void;
   /** Sends one task; the composer clears itself and keeps focus. */
@@ -32,10 +34,10 @@ export interface DispatchComposerProps {
  * footer holds the per-dispatch options: template or model + thinking, and plan mode.
  */
 export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchComposerProps>(function DispatchComposer(
-  { hostId, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
+  { hostId, draftKey, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
   ref,
 ) {
-  const [text, setText] = useState("");
+  const [text, setText, clearText] = useDraft(draftKey);
   const ta = useRef<HTMLTextAreaElement>(null);
   useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus() }), []);
   const disabled = !!disabledReason;
@@ -44,7 +46,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const send = () => {
     if (!canSend) return;
     onSend(text.trim());
-    setText("");
+    clearText();
     ta.current?.focus();
   };
 

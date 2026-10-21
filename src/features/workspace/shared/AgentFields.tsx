@@ -1,6 +1,7 @@
 import { ClipboardList, Cpu, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { useDraftState } from "@/core";
 import type { AgentSpec, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
 import { Field, Input, Select, type SelectOption, Switch, Textarea, cn, spring } from "@/design";
 import { TemplatePicker } from "./templates";
@@ -32,6 +33,28 @@ export function initialAgentDraft(settings: Pick<Settings, "defaultModel" | "def
     plan: settings?.defaultPlan ?? false,
     prompt: "",
   };
+}
+
+type AgentText = Pick<AgentDraft, "name" | "nameTouched" | "prompt">;
+const NO_TEXT: AgentText = { name: "", nameTouched: false, prompt: "" };
+
+/**
+ * An agent draft whose typed fields (name, prompt) persist as a draft under `key`; the switches and
+ * selects (start, model, thinking, plan) are component state seeded by `init`. Returns the draft, a
+ * patcher, and a clear for the typed fields (call it after a successful launch).
+ */
+export function useAgentDraft(key: string, init: () => AgentDraft): [AgentDraft, (patch: Partial<AgentDraft>) => void, () => void] {
+  const [opts, setOpts] = useState(init);
+  const [text, setText, clearText] = useDraftState<AgentText>(key, NO_TEXT);
+  const draft = useMemo(() => ({ ...opts, ...text }), [opts, text]);
+  const patch = (p: Partial<AgentDraft>) => {
+    const { name, nameTouched, prompt, ...rest } = p;
+    if (name !== undefined || nameTouched !== undefined || prompt !== undefined) {
+      setText((t) => ({ name: name ?? t.name, nameTouched: nameTouched ?? t.nameTouched, prompt: prompt ?? t.prompt }));
+    }
+    if (Object.keys(rest).length > 0) setOpts((o) => ({ ...o, ...rest }));
+  };
+  return [draft, patch, clearText];
 }
 
 export function toAgentSpec(d: AgentDraft): AgentSpec {

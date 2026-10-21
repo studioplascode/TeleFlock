@@ -1,6 +1,6 @@
 import { PanelTopClose, Pencil, SquareX, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { core, toApiError } from "@/core";
+import { core, draftKey, toApiError, useDraft } from "@/core";
 import {
   Button,
   ContextMenu,
@@ -56,7 +56,9 @@ async function run(what: string, call: () => Promise<unknown>): Promise<boolean>
 /** Right-click (long-press on touch) menu for a terminal tab: rename / close tab / close pane. */
 export function TabActions({ hostId, target, onClosed, tabPaneIds, children }: TabActionsProps) {
   const [pending, setPending] = useState<Pending>(null);
-  const [label, setLabel] = useState("");
+  // the typed name persists per tab (same key as the workspace menu's Rename tab) until a rename succeeds
+  const renameT = pending?.kind === "rename" ? pending.t : target;
+  const [label, setLabel, clearLabel] = useDraft(draftKey("tab.rename", hostId, renameT.tabId), renameT.tabLabel);
   const [busy, setBusy] = useState(false);
   const host = core.host(hostId);
 
@@ -72,7 +74,10 @@ export function TabActions({ hostId, target, onClosed, tabPaneIds, children }: T
     setBusy(true);
     const ok = await run("Rename tab", () => host.call("tab.rename", { tabId: pending.t.tabId, label: next }));
     setBusy(false);
-    if (ok) setPending(null);
+    if (ok) {
+      clearLabel();
+      setPending(null);
+    }
   };
 
   const confirmClose = async () => {
@@ -96,13 +101,7 @@ export function TabActions({ hostId, target, onClosed, tabPaneIds, children }: T
           <ContextMenuLabel>
             Tab <span className="normal-case">{target.tabLabel}</span> · <span className="font-mono normal-case">{target.paneId}</span>
           </ContextMenuLabel>
-          <ContextMenuItem
-            icon={<Pencil />}
-            onSelect={() => {
-              setLabel(target.tabLabel);
-              setPending({ kind: "rename", t: target });
-            }}
-          >
+          <ContextMenuItem icon={<Pencil />} onSelect={() => setPending({ kind: "rename", t: target })}>
             Rename tab…
           </ContextMenuItem>
           <ContextMenuSeparator />

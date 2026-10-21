@@ -46,6 +46,7 @@ pub mod methods;
 pub mod model;
 pub mod session;
 pub mod term;
+pub mod version;
 
 pub use app::*;
 pub use host::*;

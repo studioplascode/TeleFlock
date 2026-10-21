@@ -145,10 +145,15 @@ pub fn line_of(msg: &ServerMsg) -> Option<Arc<str>> {
 
 static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
 
-/// Internal control line (only `tf-hostd stop` / `attach --replace` use it).
+/// Internal control line (`tf-hostd stop` / `attach --replace`). `version` is the sender's
+/// `--version` line (older builds send none); `force` stops regardless of the stop policy.
 #[derive(serde::Deserialize)]
 struct CtlLine {
     ctl: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    force: bool,
 }
 
 /// Serves one accepted connection until it closes.
@@ -160,10 +165,25 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
         _ => return,
     }
     if let Ok(ctl) = serde_json::from_str::<CtlLine>(&first) {
-        let reply = daemon.control(&ctl.ctl);
+        let mut reply = daemon.control(&ctl.ctl);
+        let mut stop = false;
+        if ctl.ctl == "stop" {
+            let requester = ctl.version.as_deref().unwrap_or("(unversioned)");
+            match daemon.may_stop(ctl.version.as_deref(), ctl.force) {
+                Ok(()) => {
+                    info!(requester, force = ctl.force, "stop requested");
+                    stop = true;
+                }
+                Err(why) => {
+                    warn!(requester, "stop refused: {why}");
+                    reply["ok"] = false.into();
+                    reply["refused"] = why.into();
+                }
+            }
+        }
         let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
         let _ = write.flush().await;
-        if ctl.ctl == "stop" {
+        if stop {
             daemon.shutdown.cancel();
         }
         return;
@@ -171,11 +191,19 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     let (client_info, herdr_session) = match serde_json::from_str::<ClientMsg>(&first) {
         Ok(ClientMsg::Hello { protocol, client, herdr_session }) => {
             if protocol != PROTOCOL_VERSION {
+                let hint = if protocol < PROTOCOL_VERSION {
+                    format!(
+                        "This host runs tf-hostd {}, installed by a newer TeleFlock on another device. Update TeleFlock on this device.",
+                        crate::HOSTD_VERSION
+                    )
+                } else {
+                    "Reconnect so the app redeploys tf-hostd".to_string()
+                };
                 let err = ApiError::new(
                     "version_mismatch",
                     format!("client protocol {protocol}, tf-hostd protocol {PROTOCOL_VERSION}"),
                 )
-                .with_hint("Reconnect so the app redeploys tf-hostd");
+                .with_hint(hint);
                 write_now(&mut write, &ServerMsg::Error { error: err }).await;
                 return;
             }
@@ -202,7 +230,8 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
 
     let client_id = format!("c{}", NEXT_CLIENT.fetch_add(1, Ordering::Relaxed));
     let client = ClientHandle::new(client_id.clone(), client_info);
-    info!(client = %client_id, app = %client.info().app, device = %client.info().device, session = %session, "client connected");
+    let _counted = daemon.count_client();
+    info!(client = %client_id, app = %client.info().app, device = %client.info().device, session = %session, clients = daemon.clients(), "client connected");
 
     client.send(ServerMsg::Welcome {
         protocol: PROTOCOL_VERSION,

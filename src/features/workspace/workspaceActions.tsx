@@ -1,6 +1,6 @@
 import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PanelTopClose, PencilLine, SquareTerminal, SquareX, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { core, navigate, useUi } from "@/core";
+import { core, draftKey, drafts, navigate, useUi } from "@/core";
 import type { PaneInfo, Tab, Workspace } from "@/core/gen";
 import {
   ContextMenu,
@@ -88,10 +88,12 @@ export async function newShell(hostId: string, ws: Workspace): Promise<void> {
 }
 
 export async function renameWorkspace(hostId: string, ws: Workspace): Promise<void> {
-  const label = await promptText({ title: "Rename workspace", label: "Label", initial: ws.label, confirmLabel: "Rename" });
+  const key = draftKey("workspace.rename", hostId, ws.id);
+  const label = await promptText({ title: "Rename workspace", label: "Label", initial: ws.label, draftKey: key, confirmLabel: "Rename" });
   if (!label || label === ws.label) return;
   try {
     await core.host(hostId).call("workspace.rename", { workspaceId: ws.id, label });
+    drafts.clear(key);
     toast({ title: `Renamed to ${label}`, duration: 2500 });
   } catch (e) {
     failToast("Couldn't rename the workspace", e);
@@ -189,10 +191,12 @@ export async function removeWorktree(hostId: string, ws: Workspace): Promise<voi
 }
 
 export async function renameTab(hostId: string, tab: Tab): Promise<void> {
-  const label = await promptText({ title: "Rename tab", label: "Label", initial: tab.label, confirmLabel: "Rename" });
+  const key = draftKey("tab.rename", hostId, tab.id);
+  const label = await promptText({ title: "Rename tab", label: "Label", initial: tab.label, draftKey: key, confirmLabel: "Rename" });
   if (!label || label === tab.label) return;
   try {
     await core.host(hostId).call("tab.rename", { tabId: tab.id, label });
+    drafts.clear(key);
     toast({ title: `Renamed tab to ${label}`, duration: 2500 });
   } catch (e) {
     failToast("Couldn't rename the tab", e);

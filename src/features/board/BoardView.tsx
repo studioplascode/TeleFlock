@@ -50,8 +50,8 @@ export function BoardView() {
   const rootRef = useRef<HTMLDivElement>(null);
   const roomy = useMinWidth(rootRef, 1130);
   // Beside an open split the board gets narrow: the bento row steps aside so the lanes keep their height.
-  // Same on very short windows (the 560px minimum), where the tiles would leave the lanes a sliver.
-  const tall = useMediaQuery("(min-height: 620px)");
+  // Same on short windows (e.g. 1024×640 at 125 % scaling), where the tiles would leave the lanes a sliver.
+  const tall = useMediaQuery("(min-height: 680px)");
   const bento = useMinWidth(rootRef, 760) && tall;
 
   const filter = { hostId, repo: repo ?? undefined, q: q.trim() || undefined };
@@ -85,7 +85,7 @@ export function BoardView() {
           className={cn(
             "grid shrink-0 gap-3 short:gap-2.5",
             roomy
-              ? "grid-cols-[minmax(0,2.05fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.32fr)] min-[2400px]:grid-cols-[minmax(0,2fr)_minmax(0,440px)_minmax(0,440px)_minmax(0,1.6fr)]"
+              ? "grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.25fr)] min-[2400px]:grid-cols-[minmax(0,2fr)_minmax(0,440px)_minmax(0,440px)_minmax(0,1.6fr)]"
               : "grid-cols-[minmax(0,1.75fr)_minmax(0,1fr)_minmax(0,1fr)]",
           )}
         >

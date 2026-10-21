@@ -11,7 +11,17 @@ export interface NumberTickerProps {
 
 const DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
-/** Rolling odometer digits for cost / tokens. Columns are keyed from the right so units stay put. */
+/** Approximate advance of `chars` in em for the display face (tabular digits ≈ 0.51em, `.`/`,` ≈ 0.23em, `$`/units ≈ 0.64em). */
+function emWidth(chars: string[]): number {
+  let w = 0;
+  for (const ch of chars) w += DIGITS.includes(ch) ? 0.52 : ch === "." || ch === "," ? 0.25 : 0.66;
+  return w;
+}
+
+/**
+ * Rolling odometer digits for cost / tokens. Columns are keyed from the right so units stay put.
+ * Publishes `--fit-em` (the text's approximate width in em) for the `text-hero-fit` utility.
+ */
 export function NumberTicker({ value, format = formatInt, className }: NumberTickerProps) {
   const text = format(value);
   const [mounted, setMounted] = useState(false);
@@ -21,7 +31,7 @@ export function NumberTicker({ value, format = formatInt, className }: NumberTic
   }, []);
   const chars = [...text];
   return (
-    <span className={cn("tf-ticker", className)}>
+    <span className={cn("tf-ticker", className)} style={{ "--fit-em": emWidth(chars).toFixed(2) } as CSSProperties}>
       <span className="sr-only">{text}</span>
       {chars.map((ch, i) => {
         const key = chars.length - i;

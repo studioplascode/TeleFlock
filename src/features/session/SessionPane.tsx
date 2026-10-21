@@ -103,7 +103,8 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { age
   const { ui } = useSession(agentKey);
   return (
     <>
-      <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && !focus && "rounded-tile glass")}>
+      {/* desktop: a short window keeps a strip of transcript beside an ask card (the card scrolls instead) */}
+      <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && !focus && "rounded-tile glass", !mobile && "min-h-24")}>
         {ready ? (
           <Transcript agentKey={agentKey} padX={mobile ? 10 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} overscan={mobile ? 3 : 8} dense={mobile} />
         ) : (
@@ -119,7 +120,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { age
             initial={{ opacity: 0, y: 40, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
             exit={{ opacity: 0, y: 24, scale: 0.97, transition: { duration: 0.2 } }}
-            className="relative z-raised mx-auto flex max-h-[62%] w-full shrink-0 flex-col"
+            className={cn("relative z-raised mx-auto flex max-h-[62%] w-full flex-col", mobile ? "shrink-0" : "min-h-0 shrink")}
             style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
           >
             {/* Sunset bloom: flares as the card lands, then settles into a glow spilling over the transcript. */}

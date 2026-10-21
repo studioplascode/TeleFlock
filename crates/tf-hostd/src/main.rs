@@ -26,12 +26,17 @@ enum Cmd {
         /// herdr session the client will attach to (the client's hello decides).
         #[arg(long, default_value = "default")]
         session: String,
-        /// Stop a running daemon that runs a different binary first.
+        /// The app just installed this build: stop a running daemon that runs another binary
+        /// first, unless it is newer, or the same version with clients attached.
         #[arg(long)]
         replace: bool,
     },
     /// Gracefully stop the running daemon.
-    Stop,
+    Stop {
+        /// Stop it even if it refuses (it keeps serving connected clients against older builds).
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -47,7 +52,7 @@ fn main() {
             tf_hostd::logging::init_stderr();
             tf_hostd::attach::run(paths, &session, replace, cli.relay_port)
         }
-        Some(Cmd::Stop) => tf_hostd::attach::stop(paths),
+        Some(Cmd::Stop { force }) => tf_hostd::attach::stop(paths, force),
         None => {
             eprintln!("tf-hostd: missing command (daemon | attach | stop | --version)");
             Ok(2)

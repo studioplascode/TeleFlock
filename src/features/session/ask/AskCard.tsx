@@ -1,7 +1,7 @@
 import { Check, MessageCircle, PenLine, Send, SquareTerminal, X } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
-import { parseAgentKey, useAgent } from "@/core";
+import { answerDraftKey, drafts, parseAgentKey, useAgent, useDraft } from "@/core";
 import type { Answer, NeedsOption, UiRequest } from "@/core/gen";
 import { cn, Elapsed, Spinner, spring } from "@/design";
 import { haptic } from "@/features/shell/haptics";
@@ -39,8 +39,18 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   const agent = useAgent(agentKey);
   const needs = agent?.needs;
   const [picked, setPicked] = useState<string[]>([]);
-  const [other, setOther] = useState<string | null>(null);
-  const [text, setText] = useState(request.initial ?? "");
+  // Free-text answers persist per request (shared with the board and the answer HUD); the Other
+  // field shows while open or holding a draft.
+  const otherKey = answerDraftKey(agentKey, request.id, "other");
+  const textKey = answerDraftKey(agentKey, request.id, "text");
+  const [otherText, setOtherText] = useDraft(otherKey);
+  const [otherOpen, setOtherOpen] = useState(false);
+  const other = otherOpen || otherText !== "" ? otherText : null;
+  const setOther = (v: string | null) => {
+    setOtherOpen(v != null);
+    setOtherText(v ?? "");
+  };
+  const [text, setText] = useDraft(textKey, request.initial ?? "");
   const [sent, setSent] = useState<string | null>(null);
   const [choosing, setChoosing] = useState<string | null>(null);
   const [busy, run] = usePending();
@@ -62,6 +72,8 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
     const res = await run(hostCall(hostId, "agent.answer", { agentId, requestId: request.id, answer: full }, { failure: "Answer not delivered" }));
     if (res.ok) {
       haptic("success");
+      drafts.clear(otherKey);
+      drafts.clear(textKey);
       setSent(label);
       onAnswered?.();
     } else haptic("warning");
@@ -179,7 +191,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
         )}
       </div>
 
-      <h3 className={cn("relative mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "mt-2 text-lg leading-[1.2]" : "mt-2.5 text-[25px] leading-[1.15]")}>{headline}</h3>
+      <h3 className={cn("relative mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "mt-2 text-lg leading-[1.2]" : "mt-2.5 text-[25px] leading-[1.15] short:text-[21px]")}>{headline}</h3>
       {body && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-white/90">{body}</div>}
       {needs?.command && (
         <div className={cn("relative overflow-hidden rounded-md bg-[rgb(30_4_18/0.42)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]", compact ? "my-2" : "my-2.5")}>

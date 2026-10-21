@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CornerDownLeft, Maximize2, Send } from "lucide-react";
-import { type ReactNode, useRef, useState } from "react";
-import { navigate, parseAgentKey, useAgent } from "@/core";
+import { type ReactNode, useRef } from "react";
+import { draftKey, navigate, parseAgentKey, useAgent, useDraft } from "@/core";
 import { AgentGlyph, Chip, cn, Elapsed, Heartbeat, IconButton, Input, StatusPill, useActivity, useIsMobile } from "@/design";
 import { TerminalPane, type TerminalHandle } from "@/features/terminal";
 import { agentStatus, hostCall, useBeat } from "./api";
@@ -28,13 +28,13 @@ export function NonOmpView({ agentKey }: { agentKey: string }) {
   const beat = useBeat(agentKey);
   const { tier } = useActivity(beat);
   const term = useRef<TerminalHandle>(null);
-  const [line, setLine] = useState("");
+  const [line, setLine, clearLine] = useDraft(draftKey("terminal.line", agentKey));
   if (!agent) return null;
   const status = agentStatus(agent);
   const sendLine = () => {
-    if (!line) return;
-    term.current?.send(`${line}\r`);
-    setLine("");
+    if (!line || !term.current) return;
+    term.current.send(`${line}\r`);
+    clearLine();
   };
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3" data-status={status}>

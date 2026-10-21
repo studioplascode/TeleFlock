@@ -83,13 +83,15 @@ function TodayTile({ hostFilter }: { hostFilter: string }) {
   const pace = cost / hours;
   const mobile = useIsMobile();
   return (
-    <Tile variant="omp" className="flex min-h-56 flex-col p-5 max-md:min-h-0 max-md:p-4">
+    // desktop: the figure fits the tile (mega once the page is wide) instead of clipping a four-figure day
+    <Tile variant="omp" className={cn("flex min-h-56 flex-col p-5 max-md:min-h-0 max-md:p-4", !mobile && "@container @3xl:[--fit-max:var(--text-mega)]")}>
       <span className="kicker text-white/80">Today</span>
-      <NumberTicker value={cost} format={formatUsd} className={cn("mt-2 font-display font-bold", mobile ? "mt-1 text-hero" : "text-hero @3xl:text-mega")} />
+      <NumberTicker value={cost} format={formatUsd} className={cn("mt-2 font-display font-bold", mobile ? "mt-1 text-hero" : "text-hero-fit")} />
       <span className="mt-1 text-sm font-semibold text-white/85">
         <NumberTicker value={tokens} format={formatCompact} className="font-bold text-white" /> tokens
       </span>
-      <div className="mt-auto grid grid-cols-3 gap-3 pt-4 text-xs font-semibold text-white/80 max-md:pt-3 [&>span]:min-w-0 [&_b]:truncate">
+      {/* a narrow desktop tile gives the pace column (the longest figure) whatever "in"/"out" leave over */}
+      <div className="mt-auto grid grid-cols-3 gap-3 pt-4 text-xs font-semibold text-white/80 max-md:pt-3 @max-[22rem]:grid-cols-[auto_auto_minmax(0,1fr)] @max-[22rem]:gap-x-5 [&>span]:min-w-0 [&_b]:truncate">
         <span>
           <b className="block font-display text-lg text-white">{formatCompact(io[0])}</b>in
         </span>

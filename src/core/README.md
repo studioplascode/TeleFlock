@@ -82,6 +82,36 @@ if (hasMore) await loadOlder(key);
 Live sessions are reopened automatically when a host comes back online or the devserver
 socket reconnects. A host patch with a revision gap triggers `state.get`.
 
+## Drafts (`drafts.ts`, `draftImages.ts`, `draftSweep.ts`)
+
+Every user-typed field persists so it survives unmounts (switching agent or view), reloads and
+restarts. Keys come from `draftKey(scope, ...parts)` with every context identity the value
+belongs to (host, agent key, repo, request id, edited item id or `"new"`).
+
+```ts
+const [text, setText, clear] = useDraft(draftKey("review.commit", hostId, cwd));      // useState("") drop-in
+const [title, setTitle] = useDraft(draftKey("dialog.rename", agentKey), meta.title);  // prefilled field
+const [form, setForm, clearForm] = useDraftState(draftKey("hosts.edit", id ?? "new"), profile); // JSON object
+drafts.get(key, initial?) / drafts.set(key, value, initial?) / drafts.clear(key) / drafts.clearWhere(pred)
+const [images, setImages, clearImages] = useDraftImages(key);                         // composer attachments; setImages(cur => …) edits
+```
+
+- A value equal to the field's default (`initial`, `""` by default) deletes the entry; clear form
+  drafts only after a successful submit (cancel/close keeps them). Filters are never auto-cleared.
+- Text: zustand `persist` to localStorage `tf.drafts`, writes debounced (300 ms, flushed on page
+  hide/unload), never throws (quota → smaller budget → memory only). Persisted copies are pruned by
+  `pruneDrafts` (`DRAFT_LIMITS`: 400 entries, 30 days, 1 M chars; newest first).
+- Images: `DraftImage { mime, data (base64), preview }`, ≤ `MAX_DRAFT_IMAGES` (8) per key, in memory
+  and written through to IndexedDB `tf.drafts`/`images` (`{ images: {mime,data}[], at }`; preview is
+  rebuilt). Hydrated on first `useDraftImages(key)`; IndexedDB missing or failing → memory only.
+  Edits made before the stored images are read show at once and are replayed in order on top of
+  them (an added image lands after them, a clear stays a clear); nothing is written before that.
+  Edit with updaters (`setImages(cur => …)`, remove by identity), not lists built from a stale render.
+  At open, entries older than 30 days and all but the newest 40 are swept.
+- Answers: `answerDraftKey(agentKey, requestId, field)` (`"other"` is shared by the ask card, board
+  quick answer and answer-next HUD). `startDraftSweep()` (called at boot) drops them once the
+  agent's online host no longer lists that pending request (30 s grace for fresh typing).
+
 ## Imperative buses (no React state)
 
 ```ts

@@ -1,12 +1,12 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { core, navigate, parseAgentKey, useAgent, useSession, useUi } from "@/core";
+import { core, drafts, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useSession, useUi } from "@/core";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import type { OmpSubcommand } from "@/core/ompCommands";
-import { cn, GlowBorder, IconButton, Kbd, Spinner, spring, Textarea, toast } from "@/design";
-import { fileToImageInput, hostCall, type PendingImage, usePending } from "../api";
-import { useSessionUi } from "../state";
+import { cn, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
+import { fileToImageInput, hostCall, usePending } from "../api";
+import { composerDraftKey, useSessionUi } from "../state";
 import { findCommand, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
 import { useDictation } from "./useDictation";
 
@@ -34,10 +34,14 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const { meta, ui } = useSession(agentKey);
-  const draft = useSessionUi((s) => s.draft[agentKey]);
-  const [text, setText] = useState("");
-  const [images, setImages] = useState<PendingImage[]>([]);
+  // Text and images persist per agent (switching views, closing the session, restarts).
+  const draftKey = composerDraftKey(agentKey);
+  const [text, setText] = useDraft(draftKey);
+  const [images, setImages] = useDraftImages(draftKey);
+  const focusNonce = useSessionUi((s) => s.composerFocus[agentKey]);
   const [popup, setPopup] = useState<Popup | null>(null);
+  /** Attachment open in the lightbox. */
+  const [viewing, setViewing] = useState<number | null>(null);
   const [sel, setSel] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [sending, run] = usePending();
@@ -81,12 +85,14 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const dictation = useDictation((phrase) => setText((t) => (t && !t.endsWith(" ") ? `${t} ${phrase}` : t + phrase)));
 
-  // Text pushed in from elsewhere (queue chip, tree "edit from here").
+  // Focus requests from elsewhere ("Prompt…" on a board card).
   useEffect(() => {
-    if (!draft) return;
-    setText(draft.text);
-    ta.current?.focus();
-  }, [draft]);
+    if (!focusNonce) return;
+    const el = ta.current;
+    el?.focus();
+    el?.setSelectionRange(el.value.length, el.value.length);
+    useSessionUi.getState().consumeComposerFocus(agentKey);
+  }, [focusNonce, agentKey]);
 
   // The session's own commands (extensions, prompt templates, skills) for the palette.
   const [custom, setCustom] = useState<CommandInfo[]>([]);
@@ -218,11 +224,14 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     // Leading space escapes a slash: " /path is a file" goes to the model as text.
     const prompt = text.startsWith(" /") ? text.slice(1) : text.trim();
     const delivery = followUp ? "followUp" : working && caps && !caps.steer && caps.followUp ? "followUp" : "auto";
-    const imgs: ImageInput[] = images.map(({ mime, data }) => ({ mime, data }));
+    const sentImages = images;
+    const imgs: ImageInput[] = sentImages.map(({ mime, data }) => ({ mime, data }));
     const res = await run(hostCall(hostId, "agent.prompt", { agentId, text: prompt, images: imgs, delivery }, { failure: "Prompt not delivered" }));
     if (res.ok) {
-      setText("");
-      setImages([]);
+      // Only what was sent: anything typed or attached while sending stays in the draft.
+      const cur = drafts.get(draftKey);
+      drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
+      setImages((cur) => cur.filter((i) => !sentImages.includes(i)));
       setPopup(null);
       if (delivery === "followUp") toast({ title: "Queued follow-up", description: prompt.slice(0, 80), status: "running", duration: 2200 });
     }
@@ -550,11 +559,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           <div className="flex gap-2 overflow-x-auto px-3 pt-3 pb-1">
             {images.map((img, i) => (
               <motion.div key={i} initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: 1, transition: spring.bouncy }} className="group/img relative shrink-0">
-                <img src={img.preview} alt={`attachment ${i + 1}`} className="size-14 rounded-md object-cover shadow-hairline" />
+                <LightboxTrigger label={`View attachment ${i + 1}`} onClick={() => setViewing(i)}>
+                  <img src={img.preview} alt={`attachment ${i + 1}`} className="size-14 rounded-md object-cover shadow-hairline" />
+                </LightboxTrigger>
                 <button
                   type="button"
                   aria-label="Remove image"
-                  onClick={() => setImages((cur) => cur.filter((_, j) => j !== i))}
+                  onClick={() => setImages((cur) => cur.filter((x) => x !== img))}
                   className="pressable focus-ring absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full bg-tile-4 text-ink shadow-d1"
                 >
                   <X className="size-3" />
@@ -563,6 +574,11 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
             ))}
           </div>
         )}
+        <Lightbox
+          images={images.map((img, i) => ({ src: img.preview, alt: `attachment ${i + 1}` }))}
+          index={viewing !== null && viewing < images.length ? viewing : null}
+          onIndexChange={setViewing}
+        />
         <Textarea
           ref={ta}
           value={dictation.listening && dictation.interim ? `${text}${text && !text.endsWith(" ") ? " " : ""}${dictation.interim}` : text}

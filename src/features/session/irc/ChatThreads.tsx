@@ -1,6 +1,6 @@
 import { ChevronDown, CornerDownLeft, ExternalLink, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { type IrcEntry, type IrcThread, ircThreads, ircUnread, parseAgentKey, useIrcEntries, useSession } from "@/core";
+import { draftKey, drafts, type IrcEntry, type IrcThread, ircThreads, ircUnread, parseAgentKey, useDraft, useIrcEntries, useSession } from "@/core";
 import type { Subagent } from "@/core/gen";
 import { AgentGlyph, cn, formatAge, IconButton, Input, Spinner, useNow } from "@/design";
 import { hostCall, usePending } from "../api";
@@ -193,14 +193,18 @@ function MiniMessage({ entry, onJump }: { entry: IrcEntry; onJump: () => void })
 function DirectMessage({ agentKey, sub }: { agentKey: string; sub: Subagent }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
-  const [text, setText] = useState("");
+  const key = draftKey("irc.dm", agentKey, sub.id);
+  const [text, setText] = useDraft(key);
   const [busy, run] = usePending();
   const disabled = !meta?.caps.subagents;
   const send = async () => {
     const message = text.trim();
     if (!message || busy) return;
     const res = await run(hostCall(hostId, "agent.subagent", { agentId, subagentId: sub.id, action: "chat", message }, { success: `Sent to ${sub.name}`, failure: `Couldn't message ${sub.name}` }));
-    if (res.ok) setText("");
+    if (!res.ok) return;
+    // Only what was sent: anything typed while sending stays in the draft.
+    const cur = drafts.get(key);
+    drafts.set(key, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
   };
   return (
     <div>

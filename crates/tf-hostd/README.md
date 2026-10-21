@@ -7,15 +7,24 @@ Host daemon (architecture §3). Owners: HostdCore (everything not listed below),
 ```
 tf-hostd daemon [--relay-port P]                             # exit 3 when another daemon holds the lock
 tf-hostd attach [--session S] [--replace] [--relay-port P]   # stdio <-> hostd.sock, starts the daemon if needed
-tf-hostd stop
+tf-hostd stop [--force]
 tf-hostd --version                                           # "tf-hostd 0.1.0 proto 1"
 ```
 - `TF_HOSTD_HOME` overrides `~/.teleflock` (lab: `/tmp/tf-lab-core-home`). Layout in `src/paths.rs`.
 - `attach` starts the daemon detached (`setsid`, stdio null; Windows `DETACHED_PROCESS`) and waits ≤ 10 s
   for the socket. stdout carries protocol lines only; diagnostics go to stderr as `tf-hostd: …`.
-- `attach --replace` stops a running daemon whose binary identity (path, size, mtime) differs from its own.
+- Several devices share one daemon, and their apps update at different times, so a host only moves
+  forward (`tf_proto::version::cmp_lines`: semver, then protocol):
+  - `attach --replace` (the app just installed its build) stops a running daemon whose binary identity
+    (path, size, mtime) differs from its own when that daemon is older; never when it is newer; and for
+    the same version only when no client is connected (`replace_policy`). A kept daemon is attached to.
+  - While clients are connected, the daemon refuses `stop` from an older build, and from builds that
+    predate this rule (they send no version; `daemon::stop_policy`). The refused `attach` connects to
+    the running daemon instead. An idle daemon always stops; `tf-hostd stop --force` always stops it.
 - One daemon serves every herdr session: the client's `hello.herdrSession` picks the session context.
-- Internal control lines on the socket: `{"ctl":"info"}`, `{"ctl":"stop"}` (used by `stop` / `--replace`).
+- Internal control lines on the socket: `{"ctl":"info"|"stop","version":"<--version line>","force":bool}`
+  (used by `stop` / `--replace`). `info` reports `version`, `exe`, `pid` and `clients` (connected now);
+  a refused `stop` answers `"ok":false,"refused":"<why>"`.
 - Logs: `<home>/hostd.log` (rolled to `.log.1` at 8 MiB; level via `TF_HOSTD_LOG`).
 
 ## Dispatcher contract (`src/ops/mod.rs`)
