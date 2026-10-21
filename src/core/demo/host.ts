@@ -197,11 +197,11 @@ export class DemoHost implements SimHost {
   private build(): void {
     const now = this.now();
     const wsDefs: WorkspaceDef[] = this.variant === "forge" ? WORKSPACES : [{ id: "w1", repo: "teleflock", branch: "main", worktree: false, order: 0 }];
-    for (const d of wsDefs) this.addWorkspace(d.repo, d.branch, d.worktree, d.order, d.id, d.shellPane);
+    for (const d of wsDefs) this.addWorkspace(d.repo, d.branch, d.worktree, d.order, d.id, d.shellPane, d.cwd);
     const defs = this.variant === "forge" ? AGENTS : STUDIO_AGENTS;
     for (const def of defs) {
       const sim = this.addAgent(def, def.workspace);
-      if (!sim.omp) continue;
+      if (!sim.omp || def.fresh) continue;
       const to = now - (def.column === "running" ? 2000 : def.since * 1000);
       const from = now - def.age * 1000;
       const steps = historyFor(def);
@@ -689,7 +689,7 @@ export class DemoHost implements SimHost {
     if (needs.length) this.noNeedsSince = now;
     if (running.length < 2) {
       const idle = sims
-        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && now - s.agent.stateSince > 20_000)
+        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000)
         .sort((a, b) => Number(a.agent.archived) - Number(b.agent.archived) || a.agent.stateSince - b.agent.stateSince)[0];
       if (idle) idle.startTurn(DIRECTOR_PROMPTS[this.promptIdx++ % DIRECTOR_PROMPTS.length] as string, { author: OTHER_DEVICE });
     }
@@ -708,7 +708,7 @@ export class DemoHost implements SimHost {
         s.answer(p.request.id, { choices: rec ? [rec.id] : [], text: rec ? undefined : "Looks good, go ahead.", cancel: false, chat: false }, OTHER_DEVICE);
       }
     }
-    const review = sims.filter((s) => s.agent.column === "review").sort((a, b) => a.agent.stateSince - b.agent.stateSince);
+    const review = sims.filter((s) => s.agent.column === "review" && s.agent.turns > 0).sort((a, b) => a.agent.stateSince - b.agent.stateSince);
     if (review.length > 3) {
       const oldest = review[0] as AgentSim;
       if (now - oldest.agent.stateSince > 60_000) this.archive(oldest, true, OTHER_DEVICE);

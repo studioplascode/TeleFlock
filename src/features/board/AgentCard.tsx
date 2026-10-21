@@ -19,7 +19,7 @@ import {
   useNow,
 } from "@/design";
 import { BellOff } from "lucide-react";
-import { openAgent, openTerminal, reportError, stopAgent, useMuted } from "./agentActions";
+import { canReview, openAgent, openTerminal, promptAgent, reportError, stopAgent, useMuted } from "./agentActions";
 import { ArchiveButton } from "./ArchiveConfirm";
 import { CardContextMenu, CardMenuButton } from "./CardMenu";
 import { LANE_BY_COLUMN, NEEDS_LABEL } from "./lanes";
@@ -168,13 +168,14 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   if (!agent) return null;
 
   const meta = LANE_BY_COLUMN[lane];
-  const status = meta.status;
+  const ready = lane === "review" && agent.turns === 0;
+  // a fresh agent that never ran sits calmly (idle), not in review cyan
+  const status = ready ? "idle" : meta.status;
   const quiet = silentMs !== null;
   const omp = agent.omp;
   const todos = omp?.todos;
   const subs = omp?.subagents?.live ?? 0;
   const live = lane === "running" || lane === "needs";
-  const ready = lane === "review" && agent.turns === 0;
 
   const avatar =
     todos && todos.total > 0 ? (
@@ -196,19 +197,44 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         <QuickAnswer agentKey={agentKey} className="mt-2.5" max={4} chat={false} />
       </>
     );
+  } else if (lane === "review" && ready) {
+    // fresh agent: nothing to review yet, it's waiting for its first prompt
+    body = (
+      <>
+        <p className="mt-2 text-xs text-mute">Waiting for a prompt{agent.repo ? "" : agent.cwd ? ` in ${agent.cwd}` : ""}.</p>
+        <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
+            onClick={() => promptAgent(agentKey)}
+          >
+            Prompt…
+          </button>
+          <button
+            type="button"
+            className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink"
+            onClick={() => openTerminal(agentKey, false)}
+          >
+            Terminal
+          </button>
+        </div>
+      </>
+    );
   } else if (lane === "review") {
     body = (
       <>
         <LiveLine live={agent.live} running={false} className="mt-2" />
         <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-          <button
-            type="button"
-            data-status="review"
-            className="h-7 rounded-sm st-bg px-2.5 text-2xs font-extrabold pressable focus-ring hover:brightness-110"
-            onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}
-          >
-            Review diff
-          </button>
+          {canReview(agent) && (
+            <button
+              type="button"
+              data-status="review"
+              className="h-7 rounded-sm st-bg px-2.5 text-2xs font-extrabold pressable focus-ring hover:brightness-110"
+              onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}
+            >
+              Review diff
+            </button>
+          )}
           <ArchiveButton
             agentKey={agentKey}
             className="h-7 rounded-sm bg-tile-4 px-2.5 text-2xs font-bold text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] pressable focus-ring hover:bg-tile-5"
@@ -259,9 +285,11 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             <span data-status="needs-you" className="rounded-full st-bg px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase">
               {NEEDS_LABEL[agent.needs.kind]}
             </span>
+          ) : ready ? (
+            <span className="rounded-full bg-white/6 px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] text-mute uppercase">Ready</span>
           ) : (
             <span data-status="review" className="rounded-full st-soft px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase">
-              {ready ? "Ready" : "Ready to review"}
+              Ready to review
             </span>
           )}
           {todos && todos.total > 0 && (

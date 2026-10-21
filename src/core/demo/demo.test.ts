@@ -113,6 +113,23 @@ describe("demo engine", () => {
     expect(r.state.agents[agentKey("forge", "reconnect")]?.column).toBe("running");
   });
 
+  test("fresh idle agent: zero turns, no repo/diff, stays Ready until prompted", async () => {
+    const r = rig();
+    r.clock.advance(5 * 60_000);
+    const a = r.state.agents[agentKey("forge", "scratch")];
+    expect(a).toMatchObject({ column: "review", state: "idle", turns: 0, title: "", cwd: "/home/demo/scratch" });
+    expect(a?.repo).toBeUndefined();
+    expect(a?.branch).toBeUndefined();
+    expect(a?.diff).toBeUndefined();
+    expect(a?.omp?.link).toBe("live");
+    expect(r.state.hosts.forge?.state.workspaces.find((w) => w.id === a?.workspaceId)?.repo).toBeUndefined();
+    const snap = await r.call<{ items: unknown[] }>("forge", "session.open", { agentId: "scratch" });
+    expect(snap.items).toHaveLength(0);
+    await r.call("forge", "agent.prompt", { agentId: "scratch", text: "Sketch a CLI for tailing herdr events", images: [], delivery: "auto" });
+    r.clock.advance(300);
+    expect(r.state.agents[agentKey("forge", "scratch")]).toMatchObject({ column: "running", title: "Sketch a CLI for tailing herdr events" });
+  });
+
   test("long-transcript knob adds N rows of every kind to pool, pageable via session.history", async () => {
     const base = rig();
     base.clock.advance(2000);

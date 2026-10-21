@@ -123,8 +123,11 @@ export function slug(branch: string): string {
 
 export interface WorkspaceDef {
   id: string;
-  repo: string;
-  branch: string;
+  /** Absent for a plain folder (not a git repo). */
+  repo?: string;
+  branch?: string;
+  /** Folder for non-repo workspaces. */
+  cwd?: string;
   /** Linked worktree of the repo's primary workspace. */
   worktree: boolean;
   order: number;
@@ -144,6 +147,7 @@ export const WORKSPACES: WorkspaceDef[] = [
   { id: "w9", repo: "marketing-site", branch: "redesign/hero", worktree: true, order: 8 },
   { id: "w10", repo: "infra", branch: "main", worktree: false, order: 9 },
   { id: "w11", repo: "infra", branch: "ci/bun-cache", worktree: true, order: 10 },
+  { id: "w12", cwd: `${HOME}/scratch`, worktree: false, order: 11 },
 ];
 
 export interface AgentDef {
@@ -164,6 +168,8 @@ export interface AgentDef {
   todos?: TodoPhase[];
   line?: string;
   link?: "live" | "notShared";
+  /** Freshly started session: idle, zero turns, no history (the UI labels it "Ready"). */
+  fresh?: boolean;
 }
 
 const f = (path: string, added: number, removed: number, status: ChangedFile["status"] = "modified", oldPath?: string): ChangedFile =>
@@ -266,6 +272,10 @@ export const AGENTS: AgentDef[] = [
   {
     id: "copy", kind: "claude", workspace: "w3", column: "running", since: 30, age: 1300,
     title: "Tighten pricing page copy",
+  },
+  {
+    id: "scratch", kind: "omp", workspace: "w12", column: "review", model: "opus-5", thinking: "high", since: 45, age: 45, ctxPct: 1, cost: 0,
+    title: "", fresh: true,
   },
 ];
 

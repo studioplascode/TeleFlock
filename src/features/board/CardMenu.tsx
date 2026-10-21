@@ -1,4 +1,4 @@
-import { Bell, BellOff, CheckSquare, Archive, ArchiveRestore, ExternalLink, GitCompare, MoreHorizontal, Square, SquareTerminal } from "lucide-react";
+import { Archive, ArchiveRestore, Bell, BellOff, CheckSquare, ExternalLink, GitCompare, MessageSquare, MoreHorizontal, Square, SquareTerminal } from "lucide-react";
 import type { ReactNode } from "react";
 import { create } from "zustand";
 import { navigate, parseAgentKey, useAgent, useSettings } from "@/core";
@@ -21,7 +21,7 @@ import {
   DropdownMenuTrigger,
   IconButton,
 } from "@/design";
-import { archiveWithUndo, openAgent, openTerminal, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
+import { archiveWithUndo, canReview, openAgent, openTerminal, promptAgent, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
 import { useBoard } from "./boardStore";
 
 /* ───────────── archive with optional confirm (menus, selection bar) ───────────── */
@@ -90,7 +90,8 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
     { id: "open", label: "Open session", icon: <ExternalLink />, shortcut: "↵", run: () => openAgent(agentKey) },
     { id: "term", label: mobile ? "Terminal" : "Terminal (split)", icon: <SquareTerminal />, shortcut: "T", run: () => openTerminal(agentKey, mobile) },
   ];
-  if (lane === "review" || lane === "done")
+  if (lane === "review" && agent.turns === 0) items.unshift({ id: "prompt", label: "Prompt…", icon: <MessageSquare />, run: () => promptAgent(agentKey) });
+  if ((lane === "review" || lane === "done") && canReview(agent))
     items.push({ id: "diff", label: "Review diff", icon: <GitCompare />, run: () => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId }) });
   if (lane === "review") items.push({ id: "archive", label: "Archive", icon: <Archive />, run: () => requestArchive([agentKey]) });
   if (lane === "done") items.push({ id: "reopen", label: "Reopen for review", icon: <ArchiveRestore />, run: () => void setArchived(agentKey, false).catch(() => {}) });

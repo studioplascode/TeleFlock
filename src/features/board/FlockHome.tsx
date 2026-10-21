@@ -23,7 +23,7 @@ import {
   useNow,
 } from "@/design";
 import { DiffStat } from "./AgentCard";
-import { archiveWithUndo, openAgent, openAnswerHud, openTerminal, setArchived, useMuted } from "./agentActions";
+import { archiveWithUndo, canReview, openAgent, openAnswerHud, openTerminal, promptAgent, setArchived, useMuted } from "./agentActions";
 import { ArchiveConfirmDialog } from "./CardMenu";
 import { FilterChip } from "./FilterChip";
 import { SelectionBar } from "./SelectionBar";
@@ -150,7 +150,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const silent = useQuiet(column === "running" && !stale, agent?.live.lastEventAt);
   const now = useNow(30_000);
   if (!agent) return null;
-  const status = LANE_BY_COLUMN[column].status;
+  const status = column === "review" && agent.turns === 0 ? "idle" : LANE_BY_COLUMN[column].status;
   const todos = agent.omp?.todos;
   const quiet = silent !== null;
   return (
@@ -181,24 +181,41 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
               </div>
             </>
           )}
-          {column === "review" && (
+          {column === "review" && agent.turns === 0 && (
             <div className="mt-1.5 flex items-center gap-2">
-              <span data-status="review" className="rounded-full st-soft px-2 py-px text-[10px] font-bold uppercase">
-                {agent.turns === 0 ? "Ready" : "Review"}
-              </span>
-              {agent.diff && <DiffStat {...agent.diff} />}
+              <span className="rounded-full bg-white/6 px-2 py-px text-[10px] font-bold text-mute uppercase">Ready · waiting for a prompt</span>
               <button
                 type="button"
-                data-status="review"
-                className="ml-auto rounded-sm st-bg px-2.5 py-1 text-2xs font-extrabold pressable focus-ring"
+                className="ml-auto min-h-9 rounded-sm bg-accent px-3 py-1 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring"
                 onClick={(e) => {
                   e.stopPropagation();
-                  const { hostId } = parseAgentKey(agentKey);
-                  navigate({ name: "review", hostId, workspaceId: agent.workspaceId });
+                  promptAgent(agentKey);
                 }}
               >
-                Review diff
+                Prompt…
               </button>
+            </div>
+          )}
+          {column === "review" && agent.turns > 0 && (
+            <div className="mt-1.5 flex items-center gap-2">
+              <span data-status="review" className="rounded-full st-soft px-2 py-px text-[10px] font-bold uppercase">
+                Review
+              </span>
+              {agent.diff && <DiffStat {...agent.diff} />}
+              {canReview(agent) && (
+                <button
+                  type="button"
+                  data-status="review"
+                  className="ml-auto rounded-sm st-bg px-2.5 py-1 text-2xs font-extrabold pressable focus-ring"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const { hostId } = parseAgentKey(agentKey);
+                    navigate({ name: "review", hostId, workspaceId: agent.workspaceId });
+                  }}
+                >
+                  Review diff
+                </button>
+              )}
             </div>
           )}
         </div>

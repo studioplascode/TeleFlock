@@ -116,7 +116,7 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
 - **forge** (online): repos teleflock, api-gateway, marketing-site, infra. Agents (ids = names):
   `kanban`, `pool`, `ci` running · `push` (select ask) and `limits` (bash approval) need you ·
   `reconnect`, `hero` in review · `docs`, `flaky` (omp, `notShared` → `agent.connect`), `deps`
-  (caps read-only) done · `copy` (kind `claude`, herdr-only, flips working/done).
+  (caps read-only) done · `copy` (kind `claude`, herdr-only, flips working/done) · `scratch` (fresh: idle, `turns: 0`, title "", `~/scratch` not a repo; the director leaves it alone).
 - Streaming ≈ 40 tok/s with thinking, tools with live output/elapsed, diffs, todos, subagents
   (pool's task), cost/usage ticking, health jitter every 2 s, pulses at 10 Hz, patches at 5 Hz.
   `ci` goes quiet (> 90 s without events while working) shortly after start, and CI-themed

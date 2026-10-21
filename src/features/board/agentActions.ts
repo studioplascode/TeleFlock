@@ -2,6 +2,7 @@ import { core, navigate, parseAgentKey, useSettings, useUi } from "@/core";
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
 import { haptic } from "@/features/shell/haptics";
+import { useSessionUi } from "@/features/session/state";
 
 function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
@@ -84,6 +85,20 @@ export async function stopAgent(key: string): Promise<void> {
 export function openAgent(key: string): void {
   const { hostId, agentId } = parseAgentKey(key);
   morphTo(key, () => navigate({ name: "agent", hostId, agentId }));
+}
+
+/**
+ * Open the session with the composer focused (fresh agents waiting for their first prompt).
+ * Uses the session's "push text into the composer" seam with empty text, which focuses it on mount.
+ */
+export function promptAgent(key: string): void {
+  useSessionUi.getState().setDraft(key, "");
+  openAgent(key);
+}
+
+/** "Review diff" makes sense only in a git repo with something to look at. */
+export function canReview(agent: { repo?: string; diff?: { files: number }; turns: number }): boolean {
+  return !!agent.repo && ((agent.diff?.files ?? 0) > 0 || agent.turns > 0);
 }
 
 /** Desktop: open the agent's terminal in the split pane. Mobile: the full terminal view. */

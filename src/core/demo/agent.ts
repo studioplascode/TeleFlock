@@ -109,7 +109,7 @@ export class AgentSim {
     // Changed files accumulate from the seeded history's edit calls (see seeds.ts), not from the def.
     this.files = [];
     this.todos = structuredClone(def.todos ?? []);
-    const state = def.column === "running" ? "working" : def.column === "needs" ? "blocked" : def.column === "review" ? "done" : "idle";
+    const state = def.fresh ? "idle" : def.column === "running" ? "working" : def.column === "needs" ? "blocked" : def.column === "review" ? "done" : "idle";
     this.caps = capsFor(this.omp && def.link !== "notShared", def.id === "deps");
     this.agent = {
       id: def.id,
@@ -122,7 +122,7 @@ export class AgentSim {
       stateSince: now - def.since * 1000,
       column: def.column,
       archived: def.column === "done",
-      turns: Math.max(1, Math.round(def.age / 600)),
+      turns: def.fresh ? 0 : Math.max(1, Math.round(def.age / 600)),
       title: def.title,
       cwd: workspace.cwd,
       repo: workspace.repo,
