@@ -63,7 +63,7 @@ export function NeedsHeroTile({ className }: { className?: string }) {
 
   if (!key) {
     return (
-      <Tile className={cn("flex h-[212px] flex-col justify-between overflow-hidden p-5", className)}>
+      <Tile className={cn("flex h-(--bento-h) flex-col justify-between overflow-hidden p-5 short:p-4", className)}>
         <div className="flex items-center gap-2">
           <span data-status="done" className="inline-flex items-center gap-1.5 rounded-full st-soft py-1 pr-2.5 pl-2 font-display text-2xs font-bold tracking-[0.12em] uppercase">
             <StatusOrb status="done" size={6} label={null} />
@@ -86,10 +86,10 @@ export function NeedsHeroTile({ className }: { className?: string }) {
 
   return (
     <TiltCard className={cn("rounded-tile", className)} maxTilt={3}>
-      <Tile variant="sunset" className="sun-pulse flex h-[212px] flex-col overflow-hidden p-5">
+      <Tile variant="sunset" className="sun-pulse flex h-(--bento-h) flex-col overflow-hidden p-5 short:p-4">
         <div aria-hidden className="pointer-events-none absolute -top-16 -right-16 size-60 rounded-full border-[38px] border-white/8" />
         <div className="relative flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-[rgb(40_0_20/0.28)] py-1 pr-2.5 pl-2 font-display text-2xs font-bold tracking-[0.12em] uppercase">
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[rgb(40_0_20/0.28)] py-1 pr-2.5 pl-2 font-display text-2xs font-bold tracking-[0.12em] whitespace-nowrap uppercase">
             <span className="relative size-[7px] rounded-full bg-white">
               <span className="tf-loop absolute inset-0 animate-ping-soft rounded-full bg-white" />
             </span>
@@ -151,9 +151,9 @@ function HeroBody({ agentKey }: { agentKey: string }) {
   return (
     <>
       <button type="button" className="mt-2.5 text-left focus-ring rounded-sm" onClick={() => openAgent(agentKey)}>
-        <h3 className="line-clamp-2 max-w-xl font-display text-[21px] leading-tight font-bold">{n.question || n.title}</h3>
+        <h3 className="line-clamp-2 max-w-xl font-display text-[21px] leading-tight font-bold short:line-clamp-1 short:text-lg">{n.question || n.title}</h3>
       </button>
-      <p className="mt-1 truncate text-xs font-semibold opacity-85">
+      <p className="mt-1 truncate text-xs font-semibold opacity-85 short:hidden">
         {agent.repo ?? agent.name}
         {agent.branch && (
           <>
@@ -178,7 +178,7 @@ export function StatsTile({ className }: { className?: string }) {
   const total = counts.running + counts.needs + counts.review + counts.done;
   return (
     <TiltCard className={cn("rounded-tile", className)}>
-      <Tile className="flex h-[212px] flex-col p-5">
+      <Tile className="flex h-(--bento-h) flex-col p-5 short:p-4">
         <span className="kicker">
           Today · {total} agent{total === 1 ? "" : "s"}
         </span>
@@ -236,7 +236,7 @@ export function HealthTile({ className }: { className?: string }) {
 
   return (
     <TiltCard className={cn("rounded-tile", className)}>
-      <Tile className={cn("flex h-[212px] flex-col p-5", stale && "grayscale-[0.6]")}>
+      <Tile className={cn("flex h-(--bento-h) flex-col p-5 short:p-4", stale && "grayscale-[0.6]")}>
         <div className="flex items-center gap-2">
           <span className="kicker truncate">{profile?.name ?? state?.info.hostname ?? "No host"}</span>
           <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-bold text-mute">
@@ -246,7 +246,7 @@ export function HealthTile({ className }: { className?: string }) {
         </div>
         {health ? (
           <>
-            <div className="mt-3 flex items-baseline gap-1 font-display font-bold text-ink">
+            <div className="mt-3 flex items-baseline gap-1 font-display font-bold whitespace-nowrap text-ink short:mt-2">
               <NumberTicker value={Math.round(health.cpuPct)} className="text-hero" />
               <span className="text-md text-mute">% cpu</span>
               <span className="ml-auto text-2xs font-semibold text-mute tabular">load {health.load1.toFixed(2)}</span>
@@ -259,7 +259,7 @@ export function HealthTile({ className }: { className?: string }) {
                   {fmtBytes(health.memUsed)} / {fmtBytes(health.memTotal)} GB
                 </span>
               </div>
-              <div className="relative h-5">
+              <div className="relative h-5 short:hidden">
                 <Sparkline values={mem} status="review" height={20} fill live={false} aria-label="RAM history" />
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-white/6">
@@ -286,7 +286,7 @@ export function LiveTerminalTile({ className }: { className?: string }) {
 
   return (
     <TiltCard className={cn("rounded-tile", className)} maxTilt={2}>
-      <Tile variant="deep" className="flex h-[212px] flex-col overflow-hidden p-0">
+      <Tile variant="deep" className="flex h-(--bento-h) flex-col overflow-hidden p-0">
         <div className="flex items-center gap-2 px-4 pt-3.5 pb-2 text-xs font-bold">
           {agent ? (
             <>

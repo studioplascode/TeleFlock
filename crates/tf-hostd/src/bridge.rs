@@ -1,8 +1,9 @@
 //! Companion-extension bridge (architecture §4, wire format: `docs/bridge-protocol.md`).
 //!
 //! omp sessions that load `host/teleflock-bridge/teleflock-bridge.ts` connect to
-//! `~/.teleflock/run/bridge.sock` (Windows: the `bridge_pipe` named pipe), say `hello`, push events,
-//! and answer control requests. This module owns that socket and exposes:
+//! `~/.teleflock/run/bridge.sock` (Windows: the `bridge_pipe` named pipe, owner-only DACL), receive
+//! an `auth` frame carrying the secret from `run/bridge.secret`, say `hello`, push events, and
+//! answer control requests. This module owns that socket and exposes:
 //!
 //! * a registry of connected sessions keyed by omp `sessionId` (pid cross-check via [`BridgeHandle::by_pid`]),
 //! * typed async control calls with per-op timeouts and typed errors ([`BridgeError`] → [`ApiError`]),
@@ -306,6 +307,8 @@ struct Shared {
     events: broadcast::Sender<BridgeEvent>,
     next_conn: AtomicU64,
     next_req: AtomicU64,
+    /// Handshake secret sent as the first frame of every connection (see [`BridgeHandle::start`]).
+    secret: String,
 }
 
 struct Inner {
@@ -332,23 +335,29 @@ pub struct BridgeHandle {
 }
 
 impl BridgeHandle {
-    /// Binds `paths.bridge_sock` (unix, mode 0600, stale file replaced) or `paths.bridge_pipe` (windows).
-    /// Must be called inside a tokio runtime.
+    /// Generates a fresh handshake secret, writes it owner-only to `paths.bridge_secret`, then binds
+    /// `paths.bridge_sock` (unix, mode 0600, stale file replaced) or `paths.bridge_pipe` (windows,
+    /// DACL current user + SYSTEM). Must be called inside a tokio runtime.
     pub fn start(paths: &crate::paths::Paths) -> std::io::Result<BridgeHandle> {
+        paths.ensure_dirs()?;
+        let secret = crate::secure::new_secret()?;
+        crate::secure::write_secret_file(&paths.bridge_secret, &secret)?;
         #[cfg(unix)]
         let endpoint = BridgeEndpoint::Unix(paths.bridge_sock.clone());
         #[cfg(windows)]
         let endpoint = BridgeEndpoint::Pipe(paths.bridge_pipe.clone());
-        Self::bind(endpoint)
+        Self::bind(endpoint, secret)
     }
 
-    /// Binds an explicit endpoint (tests, lab harnesses).
-    pub fn bind(endpoint: BridgeEndpoint) -> std::io::Result<BridgeHandle> {
+    /// Binds an explicit endpoint (tests, lab harnesses). `secret` is presented to every
+    /// connection in the `auth` frame; the extension compares it with its secret file.
+    pub fn bind(endpoint: BridgeEndpoint, secret: String) -> std::io::Result<BridgeHandle> {
         let shared = Arc::new(Shared {
             reg: Mutex::new(Registry::default()),
             events: broadcast::channel(1024).0,
             next_conn: AtomicU64::new(1),
             next_req: AtomicU64::new(1),
+            secret,
         });
         let accept = listen(&endpoint, shared.clone())?;
         info!("bridge listening on {endpoint}");
@@ -745,10 +754,13 @@ fn listen(endpoint: &BridgeEndpoint, shared: Arc<Shared>) -> std::io::Result<Joi
     use tokio::net::windows::named_pipe::ServerOptions;
     let BridgeEndpoint::Pipe(name) = endpoint;
     let name = name.clone();
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .reject_remote_clients(true)
-        .create(&name)?;
+    // Owner-only DACL (current user + SYSTEM) on every instance; kept alive by the accept task.
+    let sd = crate::secure::PrivateSd::new()?;
+    let mut server = crate::secure::create_pipe_server(
+        ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true),
+        &name,
+        &sd,
+    )?;
     Ok(tokio::spawn(async move {
         loop {
             if let Err(e) = server.connect().await {
@@ -756,10 +768,11 @@ fn listen(endpoint: &BridgeEndpoint, shared: Arc<Shared>) -> std::io::Result<Joi
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
-            let next = match ServerOptions::new()
-                .reject_remote_clients(true)
-                .create(&name)
-            {
+            let next = match crate::secure::create_pipe_server(
+                ServerOptions::new().reject_remote_clients(true),
+                &name,
+                &sd,
+            ) {
                 Ok(n) => n,
                 Err(e) => {
                     warn!("bridge pipe create: {e}");
@@ -781,6 +794,8 @@ where
 {
     let conn_id = shared.next_conn.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // First frame on every connection: proves to the extension that this is the real hostd.
+    let _ = tx.send(json!({ "t": "auth", "v": BRIDGE_PROTOCOL, "secret": shared.secret }).to_string());
     lock(&shared.reg).conns.insert(
         conn_id,
         Conn {
@@ -1162,7 +1177,15 @@ mod tests {
     }
 
     impl FakeExt {
+        /// Connects and consumes hostd's `auth` frame (checking it carries the handle's secret).
         async fn connect(h: &BridgeHandle) -> Self {
+            let mut ext = Self::connect_raw(h).await;
+            let auth = ext.recv().await;
+            assert_eq!(auth["t"], "auth");
+            assert_eq!(auth["secret"], h.inner.shared.secret.as_str());
+            ext
+        }
+        async fn connect_raw(h: &BridgeHandle) -> Self {
             let BridgeEndpoint::Unix(p) = h.endpoint();
             let (r, w) = UnixStream::connect(p).await.unwrap().into_split();
             FakeExt {
@@ -1212,7 +1235,7 @@ mod tests {
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let sock = dir.join("run").join("bridge.sock");
-        (BridgeHandle::bind(BridgeEndpoint::Unix(sock)).unwrap(), dir)
+        (BridgeHandle::bind(BridgeEndpoint::Unix(sock), "ab".repeat(32)).unwrap(), dir)
     }
 
     async fn next_event(rx: &mut broadcast::Receiver<BridgeEvent>) -> BridgeEvent {
@@ -1248,6 +1271,33 @@ mod tests {
             std::fs::metadata(p).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_start_writes_private_secret_and_presents_it_first() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::new(dir.path().to_path_buf(), true);
+        let h = BridgeHandle::start(&paths).unwrap();
+        let secret = std::fs::read_to_string(&paths.bridge_secret).unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            std::fs::metadata(&paths.bridge_secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Every connection gets the secret as its very first frame, before any hello.
+        for _ in 0..2 {
+            let mut ext = FakeExt::connect_raw(&h).await;
+            assert_eq!(
+                ext.recv().await,
+                json!({ "t": "auth", "v": BRIDGE_PROTOCOL, "secret": secret })
+            );
+        }
+        // A restart rotates the secret.
+        drop(h);
+        let _h = BridgeHandle::start(&paths).unwrap();
+        assert_ne!(std::fs::read_to_string(&paths.bridge_secret).unwrap(), secret);
     }
 
     #[tokio::test]

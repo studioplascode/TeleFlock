@@ -94,6 +94,8 @@ export type Effect =
   /** Agents changed lanes on this host (activity refresh trigger). */
   | { kind: "lanes"; hostId: string }
   | { kind: "openAgent"; hostId: string; agentId: string }
+  /** An agent's collab link became live while its open session is in error: reopen it. */
+  | { kind: "relink"; hostId: string; agentId: string }
   | { kind: "answerNext" };
 
 export function initialCoreState(backend: Backend): CoreState {

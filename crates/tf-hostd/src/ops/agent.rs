@@ -121,10 +121,12 @@ fn bridge_err(e: BridgeError) -> ApiError {
     ApiError::from(e)
 }
 
-/// Refreshes the bridge overlay (meta fields + caps) of an omp session.
+/// Refreshes the bridge overlay (meta fields + caps) of an omp session, and re-fetches the session
+/// tree when the omp leaf moved.
 pub fn push_meta_overlay(ctx: &Ctx, session_id: &str) {
     let Some(s) = ctx.omp.session(session_id) else { return };
-    let overlay = match ctx.bridge.by_session(session_id) {
+    let bridge = ctx.bridge.by_session(session_id);
+    let overlay = match &bridge {
         Some(b) => MetaOverlay {
             bridge: true,
             model: b.state.model.clone(),
@@ -139,6 +141,19 @@ pub fn push_meta_overlay(ctx: &Ctx, session_id: &str) {
         None => MetaOverlay::default(),
     };
     s.set_overlay(overlay);
+    if let Some(b) = bridge
+        && s.claim_tree_refresh(&b.state.leaf_id)
+    {
+        let handle = ctx.bridge.clone();
+        let sid = session_id.to_owned();
+        tokio::spawn(async move {
+            let tree = handle.get_tree(&sid).await;
+            if let Err(e) = &tree {
+                tracing::debug!(session_id = %sid, "session tree fetch failed: {e:?}");
+            }
+            s.set_tree(tree.ok());
+        });
+    }
 }
 
 // ───────────────────────────── session.* ─────────────────────────────

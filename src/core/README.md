@@ -16,8 +16,8 @@ browser also starts it.
 | Backend | Chosen when |
 |---|---|
 | `tauri` | inside the Tauri webview (`window.__TAURI_INTERNALS__`) — `core_call` / `core_term_input` / `core_events(Channel)` |
-| `ws` | `?core=ws://127.0.0.1:7420/ws`, `VITE_TF_CORE`, or a production build served over http(s) (same-origin `/ws`, i.e. tf-devserver). Unreachable same-origin devserver → demo |
-| `demo` | `?demo` (or `?demo=empty` for zero profiles / onboarding), or the fallback (e.g. `vite dev`) |
+| `ws` | `?core=ws://127.0.0.1:7420/ws`, `VITE_TF_CORE`, or a production build served over http(s) (same-origin `/ws`, i.e. tf-devserver). Production builds ignore a cross-origin `?core=`. The devserver token comes from `<meta name="tf-token">` (injected by tf-devserver for loopback or token-bearing page loads) or the page's `?token=` (keep it in the URL for remote access) and is sent as `/ws?token=…`; a token already in the `?core=` URL is kept when the page has none. `vite dev` against a devserver needs `tf-devserver --allow-origin http://localhost:<port>`. Unreachable same-origin devserver → demo |
+| `demo` | `?demo` (or `?demo=empty` for zero profiles / onboarding), or the fallback (e.g. `vite dev`). `?demo&long=2000` seeds `forge::pool` with N extra history rows cycling every item kind and ToolView type (long-transcript perf testing; pages via `session.history`) |
 
 Host profiles with `kind: "demo"` always route to the in-process demo engine, even with a real
 backend (offline “Try the demo”). Events the real core emits about demo hosts are ignored.
@@ -125,8 +125,11 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
   select → confirm), unanswered questions get answered from “Pixel 9” after 4 min, review > 3
   archives the oldest.
 - **studio-pc**: stale cached snapshot; cycles offline → reconnecting (attempt, `nextRetryAt`)
-  → connecting → authenticating → authRequired (fake `login.tailscale.com` URL) → error.
-  `app.openExternal(authUrl)` or `hosts.connect` brings it online for 90 s.
+  → connecting → then, on odd cycles until trusted, hostKey (`ConnStatus.hostKey`: address,
+  `ssh-ed25519`, `SHA256:` fingerprint; unconfirmed for 20 s → error), otherwise authenticating
+  → authRequired (fake `login.tailscale.com` URL) → error. `hosts.trustKey` (matching
+  fingerprint), `app.openExternal(authUrl)` or `hosts.connect` brings it online for 90 s;
+  `hosts.connect` while the key is untrusted asks for it again.
 - Every HostMethod answers: prompts (steer / follow-up queue), answers, model/thinking/fast/plan/
   goal, compact, fork, btw (streamed), slash, keys, subagents, archive, connect, start/stop,
   workspaces/worktrees (with realistic herdr/git errors), fs (`/home/demo`, git badges), git/gh

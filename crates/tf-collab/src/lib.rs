@@ -21,5 +21,5 @@ pub use frame::{AgentCmdKind, COLLAB_PROTO, GuestFrame, HostFrame, ImageContent}
 pub use guest::{EndReason, Guest, GuestError, GuestEvent, Snapshot, TranscriptChunk};
 pub use link::{CollabLink, LinkError};
 pub use registry::{Access, HostEntry, LinkInfo, Registry, RegistryError};
-pub use relay::{Relay, RelayConfig, RelayStats};
+pub use relay::{IdentityError, Relay, RelayConfig, RelayIdentity, RelayStats};
 pub use replica::{Replica, Signal, UiReply, Update, transcript_page};

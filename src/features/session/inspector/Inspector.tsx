@@ -52,7 +52,7 @@ function useTpsHistory(value: number | undefined): number[] {
   const now = useNow(1000);
   const [hist, setHist] = useState<number[]>([]);
   useEffect(() => {
-    setHist((h) => [...h.slice(-47), value ?? 0]);
+    setHist((h) => [...h.slice(-59), value ?? 0]);
   }, [now, value]);
   return hist;
 }
@@ -66,6 +66,7 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
   const cost = meta?.cost ?? agent?.omp?.cost;
   const todos = todoCounts(meta?.todos ?? []);
   const streaming = agent?.live.streaming === true;
+  const peak = Math.max(0, ...hist);
   const ctxStatus = ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : "running";
   return (
     <Pane id="overview" title="Session" aside={<span className={cn("tabular", streaming && "text-accent-hi")}>{tps != null ? `${Math.round(tps)} tok/s` : "—"}</span>}>
@@ -95,14 +96,26 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
             </span>
           }
           v={todos.total ? `${todos.done}/${todos.total}` : "—"}
-          s={todos.blocked ? <span className="text-sun-1">{todos.blocked} blocked</span> : cost?.cacheRead ? `${formatCompact(cost.cacheRead)} cached` : undefined}
+          s={
+            todos.total ? (
+              <span className="mt-1 flex items-center gap-2">
+                <span className="relative h-1 flex-1 overflow-hidden rounded-full bg-white/8" role="progressbar" aria-valuemin={0} aria-valuemax={todos.total} aria-valuenow={todos.done} aria-label="Todos done">
+                  <span className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-accent to-done transition-[width] duration-700 ease-out" style={{ width: `${(100 * todos.done) / todos.total}%` }} />
+                </span>
+                {todos.blocked > 0 && <span className="text-sun-1">{todos.blocked} blocked</span>}
+              </span>
+            ) : undefined
+          }
         />
         <div className="col-span-2 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 pt-2 pb-1 shadow-hairline">
           <div className="flex items-center justify-between text-[10.5px] font-bold text-mute">
             <span>Throughput</span>
-            <span className="text-mute-2">60s</span>
+            <span className="text-mute-2 tabular">{peak > 0 ? `peak ${Math.round(peak)} tok/s · 60s` : "60s"}</span>
           </div>
-          <Sparkline values={hist.length > 1 ? hist : [0, 0]} height={34} live={streaming} status={streaming ? "running" : "idle"} />
+          <div className="relative">
+            <Sparkline values={hist.length > 1 ? hist : [0, 0]} height={34} live={streaming} status={streaming ? "running" : "idle"} />
+            {!streaming && peak === 0 && <span className="absolute inset-0 grid place-items-center text-[10.5px] font-semibold text-mute-2">idle · no tokens in the last minute</span>}
+          </div>
         </div>
       </div>
     </Pane>

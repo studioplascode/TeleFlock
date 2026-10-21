@@ -1,12 +1,29 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Archive, ArrowUpFromLine, Check, CircleDot, ExternalLink, GitCommitHorizontal, GitMerge, GitPullRequest, GitPullRequestArrow, Sparkles, Trash2, X } from "lucide-react";
+import {
+  Archive,
+  ArrowUpFromLine,
+  Check,
+  CircleDot,
+  ExternalLink,
+  GitBranchPlus,
+  GitCommitHorizontal,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestArrow,
+  type LucideIcon,
+  PanelRightOpen,
+  Sparkles,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { agentKey, core, navigate, openSession, useAgent, useCore, useSession } from "@/core";
-import type { Agent, GitStatusResult, MergeMethod, PrInfo, Workspace } from "@/core/gen";
-import { Badge, Button, Input, SegmentedControl, Shimmer, Spinner, Switch, Textarea, cn, spring, toast } from "@/design";
+import { agentKey, core, navigate, openSession, useAgent, useCore, useSession, useUi } from "@/core";
+import type { Agent, GitStatusResult, MergeMethod, PrInfo, PrStatusResult, Workspace } from "@/core/gen";
+import { Badge, Button, Input, Kbd, SegmentedControl, Shimmer, Spinner, Switch, Textarea, cn, spring, toast } from "@/design";
 import { removeWorktree } from "../workspace/workspaceActions";
 import { describeError } from "../workspace/shared/errors";
-import { useHostQuery } from "../workspace/shared/useHostQuery";
+import { type HostQuery, useHostQuery } from "../workspace/shared/useHostQuery";
 
 const COMMIT_PROMPT = [
   "Write a git commit message for the current uncommitted changes in this worktree (look at `git status` and `git diff`).",
@@ -20,69 +37,83 @@ function extractMessage(text: string): string {
   return (fence?.[1] ?? text).trim();
 }
 
+export const SHIP_STAGES: readonly { icon: LucideIcon; label: string }[] = [
+  { icon: GitCommitHorizontal, label: "Commit" },
+  { icon: ArrowUpFromLine, label: "Push" },
+  { icon: GitPullRequest, label: "PR" },
+  { icon: GitMerge, label: "Merge" },
+  { icon: Archive, label: "Wrap up" },
+];
+
+export interface ShipState {
+  /** Index into SHIP_STAGES of the first step not yet satisfied. */
+  stage: number;
+  dirty: boolean;
+  unpushed: boolean;
+  merged: boolean;
+  /** Why the current step can't proceed here (e.g. no PR from the default branch). */
+  blocked?: string;
+  /** One-line "what's next" for compact surfaces (collapsed rail, mobile bar). */
+  next: string;
+}
+
+/** Where a worktree is in commit → push → PR → merge → wrap up. */
+export function shipState(status: GitStatusResult, pr: PrInfo | undefined): ShipState {
+  const dirty = status.files.length > 0;
+  const unpushed = status.ahead > 0 || (!status.upstream && !!status.branch && status.branch !== status.defaultBranch);
+  const merged = pr?.state === "MERGED";
+  const onDefault = !!status.branch && status.branch === status.defaultBranch;
+  // An open PR with new local commits still needs commit/push first.
+  const stage = merged ? 4 : dirty ? 0 : unpushed ? 1 : !pr ? 2 : 3;
+  const n = status.files.length;
+  const blocked = stage === 2 && onDefault ? `On ${status.branch}: pull requests need a feature branch` : undefined;
+  const next = [
+    `Commit ${n} file${n === 1 ? "" : "s"}`,
+    status.ahead > 0 ? `Push ${status.ahead} commit${status.ahead === 1 ? "" : "s"}` : `Push ${status.branch ?? "branch"}`,
+    blocked ? "Nothing to ship" : "Open a pull request",
+    pr?.state === "CLOSED" ? `PR #${pr.number} closed` : (pr?.checks?.pending ?? 0) > 0 ? `#${pr?.number} checks running` : `Merge #${pr?.number}`,
+    "Shipped — wrap up",
+  ][stage] as string;
+  return { stage, dirty, unpushed, merged, blocked, next };
+}
+
+/** PR status for a worktree, polled while it's open (checks and mergeability change server-side). */
+export function usePrStatus(hostId: string, cwd: string | undefined): HostQuery<PrStatusResult> {
+  const pr = useHostQuery(hostId, "gh.prStatus", cwd ? { cwd } : null);
+  const info = pr.data?.pr;
+  const pending = !!info && info.state === "OPEN" && ((info.checks?.pending ?? 0) > 0 || info.mergeable === undefined);
+  const open = info?.state === "OPEN";
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setInterval(pr.reload, pending ? 4000 : 15000);
+    return () => window.clearInterval(id);
+  }, [open, pending, pr.reload]);
+  return pr;
+}
+
 export interface ShipPanelProps {
   hostId: string;
   workspace: Workspace;
   cwd: string;
   status: GitStatusResult;
+  /** From `usePrStatus` (owned by the review view so collapsed surfaces stay current). */
+  pr: HostQuery<PrStatusResult>;
   agents: Agent[];
   /** Re-fetch git status + diff after a mutation. */
   onChanged: () => void;
 }
 
 /** Commit → push → PR → checks → merge → archive, as one pipeline whose current stage glows. */
-export function ShipPanel({ hostId, workspace, cwd, status, agents, onChanged }: ShipPanelProps) {
-  const pr = useHostQuery(hostId, "gh.prStatus", { cwd });
+export function ShipPanel({ hostId, workspace, cwd, status, pr, agents, onChanged }: ShipPanelProps) {
   const [lastCommit, setLastCommit] = useState<string>();
   const info = pr.data?.pr;
-  const dirty = status.files.length > 0;
-  const unpushed = status.ahead > 0 || (!status.upstream && !!status.branch && status.branch !== status.defaultBranch);
-  const merged = info?.state === "MERGED";
-
-  // Poll the PR while checks are pending or it's open (checks/mergeability change server-side).
-  const pending = !!info && info.state === "OPEN" && ((info.checks?.pending ?? 0) > 0 || info.mergeable === undefined);
-  useEffect(() => {
-    if (!info || info.state !== "OPEN") return;
-    const id = window.setInterval(pr.reload, pending ? 4000 : 15000);
-    return () => window.clearInterval(id);
-  }, [info, pending, pr.reload]);
-
-  // Current stage = first step not yet satisfied (an open PR with new local commits still needs commit/push).
-  const stage = merged ? 4 : dirty ? 0 : unpushed ? 1 : !info ? 2 : 3;
-  const stages = [
-    { icon: GitCommitHorizontal, label: "Commit" },
-    { icon: ArrowUpFromLine, label: "Push" },
-    { icon: GitPullRequest, label: "PR" },
-    { icon: GitMerge, label: "Merge" },
-    { icon: Archive, label: "Wrap up" },
-  ];
+  const st = shipState(status, info);
+  const { stage, dirty, unpushed, merged } = st;
+  const prBlocked = dirty ? `Commit ${status.files.length === 1 ? "the change" : `${status.files.length} files`} first` : unpushed ? `Push ${status.branch ?? "the branch"} first` : st.blocked;
 
   return (
     <div className="flex flex-col gap-3">
-      <ol className="flex items-center gap-1" aria-label="Ship progress">
-        {stages.map((s, i) => (
-          <li key={s.label} className="flex flex-1 items-center gap-1">
-            <span
-              className={cn(
-                "relative grid size-7 shrink-0 place-items-center rounded-full transition-colors duration-500 [&_svg]:size-3.5",
-                i < stage && "bg-done/20 text-done",
-                i === stage && "bg-omp text-white shadow-glow-accent",
-                i > stage && "bg-tile-3 text-mute-2",
-              )}
-              title={s.label}
-            >
-              {i < stage ? <Check strokeWidth={3} /> : <s.icon />}
-              {i === stage && !merged && <span className="tf-loop absolute -inset-1 animate-ping-soft rounded-full shadow-[0_0_0_2px_rgb(163_92_240/0.45)]" aria-hidden />}
-            </span>
-            {i < stages.length - 1 && (
-              <span className="h-0.5 flex-1 overflow-hidden rounded-full bg-white/8">
-                <motion.span className="block h-full bg-done/70" initial={false} animate={{ width: i < stage ? "100%" : "0%" }} transition={spring.gentle} />
-              </span>
-            )}
-          </li>
-        ))}
-      </ol>
-
+      <ShipStepper stage={stage} blocked={!!st.blocked} />
       <CommitCard
         hostId={hostId}
         cwd={cwd}
@@ -98,31 +129,139 @@ export function ShipPanel({ hostId, workspace, cwd, status, agents, onChanged }:
       <PushCard hostId={hostId} cwd={cwd} status={status} unpushed={unpushed} dirty={dirty} onPushed={() => (onChanged(), pr.reload())} active={stage === 1} />
       {info ? (
         <PrCard hostId={hostId} cwd={cwd} pr={info} loading={pr.loading} onMerged={() => (pr.reload(), onChanged())} active={stage === 3} />
+      ) : st.blocked && !dirty && !unpushed ? (
+        <DefaultBranchCard hostId={hostId} cwd={cwd} reason={st.blocked} />
       ) : (
-        <CreatePrCard key={lastCommit} hostId={hostId} cwd={cwd} status={status} lastCommit={lastCommit} disabled={dirty || unpushed} error={pr.error?.message} onCreated={pr.reload} active={stage === 2} />
+        <CreatePrCard key={lastCommit} hostId={hostId} cwd={cwd} status={status} lastCommit={lastCommit} blockedReason={prBlocked} error={pr.error?.message} onCreated={pr.reload} active={stage === 2} />
       )}
       <AnimatePresence>{merged && <WrapUpCard hostId={hostId} workspace={workspace} agents={agents} />}</AnimatePresence>
     </div>
   );
 }
 
+function StageNode({ index, stage, blocked, size = 28 }: { index: number; stage: number; blocked: boolean; size?: number }) {
+  const s = SHIP_STAGES[index];
+  if (!s) return null;
+  const done = index < stage || (index === 4 && stage === 4);
+  const current = index === stage && !done;
+  return (
+    <span
+      className={cn(
+        "relative z-[1] grid shrink-0 place-items-center rounded-full transition-[background-color,color,box-shadow] duration-500 [&_svg]:size-3.5",
+        done && "bg-[color-mix(in_oklab,var(--color-done)_22%,var(--color-tile-2))] text-done",
+        current && !blocked && "bg-omp text-white shadow-glow-accent",
+        current && blocked && "bg-[color-mix(in_oklab,var(--color-warn)_18%,var(--color-tile-2))] text-warn",
+        index > stage && "bg-tile-3 text-mute-2",
+      )}
+      style={{ width: size, height: size }}
+    >
+      <AnimatePresence initial={false} mode="popLayout">
+        <motion.span key={done ? "done" : "todo"} className="grid place-items-center" initial={{ scale: 0.3, opacity: 0, rotate: -30 }} animate={{ scale: 1, opacity: 1, rotate: 0 }} exit={{ scale: 0.3, opacity: 0 }} transition={spring.bouncy}>
+          {done ? <Check strokeWidth={3} /> : <s.icon />}
+        </motion.span>
+      </AnimatePresence>
+      {current && !blocked && <span className="tf-loop absolute -inset-1 animate-ping-soft rounded-full shadow-[0_0_0_2px_rgb(163_92_240/0.45)]" aria-hidden />}
+    </span>
+  );
+}
+
+/** Horizontal pipeline with labels; connectors fill as stages complete. `dots` drops the labels. */
+export function ShipStepper({ stage, blocked, dots = false }: { stage: number; blocked: boolean; dots?: boolean }) {
+  return (
+    <ol className="grid grid-cols-5" aria-label="Ship progress">
+      {SHIP_STAGES.map((s, i) => {
+        const done = i < stage || (i === 4 && stage === 4);
+        return (
+          <li
+            key={s.label}
+            className="relative flex flex-col items-center gap-1.5"
+            aria-current={i === stage ? "step" : undefined}
+            aria-label={`${s.label}: ${done ? "done" : i === stage ? (blocked ? "blocked" : "next") : "to do"}`}
+          >
+            {i > 0 && (
+              <span className={cn("absolute right-1/2 h-0.5 w-full -translate-y-1/2 overflow-hidden rounded-full bg-white/8", dots ? "top-[11px]" : "top-[14px]")} aria-hidden>
+                <motion.span className="block h-full bg-done/70" initial={false} animate={{ width: i <= stage ? "100%" : "0%" }} transition={spring.gentle} />
+              </span>
+            )}
+            <StageNode index={i} stage={stage} blocked={blocked} size={dots ? 22 : 28} />
+            {!dots && (
+              <span className={cn("text-2xs font-semibold whitespace-nowrap transition-colors duration-500", done ? "text-done/80" : i === stage ? (blocked ? "text-warn" : "font-bold text-ink") : "text-mute-2")}>{s.label}</span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/** Collapsed desktop rail: the pipeline stands vertically; the whole strip opens the panel. */
+export function ShipStrip({ state, onOpen }: { state: ShipState; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={`Open ship panel. Next: ${state.next}`}
+      title={`Next: ${state.next}`}
+      className="tile group flex h-full w-[52px] shrink-0 flex-col items-center gap-3 py-3 text-mute transition-colors focus-ring hover:text-ink"
+    >
+      <PanelRightOpen className="size-4 shrink-0 transition-transform duration-300 ease-spring group-hover:-translate-x-0.5" />
+      <ol className="flex flex-col items-center" aria-hidden>
+        {SHIP_STAGES.map((s, i) => (
+          <li key={s.label} className="flex flex-col items-center">
+            {i > 0 && (
+              <span className="h-4 w-0.5 overflow-hidden rounded-full bg-white/8">
+                <motion.span className="block w-full bg-done/70" initial={false} animate={{ height: i <= state.stage ? "100%" : "0%" }} transition={spring.gentle} />
+              </span>
+            )}
+            <StageNode index={i} stage={state.stage} blocked={!!state.blocked} size={26} />
+          </li>
+        ))}
+      </ol>
+      <span className={cn("mt-1 font-display text-2xs font-bold tracking-wide uppercase [writing-mode:vertical-rl]", state.blocked ? "text-warn" : state.stage === 4 ? "text-done" : "text-accent-ink")}>
+        {state.next}
+      </span>
+    </button>
+  );
+}
+
 function Section({ icon, title, meta, active, done, children }: { icon: ReactNode; title: string; meta?: ReactNode; active: boolean; done?: boolean; children?: ReactNode }) {
   return (
     <motion.section
-      layout
+      layout="position"
       transition={spring.smooth}
       className={cn(
         "rounded-lg p-3.5 transition-[background-color,box-shadow] duration-500",
         active ? "bg-accent/[0.07] shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4),0_0_30px_-12px_rgb(163_92_240/0.6)]" : "bg-white/[0.03] shadow-hairline",
       )}
     >
-      <header className="flex items-center gap-2">
-        <span className={cn("grid size-6 place-items-center rounded-sm [&_svg]:size-3.5", done ? "bg-done/15 text-done" : active ? "bg-omp text-white" : "bg-tile-3 text-mute")}>{done ? <Check strokeWidth={3} /> : icon}</span>
-        <h3 className="font-display text-sm font-bold">{title}</h3>
-        <span className="ml-auto flex items-center gap-1.5 text-2xs text-mute">{meta}</span>
+      <header className="flex min-w-0 items-center gap-2">
+        <span className={cn("grid size-6 shrink-0 place-items-center rounded-sm [&_svg]:size-3.5", done ? "bg-done/15 text-done" : active ? "bg-omp text-white" : "bg-tile-3 text-mute")}>
+          <AnimatePresence initial={false} mode="popLayout">
+            <motion.span key={done ? "done" : "todo"} className="grid place-items-center" initial={{ scale: 0.3, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.3, opacity: 0 }} transition={spring.bouncy}>
+              {done ? <Check strokeWidth={3} /> : icon}
+            </motion.span>
+          </AnimatePresence>
+        </span>
+        <h3 className="shrink-0 font-display text-sm font-bold">{title}</h3>
+        <span className="ml-auto flex min-w-0 items-center gap-1.5 truncate text-2xs text-mute">{meta}</span>
       </header>
       {children && <div className="mt-3">{children}</div>}
     </motion.section>
+  );
+}
+
+/** On the default branch with nothing local: there's no PR to open from here. */
+function DefaultBranchCard({ hostId, cwd, reason }: { hostId: string; cwd: string; reason: string }) {
+  const ui = useUi();
+  return (
+    <Section icon={<TriangleAlert />} title="Nothing to ship" active={false}>
+      <div className="flex flex-col gap-2.5">
+        <p className="text-xs text-mute">{reason}. Start a worktree to ship changes through a pull request.</p>
+        <Button size="sm" icon={<GitBranchPlus />} onClick={() => ui.openDialog({ kind: "newWorktree", hostId, cwd })} className="self-start">
+          New worktree
+        </Button>
+      </div>
+    </Section>
   );
 }
 
@@ -190,6 +329,18 @@ function CommitCard({ hostId, cwd, dirty, fileCount, agents, onCommitted, active
             Commit
           </Button>
         </div>
+        {!asking && (
+          <p className="-mt-1 flex items-center justify-end gap-1 text-2xs text-mute-2">
+            {message.trim() ? (
+              <>
+                <Kbd>Ctrl</Kbd>
+                <Kbd>Enter</Kbd> to commit
+              </>
+            ) : (
+              `Write a message${omp ? `, or ask ${omp.name}` : ""} to commit`
+            )}
+          </p>
+        )}
       </div>
     </Section>
   );
@@ -221,7 +372,7 @@ function AskAgentButton({ hostId, agent, disabled, onAsked }: { hostId: string; 
         }
       }}
     >
-      Ask {agent.name} to write it
+      {agent.column === "running" ? `${agent.name} is working…` : agent.column === "needs" ? `${agent.name} needs you` : `Ask ${agent.name} to write it`}
     </Button>
   );
 }
@@ -323,7 +474,7 @@ function PushCard({ hostId, cwd, status, unpushed, dirty, onPushed, active }: { 
   );
 }
 
-function CreatePrCard({ hostId, cwd, status, lastCommit, disabled, error, onCreated, active }: { hostId: string; cwd: string; status: GitStatusResult; lastCommit?: string; disabled: boolean; error?: string; onCreated: () => void; active: boolean }) {
+function CreatePrCard({ hostId, cwd, status, lastCommit, blockedReason, error, onCreated, active }: { hostId: string; cwd: string; status: GitStatusResult; lastCommit?: string; blockedReason?: string; error?: string; onCreated: () => void; active: boolean }) {
   const humanBranch = (status.branch ?? "").replace(/^[\w-]+\//, "").replace(/[-_]+/g, " ");
   const [title, setTitle] = useState(lastCommit ?? (humanBranch ? humanBranch[0]?.toUpperCase() + humanBranch.slice(1) : ""));
   const [body, setBody] = useState("");
@@ -345,18 +496,23 @@ function CreatePrCard({ hostId, cwd, status, lastCommit, disabled, error, onCrea
   return (
     <Section icon={<GitPullRequest />} title="Pull request" active={active} meta={status.defaultBranch ? `into ${status.defaultBranch}` : undefined}>
       {error ? (
-        <p className="text-xs text-mute">{error}</p>
+        <p className="flex items-start gap-2 text-xs text-mute">
+          <TriangleAlert className="mt-px size-3.5 shrink-0 text-warn" />
+          {error}
+        </p>
+      ) : blockedReason ? (
+        <p className="text-xs text-mute">{blockedReason}, then open the pull request here.</p>
       ) : (
-        <div className={cn("flex flex-col gap-2", disabled && "opacity-60")}>
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="PR title" aria-label="PR title" disabled={disabled} />
-          <Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="What changed and why (markdown)" maxHeight={160} className="min-h-[3lh] text-xs" aria-label="PR description" disabled={disabled} />
+        <div className="flex flex-col gap-2">
+          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="PR title" aria-label="PR title" />
+          <Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="What changed and why (markdown)" maxHeight={160} className="min-h-[3lh] text-xs" aria-label="PR description" />
           <div className="flex items-center gap-2">
             <label className="flex items-center gap-2 text-xs font-semibold text-mute">
-              <Switch checked={draft} onCheckedChange={setDraft} label="Draft PR" disabled={disabled} />
+              <Switch checked={draft} onCheckedChange={setDraft} label="Draft PR" />
               Draft
             </label>
-            <span className="flex-1 text-right text-2xs text-mute-2">{disabled ? "Commit and push first" : ""}</span>
-            <Button size="sm" variant={active ? "primary" : "secondary"} icon={<GitPullRequestArrow />} onClick={() => void create()} loading={busy} disabled={disabled || !title.trim()}>
+            <span className="flex-1 text-right text-2xs text-mute-2">{title.trim() ? "" : "Give it a title"}</span>
+            <Button size="sm" variant={active ? "primary" : "secondary"} icon={<GitPullRequestArrow />} onClick={() => void create()} loading={busy} disabled={!title.trim()}>
               Create PR
             </Button>
           </div>

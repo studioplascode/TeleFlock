@@ -1,10 +1,10 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
+import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, Pencil, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { core, navigate, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
 import { Button, Chip, EmptyState, Kbd, SegmentedControl, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
-import { AgentFields, type AgentDraft, agentNameError, initialAgentDraft, toAgentSpec } from "../workspace/shared/AgentFields";
+import { AgentFields, type AgentDraft, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName, useModelCatalog } from "../workspace/shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "../workspace/shared/CommandPreview";
 import { agentLaunchLines, herdrArgv } from "../workspace/shared/commands";
 import { type HerdrFailure, classifyHerdrError } from "../workspace/shared/errors";
@@ -33,7 +33,7 @@ type Submit =
   | { phase: "idle" }
   | { phase: "working"; since: number }
   | { phase: "failed"; failure: HerdrFailure }
-  | { phase: "done"; created: WorktreeCreated };
+  | { phase: "done"; created: WorktreeCreated; name: string };
 
 interface WizardProps {
   open: boolean;
@@ -66,20 +66,21 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   }, [hostId, hostIds]);
 
   const branches = useHostQuery(hostId, "git.branches", repo ? { cwd: repo.path } : null);
+  const catalog = useModelCatalog(hostId);
 
   // repo name: the primary worktree root's basename (herdr's repo_name)
   const repoRoot = repo?.path ?? "";
   const repoName = basename(host?.workspaces.find((w) => w.repo?.root === repoRoot)?.repo?.root ?? repoRoot);
   const effectiveBranch = (branch.mode === "new" ? branch.name : branch.existing).trim();
   const defaultPath = home ? joinPath(home, HERDR_WORKTREES_DIR, repoName, branchSlug(effectiveBranch) || "") : `~/${HERDR_WORKTREES_DIR}/${repoName}/${branchSlug(effectiveBranch)}`;
-  const derivedName = agentNameFromBranch(effectiveBranch);
   const takenNames = useMemo(() => host?.agents.map((a) => a.name) ?? [], [host?.agents]);
+  const derivedName = uniqueAgentName(agentNameFromBranch(effectiveBranch), takenNames);
   const agentName = agent.name.trim() || derivedName;
 
   const localBranch = branches.data?.branches.find((b) => !b.remote && b.name === effectiveBranch);
   const nameError =
     branch.mode === "new"
-      ? (branchNameError(branch.name) ?? (localBranch ? (localBranch.worktreePath ? `Checked out at ${tildify(localBranch.worktreePath, home)}` : "Branch exists — use existing branch") : null))
+      ? (branchNameError(branch.name) ?? (localBranch ? (localBranch.worktreePath ? "Already checked out in another worktree" : "A branch with this name exists") : null))
       : null;
 
   const valid = [
@@ -122,7 +123,8 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
     setSubmit({ phase: "working", since: Date.now() });
     try {
       const created = await core.host(hostId).call("worktree.create", p);
-      setSubmit({ phase: "done", created });
+      // freeze the name: once the agent shows up in host state the derived name would de-dupe to `-2`
+      setSubmit({ phase: "done", created, name: p.agent?.name ?? agentName });
       if (!created.agent) {
         onClose();
         toast({
@@ -209,8 +211,15 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
             {step === 0 && repo ? `Continue with ${basename(repo.path)}` : "Continue"}
           </Button>
         ) : (
-          <Button variant="primary" icon={<Sparkles />} onClick={() => void create()} loading={submit.phase === "working"} disabled={!params} className={mobile ? "flex-1" : undefined}>
-            {agent.start ? "Create & start agent" : "Create worktree"}
+          <Button
+            variant={submit.phase === "failed" && submit.failure.kind !== "other" ? "secondary" : "primary"}
+            icon={<Sparkles />}
+            onClick={() => void create()}
+            loading={submit.phase === "working"}
+            disabled={!params}
+            className={mobile ? "flex-1" : undefined}
+          >
+            {submit.phase === "failed" ? "Try again" : agent.start ? "Create & start agent" : "Create worktree"}
           </Button>
         )}
       </div>
@@ -225,9 +234,10 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
       icon={<GitBranchPlus />}
       width={760}
       maxHeight="94dvh"
+      tall
       footer={footer}
     >
-      <div className="flex flex-col gap-5 md:min-h-[520px]">
+      <div className="flex min-h-full flex-col gap-5">
         {hostIds.length === 0 ? (
           <EmptyState
             compact
@@ -240,8 +250,16 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
           <LaunchSuccess
             hostId={hostId}
             started={submit.created.agent}
-            title={`${agentName} is starting`}
-            subtitle={`${submit.created.branch} · ${tildify(submit.created.path, home)}`}
+            title={`${submit.name} is starting`}
+            subtitle={
+              <>
+                <span className="flex items-center justify-center gap-1.5 text-ink-2">
+                  <GitBranch className="size-3.5 text-accent" />
+                  {submit.created.branch}
+                </span>
+                <span className="block truncate">{tildify(submit.created.path, home)}</span>
+              </>
+            }
             onClose={onClose}
           />
         ) : (
@@ -260,9 +278,10 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                 animate="center"
                 exit="exit"
                 transition={spring.smooth}
+                className="flex flex-1 flex-col"
               >
                 {step === 0 && hostId && (
-                  <div className="flex flex-col gap-3">
+                  <div className="flex flex-1 flex-col gap-3">
                     {hostIds.length > 1 && (
                       <div className="flex items-center gap-3">
                         <span className="text-2xs font-bold text-mute">Host</span>
@@ -280,6 +299,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                     )}
                     <FolderBrowser
                       key={hostId}
+                      className="flex-1"
                       hostId={hostId}
                       mode="repo"
                       value={repo?.path}
@@ -292,28 +312,36 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                         setStep(1);
                       }}
                     />
-                    <AnimatePresence>
-                      {repo && (
-                        <motion.div
-                          initial={{ opacity: 0, y: 6 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: 6 }}
-                          transition={spring.smooth}
-                          className="flex items-center gap-2 text-xs text-mute"
-                        >
-                          <FolderGit2 className="size-3.5 text-accent" />
-                          <span className="truncate font-mono text-ink-2">{tildify(repo.path, home)}</span>
-                          {repo.git?.branch && <Chip icon={<GitBranch />}>{repo.git.branch}</Chip>}
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
+                    <div className="flex h-7 shrink-0 items-center gap-2 overflow-hidden text-xs text-mute" aria-live="polite">
+                      <AnimatePresence mode="popLayout" initial={false}>
+                        {repo ? (
+                          <motion.span
+                            key={repo.path}
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -8 }}
+                            transition={spring.smooth}
+                            className="flex min-w-0 items-center gap-2"
+                          >
+                            <FolderGit2 className="size-3.5 shrink-0 text-accent" />
+                            <span className="truncate font-mono text-ink-2">{tildify(repo.path, home)}</span>
+                            {repo.git?.branch && <Chip icon={<GitBranch />}>{repo.git.branch}</Chip>}
+                          </motion.span>
+                        ) : (
+                          <motion.span key="none" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex items-center gap-2 text-mute-2">
+                            <FolderGit2 className="size-3.5 shrink-0" />
+                            Pick a repository: folders with the git icon
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   </div>
                 )}
                 {step === 1 && (
                   <BranchStep
                     branches={branches.data}
-                    loading={branches.loading}
-                    error={branches.error?.message}
+                    loading={branches.loading || branches.waiting}
+                    error={branches.waiting ? undefined : branches.error?.message}
                     draft={branch}
                     onChange={(patch) => setBranch((b) => ({ ...b, ...patch }))}
                     branch={effectiveBranch}
@@ -342,7 +370,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                       base={branch.mode === "new" ? baseRef : undefined}
                       path={tildify(params?.path ?? defaultPath, home)}
                       agent={agent.start ? agentName : null}
-                      model={agent.model === "default" ? "host default" : agent.model}
+                      model={agent.model === "default" ? "host default" : (catalog?.models.find((m) => `${m.provider}/${m.id}` === agent.model)?.label ?? agent.model)}
                       onEdit={goTo}
                     />
                     {submit.phase === "working" ? (
@@ -400,6 +428,26 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                             onPickRepo={() => goTo(0)}
                           />
                         )}
+                        {submit.phase === "idle" && (
+                          <ol className="grid grid-cols-1 gap-x-4 gap-y-2 md:grid-cols-2" aria-label="What happens">
+                            {[
+                              branch.mode === "new" ? `git creates ${effectiveBranch} from ${baseRef}` : `git checks out ${effectiveBranch}`,
+                              "herdr opens the checkout as a workspace",
+                              ...(agent.start ? [`omp starts as ${agentName}, shared with TeleFlock`, "You land in its session"] : ["You can start an agent there any time"]),
+                            ].map((text, i) => (
+                              <motion.li
+                                key={text}
+                                initial={{ opacity: 0, x: -6 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                transition={{ ...spring.smooth, delay: 0.12 + i * 0.05 }}
+                                className="flex min-w-0 items-center gap-2.5 text-xs text-ink-2"
+                              >
+                                <span className="grid size-5 shrink-0 place-items-center rounded-full bg-white/6 font-mono text-[10px] font-bold text-mute shadow-hairline">{i + 1}</span>
+                                <span className="truncate">{text}</span>
+                              </motion.li>
+                            ))}
+                          </ol>
+                        )}
                         <CommandPreview lines={preview} />
                       </>
                     )}
@@ -449,13 +497,18 @@ function Summary({
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ ...spring.smooth, delay: i * 0.04 }}
-          className="flex items-center gap-3 rounded-md bg-white/4 px-3 py-2.5 text-left shadow-hairline transition-colors focus-ring hover:bg-white/7"
+          title={r.v}
+          aria-label={`${r.k}: ${r.v}. Edit`}
+          className="group flex items-center gap-3 rounded-md bg-white/4 px-3 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-white/7"
         >
-          <r.icon className="size-4 shrink-0 text-accent" />
-          <span className="flex min-w-0 flex-col">
+          <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-accent/12 text-accent shadow-[inset_0_0_0_1px_rgb(163_92_240/0.25)]">
+            <r.icon className="size-4" />
+          </span>
+          <span className="flex min-w-0 flex-1 flex-col">
             <span className="text-2xs font-bold text-mute-2">{r.k}</span>
             <span className="truncate font-mono text-xs font-semibold text-ink">{r.v}</span>
           </span>
+          <Pencil className="size-3.5 shrink-0 text-mute-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-60" aria-hidden />
         </motion.button>
       ))}
     </div>

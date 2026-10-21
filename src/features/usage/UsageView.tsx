@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { core, useAgent, useCore, useHostIds, useHosts } from "@/core";
 import type { UsageDay, UsageModel, UsageReport } from "@/core/gen";
-import { AgentGlyph, EmptyState, NumberTicker, Skeleton, Tile, Tooltip, agentGlyphTheme, cn, formatCompact, formatUsd, spring, useIsMobile, useNow } from "@/design";
+import { AgentGlyph, EmptyState, NumberTicker, PageHeader, Skeleton, Tile, Tooltip, agentGlyphTheme, cn, formatCompact, formatUsd, spring, useIsMobile, useNow } from "@/design";
 import { reportError } from "@/features/board/agentActions";
 import { useTodayUsage } from "@/features/board/BentoRow";
 import { MobileHeader } from "@/features/shell/MobileHeader";
@@ -140,6 +140,49 @@ function DaysChart({ days, todayLive, className }: { days: UsageDay[]; todayLive
   );
 }
 
+const DONUT_R = 52;
+const DONUT_C = 2 * Math.PI * DONUT_R;
+
+/** Share of spend per model as an animated ring; the centre shows the total. */
+function ModelDonut({ models }: { models: UsageModel[] }) {
+  const total = models.reduce((a, m) => a + m.costUsd, 0);
+  let offset = 0;
+  return (
+    <div className="relative mx-auto mt-4 grid size-[150px] place-items-center">
+      <svg viewBox="0 0 128 128" className="absolute inset-0 -rotate-90" aria-hidden>
+        <circle cx="64" cy="64" r={DONUT_R} fill="none" stroke="rgb(255 255 255 / 0.06)" strokeWidth="11" />
+        {models.map((m, i) => {
+          const theme = agentGlyphTheme(m.model);
+          const len = total > 0 ? (m.costUsd / total) * DONUT_C : 0;
+          const gap = models.length > 1 ? Math.min(3, len / 3) : 0;
+          const start = offset;
+          offset += len;
+          return (
+            <motion.circle
+              key={m.model}
+              cx="64"
+              cy="64"
+              r={DONUT_R}
+              fill="none"
+              stroke={theme.from}
+              strokeWidth="11"
+              strokeLinecap="round"
+              strokeDashoffset={-start}
+              initial={{ strokeDasharray: `0 ${DONUT_C}` }}
+              animate={{ strokeDasharray: `${Math.max(0, len - gap)} ${DONUT_C}` }}
+              transition={{ ...spring.gentle, delay: 0.1 + i * 0.07 }}
+            />
+          );
+        })}
+      </svg>
+      <div className="text-center">
+        <NumberTicker value={total} format={formatUsd} className="font-display text-xl font-bold text-ink" />
+        <div className="text-2xs font-semibold text-mute">{models.length} model{models.length === 1 ? "" : "s"}</div>
+      </div>
+    </div>
+  );
+}
+
 function ModelsTile({ models, className }: { models: UsageModel[]; className?: string }) {
   const max = Math.max(...models.map((m) => m.costUsd), 0.01);
   return (
@@ -148,29 +191,33 @@ function ModelsTile({ models, className }: { models: UsageModel[]; className?: s
       {models.length === 0 ? (
         <p className="mt-4 text-sm text-mute">No model usage recorded yet.</p>
       ) : (
-        <ul className="mt-4 flex flex-col gap-3">
-          {models.map((m, i) => {
-            const theme = agentGlyphTheme(m.model);
-            return (
-              <li key={m.model} className="flex flex-col gap-1">
-                <div className="flex items-baseline gap-2 text-xs">
-                  <span className="truncate font-mono font-bold text-ink">{m.model}</span>
-                  <span className="ml-auto text-mute tabular">{formatCompact(m.tokens)} tok</span>
-                  <span className="w-16 text-right font-bold text-ink tabular">{formatUsd(m.costUsd)}</span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-white/6">
-                  <motion.div
-                    className="h-full rounded-full"
-                    style={{ background: `linear-gradient(90deg, ${theme.from}, ${theme.to})` }}
-                    initial={{ width: 0 }}
-                    animate={{ width: `${(m.costUsd / max) * 100}%` }}
-                    transition={{ ...spring.gentle, delay: i * 0.05 }}
-                  />
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+        <>
+          <ModelDonut models={models} />
+          <ul className="mt-5 flex flex-col gap-3">
+            {models.map((m, i) => {
+              const theme = agentGlyphTheme(m.model);
+              return (
+                <li key={m.model} className="flex flex-col gap-1">
+                  <div className="flex items-baseline gap-2 text-xs">
+                    <span className="size-2 shrink-0 self-center rounded-full" style={{ background: theme.from }} aria-hidden />
+                    <span className="min-w-0 truncate font-mono font-bold text-ink">{m.model}</span>
+                    <span className="ml-auto shrink-0 text-mute tabular">{formatCompact(m.tokens)} tok</span>
+                    <span className="w-16 shrink-0 text-right font-bold text-ink tabular">{formatUsd(m.costUsd)}</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-white/6">
+                    <motion.div
+                      className="h-full rounded-full"
+                      style={{ background: `linear-gradient(90deg, ${theme.from}, ${theme.to})` }}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${(m.costUsd / max) * 100}%` }}
+                      transition={{ ...spring.gentle, delay: i * 0.05 }}
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
     </Tile>
   );
@@ -265,16 +312,14 @@ export function UsageView() {
   if (mobile)
     return (
       <div className="flex min-h-full flex-col">
-        <MobileHeader title="Usage" subtitle="Cost and tokens" />
+        <MobileHeader title="Usage" subtitle="Cost and tokens" back />
         <div className="px-4 pt-2 pb-6">{body}</div>
       </div>
     );
   return (
-    <div>
-      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-6">
-        <h1 className="font-display text-2xl font-bold text-ink">Usage</h1>
-        {body}
-      </div>
+    <div className="mx-auto flex max-w-[1200px] flex-col gap-5 px-8 pt-7 pb-12">
+      <PageHeader kicker="Spend" title="Usage" description="Cost and tokens from every omp session on the hosts in view." />
+      {body}
     </div>
   );
 }

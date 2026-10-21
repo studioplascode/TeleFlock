@@ -1,11 +1,11 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Bot, Columns2, FolderOpen, FolderPlus, Layers, PanelTop, Rows2, Sparkles, TriangleAlert } from "lucide-react";
+import { Bot, Columns2, FolderOpen, FolderPlus, Layers, PanelTop, Rows2, Sparkles, TriangleAlert, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { core, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { Split, Started, StartTarget, Workspace } from "@/core/gen";
-import { Button, Chip, EmptyState, Field, Input, SegmentedControl, StatusOrb, type Status, Switch, cn, spring, toast, useIsMobile } from "@/design";
+import { Button, Chip, EmptyState, Field, IconButton, Input, Kbd, SegmentedControl, StatusOrb, type Status, Switch, cn, spring, toast, useIsMobile } from "@/design";
 import { FolderBrowser, type FolderPick } from "../worktree/FolderBrowser";
-import { AgentFields, type AgentDraft, agentNameError, initialAgentDraft, toAgentSpec } from "./shared/AgentFields";
+import { AgentFields, type AgentDraft, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName } from "./shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "./shared/CommandPreview";
 import { agentLaunchLines, herdrArgv } from "./shared/commands";
 import { describeError } from "./shared/errors";
@@ -42,7 +42,7 @@ export function NewAgentDialog() {
 
 const ROLLUP_STATUS: Record<Workspace["rollup"], Status> = { working: "running", blocked: "needs-you", idle: "review", done: "review", unknown: "idle" };
 
-type Submit = { phase: "idle" } | { phase: "working"; since: number } | { phase: "failed"; title: string; hint?: string } | { phase: "done"; started: Started };
+type Submit = { phase: "idle" } | { phase: "working"; since: number } | { phase: "failed"; title: string; hint?: string } | { phase: "done"; started: Started; name: string };
 
 function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { open: boolean; initialHostId?: string; initialWorkspaceId?: string; onClose: () => void }) {
   const mobile = useIsMobile();
@@ -77,7 +77,11 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
   }, [mode, workspaceId, workspaces]);
 
   const takenNames = host?.agents.map((a) => a.name) ?? [];
-  const derived = mode === "workspace" ? agentNameFromBranch(ws?.worktree?.branch ?? ws?.repo?.branch ?? ws?.label ?? "") : agentNameFromBranch(folder ? basename(folder.path) : "");
+  // a worktree is named after its branch; a primary checkout after its workspace (not "main")
+  const derived = uniqueAgentName(
+    mode === "workspace" ? agentNameFromBranch(ws?.worktree?.branch ?? ws?.label ?? "") : agentNameFromBranch(folder ? basename(folder.path) : ""),
+    takenNames,
+  );
   const name = agent.name.trim() || derived;
   const startAgent = mode === "workspace" || agent.start;
   const target: StartTarget | null =
@@ -101,7 +105,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         return;
       }
       const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name }) });
-      setSubmit({ phase: "done", started });
+      setSubmit({ phase: "done", started, name });
     } catch (e) {
       const d = describeError(e);
       setSubmit({ phase: "failed", ...d });
@@ -127,13 +131,20 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
           ]
         : [];
 
-  const primaryLabel = startAgent ? "Start agent" : "Open folder";
+  const primaryLabel = submit.phase === "failed" ? "Try again" : !target ? (mode === "workspace" ? "Pick a workspace" : "Pick a folder") : startAgent ? "Start agent" : "Open folder";
   const footer =
     submit.phase === "done" ? undefined : (
-      <div className="flex w-full items-center justify-end gap-2">
+      <div className="flex w-full items-center gap-2">
         <Button variant="ghost" onClick={onClose} disabled={busy}>
           Cancel
         </Button>
+        <span className="flex-1" />
+        {!mobile && valid && (
+          <span className="flex items-center gap-1 text-2xs text-mute-2" aria-hidden>
+            <Kbd>Ctrl</Kbd>
+            <Kbd>Enter</Kbd>
+          </span>
+        )}
         <Button
           variant="primary"
           icon={startAgent ? <Sparkles /> : <FolderOpen />}
@@ -156,10 +167,11 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
       icon={<Bot />}
       width={720}
       maxHeight="94dvh"
+      tall
       footer={footer}
     >
       <div
-        className="flex flex-col gap-4"
+        className="flex min-h-full flex-col gap-4"
         onKeyDownCapture={(e) => {
           if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && valid) {
             e.preventDefault();
@@ -171,11 +183,31 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         {hostIds.length === 0 ? (
           <EmptyState compact icon={<TriangleAlert />} title="No host connected" action={<Button onClick={() => openDialog({ kind: "hostEditor" })}>Add a host</Button>} />
         ) : submit.phase === "done" && hostId ? (
-          <LaunchSuccess hostId={hostId} started={submit.started} title={`${name} is starting`} subtitle={ws ? ws.label : folder ? tildify(folder.path, home) : undefined} onClose={onClose} />
+          <LaunchSuccess hostId={hostId} started={submit.started} title={`${submit.name} is starting`} subtitle={ws ? ws.label : folder ? tildify(folder.path, home) : undefined} onClose={onClose} />
         ) : submit.phase === "working" ? (
           <WorkingPanel since={submit.since} label={startAgent ? `Starting ${name}` : "Opening folder"} detail={preview[0]?.argv.join(" ")} />
         ) : (
           <>
+            {submit.phase === "failed" && (
+              <motion.div
+                role="alert"
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0, x: [0, -6, 5, -3, 0] }}
+                transition={{ ...spring.smooth, x: { duration: 0.4 } }}
+                className="flex gap-3 rounded-lg bg-error/10 p-3.5 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]"
+              >
+                <TriangleAlert className="mt-0.5 size-4 shrink-0 text-error" />
+                <div className="min-w-0 flex-1 text-xs">
+                  <p className="text-sm font-bold">Couldn't {startAgent ? "start the agent" : "open the folder"}</p>
+                  <p className="mt-0.5 font-mono whitespace-pre-wrap text-ink-2">{submit.title}</p>
+                  {submit.hint && <p className="mt-1 text-mute">{submit.hint}</p>}
+                  <p className="mt-1.5 text-mute-2">Adjust anything below, then try again.</p>
+                </div>
+                <IconButton label="Dismiss" size="sm" className="-mt-1 -mr-1" onClick={() => setSubmit({ phase: "idle" })}>
+                  <X />
+                </IconButton>
+              </motion.div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <SegmentedControl
                 value={mode}
@@ -272,23 +304,6 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                     </motion.div>
                   )}
                 </AnimatePresence>
-
-                {submit.phase === "failed" && (
-                  <motion.div
-                    role="alert"
-                    initial={{ opacity: 0, y: -6 }}
-                    animate={{ opacity: 1, y: 0, x: [0, -6, 5, -3, 0] }}
-                    transition={{ ...spring.smooth, x: { duration: 0.4 } }}
-                    className="flex gap-3 rounded-lg bg-error/10 p-3.5 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]"
-                  >
-                    <TriangleAlert className="mt-0.5 size-4 shrink-0 text-error" />
-                    <div className="min-w-0 text-xs">
-                      <p className="text-sm font-bold">Couldn't {startAgent ? "start the agent" : "open the folder"}</p>
-                      <p className="mt-0.5 font-mono whitespace-pre-wrap text-ink-2">{submit.title}</p>
-                      {submit.hint && <p className="mt-1 text-mute">{submit.hint}</p>}
-                    </div>
-                  </motion.div>
-                )}
 
                 {preview.length > 0 && <CommandPreview lines={preview} />}
               </motion.div>

@@ -1,7 +1,7 @@
 import { ArrowRight, FlaskConical, Network } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
-import { AmbientGlow, cn, LogoMark, spring, StatusOrb, TiltCard, toast } from "@/design";
+import { AmbientGlow, cn, FlockSky, LogoMark, spring, StatusOrb, TiltCard, toast } from "@/design";
 import { core, useUi } from "@/core";
 import type { HostProfile } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
@@ -42,6 +42,7 @@ export function Onboarding() {
   return (
     <div className="relative h-full overflow-y-auto overscroll-contain">
       <AmbientGlow mood="running" />
+      <FlockSky className="fixed" />
       <div className="grid min-h-full place-items-center px-5 pt-[max(40px,env(safe-area-inset-top))] pb-[max(40px,env(safe-area-inset-bottom))]">
       <div className="flex w-full max-w-[760px] flex-col items-center text-center">
         <motion.div initial={{ scale: 0.4, opacity: 0, rotate: -12 }} animate={{ scale: 1, opacity: 1, rotate: 0 }} transition={spring.bouncy} className="relative">

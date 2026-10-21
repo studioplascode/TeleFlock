@@ -8,6 +8,7 @@
 //!
 //! See `README.md` for the API contract.
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,8 +213,10 @@ pub enum TransportEvent {
 /// App-provided connection settings.
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
-    /// OpenSSH-format known_hosts file for trust-on-first-use host key pinning.
+    /// OpenSSH-format known_hosts file for host key pinning.
     pub known_hosts: PathBuf,
+    /// Decides whether a host key that is not pinned yet may be pinned now.
+    pub host_key_policy: HostKeyPolicy,
     /// DNS resolution deadline.
     pub resolve_timeout: Duration,
     /// TCP connect deadline (per resolved address).
@@ -236,6 +239,7 @@ impl ConnectOptions {
     pub fn new(known_hosts: impl Into<PathBuf>) -> Self {
         Self {
             known_hosts: known_hosts.into(),
+            host_key_policy: HostKeyPolicy::tailnet_only(),
             resolve_timeout: Duration::from_secs(10),
             connect_timeout: Duration::from_secs(15),
             handshake_timeout: Duration::from_secs(20),
@@ -245,6 +249,75 @@ impl ConnectOptions {
             ping_max_misses: 3,
             wsl_start_timeout: Duration::from_secs(90),
         }
+    }
+}
+
+/// A host key presented by an SSH server that is not pinned in known_hosts yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyCheck {
+    /// known_hosts host field (`name` or `[name]:port`).
+    pub host: String,
+    /// Resolved peer address the key was presented by.
+    pub address: IpAddr,
+    /// Key algorithm, e.g. `ssh-ed25519`.
+    pub algorithm: String,
+    /// `SHA256:…` fingerprint.
+    pub fingerprint: String,
+}
+
+/// Outcome of [`HostKeyPolicy::decide`]. A key that differs from a pinned one is always
+/// rejected ([`TransportError::HostKeyMismatch`]) and never reaches the policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyDecision {
+    /// Pin the key and continue the handshake.
+    Trust,
+    /// Abort with [`TransportError::HostKeyUnconfirmed`] so the user can confirm the
+    /// fingerprint; connect again once it is trusted.
+    Confirm,
+}
+
+/// Host key decision hook for keys seen for the first time. Called synchronously during
+/// the SSH key exchange, so it must not block.
+#[derive(Clone)]
+pub struct HostKeyPolicy(Arc<dyn Fn(&HostKeyCheck) -> HostKeyDecision + Send + Sync>);
+
+impl HostKeyPolicy {
+    pub fn new(decide: impl Fn(&HostKeyCheck) -> HostKeyDecision + Send + Sync + 'static) -> Self {
+        Self(Arc::new(decide))
+    }
+
+    /// Silent trust-on-first-use for tailnet addresses (Tailscale authenticates the node);
+    /// every other address needs an explicit confirmation.
+    pub fn tailnet_only() -> Self {
+        Self::new(|c| if is_tailnet_ip(c.address) { HostKeyDecision::Trust } else { HostKeyDecision::Confirm })
+    }
+
+    pub fn decide(&self, check: &HostKeyCheck) -> HostKeyDecision {
+        (self.0)(check)
+    }
+}
+
+impl std::fmt::Debug for HostKeyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostKeyPolicy")
+    }
+}
+
+/// Tailscale node address: `100.64.0.0/10` (CGNAT range Tailscale assigns) or
+/// `fd7a:115c:a1e0::/48` (Tailscale's ULA prefix), including IPv4-mapped IPv6.
+pub fn is_tailnet_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xC0) == 64
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_tailnet_ip(IpAddr::V4(v4)),
+            None => {
+                let s = v6.segments();
+                s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+            }
+        },
     }
 }
 

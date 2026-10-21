@@ -1,10 +1,14 @@
 import { Check, Copy } from "lucide-react";
 import { memo, type ReactNode, useContext, useState } from "react";
+import { linkProps } from "@/core";
 import { Caret, cn } from "@/design";
 import { PreviewButton } from "@/features/preview";
 import { SessionCtx } from "../context";
 import { highlight, languageFor, TOKEN_CLASS } from "../lib/highlight";
+import { lruMemo } from "../lib/lru";
 import { type Block, type Inline, localhostPort, parseBlocks, parseInline } from "./parse";
+
+const parseBlocksCached = lruMemo(300, parseBlocks);
 
 export interface MarkdownProps {
   text: string;
@@ -13,35 +17,113 @@ export interface MarkdownProps {
   className?: string;
 }
 
+/** How long a streamed chunk keeps its own fade-in span before it settles into plain text. */
+const FRESH_MS = 700;
+const MAX_FRESH = 10;
+const NO_FRESH: FreshChunk[] = [];
+
+interface FreshChunk {
+  key: number;
+  len: number;
+  at: number;
+}
+
+/**
+ * Tracks the trailing chunks appended while streaming, so each one can fade in on its own
+ * (`.tf-token`). Derived during render from the previous text, like `StreamText`.
+ */
+function useFreshChunks(text: string, streaming: boolean): FreshChunk[] {
+  const [s, setS] = useState<{ source: string; chunks: FreshChunk[]; next: number }>({ source: text, chunks: NO_FRESH, next: 0 });
+  if (text !== s.source) {
+    if (streaming && text.startsWith(s.source)) {
+      const now = performance.now();
+      const chunks = [...s.chunks.filter((c) => now - c.at < FRESH_MS), { key: s.next, len: text.length - s.source.length, at: now }].slice(-MAX_FRESH);
+      setS({ source: text, chunks, next: s.next + 1 });
+    } else {
+      setS({ source: text, chunks: NO_FRESH, next: s.next + 1 });
+    }
+  }
+  return streaming ? s.chunks : NO_FRESH;
+}
+
+/**
+ * Wraps the trailing characters of an inline tree in `fresh` nodes, newest chunk last. Counts
+ * visible characters, so markdown syntax at the tail shifts the boundary by a glyph at most.
+ */
+function markFresh(nodes: Inline[], chunks: FreshChunk[]): Inline[] {
+  if (chunks.length === 0) return nodes;
+  const queue = chunks.map((c) => ({ key: c.key, len: c.len })).reverse();
+  const walk = (list: Inline[]): Inline[] => {
+    const out: Inline[] = [];
+    let i = list.length - 1;
+    for (; i >= 0 && queue.length > 0; i--) {
+      const n = list[i]!;
+      if (n.t === "text") {
+        let rest = n.v;
+        const parts: Inline[] = [];
+        while (rest.length > 0 && queue.length > 0) {
+          const c = queue[0]!;
+          const take = Math.min(c.len, rest.length);
+          parts.unshift({ t: "fresh", key: c.key, v: rest.slice(rest.length - take) });
+          rest = rest.slice(0, rest.length - take);
+          c.len -= take;
+          if (c.len === 0) queue.shift();
+        }
+        if (rest) parts.unshift({ t: "text", v: rest });
+        out.unshift(...parts);
+      } else if (n.t === "strong" || n.t === "em" || n.t === "del" || n.t === "link") {
+        out.unshift({ ...n, c: walk(n.c) });
+      } else {
+        // Inline code and breaks are atomic: consume their width without splitting them.
+        let w = n.t === "code" ? n.v.length : 1;
+        while (w > 0 && queue.length > 0) {
+          const c = queue[0]!;
+          const take = Math.min(c.len, w);
+          c.len -= take;
+          w -= take;
+          if (c.len === 0) queue.shift();
+        }
+        out.unshift(n);
+      }
+    }
+    return [...list.slice(0, i + 1), ...out];
+  };
+  return walk(nodes);
+}
+
 /**
  * Markdown for assistant text, plan reviews and tool markdown views. Blocks are memoised by
- * their source, so while streaming only the last (growing) block re-renders.
+ * their source, so while streaming only the last (growing) block re-renders; its newest chunks
+ * fade in from omp purple behind the caret.
  */
 export function Markdown({ text, streaming = false, className }: MarkdownProps) {
-  const blocks = parseBlocks(text);
+  const blocks = parseBlocksCached(text);
+  const fresh = useFreshChunks(text, streaming);
   return (
     <div className={cn("tf-md min-w-0 text-[13.5px] leading-[1.62] text-ink-2", className)}>
-      {blocks.map((b, i) => (
-        <BlockView key={i} block={b} src={b.src} tail={streaming && i === blocks.length - 1 ? <Caret /> : null} />
-      ))}
+      {blocks.map((b, i) => {
+        const last = streaming && i === blocks.length - 1;
+        return <BlockView key={i} block={b} src={b.src} tail={last ? <Caret /> : null} fresh={last ? fresh : NO_FRESH} />;
+      })}
       {streaming && blocks.length === 0 && <Caret />}
     </div>
   );
 }
 
 const BlockView = memo(
-  function BlockView({ block, tail }: { block: Block; src: string; tail: ReactNode }) {
-    return renderBlock(block, tail);
+  function BlockView({ block, tail, fresh }: { block: Block; src: string; tail: ReactNode; fresh: FreshChunk[] }) {
+    return renderBlock(block, tail, fresh);
   },
-  (a, b) => a.src === b.src && a.tail === b.tail && a.block.t === b.block.t && (a.block.t !== "code" || b.block.t !== "code" || a.block.open === b.block.open),
+  (a, b) =>
+    a.src === b.src && a.tail === b.tail && a.fresh === b.fresh && a.block.t === b.block.t && (a.block.t !== "code" || b.block.t !== "code" || a.block.open === b.block.open),
 );
 
-function renderBlock(b: Block, tail: ReactNode): ReactNode {
+function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH): ReactNode {
   switch (b.t) {
     case "p":
       return (
         <p className="my-2 first:mt-0 last:mb-0 [overflow-wrap:anywhere]">
-          <Inlines nodes={parseInline(b.text)} />
+          <Inlines nodes={markFresh(parseInline(b.text), fresh)} />
           {tail}
         </p>
       );
@@ -49,7 +131,7 @@ function renderBlock(b: Block, tail: ReactNode): ReactNode {
       const size = b.level <= 1 ? "text-xl" : b.level === 2 ? "text-lg" : b.level === 3 ? "text-md" : "text-base";
       return (
         <div role="heading" aria-level={b.level} className={cn("mt-4 mb-1.5 font-display font-bold tracking-tight text-ink first:mt-0", size)}>
-          <Inlines nodes={parseInline(b.text)} />
+          <Inlines nodes={markFresh(parseInline(b.text), fresh)} />
           {tail}
         </div>
       );
@@ -62,7 +144,7 @@ function renderBlock(b: Block, tail: ReactNode): ReactNode {
       return (
         <blockquote className="my-2 border-l-2 border-accent/50 pl-3 text-mute">
           {b.blocks.map((c, i) => (
-            <BlockView key={i} block={c} src={c.src} tail={i === b.blocks.length - 1 ? tail : null} />
+            <BlockView key={i} block={c} src={c.src} tail={i === b.blocks.length - 1 ? tail : null} fresh={i === b.blocks.length - 1 ? fresh : NO_FRESH} />
           ))}
         </blockquote>
       );
@@ -84,9 +166,10 @@ function renderBlock(b: Block, tail: ReactNode): ReactNode {
                 </span>
               )}
               <div className="min-w-0 [&>p]:my-0">
-                {item.blocks.map((c, j) => (
-                  <BlockView key={j} block={c} src={c.src} tail={i === b.items.length - 1 && j === item.blocks.length - 1 ? tail : null} />
-                ))}
+                {item.blocks.map((c, j) => {
+                  const last = i === b.items.length - 1 && j === item.blocks.length - 1;
+                  return <BlockView key={j} block={c} src={c.src} tail={last ? tail : null} fresh={last ? fresh : NO_FRESH} />;
+                })}
               </div>
             </li>
           ))}
@@ -126,12 +209,23 @@ function renderBlock(b: Block, tail: ReactNode): ReactNode {
 
 export function Inlines({ nodes }: { nodes: Inline[] }) {
   const session = useContext(SessionCtx);
+  // A chunk split around inline code yields two fresh pieces in one parent: suffix repeats.
+  const seen = new Set<number>();
   return (
     <>
       {nodes.map((n, i) => {
         switch (n.t) {
           case "text":
             return n.v;
+          case "fresh": {
+            const key = seen.has(n.key) ? `f${n.key}.${i}` : `f${n.key}`;
+            seen.add(n.key);
+            return (
+              <span key={key} className="tf-token">
+                {n.v}
+              </span>
+            );
+          }
           case "code":
             return (
               <code key={i} className="rounded-[6px] bg-white/[0.07] px-[5px] py-[1px] font-mono text-[0.88em] text-[#e9dcff] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.06)]">
@@ -157,10 +251,13 @@ export function Inlines({ nodes }: { nodes: Inline[] }) {
               </del>
             );
           case "link": {
-            const port = session ? localhostPort(n.href) : undefined;
+            const link = linkProps(n.href);
+            // Non-http(s) targets (javascript:, file:, custom handlers, relative paths) stay inert text.
+            if (!link) return <Inlines key={i} nodes={n.c} />;
+            const port = session ? localhostPort(link.href) : undefined;
             return (
               <span key={i}>
-                <a href={n.href} target="_blank" rel="noreferrer noopener" className="font-semibold text-accent-hi underline decoration-accent/40 underline-offset-2 hover:decoration-accent-hi">
+                <a {...link} className="font-semibold text-accent-hi underline decoration-accent/40 underline-offset-2 hover:decoration-accent-hi">
                   <Inlines nodes={n.c} />
                 </a>
                 {port != null && session && <PreviewButton hostId={session.hostId} port={port} className="mx-1 align-middle" />}

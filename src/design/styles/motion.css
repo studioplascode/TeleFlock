@@ -397,7 +397,44 @@ html[data-motion="reduced"] .live-gradient { animation: none; }
   0%, 100% { transform: translateY(0) scaleY(1); }
   50% { transform: translateY(-1.2px) scaleY(0.82); }
 }
+/* FlockSky: a flock gliding across a hero background (transform-only). */
+@keyframes tf-glide {
+  from { transform: translate3d(calc(-1 * var(--sky-x, 0px) - 18vw), 0, 0); }
+  to { transform: translate3d(calc(118vw - var(--sky-x, 0px)), var(--sky-rise, -8vh), 0); }
+}
+@keyframes tf-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(var(--bob, -7px)); }
+}
 @layer components {
+.tf-sky {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.tf-sky__flock {
+  position: absolute;
+  left: var(--sky-x, 0px);
+  will-change: transform;
+  animation: tf-glide var(--sky-dur, 40s) linear infinite;
+  animation-delay: var(--sky-delay, 0s);
+}
+.tf-sky__bird {
+  position: absolute;
+  animation: tf-bob var(--bob-dur, 3.4s) var(--ease-in-out-sine) infinite;
+  animation-delay: var(--bob-delay, 0s);
+}
+.tf-sky__bird path {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: tf-flap var(--flap, 1.3s) ease-in-out infinite;
+  animation-delay: var(--bob-delay, 0s);
+}
+html[data-motion="reduced"] .tf-sky__flock,
+html[data-motion="reduced"] .tf-sky__bird,
+html[data-motion="reduced"] .tf-sky__bird path { animation: none; }
+
 
 .tf-pop[data-state="open"], .tf-pop[data-state="delayed-open"], .tf-pop[data-state="instant-open"] { animation: tf-pop-in 0.3s var(--ease-spring); transform-origin: var(--radix-popper-transform-origin, center); }
 .tf-pop[data-state="closed"] { animation: tf-pop-out 0.14s ease-in forwards; }

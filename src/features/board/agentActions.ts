@@ -1,6 +1,6 @@
 import { core, navigate, parseAgentKey, useUi } from "@/core";
 import type { Answer, ApiError } from "@/core/gen";
-import { toast } from "@/design";
+import { morphTo, toast } from "@/design";
 
 function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
@@ -45,9 +45,10 @@ export async function stopAgent(key: string): Promise<void> {
   }
 }
 
+/** Open the agent's session; tagged cards on screen morph into its header (design `morphTo`). */
 export function openAgent(key: string): void {
   const { hostId, agentId } = parseAgentKey(key);
-  navigate({ name: "agent", hostId, agentId });
+  morphTo(key, () => navigate({ name: "agent", hostId, agentId }));
 }
 
 /** Desktop: open the agent's terminal in the split pane. Mobile: the full terminal view. */

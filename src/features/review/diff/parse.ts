@@ -15,7 +15,10 @@ export interface Hunk {
   /** Text after the second `@@` (enclosing function), if any. */
   section: string;
   oldStart: number;
+  /** Line counts from the header (`-start,count +start,count`; a missing count means 1). */
+  oldLines: number;
   newStart: number;
+  newLines: number;
   lines: DiffLine[];
 }
 
@@ -31,7 +34,7 @@ export interface DiffFile {
   maxLen: number;
 }
 
-const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)$/;
+const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
 
 function unquote(p: string): string {
   if (p.startsWith('"') && p.endsWith('"')) return p.slice(1, -1).replace(/\\(.)/g, "$1");
@@ -115,8 +118,8 @@ export function parsePatch(patch: string): DiffFile[] {
     const h = line.match(HUNK_RE);
     if (h) {
       oldNo = Number(h[1]);
-      newNo = Number(h[2]);
-      hunk = { header: line, section: h[3] ?? "", oldStart: oldNo, newStart: newNo, lines: [] };
+      newNo = Number(h[3]);
+      hunk = { header: line, section: h[5] ?? "", oldStart: oldNo, oldLines: h[2] === undefined ? 1 : Number(h[2]), newStart: newNo, newLines: h[4] === undefined ? 1 : Number(h[4]), lines: [] };
       file.hunks.push(hunk);
       continue;
     }
@@ -154,17 +157,77 @@ export function mergeFiles(parsed: DiffFile[], stats: ChangedFile[]): DiffFile[]
   return out;
 }
 
-/** Common-prefix/suffix intra-line change span for a deleted/added pair (cheap word-diff). */
-export function changedSpan(a: string, b: string): { a: [number, number]; b: [number, number] } | null {
-  const max = Math.min(a.length, b.length);
+/** Half-open character range `[start, end)` within a line. */
+export type Range = [number, number];
+
+/** Words (letters/digits/`_`/`$`), whitespace runs, or single punctuation characters. */
+const WORD_RE = /[\p{L}\p{N}_$]+|\s+|[^\p{L}\p{N}_$\s]/gu;
+/** LCS table budget (tokens × tokens); longer pairs fall back to one prefix/suffix span. */
+const MAX_CELLS = 40_000;
+
+/**
+ * Word-level intra-line diff for a deleted/added pair: the character ranges that changed on each
+ * side (token LCS after trimming the common prefix/suffix). Returns null for whole-line rewrites,
+ * where emphasis would carry no extra signal.
+ */
+export function wordDiff(a: string, b: string): { a: Range[]; b: Range[] } | null {
+  if (a === b) return null;
+  const ta = a.match(WORD_RE) ?? [];
+  const tb = b.match(WORD_RE) ?? [];
   let p = 0;
-  while (p < max && a.charCodeAt(p) === b.charCodeAt(p)) p++;
+  while (p < ta.length && p < tb.length && ta[p] === tb[p]) p++;
   let s = 0;
-  while (s < max - p && a.charCodeAt(a.length - 1 - s) === b.charCodeAt(b.length - 1 - s)) s++;
-  const ae = a.length - s;
-  const be = b.length - s;
-  // Whole-line rewrites carry no extra signal; skip the highlight.
-  if (p === 0 && s === 0) return null;
-  if (ae - p > a.length * 0.85 && be - p > b.length * 0.85) return null;
-  return { a: [p, ae], b: [p, be] };
+  while (s < ta.length - p && s < tb.length - p && ta[ta.length - 1 - s] === tb[tb.length - 1 - s]) s++;
+  const n = ta.length - p - s;
+  const m = tb.length - p - s;
+  const changedA = new Uint8Array(ta.length);
+  const changedB = new Uint8Array(tb.length);
+  if (n === 0 || m === 0 || n * m > MAX_CELLS) {
+    changedA.fill(1, p, p + n);
+    changedB.fill(1, p, p + m);
+  } else {
+    // LCS lengths of the middle tokens, filled from the end so the walk below goes forwards.
+    const w = m + 1;
+    const dp = new Uint16Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i * w + j] = ta[p + i] === tb[p + j] ? (dp[(i + 1) * w + j + 1] ?? 0) + 1 : Math.max(dp[(i + 1) * w + j] ?? 0, dp[i * w + j + 1] ?? 0);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (ta[p + i] === tb[p + j]) {
+        i++;
+        j++;
+      } else if ((dp[(i + 1) * w + j] ?? 0) >= (dp[i * w + j + 1] ?? 0)) changedA[p + i++] = 1;
+      else changedB[p + j++] = 1;
+    }
+    changedA.fill(1, p + i, p + n);
+    changedB.fill(1, p + j, p + m);
+  }
+  const ra = toRanges(ta, changedA);
+  const rb = toRanges(tb, changedB);
+  const kept = a.length - ra.chars + (b.length - rb.chars);
+  if (kept < (a.length + b.length) * 0.4) return null;
+  return { a: ra.ranges, b: rb.ranges };
+}
+
+/** Changed tokens → merged character ranges (a single unchanged space between two changes joins them). */
+function toRanges(toks: string[], changed: Uint8Array): { ranges: Range[]; chars: number } {
+  const ranges: Range[] = [];
+  let pos = 0;
+  let chars = 0;
+  for (let i = 0; i < toks.length; i++) {
+    const len = toks[i]?.length ?? 0;
+    if (changed[i]) {
+      chars += len;
+      const last = ranges[ranges.length - 1];
+      const prev = toks[i - 1] ?? "";
+      if (last && (last[1] === pos || (last[1] === pos - prev.length && !changed[i - 1] && prev.trim() === "" && prev.length <= 1))) last[1] = pos + len;
+      else ranges.push([pos, pos + len]);
+    }
+    pos += len;
+  }
+  return { ranges, chars };
 }

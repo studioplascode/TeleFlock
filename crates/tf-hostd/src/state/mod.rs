@@ -541,6 +541,9 @@ impl StateHandle {
         let mut info = m.published.info.clone();
         info.relay_port = store.omp.relay_port();
         info.setup.relay = store.omp.relay_listening();
+        // Bind failures/recoveries show up without waiting for the next full setup probe.
+        info.setup.issues.retain(|i| !crate::omp::RELAY_ISSUE_IDS.contains(&i.id.as_str()));
+        info.setup.issues.extend(store.omp.relay_issue());
 
         // Diff.
         let mut ops = Vec::new();

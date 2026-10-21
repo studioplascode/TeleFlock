@@ -1,4 +1,5 @@
 import {
+  ArrowDown,
   Ban,
   Bot,
   ChevronDown,
@@ -13,17 +14,20 @@ import {
   MessageCircleQuestion,
   NotebookText,
   Search,
+  ShieldQuestion,
   ShieldX,
   SquareTerminal,
   Wrench,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { motion } from "motion/react";
+import { type ReactNode, useContext, useState } from "react";
+import { linkProps, useAgent } from "@/core";
 import type { BashView, ImageRef, Subagent, ToolItem, ToolView } from "@/core/gen";
-import { Chip, cn, Elapsed, formatElapsed, Shimmer, Spinner } from "@/design";
+import { Chip, cn, Elapsed, formatElapsed, Shimmer, spring, Spinner } from "@/design";
 import { languageFor } from "../lib/highlight";
 import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
 import { SubagentCard, SubagentDialog } from "../subagents/Subagents";
-import { useSessionRef } from "../context";
+import { SessionCtx, useSessionRef } from "../context";
 import { AnsiText } from "./AnsiText";
 import { DiffStatText, FileDiffView } from "./DiffBody";
 import { TodoPhases, todoCounts } from "./TodoList";
@@ -42,6 +46,34 @@ const ICON: Record<ViewType, typeof Wrench> = {
   ask: MessageCircleQuestion,
   markdown: NotebookText,
   generic: Wrench,
+};
+
+/** Tool name → icon kind, for calls whose rich view hasn't arrived yet (or never will). */
+const TOOL_KIND: [RegExp, ViewType][] = [
+  [/^(bash|shell|exec|python|eval|recipe)/i, "bash"],
+  [/^(edit|write|patch|apply|ast_edit|multi_?edit)/i, "diff"],
+  [/^(read|view|cat)/i, "read"],
+  [/^(grep|find|glob|search|ast_grep|lsp)/i, "search"],
+  [/^(web|fetch|browser)/i, "web"],
+  [/^(task|agent|subagent)/i, "task"],
+  [/^todo/i, "todo"],
+  [/^ask/i, "ask"],
+  [/^(image|screenshot)/i, "image"],
+];
+
+/** Per-kind icon tint so a long run of tool cards scans by shape and colour, not by reading. */
+const TONE: Record<ViewType, string> = {
+  diff: "bg-add/12 text-add",
+  bash: "bg-accent/15 text-accent-hi",
+  read: "bg-review/12 text-review",
+  search: "bg-warn/12 text-warn",
+  todo: "bg-done/12 text-done",
+  task: "bg-omp-blue/15 text-omp-blue",
+  web: "bg-review/12 text-review",
+  image: "bg-omp-pink/15 text-omp-pink",
+  ask: "bg-sun-1/15 text-sun-1",
+  markdown: "bg-white/8 text-ink-2",
+  generic: "bg-white/6 text-mute",
 };
 
 /** Views that start expanded (the rest open on click). */
@@ -70,24 +102,48 @@ function bashOutput(item: ToolItem, view: BashView): string {
   return b.length > a.length ? b : a;
 }
 
-function StatusMeta({ item, extra }: { item: ToolItem; extra?: ReactNode }) {
-  const live = item.status === "running" || item.status === "pending";
+/** Pending call: "awaiting you" when it's the call an approval is gating, else queued. */
+function PendingLabel() {
+  const session = useContext(SessionCtx);
+  const gated = useAgent(session?.key ?? "")?.needs?.kind === "approval";
+  return gated ? (
+    <span className="flex items-center gap-1.5 text-sun-1">
+      <ShieldQuestion className="tf-loop size-3 animate-breathe [--tf-breath:1.6s]" />
+      awaiting you
+    </span>
+  ) : (
+    <span className="flex items-center gap-1.5 text-accent-hi">
+      <Spinner size={12} label="queued" />
+      queued
+    </span>
+  );
+}
+
+function StatusMeta({ item, extra, settled }: { item: ToolItem; extra?: ReactNode; settled: boolean }) {
+  // Finished while on screen: the result icon pops in instead of just appearing.
+  const pop = settled ? { initial: { scale: 0.2, opacity: 0 }, animate: { scale: 1, opacity: 1, transition: spring.bouncy } } : {};
   return (
     <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 text-[11.5px] font-semibold whitespace-nowrap text-mute tabular">
       {extra}
-      {live ? (
+      {item.status === "pending" ? (
+        <PendingLabel />
+      ) : item.status === "running" ? (
         <span className="flex items-center gap-1.5 text-accent-hi">
           <Spinner size={12} label="running" />
-          {item.status === "pending" ? "queued" : <Elapsed since={item.at} />}
+          <Elapsed since={item.at} />
         </span>
       ) : item.status === "ok" ? (
         <span className="flex items-center gap-1">
-          <CircleCheck className="size-3 text-done/80" />
+          <motion.span className="grid" {...pop}>
+            <CircleCheck className="size-3 text-done/80" />
+          </motion.span>
           {item.durationMs != null && formatElapsed(item.durationMs)}
         </span>
       ) : item.status === "error" ? (
         <span className="flex items-center gap-1 text-error">
-          <CircleX className="size-3" />
+          <motion.span className="grid" {...pop}>
+            <CircleX className="size-3" />
+          </motion.span>
           failed
         </span>
       ) : item.status === "denied" ? (
@@ -174,11 +230,20 @@ function headTitle(item: ToolItem): ReactNode {
 /** Rich card for one tool call. Every `ToolView` has a renderer; anything else gets args/output. */
 export function ToolCard({ item }: { item: ToolItem }) {
   const type: ViewType = item.view?.type ?? "generic";
+  // The rich view often lands only when the call finishes: pick the icon from the tool name meanwhile.
+  const kind: ViewType = type !== "generic" ? type : (TOOL_KIND.find(([re]) => re.test(item.tool))?.[1] ?? "generic");
   const [openState, setOpen] = useState<boolean | null>(null);
   const live = item.status === "running" || item.status === "pending";
   const failed = item.status === "error";
+  // Remember a live → done transition seen on screen, to play the one-shot settle flash.
+  const [wasLive, setWasLive] = useState(live);
+  const [settled, setSettled] = useState(false);
+  if (wasLive !== live) {
+    setWasLive(live);
+    if (!live) setSettled(true);
+  }
   const open = openState ?? (OPEN_BY_DEFAULT[type] || failed);
-  const Icon = ICON[type];
+  const Icon = ICON[kind];
   const hasBody = item.view != null || item.output != null || item.args != null || item.error != null;
   return (
     <div
@@ -190,20 +255,31 @@ export function ToolCard({ item }: { item: ToolItem }) {
       )}
     >
       {live && <span className="tf-loop live-gradient absolute inset-x-0 top-0 h-[2px]" aria-hidden />}
+      {settled && (item.status === "ok" || failed) && (
+        <span
+          aria-hidden
+          className={cn(
+            "tf-keep pointer-events-none absolute inset-0 rounded-[16px] animate-[tf-flash_1.1s_ease-out_forwards]",
+            failed
+              ? "bg-error/[0.07] shadow-[inset_0_0_0_1.5px_rgb(255_77_94/0.75),inset_0_0_32px_-8px_rgb(255_77_94/0.5)]"
+              : "bg-done/[0.05] shadow-[inset_0_0_0_1.5px_rgb(52_211_153/0.6),inset_0_0_32px_-8px_rgb(52_211_153/0.4)]",
+          )}
+        />
+      )}
       <button
         type="button"
         onClick={() => hasBody && setOpen(!open)}
         aria-expanded={hasBody ? open : undefined}
         className={cn("focus-ring flex w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left", hasBody && "hover:bg-white/[0.025]")}
       >
-        <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px] bg-white/6 text-mute", live && "st-soft")}>
+        <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px] transition-colors duration-500", live ? "st-soft" : failed ? "bg-error/14 text-error" : TONE[kind])}>
           <Icon className="size-3" />
         </span>
         <span className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
         <span className="min-w-0 truncate font-mono text-[11.5px] text-[#e2e2ea]" title={typeof item.title === "string" ? item.title : undefined}>
           {live && type === "generic" ? <Shimmer>{item.title}</Shimmer> : headTitle(item)}
         </span>
-        <StatusMeta item={item} extra={summary(item)} />
+        <StatusMeta item={item} extra={summary(item)} settled={settled} />
         {hasBody && <ChevronDown className={cn("size-3.5 shrink-0 text-mute-2 transition-transform duration-300", !open && "-rotate-90")} />}
       </button>
       {item.intent && open && <div className="-mt-1 px-3 pb-1.5 pl-[46px] text-xs text-mute italic">{item.intent}</div>}
@@ -315,24 +391,30 @@ function ToolBody({ item }: { item: ToolItem }) {
               } catch {
                 /* keep the raw url */
               }
+              const link = linkProps(s.url);
+              const body = (
+                <>
+                  <span className="mt-px grid size-5 shrink-0 place-items-center rounded-[6px] bg-accent/15 font-mono text-[10px] font-bold text-accent-hi">{i + 1}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5 text-[12.5px] font-bold text-ink">
+                      <span className="truncate">{s.title || host}</span>
+                      {link && <ExternalLink className="size-3 shrink-0 text-mute-2 opacity-0 transition-opacity group-hover/src:opacity-100" />}
+                    </span>
+                    <span className="block truncate font-mono text-[10.5px] text-mute-2">{host}</span>
+                    {s.snippet && <span className="mt-0.5 line-clamp-2 block text-xs text-mute">{s.snippet}</span>}
+                  </span>
+                </>
+              );
               return (
                 <li key={i}>
-                  <a
-                    href={s.url}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="group/src focus-ring pressable flex items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-white/[0.04]"
-                  >
-                    <span className="mt-px grid size-5 shrink-0 place-items-center rounded-[6px] bg-accent/15 font-mono text-[10px] font-bold text-accent-hi">{i + 1}</span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5 text-[12.5px] font-bold text-ink">
-                        <span className="truncate">{s.title || host}</span>
-                        <ExternalLink className="size-3 shrink-0 text-mute-2 opacity-0 transition-opacity group-hover/src:opacity-100" />
-                      </span>
-                      <span className="block truncate font-mono text-[10.5px] text-mute-2">{host}</span>
-                      {s.snippet && <span className="mt-0.5 line-clamp-2 block text-xs text-mute">{s.snippet}</span>}
-                    </span>
-                  </a>
+                  {link ? (
+                    <a {...link} className="group/src focus-ring pressable flex items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-white/[0.04]">
+                      {body}
+                    </a>
+                  ) : (
+                    // Non-http(s) source: shown, never followable.
+                    <div className="flex items-start gap-2.5 px-2 py-1.5">{body}</div>
+                  )}
                 </li>
               );
             })}
@@ -341,6 +423,7 @@ function ToolBody({ item }: { item: ToolItem }) {
       );
     case "image": {
       const src = imageSrc(v.image);
+      const urlLink = linkProps(v.url);
       return (
         <figure className="p-2">
           {src ? (
@@ -358,11 +441,14 @@ function ToolBody({ item }: { item: ToolItem }) {
           {(v.url || v.alt) && (
             <figcaption className="mt-1.5 flex items-center gap-2 px-1 text-2xs text-mute">
               {v.alt && <span className="truncate">{v.alt}</span>}
-              {v.url && (
-                <a href={v.url} target="_blank" rel="noreferrer noopener" className="truncate font-mono text-accent-hi hover:underline">
-                  {v.url}
-                </a>
-              )}
+              {v.url &&
+                (urlLink ? (
+                  <a {...urlLink} className="truncate font-mono text-accent-hi hover:underline">
+                    {v.url}
+                  </a>
+                ) : (
+                  <span className="truncate font-mono">{v.url}</span>
+                ))}
             </figcaption>
           )}
         </figure>
@@ -371,35 +457,45 @@ function ToolBody({ item }: { item: ToolItem }) {
     case "ask":
       return (
         <div className="flex flex-col gap-3 px-3 py-2.5">
-          {v.questions.map((q, i) => (
-            <div key={i}>
-              <div className="text-[13px] font-bold text-ink">{q.question}</div>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {q.options.map((o) => {
-                  const chosen = q.answer != null && (q.answer === o || q.answer.split(/\s*,\s*/).includes(o));
-                  return (
-                    <span
-                      key={o}
-                      className={cn(
-                        "rounded-full px-2.5 py-1 text-xs font-semibold",
-                        chosen ? "bg-sun text-white shadow-glow-sun" : "bg-white/5 text-mute shadow-hairline",
-                      )}
-                    >
-                      {chosen && "✓ "}
-                      {o}
-                    </span>
-                  );
-                })}
+          {v.questions.map((q, i) =>
+            q.answer == null && item.status === "running" ? (
+              // The sunset card under the transcript carries the options; don't repeat them here.
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                {q.question !== item.title && <span className="min-w-0 text-[13px] font-bold text-ink">{q.question}</span>}
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-sun-1/12 px-2.5 py-1 text-[11.5px] font-bold text-sun-1 shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)]">
+                  <ArrowDown className="tf-loop size-3 animate-bounce" />
+                  Answer in the card below · {q.options.length} option{q.options.length === 1 ? "" : "s"}
+                </span>
               </div>
-              {q.answer != null && !q.options.some((o) => q.answer === o || q.answer?.split(/\s*,\s*/).includes(o)) && (
-                <div className="mt-1.5 rounded-md bg-white/[0.04] px-2.5 py-1.5 text-xs text-ink-2 shadow-hairline">
-                  <span className="kicker mr-2">answer</span>
-                  {q.answer}
+            ) : (
+              <div key={i}>
+                <div className="text-[13px] font-bold text-ink">{q.question}</div>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {q.options.map((o) => {
+                    const chosen = q.answer != null && (q.answer === o || q.answer.split(/\s*,\s*/).includes(o));
+                    return (
+                      <span
+                        key={o}
+                        className={cn(
+                          "rounded-full px-2.5 py-1 text-xs font-semibold",
+                          chosen ? "bg-sun text-white shadow-glow-sun" : "bg-white/5 text-mute shadow-hairline",
+                        )}
+                      >
+                        {chosen && "✓ "}
+                        {o}
+                      </span>
+                    );
+                  })}
                 </div>
-              )}
-              {q.answer == null && item.status === "running" && <Shimmer className="mt-1.5 block text-xs">Waiting for your answer…</Shimmer>}
-            </div>
-          ))}
+                {q.answer != null && !q.options.some((o) => q.answer === o || q.answer?.split(/\s*,\s*/).includes(o)) && (
+                  <div className="mt-1.5 rounded-md bg-white/[0.04] px-2.5 py-1.5 text-xs text-ink-2 shadow-hairline">
+                    <span className="kicker mr-2">answer</span>
+                    {q.answer}
+                  </div>
+                )}
+              </div>
+            ),
+          )}
         </div>
       );
     case "markdown":

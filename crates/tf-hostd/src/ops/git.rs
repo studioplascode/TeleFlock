@@ -223,8 +223,37 @@ const GIT_ENV: &[(&str, &str)] = &[
     ("GCM_INTERACTIVE", "never"),
 ];
 
-/// Runs git in `cwd`. Non-zero exits are returned (callers decide); spawn failures and
-/// timeouts become `git_error`.
+/// `core.hooksPath` for calls that must not run hooks: a path that can never hold one.
+const NO_HOOKS: &str = if cfg!(windows) { "core.hooksPath=NUL" } else { "core.hooksPath=/dev/null" };
+
+/// Subcommands the user explicitly asked to mutate the repository with; they keep the
+/// repository's hooks (pre-commit, pre-push, post-checkout, …). Everything else runs hookless.
+const HOOKED: &[&str] = &["add", "commit", "push", "pull", "merge", "rebase", "checkout", "switch", "cherry-pick", "revert", "am"];
+
+/// Full argument list for one git call. Repository config can name programs (`core.fsmonitor`,
+/// hooks, textconv / external diff drivers) and `fs.list` runs git in folders the user only
+/// browses, so: fsmonitor is always off, read-only calls get no hooks, and diff-producing
+/// subcommands never run textconv or external diff drivers.
+fn hardened_args<S: AsRef<OsStr>>(args: &[S]) -> Vec<&OsStr> {
+    let sub = args.first().map(|a| a.as_ref());
+    let is = |name: &str| sub == Some(OsStr::new(name));
+    let hooked = HOOKED.iter().any(|h| is(h)) || (is("worktree") && args.get(1).is_some_and(|a| a.as_ref() == OsStr::new("add")));
+    let mut full: Vec<&OsStr> =
+        ["-c", "core.quotepath=off", "-c", "color.ui=never", "-c", "core.fsmonitor=false"].into_iter().map(OsStr::new).collect();
+    if !hooked {
+        full.extend([OsStr::new("-c"), OsStr::new(NO_HOOKS)]);
+    }
+    let mut rest = args.iter().map(|a| a.as_ref());
+    full.extend(rest.next());
+    if is("diff") || is("show") || is("log") {
+        full.extend([OsStr::new("--no-textconv"), OsStr::new("--no-ext-diff")]);
+    }
+    full.extend(rest);
+    full
+}
+
+/// Runs git in `cwd` (arguments hardened by [`hardened_args`]). Non-zero exits are returned
+/// (callers decide); spawn failures and timeouts become `git_error`.
 pub(crate) async fn git<S: AsRef<OsStr>>(cwd: &Path, args: &[S], timeout: Duration) -> Result<CmdOut, ApiError> {
     git_with_input(cwd, args, None, timeout).await
 }
@@ -236,8 +265,7 @@ pub(crate) async fn git_with_input<S: AsRef<OsStr>>(
     timeout: Duration,
 ) -> Result<CmdOut, ApiError> {
     let bin = git_bin()?;
-    let mut full: Vec<&OsStr> = vec![OsStr::new("-c"), OsStr::new("core.quotepath=off"), OsStr::new("-c"), OsStr::new("color.ui=never")];
-    full.extend(args.iter().map(|a| a.as_ref()));
+    let full = hardened_args(args);
     run_cmd(&bin, &full, Some(cwd), GIT_ENV, stdin, timeout).await.map_err(|e| match e.kind() {
         io::ErrorKind::TimedOut => ApiError::new("timeout", format!("git {} timed out", first_arg(args))).retryable(),
         io::ErrorKind::NotFound if !cwd.exists() => {
@@ -679,7 +707,7 @@ pub async fn status(cwd: &Path) -> Result<GitStatusResult, ApiError> {
     let st = parse_status_v2(&st_out.stdout);
     let head_exists = st.oid.is_some();
     let against = if head_exists { "HEAD".to_string() } else { empty_tree(&root).await? };
-    let numstat = git(&root, &["diff", "--numstat", "-z", "-M", "--no-ext-diff", &against], SLOW).await?;
+    let numstat = git(&root, &["diff", "--numstat", "-z", "-M", &against], SLOW).await?;
     let counts: HashMap<String, NumStat> = parse_numstat_z(&numstat.stdout).into_iter().map(|n| (n.path.clone(), n)).collect();
 
     let untracked: Vec<String> = st.entries.iter().filter(|e| e.status == FileStatus::Untracked).map(|e| e.path.clone()).collect();
@@ -805,7 +833,7 @@ pub async fn diff(p: &GitDiffParams) -> Result<GitDiffResult, ApiError> {
         }
     };
     let ctx_arg = format!("-U{}", p.context.unwrap_or(3).min(1000));
-    let mut common: Vec<String> = vec!["diff".into(), "-M".into(), "--no-ext-diff".into(), "--no-color".into()];
+    let mut common: Vec<String> = vec!["diff".into(), "-M".into(), "--no-color".into()];
     let mut patch_args = common.clone();
     patch_args.extend([ctx_arg, base.clone()]);
     let mut ns_args = common.clone();
@@ -1154,5 +1182,83 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         let main_badge = badge_for_dir(td.path(), Duration::from_secs(5)).await.unwrap();
         assert_eq!(main_badge.branch.as_deref(), Some("feat"));
         assert!(main_badge.dirty.unwrap() >= 4);
+    }
+
+    #[test]
+    fn hardened_args_by_subcommand() {
+        let s = |args: &[&str]| hardened_args(args).iter().map(|a| a.to_str().unwrap()).collect::<Vec<_>>().join(" ");
+        let status = s(&["status", "-z"]);
+        assert!(status.starts_with("-c core.quotepath=off -c color.ui=never -c core.fsmonitor=false -c core.hooksPath="), "{status}");
+        assert!(status.ends_with(" status -z"), "{status}");
+        let commit = s(&["commit", "-F", "-"]);
+        assert!(commit.contains("-c core.fsmonitor=false") && !commit.contains("hooksPath"), "{commit}");
+        assert!(!s(&["push"]).contains("hooksPath"));
+        assert!(!s(&["worktree", "add", "x"]).contains("hooksPath"));
+        assert!(s(&["worktree", "list", "--porcelain"]).contains("hooksPath"));
+        assert!(s(&["diff", "--numstat", "HEAD"]).ends_with(" diff --no-textconv --no-ext-diff --numstat HEAD"));
+        assert!(s(&["show", "HEAD"]).ends_with(" show --no-textconv --no-ext-diff HEAD"));
+        assert!(s(&["log", "-1"]).ends_with(" log --no-textconv --no-ext-diff -1"));
+        assert!(!s(&["ls-files", "-z"]).contains("--no-textconv"));
+    }
+
+    /// Repository config that names programs (fsmonitor, textconv and external diff drivers)
+    /// must not run on read paths: `fs.list` badges of browsed folders, status, diff, show,
+    /// log. Commits keep the repository's hooks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_config_programs_never_run_on_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        let td = fixture();
+        let repo = parent.path().join("repo");
+        std::fs::rename(td.path(), &repo).unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let script = |dir: &Path, name: &str, code: u8| {
+            let p = dir.join(name);
+            let mark = marks.path().join(format!("{name}.ran"));
+            std::fs::write(&p, format!("#!/bin/sh\ntouch '{}'\nexit {code}\n", mark.display())).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.display().to_string()
+        };
+        let ran = |name: &str| marks.path().join(format!("{name}.ran")).exists();
+        sh(&repo, &["config", "core.fsmonitor", &script(marks.path(), "fsmonitor", 1)]);
+        sh(&repo, &["config", "diff.evil.textconv", &script(marks.path(), "textconv", 1)]);
+        sh(&repo, &["config", "diff.evil.command", &script(marks.path(), "extdiff", 1)]);
+        std::fs::write(repo.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
+
+        // Positive controls: plain git runs every one of them.
+        let plain = |args: &[&str]| {
+            let _ = std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        };
+        plain(&["status", "--porcelain"]);
+        plain(&["diff", "HEAD"]);
+        plain(&["diff", "--no-ext-diff", "HEAD"]);
+        for name in ["fsmonitor", "textconv", "extdiff"] {
+            assert!(ran(name), "control: plain git did not run {name}");
+            std::fs::remove_file(marks.path().join(format!("{name}.ran"))).unwrap();
+        }
+
+        let listing = crate::ops::fs::list(&tf_proto::FsListParams { path: parent.path().display().to_string(), hidden: false })
+            .await
+            .unwrap();
+        let badge = listing.entries.iter().find(|e| e.name == "repo").and_then(|e| e.git.clone()).unwrap();
+        assert_eq!(badge.branch.as_deref(), Some("feat"));
+        assert!(badge_for_dir(&repo, Duration::from_secs(5)).await.unwrap().dirty.is_some());
+        let st = status(&repo).await.unwrap();
+        assert!(st.files.iter().any(|f| f.path == "a.txt"));
+        let d = diff(&GitDiffParams { cwd: repo.display().to_string(), base: None, path: None, context: None }).await.unwrap();
+        assert!(d.patch.contains("+five"));
+        for args in [&["show", "HEAD"][..], &["log", "-p", "-1"], &["diff", "--stat", "HEAD"]] {
+            assert!(git(&repo, args, QUICK).await.unwrap().ok(), "{args:?}");
+        }
+        for name in ["fsmonitor", "textconv", "extdiff"] {
+            assert!(!ran(name), "{name} ran on a read path");
+        }
+
+        std::fs::create_dir_all(repo.join(".git").join("hooks")).unwrap();
+        script(&repo.join(".git").join("hooks"), "pre-commit", 0);
+        commit(&GitCommitParams { cwd: repo.display().to_string(), message: "hooked".into(), all: true }).await.unwrap();
+        assert!(ran("pre-commit"), "commit must keep the repository's hooks");
+        assert!(!ran("fsmonitor"));
     }
 }

@@ -3,7 +3,7 @@ import { pulseBus, termBus } from "./buses";
 import type { DemoClock } from "./demo/clock";
 import { DemoEngine } from "./demo/engine";
 import { toApiError } from "./errors";
-import { parseAgentKey } from "./keys";
+import { agentKey, parseAgentKey } from "./keys";
 import { navigate } from "./nav";
 import { FrameBatcher } from "./store/batcher";
 import { reduceEvents } from "./store/reduce";
@@ -26,21 +26,40 @@ export interface CoreClient {
   readonly backend: Backend;
 }
 
-type Selection = { kind: "tauri" } | { kind: "demo"; empty: boolean } | { kind: "ws"; url: string; fallback: boolean };
+type Selection = { kind: "tauri" } | { kind: "demo"; empty: boolean; long: number } | { kind: "ws"; url: string; token?: string; fallback: boolean };
 
-/** Backend auto-selection (architecture §6.1). */
-export function selectBackend(loc: { search: string; protocol: string; host: string }, opts: { tauri: boolean; prod: boolean; envUrl?: string }): Selection {
+/**
+ * Backend auto-selection (architecture §6.1). `metaToken` is the devserver's per-launch token from
+ * `<meta name="tf-token">`; `?token=` covers a UI served from elsewhere (vite dev).
+ */
+export function selectBackend(
+  loc: { search: string; protocol: string; host: string },
+  opts: { tauri: boolean; prod: boolean; envUrl?: string; metaToken?: string },
+): Selection {
   const q = new URLSearchParams(loc.search);
-  if (q.has("demo")) return { kind: "demo", empty: q.get("demo") === "empty" };
+  // `?demo&long=2000`: seed forge::pool with N extra transcript rows (long-transcript perf testing).
+  const long = Math.max(0, Math.min(50_000, Math.floor(Number(q.get("long")) || 0)));
+  if (q.has("demo")) return { kind: "demo", empty: q.get("demo") === "empty", long };
   if (opts.tauri) return { kind: "tauri" };
-  const explicit = q.get("core") ?? opts.envUrl;
-  if (explicit) return { kind: "ws", url: explicit, fallback: false };
+  const token = opts.metaToken || q.get("token") || undefined;
+  const scheme = loc.protocol === "https:" ? "wss:" : "ws:";
+  let queryCore = q.get("core");
+  // Production: a crafted `?core=` link must not point the served UI at someone else's socket.
+  if (queryCore && opts.prod) {
+    try {
+      const u = new URL(queryCore);
+      if (u.protocol !== scheme || u.host !== loc.host) queryCore = null;
+    } catch {
+      queryCore = null;
+    }
+  }
+  const explicit = queryCore ?? opts.envUrl;
+  if (explicit) return { kind: "ws", url: explicit, token, fallback: false };
   if (opts.prod && (loc.protocol === "http:" || loc.protocol === "https:")) {
     // Served by tf-devserver: same-origin `/ws`. Unreachable → demo.
-    const scheme = loc.protocol === "https:" ? "wss:" : "ws:";
-    return { kind: "ws", url: `${scheme}//${loc.host}/ws`, fallback: true };
+    return { kind: "ws", url: `${scheme}//${loc.host}/ws`, token, fallback: true };
   }
-  return { kind: "demo", empty: false };
+  return { kind: "demo", empty: false, long };
 }
 
 // ---------------------------------------------------------------- runtime state
@@ -48,6 +67,7 @@ export function selectBackend(loc: { search: string; protocol: string; host: str
 let transport: CoreTransport | null = null;
 let demo: DemoEngine | null = null;
 let demoEmpty = false;
+let demoLong = 0;
 let demoClock: DemoClock | undefined;
 let unsubTransport: (() => void) | null = null;
 /** Demo-kind profiles inside a real backend: routed to the in-process demo engine. */
@@ -64,7 +84,7 @@ const batcher = new FrameBatcher<CoreEvent>((events) => {
 
 function ensureDemo(mode: "backend" | "embedded" = "embedded"): DemoEngine {
   if (!demo) {
-    demo = new DemoEngine({ mode, empty: demoEmpty, clock: demoClock });
+    demo = new DemoEngine({ mode, empty: demoEmpty, longTranscript: demoLong, clock: demoClock });
     // Embedded: the engine only owns demo-kind hosts; its events join the real stream.
     if (mode === "embedded") demo.subscribe((e) => ingest(e, "demo"));
   }
@@ -142,6 +162,11 @@ function runEffect(fx: Effect): void {
     case "answerNext":
       useUi.getState().setAnswerNext(true);
       break;
+    case "relink": {
+      const key = agentKey(fx.hostId, fx.agentId);
+      if ((sessionRefs.get(key) ?? 0) > 0) void loadSession(key);
+      break;
+    }
   }
 }
 
@@ -402,25 +427,28 @@ export function startCore(): void {
     tauri: inTauri(),
     prod: import.meta.env?.PROD ?? false,
     envUrl: import.meta.env?.VITE_TF_CORE as string | undefined,
+    metaToken: typeof document === "undefined" ? undefined : (document.querySelector<HTMLMetaElement>('meta[name="tf-token"]')?.content ?? undefined),
   });
   if (sel.kind === "tauri") install(createTauriTransport());
   else if (sel.kind === "ws") {
     install(
       createWsTransport({
         url: sel.url,
+        token: sel.token,
         onFirstFailure: sel.fallback
           ? () => {
               console.info("[core] devserver unreachable; using the demo backend");
-              startDemoBackend(false);
+              startDemoBackend(false, 0);
             }
           : undefined,
       }),
     );
-  } else startDemoBackend(sel.empty);
+  } else startDemoBackend(sel.empty, sel.long);
 }
 
-function startDemoBackend(empty: boolean): void {
+function startDemoBackend(empty: boolean, long: number): void {
   demoEmpty = empty;
+  demoLong = long;
   demo?.dispose();
   demo = null;
   const engine = ensureDemo("backend");

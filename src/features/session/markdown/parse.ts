@@ -197,7 +197,9 @@ export type Inline =
   | { t: "em"; c: Inline[] }
   | { t: "del"; c: Inline[] }
   | { t: "link"; href: string; c: Inline[] }
-  | { t: "br" };
+  | { t: "br" }
+  /** Streaming only: a just-arrived chunk of text that fades in (never produced by the parser). */
+  | { t: "fresh"; key: number; v: string };
 
 const URL_RE = /^(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"\]])/;
 

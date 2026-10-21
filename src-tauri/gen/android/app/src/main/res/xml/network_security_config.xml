@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Release: HTTPS everywhere, except loopback. Preview tunnels listen on 127.0.0.1:<port> and the
+     in-app preview iframe loads them over plain HTTP; nothing else may use cleartext.
+     Debug builds override this file from src/debug (dev server on the LAN). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

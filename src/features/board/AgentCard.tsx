@@ -155,7 +155,8 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
   const silentMs = useQuiet(lane === "running" && !stale, agent?.live.lastEventAt);
   const nudge = useNudge(lane === "needs" && !stale);
   const burst = useArrival(agentKey, lane, floating);
-  const now = useNow(lane === "done" || lane === "review" ? 30_000 : 1000);
+  // Live lanes render their clocks with <Elapsed>; the card itself only needs `now` for ages.
+  const now = useNow(stale ? 1000 : lane === "done" || lane === "review" ? 30_000 : 60_000);
   if (!agent) return null;
 
   const meta = LANE_BY_COLUMN[lane];
@@ -232,6 +233,8 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
   const card = (
     <Card
       data-status={status}
+      data-morph={floating ? undefined : "surface"}
+      data-morph-key={floating ? undefined : agentKey}
       selected={selected}
       className={cn(
         "group/card relative flex flex-col rounded-xl p-3.5 outline-none",
@@ -255,7 +258,7 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
             </span>
           )}
           {todos && todos.total > 0 && (
-            <span className="text-2xs font-semibold text-mute">
+            <span className="min-w-0 truncate text-2xs font-semibold text-mute">
               {todos.done}/{todos.total} todos
             </span>
           )}
@@ -281,18 +284,24 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
               <path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </span>
-        ) : subs > 0 ? (
-          <Swarm count={subs} size={36} status={status}>
-            {avatar}
-          </Swarm>
         ) : (
-          avatar
+          <span data-morph={floating ? undefined : "glyph"} data-morph-key={floating ? undefined : agentKey} className="shrink-0">
+            {subs > 0 ? (
+              <Swarm count={subs} size={36} status={status}>
+                {avatar}
+              </Swarm>
+            ) : (
+              avatar
+            )}
+          </span>
         )}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5 text-xs">
             {lane === "running" && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
             {multiHost && <HostDot hostId={agent.hostId} />}
-            <span className="shrink-0 font-extrabold text-ink">{agent.name}</span>
+            <span data-morph={floating ? undefined : "name"} data-morph-key={floating ? undefined : agentKey} className="shrink-0 font-extrabold text-ink">
+              {agent.name}
+            </span>
             {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
             {(agent.repo || agent.branch) && (
               <span className="min-w-0 truncate font-mono text-2xs text-mute-2">

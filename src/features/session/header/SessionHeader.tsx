@@ -18,14 +18,23 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
   const subs = meta?.subagents.filter((s) => s.status === "running").length ?? agent.omp?.subagents?.live ?? 0;
   const cost = meta?.cost?.usd ?? agent.omp?.cost?.usd;
   return (
-    <header data-status={status} className={cn("relative flex flex-col gap-2 rounded-[22px] glass px-3.5 py-2.5", compact && "rounded-[18px] px-3 py-2")}>
+    <header
+      data-status={status}
+      data-morph="surface"
+      data-morph-key={agent.key}
+      className={cn("relative flex flex-col gap-2 rounded-[22px] glass px-3.5 py-2.5", compact && "rounded-[18px] px-3 py-2")}
+    >
       <div className="flex min-w-0 items-center gap-3">
         <Swarm count={subs} size={44}>
-          <AgentGlyph name={agent.name} size={36} status={status} />
+          <span className="shrink-0" data-morph="glyph" data-morph-key={agent.key}>
+            <AgentGlyph name={agent.name} size={36} status={status} />
+          </span>
         </Swarm>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2.5">
-            <h2 className="truncate font-display text-[19px] font-bold tracking-[-0.02em] text-ink">{agent.name}</h2>
+            <h2 data-morph="name" data-morph-key={agent.key} className="truncate font-display text-[19px] font-bold tracking-[-0.02em] text-ink">
+              {agent.name}
+            </h2>
             <StatusPill status={status} activity={tier} size="sm">
               {agent.needs ? agent.needs.title : undefined}
             </StatusPill>

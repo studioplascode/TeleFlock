@@ -47,8 +47,15 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   = stale). On `RecvError::Lagged`, call it again and resend the replay.
 * Connection phases: `connecting → authenticating → (authRequired) → deploying → starting → online`;
   failures go to `reconnecting` (backoff 1, 2, 4 … 30 s + jitter, `attempt`, `nextRetryAt`; reset after
-  60 s online) or `error` for permanent failures (unsupported arch, version mismatch, host key).
-  `hosts.connect` / `resume()` retry immediately; `hosts.disconnect` → `offline`.
+  60 s online) or `error` for permanent failures (unsupported arch, version mismatch, host key mismatch).
+  `hosts.connect` / `resume()` retry immediately; `hosts.disconnect` → `offline` and closes the host's tunnels.
+* Host keys: a new SSH host key from a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48, checked on
+  the resolved peer) is pinned silently. Any other address stops in `hostKey` with
+  `status.hostKey {address, algorithm, fingerprint}` and pins nothing; `hosts.trustKey {hostId,
+  fingerprint}` (must equal the shown fingerprint) reconnects and pins it, `hosts.disconnect` cancels
+  (→ `offline`). A key that differs from the pinned one is always `error` (`transport.hostKeyMismatch`).
+* Tunnels (`tunnel.open`) only target the host's loopback: `remoteHost` ∈ `127.0.0.1` (default), `::1`,
+  `localhost`; anything else is `invalid_params`.
 * On reconnect, sessions that were open get a `Session{ev: reset}` (or `ended` if gone); open
   terminals get `Term{ev: closed}` when the link drops.
 * `notification_action`: `action_id` with an `answer` → `agent.answer`; `reply` text → free-text
@@ -58,7 +65,9 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   is enabled (`needs`→notifyNeeds, `finished`→notifyFinished, `error`/`quiet`→notifyErrors); during
   quiet hours `style.silent = true`, `style.sound = false`.
 * Deploy: `uname -sm` → triple; upload `<home>/bin/tf-hostd`, `<home>/ext/teleflock-bridge.ts`,
-  `<home>/omp-overlay.yml` (+ `.sha256` stamps) when the version line or content differ;
+  `<home>/omp-overlay.yml` (+ `.sha256` stamps) when the version line or content differ. Remote uploads
+  land in a temp file whose sha256 (`sha256sum`/`shasum -a 256`) must match before the `mv`;
+  `TF_HOSTD_BIN` (the embedder's `hostd_bins_override`) is honoured by debug app builds only;
   `<home>` = `$TF_HOSTD_HOME` or `~/.teleflock`. Attach: `tf-hostd attach --session S
   [--relay-port P] [--replace]`.
 
@@ -71,7 +80,13 @@ Windows triples. It also embeds `host/teleflock-bridge/teleflock-bridge.ts`. Mis
 deploy time with an error naming the triple / file.
 
 # tf-devserver
-`tf-devserver --bind 127.0.0.1:7420 --data-dir <dir> [--static dist] [--hostd-bin <path>]`
-* `GET /ws`: client → `{id, hostId?, method, params}` and `{termIn: {hostId, termId, data}}`;
-  server → `{id, result}` | `{id, error}` | `{event: AppEvent}`. Each connection starts with the replay.
-* Everything else: static files from `--static` with `index.html` fallback.
+`tf-devserver --bind 127.0.0.1:7420 --data-dir <dir> [--static dist] [--hostd-bin <path>] [--token <t>]
+[--allow-host <name[:port]>]… [--allow-origin <origin>]… [--allow-remote]`
+* `GET /ws?token=<t>` (or subprotocol `teleflock.<t>`, echoed): client → `{id, hostId?, method, params}`
+  and `{termIn: {hostId, termId, data}}`; server → `{id, result}` | `{id, error}` | `{event: AppEvent}`.
+  Each connection starts with the replay. Missing/wrong token → 401, foreign `Origin` → 403.
+* Every route: `Host` must be allow-listed (bind IP, `localhost`/loopback on the bound port, `--allow-host`) → else 421.
+* Everything else: static files from `--static` with `index.html` fallback; the index gets
+  `<meta name="tf-token">` for loopback clients or a page URL with the right `?token=`.
+* Non-loopback `--bind` needs `--allow-remote`. Startup prints `http://<bind>/?token=<t>`.
+  Details: architecture §5.3.

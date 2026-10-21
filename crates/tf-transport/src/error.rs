@@ -17,6 +17,10 @@ pub enum TransportError {
     /// The host presented a different key than the one pinned in known_hosts.
     #[error("host key for {host} changed: got {actual}, expected {}", expected.join(" or "))]
     HostKeyMismatch { host: String, expected: Vec<String>, actual: String, known_hosts: String },
+    /// A host key seen for the first time needs the user's confirmation
+    /// ([`crate::HostKeyDecision::Confirm`]). Nothing was pinned.
+    #[error("new host key for {host} ({address}) needs confirmation: {algorithm} {fingerprint}")]
+    HostKeyUnconfirmed { host: String, address: String, algorithm: String, fingerprint: String },
     /// Reading or writing the known_hosts file failed, or the key could not be handled.
     #[error("host key store error: {0}")]
     HostKeyStore(String),
@@ -66,6 +70,7 @@ impl TransportError {
             Self::Connect { .. } => "transport.connect",
             Self::Timeout { .. } => "transport.timeout",
             Self::HostKeyMismatch { .. } => "transport.hostKeyMismatch",
+            Self::HostKeyUnconfirmed { .. } => "transport.hostKeyUnconfirmed",
             Self::HostKeyStore(_) => "transport.hostKeyStore",
             Self::AuthDenied { .. } => "transport.authDenied",
             Self::NotTailscaleSsh { .. } => "transport.notTailscaleSsh",
@@ -92,6 +97,9 @@ impl TransportError {
             Self::HostKeyMismatch { known_hosts, host, .. } => format!(
                 "If the host was reinstalled or re-keyed, remove the {host} line from {known_hosts} and reconnect. Otherwise someone may be intercepting the connection."
             ),
+            Self::HostKeyUnconfirmed { .. } => {
+                "This is not a Tailscale address, so the key is not vouched for by the tailnet. Compare the fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the host before trusting it.".into()
+            }
             Self::AuthDenied { .. } => "Check the tailnet SSH policy (ssh rules and users) for this device and user.".into(),
             Self::NotTailscaleSsh { .. } => {
                 "Reached a regular sshd. Enable Tailscale SSH on the host (`tailscale set --ssh`) and connect via its Tailscale IP from another device.".into()

@@ -739,16 +739,7 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
             recommended: true,
         });
     }
-    if !relay {
-        issues.push(SetupIssue {
-            id: "relay-down".into(),
-            severity: Severity::Error,
-            title: "The TeleFlock relay is not listening".into(),
-            detail: format!("tf-hostd could not bind 127.0.0.1:{port}; live sessions cannot connect. Check ~/.teleflock/hostd.log."),
-            fixable: false,
-            recommended: true,
-        });
-    }
+    issues.extend(ctx.omp.relay_issue());
     SetupStatus { herdr_integration: integration == IntegrationState::Current, global_sharing, global_bridge: bridge_installed, relay, issues }
 }
 

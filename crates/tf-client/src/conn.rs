@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tf_proto::{
-    ApiError, AppEvent, ClientInfo, ClientMsg, ConnPhase, ConnStatus, HostKind, HostProfile, HostState, Millis,
+    ApiError, AppEvent, ClientInfo, ClientMsg, ConnPhase, ConnStatus, HostKeyInfo, HostKind, HostProfile, HostState, Millis,
     Notification, PROTOCOL_VERSION, ServerMsg, SessionEvent, SessionSnapshot, StatePatch, TermEvent,
 };
-use tf_transport::{Cmd, ConnectOptions, Transport, TransportEvent};
+use tf_transport::{Cmd, ConnectOptions, HostKeyDecision, HostKeyPolicy, Transport, TransportError, TransportEvent};
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::deploy;
@@ -43,6 +43,8 @@ pub(crate) struct HostView {
     /// Open sessions (`session.open` params by agent id), re-opened after a reconnect.
     pub sessions: HashMap<String, Value>,
     pub terms: HashSet<String>,
+    /// Fingerprint the user confirmed with `hosts.trustKey`; consumed by the next attempt.
+    pub approved_key: Option<String>,
 }
 
 pub(crate) struct HostRt {
@@ -59,6 +61,8 @@ pub(crate) struct HostRt {
 const NOTIFICATION_RING: usize = 100;
 const FATAL_CODES: &[&str] =
     &["unsupported", "version_mismatch", "invalid_params", "not_found", "permission_denied", "auth_denied"];
+/// `TransportError::HostKeyUnconfirmed`: fatal, but parks in `hostKey` instead of `error`.
+const HOST_KEY_UNCONFIRMED: &str = "transport.hostKeyUnconfirmed";
 
 fn idle_status() -> ConnStatus {
     ConnStatus {
@@ -72,7 +76,21 @@ fn idle_status() -> ConnStatus {
         next_retry_at: None,
         last_online_at: None,
         hostd_version: None,
+        host_key: None,
     }
+}
+
+/// Host key policy for one connect attempt: tailnet addresses are trusted on first use
+/// (Tailscale authenticates the node); any other address needs the fingerprint the user
+/// confirmed (`approved`).
+pub(crate) fn host_key_policy(approved: Option<String>) -> HostKeyPolicy {
+    HostKeyPolicy::new(move |c| {
+        if tf_transport::is_tailnet_ip(c.address) || approved.as_deref() == Some(c.fingerprint.as_str()) {
+            HostKeyDecision::Trust
+        } else {
+            HostKeyDecision::Confirm
+        }
+    })
 }
 
 /// Reconnect delay for the n-th consecutive failure (1, 2, 4 … 30 s, +0–20 % jitter).
@@ -103,6 +121,7 @@ impl HostRt {
                 notifications: VecDeque::new(),
                 sessions: HashMap::new(),
                 terms: HashSet::new(),
+                approved_key: None,
             }),
             link: Mutex::new(None),
             transport: Mutex::new(None),
@@ -140,6 +159,22 @@ impl HostRt {
             v.notifications.pop_front();
         }
         v.notifications.push_back(n);
+    }
+
+    /// `hosts.trustKey`: accept the key awaiting confirmation (phase `hostKey`) when the
+    /// fingerprint matches what the user was shown. The caller then connects again.
+    pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), ApiError> {
+        let mut v = self.view.lock().unwrap();
+        let pending = match (&v.status.phase, &v.status.host_key) {
+            (ConnPhase::HostKey, Some(k)) => k.fingerprint.clone(),
+            _ => return Err(ApiError::new("invalid_params", "no host key is waiting for confirmation on this host")),
+        };
+        if pending != fingerprint.trim() {
+            return Err(ApiError::new("invalid_params", "the fingerprint does not match the host key awaiting confirmation")
+                .with_hint("The host presented a different key; reconnect and compare the fingerprint again."));
+        }
+        v.approved_key = Some(pending);
+        Ok(())
     }
 }
 
@@ -225,7 +260,16 @@ pub(crate) async fn run(inner: Weak<Inner>, rt: Arc<HostRt>, mut rx: mpsc::Unbou
                         i.refresh_keep_alive();
                     }
                 }
-                Some(ConnCmd::Disconnect) => continue,
+                Some(ConnCmd::Disconnect) => {
+                    // Cancel on the host key card: leave `hostKey` for `offline`.
+                    if rt.status().phase == ConnPhase::HostKey
+                        && let Some(eng) = inner.upgrade()
+                    {
+                        rt.view.lock().unwrap().approved_key = None;
+                        eng.set_phase(&rt, ConnPhase::Offline, Some("Disconnected".into()));
+                    }
+                    continue;
+                }
             }
         }
         let Some(eng) = inner.upgrade() else { break };
@@ -275,8 +319,10 @@ pub(crate) async fn run(inner: Weak<Inner>, rt: Arc<HostRt>, mut rx: mpsc::Unbou
                 };
                 if is_fatal(&error) {
                     rt.wanted.store(false, Ordering::SeqCst);
+                    // An unconfirmed host key waits in `hostKey` for `hosts.trustKey`.
+                    let phase = if error.code == HOST_KEY_UNCONFIRMED { ConnPhase::HostKey } else { ConnPhase::Error };
                     eng.update_status(&rt, |s| {
-                        s.phase = ConnPhase::Error;
+                        s.phase = phase;
                         s.message = Some(error.message.clone());
                         s.error = Some(error.clone());
                         s.next_retry_at = None;
@@ -369,6 +415,7 @@ async fn connect_and_serve(
         s.attempt = attempt;
         s.next_retry_at = None;
         s.auth_url = None;
+        s.host_key = None;
     });
 
     // Transport events → status.
@@ -410,8 +457,16 @@ async fn connect_and_serve(
         });
     }
 
-    let opts = ConnectOptions::new(eng.data_dir().join("known_hosts"));
-    let transport = tf_transport::connect(profile, &opts, ev_tx).await.map_err(transport_err)?;
+    let mut opts = ConnectOptions::new(eng.data_dir().join("known_hosts"));
+    opts.host_key_policy = host_key_policy(rt.view.lock().unwrap().approved_key.take());
+    let transport = tf_transport::connect(profile, &opts, ev_tx).await.map_err(|e| {
+        if let TransportError::HostKeyUnconfirmed { address, algorithm, fingerprint, .. } = &e {
+            // `run` moves to `hostKey`; the card shows this until `hosts.trustKey`.
+            let info = HostKeyInfo { address: address.clone(), algorithm: algorithm.clone(), fingerprint: fingerprint.clone() };
+            eng.update_status(rt, |s| s.host_key = Some(info));
+        }
+        transport_err(e)
+    })?;
     *rt.transport.lock().unwrap() = Some(transport.clone());
 
     eng.set_phase(rt, ConnPhase::Deploying, Some("Checking host…".into()));

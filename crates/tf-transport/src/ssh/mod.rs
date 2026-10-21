@@ -1,7 +1,9 @@
 //! Tailscale SSH transport over one long-lived russh connection.
 //!
 //! * TCP dial with friendly resolve/connect errors, then SSH with the `ring` backend.
-//! * Host key: trust-on-first-use in the app's known_hosts file; mismatch is a hard error.
+//! * Host key: pinned in the app's known_hosts file; a key seen for the first time is
+//!   pinned when `ConnectOptions::host_key_policy` trusts it, else the connect fails with
+//!   `HostKeyUnconfirmed`. A mismatch is always a hard error.
 //! * Auth: `none` only (Tailscale identity comes from the tailnet). A banner carrying a
 //!   URL (check mode) becomes `AuthUrl` + `authRequired`, and we keep waiting.
 //! * russh's own keepalive is off (it busy-loops while auth is pending in 0.64.1); after
@@ -26,8 +28,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
-    BoxedStream, Child, Cmd, ConnPhase, ConnectOptions, ExitStatus, HostKind, HostProfile, Output, Transport, TransportError,
-    TransportEvent, quote,
+    BoxedStream, Child, Cmd, ConnPhase, ConnectOptions, ExitStatus, HostKeyCheck, HostKeyDecision, HostKeyPolicy, HostKind,
+    HostProfile, Output, Transport, TransportError, TransportEvent, quote,
 };
 pub use known_hosts::{KnownHosts, Verdict, fingerprint, host_pattern};
 
@@ -94,6 +96,9 @@ struct ClientHandler {
     shared: Arc<Shared>,
     known_hosts: KnownHosts,
     host_pattern: String,
+    /// Resolved peer address of the TCP connection.
+    peer: std::net::IpAddr,
+    policy: HostKeyPolicy,
     banners: Arc<Mutex<Vec<String>>>,
 }
 
@@ -135,17 +140,30 @@ impl client::Handler for ClientHandler {
                 return Err(TransportError::HostKeyStore("host presented an SSH certificate; only plain host keys are supported".into()));
             }
         };
-        match self.known_hosts.verify(&self.host_pattern, key)? {
+        let check = HostKeyCheck {
+            host: self.host_pattern.clone(),
+            address: self.peer,
+            algorithm: key.algorithm().to_string(),
+            fingerprint: fingerprint(key),
+        };
+        let policy = &self.policy;
+        match self.known_hosts.verify(&self.host_pattern, key, || policy.decide(&check) == HostKeyDecision::Trust)? {
             Verdict::Known => Ok(true),
             Verdict::Learned => {
-                let msg = format!("Trusted new host key {} (first connection)", fingerprint(key));
+                let msg = format!("Trusted new host key {} (first connection)", check.fingerprint);
                 let _ = self.shared.events.send(TransportEvent::Phase(ConnPhase::Connecting, Some(msg))).await;
                 Ok(true)
             }
+            Verdict::Unconfirmed => Err(TransportError::HostKeyUnconfirmed {
+                host: check.host,
+                address: check.address.to_string(),
+                algorithm: check.algorithm,
+                fingerprint: check.fingerprint,
+            }),
             Verdict::Mismatch(expected) => Err(TransportError::HostKeyMismatch {
                 host: self.host_pattern.clone(),
                 expected,
-                actual: fingerprint(key),
+                actual: check.fingerprint,
                 known_hosts: self.known_hosts.path().display().to_string(),
             }),
         }
@@ -265,10 +283,17 @@ impl SshTransport {
             stop: watch::Sender::new(false),
         });
         let banners = Arc::new(Mutex::new(Vec::new()));
+        let peer = tcp.peer_addr().map_err(TransportError::io)?.ip();
+        let peer = match peer {
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(peer, std::net::IpAddr::V4),
+            v4 => v4,
+        };
         let handler = ClientHandler {
             shared: shared.clone(),
             known_hosts: KnownHosts::new(&opts.known_hosts),
             host_pattern: host_pattern(addr, port),
+            peer,
+            policy: opts.host_key_policy.clone(),
             banners: banners.clone(),
         };
         let config = Arc::new(client::Config {

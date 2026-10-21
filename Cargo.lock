@@ -5535,9 +5535,11 @@ dependencies = [
 name = "tf-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "log",
  "rand 0.9.5",
+ "russh",
  "ruzstd",
  "serde",
  "serde_json",
@@ -5557,10 +5559,12 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.3.4",
+ "hmac",
  "httparse",
  "log",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tf-proto",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -5575,6 +5579,7 @@ dependencies = [
  "clap",
  "env_logger",
  "futures-util",
+ "getrandom 0.3.4",
  "log",
  "serde",
  "serde_json",
@@ -5606,6 +5611,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "getrandom 0.3.4",
  "libc",
  "rusqlite",
  "serde",
@@ -5619,6 +5625,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

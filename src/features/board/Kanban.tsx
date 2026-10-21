@@ -13,9 +13,10 @@ import {
 } from "@dnd-kit/core";
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useAgent, useUi } from "@/core";
 import type { Column } from "@/core/gen";
-import { CardFlight, CountBadge, EmptyState, LayoutGroup, StatusOrb, cn, toast, useCalmMotion } from "@/design";
+import { AnimatePresence, CardFlight, CountBadge, EmptyState, LayoutGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion } from "@/design";
 import { AgentCard } from "./AgentCard";
 import { openAgent, setArchived } from "./agentActions";
 import { useBoard } from "./boardStore";
@@ -109,6 +110,7 @@ function Lane({
   const { setNodeRef, isOver } = useDroppable({ id: meta.column });
   const refused = dragFrom !== null && dragFrom !== meta.column ? refusal(dragFrom, meta.column, dragName) : null;
   const accepting = dragFrom !== null && dragFrom !== meta.column && !refused;
+  const q = useBoard((s) => s.q);
   return (
     <section
       ref={setNodeRef}
@@ -127,9 +129,9 @@ function Lane({
         {meta.column === "needs" && keys.length > 0 ? (
           <CountBadge count={keys.length} />
         ) : (
-          <span className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute tabular">{keys.length}</span>
+          <NumberTicker value={keys.length} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />
         )}
-        <span className="ml-auto text-2xs font-semibold text-mute-2">{meta.hint}</span>
+        <span className="ml-auto truncate text-2xs font-semibold text-mute-2">{meta.hint}</span>
       </header>
       {refused && isOver && (
         <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mx-3 mb-2 rounded-md bg-error/10 px-3 py-2 text-2xs font-semibold text-[#ff9fb2]">
@@ -137,10 +139,32 @@ function Lane({
         </motion.p>
       )}
       <motion.div layoutScroll className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-2.5 pb-3">
+        <AnimatePresence initial={false}>
+          {accepting && (
+            <motion.div
+              key="drop-slot"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 64 }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={spring.snappy}
+              className={cn(
+                "grid shrink-0 place-items-center rounded-xl border-[1.5px] border-dashed text-2xs font-bold transition-colors",
+                isOver ? "border-[rgb(var(--st-rgb)/0.9)] bg-[rgb(var(--st-rgb)/0.12)] st-text" : "border-[rgb(var(--st-rgb)/0.35)] text-mute",
+              )}
+            >
+              {meta.column === "done" ? "Drop to archive" : "Drop to reopen for review"}
+            </motion.div>
+          )}
+        </AnimatePresence>
         {keys.map((k) => (
           <DraggableCard key={k} agentKey={k} lane={meta.column} selected={k === selectedKey} />
         ))}
-        {keys.length === 0 && <EmptyState compact title={meta.empty.title} description={meta.empty.description} className="my-6" />}
+        {keys.length === 0 &&
+          (q.trim() ? (
+            <EmptyState compact title="No matches" description={`Nothing in ${meta.title} matches “${q.trim()}”.`} className="my-6" />
+          ) : (
+            <EmptyState compact title={meta.empty.title} description={meta.empty.description} className="my-6" />
+          ))}
       </motion.div>
     </section>
   );
@@ -201,13 +225,17 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
       {Object.entries(moves).map(([k, target]) => (
         <MoveWatcher key={k} agentKey={k} target={target} />
       ))}
-      <DragOverlay dropAnimation={dropOk || calm ? null : { ...defaultDropAnimation, duration: 420, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" }}>
-        {drag && (
-          <motion.div initial={{ scale: 1, rotate: 0 }} animate={{ scale: 1.03, rotate: -1.5 }} className="cursor-grabbing">
-            <AgentCard agentKey={drag.key} lane={drag.from} floating />
-          </motion.div>
-        )}
-      </DragOverlay>
+      {/* Portalled: any transformed/filtered ancestor would offset the fixed-position overlay. */}
+      {createPortal(
+        <DragOverlay zIndex={40} dropAnimation={dropOk || calm ? null : { ...defaultDropAnimation, duration: 420, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" }}>
+          {drag && (
+            <motion.div initial={{ scale: 1, rotate: 0 }} animate={{ scale: 1.03, rotate: -1.5 }} className="cursor-grabbing">
+              <AgentCard agentKey={drag.key} lane={drag.from} floating />
+            </motion.div>
+          )}
+        </DragOverlay>,
+        document.body,
+      )}
     </DndContext>
   );
 }

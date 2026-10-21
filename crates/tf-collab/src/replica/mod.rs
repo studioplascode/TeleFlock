@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 use tf_proto::{
-    ActiveTool, AppendField, AssistantItem, Capabilities, CompactionItem, ContextUsage, CostInfo, HistoryPage,
+    ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, FileStatus, HistoryPage,
     Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
     SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase,
     TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem,
@@ -171,6 +171,8 @@ pub struct Replica {
     subs: BTreeMap<String, SubState>,
     ui: ui::UiState,
     ended: bool,
+    /// Files each successful edit/write call changed (call id → files), for `SessionMeta.files`.
+    file_edits: Vec<(String, Vec<ChangedFile>)>,
 }
 
 impl Replica {
@@ -208,6 +210,7 @@ impl Replica {
             subs: BTreeMap::new(),
             ui: ui::UiState::default(),
             ended: false,
+            file_edits: Vec::new(),
         }
     }
 
@@ -873,7 +876,10 @@ impl Replica {
         }
         let t = entry_ts.or_else(|| ts(msg)).unwrap_or(self.now);
         let id = format!("u{t}");
-        let text = content_text(msg.get("content"));
+        let text = match custom_type {
+            Some("advisor") => advisor_text(msg).unwrap_or_else(|| content_text(msg.get("content"))),
+            _ => content_text(msg.get("content")),
+        };
         let images = content_images(msg.get("content"));
         let (author, synthetic) = match (role, custom_type) {
             (_, Some("collab-prompt")) => (msg.get("details").and_then(|d| non_empty(d, "from")).map(str::to_owned), false),
@@ -1045,6 +1051,9 @@ impl Replica {
         if let Some(phases) = tools::todo_phases(&name, details) {
             self.meta.todos = phases;
         }
+        if !is_error {
+            self.record_file_edits(call_id, t.view.as_ref());
+        }
         self.tools
             .entry(call_id.to_owned())
             .and_modify(|s| s.ended = true)
@@ -1055,6 +1064,41 @@ impl Replica {
             out.signals.push(Signal::ToolError { tool: name.clone(), error: t.error.clone().unwrap_or_default() });
         }
         self.upsert(TranscriptItem::Tool(t), out);
+    }
+
+    /// Folds a diff view into `SessionMeta.files` (paths relative to the session cwd).
+    fn record_file_edits(&mut self, call_id: &str, view: Option<&tf_proto::ToolView>) {
+        let Some(tf_proto::ToolView::Diff(d)) = view else { return };
+        let cwd = self.meta.cwd.as_deref().map(|c| format!("{}/", c.trim_end_matches('/')));
+        let files: Vec<ChangedFile> = d
+            .files
+            .iter()
+            .map(|f| ChangedFile {
+                path: cwd.as_deref().and_then(|c| f.path.strip_prefix(c)).unwrap_or(&f.path).to_owned(),
+                added: f.added,
+                removed: f.removed,
+                status: f.status,
+                old_path: None,
+            })
+            .collect();
+        match self.file_edits.iter_mut().find(|(c, _)| c == call_id) {
+            Some(e) => e.1 = files,
+            None => self.file_edits.push((call_id.to_owned(), files)),
+        }
+        let mut agg: Vec<ChangedFile> = Vec::new();
+        for f in self.file_edits.iter().flat_map(|(_, fs)| fs) {
+            match agg.iter_mut().find(|a| a.path == f.path) {
+                Some(a) => {
+                    a.added += f.added;
+                    a.removed += f.removed;
+                    if f.status == FileStatus::Deleted {
+                        a.status = FileStatus::Deleted;
+                    }
+                }
+                None => agg.push(f.clone()),
+            }
+        }
+        self.meta.files = agg;
     }
 
     fn tool_result(&mut self, msg: &Value, out: &mut Update) {
@@ -1357,6 +1401,22 @@ pub(crate) fn parse_thinking(level: &str) -> Option<ThinkingLevel> {
     })
 }
 
+/// omp advisor notes (`customType: "advisor"`) carry the readable notes in `details.notes`;
+/// `content` is the `<advisory …>` envelope meant for the model.
+fn advisor_text(msg: &Value) -> Option<String> {
+    let notes: Vec<String> = arr(msg.get("details")?, "notes")
+        .iter()
+        .filter_map(|n| {
+            let note = non_empty(n, "note")?;
+            Some(match non_empty(n, "severity") {
+                Some(sev) => format!("{sev}: {note}"),
+                None => note.to_owned(),
+            })
+        })
+        .collect();
+    (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
 /// Last sentence fragment of streamed text, ≤ 80 chars, for `Liveness.line`.
 fn last_sentence(text: &str) -> Option<String> {
     let trimmed = text.trim_end();
@@ -1364,13 +1424,18 @@ fn last_sentence(text: &str) -> Option<String> {
         return None;
     }
     let line = trimmed.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
-    let cut = line
-        .char_indices()
-        .rev()
-        .skip(1)
-        .find(|(_, c)| matches!(c, '.' | '!' | '?'))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(0);
+    // A sentence ends at `.`/`!`/`?` followed by whitespace, so `README.md` or `v1.2` stay whole.
+    let mut cut = 0;
+    let mut prev: Option<(usize, char)> = None;
+    for (i, c) in line.char_indices() {
+        if c.is_whitespace()
+            && let Some((pi, pc)) = prev
+            && matches!(pc, '.' | '!' | '?')
+        {
+            cut = pi + pc.len_utf8();
+        }
+        prev = Some((i, c));
+    }
     let frag = line[cut..].trim();
     let frag = if frag.is_empty() { line } else { frag };
     let n = frag.chars().count();
@@ -1515,3 +1580,18 @@ pub fn transcript_page(jsonl: &str) -> HistoryPage {
 
 #[cfg(test)]
 mod golden;
+
+#[cfg(test)]
+mod sentence_tests {
+    use super::last_sentence;
+
+    #[test]
+    fn last_sentence_keeps_dotted_words() {
+        assert_eq!(
+            last_sentence("README.md describes this repo.").as_deref(),
+            Some("README.md describes this repo.")
+        );
+        assert_eq!(last_sentence("Done. Bumped to v1.2 now").as_deref(), Some("Bumped to v1.2 now"));
+        assert_eq!(last_sentence("First! Second?").as_deref(), Some("Second?"));
+    }
+}

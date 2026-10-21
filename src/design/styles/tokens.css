@@ -310,3 +310,6 @@
   &::-webkit-scrollbar { display: none; }
 }
 @utility safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0px); }
+
+/* Short desktop windows (≤ 820px tall, e.g. 1366×768 laptops): `short:` compacts dense chrome. */
+@custom-variant short (@media (min-width: 768px) and (max-height: 820px));

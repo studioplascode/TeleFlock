@@ -1,6 +1,7 @@
-//! Trust-on-first-use host key pinning in an OpenSSH-format known_hosts file
-//! (`<host> <alg> <base64>`, `[host]:port` for non-22 ports). Hashed (`|1|`) and marker
-//! (`@cert-authority`, `@revoked`) lines written by other tools are ignored.
+//! Host key pinning in an OpenSSH-format known_hosts file (`<host> <alg> <base64>`,
+//! `[host]:port` for non-22 ports). A key seen for the first time is pinned only when the
+//! caller's decision allows it. Hashed (`|1|`) and marker (`@cert-authority`, `@revoked`)
+//! lines written by other tools are ignored.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,8 +18,10 @@ static LOCK: Mutex<()> = Mutex::new(());
 pub enum Verdict {
     /// The key matches a pinned entry.
     Known,
-    /// No entry existed; the key has been pinned now.
+    /// No entry existed and the caller trusted the key; it has been pinned now.
     Learned,
+    /// No entry existed and the caller did not trust the key; nothing was pinned.
+    Unconfirmed,
     /// Entries exist for this host but none matches; fingerprints of the pinned keys.
     Mismatch(Vec<String>),
 }
@@ -75,8 +78,9 @@ impl KnownHosts {
         Ok(keys)
     }
 
-    /// Check `key` for `pattern`, pinning it if the host is unknown.
-    pub fn verify(&self, pattern: &str, key: &PublicKey) -> Result<Verdict, TransportError> {
+    /// Check `key` for `pattern`. For an unknown host, `trust()` decides whether the key
+    /// is pinned now; a key differing from a pinned one never reaches it.
+    pub fn verify(&self, pattern: &str, key: &PublicKey, trust: impl FnOnce() -> bool) -> Result<Verdict, TransportError> {
         let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let pinned = self.pinned(pattern)?;
         if pinned.iter().any(|k| k.key_data() == key.key_data()) {
@@ -84,6 +88,9 @@ impl KnownHosts {
         }
         if !pinned.is_empty() {
             return Ok(Verdict::Mismatch(pinned.iter().map(fingerprint).collect()));
+        }
+        if !trust() {
+            return Ok(Verdict::Unconfirmed);
         }
         let mut openssh = key.to_openssh().map_err(|e| store_err(&self.path, e))?;
         // Drop the comment: "<alg> <base64>".
@@ -115,11 +122,15 @@ mod tests {
         let b = PublicKey::from_openssh(KEY_B).unwrap();
         let pat = host_pattern("Aron-Dev.", 2222);
         assert_eq!(pat, "[aron-dev]:2222");
-        assert_eq!(kh.verify(&pat, &a).unwrap(), Verdict::Learned);
-        assert_eq!(kh.verify(&pat, &a).unwrap(), Verdict::Known);
-        assert_eq!(kh.verify(&pat, &b).unwrap(), Verdict::Mismatch(vec![fingerprint(&a)]));
-        // Other hosts are independent.
-        assert_eq!(kh.verify(&host_pattern("100.64.0.1", 22), &b).unwrap(), Verdict::Learned);
+        assert_eq!(kh.verify(&pat, &a, || true).unwrap(), Verdict::Learned);
+        assert_eq!(kh.verify(&pat, &a, || panic!("known key must not ask")).unwrap(), Verdict::Known);
+        // A changed key is a mismatch, whatever the policy would say.
+        assert_eq!(kh.verify(&pat, &b, || panic!("mismatch must not ask")).unwrap(), Verdict::Mismatch(vec![fingerprint(&a)]));
+        // Other hosts are independent; an untrusted key is not pinned.
+        let other = host_pattern("203.0.113.7", 22);
+        assert_eq!(kh.verify(&other, &b, || false).unwrap(), Verdict::Unconfirmed);
+        assert_eq!(kh.verify(&other, &b, || false).unwrap(), Verdict::Unconfirmed);
+        assert_eq!(kh.verify(&other, &b, || true).unwrap(), Verdict::Learned);
         let text = std::fs::read_to_string(kh.path()).unwrap();
         assert!(text.starts_with("[aron-dev]:2222 ssh-ed25519 AAAA"), "{text}");
         assert!(!text.contains("tf-test-a"));

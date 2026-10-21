@@ -5,7 +5,9 @@ mod support;
 use std::time::{Duration, Instant};
 
 use support::*;
-use tf_transport::{Cmd, ConnPhase, HostKind, TransportError, TransportEvent, connect};
+use tf_transport::{
+    Cmd, ConnPhase, HostKeyDecision, HostKeyPolicy, HostKind, TransportError, TransportEvent, connect, is_tailnet_ip,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const T: Duration = Duration::from_secs(10);
@@ -136,6 +138,58 @@ async fn host_key_tofu_and_mismatch() {
     assert!(err.hint().unwrap().contains("known_hosts"));
     // The pinned key was not replaced.
     assert_eq!(std::fs::read_to_string(&o.known_hosts).unwrap(), kh);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_tailnet_key_needs_confirmation() {
+    let home = TempDir::new("home");
+    let srv = TestServer::start(KEY_A, AuthMode::Accept, home.0.clone()).await;
+    let dir = TempDir::new("kh");
+    // Default policy: loopback is not a tailnet address, so the first key is not pinned.
+    let mut o = opts(&dir);
+    o.host_key_policy = HostKeyPolicy::tailnet_only();
+    let err = connect(&profile(srv.addr), &o, Events::new().tx).await.err().expect("unconfirmed key must stop");
+    let TransportError::HostKeyUnconfirmed { host, address, algorithm, fingerprint } = &err else {
+        panic!("expected HostKeyUnconfirmed, got {err:?}")
+    };
+    assert_eq!(host, &format!("[127.0.0.1]:{}", srv.addr.port()));
+    assert_eq!(address, "127.0.0.1");
+    assert_eq!(algorithm, "ssh-ed25519");
+    assert!(fingerprint.starts_with("SHA256:"));
+    assert_eq!(err.code(), "transport.hostKeyUnconfirmed");
+    assert!(!err.retryable());
+    assert!(!o.known_hosts.exists(), "nothing pinned before confirmation");
+
+    // The user confirmed this fingerprint: pin it and connect.
+    let confirmed = fingerprint.clone();
+    o.host_key_policy = HostKeyPolicy::new(move |c| {
+        if c.fingerprint == confirmed { HostKeyDecision::Trust } else { HostKeyDecision::Confirm }
+    });
+    let t = connect(&profile(srv.addr), &o, Events::new().tx).await.expect("confirmed key connects");
+    t.close().await;
+    assert_eq!(std::fs::read_to_string(&o.known_hosts).unwrap().lines().count(), 1);
+
+    // A changed key is a mismatch even under a policy that would trust anything new.
+    srv.set_key(KEY_B);
+    o.host_key_policy = HostKeyPolicy::new(|_| HostKeyDecision::Trust);
+    let err = connect(&profile(srv.addr), &o, Events::new().tx).await.err().expect("mismatch");
+    assert!(matches!(err, TransportError::HostKeyMismatch { .. }), "{err:?}");
+}
+
+#[test]
+fn tailnet_ranges() {
+    let tailnet = |s: &str| is_tailnet_ip(s.parse().unwrap());
+    assert!(tailnet("100.64.0.1"));
+    assert!(tailnet("100.127.255.254"));
+    assert!(tailnet("::ffff:100.100.1.2"));
+    assert!(tailnet("fd7a:115c:a1e0::1"));
+    assert!(tailnet("fd7a:115c:a1e0:ab12:4843:cd96:6258:b240"));
+    assert!(!tailnet("100.63.255.255"));
+    assert!(!tailnet("100.128.0.1"));
+    assert!(!tailnet("127.0.0.1"));
+    assert!(!tailnet("192.168.1.10"));
+    assert!(!tailnet("fd7a:115c:a1e1::1"));
+    assert!(!tailnet("::1"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

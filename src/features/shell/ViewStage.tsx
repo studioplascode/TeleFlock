@@ -100,7 +100,9 @@ export function ViewStage({ mobile }: { mobile: boolean }) {
       }
     : {
         initial: { opacity: 0, y: 14, scale: 0.992, filter: "blur(6px)" },
-        animate: { opacity: 1, y: 0, scale: 1, filter: "blur(0px)", transition: spring.smooth },
+        // `filter: none` once settled: a lingering blur(0px) keeps the whole view on its own render
+        // surface and turns it into the containing block for position:fixed descendants.
+        animate: { opacity: 1, y: 0, scale: 1, filter: "blur(0px)", transition: spring.smooth, transitionEnd: { filter: "none" } },
         exit: { opacity: 0, y: -6, filter: "blur(4px)", transition: tween.fast },
       };
 

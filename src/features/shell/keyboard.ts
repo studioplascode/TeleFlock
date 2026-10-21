@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { toast } from "@/design";
 import { navigate, parseAgentKey, type Route, type UiState, useRoute, useUi } from "@/core";
+import { toggleSidebar } from "./sidebarState";
 
 export interface ShortcutDef {
   keys: string[];
@@ -101,7 +102,7 @@ export function useGlobalShortcuts(): void {
         }
         if (key === "b") {
           e.preventDefault();
-          u.toggleSidebar();
+          toggleSidebar();
           return;
         }
         if (key === "\\") {

@@ -10,6 +10,7 @@ import {
   isAndroid,
   isTauri,
   Kbd,
+  PageHeader,
   SegmentedControl,
   Select,
   spring,
@@ -45,7 +46,8 @@ function Section({ icon, title, description, children, index }: { icon: ReactNod
   );
 }
 
-function Row({ label, description, children, htmlFor }: { label: string; description?: ReactNode; children: ReactNode; htmlFor?: string }) {
+/** One setting. `wide` controls (segmented, selects, text) take the full row on phones. */
+function Row({ label, description, children, htmlFor, wide }: { label: string; description?: ReactNode; children: ReactNode; htmlFor?: string; wide?: boolean }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-1 last:pb-1">
       <div className="min-w-0 flex-1 basis-56">
@@ -54,7 +56,7 @@ function Row({ label, description, children, htmlFor }: { label: string; descrip
         </label>
         {description && <div className="text-xs text-mute">{description}</div>}
       </div>
-      <div className="flex shrink-0 items-center gap-2">{children}</div>
+      <div className={cn("flex shrink-0 items-center gap-2", wide && "max-md:w-full max-md:[&>*]:w-full")}>{children}</div>
     </div>
   );
 }
@@ -188,17 +190,11 @@ export function SettingsView() {
 
   return (
     <div className="flex min-h-full flex-col">
-      {mobile ? (
-        <MobileHeader title="Settings" back />
-      ) : (
-        <header className="px-8 pt-7 pb-5">
-          <div className="kicker">Preferences</div>
-          <h1 className="font-display text-display font-bold">Settings</h1>
-        </header>
-      )}
-      <div className={cn("mx-auto grid w-full max-w-[880px] content-start gap-4", mobile ? "px-3 pb-8" : "px-8 pb-12")}>
+      {mobile && <MobileHeader title="Settings" back />}
+      <div className={cn("mx-auto grid w-full max-w-[880px] content-start gap-4", mobile ? "px-3 pb-8" : "px-8 pt-7 pb-12")}>
+        {!mobile && <PageHeader kicker="Preferences" title="Settings" description="How TeleFlock moves, notifies and starts new agents on this device." className="mb-2" />}
         <Section index={0} icon={<Sparkles />} title="Motion" description="Animation is how TeleFlock shows that work is alive. Reduced keeps every meaning with calm, static colour.">
-          <Row label="Animation">
+          <Row label="Animation" wide>
             <SegmentedControl<MotionPref>
               value={settings.motion}
               onValueChange={(motion) => {
@@ -211,6 +207,7 @@ export function SettingsView() {
                 { value: "reduced", label: "Reduced" },
               ]}
               aria-label="Animation"
+              fill={mobile}
             />
           </Row>
         </Section>
@@ -266,7 +263,7 @@ export function SettingsView() {
         </Section>
 
         <Section index={2} icon={<Bot />} title="New agents" description="Defaults for agents you start from TeleFlock.">
-          <Row label="Model" htmlFor="tf-default-model">
+          <Row label="Model" htmlFor="tf-default-model" wide>
             <Select
               id="tf-default-model"
               className="w-60"
@@ -275,7 +272,7 @@ export function SettingsView() {
               options={modelOptions}
             />
           </Row>
-          <Row label="Thinking" htmlFor="tf-default-thinking">
+          <Row label="Thinking" htmlFor="tf-default-thinking" wide>
             <Select
               id="tf-default-thinking"
               className="w-40"
@@ -309,7 +306,7 @@ export function SettingsView() {
         </Section>
 
         <Section index={4} icon={<MonitorSmartphone />} title="This device">
-          <Row label="Device name" description="Shown to other clients as the author of prompts you send." htmlFor="tf-device-name">
+          <Row label="Device name" description="Shown to other clients as the author of prompts you send." htmlFor="tf-device-name" wide>
             <CommitInput id="tf-device-name" value={settings.deviceName} onCommit={(deviceName) => update({ deviceName: deviceName.trim() || settings.deviceName })} className="w-56" />
           </Row>
           {(isAndroid || info?.capabilities.keepAlive) && (

@@ -6,6 +6,7 @@ import type { HostProfile } from "./HostProfile";
 import type { HostRef } from "./HostRef";
 import type { HostsListResult } from "./HostsListResult";
 import type { Settings } from "./Settings";
+import type { TrustKeyParams } from "./TrustKeyParams";
 import type { TunnelInfo } from "./TunnelInfo";
 import type { TunnelListResult } from "./TunnelListResult";
 import type { TunnelOpenParams } from "./TunnelOpenParams";
@@ -23,6 +24,7 @@ export interface AppMethods {
   "hosts.connect": { params: HostRef; result: Empty };
   "hosts.disconnect": { params: HostRef; result: Empty };
   "hosts.test": { params: HostProfile; result: DiagReport };
+  "hosts.trustKey": { params: TrustKeyParams; result: Empty };
   "wsl.distros": { params: Empty; result: WslDistrosResult };
   "settings.get": { params: Empty; result: Settings };
   "settings.set": { params: Settings; result: Settings };

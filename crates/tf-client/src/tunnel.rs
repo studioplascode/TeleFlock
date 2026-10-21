@@ -30,7 +30,7 @@ impl Tunnels {
 
     /// Opens (or returns the existing) tunnel to `remote_host:port` on `rt`'s host.
     pub async fn open(&self, rt: &Arc<HostRt>, p: TunnelOpenParams) -> Result<TunnelInfo, ApiError> {
-        let remote_host = p.remote_host.filter(|h| !h.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into());
+        let remote_host = loopback_target(p.remote_host.as_deref())?;
         if p.port == 0 {
             return Err(ApiError::new("invalid_params", "port must be 1-65535"));
         }
@@ -104,5 +104,39 @@ async fn accept_loop(listener: TcpListener, rt: Weak<HostRt>, host: String, port
                 Err(e) => log::warn!("tunnel {host}:{port}: forward failed: {e}"),
             }
         });
+    }
+}
+
+/// Normalized tunnel target. Previews only reach services on the host's own loopback, so
+/// a tunnel can never be pointed at other machines on the host's network.
+fn loopback_target(remote_host: Option<&str>) -> Result<String, ApiError> {
+    let h = remote_host.map(str::trim).filter(|h| !h.is_empty()).unwrap_or("127.0.0.1");
+    let unbracketed = h.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(h);
+    if h.eq_ignore_ascii_case("localhost") {
+        return Ok("localhost".into());
+    }
+    match unbracketed.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) if ip == std::net::Ipv4Addr::LOCALHOST => Ok("127.0.0.1".into()),
+        Ok(std::net::IpAddr::V6(ip)) if ip == std::net::Ipv6Addr::LOCALHOST => Ok("::1".into()),
+        _ => Err(ApiError::new("invalid_params", format!("tunnels only reach the host's loopback, not `{h}`"))
+            .with_hint("Use 127.0.0.1, ::1 or localhost.")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loopback_target;
+
+    #[test]
+    fn only_loopback_targets() {
+        assert_eq!(loopback_target(None).unwrap(), "127.0.0.1");
+        assert_eq!(loopback_target(Some(" ")).unwrap(), "127.0.0.1");
+        assert_eq!(loopback_target(Some("127.0.0.1")).unwrap(), "127.0.0.1");
+        assert_eq!(loopback_target(Some("LocalHost")).unwrap(), "localhost");
+        assert_eq!(loopback_target(Some("::1")).unwrap(), "::1");
+        assert_eq!(loopback_target(Some("[::1]")).unwrap(), "::1");
+        for bad in ["10.0.0.5", "127.0.0.2", "0.0.0.0", "169.254.169.254", "example.com", "localhost.evil.com", "::", "[::ffff:127.0.0.1]"] {
+            assert_eq!(loopback_target(Some(bad)).unwrap_err().code, "invalid_params", "{bad}");
+        }
     }
 }

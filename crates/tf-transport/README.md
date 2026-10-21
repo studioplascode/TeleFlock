@@ -37,10 +37,16 @@ pub type BoxedWrite = Box<dyn AsyncWrite + Send + Unpin>;
 pub type BoxedStream = Box<dyn AsyncStream>;   // AsyncRead + AsyncWrite + Send + Unpin
 
 pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Latency(u32), Closed(Option<String>) }
-pub struct ConnectOptions { pub known_hosts: PathBuf, pub auth_timeout: Duration /* 31 min */,
+pub struct ConnectOptions { pub known_hosts: PathBuf, pub host_key_policy: HostKeyPolicy /* tailnet_only() */,
+                            pub auth_timeout: Duration /* 31 min */,
                             pub ping_interval: Duration /* 15 s */, pub ping_timeout, pub ping_max_misses /* 3 */,
                             pub resolve_timeout, pub connect_timeout, pub handshake_timeout, pub wsl_start_timeout }
 // ConnectOptions::new(known_hosts_path) fills in the defaults.
+
+pub struct HostKeyCheck { pub host: String, pub address: IpAddr, pub algorithm: String, pub fingerprint: String }
+pub enum HostKeyDecision { Trust, Confirm }
+impl HostKeyPolicy { fn new(impl Fn(&HostKeyCheck) -> HostKeyDecision); fn tailnet_only() -> Self; fn decide(&self, &HostKeyCheck) }
+pub fn is_tailnet_ip(ip: IpAddr) -> bool;      // 100.64.0.0/10, fd7a:115c:a1e0::/48 (incl. v4-mapped)
 ```
 
 Differences from the architecture sketch:
@@ -98,9 +104,11 @@ Differences from the architecture sketch:
 
 **Host keys**
 
-- Trust on first use, stored in OpenSSH format (`[host]:port` when the port isn't 22).
-- On first use the key is pinned and the transport emits `Phase(Connecting, "Trusted new host key SHA256:…")`.
-- A different key fails with `HostKeyMismatch { host, expected, actual, known_hosts }`. The pin is never overwritten.
+- Stored in OpenSSH format (`[host]:port` when the port isn't 22).
+- A key seen for the first time goes to `ConnectOptions::host_key_policy` with the resolved peer address. The default `tailnet_only()` trusts tailnet addresses silently (Tailscale authenticates the node) and asks for confirmation everywhere else.
+- `Trust`: the key is pinned and the transport emits `Phase(Connecting, "Trusted new host key SHA256:…")`.
+- `Confirm`: nothing is pinned and the connect fails with `HostKeyUnconfirmed { host, address, algorithm, fingerprint }` (`transport.hostKeyUnconfirmed`, not retryable). Connect again with a policy that trusts that fingerprint once the user has confirmed it.
+- A different key fails with `HostKeyMismatch { host, expected, actual, known_hosts }`, whatever the policy says. The pin is never overwritten.
 
 **Authentication**
 

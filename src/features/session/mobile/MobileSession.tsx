@@ -151,7 +151,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
       />
       <PagerDots keys={keys} current={key} />
       {omp && (
-        <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pb-2 no-scrollbar">
+        <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pr-8 pb-2 no-scrollbar [mask-image:linear-gradient(90deg,#000_calc(100%-40px),transparent)]">
           <ModelPicker agentKey={key} mobile />
           <ThinkingPicker agentKey={key} />
           <PlanToggle agentKey={key} />

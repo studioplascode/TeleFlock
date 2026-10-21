@@ -214,6 +214,7 @@ function replaceHost(
     const old = d.agents[key];
     if (old && sameAgent(a, old)) continue;
     if (!old || old.column !== a.column) lanesChanged = true;
+    relinkIfLive(d, hostId, old, a, effects);
     d.agents[key] = viewOf(hostId, a);
   }
   for (const key of Object.keys(d.agents)) {
@@ -223,6 +224,12 @@ function replaceHost(
     }
   }
   if (lanesChanged) effects.push({ kind: "lanes", hostId });
+}
+
+/** An open session that failed (e.g. hostd restarted before it rejoined the room) reopens once the link is live. */
+function relinkIfLive(d: CoreState, hostId: string, old: AgentView | undefined, next: Agent, effects: Effect[]): void {
+  if (next.omp?.link !== "live" || old?.omp?.link === "live") return;
+  if (d.sessions[agentKey(hostId, next.id)]?.status === "error") effects.push({ kind: "relink", hostId, agentId: next.id });
 }
 
 function upsertById<T extends { id: string }>(list: T[], id: string, value: T | null): T[] {
@@ -269,6 +276,7 @@ function applyPatch(tx: Tx, d: CoreState, hostId: string, rev: number, ops: Stat
           }
         } else {
           if (!old || old.column !== op.value.column) effects.push({ kind: "lanes", hostId });
+          relinkIfLive(d, hostId, old, op.value, effects);
           d.agents[key] = viewOf(hostId, op.value);
         }
         break;

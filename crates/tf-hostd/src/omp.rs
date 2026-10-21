@@ -7,18 +7,21 @@
 //! broadcast channel that each state store consumes.
 
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use tf_collab::{Access, EndReason, Guest, GuestEvent, HostEntry, Registry, Relay, RelayConfig, Replica, Signal};
+use tf_collab::{
+    Access, EndReason, Guest, GuestEvent, HostEntry, Registry, Relay, RelayConfig, RelayIdentity, Replica, Signal,
+};
 use tf_proto::host::ServerMsg;
-use tf_proto::model::{Answer, CostInfo, LinkState, Liveness, NeedsYou, PulseKind, UsageTotals};
-use tf_proto::session::{HistoryPage, SessionEvent, SessionMeta, SessionSnapshot, UiRequest};
+use tf_proto::model::{Answer, CostInfo, LinkState, Liveness, NeedsYou, PulseKind, SetupIssue, Severity, UsageTotals};
+use tf_proto::session::{HistoryPage, SessionEvent, SessionMeta, SessionSnapshot, TreeInfo, UiRequest};
 use tf_proto::{ApiError, Millis};
 
 use crate::clients::ClientHandle;
@@ -70,6 +73,8 @@ struct SessionState {
     last_cost: Option<CostInfo>,
     first_prompt: Option<String>,
     overlay: MetaOverlay,
+    /// Raw omp leaf id the cached (or in-flight) session tree was fetched for.
+    tree_for: Option<Option<String>>,
 }
 
 /// One joined omp collab room.
@@ -136,17 +141,43 @@ impl OmpSession {
         meta
     }
 
-    /// Replaces the bridge overlay; subscribers get a `meta` event when it changed.
-    pub fn set_overlay(&self, overlay: MetaOverlay) {
+    /// Replaces the bridge overlay; subscribers get a `meta` event when it changed. The cached
+    /// session tree survives (it is refreshed separately through [`Self::set_tree`]).
+    pub fn set_overlay(&self, mut overlay: MetaOverlay) {
         let mut st = self.lock();
+        if overlay.tree.is_none() {
+            overlay.tree = st.overlay.tree.clone();
+        }
         if st.overlay == overlay {
             return;
         }
         st.overlay = overlay;
-        let mut meta = st.replica.meta().clone();
-        st.overlay.apply(&mut meta, st.link == LinkState::Live);
-        st.pending.push(SessionEvent::Meta { meta });
-        flush_locked(&mut st);
+        emit_meta_locked(&mut st);
+    }
+
+    /// Claims a tree refresh for the raw omp leaf `leaf`; `false` when the cached or in-flight
+    /// tree already covers it.
+    pub fn claim_tree_refresh(&self, leaf: &Option<String>) -> bool {
+        let mut st = self.lock();
+        if st.tree_for.as_ref() == Some(leaf) {
+            return false;
+        }
+        st.tree_for = Some(leaf.clone());
+        true
+    }
+
+    /// Stores a fetched tree (`None` = the fetch failed; the next state change retries).
+    pub fn set_tree(&self, tree: Option<TreeInfo>) {
+        let mut st = self.lock();
+        let Some(tree) = tree else {
+            st.tree_for = None;
+            return;
+        };
+        if st.overlay.tree.as_ref() == Some(&tree) {
+            return;
+        }
+        st.overlay.tree = Some(tree);
+        emit_meta_locked(&mut st);
     }
 
     pub fn link(&self) -> (LinkState, Option<String>) {
@@ -257,6 +288,14 @@ impl MetaOverlay {
     }
 }
 
+/// Queues a `meta` event with the replica meta plus the overlay and flushes.
+fn emit_meta_locked(st: &mut SessionState) {
+    let mut meta = st.replica.meta().clone();
+    st.overlay.apply(&mut meta, st.link == LinkState::Live);
+    st.pending.push(SessionEvent::Meta { meta });
+    flush_locked(st);
+}
+
 /// Sends pending events to the subscribers, merging appends to the same row.
 fn flush_locked(st: &mut SessionState) {
     st.last_flush = Instant::now();
@@ -326,6 +365,61 @@ pub fn loopback_port(url: &str) -> Option<u16> {
     port.parse().ok()
 }
 
+/// Why the embedded relay is not listening (from the last bind attempt).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayDown {
+    /// Another process holds `127.0.0.1:<port>`.
+    PortInUse,
+    Other(String),
+}
+
+/// Setup issue ids for a relay that is not listening (never fixable by `host.setupApply`).
+pub const ISSUE_RELAY_PORT_IN_USE: &str = "relay-port-in-use";
+pub const ISSUE_RELAY_DOWN: &str = "relay-down";
+pub const RELAY_ISSUE_IDS: [&str; 2] = [ISSUE_RELAY_PORT_IN_USE, ISSUE_RELAY_DOWN];
+
+/// Setup-checklist entry for a relay that is not listening; `None` while it is.
+pub fn relay_issue(port: u16, listening: bool, down: Option<&RelayDown>) -> Option<SetupIssue> {
+    if listening {
+        return None;
+    }
+    let (id, title, detail) = match down {
+        Some(RelayDown::PortInUse) => (
+            ISSUE_RELAY_PORT_IN_USE,
+            "Another process holds the TeleFlock relay port".to_string(),
+            format!(
+                "tf-hostd could not listen on 127.0.0.1:{port} because another process already holds that port. Live omp sessions cannot connect, and TeleFlock will not join rooms on a relay it does not own. Stop that process (find it with `ss -ltnp 'sport = :{port}'`) or restart tf-hostd with a different --relay-port; tf-hostd retries the port every few seconds."
+            ),
+        ),
+        Some(RelayDown::Other(e)) => (
+            ISSUE_RELAY_DOWN,
+            "The TeleFlock relay is not listening".to_string(),
+            format!("tf-hostd could not bind 127.0.0.1:{port} ({e}); live sessions cannot connect. Check ~/.teleflock/hostd.log."),
+        ),
+        None => (
+            ISSUE_RELAY_DOWN,
+            "The TeleFlock relay is not listening".to_string(),
+            format!("tf-hostd is not serving 127.0.0.1:{port}; live sessions cannot connect. Check ~/.teleflock/hostd.log."),
+        ),
+    };
+    Some(SetupIssue { id: id.into(), severity: Severity::Error, title, detail, fixable: false, recommended: true })
+}
+
+/// Proves that the relay a room lives on is the one this process started (fresh nonce, HMAC
+/// answered on `/healthz`) and returns the `ws://` origin the guest must connect to. `own` is our
+/// relay's identity and bound address; `None` when it is not running (another process may hold
+/// the port).
+async fn verify_room_relay(own: Option<(RelayIdentity, SocketAddr)>, port: u16, ws_url: &str) -> Result<String, String> {
+    let (identity, addr) = own.ok_or_else(|| {
+        format!("the TeleFlock relay is not running on 127.0.0.1:{port}; not joining a room on a relay tf-hostd does not own")
+    })?;
+    // omp connects where its URL points: `[::1]` is a different socket from our IPv4 listener.
+    let host = ws_url.split_once("://").map_or(ws_url, |(_, r)| r);
+    let target = if host.starts_with("[::1]") { SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port) } else { addr };
+    identity.verify(target).await.map_err(|e| format!("refusing to join: the relay on {target} failed the identity check ({e})"))?;
+    Ok(format!("ws://{target}"))
+}
+
 #[derive(Default)]
 struct Registryish {
     rows: Vec<HostEntry>,
@@ -340,6 +434,8 @@ struct Inner {
     relay_port: u16,
     relay: tokio::sync::Mutex<Option<Relay>>,
     relay_ok: AtomicBool,
+    /// Last bind failure while the relay is down.
+    relay_down: Mutex<Option<RelayDown>>,
     registry: Registry,
     reg: Mutex<Registryish>,
     sessions: RwLock<HashMap<String, Arc<OmpSession>>>,
@@ -364,6 +460,7 @@ impl OmpHandle {
             relay_port,
             relay: tokio::sync::Mutex::new(None),
             relay_ok: AtomicBool::new(false),
+            relay_down: Mutex::new(None),
             registry: Registry::new(),
             reg: Mutex::new(Registryish::default()),
             sessions: RwLock::new(HashMap::new()),
@@ -384,15 +481,37 @@ impl OmpHandle {
         if slot.is_some() {
             return true;
         }
-        match Relay::start(RelayConfig::new(self.inner.relay_port)).await {
+        let port = self.inner.relay_port;
+        match Relay::start(RelayConfig::new(port)).await {
             Ok(r) => {
                 info!(port = r.port(), "collab relay listening");
                 *slot = Some(r);
                 self.inner.relay_ok.store(true, Ordering::Relaxed);
+                self.inner.relay_down.lock().unwrap_or_else(|p| p.into_inner()).take();
+                let _ = self.inner.updates.send(OmpUpdate::Registry);
                 true
             }
             Err(e) => {
-                warn!(port = self.inner.relay_port, "collab relay bind failed: {e}");
+                let down = if e.kind() == std::io::ErrorKind::AddrInUse {
+                    RelayDown::PortInUse
+                } else {
+                    RelayDown::Other(e.to_string())
+                };
+                let mut last = self.inner.relay_down.lock().unwrap_or_else(|p| p.into_inner());
+                // Logged loudly once per distinct failure; the keeper retries every 5 s.
+                if last.as_ref() != Some(&down) {
+                    match &down {
+                        RelayDown::PortInUse => {
+                            error!(port, "collab relay cannot listen: another process holds 127.0.0.1:{port}; not joining rooms until it is free")
+                        }
+                        RelayDown::Other(_) => error!(port, "collab relay bind failed: {e}"),
+                    }
+                    *last = Some(down);
+                    drop(last);
+                    let _ = self.inner.updates.send(OmpUpdate::Registry);
+                } else {
+                    debug!(port, "collab relay bind still failing: {e}");
+                }
                 false
             }
         }
@@ -400,6 +519,12 @@ impl OmpHandle {
 
     pub fn relay_listening(&self) -> bool {
         self.inner.relay_ok.load(Ordering::Relaxed)
+    }
+
+    /// The setup issue for a relay that is not listening (`relay-port-in-use` / `relay-down`).
+    pub fn relay_issue(&self) -> Option<SetupIssue> {
+        let down = self.inner.relay_down.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        relay_issue(self.inner.relay_port, self.relay_listening(), down.as_ref())
     }
 
     pub fn relay_port(&self) -> u16 {
@@ -589,7 +714,10 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
         inner.reg.lock().unwrap_or_else(|p| p.into_inner()).foreign.insert((row.instance_id.clone(), link.generation));
         return Ok(());
     }
-    let (guest, rx) = Guest::connect(link.link, GUEST_NAME).await.map_err(|e| e.to_string())?;
+    let own = inner.relay.lock().await.as_ref().map(|r| (r.identity(), r.local_addr()));
+    let relay_url = verify_room_relay(own, inner.relay_port, &link.link.ws_url).await?;
+    let room = link.link.with_relay(&relay_url).map_err(|e| e.to_string())?;
+    let (guest, rx) = Guest::connect(room, GUEST_NAME).await.map_err(|e| e.to_string())?;
     let session = Arc::new(OmpSession {
         session_id: session_id.clone(),
         instance_id: row.instance_id.clone(),
@@ -607,6 +735,7 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
             last_cost: None,
             first_prompt: None,
             overlay: MetaOverlay::default(),
+            tree_for: None,
         }),
         closed: AtomicBool::new(false),
     });
@@ -773,5 +902,63 @@ mod tests {
         assert_eq!(loopback_port("ws://localhost:7466"), Some(7466));
         assert_eq!(loopback_port("wss://relay.example.com:443/r/x"), None);
         assert_eq!(loopback_port("ws://[::1]:5/r"), Some(5));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn joins_only_after_own_relay_proves_identity() {
+        let ours = Relay::start(RelayConfig::new(0)).await.unwrap();
+        let foreign = Relay::start(RelayConfig::new(0)).await.unwrap();
+        let port = ours.port();
+        let url = format!("ws://127.0.0.1:{port}/r/TfRelayJoinRoom000001");
+
+        let own = Some((ours.identity(), ours.local_addr()));
+        assert_eq!(verify_room_relay(own, port, &url).await.unwrap(), format!("ws://127.0.0.1:{port}"));
+        let localhost = format!("ws://localhost:{port}/r/TfRelayJoinRoom000001");
+        assert_eq!(verify_room_relay(Some((ours.identity(), ours.local_addr())), port, &localhost).await.unwrap(), ours.url());
+
+        // The socket answering on our port is someone else's relay (different secret).
+        let err = verify_room_relay(Some((ours.identity(), foreign.local_addr())), port, &url).await.unwrap_err();
+        assert!(err.contains("identity check"), "{err}");
+
+        // Our relay is not running (another process may hold the port): never join.
+        let err = verify_room_relay(None, port, &url).await.unwrap_err();
+        assert!(err.contains(&format!("127.0.0.1:{port}")) && err.contains("not running"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bind_failure_is_a_setup_issue() {
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        let dir = std::env::temp_dir().join(format!("tf-hostd-relay-bind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let persist = Persist::load(dir.join("state.json"));
+        // Pre-cancelled: only the initial relay bind runs, no registry polling.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let omp = OmpHandle::start(port, persist, cancel).await;
+
+        assert!(!omp.relay_listening());
+        let issue = omp.relay_issue().expect("relay issue");
+        assert_eq!(issue.id, ISSUE_RELAY_PORT_IN_USE);
+        assert_eq!(issue.severity, Severity::Error);
+        assert!(!issue.fixable);
+        assert!(issue.detail.contains(&format!("127.0.0.1:{port}")) && issue.detail.contains("another process"), "{}", issue.detail);
+
+        // Port freed → the next attempt binds and the issue clears.
+        drop(squatter);
+        assert!(omp.try_start_relay().await);
+        assert!(omp.relay_listening());
+        assert_eq!(omp.relay_issue(), None);
+        omp.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relay_issue_kinds() {
+        assert_eq!(relay_issue(1, true, Some(&RelayDown::PortInUse)), None);
+        let other = relay_issue(7, false, Some(&RelayDown::Other("permission denied".into()))).unwrap();
+        assert_eq!(other.id, ISSUE_RELAY_DOWN);
+        assert!(other.detail.contains("permission denied"));
+        assert_eq!(relay_issue(7, false, None).unwrap().id, ISSUE_RELAY_DOWN);
     }
 }

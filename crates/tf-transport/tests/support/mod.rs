@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use tf_transport::{ConnectOptions, HostKind, HostProfile, TransportEvent};
+use tf_transport::{ConnectOptions, HostKeyDecision, HostKeyPolicy, HostKind, HostProfile, TransportEvent};
 
 pub const KEY_A: &str = include_str!("../fixtures/host_key_a");
 pub const KEY_B: &str = include_str!("../fixtures/host_key_b");
@@ -406,6 +406,8 @@ pub fn profile(addr: SocketAddr) -> HostProfile {
 
 pub fn opts(dir: &TempDir) -> ConnectOptions {
     let mut o = ConnectOptions::new(dir.0.join("known_hosts"));
+    // The test server is on loopback, not the tailnet: trust first-seen keys like a tailnet host.
+    o.host_key_policy = HostKeyPolicy::new(|_| HostKeyDecision::Trust);
     o.connect_timeout = Duration::from_secs(3);
     o.handshake_timeout = Duration::from_secs(5);
     o

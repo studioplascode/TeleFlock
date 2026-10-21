@@ -6,21 +6,32 @@
 //!   `{termIn: {hostId, termId, data}}` (no response).
 //! * server → client: `{id, result}` | `{id, error}` responses and `{event: AppEvent}`.
 //!   Each connection first receives a replay of the current state as events.
+//!
+//! Access control lives in [`access`]: allow-listed `Host` on every route, and a per-launch token
+//! plus same-origin `Origin` on `/ws`. The served `index.html` carries the token as
+//! `<meta name="tf-token">` for loopback requests (or when the page URL has the right `?token=`).
+
+pub mod access;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection};
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tf_client::tf_proto::{ApiError, AppEvent};
 use tf_client::{BadgeState, Engine, NotifyStyle, Platform};
 use tokio::sync::{broadcast, mpsc};
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
+
+pub use access::Access;
 
 /// Platform for the devserver: OS integration happens in the browser, so notifications are
 /// left to the UI (`AppEvent::Notify`) and logged here.
@@ -63,23 +74,85 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "devserver".into())
 }
 
-/// Builds the HTTP app: `/ws` plus optional static files with `index.html` fallback.
-pub fn router(engine: Engine, static_dir: Option<PathBuf>) -> Router {
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(engine);
-    match static_dir {
-        Some(dir) => {
-            let index = dir.join("index.html");
-            app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
-        }
-        None => app,
+#[derive(Clone)]
+struct AppState {
+    engine: Engine,
+    access: Arc<Access>,
+    static_dir: Option<Arc<PathBuf>>,
+}
+
+/// Builds the HTTP app: `/ws` plus optional static files with an `index.html` SPA fallback (the
+/// index gets the token meta injected). Every route enforces `access`'s Host allow-list.
+pub fn router(engine: Engine, static_dir: Option<PathBuf>, access: Access) -> Router {
+    let access = Arc::new(access);
+    let state = AppState { engine, access: access.clone(), static_dir: static_dir.clone().map(Arc::new) };
+    let mut app = Router::new().route("/ws", get(ws_handler));
+    if let Some(dir) = static_dir {
+        let index = get(index_html).with_state(state.clone());
+        app = app
+            .route("/index.html", get(index_html))
+            .fallback_service(ServeDir::new(dir).append_index_html_on_directories(false).fallback(index));
     }
+    app.with_state(state).layer(middleware::from_fn_with_state(access, check_host))
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(engine): State<Engine>) -> impl IntoResponse {
+/// Host allow-list for every route (DNS rebinding).
+async fn check_host(State(access): State<Arc<Access>>, req: Request, next: Next) -> Response {
+    match access::request_authority(req.headers(), req.uri()) {
+        Some(host) if access.host_allowed(host) => next.run(req).await,
+        _ => (StatusCode::MISDIRECTED_REQUEST, "unexpected Host header").into_response(),
+    }
+}
+
+/// `index.html` (also for `/` and SPA routes), uncached. The token meta is injected when the
+/// request is a loopback client addressing a loopback name, or the page URL has the right
+/// `?token=`, so neither remote peers nor reverse-proxied clients can read the token from it.
+async fn index_html(State(st): State<AppState>, req: Request) -> Response {
+    let Some(dir) = &st.static_dir else { return StatusCode::NOT_FOUND.into_response() };
+    let html = match tokio::fs::read_to_string(dir.join("index.html")).await {
+        Ok(html) => html,
+        Err(e) => {
+            log::warn!("{}: {e}", dir.join("index.html").display());
+            return (StatusCode::NOT_FOUND, "index.html not found (build the UI with `bun run build`)").into_response();
+        }
+    };
+    let loopback_peer = req.extensions().get::<ConnectInfo<SocketAddr>>().is_some_and(|c| c.0.ip().to_canonical().is_loopback());
+    let loopback_host = access::request_authority(req.headers(), req.uri()).is_some_and(Access::is_loopback_host);
+    let body = if (loopback_peer && loopback_host) || st.access.query_token_ok(req.uri().query()) {
+        access::inject_token_meta(&html, st.access.token())
+    } else {
+        html
+    };
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], body).into_response()
+}
+
+/// `/ws`: authorized (Host, Origin, token) before the upgrade is accepted.
+async fn ws_handler(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    let protocol = match st.access.authorize_ws(&headers, &uri) {
+        Ok(p) => p,
+        Err((status, why)) => {
+            log::warn!("rejected /ws request: {why}");
+            return (status, why).into_response();
+        }
+    };
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(e) => return e.into_response(),
+    };
+    let ws = match protocol {
+        Some(p) => ws.protocols([p]),
+        None => ws,
+    };
+    let engine = st.engine;
     ws.max_message_size(64 << 20).on_upgrade(move |socket| client(socket, engine))
 }
 

@@ -23,7 +23,7 @@ import {
   SquareTerminal,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Badge,
   cn,
@@ -41,8 +41,10 @@ import {
   type Status,
   StatusOrb,
   Tooltip,
+  useMediaQuery,
 } from "@/design";
 import { core, navigate, type Route, useAgent, useAgentKeys, useHostIds, useHosts, useHostStale, useInbox, useRoute, useUi, useWorkspaces } from "@/core";
+import { routeKey } from "@/app/routes";
 import type { HerdrState, Workspace } from "@/core/gen";
 import { connect } from "@/features/hosts/ConnStatusCard";
 import { hostCall } from "@/features/palette/sessionCommands";
@@ -50,6 +52,7 @@ import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { WorkspaceActionsMenu } from "@/features/workspace/workspaceActions";
 import { useHealthHistory } from "./healthHistory";
 import { agentTier, COLUMN_SHORT, COLUMN_STATUS, connSummary, PHASE_STATUS } from "./status";
+import { SIDEBAR_RAIL_QUERY, toggleSidebar, useSidebarPeek } from "./sidebarState";
 
 const ROLLUP_STATUS: Record<HerdrState, Status> = {
   working: "running",
@@ -323,7 +326,7 @@ function HostRow({ id, collapsed }: { id: string; collapsed: boolean }) {
       {orb}
       <span className="h-3.5 w-1 shrink-0 rounded-full" style={{ background: profile.color ?? "transparent" }} aria-hidden />
       <span className="min-w-0 flex-1 truncate font-bold text-ink-2">{profile.name}</span>
-      <span className={cn("font-mono text-2xs tabular", phase === "online" ? "text-mute" : phase === "authRequired" ? "text-sun-2" : "text-mute-2")}>{connSummary(status)}</span>
+      <span className={cn("font-mono text-2xs tabular", phase === "online" ? "text-mute" : phase === "authRequired" || phase === "hostKey" ? "text-sun-2" : "text-mute-2")}>{connSummary(status)}</span>
     </button>
   );
 }
@@ -371,7 +374,12 @@ function HealthMini({ hostId }: { hostId: string }) {
 
 /** Collapsible desktop sidebar: views, hosts, live workspace tree, quick actions, host health. */
 export function Sidebar() {
-  const { sidebarCollapsed: collapsed, toggleSidebar, openDialog } = useUi();
+  const { sidebarCollapsed, openDialog } = useUi();
+  const rail = useMediaQuery(SIDEBAR_RAIL_QUERY);
+  const peek = useSidebarPeek((s) => s.open);
+  const setPeek = useSidebarPeek((s) => s.set);
+  const collapsed = rail ? !peek : sidebarCollapsed;
+  const overlay = rail && peek;
   const route = useRoute();
   const ids = useHostIds();
   const { filter, status } = useHosts();
@@ -379,6 +387,16 @@ export function Sidebar() {
   const onlineIds = ids.filter((id) => status[id]?.phase === "online" || status[id]?.phase === "reconnecting");
   const treeIds = filter === "all" ? ids : ids.filter((id) => id === filter);
   const host = filter === "all" ? onlineIds[0] : filter;
+
+  // The peek overlay closes on navigation, Escape, or when the window grows out of rail mode.
+  const routeId = routeKey(route);
+  useEffect(() => setPeek(false), [routeId, rail, setPeek]);
+  useEffect(() => {
+    if (!overlay) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPeek(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlay, setPeek]);
 
   const actions: { icon: LucideIcon; label: string; run: () => void }[] = [
     { icon: GitBranchPlus, label: "New worktree", run: () => openDialog({ kind: "newWorktree", hostId: host }) },
@@ -388,11 +406,30 @@ export function Sidebar() {
   ];
 
   return (
+    <div className="relative z-raised h-full shrink-0" style={rail ? { width: COLLAPSED_W } : undefined}>
+      <AnimatePresence>
+        {overlay && (
+          <motion.div
+            key="scrim"
+            className="fixed inset-0 bg-[rgb(5_5_9/0.5)]"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onPointerDown={() => setPeek(false)}
+            aria-hidden
+          />
+        )}
+      </AnimatePresence>
     <motion.aside
       initial={false}
       animate={{ width: collapsed ? COLLAPSED_W : EXPANDED_W }}
       transition={spring.smooth}
-      className="relative z-raised flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-[rgb(13_13_19/0.55)] backdrop-blur-xl"
+      className={cn(
+        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-[rgb(13_13_19/0.55)] backdrop-blur-xl",
+        rail && "absolute inset-y-0 left-0",
+        overlay && "bg-[rgb(15_15_22/0.94)] shadow-[var(--shadow-d3),1px_0_0_var(--color-line-2)]",
+      )}
       aria-label="Sidebar"
     >
       <div className={cn("flex flex-col gap-0.5 p-2", collapsed && "items-center")}>
@@ -452,5 +489,6 @@ export function Sidebar() {
         </IconButton>
       </div>
     </motion.aside>
+    </div>
   );
 }

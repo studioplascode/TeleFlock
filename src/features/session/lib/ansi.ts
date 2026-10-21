@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { lruMemo } from "./lru";
 
 /**
  * ANSI SGR → styled segments. Handles 16/256/truecolor fg/bg, bold, dim, italic, underline,
@@ -109,7 +110,10 @@ function visibleLength(s: string): number {
 // eslint-disable-next-line no-control-regex
 const ESC_RE = /\x1b\[([0-9;?:]*)([A-Za-z@`])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>78DEHMNOc]/g;
 
-export function parseAnsi(input: string): AnsiSegment[] {
+/** ANSI → styled segments (memoised; treat the result as immutable). */
+export const parseAnsi: (input: string) => AnsiSegment[] = lruMemo(400, parseAnsiUncached);
+
+function parseAnsiUncached(input: string): AnsiSegment[] {
   const text = resolveCarriageReturns(input);
   const out: AnsiSegment[] = [];
   let style: AnsiStyle = {};

@@ -24,8 +24,12 @@ export interface DialogContentProps extends Omit<RadixDialog.DialogContentProps,
   width?: number;
 }
 
-/** Centered modal over a blurred backdrop. Title/description are wired for screen readers. */
-export function DialogContent({ title, description, icon, footer, hideClose, width = 560, className, children, style, ...rest }: DialogContentProps) {
+/**
+ * Centered modal over a blurred backdrop. Title/description are wired for screen readers.
+ * Initial focus goes to the first `[data-autofocus]` element inside (design `Input`/`Textarea`
+ * set it from `autoFocus`), with its text selected; otherwise to the first tabbable control.
+ */
+export function DialogContent({ title, description, icon, footer, hideClose, width = 560, className, children, style, onOpenAutoFocus, ...rest }: DialogContentProps) {
   return (
     <RadixDialog.Portal>
       <RadixDialog.Overlay className={overlayClass} />
@@ -35,6 +39,15 @@ export function DialogContent({ title, description, icon, footer, hideClose, wid
           className,
         )}
         style={{ maxWidth: width, ...style }}
+        onOpenAutoFocus={(e) => {
+          onOpenAutoFocus?.(e);
+          if (e.defaultPrevented || !(e.currentTarget instanceof HTMLElement)) return;
+          const target = e.currentTarget.querySelector<HTMLElement>("[data-autofocus]");
+          if (!target) return;
+          e.preventDefault();
+          target.focus();
+          if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) target.select();
+        }}
         {...rest}
       >
         <div className="flex items-start gap-3.5">

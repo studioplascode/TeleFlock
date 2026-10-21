@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { type HostActivityEvent, type HostNotification, loadOlderActivity, navigate, useActivity, useCore, useHosts, useNotifications } from "@/core";
 import type { ActivityKind, NotifyKind } from "@/core/gen";
-import { AgentGlyph, Button, EmptyState, SegmentedControl, StatusOrb, type Status, cn, formatAge, spring, useIsMobile, useNow } from "@/design";
+import { AgentGlyph, Button, EmptyState, NumberTicker, PageHeader, SegmentedControl, Sparkline, StatusOrb, type Status, cn, formatAge, spring, useIsMobile, useNow } from "@/design";
 import { HostTag } from "@/features/board/AgentCard";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 
@@ -142,6 +142,73 @@ function EventRow({ row, now }: { row: Row; now: number }) {
   );
 }
 
+const PULSE: readonly { group: Group; label: string; status: Status }[] = [
+  { group: "all", label: "Last hour", status: "running" },
+  { group: "finished", label: "Finished today", status: "review" },
+  { group: "needs", label: "Asks today", status: "needs-you" },
+  { group: "problems", label: "Problems today", status: "error" },
+];
+
+const BUCKET_MS = 5 * 60_000;
+
+/** Bento strip over the timeline: the last hour's pulse plus today's tallies; each tile filters. */
+function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostActivityEvent[]; now: number; group: Group; onPick: (g: Group) => void; mobile: boolean }) {
+  const hourAgo = now - 12 * BUCKET_MS;
+  const midnight = new Date(now).setHours(0, 0, 0, 0);
+  const buckets: number[] = Array.from({ length: 12 }, () => 0);
+  const tally: Record<Group, number> = { all: 0, finished: 0, needs: 0, problems: 0, git: 0, lifecycle: 0 };
+  for (const ev of events) {
+    if (ev.at >= hourAgo) {
+      tally.all++;
+      const b = Math.min(11, Math.floor((ev.at - hourAgo) / BUCKET_MS));
+      buckets[b] = (buckets[b] ?? 0) + 1;
+    }
+    if (ev.at >= midnight && ev.kind !== "answered" && ev.kind !== "approved" && ev.kind !== "denied") tally[KIND_GROUP[ev.kind]]++;
+  }
+  return (
+    <div className={cn("grid gap-3", mobile ? "grid-cols-2" : "grid-cols-4")}>
+      {PULSE.map((t, i) => {
+        const on = group === t.group && t.group !== "all";
+        const n = tally[t.group];
+        return (
+          <motion.button
+            key={t.group}
+            type="button"
+            data-status={t.status}
+            aria-pressed={on}
+            onClick={() => onPick(on || t.group === "all" ? "all" : t.group)}
+            initial={{ opacity: 0, y: 12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ ...spring.smooth, delay: 0.06 + i * 0.05 }}
+            className={cn(
+              "card-surface group relative flex h-[104px] flex-col overflow-hidden rounded-lg p-3.5 text-left pressable focus-ring lift",
+              on && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.6),0_10px_30px_-12px_rgb(var(--st-rgb)/0.6)]",
+            )}
+          >
+            <span className="flex items-center gap-1.5 text-2xs font-bold text-mute">
+              <StatusOrb status={n > 0 ? t.status : "idle"} size={6} label={null} activity={t.group === "all" && n > 0 ? "busy" : "silent"} />
+              {t.label}
+            </span>
+            <NumberTicker value={n} className={cn("mt-1 font-display text-3xl font-bold", n > 0 ? "text-ink" : "text-mute-2")} />
+            {t.group === "all" ? (
+              <Sparkline values={buckets} status="running" height={22} className="mt-auto" aria-label="Events per 5 minutes over the last hour" />
+            ) : (
+              <span className="mt-auto h-1 overflow-hidden rounded-full bg-white/6">
+                <motion.span
+                  className="block h-full rounded-full st-bg"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.min(100, n * 10)}%` }}
+                  transition={{ ...spring.gentle, delay: 0.15 + i * 0.05 }}
+                />
+              </span>
+            )}
+          </motion.button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Cross-agent timeline (spec §5 Activity): host activity + live notifications, newest first. */
 export function ActivityView() {
   const filter = useHosts((s) => s.filter);
@@ -187,6 +254,7 @@ export function ActivityView() {
 
   const content = (
     <>
+      <ActivityPulse events={events} now={now} group={group} onPick={setGroup} mobile={mobile} />
       <SegmentedControl<Group> size="sm" value={group} onValueChange={setGroup} options={GROUPS} className={cn(mobile && "w-full overflow-x-auto")} />
       {rows.length === 0 ? (
         <EmptyState
@@ -197,8 +265,8 @@ export function ActivityView() {
       ) : (
         days.map((d) => (
           <section key={d.label} aria-label={d.label} className="[content-visibility:auto]">
-            <h2 className="sticky top-0 z-20 -mx-1 mb-1 bg-bg/80 px-1 py-1.5 font-display text-xs font-bold tracking-[0.12em] text-mute uppercase backdrop-blur">
-              {d.label}
+            <h2 className="pointer-events-none sticky top-2 z-20 mb-1 py-1">
+              <span className="inline-flex rounded-full glass px-2.5 py-1 font-display text-2xs font-bold tracking-[0.12em] text-ink-2 uppercase">{d.label}</span>
             </h2>
             <ol className="relative flex flex-col before:absolute before:top-2 before:bottom-2 before:left-[16px] before:w-px before:bg-gradient-to-b before:from-line-3 before:to-transparent">
               <AnimatePresence initial={false}>
@@ -221,22 +289,23 @@ export function ActivityView() {
   if (mobile)
     return (
       <div className="flex min-h-full flex-col">
-        <MobileHeader title="Activity" subtitle="Every agent, one timeline" />
+        <MobileHeader title="Activity" subtitle="Every agent, one timeline" back />
         <div className="flex flex-col gap-4 px-4 pt-2 pb-6">{content}</div>
       </div>
     );
   return (
-    <div>
-      <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
-        <header className="flex items-center gap-3">
-          <h1 className="font-display text-2xl font-bold text-ink">Activity</h1>
-          <span className="flex items-center gap-1.5 text-xs font-bold text-mute">
-            <StatusOrb status="running" size={7} label={null} activity="steady" /> live
-          </span>
-          <span className="ml-auto text-xs font-semibold text-mute-2">{rows.length} events</span>
-        </header>
-        {content}
-      </div>
+    <div className="mx-auto flex max-w-[920px] flex-col gap-4 px-8 pt-7 pb-12">
+      <PageHeader
+        kicker="Timeline"
+        title="Activity"
+        meta={
+          <>
+            <StatusOrb status="running" size={7} label={null} activity="steady" /> live · {rows.length} events
+          </>
+        }
+        className="mb-1"
+      />
+      {content}
     </div>
   );
 }

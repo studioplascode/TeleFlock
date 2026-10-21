@@ -45,6 +45,22 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const working = agent?.column === "running" || agent?.live.streaming === true || agent?.live.tool != null;
   const queue = meta?.queue ?? agent?.omp?.queue;
   const cwd = meta?.cwd ?? agent?.cwd;
+  const [altHeld, setAltHeld] = useState(false);
+
+  useEffect(() => {
+    if (!working || mobile) return;
+    const track = (e: globalThis.KeyboardEvent) => setAltHeld(e.altKey);
+    const reset = () => setAltHeld(false);
+    window.addEventListener("keydown", track);
+    window.addEventListener("keyup", track);
+    window.addEventListener("blur", reset);
+    return () => {
+      window.removeEventListener("keydown", track);
+      window.removeEventListener("keyup", track);
+      window.removeEventListener("blur", reset);
+      setAltHeld(false);
+    };
+  }, [working, mobile]);
   const disabledReason = !agent
     ? "Agent not found"
     : agent.omp?.link !== "live"
@@ -256,7 +272,16 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         : mobile
           ? "Message omp · / commands"
           : "Message omp · / commands · @ files";
-  const queued = [...(queue?.steering ?? []).map((t) => ({ t, kind: "steer" as const })), ...(queue?.followUp ?? []).map((t) => ({ t, kind: "follow" as const }))];
+  const occurrences = new Map<string, number>();
+  const queued = [...(queue?.steering ?? []).map((t) => ({ t, kind: "steer" as const })), ...(queue?.followUp ?? []).map((t) => ({ t, kind: "follow" as const }))].map((q) => {
+    // Stable keys (text + occurrence) so a delivered message animates out instead of re-keying the rest.
+    const base = `${q.kind}:${q.t}`;
+    const n = (occurrences.get(base) ?? 0) + 1;
+    occurrences.set(base, n);
+    return { ...q, id: `${base}#${n}` };
+  });
+  // Holding Alt while the agent works previews follow-up mode on the send button and hints.
+  const followMode = working && altHeld && caps?.followUp === true;
 
   return (
     <div
@@ -330,7 +355,18 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                         <FileText className="size-3.5 shrink-0 text-mute-2" />
                         <span className="truncate">
                           {p.includes("/") && <span className="text-mute-2">{p.slice(0, p.lastIndexOf("/") + 1)}</span>}
-                          {p.slice(p.lastIndexOf("/") + 1)}
+                          {(() => {
+                            const name = p.slice(p.lastIndexOf("/") + 1);
+                            const at = popup.query ? name.toLowerCase().indexOf(popup.query.toLowerCase()) : -1;
+                            if (at < 0) return name;
+                            return (
+                              <>
+                                {name.slice(0, at)}
+                                <span className="font-bold text-accent-hi">{name.slice(at, at + popup.query.length)}</span>
+                                {name.slice(at + popup.query.length)}
+                              </>
+                            );
+                          })()}
                         </span>
                       </button>
                     ))}
@@ -341,26 +377,44 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
       <AnimatePresence initial={false}>
         {queued.length > 0 && (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="mb-2 flex flex-wrap gap-1.5 overflow-hidden">
-            {queued.map((q, i) => (
-              <motion.button
-                layout
-                key={`${q.kind}-${i}-${q.t}`}
-                type="button"
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1, transition: spring.bouncy }}
-                title={`${q.kind === "steer" ? "Steering" : "Follow-up"} (queued): ${q.t}\nClick to copy into the composer`}
-                onClick={() => setText(q.t)}
-                className={cn(
-                  "focus-ring flex max-w-[280px] items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-semibold shadow-hairline",
-                  q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-white/5 text-ink-2",
-                )}
-              >
-                {q.kind === "steer" ? <CornerDownRight className="size-3 shrink-0" /> : <ListPlus className="size-3 shrink-0" />}
-                <span className="truncate">{q.t}</span>
-                <span className="tf-loop size-1.5 shrink-0 animate-breathe rounded-full bg-current opacity-70" aria-hidden />
-              </motion.button>
-            ))}
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mb-2 flex flex-wrap items-center gap-1.5 overflow-hidden px-1"
+            aria-label="Queued messages"
+          >
+            <span className="mr-0.5 text-[10px] font-extrabold tracking-[0.1em] text-mute-2 uppercase">Queued · {queued.length}</span>
+            <AnimatePresence initial={false} mode="popLayout">
+              {queued.map((q) => (
+                <motion.button
+                  layout
+                  key={q.id}
+                  type="button"
+                  initial={{ opacity: 0, scale: 0.8, y: 6 }}
+                  animate={{ opacity: 1, scale: 1, y: 0, transition: spring.bouncy }}
+                  exit={{ opacity: 0, scale: 0.85, y: -10, transition: { duration: 0.22 } }}
+                  title={`${q.kind === "steer" ? "Steering: lands mid-turn" : "Follow-up: runs after this turn"}\n${q.t}\nClick to copy into the composer`}
+                  onClick={() => setText(q.t)}
+                  className={cn(
+                    "focus-ring flex max-w-[300px] items-center gap-1.5 rounded-full py-1 pr-2.5 pl-1 text-[11.5px] font-semibold shadow-hairline",
+                    q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-white/5 text-ink-2",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-extrabold tracking-wider uppercase",
+                      q.kind === "steer" ? "bg-accent/25 text-accent-hi" : "bg-white/8 text-mute",
+                    )}
+                  >
+                    {q.kind === "steer" ? <CornerDownRight className="size-2.5" /> : <ListPlus className="size-2.5" />}
+                    {q.kind === "steer" ? "steer" : "next"}
+                  </span>
+                  <span className="truncate">{q.t}</span>
+                  <span className="tf-loop size-1.5 shrink-0 animate-breathe rounded-full bg-current opacity-70" aria-hidden />
+                </motion.button>
+              ))}
+            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>
@@ -446,16 +500,26 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
               ) : (
                 !mobile && (
                   <span className="flex min-w-0 items-center gap-2 truncate text-[11px] font-semibold text-mute-2">
-                    <span className={cn("flex items-center gap-1", working && "text-accent-hi")}>
+                    {working && hasContent && !text.startsWith("/") && (
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-[10px] font-extrabold tracking-wider uppercase transition-colors duration-200",
+                          followMode ? "bg-white/8 text-ink-2" : "bg-accent/18 text-accent-hi",
+                        )}
+                      >
+                        {followMode ? "follow-up · after this turn" : "steer · lands mid-turn"}
+                      </span>
+                    )}
+                    <span className={cn("flex items-center gap-1 transition-colors", working && !followMode && "text-accent-hi")}>
                       <Kbd>Enter</Kbd>
                       {working ? "steer" : "send"}
                     </span>
-                    <span className="flex items-center gap-1">
+                    <span className={cn("flex items-center gap-1 transition-colors", followMode && "text-ink")}>
                       <Kbd>Alt</Kbd>
                       <Kbd>Enter</Kbd>
                       follow-up
                     </span>
-                    {working && (
+                    {working && !hasContent && (
                       <span className="flex items-center gap-1">
                         <Kbd>Esc</Kbd>
                         stop
@@ -466,7 +530,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
               )}
               {dictation.error && <span className="truncate text-2xs font-semibold text-error">{dictation.error}</span>}
               <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                {working && hasContent && !disabledReason && caps?.followUp && (
+                {working && hasContent && !disabledReason && caps?.followUp && !followMode && (
                   <IconButton label="Queue follow-up (Alt+Enter)" size="sm" variant="secondary" onClick={() => void send(true)} disabled={sending}>
                     <ListPlus />
                   </IconButton>
@@ -478,13 +542,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                 )}
                 {(hasContent || !working) && (
                   <IconButton
-                    label={working ? "Steer (Enter)" : "Send (Enter)"}
+                    label={followMode ? "Queue follow-up (Alt+Enter)" : working ? "Steer (Enter)" : "Send (Enter)"}
                     size={mobile ? "md" : "sm"}
                     variant="primary"
-                    onClick={() => void send(false)}
+                    onClick={() => void send(followMode)}
                     disabled={!hasContent || sending || (!!disabledReason && !text.trim().startsWith("/"))}
                   >
-                    {sending ? <Spinner size={14} /> : working ? <CornerDownRight /> : <ArrowUp />}
+                    {sending ? <Spinner size={14} /> : followMode ? <ListPlus /> : working ? <CornerDownRight /> : <ArrowUp />}
                   </IconButton>
                 )}
               </span>

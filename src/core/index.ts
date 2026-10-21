@@ -16,6 +16,8 @@ export {
   flushCoreEvents,
 } from "./client";
 export { agentKey, parseAgentKey } from "./keys";
+export { linkProps, openLink, safeHref } from "./links";
+export type { LinkProps } from "./links";
 export { CoreError, apiError, isApiError, toApiError } from "./errors";
 export { pulseBus, termBus } from "./buses";
 export type { PulseListener, PulseAllListener, TermListener } from "./buses";

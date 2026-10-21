@@ -65,7 +65,7 @@ import {
   pushAfter,
   renderTurn,
 } from "./scripts";
-import { historyFor } from "./seeds";
+import { historyFor, longHistory } from "./seeds";
 import { DemoTerm } from "./term";
 
 export type HostVariant = "forge" | "studio";
@@ -74,11 +74,14 @@ export interface HostEnv {
   clock: DemoClock;
   emit(e: AppEvent): void;
   seed: number;
+  /** Extra rows seeded before pool's history (long-transcript perf knob). */
+  longTranscript?: number;
 }
 
 const OTHER_DEVICE = "Pixel 9";
 const TICK = 100;
-const OFFLINE: ConnPhase[] = ["offline", "error", "reconnecting", "authRequired", "idle"];
+const OFFLINE: ConnPhase[] = ["offline", "error", "reconnecting", "authRequired", "hostKey", "idle"];
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 interface WsModel {
   ws: Workspace;
@@ -130,6 +133,8 @@ export class DemoHost implements SimHost {
   private stopTick: (() => void) | null = null;
   private phaseTimer: (() => void) | null = null;
   private cycle = 0;
+  /** studio-pc presents an unknown SSH host key until the user trusts it (`hosts.trustKey`). */
+  private keyTrusted = false;
   private everOnline = false;
 
   constructor(
@@ -193,6 +198,8 @@ export class DemoHost implements SimHost {
       const steps = historyFor(def);
       if (def.id === "push") steps.push({ t: "ui", ui: PUSH_ASK, then: pushAfter });
       if (def.id === "limits") steps.push({ t: "ui", ui: LIMITS_APPROVAL, then: limitsAfter });
+      const long = def.id === "pool" ? (this.env.longTranscript ?? 0) : 0;
+      if (long > 0) sim.seed(longHistory(long), from - long * 15_000, from);
       sim.seed(steps, from, to);
       if (def.id === "pool") sim.seedCompaction(from + (to - from) * 0.55, 142_000);
       if (def.column === "needs" && sim.agent.needs) {
@@ -476,7 +483,10 @@ export class DemoHost implements SimHost {
     });
   }
 
-  /** studio-pc: offline → reconnecting → connecting → authenticating → authRequired → error → … */
+  /**
+   * studio-pc: offline → reconnecting → connecting → hostKey (odd cycles, until trusted) or
+   * authenticating → authRequired → error → …
+   */
   private studioCycle(): void {
     this.cycle++;
     const attempt = this.cycle;
@@ -484,6 +494,10 @@ export class DemoHost implements SimHost {
     this.schedule(6000, () => {
       this.setPhase("connecting", { attempt, message: "Connecting to studio-pc…" });
       this.schedule(1500, () => {
+        if (!this.keyTrusted && attempt % 2 === 1) {
+          this.askHostKey(attempt);
+          return;
+        }
         this.setPhase("authenticating", { attempt, message: "Tailscale SSH" });
         this.schedule(1500, () => {
           this.setPhase("authRequired", {
@@ -503,9 +517,42 @@ export class DemoHost implements SimHost {
     });
   }
 
+  /** First connection over a non-tailnet address: wait for the user to confirm the key fingerprint. */
+  private askHostKey(attempt: number): void {
+    const rng = new Rng(hash(`${this.id}:hostkey`));
+    let b64 = "";
+    for (let i = 0; i < 43; i++) b64 += B64[rng.int(0, 63)];
+    this.setPhase("hostKey", {
+      attempt,
+      message: "Unknown host key for studio-pc.example.net",
+      hostKey: { address: "203.0.113.42:22", algorithm: "ssh-ed25519", fingerprint: `SHA256:${b64}` },
+    });
+    this.schedule(20_000, () => {
+      this.setPhase("error", { attempt, error: { code: "transport.hostKeyUnconfirmed", message: "The host key wasn't confirmed", hint: "Reconnect and verify the fingerprint", retryable: true } });
+      this.schedule(6000, () => {
+        this.setPhase("offline", { attempt, message: "studio-pc is offline" });
+        this.schedule(12_000, () => this.studioCycle());
+      });
+    });
+  }
+
+  /** `hosts.trustKey`: pins the presented key and finishes the connection. */
+  trustKey(fingerprint: string): void {
+    if (this.status.phase !== "hostKey" || this.status.hostKey?.fingerprint !== fingerprint) {
+      throw apiError("invalid_params", "That fingerprint isn't the key waiting for confirmation", { hint: "Reconnect and verify the fingerprint again" });
+    }
+    this.keyTrusted = true;
+    this.connectSequence(true);
+  }
+
   connect(): void {
     // Already online or mid-handshake: a repeated connect must not restart the sequence.
-    if (this.online || ["connecting", "authenticating", "deploying", "starting"].includes(this.status.phase)) return;
+    if (this.online || ["connecting", "authenticating", "hostKey", "deploying", "starting"].includes(this.status.phase)) return;
+    if (this.variant === "studio" && !this.keyTrusted && this.status.phase !== "authRequired") {
+      this.setPhase("connecting", { message: "Connecting to studio-pc…" });
+      this.schedule(900, () => this.askHostKey(this.status.attempt));
+      return;
+    }
     this.connectSequence(this.status.phase === "authRequired");
   }
 

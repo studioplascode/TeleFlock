@@ -3,11 +3,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { AnimatePresence, motion } from "motion/react";
-import { ClipboardCopy, ClipboardPaste, Cpu, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
+import { ClipboardCopy, ClipboardPaste, Cpu, Eye, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
 import { type CSSProperties, type Ref, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { useHosts, useSettings } from "@/core";
-import type { TermMode, TermOpened, TermTarget } from "@/core/gen";
+import { openLink, useHosts, useSettings } from "@/core";
+import type { TermMode, TermOpened, TermTarget, TunnelInfo } from "@/core/gen";
 import {
+  Button,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -22,8 +23,11 @@ import {
   useIsMobile,
   useMediaQuery,
 } from "@/design";
+import { PreviewSheet } from "@/features/preview/PreviewButton";
+import { openExternal, openTunnel } from "@/features/preview/store";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
+import { localhostUrlRanges } from "./frames";
 import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraKeys";
 import { applyMods, encodeKey } from "./keys";
 import { PaneOverlay, closedCopy } from "./PaneOverlay";
@@ -57,12 +61,19 @@ export interface TerminalPaneProps {
   /** Phase changes (TerminalView renders its header state from this). */
   onPhase?: (phase: TermPhase) => void;
   handleRef?: Ref<TerminalHandle>;
+  /**
+   * Lets the pane switch modes itself: the busy/taken-over banner offers "Watch" (→ observe) and the
+   * observe ribbon offers "Take control" (→ control). Omit to hide those actions.
+   */
+  onModeChange?: (mode: TermMode) => void;
 }
 
 const NO_MODS: ModState = { ctrl: 0, alt: 0 };
 const RESIZE_DEBOUNCE_MS = 70;
 const FLASH_MIN_GAP_MS = 90;
 const SWIPE_SLOP_PX = 8;
+/** The status chip shows its label this long after a state change, then collapses to its orb. */
+const CHIP_PEEK_MS = 2600;
 
 /**
  * A real terminal attached to a herdr pane (or agent, or a new shell): xterm.js with the WebGL
@@ -79,12 +90,16 @@ export function TerminalPane({
   onOpened,
   onPhase,
   handleRef,
+  onModeChange,
 }: TerminalPaneProps) {
   const targetKey = JSON.stringify(target);
   const interactive = mode === "control" && !compact;
   const coarse = useMediaQuery("(pointer: coarse)");
+  const isMobile = useIsMobile();
+  const mobileRef = useRef(isMobile);
+  mobileRef.current = isMobile;
   // Phone layout or a touch screen: extra-keys row and soft-keyboard handling.
-  const touchUi = useIsMobile() || coarse;
+  const touchUi = isMobile || coarse;
   const renderer = useTermRenderer();
   const terminalFontSize = useSettings((s) => s.terminalFontSize);
   const conn = useHosts((h) => h.status[hostId]);
@@ -107,6 +122,8 @@ export function TerminalPane({
   modsRef.current = mods;
   const [pinchFont, setPinchFont] = useState<number | null>(null);
   const [badge, setBadge] = useState<{ text: string; n: number } | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [previewTunnel, setPreviewTunnel] = useState<TunnelInfo | null>(null);
   const { tier } = useActivity(beat);
 
   const savedFont = clampFontSize(terminalFontSize || DEFAULT_FONT_SIZE);
@@ -153,6 +170,14 @@ export function TerminalPane({
       rightClickSelectsWord: true,
       drawBoldTextInBrightColors: false,
       minimumContrastRatio: 1,
+      // OSC 8 hyperlinks are program-controlled: http(s) only, opened outside the webview.
+      linkHandler: {
+        allowNonHttpProtocols: false,
+        activate: (e, uri) => {
+          e.preventDefault();
+          openLink(uri);
+        },
+      },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -203,6 +228,46 @@ export function TerminalPane({
       }
     };
   }, [ready, compact, renderer]);
+
+  /* ---------- localhost links → preview tunnels ---------- */
+  useEffect(() => {
+    const term = termRef.current;
+    if (!ready || !term || compact) return;
+    const openPreview = async (port: number) => {
+      haptic("select");
+      const tunnel = await openTunnel(hostId, port);
+      if (!tunnel) return;
+      if (mobileRef.current) setPreviewTunnel(tunnel);
+      else openExternal(tunnel);
+    };
+    const sub = term.registerLinkProvider({
+      provideLinks(y, callback) {
+        const line = term.buffer.active.getLine(y - 1);
+        const found = line ? localhostUrlRanges(line.translateToString(true)) : [];
+        if (!line || found.length === 0) return callback(undefined);
+        // String offset → cell column: wide glyphs span two cells (the second one is empty).
+        const col: number[] = [];
+        for (let x = 0; x < line.length; x++) {
+          const cell = line.getCell(x);
+          if (!cell || cell.getWidth() === 0) continue;
+          const chars = cell.getChars() || " ";
+          for (let i = 0; i < chars.length; i++) col.push(x);
+        }
+        callback(
+          found.map((u) => ({
+            range: { start: { x: (col[u.start] ?? u.start) + 1, y }, end: { x: (col[u.end - 1] ?? u.end - 1) + 1, y } },
+            text: u.url,
+            decorations: { pointerCursor: true, underline: true },
+            activate: (e: MouseEvent) => {
+              e.preventDefault();
+              void openPreview(u.port);
+            },
+          })),
+        );
+      },
+    });
+    return () => sub.dispose();
+  }, [ready, compact, hostId]);
 
   /* ---------- observe-mode scaling ---------- */
   const applyObserveScale = useCallback(() => {
@@ -262,7 +327,8 @@ export function TerminalPane({
           requestAnimationFrame(applyObserveScale);
         }
         const now = performance.now();
-        if (now - lastFlash > FLASH_MIN_GAP_MS && flashRef.current) {
+        // Frame flash: a light sweep along the top edge per repaint (skipped with reduced motion).
+        if (now - lastFlash > FLASH_MIN_GAP_MS && flashRef.current && document.documentElement.dataset.motion !== "reduced") {
           lastFlash = now;
           flashRef.current.animate(
             [
@@ -627,7 +693,7 @@ export function TerminalPane({
   const chip: { status: Status; label: string } = offline
     ? { status: "idle", label: conn ? PHASE_LABEL[conn.phase] : "Reconnecting" }
     : phase.k === "live"
-      ? { status: "running", label: mode === "observe" ? "Observing" : "Live" }
+      ? { status: mode === "observe" ? "review" : "running", label: mode === "observe" ? "Observing" : "Live" }
       : phase.k === "opening"
         ? { status: "running", label: phase.takeover ? "Taking over" : "Attaching" }
         : phase.k === "closed"
@@ -635,6 +701,16 @@ export function TerminalPane({
           : phase.k === "error"
             ? { status: busy ? "needs-you" : "error", label: busy ? "In use" : "Error" }
             : { status: "idle", label: "Idle" };
+
+  // While live the chip collapses to its orb so it never covers output; it re-expands on every
+  // state change (and on hover) so transitions are still announced.
+  const [peek, setPeek] = useState(true);
+  useEffect(() => {
+    setPeek(true);
+    const t = window.setTimeout(() => setPeek(false), CHIP_PEEK_MS);
+    return () => clearTimeout(t);
+  }, [chip.label]);
+  const chipOpen = !live || peek;
 
   const frameStyle = useMemo<CSSProperties>(() => ({ backgroundColor: termTheme.background }), []);
 
@@ -657,7 +733,12 @@ export function TerminalPane({
       <div
         ref={flashRef}
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-[2px] origin-center bg-omp opacity-0 shadow-[0_0_14px_rgb(163_92_240/0.9)]"
+        className={cn(
+          "pointer-events-none absolute inset-x-0 top-0 h-[2px] origin-center opacity-0",
+          mode === "observe"
+            ? "bg-[linear-gradient(90deg,transparent,var(--color-review),transparent)] shadow-[0_0_14px_rgb(34_211_238/0.8)]"
+            : "bg-omp shadow-[0_0_14px_rgb(163_92_240/0.9)]",
+        )}
       />
       <PaneOverlay
         phase={phase}
@@ -668,6 +749,14 @@ export function TerminalPane({
         gotFrame={gotFrame}
         onReattach={() => reopen(false)}
         onTakeover={() => reopen(true)}
+        onObserve={
+          onModeChange
+            ? () => {
+                haptic("select");
+                onModeChange("observe");
+              }
+            : undefined
+        }
       />
       {!compact && (
         <div className="pointer-events-none absolute top-2 right-3 flex items-center gap-1.5">
@@ -687,13 +776,22 @@ export function TerminalPane({
           </AnimatePresence>
           <span
             className={cn(
-              "flex items-center gap-1.5 rounded-full bg-[rgb(20_20_28/0.78)] py-0.5 pr-2 pl-1.5 text-2xs font-extrabold tracking-wide uppercase shadow-[inset_0_0_0_1px_var(--color-line)] backdrop-blur transition-colors",
-              live ? "text-accent-ink" : "text-mute",
+              "flex items-center rounded-full bg-[rgb(20_20_28/0.82)] py-[5px] pr-[5px] pl-[5px] text-2xs font-extrabold tracking-wide uppercase shadow-[inset_0_0_0_1px_var(--color-line-2)] backdrop-blur transition-colors",
+              live ? (mode === "observe" ? "text-review" : "text-accent-ink") : "text-mute",
             )}
             aria-live="polite"
           >
             <StatusOrb status={chip.status} activity={live ? tier : "silent"} size={7} label={null} />
-            {chip.label}
+            <span
+              className={cn(
+                "grid transition-[grid-template-columns,opacity] duration-300 ease-out",
+                chipOpen ? "grid-cols-[1fr] opacity-100" : "grid-cols-[0fr] opacity-0 group-hover/term:grid-cols-[1fr] group-hover/term:opacity-100",
+              )}
+            >
+              <span className="min-w-0 overflow-hidden">
+                <span className="block pr-1 pl-1.5 leading-none whitespace-nowrap">{chip.label}</span>
+              </span>
+            </span>
           </span>
         </div>
       )}
@@ -705,8 +803,12 @@ export function TerminalPane({
       ref={wrapRef}
       data-tf-terminal=""
       data-mode={mode}
-      className={cn("tf-terminal relative flex h-full min-h-0 w-full flex-col overflow-hidden", className)}
+      className={cn("tf-terminal group/term relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-[inherit]", className)}
       style={frameStyle}
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false);
+      }}
     >
       {compact ? (
         body
@@ -751,15 +853,54 @@ export function TerminalPane({
           </ContextMenuContent>
         </ContextMenu>
       )}
+      {mode === "observe" && !compact && (
+        <div
+          role="status"
+          className="flex shrink-0 items-center gap-2 border-t border-[rgb(34_211_238/0.22)] bg-[linear-gradient(90deg,rgb(34_211_238/0.14),rgb(34_211_238/0.03)_70%)] py-1.5 pr-1.5 pl-3 text-xs"
+        >
+          <Eye className="size-3.5 shrink-0 text-review" aria-hidden />
+          <span className="shrink-0 font-extrabold text-review">Read-only</span>
+          <span className="min-w-0 truncate text-mute">
+            {isMobile ? "watching, no input" : "watching at the driver's size · keys and resizes stay with them"}
+          </span>
+          {onModeChange ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<Keyboard />}
+              className="ml-auto shrink-0"
+              onClick={() => {
+                haptic("select");
+                onModeChange("control");
+              }}
+            >
+              Take control
+            </Button>
+          ) : (
+            <span className="h-8" aria-hidden />
+          )}
+        </div>
+      )}
       {showExtraKeys && (
         <ExtraKeys
           mods={mods}
           onKey={onExtraKey}
           onSetMod={onSetMod}
           onPaste={() => void paste()}
-          className="shrink-0 border-t border-line bg-chrome"
+          className="shrink-0 border-t border-line bg-[linear-gradient(180deg,var(--color-tile-1),var(--color-chrome))]"
         />
       )}
+      {/* keyboard focus: typing goes to this pane */}
+      {interactive && (
+        <div
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-0 z-raised rounded-[inherit] shadow-[inset_0_0_0_1.5px_rgb(163_92_240/0.75),inset_0_0_28px_-10px_rgb(163_92_240/0.55)] transition-opacity duration-300",
+            focused && live ? "opacity-100" : "opacity-0",
+          )}
+        />
+      )}
+      {isMobile && !compact && <PreviewSheet tunnel={previewTunnel} onClose={() => setPreviewTunnel(null)} />}
     </div>
   );
 }

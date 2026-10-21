@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { pulseBus } from "./buses";
-import { core, flushCoreEvents, openSession, pushInternal, refreshHost, startCoreWith } from "./client";
+import { core, flushCoreEvents, openSession, pushInternal, refreshHost, selectBackend, startCoreWith } from "./client";
 import { ManualClock } from "./demo/clock";
 import type { AppEvent, HostProfile, HostState } from "./gen";
 import { coreStore } from "./store/store";
@@ -147,5 +147,25 @@ describe("client pipeline", () => {
     pushInternal({ type: "tunnels", tunnels: [] });
     flushCoreEvents();
     expect(coreStore.getState().tunnels).toEqual([]);
+  });
+});
+
+describe("backend selection", () => {
+  const served = { search: "", protocol: "http:", host: "100.64.0.7:7420" };
+
+  test("production ignores a cross-origin ?core=", () => {
+    const sel = selectBackend({ ...served, search: "?core=ws://evil.example:7420/ws" }, { tauri: false, prod: true });
+    expect(sel).toEqual({ kind: "ws", url: "ws://100.64.0.7:7420/ws", token: undefined, fallback: true });
+    const same = selectBackend({ ...served, search: "?core=ws://100.64.0.7:7420/other" }, { tauri: false, prod: true });
+    expect(same).toMatchObject({ kind: "ws", url: "ws://100.64.0.7:7420/other", fallback: false });
+  });
+
+  test("dev builds still honour ?core=", () => {
+    expect(selectBackend({ ...served, search: "?core=ws://127.0.0.1:7420/ws" }, { tauri: false, prod: false })).toMatchObject({ kind: "ws", url: "ws://127.0.0.1:7420/ws" });
+  });
+
+  test("the devserver token comes from the meta tag, else ?token=", () => {
+    expect(selectBackend(served, { tauri: false, prod: true, metaToken: "m" })).toMatchObject({ token: "m" });
+    expect(selectBackend({ ...served, search: "?token=q" }, { tauri: false, prod: true, metaToken: "" })).toMatchObject({ token: "q" });
   });
 });

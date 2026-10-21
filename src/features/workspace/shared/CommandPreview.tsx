@@ -32,15 +32,23 @@ export function CommandPreview({ lines, className }: { lines: PreviewLine[]; cla
       >
         {copied ? <Check className="text-done" /> : <Copy />}
       </IconButton>
-      <pre className="overflow-x-auto font-mono text-[11.5px] leading-[1.65] whitespace-pre-wrap text-ink-2">
+      <pre className="overflow-x-auto font-mono text-[11.5px] leading-[1.65] whitespace-normal text-ink-2">
         {lines.map((l, i) => (
-          <span key={i} className="block">
+          // wrap only between arguments; continuation lines hang under the command like a shell `\`
+          <span key={i} className="block pl-[3ch] -indent-[3ch]">
             {l.note && <span className="block text-mute-2"># {l.note}</span>}
             <span className="text-mute-2 select-none">$ </span>
             {l.argv.map((a, j) => (
               <span key={j}>
                 {j > 0 && " "}
-                <span className={cn(j === 0 ? "font-bold text-accent-hi" : a === "--" ? "text-mute" : a.startsWith("-") ? "text-omp-blue" : "text-ink")}>{a}</span>
+                <span
+                  className={cn(
+                    "inline-block max-w-full indent-0 break-all whitespace-pre-wrap",
+                    j === 0 ? "font-bold text-accent-hi" : a === "--" ? "text-mute" : a.startsWith("-") ? "text-omp-blue" : "text-ink",
+                  )}
+                >
+                  {a}
+                </span>
               </span>
             ))}
           </span>

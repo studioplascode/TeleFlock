@@ -1,10 +1,10 @@
-import { ExternalLink, Globe, RotateCw } from "lucide-react";
+import { AlertTriangle, ExternalLink, Globe, RotateCw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { core, useTunnels } from "@/core";
 import type { TunnelInfo } from "@/core/gen";
-import { BottomSheet, Button, Spinner, cn, popIn, toast, useIsMobile } from "@/design";
-import { describeError } from "../workspace/shared/errors";
+import { BottomSheet, Button, Spinner, cn, popIn, useIsMobile } from "@/design";
+import { openExternal, openTunnel, tunnelKey, usePreviewStore } from "./store";
 
 export interface PreviewButtonProps {
   hostId: string;
@@ -18,45 +18,53 @@ export interface PreviewButtonProps {
 
 /**
  * "Open preview" for a dev server on the agent host: opens (or reuses) a tunnel, then launches the
- * default browser on desktop or an in-app preview sheet on mobile. Live tunnels glow.
+ * default browser on desktop or an in-app preview sheet on mobile. Live tunnels glow, opening ones
+ * spin, failed ones turn red and retry on click.
  */
 export function PreviewButton({ hostId, port, label, size = "sm", className }: PreviewButtonProps) {
   const mobile = useIsMobile();
-  const tunnels = useTunnels();
-  const existing = tunnels.find((t) => t.hostId === hostId && t.remotePort === port);
-  const [busy, setBusy] = useState(false);
+  const live = useTunnels().find((t) => t.hostId === hostId && t.remotePort === port);
+  const pending = usePreviewStore((s) => (live ? undefined : s.pending[tunnelKey(hostId, port)]));
   const [sheet, setSheet] = useState<TunnelInfo | null>(null);
+  const opening = pending?.state === "opening";
+  const failed = pending?.state === "error" ? pending : null;
 
   const open = async () => {
-    setBusy(true);
-    try {
-      const tunnel = existing ?? (await core.app("tunnel.open", { hostId, port }));
-      if (mobile) setSheet(tunnel);
-      else await core.app("app.openExternal", { url: tunnel.url });
-    } catch (e) {
-      const d = describeError(e);
-      toast({ title: `Couldn't open preview for :${port}`, description: d.hint ?? d.title, status: "error" });
-    } finally {
-      setBusy(false);
-    }
+    const tunnel = live ?? (await openTunnel(hostId, port));
+    if (!tunnel) return;
+    if (mobile) setSheet(tunnel);
+    else openExternal(tunnel);
   };
+
+  const title = live
+    ? `Tunnel live on 127.0.0.1:${live.localPort} · click to open`
+    : failed
+      ? `Couldn't open the tunnel: ${failed.title}. Click to retry.`
+      : opening
+        ? `Opening a tunnel to port ${port}…`
+        : `Open a tunnel to port ${port} on the host`;
 
   return (
     <>
       <Button
         size={size}
-        variant={existing ? "primary" : "secondary"}
-        onClick={open}
-        loading={busy}
+        variant={failed ? "danger" : live ? "primary" : "secondary"}
+        onClick={() => void open()}
+        loading={opening}
+        aria-label={`${failed ? "Retry preview" : live ? "Open preview" : "Preview"} ${label ?? `localhost:${port}`}`}
         icon={
-          <span className="relative grid place-items-center">
-            <Globe />
-            {existing && <span className="tf-loop absolute -top-0.5 -right-0.5 size-1.5 animate-breathe rounded-full bg-done shadow-[0_0_6px_var(--color-done)]" aria-hidden />}
-          </span>
+          failed ? (
+            <AlertTriangle />
+          ) : (
+            <span className="relative grid place-items-center">
+              <Globe />
+              {live && <span className="tf-loop absolute -top-0.5 -right-0.5 size-1.5 animate-breathe rounded-full bg-done shadow-[0_0_6px_var(--color-done)]" aria-hidden />}
+            </span>
+          )
         }
-        trailing={!mobile ? <ExternalLink className="opacity-60" /> : undefined}
-        className={cn("max-w-full", className)}
-        title={existing ? `Tunnel open on 127.0.0.1:${existing.localPort}` : `Open a tunnel to port ${port} on the host`}
+        trailing={!mobile && !failed ? <ExternalLink className="opacity-60" /> : failed ? <RotateCw className="opacity-80" /> : undefined}
+        className={cn("max-w-full font-mono", className)}
+        title={title}
       >
         <span className="truncate">{label ?? `localhost:${port}`}</span>
       </Button>
@@ -74,7 +82,7 @@ export function PreviewSheet({ tunnel, onClose }: { tunnel: TunnelInfo | null; o
       open={!!tunnel}
       onOpenChange={(o) => !o && onClose()}
       title={tunnel ? `Preview · :${tunnel.remotePort}` : "Preview"}
-      description={tunnel ? `${tunnel.remoteHost}:${tunnel.remotePort} → ${tunnel.url}` : undefined}
+      description={tunnel ? `${tunnel.remoteHost}:${tunnel.remotePort} → 127.0.0.1:${tunnel.localPort}` : undefined}
       maxHeight="94dvh"
       footer={
         tunnel && (

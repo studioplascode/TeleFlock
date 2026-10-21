@@ -1,7 +1,10 @@
 import type { ITheme } from "@xterm/xterm";
 import { color } from "@/design";
 
-/** xterm palette derived from the Bento × omp tokens (dark only). */
+/**
+ * xterm palette derived from the Bento × omp tokens (dark only). Tuned against `bg-deep`: every
+ * normal/bright colour clears 4.5:1 except `black`, which programs use as a background shade.
+ */
 export const termTheme: ITheme = {
   background: color.bgDeep,
   foreground: color.ink2,
@@ -21,7 +24,8 @@ export const termTheme: ITheme = {
   magenta: color.accentHi,
   cyan: color.review,
   white: color.ink2,
-  brightBlack: color.mute2,
+  // mute-2 (#6e6e82) is ~4:1 on bg-deep; this is ~5.2:1 so dim/comment text stays readable.
+  brightBlack: "#80809a",
   brightRed: "#ff8aa5",
   brightGreen: "#c4f06b",
   brightYellow: "#fde68a",
@@ -31,7 +35,9 @@ export const termTheme: ITheme = {
   brightWhite: color.ink,
 };
 
-export const TERM_FONT_FAMILY = '"JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace';
+/** Symbol fonts before the generic fallback so glyphs like ⏺ ✻ ⎿ render as text, not colour emoji. */
+export const TERM_FONT_FAMILY =
+  '"JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, "Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols", "Apple Symbols", "DejaVu Sans Mono", monospace';
 
 export const MIN_FONT_SIZE = 8;
 export const MAX_FONT_SIZE = 28;

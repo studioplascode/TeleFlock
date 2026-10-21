@@ -2,6 +2,8 @@
 //!
 //! `TF_HOSTD_HOME` overrides the default `~/.teleflock` (lab instances use `/tmp/...`).
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -18,6 +20,8 @@ pub struct Paths {
     pub bridge_sock: PathBuf,
     /// Companion-extension named pipe (windows).
     pub bridge_pipe: String,
+    /// Bridge handshake secret `<home>/run/bridge.secret` (owner-only; rewritten at every start).
+    pub bridge_secret: PathBuf,
     /// Single-instance lock `<home>/run/hostd.lock` (holds the pid).
     pub lock: PathBuf,
     /// Persistent state `<home>/state.json`.
@@ -50,6 +54,7 @@ impl Paths {
         Self {
             sock: run.join("hostd.sock"),
             bridge_sock: run.join("bridge.sock"),
+            bridge_secret: run.join("bridge.secret"),
             lock: run.join("hostd.lock"),
             pipe: format!(r"\\.\pipe\teleflock-hostd-{user}{suffix}"),
             bridge_pipe: format!(r"\\.\pipe\teleflock-bridge-{user}{suffix}"),
@@ -63,12 +68,16 @@ impl Paths {
         }
     }
 
-    pub fn ensure_dirs(&self) -> std::io::Result<()> {
+    /// Creates the home and `run/`. Unix: both are owner-only (0700), also when they already
+    /// existed with looser modes (the state, log and sockets inside are private).
+    pub fn ensure_dirs(&self) -> io::Result<()> {
         std::fs::create_dir_all(&self.run)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.run, std::fs::Permissions::from_mode(0o700))?;
+            for dir in [&self.home, &self.run] {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
         Ok(())
     }
@@ -110,10 +119,64 @@ fn fnv1a(bytes: &[u8]) -> u32 {
     h
 }
 
-/// Writes `bytes` to `path` atomically (tmp file + rename).
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// `OpenOptions` whose newly created files are owner-only (0600 on unix).
+fn private_options() -> OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut o = OpenOptions::new();
+        o.mode(0o600);
+        o
+    }
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new()
+    }
+}
+
+/// Tightens an open file to owner-only (unix): the creation mode does not apply to files
+/// that already existed.
+fn restrict_open(file: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
+
+/// Tightens an existing file to owner-only (0600 on unix). Missing files are fine.
+pub fn restrict_file(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Opens `path` for appending; owner-only (0600 on unix) whether created or pre-existing.
+pub fn open_private_append(path: &Path) -> io::Result<File> {
+    let file = private_options().create(true).append(true).open(path)?;
+    restrict_open(&file)?;
+    Ok(file)
+}
+
+/// Writes `bytes` to `path` atomically (tmp file + rename); the result is owner-only (0600
+/// on unix).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    let mut file = private_options().write(true).create(true).truncate(true).open(&tmp)?;
+    restrict_open(&file)?;
+    file.write_all(bytes)?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 
@@ -128,5 +191,63 @@ mod tests {
         assert_eq!(p.ext, PathBuf::from("/tmp/x/ext/teleflock-bridge.ts"));
         assert!(p.pipe.starts_with(r"\\.\pipe\teleflock-hostd-"));
         assert_ne!(p.pipe, Paths::new(PathBuf::from("/tmp/y"), true).pipe);
+    }
+
+    #[cfg(unix)]
+    fn mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn chmod(p: &Path, m: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_and_run_are_owner_only() {
+        let td = tempfile::tempdir().unwrap();
+        let fresh = Paths::new(td.path().join("fresh"), true);
+        fresh.ensure_dirs().unwrap();
+        assert_eq!((mode(&fresh.home), mode(&fresh.run)), (0o700, 0o700));
+        // Pre-existing loose dirs are tightened.
+        let old = Paths::new(td.path().join("old"), true);
+        std::fs::create_dir_all(&old.run).unwrap();
+        chmod(&old.home, 0o755);
+        chmod(&old.run, 0o755);
+        old.ensure_dirs().unwrap();
+        assert_eq!((mode(&old.home), mode(&old.run)), (0o700, 0o700));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_0600() {
+        let td = tempfile::tempdir().unwrap();
+        let state = td.path().join("state.json");
+        write_atomic(&state, b"{}").unwrap();
+        assert_eq!(mode(&state), 0o600);
+        // Loose target and a stale loose tmp file: the replacement is still 0600.
+        chmod(&state, 0o644);
+        std::fs::write(state.with_extension("tmp"), b"stale").unwrap();
+        chmod(&state.with_extension("tmp"), 0o666);
+        write_atomic(&state, b"{\"v\":1}").unwrap();
+        assert_eq!(mode(&state), 0o600);
+        assert_eq!(std::fs::read(&state).unwrap(), b"{\"v\":1}");
+
+        let log = td.path().join("hostd.log");
+        drop(open_private_append(&log).unwrap());
+        assert_eq!(mode(&log), 0o600);
+        chmod(&log, 0o644);
+        drop(open_private_append(&log).unwrap());
+        assert_eq!(mode(&log), 0o600);
+
+        let loose = td.path().join("loose");
+        std::fs::write(&loose, b"x").unwrap();
+        chmod(&loose, 0o644);
+        restrict_file(&loose).unwrap();
+        assert_eq!(mode(&loose), 0o600);
+        restrict_file(&td.path().join("missing")).unwrap();
     }
 }

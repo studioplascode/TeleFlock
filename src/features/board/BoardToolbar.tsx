@@ -32,20 +32,20 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
   const openDialog = useUi((s) => s.openDialog);
 
   return (
-    <div className={cn("flex flex-wrap items-center gap-2", className)}>
-      <h1 className="mr-2 font-display text-xl font-bold text-ink">Board</h1>
+    <div className={cn("flex min-w-0 items-center gap-2", className)}>
+      <h1 className="mr-2 shrink-0 font-display text-xl font-bold text-ink">Board</h1>
       {profiles.length > 1 && (
         <Select
           value={filter}
           onValueChange={setFilter}
-          className="h-9 w-36"
+          className="h-9 w-36 min-w-24 shrink"
           options={[{ value: "all", label: "All hosts" }, ...profiles.map((p) => ({ value: p.id, label: p.name }))]}
         />
       )}
       <Select
         value={repo ?? "*"}
         onValueChange={(v) => setRepo(v === "*" ? null : v)}
-        className="h-9 w-40"
+        className="h-9 w-40 min-w-24 shrink"
         options={[{ value: "*", label: "All repos" }, ...repos.map((r) => ({ value: r, label: r }))]}
       />
       <Input
@@ -60,7 +60,7 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
         }}
         placeholder="Filter agents…"
         aria-label="Filter agents"
-        boxClassName="h-9 w-56"
+        boxClassName="h-9 w-56 min-w-32 shrink"
         leading={
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
             <circle cx="7" cy="7" r="4.5" />
@@ -69,7 +69,7 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
         }
         trailing={<Kbd>/</Kbd>}
       />
-      <SegmentedControl<GroupBy> size="sm" value={groupBy} onValueChange={setGroupBy} options={GROUPS} aria-label="Group by" />
+      <SegmentedControl<GroupBy> size="sm" value={groupBy} onValueChange={setGroupBy} options={GROUPS} aria-label="Group by" className="shrink-0" />
       <span className="ml-auto hidden items-center gap-1.5 text-2xs font-semibold text-mute-2 min-[1700px]:flex">
         <Kbd>J</Kbd>
         <Kbd>K</Kbd> move · <Kbd>↵</Kbd> open · <Kbd>A</Kbd> answer · <Kbd>T</Kbd> terminal
@@ -77,7 +77,7 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
       <Button
         size="sm"
         variant="primary"
-        className="ml-auto min-[1700px]:ml-0"
+        className="ml-auto shrink-0 min-[1700px]:ml-0"
         onClick={() => openDialog({ kind: "newWorktree", hostId: filter !== "all" ? filter : undefined })}
         trailing={<Kbd>N</Kbd>}
       >

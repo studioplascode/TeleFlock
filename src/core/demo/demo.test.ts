@@ -7,9 +7,9 @@ import { ManualClock } from "./clock";
 import { DemoEngine } from "./engine";
 
 /** Engine + manual clock + a store fed through the real reducer. */
-function rig(opts: { empty?: boolean } = {}) {
+function rig(opts: { empty?: boolean; long?: number } = {}) {
   const clock = new ManualClock();
-  const engine = new DemoEngine({ mode: "backend", clock, empty: opts.empty });
+  const engine = new DemoEngine({ mode: "backend", clock, empty: opts.empty, longTranscript: opts.long });
   const events: AppEvent[] = [];
   let state: CoreState = initialCoreState("demo");
   engine.subscribe((e) => {
@@ -113,6 +113,29 @@ describe("demo engine", () => {
     expect(r.state.agents[agentKey("forge", "reconnect")]?.column).toBe("running");
   });
 
+  test("long-transcript knob adds N rows of every kind to pool, pageable via session.history", async () => {
+    const base = rig();
+    base.clock.advance(2000);
+    const normal = await base.call<{ items: unknown[]; cursor?: string }>("forge", "session.open", { agentId: "pool", limit: 1 });
+    const r = rig({ long: 2000 });
+    r.clock.advance(2000);
+    type Item = { kind: string; view?: { type: string } };
+    const first = await r.call<{ items: Item[]; hasMore: boolean; cursor?: string }>("forge", "session.open", { agentId: "pool", limit: 200 });
+    expect(first.hasMore).toBe(true);
+    expect(Number(first.cursor) + 200).toBe(Number(normal.cursor) + 1 + 2000);
+    const all: Item[] = [...first.items];
+    let cursor = first.cursor;
+    while (cursor) {
+      const page = await r.call<{ items: Item[]; cursor?: string }>("forge", "session.history", { agentId: "pool", cursor, limit: 500 });
+      all.unshift(...page.items);
+      cursor = page.cursor;
+    }
+    const kinds = new Set(all.map((i) => i.kind));
+    for (const k of ["user", "assistant", "thinking", "tool", "notice", "mode", "compaction"]) expect(kinds.has(k)).toBe(true);
+    const views = new Set(all.flatMap((i) => (i.kind === "tool" ? [i.view?.type ?? "none"] : [])));
+    for (const v of ["bash", "read", "search", "diff", "todo", "task", "web", "image", "ask", "markdown", "none"]) expect(views.has(v)).toBe(true);
+  });
+
   test("commit-message prompts answer with one ```text block and go idle without dialogs", async () => {
     const r = rig();
     r.clock.advance(2000);
@@ -207,23 +230,40 @@ describe("demo engine", () => {
     await expect(r.call("forge", "git.commit", { cwd: "/home/demo/.herdr/worktrees/marketing-site/redesign-hero", message: "again", all: true })).rejects.toMatchObject({ code: "git_error" });
   });
 
-  test("studio-pc cycles through reconnecting and authRequired; opening the link brings it online", async () => {
+  test("studio-pc cycles through reconnecting, hostKey and authRequired; opening the link brings it online", async () => {
     const r = rig();
     r.clock.advance(1000);
     expect(r.state.status["studio-pc"]?.phase).toBe("offline");
     expect(r.state.hosts["studio-pc"]).toBeDefined(); // stale cached snapshot
     const phases = new Set<string>();
     let authUrl: string | undefined;
-    for (let i = 0; i < 400 && !authUrl; i++) {
+    for (let i = 0; i < 1200 && !authUrl; i++) {
       r.clock.advance(100);
       const s = r.state.status["studio-pc"];
       if (s) phases.add(s.phase);
       if (s?.phase === "authRequired") authUrl = s.authUrl;
     }
     expect(phases.has("reconnecting")).toBe(true);
+    expect(phases.has("hostKey")).toBe(true);
     expect(authUrl).toMatch(/^https:\/\/login\.tailscale\.com\//);
     await r.call(null, "app.openExternal", { url: authUrl });
     r.clock.advance(4000);
+    expect(r.state.status["studio-pc"]?.phase).toBe("online");
+  });
+
+  test("studio-pc asks to verify its host key; trusting the fingerprint brings it online", async () => {
+    const r = rig();
+    let key: { address: string; algorithm: string; fingerprint: string } | undefined;
+    for (let i = 0; i < 400 && !key; i++) {
+      r.clock.advance(100);
+      key = r.state.status["studio-pc"]?.hostKey;
+    }
+    expect(r.state.status["studio-pc"]?.phase).toBe("hostKey");
+    expect(key?.algorithm).toBe("ssh-ed25519");
+    expect(key?.fingerprint).toMatch(/^SHA256:[A-Za-z0-9+/]{43}$/);
+    await expect(r.call(null, "hosts.trustKey", { hostId: "studio-pc", fingerprint: "SHA256:wrong" })).rejects.toMatchObject({ code: "invalid_params" });
+    await r.call(null, "hosts.trustKey", { hostId: "studio-pc", fingerprint: key!.fingerprint });
+    r.clock.advance(2000);
     expect(r.state.status["studio-pc"]?.phase).toBe("online");
   });
 

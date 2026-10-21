@@ -9,6 +9,7 @@ const PHASE_TEXT: Record<ConnPhase, string> = {
   connecting: "connecting…",
   authenticating: "authenticating…",
   authRequired: "needs Tailscale sign-in",
+  hostKey: "needs you to verify its host key",
   deploying: "updating tf-hostd…",
   starting: "starting…",
   online: "online",
@@ -35,7 +36,7 @@ function StaleHost({ hostId }: { hostId: string }) {
       role="status"
       className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]"
     >
-      <StatusOrb status={st.phase === "authRequired" || st.phase === "error" ? "error" : "idle"} size={8} label={null} />
+      <StatusOrb status={st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error" ? "error" : "idle"} size={8} label={null} />
       <span className="font-bold text-ink">{name}</span>
       <span className={cn("text-mute", busy && "tf-shimmer-text")}>
         {st.phase === "authRequired"
@@ -48,9 +49,9 @@ function StaleHost({ hostId }: { hostId: string }) {
       </span>
       {st.error && <span className="truncate text-[#ff9fb2]">{st.error.message}</span>}
       <span className="ml-auto flex gap-1.5">
-        {st.phase === "authRequired" ? (
+        {st.phase === "authRequired" || st.phase === "hostKey" ? (
           <Button size="sm" variant="secondary" onClick={() => navigate({ name: "hosts" })}>
-            Sign in
+            {st.phase === "hostKey" ? "Verify" : "Sign in"}
           </Button>
         ) : (
           <Button

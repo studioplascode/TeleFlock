@@ -9,7 +9,7 @@ export type { Status, StatusMeta } from "./tokens";
 export { cn } from "./lib/cn";
 export { useNow, onFrame } from "./lib/clock";
 export type { FrameCallback } from "./lib/clock";
-export { useMediaQuery, useIsMobile, useFinePointer, useInView } from "./lib/hooks";
+export { useMediaQuery, useIsMobile, useFinePointer, useInView, useMinWidth } from "./lib/hooks";
 export { isTauri, isAndroid, isWindows, hasCustomWindowChrome } from "./lib/platform";
 export { formatElapsed, formatAge, formatCompact, formatUsd, formatInt } from "./lib/format";
 export { hashString, seededRandom } from "./lib/hash";
@@ -36,8 +36,11 @@ export { AmbientGlow, moodFor } from "./motion/AmbientGlow";
 export type { AmbientMood } from "./motion/AmbientGlow";
 export { Swarm } from "./motion/Swarm";
 export { Sparkline } from "./motion/Sparkline";
+export { FlockSky } from "./motion/FlockSky";
 export { Skeleton } from "./motion/Skeleton";
 export { CardFlight, cardLayoutId, LayoutGroup, AnimatePresence } from "./motion/layout";
+export { morphTo, MORPH_PARTS } from "./motion/morph";
+export type { MorphPart } from "./motion/morph";
 
 // brand
 export { LogoMark, Wordmark } from "./brand/Logo";
@@ -93,3 +96,5 @@ export {
   CommandSeparator,
 } from "./ui/Command";
 export { TitleBar } from "./ui/TitleBar";
+export { PageHeader } from "./ui/PageHeader";
+export type { PageHeaderProps } from "./ui/PageHeader";

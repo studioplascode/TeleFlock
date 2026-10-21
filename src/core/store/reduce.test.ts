@@ -217,6 +217,19 @@ describe("sessions", () => {
     s = reduceEvents(s, [{ type: "$sessionDrop", hostId: "h", agentId: "a" }]).state;
     expect(s.sessions["h::a"]).toBeUndefined();
   });
+
+  test("an errored session relinks when the agent's link turns live", () => {
+    const linked = (link: "connecting" | "live"): Agent => ({
+      ...agent("a"),
+      omp: { link, bridge: true, fast: false, mode: "normal", queue: { steering: [], followUp: [] } },
+    });
+    let s = reduceEvents(base(), [{ type: "hostSnapshot", hostId: "h", rev: 6, state: hostState([linked("connecting")]) }]).state;
+    s = reduceEvents(s, [{ type: "$sessionError", hostId: "h", agentId: "a", error: { code: "not_connected", message: "x", retryable: true } }]).state;
+    const r = reduceEvents(s, [{ type: "hostPatch", hostId: "h", rev: 7, ops: [{ op: "agent", id: "a", value: linked("live") }] }]);
+    expect(r.effects.filter((e) => e.kind === "relink")).toEqual([{ kind: "relink", hostId: "h", agentId: "a" }]);
+    const again = reduceEvents(r.state, [{ type: "hostPatch", hostId: "h", rev: 8, ops: [{ op: "agent", id: "a", value: { ...linked("live"), turns: 2 } }] }]);
+    expect(again.effects.some((e) => e.kind === "relink")).toBe(false);
+  });
 });
 
 describe("notifications & misc", () => {

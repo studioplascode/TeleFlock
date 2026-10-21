@@ -55,6 +55,7 @@ import type { MotionPref, ThinkingLevel } from "@/core/gen";
 import { connect } from "@/features/hosts/ConnStatusCard";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { toggleSplit } from "@/features/shell/keyboard";
+import { toggleSidebar } from "@/features/shell/sidebarState";
 import { COLUMN_STATUS, PHASE_STATUS } from "@/features/shell/status";
 import { rankItem } from "./fuzzy";
 import { type PaletteCommand, useContributed, useRecents } from "./registry";
@@ -134,7 +135,7 @@ function useEntries(): Entry[] {
     { id: "act:past", title: "Past sessions…", group: "Actions", keywords: ["history", "resume"], icon: <History />, run: () => ui.openDialog({ kind: "pastSessions", hostId: defaultHost }) },
     { id: "act:open-folder", title: "Open folder as workspace…", group: "Actions", keywords: ["folder", "workspace", "directory", "browse"], icon: <FolderOpen />, run: () => openNewAgent({ hostId: defaultHost, openFolder: true }) },
     { id: "act:split", title: ui.split ? "Close split view" : "Split view", group: "Actions", keywords: ["side by side", "terminal", "pane"], icon: <Columns2 />, shortcut: "Ctrl \\", run: () => toggleSplit(ui, route) },
-    { id: "act:sidebar", title: ui.sidebarCollapsed ? "Show sidebar" : "Hide sidebar", group: "Actions", keywords: ["panel"], icon: <PanelLeft />, shortcut: "Ctrl B", run: () => ui.toggleSidebar() },
+    { id: "act:sidebar", title: "Toggle sidebar", group: "Actions", keywords: ["panel", "show", "hide"], icon: <PanelLeft />, shortcut: "Ctrl B", run: toggleSidebar },
     { id: "act:add-host", title: "Add a host…", group: "Actions", keywords: ["connect", "tailscale", "ssh", "wsl", "local"], icon: <Server />, run: () => ui.openDialog({ kind: "hostEditor" }) },
     { id: "act:shortcuts", title: "Keyboard shortcuts", group: "Actions", keywords: ["keys", "help", "?"], icon: <Keyboard />, shortcut: "?", run: () => ui.openDialog({ kind: "shortcuts" }) },
   );

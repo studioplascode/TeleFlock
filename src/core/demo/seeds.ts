@@ -1,3 +1,5 @@
+import type { Subagent } from "@/core/gen";
+import { fileDiff } from "./codegen";
 import type { AgentDef } from "./data";
 import { bash, edit, grep, read, say, type Step, think, todo } from "./scripts";
 
@@ -161,3 +163,45 @@ export function historyFor(def: AgentDef): Step[] {
 }
 
 export { HERO_SHOT };
+
+const LONG_MD = [
+  "Here's where things stand after this pass:\n\n- **Pool** sized at 16, health-checked every 30 s\n- `search` and `tenants` handlers moved over\n- `billing` still opens its own connection (advisory locks)\n\n```go\npool, err := pgxpool.NewWithConfig(ctx, cfg)\nif err != nil {\n\treturn fmt.Errorf(\"pool: %w\", err)\n}\ndefer pool.Close()\n```",
+  "| Endpoint | Before p99 | After p99 |\n|---|---|---|\n| `/v1/search` | 41 ms | 17 ms |\n| `/v1/tenants` | 28 ms | 12 ms |\n| `/v1/events` | 55 ms | 49 ms |\n\nEvents barely moved because it holds connections for the whole stream.",
+  "Two options for the remaining handlers:\n\n1. Schema-qualify every query (`app.tenants` instead of `tenants`)\n2. Keep `SET search_path` but run it in an `AfterConnect` hook\n\nOption 1 is safer with a shared pool; I'll go with it unless you object.",
+];
+
+const LONG_SUBAGENTS: Subagent[] = [
+  { id: "long-sub-1", name: "QueryScout", description: "Rank handlers by connection opens", status: "done", startedAt: 0, endedAt: 26_000, progress: 1, toolCount: 14, tokens: 38_000, costUsd: 0.42, line: "ranked 12 handlers" },
+  { id: "long-sub-2", name: "PoolBench", description: "Benchmark pool sizes", status: "done", startedAt: 0, endedAt: 33_000, progress: 1, toolCount: 9, tokens: 21_000, costUsd: 0.27, line: "size=16 p99 18ms" },
+];
+
+/**
+ * Long-transcript perf knob (`?demo&long=N`): exactly `n` extra history rows, cycling through
+ * every transcript kind and every ToolView type. Deterministic.
+ */
+export function longHistory(n: number): Step[] {
+  const ansi = Array.from({ length: 20 }, (_, i) =>
+    i % 5 === 4 ? `${"\x1b[31m"}✗${X} case_${i}_test.go ${D}(expected 200, got 429)${X}` : `${G}✓${X} case_${i}_test.go ${D}(${(i * 37) % 900}ms)${X}`,
+  );
+  const diff = fileDiff({ path: "internal/db/pool.go", added: 18, removed: 6, status: "modified" });
+  const shot = { mime: "image/svg+xml", data: HERO_SHOT, width: 480, height: 270 };
+  const kinds: ((i: number) => Step)[] = [
+    (i) => ({ t: "user", text: `Round ${i}: keep going on the pool migration and report p99 for the next handler.` }),
+    (i) => think(`Round ${i}: the next handler to migrate is the one with the most opens per request; check it for session state first.`, 1800 + (i % 7) * 400),
+    (i) => say(LONG_MD[i % LONG_MD.length] as string),
+    () => bash("go test ./internal/... -run Pool -v", ansi, 6200, 1),
+    (i) => read(["internal/db/pool.go", "internal/http/router.go", "cmd/gateway/main.go"][i % 3] as string, 60 + (i % 90)),
+    () => grep("db\\.Open|QueryRow", [{ path: "internal/http/router.go", line: 41, text: "conn, err := db.Open(ctx, cfg.DSN)" }, { path: "internal/http/middleware.go", line: 18, text: "row := conn.QueryRow(ctx, q, id)" }]),
+    () => ({ t: "tool", spec: { tool: "edit", title: "internal/db/pool.go", args: { path: "internal/db/pool.go" }, ms: 900, view: { type: "diff", files: [diff] } } }),
+    () => ({ t: "tool", spec: { tool: "todo_write", title: "3 tasks", args: {}, ms: 200, view: { type: "todo", phases: [{ name: "Pool", tasks: [{ content: "Migrate handler", status: "completed" }, { content: "Measure p99", status: "inProgress" }, { content: "Update docs", status: "pending" }] }] } } }),
+    () => ({ t: "tool", spec: { tool: "task", title: "2 subagents", args: {}, ms: 33_000, view: { type: "task", agents: LONG_SUBAGENTS } } }),
+    () => ({ t: "tool", spec: { tool: "web_search", title: "pgxpool AfterConnect search_path", args: { query: "pgxpool AfterConnect search_path" }, ms: 3800, view: { type: "web", query: "pgxpool AfterConnect search_path", answer: "Use AfterConnect to run per-connection setup such as SET search_path.", sources: [{ title: "pgxpool docs", url: "https://pkg.go.dev/github.com/jackc/pgx/v5/pgxpool", snippet: "AfterConnect is called after a connection is established…" }] } } }),
+    () => ({ t: "tool", spec: { tool: "browser", title: "screenshot http://localhost:8080/debug/pool", args: {}, ms: 2400, view: { type: "image", image: shot, alt: "Pool debug page", url: "http://localhost:8080/debug/pool" } } }),
+    () => ({ t: "tool", spec: { tool: "ask", title: "Migrate billing now?", args: {}, ms: 0, view: { type: "ask", questions: [{ question: "Migrate billing in this PR?", options: ["Yes", "Later"], answer: "Later" }] } } }),
+    () => ({ t: "tool", spec: { tool: "github", title: "gh pr view 88", args: {}, ms: 1500, view: { type: "markdown", text: "**#88 · Pool search + tenants** (draft)\n\nChecks: 9/9 passing." } } }),
+    () => ({ t: "tool", spec: { tool: "lsp", title: "diagnostics internal/db", args: { action: "diagnostics" }, ms: 900, output: ["pool.go:41:2  warning  unused variable 'cfg'", "0 errors, 1 warning"] } }),
+    (i) => ({ t: "notice", level: i % 2 ? "warn" : "info", text: i % 2 ? "Context is getting full — consider /compact" : "Retrying after a transient provider error" }),
+    (i) => ({ t: "mode", text: i % 2 ? "Thinking: high" : "Model switched to gpt-5.5 · xhigh" }),
+  ];
+  return Array.from({ length: n }, (_, i) => (kinds[i % kinds.length] as (i: number) => Step)(i));
+}

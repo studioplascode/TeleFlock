@@ -24,6 +24,10 @@ pub fn run(paths: Paths, session: &str, replace: bool, relay_port: u16) -> anyho
         }
         let (read, write) = match ipc::connect(&paths).await {
             Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("tf-hostd: {} is not owned by this user: {e}", paths.endpoint());
+                return Ok(1);
+            }
             Err(_) => {
                 eprintln!("tf-hostd: starting daemon (herdr session {session})");
                 match start_and_connect(&paths, relay_port).await {
@@ -109,8 +113,12 @@ async fn start_and_connect(paths: &Paths, relay_port: u16) -> Result<(ipc::BoxRe
     let deadline = Instant::now() + START_WAIT;
     let mut exited: Option<i32> = None;
     while Instant::now() < deadline {
-        if let Ok(c) = ipc::connect(paths).await {
-            return Ok(c);
+        match ipc::connect(paths).await {
+            Ok(c) => return Ok(c),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(format!("{} is not owned by this user: {e}", paths.endpoint()));
+            }
+            Err(_) => {}
         }
         if exited.is_none() {
             if let Ok(Some(status)) = child.try_wait() {

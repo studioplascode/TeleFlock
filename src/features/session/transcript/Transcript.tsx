@@ -9,6 +9,8 @@ import { Row } from "./rows";
 const STICK_PX = 56;
 const LOAD_OLDER_PX = 480;
 const ROW_GAP = 12;
+/** Growth larger than this while following is a jump (session switch, big paste), not a glide. */
+const GLIDE_MAX_PX = 900;
 
 export interface TranscriptProps {
   agentKey: string;
@@ -38,11 +40,12 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
   const anchor = useRef<{ id: string; delta: number } | null>(null);
   const lastCount = useRef(ids.length);
   const lastTop = useRef(0);
+  const glideRaf = useRef(0);
 
   const virtualizer = useVirtualizer({
     count: ids.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 96,
+    estimateSize: () => 132,
     getItemKey: (i) => ids[i] ?? i,
     overscan: 8,
     gap: ROW_GAP,
@@ -62,6 +65,26 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     else el.scrollTop = el.scrollHeight;
   };
 
+  // Follow the bottom with an eased glide instead of snapping on every streamed line, so text
+  // rolls up smoothly. Reduced motion (and big jumps) snap.
+  const glide = () => {
+    if (glideRaf.current) return;
+    const step = () => {
+      glideRaf.current = 0;
+      const el = scrollRef.current;
+      if (!el || !stick.current) return;
+      const gap = el.scrollHeight - el.clientHeight - el.scrollTop;
+      if (gap <= 0.5) return;
+      if (gap > GLIDE_MAX_PX || document.documentElement.dataset.motion === "reduced") {
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      el.scrollTop += Math.max(1, gap * 0.2);
+      glideRaf.current = requestAnimationFrame(step);
+    };
+    glideRaf.current = requestAnimationFrame(step);
+  };
+
   // Follow growth (new rows, streaming text, rows measuring) and viewport shrink (ask card,
   // queue chips, keyboard) while stuck to the bottom.
   useEffect(() => {
@@ -69,11 +92,15 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     const viewport = scrollRef.current;
     if (!content || !viewport) return;
     const ro = new ResizeObserver(() => {
-      if (stick.current) toBottom();
+      if (stick.current) glide();
     });
     ro.observe(content);
     ro.observe(viewport);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(glideRaf.current);
+      glideRaf.current = 0;
+    };
   }, []);
 
   // Rows appended / prepended.
@@ -91,8 +118,11 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
         return;
       }
     }
-    if (stick.current) toBottom();
-    else if (ids.length > prev) setUnseen((n) => n + (ids.length - prev));
+    if (stick.current) {
+      // First paint of a session lands at the bottom instantly; later rows glide in.
+      if (prev === 0) toBottom();
+      else glide();
+    } else if (ids.length > prev) setUnseen((n) => n + (ids.length - prev));
   }, [ids]);
 
   const onScroll = () => {
@@ -154,7 +184,13 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
                 const id = ids[v.index];
                 if (!id) return null;
                 return (
-                  <div key={v.key} data-index={v.index} ref={virtualizer.measureElement} className="absolute top-0 left-0 w-full" style={{ transform: `translateY(${v.start}px)` }}>
+                  <div
+                    key={v.key}
+                    data-index={v.index}
+                    ref={virtualizer.measureElement}
+                    className="absolute top-0 left-0 w-full [contain:layout_style]"
+                    style={{ transform: `translateY(${v.start}px)` }}
+                  >
                     <Row agentKey={agentKey} itemId={id} />
                   </div>
                 );

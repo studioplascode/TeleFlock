@@ -8,6 +8,7 @@
 // Hard rule: this file must never take omp down. Every callback that can run outside omp's handler
 // dispatch (socket callbacks, timers, promise chains) is wrapped, and timers go through `ctx.setInterval`.
 import fs from "node:fs";
+import crypto from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,11 @@ const SUBMIT_SETTLE_MS = 15_000;
 const ATTACH_COMMAND = "teleflock-attach";
 const STATUS_KEY = "teleflock";
 const MAX_LINE = 64 * 1024 * 1024;
+/** hostd must send its auth frame within this window after the socket opens. */
+const AUTH_TIMEOUT_MS = 5_000;
+/** Cap on buffered bytes before hostd has authenticated. */
+const MAX_AUTH_LINE = 4 * 1024;
+const SECRET_HEX = /^[0-9a-f]{64}$/;
 
 type ThinkingLevel = Parameters<ExtensionAPI["setThinkingLevel"]>[0];
 type Params = Record<string, unknown>;
@@ -95,26 +101,41 @@ const isGoalLike = (g: unknown): g is GoalLike =>
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
 
 /**
- * Where hostd listens; must match tf-hostd `Paths`. The hostd home is resolved, in order:
- * 1. `TF_BRIDGE_SOCK` (socket path or pipe name, verbatim);
- * 2. this file's own location when deployed by the app as `<home>/ext/teleflock-bridge.ts`
- *    (omp runs with the herdr pane's env, which usually lacks `TF_HOSTD_HOME`);
- * 3. `TF_HOSTD_HOME`; 4. `~/.teleflock`.
- * A home other than `~/.teleflock` is "custom": its Windows pipe name gets the FNV-1a suffix.
+ * The tf-hostd home, resolved in order: this file's own location when deployed by the app as
+ * `<home>/ext/teleflock-bridge.ts` (omp runs with the herdr pane's env, which usually lacks
+ * `TF_HOSTD_HOME`), then `TF_HOSTD_HOME`, then `~/.teleflock`.
  */
-function bridgeEndpoint(): string {
+function hostdHome(): string {
+	return deployedHome() ?? (process.env.TF_HOSTD_HOME || path.join(os.homedir(), ".teleflock"));
+}
+
+/**
+ * Where hostd listens; must match tf-hostd `Paths`. `TF_BRIDGE_SOCK` (socket path or pipe name)
+ * overrides verbatim. A home other than `~/.teleflock` is "custom": its Windows pipe name gets the
+ * FNV-1a suffix.
+ */
+function bridgeEndpoint(home: string): string {
 	const explicit = process.env.TF_BRIDGE_SOCK;
 	if (explicit) return explicit;
-	const defaultHome = path.join(os.homedir(), ".teleflock");
-	const home = deployedHome() ?? (process.env.TF_HOSTD_HOME || defaultHome);
 	if (process.platform === "win32") {
 		const raw = process.env.USERNAME || process.env.USER || "user";
 		const user = raw.replace(/[^A-Za-z0-9_-]/g, "_");
+		const defaultHome = path.join(os.homedir(), ".teleflock");
 		const custom = path.resolve(home).toLowerCase() !== path.resolve(defaultHome).toLowerCase();
 		const suffix = custom ? `-${fnv1a(home).toString(16).padStart(8, "0")}` : "";
 		return `\\\\.\\pipe\\teleflock-bridge-${user}${suffix}`;
 	}
 	return path.join(home, "run", "bridge.sock");
+}
+
+/**
+ * hostd's per-start shared secret, `<home>/run/bridge.secret` (next to an explicit unix
+ * `TF_BRIDGE_SOCK`). hostd proves itself with it in the first frame before we say anything.
+ */
+function bridgeSecretPath(home: string): string {
+	const explicit = process.env.TF_BRIDGE_SOCK;
+	if (explicit && process.platform !== "win32") return path.join(path.dirname(explicit), "bridge.secret");
+	return path.join(home, "run", "bridge.secret");
 }
 
 /** `<home>` when this file lives at `<home>/ext/<file>` (the app's deploy layout), else undefined. */
@@ -263,8 +284,20 @@ function contentText(content: unknown): string {
 	return toolCall ? "[tool calls]" : image ? "[image]" : "";
 }
 
+/** omp advisor notes: readable text lives in `details.notes`, `content` is the `<advisory>` envelope. */
+function advisorText(details: unknown): string {
+	const notes = details && typeof details === "object" && "notes" in details ? details.notes : undefined;
+	if (!Array.isArray(notes)) return "";
+	return notes
+		.map((n) => (n && typeof n === "object" && "note" in n && typeof n.note === "string" ? n.note : ""))
+		.filter(Boolean)
+		.join(" ");
+}
+
 export default function teleflockBridge(pi: ExtensionAPI) {
-	const endpoint = bridgeEndpoint();
+	const home = hostdHome();
+	const endpoint = bridgeEndpoint(home);
+	const secretPath = bridgeSecretPath(home);
 	const bridgeLog = (msg: string) => {
 		try {
 			pi.logger.debug(`teleflock-bridge: ${msg}`);
@@ -279,7 +312,8 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 	let active = false; // between session_start and session_shutdown
 	let sock: net.Socket | undefined;
 	let connected = false;
-	let connecting = false;
+	let connecting = false; // socket open (or opening) but hostd not yet authenticated
+	let connectStartedAt = 0;
 	let nextRetryAt = 0;
 	let tick: Timer | undefined;
 	let helloSessionId: string | undefined;
@@ -512,6 +546,29 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 		showStatus(false);
 	};
 
+	/** Checks hostd's first frame `{"t":"auth","v":1,"secret":"<64 hex>"}` against `bridge.secret` (read fresh). */
+	const verifyAuth = (line: string): string | undefined => {
+		let frame: unknown;
+		try {
+			frame = JSON.parse(line);
+		} catch {
+			return "first frame is not JSON";
+		}
+		if (!frame || typeof frame !== "object" || !("t" in frame) || frame.t !== "auth") return "first frame is not auth";
+		const offered = "secret" in frame && typeof frame.secret === "string" ? frame.secret : "";
+		if (!SECRET_HEX.test(offered)) return "malformed secret";
+		let expected: string;
+		try {
+			expected = fs.readFileSync(secretPath, "utf8").trim();
+		} catch (err) {
+			return `cannot read ${secretPath}: ${String(err)}`;
+		}
+		if (!SECRET_HEX.test(expected)) return `malformed ${secretPath}`;
+		const a = Buffer.from(offered, "hex");
+		const b = Buffer.from(expected, "hex");
+		return a.length === b.length && crypto.timingSafeEqual(a, b) ? undefined : "secret mismatch";
+	};
+
 	const connect = (): void => {
 		if (connecting || connected || !active) return;
 		if (process.platform !== "win32" && !fs.existsSync(endpoint)) {
@@ -519,6 +576,7 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 			return;
 		}
 		connecting = true;
+		connectStartedAt = Date.now();
 		let s: net.Socket;
 		try {
 			s = net.createConnection(endpoint);
@@ -530,33 +588,40 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 		}
 		sock = s;
 		let buf = "";
+		// Nothing is sent until hostd authenticates with the first frame (see docs/bridge-protocol.md).
+		let authed = false;
 		s.setEncoding("utf8");
-		s.on("connect", () => {
-			try {
-				if (sock !== s) return;
-				connecting = false;
-				connected = true;
-				showStatus(true);
-				sendHello("connect");
-			} catch (err) {
-				bridgeLog(`on connect: ${String(err)}`);
-			}
-		});
 		s.on("data", (chunk: string) => {
 			try {
+				if (sock !== s) return;
 				buf += chunk;
-				if (buf.length > MAX_LINE) {
-					bridgeLog("oversized frame; reconnecting");
+				if (buf.length > (authed ? MAX_LINE : MAX_AUTH_LINE)) {
+					bridgeLog(authed ? "oversized frame; reconnecting" : "oversized auth frame; reconnecting");
 					dropSocket();
 					nextRetryAt = Date.now() + RETRY_MS;
 					return;
 				}
 				let i = buf.indexOf("\n");
-				while (i >= 0) {
+				while (i >= 0 && sock === s) {
 					const line = buf.slice(0, i);
 					buf = buf.slice(i + 1);
 					i = buf.indexOf("\n");
 					if (!line.trim()) continue;
+					if (!authed) {
+						const problem = verifyAuth(line);
+						if (problem) {
+							bridgeLog(`hostd auth failed: ${problem}`);
+							dropSocket();
+							nextRetryAt = Date.now() + RETRY_MS;
+							return;
+						}
+						authed = true;
+						connecting = false;
+						connected = true;
+						showStatus(true);
+						sendHello("connect");
+						continue;
+					}
 					try {
 						onLine(line);
 					} catch (err) {
@@ -585,6 +650,12 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 	const onTick = (): void => {
 		try {
 			if (!active) return;
+			if (connecting && Date.now() - connectStartedAt > AUTH_TIMEOUT_MS) {
+				bridgeLog("hostd did not authenticate in time; reconnecting");
+				dropSocket();
+				nextRetryAt = Date.now() + RETRY_MS;
+				return;
+			}
 			if (!connected) {
 				if (!connecting && Date.now() >= nextRetryAt) connect();
 				return;
@@ -790,9 +861,11 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 			const parentId = nearestIncluded(e.parentId);
 			if (parentId) childCount.set(parentId, (childCount.get(parentId) ?? 0) + 1);
 			let text = "";
-			if (e.type === "message") text = contentText(e.message.content);
+			if (e.type === "message")
+				text = contentText(e.message.content) || ("stopReason" in e.message && e.message.stopReason === "aborted" ? "[aborted]" : "");
 			else if (e.type === "branch_summary" || e.type === "compaction") text = e.summary;
-			else if (e.type === "custom_message") text = contentText(e.content) || e.customType;
+			else if (e.type === "custom_message")
+				text = (e.customType === "advisor" ? advisorText(e.details) : "") || contentText(e.content) || e.customType;
 			text = text.replace(/\s+/g, " ").trim();
 			const ts = Date.parse(e.timestamp);
 			nodes.push({

@@ -76,8 +76,13 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
         platform_name: PLATFORM_NAME.to_owned(),
         client_app: CLIENT_APP.to_owned(),
         version: app.package_info().version.to_string(),
-        // Dev override: a tf-hostd binary or a dist dir (`<triple>/tf-hostd[.exe]`).
-        hostd_bins_override: std::env::var_os("TF_HOSTD_BIN").map(std::path::PathBuf::from),
+        // Dev override: a tf-hostd binary or a dist dir (`<triple>/tf-hostd[.exe]`). Debug builds
+        // only: in release an environment variable must never swap the binary deployed to every host.
+        hostd_bins_override: if cfg!(debug_assertions) {
+            std::env::var_os("TF_HOSTD_BIN").map(std::path::PathBuf::from)
+        } else {
+            None
+        },
     };
     let (engine, initial) = tauri::async_runtime::block_on(Engine::start(cfg, platform.clone()));
     let core = Core::new(engine, initial);

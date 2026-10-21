@@ -49,21 +49,26 @@ export interface AmbientGlowProps {
 export function AmbientGlow({ mood, intensity = 1, className }: AmbientGlowProps) {
   return (
     <div className={cn("tf-ambient", className)} data-mood={mood} aria-hidden>
-      {BLOBS.map((b, i) => (
-        <span
-          key={i}
-          className="tf-ambient__blob tf-loop"
-          data-on={b.moods.includes(mood)}
-          style={
-            {
-              ...b.style,
-              "--blob-o": b.opacity * intensity,
-              background: `radial-gradient(circle at center, rgb(${b.color} / 1) 0%, rgb(${b.color} / 0.35) 32%, rgb(${b.color} / 0) 68%)`,
-              animation: `tf-drift-${b.drift} ${b.seconds}s ease-in-out infinite`,
-            } as CSSProperties
-          }
-        />
-      ))}
+      {BLOBS.map((b, i) => {
+        const on = b.moods.includes(mood);
+        return (
+          <span
+            key={i}
+            className="tf-ambient__blob tf-loop"
+            data-on={on}
+            style={
+              {
+                ...b.style,
+                "--blob-o": b.opacity * intensity,
+                background: `radial-gradient(circle at center, rgb(${b.color} / 1) 0%, rgb(${b.color} / 0.35) 32%, rgb(${b.color} / 0) 68%)`,
+                // Off blobs (opacity 0) hold still: no per-frame work for what nobody sees, and no
+                // position jump when they fade back in.
+                animation: `tf-drift-${b.drift} ${b.seconds}s ease-in-out infinite ${on ? "running" : "paused"}`,
+              } as CSSProperties
+            }
+          />
+        );
+      })}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { motion } from "motion/react";
 import { useRef } from "react";
 import { useInbox, useUi } from "@/core";
-import { AnimatePresence, Button, CardFlight, EmptyState, Kbd, LayoutGroup, cn, fadeRise, useInView, useIsMobile } from "@/design";
+import { AnimatePresence, Button, CardFlight, EmptyState, Kbd, LayoutGroup, PageHeader, StatusOrb, cn, fadeRise, useInView, useIsMobile } from "@/design";
 import { openAgent, openAnswerHud, openTerminal } from "@/features/board/agentActions";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
 import { MobileHeader } from "@/features/shell/MobileHeader";
@@ -79,19 +79,32 @@ export function InboxView() {
     );
   }
   return (
-    <div>
-      <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
-        <header className="flex items-center gap-3">
-          <h1 className="font-display text-2xl font-bold text-ink">Inbox</h1>
-          <span className="text-sm font-semibold text-mute">{keys.length > 0 ? `${keys.length} waiting · oldest first` : "All clear"}</span>
-          {keys.length > 0 && (
-            <Button variant="sunset" size="sm" className="ml-auto" onClick={() => setAnswerNext(true)} trailing={<Kbd>Ctrl J</Kbd>}>
+    <div className="mx-auto flex max-w-[820px] flex-col gap-5 px-8 pt-7 pb-12">
+      <PageHeader
+        kicker="Needs you"
+        title="Inbox"
+        meta={
+          keys.length > 0 ? (
+            <>
+              <StatusOrb status="needs-you" size={7} label={null} />
+              {keys.length} waiting · oldest first
+            </>
+          ) : (
+            <>
+              <StatusOrb status="done" size={7} label={null} />
+              All clear
+            </>
+          )
+        }
+        actions={
+          keys.length > 0 && (
+            <Button variant="sunset" size="sm" onClick={() => setAnswerNext(true)} trailing={<Kbd>Ctrl J</Kbd>}>
               Answer next
             </Button>
-          )}
-        </header>
-        {body}
-      </div>
+          )
+        }
+      />
+      {body}
     </div>
   );
 }

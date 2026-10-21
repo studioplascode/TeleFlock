@@ -4,6 +4,8 @@
  * streamed chunk of the block that is still growing.
  */
 
+import { lruMemo } from "./lru";
+
 export type TokenKind = "kw" | "str" | "num" | "com" | "fn" | "type" | "op" | "punc" | "attr" | "var" | "tag" | "lit" | "plain";
 
 export interface Token {
@@ -143,9 +145,19 @@ export function languageFor(hint: string | undefined): string | undefined {
   return undefined;
 }
 
-/** Tokenise source text. Unknown languages return one plain token. */
+const tokenCache = lruMemo(4000, (key) => {
+  const sep = key.indexOf("\u0000");
+  return tokenize(key.slice(sep + 1), key.slice(0, sep));
+});
+
+/** Tokenise source text (memoised; treat the result as immutable). Unknown languages return one plain token. */
 export function highlight(code: string, lang: string | undefined): Token[] {
-  const g = lang ? LANGS[lang] : undefined;
+  if (!lang || !LANGS[lang]) return [{ text: code, kind: "plain" }];
+  return tokenCache(`${lang}\u0000${code}`);
+}
+
+function tokenize(code: string, lang: string): Token[] {
+  const g = LANGS[lang];
   if (!g) return [{ text: code, kind: "plain" }];
   const out: Token[] = [];
   const push = (text: string, kind: TokenKind) => {

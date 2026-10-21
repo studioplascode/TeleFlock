@@ -31,7 +31,7 @@ export function HostPill() {
   const phases = profiles.map((p) => status[p.id]?.phase ?? "idle");
   const orb: Status = current
     ? PHASE_STATUS[status[current.id]?.phase ?? "idle"]
-    : phases.includes("authRequired")
+    : phases.includes("authRequired") || phases.includes("hostKey")
       ? "needs-you"
       : phases.includes("error")
         ? "error"
@@ -76,7 +76,7 @@ export function HostPill() {
               <span className="flex w-full items-center gap-2">
                 <span className="truncate">{p.name}</span>
                 {filter === p.id && <Check className="!size-3.5 !text-accent" />}
-                <span className={cn("ml-auto font-mono text-2xs", phase === "online" ? "text-mute" : phase === "authRequired" ? "text-sun-2" : "text-mute-2")}>
+                <span className={cn("ml-auto font-mono text-2xs", phase === "online" ? "text-mute" : phase === "authRequired" || phase === "hostKey" ? "text-sun-2" : "text-mute-2")}>
                   {phase === "online" ? connSummary(s) : PHASE_LABEL[phase]}
                 </span>
               </span>

@@ -14,6 +14,7 @@ import {
   fadeRise,
   formatElapsed,
   IconButton,
+  PageHeader,
   Sparkline,
   spring,
   StatusOrb,
@@ -130,7 +131,7 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
             <div className="mt-0.5 flex items-center gap-2 text-xs text-mute">
               <span className="truncate font-mono">{profileAddress(profile)}</span>
               <span aria-hidden>·</span>
-              <span className={cn("font-semibold", online ? "text-done" : phase === "error" ? "text-error" : phase === "authRequired" ? "text-sun-2" : "text-mute")}>{connSummary(status)}</span>
+              <span className={cn("font-semibold", online ? "text-done" : phase === "error" ? "text-error" : phase === "authRequired" || phase === "hostKey" ? "text-sun-2" : "text-mute")}>{connSummary(status)}</span>
             </div>
           </div>
           {active && (
@@ -216,21 +217,28 @@ export function HostsView() {
       Add host
     </Button>
   );
+  const online = profiles.filter((p) => status[p.id]?.phase === "online").length;
   return (
     <div className="flex min-h-full flex-col">
-      {mobile ? (
-        <MobileHeader title="Hosts" subtitle={`${profiles.length} saved`} back actions={add} />
-      ) : (
-        <header className="flex items-end gap-4 px-8 pt-7 pb-5">
-          <div className="min-w-0 flex-1">
-            <div className="kicker">Connections</div>
-            <h1 className="font-display text-display font-bold">Hosts</h1>
-            <p className="mt-1 text-sm text-mute">Your herdr hosts. Tailscale SSH everywhere; local and WSL on this PC.</p>
-          </div>
-          {add}
-        </header>
-      )}
-      <div className={cn("grid flex-1 content-start gap-4", mobile ? "px-3 pb-6" : "px-8 pb-10 xl:grid-cols-2")}>
+      {mobile && <MobileHeader title="Hosts" subtitle={`${profiles.length} saved`} back actions={add} />}
+      <div className={cn("mx-auto grid w-full flex-1 content-start gap-4", mobile ? "px-3 pb-6" : "max-w-[1200px] px-8 pt-7 pb-10 xl:grid-cols-2")}>
+        {!mobile && (
+          <PageHeader
+            className="col-span-full mb-1"
+            kicker="Connections"
+            title="Hosts"
+            meta={
+              profiles.length > 0 && (
+                <>
+                  <StatusOrb status={online > 0 ? "done" : "idle"} size={7} label={null} />
+                  {online}/{profiles.length} online
+                </>
+              )
+            }
+            description="Your herdr hosts. Tailscale SSH everywhere; local and WSL on this PC."
+            actions={add}
+          />
+        )}
         {profiles.map((p, i) => (
           <HostCard key={p.id} profile={p} status={status[p.id]} index={i} />
         ))}

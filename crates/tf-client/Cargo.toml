@@ -24,3 +24,6 @@ zstd = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
+# tests/host_key.rs reuses tf-transport's in-process SSH server (tests/support).
+bytes = "1"
+russh = { version = "0.64.1", default-features = false, features = ["flate2", "rsa", "ring"] }

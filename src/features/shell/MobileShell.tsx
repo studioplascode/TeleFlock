@@ -41,7 +41,7 @@ function BottomNav() {
   const { profiles, status } = useHosts();
   const hostIssue = profiles.some((p) => {
     const ph = status[p.id]?.phase;
-    return ph === "authRequired" || ph === "error";
+    return ph === "authRequired" || ph === "hostKey" || ph === "error";
   });
 
   const go = (tab: Tab) => {

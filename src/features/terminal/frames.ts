@@ -43,18 +43,25 @@ export interface LocalhostUrl {
 
 const URL_RE = /\b(?:(https?):\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})(\/[^\s"'<>()`]*)?/gi;
 
-/** Every `http://localhost:PORT` / `127.0.0.1:PORT` (scheme optional) in a text, in order. */
-export function findLocalhostUrls(text: string, seenAt = Date.now()): LocalhostUrl[] {
-  const out: LocalhostUrl[] = [];
+/** Localhost URLs in a text with their string ranges `[start, end)` (terminal link provider). */
+export function localhostUrlRanges(text: string): { url: string; host: string; port: number; start: number; end: number }[] {
+  const out: { url: string; host: string; port: number; start: number; end: number }[] = [];
   for (const m of text.matchAll(URL_RE)) {
     const port = Number(m[3]);
     if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
     const host = (m[2] ?? "localhost").toLowerCase();
     // A bare `localhost:1234` without scheme is only a URL when it isn't part of a word/path.
     const scheme = (m[1] ?? "http").toLowerCase();
-    const path = (m[4] ?? "").replace(/[.,;:!?]+$/, "");
+    const rawPath = m[4] ?? "";
+    const path = rawPath.replace(/[.,;:!?]+$/, "");
     const shownHost = host === "0.0.0.0" ? "localhost" : host;
-    out.push({ url: `${scheme}://${shownHost}:${port}${path}`, host: shownHost, port, seenAt });
+    const start = m.index ?? 0;
+    out.push({ url: `${scheme}://${shownHost}:${port}${path}`, host: shownHost, port, start, end: start + m[0].length - (rawPath.length - path.length) });
   }
   return out;
+}
+
+/** Every `http://localhost:PORT` / `127.0.0.1:PORT` (scheme optional) in a text, in order. */
+export function findLocalhostUrls(text: string, seenAt = Date.now()): LocalhostUrl[] {
+  return localhostUrlRanges(text).map(({ url, host, port }) => ({ url, host, port, seenAt }));
 }

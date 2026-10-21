@@ -15,6 +15,11 @@ export interface BottomSheetProps {
   className?: string;
   /** Max height as CSS length (default 88dvh). */
   maxHeight?: string;
+  /**
+   * Focus the first tabbable control on open (default true). Pass false when that control is a
+   * text field, so opening the sheet doesn't pop the phone keyboard; focus stays on the sheet.
+   */
+  autoFocus?: boolean;
 }
 
 const DISMISS_OFFSET = 110;
@@ -24,7 +29,7 @@ const DISMISS_VELOCITY = 550;
  * Mobile bottom sheet: springs up, drag the handle/header down to dismiss (velocity- or
  * distance-based), scrim fades with the drag. Built on Radix Dialog for focus trap + a11y.
  */
-export function BottomSheet({ open, onOpenChange, title, description, footer, children, className, maxHeight = "88dvh" }: BottomSheetProps) {
+export function BottomSheet({ open, onOpenChange, title, description, footer, children, className, maxHeight = "88dvh", autoFocus = true }: BottomSheetProps) {
   const controls = useDragControls();
   const y = useMotionValue(0);
   const scrim = useTransform(y, [0, 400], [1, 0]);
@@ -48,7 +53,15 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
                 style={{ opacity: scrim }}
               />
             </RadixDialog.Overlay>
-            <RadixDialog.Content asChild forceMount>
+            <RadixDialog.Content
+              asChild
+              forceMount
+              onOpenAutoFocus={(e) => {
+                if (autoFocus) return;
+                e.preventDefault();
+                if (e.currentTarget instanceof HTMLElement) e.currentTarget.focus({ preventScroll: true });
+              }}
+            >
               <motion.div
                 className={cn(
                   "fixed inset-x-0 bottom-0 z-modal mx-auto flex w-full max-w-[640px] flex-col rounded-t-sheet bg-[linear-gradient(180deg,#21212d,#16161e)] shadow-[0_-24px_60px_rgb(0_0_0/0.65),inset_0_1px_0_rgb(255_255_255/0.09)] outline-none",

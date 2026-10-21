@@ -53,6 +53,18 @@ export function agentNameError(name: string, taken: readonly string[]): string |
   return null;
 }
 
+/**
+ * A derived (not typed) name that doesn't collide with a running agent: `docs` → `docs-2`. Without
+ * this the dialog would silently refuse to launch with the auto name.
+ */
+export function uniqueAgentName(base: string, taken: readonly string[]): string {
+  if (!base || !taken.includes(base)) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `${base}-${i}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
 export function useModelCatalog(hostId: string | undefined): ModelCatalog | undefined {
   return useHostQuery(hostId, "host.models", {}).data;
 }

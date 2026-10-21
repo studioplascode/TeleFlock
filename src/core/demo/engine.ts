@@ -8,6 +8,8 @@ export interface DemoEngineOptions {
   mode: "backend" | "embedded";
   /** Backend mode: start with no profiles (onboarding). */
   empty?: boolean;
+  /** Extra seeded transcript rows for `forge::pool` (`?demo&long=N`). Default 0. */
+  longTranscript?: number;
   clock?: DemoClock;
   seed?: number;
   /** Start hosts immediately (default true). Tests may defer. */
@@ -71,7 +73,7 @@ export class DemoEngine {
   }
 
   private addHost(profile: HostProfile, variant: HostVariant, start: boolean): DemoHost {
-    const host = new DemoHost({ clock: this.clock, emit: (e) => this.emit(e), seed: this.seed }, profile, variant);
+    const host = new DemoHost({ clock: this.clock, emit: (e) => this.emit(e), seed: this.seed, longTranscript: this.opts.longTranscript ?? 0 }, profile, variant);
     this.hosts.set(profile.id, host);
     if (this.opts.mode === "backend") this.profiles = [...this.profiles.filter((p) => p.id !== profile.id), profile];
     if (start) this.clock.after(0, () => host.start());
@@ -166,6 +168,12 @@ export class DemoEngine {
         }
         if (method === "hosts.connect") host.connect();
         else host.disconnect();
+        return {};
+      }
+      case "hosts.trustKey": {
+        const host = this.hosts.get(String(p.hostId ?? ""));
+        if (!host) throw apiError("not_found", `Unknown host ${String(p.hostId)}`);
+        host.trustKey(String(p.fingerprint ?? ""));
         return {};
       }
       case "hosts.test":

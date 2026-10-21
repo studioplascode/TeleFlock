@@ -102,9 +102,19 @@ function SessionBody({ agentKey, hotkeys, mobile, compact }: { agentKey: string;
             initial={{ opacity: 0, y: 40, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
             exit={{ opacity: 0, y: 24, scale: 0.97, transition: { duration: 0.2 } }}
-            className="relative z-raised max-h-[62%] shrink-0 overflow-y-auto rounded-tile"
+            className="relative z-raised flex max-h-[62%] shrink-0 flex-col"
           >
-            <AskCard agentKey={agentKey} request={ui} hotkeys={hotkeys} compact={mobile || compact} />
+            {/* Sunset bloom: flares as the card lands, then settles into a glow spilling over the transcript. */}
+            <motion.span
+              aria-hidden
+              className="pointer-events-none absolute -inset-x-4 -top-20 bottom-1/2 -z-10 rounded-[64px] bg-[radial-gradient(55%_60%_at_50%_42%,rgb(255_61_119/0.8),rgb(255_122_24/0.35)_55%,transparent_80%)] blur-2xl"
+              initial={{ opacity: 0, scale: 0.6 }}
+              animate={{ opacity: [0, 1, 0.7], scale: [0.6, 1.1, 1] }}
+              transition={{ duration: 1.6, times: [0, 0.3, 1], ease: "easeOut" }}
+            />
+            <div className="min-h-0 overflow-y-auto rounded-tile">
+              <AskCard agentKey={agentKey} request={ui} hotkeys={hotkeys} compact={mobile || compact} />
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

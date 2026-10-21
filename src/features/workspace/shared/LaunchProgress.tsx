@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { SquareTerminal } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { navigate, useHostState } from "@/core";
 import type { Started } from "@/core/gen";
 import { Button, Elapsed, Shimmer, cn, spring, tween } from "@/design";
@@ -13,7 +13,7 @@ const AGENT_WAIT_MS = 15000;
 /** Indeterminate "it's working" panel: orbiting gradient ring, shimmering stage line, ticking timer. */
 export function WorkingPanel({ label, detail, since }: { label: string; detail?: string; since: number }) {
   return (
-    <div className="flex flex-col items-center gap-4 py-8 text-center" role="status" aria-live="polite">
+    <div className="flex flex-1 flex-col items-center justify-center gap-4 py-8 text-center" role="status" aria-live="polite">
       <div className="relative grid size-24 place-items-center">
         <span className="tf-loop absolute inset-0 animate-spin rounded-full [background:conic-gradient(from_0deg,transparent_0%,#f053d0_30%,#a15eef_55%,#7fa2e7_75%,transparent_100%)] [mask:radial-gradient(farthest-side,transparent_calc(100%-3px),#000_calc(100%-2px))] [animation-duration:1.4s]" />
         <span className="tf-loop absolute inset-3 animate-spin rounded-full [background:conic-gradient(from_180deg,transparent,rgb(163_92_240/0.6),transparent_60%)] [mask:radial-gradient(farthest-side,transparent_calc(100%-2px),#000_calc(100%-1px))] [animation-direction:reverse] [animation-duration:2.2s]" />
@@ -34,7 +34,7 @@ export interface LaunchSuccessProps {
   hostId: string;
   started: Started;
   title: string;
-  subtitle?: string;
+  subtitle?: ReactNode;
   /** Close the dialog (called right before navigation). */
   onClose: () => void;
 }
@@ -68,8 +68,15 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
   }, [held, agentId, hostId, onClose]);
 
   return (
-    <div className="flex flex-col items-center gap-4 py-6 text-center" role="status" aria-live="polite">
+    <div className="flex flex-1 flex-col items-center justify-center gap-4 py-6 text-center" role="status" aria-live="polite">
       <div className="relative grid size-28 place-items-center">
+        <motion.span
+          className="absolute -inset-10 rounded-full bg-[radial-gradient(closest-side,rgb(163_92_240/0.45),rgb(240_83_208/0.12)_55%,transparent)]"
+          initial={{ scale: 0.2, opacity: 0 }}
+          animate={{ scale: [0.2, 1.15, 1], opacity: [0, 1, 0.55] }}
+          transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
+          aria-hidden
+        />
         {[0, 1, 2].map((i) => (
           <motion.span
             key={i}
@@ -104,9 +111,9 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
           </svg>
         </motion.div>
       </div>
-      <motion.div className="flex flex-col gap-1" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.2 }}>
+      <motion.div className="flex w-full min-w-0 flex-col gap-1" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.2 }}>
         <p className="font-display text-2xl font-bold">{title}</p>
-        {subtitle && <p className="font-mono text-xs text-mute">{subtitle}</p>}
+        {subtitle && <div className="mx-auto flex max-w-full min-w-0 flex-col gap-0.5 font-mono text-xs text-mute">{subtitle}</div>}
       </motion.div>
       {!late || agentId ? (
         <div className="flex w-56 flex-col items-center gap-2">

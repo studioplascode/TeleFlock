@@ -13,6 +13,8 @@ export interface WsTransportOptions {
   timeoutMs?: number;
   /** Called once if the very first connection attempt fails (used for the demo fallback). */
   onFirstFailure?: () => void;
+  /** tf-devserver per-launch token; sent as `?token=` on every (re)connect. */
+  token?: string;
 }
 
 const TERM_OPEN_TIMEOUT = 20_000;
@@ -24,6 +26,12 @@ const TERM_OPEN_TIMEOUT = 20_000;
  */
 export function createWsTransport(opts: WsTransportOptions): CoreTransport {
   const listeners = new Set<(e: AppEvent) => void>();
+  let url = opts.url;
+  if (opts.token) {
+    const u = new URL(opts.url, typeof location === "undefined" ? undefined : location.href);
+    u.searchParams.set("token", opts.token);
+    url = u.href;
+  }
   const linkListeners = new Set<(up: boolean) => void>();
   const pending = new Map<number, Pending>();
   const outbox: string[] = [];
@@ -41,7 +49,7 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
 
   const connect = () => {
     if (closed) return;
-    const sock = new WebSocket(opts.url);
+    const sock = new WebSocket(url);
     ws = sock;
     sock.onopen = () => {
       attempt = 0;

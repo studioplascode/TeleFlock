@@ -37,9 +37,22 @@ wire_struct! {
 }
 
 wire_enum! {
+    /// `hostKey`: first connection to a host outside the tailnet address ranges; the user must
+    /// confirm `ConnStatus.hostKey` with `hosts.trustKey` before the connection proceeds.
     pub enum ConnPhase {
-        Idle, Connecting, Authenticating, AuthRequired, Deploying, Starting, Online,
+        Idle, Connecting, Authenticating, AuthRequired, HostKey, Deploying, Starting, Online,
         Reconnecting, Offline, Error
+    }
+}
+
+wire_struct! {
+    pub struct HostKeyInfo {
+        /// Resolved address the key was presented by.
+        pub address: String,
+        /// e.g. `ssh-ed25519`.
+        pub algorithm: String,
+        /// `SHA256:<base64>` (same format as `ssh-keygen -lf`).
+        pub fingerprint: String,
     }
 }
 
@@ -57,6 +70,8 @@ wire_struct! {
         pub next_retry_at: Option<Millis>,
         pub last_online_at: Option<Millis>,
         pub hostd_version: Option<String>,
+        /// Unconfirmed host key (phase `hostKey`).
+        pub host_key: Option<HostKeyInfo>,
     }
 }
 

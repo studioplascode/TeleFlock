@@ -1,9 +1,9 @@
-import { Check, MessageCircle, PenLine, Send, X } from "lucide-react";
+import { Check, MessageCircle, PenLine, Send, SquareTerminal, X } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { parseAgentKey, useAgent } from "@/core";
 import type { Answer, NeedsOption, UiRequest } from "@/core/gen";
-import { cn, Elapsed, spring } from "@/design";
+import { cn, Elapsed, Spinner, spring } from "@/design";
 import { hostCall, usePending } from "../api";
 import { Markdown } from "../markdown/Markdown";
 
@@ -41,6 +41,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   const [other, setOther] = useState<string | null>(null);
   const [text, setText] = useState(request.initial ?? "");
   const [sent, setSent] = useState<string | null>(null);
+  const [choosing, setChoosing] = useState<string | null>(null);
   const [busy, run] = usePending();
   const otherRef = useRef<HTMLInputElement>(null);
   const multi = request.kind === "multiSelect";
@@ -71,6 +72,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       setPicked((p) => (p.includes(o.id) ? p.filter((x) => x !== o.id) : [...p, o.id]));
       return;
     }
+    setChoosing(o.id);
     return answer({ choices: [o.id] }, o.label);
   };
 
@@ -114,6 +116,20 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   });
 
   const n = options.length + (request.allowOther ? 1 : 0);
+  // omp often titles dialogs generically ("Question", "Continue?") and puts the real question in
+  // the message: promote it to the headline. Approval messages repeat the command and the title.
+  const genericTitle = /^(question|ask|input|confirm|continue\??)$/i.test(request.title.trim());
+  const message = request.message
+    ?.split("\n")
+    .filter((l) => {
+      const t = l.trim();
+      return !(needs?.command && t === needs.command.trim()) && !(kindKey === "approval" && /^allow tool:/i.test(t));
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  const headline = genericTitle && message ? message : request.title;
+  const body = genericTitle && message ? null : message;
   return (
     <motion.section
       layout
@@ -160,13 +176,17 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
         )}
       </div>
 
-      <h3 className={cn("relative mt-2 mb-1 font-display font-bold tracking-[-0.03em]", compact ? "text-xl" : "text-[25px] leading-[1.15]")}>{request.title}</h3>
-      {request.message && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-white/90">{request.message}</div>}
+      <h3 className={cn("relative mt-2.5 mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "text-xl leading-[1.2]" : "text-[25px] leading-[1.15]")}>{headline}</h3>
+      {body && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-white/90">{body}</div>}
       {needs?.command && (
-        <div className="relative my-2 overflow-x-auto rounded-md bg-black/25 px-3 py-2 font-mono text-[12px] whitespace-pre-wrap shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]">
-          <span className="opacity-70">Allow </span>
-          {needs.command}
-          <span className="opacity-70">?</span>
+        <div className="relative my-2.5 overflow-hidden rounded-md bg-[rgb(30_4_18/0.42)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]">
+          <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-1 text-[10px] font-extrabold tracking-[0.08em] uppercase opacity-75">
+            <SquareTerminal className="size-3" /> Wants to run
+          </div>
+          <pre className="overflow-x-auto px-3 py-2 font-mono text-[12.5px] leading-[1.5] whitespace-pre-wrap">
+            <span className="select-none opacity-60">$ </span>
+            {needs.command}
+          </pre>
         </div>
       )}
 
@@ -243,7 +263,11 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
                   </span>
                   {o.description && <span className={cn("mt-0.5 block text-[11.5px] leading-[1.35]", on ? "opacity-70" : "opacity-[0.88]")}>{o.description}</span>}
                 </span>
-                {!compact && i < 9 && <kbd className={cn("shrink-0 rounded-xs px-1.5 font-mono text-[10px] font-bold", on ? "bg-black/10" : "bg-white/15")}>{i + 1}</kbd>}
+                {busy && choosing === o.id ? (
+                  <Spinner size={13} label="Sending" className="shrink-0" />
+                ) : (
+                  !compact && i < 9 && <kbd className={cn("shrink-0 rounded-xs px-1.5 font-mono text-[10px] font-bold", on ? "bg-black/10" : "bg-white/15")}>{i + 1}</kbd>
+                )}
               </motion.button>
             );
           })}

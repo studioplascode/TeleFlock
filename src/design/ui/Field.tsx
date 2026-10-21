@@ -25,6 +25,7 @@ export function Input({ leading, trailing, boxClassName, className, invalid, ...
       {leading}
       <input
         aria-invalid={invalid || undefined}
+        data-autofocus={rest.autoFocus || undefined}
         className={cn("h-full min-w-0 flex-1 bg-transparent outline-none placeholder:text-mute-2 focus-visible:outline-none", className)}
         {...rest}
       />
@@ -49,6 +50,7 @@ export function Textarea({ maxHeight = 240, boxClassName, className, invalid, fo
     <div aria-invalid={invalid || undefined} className={cn(fieldBox, "flex flex-col px-3 py-2.5", boxClassName)}>
       <textarea
         aria-invalid={invalid || undefined}
+        data-autofocus={rest.autoFocus || undefined}
         className={cn(
           "min-h-[1.5lh] w-full resize-none bg-transparent leading-normal outline-none [field-sizing:content] placeholder:text-mute-2 focus-visible:outline-none",
           className,

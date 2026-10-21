@@ -139,6 +139,9 @@ impl Inner {
             if phase != ConnPhase::AuthRequired {
                 s.auth_url = None;
             }
+            if phase != ConnPhase::HostKey {
+                s.host_key = None;
+            }
         });
     }
 
@@ -767,6 +770,16 @@ impl Engine {
             AppMethod::HostsDisconnect(r) => {
                 let rt = i.host(&r.host_id).ok_or_else(|| not_found_host(&r.host_id))?;
                 let _ = rt.cmd.send(ConnCmd::Disconnect);
+                if i.tunnels.close_host(&r.host_id) {
+                    i.emit_tunnels();
+                }
+                to_value(&Empty {})
+            }
+            AppMethod::HostsTrustKey(r) => {
+                let rt = i.host(&r.host_id).ok_or_else(|| not_found_host(&r.host_id))?;
+                rt.approve_host_key(&r.fingerprint)?;
+                self.send_cmd(&r.host_id, ConnCmd::Connect);
+                i.refresh_keep_alive();
                 to_value(&Empty {})
             }
             AppMethod::HostsTest(p) => {

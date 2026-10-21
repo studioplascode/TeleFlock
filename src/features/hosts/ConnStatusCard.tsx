@@ -1,9 +1,9 @@
-import { Copy, ExternalLink, KeyRound, Plug, RefreshCw, ServerCrash, WifiOff } from "lucide-react";
+import { Copy, ExternalLink, Fingerprint, KeyRound, Plug, RefreshCw, ServerCrash, ShieldCheck, WifiOff, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { Button, cn, formatAge, Shimmer, Spinner, spring, toast, useNow } from "@/design";
 import { core } from "@/core";
-import type { ConnPhase, ConnStatus } from "@/core/gen";
+import type { ConnPhase, ConnStatus, HostKeyInfo } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
@@ -137,6 +137,109 @@ function AuthRequired({ hostId, url }: { hostId: string; url?: string }) {
   );
 }
 
+/** `SHA256:AbCd…` → hash label + 4-char groups, so a fingerprint can be compared at a glance. */
+function fingerprintGroups(fp: string): { hash: string; groups: string[] } {
+  const at = fp.indexOf(":");
+  const hash = at > 0 ? fp.slice(0, at) : "";
+  return { hash, groups: fp.slice(at + 1).match(/.{1,4}/g) ?? [] };
+}
+
+/** Unknown SSH host key: show it and require an explicit Trust before the connection continues. */
+function HostKey({ hostId, info }: { hostId: string; info?: HostKeyInfo }) {
+  const [busy, setBusy] = useState<"trust" | "cancel" | null>(null);
+  const fp = info ? fingerprintGroups(info.fingerprint) : null;
+  const trust = () => {
+    if (!info) return;
+    haptic("select");
+    setBusy("trust");
+    core.app("hosts.trustKey", { hostId, fingerprint: info.fingerprint }).then(
+      () => setBusy(null),
+      (err: unknown) => {
+        setBusy(null);
+        toast({ title: `Couldn't trust the key: ${errorMessage(err)}`, description: errorHint(err), status: "error" });
+      },
+    );
+  };
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, scale: 0.97 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={spring.bouncy}
+      className="rounded-xl bg-warn/8 p-4 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]"
+      role="alert"
+      aria-label="Verify the host key"
+    >
+      <div className="flex items-start gap-3">
+        <span className="grid size-9 shrink-0 place-items-center rounded-md bg-warn/16 text-warn [&_svg]:size-4.5">
+          <Fingerprint />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h4 className="font-display text-lg font-bold text-ink">Verify the host key</h4>
+          <p className="mt-0.5 text-sm text-mute">
+            This is the first connection to a host outside your tailnet, so its identity isn't vouched for. Compare the fingerprint with{" "}
+            <code className="font-mono text-xs text-ink-2">ssh-keygen -lf</code> on the host before trusting it.
+          </p>
+        </div>
+      </div>
+      {info && fp ? (
+        <dl className="mt-3 grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1.5 rounded-md bg-black/25 px-3 py-2.5 text-xs">
+          <dt className="text-mute-2">Address</dt>
+          <dd className="min-w-0 truncate font-mono text-ink-2" title={info.address}>
+            {info.address}
+          </dd>
+          <dt className="text-mute-2">Key type</dt>
+          <dd className="font-mono text-ink-2">{info.algorithm}</dd>
+          <dt className="text-mute-2">Fingerprint</dt>
+          <dd className="flex min-w-0 items-start gap-2">
+            <code className="flex min-w-0 flex-1 flex-wrap gap-x-1.5 gap-y-0.5 font-mono text-[12.5px] leading-5 text-ink" aria-label={info.fingerprint} data-fingerprint={info.fingerprint}>
+              {fp.hash && <span className="text-mute">{fp.hash}:</span>}
+              {fp.groups.map((g, i) => (
+                <span key={i}>{g}</span>
+              ))}
+            </code>
+            <button
+              type="button"
+              className="grid size-6 shrink-0 place-items-center rounded-sm text-mute pressable focus-ring hover:bg-white/10 hover:text-ink"
+              aria-label="Copy fingerprint"
+              title="Copy fingerprint"
+              onClick={() => {
+                navigator.clipboard.writeText(info.fingerprint).then(
+                  () => toast({ title: "Fingerprint copied" }),
+                  () => toast({ title: "Couldn't copy the fingerprint", status: "error" }),
+                );
+              }}
+            >
+              <Copy className="size-3.5" />
+            </button>
+          </dd>
+        </dl>
+      ) : (
+        <div className="mt-3 flex items-center gap-2 text-sm text-mute">
+          <Spinner size={14} /> Reading the host key…
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<X />}
+          disabled={busy !== null}
+          onClick={() => {
+            setBusy("cancel");
+            void disconnect(hostId).finally(() => setBusy(null));
+          }}
+        >
+          Cancel
+        </Button>
+        <Button size="sm" variant="primary" icon={busy === "trust" ? <Spinner size={14} /> : <ShieldCheck />} disabled={!info || busy !== null} onClick={trust}>
+          Trust and connect
+        </Button>
+      </div>
+    </motion.div>
+  );
+}
+
 function Reconnecting({ hostId, status }: { hostId: string; status: ConnStatus }) {
   const now = useNow(250);
   const [first] = useState(() => ({ at: Date.now(), next: status.nextRetryAt }));
@@ -221,6 +324,7 @@ export function ConnStatusCard({ hostId, status, className }: { hostId: string; 
   let body: React.ReactNode = null;
   if (!status || phase === "idle" || phase === "offline") body = <Offline hostId={hostId} status={status ?? { phase: "idle", since: 0, attempt: 0 }} />;
   else if (phase === "authRequired") body = <AuthRequired hostId={hostId} url={status.authUrl} />;
+  else if (phase === "hostKey") body = <HostKey hostId={hostId} info={status.hostKey} />;
   else if (phase === "reconnecting") body = <Reconnecting hostId={hostId} status={status} />;
   else if (phase === "error") body = <Failed hostId={hostId} status={status} />;
   else if (phase !== "online") body = <Stepper phase={phase} message={status.message} />;

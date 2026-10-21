@@ -410,13 +410,19 @@ async fn put_file(
     }
 }
 
-/// `exec` with the payload on stdin: write to a temp file, chmod, rename, then stamp.
-/// `rel` is a fixed relative path made of safe characters (`bin/tf-hostd`).
+/// `exec` with the payload on stdin: write to a temp file, verify its sha256 against `sha`
+/// (a truncated or corrupted upload never replaces the installed file), chmod, rename,
+/// then stamp. `rel` is a fixed relative path made of safe characters (`bin/tf-hostd`).
 pub fn upload_script(home: &str, rel: &str, sha: &str, executable: bool) -> String {
     let dir = rel.rsplit_once('/').map(|(d, _)| format!("/{d}")).unwrap_or_default();
     format!(
-        "set -e\nH={h}\nmkdir -p \"$H{dir}\"\nt=\"$H/{rel}.tmp.$$\"\ncat > \"$t\"\nchmod {mode} \"$t\"\n\
-         mv -f \"$t\" \"$H/{rel}\"\nprintf '%s' {sha} > \"$H/{rel}.sha256\"\n",
+        "set -e\numask 077\nH={h}\nmkdir -p \"$H{dir}\"\nt=\"$H/{rel}.tmp.$$\"\ntrap 'rm -f \"$t\"' EXIT\ncat > \"$t\"\n\
+         if command -v sha256sum >/dev/null 2>&1; then a=$(sha256sum \"$t\")\n\
+         elif command -v shasum >/dev/null 2>&1; then a=$(shasum -a 256 \"$t\")\n\
+         else echo 'neither sha256sum nor shasum is installed on the host' >&2; exit 3; fi\n\
+         a=${{a%% *}}\n\
+         if [ \"$a\" != {sha} ]; then echo \"checksum mismatch for {rel}: got $a, expected \"{sha} >&2; exit 4; fi\n\
+         chmod {mode} \"$t\"\nmv -f \"$t\" \"$H/{rel}\"\nprintf '%s' {sha} > \"$H/{rel}.sha256\"\n",
         h = sh_quote(home),
         mode = if executable { "755" } else { "644" },
         sha = sh_quote(sha),
@@ -507,24 +513,46 @@ mod tests {
         assert!(y.contains("relayUrl: ws://127.0.0.1:47591"));
     }
 
-    #[tokio::test]
-    async fn upload_script_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home with space").to_string_lossy().into_owned();
-        let script = upload_script(&home, "ext/teleflock-bridge.ts", "s1", false);
+    async fn run_upload(home: &str, sha: &str, payload: &[u8]) -> std::process::Output {
+        let script = upload_script(home, "ext/teleflock-bridge.ts", sha, false);
         let mut child = tokio::process::Command::new("sh")
             .args(["-c", &script])
             .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         use tokio::io::AsyncWriteExt;
         let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(b"export default 1;\n").await.unwrap();
+        stdin.write_all(payload).await.unwrap();
         drop(stdin);
-        assert!(child.wait().await.unwrap().success());
+        child.wait_with_output().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_script_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home with space").to_string_lossy().into_owned();
+        let payload = b"export default 1;\n";
+        let sha = sha256_hex(payload);
+        assert!(run_upload(&home, &sha, payload).await.status.success());
         let base = Path::new(&home).join("ext");
         assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts")).unwrap(), "export default 1;\n");
-        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts.sha256")).unwrap(), "s1");
+        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts.sha256")).unwrap(), sha);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700, "umask 077 home");
+            assert_eq!(std::fs::metadata(base.join("teleflock-bridge.ts")).unwrap().permissions().mode() & 0o777, 0o644);
+        }
+
+        // A payload that doesn't hash to the expected sha never replaces the file.
+        let out = run_upload(&home, &sha, b"export default 2;\n").await;
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"), "{out:?}");
+        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts")).unwrap(), "export default 1;\n");
+        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts.sha256")).unwrap(), sha);
+        let leftovers: Vec<_> = std::fs::read_dir(&base).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".tmp.")).collect();
+        assert!(leftovers.is_empty(), "temp file removed");
     }
 
     /// Every embedded binary decompresses to exactly the bytes its stamp describes.

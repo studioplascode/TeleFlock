@@ -804,6 +804,14 @@ methods!(HostMethod, "HostMethods", {
 wire_struct! { pub struct HostRef { pub host_id: String } }
 
 wire_struct! {
+    pub struct TrustKeyParams {
+        pub host_id: String,
+        /// Must equal the `ConnStatus.hostKey.fingerprint` being confirmed.
+        pub fingerprint: String,
+    }
+}
+
+wire_struct! {
     pub struct HostsListResult {
         pub profiles: Vec<HostProfile>,
         pub statuses: Vec<HostStatusEntry>,
@@ -849,6 +857,7 @@ methods!(AppMethod, "AppMethods", {
     "hosts.connect" => HostsConnect(HostRef) -> Empty;
     "hosts.disconnect" => HostsDisconnect(HostRef) -> Empty;
     "hosts.test" => HostsTest(HostProfile) -> DiagReport;
+    "hosts.trustKey" => HostsTrustKey(TrustKeyParams) -> Empty;
     "wsl.distros" => WslDistros(Empty) -> WslDistrosResult;
     "settings.get" => SettingsGet(Empty) -> Settings;
     "settings.set" => SettingsSet(Settings) -> Settings;

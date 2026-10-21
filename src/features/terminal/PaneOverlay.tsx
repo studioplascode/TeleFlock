@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { CloudOff, PlugZap, RotateCcw, Unplug, Zap } from "lucide-react";
+import { CloudOff, Eye, PlugZap, RotateCcw, Unplug, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import type { ConnStatus, TermMode } from "@/core/gen";
 import { Button, Shimmer, Skeleton, Spinner, cn, spring, tween, useNow } from "@/design";
@@ -15,6 +15,8 @@ export interface PaneOverlayProps {
   gotFrame: boolean;
   onReattach(): void;
   onTakeover(): void;
+  /** Switch the pane to read-only observing (offered when another client holds the input lease). */
+  onObserve?: () => void;
 }
 
 /** Human copy for herdr's `terminal.closed` reasons. */
@@ -34,7 +36,7 @@ function RetryIn({ at }: { at: number }) {
 }
 
 /** Attach / reconnect / closed / error states drawn over the terminal grid. */
-export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onReattach, onTakeover }: PaneOverlayProps) {
+export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onReattach, onTakeover, onObserve }: PaneOverlayProps) {
   const attaching = !offline && !gotFrame && (phase.k === "idle" || phase.k === "opening" || phase.k === "live");
   const reattaching = !offline && gotFrame && phase.k === "opening";
 
@@ -89,6 +91,11 @@ export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onR
                   Take over
                 </Button>
               )}
+              {phase.takenOver && mode === "control" && onObserve && (
+                <Button size="sm" variant="ghost" icon={<Eye />} onClick={onObserve}>
+                  Watch
+                </Button>
+              )}
             </>
           }
         >
@@ -114,14 +121,19 @@ export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onR
                   Take over
                 </Button>
               )}
-              <Button size="sm" variant={busy ? "secondary" : "primary"} icon={<RotateCcw />} onClick={onReattach}>
+              {busy && mode === "control" && onObserve && (
+                <Button size="sm" variant="secondary" icon={<Eye />} onClick={onObserve}>
+                  Watch
+                </Button>
+              )}
+              <Button size="sm" variant={busy ? "ghost" : "primary"} icon={<RotateCcw />} onClick={onReattach}>
                 Retry
               </Button>
             </>
           }
         >
-          {busy ? "Taking over moves input and sizing to this device." : phase.error.message}
-          {phase.error.hint && <span className="mt-1 block text-mute-2">{phase.error.hint}</span>}
+          {busy ? "Take over to type and resize from here, or watch read-only." : phase.error.message}
+          {phase.error.hint && !busy && <span className="mt-1 block text-mute-2">{phase.error.hint}</span>}
         </Banner>
       ),
     };

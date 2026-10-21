@@ -44,27 +44,38 @@ pub async fn connect(paths: &Paths) -> io::Result<(BoxRead, BoxWrite)> {
 #[cfg(windows)]
 pub struct Listener {
     name: String,
+    /// Owner-only descriptor applied to every instance (kept alive across instances).
+    sd: crate::secure::PrivateSd,
     next: tokio::net::windows::named_pipe::NamedPipeServer,
 }
 
 #[cfg(windows)]
 impl Listener {
+    /// Creates the first pipe instance (fails if another process, possibly another user, already
+    /// owns the name). DACL: current user + SYSTEM; remote clients rejected.
     pub fn bind(paths: &Paths) -> io::Result<Self> {
         use tokio::net::windows::named_pipe::ServerOptions;
-        let next = ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true).create(&paths.pipe)?;
-        Ok(Self { name: paths.pipe.clone(), next })
+        let sd = crate::secure::PrivateSd::new()?;
+        let next = crate::secure::create_pipe_server(
+            ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true),
+            &paths.pipe,
+            &sd,
+        )?;
+        Ok(Self { name: paths.pipe.clone(), sd, next })
     }
 
     pub async fn accept(&mut self) -> io::Result<(BoxRead, BoxWrite)> {
         use tokio::net::windows::named_pipe::ServerOptions;
         self.next.connect().await?;
-        let fresh = ServerOptions::new().reject_remote_clients(true).create(&self.name)?;
+        let fresh = crate::secure::create_pipe_server(ServerOptions::new().reject_remote_clients(true), &self.name, &self.sd)?;
         let connected = std::mem::replace(&mut self.next, fresh);
         let (r, w) = tokio::io::split(connected);
         Ok((Box::pin(r), Box::pin(w)))
     }
 }
 
+/// Connects to the daemon pipe. Fails with `PermissionDenied` when the pipe's server process runs
+/// as another user (a squatted pipe name).
 #[cfg(windows)]
 pub async fn connect(paths: &Paths) -> io::Result<(BoxRead, BoxWrite)> {
     use tokio::net::windows::named_pipe::ClientOptions;
@@ -73,6 +84,7 @@ pub async fn connect(paths: &Paths) -> io::Result<(BoxRead, BoxWrite)> {
     loop {
         match ClientOptions::new().open(&paths.pipe) {
             Ok(client) => {
+                crate::secure::verify_pipe_server(&client)?;
                 let (r, w) = tokio::io::split(client);
                 return Ok((Box::pin(r), Box::pin(w)));
             }

@@ -309,6 +309,11 @@ fn s03_edit_tool() {
     assert_eq!((f.added, f.removed), (1, 1));
     assert_eq!(f.status, FileStatus::Modified);
     assert!(f.patch.contains("-beta\n+BETA-EDITED\n"), "{}", f.patch);
+    // The session's changed-files list folds every successful edit (relative to the cwd).
+    let files = &r.replica.meta().files;
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].path.ends_with("notes.txt"));
+    assert_eq!((files[0].added, files[0].removed, files[0].status), (1, 1, FileStatus::Modified));
 }
 
 #[test]

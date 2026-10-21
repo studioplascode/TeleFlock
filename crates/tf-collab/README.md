@@ -50,18 +50,33 @@ pub struct ImageContent { pub kind: String /* "image" */, pub data: String /* ba
 
 // ── relay ──────────────────────────────────────────────────────────────
 pub struct RelayConfig { pub bind: IpAddr /*127.0.0.1*/, pub port: u16 /*0 = any*/, pub ping_interval: Duration /*20s*/,
-    pub idle_timeout: Duration /*60s*/, pub max_message: usize /*16 MiB*/, pub max_guests_per_room: usize /*16, 0 = ∞*/ }
+    pub idle_timeout: Duration /*60s*/, pub max_message: usize /*16 MiB*/, pub max_guests_per_room: usize /*16, 0 = ∞*/,
+    pub max_rooms: usize /*256, 0 = ∞*/, pub max_connections: usize /*512, 0 = ∞*/,
+    pub max_queued_bytes: usize /*32 MiB per connection, ≥ max_message*/ }
 impl RelayConfig { pub fn new(port: u16) -> Self }
 pub struct Relay;   // GET /r/<room>?role=host|guest (404 / 426), GET /healthz → {"ok":true,"rooms":N,"guests":M}
+                    // GET /healthz?nonce=<[A-Za-z0-9_-]{1,128}> adds "proof": hex(HMAC-SHA256(secret, nonce))
+                    // Any request with an Origin header → 403 (omp's Bun client and tungstenite send none).
+                    // Over max_connections → 503 before reading the request.
 impl Relay {
     pub async fn start(cfg: RelayConfig) -> std::io::Result<Relay>;
     pub fn local_addr(&self) -> SocketAddr;
     pub fn port(&self) -> u16;
     pub fn url(&self) -> String;                     // "ws://127.0.0.1:<port>" (omp's collab.relayUrl)
+    pub fn identity(&self) -> RelayIdentity;         // per-process random HMAC key
     pub fn stats(&self) -> RelayStats;               // { rooms, guests, frames_h2g, bytes_h2g, frames_g2h, bytes_g2h }
     pub async fn shutdown(self);                     // guests: room-closed + 4001, hosts: 1001
 }
-// Close codes: 4001 room closed, 4004 no such room, 4009 duplicate host, 4029 room full.
+pub struct RelayIdentity;  // Clone
+impl RelayIdentity {
+    pub fn proof(&self, nonce: &str) -> String;
+    pub fn check(&self, nonce: &str, proof: &str) -> bool;   // constant-time
+    pub async fn verify(&self, addr: SocketAddr) -> Result<(), IdentityError>;  // fresh nonce → /healthz
+}
+pub enum IdentityError { Unreachable(String), Foreign(String) }
+// Close codes: 4001 room closed, 4004 no such room, 4009 duplicate host, 4029 room full,
+// 1013 relay room limit, 1008 guest exceeded its queued-bytes budget (host → guest frames are
+// shared `Bytes`; guest → host frames wait for the host's budget instead of being dropped).
 
 // ── registry ───────────────────────────────────────────────────────────
 pub struct HostEntry { pub instance_id: String, pub generation: u64, pub pid: u32, pub session_id: Option<String>,

@@ -1,5 +1,6 @@
 import { useMemo, useRef } from "react";
 import { useColumnKeys, useCore, useHosts, useUi } from "@/core";
+import { cn, useMinWidth } from "@/design";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
 import { HealthTile, LiveTerminalTile, NeedsHeroTile, StatsTile } from "./BentoRow";
 import { BoardToolbar, useRepoNames } from "./BoardToolbar";
@@ -44,6 +45,8 @@ export function BoardView() {
   const moves = useBoard((s) => s.moves);
   const selectedKey = useUi((s) => s.selectedKey);
   const searchRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const roomy = useMinWidth(rootRef, 1130);
 
   const filter = { hostId, repo: repo ?? undefined, q: q.trim() || undefined };
   const running = useColumnKeys("running", filter);
@@ -61,14 +64,15 @@ export function BoardView() {
   useBoardCommands(review, searchRef);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 p-4">
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-3 p-4 [--bento-h:212px] short:gap-2.5 short:p-3 short:[--bento-h:178px]">
       <BoardToolbar searchRef={searchRef} />
       <StaleHosts />
-      <div className="grid shrink-0 grid-cols-[2.05fr_1fr_1fr_1.32fr] gap-3">
+      {/* Under ~1130px of board the live terminal tile steps aside (unmounted) so the hero keeps room. */}
+      <div className={cn("grid shrink-0 gap-3", roomy ? "grid-cols-[2.05fr_1fr_1fr_1.32fr]" : "grid-cols-[1.75fr_1fr_1fr]")}>
         <NeedsHeroTile />
         <StatsTile />
         <HealthTile />
-        <LiveTerminalTile />
+        {roomy && <LiveTerminalTile />}
       </div>
       {groupBy === "repo" ? (
         <RepoBoard repos={shownRepos} filter={{ hostId, q }} selectedKey={selectedKey} />

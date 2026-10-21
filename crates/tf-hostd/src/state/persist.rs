@@ -105,6 +105,10 @@ pub struct Persist {
 
 impl Persist {
     pub fn load(path: PathBuf) -> Arc<Self> {
+        // Saves replace the file owner-only; tighten a file written by an older build now.
+        if let Err(e) = crate::paths::restrict_file(&path) {
+            warn!("restrict {}: {e}", path.display());
+        }
         let data = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<PersistData>(&bytes).unwrap_or_else(|e| {
                 warn!("{}: unreadable ({e}); starting fresh", path.display());
@@ -202,5 +206,22 @@ mod tests {
         let q = Persist::load(path);
         assert_eq!(q.read(|d| d.sessions["lab"].archived["term_1"]), 42);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("state.json");
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let p = Persist::load(path.clone());
+        assert_eq!(mode(&path), 0o600);
+        std::fs::remove_file(&path).unwrap();
+        p.update(|d| d.version = 1);
+        p.save_now();
+        assert_eq!(mode(&path), 0o600);
     }
 }

@@ -8,7 +8,7 @@ The wire between **tf-hostd** (`crates/tf-hostd/src/bridge.rs`) and the omp comp
 | Platform | Endpoint | Notes |
 |---|---|---|
 | Linux / macOS / WSL | `<home>/run/bridge.sock` | Unix socket, mode `0600`, dir `0700`. hostd replaces a stale file on start. |
-| Windows | `\\.\pipe\teleflock-bridge-<USERNAME>` | For a home other than `%USERPROFILE%\.teleflock`: `…-<USERNAME>-<fnv1a32(home) as 8 hex>`. Remote clients rejected. |
+| Windows | `\\.\pipe\teleflock-bridge-<USERNAME>` | For a home other than `%USERPROFILE%\.teleflock`: `…-<USERNAME>-<fnv1a32(home) as 8 hex>`. Remote clients rejected. Every pipe instance carries a protected DACL granting `GENERIC_ALL` to the current user's SID and SYSTEM only. |
 
 The extension resolves `<home>` in this order:
 1. `TF_BRIDGE_SOCK`, which overrides the whole endpoint verbatim.
@@ -21,10 +21,20 @@ The extension resolves `<home>` in this order:
 - Every frame has a string `t` (frame type). Unknown `t` values and unknown fields are ignored by both sides.
 - All keys are camelCase. Enum values are camelCase strings (`planPaused`, `xhigh`, `inPlace`).
 
+### Authentication (`bridge.secret`)
+
+On Windows another local user can create the pipe name before hostd does (the extension cannot check who owns a pipe), so every connection starts with hostd proving it knows a per-start secret. The handshake runs on every platform.
+
+- At every start, before it listens, hostd writes 32 random bytes as **64 lowercase hex characters** (no newline) to `<home>/run/bridge.secret`. The file is replaced atomically (tmp file + rename) and is readable by the current user only: mode `0600` inside the `0700` run dir on unix, a protected DACL (current user + SYSTEM) on Windows.
+- The extension reads the secret from `<home>/run/bridge.secret`, using the same `<home>` resolution as the endpoint. With a unix `TF_BRIDGE_SOCK`, it reads `bridge.secret` next to that socket instead. It reads the file fresh on every connection attempt, because hostd rotates it on restart.
+- hostd's **first frame** on every connection is [`auth`](#auth). The extension sends nothing, not even `hello`, until it has verified that frame. It hex-decodes both values and compares them with `crypto.timingSafeEqual`.
+- On a missing or unreadable file, a malformed or mismatched secret, a first frame that is not `auth`, more than 4 KiB before `auth`, or no `auth` within 5 s, the extension closes the connection, logs to the omp debug log, and retries on the normal 5 s schedule.
+- The Rust clients of the **hostd** pipe (`tf-hostd attach`/`stop`) don't need the secret. After connecting, they check that the pipe's server process (`GetNamedPipeServerProcessId` → process token `TokenUser`) runs as the current user's SID. If it doesn't, they refuse with an error.
+
 ### Connection lifecycle (extension)
 1. On `session_start` the extension starts a 1 s managed ticker (`ctx.setInterval`).
 2. If not connected, it connects when the endpoint exists. After any failure or close it retries **every 5 s**.
-3. On connect it sends `hello` (`reason: "connect"`).
+3. On connect it waits for hostd's `auth` frame and verifies it (see [Authentication](#authentication-bridgesecret)). Only then does it send `hello` (`reason: "connect"`).
 4. Each tick (and right after every request and relevant omp event) it compares the live state with the last one it sent and pushes `state` / `queue_update` deltas.
 5. When the omp session changes inside the same process (`/new`, `/resume`, `/fork`, `branch`), it sends a fresh `hello` with `reason: "switch"` and `previousSessionId`.
 6. On `session_shutdown` it sends `bye` and closes.
@@ -71,6 +81,9 @@ hostd attributes events to the connection's current session (from its last `hell
 `{"t":"bye","sessionId":"…"}`: sent on `session_shutdown`, just before closing.
 
 ## Frames: hostd → extension
+
+### `auth`
+`{"t":"auth","v":1,"secret":"<64 lowercase hex>"}`: always the first frame on a connection, sent before the extension says anything. The extension must verify `secret` against `<home>/run/bridge.secret` before it serves any request or sends `hello`. It does not check `v`.
 
 ### `welcome`
 `{"t":"welcome","v":1,"hostd":"0.1.0"}`: sent after every `hello`. It is informational; the extension ignores it.

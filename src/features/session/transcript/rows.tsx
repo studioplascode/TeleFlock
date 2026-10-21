@@ -93,7 +93,7 @@ function SyntheticTurn({ item }: { item: UserItem }) {
     >
       <span className="flex items-center gap-1.5 font-semibold">
         <Repeat2 className="size-3" />
-        System turn
+        {item.author === "advisor" ? "Advisor note" : "System turn"}
         <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
       </span>
       <span className={cn("mt-0.5 block whitespace-pre-wrap", !open && "line-clamp-1")}>{item.text}</span>
