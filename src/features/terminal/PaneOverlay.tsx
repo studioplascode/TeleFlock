@@ -207,11 +207,12 @@ function Banner({
       )}
     >
       <span className="ov-icon grid size-8 shrink-0 place-items-center rounded-md bg-white/6 [&_svg]:size-4">{icon}</span>
-      <div className="min-w-0 flex-1">
+      {/* min width keeps the copy readable: on narrow panes the actions wrap to their own row */}
+      <div className="min-w-48 flex-1">
         <div className="text-sm font-extrabold text-ink">{title}</div>
         {children && <div className="text-xs text-mute">{children}</div>}
       </div>
-      {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+      {actions && <div className="ml-auto flex flex-wrap justify-end gap-2">{actions}</div>}
     </motion.div>
   );
 }

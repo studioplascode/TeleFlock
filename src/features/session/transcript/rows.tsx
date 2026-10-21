@@ -1,7 +1,7 @@
 import { AlertTriangle, Brain, ChevronDown, CircleAlert, CornerDownRight, Info, Layers, Repeat2, Sparkles } from "lucide-react";
 import { memo, useState } from "react";
-import { useSessionItem } from "@/core";
-import type { AssistantItem, CompactionItem, ModeItem, NoticeItem, ThinkingItem, TranscriptItem, UserItem } from "@/core/gen";
+import { useCore, useSessionItem } from "@/core";
+import type { AssistantItem, CompactionItem, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
 import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, LogoMark, Shimmer, Tooltip } from "@/design";
 import { Markdown } from "../markdown/Markdown";
 import { imageSrc, ToolCard } from "../tools/ToolCard";
@@ -9,12 +9,47 @@ import { imageSrc, ToolCard } from "../tools/ToolCard";
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 const clock = (at: number) => timeFmt.format(at);
 
-/** Row bound to the store: re-renders only when this item changes (per-row subscription). */
-export const Row = memo(function Row({ agentKey, itemId }: { agentKey: string; itemId: string }) {
+export interface RowProps {
+  agentKey: string;
+  itemId: string;
+  /** Neighbours, so runs of tool calls draw one connected timeline in the gutter. */
+  prevId?: string;
+  nextId?: string;
+  /** Draw the gutter timeline (off when there is no gutter, e.g. phones). */
+  rail?: boolean;
+}
+
+/** Row bound to the store: re-renders only when this item (or a neighbour's kind) changes. */
+export const Row = memo(function Row({ agentKey, itemId, prevId, nextId, rail = false }: RowProps) {
   const item = useSessionItem(agentKey, itemId);
+  // Booleans only, so a neighbour streaming output never re-renders this row.
+  const prevTool = useCore((s) => rail && prevId != null && s.sessions[agentKey]?.items[prevId]?.kind === "tool");
+  const nextTool = useCore((s) => rail && nextId != null && s.sessions[agentKey]?.items[nextId]?.kind === "tool");
   if (!item) return null;
+  if (rail && item.kind === "tool") return <ToolRow item={item} up={prevTool} down={nextTool} />;
   return <ItemView item={item} />;
 });
+
+const RAIL_DOT: Record<ToolItem["status"], string> = {
+  pending: "bg-accent shadow-[0_0_8px_rgb(163_92_240/0.9)] tf-loop animate-breathe [--tf-breath:1.4s]",
+  running: "bg-accent shadow-[0_0_8px_rgb(163_92_240/0.9)] tf-loop animate-breathe [--tf-breath:1.4s]",
+  ok: "bg-mute-2/70",
+  error: "bg-error shadow-[0_0_8px_rgb(255_77_94/0.7)]",
+  denied: "bg-sun-2",
+  aborted: "bg-mute-2/40",
+};
+
+/** Tool call with its node on the turn's timeline: consecutive calls read as one connected run. */
+function ToolRow({ item, up, down }: { item: ToolItem; up: boolean; down: boolean }) {
+  return (
+    <div className="relative pl-[var(--tf-gutter,38px)]">
+      {up && <span aria-hidden className="absolute -top-3 left-[13.5px] h-[calc(0.75rem+15px)] w-px bg-line-2" />}
+      {down && <span aria-hidden className="absolute top-[23px] -bottom-3 left-[13.5px] w-px bg-line-2" />}
+      <span aria-hidden className={cn("absolute top-[15.5px] left-[10.5px] size-[7px] rounded-full transition-colors duration-500", RAIL_DOT[item.status])} />
+      <ToolCard item={item} />
+    </div>
+  );
+}
 
 /** Pure renderer for one transcript item (also used for subagent transcripts). */
 export function ItemView({ item }: { item: TranscriptItem }) {

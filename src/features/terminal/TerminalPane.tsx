@@ -887,7 +887,10 @@ export function TerminalPane({
           onKey={onExtraKey}
           onSetMod={onSetMod}
           onPaste={() => void paste()}
-          className="shrink-0 border-t border-line bg-[linear-gradient(180deg,var(--color-tile-1),var(--color-chrome))]"
+          className={cn(
+            "shrink-0 border-t border-line bg-[linear-gradient(180deg,var(--color-tile-1),var(--color-chrome))] transition-opacity duration-300",
+            !live && "pointer-events-none opacity-45",
+          )}
         />
       )}
       {/* keyboard focus: typing goes to this pane */}

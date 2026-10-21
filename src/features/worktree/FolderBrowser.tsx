@@ -555,12 +555,10 @@ function FolderRow({ id, index, row, active, selected, mode, homePath, onHover, 
             <span className="truncate">{row.git.branch}</span>
           </Chip>
         )}
+        {/* fs.list badges carry no dirty count (hostd never runs git while browsing): branch only then. */}
         {repo &&
-          (row.git?.dirty === undefined ? (
-            <span className="text-2xs font-bold text-mute-2" title="Change count not available (status check timed out)">
-              …
-            </span>
-          ) : row.git.dirty > 0 ? (
+          row.git?.dirty !== undefined &&
+          (row.git.dirty > 0 ? (
             <span className="inline-flex items-center gap-1 text-2xs font-bold text-warn" title={`${row.git.dirty} changed files`}>
               <span className="size-1.5 rounded-full bg-warn" />
               {row.git.dirty}

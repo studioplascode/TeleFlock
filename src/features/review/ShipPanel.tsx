@@ -168,7 +168,7 @@ function StageNode({ index, stage, blocked, size = 28 }: { index: number; stage:
 /** Horizontal pipeline with labels; connectors fill as stages complete. `dots` drops the labels. */
 export function ShipStepper({ stage, blocked, dots = false }: { stage: number; blocked: boolean; dots?: boolean }) {
   return (
-    <ol className="grid grid-cols-5" aria-label="Ship progress">
+    <ol className="grid grid-cols-5 pt-1.5" aria-label="Ship progress">
       {SHIP_STAGES.map((s, i) => {
         const done = i < stage || (i === 4 && stage === 4);
         return (

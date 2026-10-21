@@ -628,40 +628,54 @@ pub(crate) async fn merge_base(cwd: &Path, a: &str, b: &str) -> Option<String> {
     o.ok().then(|| o.line()).filter(|s| !s.is_empty())
 }
 
-/// Reads the branch of a checkout straight from `.git/HEAD` (no process). `dot_git` is
-/// the `.git` entry of the work tree (directory, or a `gitdir:` file for linked worktrees).
+/// Reads the branch of a checkout straight from `HEAD` (no process): `ref: refs/heads/<b>`
+/// gives `<b>`, a detached HEAD gives the short sha. `dot_git` is the `.git` entry of the work
+/// tree (directory, or a `gitdir:` file for linked worktrees). `None` if it is not a git dir.
 pub(crate) fn read_head_branch(dot_git: &Path) -> Option<String> {
     let gitdir = if dot_git.is_dir() {
         dot_git.to_path_buf()
     } else {
-        let content = std::fs::read_to_string(dot_git).ok()?;
+        let content = read_capped(dot_git)?;
         let rel = content.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim().to_string();
         let p = PathBuf::from(&rel);
         if p.is_absolute() { p } else { dot_git.parent()?.join(p) }
     };
-    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = read_capped(&gitdir.join("HEAD"))?;
     let head = head.trim();
-    match head.strip_prefix("ref: ") {
-        Some(r) => Some(r.strip_prefix("refs/heads/").unwrap_or(r).to_string()),
-        None => Some(head.chars().take(7).collect()),
+    match head.strip_prefix("ref:") {
+        Some(r) => {
+            let r = r.trim();
+            Some(r.strip_prefix("refs/heads/").unwrap_or(r).to_string()).filter(|b| !b.is_empty())
+        }
+        None if head.len() >= 7 && head.bytes().all(|b| b.is_ascii_hexdigit()) => Some(head[..7].to_string()),
+        None => None,
     }
 }
 
+/// First 4 KiB of a small metadata file (`HEAD`, `gitdir:` files) as UTF-8.
+fn read_capped(p: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(p).ok()?.take(4096).read_to_end(&mut buf).ok()?;
+    String::from_utf8(buf).ok()
+}
+
 /// Number of changed files (staged + unstaged + untracked) or `None` on error/timeout.
+/// Runs `git status`: only for registered workspaces and explicit user actions, never for
+/// folders the user is merely browsing.
 pub(crate) async fn dirty_count(cwd: &Path, timeout: Duration) -> Option<u32> {
     let o = git(cwd, &["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=dirty"], timeout).await.ok()?;
     o.ok().then(|| count_porcelain_v1_z(&o.stdout))
 }
 
-/// Cheap badge for a directory that has a `.git` entry (directory listing): branch from
-/// `.git/HEAD` (no process); dirty count only while `dirty_budget` lasts.
-pub(crate) async fn badge_for_dir(dir: &Path, dirty_budget: Duration) -> Option<GitBadge> {
+/// Badge for a directory that has a `.git` entry, computed from the filesystem only (never
+/// spawns git: browsed repositories are untrusted and their config can name programs).
+/// `dirty` is always `None`.
+pub(crate) fn badge_for_dir(dir: &Path) -> Option<GitBadge> {
     let dot_git = dir.join(".git");
     let meta = std::fs::symlink_metadata(&dot_git).ok()?;
-    let worktree = meta.is_file();
-    let branch = read_head_branch(&dot_git);
-    let dirty = if dirty_budget.is_zero() { None } else { dirty_count(dir, dirty_budget).await };
-    Some(GitBadge { repo_root: true, worktree, branch, dirty })
+    let branch = read_head_branch(&dot_git)?;
+    Some(GitBadge { repo_root: true, worktree: meta.is_file(), branch: Some(branch), dirty: None })
 }
 
 /// Repository facts for a workspace cwd (used by the state store for workspace badges).
@@ -1175,13 +1189,21 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         let info = repo_info(&wt).await.unwrap();
         assert_eq!(Path::new(&info.root), td.path().canonicalize().unwrap());
         assert_eq!(info.branch.as_deref(), Some("other"));
-        let badge = badge_for_dir(&wt, Duration::from_secs(5)).await.unwrap();
+        let badge = badge_for_dir(&wt).unwrap();
         assert!(badge.worktree && badge.repo_root);
         assert_eq!(badge.branch.as_deref(), Some("other"));
-        assert_eq!(badge.dirty, Some(0));
-        let main_badge = badge_for_dir(td.path(), Duration::from_secs(5)).await.unwrap();
+        assert_eq!(badge.dirty, None);
+        let main_badge = badge_for_dir(td.path()).unwrap();
         assert_eq!(main_badge.branch.as_deref(), Some("feat"));
-        assert!(main_badge.dirty.unwrap() >= 4);
+        assert_eq!(main_badge.dirty, None);
+        // detached HEAD → short sha; a `.git` without HEAD is not a repo
+        sh(&wt, &["checkout", "-q", "--detach"]);
+        assert_eq!(badge_for_dir(&wt).unwrap().branch.map(|b| b.len()), Some(7));
+        let fake = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fake.path().join(".git")).unwrap();
+        assert!(badge_for_dir(fake.path()).is_none());
+        // dirty counts stay available for explicit actions / registered workspaces
+        assert!(dirty_count(td.path(), Duration::from_secs(5)).await.unwrap() >= 4);
     }
 
     #[test]
@@ -1243,7 +1265,8 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
             .unwrap();
         let badge = listing.entries.iter().find(|e| e.name == "repo").and_then(|e| e.git.clone()).unwrap();
         assert_eq!(badge.branch.as_deref(), Some("feat"));
-        assert!(badge_for_dir(&repo, Duration::from_secs(5)).await.unwrap().dirty.is_some());
+        assert_eq!(badge.dirty, None);
+        assert!(dirty_count(&repo, Duration::from_secs(5)).await.is_some());
         let st = status(&repo).await.unwrap();
         assert!(st.files.iter().any(|f| f.path == "a.txt"));
         let d = diff(&GitDiffParams { cwd: repo.display().to_string(), base: None, path: None, context: None }).await.unwrap();

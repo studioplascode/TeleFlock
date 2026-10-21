@@ -19,10 +19,9 @@ use crate::ops::{to_value, Ctx};
 
 /// Entries returned by one `fs.list` (huge directories are cut, dirs first).
 const LIST_CAP: usize = 5000;
-/// Total wall-clock budget for the dirty counts of all repos in one listing.
-const BADGE_BUDGET: Duration = Duration::from_millis(1500);
-/// Concurrent `git status` runs for badges.
-const BADGE_CONCURRENCY: usize = 8;
+// Badges in `fs.list` never run git: the folder browser reaches untrusted repositories whose
+// config can name programs (filter drivers, fsmonitor, …). Dirty counts come from explicit
+// git actions and registered workspaces only.
 const READ_DEFAULT: u64 = 512 * 1024;
 const READ_MAX: u64 = 8 * 1024 * 1024;
 const SEARCH_DEFAULT: usize = 50;
@@ -116,45 +115,16 @@ pub async fn list(p: &FsListParams) -> Result<FsListing, ApiError> {
     let dir = resolve_path(&p.path)?;
     let show_hidden = p.hidden;
     let dir2 = dir.clone();
-    let mut entries = tokio::task::spawn_blocking(move || read_dir_sorted(&dir2, show_hidden))
-        .await
-        .map_err(|e| ApiError::new("internal", e.to_string()))??;
-
-    // Badges: every directory entry that has a `.git` (no process for branch; dirty
-    // counts run concurrently under one deadline).
-    let deadline = Instant::now() + BADGE_BUDGET;
-    let sem = Arc::new(tokio::sync::Semaphore::new(BADGE_CONCURRENCY));
-    let mut jobs = tokio::task::JoinSet::new();
-    for (idx, e) in entries.iter().enumerate() {
-        if e.kind == FsKind::Dir && Path::new(&e.path).join(".git").exists() {
-            let path = PathBuf::from(&e.path);
-            let sem = sem.clone();
-            jobs.spawn(async move {
-                let _permit = sem.acquire_owned().await;
-                let left = deadline.saturating_duration_since(Instant::now());
-                (idx, git::badge_for_dir(&path, left).await)
-            });
+    let (entries, self_badge) = tokio::task::spawn_blocking(move || {
+        let mut entries = read_dir_sorted(&dir2, show_hidden)?;
+        for e in entries.iter_mut().filter(|e| e.kind == FsKind::Dir) {
+            e.git = git::badge_for_dir(Path::new(&e.path));
         }
-    }
-    let self_badge = async {
-        if dir.join(".git").exists() {
-            git::badge_for_dir(&dir, BADGE_BUDGET).await
-        } else {
-            enclosing_badge(&dir).await
-        }
-    };
-    let (self_badge, results) = tokio::join!(self_badge, async {
-        let mut v = Vec::new();
-        while let Some(r) = jobs.join_next().await {
-            if let Ok(r) = r {
-                v.push(r);
-            }
-        }
-        v
-    });
-    for (idx, badge) in results {
-        entries[idx].git = badge;
-    }
+        let own = git::badge_for_dir(&dir2).or_else(|| enclosing_badge(&dir2));
+        Ok::<_, ApiError>((entries, own))
+    })
+    .await
+    .map_err(|e| ApiError::new("internal", e.to_string()))??;
     Ok(FsListing {
         parent: dir.parent().map(|p| p.display().to_string()),
         path: dir.display().to_string(),
@@ -163,18 +133,11 @@ pub async fn list(p: &FsListParams) -> Result<FsListing, ApiError> {
     })
 }
 
-/// Badge for a directory *inside* a repository (not its root).
-async fn enclosing_badge(dir: &Path) -> Option<GitBadge> {
-    let o = git::git(dir, &["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"], Duration::from_secs(3)).await.ok()?;
-    if !o.ok() {
-        return None;
-    }
-    let s = o.stdout_str();
-    let mut lines = s.lines();
-    let top = PathBuf::from(lines.next()?);
-    let branch = lines.next().map(str::to_string).filter(|b| b != "HEAD");
-    let worktree = std::fs::symlink_metadata(top.join(".git")).map(|m| m.is_file()).unwrap_or(false);
-    Some(GitBadge { repo_root: false, worktree, branch, dirty: None })
+/// Badge for a directory *inside* a repository (not its root): the nearest ancestor with a
+/// `.git`, read without running git.
+fn enclosing_badge(dir: &Path) -> Option<GitBadge> {
+    let top = dir.ancestors().skip(1).find(|a| std::fs::symlink_metadata(a.join(".git")).is_ok())?;
+    git::badge_for_dir(top).map(|b| GitBadge { repo_root: false, ..b })
 }
 
 fn read_dir_sorted(dir: &Path, show_hidden: bool) -> Result<Vec<FsEntry>, ApiError> {
@@ -529,7 +492,7 @@ mod tests {
         let badge = l.git.unwrap();
         assert!(badge.repo_root);
         assert_eq!(badge.branch.as_deref(), Some("feat"));
-        assert!(badge.dirty.unwrap() >= 4);
+        assert_eq!(badge.dirty, None, "browsing never runs git status");
         let l2 = list(&FsListParams { path: parent.display().to_string(), hidden: true }).await.unwrap();
         assert!(l2.entries.iter().any(|e| e.name == ".hiddendir" && e.hidden));
         // Entry badge from the parent dir's view.
@@ -540,6 +503,40 @@ mod tests {
         let sub = list(&FsListParams { path: parent.join("Zdir").display().to_string(), hidden: false }).await.unwrap();
         assert_eq!(sub.git.map(|g| (g.repo_root, g.branch)), Some((false, Some("feat".into()))));
         assert_eq!(list(&FsListParams { path: "/definitely/not/here".into(), hidden: false }).await.unwrap_err().code, "not_found");
+    }
+
+    /// A browsed repository whose config names a filter driver must not get it executed:
+    /// `fs.list` reads `.git` from the filesystem only.
+    #[tokio::test]
+    async fn list_never_runs_repo_programs() {
+        use crate::ops::git::tests::sh;
+        let outer = tempfile::tempdir().unwrap();
+        let repo = outer.path().join("hostile");
+        std::fs::create_dir(&repo).unwrap();
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        let marker = outer.path().join("pwned");
+        let cmd = format!("touch '{}'; cat", marker.display());
+        sh(&repo, &["config", "filter.x.clean", &cmd]);
+        sh(&repo, &["config", "core.fsmonitor", &format!("touch '{}' #", marker.display())]);
+        std::fs::write(repo.join(".gitattributes"), "* filter=x\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::create_dir(repo.join("sub")).unwrap();
+
+        let up = list(&FsListParams { path: outer.path().display().to_string(), hidden: true }).await.unwrap();
+        let badge = up.entries.iter().find(|e| e.name == "hostile").and_then(|e| e.git.clone()).unwrap();
+        assert_eq!((badge.branch.as_deref(), badge.dirty), (Some("main"), None));
+        let own = list(&FsListParams { path: repo.display().to_string(), hidden: true }).await.unwrap();
+        assert_eq!(own.git.map(|g| g.repo_root), Some(true));
+        let sub = list(&FsListParams { path: repo.join("sub").display().to_string(), hidden: true }).await.unwrap();
+        assert_eq!(sub.git.map(|g| (g.repo_root, g.branch)), Some((false, Some("main".into()))));
+        assert!(!marker.exists(), "fs.list executed a program from the browsed repo's config");
+
+        // Sanity: the fixture is live: a real `git status` (explicit action) runs the filter.
+        crate::ops::git::dirty_count(&repo, Duration::from_secs(10)).await;
+        assert!(marker.exists(), "fixture filter should fire under git status");
     }
 
     #[tokio::test]

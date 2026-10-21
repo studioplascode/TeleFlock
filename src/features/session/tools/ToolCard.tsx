@@ -214,7 +214,7 @@ function summary(item: ToolItem): ReactNode {
       );
     }
     case "web":
-      return <span>{v.sources.length} sources</span>;
+      return <span>{v.sources.length} source{v.sources.length === 1 ? "" : "s"}</span>;
     default:
       return null;
   }

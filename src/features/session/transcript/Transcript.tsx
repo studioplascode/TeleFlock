@@ -191,7 +191,7 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
                     className="absolute top-0 left-0 w-full [contain:layout_style]"
                     style={{ transform: `translateY(${v.start}px)` }}
                   >
-                    <Row agentKey={agentKey} itemId={id} />
+                    <Row agentKey={agentKey} itemId={id} prevId={ids[v.index - 1]} nextId={ids[v.index + 1]} rail={gutter > 0} />
                   </div>
                 );
               })}

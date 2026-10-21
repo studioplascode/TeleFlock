@@ -927,8 +927,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn bind_failure_is_a_setup_issue() {
-        let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = squatter.local_addr().unwrap().port();
+        // A port below Linux's ephemeral range (32768–60999): parallel tests that bind
+        // `127.0.0.1:0` can never be handed it after the squatter frees it.
+        let (squatter, port) = (20_000 + (std::process::id() % 10_000) as u16..32_000)
+            .find_map(|p| std::net::TcpListener::bind(("127.0.0.1", p)).ok().map(|l| (l, p)))
+            .expect("a free non-ephemeral port");
         let dir = std::env::temp_dir().join(format!("tf-hostd-relay-bind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let persist = Persist::load(dir.join("state.json"));
@@ -944,9 +947,19 @@ mod tests {
         assert!(!issue.fixable);
         assert!(issue.detail.contains(&format!("127.0.0.1:{port}")) && issue.detail.contains("another process"), "{}", issue.detail);
 
-        // Port freed → the next attempt binds and the issue clears.
+        // Port freed → the next attempt binds and the issue clears. Parallel tests that
+        // fork children (git, gh, …) can hold a duplicate of the squatter's fd for the
+        // instant between fork and exec, so allow a few attempts.
         drop(squatter);
-        assert!(omp.try_start_relay().await);
+        let started = std::time::Instant::now();
+        let mut bound = false;
+        while !bound && started.elapsed() < Duration::from_secs(3) {
+            bound = omp.try_start_relay().await;
+            if !bound {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        assert!(bound, "rebind failed for 3 s: {:?}", omp.relay_issue());
         assert!(omp.relay_listening());
         assert_eq!(omp.relay_issue(), None);
         omp.shutdown().await;

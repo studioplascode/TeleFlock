@@ -22,9 +22,11 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`. Binaries are found on `PATH`, then `~/.local/bin`,
   `~/.bun/bin`, … (non-login SSH execs lack them).
 - **fs.list**: dirs first (symlinked dirs count as dirs), case-insensitive, hidden filter (dotfiles;
-  Windows hidden attribute), ≤ 5000 entries. Badges for entries with `.git`: branch read from
-  `.git/HEAD` (no process), dirty count via `git status` under a shared 1.5 s budget (`dirty`
-  absent when it ran out). The listing's own `git` badge also covers sub-folders of a repo.
+  Windows hidden attribute), ≤ 5000 entries. **Never runs git** (browsed repos are untrusted; their
+  config can name filter drivers). Badges come from the filesystem only: `.git` dir or `gitdir:`
+  file → `repoRoot`/`worktree`, branch from `HEAD` (detached → short sha), `dirty` always absent.
+  The listing's own `git` badge also covers sub-folders of a repo (nearest ancestor `.git`).
+  Dirty counts come from `worktree.list`, `git.status` and registered workspaces' `RepoInfo`.
 - **fs.search**: `git ls-files -co --exclude-standard`, else a capped walk (skips dotdirs,
   `node_modules`, `target`, …); candidates cached 15 s per root; fzf-style ranking (segment and
   camel boundaries, consecutive runs, basename bonus). Paths are relative to `root`.

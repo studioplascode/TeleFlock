@@ -18,6 +18,7 @@ export function TerminalPane(props: {
   onOpened?: (opened: TermOpened | null) => void; // termId/paneId once open; null on close
   onPhase?: (phase: TermPhase) => void; // idle | opening | live | closed(reason) | error(ApiError)
   handleRef?: Ref<TerminalHandle>;
+  onModeChange?: (mode: TermMode) => void; // enables "Watch" on the busy/taken-over banner and "Take control" on the observe ribbon
 }): JSX.Element;
 
 export interface TerminalHandle {
@@ -40,8 +41,17 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 
 ## Behaviour notes
 - `scrollback: 0`; wheel / PageUp / PageDown → `term.scroll` (herdr host scrollback; `docs/research/herdr.md` §6).
-- `closed` events show a banner with the reason and **Reattach** / **Take over** actions.
+- `closed` events show a banner with the reason and **Reattach** / **Take over** (+ **Watch** with `onModeChange`) actions;
+  a busy lease offers **Take over** / **Watch** / **Retry**.
 - Reopens automatically when the host goes back to `online`.
 - Font size comes from `useSettings().terminalFontSize`; pinch-zoom (mobile) and Ctrl +/−/0 (desktop) persist it.
 - Renderer: WebGL by default; the context menu switches to xterm's DOM renderer (per device, `localStorage["tf.terminal.renderer"]`). Board tiles (`compact`) always use the DOM renderer.
 - Keys inside the terminal go to the pane, except Ctrl+K, Ctrl+1…6 and Ctrl+Shift+(not C/V), which bubble to the app shell.
+- Mode is always visible: control = purple liveness, observe = cyan liveness + a "Read-only" ribbon (it replaces the
+  mobile extra keys). The status chip collapses to its orb while live and re-expands on every state change / hover.
+- Keyboard focus draws an inset accent ring; the frame flash is skipped with reduced motion.
+- `localhost:PORT` links in the output are clickable: they open a preview tunnel (`@/features/preview` store), then the
+  browser (desktop) or the in-app preview sheet (mobile).
+- Mobile extra keys: Esc/Ctrl/Alt pinned, the rest scrolls with edge fades; Ctrl/Alt tap = next key, double-tap or
+  long-press = lock (haptic tick/select/heavy). Dimmed while detached.
+- TerminalView shortcuts: Ctrl+Shift+M mode, Ctrl+Shift+T new shell, Ctrl+Shift+[ / ] previous/next pane, ←/→ in the pane tabs.

@@ -330,9 +330,10 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
     />
   );
 
+  // Detected dev servers. Mobile shows the newest one in the tab row, so a URL never resizes the pane.
   const detected = (
     <AnimatePresence initial={false}>
-      {urls.map((u) => (
+      {(isMobile ? urls.slice(0, 1) : urls).map((u) => (
         <motion.div
           key={u.port}
           layout
@@ -340,7 +341,7 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.8 }}
           transition={spring.bouncy}
-          className="max-w-52 shrink-0"
+          className={cn("shrink-0", isMobile ? "max-w-32" : "max-w-52")}
         >
           <PreviewButton hostId={hostId} port={u.port} label={urlLabel(u.url, u.port)} />
         </motion.div>
@@ -380,9 +381,9 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
         />
         <div className="flex shrink-0 items-center gap-1 pr-2 pb-1.5 pl-2">
           <div className="min-w-0 flex-1">{tabs}</div>
+          {detected}
           <PreviewsMenu mobile />
         </div>
-        {urls.length > 0 && <div className="flex shrink-0 gap-2 overflow-x-auto px-3 pb-1.5 [scrollbar-width:none]">{detected}</div>}
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <div aria-hidden className={cn("absolute inset-x-0 top-0 z-raised h-[2px] transition-colors duration-500", edge)} />
           {pane}
