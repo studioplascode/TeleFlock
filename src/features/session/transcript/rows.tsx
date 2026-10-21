@@ -1,10 +1,20 @@
 import { AlertTriangle, Brain, ChevronDown, CircleAlert, CornerDownRight, Info, Layers, Repeat2, Sparkles } from "lucide-react";
 import { memo, useState } from "react";
-import { useCore, useSessionItem, useSettings } from "@/core";
+import { ircOf, useCore, useSessionItem, useSettings } from "@/core";
 import type { AssistantItem, CompactionItem, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
 import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, LogoMark, Shimmer, Tooltip } from "@/design";
+import { IrcBubble } from "../irc/IrcBubble";
 import { Markdown } from "../markdown/Markdown";
 import { imageSrc, ToolCard } from "../tools/ToolCard";
+
+/** `in:<peer>` / `out:<peer>` for IRC rows (consecutive rows with the same key group), else null. */
+export function ircThreadKey(item: TranscriptItem | undefined): string | null {
+  const m = ircOf(item)?.message;
+  return m ? `${m.direction}:${m.peer}` : null;
+}
+
+/** A tool call on the gutter timeline (IRC sends render as chat bubbles instead). */
+export const isRailTool = (item: TranscriptItem | undefined) => item?.kind === "tool" && item.view?.type !== "irc";
 
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 const clock = (at: number) => timeFmt.format(at);
@@ -22,11 +32,39 @@ export interface RowProps {
 /** Row bound to the store: re-renders only when this item (or a neighbour's kind) changes. */
 export const Row = memo(function Row({ agentKey, itemId, prevId, nextId, rail = false }: RowProps) {
   const item = useSessionItem(agentKey, itemId);
-  // Booleans only, so a neighbour streaming output never re-renders this row.
-  const prevTool = useCore((s) => rail && prevId != null && s.sessions[agentKey]?.items[prevId]?.kind === "tool");
-  const nextTool = useCore((s) => rail && nextId != null && s.sessions[agentKey]?.items[nextId]?.kind === "tool");
+  // Booleans / short keys only, so a neighbour streaming output never re-renders this row.
+  const prevTool = useCore((s) => rail && prevId != null && isRailTool(s.sessions[agentKey]?.items[prevId]));
+  const nextTool = useCore((s) => rail && nextId != null && isRailTool(s.sessions[agentKey]?.items[nextId]));
+  const prevIrc = useCore((s) => (prevId != null ? ircThreadKey(s.sessions[agentKey]?.items[prevId]) : null));
+  const nextIrc = useCore((s) => (nextId != null ? ircThreadKey(s.sessions[agentKey]?.items[nextId]) : null));
   if (!item) return null;
-  if (rail && item.kind === "tool") return <ToolRow item={item} up={prevTool} down={nextTool} />;
+  const irc = ircThreadKey(item);
+  return <ItemRow item={item} rail={rail} up={prevTool} down={nextTool} ircPrev={irc != null && prevIrc === irc} ircNext={irc != null && nextIrc === irc} />;
+});
+
+/**
+ * Same row as `Row` for items held outside the store (subagent transcripts). `up`/`down`: the
+ * neighbouring rows are tool calls (joins the gutter timeline when `rail`). `ircPrev`/`ircNext`:
+ * the neighbouring rows continue this IRC conversation (same peer and direction).
+ */
+export const ItemRow = memo(function ItemRow({
+  item,
+  rail = false,
+  up = false,
+  down = false,
+  ircPrev = false,
+  ircNext = false,
+}: {
+  item: TranscriptItem;
+  rail?: boolean;
+  up?: boolean;
+  down?: boolean;
+  ircPrev?: boolean;
+  ircNext?: boolean;
+}) {
+  const irc = ircOf(item);
+  if (irc) return <IrcBubble entry={irc} withPrev={ircPrev} withNext={ircNext} />;
+  if (rail && item.kind === "tool") return <ToolRow item={item} up={up} down={down} />;
   return <ItemView item={item} />;
 });
 
@@ -51,8 +89,8 @@ function ToolRow({ item, up, down }: { item: ToolItem; up: boolean; down: boolea
   );
 }
 
-/** Pure renderer for one transcript item (also used for subagent transcripts). */
-export function ItemView({ item }: { item: TranscriptItem }) {
+/** Pure renderer for one transcript item. */
+function ItemView({ item }: { item: TranscriptItem }) {
   switch (item.kind) {
     case "user":
       return <UserRow item={item} />;
@@ -72,6 +110,10 @@ export function ItemView({ item }: { item: TranscriptItem }) {
       return <CompactionRow item={item} />;
     case "mode":
       return <ModeRow item={item} />;
+    case "irc": {
+      const irc = ircOf(item);
+      return irc && <IrcBubble entry={irc} />;
+    }
   }
 }
 
@@ -95,7 +137,7 @@ function UserRow({ item }: { item: UserItem }) {
     );
   }
   return (
-    <div className="flex flex-col items-end gap-1 pt-2">
+    <div className="flex flex-col items-end gap-1 pt-2 max-md:gap-0.5 max-md:pt-0.5">
       <div className="flex items-center gap-2 pr-1 text-[11px] font-bold text-mute-2">
         {item.steering && (
           <span className="flex items-center gap-1 rounded-full bg-accent/14 px-2 py-0.5 text-[10px] tracking-wider text-accent-hi uppercase" title="Sent while the agent was working">
@@ -108,7 +150,7 @@ function UserRow({ item }: { item: UserItem }) {
       </div>
       <div
         className={cn(
-          "max-w-[min(720px,88%)] rounded-[20px] rounded-tr-[8px] px-4 py-2.5 text-[13.5px] leading-[1.55] whitespace-pre-wrap text-ink [overflow-wrap:anywhere]",
+          "max-w-[min(720px,88%)] rounded-[20px] rounded-tr-[8px] px-4 py-2.5 text-[13.5px] leading-[1.55] whitespace-pre-wrap text-ink [overflow-wrap:anywhere] max-md:max-w-[92%] max-md:rounded-[18px] max-md:rounded-tr-[6px] max-md:px-3.5 max-md:py-2",
           item.steering
             ? "bg-[linear-gradient(135deg,rgb(163_92_240/0.24),rgb(79_139_255/0.16))] shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]"
             : "bg-tile-4 shadow-[inset_0_1px_0_rgb(255_255_255/0.06),var(--shadow-d1)]",
@@ -150,7 +192,7 @@ function SyntheticTurn({ item }: { item: UserItem }) {
 function AssistantRow({ item }: { item: AssistantItem }) {
   const stopped = item.stopReason && !/^(stop|end_turn|endTurn|toolUse|tool_use|length)$/.test(item.stopReason);
   return (
-    <div className="flex gap-2.5 pt-1">
+    <div className="flex gap-2.5 pt-1 max-md:pt-0">
       <span
         className={cn(
           "grid size-7 shrink-0 place-items-center rounded-[10px] bg-run shadow-[0_4px_14px_-4px_rgb(91_103_246/0.7)]",

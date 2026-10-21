@@ -1,0 +1,29 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "TeleFlock",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 420,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true,
+        "decorations": false,
+        "transparent": false,
+        "backgroundColor": "#0b0b10"
+      }
+    ]
+  },
+  "bundle": {
+    "linux": {
+      "deb": {
+        "section": "devel",
+        "depends": ["libayatana-appindicator3-1"],
+        "desktopTemplate": "linux/teleflock.desktop"
+      }
+    }
+  }
+}

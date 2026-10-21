@@ -1,0 +1,63 @@
+{
+  "name": "18b-irc-incoming",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the task tool to spawn exactly one subagent named Pinger with this assignment: run the bash command `sleep 25`, then send your parent the message `ping from Pinger: what is 3+3?` by writing it to agent://Main, then finish by replying with the single word sent. Do not wait for Pinger and do not call wait: right after spawning it, end your turn by replying spawned. Later, when an IRC message from Pinger arrives, answer it by writing `pong from Main: 6` to agent://Pinger and then reply ok."
+  },
+  "sentAt": 1792576881036,
+  "latencyMsFromSend": {
+    "firstFrame": 12,
+    "first_agent_start": 12,
+    "first_turn_start": 40,
+    "first_message_start": 40,
+    "first_message_end": 40,
+    "first_entry": 40,
+    "first_state": 111,
+    "first_message_update": 3821,
+    "firstAssistantUpdate": 3821,
+    "first_tool_execution_start": 5114,
+    "first_tool_execution_update": 5121,
+    "first_tool_execution_end": 5125,
+    "first_turn_end": 5197,
+    "first_bus": 5240,
+    "first_agents": 5317,
+    "first_agent_end": 8539
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 3,
+    "event:turn_start": 5,
+    "event:message_start": 11,
+    "event:message_end": 11,
+    "h2g:entry": 11,
+    "h2g:state": 8,
+    "event:message_update": 181,
+    "event:tool_execution_start": 2,
+    "event:tool_execution_update": 21,
+    "event:tool_execution_end": 2,
+    "event:turn_end": 5,
+    "h2g:bus": 28,
+    "h2g:agents": 5,
+    "event:agent_end": 3
+  },
+  "h2gBytes": 416780,
+  "decryptMs": {
+    "n": 296,
+    "max": 9.096936999994796,
+    "avg": 0.18489542567584902
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 9,
+      "status": "idle"
+    },
+    {
+      "tMs": 165,
+      "status": "working"
+    },
+    {
+      "tMs": 54251,
+      "status": "idle"
+    }
+  ]
+}

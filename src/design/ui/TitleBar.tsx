@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type ReactNode, useEffect, useState } from "react";
 import { Wordmark } from "../brand/Logo";
 import { cn } from "../lib/cn";
-import { hasCustomWindowChrome, isAndroid } from "../lib/platform";
+import { hasCustomWindowChrome, isAndroid, isMac, isTauri } from "../lib/platform";
 
 export interface TitleBarProps {
   /** Text/nodes after the wordmark, e.g. "forge · default · ● Tailscale". */
@@ -18,10 +18,12 @@ const ctrl =
 /**
  * Custom desktop title bar (the main window is undecorated). The whole bar is a Tauri drag region
  * (double-click maximizes); Windows-style minimize / maximize-restore / close on the right.
+ * On macOS the native traffic lights overlay its left edge instead (tauri.macos.conf.json).
  * In a plain browser it renders without window controls; on Android it renders nothing.
  */
 export function TitleBar({ subtitle, actions, className }: TitleBarProps) {
   const chrome = hasCustomWindowChrome();
+  const trafficLights = isMac && isTauri();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -55,19 +57,21 @@ export function TitleBar({ subtitle, actions, className }: TitleBarProps) {
       data-tauri-drag-region
       className={cn(
         "relative z-titlebar flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-[rgb(10_10_15/0.6)] pl-3.5 select-none",
+        // Clear the traffic lights (x 14 + 3 buttons ≈ 68 px).
+        trafficLights && "pl-20",
         className,
       )}
     >
-      <Wordmark size={18} className="pointer-events-none" />
+      <Wordmark size={18} className="pointer-events-none shrink-0" />
       {subtitle && (
         <span data-tauri-drag-region className="min-w-0 truncate text-xs text-mute-2">
           {subtitle}
         </span>
       )}
-      <div data-tauri-drag-region className="h-full flex-1" />
-      {actions && <div className="flex items-center gap-1.5 pr-2">{actions}</div>}
+      <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
+      {actions && <div className="flex shrink-0 items-center gap-1.5 pr-2">{actions}</div>}
       {chrome && (
-        <div className="flex h-full" role="group" aria-label="Window controls">
+        <div className="flex h-full shrink-0" role="group" aria-label="Window controls">
           <button type="button" className={ctrl} aria-label="Minimize" title="Minimize" onClick={() => void getCurrentWindow().minimize()}>
             <svg viewBox="0 0 10 10" className="size-2.5" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden>
               <path d="M0 5h10" />

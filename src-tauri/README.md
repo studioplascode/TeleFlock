@@ -6,13 +6,60 @@ Embeds `tf_client::Engine` (AppCore) and wires it to the webview and the OS.
 
 | Call | Args (camelCase) | Result |
 |---|---|---|
-| `invoke("core_call", …)` | `{ hostId: string \| null, method: string, params?: unknown }` | method result; rejects with a tf-proto `ApiError` |
+| `invoke("core_call", …)` | `{ hostId: string \| null, method: string, params?: unknown }` | method result; rejects with a tf-proto `ApiError`. `app.update*` are answered by the shell (below), everything else by the engine |
 | `invoke("core_term_input", …)` | `{ hostId, termId, data: string }` | `void` (fast path, never waits for the host) |
 | `invoke("core_events", …)` | `{ channel: Channel<AppEvent> }` | `void`. Replays current state first (Profiles, Settings, Tunnels, HostStatus + HostSnapshot per host), then streams live events. Call once per page load; a reload drops older subscriptions. |
 
 UI intents arrive on the same channel: `{type:"openAgent", hostId, agentId}` (toast / notification /
 deep link) and `{type:"answerNext"}` (tray menu, `teleflock://answer-next`). Intents raised while no
 page is subscribed (cold start from a notification) are delivered right after the next replay.
+
+## Self-update (`src/update/`)
+
+Same IPC as the engine's app methods (typed in tf-proto `AppMethods`, so the UI calls
+`core.app("app.updateCheck", …)`), but answered in `core_call` by `update::Updater` before the
+engine sees them (tf-client answers them `unsupported`, e.g. for tf-devserver). Status changes
+are pushed as `{type:"update", status: UpdateStatus}` on the `core_events` channel.
+
+| Method | Params | Result |
+|---|---|---|
+| `app.updateStatus` | `{}` | `UpdateStatus` `{ current, supported, manual, unsupportedReason?, phase, latest?, progress?, error?, checkedAt? }` |
+| `app.updateCheck` | `{ launch, install }` | `UpdateStatus` once discovery is done. `launch`: once per process, skipped while `settings.autoUpdate` is off, installs what it finds. `install`: install right away |
+| `app.updateInstall` | `{}` | `UpdateStatus`; starts download + install of the last found release (`not_found` before a check found one). `manual` (macOS): opens the release's `.dmg` in the browser instead |
+
+`phase`: `idle` → `checking` → `upToDate` \| `available` → `downloading` (`progress` 0–100) →
+`installing`; `needsPermission` (Android), `error` (message in `error`; failures are only logged and
+shown in Settings, never toasted). `supported` is false in debug builds, for the Arch package
+(pacman owns it) and for any Linux copy that is neither a running AppImage nor dpkg's `.deb`
+install; `unsupportedReason` says why and Settings shows it.
+
+- Discovery (`release.rs`, unit-tested): `GET https://api.github.com/repos/studioplascode/TeleFlock/releases?per_page=30`
+  anonymously (rustls + webpki roots, 10 s connect / 20 s request timeouts); highest semver
+  `vX.Y.Z[-pre]` tag, drafts skipped, that has this platform's assets, if newer than the app.
+- Windows, Linux: tauri-plugin-updater with that release's `latest.json` as the only
+  endpoint. `latest.json` must announce the tag's version; the plugin checks the minisign signature
+  against `plugins.updater.pubkey` and, with `requireSignedVersion`, that the signature was made for
+  that version (no replay of an older signed package under a newer tag). Downloads fail after 60 s
+  without data. It installs by
+  bundle type. Windows runs the NSIS installer passively (`installMode: passive`) and exits; the
+  installer relaunches TeleFlock. Teardown (toasts, engine shutdown, tray) runs in the plugin's
+  `on_before_exit`, as `RunEvent::Exit` won't fire. Linux replaces the AppImage in place or runs
+  `pkexec dpkg -i` for the `.deb`; then `request_restart()` exits through `RunEvent::Exit` and
+  starts the new version.
+- macOS (`manual: true`): discovery looks for the release's `TeleFlock_<v>_universal.dmg` (built
+  by `macos.yml`, never signed with the updater key); the launch check never installs, the UI
+  shows a one-time "vX is available" toast and Settings a **Download** button, both calling
+  `app.updateInstall`, which opens the `.dmg` URL (`Platform::open_external` → `open`).
+- Android: `<cacheDir>/updates/TeleFlock_<v>_universal.apk`, SHA-256 checked against the release's
+  `.sha256` (a verified file is reused), then the plugin's `installApk` (below), which rejects and
+  deletes an APK that isn't this package, signed by the installed app's certificates, with a
+  higher versionCode. On
+  `needsPermission` the shell retries on the next `RunEvent::Resumed`; a dismissed system prompt
+  falls back to `available`.
+- UI: `src/features/updates/updates.tsx` (`useAutoUpdate`, mounted in `App`: launch check after
+  4 s, progress toast) and Settings → Updates (`src/features/settings/Updates.tsx`).
+
+Release assets, keys and publishing: `docs/build.md` §11.
 
 Android only (Kotlin plugin `src-tauri/plugins/teleflock-android`, capability `teleflock-android:default`):
 
@@ -24,8 +71,21 @@ Android only (Kotlin plugin `src-tauri/plugins/teleflock-android`, capability `t
 | `invoke("plugin:teleflock-android\|battery_status")` | – | `{ ignoringOptimizations: boolean }` |
 | `invoke("plugin:teleflock-android\|request_ignore_battery_optimizations")` | – | `void` |
 
+Driven from Rust only (`run_mobile_plugin`, not in the webview ACL): `installApk { path, openSettings }`
+→ `{ status: "started" | "needsPermission" }`. First checks the archive with
+`getPackageArchiveInfo(GET_SIGNING_CERTIFICATES)`: package name = ours, signing-certificate SHA-256
+set = the installed app's, `longVersionCode` > the installed one; otherwise deletes the file and
+rejects with `APK_REJECTED`. Then opens the package installer for the cache-dir APK via
+the app's FileProvider (`${applicationId}.fileprovider`, `res/xml/file_paths.xml` →
+`cache-path updates/`) with `FLAG_GRANT_READ_URI_PERMISSION`; needs `REQUEST_INSTALL_PACKAGES`
+(plugin manifest) and, on Android 8+, the per-app "install unknown apps" grant: without it,
+`needsPermission` and (with `openSettings`) `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` opens.
+
 Desktop window chrome: `src/design/ui/TitleBar.tsx` (drag region, window controls; the maximize
 button has `id="tf-max"` for the Windows 11 Snap Layouts overlay of `tauri-plugin-snap-layout`).
+Linux uses the same undecorated window (opaque: `tauri.linux.conf.json`); macOS keeps native
+traffic lights over the bar (`tauri.macos.conf.json`, `titleBarStyle: Overlay`) and TitleBar
+drops its own buttons there.
 
 ## Deep links (`teleflock://`)
 
@@ -34,25 +94,38 @@ button has `id="tf-max"` for the Windows 11 Snap Layouts overlay of `tauri-plugi
 - `teleflock://answer-next`, `teleflock://open`.
 
 Windows: registered by the NSIS installer (`register_all()` in debug builds); a second instance
-forwards its URL to the running one (single-instance). Android: intent filter from the deep-link
-plugin; notification taps use it too.
+forwards its URL to the running one (single-instance). Linux: the `.deb` / Arch desktop entry
+(`linux/teleflock.desktop`, `MimeType=x-scheme-handler/teleflock;`, `Exec=teleflock %u`); an
+AppImage registers a `~/.local/share/applications` handler on every launch (`register_all()`);
+single-instance forwards like on Windows (D-Bus). macOS: `CFBundleURLTypes` in Info.plist,
+delivered to the running app by the OS. Android: intent filter from the deep-link plugin;
+notification taps use it too.
 
 ## OS integration
 
 | | Windows | Android |
 |---|---|---|
-| Notifications | WinRT toasts: buttons + inline reply (in-process activation), body = protocol deep link, cleared on quit | Kotlin notifications: ≤ 3 actions incl. RemoteInput reply → JNI → engine, even with the Activity gone |
+| Notifications | WinRT toasts (tag = host/agent, group `agents`): buttons + inline reply (in-process activation), body = protocol deep link, cleared on quit | Kotlin notifications (tag = host/agent, id 1, grouped): ≤ 3 actions incl. RemoteInput reply → JNI → engine, even with the Activity gone |
+| Handled elsewhere | `Platform::retract` → removed from Action Center by tag + group (`History.RemoveGroupedTagWithId`) if that tag still shows the notification; user close (`Dismissed`/`UserCanceled`) → `Engine::notification_dismissed` | `retract` command → cancelled by tag + id if the shown notification still carries that `notificationId` extra; group summary count updated, removed with the last child; swipe-away (delete intent) → JNI `onNotificationDismissed` → `Engine::notification_dismissed` |
 | Badge | tray icon (orbiting comet while running, pink count when needs-you) + taskbar overlay + progress bar + flash | keep-alive notice text "3 running · 2 need you" |
 | Keep-alive | window close hides to tray | `remoteMessaging` foreground service while `settings.keepAlive` and a host is connected |
 | Reconnect hints | window focus → `engine.resume()` | activity resume + default-network change → `engine.resume()` |
+
+Linux and macOS: no OS notifications (`supports_notifications() == false`: the engine keeps them
+in the app, i.e. the inbox, tray badge and tooltip; a test notification answers `unsupported`).
+Tray icon with the same badge and menu (Linux: libayatana-appindicator / StatusNotifierItem; the
+comet stays still there), window close hides to the tray, focus → `engine.resume()`; macOS also
+reopens the hidden window from the Dock (`RunEvent::Reopen`). `open_external` uses `xdg-open` /
+`open`.
 
 ## Layout
 
 - `src/lib.rs` builder, plugins, run loop · `core.rs` commands + event fan-out · `platform.rs`
   `tf_client::Platform` impl · `present.rs` notification presentation · `deeplink.rs` ·
-  `tray.rs` + `badge.rs` (desktop) · `toast.rs` + `toastxml.rs` (Windows).
+  `tray.rs` + `badge.rs` (desktop) · `toast.rs` + `toastxml.rs` (Windows) · `update/` self-update.
 - `plugins/teleflock-android/` Kotlin plugin crate (`dev.teleflock.android`).
 - `gen/android/` generated by `tauri android init`, plus the release signing block and theme.
 
-Builds: `scripts/build-hostd.sh`, `scripts/build-windows.sh`, `scripts/build-android.sh`
-(see `docs/build.md`).
+Builds: `scripts/build-hostd.sh`, `scripts/build-windows.sh`, `scripts/build-android.sh`,
+`scripts/build-linux.sh`, `.github/workflows/macos.yml`; releases: `scripts/set-version.sh`,
+`scripts/release.sh` (see `docs/build.md`).

@@ -1,0 +1,63 @@
+{
+  "name": "17-task-completion-probe",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the task tool to spawn exactly one subagent whose assignment is: run the bash command `sleep 170; ls | wc -l` and reply with the number it prints. Then reply done."
+  },
+  "sentAt": 1792576185708,
+  "latencyMsFromSend": {
+    "firstFrame": 7,
+    "first_agent_start": 7,
+    "first_turn_start": 38,
+    "first_message_start": 38,
+    "first_message_end": 38,
+    "first_entry": 38,
+    "first_state": 106,
+    "first_message_update": 4573,
+    "firstAssistantUpdate": 4573,
+    "first_tool_execution_start": 5925,
+    "first_tool_execution_update": 5929,
+    "first_tool_execution_end": 5930,
+    "first_turn_end": 5964,
+    "first_bus": 5991,
+    "first_agents": 6079,
+    "first_agent_end": 8996
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 2,
+    "event:turn_start": 4,
+    "event:message_start": 8,
+    "event:message_end": 8,
+    "h2g:entry": 8,
+    "h2g:state": 7,
+    "event:message_update": 100,
+    "event:tool_execution_start": 2,
+    "event:tool_execution_update": 539,
+    "event:tool_execution_end": 2,
+    "event:turn_end": 4,
+    "h2g:bus": 238,
+    "h2g:agents": 3,
+    "event:agent_end": 2
+  },
+  "h2gBytes": 1323343,
+  "decryptMs": {
+    "n": 927,
+    "max": 8.241187999999966,
+    "avg": 0.15409895685013736
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 3,
+      "status": "idle"
+    },
+    {
+      "tMs": 312,
+      "status": "working"
+    },
+    {
+      "tMs": 181656,
+      "status": "idle"
+    }
+  ]
+}

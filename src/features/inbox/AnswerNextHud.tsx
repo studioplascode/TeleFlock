@@ -26,7 +26,7 @@ function AnswerBurst() {
   return (
     <motion.span
       aria-hidden
-      className="pointer-events-none absolute top-1/2 left-1/2 z-10 size-24 rounded-full border-2 border-done"
+      className="pointer-events-none absolute top-1/2 left-1/2 z-raised size-24 rounded-full border-2 border-done"
       style={{ x: "-50%", y: "-50%" }}
       initial={{ scale: 0.3, opacity: 0.9 }}
       animate={{ scale: 4, opacity: 0 }}

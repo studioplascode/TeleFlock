@@ -198,7 +198,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
             Back
           </Button>
         )}
-        <span className="flex-1" />
+        {!mobile && <span className="flex-1" />}
         {!mobile && (
           <span className="hidden items-center gap-1 text-2xs text-mute-2 md:flex">
             <Kbd>Ctrl</Kbd>

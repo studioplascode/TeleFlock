@@ -14,11 +14,13 @@ export interface ProgressRingProps {
   stroke?: number;
   /** Centre label; defaults to "done/total". Pass null to hide. */
   label?: React.ReactNode | null;
+  /** Accessible name; defaults to "done of total todos". */
+  ariaLabel?: string;
   className?: string;
 }
 
 /** Todo progress ring. While running, a comet orbits the ring so you can see the agent working. */
-export function ProgressRing({ done, total, status = "running", size = 40, stroke = 4, label, className }: ProgressRingProps) {
+export function ProgressRing({ done, total, status = "running", size = 40, stroke = 4, label, ariaLabel, className }: ProgressRingProps) {
   const gid = `tf-ring-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const meta = STATUS[status];
   const r = (size - stroke) / 2;
@@ -34,7 +36,7 @@ export function ProgressRing({ done, total, status = "running", size = 40, strok
       aria-valuemin={0}
       aria-valuemax={total}
       aria-valuenow={done}
-      aria-label={`${done} of ${total} todos`}
+      aria-label={ariaLabel ?? `${done} of ${total} todos`}
     >
       {status === "running" && <span className="tf-ring__comet tf-loop" />}
       <svg viewBox={`0 0 ${size} ${size}`} aria-hidden>

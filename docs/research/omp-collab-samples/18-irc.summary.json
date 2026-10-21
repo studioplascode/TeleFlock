@@ -1,0 +1,63 @@
+{
+  "name": "18-irc",
+  "sent": {
+    "t": "prompt",
+    "text": "Use the task tool to spawn exactly one subagent named Pinger with this assignment: send your parent the message `ping from Pinger: what is 2+2?` by writing it to agent://Main, then finish by replying with the single word sent. If you are messaged again later, answer in one short sentence. Afterwards, when Pinger messages you, answer it by writing `pong from Main: 4` to agent://Pinger. Do nothing else."
+  },
+  "sentAt": 1792576692229,
+  "latencyMsFromSend": {
+    "firstFrame": 16,
+    "first_agent_start": 16,
+    "first_turn_start": 55,
+    "first_message_start": 55,
+    "first_message_end": 56,
+    "first_entry": 56,
+    "first_state": 115,
+    "first_message_update": 2496,
+    "firstAssistantUpdate": 2496,
+    "first_tool_execution_start": 3680,
+    "first_tool_execution_update": 3684,
+    "first_tool_execution_end": 3685,
+    "first_turn_end": 3726,
+    "first_bus": 3758,
+    "first_agents": 3844,
+    "first_agent_end": 16244
+  },
+  "frameCounts": {
+    "g2h:prompt": 1,
+    "event:agent_start": 2,
+    "event:turn_start": 6,
+    "event:message_start": 12,
+    "event:message_end": 12,
+    "h2g:entry": 13,
+    "h2g:state": 7,
+    "event:message_update": 198,
+    "event:tool_execution_start": 3,
+    "event:tool_execution_update": 15,
+    "event:tool_execution_end": 3,
+    "event:turn_end": 6,
+    "h2g:bus": 20,
+    "h2g:agents": 4,
+    "event:agent_end": 1
+  },
+  "h2gBytes": 418151,
+  "decryptMs": {
+    "n": 302,
+    "max": 2.2469770000006974,
+    "avg": 0.09566436423838903
+  },
+  "herdrTimeline": [
+    {
+      "tMs": 6,
+      "status": "idle"
+    },
+    {
+      "tMs": 161,
+      "status": "working"
+    },
+    {
+      "tMs": 16691,
+      "status": "idle"
+    }
+  ]
+}

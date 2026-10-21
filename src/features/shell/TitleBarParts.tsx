@@ -130,16 +130,18 @@ export function GlobalHeartbeat({ className }: { className?: string }) {
 /** The Ctrl+K search field (a button that opens the palette). */
 export function SearchField() {
   const { setPalette } = useUi();
+  // Narrow windows: shrinks, then collapses to an icon so the window controls never get pushed off the bar.
   return (
     <button
       type="button"
       onClick={() => setPalette(true)}
-      className="group flex h-7 w-[260px] items-center gap-2 rounded-full bg-black/25 pr-1.5 pl-3 text-xs text-mute-2 shadow-[inset_0_0_0_1px_var(--color-line-2)] transition-[box-shadow,background-color] focus-ring hover:bg-black/35 hover:shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)] lg:w-[300px]"
+      className="group flex h-7 w-[220px] items-center gap-2 rounded-full bg-black/25 pr-1.5 pl-3 text-xs text-mute-2 shadow-[inset_0_0_0_1px_var(--color-line-2)] transition-[box-shadow,background-color] focus-ring hover:bg-black/35 hover:shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)] max-[959px]:w-7 max-[959px]:justify-center max-[959px]:px-0 lg:w-[300px]"
       aria-label="Search and commands (Ctrl+K)"
+      title="Search and commands (Ctrl+K)"
     >
-      <Search className="size-3.5 transition-colors group-hover:text-accent-hi" />
-      <span className="flex-1 truncate text-left">Search agents, run a command</span>
-      <span className="flex gap-0.5">
+      <Search className="size-3.5 shrink-0 transition-colors group-hover:text-accent-hi" />
+      <span className="flex-1 truncate text-left max-[959px]:hidden">Search agents, run a command</span>
+      <span className="flex gap-0.5 max-[959px]:hidden">
         <Kbd className="h-[18px]">Ctrl</Kbd>
         <Kbd className="h-[18px]">K</Kbd>
       </span>

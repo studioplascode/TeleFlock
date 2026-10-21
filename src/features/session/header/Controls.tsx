@@ -245,7 +245,7 @@ export function ModelPicker({ agentKey, mobile = false }: { agentKey: string; mo
   const trigger = (
     <ControlChip disabled={disabled} aria-label="Model" title={disabled ? "Model can't be changed right now" : "Switch model (/model)"} onClick={mobile ? () => setOpen(true) : undefined}>
       <Sparkles className="size-3.5 text-accent-hi" />
-      <span className="max-w-[160px] truncate">{modelLabel(meta)}</span>
+      <span className={cn("truncate", mobile ? "max-w-[112px]" : "max-w-[160px]")}>{modelLabel(meta)}</span>
       <ChevronDown className="size-3 text-mute" />
     </ControlChip>
   );

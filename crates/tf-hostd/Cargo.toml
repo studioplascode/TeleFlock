@@ -3,6 +3,7 @@ name = "tf-hostd"
 description = "TeleFlock host daemon: collab relay + guests, herdr state, agent ops, client protocol"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [lib]

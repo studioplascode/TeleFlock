@@ -22,10 +22,10 @@ function LinkRow({ icon: Icon, label, hint, route, onClick, badge }: { icon: Luc
         if (onClick) onClick();
         else if (route) navigate(route);
       }}
-      className="flex h-14 w-full items-center gap-3.5 px-4 text-left pressable focus-ring active:bg-white/4"
+      className="flex min-h-12 w-full items-center gap-3 px-3.5 py-1.5 text-left pressable focus-ring active:bg-white/4"
     >
-      <span className="grid size-9 place-items-center rounded-md bg-accent/14 text-accent-hi">
-        <Icon className="size-4.5" />
+      <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/14 text-accent-hi">
+        <Icon className="size-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-md font-bold text-ink">{label}</span>
@@ -55,9 +55,9 @@ export function MoreView() {
           </IconButton>
         }
       />
-      <div className="flex flex-col gap-4 px-3 pb-8">
+      <div className="flex flex-col gap-3 px-3 pt-1 pb-6">
         <motion.div {...fadeRise}>
-          <Tile className="p-4">
+          <Tile className="px-3.5 py-3">
             <div className="flex items-center justify-between">
               <span className="kicker">Flock pulse</span>
               <span className="text-xs font-bold text-mute">
@@ -69,7 +69,7 @@ export function MoreView() {
         </motion.div>
 
         <motion.section {...fadeRise} transition={{ ...spring.smooth, delay: 0.05 }} aria-label="Hosts">
-          <div className="flex items-center justify-between px-1 pb-2">
+          <div className="flex items-center justify-between px-1 pb-1">
             <h2 className="kicker">Hosts</h2>
             <IconButton label="Add host" size="sm" onClick={() => openDialog({ kind: "hostEditor" })}>
               <Plus />
@@ -80,8 +80,8 @@ export function MoreView() {
               const s = status[p.id];
               const phase = s?.phase ?? "idle";
               return (
-                <div key={p.id} className="flex flex-col gap-3 p-4">
-                  <button type="button" onClick={() => navigate({ name: "hosts" })} className="flex items-center gap-3 text-left focus-ring rounded-sm">
+                <div key={p.id} className="flex flex-col gap-2 px-3.5 py-2">
+                  <button type="button" onClick={() => navigate({ name: "hosts" })} className="flex min-h-11 items-center gap-3 text-left focus-ring rounded-sm">
                     <StatusOrb status={PHASE_STATUS[phase]} size={10} label={null} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-md font-bold text-ink">{p.name}</span>

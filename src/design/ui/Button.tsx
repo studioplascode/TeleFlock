@@ -6,15 +6,18 @@ import { Spinner } from "./Spinner";
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "sunset";
 export type ButtonSize = "sm" | "md" | "lg";
 
+// Native-disabled buttons keep pointer events so they show the not-allowed cursor (base.css) instead of
+// passing the hover/click through to whatever sits underneath (e.g. a clickable card).
 const base =
-  "relative inline-flex items-center justify-center gap-2 font-bold whitespace-nowrap select-none pressable touch-hit focus-ring disabled:pointer-events-none disabled:opacity-45 aria-disabled:pointer-events-none aria-disabled:opacity-45";
+  "relative inline-flex items-center justify-center gap-2 font-bold whitespace-nowrap select-none pressable touch-hit focus-ring disabled:opacity-45 aria-disabled:pointer-events-none aria-disabled:opacity-45";
 
 const variants: Record<ButtonVariant, string> = {
   primary:
     "bg-omp text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.28),var(--shadow-glow-accent)] hover:brightness-110 active:brightness-95",
   secondary: "bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5",
   ghost: "text-mute hover:bg-white/6 hover:text-ink",
-  danger: "bg-error/12 text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)] hover:bg-error hover:text-white",
+  danger:
+    "bg-error/12 text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)] hover:bg-error hover:text-white disabled:hover:bg-error/12 disabled:hover:text-[#ff8aa5]",
   sunset: "bg-sun text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-sun)] hover:brightness-110",
 };
 
@@ -97,7 +100,7 @@ export function IconButton({ label, variant = "ghost", size = "md", badge, class
     >
       {children}
       {badge !== undefined && badge !== null && (
-        <span className="absolute -top-1 -right-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-sun px-1 text-[10.5px] leading-none font-extrabold text-white shadow-[0_0_0_3px_var(--color-chrome),0_4px_14px_rgb(255_61_119/0.6)]">
+        <span className="pointer-events-none absolute -top-0.5 -right-0.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-sun px-1 text-[10.5px] leading-none font-extrabold text-white shadow-[0_0_0_3px_var(--color-chrome),0_4px_14px_rgb(255_61_119/0.6)]">
           {badge}
         </span>
       )}

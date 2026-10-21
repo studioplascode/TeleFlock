@@ -2,6 +2,8 @@
 //!
 //! Commands (camelCase args from JS):
 //! * `core_call({ hostId, method, params })` → result JSON, rejects with a tf-proto `ApiError`.
+//!   The self-update app methods (`app.update*`) are answered by the shell (`crate::update`);
+//!   everything else goes to the engine.
 //! * `core_term_input({ hostId, termId, data })` → fire-and-forget terminal input.
 //! * `core_events({ channel })` → subscribes the page: first a replay of the current state
 //!   (profiles, statuses, snapshots, settings, tunnels), then live `AppEvent`s.
@@ -142,7 +144,8 @@ impl Core {
 pub type CoreState = std::sync::Arc<Core>;
 
 #[tauri::command]
-pub async fn core_call(
+pub async fn core_call<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     core: State<'_, CoreState>,
     host_id: Option<String>,
     method: String,
@@ -150,6 +153,11 @@ pub async fn core_call(
 ) -> Result<Value, ApiError> {
     // Omitted params (`invoke("core_call", { method })`) mean `{}` (methods taking `Empty`).
     let params = params.unwrap_or_else(|| Value::Object(Default::default()));
+    if crate::update::METHODS.contains(&method.as_str())
+        && let Some(updater) = tauri::Manager::try_state::<crate::update::UpdaterState>(&app)
+    {
+        return updater.call(&method, params).await;
+    }
     core.engine.call(host_id.as_deref(), &method, params).await
 }
 

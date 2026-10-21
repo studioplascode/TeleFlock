@@ -1,0 +1,133 @@
+# TeleFlock macOS app (universal: Apple silicon + Intel) on a GitHub macOS runner (free for this
+# public repo). No Apple Developer account: the app is ad-hoc signed (tauri.macos.conf.json
+# `signingIdentity: "-"`) and not notarized, so the first launch needs the Gatekeeper override in
+# README.md / docs/build.md §13. macOS updates are manual downloads: no updater key ever reaches CI
+# and CI-built packages are never signed with it, so latest.json has no darwin entry and the app
+# only points at the new .dmg (src-tauri/src/update).
+# Layout: Cargo workspace root = repo root (target/ at repo root), Tauri app in src-tauri/, bun.
+#
+# Runs on a pushed v* tag (scripts/release.sh tags HEAD when it publishes the release): the build
+# job (read-only token) builds the tagged tree and stores the .dmg as an artifact; the upload job
+# (no third-party actions, no checkout) waits for the release of that tag and adds the .dmg +
+# .sha256 to it, refusing to replace existing assets. A manual run builds without uploading.
+# Third-party actions are pinned by commit SHA.
+name: macos
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  hostd:
+    uses: ./.github/workflows/hostd.yml
+
+  build:
+    needs: hostd
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      TF_HOSTD_DIST: ${{ github.workspace }}/target/hostd-dist
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Tag matches the app version
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+          [ "$GITHUB_REF_NAME" = "v$VERSION" ] || { echo "tag $GITHUB_REF_NAME != v$VERSION in tauri.conf.json" >&2; exit 1; }
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: tf-hostd-dist
+          path: target/hostd-dist
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: '. -> target'
+
+      - name: Build tf-hostd for macOS hosts (Local mode on this Mac)
+        # The Linux/Windows daemons come from hostd.yml; the macOS ones need a macOS SDK, so they
+        # are built here and embedded into this app only (tf-client build.rs).
+        run: |
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p tf-hostd --target "$triple"
+            mkdir -p "target/hostd-dist/$triple"
+            cp "target/$triple/release/tf-hostd" "target/hostd-dist/$triple/tf-hostd"
+          done
+          file target/hostd-dist/*-apple-darwin/tf-hostd
+
+      - name: Install frontend deps
+        run: bun install --frozen-lockfile
+
+      - name: Build universal .app + .dmg
+        # beforeBuildCommand (bun run build) builds the frontend. No updater artifacts (no key here).
+        run: bun tauri build --target universal-apple-darwin --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Verify + checksum
+        run: |
+          VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+          BUNDLE=target/universal-apple-darwin/release/bundle
+          APP="$BUNDLE/macos/TeleFlock.app"
+          lipo -archs "$APP/Contents/MacOS/teleflock"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv "$APP" 2>&1 | grep -E '^(Identifier|Signature|Format)'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes' "$APP/Contents/Info.plist"
+          mkdir -p out
+          cp "$BUNDLE/dmg/TeleFlock_${VERSION}_universal.dmg" out/
+          (cd out && shasum -a 256 "TeleFlock_${VERSION}_universal.dmg" > "TeleFlock_${VERSION}_universal.dmg.sha256")
+          ls -la out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: teleflock-macos
+          path: out/
+          if-no-files-found: error
+
+  upload:
+    # Only for tags. Deliberately minimal: GitHub's own download action and the preinstalled gh,
+    # nothing from the repo is executed with the write token.
+    if: ${{ github.ref_type == 'tag' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: teleflock-macos
+          path: out
+
+      - name: Upload to release ${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # scripts/release.sh creates the release; a tag pushed by hand before it waits here.
+          for _ in $(seq 60); do
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && break
+            echo "waiting for release $TAG…"; sleep 60
+          done
+          # No --clobber: an asset that already exists is never replaced (gh fails instead).
+          gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY"

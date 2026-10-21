@@ -1,6 +1,6 @@
 import { Archive, ArchiveRestore, Bell, BellOff, Columns2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useCore, useSettings, useUi } from "@/core";
 import { Kbd, NumberTicker, cn, spring } from "@/design";
@@ -45,6 +45,29 @@ export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
     if (columns.some((c) => c === "")) useBoard.setState((s) => ({ picked: s.picked.filter((_, i) => columns[i] !== "") }));
   }, [columns]);
 
+  // Desktop: publish the bar's live height (it wraps onto more rows on narrow boards) so the toast stack
+  // lifts clear of it and the lanes pad their bottoms enough to scroll the last card above it.
+  const showing = picked.length > 0;
+  const barRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = barRef.current;
+    if (mobile || !showing || !el) return;
+    const root = document.documentElement.style;
+    const publish = () => {
+      const h = el.offsetHeight;
+      root.setProperty("--tf-selbar-h", `${h}px`);
+      root.setProperty("--tf-toast-lift", `${h + 16}px`);
+    };
+    publish();
+    const ro = new ResizeObserver(publish);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.removeProperty("--tf-selbar-h");
+      root.removeProperty("--tf-toast-lift");
+    };
+  }, [mobile, showing]);
+
   const keysIn = (col: string) => picked.filter((_, i) => columns[i] === col);
   const review = keysIn("review");
   const done = keysIn("done");
@@ -59,6 +82,7 @@ export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
     <AnimatePresence>
       {picked.length > 0 && (
         <motion.div
+          ref={barRef}
           key="selection-bar"
           role="toolbar"
           aria-label={`${picked.length} selected`}
@@ -67,8 +91,13 @@ export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
           exit={{ y: 80, opacity: 0, scale: 0.94 }}
           transition={spring.bouncy}
           className={cn(
-            mobile ? "bottom-[calc(84px+env(safe-area-inset-bottom))] max-w-[calc(100vw-20px)] overflow-x-auto no-scrollbar" : "bottom-6",
-            "fixed left-1/2 z-sticky flex items-center gap-1 rounded-lg glass p-1.5 shadow-[var(--shadow-d3),0_0_0_1px_rgb(163_92_240/0.35),0_18px_50px_-12px_rgb(163_92_240/0.5)]",
+            // Phone: over the bottom nav, scrolls sideways. Desktop: anchored to the board (its nearest positioned
+            // ancestor), so it centres on the lanes rather than the window and never covers a split; on a narrow
+            // board it wraps onto centred rows instead of hiding actions off the edge.
+            mobile
+              ? "fixed bottom-[calc(84px+env(safe-area-inset-bottom))] max-w-[calc(100vw-20px)] overflow-x-auto no-scrollbar"
+              : "absolute bottom-6 max-w-[calc(100%-24px)] flex-wrap justify-center gap-y-1",
+            "left-1/2 z-sticky flex w-max items-center gap-x-1 rounded-lg glass p-1.5 shadow-[var(--shadow-d3),0_0_0_1px_rgb(163_92_240/0.35),0_18px_50px_-12px_rgb(163_92_240/0.5)]",
           )}
           style={{ x: "-50%" }}
         >

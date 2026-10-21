@@ -1,5 +1,6 @@
 //! TeleFlock host daemon (architecture §3). See README.md for the module contracts.
 
+pub mod artifacts;
 pub mod attach;
 pub mod bridge;
 pub mod clients;

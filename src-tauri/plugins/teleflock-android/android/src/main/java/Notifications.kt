@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.RemoteInput
@@ -27,6 +28,7 @@ object Notifications {
     const val GROUP_AGENTS = "dev.teleflock.agents"
     const val KEY_REPLY = "reply"
     const val ACTION_NOTIFICATION = "dev.teleflock.android.NOTIFICATION_ACTION"
+    const val ACTION_DISMISSED = "dev.teleflock.android.NOTIFICATION_DISMISSED"
     const val EXTRA_ID = "id"
     const val EXTRA_TAG = "tag"
     const val EXTRA_HOST = "hostId"
@@ -125,6 +127,8 @@ object Notifications {
             .setOnlyAlertOnce(false)
             .setSilent(a.silent || !a.sound)
             .setContentIntent(openAppIntent(ctx, requestCode(a.id, a.tag, "open"), a.openUrl))
+            .setDeleteIntent(dismissIntent(ctx, a))
+            .addExtras(identity(a.notificationId))
         if (a.`when` > 0) b.setWhen(a.`when`).setShowWhen(true)
 
         val maxButtons = if (a.reply) 2 else 3
@@ -153,10 +157,13 @@ object Notifications {
         try {
             val nm = NotificationManagerCompat.from(ctx)
             nm.notify(a.tag, a.id, b.build())
-            postGroupSummary(ctx)
+            syncGroupSummary(ctx)
         } catch (_: SecurityException) {
         }
     }
+
+    /** Which tf-proto notification a posted notification shows (checked by [retract]). */
+    private fun identity(notificationId: String) = Bundle().apply { putString(EXTRA_NOTIFICATION, notificationId) }
 
     private fun actionIntent(ctx: Context, a: NotifyArgs, actionId: String?, mutable: Boolean): PendingIntent {
         // Explicit component: required for mutable PendingIntents on targetSdk 34+.
@@ -174,19 +181,60 @@ object Notifications {
         return PendingIntent.getBroadcast(ctx, requestCode(a.id, a.tag, actionId ?: "reply"), intent, flags)
     }
 
-    /** Bundles agent notifications once there are several (Android groups 4+ automatically, we do it from 2). */
-    private fun postGroupSummary(ctx: Context) {
+    /** Swipe-away / "clear all": the app marks the notification read. */
+    private fun dismissIntent(ctx: Context, a: NotifyArgs): PendingIntent {
+        val intent = Intent(ctx, ActionReceiver::class.java)
+            .setAction(ACTION_DISMISSED)
+            .putExtra(EXTRA_ID, a.id)
+            .putExtra(EXTRA_TAG, a.tag)
+            .putExtra(EXTRA_HOST, a.hostId)
+            .putExtra(EXTRA_NOTIFICATION, a.notificationId)
+        return PendingIntent.getBroadcast(
+            ctx, requestCode(a.id, a.tag, "dismiss"), intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
+    /**
+     * Handled elsewhere (answered in the app, on another device, in omp; read in the app):
+     * removes `(tag, id)` if it still shows [notificationId]. A newer notification of the same
+     * agent, or the "Sent" confirmation of an inline reply, stays.
+     */
+    fun retract(ctx: Context, tag: String, id: Int, notificationId: String) {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
-        val active = nm.activeNotifications.count { it.notification.group == GROUP_AGENTS && it.id != SUMMARY_ID }
-        if (active < 2) return
+        val shown = nm.activeNotifications.any {
+            it.tag == tag && it.id == id && it.notification.extras.getString(EXTRA_NOTIFICATION) == notificationId
+        }
+        if (!shown) return
+        nm.cancel(tag, id)
+        syncGroupSummary(ctx, gone = tag to id)
+    }
+
+    /**
+     * Bundles agent notifications once there are several (Android groups 4+ automatically, we do
+     * it from 2), keeps the count current and removes the summary with the last child. [gone]:
+     * a child just cancelled that may still be listed as active.
+     */
+    fun syncGroupSummary(ctx: Context, gone: Pair<String?, Int>? = null) {
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+        val listed = nm.activeNotifications.filter { it.notification.group == GROUP_AGENTS }
+        val hasSummary = listed.any { it.id == SUMMARY_ID && it.tag == null }
+        val active = listed.count { it.id != SUMMARY_ID && (gone == null || it.tag != gone.first || it.id != gone.second) }
+        if (active == 0) {
+            // Only with no children left: cancelling a summary cancels its children too.
+            if (hasSummary) nm.cancel(SUMMARY_ID)
+            return
+        }
+        if (active < 2 && !hasSummary) return
         val summary = NotificationCompat.Builder(ctx, CHANNEL_QUIET)
             .setSmallIcon(R.drawable.ic_stat_teleflock)
             .setColor(COLOR_ACCENT)
             .setContentTitle("TeleFlock")
-            .setContentText("$active agent updates")
+            .setContentText(if (active == 1) "1 agent update" else "$active agent updates")
             .setGroup(GROUP_AGENTS)
             .setGroupSummary(true)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .setContentIntent(openAppIntent(ctx))
             .build()

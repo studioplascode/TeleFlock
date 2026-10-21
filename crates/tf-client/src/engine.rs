@@ -10,18 +10,18 @@ use std::time::Duration;
 use serde_json::Value;
 use tf_proto::{
     Answer, ApiError, AppCapabilities, AppEvent, AppInfo, AppMethod, ConnPhase, ConnStatus, Delivery, Empty,
-    HostKind, HostMethod, HostProfile, HostStatusEntry, HostsListResult, NeedsKind, Notification, NotifyKind,
-    Settings, TunnelListResult, WslDistrosResult,
+    HostKind, HostMethod, HostProfile, HostState, HostStatusEntry, HostsListResult, NeedsKind, NeedsYou, Notification,
+    NotifyKind, Settings, StatePatch, TunnelListResult, WslDistrosResult,
 };
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::conn::{self, ConnCmd, HostRt};
+use crate::conn::{self, ConnCmd, HostRt, HostView, Tracked};
 use crate::deploy::{Artifacts, HOSTD_VERSION};
 use crate::link::timeout_for;
 use crate::platform::{BadgeState, NotifyStyle, Platform};
 use crate::settings::{default_settings, in_quiet_hours, is_muted, local_minutes_now, validate, wants};
-use crate::state::{CacheRecord, counts};
+use crate::state::{CacheRecord, apply_patches, counts};
 use crate::tunnel::Tunnels;
 use crate::util::{invalid, now_ms, rand_id, read_json, to_value, write_json};
 
@@ -208,22 +208,125 @@ impl Inner {
         }
     }
 
+    /// Applies a full host state (initial snapshot, resync) and derives needs-you resolution.
+    pub fn apply_snapshot(&self, rt: &HostRt, rev: u64, state: HostState) {
+        {
+            let _g = self.emit_lock.lock().unwrap();
+            let mut v = rt.view.lock().unwrap();
+            v.state = Some((rev, state.clone()));
+            v.live = true;
+            v.dirty = true;
+            self.send(AppEvent::HostSnapshot { host_id: rt.id.clone(), rev, state });
+        }
+        self.refresh_badge();
+        self.sync_needs(rt);
+    }
+
+    /// Applies a state patch and derives needs-you resolution.
+    pub fn apply_patch(&self, rt: &HostRt, rev: u64, ops: Vec<StatePatch>) {
+        {
+            let _g = self.emit_lock.lock().unwrap();
+            let mut v = rt.view.lock().unwrap();
+            if let Some((r, s)) = v.state.as_mut() {
+                apply_patches(s, ops.clone());
+                *r = rev;
+            }
+            v.dirty = true;
+            self.send(AppEvent::HostPatch { host_id: rt.id.clone(), rev, ops });
+        }
+        self.refresh_badge();
+        self.sync_needs(rt);
+    }
+
     /// Notification policy: always forward to the UI; reach the OS per settings, per-agent
     /// mute and quiet hours.
     pub fn on_notify(&self, rt: &HostRt, n: Notification) {
         self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n.clone() });
-        rt.remember_notification(n.clone());
+        // tf-hostd publishes the state carrying the request before notifying about it.
+        let seen = n.kind == NotifyKind::Needs && request_pending(rt, &n) == Some(true);
+        let style = self.os_style(rt, &n);
+        rt.remember_notification(Tracked { n: n.clone(), posted: style.is_some(), seen, read: false, resolved: false });
+        if let Some(style) = style {
+            let profile = self.profile(&rt.id);
+            self.platform.notify(profile.as_ref(), &n, style);
+        }
+    }
+
+    /// How `n` reaches the OS, or `None` when it stays in the app.
+    fn os_style(&self, rt: &HostRt, n: &Notification) -> Option<NotifyStyle> {
         if !self.platform.supports_notifications() {
-            return;
+            return None;
         }
         let settings = self.settings();
         if !wants(&settings, n.kind) || is_muted(&settings, &rt.id, &n.agent_id) {
-            return;
+            return None;
         }
         let quiet = in_quiet_hours(&settings, local_minutes_now());
-        let style = NotifyStyle { sound: settings.notify_sound && !quiet, silent: quiet, reply: reply_allowed(rt, &n) };
-        let profile = self.profile(&rt.id);
-        self.platform.notify(profile.as_ref(), &n, style);
+        Some(NotifyStyle { sound: settings.notify_sound && !quiet, silent: quiet, reply: reply_allowed(rt, n) })
+    }
+
+    /// Needs-you notifications whose request left host state (answered anywhere, cancelled,
+    /// replaced by a new request, agent stopped, archived or gone) are resolved: retracted from
+    /// the OS and reported as `NotifyDone { resolved: true }`.
+    fn sync_needs(&self, rt: &HostRt) {
+        let mut done = Settled::default();
+        {
+            let mut v = rt.view.lock().unwrap();
+            let HostView { state, live, notifications, .. } = &mut *v;
+            let (true, Some((_, s))) = (*live, state.as_ref()) else { return };
+            for t in notifications.iter_mut().filter(|t| t.n.kind == NotifyKind::Needs && !t.resolved) {
+                match request_state(s, &t.n) {
+                    Request::Pending => t.seen = true,
+                    Request::Handled if !t.seen => {}
+                    Request::Handled | Request::AgentGone => done.settle(t, true, true),
+                }
+            }
+        }
+        self.finish(rt, done, true);
+    }
+
+    /// Marks the matching unread notifications read; their OS notifications are retracted
+    /// unless they ask about a request that is still pending.
+    pub fn mark_read(&self, rt: &HostRt, matches: impl Fn(&Notification) -> bool) {
+        let mut done = Settled::default();
+        for t in rt.view.lock().unwrap().notifications.iter_mut().filter(|t| !t.read && matches(&t.n)) {
+            let pending = t.n.kind == NotifyKind::Needs && !t.resolved;
+            done.settle(t, false, !pending);
+        }
+        self.finish(rt, done, false);
+    }
+
+    /// The user dismissed the OS notification: it is gone there, and read in the app.
+    pub fn os_dismissed(&self, rt: &HostRt, notification_id: &str) {
+        let mut done = Settled::default();
+        if let Some(t) = rt.view.lock().unwrap().notifications.iter_mut().find(|t| t.n.id == notification_id) {
+            t.posted = false;
+            done.settle(t, false, false);
+        }
+        self.finish(rt, done, false);
+    }
+
+    /// The host was removed: nothing of it may stay on screen.
+    fn close_notifications(&self, rt: &HostRt) {
+        let (mut resolved, mut read) = (Settled::default(), Settled::default());
+        for t in rt.view.lock().unwrap().notifications.iter_mut() {
+            if t.n.kind == NotifyKind::Needs && !t.resolved {
+                resolved.settle(t, true, true);
+            } else {
+                read.settle(t, false, true);
+            }
+        }
+        self.finish(rt, resolved, true);
+        self.finish(rt, read, false);
+    }
+
+    fn finish(&self, rt: &HostRt, done: Settled, resolved: bool) {
+        for n in &done.retract {
+            self.platform.retract(&rt.id, n);
+        }
+        if !done.ids.is_empty() {
+            self.send(AppEvent::NotifyDone { host_id: rt.id.clone(), ids: done.ids, resolved });
+        }
     }
 
     fn capabilities(&self) -> AppCapabilities {
@@ -255,36 +358,81 @@ impl Inner {
     }
 }
 
+/// Notifications settled in one step: ids for `NotifyDone`, OS notifications to retract.
+#[derive(Default)]
+struct Settled {
+    ids: Vec<String>,
+    retract: Vec<Notification>,
+}
+
+impl Settled {
+    fn settle(&mut self, t: &mut Tracked, resolved: bool, retract: bool) {
+        if !t.read || (resolved && !t.resolved) {
+            self.ids.push(t.n.id.clone());
+        }
+        t.read = true;
+        t.resolved |= resolved;
+        if retract && t.posted {
+            t.posted = false;
+            self.retract.push(t.n.clone());
+        }
+    }
+}
+
+enum Request {
+    Pending,
+    /// The agent no longer waits on this request (answered, cancelled, replaced, stopped).
+    Handled,
+    /// The agent is gone or archived.
+    AgentGone,
+}
+
+/// Where the request a needs-you notification asks about stands in host state.
+fn request_state(s: &HostState, n: &Notification) -> Request {
+    match s.agents.iter().find(|a| a.id == n.agent_id) {
+        None => Request::AgentGone,
+        Some(a) if a.archived => Request::AgentGone,
+        Some(a) => match &a.needs {
+            Some(needs) if needs.request_id == n.request_id => Request::Pending,
+            _ => Request::Handled,
+        },
+    }
+}
+
+/// Whether the request `n` asks about is still pending (`None` while the state is not live).
+fn request_pending(rt: &HostRt, n: &Notification) -> Option<bool> {
+    let v = rt.view.lock().unwrap();
+    match (v.live, v.state.as_ref()) {
+        (true, Some((_, s))) => Some(matches!(request_state(s, n), Request::Pending)),
+        _ => None,
+    }
+}
+
 /// Free text can answer this notification's pending request (else replies become prompts).
 fn reply_allowed(rt: &HostRt, n: &Notification) -> bool {
     match n.kind {
         NotifyKind::Finished | NotifyKind::Error | NotifyKind::Quiet => true,
         NotifyKind::Info => false,
-        NotifyKind::Needs => {
-            let v = rt.view.lock().unwrap();
-            let needs = v
-                .state
-                .as_ref()
-                .and_then(|(_, s)| s.agents.iter().find(|a| a.id == n.agent_id))
-                .and_then(|a| a.needs.as_ref());
-            match needs {
-                Some(needs) => needs.answerable && (needs.allow_other || needs.kind == NeedsKind::Input),
-                None => false,
-            }
-        }
+        NotifyKind::Needs => pending_needs(rt, n).is_some_and(|needs| text_answerable(&needs)),
     }
 }
 
-/// Free-text answer for the pending request, if the request is still the one notified.
-fn pending_text_answer(rt: &HostRt, agent_id: &str, request_id: &str) -> bool {
+/// The agent's pending request, if it is still the one `n` asks about.
+fn pending_needs(rt: &HostRt, n: &Notification) -> Option<NeedsYou> {
     let v = rt.view.lock().unwrap();
     v.state
         .as_ref()
-        .and_then(|(_, s)| s.agents.iter().find(|a| a.id == agent_id))
-        .and_then(|a| a.needs.as_ref())
-        .is_some_and(|n| {
-            n.request_id.as_deref() == Some(request_id) && n.answerable && (n.allow_other || n.kind == NeedsKind::Input)
-        })
+        .and_then(|(_, s)| s.agents.iter().find(|a| a.id == n.agent_id))
+        .and_then(|a| a.needs.clone())
+        .filter(|needs| needs.request_id == n.request_id)
+}
+
+fn text_answerable(needs: &NeedsYou) -> bool {
+    needs.answerable && (needs.allow_other || needs.kind == NeedsKind::Input)
+}
+
+fn stale_request() -> ApiError {
+    ApiError::new("stale", "this request was already handled").with_hint("Open the agent to see what it needs now")
 }
 
 fn validate_profile(mut p: HostProfile, platform: &str) -> Result<HostProfile, ApiError> {
@@ -637,7 +785,9 @@ impl Engine {
 
     /// Routes an OS notification interaction: an action with an answer → `agent.answer`;
     /// `reply` text → free-text answer when the request accepts it, else `agent.prompt`;
-    /// anything else → `AppEvent::OpenAgent`.
+    /// anything else → `AppEvent::OpenAgent` (and the notification becomes read). Answers to a
+    /// needs-you notification whose request was already handled fail with `stale`: they never
+    /// reach whatever the agent asks next.
     pub async fn notification_action(
         &self,
         host_id: &str,
@@ -646,56 +796,82 @@ impl Engine {
         reply: Option<String>,
     ) -> Result<(), ApiError> {
         let rt = self.inner.host(host_id).ok_or_else(|| not_found_host(host_id))?;
-        let n = rt
-            .find_notification(notification_id)
-            .ok_or_else(|| ApiError::new("not_found", format!("unknown notification `{notification_id}`")))?;
-        let open = || self.emit(AppEvent::OpenAgent { host_id: host_id.to_string(), agent_id: n.agent_id.clone() });
+        let unknown = || ApiError::new("not_found", format!("unknown notification `{notification_id}`"));
+        let n = rt.find_notification(notification_id).ok_or_else(unknown)?.n;
+        let open = || {
+            self.inner.mark_read(&rt, |x| x.id == n.id);
+            self.emit(AppEvent::OpenAgent { host_id: host_id.to_string(), agent_id: n.agent_id.clone() });
+        };
 
-        let call = match (reply, action_id) {
-            (Some(text), _) if !text.trim().is_empty() => {
-                match n.request_id.as_deref().filter(|r| pending_text_answer(&rt, &n.agent_id, r)) {
-                    Some(req) => (
-                        "agent.answer",
-                        serde_json::json!({
-                            "agentId": n.agent_id, "requestId": req,
-                            "answer": Answer { choices: vec![], text: Some(text), cancel: false, chat: false },
-                        }),
-                    ),
-                    None => (
-                        "agent.prompt",
-                        serde_json::json!({ "agentId": n.agent_id, "text": text, "images": [], "delivery": Delivery::Auto }),
-                    ),
-                }
-            }
-            (_, Some(aid)) => {
+        let reply = reply.filter(|t| !t.trim().is_empty());
+        let answer = match (&reply, action_id) {
+            (Some(_), _) => None,
+            (None, Some(aid)) => {
                 let action = n
                     .actions
                     .iter()
                     .find(|a| a.id == aid)
                     .ok_or_else(|| ApiError::new("not_found", format!("unknown action `{aid}`")))?;
                 match (&action.answer, &n.request_id) {
-                    (Some(answer), Some(req)) => (
-                        "agent.answer",
-                        serde_json::json!({ "agentId": n.agent_id, "requestId": req, "answer": answer }),
-                    ),
+                    (Some(answer), Some(_)) => Some(answer.clone()),
                     _ => {
                         open();
                         return Ok(());
                     }
                 }
             }
-            _ => {
+            (None, None) => {
                 open();
                 return Ok(());
             }
         };
+        // Answers and replies to a needs-you request must reach exactly that request.
+        let guarded = n.kind == NotifyKind::Needs && n.request_id.is_some();
+        let resolved = || rt.find_notification(notification_id).is_none_or(|t| t.resolved);
+        if guarded && resolved() {
+            return Err(stale_request());
+        }
         if rt.link().is_none() {
             self.send_cmd(host_id, ConnCmd::Connect);
             if !rt.wait_online(Duration::from_secs(30)).await {
                 return Err(self.offline_error(host_id, &rt));
             }
         }
-        self.host_call(host_id, call.0, call.1).await.map(|_| ())
+        // Again on the live state (connecting brought a fresh snapshot).
+        if guarded && (resolved() || request_pending(&rt, &n) != Some(true)) {
+            return Err(stale_request());
+        }
+        let (method, params) = match (answer, reply) {
+            (Some(answer), _) => (
+                "agent.answer",
+                serde_json::json!({ "agentId": n.agent_id, "requestId": n.request_id, "answer": answer }),
+            ),
+            (None, Some(text)) => match &n.request_id {
+                Some(req) if pending_needs(&rt, &n).is_some_and(|needs| text_answerable(&needs)) => (
+                    "agent.answer",
+                    serde_json::json!({
+                        "agentId": n.agent_id, "requestId": req,
+                        "answer": Answer { choices: vec![], text: Some(text), cancel: false, chat: false },
+                    }),
+                ),
+                _ => (
+                    "agent.prompt",
+                    serde_json::json!({ "agentId": n.agent_id, "text": text, "images": [], "delivery": Delivery::Auto }),
+                ),
+            },
+            (None, None) => unreachable!("handled above"),
+        };
+        self.host_call(host_id, method, params).await?;
+        self.inner.mark_read(&rt, |x| x.id == n.id);
+        Ok(())
+    }
+
+    /// The user dismissed (swiped away, closed) an OS notification: it becomes read in the app.
+    /// Unknown ids (older than the notification ring, other process) are ignored.
+    pub fn notification_dismissed(&self, host_id: &str, notification_id: &str) {
+        if let Some(rt) = self.inner.host(host_id) {
+            self.inner.os_dismissed(&rt, notification_id);
+        }
     }
 
     async fn app_call(&self, m: AppMethod) -> Result<Value, ApiError> {
@@ -733,6 +909,15 @@ impl Engine {
                 };
                 i.platform.notify(None, &n, NotifyStyle { sound: s.notify_sound, silent: false, reply: false });
                 to_value(&Empty {})
+            }
+            AppMethod::AppNotifyRead(p) => {
+                let rt = i.host(&p.host_id).ok_or_else(|| not_found_host(&p.host_id))?;
+                i.mark_read(&rt, |n| p.agent_id.as_ref().is_none_or(|a| *a == n.agent_id));
+                to_value(&Empty {})
+            }
+            AppMethod::AppUpdateStatus(_) | AppMethod::AppUpdateCheck(_) | AppMethod::AppUpdateInstall(_) => {
+                // The Tauri shell answers these before they reach the engine (src-tauri/src/update).
+                Err(ApiError::new("unsupported", "self-update is only available in the installed app"))
             }
             AppMethod::HostsList(_) => {
                 let profiles = i.profiles.lock().unwrap().clone();
@@ -807,6 +992,7 @@ impl Engine {
                 let rt = i.hosts.lock().unwrap().remove(&r.host_id);
                 let task = i.tasks.lock().unwrap().remove(&r.host_id);
                 if let Some(rt) = rt {
+                    i.close_notifications(&rt);
                     let _ = rt.cmd.send(ConnCmd::Shutdown);
                 }
                 if let Some(t) = task {
@@ -897,12 +1083,22 @@ mod tests {
     #[derive(Default)]
     pub(crate) struct TestPlatform {
         pub notified: Mutex<Vec<(Option<String>, Notification, NotifyStyle)>>,
+        /// `(host_id, notification_id)` per `retract` call.
+        pub retracted: Mutex<Vec<(String, String)>>,
         pub badges: Mutex<Vec<BadgeState>>,
         pub keep_alive: Mutex<Vec<bool>>,
+    }
+    impl TestPlatform {
+        fn take_retracted(&self) -> Vec<String> {
+            std::mem::take(&mut *self.retracted.lock().unwrap()).into_iter().map(|(_, id)| id).collect()
+        }
     }
     impl Platform for TestPlatform {
         fn notify(&self, host: Option<&HostProfile>, n: &Notification, style: NotifyStyle) {
             self.notified.lock().unwrap().push((host.map(|h| h.id.clone()), n.clone(), style));
+        }
+        fn retract(&self, host_id: &str, n: &Notification) {
+            self.retracted.lock().unwrap().push((host_id.to_string(), n.id.clone()));
         }
         fn open_external(&self, _: &str) -> Result<(), ApiError> {
             Ok(())
@@ -1152,12 +1348,19 @@ mod tests {
         engine.call(Some("lab"), "term.open", term).await.unwrap();
         engine.term_input("lab", "t1", "ls\r".into());
 
-        // Notification action → agent.answer → patch removes the needs agent → badge drops.
+        // Notification action → agent.answer → patch removes the needs agent → badge drops, and
+        // the request's notification is resolved everywhere: OS retracted, UI told.
         engine.notification_action("lab", "n1", Some("yes"), None).await.unwrap();
         wait_event(&mut rx, &mut seen, |e| matches!(e, AppEvent::HostPatch { rev: 2, .. })).await;
+        wait_event(&mut rx, &mut seen, |e| matches!(e, AppEvent::NotifyDone { ids, resolved: true, .. } if ids == &["n1"])).await;
+        assert_eq!(*platform.retracted.lock().unwrap(), [("lab".to_string(), "n1".to_string())]);
         assert_eq!(platform.badges.lock().unwrap().last(), Some(&BadgeState { needs: 0, running: 1 }));
+        // A second tap on the (stale) button answers nothing.
+        let e = engine.notification_action("lab", "n1", Some("yes"), None).await.unwrap_err();
+        assert_eq!(e.code, "stale");
         engine.notification_action("lab", "n1", None, None).await.unwrap();
         wait_event(&mut rx, &mut seen, |e| matches!(e, AppEvent::OpenAgent { agent_id, .. } if agent_id == "a1")).await;
+        assert_eq!(platform.retracted.lock().unwrap().len(), 1, "already retracted");
 
         // Crash: the request fails, the term closes, backoff, reconnect, session re-open.
         let e = engine.call(Some("lab"), "host.health", serde_json::json!({})).await.unwrap_err();
@@ -1249,5 +1452,182 @@ mod tests {
         assert_eq!(os.len(), 1);
         assert_eq!(os[0].1.agent_id, "a2");
         assert!(rt.find_notification("n-a1").is_some(), "muted notifications stay actionable");
+    }
+
+    fn asking(id: &str, request: &str) -> tf_proto::Agent {
+        let mut a = agent(id, tf_proto::Column::Needs);
+        a.needs = Some(NeedsYou {
+            kind: NeedsKind::Ask,
+            request_id: Some(request.into()),
+            since: 0,
+            title: "Question".into(),
+            question: "Proceed?".into(),
+            detail: None,
+            options: vec![],
+            multi: false,
+            allow_other: true,
+            allow_chat: false,
+            command: None,
+            answerable: true,
+        });
+        a
+    }
+
+    fn note(id: &str, kind: NotifyKind, agent: &str, request: Option<&str>) -> Notification {
+        let yes = Answer { choices: vec!["yes".into()], text: None, cancel: false, chat: false };
+        Notification {
+            id: id.into(),
+            at: 1,
+            kind,
+            agent_id: agent.into(),
+            title: "t".into(),
+            body: "b".into(),
+            request_id: request.map(String::from),
+            actions: match request {
+                Some(_) => vec![tf_proto::NotifyAction { id: "yes".into(), label: "Yes".into(), answer: Some(yes) }],
+                None => vec![],
+            },
+        }
+    }
+
+    fn upsert(a: tf_proto::Agent) -> StatePatch {
+        StatePatch::Agent { id: a.id.clone(), value: Some(a) }
+    }
+
+    /// `NotifyDone` events (ids, resolved) received so far.
+    fn done(rx: &mut broadcast::Receiver<AppEvent>) -> Vec<(Vec<String>, bool)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|e| match e {
+                AppEvent::NotifyDone { host_id, ids, resolved } if host_id == "lab" => Some((ids, resolved)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A registered (never connected) host `lab` whose state the test drives directly.
+    async fn notify_host(dir: &Path) -> (Engine, Arc<TestPlatform>, Arc<HostRt>, broadcast::Receiver<AppEvent>) {
+        let platform = Arc::new(TestPlatform::default());
+        let (engine, _rx) = Engine::start(cfg(dir), platform.clone()).await;
+        let mut p = profile(HostKind::Local);
+        p.id = "lab".into();
+        engine.call(None, "hosts.save", to_value(&p).unwrap()).await.unwrap();
+        let rt = engine.inner.host("lab").unwrap();
+        let rx = engine.subscribe();
+        (engine, platform, rt, rx)
+    }
+
+    /// Needs-you notifications follow host state: whoever resolves the request (another device,
+    /// the omp TUI, cancel, a new question, the agent going away), every surface clears once.
+    #[tokio::test]
+    async fn needs_you_resolution_from_host_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, platform, rt, mut rx) = notify_host(dir.path()).await;
+        let i = &engine.inner;
+        let mut st = host_state();
+        st.agents = vec![asking("a1", "r1"), asking("a2", "r2"), asking("a3", "r3"), asking("a4", "r4")];
+        i.apply_snapshot(&rt, 1, st);
+        for (id, a, r) in [("n1", "a1", "r1"), ("n2", "a2", "r2"), ("n3", "a3", "r3"), ("n4", "a4", "r4")] {
+            i.on_notify(&rt, note(id, NotifyKind::Needs, a, Some(r)));
+        }
+        assert_eq!(platform.notified.lock().unwrap().len(), 4);
+        assert!(done(&mut rx).is_empty());
+
+        // Answered elsewhere (state only): a1 is running again.
+        i.apply_patch(&rt, 2, vec![upsert(agent("a1", tf_proto::Column::Running))]);
+        assert_eq!(platform.take_retracted(), ["n1"]);
+        assert_eq!(done(&mut rx), [(ids(&["n1"]), true)]);
+
+        // The request is replaced by a new one: the old notification goes, the new one stays.
+        i.apply_patch(&rt, 3, vec![upsert(asking("a2", "r2b"))]);
+        assert_eq!(platform.take_retracted(), ["n2"]);
+        assert_eq!(done(&mut rx), [(ids(&["n2"]), true)]);
+        i.on_notify(&rt, note("n2b", NotifyKind::Needs, "a2", Some("r2b")));
+        i.apply_patch(&rt, 4, vec![upsert(asking("a4", "r4"))]);
+        assert!(platform.take_retracted().is_empty(), "pending requests keep their notifications");
+        assert!(done(&mut rx).is_empty());
+
+        // The agent goes away, or is archived.
+        i.apply_patch(&rt, 5, vec![StatePatch::Agent { id: "a3".into(), value: None }]);
+        assert_eq!(platform.take_retracted(), ["n3"]);
+        let mut archived = asking("a4", "r4");
+        archived.archived = true;
+        i.apply_patch(&rt, 6, vec![upsert(archived)]);
+        assert_eq!(platform.take_retracted(), ["n4"]);
+        assert_eq!(done(&mut rx), [(ids(&["n3"]), true), (ids(&["n4"]), true)]);
+
+        // A newer notification of the same agent replaced n2b on the OS: resolving n2b must not
+        // retract it.
+        i.on_notify(&rt, note("f2", NotifyKind::Finished, "a2", None));
+        i.apply_patch(&rt, 7, vec![upsert(agent("a2", tf_proto::Column::Review))]);
+        assert!(platform.take_retracted().is_empty());
+        assert_eq!(done(&mut rx), [(ids(&["n2b"]), true)]);
+
+        // Stale buttons and replies fail safe (and never reach the host).
+        let e = engine.notification_action("lab", "n1", Some("yes"), None).await.unwrap_err();
+        assert_eq!(e.code, "stale");
+        let e = engine.notification_action("lab", "n2", None, Some("go".into())).await.unwrap_err();
+        assert_eq!(e.code, "stale");
+    }
+
+    /// Reading a notification in the app or the OS clears it everywhere; needs-you ones stay on
+    /// the OS until their request is resolved.
+    #[tokio::test]
+    async fn read_and_dismissals_sync_across_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, platform, rt, mut rx) = notify_host(dir.path()).await;
+        let i = &engine.inner;
+        let mut st = host_state();
+        st.agents = vec![asking("a1", "r1"), agent("a2", tf_proto::Column::Review)];
+        i.apply_snapshot(&rt, 1, st);
+        i.on_notify(&rt, note("nN", NotifyKind::Needs, "a1", Some("r1")));
+        i.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None));
+        i.on_notify(&rt, note("nE", NotifyKind::Error, "a3", None));
+
+        // Opened a2's session in the app.
+        engine.call(None, "app.notifyRead", serde_json::json!({"hostId": "lab", "agentId": "a2"})).await.unwrap();
+        assert_eq!(platform.take_retracted(), ["nF"]);
+        assert_eq!(done(&mut rx), [(ids(&["nF"]), false)]);
+
+        // Swiped away in the OS: read in the app, nothing left to retract.
+        engine.notification_dismissed("lab", "nE");
+        assert!(platform.take_retracted().is_empty());
+        assert_eq!(done(&mut rx), [(ids(&["nE"]), false)]);
+
+        // Read everything: the pending question stays on the OS …
+        engine.call(None, "app.notifyRead", serde_json::json!({"hostId": "lab"})).await.unwrap();
+        assert!(platform.take_retracted().is_empty());
+        assert_eq!(done(&mut rx), [(ids(&["nN"]), false)]);
+        // … until it is answered.
+        i.apply_patch(&rt, 2, vec![upsert(agent("a1", tf_proto::Column::Running))]);
+        assert_eq!(platform.take_retracted(), ["nN"]);
+        assert_eq!(done(&mut rx), [(ids(&["nN"]), true)]);
+
+        // Body tap on an OS notification: opens the agent, read and retracted.
+        i.on_notify(&rt, note("nG", NotifyKind::Finished, "a2", None));
+        engine.notification_action("lab", "nG", None, None).await.unwrap();
+        assert_eq!(platform.take_retracted(), ["nG"]);
+        let evs: Vec<AppEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(evs.iter().any(|e| matches!(e, AppEvent::NotifyDone { ids, resolved: false, .. } if ids == &["nG"])));
+        assert!(evs.iter().any(|e| matches!(e, AppEvent::OpenAgent { agent_id, .. } if agent_id == "a2")));
+    }
+
+    /// Removing a host takes its notifications off every surface.
+    #[tokio::test]
+    async fn removing_a_host_clears_its_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, platform, rt, mut rx) = notify_host(dir.path()).await;
+        let mut st = host_state();
+        st.agents = vec![asking("a1", "r1")];
+        engine.inner.apply_snapshot(&rt, 1, st);
+        engine.inner.on_notify(&rt, note("nN", NotifyKind::Needs, "a1", Some("r1")));
+        engine.inner.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None));
+        drop(rt);
+        engine.call(None, "hosts.remove", serde_json::json!({"hostId": "lab"})).await.unwrap();
+        assert_eq!(platform.take_retracted(), ["nN", "nF"]);
+        assert_eq!(done(&mut rx), [(ids(&["nN"]), true), (ids(&["nF"]), false)]);
     }
 }

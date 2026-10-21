@@ -3,6 +3,7 @@ name = "tf-client"
 description = "TeleFlock app core: host profiles, connections, hostd deploy, protocol client, app methods, tunnels, notification policy"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 build = "build.rs"
 

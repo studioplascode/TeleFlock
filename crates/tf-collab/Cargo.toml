@@ -3,6 +3,7 @@ name = "tf-collab"
 description = "omp collab for tf-hostd: link, crypto, frames, loopback relay, registry, guest, and the replica normalizer (omp → tf-proto)"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

@@ -3,9 +3,12 @@
 //! * `KeepAliveService`: a `remoteMessaging` foreground service that keeps the process (and the
 //!   in-process Rust core with its SSH sessions) at foreground priority while `keepAlive` is on.
 //! * Agent notifications with up to 3 action buttons and an optional inline reply. Taps on
-//!   buttons / replies reach Rust over JNI ([`set_sink`]) even when no WebView is alive; taps on
-//!   the body open the app through a `teleflock://` deep link.
+//!   buttons / replies and swipe-dismissals reach Rust over JNI ([`set_sink`]) even when no
+//!   WebView is alive; taps on the body open the app through a `teleflock://` deep link.
+//!   Notifications handled elsewhere are retracted by tag + id (the group summary follows).
 //! * `POST_NOTIFICATIONS` permission flow, haptics, battery-optimisation status.
+//! * Self-update install: a verified APK from the cache dir goes to the system installer through
+//!   the app's FileProvider (`REQUEST_INSTALL_PACKAGES`, "install unknown apps" grant flow).
 //! * Default-network changes (Wi-Fi ↔ cellular, VPN up) are reported through the same sink so
 //!   the core can reconnect immediately.
 //!
@@ -21,7 +24,7 @@ use tauri::{
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub use android::{Permission, TeleFlockAndroid, TeleFlockAndroidExt, set_sink};
+pub use android::{ApkInstall, Permission, TeleFlockAndroid, TeleFlockAndroidExt, set_sink};
 
 /// A user action on one of our notifications, delivered from the Kotlin `ActionReceiver`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -35,10 +38,20 @@ pub struct NotificationAction {
     pub reply: Option<String>,
 }
 
+/// One of our notifications, by its tf-proto identity.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationRef {
+    pub host_id: String,
+    pub notification_id: String,
+}
+
 /// Events Kotlin pushes into Rust without going through the WebView.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeEvent {
     Action(NotificationAction),
+    /// The user swiped a notification away.
+    Dismissed(NotificationRef),
     /// The default network changed (became available or its capabilities changed).
     NetworkChanged,
 }

@@ -59,8 +59,9 @@ transcript rows keep identity, so selectors re-render only what changed.
 | `useSession(key)` | `{ status, meta?, itemIds, ui?, hasMore, error?, endedReason? }` — `ui` is `UiRequest \| null` once loaded |
 | `useSessionItem(key, itemId)` | one `TranscriptItem` (per-row subscription) |
 | `useBtw(key)` | `Record<btwId, { text, done }>` (deltas accumulated) |
-| `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read}), unread, markRead(), clear() }` |
+| `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read, resolved?}), unread, markRead(), clear() }`; `markRead`/`clear` and `markAgentNotificationsRead(hostId, agentId)` also call `app.notifyRead` so the core retracts OS notifications; `notifyDone` events mark items read / resolved |
 | `useActivity(hostId?)` | `(ActivityEvent & {hostId})[]` newest first; loads `host.activity`, refreshes on lane changes/notifications while mounted. `loadOlderActivity(hostId)` pages |
+| `useAccountLimits(hostIds)` | `Record<hostId, { data?: AccountLimits, error?, loading, receivedAt? }>`; one shared `host.limits` poll per host (60 s) while anything is mounted; `refreshLimits(hostId)` forces one. Pure helpers in `limits.ts`: `projectWindow` (pace + `runsOut`/`resetsFirst`/`idle`/`exhausted`/`reset`/`unknown`), `tightestWindow`, `windowsForModel` (tier windows only for models naming the tier), `sessionLimits(data, sessionId, model, now)`, `describePace`, `formatSpan`, `formatPct` |
 | `useSettings(sel?)` / `.getState()` | `Settings & { update(patch), setMuted(key, muted), saveTemplate(t), removeTemplate(id), loaded }` (optimistic, rolls back on error; `mutedAgents`/`templates` always present) |
 | `isMuted(key)` / `useIsMuted(key)` | agent muted in `settings.mutedAgents` → suppress needs-you toasts, sounds, OS notifications |
 | `useTunnels()` | `TunnelInfo[]` |
@@ -96,11 +97,11 @@ events / 15 s) and replays them on the first subscribe, so the initial frame is 
 
 ```ts
 type Route = { name: "board" } | { name: "agent"; hostId; agentId } | { name: "terminal"; hostId; paneId?; agentId? }
-  | { name: "review"; hostId; workspaceId } | { name: "inbox" | "activity" | "usage" | "hosts" | "settings" | "more" | "design" };
+  | { name: "review"; hostId; workspaceId } | { name: "dispatch" | "inbox" | "activity" | "usage" | "hosts" | "settings" | "more" | "design" };
 navigate(route, { replace? }); useRoute(); getRoute(); routeToHash(route); parseHash(hash);
 ```
 
-Hashes: `#/board`, `#/agent/:h/:a`, `#/terminal/:h`, `#/terminal/:h/p/:paneId`,
+Hashes: `#/board`, `#/dispatch`, `#/agent/:h/:a`, `#/terminal/:h`, `#/terminal/:h/p/:paneId`,
 `#/terminal/:h/a/:agentId`, `#/review/:h/:ws`, `#/inbox`, `#/activity`, `#/usage`, `#/hosts`,
 `#/settings`, `#/more`, `#/design`.
 
@@ -138,6 +139,9 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
   echo + commands; agent panes mirror the omp stream and Enter prompts the agent; takeover
   closes the previous lease), usage (14 days), models, past sessions, resume, setup/setupApply,
   activity paging, tab.rename/tab.close/pane.close (last pane closes the workspace; refused for a primary with linked worktrees). Settings seed 3 templates. App methods: hosts.*, wsl.distros, settings, tunnels (blob: preview page).
+- Agents started with a spec (`worktree.create{agent}`, `agent.start`) begin fresh (idle, `turns: 0`, link
+  `connecting`); ~1.4 s later the link goes live and the spec's prompt starts a streamed turn, after which
+  they move through the lanes like the seeded agents. `worktree.create` answers after ~350 ms.
 
 ## Tests
 

@@ -17,6 +17,7 @@ import { useGlobalMood, useGlobalPulseFeed } from "@/features/shell/liveness";
 import { MobileShell } from "@/features/shell/MobileShell";
 import { SheetHost } from "@/features/shell/sheets";
 import { ShortcutsSheet } from "@/features/shell/ShortcutsSheet";
+import { useAutoUpdate } from "@/features/updates/updates";
 import { RouteView } from "./routes";
 
 /** Overlays mounted exactly once, above every layout. */
@@ -66,6 +67,7 @@ function Frame() {
   const focus = useUi((s) => s.focusMode);
   useMotionSettingSync();
   useNotifyBridge();
+  useAutoUpdate();
   useGlobalPulseFeed();
   useGlobalShortcuts();
   useOverlayBack(mobile);

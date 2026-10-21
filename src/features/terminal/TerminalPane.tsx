@@ -33,7 +33,7 @@ import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraK
 import { applyMods, encodeKey } from "./keys";
 import { PaneOverlay, closedCopy } from "./PaneOverlay";
 import { type TermPhase, TermSession } from "./session";
-import { COMPACT_FONT_SIZE, DEFAULT_FONT_SIZE, TERM_FONT_FAMILY, clampFontSize, termTheme } from "./theme";
+import { COMPACT_FONT_SIZE, DEFAULT_FONT_SIZE, TERM_FONT_FAMILY, clampFontSize, isTermFontFace, loadTermFonts, termTheme } from "./theme";
 import { setTermRenderer, useTermRenderer } from "./renderer";
 import { SearchBar } from "./SearchBar";
 import { registerLiveTerm } from "./useLocalhostUrls";
@@ -74,9 +74,8 @@ export interface TerminalPaneProps {
 
 const NO_MODS: ModState = { ctrl: 0, alt: 0 };
 const RESIZE_DEBOUNCE_MS = 70;
-const FLASH_MIN_GAP_MS = 90;
 const SWIPE_SLOP_PX = 8;
-/** Longest the first paint waits for the mono font (it re-measures when the font lands later). */
+/** Longest the first paint waits for the terminal fonts (it re-measures when they land later). */
 const FONT_WAIT_MS = 120;
 
 /** Set once WebGL proved to draw nothing on this device; later panes go straight to the DOM renderer. */
@@ -142,7 +141,6 @@ export function TerminalPane({
   const wrapRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
-  const flashRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
@@ -205,6 +203,8 @@ export function TerminalPane({
       rightClickSelectsWord: true,
       drawBoldTextInBrightColors: false,
       minimumContrastRatio: 1,
+      // WebGL: squeeze fallback-font symbols wider than a cell (Nerd Font icons and emoji are exempt).
+      rescaleOverlappingGlyphs: true,
       // OSC 8 hyperlinks are program-controlled: http(s) only, opened outside the webview.
       linkHandler: {
         allowNonHttpProtocols: false,
@@ -222,17 +222,19 @@ export function TerminalPane({
     termRef.current = term;
     fitRef.current = fit;
 
-    // Wait briefly for the mono font so the first cell measurement is right, but never hold the
-    // first paint on it: a slow font fetch must not delay the terminal by seconds.
-    const fontLoad = document.fonts.load(`${fontSizeRef.current}px "JetBrains Mono Variable"`).catch(() => []);
-    let fontReady = false;
-    void fontLoad.then(() => {
-      fontReady = true;
-      if (disposed || !term.element) return;
-      // Late font: re-measure cells (a changed family string forces xterm to re-measure) and re-fit.
-      term.options.fontFamily = `${TERM_FONT_FAMILY} `;
-      fit.fit();
-    });
+    // Wait briefly for the fonts so the first cell measurement is right, but never hold the first
+    // paint on them: a slow font fetch must not delay the terminal by seconds.
+    const fontLoad = loadTermFonts();
+    // Late font (any Fira Code subset or the icon font): re-measure cells (a changed family string
+    // forces xterm to), drop glyphs the WebGL atlas rasterized with a fallback font (tofu) and re-fit.
+    const onFontsLoaded = (e: FontFaceSetLoadEvent) => {
+      if (disposed || !term.element || !e.fontfaces.some(isTermFontFace)) return;
+      term.options.fontFamily = term.options.fontFamily === TERM_FONT_FAMILY ? `${TERM_FONT_FAMILY} ` : TERM_FONT_FAMILY;
+      term.clearTextureAtlas();
+      term.refresh(0, term.rows - 1);
+      refitRef.current();
+    };
+    document.fonts.addEventListener("loadingdone", onFontsLoaded);
     // (Promise.withResolvers is ES2024; the Windows webview target is chrome105.)
     let fontTimer: number | undefined;
     const fontWait = new Promise<void>((resolve) => {
@@ -243,12 +245,12 @@ export function TerminalPane({
       if (disposed) return;
       term.open(el);
       fit.fit();
-      if (fontReady) term.options.fontFamily = TERM_FONT_FAMILY;
       setInst(term);
     });
 
     return () => {
       disposed = true;
+      document.fonts.removeEventListener("loadingdone", onFontsLoaded);
       // Release the attachment before its terminal goes away (the session effect only re-runs
       // once the new instance is published).
       sessionRef.current?.dispose();
@@ -370,7 +372,6 @@ export function TerminalPane({
     if (!term) return;
     setGotFrame(false);
     let frames = 0;
-    let lastFlash = 0;
     let beatTimer: number | undefined;
     let prev: TermPhase = { k: "idle" };
     let unregister: (() => void) | null = null;
@@ -405,18 +406,6 @@ export function TerminalPane({
         if (mode === "observe" && (ev.cols !== term.cols || ev.rows !== term.rows) && ev.cols > 0 && ev.rows > 0) {
           term.resize(ev.cols, ev.rows);
           requestAnimationFrame(applyObserveScaleRef.current);
-        }
-        const now = performance.now();
-        // Frame flash: a light sweep along the top edge per repaint (skipped with reduced motion).
-        if (now - lastFlash > FLASH_MIN_GAP_MS && flashRef.current && document.documentElement.dataset.motion !== "reduced") {
-          lastFlash = now;
-          flashRef.current.animate(
-            [
-              { opacity: 0.95, transform: "scaleX(0.35)" },
-              { opacity: 0, transform: "scaleX(1)" },
-            ],
-            { duration: 650, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
-          );
         }
       },
     });
@@ -499,6 +488,8 @@ export function TerminalPane({
     }
     requestAnimationFrame(applyObserveScale);
   }, [mode, compact, showBadge, applyObserveScale]);
+  const refitRef = useRef(refit);
+  refitRef.current = refit;
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -810,20 +801,13 @@ export function TerminalPane({
       <div
         ref={hostRef}
         className={cn(
-          "absolute origin-top-left transition-[filter,opacity] duration-500",
+          // Fira Code ligatures off: the WebGL renderer draws cell by cell, so the DOM renderer matches it.
+          "absolute origin-top-left transition-[filter,opacity] duration-500 [font-variant-ligatures:none]",
+          // DOM renderer: glyphs wider than their cell (Nerd Font icons are 1 em) get a negative letter-spacing
+          // and overflow into the next cell, like WebGL draws them; keep the next cell's background from covering them.
+          "[&_.xterm-rows_span[style*='letter-spacing:_-']]:relative",
           compact ? "inset-1" : "inset-x-2.5 top-2 bottom-1",
           dim && "opacity-60 saturate-[0.15]",
-        )}
-      />
-      {/* frame flash: every repaint sweeps a gradient line across the top edge */}
-      <div
-        ref={flashRef}
-        aria-hidden
-        className={cn(
-          "pointer-events-none absolute inset-x-0 top-0 h-[2px] origin-center opacity-0",
-          mode === "observe"
-            ? "bg-[linear-gradient(90deg,transparent,var(--color-review),transparent)] shadow-[0_0_14px_rgb(34_211_238/0.8)]"
-            : "bg-omp shadow-[0_0_14px_rgb(163_92_240/0.9)]",
         )}
       />
       <AnimatePresence>

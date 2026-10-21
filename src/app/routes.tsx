@@ -18,6 +18,7 @@ const UsageView = lazy(() => import("@/features/usage/UsageView").then((m) => ({
 const SessionView = lazy(() => import("@/features/session/SessionView").then((m) => ({ default: m.SessionView })));
 const TerminalView = lazy(() => import("@/features/terminal/TerminalView").then((m) => ({ default: m.TerminalView })));
 const ReviewView = lazy(() => import("@/features/review/ReviewView").then((m) => ({ default: m.ReviewView })));
+const DispatchView = lazy(() => import("@/features/dispatch/DispatchView").then((m) => ({ default: m.DispatchView })));
 const DesignGallery = lazy(() => import("./routes/design/DesignGallery"));
 
 /** Stable key per screen (agent/terminal/review include their ids so switching agents re-animates). */
@@ -36,13 +37,15 @@ export function routeKey(r: Route): string {
 
 /** Screens that own their full height (no page scroll / pull-to-refresh). The phone board scrolls. */
 export function isFullBleed(r: Route, mobile: boolean): boolean {
-  return r.name === "agent" || r.name === "terminal" || r.name === "review" || (r.name === "board" && !mobile) || r.name === "design";
+  return r.name === "agent" || r.name === "dispatch" || r.name === "terminal" || r.name === "review" || (r.name === "board" && !mobile) || r.name === "design";
 }
 
 export function RouteView({ route, mobile }: { route: Route; mobile: boolean }) {
   switch (route.name) {
     case "board":
       return mobile ? <FlockHome /> : <BoardView />;
+    case "dispatch":
+      return <DispatchView />;
     case "agent":
       return <SessionView hostId={route.hostId} agentId={route.agentId} />;
     case "terminal":

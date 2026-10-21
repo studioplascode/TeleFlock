@@ -90,30 +90,30 @@ function Widgets() {
     }, 0),
   );
   return (
-    <div className="grid grid-cols-[1fr_1fr_1.35fr] gap-2.5">
+    <div className="grid grid-cols-[1fr_1fr_1.35fr] gap-2">
       <button
         type="button"
         onClick={() => (needs[0] ? openAnswerHud(needs[0]) : navigate({ name: "inbox" }))}
         className="text-left pressable focus-ring rounded-tile"
         aria-label={`${needs.length} need you`}
       >
-        <Tile variant={needs.length > 0 ? "sunset" : "default"} className={cn("flex h-28 flex-col justify-between rounded-[22px] p-3.5", needs.length > 0 && "sun-pulse")}>
-          <NumberTicker value={needs.length} className="font-display text-hero leading-none font-bold" />
+        <Tile variant={needs.length > 0 ? "sunset" : "default"} className={cn("flex h-24 flex-col justify-between rounded-[20px] p-3", needs.length > 0 && "sun-pulse")}>
+          <NumberTicker value={needs.length} className="font-display text-display leading-none font-bold" />
           <span className={cn("text-xs font-bold", needs.length > 0 ? "text-white/90" : "text-mute")}>need you</span>
         </Tile>
       </button>
       <Tile
-        className="flex h-28 flex-col justify-between overflow-hidden rounded-[22px] p-3.5"
+        className="flex h-24 flex-col justify-between overflow-hidden rounded-[20px] p-3"
         aria-label={`${running.length} running${quiet > 0 ? `, ${quiet} quiet (no events for over 90 seconds)` : ""}`}
         role="group"
       >
         <div className="flex items-start justify-between">
-          <NumberTicker value={running.length} className="font-display text-hero leading-none font-bold text-ink" />
+          <NumberTicker value={running.length} className="font-display text-display leading-none font-bold text-ink" />
           <StatusOrb status="running" size={8} activity={running.length > quiet ? "busy" : "silent"} label={null} />
         </div>
         <div>
           <div className="flex items-center gap-1.5">
-            <Heartbeat beat={beat} lastEventAt={lastAt} status="running" height={18} showAge={false} className="min-w-0 flex-1" />
+            <Heartbeat beat={beat} lastEventAt={lastAt} status="running" height={16} showAge={false} className="min-w-0 flex-1" />
             {quiet > 0 && (
               <span className="flex shrink-0 items-center gap-1 text-2xs font-extrabold whitespace-nowrap text-warn" title="No events for over 90 s while working: possibly stuck">
                 <span className="size-1.5 rounded-full bg-warn shadow-[0_0_6px_rgb(251_191_36/0.7)]" aria-hidden />
@@ -124,9 +124,9 @@ function Widgets() {
           <span className="text-xs font-bold text-mute">running</span>
         </div>
       </Tile>
-      <Tile className="flex h-28 flex-col justify-between rounded-[22px] p-3.5">
-        <NumberTicker value={cost} format={formatUsd} className="font-display text-3xl leading-none font-bold text-ink" />
-        <span className="text-xs font-bold text-mute">
+      <Tile className="flex h-24 min-w-0 flex-col justify-between rounded-[20px] p-3">
+        <NumberTicker value={cost} format={formatUsd} className="font-display text-2xl leading-none font-bold text-ink" />
+        <span className="truncate text-xs font-bold text-mute">
           today · <NumberTicker value={tokens} format={formatCompact} className="text-ink" /> tok
         </span>
       </Tile>
@@ -144,23 +144,23 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
   const n = agent.needs;
   return (
     <SwipeRow id={agentKey} actions={swipeActions(agentKey, "needs")} onOpen={() => openAgent(agentKey)}>
-      <div data-status="needs-you" data-morph="surface" data-morph-key={agentKey} className={cn("card-surface st-border-grad rounded-xl p-4", stale && "opacity-70 grayscale-[0.6]")}>
+      <div data-status="needs-you" data-morph="surface" data-morph-key={agentKey} className={cn("card-surface st-border-grad rounded-xl p-3.5", stale && "opacity-70 grayscale-[0.6]")}>
         <div className="flex items-center gap-2">
-          <span data-status="needs-you" className="rounded-full st-bg px-2 py-0.5 font-display text-[10px] font-bold tracking-[0.12em] uppercase">
+          <span data-status="needs-you" className="min-w-0 truncate rounded-full st-bg px-2 py-0.5 font-display text-[10px] font-bold tracking-[0.12em] uppercase">
             {agent.name} · {NEEDS_LABEL[n.kind]}
           </span>
           {muted && <BellOff className="size-3.5 shrink-0 text-mute-2" aria-label="Notifications muted" />}
-          <span className="ml-auto text-xs font-bold text-[#ffb08a]">
+          <span className="ml-auto shrink-0 text-xs font-bold whitespace-nowrap text-[#ffb08a]">
             waiting <Elapsed since={n.since} />
           </span>
         </div>
-        <p className="mt-2.5 font-display text-xl leading-tight font-bold text-ink">{n.question || n.title}</p>
+        <p className="mt-2 font-display text-lg leading-snug font-bold text-ink">{n.question || n.title}</p>
         <p className="mt-1 truncate font-mono text-2xs text-mute-2">
           {agent.repo}
           {agent.branch && ` · ${agent.branch}`}
         </p>
-        {n.command && <pre className="mt-2.5 overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs text-ink-2">{n.command}</pre>}
-        <QuickAnswer agentKey={agentKey} appearance="big" mobile className="mt-3.5" />
+        {n.command && <pre className="mt-2 overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs text-ink-2">{n.command}</pre>}
+        <QuickAnswer agentKey={agentKey} appearance="big" mobile className="mt-3" />
       </div>
     </SwipeRow>
   );
@@ -178,11 +178,11 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const quiet = silent !== null;
   return (
     <SwipeRow id={agentKey} actions={swipeActions(agentKey, column)} onOpen={() => openAgent(agentKey)}>
-      <div data-status={status} data-morph="surface" data-morph-key={agentKey} className={cn("card-surface flex gap-3 rounded-xl p-3.5", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]")}>
+      <div data-status={status} data-morph="surface" data-morph-key={agentKey} className={cn("card-surface flex gap-2.5 rounded-xl p-3", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]")}>
         {todos && todos.total > 0 ? (
-          <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={40} stroke={3.5} />
+          <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={36} stroke={3.5} />
         ) : (
-          <AgentGlyph name={agent.name} size={40} status={column === "running" ? status : undefined} />
+          <AgentGlyph name={agent.name} size={36} status={column === "running" ? status : undefined} />
         )}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
@@ -197,9 +197,9 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
           <p className={cn("mt-0.5 font-semibold text-ink-2", column === "done" ? "truncate text-xs" : "line-clamp-2 text-sm leading-snug")}>{agent.title || agent.name}</p>
           {column === "running" && (
             <>
-              <LiveLine live={agent.live} running={!stale} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="mt-1.5" />
-              <div className="mt-1.5 flex items-center gap-2">
-                <AgentHeartbeat agentKey={agentKey} status={quiet ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={18} className="min-w-0 flex-1" />
+              <LiveLine live={agent.live} running={!stale} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="mt-1" />
+              <div className="mt-1 flex items-center gap-2">
+                <AgentHeartbeat agentKey={agentKey} status={quiet ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={16} className="min-w-0 flex-1" />
                 {quiet && <QuietChip silentMs={silent} />}
               </div>
             </>
@@ -249,7 +249,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
 
 function Section({ title, column, count, children, action }: { title: string; column: Column; count: number; children: ReactNode; action?: ReactNode }) {
   return (
-    <section className="flex flex-col gap-2.5" aria-label={title}>
+    <section className="flex flex-col gap-2" aria-label={title}>
       <header className="flex items-center gap-2 px-1">
         <StatusOrb status={LANE_BY_COLUMN[column].status} size={7} label={null} />
         <h2 className="font-display text-md font-bold text-ink">{title}</h2>
@@ -275,13 +275,13 @@ export function FlockHome() {
   useEffect(() => () => useBoard.getState().clearPicked(), []);
 
   return (
-    <div className="flex min-h-full flex-col gap-5 px-4 pt-[max(14px,env(safe-area-inset-top))] pb-24">
+    <div className="flex min-h-full flex-col gap-4 px-3.5 pt-3 pb-22">
       <WhileAwayToast />
       <div className="contents">
         <header className="flex items-end justify-between">
           <div>
             <span className="kicker">Your agents, herded</span>
-            <h1 className="font-display text-display font-bold text-ink">Flock</h1>
+            <h1 className="font-display text-3xl font-bold text-ink">Flock</h1>
           </div>
           <HostChip />
         </header>
@@ -343,11 +343,12 @@ export function FlockHome() {
                 {doneOpen && (
                   <motion.div
                     key="done"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
+                    initial={{ height: 0, opacity: 0, overflow: "hidden" }}
+                    // Clip only while sizing: settled, the cards' shadows and selection rings must not be cut.
+                    animate={{ height: "auto", opacity: 1, transitionEnd: { overflow: "visible" } }}
+                    exit={{ height: 0, opacity: 0, overflow: "hidden" }}
                     transition={spring.smooth}
-                    className="flex flex-col gap-2.5 overflow-hidden"
+                    className="flex flex-col gap-2"
                   >
                     {done.map((k) => (
                       <CardFlight key={k} flightId={k}>

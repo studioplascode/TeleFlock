@@ -295,11 +295,11 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
 
       <Diagnostics kind={p.kind} report={report} running={testing} />
 
-      {/* Phone: the actions stay pinned to the bottom of the sheet (which rides above the keyboard), primary full-width in the thumb zone. */}
+      {/* The actions stay pinned to the bottom of the scrolling body: phone sheets ride above the keyboard (primary full-width in the thumb zone); short desktop windows keep them reachable. */}
       <div
         className={cn(
           "flex flex-wrap items-center gap-2 border-t border-line pt-4",
-          mobile && "sticky bottom-0 z-raised -mx-5 -mb-4 bg-[#17171f] px-5 pt-3 pb-4 shadow-[0_-12px_24px_-12px_rgb(0_0_0/0.6)]",
+          mobile ? "sticky bottom-0 z-raised -mx-4 -mb-3 bg-[#17171f] px-4 pt-2.5 pb-3 shadow-[0_-12px_24px_-12px_rgb(0_0_0/0.6)]" : "sticky bottom-0 z-raised bg-[#17171f]",
         )}
       >
         {editing && (

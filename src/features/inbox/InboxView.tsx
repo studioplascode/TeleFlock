@@ -16,13 +16,13 @@ function InboxItem({ agentKey, index, mobile }: { agentKey: string; index: numbe
         ref={ref}
         data-status="needs-you"
         aria-label={`Waiting ${index + 1}`}
-        className={cn("card-surface st-border-grad flex flex-col gap-3.5 rounded-xl", mobile ? "p-4" : "p-5")}
+        className={cn("card-surface st-border-grad flex flex-col rounded-xl", mobile ? "gap-3 p-3.5" : "gap-3.5 p-5")}
       >
         <NeedsHeader agentKey={agentKey} />
         <LastAssistantText agentKey={agentKey} enabled={visible} />
         <NeedsQuestion agentKey={agentKey} />
         <QuickAnswer agentKey={agentKey} appearance={mobile ? "big" : "card"} mobile={mobile} />
-        <div className="flex flex-wrap gap-1.5 border-t border-line pt-3">
+        <div className={cn("flex flex-wrap gap-1.5 border-t border-line", mobile ? "-mb-1 pt-2" : "pt-3")}>
           <Button size="sm" variant="ghost" onClick={() => openAgent(agentKey)}>
             Open session
           </Button>
@@ -47,7 +47,7 @@ export function InboxView() {
   const setAnswerNext = useUi((s) => s.setAnswerNext);
   const body = (
     <LayoutGroup id="inbox">
-      <div className="flex flex-col gap-3.5">
+      <div className={cn("flex flex-col", mobile ? "gap-3" : "gap-3.5")}>
         <AnimatePresence mode="popLayout" initial={false}>
           {keys.map((k, i) => (
             <InboxItem key={k} agentKey={k} index={i} mobile={mobile} />
@@ -74,7 +74,7 @@ export function InboxView() {
     return (
       <div className="flex min-h-full flex-col">
         <MobileHeader title="Inbox" subtitle={keys.length > 0 ? `${keys.length} waiting · oldest first` : "All clear"} />
-        <div className="px-4 pt-2 pb-6">{body}</div>
+        <div className="px-3 pt-1 pb-5">{body}</div>
       </div>
     );
   }

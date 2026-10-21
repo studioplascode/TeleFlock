@@ -1,0 +1,17 @@
+/*
+ * Symbols Nerd Font Mono (Nerd Fonts v3.5.1, NerdFontsSymbolsOnly, WOFF2 re-encode of the unmodified
+ * TTF; MIT + per-icon-set licenses, see LICENSE and README.md next to this file).
+ * Terminal fallback for omp's `symbolPreset: nerd` icons: the unicode-range is exactly the font's
+ * Private Use Area coverage, so every other character keeps resolving to Fira Code / system fonts.
+ */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./SymbolsNerdFontMono-Regular.woff2") format("woff2");
+  unicode-range:
+    U+E000-E00A, U+E0A0-E0A3, U+E0B0-E0C8, U+E0CA, U+E0CC-E0D2, U+E0D4, U+E0D6-E0D7, U+E200-E2A9, U+E300-E3E3,
+    U+E5FA-E6BB, U+E700-E958, U+EA60-EA88, U+EA8A-EA8C, U+EA8F-EAC7, U+EAC9, U+EACC-EB09, U+EB0B-EB4E,
+    U+EB50-EC5E, U+EC60-EC84, U+ED00-EFCF, U+F000-F385, U+F400-F533, U+F0001-F1AF0;
+}

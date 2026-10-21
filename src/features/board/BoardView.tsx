@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useColumnKeys, useCore, useHosts, useUi } from "@/core";
-import { cn, useMinWidth } from "@/design";
+import { cn, useMediaQuery, useMinWidth } from "@/design";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
 import { HealthTile, LiveTerminalTile, NeedsHeroTile, StatsTile } from "./BentoRow";
 import { BoardToolbar, useRepoNames } from "./BoardToolbar";
@@ -50,7 +50,9 @@ export function BoardView() {
   const rootRef = useRef<HTMLDivElement>(null);
   const roomy = useMinWidth(rootRef, 1130);
   // Beside an open split the board gets narrow: the bento row steps aside so the lanes keep their height.
-  const bento = useMinWidth(rootRef, 760);
+  // Same on very short windows (the 560px minimum), where the tiles would leave the lanes a sliver.
+  const tall = useMediaQuery("(min-height: 620px)");
+  const bento = useMinWidth(rootRef, 760) && tall;
 
   const filter = { hostId, repo: repo ?? undefined, q: q.trim() || undefined };
   const running = useColumnKeys("running", filter);
@@ -72,12 +74,21 @@ export function BoardView() {
   useEffect(() => () => useBoard.getState().clearPicked(), []);
 
   return (
-    <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-3 p-4 [--bento-h:212px] short:gap-2.5 short:p-3 short:[--bento-h:178px]">
+    <div ref={rootRef} className="relative flex h-full min-h-0 flex-col gap-3 p-4 [--bento-h:212px] short:gap-2.5 short:p-3 short:[--bento-h:178px]">
       <BoardToolbar searchRef={searchRef} />
       <StaleHosts />
       {/* Under ~1130px of board the live terminal tile steps aside (unmounted) so the hero keeps room. */}
       {bento && (
-        <div className={cn("grid shrink-0 gap-3", roomy ? "grid-cols-[2.05fr_1fr_1fr_1.32fr]" : "grid-cols-[1.75fr_1fr_1fr]")}>
+        // minmax(0,…): a long question or terminal line must never push a tile wider than its share.
+        // Past ~2400px the stat tiles stop growing and the hero + live terminal take the extra room.
+        <div
+          className={cn(
+            "grid shrink-0 gap-3 short:gap-2.5",
+            roomy
+              ? "grid-cols-[minmax(0,2.05fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.32fr)] min-[2400px]:grid-cols-[minmax(0,2fr)_minmax(0,440px)_minmax(0,440px)_minmax(0,1.6fr)]"
+              : "grid-cols-[minmax(0,1.75fr)_minmax(0,1fr)_minmax(0,1fr)]",
+          )}
+        >
           <NeedsHeroTile />
           <StatsTile />
           <HealthTile />

@@ -759,7 +759,8 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
     }
     info!(session = %session_id, instance = %row.instance_id, generation = link.generation, pid = row.pid, "joined omp session");
     tokio::spawn(pump(Arc::downgrade(inner), session.clone(), rx));
-    tokio::spawn(journal_loop(Arc::downgrade(inner), session));
+    tokio::spawn(journal_loop(Arc::downgrade(inner), session.clone()));
+    tokio::spawn(artifact_loop(Arc::downgrade(inner), session));
     Ok(())
 }
 
@@ -798,21 +799,14 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
             if st.first_prompt.is_none() {
                 st.first_prompt = first_prompt_in(&update.events);
             }
-            let usage = st.replica.usage().filter(|c| st.last_cost.as_ref() != Some(c));
-            if let Some(c) = &usage {
-                st.last_cost = Some(c.clone());
-            }
-            (update, usage.map(|c| (c, st.replica.meta().model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)))))
+            (update, changed_usage(&mut st))
         };
         for r in &update.replies {
             if let Err(e) = session.guest.ui_response(r.req_id, r.value.clone()) {
                 warn!(session = %sid, "auto ui-response: {e}");
             }
         }
-        if let Some((cost, model)) = usage {
-            let day = local_day(now);
-            inner.persist.update(|d| d.usage.observe(&sid, &cost, model.as_deref(), &day));
-        }
+        observe_usage(&inner, &sid, usage, now);
         if !update.pulses.is_empty() {
             let _ = inner.updates.send(OmpUpdate::Pulses { session_id: sid.clone(), pulses: update.pulses.clone() });
         }
@@ -881,7 +875,7 @@ async fn read_journal(inner: &Arc<Inner>, session: &Arc<OmpSession>) -> Result<(
         };
         let chunk = session.guest.fetch_transcript(&main, offset).await.map_err(|e| e.to_string())?;
         let done = chunk.text.is_empty() || chunk.error.is_some();
-        let changed = {
+        let (changed, usage) = {
             let mut st = session.lock();
             if st.replica.journal_offset() != offset {
                 // Raced with a resync/rotation that reset the offset; start over next time.
@@ -890,8 +884,9 @@ async fn read_journal(inner: &Arc<Inner>, session: &Arc<OmpSession>) -> Result<(
             let update = st.replica.apply_journal(&chunk);
             st.pending.extend(update.events.iter().cloned());
             schedule_flush(session, &mut st);
-            update.meta_changed || !update.events.is_empty()
+            (update.meta_changed || !update.events.is_empty(), changed_usage(&mut st))
         };
+        observe_usage(inner, &session.session_id, usage, now_ms());
         if changed {
             let _ = inner.updates.send(OmpUpdate::Changed { session_id: session.session_id.clone() });
         }
@@ -903,6 +898,108 @@ async fn read_journal(inner: &Arc<Inner>, session: &Arc<OmpSession>) -> Result<(
         }
     }
     Ok(())
+}
+
+/// The replica's session total when it changed since the last call (for the usage ledger).
+fn changed_usage(st: &mut SessionState) -> Option<CostInfo> {
+    let c = st.replica.usage().filter(|c| st.last_cost.as_ref() != Some(c))?;
+    st.last_cost = Some(c.clone());
+    Some(c)
+}
+
+fn observe_usage(inner: &Inner, session_id: &str, cost: Option<CostInfo>, now: Millis) {
+    if let Some(cost) = cost {
+        let day = local_day(now);
+        inner.persist.update(|d| d.usage.observe(session_id, &cost, &day));
+    }
+}
+
+/// Artifact scan cadence while anything in the session may be billing (a turn, a running
+/// subagent, a reply being replayed, recent transcript growth), and while it is quiet.
+const ARTIFACTS_BUSY: Duration = Duration::from_secs(1);
+const ARTIFACTS_IDLE: Duration = Duration::from_secs(5);
+/// How long after the last growth the scan stays on the busy cadence.
+const ARTIFACTS_LINGER: Duration = Duration::from_secs(30);
+/// Retry interval while the session file is not on disk yet (omp writes it lazily).
+const ARTIFACTS_LOCATE_EVERY: Duration = Duration::from_secs(10);
+
+/// Tails the session's artifacts dir (subagent and advisor transcripts, which collab never
+/// mirrors) into the replica's spend and throughput. See [`crate::artifacts`].
+async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
+    // (omp session id the ledger belongs to, artifacts dir, ledger)
+    let mut tail: Option<(String, std::path::PathBuf, tf_collab::ArtifactLedger)> = None;
+    let mut next_locate = Instant::now();
+    let mut last_growth: Option<Instant> = None;
+    let mut was_replaying = false;
+    loop {
+        let (sid, busy) = {
+            let st = session.lock();
+            let sid = st.replica.header().map(|h| h.id.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| session.session_id.clone());
+            let busy = st.replica.is_streaming()
+                || st.replica.replaying(now_ms())
+                || st.replica.meta().subagents.iter().any(|s| s.status == tf_proto::session::SubagentStatus::Running)
+                || last_growth.is_some_and(|t| t.elapsed() < ARTIFACTS_LINGER);
+            (sid, busy)
+        };
+        tokio::time::sleep(if busy { ARTIFACTS_BUSY } else { ARTIFACTS_IDLE }).await;
+        if session.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(inner) = weak.upgrade() else { return };
+        if tail.as_ref().is_some_and(|(id, _, _)| *id != sid) {
+            tail = None;
+        }
+        if tail.is_none() {
+            if Instant::now() < next_locate {
+                continue;
+            }
+            next_locate = Instant::now() + ARTIFACTS_LOCATE_EVERY;
+            let root = crate::ops::host::omp_agent_dir().join("sessions");
+            let id = sid.clone();
+            let found = tokio::task::spawn_blocking(move || crate::artifacts::find_session_file(&root, &id)).await.ok().flatten();
+            let Some(file) = found else { continue };
+            debug!(session = %sid, file = %file.display(), "artifact scan: session file");
+            tail = Some((sid.clone(), crate::artifacts::artifacts_dir(&file), tf_collab::ArtifactLedger::default()));
+        }
+        let Some((id, dir, mut ledger)) = tail.take() else { continue };
+        let scanned = tokio::task::spawn_blocking(move || {
+            let calls = crate::artifacts::scan(&dir, &mut ledger);
+            (dir, ledger, calls)
+        })
+        .await;
+        let calls = match scanned {
+            Ok((dir, ledger, calls)) => {
+                tail = Some((id, dir, ledger));
+                calls
+            }
+            Err(e) => {
+                warn!(session = %sid, "artifact scan: {e}");
+                continue;
+            }
+        };
+        let Some((_, _, ledger)) = tail.as_ref() else { continue };
+        let now = now_ms();
+        let (changed, replaying, usage) = {
+            let mut st = session.lock();
+            let update = if !calls.is_empty() || st.replica.artifacts_stale(ledger) {
+                st.replica.apply_artifacts(ledger, &calls, now)
+            } else {
+                tf_collab::Update::default()
+            };
+            st.pending.extend(update.events.iter().cloned());
+            schedule_flush(&session, &mut st);
+            (update.meta_changed, st.replica.replaying(now), changed_usage(&mut st))
+        };
+        if !calls.is_empty() {
+            last_growth = Some(Instant::now());
+        }
+        observe_usage(&inner, &session.session_id, usage, now);
+        // The board re-reads `Liveness.tps` on every change: keep it ticking while a reply replays.
+        if changed || replaying || was_replaying {
+            let _ = inner.updates.send(OmpUpdate::Changed { session_id: session.session_id.clone() });
+        }
+        was_replaying = replaying;
+    }
 }
 
 fn schedule_flush(session: &Arc<OmpSession>, st: &mut SessionState) {

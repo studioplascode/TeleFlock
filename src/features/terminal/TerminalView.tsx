@@ -497,7 +497,7 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
 
       <footer className="@container flex min-h-8 shrink-0 items-center gap-3">
         {mode === "control" && <SendKeysBar onSend={send} disabled={!live} />}
-        <div className="ml-auto flex shrink-0 items-center gap-3 text-2xs text-mute-2 @max-[900px]:hidden" aria-label="Terminal shortcuts">
+        <div className="ml-auto flex shrink-0 items-center gap-3 text-2xs text-mute-2 @max-[1040px]:hidden" aria-label="Terminal shortcuts">
           <span className="flex items-center gap-1">
             <Kbd>Ctrl Shift M</Kbd> mode
           </span>

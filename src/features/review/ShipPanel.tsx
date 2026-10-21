@@ -147,7 +147,7 @@ function StageNode({ index, stage, blocked, size = 28 }: { index: number; stage:
   return (
     <span
       className={cn(
-        "relative z-[1] grid shrink-0 place-items-center rounded-full transition-[background-color,color,box-shadow] duration-500 [&_svg]:size-3.5",
+        "relative z-raised grid shrink-0 place-items-center rounded-full transition-[background-color,color,box-shadow] duration-500 [&_svg]:size-3.5",
         done && "bg-[color-mix(in_oklab,var(--color-done)_22%,var(--color-tile-2))] text-done",
         current && !blocked && "bg-omp text-white shadow-glow-accent",
         current && blocked && "bg-[color-mix(in_oklab,var(--color-warn)_18%,var(--color-tile-2))] text-warn",
@@ -168,7 +168,7 @@ function StageNode({ index, stage, blocked, size = 28 }: { index: number; stage:
 /** Horizontal pipeline with labels; connectors fill as stages complete. `dots` drops the labels. */
 export function ShipStepper({ stage, blocked, dots = false }: { stage: number; blocked: boolean; dots?: boolean }) {
   return (
-    <ol className="grid grid-cols-5 pt-1.5" aria-label="Ship progress">
+    <ol className="isolate grid grid-cols-5 pt-1.5" aria-label="Ship progress">
       {SHIP_STAGES.map((s, i) => {
         const done = i < stage || (i === 4 && stage === 4);
         return (
@@ -205,7 +205,7 @@ export function ShipStrip({ state, onOpen }: { state: ShipState; onOpen: () => v
       className="tile group flex h-full w-[52px] shrink-0 flex-col items-center gap-3 py-3 text-mute transition-colors focus-ring hover:text-ink"
     >
       <PanelRightOpen className="size-4 shrink-0 transition-transform duration-300 ease-spring group-hover:-translate-x-0.5" />
-      <ol className="flex flex-col items-center" aria-hidden>
+      <ol className="isolate flex flex-col items-center" aria-hidden>
         {SHIP_STAGES.map((s, i) => (
           <li key={s.label} className="flex flex-col items-center">
             {i > 0 && (

@@ -18,6 +18,7 @@ import {
   PanelLeft,
   Plug,
   PlugZap,
+  Send,
   Server,
   Settings2,
   Sparkles,
@@ -25,7 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -158,6 +159,7 @@ function useEntries(): Entry[] {
 
   const views: { title: string; route: Route; icon: ReactNode; keys: string[]; shortcut?: string }[] = [
     { title: "Board", route: { name: "board" }, icon: <LayoutDashboard />, keys: ["home", "kanban", "flock"], shortcut: "Ctrl 1" },
+    { title: "Dispatch", route: { name: "dispatch" }, icon: <Send />, keys: ["send", "fire", "tasks", "many agents", "worktree", "quick"], shortcut: "D" },
     { title: "Inbox", route: { name: "inbox" }, icon: <Inbox />, keys: ["needs you", "questions"], shortcut: "Ctrl 2" },
     { title: "Activity", route: { name: "activity" }, icon: <Activity />, keys: ["timeline", "feed", "history"], shortcut: "Ctrl 3" },
     { title: "Usage", route: { name: "usage" }, icon: <BarChart3 />, keys: ["cost", "tokens", "spend"], shortcut: "Ctrl 4" },
@@ -344,6 +346,14 @@ function PaletteBody({ close }: { close: () => void }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState<PalettePage | null>(null);
   const [busy, setBusy] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // cmdk scrolls the newly selected first result into view before React re-orders the ranked list,
+  // which left the list scrolled deep into the old order with the top match out of sight.
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => listRef.current?.scrollTo({ top: 0 }));
+    return () => cancelAnimationFrame(raf);
+  }, [query, page]);
 
   const choose = (e: Entry) => {
     pushRecent(e.id);
@@ -399,7 +409,7 @@ function PaletteBody({ close }: { close: () => void }) {
           </span>
         </motion.div>
       )}
-      <CommandList>
+      <CommandList ref={listRef}>
         {page?.kind === "model" && <ModelPage hostId={page.hostId} agentId={page.agentId} query={query} done={close} />}
         {page?.kind === "thinking" && <ThinkingPage hostId={page.hostId} agentId={page.agentId} query={query} done={close} />}
         {page?.kind === "text" && (

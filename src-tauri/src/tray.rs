@@ -1,7 +1,8 @@
 //! Desktop tray icon + taskbar indicators.
 //!
-//! * Tray icon: app icon with an orbiting comet while agents run and a pink count badge when
-//!   agents need you. Tooltip "3 running · 2 need you". Menu: Answer next (n), Open, Quit.
+//! * Tray icon: app icon with an orbiting comet while agents run (a still comet on Linux) and a
+//!   pink count badge when agents need you. Tooltip "3 running · 2 need you". Menu: Answer next
+//!   (n), Open, Quit.
 //! * Windows taskbar: overlay badge (count / running dot), progress bar (indeterminate while
 //!   running, paused-yellow while something needs you) and a flash when a new agent needs you
 //!   while the window is in the background.
@@ -128,7 +129,9 @@ impl<R: Runtime> Tray<R> {
 
     /// Static frame, or (re)start the orbit animation while agents run.
     fn refresh(self: &Arc<Self>, s: BadgeState) {
-        let animate = s.running > 0 && !self.reduced_motion.load(Ordering::Acquire);
+        // Linux: every tray frame is a PNG written to disk and re-read by the panel over D-Bus
+        // (StatusNotifierItem); 9 fps of that for hours is real load, so the comet stays still.
+        let animate = !cfg!(target_os = "linux") && s.running > 0 && !self.reduced_motion.load(Ordering::Acquire);
         if !animate {
             self.set_frame(s, 0);
             return;

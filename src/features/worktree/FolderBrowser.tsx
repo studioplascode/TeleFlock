@@ -290,18 +290,20 @@ export function FolderBrowser({ hostId, mode, value, onSelect, onConfirm, initia
             return (
               <span key={c.path} className="flex shrink-0 items-center">
                 {i > 0 && <ChevronRight className="size-3 text-mute-2" aria-hidden />}
-                <button
-                  type="button"
-                  onClick={() => !last && go(c.path, -1)}
-                  aria-current={last ? "location" : undefined}
-                  className={cn(
-                    "flex items-center gap-1 rounded-xs px-1.5 py-0.5 font-mono text-xs transition-colors focus-ring",
-                    last ? "cursor-default font-bold text-ink" : "text-mute hover:bg-white/8 hover:text-ink",
-                  )}
-                >
-                  {last && here?.repoRoot && mode === "repo" && <FolderGit2 className="size-3 text-accent" aria-hidden />}
-                  {c.label}
-                </button>
+                {last ? (
+                  <span aria-current="location" className="flex items-center gap-1 px-1.5 py-0.5 font-mono text-xs font-bold text-ink">
+                    {here?.repoRoot && mode === "repo" && <FolderGit2 className="size-3 text-accent" aria-hidden />}
+                    {c.label}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => go(c.path, -1)}
+                    className="flex items-center gap-1 rounded-xs px-1.5 py-0.5 font-mono text-xs text-mute transition-colors focus-ring hover:bg-white/8 hover:text-ink"
+                  >
+                    {c.label}
+                  </button>
+                )}
               </span>
             );
           })}

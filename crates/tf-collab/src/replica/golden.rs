@@ -445,7 +445,151 @@ fn s07_task_subagent() {
     assert_eq!(subs[0].status, SubagentStatus::Done);
     assert_eq!(subs[0].parent_id.as_deref(), Some("Main"));
     assert!(subs[0].tokens.unwrap() > 0);
+    // omp's TUI row: `· 2.4%/272K` (contextTokens 6637 / contextWindow 272000).
+    for sub in [&subs[0], &v.agents[0]] {
+        let ctx = sub.context.as_ref().expect("subagent context usage");
+        assert_eq!((ctx.tokens, ctx.window), (6637, 272_000));
+        assert!((ctx.pct - 2.44).abs() < 0.01, "{}", ctx.pct);
+        assert_eq!(sub.completion_pct, None, "no probe answered in a 2 s run");
+    }
     assert!(r.rows().iter().any(|i| matches!(i, TranscriptItem::User(u) if u.synthetic && u.author.as_deref() == Some("async-result"))));
+}
+
+/// A ~3 min subagent outlives omp's first completion probe (2 min): its `AgentProgress.completionPercent`
+/// (omp TUI `· 15%`) reaches the meta subagent and the task tool card while it runs, then drops once it ends.
+#[test]
+fn s17_task_completion_probe() {
+    let r = run("17-task-completion-probe");
+    let metas: Vec<&SessionMeta> = r.events().into_iter().filter_map(|e| match e { SessionEvent::Meta { meta } => Some(meta), _ => None }).collect();
+    let live: Vec<&Subagent> = metas.iter().flat_map(|m| &m.subagents).filter(|s| s.completion_pct.is_some()).collect();
+    assert!(!live.is_empty(), "no meta subagent carried the completion estimate");
+    for s in &live {
+        assert_eq!(s.status, SubagentStatus::Running);
+        assert_eq!(s.completion_pct, Some(15.0));
+        let ctx = s.context.as_ref().unwrap();
+        assert_eq!(ctx.window, 272_000);
+        assert!(ctx.pct > 0.0 && ctx.pct < 100.0, "{}", ctx.pct);
+    }
+    let cards: Vec<&Subagent> = r
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            SessionEvent::Upsert { item: TranscriptItem::Tool(t) } => match &t.view {
+                Some(ToolView::Task(v)) => Some(&v.agents),
+                _ => None,
+            },
+            _ => None,
+        })
+        .flatten()
+        .filter(|a| a.completion_pct.is_some())
+        .collect();
+    assert!(cards.iter().any(|a| a.completion_pct == Some(15.0)), "task tool card never showed the estimate");
+    // Finished: omp's TUI only prints the estimate on live rows.
+    let subs = &r.replica.meta().subagents;
+    assert_eq!(subs.len(), 1, "{subs:?}");
+    assert_eq!(subs[0].status, SubagentStatus::Done);
+    assert_eq!(subs[0].completion_pct, None);
+    assert!(subs[0].context.is_some());
+}
+
+/// Session cost is omp's status-line total: main (assistant turns) + subagents (`max` of task
+/// results, the artifact tree, live `progress.cost`) + advisor (`__advisor*.jsonl`). Sample 17 has
+/// an async subagent (no `details.usage`) and an advisor note; the artifacts dir is fed through an
+/// [`super::ArtifactLedger`] as tf-hostd does. Finished subagent/advisor replies replay into tok/s
+/// and expire, so throughput idles after the turn.
+#[test]
+fn s17_cost_covers_subagents_and_advisor() {
+    let mut r = run("17-task-completion-probe");
+    let rows = load("17-task-completion-probe");
+    let main: f64 = rows
+        .iter()
+        .filter(|row| row.frame["t"] == "entry" && row.frame["entry"]["message"]["role"] == "assistant")
+        .filter_map(|row| row.frame["entry"]["message"]["usage"]["cost"]["total"].as_f64())
+        .sum();
+    let progress = rows
+        .iter()
+        .rev()
+        .find_map(|row| (row.frame["channel"] == "task:subagent:progress").then(|| row.frame["data"]["progress"]["cost"].as_f64()).flatten())
+        .unwrap();
+    let c = r.replica.usage().unwrap();
+    let split = c.split.clone().unwrap();
+    assert!((split.main - main).abs() < 1e-12, "{split:?} vs {main}");
+    assert!((split.subagents - progress).abs() < 1e-12, "async subagent bills through progress: {split:?}");
+    assert_eq!(split.advisor, 0.0, "advisors are never mirrored over collab");
+    assert!((c.usd - (main + progress)).abs() < 1e-12);
+    assert_eq!(r.replica.meta().cost.as_ref(), Some(&c), "meta and board read the same total");
+
+    // tf-hostd reads the artifacts dir: the subagent transcript bills slightly more than progress
+    // (its `model_usage` probe calls), and the advisor transcript bills its own turns.
+    let now = 1_792_576_400_000;
+    let line = |v: Value| format!("{v}\n");
+    let header = line(serde_json::json!({"type": "session", "id": "s"}));
+    let reply = |usd: f64, output: u64| {
+        line(serde_json::json!({"type": "message", "message": {"role": "assistant", "timestamp": now - 3_000, "duration": 2_500.0, "ttft": 500.0,
+            "usage": {"input": 900, "output": output, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": usd}}}}))
+    };
+    let mut ledger = super::ArtifactLedger::default();
+    let mut calls = ledger.ingest("RequestedSleepCount.jsonl", format!("{header}{}", reply(progress, 40)).as_bytes());
+    calls.extend(ledger.ingest(
+        "RequestedSleepCount.jsonl",
+        line(serde_json::json!({"type": "model_usage", "usage": {"output": 3, "cost": {"total": 0.0001}}})).as_bytes(),
+    ));
+    calls.extend(ledger.ingest("__advisor.default.jsonl", format!("{header}{}", reply(0.01, 120)).as_bytes()));
+    assert_eq!(calls.len(), 3);
+    let up = r.replica.apply_artifacts(&ledger, &calls, now);
+    assert!(up.meta_changed && up.events.iter().any(|e| matches!(e, SessionEvent::Meta { .. })));
+    let c = r.replica.usage().unwrap();
+    let split = c.split.clone().unwrap();
+    assert!((split.subagents - (progress + 0.0001)).abs() < 1e-12, "{split:?}");
+    assert!((split.advisor - 0.01).abs() < 1e-12);
+    assert!((c.usd - (split.main + split.subagents + split.advisor)).abs() < 1e-12, "parts sum to the total");
+    assert!(!r.replica.artifacts_stale(&ledger));
+
+    // Throughput: each reply replays at output / (duration − ttft) = n / 2 s; the turn is over, so
+    // the main agent contributes nothing, and once the replays end tok/s is gone.
+    let live = r.replica.liveness(now + 500);
+    let tps = live.tps_split.unwrap();
+    assert_eq!(tps.main, 0.0);
+    assert!((tps.subagents - 20.0).abs() < 1e-3 && (tps.advisor - 60.0).abs() < 1e-3, "{tps:?}");
+    assert!((live.tps.unwrap() - 80.0).abs() < 1e-3);
+    assert!(r.replica.replaying(now + 500));
+    let idle = r.replica.liveness(now + 2_001);
+    assert!(idle.tps.is_none() && idle.tps_split.is_none());
+    assert!(!r.replica.replaying(now + 2_001));
+}
+
+/// The artifacts dir of a real run (omp 18.12.3, advisor on, one sync subagent; captured
+/// 2026-10-21 in `19-artifacts/`). Both transcripts open with omp's `title` slot line before the
+/// session header. The ledger bills what omp bills: assistant turns (+ subagent `model_usage`).
+#[test]
+fn s19_artifact_transcripts() {
+    let dir = format!("{DIR}/19-artifacts");
+    let mut ledger = super::ArtifactLedger::default();
+    let mut expect = (0.0, 0.0);
+    for (name, advisor) in [("TinyFilesEssay.jsonl", false), ("__advisor.default.jsonl", true)] {
+        let raw = std::fs::read(format!("{dir}/{name}")).unwrap();
+        let first: Value = serde_json::from_slice(raw.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        assert_eq!(first["type"], "title", "{name}: title slot first");
+        let billed: f64 = String::from_utf8_lossy(&raw)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| (e["type"] == "message" && e["message"]["role"] == "assistant") || (!advisor && e["type"] == "model_usage"))
+            .filter_map(|e| e["message"]["usage"]["cost"]["total"].as_f64().or_else(|| e["usage"]["cost"]["total"].as_f64()))
+            .sum();
+        if advisor {
+            expect.1 += billed;
+        } else {
+            expect.0 += billed;
+        }
+        // Fed in two arbitrary chunks, as tf-hostd reads a file that is still growing.
+        let (a, b) = raw.split_at(raw.len() / 3);
+        let calls = [ledger.ingest(name, a), ledger.ingest(name, b)].concat();
+        assert!(!calls.is_empty(), "{name}");
+        assert!(calls.iter().all(|c| c.ended_at.is_some() && c.decode_ms.is_some_and(|d| d > 0)), "{name}: replayable");
+    }
+    assert!(expect.0 > 0.0 && expect.1 > 0.0);
+    assert!((ledger.subagents().usd - expect.0).abs() < 1e-12, "{} vs {}", ledger.subagents().usd, expect.0);
+    assert!((ledger.advisor().usd - expect.1).abs() < 1e-12, "{} vs {}", ledger.advisor().usd, expect.1);
 }
 
 #[test]
@@ -762,4 +906,80 @@ fn journal_goal_plan_and_todo_edits() {
     // Errors are ignored; the offset stays.
     rep.apply_journal(&crate::guest::TranscriptChunk { text: String::new(), new_size: 0, error: Some("x".into()) });
     assert_eq!(rep.journal_offset(), 20);
+}
+
+fn irc_rows(rows: &[TranscriptItem]) -> Vec<(String, IrcMessage, Option<ToolStatus>)> {
+    rows.iter()
+        .filter_map(|i| match i {
+            TranscriptItem::Irc(r) => Some((r.id.clone(), r.message.clone(), None)),
+            TranscriptItem::Tool(t) => match &t.view {
+                Some(ToolView::Irc(m)) => Some((t.id.clone(), m.clone(), Some(t.status))),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// IRC (agent ↔ agent messages). Main spawns `Pinger`, consumes its ping with `wait` (inbound via
+/// the tool result) and answers with `write agent://Pinger` (outbound, receipt `woken`).
+#[test]
+fn s18_irc_wait_and_send() {
+    let r = run("18-irc");
+    r.check_mirror();
+    let irc = irc_rows(&r.rows());
+    assert_eq!(irc.len(), 2, "{irc:#?}");
+    let (_, ping, status) = &irc[0];
+    assert_eq!((ping.direction, ping.peer.as_str(), ping.text.as_str()), (IrcDirection::In, "Pinger", "ping from Pinger: what is 2+2?"));
+    assert_eq!(ping.message_id.as_deref(), Some("15aec6c15b16073c"));
+    assert_eq!(*status, Some(ToolStatus::Ok), "carried by the wait call");
+    // The row is stamped with the wait call's start; omp's send time rides along.
+    assert_eq!(ping.sent_at, Some(1792576697708));
+    let wait_at = r.rows().iter().find_map(|i| match i {
+        TranscriptItem::Tool(t) if t.tool == "wait" => Some(t.at),
+        _ => None,
+    });
+    assert!(wait_at.is_some_and(|at| at < 1792576697708), "wait started before the ping was sent");
+    let (_, pong, status) = &irc[1];
+    assert_eq!((pong.direction, pong.peer.as_str(), pong.text.as_str()), (IrcDirection::Out, "Pinger", "pong from Main: 4"));
+    assert_eq!(pong.sent_at, None, "sends are stamped by the call");
+    assert_eq!(pong.receipts, vec![IrcReceipt { to: "Pinger".into(), outcome: "woken".into(), error: None }]);
+    assert_eq!(*status, Some(ToolStatus::Ok));
+    // A message write is not a file edit.
+    assert!(r.replica.meta().files.iter().all(|f| !f.path.starts_with("agent:")));
+}
+
+/// IRC to an idle main agent: the ping arrives as an `irc:incoming` custom message (live event
+/// and entry share the row), wakes Main, and Main answers with `write agent://Pinger-2`.
+#[test]
+fn s18b_irc_incoming_wakes_main() {
+    let r = run("18b-irc-incoming");
+    r.check_mirror();
+    let rows = r.rows();
+    let irc = irc_rows(&rows);
+    assert_eq!(irc.len(), 2, "{irc:#?}");
+    let (id, ping, status) = &irc[0];
+    assert_eq!(id, "u1792576920212");
+    assert_eq!((ping.direction, ping.peer.as_str(), ping.text.as_str()), (IrcDirection::In, "Pinger-2", "ping from Pinger: what is 3+3?"));
+    assert_eq!((ping.message_id.as_deref(), ping.from_parent, ping.wake_relay), (Some("15aec79aa5160741"), false, false));
+    assert_eq!(*status, None, "a transcript row of its own");
+    assert_eq!(ping.sent_at, Some(1792576920212));
+    let (_, pong, _) = &irc[1];
+    assert_eq!((pong.direction, pong.peer.as_str(), pong.text.as_str()), (IrcDirection::Out, "Pinger-2", "pong from Main: 6"));
+    // No "System turn" (synthetic user row) for the IRC message.
+    assert!(!rows.iter().any(|i| matches!(i, TranscriptItem::User(u) if u.author.as_deref() == Some("irc:incoming"))));
+    assert!(r.signals().iter().any(|s| matches!(s, Signal::Prompted { author: Some(a), .. } if a == "Pinger-2 via IRC")));
+}
+
+/// The subagent's side (its session file, as `agent.subagentTranscript` reads it): the ping it
+/// sent its parent, and the parent's answer (`irc:incoming` with `fromParent`).
+#[test]
+fn irc_subagent_transcript() {
+    let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/research/omp-samples/session-irc-subagent.jsonl")).unwrap();
+    let page = super::transcript_page(&raw);
+    let irc = irc_rows(&page.items);
+    assert_eq!(irc.len(), 2, "{irc:#?}");
+    assert_eq!((irc[0].1.direction, irc[0].1.peer.as_str(), irc[0].1.text.as_str()), (IrcDirection::Out, "Main", "ping from Pinger: what is 3+3?"));
+    assert_eq!((irc[1].1.direction, irc[1].1.peer.as_str(), irc[1].1.text.as_str()), (IrcDirection::In, "Main", "pong from Main: 6"));
+    assert!(irc[1].1.from_parent);
 }

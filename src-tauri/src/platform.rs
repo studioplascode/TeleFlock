@@ -1,4 +1,5 @@
-//! `tf_client::Platform` for the Tauri shell (Windows desktop, Android; Linux only for dev).
+//! `tf_client::Platform` for the Tauri shell (Windows, Android; Linux and macOS without OS
+//! notifications: tray badge and in-app inbox only).
 
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -35,6 +36,10 @@ pub struct TauriPlatform {
 fn is_web_url(url: &str) -> bool {
     tauri::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
+
+/// Android notification id of agent notifications; the tag tells them apart.
+#[cfg(target_os = "android")]
+const ANDROID_NOTIFY_ID: i32 = 1;
 
 impl TauriPlatform {
     pub fn new(app: AppHandle<Wry>, shell: Arc<Shell>) -> Self {
@@ -104,7 +109,7 @@ impl Platform for TauriPlatform {
             use tauri_plugin_teleflock_android::{NotifyButton, NotifyCategory, TeleFlockAndroidExt};
             let reply = p.reply;
             let notify = tauri_plugin_teleflock_android::Notify {
-                id: 1,
+                id: ANDROID_NOTIFY_ID,
                 tag: p.tag,
                 host_id: p.host_id,
                 notification_id: p.notification_id,
@@ -136,7 +141,24 @@ impl Platform for TauriPlatform {
             }
         }
         #[cfg(not(any(windows, target_os = "android")))]
-        log::info!("notification (no OS notifications on this dev platform): {} — {}", p.title, p.body);
+        log::info!("notification (no OS notifications on this platform): {} — {}", p.title, p.body);
+    }
+
+    fn retract(&self, host_id: &str, n: &Notification) {
+        let tag = present::tag(host_id, n);
+        #[cfg(windows)]
+        if let Some(t) = self.shell.toasts.get() {
+            t.retract(&tag, &n.id);
+        }
+        #[cfg(target_os = "android")]
+        {
+            use tauri_plugin_teleflock_android::TeleFlockAndroidExt;
+            if let Err(e) = self.app.teleflock_android().retract(ANDROID_NOTIFY_ID, &tag, &n.id) {
+                log::warn!("retracting notification failed: {e}");
+            }
+        }
+        #[cfg(not(any(windows, target_os = "android")))]
+        log::debug!("retract notification {} ({tag})", n.id);
     }
 
     fn open_external(&self, url: &str) -> Result<(), ApiError> {
@@ -163,11 +185,12 @@ impl Platform for TauriPlatform {
         }
         #[cfg(not(any(windows, target_os = "android")))]
         {
-            std::process::Command::new("xdg-open")
+            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+            std::process::Command::new(opener)
                 .arg(url)
                 .spawn()
                 .map(drop)
-                .map_err(|e| ApiError::new("io_error", format!("xdg-open: {e}")))
+                .map_err(|e| ApiError::new("io_error", format!("{opener}: {e}")))
         }
     }
 

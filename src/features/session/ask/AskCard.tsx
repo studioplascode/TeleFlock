@@ -140,7 +140,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       data-status="needs-you"
       className={cn(
         "relative isolate overflow-hidden text-white",
-        compact ? "rounded-[24px] px-4 pt-3.5 pb-4" : "rounded-tile px-5 pt-4 pb-5",
+        compact ? "rounded-[24px] px-3.5 pt-3 pb-3.5" : "rounded-tile px-5 pt-4 pb-5",
         "[background:radial-gradient(90%_140%_at_100%_0%,rgb(255_61_119)_0%,transparent_65%),linear-gradient(125deg,#ff7a18,#ff3d77)]",
         "shadow-[0_30px_70px_-18px_rgb(255_61_119/0.75),0_10px_30px_-10px_rgb(255_122_24/0.6),inset_0_1px_0_rgb(255_255_255/0.35)]",
       )}
@@ -179,10 +179,10 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
         )}
       </div>
 
-      <h3 className={cn("relative mt-2.5 mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "text-xl leading-[1.2]" : "text-[25px] leading-[1.15]")}>{headline}</h3>
+      <h3 className={cn("relative mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "mt-2 text-lg leading-[1.2]" : "mt-2.5 text-[25px] leading-[1.15]")}>{headline}</h3>
       {body && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-white/90">{body}</div>}
       {needs?.command && (
-        <div className="relative my-2.5 overflow-hidden rounded-md bg-[rgb(30_4_18/0.42)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]">
+        <div className={cn("relative overflow-hidden rounded-md bg-[rgb(30_4_18/0.42)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]", compact ? "my-2" : "my-2.5")}>
           <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-1 text-[10px] font-extrabold tracking-[0.08em] uppercase opacity-75">
             <SquareTerminal className="size-3" /> Wants to run
           </div>
@@ -223,7 +223,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       )}
 
       {options.length > 0 && (
-        <div className={cn("relative mt-2 grid gap-2", compact ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2")} role={multi ? "group" : "radiogroup"} aria-label="Options">
+        <div className={cn("relative mt-2 grid", compact ? "grid-cols-1 gap-1.5" : "grid-cols-1 gap-2 sm:grid-cols-2")} role={multi ? "group" : "radiogroup"} aria-label="Options">
           {options.map((o, i) => {
             const on = picked.includes(o.id) || sent === o.label;
             return (
@@ -333,7 +333,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       )}
 
       {(request.allowChat || request.kind !== "planReview") && (
-        <div className="relative mt-3 flex flex-wrap items-center gap-2 text-xs font-bold">
+        <div className={cn("relative flex flex-wrap items-center gap-2 text-xs font-bold", compact ? "mt-2" : "mt-3")}>
           {request.allowChat && (
             <button
               type="button"

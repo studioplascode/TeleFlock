@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAgent, useUi } from "@/core";
 import type { Column } from "@/core/gen";
-import { AnimatePresence, CardFlight, CountBadge, EmptyState, LayoutGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion } from "@/design";
+import { AnimatePresence, CardFlight, CountBadge, EmptyState, LayoutGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion, z } from "@/design";
 import { AgentCard } from "./AgentCard";
 import { openAgent, setArchived } from "./agentActions";
 import { DropConfirm, type PendingDrop, useConfirmArchive } from "./ArchiveConfirm";
@@ -98,7 +98,7 @@ function DraggableCard({ agentKey, lane, selected }: { agentKey: string; lane: C
           // Shift-click must not start a text selection across cards
           if (e.shiftKey) e.preventDefault();
         }}
-        className="cursor-pointer touch-manipulation rounded-xl outline-none"
+        className="cursor-pointer touch-manipulation rounded-xl outline-none active:cursor-grabbing"
       >
         <AgentCard agentKey={agentKey} lane={lane} selected={selected} picked={picked} />
       </div>
@@ -123,6 +123,9 @@ function Lane({
   const refused = dragFrom !== null && dragFrom !== meta.column ? refusal(dragFrom, meta.column, dragName) : null;
   const accepting = dragFrom !== null && dragFrom !== meta.column && !refused;
   const q = useBoard((s) => s.q);
+  // the floating selection bar covers the lane bottoms: leave room (its live height, published by SelectionBar)
+  // to scroll the last card above it
+  const selecting = useBoard((s) => s.picked.length > 0);
   return (
     <section
       ref={setNodeRef}
@@ -143,15 +146,22 @@ function Lane({
         ) : (
           <NumberTicker value={keys.length} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />
         )}
-        <span className="ml-auto truncate text-2xs font-semibold text-mute-2">{meta.hint}</span>
+        <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2">{meta.hint}</span>
       </header>
       {refused && isOver && (
         <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mx-3 mb-2 rounded-md bg-error/10 px-3 py-2 text-2xs font-semibold text-[#ff9fb2]">
           {refused.title}
         </motion.p>
       )}
-      {/* -mt/pt pair: headroom so a lifted (selected) card and its check badge aren't clipped by the scroller */}
-      <motion.div layoutScroll className="no-scrollbar -mt-2 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-2.5 pt-2 pb-3">
+      {/* -mt/pt pair: headroom so a lifted (selected) card and its check badge aren't clipped by the scroller;
+          the edge fades soften glows cut by the scroll box. Very wide lanes (ultrawide) flow cards in two columns. */}
+      <motion.div
+        layoutScroll
+        className={cn(
+          "no-scrollbar -mt-3 grid min-h-0 flex-1 grid-cols-[repeat(auto-fill,minmax(min(100%,340px),1fr))] content-start items-start gap-2.5 overflow-y-auto px-2.5 pt-3 pb-3 [mask-image:linear-gradient(to_bottom,transparent,#000_8px,#000_calc(100%-10px),transparent)]",
+          selecting && "pb-[calc(var(--tf-selbar-h,48px)+24px)]",
+        )}
+      >
         <AnimatePresence initial={false}>
           {accepting && (
             <motion.div
@@ -161,7 +171,7 @@ function Lane({
               exit={{ opacity: 0, height: 0 }}
               transition={spring.snappy}
               className={cn(
-                "grid shrink-0 place-items-center rounded-xl border-[1.5px] border-dashed text-2xs font-bold transition-colors",
+                "col-span-full grid shrink-0 place-items-center rounded-xl border-[1.5px] border-dashed text-2xs font-bold transition-colors",
                 isOver ? "border-[rgb(var(--st-rgb)/0.9)] bg-[rgb(var(--st-rgb)/0.12)] st-text" : "border-[rgb(var(--st-rgb)/0.35)] text-mute",
               )}
             >
@@ -174,9 +184,9 @@ function Lane({
         ))}
         {keys.length === 0 &&
           (q.trim() ? (
-            <EmptyState compact title="No matches" description={`Nothing in ${meta.title} matches “${q.trim()}”.`} className="my-6" />
+            <EmptyState compact title="No matches" description={`Nothing in ${meta.title} matches “${q.trim()}”.`} className="col-span-full my-6" />
           ) : (
-            <EmptyState compact title={meta.empty.title} description={meta.empty.description} className="my-6" />
+            <EmptyState compact title={meta.empty.title} description={meta.empty.description} className="col-span-full my-6" />
           ))}
       </motion.div>
     </section>
@@ -195,6 +205,15 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
   const confirmArchive = useConfirmArchive();
   const dragAgent = useAgent(drag?.key ?? "");
   const view = applyMoves(lanes, pending ? { ...moves, [pending.key]: "done" } : moves);
+  // Whole-document grabbing cursor while a card is in flight (lanes and cards underneath would show their own).
+  const dragging = drag !== null;
+  useEffect(() => {
+    if (!dragging) return;
+    document.documentElement.dataset.dragging = "";
+    return () => {
+      delete document.documentElement.dataset.dragging;
+    };
+  }, [dragging]);
 
   const onStart = (e: DragStartEvent) => {
     const from = e.active.data.current?.lane as Column | undefined;
@@ -239,7 +258,8 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
   return (
     <DndContext sensors={sensors} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => setDrag(null)}>
       <LayoutGroup id="board">
-        <div className="grid min-h-0 flex-1 snap-x grid-cols-[repeat(4,minmax(264px,1fr))] gap-3 overflow-x-auto overscroll-x-contain [&>section]:snap-start">
+        {/* Bleeds into the board padding so a narrow window scrolls lanes edge to edge instead of clipping them short. */}
+        <div className="-mx-4 grid min-h-0 flex-1 snap-x scroll-px-4 grid-cols-[repeat(4,minmax(216px,1fr))] gap-3 overflow-x-auto overscroll-x-contain px-4 short:-mx-3 short:scroll-px-3 short:px-3 [&>section]:snap-start">
           {LANES.map((meta) => (
             <Lane
               key={meta.column}
@@ -257,7 +277,7 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
       ))}
       {/* Portalled: any transformed/filtered ancestor would offset the fixed-position overlay. */}
       {createPortal(
-        <DragOverlay zIndex={40} dropAnimation={dropOk || calm ? null : { ...defaultDropAnimation, duration: 420, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" }}>
+        <DragOverlay zIndex={z.drag} dropAnimation={dropOk || calm ? null : { ...defaultDropAnimation, duration: 420, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" }}>
           {drag && (
             <motion.div initial={{ scale: 1, rotate: 0 }} animate={{ scale: 1.03, rotate: -1.5 }} className="cursor-grabbing">
               <AgentCard agentKey={drag.key} lane={drag.from} floating />

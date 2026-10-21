@@ -316,6 +316,9 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   };
 
   const hasContent = text.trim() !== "" || images.length > 0;
+  // Phone, nothing typed: one row (text + attach/mic/stop) so the transcript keeps the height;
+  // the first character expands to the full toolbar with send.
+  const inline = mobile && !hasContent && !dictation.listening && !dictation.error;
   const placeholder = disabledReason
     ? disabledReason
     : agent?.needs
@@ -580,8 +583,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           autoFocus={autoFocus}
           enterKeyHint={mobile ? "send" : undefined}
           maxHeight={mobile ? 160 : 260}
-          boxClassName={cn("rounded-[22px] glass px-4 py-3", !!disabledReason && "opacity-80")}
-          className={cn("text-[14px]", mobile && "text-[15px]")}
+          boxClassName={cn(
+            "rounded-[22px] glass px-4 py-3 md:[@media(max-height:720px)]:py-2",
+            mobile && "py-2 pr-2 pl-4 [&>div]:mt-1.5",
+            inline && "flex-row items-center gap-1 py-1 pr-1 [&>div]:mt-0 [&>div]:shrink-0",
+            !!disabledReason && "opacity-80",
+          )}
+          className={cn("text-[14px]", mobile && "min-h-[1lh] text-[15px]", inline && "min-w-0 flex-1 overflow-hidden whitespace-nowrap")}
           footer={
             <>
               <input
@@ -595,13 +603,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   e.target.value = "";
                 }}
               />
-              <IconButton label="Attach image" size="sm" onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
+              <IconButton label="Attach image" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
                 <ImagePlus />
               </IconButton>
               {mobile && dictation.supported && (
                 <IconButton
                   label={dictation.listening ? "Stop dictation" : "Dictate"}
-                  size="sm"
+                  size="md"
                   variant={dictation.listening ? "sunset" : "ghost"}
                   onClick={dictation.toggle}
                   disabled={!!disabledReason}
@@ -611,10 +619,12 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                 </IconButton>
               )}
               {disabledReason ? (
-                <span className="flex min-w-0 items-center gap-1.5 truncate text-2xs font-semibold text-mute-2">
-                  <Lock className="size-3 shrink-0" />
-                  {disabledReason}
-                </span>
+                inline ? null : (
+                  <span className="flex min-w-0 items-center gap-1.5 truncate text-2xs font-semibold text-mute-2">
+                    <Lock className="size-3 shrink-0" />
+                    {disabledReason}
+                  </span>
+                )
               ) : (
                 !mobile && (
                   <span className="flex min-w-0 items-center gap-2 truncate text-[11px] font-semibold text-mute-2">
@@ -649,19 +659,19 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
               {dictation.error && <span className="truncate text-2xs font-semibold text-error">{dictation.error}</span>}
               <span className="ml-auto flex shrink-0 items-center gap-1.5">
                 {working && hasContent && !disabledReason && caps?.followUp && !followMode && (
-                  <IconButton label="Queue follow-up (Alt+Enter)" size="sm" variant="secondary" onClick={() => void send(true)} disabled={sending}>
+                  <IconButton label="Queue follow-up (Alt+Enter)" size={mobile ? "md" : "sm"} variant="secondary" onClick={() => void send(true)} disabled={sending}>
                     <ListPlus />
                   </IconButton>
                 )}
                 {working && (!hasContent || mobile) && caps?.abort !== false && (
-                  <IconButton label="Stop (Esc)" size={mobile ? "md" : "sm"} variant="danger" onClick={abort} disabled={sending}>
+                  <IconButton label="Stop (Esc)" size={mobile ? "lg" : "sm"} variant="danger" onClick={abort} disabled={sending}>
                     <Square className="fill-current" />
                   </IconButton>
                 )}
-                {(hasContent || !working) && (
+                {(hasContent || !working) && !inline && (
                   <IconButton
                     label={followMode ? "Queue follow-up (Alt+Enter)" : working ? "Steer (Enter)" : "Send (Enter)"}
-                    size={mobile ? "md" : "sm"}
+                    size={mobile ? "lg" : "sm"}
                     variant="primary"
                     onClick={() => void send(followMode)}
                     disabled={!hasContent || sending || (!!disabledReason && !text.trim().startsWith("/"))}

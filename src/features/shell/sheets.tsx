@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { create } from "zustand";
 import { BottomSheet, Dialog, DialogContent, useIsMobile } from "@/design";
+import { useRoute } from "@/core";
 
 export interface SheetSpec {
   title: ReactNode;
@@ -27,10 +28,16 @@ export function closeSheet(): void {
   useSheetStore.setState({ open: false });
 }
 
-/** Mounted once by the shell. */
+/** Mounted once by the shell. Any route change (a link in the sheet, back, a notification) closes it. */
 export function SheetHost() {
   const { sheet, open } = useSheetStore();
   const mobile = useIsMobile();
+  const key = JSON.stringify(useRoute());
+  const shownAt = useRef(key);
+  useEffect(() => {
+    if (shownAt.current !== key && useSheetStore.getState().open) closeSheet();
+    shownAt.current = key;
+  }, [key]);
   if (!sheet) return null;
   const onOpenChange = (o: boolean) => {
     if (!o) closeSheet();

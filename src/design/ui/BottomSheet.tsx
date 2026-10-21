@@ -45,7 +45,9 @@ function scrolledToTop(target: EventTarget | null, body: HTMLElement): boolean {
 export function BottomSheet({ open, onOpenChange, title, description, footer, children, className, maxHeight = "88dvh", autoFocus = true }: BottomSheetProps) {
   const controls = useDragControls();
   const y = useMotionValue(0);
-  const scrim = useTransform(y, [0, 400], [1, 0]);
+  // Scrim follows a dismiss drag (px). While the sheet springs in/out `y` is a "%" string; the
+  // overlay's own opacity animation covers that, so the drag factor stays at 1.
+  const scrim = useTransform(y, (v: number | string) => (typeof v === "number" ? Math.min(1, Math.max(0, 1 - v / 400)) : 1));
   const press = useRef<{ id: number; x: number; y: number } | null>(null);
 
   const onDragEnd = (_: unknown, info: PanInfo) => {
@@ -77,13 +79,16 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
           <RadixDialog.Portal forceMount>
             <RadixDialog.Overlay asChild forceMount>
               <motion.div
-                className="fixed inset-0 z-overlay bg-[rgb(8_8_12/0.6)] backdrop-blur-[3px]"
+                className="fixed inset-0 z-overlay backdrop-blur-[3px]"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={tween.base}
-                style={{ opacity: scrim }}
-              />
+              >
+                {/* Separate layer: an `opacity` MotionValue in `style` would fight the fade above. The blur
+                    stays on the fading parent: WebView drops a child's backdrop-filter while the parent fades. */}
+                <motion.div className="absolute inset-0 bg-[rgb(8_8_12/0.6)]" style={{ opacity: scrim }} />
+              </motion.div>
             </RadixDialog.Overlay>
             <RadixDialog.Content
               asChild
@@ -112,19 +117,19 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
                 onDragEnd={onDragEnd}
               >
                 <div
-                  className="shrink-0 cursor-grab touch-none px-5 pt-2.5 pb-3 active:cursor-grabbing"
+                  className="shrink-0 cursor-grab touch-none px-4 pt-2 pb-2.5 active:cursor-grabbing"
                   onPointerDown={(e) => controls.start(e)}
                 >
-                  <div className="mx-auto mb-3 h-1 w-[42px] rounded-full bg-white/25" aria-hidden />
-                  <RadixDialog.Title className="font-display text-2xl font-bold tracking-[-0.03em]">{title}</RadixDialog.Title>
+                  <div className="mx-auto mb-2.5 h-1 w-10 rounded-full bg-white/25" aria-hidden />
+                  <RadixDialog.Title className="font-display text-xl font-bold tracking-[-0.025em]">{title}</RadixDialog.Title>
                   {description ? (
-                    <RadixDialog.Description className="mt-0.5 text-sm text-mute">{description}</RadixDialog.Description>
+                    <RadixDialog.Description className="mt-0.5 text-xs text-mute">{description}</RadixDialog.Description>
                   ) : (
                     <RadixDialog.Description className="sr-only">{typeof title === "string" ? title : "Sheet"}</RadixDialog.Description>
                   )}
                 </div>
                 <div
-                  className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-4 [touch-action:pan-down] [&_.overflow-y-auto]:[touch-action:pan-down]"
+                  className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-3 [touch-action:pan-down] [&_.overflow-y-auto]:[touch-action:pan-down]"
                   onPointerDown={onBodyPointerDown}
                   onPointerMove={onBodyPointerMove}
                   onPointerUp={() => (press.current = null)}
@@ -136,8 +141,8 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
                 >
                   {children}
                 </div>
-                {footer && <div className="shrink-0 border-t border-line px-5 pt-3 pb-[max(20px,env(safe-area-inset-bottom))]">{footer}</div>}
-                {!footer && <div className="h-[max(12px,env(safe-area-inset-bottom))] shrink-0" />}
+                {footer && <div className="shrink-0 border-t border-line px-4 pt-2.5 pb-[max(14px,env(safe-area-inset-bottom))]">{footer}</div>}
+                {!footer && <div className="h-[max(10px,env(safe-area-inset-bottom))] shrink-0" />}
               </motion.div>
             </RadixDialog.Content>
           </RadixDialog.Portal>

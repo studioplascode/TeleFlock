@@ -3,6 +3,7 @@ import type { AskView } from "./AskView";
 import type { BashView } from "./BashView";
 import type { DiffView } from "./DiffView";
 import type { ImageView } from "./ImageView";
+import type { IrcMessage } from "./IrcMessage";
 import type { MarkdownView } from "./MarkdownView";
 import type { ReadView } from "./ReadView";
 import type { SearchView } from "./SearchView";
@@ -13,4 +14,4 @@ import type { WebView } from "./WebView";
 /**
  * Rich renderer hint for a tool item. Absent → generic args/output rendering.
  */
-export type ToolView = { "type": "diff" } & DiffView | { "type": "bash" } & BashView | { "type": "read" } & ReadView | { "type": "search" } & SearchView | { "type": "todo" } & TodoView | { "type": "task" } & TaskView | { "type": "web" } & WebView | { "type": "image" } & ImageView | { "type": "ask" } & AskView | { "type": "markdown" } & MarkdownView;
+export type ToolView = { "type": "diff" } & DiffView | { "type": "bash" } & BashView | { "type": "read" } & ReadView | { "type": "search" } & SearchView | { "type": "todo" } & TodoView | { "type": "task" } & TaskView | { "type": "web" } & WebView | { "type": "image" } & ImageView | { "type": "ask" } & AskView | { "type": "markdown" } & MarkdownView | { "type": "irc" } & IrcMessage;

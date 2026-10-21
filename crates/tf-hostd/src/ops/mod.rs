@@ -23,6 +23,7 @@ pub mod fs;
 pub mod gh;
 pub mod git;
 pub mod host;
+pub mod limits;
 pub mod term;
 pub mod workspace;
 pub mod worktree;

@@ -1,4 +1,4 @@
-import { type RefObject, startTransition, useEffect, useState, useSyncExternalStore } from "react";
+import { type RefObject, startTransition, useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react";
 import { MOBILE_MAX_WIDTH } from "../tokens";
 
 /** Live `window.matchMedia(query).matches`. */
@@ -46,9 +46,15 @@ export function useInView(ref: RefObject<Element | null>, rootMargin = "64px"): 
  */
 export function useMinWidth(ref: RefObject<Element | null>, px: number): boolean {
   const [wide, setWide] = useState(true);
-  useEffect(() => {
+  // Layout effect + an immediate measurement: a narrow mount (e.g. beside an open split) must not paint the
+  // wide layout for a frame before the observer's first callback.
+  useLayoutEffect(() => {
     const el = ref.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
+    if (!el) return;
+    // content-box width, matching ResizeObserver's contentRect (and unaffected by enter-animation transforms)
+    const cs = getComputedStyle(el);
+    setWide(el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) >= px);
+    if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver((entries) => {
       const entry = entries[entries.length - 1];
       if (entry) setWide(entry.contentRect.width >= px);

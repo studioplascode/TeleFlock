@@ -10,9 +10,9 @@ export const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "med
 export function Section({ icon, title, description, children, index, action }: { icon: ReactNode; title: string; description?: string; children: ReactNode; index: number; action?: ReactNode }) {
   return (
     <motion.section {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }}>
-      <Tile className="p-5">
-        <div className="mb-3 flex items-start gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-md bg-accent/16 text-accent-hi [&_svg]:size-4">{icon}</span>
+      <Tile className="p-5 max-md:p-4">
+        <div className="mb-3 flex items-start gap-3 max-md:mb-2">
+          <span className="grid size-9 shrink-0 place-items-center rounded-md bg-accent/16 text-accent-hi max-md:size-8 [&_svg]:size-4">{icon}</span>
           <div className="min-w-0 flex-1">
             <h2 className="font-display text-lg font-bold">{title}</h2>
             {description && <p className="text-xs text-mute">{description}</p>}
@@ -28,8 +28,8 @@ export function Section({ icon, title, description, children, index, action }: {
 /** One setting. `wide` controls (segmented, selects, text) take the full row on phones. */
 export function Row({ label, description, children, htmlFor, wide }: { label: string; description?: ReactNode; children: ReactNode; htmlFor?: string; wide?: boolean }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-1 last:pb-1">
-      <div className="min-w-0 flex-1 basis-56">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-1 last:pb-1 max-md:gap-x-3 max-md:py-2.5">
+      <div className="min-w-0 flex-1 basis-56 max-md:basis-48">
         <label htmlFor={htmlFor} className="block text-sm font-bold text-ink">
           {label}
         </label>

@@ -70,7 +70,7 @@ export function DialogContent({ title, description, icon, footer, hideClose, wid
             </RadixDialog.Close>
           )}
         </div>
-        <div className="mt-5 min-h-0 flex-1 overflow-auto">{children}</div>
+        {children != null && children !== false && <div className="mt-5 min-h-0 flex-1 overflow-auto">{children}</div>}
         {footer && <div className="mt-5 flex items-center justify-end gap-2 border-t border-line pt-4">{footer}</div>}
       </RadixDialog.Content>
     </RadixDialog.Portal>

@@ -9,8 +9,9 @@ import type { Settings } from "./Settings";
 import type { StatePatch } from "./StatePatch";
 import type { TermEvent } from "./TermEvent";
 import type { TunnelInfo } from "./TunnelInfo";
+import type { UpdateStatus } from "./UpdateStatus";
 
 /**
  * Everything the app core pushes to the frontend over its single event channel.
  */
-export type AppEvent = { "type": "profiles", profiles: Array<HostProfile>, } | { "type": "hostStatus", hostId: string, status: ConnStatus, } | { "type": "hostSnapshot", hostId: string, rev: bigint, state: HostState, } | { "type": "hostPatch", hostId: string, rev: bigint, ops: Array<StatePatch>, } | { "type": "pulse", hostId: string, at: bigint, pulses: Array<Pulse>, } | { "type": "session", hostId: string, agentId: string, ev: SessionEvent, } | { "type": "term", hostId: string, termId: string, ev: TermEvent, } | { "type": "notify", hostId: string, notification: Notification, } | { "type": "tunnels", tunnels: Array<TunnelInfo>, } | { "type": "settings", settings: Settings, } | { "type": "openAgent", hostId: string, agentId: string, } | { "type": "answerNext" };
+export type AppEvent = { "type": "profiles", profiles: Array<HostProfile>, } | { "type": "hostStatus", hostId: string, status: ConnStatus, } | { "type": "hostSnapshot", hostId: string, rev: bigint, state: HostState, } | { "type": "hostPatch", hostId: string, rev: bigint, ops: Array<StatePatch>, } | { "type": "pulse", hostId: string, at: bigint, pulses: Array<Pulse>, } | { "type": "session", hostId: string, agentId: string, ev: SessionEvent, } | { "type": "term", hostId: string, termId: string, ev: TermEvent, } | { "type": "notify", hostId: string, notification: Notification, } | { "type": "notifyDone", hostId: string, ids: Array<string>, resolved: boolean, } | { "type": "tunnels", tunnels: Array<TunnelInfo>, } | { "type": "settings", settings: Settings, } | { "type": "openAgent", hostId: string, agentId: string, } | { "type": "answerNext" } | { "type": "update", status: UpdateStatus, };

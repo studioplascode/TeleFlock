@@ -129,7 +129,9 @@ export function SplitFrame({ children }: { children: ReactNode }) {
             </div>
             <section className="glass m-2 ml-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tile" aria-label="Split view">
               <SplitHeader split={split} />
-              <div className="min-h-0 flex-1">
+              {/* Bounded box, like the full-bleed route stage: whatever renders here (session, terminal, fallback)
+                  fills it exactly — h-full or flex-1 roots both resolve — and scrolls inside, never grows past it. */}
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden *:min-h-0 *:flex-1">
                 <Suspense fallback={<div className="grid h-full place-items-center"><Spinner size={20} /></div>}>
                   <SplitBody key={split.kind === "session" ? split.key : `${split.hostId}:${split.agentId ?? split.paneId}`} split={split} />
                 </Suspense>

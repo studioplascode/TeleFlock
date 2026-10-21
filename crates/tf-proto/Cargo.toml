@@ -3,6 +3,7 @@ name = "tf-proto"
 description = "TeleFlock wire protocol: shared types for tf-hostd, tf-client, tf-devserver and (generated) TypeScript"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

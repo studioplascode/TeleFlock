@@ -34,21 +34,28 @@ function StaleHost({ hostId }: { hostId: string }) {
       exit={{ opacity: 0, y: -8 }}
       transition={spring.smooth}
       role="status"
-      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]"
+      // The text wraps inside its own column; the action stays pinned on the right (no extra row on phones).
+      className="flex items-center gap-3 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)] max-md:px-3"
     >
-      <StatusOrb status={st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error" ? "error" : "idle"} size={8} label={null} />
-      <span className="font-bold text-ink">{name}</span>
-      <span className={cn("text-mute", busy && "tf-shimmer-text")}>
-        {st.phase === "authRequired"
-          ? "needs Tailscale sign-in"
-          : st.phase === "reconnecting" && retryIn !== null
-            ? `reconnecting in ${retryIn}s`
-            : PHASE_TEXT[st.phase]}
-        {" · "}
-        showing the last snapshot{st.lastOnlineAt ? ` from ${formatAge(now - st.lastOnlineAt)}` : ""}
-      </span>
-      {st.error && <span className="truncate text-[#ff9fb2]">{st.error.message}</span>}
-      <span className="ml-auto flex gap-1.5">
+      <StatusOrb status={st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error" ? "error" : "idle"} size={8} label={null} className="shrink-0" />
+      <p className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+        <span className="font-bold text-ink">{name}</span>
+        <span className={cn("text-mute", busy && "tf-shimmer-text")}>
+          {st.phase === "authRequired"
+            ? "needs Tailscale sign-in"
+            : st.phase === "reconnecting" && retryIn !== null
+              ? `reconnecting in ${retryIn}s`
+              : PHASE_TEXT[st.phase]}
+          {" · "}
+          showing the last snapshot{st.lastOnlineAt ? ` from ${formatAge(now - st.lastOnlineAt)}` : ""}
+        </span>
+        {st.error && (
+          <span className="max-w-full min-w-0 truncate text-[#ff9fb2]" title={st.error.message}>
+            {st.error.message}
+          </span>
+        )}
+      </p>
+      <span className="flex shrink-0 gap-1.5">
         {st.phase === "authRequired" || st.phase === "hostKey" ? (
           <Button size="sm" variant="secondary" onClick={() => navigate({ name: "hosts" })}>
             {st.phase === "hostKey" ? "Verify" : "Sign in"}

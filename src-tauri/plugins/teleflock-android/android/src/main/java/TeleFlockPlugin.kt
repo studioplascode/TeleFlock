@@ -6,6 +6,9 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -16,6 +19,7 @@ import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.webkit.WebView
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.FileProvider
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -25,6 +29,8 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
+import java.security.MessageDigest
 
 @InvokeArg
 class KeepAliveArgs {
@@ -60,9 +66,10 @@ class NotifyArgs {
 }
 
 @InvokeArg
-class CancelArgs {
+class RetractArgs {
     var id: Int = 0
-    var tag: String? = null
+    lateinit var tag: String
+    lateinit var notificationId: String
 }
 
 @InvokeArg
@@ -73,6 +80,12 @@ class HapticArgs {
 @InvokeArg
 class UrlArgs {
     lateinit var url: String
+}
+
+@InvokeArg
+class InstallApkArgs {
+    lateinit var path: String
+    var openSettings: Boolean = true
 }
 
 @TauriPlugin(
@@ -121,9 +134,9 @@ class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun cancel(invoke: Invoke) {
-        val a = invoke.parseArgs(CancelArgs::class.java)
-        NotificationManagerCompat.from(activity).cancel(a.tag, a.id)
+    fun retract(invoke: Invoke) {
+        val a = invoke.parseArgs(RetractArgs::class.java)
+        Notifications.retract(activity, a.tag, a.id, a.notificationId)
         invoke.resolve()
     }
 
@@ -254,6 +267,98 @@ class TeleFlockPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("no app can open $url", "NO_HANDLER", e)
         }
     }
+
+    // ── self-update ───────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Opens the system installer for a verified APK in the cache dir (FileProvider authority
+     * `<applicationId>.fileprovider`, declared by the app manifest with `res/xml/file_paths.xml`).
+     * The archive must be this package, signed with exactly the installed app's certificates and
+     * have a higher versionCode; otherwise it is deleted and the call rejects (`APK_REJECTED`).
+     * Android 8+ needs the per-app "install unknown apps" grant first: without it, resolves
+     * `needsPermission` (opening that settings screen when `openSettings`); Rust retries on resume.
+     */
+    @Command
+    fun installApk(invoke: Invoke) {
+        val a = invoke.parseArgs(InstallApkArgs::class.java)
+        val file = File(a.path)
+        if (!file.isFile) {
+            invoke.reject("update file missing: ${a.path}", "NOT_FOUND")
+            return
+        }
+        val rejected = try {
+            apkRejectReason(file)
+        } catch (e: Exception) {
+            "the update can't be inspected: ${e.message}"
+        }
+        if (rejected != null) {
+            file.delete()
+            invoke.reject(rejected, "APK_REJECTED")
+            return
+        }
+        val r = JSObject()
+        if (Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()) {
+            if (a.openSettings) {
+                try {
+                    activity.startActivity(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + activity.packageName))
+                    )
+                } catch (_: ActivityNotFoundException) {
+                }
+            }
+            r.put("status", "needsPermission")
+            invoke.resolve(r)
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
+            val i = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(i)
+            r.put("status", "started")
+            invoke.resolve(r)
+        } catch (e: Exception) { // IllegalArgumentException (path outside the provider), ActivityNotFoundException
+            invoke.reject(e.message ?: "couldn't open the package installer", "INSTALL_FAILED", e)
+        }
+    }
+
+    /** Why `apk` must not replace this app, or null when it may. */
+    @Suppress("DEPRECATION")
+    private fun apkRejectReason(apk: File): String? {
+        val pm = activity.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val archive = pm.getPackageArchiveInfo(apk.path, flags) ?: return "the update is not a valid APK"
+        if (archive.packageName != activity.packageName) {
+            return "the update is for ${archive.packageName}, not ${activity.packageName}"
+        }
+        val installed = pm.getPackageInfo(activity.packageName, flags)
+        val signers = signerDigests(archive)
+        if (signers.isEmpty() || signers != signerDigests(installed)) {
+            return "the update is not signed with TeleFlock's key"
+        }
+        val (next, current) = versionCode(archive) to versionCode(installed)
+        if (next <= current) return "the update (versionCode $next) is not newer than this app ($current)"
+        return null
+    }
+
+    /** SHA-256 (hex) of the package's signing certificates. */
+    @Suppress("DEPRECATION")
+    private fun signerDigests(p: PackageInfo): Set<String> {
+        val certs: Array<out Signature?>? = if (Build.VERSION.SDK_INT >= 28) {
+            val s = p.signingInfo ?: return emptySet()
+            if (s.hasMultipleSigners()) s.apkContentsSigners else s.signingCertificateHistory
+        } else {
+            p.signatures
+        }
+        return certs.orEmpty().filterNotNull().map { sig ->
+            MessageDigest.getInstance("SHA-256").digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+        }.toSet()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun versionCode(p: PackageInfo): Long =
+        if (Build.VERSION.SDK_INT >= 28) p.longVersionCode else p.versionCode.toLong()
 
     companion object {
         @Volatile private var networkWatched = false

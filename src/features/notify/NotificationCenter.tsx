@@ -63,10 +63,10 @@ function Item({ n, unread, index, onOpen }: { n: HostNotification; unread: boole
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 24, transition: { duration: 0.15 } }}
       transition={{ ...spring.smooth, delay: Math.min(index, 8) * 0.03 }}
-      className={cn("relative rounded-lg p-3 transition-colors", unread ? "bg-accent/8" : "hover:bg-white/[0.03]", n.kind === "needs" && unread && "bg-sun-2/8 shadow-[inset_0_0_0_1px_rgb(255_61_119/0.25)]")}
+      className={cn("relative rounded-lg p-3 transition-colors", unread ? "bg-accent/8" : "hover:bg-white/[0.03]", n.kind === "needs" && unread && !n.resolved && "bg-sun-2/8 shadow-[inset_0_0_0_1px_rgb(255_61_119/0.25)]", n.resolved && "opacity-70")}
     >
       <button type="button" onClick={onOpen} className="flex w-full items-start gap-3 rounded-sm text-left focus-ring">
-        <StatusOrb status={KIND_STATUS[n.kind]} size={9} className="mt-1.5" label={n.kind} />
+        <StatusOrb status={n.resolved ? "done" : KIND_STATUS[n.kind]} size={9} className="mt-1.5" label={n.resolved ? "resolved" : n.kind} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-bold text-ink">{n.title}</span>
@@ -77,7 +77,13 @@ function Item({ n, unread, index, onOpen }: { n: HostNotification; unread: boole
         </div>
         {unread && <span className="mt-2 size-1.5 shrink-0 rounded-full bg-accent-hi shadow-[0_0_8px_rgb(163_92_240/0.9)]" aria-label="Unread" />}
       </button>
-      {answerable.length > 0 && n.requestId && (
+      {n.resolved ? (
+        <div className="mt-2 pl-6">
+          <motion.span initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="text-xs font-bold text-done">
+            ✓ {answered ? `Answered “${answered}”` : "Resolved"}
+          </motion.span>
+        </div>
+      ) : answerable.length > 0 && n.requestId && (
         <div className="mt-2.5 flex flex-wrap gap-1.5 pl-6">
           {answered ? (
             <motion.span initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="text-xs font-bold text-done">

@@ -1,8 +1,8 @@
-import { Bot, Coins, FileCode2, GitBranch, GitFork, GitMerge, ListTodo, MessageCircleQuestion, Navigation, Send, Workflow } from "lucide-react";
+import { Bot, Coins, FileCode2, GitBranch, GitFork, GitMerge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Send, Workflow } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { navigate, parseAgentKey, useAgent, useBtw, useSession } from "@/core";
+import { navigate, parseAgentKey, useAgent, useBtw, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
-import type { Subagent, TreeInfo, TreeNode } from "@/core/gen";
+import type { TreeInfo, TreeNode } from "@/core/gen";
 import {
   cn,
   EmptyState,
@@ -19,11 +19,14 @@ import {
   useNow,
 } from "@/design";
 import { hostCall, usePending } from "../api";
+import { ChatThreads, useIrcUnreadCount } from "../irc/ChatThreads";
 import { Markdown } from "../markdown/Markdown";
 import { type InspectorTab, useSessionUi } from "../state";
-import { SubagentCard, SubagentDialog } from "../subagents/Subagents";
+import { SubagentCard } from "../subagents/Subagents";
 import { DiffStatText } from "../tools/DiffBody";
 import { TodoPhases, todoCounts } from "../tools/TodoList";
+import { SpendBreakdown } from "../spend";
+import { LimitsTile } from "./LimitsTile";
 
 function Pane({ id, title, aside, children, className }: { id: InspectorTab; title: ReactNode; aside?: ReactNode; children: ReactNode; className?: string }) {
   return (
@@ -47,29 +50,41 @@ function Mini({ k, v, s, className }: { k: ReactNode; v: ReactNode; s?: ReactNod
   );
 }
 
-/** Rolling tok/s history sampled once a second (only while mounted). */
+/** Rolling tok/s history: one sample per second of the latest value, 60 s (only while mounted). */
 function useTpsHistory(value: number | undefined): number[] {
   const now = useNow(1000);
   const [hist, setHist] = useState<number[]>([]);
+  const latest = value ?? 0;
+  // one sample per clock tick (not per tps patch), so the history always spans 60 s
   useEffect(() => {
-    setHist((h) => [...h.slice(-59), value ?? 0]);
-  }, [now, value]);
+    setHist((h) => [...h.slice(-59), latest]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [now]);
   return hist;
 }
 
 export function OverviewPanel({ agentKey }: { agentKey: string }) {
   const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
-  const tps = meta?.tps ?? agent?.live.tps;
+  // Every spender's live output (main + subagents + advisor), as tf-hostd sums it.
+  const tps = agent?.live.tps;
   const hist = useTpsHistory(tps);
   const ctx = meta?.context ?? agent?.omp?.context;
   const cost = meta?.cost ?? agent?.omp?.cost;
   const todos = todoCounts(meta?.todos ?? []);
-  const streaming = agent?.live.streaming === true;
+  const producing = tps != null && tps > 0;
   const peak = Math.max(0, ...hist);
   const ctxStatus = ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : "running";
   return (
-    <Pane id="overview" title="Session" aside={<span className={cn("tabular", streaming && "text-accent-hi")}>{tps != null ? `${Math.round(tps)} tok/s` : "—"}</span>}>
+    <Pane
+      id="overview"
+      title="Session"
+      aside={
+        <span className={cn("tabular", producing && "text-accent-hi")}>
+          {producing ? `${Math.round(tps)} tok/s` : meta?.tps != null ? `last turn ${Math.round(meta.tps)} tok/s` : "—"}
+        </span>
+      }
+    >
       <div className="grid grid-cols-2 gap-2">
         <div className="col-span-2 flex items-center gap-3 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline">
           <ProgressRing done={ctx?.pct ?? 0} total={100} size={48} stroke={4.5} status={ctxStatus} label={<span className="text-[11px] font-bold">{ctx ? `${Math.round(ctx.pct)}%` : "—"}</span>} />
@@ -113,10 +128,12 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
             <span className="text-mute-2 tabular">{peak > 0 ? `peak ${Math.round(peak)} tok/s · 60s` : "60s"}</span>
           </div>
           <div className="relative">
-            <Sparkline values={hist.length > 1 ? hist : [0, 0]} height={34} live={streaming} status={streaming ? "running" : "idle"} />
-            {!streaming && peak === 0 && <span className="absolute inset-0 grid place-items-center text-[10.5px] font-semibold text-mute-2">idle · no tokens in the last minute</span>}
+            <Sparkline values={hist.length > 1 ? hist : [0, 0]} height={34} live={producing} status={producing ? "running" : "idle"} />
+            {!producing && peak === 0 && <span className="absolute inset-0 grid place-items-center text-[10.5px] font-semibold text-mute-2">idle · no tokens in the last minute</span>}
           </div>
         </div>
+        <SpendBreakdown cost={cost} tps={agent?.live.tpsSplit} />
+        <LimitsTile agentKey={agentKey} tps={tps ?? undefined} />
       </div>
     </Pane>
   );
@@ -137,18 +154,15 @@ export function TodosPanel({ agentKey }: { agentKey: string }) {
 export function SubagentsPanel({ agentKey }: { agentKey: string }) {
   const { meta } = useSession(agentKey);
   const subs = meta?.subagents ?? [];
-  const [openId, setOpenId] = useState<string | null>(null);
-  const sub: Subagent | undefined = subs.find((s) => s.id === openId);
   if (subs.length === 0) return null;
   const live = subs.filter((s) => s.status === "running").length;
   return (
     <Pane id="agents" title="Subagents" aside={live ? <span className="text-accent-hi">{live} live</span> : `${subs.length} done`}>
       <div className="flex flex-col gap-1">
         {subs.map((s) => (
-          <SubagentCard key={s.id} sub={s} dense onOpen={() => setOpenId(s.id)} />
+          <SubagentCard key={s.id} sub={s} dense onOpen={() => useSessionUi.getState().openSubagent(agentKey, s.id)} />
         ))}
       </div>
-      <SubagentDialog agentKey={agentKey} sub={sub} open={sub != null} onOpenChange={(o) => !o && setOpenId(null)} />
     </Pane>
   );
 }
@@ -241,7 +255,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
             <div
               key={node.id}
               data-leaf={leaf}
-              className={cn("group/node relative flex items-center gap-2 rounded-[10px] py-[3px] pr-1 hover:bg-white/[0.04]", leaf && "bg-accent/10")}
+              className={cn("group/node relative isolate flex items-center gap-2 rounded-[10px] py-[3px] pr-1 hover:bg-white/[0.04]", leaf && "bg-accent/10")}
               style={{ paddingLeft: 6 + depth * 14 }}
             >
               {Array.from({ length: depth }, (_, i) => (
@@ -249,7 +263,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
               ))}
               <span
                 className={cn(
-                  "relative z-[1] size-2 shrink-0 rounded-full",
+                  "relative z-raised size-2 shrink-0 rounded-full",
                   leaf ? "bg-sun shadow-[0_0_0_3px_rgb(255_61_119/0.25)]" : node.onPath ? "bg-ink-2" : depth > 0 ? "bg-review" : "bg-mute-2",
                 )}
               />
@@ -258,7 +272,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
                 {node.label.replace(/\*\*|__|`/g, "")}
               </span>
               {node.children > 1 && <span className="shrink-0 font-mono text-[10px] text-review">⑂{node.children}</span>}
-              <span className="hidden shrink-0 items-center gap-0.5 group-focus-within/node:flex group-hover/node:flex">
+              <span className="absolute inset-y-0 right-1 z-raised flex items-center gap-0.5 rounded-[8px] bg-[rgb(24_24_32/0.96)] pl-1 opacity-0 transition-opacity group-focus-within/node:opacity-100 group-hover/node:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:shrink-0 [@media(pointer:coarse)]:bg-transparent [@media(pointer:coarse)]:opacity-100">
                 {caps?.tree && !leaf && (
                   <IconButton label="Go to this point" size="sm" className="size-6" disabled={busy} onClick={() => void run(hostCall(hostId, "agent.navigate", { agentId, entryId: node.id }, { success: "Moved in tree" }))}>
                     <Navigation />
@@ -285,7 +299,10 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
           ))}
         </div>
       )}
-      <div className="mt-2 text-[10.5px] text-mute-2">Hover a node to go there, branch, or fork.</div>
+      <div className="mt-2 text-[10.5px] text-mute-2">
+        <span className="[@media(pointer:coarse)]:hidden">Hover a node to go there, branch, or fork.</span>
+        <span className="hidden [@media(pointer:coarse)]:inline">Go to, branch, or fork from any node.</span>
+      </div>
     </Pane>
   );
 }
@@ -348,6 +365,19 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
   );
 }
 
+/** Agent ↔ agent IRC of this session, grouped by peer (hidden until there is any). */
+export function ChatPanel({ agentKey }: { agentKey: string }) {
+  const entries = useIrcEntries(agentKey);
+  const unread = useIrcUnreadCount(agentKey);
+  if (entries.length === 0) return null;
+  const peers = new Set(entries.map((e) => e.message.peer)).size;
+  return (
+    <Pane id="chat" title="Agent chat · IRC" aside={unread > 0 ? <span className="text-accent-hi">{unread} new</span> : `${peers} peer${peers === 1 ? "" : "s"}`}>
+      <ChatThreads agentKey={agentKey} />
+    </Pane>
+  );
+}
+
 /** Desktop right rail: every inspector panel stacked; `tab` changes scroll to (and flash) a panel. */
 export function Inspector({ agentKey, className }: { agentKey: string; className?: string }) {
   const tab = useSessionUi((s) => s.tab[agentKey]);
@@ -366,6 +396,7 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
       <OverviewPanel agentKey={agentKey} />
       <TodosPanel agentKey={agentKey} />
       <SubagentsPanel agentKey={agentKey} />
+      <ChatPanel agentKey={agentKey} />
       <FilesPanel agentKey={agentKey} />
       <BtwPanel agentKey={agentKey} />
       <TreePanel agentKey={agentKey} />
@@ -378,6 +409,7 @@ const TABS: { value: InspectorTab; label: ReactNode }[] = [
   { value: "overview", label: "Overview" },
   { value: "todos", label: <ListTodo className="size-4" aria-label="Todos" /> },
   { value: "agents", label: <Bot className="size-4" aria-label="Subagents" /> },
+  { value: "chat", label: <MessagesSquare className="size-4" aria-label="Agent chat" /> },
   { value: "files", label: <FileCode2 className="size-4" aria-label="Files" /> },
   { value: "tree", label: <Workflow className="size-4" aria-label="Tree" /> },
   { value: "btw", label: <MessageCircleQuestion className="size-4" aria-label="btw" /> },
@@ -388,19 +420,44 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
   const tab = useSessionUi((s) => s.tab[agentKey]) ?? "overview";
   const setTab = (t: InspectorTab) => useSessionUi.getState().setTab(agentKey, t);
   const { meta } = useSession(agentKey);
+  const chats = useIrcEntries(agentKey).length;
+  const unread = useIrcUnreadCount(agentKey);
+  const tabs = TABS.map((t) =>
+    t.value === "chat" && unread > 0
+      ? {
+          ...t,
+          label: (
+            <span className="relative">
+              {t.label}
+              <span className="absolute -top-1 -right-1.5 size-2 rounded-full bg-accent shadow-[0_0_6px_rgb(163_92_240/0.9)]" aria-label={`${unread} unread`} />
+            </span>
+          ),
+        }
+      : t,
+  );
   const empty =
-    (tab === "todos" && !meta?.todos.length) || (tab === "agents" && !meta?.subagents.length) || (tab === "files" && !meta?.files.length);
+    (tab === "todos" && !meta?.todos.length) ||
+    (tab === "agents" && !meta?.subagents.length) ||
+    (tab === "chat" && !chats) ||
+    (tab === "files" && !meta?.files.length);
   return (
     <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
     <div className="flex flex-col gap-3 pb-2">
-      <SegmentedControl value={tab} onValueChange={setTab} options={TABS} fill size="sm" />
+      <SegmentedControl value={tab} onValueChange={setTab} options={tabs} fill size="sm" />
       {tab === "overview" && <OverviewPanel agentKey={agentKey} />}
       {tab === "todos" && <TodosPanel agentKey={agentKey} />}
       {tab === "agents" && <SubagentsPanel agentKey={agentKey} />}
+      {tab === "chat" && <ChatPanel agentKey={agentKey} />}
       {tab === "files" && <FilesPanel agentKey={agentKey} />}
       {tab === "tree" && <TreePanel agentKey={agentKey} />}
       {tab === "btw" && <BtwPanel agentKey={agentKey} />}
-      {empty && <EmptyState compact title={tab === "todos" ? "No todos" : tab === "agents" ? "No subagents" : "No changed files"} />}
+      {empty && (
+        <EmptyState
+          compact
+          title={tab === "todos" ? "No todos" : tab === "agents" ? "No subagents" : tab === "chat" ? "No agent chat yet" : "No changed files"}
+          description={tab === "chat" ? "Messages this agent and its subagents send each other over omp IRC show up here." : undefined}
+        />
+      )}
     </div>
     </SessionCtx.Provider>
   );

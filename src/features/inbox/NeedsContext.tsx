@@ -45,10 +45,10 @@ export function LastAssistantText({ agentKey, enabled = true, className }: { age
   if (!text && !loading) return null;
   const tail = text && text.length > TAIL_CHARS ? `…${text.slice(text.length - TAIL_CHARS)}` : text;
   return (
-    <div className={cn("relative rounded-md well px-3.5 py-2.5", className)}>
+    <div className={cn("relative rounded-md well px-3.5 py-2.5 max-md:px-3 max-md:py-2", className)}>
       <span className="kicker">Agent said</span>
       {tail ? (
-        <p className="mt-1 max-h-40 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap text-ink-2">{tail}</p>
+        <p className="mt-1 max-h-40 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap text-ink-2 max-md:max-h-32 max-md:leading-normal">{tail}</p>
       ) : (
         <p className="mt-1 text-sm">
           <Shimmer>Loading the conversation…</Shimmer>
@@ -66,7 +66,7 @@ export function NeedsQuestion({ agentKey, className }: { agentKey: string; class
   return (
     <div className={cn("flex flex-col gap-2", className)}>
       {n.title && n.question && n.title !== n.question && <span className="text-xs font-bold text-mute">{n.title}</span>}
-      <p className="font-display text-xl leading-snug font-bold text-ink">{n.question || n.title}</p>
+      <p className="font-display text-xl leading-snug font-bold text-ink max-md:text-lg">{n.question || n.title}</p>
       {n.detail && <p className="text-sm whitespace-pre-wrap text-ink-2">{n.detail}</p>}
       {n.command && <pre className="overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs whitespace-pre-wrap text-ink">{n.command}</pre>}
       {described.length > 0 && (

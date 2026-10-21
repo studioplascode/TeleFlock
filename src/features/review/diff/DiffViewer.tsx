@@ -194,7 +194,7 @@ export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, o
     <div
       ref={frameRef}
       data-hscroll="none"
-      className={cn("group/diff relative min-h-0 overflow-hidden rounded-lg bg-bg-deep shadow-[inset_0_0_0_1px_var(--color-line)]", className)}
+      className={cn("group/diff relative isolate min-h-0 overflow-hidden rounded-lg bg-bg-deep shadow-[inset_0_0_0_1px_var(--color-line)]", className)}
       style={{ "--vw": `${viewW}px` } as CSSProperties}
     >
       {topFile && (
@@ -237,7 +237,7 @@ export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, o
         </div>
       </div>
       {/* Long lines continue to the right: fade the edge and offer wrapping. */}
-      <div className="pointer-events-none absolute top-[44px] right-0 bottom-0 z-[1] flex w-20 items-end justify-end bg-[linear-gradient(90deg,transparent,var(--color-bg-deep)_85%)] p-2.5 opacity-0 transition-opacity duration-300 group-data-[hscroll=more]/diff:opacity-100">
+      <div className="pointer-events-none absolute top-[44px] right-0 bottom-0 z-raised flex w-20 items-end justify-end bg-[linear-gradient(90deg,transparent,var(--color-bg-deep)_85%)] p-2.5 opacity-0 transition-opacity duration-300 group-data-[hscroll=more]/diff:opacity-100">
         {onWrap && (
           <button
             type="button"
@@ -477,7 +477,7 @@ function UnifiedLine({ line, marks, path, wrap, compact }: { line: DiffLine; mar
   }
   return (
     <div className={cn("flex min-h-5", LINE_BG[line.kind])}>
-      <span className={cn("sticky left-0 z-[1] flex shrink-0 select-none", GUTTER[line.kind])} aria-hidden={line.kind === "ctx" || undefined}>
+      <span className={cn("sticky left-0 z-raised flex shrink-0 select-none", GUTTER[line.kind])} aria-hidden={line.kind === "ctx" || undefined}>
         {compact ? (
           <span className="w-10 pr-1 text-right tabular">{(line.kind === "del" ? line.oldNo : line.newNo) ?? ""}</span>
         ) : (

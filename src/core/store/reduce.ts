@@ -145,6 +145,15 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[]): Red
         effects.push({ kind: "lanes", hostId: e.hostId });
         break;
       }
+      case "notifyDone": {
+        const ids = new Set(e.ids);
+        const hit = (n: HostNotification) => n.hostId === e.hostId && ids.has(n.id) && (!n.read || (e.resolved && !n.resolved));
+        if (s.notifications.some(hit)) {
+          const d = draft();
+          d.notifications = d.notifications.map((n) => (hit(n) ? { ...n, read: true, resolved: n.resolved || e.resolved } : n));
+        }
+        break;
+      }
       case "$activity": {
         const d = draft();
         d.activity = tx.own(d.activity);

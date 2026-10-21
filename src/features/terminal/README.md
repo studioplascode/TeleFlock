@@ -45,11 +45,20 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
   a busy lease offers **Take over** / **Watch** / **Retry**.
 - Reopens automatically when the host goes back to `online`.
 - Font size comes from `useSettings().terminalFontSize`; pinch-zoom (mobile) and Ctrl +/−/0 (desktop) persist it.
+- Font (every surface, `TERM_FONT_FAMILY` in `theme.ts`): bundled Fira Code (`@fontsource-variable/fira-code`, OFL,
+  `src/assets/fonts/fira-code/LICENSE`), then bundled Symbols Nerd Font Mono (Nerd Fonts v3.5.1 symbols-only, MIT + icon-set
+  licenses in `src/assets/fonts/symbols-nerd-font/`) restricted by `unicode-range` to the Nerd Font Private Use Area, so
+  omp's `symbolPreset: nerd` icons render; other symbols fall back to system symbol fonts. Ligatures are off (the WebGL
+  renderer draws cell by cell; the DOM renderer matches). All faces of both fonts are loaded up front (`loadTermFonts`);
+  the first paint waits ≤ 120 ms for them, and any terminal-font face that lands later re-measures the cells and clears
+  the WebGL texture atlas so fallback glyphs (tofu) never stay cached. WebGL draws box drawing / block elements itself
+  (`customGlyphs`) and squeezes over-wide fallback symbols (`rescaleOverlappingGlyphs`).
 - Renderer: WebGL by default; the context menu switches to xterm's DOM renderer (per device, `localStorage["tf.terminal.renderer"]`). Board tiles (`compact`) always use the DOM renderer.
 - Keys inside the terminal go to the pane, except Ctrl+K, Ctrl+1…6 and Ctrl+Shift+(not C/V), which bubble to the app shell.
 - Mode is always visible: control = purple liveness, observe = cyan liveness + a "Read-only" ribbon (it replaces the
-  mobile extra keys). The status chip collapses to its orb while live and re-expands on every state change / hover.
-- Keyboard focus draws an inset accent ring; the frame flash is skipped with reduced motion.
+  mobile extra keys). The status chip collapses to its orb while live and re-expands on every state change / hover;
+  the orb's activity pulse is the only output indicator (no per-frame flash: frames arrive ~10×/s while omp streams).
+- Keyboard focus draws an inset accent ring.
 - `localhost:PORT` links in the output are clickable: they open a preview tunnel (`@/features/preview` store), then the
   browser (desktop) or the in-app preview sheet (mobile).
 - Mobile extra keys: Esc/Ctrl/Alt pinned, the rest scrolls with edge fades; Ctrl/Alt tap = next key, double-tap or

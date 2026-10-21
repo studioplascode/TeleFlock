@@ -94,7 +94,7 @@ export function TabActions({ hostId, target, onClosed, tabPaneIds, children }: T
         <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuLabel>
-            Tab {target.tabLabel} · {target.paneId}
+            Tab <span className="normal-case">{target.tabLabel}</span> · <span className="font-mono normal-case">{target.paneId}</span>
           </ContextMenuLabel>
           <ContextMenuItem
             icon={<Pencil />}

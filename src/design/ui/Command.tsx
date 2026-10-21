@@ -61,7 +61,7 @@ export function CommandItem({ className, icon, shortcut, children, ...rest }: Co
   return (
     <Cmdk.Item
       className={cn(
-        "flex h-11 cursor-default items-center gap-3 rounded-md px-2.5 text-sm font-semibold text-ink-2 select-none data-[disabled=true]:opacity-40 data-[selected=true]:bg-accent/14 data-[selected=true]:text-ink data-[selected=true]:shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)] [&_svg]:size-4 [&_svg]:text-mute data-[selected=true]:[&_svg]:text-accent-hi",
+        "flex h-11 cursor-pointer items-center gap-3 rounded-md px-2.5 text-sm font-semibold text-ink-2 select-none data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-40 data-[selected=true]:bg-accent/14 data-[selected=true]:text-ink data-[selected=true]:shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)] [&_svg]:size-4 [&_svg]:text-mute data-[selected=true]:[&_svg]:text-accent-hi",
         className,
       )}
       {...rest}

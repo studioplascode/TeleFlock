@@ -110,7 +110,7 @@ function EventRow({ row, now }: { row: Row; now: number }) {
       transition={spring.smooth}
       className="relative pl-9"
     >
-      <span data-status={status} className="absolute top-3.5 left-[11px] z-10 grid size-3 place-items-center">
+      <span data-status={status} className="absolute top-3.5 left-[11px] z-raised grid size-3 place-items-center">
         <StatusOrb status={status} size={9} label={null} activity={fresh ? "busy" : "silent"} />
       </span>
       <button
@@ -166,7 +166,7 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
     if (ev.at >= midnight && ev.kind !== "answered" && ev.kind !== "approved" && ev.kind !== "denied") tally[KIND_GROUP[ev.kind]]++;
   }
   return (
-    <div className={cn("grid gap-3", mobile ? "grid-cols-2" : "grid-cols-4")}>
+    <div className={cn("grid", mobile ? "grid-cols-2 gap-2" : "grid-cols-4 gap-3")}>
       {PULSE.map((t, i) => {
         const on = group === t.group && t.group !== "all";
         const n = tally[t.group];
@@ -181,7 +181,8 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
             animate={{ opacity: 1, y: 0, scale: 1 }}
             transition={{ ...spring.smooth, delay: 0.06 + i * 0.05 }}
             className={cn(
-              "card-surface group relative flex h-[104px] flex-col overflow-hidden rounded-lg p-3.5 text-left pressable focus-ring lift",
+              "card-surface group relative flex flex-col overflow-hidden rounded-lg text-left pressable focus-ring lift",
+              mobile ? "h-[88px] p-3" : "h-[104px] p-3.5",
               on && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.6),0_10px_30px_-12px_rgb(var(--st-rgb)/0.6)]",
             )}
           >
@@ -189,7 +190,7 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
               <StatusOrb status={n > 0 ? t.status : "idle"} size={6} label={null} activity={t.group === "all" && n > 0 ? "busy" : "silent"} />
               {t.label}
             </span>
-            <NumberTicker value={n} className={cn("mt-1 font-display text-3xl font-bold", n > 0 ? "text-ink" : "text-mute-2")} />
+            <NumberTicker value={n} className={cn("mt-1 font-display font-bold", mobile ? "text-2xl" : "text-3xl", n > 0 ? "text-ink" : "text-mute-2")} />
             {t.group === "all" ? (
               <Sparkline values={buckets} status="running" height={22} className="mt-auto" aria-label="Events per 5 minutes over the last hour" />
             ) : (
@@ -265,10 +266,10 @@ export function ActivityView() {
       ) : (
         days.map((d) => (
           <section key={d.label} aria-label={d.label} className="[content-visibility:auto]">
-            <h2 className="pointer-events-none sticky top-2 z-20 mb-1 py-1">
+            <h2 className="pointer-events-none sticky top-2 z-sticky mb-1 py-1 max-md:top-13 max-md:z-raised">
               <span className="inline-flex rounded-full glass px-2.5 py-1 font-display text-2xs font-bold tracking-[0.12em] text-ink-2 uppercase">{d.label}</span>
             </h2>
-            <ol className="relative flex flex-col before:absolute before:top-2 before:bottom-2 before:left-[16px] before:w-px before:bg-gradient-to-b before:from-line-3 before:to-transparent">
+            <ol className="relative isolate flex flex-col before:absolute before:top-2 before:bottom-2 before:left-[16px] before:w-px before:bg-gradient-to-b before:from-line-3 before:to-transparent">
               <AnimatePresence initial={false}>
                 {d.rows.map((r) => (
                   <EventRow key={r.id} row={r} now={now} />
@@ -290,7 +291,7 @@ export function ActivityView() {
     return (
       <div className="flex min-h-full flex-col">
         <MobileHeader title="Activity" subtitle="Every agent, one timeline" back />
-        <div className="flex flex-col gap-4 px-4 pt-2 pb-6">{content}</div>
+        <div className="flex flex-col gap-3 px-3 pt-1 pb-5">{content}</div>
       </div>
     );
   return (

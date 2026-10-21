@@ -7,7 +7,7 @@
 //! The generated TypeScript `HostMethods` / `AppMethods` interfaces map method name →
 //! `{ params; result }`.
 
-use crate::app::{DiagReport, HostProfile, HostStatusEntry, Settings, TunnelInfo, WslDistro, AppCapabilities};
+use crate::app::{DiagReport, HostProfile, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
 use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, UsageTotals};
 use crate::session::{ChangedFile, HistoryPage, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
@@ -690,6 +690,102 @@ wire_struct! {
 }
 
 wire_struct! {
+    pub struct LimitsParams {
+        /// Skip hostd's 60 s cache and ask omp again now (omp still serves its own per-account
+        /// cache, so provider usage endpoints are hit at most every ~5 min per account).
+        pub refresh: Option<bool>,
+    }
+}
+
+wire_enum! {
+    /// omp's `UsageStatus` for one limit window.
+    pub enum LimitStatus { Ok, Warning, Exhausted, Unknown }
+}
+
+wire_struct! {
+    /// One utilization reading of a limit window.
+    pub struct LimitSample {
+        pub at: Millis,
+        /// Used fraction (0..1; above 1 = overage).
+        pub used: f64,
+    }
+}
+
+wire_struct! {
+    /// One quota window of an account (omp `UsageLimit`).
+    pub struct LimitWindow {
+        /// omp's limit id, e.g. `anthropic:5h`, `anthropic:7d:fable`, `openai-codex:primary`.
+        pub id: String,
+        /// e.g. `Claude 5 Hour`.
+        pub label: String,
+        /// Window label, e.g. `5 Hour`, `7 days`.
+        pub window: Option<String>,
+        /// Model tier the window is scoped to (e.g. `fable`); absent = shared by every model.
+        pub tier: Option<String>,
+        pub duration_ms: Option<i64>,
+        pub resets_at: Option<Millis>,
+        /// Used fraction (0..1; above 1 = overage); absent when the provider gave no amount.
+        pub used: Option<f64>,
+        pub status: LimitStatus,
+        /// Absolute amounts when the provider meters in a real unit (tokens, requests, usd, …).
+        pub amount: Option<f64>,
+        pub limit: Option<f64>,
+        /// `percent` | `tokens` | `requests` | `credits` | `usd` | `minutes` | `bytes` | `unknown`.
+        pub unit: String,
+        pub notes: Vec<String>,
+        /// Readings in the current window period (oldest first, ≤ 120): omp's hourly usage
+        /// history plus hostd's own polls. Drives the pace projection.
+        pub samples: Vec<LimitSample>,
+    }
+}
+
+wire_struct! {
+    /// One connected account (OAuth login / subscription) of a provider.
+    pub struct LimitAccount {
+        /// `provider|identity` (identity as omp keys credentials: `email:…|org:…`, `account:…`).
+        pub key: String,
+        /// omp provider id (`anthropic`, `openai-codex`, …).
+        pub provider: String,
+        /// Email, else account / project id.
+        pub label: String,
+        pub org: Option<String>,
+        /// Plan / tier the provider reported (e.g. Codex `prolite`).
+        pub plan: Option<String>,
+        /// When omp fetched this report (provider endpoint or response headers).
+        pub fetched_at: Option<Millis>,
+        pub windows: Vec<LimitWindow>,
+        /// Banked limit resets the account can redeem (`omp usage reset`).
+        pub resets_available: Option<u32>,
+        pub notes: Vec<String>,
+        /// Why there are no windows: no usage report from omp, or the credential is disabled.
+        pub error: Option<String>,
+        /// omp disabled the credential (e.g. expired refresh token); re-login needed.
+        pub disabled: bool,
+    }
+}
+
+wire_struct! {
+    /// A live omp session on this host and the account omp routes it through.
+    pub struct LimitSession {
+        pub session_id: String,
+        pub provider: String,
+        /// `LimitAccount.key`; absent when omp hasn't pinned the session to an account yet.
+        pub account_key: Option<String>,
+    }
+}
+
+wire_struct! {
+    pub struct AccountLimits {
+        /// When hostd last asked omp (`omp usage --json`).
+        pub fetched_at: Millis,
+        pub accounts: Vec<LimitAccount>,
+        pub sessions: Vec<LimitSession>,
+        /// The last refresh failed (omp missing, timed out, …); `accounts` is the previous snapshot.
+        pub error: Option<String>,
+    }
+}
+
+wire_struct! {
     pub struct ModelInfo {
         pub provider: String,
         pub id: String,
@@ -827,6 +923,7 @@ methods!(HostMethod, "HostMethods", {
 
     "host.health" => HostHealthReq(Empty) -> HostHealth;
     "host.usage" => HostUsage(UsageParams) -> UsageReport;
+    "host.limits" => HostLimits(LimitsParams) -> AccountLimits;
     "host.models" => HostModels(Empty) -> ModelCatalog;
     "host.sessions" => HostSessions(SessionsParams) -> PastSessions;
     "host.resume" => HostResume(ResumeParams) -> Started;
@@ -872,6 +969,18 @@ wire_struct! { pub struct TunnelListResult { pub tunnels: Vec<TunnelInfo> } }
 wire_struct! { pub struct UrlParams { pub url: String } }
 
 wire_struct! {
+    /// `app.notifyRead`: the user acted on the host's (or one agent's) notifications in the
+    /// app (opened the agent, read the list). Unread ones become read (`AppEvent::NotifyDone`)
+    /// and their OS notifications are retracted, except needs-you ones whose request is still
+    /// pending: those stay until the request is resolved.
+    pub struct NotifyReadParams {
+        pub host_id: String,
+        /// Only this agent's notifications (default: every notification of the host).
+        pub agent_id: Option<String>,
+    }
+}
+
+wire_struct! {
     pub struct AppInfo {
         pub version: String,
         /// `windows` | `android` | `linux` | `web`.
@@ -887,6 +996,11 @@ methods!(AppMethod, "AppMethods", {
     "app.info" => AppInfoReq(Empty) -> AppInfo;
     "app.openExternal" => AppOpenExternal(UrlParams) -> Empty;
     "app.notifyTest" => AppNotifyTest(Empty) -> Empty;
+    "app.notifyRead" => AppNotifyRead(NotifyReadParams) -> Empty;
+    // Self-update: handled by the Tauri shell (src-tauri/src/update), `unsupported` elsewhere.
+    "app.updateStatus" => AppUpdateStatus(Empty) -> UpdateStatus;
+    "app.updateCheck" => AppUpdateCheck(UpdateCheckParams) -> UpdateStatus;
+    "app.updateInstall" => AppUpdateInstall(Empty) -> UpdateStatus;
     "hosts.list" => HostsList(Empty) -> HostsListResult;
     "hosts.save" => HostsSave(HostProfile) -> HostProfile;
     "hosts.remove" => HostsRemove(HostRef) -> Empty;

@@ -198,12 +198,37 @@ wire_struct! {
 }
 
 wire_struct! {
+    /// Session spend as omp's status line sums it: the session's own model calls, its subagent
+    /// tree and its advisor. `usd` and the token counts cover all three.
     pub struct CostInfo {
         pub usd: f64,
         pub input: u64,
         pub output: u64,
         pub cache_read: u64,
         pub cache_write: u64,
+        /// Where `usd` went; absent for sources that only know a total.
+        pub split: Option<CostSplit>,
+    }
+}
+
+wire_struct! {
+    /// `usd` per spender (no overlap: the parts sum to `CostInfo.usd`).
+    pub struct CostSplit {
+        /// The main agent's own assistant turns and side calls (`model_usage`).
+        pub main: f64,
+        /// Every subagent in the tree, nested ones and their advisors included.
+        pub subagents: f64,
+        /// The main session's advisor(s).
+        pub advisor: f64,
+    }
+}
+
+wire_struct! {
+    /// Output tokens per second per spender (sums to `Liveness.tps`).
+    pub struct TpsSplit {
+        pub main: f32,
+        pub subagents: f32,
+        pub advisor: f32,
     }
 }
 
@@ -220,6 +245,9 @@ wire_struct! {
     pub struct SubagentSummary {
         pub live: u32,
         pub total: u32,
+        /// Mean of the running subagents' own completion estimates (`Subagent::completion_pct`,
+        /// 0..=100); absent while none has reported one.
+        pub completion_pct: Option<f32>,
     }
 }
 
@@ -293,8 +321,11 @@ wire_struct! {
         /// Thinking tokens are streaming (or waiting for the first token of a turn).
         pub thinking: bool,
         pub tool: Option<ActiveTool>,
-        /// Rolling output tokens per second.
+        /// Rolling output tokens per second over every spender (main + subagents + advisor);
+        /// absent while none of them produces output.
         pub tps: Option<f32>,
+        /// `tps` per spender, present together with `tps`.
+        pub tps_split: Option<TpsSplit>,
         /// One-line summary of current activity (tool label, last assistant sentence, …).
         pub line: Option<String>,
     }

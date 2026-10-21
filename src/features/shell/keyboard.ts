@@ -33,6 +33,7 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
       { keys: ["Ctrl", "\\"], label: "Toggle split view" },
       { keys: ["Ctrl", "B"], label: "Toggle sidebar" },
       { keys: ["N"], label: "New worktree" },
+      { keys: ["D"], label: "Dispatch" },
       { keys: ["?"], label: "Keyboard shortcuts" },
       { keys: ["Esc"], label: "Close overlay" },
     ],
@@ -146,6 +147,9 @@ export function useGlobalShortcuts(): void {
       } else if (key === "n" && !e.shiftKey) {
         e.preventDefault();
         u.openDialog({ kind: "newWorktree" });
+      } else if (key === "d" && !e.shiftKey && r.name !== "dispatch") {
+        e.preventDefault();
+        navigate({ name: "dispatch" });
       }
     };
     window.addEventListener("keydown", onKey);

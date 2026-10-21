@@ -21,7 +21,11 @@ import type { Backend } from "@/core/transport/types";
 /** An agent with its host attached. `key` = `${hostId}::${id}`. */
 export type AgentView = Agent & { hostId: string; key: string };
 
-export type HostNotification = Notification & { hostId: string; read: boolean };
+/**
+ * `read`: seen or acted on (here, in the OS, or by opening the agent). `resolved`: the needs-you
+ * request it asked about was handled (anywhere); its answers are no longer offered.
+ */
+export type HostNotification = Notification & { hostId: string; read: boolean; resolved?: boolean };
 
 export type HostActivityEvent = ActivityEvent & { hostId: string };
 

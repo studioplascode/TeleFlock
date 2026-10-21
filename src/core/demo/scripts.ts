@@ -30,6 +30,17 @@ export interface SubagentSpec {
   ms: number;
   model?: string;
   lines: string[];
+  /** omp IRC with the parent while the task runs (ms after it starts). */
+  irc?: IrcSpec[];
+}
+
+/** A subagent → parent IRC message, optionally answered by the parent (`write agent://<name>`). */
+export interface IrcSpec {
+  at: number;
+  text: string;
+  /** omp's automatic relay of the subagent's final answer, not a hand-written message. */
+  relay?: boolean;
+  reply?: { after: number; text: string };
 }
 
 export interface UiSpec {
@@ -224,9 +235,49 @@ export function poolTurn(): Step[] {
         args: { tasks: 3 },
         ms: 34_000,
         subagents: [
-          { name: "QueryScout", description: "Rank handlers by connection opens per request", ms: 26_000, model: "sonnet-5", lines: ["reading internal/http/router.go", "tracing db.Open call sites", "12 handlers open a fresh conn", "ranking by p99 contribution"] },
-          { name: "PoolBench", description: "Benchmark pgxpool sizes 8/16/32 against staging replica", ms: 33_000, model: "sonnet-5", lines: ["go test -bench Pool -benchtime 10s", "size=8 p99 41ms", "size=16 p99 18ms", "size=32 p99 17ms (diminishing)"] },
-          { name: "LockAudit", description: "Check for session-level state that breaks pooling", ms: 21_000, model: "luna", lines: ["grep SET LOCAL / advisory locks", "2 handlers use SET search_path", "both can switch to schema-qualified names"] },
+          {
+            name: "QueryScout",
+            description: "Rank handlers by connection opens per request",
+            ms: 26_000,
+            model: "sonnet-5",
+            lines: ["reading internal/http/router.go", "tracing db.Open call sites", "12 handlers open a fresh conn", "ranking by p99 contribution"],
+            irc: [
+              {
+                at: 6_000,
+                text: "Heads-up: `/v1/search` opens **3 connections per request** (one per shard lookup). Rank it per request or per open?",
+                reply: { after: 2_600, text: "Per request: that's what the pool has to absorb. Keep the 3× in a column so I can quote it." },
+              },
+            ],
+          },
+          {
+            name: "PoolBench",
+            description: "Benchmark pgxpool sizes 8/16/32 against staging replica",
+            ms: 33_000,
+            model: "sonnet-5",
+            lines: ["go test -bench Pool -benchtime 10s", "size=8 p99 41ms", "size=16 p99 18ms", "size=32 p99 17ms (diminishing)"],
+            irc: [
+              {
+                at: 11_000,
+                text: "Staging caps `max_connections` at **50**. Two pods × 32 would trip it. Bench 64 anyway?",
+                reply: { after: 3_200, text: "No, stop at 32. Prod has 100 shared by two pods, so 16 per pod is the realistic target." },
+              },
+              { at: 31_500, relay: true, text: "Done. size=8 → p99 41 ms, **size=16 → 18 ms**, size=32 → 17 ms. 16 is the knee." },
+            ],
+          },
+          {
+            name: "LockAudit",
+            description: "Check for session-level state that breaks pooling",
+            ms: 21_000,
+            model: "luna",
+            lines: ["grep SET LOCAL / advisory locks", "2 handlers use SET search_path", "both can switch to schema-qualified names"],
+            irc: [
+              {
+                at: 15_500,
+                text: "`billing` takes `pg_advisory_lock` per invoice run. A pooled conn would carry the lock into the next request.\n\nFlagging so billing stays out of this PR.",
+                reply: { after: 1_800, text: "Thanks, billing stays on its own connection for now." },
+              },
+            ],
+          },
         ],
       },
     },
@@ -638,11 +689,30 @@ export const DIRECTOR_PROMPTS: string[] = [
   "Commit this and get it ready for a PR",
 ];
 
+/** Context window of the demo subagent models (luna matches the 272K omp reports for gpt-6-luna). */
+const SUB_WINDOW: Record<string, number> = { luna: 272_000, "sonnet-5": 200_000 };
+
+/** Fractions of a demo subagent's run at which omp's completion probe "answers" (real omp: 2, 7, 17 min…). */
+const PROBES = [0.12, 0.27, 0.42, 0.57, 0.72, 0.87];
+
+/**
+ * The subagent's own completion estimate as omp's probe reports it: absent until the first answer, then a
+ * step that lags the true progress a little and holds until the next probe (each agent misjudges by its own bias).
+ */
+function completionEstimate(spec: SubagentSpec, p: number): number | undefined {
+  const probe = PROBES.findLast((f) => p >= f);
+  if (probe === undefined) return undefined;
+  const bias = (spec.name.length % 5) * 3 - 6;
+  return Math.max(5, Math.min(95, Math.round(probe * 100 + bias)));
+}
+
 /** Fixed subagent rows for task views, with live progress. */
 export function subagentRow(spec: SubagentSpec, id: string, startedAt: number, now: number): Subagent {
   const p = Math.min(1, (now - startedAt) / spec.ms);
   const done = p >= 1;
   const lineIdx = Math.min(spec.lines.length - 1, Math.floor(p * spec.lines.length));
+  const window = SUB_WINDOW[spec.model ?? ""] ?? 200_000;
+  const contextTokens = Math.floor(6_400 + p * 41_000);
   return {
     id,
     name: spec.name,
@@ -652,7 +722,8 @@ export function subagentRow(spec: SubagentSpec, id: string, startedAt: number, n
     endedAt: done ? startedAt + spec.ms : undefined,
     model: spec.model,
     line: spec.lines[lineIdx],
-    progress: Math.round(p * 100) / 100,
+    completionPct: done ? undefined : completionEstimate(spec, p),
+    context: { tokens: contextTokens, window, pct: (contextTokens / window) * 100 },
     toolCount: Math.floor(p * 14) + 1,
     tokens: Math.floor(p * 38_000),
     costUsd: Math.round(p * 0.42 * 100) / 100,

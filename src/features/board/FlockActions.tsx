@@ -17,11 +17,11 @@ function SheetRow({ icon, label, hint, trailing, selected, onClick }: { icon: Re
       onClick={onClick}
       aria-current={selected || undefined}
       className={cn(
-        "flex min-h-14 w-full items-center gap-3.5 rounded-lg px-3.5 py-2 text-left pressable focus-ring",
+        "flex min-h-13 w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left pressable focus-ring",
         selected ? "bg-accent/12 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.035]",
       )}
     >
-      <span className="grid size-9 shrink-0 place-items-center rounded-md bg-white/[0.06] text-accent-hi [&_svg]:size-[18px]">{icon}</span>
+      <span className="grid size-8 shrink-0 place-items-center rounded-md bg-white/[0.06] text-accent-hi [&_svg]:size-4.5">{icon}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-md font-bold text-ink">{label}</span>
         {hint && <span className="block truncate text-xs text-mute">{hint}</span>}
@@ -43,7 +43,7 @@ function CreateActions() {
     run(host);
   };
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1">
       <SheetRow icon={<GitBranchPlus />} label="New worktree" hint="Branch off a repo and start an agent in it" onClick={act((hostId) => openDialog({ kind: "newWorktree", hostId }))} />
       <SheetRow icon={<Bot />} label="New agent" hint="In an existing workspace or folder" onClick={act((hostId) => openDialog({ kind: "newAgent", hostId }))} />
       <SheetRow icon={<GitFork />} label="Fan out" hint="One prompt, several agents side by side" onClick={act((hostId) => openDialog({ kind: "fanOut", hostId }))} />
@@ -76,7 +76,7 @@ export function FlockFab() {
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={calm ? { opacity: 0 } : { opacity: 0, scale: 0.6, y: 24 }}
           transition={calm ? { duration: 0.12 } : spring.bouncy}
-          className="fixed right-4 bottom-[calc(84px+env(safe-area-inset-bottom))] z-sticky grid size-14 place-items-center rounded-[20px] bg-accent text-white shadow-[0_14px_34px_-8px_rgb(163_92_240/0.7),inset_0_1px_0_rgb(255_255_255/0.25)] pressable focus-ring in-data-[kb=open]:hidden [&_svg]:size-6"
+          className="fixed right-3.5 bottom-[calc(66px+env(safe-area-inset-bottom))] z-sticky grid size-13 place-items-center rounded-[18px] bg-accent text-white shadow-[0_14px_34px_-8px_rgb(163_92_240/0.7),inset_0_1px_0_rgb(255_255_255/0.25)] pressable focus-ring in-data-[kb=open]:hidden [&_svg]:size-6"
         >
           <Plus strokeWidth={2.4} />
         </motion.button>
@@ -109,7 +109,7 @@ function HostFilterList() {
   const filter = useHosts((s) => s.filter);
   const online = useHosts((s) => ids.filter((id) => s.status[id]?.phase === "online").length);
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1">
       <SheetRow
         icon={<Server />}
         label="All hosts"

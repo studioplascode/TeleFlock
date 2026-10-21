@@ -72,8 +72,26 @@ export function historyFor(def: AgentDef): Step[] {
             args: {},
             ms: 41_000,
             subagents: [
-              { name: "FcmScout", description: "Map FCM setup cost for a tailnet-only app", ms: 41_000, lines: ["done"] },
-              { name: "NtfyScout", description: "Evaluate self-hosted ntfy on forge", ms: 37_000, lines: ["done"] },
+              {
+                name: "FcmScout",
+                description: "Map FCM setup cost for a tailnet-only app",
+                ms: 41_000,
+                lines: ["done"],
+                irc: [
+                  {
+                    at: 9_000,
+                    text: "FCM needs a Firebase project and `google-services.json` in the APK: the app's only Google dependency. Still worth costing out?",
+                    reply: { after: 4_000, text: "Yes, note it as the cost. Then compare battery with ntfy." },
+                  },
+                ],
+              },
+              {
+                name: "NtfyScout",
+                description: "Evaluate self-hosted ntfy on forge",
+                ms: 37_000,
+                lines: ["done"],
+                irc: [{ at: 35_000, relay: true, text: "ntfy on forge works over the tailnet via UnifiedPush, no Google account. Battery: one long-lived connection, ~1%/day on a Pixel 8." }],
+              },
             ],
           },
         },
@@ -171,8 +189,8 @@ const LONG_MD = [
 ];
 
 const LONG_SUBAGENTS: Subagent[] = [
-  { id: "long-sub-1", name: "QueryScout", description: "Rank handlers by connection opens", status: "done", startedAt: 0, endedAt: 26_000, progress: 1, toolCount: 14, tokens: 38_000, costUsd: 0.42, line: "ranked 12 handlers" },
-  { id: "long-sub-2", name: "PoolBench", description: "Benchmark pool sizes", status: "done", startedAt: 0, endedAt: 33_000, progress: 1, toolCount: 9, tokens: 21_000, costUsd: 0.27, line: "size=16 p99 18ms" },
+  { id: "long-sub-1", name: "QueryScout", description: "Rank handlers by connection opens", status: "done", startedAt: 0, endedAt: 26_000, context: { tokens: 47_400, window: 200_000, pct: 23.7 }, toolCount: 14, tokens: 38_000, costUsd: 0.42, line: "ranked 12 handlers" },
+  { id: "long-sub-2", name: "PoolBench", description: "Benchmark pool sizes", status: "done", startedAt: 0, endedAt: 33_000, context: { tokens: 31_200, window: 200_000, pct: 15.6 }, toolCount: 9, tokens: 21_000, costUsd: 0.27, line: "size=16 p99 18ms" },
 ];
 
 /**

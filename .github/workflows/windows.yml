@@ -1,6 +1,9 @@
 # TeleFlock Windows installer (NSIS setup .exe) on a native Windows runner.
 # Layout: Cargo workspace root = repo root (target/ at repo root), Tauri app in src-tauri/, bun.
 # Local cross-build alternative: scripts/build-windows.sh (docs/build.md §5).
+# CI never sees the updater signing key: the installer is built without updater artifacts
+# (no .sig), so it can't be published as an update. Releases are built and signed locally with
+# scripts/release.sh (docs/build.md §11).
 name: windows
 
 on:
@@ -47,9 +50,10 @@ jobs:
       - name: Install frontend deps
         run: bun install --frozen-lockfile
 
-      - name: Build NSIS installer
+      - name: Build NSIS installer (no updater .sig)
         # beforeBuildCommand (bun run build) builds the frontend.
-        run: bun tauri build --target x86_64-pc-windows-msvc --bundles nsis
+        shell: bash
+        run: bun tauri build --target x86_64-pc-windows-msvc --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
         # Authenticode signing: set bundle.windows.signCommand / certificateThumbprint and pass
         # the certificate via secrets here (not configured yet).
 

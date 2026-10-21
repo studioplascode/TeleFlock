@@ -2,6 +2,7 @@ import type { AppEvent, DiagReport, HostProfile, HostStatusEntry, Settings, Tunn
 import { apiError } from "../errors";
 import { type DemoClock, realClock } from "./clock";
 import { DemoHost, type HostVariant } from "./host";
+import { NotifySync } from "./notifySync";
 
 export interface DemoEngineOptions {
   /** `backend`: the whole app runs on the demo (app methods too). `embedded`: only demo-kind hosts. */
@@ -32,6 +33,7 @@ const DEFAULT_SETTINGS: Settings = {
   defaultPlan: false,
   deviceName: "Demo browser",
   mutedAgents: [],
+  autoUpdate: true,
   templates: [
     {
       id: "tpl-careful-reviewer",
@@ -82,6 +84,8 @@ export class DemoEngine {
   private nextTunnel = 1;
   private readonly seed: number;
   private disposed = false;
+  /** The core's notification sync (needs-you resolution, read sync), applied to everything emitted. */
+  private readonly notes = new NotifySync((e) => this.emit(e));
 
   constructor(private readonly opts: DemoEngineOptions) {
     this.clock = opts.clock ?? realClock;
@@ -100,6 +104,7 @@ export class DemoEngine {
   private emit(e: AppEvent): void {
     if (this.disposed) return;
     for (const l of this.listeners) l(e);
+    this.notes.observe(e);
   }
 
   private addHost(profile: HostProfile, variant: HostVariant, start: boolean): DemoHost {
@@ -128,6 +133,7 @@ export class DemoEngine {
   detachHost(id: string): void {
     this.hosts.get(id)?.dispose();
     this.hosts.delete(id);
+    this.notes.forget(id);
     const before = this.tunnels.length;
     this.tunnels = this.tunnels.filter((t) => t.hostId !== id);
     if (before !== this.tunnels.length) this.emit({ type: "tunnels", tunnels: this.tunnels });
@@ -173,6 +179,12 @@ export class DemoEngine {
           hostId: host?.id ?? "demo",
           notification: { id: `test-${this.clock.now()}`, at: this.clock.now(), kind: "info", agentId: "", title: "TeleFlock notifications work", body: "This is a test notification from the demo backend.", actions: [] },
         });
+        return {};
+      }
+      case "app.notifyRead": {
+        const hostId = String(p.hostId ?? "");
+        if (!this.hosts.has(hostId)) throw apiError("not_found", `Unknown host ${hostId}`);
+        this.notes.read(hostId, typeof p.agentId === "string" ? p.agentId : undefined);
         return {};
       }
       case "hosts.list":

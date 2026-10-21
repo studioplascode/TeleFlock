@@ -3,6 +3,7 @@ name = "tf-herdr"
 description = "Host-side herdr client: socket/named-pipe API, typed calls, coalesced events, terminal sessions, server discovery"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

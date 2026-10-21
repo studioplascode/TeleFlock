@@ -16,8 +16,8 @@ export TF_LAB_SESSION="${TF_LAB_SESSION:-tf-lab-collab}"
 RELAY_PORT="${TF_RELAY_PORT:-7466}"
 GUEST_PORT="${TF_GUEST_PORT:-7467}"
 MODEL="${TF_MODEL:-openai-codex/gpt-6-luna:low}"
-WORK=/tmp/tf-collab-work
-RUN=/tmp/tf-collab-run
+WORK="${TF_WORK:-/tmp/tf-collab-work}"
+RUN="${TF_RUN:-/tmp/tf-collab-run}"
 HL="$POC/hl"
 export TF_GUEST="http://127.0.0.1:$GUEST_PORT" TF_AGENT=collabhost
 
@@ -68,6 +68,9 @@ scenarios() {
 		--answer '{"value":"Blue"}' --answer-delay-ms 6000
 	$s 06-abort '{"t":"prompt","text":"Write the numbers from 1 to 400 in English words, one per line. No tools."}' --abort-after-ms 1500
 	$s 07-task-subagent '{"t":"prompt","text":"Use the task tool to spawn exactly one subagent whose assignment is: reply with the single word ok and do nothing else. Then reply done."}' --timeout 240 --settle 3000
+	# a subagent alive past omp's first completion probe (2 min) → AgentProgress.completionPercent.
+	# The task runs async (the main turn ends at once), so hold the capture open until it reports back.
+	$s 17-task-completion-probe '{"t":"prompt","text":"Use the task tool to spawn exactly one subagent whose assignment is: run the bash command `sleep 170; ls | wc -l` and reply with the number it prints. Then reply done."}' --timeout 290 --settle 290000
 	# keystroke injection: TUI-only command through herdr; the guest observes the state change
 	$s 10-injected-switch-thinking --no-send --timeout 12 &
 	sleep 1

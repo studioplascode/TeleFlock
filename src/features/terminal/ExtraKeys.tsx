@@ -54,7 +54,7 @@ export interface ExtraKeysProps {
 }
 
 const keyCls =
-  "relative grid h-11 min-w-11 shrink-0 place-items-center rounded-sm px-2.5 font-mono text-[13px] font-bold text-ink-2 select-none touch-manipulation shadow-key [&_svg]:size-[18px] bg-tile-3 transition-colors active:bg-tile-5 active:text-ink [-webkit-tap-highlight-color:transparent]";
+  "relative grid h-10 min-w-10 shrink-0 place-items-center rounded-sm px-2 font-mono text-[13px] font-bold text-ink-2 select-none touch-manipulation shadow-key [&_svg]:size-[18px] bg-tile-3 transition-colors active:bg-tile-5 active:text-ink [-webkit-tap-highlight-color:transparent]";
 
 /**
  * Mobile extra-keys row (Termux-style). Esc/Ctrl/Alt are pinned on the left; the rest scrolls with
@@ -160,7 +160,7 @@ export function ExtraKeys({ mods, onKey, onSetMod, onPaste, className }: ExtraKe
         transition={spring.press}
         className={cn(
           keyCls,
-          "min-w-[52px] text-[11.5px] tracking-wide",
+          "min-w-12 text-[11.5px] tracking-wide",
           state === 1 && "bg-accent/22 text-accent-ink shadow-[inset_0_0_0_1.5px_rgb(163_92_240/0.75),0_0_18px_-4px_rgb(163_92_240/0.9)] active:bg-accent/30",
           state === 2 && "bg-omp text-white shadow-glow-accent active:bg-omp",
         )}
@@ -214,7 +214,7 @@ export function ExtraKeys({ mods, onKey, onSetMod, onPaste, className }: ExtraKe
       role="toolbar"
       aria-label="Extra keys"
       className={cn(
-        "flex items-center gap-1.5 py-1.5 pr-[max(0.25rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))]",
+        "flex items-center gap-1 py-1 pr-[max(0.25rem,env(safe-area-inset-right))] pl-[max(0.375rem,env(safe-area-inset-left))]",
         className,
       )}
       // Keep focus (and the soft keyboard) on the terminal.
@@ -222,11 +222,11 @@ export function ExtraKeys({ mods, onKey, onSetMod, onPaste, className }: ExtraKe
       onMouseDown={(e) => e.preventDefault()}
     >
       {PINNED.map((k) => (k.kind === "mod" ? renderMod(k.mod) : renderKey(k)))}
-      <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-line-2" />
+      <span aria-hidden className="mx-0.5 h-6 w-px shrink-0 bg-line-2" />
       <div
         ref={scrollRef}
         onScroll={updateFade}
-        className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto overscroll-x-contain py-0.5 pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="flex min-w-0 flex-1 gap-1 overflow-x-auto overscroll-x-contain py-0.5 pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {SCROLLING.map(renderKey)}
         <motion.button

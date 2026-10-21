@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 use tf_proto::{
-    AskQuestion, AskView, BashView, DiffView, FileDiff, FileStatus, ImageView, ReadView, SearchHit, SearchView,
+    AskQuestion, AskView, BashView, ContextUsage, DiffView, FileDiff, FileStatus, ImageView, ReadView, SearchHit, SearchView,
     Subagent, SubagentStatus, TaskView, TodoPhase, TodoStatus, TodoTask, TodoView, ToolStatus, ToolView, WebSource,
     WebView,
 };
@@ -153,6 +153,9 @@ pub(crate) fn todo_phases(name: &str, details: Option<&Value>) -> Option<Vec<Tod
 /// `Some` for final results.
 pub(crate) fn view(name: &str, args: &Value, result: Option<&Value>, is_error: Option<bool>) -> Option<ToolView> {
     let details = result.and_then(|r| r.get("details")).filter(|d| !d.is_null());
+    if let Some(v) = super::irc::tool_view(name, args, details) {
+        return Some(v);
+    }
     let text = result.map(|r| content_text(r.get("content"))).unwrap_or_default();
     let finished = is_error.is_some();
     match name {
@@ -366,10 +369,31 @@ fn progress_agent(p: &Value) -> Subagent {
             .or_else(|| non_empty(p, "lastIntent"))
             .map(str::to_owned)
             .or_else(|| arr(p, "recentOutput").last().and_then(Value::as_str).map(|o| clip(o, 120))),
-        progress: None,
+        completion_pct: completion_pct(p, status),
+        context: subagent_context(p),
         tool_count: u(p, "toolCount").map(|n| n as u32),
         parent_id: None,
     }
+}
+
+/// omp `AgentProgress.completionPercent`: the subagent's own completion estimate from the
+/// completion probe (omp `task/completion-probe.ts`). The TUI shows it only while the row is live
+/// (`pi-tui/tools/agent-tree.ts` `renderAgentTreeRow`), so it is dropped once the subagent stops.
+pub(super) fn completion_pct(p: &Value, status: SubagentStatus) -> Option<f32> {
+    if status != SubagentStatus::Running {
+        return None;
+    }
+    f(p, "completionPercent").filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 100.0) as f32)
+}
+
+/// omp `AgentProgress.contextTokens` / `contextWindow`: the subagent's context-window usage,
+/// computed the way the TUI's `formatAgentStatRun` does (`tokens / window * 100`). Absent until the
+/// subagent reports tokens; `window` 0 means omp knows no window (TUI: `<tokens>/?`).
+pub(super) fn subagent_context(p: &Value) -> Option<ContextUsage> {
+    let tokens = u(p, "contextTokens").filter(|t| *t > 0)?;
+    let window = u(p, "contextWindow").unwrap_or(0);
+    let pct = if window > 0 { (tokens as f64 / window as f64 * 100.0) as f32 } else { 0.0 };
+    Some(ContextUsage { tokens, window, pct })
 }
 
 /// omp's numbered diff (` 1|ctx`, `-2|old`, `+2|new`) → unified patch.

@@ -100,7 +100,7 @@ export function Markdown({ text, streaming = false, className }: MarkdownProps) 
   const blocks = parseBlocksCached(text);
   const fresh = useFreshChunks(text, streaming);
   return (
-    <div className={cn("tf-md min-w-0 text-[13.5px] leading-[1.62] text-ink-2", className)}>
+    <div className={cn("tf-md min-w-0 text-[13.5px] leading-[1.62] text-ink-2 max-md:leading-[1.55]", className)}>
       {blocks.map((b, i) => {
         const last = streaming && i === blocks.length - 1;
         return <BlockView key={i} block={b} src={b.src} tail={last ? <Caret /> : null} fresh={last ? fresh : NO_FRESH} />;
@@ -122,27 +122,27 @@ function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH):
   switch (b.t) {
     case "p":
       return (
-        <p className="my-2 first:mt-0 last:mb-0 [overflow-wrap:anywhere]">
+        <p className="my-2 first:mt-0 last:mb-0 [overflow-wrap:anywhere] max-md:my-1.5">
           <Inlines nodes={markFresh(parseInline(b.text), fresh)} />
           {tail}
         </p>
       );
     case "h": {
-      const size = b.level <= 1 ? "text-xl" : b.level === 2 ? "text-lg" : b.level === 3 ? "text-md" : "text-base";
+      const size = b.level <= 1 ? "text-xl max-md:text-lg" : b.level === 2 ? "text-lg max-md:text-md" : b.level === 3 ? "text-md" : "text-base";
       return (
-        <div role="heading" aria-level={b.level} className={cn("mt-4 mb-1.5 font-display font-bold tracking-tight text-ink first:mt-0", size)}>
+        <div role="heading" aria-level={b.level} className={cn("mt-4 mb-1.5 font-display font-bold tracking-tight text-ink first:mt-0 max-md:mt-3 max-md:mb-1", size)}>
           <Inlines nodes={markFresh(parseInline(b.text), fresh)} />
           {tail}
         </div>
       );
     }
     case "hr":
-      return <hr className="my-4 border-0 border-t border-line-2" />;
+      return <hr className="my-4 border-0 border-t border-line-2 max-md:my-3" />;
     case "code":
       return <CodeBlock code={b.code} lang={b.lang} open={b.open} tail={tail} />;
     case "quote":
       return (
-        <blockquote className="my-2 border-l-2 border-accent/50 pl-3 text-mute">
+        <blockquote className="my-2 border-l-2 border-accent/50 pl-3 text-mute max-md:my-1.5 max-md:pl-2.5">
           {b.blocks.map((c, i) => (
             <BlockView key={i} block={c} src={c.src} tail={i === b.blocks.length - 1 ? tail : null} fresh={i === b.blocks.length - 1 ? fresh : NO_FRESH} />
           ))}
@@ -151,9 +151,9 @@ function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH):
     case "list": {
       const Tag = b.ordered ? "ol" : "ul";
       return (
-        <Tag start={b.ordered ? b.start : undefined} className={cn("my-2 space-y-1 pl-5", b.ordered ? "list-decimal marker:text-mute" : "list-disc marker:text-accent/80")}>
+        <Tag start={b.ordered ? b.start : undefined} className={cn("my-2 space-y-1 pl-5 max-md:my-1.5 max-md:space-y-0.5 max-md:pl-4", b.ordered ? "list-decimal marker:text-mute" : "list-disc marker:text-accent/80")}>
           {b.items.map((item, i) => (
-            <li key={i} className={cn("pl-0.5", item.task && "-ml-5 flex list-none items-start gap-2")}>
+            <li key={i} className={cn("pl-0.5", item.task && "-ml-5 flex list-none items-start gap-2 max-md:-ml-4")}>
               {item.task && (
                 <span
                   aria-label={item.checked ? "done" : "open"}
@@ -178,12 +178,12 @@ function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH):
     }
     case "table":
       return (
-        <div className="my-3 overflow-x-auto rounded-md well">
+        <div className="my-3 overflow-x-auto rounded-md well max-md:my-2">
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
                 {b.head.map((h, i) => (
-                  <th key={i} style={{ textAlign: b.align[i] }} className="border-b border-line-2 px-3 py-1.5 text-left font-bold text-ink">
+                  <th key={i} style={{ textAlign: b.align[i] }} className="border-b border-line-2 px-3 py-1.5 text-left font-bold text-ink max-md:px-2 max-md:py-1">
                     <Inlines nodes={parseInline(h)} />
                   </th>
                 ))}
@@ -193,7 +193,7 @@ function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH):
               {b.rows.map((r, i) => (
                 <tr key={i} className="odd:bg-white/[0.015]">
                   {b.head.map((_, j) => (
-                    <td key={j} style={{ textAlign: b.align[j] }} className="border-b border-line px-3 py-1.5 align-top">
+                    <td key={j} style={{ textAlign: b.align[j] }} className="border-b border-line px-3 py-1.5 align-top max-md:px-2 max-md:py-1">
                       <Inlines nodes={parseInline(r[j] ?? "")} />
                     </td>
                   ))}
@@ -283,20 +283,20 @@ export function CodeBlock({ code, lang, open = false, tail, className, maxHeight
   };
   return (
     <div className={cn("group/code relative my-2.5 overflow-hidden rounded-md bg-bg-deep/80 shadow-[inset_0_0_0_1px_rgb(255_255_255/0.07)]", className)}>
-      <div className="flex h-7 items-center gap-2 border-b border-line px-3 text-2xs text-mute-2">
+      <div className="flex h-7 items-center gap-2 border-b border-line px-3 text-2xs text-mute-2 max-md:h-6 max-md:px-2.5">
         <span className="font-mono font-semibold tracking-wide">{lang || "text"}</span>
         {open && <span className="tf-shimmer-text tf-loop font-semibold">writing…</span>}
         <button
           type="button"
           onClick={copy}
-          className="pressable focus-ring ml-auto flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-mute opacity-0 transition-opacity group-hover/code:opacity-100 hover:text-ink focus-visible:opacity-100"
+          className="pressable focus-ring ml-auto flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-mute opacity-0 transition-opacity group-hover/code:opacity-100 hover:text-ink focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-100"
           aria-label="Copy code"
         >
           {copied ? <Check className="size-3 text-done" /> : <Copy className="size-3" />}
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="overflow-x-auto px-3 py-2.5 font-mono text-[12px] leading-[1.6] text-ink-2" style={maxHeight ? { maxHeight, overflowY: "auto" } : undefined}>
+      <pre className="overflow-x-auto px-3 py-2.5 font-mono text-[12px] leading-[1.6] text-ink-2 max-md:px-2.5 max-md:py-2 max-md:text-[11.5px] max-md:leading-[1.55]" style={maxHeight ? { maxHeight, overflowY: "auto" } : undefined}>
         <code>
           <Highlighted code={code} lang={key} />
           {tail}

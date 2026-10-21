@@ -14,6 +14,7 @@ mod toast;
 mod toastxml;
 #[cfg(desktop)]
 mod tray;
+mod update;
 
 use std::sync::Arc;
 
@@ -88,6 +89,7 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
     let core = Core::new(engine, initial);
     app.manage(Arc::clone(&core));
     app.manage(Arc::clone(&platform));
+    app.manage(update::Updater::new(handle.clone(), Arc::clone(&core)));
 
     #[cfg(windows)]
     {
@@ -102,7 +104,14 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
             &app.config().identifier,
             app.config().product_name.as_deref().unwrap_or("TeleFlock"),
             icon.as_deref(),
-            Arc::new(move |host, nid, action, reply| sink_core.notification_action(host, nid, action, reply)),
+            Arc::new(move |ev| match ev {
+                toast::ToastEvent::Activated { host_id, notification_id, action_id, reply } => {
+                    sink_core.notification_action(host_id, notification_id, action_id, reply)
+                }
+                toast::ToastEvent::Dismissed { host_id, notification_id } => {
+                    sink_core.engine.notification_dismissed(&host_id, &notification_id)
+                }
+            }),
         );
         let _ = shell.toasts.set(toasts);
     }
@@ -119,6 +128,15 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(debug_assertions, windows))]
     if let Err(e) = app.deep_link().register_all() {
         log::warn!("registering teleflock:// for this dev build failed: {e}");
+    }
+    // Linux: the .deb / Arch package's desktop file declares the scheme; an AppImage has none
+    // installed, so it registers itself (a `~/.local/share/applications` handler pointing at
+    // the AppImage path, refreshed on every launch in case the file moved).
+    #[cfg(target_os = "linux")]
+    if app.env().appimage.is_some()
+        && let Err(e) = app.deep_link().register_all()
+    {
+        log::warn!("registering teleflock:// for this AppImage failed: {e}");
     }
     let link_app = handle.clone();
     app.deep_link().on_open_url(move |e| {
@@ -156,6 +174,20 @@ fn watch_motion(core: CoreState, tray: Arc<tray::Tray<Wry>>) {
     });
 }
 
+/// Process teardown: `RunEvent::Exit`, and the Windows updater right before it runs the
+/// installer and exits the process (no `RunEvent::Exit` then).
+fn before_exit(app: &AppHandle<Wry>) {
+    #[cfg(windows)]
+    if let Some(p) = app.try_state::<Arc<TauriPlatform>>()
+        && let Some(t) = p.shell.toasts.get()
+    {
+        t.clear_all();
+    }
+    if let Some(core) = app.try_state::<CoreState>() {
+        tauri::async_runtime::block_on(core.engine.shutdown());
+    }
+}
+
 /// Android: notification buttons / replies and network changes arrive over JNI, independent of
 /// the WebView. Installed before the builder so a tap right after launch is not lost.
 #[cfg(target_os = "android")]
@@ -170,6 +202,7 @@ fn install_android_sink() -> Arc<std::sync::OnceLock<AppHandle<Wry>>> {
         };
         match ev {
             NativeEvent::Action(a) => core.notification_action(a.host_id, a.notification_id, a.action_id, a.reply),
+            NativeEvent::Dismissed(r) => core.engine.notification_dismissed(&r.host_id, &r.notification_id),
             NativeEvent::NetworkChanged => core.engine.resume(),
         }
     });
@@ -191,7 +224,10 @@ pub fn run() {
     builder = builder.plugin(tauri_plugin_deep_link::init());
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_snap_layout::init().button_id("tf-max").build());
+        builder = builder
+            .plugin(tauri_plugin_snap_layout::init().button_id("tf-max").build())
+            // Endpoints are set per check (src/update); pubkey + install mode come from tauri.conf.json.
+            .plugin(tauri_plugin_updater::Builder::new().build());
     }
     #[cfg(target_os = "android")]
     {
@@ -237,17 +273,10 @@ pub fn run() {
                 api.prevent_exit();
             }
         }
-        RunEvent::Exit => {
-            #[cfg(windows)]
-            if let Some(p) = app.try_state::<Arc<TauriPlatform>>()
-                && let Some(t) = p.shell.toasts.get()
-            {
-                t.clear_all();
-            }
-            if let Some(core) = app.try_state::<CoreState>() {
-                tauri::async_runtime::block_on(core.engine.shutdown());
-            }
-        }
+        RunEvent::Exit => before_exit(app),
+        // macOS: closing hid the window to the tray; a Dock icon click brings it back.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { has_visible_windows: false, .. } => tray::show_main(app),
         #[cfg(mobile)]
         RunEvent::Resumed => {
             if let Some(core) = app.try_state::<CoreState>() {
@@ -256,6 +285,10 @@ pub fn run() {
             #[cfg(target_os = "android")]
             if let Some(p) = app.try_state::<Arc<TauriPlatform>>() {
                 p.sync_keep_alive();
+            }
+            #[cfg(target_os = "android")]
+            if let Some(u) = app.try_state::<update::UpdaterState>() {
+                u.resumed();
             }
         }
         _ => {}

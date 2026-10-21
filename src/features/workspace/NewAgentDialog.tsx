@@ -138,7 +138,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         <Button variant="ghost" onClick={onClose} disabled={busy}>
           Cancel
         </Button>
-        <span className="flex-1" />
+        {!mobile && <span className="flex-1" />}
         {!mobile && valid && (
           <span className="flex items-center gap-1 text-2xs text-mute-2" aria-hidden>
             <Kbd>Ctrl</Kbd>

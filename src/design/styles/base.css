@@ -33,11 +33,37 @@
     font-weight: 700;
     margin: 0;
   }
-  button {
+  /* Pointer for everything that behaves like a control. Element-level gaps
+     (onClick on div/span/li/tr) still need `cursor-pointer` where they live. */
+  button,
+  summary,
+  select,
+  a[href],
+  label[for],
+  [role="button"],
+  [role="link"],
+  [role="menuitem"],
+  [role="menuitemcheckbox"],
+  [role="menuitemradio"],
+  [role="option"],
+  [role="tab"],
+  [role="switch"],
+  [role="checkbox"],
+  [role="radio"],
+  [aria-haspopup]:not(input):not(textarea) {
     cursor: pointer;
   }
-  button:disabled {
-    cursor: default;
+  /* Disabled always wins, even over utilities like `cursor-pointer`
+     (important declarations in an earlier layer beat later layers). */
+  :disabled,
+  [aria-disabled="true"],
+  [data-disabled]:not([data-disabled="false"]) {
+    cursor: not-allowed !important;
+  }
+  /* Set on <html> while a board card is being dragged. */
+  html[data-dragging],
+  html[data-dragging] * {
+    cursor: grabbing !important;
   }
   code, kbd, pre, samp {
     font-family: var(--font-mono);

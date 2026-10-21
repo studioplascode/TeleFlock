@@ -1,4 +1,4 @@
-import { Grid2x2, Inbox, LayoutGrid, type LucideIcon, SquareTerminal } from "lucide-react";
+import { Grid2x2, Inbox, LayoutGrid, type LucideIcon, Send, SquareTerminal } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { cn, spring, toast } from "@/design";
 import { navigate, type Route, useHosts, useInbox, useNotifications, useRoute, useUi } from "@/core";
@@ -11,6 +11,7 @@ type Tab = (typeof MOBILE_TABS)[number];
 
 const TAB_META: Record<Tab, { label: string; icon: LucideIcon }> = {
   board: { label: "Flock", icon: LayoutGrid },
+  dispatch: { label: "Dispatch", icon: Send },
   inbox: { label: "Inbox", icon: Inbox },
   terminal: { label: "Terminal", icon: SquareTerminal },
   more: { label: "More", icon: Grid2x2 },
@@ -19,6 +20,8 @@ const TAB_META: Record<Tab, { label: string; icon: LucideIcon }> = {
 /** Which tab a route belongs to (pushed screens keep their parent tab lit). */
 function tabFor(r: Route): Tab {
   switch (r.name) {
+    case "dispatch":
+      return "dispatch";
     case "inbox":
       return "inbox";
     case "terminal":
@@ -64,10 +67,10 @@ function BottomNav() {
 
   return (
     <nav
-      className="relative z-sticky shrink-0 border-t border-line bg-[rgb(12_12_18/0.86)] px-2 pt-1.5 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl"
+      className="relative z-sticky shrink-0 border-t border-line bg-[rgb(12_12_18/0.86)] px-1 pt-1 pb-[max(4px,env(safe-area-inset-bottom))] backdrop-blur-xl"
       aria-label="Primary"
     >
-      <ul className="grid grid-cols-4">
+      <ul className="grid grid-cols-5">
         {MOBILE_TABS.map((tab) => {
           const { label, icon: Icon } = TAB_META[tab];
           const on = active === tab;
@@ -79,9 +82,9 @@ function BottomNav() {
                 type="button"
                 onClick={() => go(tab)}
                 aria-current={on ? "page" : undefined}
-                className="relative flex w-full flex-col items-center gap-1 py-1 text-[10.5px] font-bold focus-ring rounded-md"
+                className="relative flex min-h-11 w-full min-w-0 flex-col items-center justify-center gap-0.5 rounded-md py-0.5 text-[10px] leading-3 font-bold focus-ring"
               >
-                <span className="relative grid h-8 w-14 place-items-center">
+                <span className="relative grid h-7 w-12 place-items-center">
                   {on && (
                     <motion.span
                       layoutId="tf-tab-pill"
@@ -100,16 +103,16 @@ function BottomNav() {
                       animate={{ scale: 1 }}
                       transition={spring.bouncy}
                       className={cn(
-                        "absolute -top-1 right-1.5 grid h-[17px] min-w-[17px] place-items-center rounded-full px-1 text-[10px] leading-none font-extrabold text-white shadow-[0_0_0_2px_rgb(12_12_18)]",
+                        "absolute -top-1 right-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[9.5px] leading-none font-extrabold text-white shadow-[0_0_0_2px_rgb(12_12_18)]",
                         tab === "inbox" ? "bg-sun sun-pulse" : "bg-accent",
                       )}
                     >
                       {badge > 99 ? "99+" : badge}
                     </motion.span>
                   )}
-                  {dot && badge === 0 && <span className="absolute top-0 right-3 size-2 rounded-full bg-sun-2 shadow-glow-sun" />}
+                  {dot && badge === 0 && <span className="absolute top-0 right-2.5 size-2 rounded-full bg-sun-2 shadow-glow-sun" />}
                 </span>
-                <span className={on ? "text-ink" : "text-mute"}>{label}</span>
+                <span className={cn("max-w-full truncate px-0.5", on ? "text-ink" : "text-mute")}>{label}</span>
               </button>
             </li>
           );
@@ -127,26 +130,32 @@ const NAV_VARIANTS = {
 
 /**
  * Phone frame: safe areas, routed views with push/pop transitions, bottom nav, edge-swipe back.
- * The bottom nav steps aside in focus mode and while the soft keyboard is up, and the frame pads
- * itself above a keyboard that overlays the webview, so the composer always sits on top of it.
+ * The bottom nav steps aside on the agent view (a drill-down that wants every row for the chat),
+ * in focus mode and while the soft keyboard is up, and the frame pads itself above a keyboard
+ * that overlays the webview, so the composer always sits on top of it.
  */
 export function MobileShell() {
   const route = useRoute();
   const focus = useUi((s) => s.focusMode);
   const keyboard = useSoftKeyboard();
-  const atRoot = route.name === "board" || route.name === "inbox" || route.name === "more" || (route.name === "terminal" && !route.agentId && !route.paneId);
+  const atRoot =
+    route.name === "board" || route.name === "dispatch" || route.name === "inbox" || route.name === "more" || (route.name === "terminal" && !route.agentId && !route.paneId);
+  const nav = !focus && !keyboard && route.name !== "agent";
   return (
     <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--kb-inset,0px)] pl-[env(safe-area-inset-left)]">
       <main className="relative min-h-0 flex-1">
         <ViewStage mobile />
       </main>
       <AnimatePresence initial={false} custom={keyboard}>
-        {!focus && !keyboard && (
+        {nav && (
           <motion.div key="nav" custom={keyboard} variants={NAV_VARIANTS} initial="hidden" animate="shown" exit="hidden" className="shrink-0 overflow-hidden">
             <BottomNav />
           </motion.div>
         )}
       </AnimatePresence>
+      {/* Without the nav (agent view, focus mode) the frame still keeps clear of the gesture bar /
+          home indicator; with the keyboard up the keyboard covers that strip, so no spacer. */}
+      {!nav && !keyboard && <div className="safe-bottom shrink-0" aria-hidden />}
       <EdgeSwipeBack enabled={!atRoot} />
     </div>
   );

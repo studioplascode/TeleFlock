@@ -30,9 +30,15 @@ pub struct BadgeState {
 pub trait Platform: Send + Sync + 'static {
     /// Show an OS notification. Called only after the engine applied the notification
     /// settings (`notifyNeeds`/`notifyFinished`/`notifyErrors`). `n.actions` holds at most 3
-    /// actions; route activations back through [`crate::Engine::notification_action`].
+    /// actions; route activations back through [`crate::Engine::notification_action`] and
+    /// user dismissals through [`crate::Engine::notification_dismissed`]. Keep at most one
+    /// notification per (host, agent): a newer one replaces the older.
     /// `host` is `None` only for `app.notifyTest`.
     fn notify(&self, host: Option<&HostProfile>, n: &Notification, style: NotifyStyle);
+    /// Remove the OS notification posted for `n` (handled elsewhere: its request was resolved,
+    /// or it was read in the app). Must be a no-op when the agent's notification shown now is
+    /// a newer one, or it is gone already. Platforms without OS notifications keep the default.
+    fn retract(&self, _host_id: &str, _n: &Notification) {}
     /// Open a URL in the system browser (Tailscale auth URLs, previews).
     fn open_external(&self, url: &str) -> Result<(), ApiError>;
     /// Android: hold the foreground service while `on`. Called when

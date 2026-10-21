@@ -48,13 +48,23 @@ function Peek({ agentKey, side }: { agentKey: string | undefined; side: "left" |
   );
 }
 
-function PagerDots({ keys, current }: { keys: string[]; current: string }) {
+/**
+ * Page indicator. Over a transcript it floats in the top fade so it costs no row (only the dots
+ * take taps); `inline` gives it its own row where content starts at the very top (terminal view).
+ */
+function PagerDots({ keys, current, inline = false }: { keys: string[]; current: string; inline?: boolean }) {
   if (keys.length < 2) return null;
   return (
-    <div className="flex items-center justify-center gap-1.5 py-1" role="tablist" aria-label="Agents">
-      {keys.slice(0, 12).map((k) => (
-        <Dot key={k} k={k} on={k === current} />
-      ))}
+    <div className={cn("pointer-events-none flex justify-center", inline ? "shrink-0 pb-1.5" : "absolute inset-x-0 top-0 z-raised")}>
+      <div
+        className={cn("mt-0.5 flex items-center gap-1.5 rounded-full px-2 py-1", !inline && "bg-[rgb(12_12_18/0.72)] shadow-hairline backdrop-blur-md")}
+        role="tablist"
+        aria-label="Agents"
+      >
+        {keys.slice(0, 12).map((k) => (
+          <Dot key={k} k={k} on={k === current} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -73,7 +83,11 @@ function Dot({ k, on }: { k: string; on: boolean }) {
         navigate({ name: "agent", hostId, agentId }, { replace: true });
       }}
       data-status={status}
-      className={cn("h-1.5 rounded-full transition-all duration-300", on ? "w-5 st-fill" : "w-1.5 bg-white/20", !on && status === "needs-you" && "st-fill opacity-70")}
+      className={cn(
+        "pointer-events-auto h-1.5 rounded-full transition-all duration-300",
+        on ? "w-5 st-fill" : "w-1.5 bg-white/20",
+        !on && status === "needs-you" && "st-fill opacity-70",
+      )}
     />
   );
 }
@@ -138,12 +152,14 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
 
   const status = agentStatus(agent);
   const omp = agent?.omp != null && agent.omp.link === "live";
+  // Non-omp agents open straight onto a terminal: its first row would sit under floating dots.
+  const terminal = agent != null && agent.omp == null;
   return (
     <div className="flex h-full min-h-0 flex-col" data-status={status}>
       <MobileHeader
         back
         title={
-          <span className="flex min-w-0 items-center gap-2">
+          <span className="flex min-w-0 items-center gap-2 pl-1.5">
             <StatusOrb status={status} activity={tier} size={8} label={null} />
             <span data-morph="name" data-morph-key={key} className="truncate">
               {agent?.name ?? agentId}
@@ -169,9 +185,8 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           ) : undefined
         }
       />
-      <PagerDots keys={keys} current={key} />
       {omp && (
-        <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pr-8 pb-2 no-scrollbar [mask-image:linear-gradient(90deg,#000_calc(100%-40px),transparent)]">
+        <div className="flex shrink-0 gap-1.5 overflow-x-auto px-2 pr-8 pb-1.5 no-scrollbar [mask-image:linear-gradient(90deg,#000_calc(100%-40px),transparent)]">
           <ModelPicker agentKey={key} mobile />
           <ThinkingPicker agentKey={key} mobile />
           <PlanToggle agentKey={key} />
@@ -179,12 +194,14 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           <GoalChip agentKey={key} compact={!meta?.goal} />
         </div>
       )}
+      {terminal && <PagerDots keys={keys} current={key} inline />}
       <div
         ref={(el) => {
           if (el) width.current = el.clientWidth;
         }}
         className="relative min-h-0 flex-1 overflow-x-clip"
       >
+        {!terminal && <PagerDots keys={keys} current={key} />}
         <motion.div
           drag="x"
           dragControls={controls}
@@ -197,7 +214,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           // Horizontal pans belong to the pager. With `dragListener={false}` motion doesn't set
           // touch-action itself, and nested scrollers re-enable every pan, so the browser would
           // claim the swipe (pointercancel). Code blocks, tables and inputs keep native panning.
-          className="relative flex h-full min-h-0 flex-col px-3 pb-2 touch-pan-y [&_*]:touch-pan-y [&_:is(pre,table,textarea,input,[data-no-swipe])]:touch-auto [&_:is(pre,table,[data-no-swipe])_*]:touch-auto"
+          className="relative flex h-full min-h-0 flex-col px-2 pb-1.5 touch-pan-y [&_*]:touch-pan-y [&_:is(pre,table,textarea,input,[data-no-swipe])]:touch-auto [&_:is(pre,table,[data-no-swipe])_*]:touch-auto"
           onPointerDown={(e) => {
             // Page from anywhere except text inputs, so typing and selecting never swipe.
             const t = e.target as HTMLElement;
@@ -211,7 +228,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         </motion.div>
       </div>
       {omp && (
-        <BottomSheet open={sheet} onOpenChange={(o) => useSessionUi.getState().setSheet(key, o)} title={agent?.name ?? "Session"} description="Context, todos, subagents, files, tree and btw">
+        <BottomSheet open={sheet} onOpenChange={(o) => useSessionUi.getState().setSheet(key, o)} title={agent?.name ?? "Session"} description="Context, todos, subagents, agent chat, files, tree and btw">
           <InspectorBody agentKey={key} />
         </BottomSheet>
       )}

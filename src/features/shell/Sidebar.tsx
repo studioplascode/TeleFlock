@@ -19,6 +19,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Send,
   Server,
   Settings2,
   SquareTerminal,
@@ -76,6 +77,7 @@ interface NavDef {
 
 const NAV: readonly NavDef[] = [
   { label: "Board", icon: LayoutDashboard, route: { name: "board" }, match: ["board"], shortcut: "Ctrl 1" },
+  { label: "Dispatch", icon: Send, route: { name: "dispatch" }, match: ["dispatch"], shortcut: "D" },
   { label: "Inbox", icon: Inbox, route: { name: "inbox" }, match: ["inbox"], shortcut: "Ctrl 2" },
   { label: "Activity", icon: Activity, route: { name: "activity" }, match: ["activity"], shortcut: "Ctrl 3" },
   { label: "Usage", icon: BarChart3, route: { name: "usage" }, match: ["usage"], shortcut: "Ctrl 4" },
@@ -185,7 +187,12 @@ function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; n
         <button
           type="button"
           onClick={() => ws.repo && navigate({ name: "review", hostId, workspaceId: ws.id })}
-          className={cn("flex h-7 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-xs font-bold transition-colors focus-ring", active ? "bg-white/7 text-ink" : "text-mute hover:bg-white/4 hover:text-ink-2")}
+          // Plain folders have no review screen: the row only carries the right-click menu, so no pointer.
+          className={cn(
+            "flex h-7 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-xs font-bold transition-colors focus-ring",
+            active ? "bg-white/7 text-ink" : "text-mute hover:bg-white/4 hover:text-ink-2",
+            !ws.repo && "cursor-default",
+          )}
           style={{ paddingLeft: nested ? 22 : 8 }}
           title={`${ws.label} · ${ws.cwd}`}
         >
@@ -434,6 +441,9 @@ export function Sidebar() {
       )}
       aria-label="Sidebar"
     >
+      {/* Everything above the collapse toggle scrolls as one column on short windows, so the toggle and
+          quick actions never get clipped; the workspace tree keeps its own scroller with a usable minimum. */}
+      <div className="no-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
       <div className={cn("flex flex-col gap-0.5 p-2", collapsed && "items-center")}>
         {NAV.map((d) => (
           <NavItem key={d.label} def={d} collapsed={collapsed} active={d.match.includes(route.name)} badge={d.route.name === "inbox" ? needs : undefined} />
@@ -459,7 +469,7 @@ export function Sidebar() {
       {collapsed ? (
         <div className="flex-1" />
       ) : (
-        <ScrollArea className="min-h-0 flex-1 border-t border-line" viewportClassName="px-2 py-2" fade>
+        <ScrollArea className="min-h-28 flex-1 border-t border-line" viewportClassName="px-2 py-2" fade>
           <div className="flex items-center justify-between px-2 pb-1">
             <span className="kicker">Workspaces</span>
           </div>
@@ -484,6 +494,7 @@ export function Sidebar() {
           ))}
         </div>
       )}
+      </div>
 
       <div className={cn("flex border-t border-line p-2", collapsed ? "justify-center" : "justify-end")}>
         <IconButton label={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"} size="sm" onClick={toggleSidebar}>

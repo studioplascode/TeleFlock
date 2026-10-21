@@ -20,6 +20,7 @@ declare module "bun:test" {
     toBeGreaterThanOrEqual(n: number): R;
     toBeLessThan(n: number): R;
     toBeLessThanOrEqual(n: number): R;
+    toBeCloseTo(n: number, digits?: number): R;
     toContain(item: unknown): R;
     toHaveLength(n: number): R;
     toMatch(re: RegExp | string): R;

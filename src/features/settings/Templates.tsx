@@ -73,7 +73,7 @@ function TemplateForm({ initial, onSave }: { initial: AgentTemplate; onSave: (t:
       <Field label="Prompt" hint="optional" description="Sent as the first message. Leave empty for a pure model preset.">
         {(id) => <Textarea id={id} value={t.prompt} onChange={(e) => set({ prompt: e.target.value })} placeholder="Read the README, then…" maxHeight={220} />}
       </Field>
-      <div className="flex justify-end gap-2 border-t border-line pt-4">
+      <div className="flex justify-end gap-2 border-t border-line pt-4 md:sticky md:bottom-0 md:z-raised md:bg-[#17171f]">
         <Button variant="ghost" onClick={closeSheet}>
           Cancel
         </Button>
@@ -167,7 +167,11 @@ export function Templates({ index }: { index: number }) {
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     <Chip className="h-5 text-2xs">{t.model ?? "default model"}</Chip>
                     {t.thinking && <Chip className="h-5 text-2xs">think {t.thinking}</Chip>}
-                    {t.prompt && <Chip className="h-5 max-w-60 truncate text-2xs">“{t.prompt.split("\n")[0]}”</Chip>}
+                    {t.prompt && (
+                      <Chip className="h-5 max-w-60 min-w-0 text-2xs">
+                        <span className="truncate">“{t.prompt.split("\n")[0]}”</span>
+                      </Chip>
+                    )}
                   </div>
                 </button>
                 <div className="flex shrink-0 gap-0.5">

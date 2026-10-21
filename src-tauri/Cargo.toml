@@ -29,13 +29,22 @@ log = { workspace = true }
 tauri = { workspace = true, features = ["tray-icon", "image-png"] }
 tauri-plugin-log = { workspace = true }
 tauri-plugin-deep-link = "2.6.2"
-tokio = { version = "1", features = ["sync", "time", "macros"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "fs", "io-util"] }
 percent-encoding = "2"
+# Self-update (src/update): GitHub release discovery + APK download. rustls on ring with the
+# webpki roots (no platform verifier: it needs JNI setup on Android); ring is already built for russh.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+semver = "1"
+sha2 = "0.10"
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
 # Windows 11 Snap Layouts over the custom maximize button (no-op on other desktops).
 tauri-plugin-snap-layout = "1.0.9"
+# Windows self-update: download, minisign verification and the passive NSIS install.
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "system-proxy"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { useShallow } from "zustand/react/shallow";
@@ -16,6 +16,7 @@ import type {
 } from "@/core/gen";
 import type { ApiError, SessionMeta } from "@/core/gen";
 import { activityWatchers, core, loadActivity, pushInternal, startCore } from "./client";
+import { type IrcEntry, ircOf } from "./irc";
 import type { AgentView, BtwEntry, CoreState, HostActivityEvent, HostNotification, SessionStatus } from "./store/state";
 import { coreStore } from "./store/store";
 import type { Backend } from "./transport/types";
@@ -264,6 +265,23 @@ export function useSessionItem(key: string, itemId: string): TranscriptItem | un
   return useCore((s) => s.sessions[key]?.items[itemId]);
 }
 
+/** The loaded IRC messages of a session, oldest first. Re-renders only when an IRC row changes. */
+export function useIrcEntries(key: string): IrcEntry[] {
+  const items = useCore(
+    useShallow((s) => {
+      const e = s.sessions[key];
+      if (!e) return [];
+      const out: TranscriptItem[] = [];
+      for (const id of e.itemIds) {
+        const it = e.items[id];
+        if (it && (it.kind === "irc" || (it.kind === "tool" && it.view?.type === "irc"))) out.push(it);
+      }
+      return out;
+    }),
+  );
+  return useMemo(() => items.flatMap((it) => ircOf(it) ?? []), [items]);
+}
+
 /** Loaded transcript rows of a session, oldest first (imperative; for one-shot actions like copy). */
 export function getTranscript(key: string): { items: TranscriptItem[]; hasMore: boolean } {
   const e = coreStore.getState().sessions[key];
@@ -285,14 +303,39 @@ export interface NotificationsView {
   clear(): void;
 }
 
-function markRead(): void {
+/**
+ * Marks the matching notifications read here, and through `app.notifyRead` on every other
+ * surface (the core retracts their OS notifications) for each host in `hosts`.
+ */
+function readWhere(match: (n: HostNotification) => boolean, hosts: Iterable<[hostId: string, agentId?: string]>): void {
   const s = coreStore.getState();
-  if (!s.notifications.some((n) => !n.read)) return;
-  coreStore.setState({ notifications: s.notifications.map((n) => (n.read ? n : { ...n, read: true })) });
+  if (s.notifications.some((n) => !n.read && match(n))) {
+    coreStore.setState({ notifications: s.notifications.map((n) => (n.read || !match(n) ? n : { ...n, read: true })) });
+  }
+  for (const [hostId, agentId] of hosts) {
+    core.app("app.notifyRead", { hostId, agentId }).catch(() => {
+      // Best effort: the host may be gone, and this surface is already up to date.
+    });
+  }
 }
 
+function markRead(): void {
+  const unread = coreStore.getState().notifications.filter((n) => !n.read);
+  readWhere(() => true, [...new Set(unread.map((n) => n.hostId))].map((h): [string] => [h]));
+}
+
+/** Clearing the list deals with everything in it: unread ones are marked read everywhere first. */
 function clearNotifications(): void {
+  markRead();
   coreStore.setState({ notifications: [] });
+}
+
+/**
+ * The user looked at an agent (opened its session): its notifications are read here and on every
+ * other surface. Needs-you ones stay answerable until their request is resolved.
+ */
+export function markAgentNotificationsRead(hostId: string, agentId: string): void {
+  readWhere((n) => n.hostId === hostId && n.agentId === agentId, [[hostId, agentId]]);
 }
 
 let notifCache: NotificationsView | null = null;
@@ -378,6 +421,7 @@ export const DEFAULT_SETTINGS: Settings = {
   deviceName: "TeleFlock",
   mutedAgents: [],
   templates: [],
+  autoUpdate: true,
 };
 
 export interface SettingsView extends Settings {

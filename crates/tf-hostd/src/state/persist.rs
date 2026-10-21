@@ -39,9 +39,7 @@ pub struct SessionData {
 pub struct UsageLedger {
     /// Host-local day → totals.
     pub days: BTreeMap<String, UsageTotals>,
-    /// Per-model totals for the current ledger window (`provider/id` → totals).
-    pub models: BTreeMap<String, UsageTotals>,
-    /// Last cumulative cost seen per omp session (delta accounting).
+    /// Highest cumulative cost seen per omp session (delta accounting).
     pub seen: HashMap<String, CostInfo>,
 }
 
@@ -54,31 +52,36 @@ pub struct PersistData {
 }
 
 impl UsageLedger {
-    /// Accounts the growth of one session's cumulative cost. The first observation of a
-    /// session only sets the baseline (its earlier spend predates tracking).
-    pub fn observe(&mut self, session_id: &str, cost: &CostInfo, model: Option<&str>, day: &str) -> bool {
+    /// Accounts the growth of one session's cumulative cost (main + subagents + advisor). The
+    /// first observation of a session only sets the baseline (its earlier spend predates
+    /// tracking). The baseline is a high-water mark: a total that dips (a resync before the
+    /// artifact tree is read again) and recovers is not counted twice.
+    pub fn observe(&mut self, session_id: &str, cost: &CostInfo, day: &str) -> bool {
         let Some(prev) = self.seen.get(session_id).cloned() else {
-            self.seen.insert(session_id.to_string(), cost.clone());
+            self.seen.insert(session_id.to_string(), CostInfo { split: None, ..cost.clone() });
             return false;
         };
         let d_usd = (cost.usd - prev.usd).max(0.0);
         let d_in = cost.input.saturating_sub(prev.input);
         let d_out = cost.output.saturating_sub(prev.output);
         let d_cache = (cost.cache_read + cost.cache_write).saturating_sub(prev.cache_read + prev.cache_write);
-        self.seen.insert(session_id.to_string(), cost.clone());
+        let high = CostInfo {
+            usd: prev.usd.max(cost.usd),
+            input: prev.input.max(cost.input),
+            output: prev.output.max(cost.output),
+            cache_read: prev.cache_read.max(cost.cache_read),
+            cache_write: prev.cache_write.max(cost.cache_write),
+            split: None,
+        };
+        self.seen.insert(session_id.to_string(), high);
         if d_usd == 0.0 && d_in == 0 && d_out == 0 && d_cache == 0 {
             return false;
         }
-        let add = |t: &mut UsageTotals| {
-            t.cost_usd += d_usd;
-            t.input += d_in;
-            t.output += d_out;
-            t.tokens += d_in + d_out + d_cache;
-        };
-        add(self.days.entry(day.to_string()).or_insert_with(zero));
-        if let Some(m) = model {
-            add(self.models.entry(m.to_string()).or_insert_with(zero));
-        }
+        let t = self.days.entry(day.to_string()).or_insert_with(zero);
+        t.cost_usd += d_usd;
+        t.input += d_in;
+        t.output += d_out;
+        t.tokens += d_in + d_out + d_cache;
         while self.days.len() > USAGE_DAYS {
             let first = self.days.keys().next().cloned();
             if let Some(k) = first {
@@ -177,20 +180,31 @@ mod tests {
     use super::*;
 
     fn cost(usd: f64, input: u64, output: u64) -> CostInfo {
-        CostInfo { usd, input, output, cache_read: 0, cache_write: 0 }
+        CostInfo { usd, input, output, cache_read: 0, cache_write: 0, split: None }
     }
 
     #[test]
     fn usage_counts_growth_only() {
         let mut l = UsageLedger::default();
-        assert!(!l.observe("s1", &cost(5.0, 1000, 100), Some("m"), "2026-10-20"));
+        assert!(!l.observe("s1", &cost(5.0, 1000, 100), "2026-10-20"));
         assert_eq!(l.day("2026-10-20").cost_usd, 0.0);
-        assert!(l.observe("s1", &cost(5.5, 1200, 150), Some("m"), "2026-10-20"));
+        assert!(l.observe("s1", &cost(5.5, 1200, 150), "2026-10-20"));
         let t = l.day("2026-10-20");
         assert!((t.cost_usd - 0.5).abs() < 1e-9);
         assert_eq!((t.input, t.output, t.tokens), (200, 50, 250));
-        assert!(!l.observe("s1", &cost(5.5, 1200, 150), Some("m"), "2026-10-20"));
-        assert_eq!(l.models["m"].output, 50);
+        assert!(!l.observe("s1", &cost(5.5, 1200, 150), "2026-10-20"));
+    }
+
+    #[test]
+    fn usage_dip_and_recovery_counts_once() {
+        let mut l = UsageLedger::default();
+        l.observe("s1", &cost(1.0, 100, 10), "d");
+        assert!(l.observe("s1", &cost(2.0, 200, 20), "d"));
+        // Resync: the subagent tree is not re-read yet, then it is.
+        assert!(!l.observe("s1", &cost(1.2, 120, 12), "d"));
+        assert!(!l.observe("s1", &cost(2.0, 200, 20), "d"));
+        assert!(l.observe("s1", &cost(2.5, 250, 25), "d"));
+        assert!((l.day("d").cost_usd - 1.5).abs() < 1e-9);
     }
 
     #[test]

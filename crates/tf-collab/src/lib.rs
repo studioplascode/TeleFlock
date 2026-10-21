@@ -22,4 +22,4 @@ pub use guest::{EndReason, Guest, GuestError, GuestEvent, Snapshot, TranscriptCh
 pub use link::{CollabLink, LinkError};
 pub use registry::{Access, HostEntry, LinkInfo, Registry, RegistryError};
 pub use relay::{IdentityError, Relay, RelayConfig, RelayIdentity, RelayStats};
-pub use replica::{Replica, Signal, UiReply, Update, transcript_page};
+pub use replica::{ArtifactCall, ArtifactKind, ArtifactLedger, Replica, Signal, Spend, UiReply, Update, transcript_page};

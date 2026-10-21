@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}} %u
+Icon={{icon}}
+StartupWMClass={{exec}}
+Terminal=false
+Categories={{categories}}
+Keywords=omp;herdr;agents;AI;coding;terminal;
+{{#if mime_type}}
+MimeType={{mime_type}};
+{{/if}}

@@ -78,7 +78,7 @@ pub fn present(host: Option<&HostProfile>, n: &Notification, style: NotifyStyle)
         Vec::new()
     };
     Presentation {
-        tag: if n.agent_id.is_empty() { format!("{host_id}/{}", n.id) } else { format!("{host_id}/{}", n.agent_id) },
+        tag: tag(&host_id, n),
         host_id,
         notification_id: n.id.clone(),
         category,
@@ -92,6 +92,12 @@ pub fn present(host: Option<&HostProfile>, n: &Notification, style: NotifyStyle)
         sound: style.sound && !style.silent,
         at: n.at,
     }
+}
+
+/// OS identity of `n`'s notification (Windows toast tag, Android notification tag): one live
+/// notification per agent, so a newer one replaces the older.
+pub fn tag(host_id: &str, n: &Notification) -> String {
+    if n.agent_id.is_empty() { format!("{host_id}/{}", n.id) } else { format!("{host_id}/{}", n.agent_id) }
 }
 
 /// "3 running · 2 need you" (tray tooltip, Android keep-alive text).
@@ -141,6 +147,7 @@ mod tests {
         let n = notification(vec![act("a", "Allow", false), act("d", "Deny", true), act("x", "No thanks", false), act("y", "Extra", false)]);
         let p = present(Some(&h), &n, NotifyStyle { sound: true, silent: false, reply: true });
         assert_eq!(p.tag, "h1/w1:p2");
+        assert_eq!(tag("h1", &n), p.tag, "retract finds what notify posted");
         assert_eq!(p.category, Category::Needs);
         assert_eq!(p.buttons.len(), 3);
         assert!(!p.buttons[0].destructive);

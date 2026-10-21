@@ -39,8 +39,12 @@ wire_struct! {
         pub model: Option<String>,
         /// Latest activity line.
         pub line: Option<String>,
-        /// 0..=1 when known.
-        pub progress: Option<f32>,
+        /// The subagent's own estimate of how far along its task is, 0..=100. omp's completion probe
+        /// asks the running subagent periodically (first after ~2 min); absent until it answers and
+        /// once the subagent stops running. omp's TUI shows it as `· 40%` on the task row.
+        pub completion_pct: Option<f32>,
+        /// The subagent's own context-window usage (omp's TUI: `· 2.4%/272K`).
+        pub context: Option<ContextUsage>,
         pub tool_count: Option<u32>,
         pub parent_id: Option<String>,
     }
@@ -317,6 +321,47 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// `in`: a peer's message delivered to this agent; `out`: this agent's send to a peer.
+    pub enum IrcDirection { In, Out }
+}
+
+wire_struct! {
+    /// Delivery outcome for one recipient of an outbound IRC send (omp `IrcDeliveryReceipt`).
+    pub struct IrcReceipt {
+        pub to: String,
+        /// `injected` | `woken` | `revived` | `failed`.
+        pub outcome: String,
+        pub error: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One omp IRC (agent ↔ agent) message, seen from this agent: inbound from `peer`, or outbound
+    /// to `peer`. Peers are omp agent ids (`Main`, subagent ids; `all` = broadcast send).
+    pub struct IrcMessage {
+        pub direction: IrcDirection,
+        pub peer: String,
+        /// Markdown body.
+        pub text: String,
+        /// omp message id (inbound).
+        pub message_id: Option<String>,
+        /// Message id this one answers.
+        pub reply_to: Option<String>,
+        /// One leg of an `agent://all` broadcast (or the broadcast send itself).
+        pub broadcast: bool,
+        /// omp relayed the peer's final output when its wake turn stopped (not a hand-written send).
+        pub wake_relay: bool,
+        /// Sent by this agent's parent.
+        pub from_parent: bool,
+        /// Outbound: per-recipient delivery outcomes once the send finished.
+        pub receipts: Vec<IrcReceipt>,
+        /// When omp sent the message (inbound). A row carried by a `wait` call is stamped with the
+        /// call's start, so prefer this for display, ordering and unread.
+        pub sent_at: Option<Millis>,
+    }
+}
+
 /// Rich renderer hint for a tool item. Absent → generic args/output rendering.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -332,6 +377,8 @@ pub enum ToolView {
     Image(ImageView),
     Ask(AskView),
     Markdown(MarkdownView),
+    /// Outbound IRC send (`write agent://<id>`) or a message consumed by `wait`.
+    Irc(IrcMessage),
 }
 
 wire_struct! {
@@ -389,6 +436,15 @@ wire_struct! {
     }
 }
 
+wire_struct! {
+    /// Inbound IRC message (omp `irc:incoming`, or a parent's `<irc from="parent">` steer).
+    pub struct IrcItem {
+        pub id: String,
+        pub at: Millis,
+        pub message: IrcMessage,
+    }
+}
+
 /// One row of the transcript. Rows are keyed by `id` and updated in place.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -401,6 +457,7 @@ pub enum TranscriptItem {
     Notice(NoticeItem),
     Compaction(CompactionItem),
     Mode(ModeItem),
+    Irc(IrcItem),
 }
 
 impl TranscriptItem {
@@ -413,6 +470,7 @@ impl TranscriptItem {
             Self::Notice(i) => &i.id,
             Self::Compaction(i) => &i.id,
             Self::Mode(i) => &i.id,
+            Self::Irc(i) => &i.id,
         }
     }
 }

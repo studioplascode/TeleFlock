@@ -3,6 +3,7 @@ name = "tf-transport"
 description = "TeleFlock app-side transports: Tailscale SSH (russh), Local and WSL"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

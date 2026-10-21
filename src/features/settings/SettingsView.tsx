@@ -24,6 +24,7 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { MutedAgents } from "./MutedAgents";
 import { CommitInput, Row, Section, THINKING, useModels } from "./parts";
 import { Templates } from "./Templates";
+import { Updates } from "./Updates";
 
 type PermState = "granted" | "denied" | "prompt" | "prompt-with-rationale";
 
@@ -135,7 +136,7 @@ export function SettingsView() {
   return (
     <div className="flex min-h-full flex-col">
       {mobile && <MobileHeader title="Settings" back />}
-      <div className={cn("mx-auto grid w-full max-w-[880px] grid-cols-[minmax(0,1fr)] content-start gap-4", mobile ? "px-3 pb-8" : "px-8 pt-7 pb-12")}>
+      <div className={cn("mx-auto grid w-full max-w-[880px] grid-cols-[minmax(0,1fr)] content-start", mobile ? "gap-3 px-3 pt-1 pb-6" : "gap-4 px-8 pt-7 pb-12")}>
         {!mobile && <PageHeader kicker="Preferences" title="Settings" description="How TeleFlock moves, notifies and starts new agents on this device." className="mb-2" />}
         <Section index={0} icon={<Sparkles />} title="Motion" description="Animation is how TeleFlock shows that work is alive. Reduced keeps every meaning with calm, static colour.">
           <Row label="Animation" wide>
@@ -156,7 +157,16 @@ export function SettingsView() {
           </Row>
         </Section>
 
-        <Section index={1} icon={<Bell />} title="Notifications" description="When TeleFlock should tap you on the shoulder.">
+        <Section
+          index={1}
+          icon={<Bell />}
+          title="Notifications"
+          description={
+            info?.capabilities.notifications === false
+              ? "No system notifications on this platform yet: what needs you shows in the inbox and the tray badge."
+              : "When TeleFlock should tap you on the shoulder."
+          }
+        >
           <Row label="Needs you" description="Questions, approvals and plan reviews.">
             <Switch checked={settings.notifyNeeds} onCheckedChange={(notifyNeeds) => update({ notifyNeeds })} label="Notify when an agent needs you" />
           </Row>
@@ -183,26 +193,28 @@ export function SettingsView() {
               label="Quiet hours"
             />
           </Row>
-          <Row label="Test" description="Send a sample notification through the system.">
-            <Button
-              size="sm"
-              variant="secondary"
-              icon={<BellRing />}
-              loading={testing}
-              onClick={() => {
-                setTesting(true);
-                core
-                  .app("app.notifyTest", {})
-                  .then(
-                    () => toast({ title: "Test notification sent", status: "done" }),
-                    (err: unknown) => toast({ title: `Couldn't notify: ${errorMessage(err)}`, description: errorHint(err), status: "error" }),
-                  )
-                  .finally(() => setTesting(false));
-              }}
-            >
-              Send test
-            </Button>
-          </Row>
+          {info?.capabilities.notifications !== false && (
+            <Row label="Test" description="Send a sample notification through the system.">
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<BellRing />}
+                loading={testing}
+                onClick={() => {
+                  setTesting(true);
+                  core
+                    .app("app.notifyTest", {})
+                    .then(
+                      () => toast({ title: "Test notification sent", status: "done" }),
+                      (err: unknown) => toast({ title: `Couldn't notify: ${errorMessage(err)}`, description: errorHint(err), status: "error" }),
+                    )
+                    .finally(() => setTesting(false));
+                }}
+              >
+                Send test
+              </Button>
+            </Row>
+          )}
           {isTauri() && isAndroid && <AndroidRows />}
         </Section>
 
@@ -270,6 +282,8 @@ export function SettingsView() {
             </Row>
           )}
         </Section>
+
+        <Updates index={5} />
 
         <Section index={5} icon={<Info />} title="About">
           <Row label="TeleFlock" description={info ? `${info.platform} · data in ${info.dataDir}` : "…"}>

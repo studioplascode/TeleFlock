@@ -97,7 +97,7 @@ pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
     let omp = is_omp(a).then(|| omp_info(i, meta));
     let mut live = match i.omp {
         Some(v) => v.live.clone(),
-        None => Liveness { last_event_at: None, streaming: false, thinking: false, tool: None, tps: None, line: None },
+        None => Liveness { last_event_at: None, streaming: false, thinking: false, tool: None, tps: None, tps_split: None, line: None },
     };
     if live.last_event_at.is_none() || i.omp.is_none() {
         live.last_event_at = max_opt(live.last_event_at, i.pane_activity);
@@ -163,9 +163,13 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&SessionMeta>) -> OmpInfo {
         })
     });
     let subagents = meta.and_then(|m| {
-        (!m.subagents.is_empty()).then(|| SubagentSummary {
-            live: m.subagents.iter().filter(|s| s.status == SubagentStatus::Running).count() as u32,
-            total: m.subagents.len() as u32,
+        (!m.subagents.is_empty()).then(|| {
+            let (sum, n) = m.subagents.iter().filter_map(|s| s.completion_pct).fold((0.0f32, 0u32), |(sum, n), p| (sum + p, n + 1));
+            SubagentSummary {
+                live: m.subagents.iter().filter(|s| s.status == SubagentStatus::Running).count() as u32,
+                total: m.subagents.len() as u32,
+                completion_pct: (n > 0).then(|| sum / n as f32),
+            }
         })
     });
     OmpInfo {

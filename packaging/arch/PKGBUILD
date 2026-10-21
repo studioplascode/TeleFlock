@@ -1,0 +1,45 @@
+# Maintainer: TeleFlock <https://github.com/studioplascode/TeleFlock>
+#
+# Arch package (AUR: teleflock-bin) repackaging the official .deb of a GitHub release.
+# scripts/build-linux.sh stamps `_version` and the checksums for the release it builds and writes
+# the result (plus .SRCINFO) to dist-release/aur/; that copy is what gets pushed to the AUR.
+# Dependencies: the libraries /usr/bin/teleflock links (namcap-clean) plus libayatana-appindicator,
+# which the tray loads at runtime (dlopen). build-linux.sh checks them with pacman -U + ldd + namcap
+# in a clean container.
+
+pkgname=teleflock-bin
+_version=0.1.0
+pkgver=${_version//-/}
+pkgrel=1
+pkgdesc='A native GUI for omp agents running in herdr: live board, answers, review and a real terminal'
+arch=('x86_64')
+url='https://github.com/studioplascode/TeleFlock'
+license=('MIT')
+depends=(
+  'cairo'
+  'dbus'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libayatana-appindicator'
+  'libgcc'
+  'libsoup3'
+  'webkit2gtk-4.1'
+)
+provides=('teleflock')
+conflicts=('teleflock')
+# The binary is already stripped by the release build; no debug package from a prebuilt binary.
+options=('!strip' '!debug')
+source_x86_64=("TeleFlock_${_version}_amd64.deb::${url}/releases/download/v${_version}/TeleFlock_${_version}_amd64.deb"
+               "LICENSE-${_version}::https://raw.githubusercontent.com/studioplascode/TeleFlock/v${_version}/LICENSE")
+sha256sums_x86_64=('SKIP'
+                   'SKIP') # LICENSE
+
+package() {
+  # makepkg extracted the .deb (ar) into data.tar.* + control.tar.*.
+  bsdtar -xf data.tar.* -C "$pkgdir" --no-same-owner
+  chmod 755 "$pkgdir/usr/bin/teleflock"
+  install -Dm644 "LICENSE-${_version}" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

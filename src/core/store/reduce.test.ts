@@ -244,6 +244,27 @@ describe("notifications & misc", () => {
     expect(state.notifications.every((x) => !x.read && x.hostId === "h")).toBe(true);
   });
 
+  test("notifyDone marks read, resolved only when the request was handled, per host", () => {
+    const n = (id: string) => ({ id, at: 1, kind: "needs" as const, agentId: "a", title: "t", body: "b", actions: [] });
+    const { state } = reduceEvents(base(), [
+      { type: "notify", hostId: "h", notification: n("1") },
+      { type: "notify", hostId: "h", notification: n("2") },
+      { type: "notify", hostId: "other", notification: n("1") },
+      { type: "notifyDone", hostId: "h", ids: ["1"], resolved: false },
+      { type: "notifyDone", hostId: "h", ids: ["1", "2"], resolved: true },
+    ]);
+    const by = (hostId: string, id: string) => state.notifications.find((x) => x.hostId === hostId && x.id === id);
+    expect(by("h", "1")).toMatchObject({ read: true, resolved: true });
+    expect(by("h", "2")).toMatchObject({ read: true, resolved: true });
+    expect(by("other", "1")).toMatchObject({ read: false });
+    expect(by("other", "1")?.resolved).toBeUndefined();
+    const read = reduceEvents(base(), [
+      { type: "notify", hostId: "h", notification: n("3") },
+      { type: "notifyDone", hostId: "h", ids: ["3"], resolved: false },
+    ]).state.notifications[0];
+    expect(read).toMatchObject({ read: true, resolved: false });
+  });
+
   test("openAgent and answerNext become effects", () => {
     const { effects } = reduceEvents(base(), [{ type: "openAgent", hostId: "h", agentId: "a" }, { type: "answerNext" }]);
     expect(effects).toEqual([{ kind: "openAgent", hostId: "h", agentId: "a" }, { kind: "answerNext" }]);

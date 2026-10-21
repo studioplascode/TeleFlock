@@ -16,8 +16,8 @@ export function StepRail({ steps, current, reachable, onJump }: StepRailProps) {
   const frac = steps.length > 1 ? current / (steps.length - 1) : 0;
   const reach = steps.length > 1 ? Math.max(current, reachable) / (steps.length - 1) : 0;
   return (
-    <nav aria-label="Steps" className="relative">
-      <div className="absolute top-[13px] right-[calc(100%/var(--n)/2)] left-[calc(100%/var(--n)/2)] h-0.5 rounded-full bg-white/8" style={{ "--n": steps.length } as CSSProperties}>
+    <nav aria-label="Steps" className="relative md:pt-1.5">
+      <div className="absolute top-[13px] right-[calc(100%/var(--n)/2)] left-[calc(100%/var(--n)/2)] h-0.5 rounded-full bg-white/8 md:top-[19px]" style={{ "--n": steps.length } as CSSProperties}>
         {/* how far you could jump right now: a faint lead ahead of the solid progress */}
         <motion.div className="absolute inset-y-0 left-0 rounded-full bg-accent/30" initial={false} animate={{ width: `${reach * 100}%` }} transition={spring.smooth} />
         <motion.div className="relative h-full rounded-full bg-omp shadow-glow-accent" initial={false} animate={{ width: `${frac * 100}%` }} transition={spring.smooth} />

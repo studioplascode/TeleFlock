@@ -83,6 +83,8 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Goal (objective + budget) | Goal chip → dialog | same | `agent.goal` | B `/goal …` | ⚠️ the call works; **the goal chip state is read from collab meta only**: the bridge `CtlState.goal` is not in `MetaOverlay` (`omp.rs`); HostdCore owns this |
 | Inspector: context, cost, tok/s, todos, files | Inspector | inspector sheet | session meta | C/B | ✅ demo |
 | Subagents steer/kill/revive/transcript | Inspector → Subagents | sheet | `agent.subagent`, `session.subagentTranscript` | C `agent-cmd`, `fetch-transcript` | ✅ demo; ⚠️ real host needs collab |
+| Agent chat (omp IRC): inline chat bubbles (inbound left, sends right with delivery state, grouped), Chat tab grouped by peer with unread, jump-to-row, open subagent, direct message | Transcript rows; Inspector → Agent chat | sheet → chat tab | `TranscriptItem::Irc`, `ToolView::Irc`; direct message = `agent.subagent` chat | C replica (`irc:incoming`, parent `<irc>` steer, `write agent://`, `wait`) | ✅ demo + real host (golden samples 18/18b). Direct messages land as the user's message in the subagent, not as IRC (no external IRC endpoint); agent↔agent relays between subagents aren't visible (omp doesn't mirror them) |
+| Subagent completion estimate + context % (omp TUI `· 40%` / `· 2.4%/272K`) | Subagents panel, task tool card (+ header "1 live · 40% done"), subagent viewer, board card footer (mean of running subagents) | same | `Subagent.completionPct` / `Subagent.context`, `SubagentSummary.completionPct` | C `AgentProgress.completionPercent` / `contextTokens` / `contextWindow` | ✅ demo + real host (estimate first arrives after ~2 min, interactive omp TUI only) |
 | Session tree navigate/branch/fork-from | Inspector → Tree | sheet | `agent.navigate/branch/fork` | B | ✅ demo; ⚠️ fork-from-entry needs the bridge |
 | Compact / handoff / export / rename / new / btw | Actions menu + dialogs | Session actions | `agent.compact/handoff/export/rename/newSession/btw` | B → I | ✅ demo |
 | Rename herdr handle | — | — | `agent.renameHandle` (no UI caller) | H `agent rename` | ❌ **no UI**: the method exists; needs a field in the Rename dialog (FrontSession) |
@@ -93,6 +95,7 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Close a shell pane / rename tab / close tab | — (agent panes: "Close pane" = `agent.stop closePane`) | — | — | H has `pane.close`, `tab.rename/close` (`tf-herdr/api.rs`) | ❌ **blocked on tf-proto**: needs `pane.close`, `tab.rename`, `tab.close` host methods (orchestrator) |
 | Worktree wizard (browser, badges, recents, new/existing branch, base, path, label, agent, preview) | NewWorktreeDialog | responsive sheet | `fs.list`, `git.branches`, `worktree.create{existing}` | G + H `worktree create` | ✅ demo; ⚠️ an *already checked-out* worktree is opened via "Open folder", not `worktree.open` |
 | Open folder / agent in workspace | NewAgentDialog | palette | `workspace.create`, `agent.start` | H | ✅ demo |
+| Dispatch: one message → worktree + omp agent, live thread per repo | Sidebar Dispatch, `D`, palette | Dispatch tab | `git.branches`, `fs.list`, `worktree.create{agent}`, `agent.answer` | H `worktree create` + agent start | ✅ demo; ✅ real stack (tf-devserver + herdr/omp) |
 | Remove worktree (dirty/force), close workspace (+group), rename workspace | Sidebar workspace menu | Review → Workspace actions | `worktree.remove`, `workspace.close{group}`, `workspace.rename` | H | ✅ demo (desktop) |
 | Inbox, Answer-next HUD (Ctrl+J) | Inbox, Ctrl+J | Inbox tab, palette | `agent.answer` | C | ✅ demo |
 | Notifications with actions / inline reply | Windows toast actions | Android action buttons + reply | `agent.answer` from `NotifyAction` | L `platform.rs`, `Notifications.kt` | ⚠️ needs a device |
@@ -102,6 +105,7 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Review & ship (diff, commit, ask agent, push, PR create/checks/merge) | Review + ShipPanel | Review | `git.*`, `gh.*` | G | ✅ demo; ⚠️ archive on merge is a manual button |
 | Activity + while-away | Activity | More → Activity | `host.activity` | state | ✅ demo |
 | Usage | Usage | More → Usage | `host.usage` | `omp stats` | ✅ demo; ⚠️ no budget hints |
+| Subscription limits (per account/window, reset countdown, pace projection; inspector tile + header chip < 20 % left) | Usage → Subscriptions & limits; inspector Session pane; session header | More → Usage; session inspector | `host.limits` | `omp usage --json` + `--history --json`, `agent.db` session pin (read-only) | ✅ demo; ✅ real stack (omp 18.12.3, 3 Claude + 1 Codex account) |
 | Preview tunnels | link buttons in transcript/terminal | same (in-app webview) | `tunnel.open` | L SSH forward | ✅ demo |
 | Session history + resume in new pane | Past sessions | palette | `host.sessions/resume` | G scan + H start `--resume` | ✅ demo |
 | Fan-out (P2), templates (P2), focus mode (P2) | — | — | — | — | ❌ stretch, not built (prompt templates are reachable as custom `/` commands) |
@@ -109,7 +113,7 @@ Board cards, Flock rows and the session header render every encoding listed in t
 
 ## §6 Keyboard map
 
-Ctrl+K, Ctrl+J, Ctrl+1…6, J/K, Enter, A, T, N, Esc, Ctrl+Enter, Alt+Enter, Ctrl+\\, Ctrl+B and ? are all handled (`shell/keyboard.ts`, `useBoardKeys.ts`, `Composer.tsx`, `SessionPane.tsx`). ✅ demo on desktop. Mobile has no keyboard map, by design.
+Ctrl+K, Ctrl+J, Ctrl+1…6, J/K, Enter, A, T, N, D, Esc, Ctrl+Enter, Alt+Enter, Ctrl+\\, Ctrl+B and ? are all handled (`shell/keyboard.ts`, `useBoardKeys.ts`, `Composer.tsx`, `SessionPane.tsx`). ✅ demo on desktop. Mobile has no keyboard map, by design.
 
 ## omp §1: slash commands (all 87 builtins)
 

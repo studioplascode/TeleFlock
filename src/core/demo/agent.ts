@@ -17,6 +17,7 @@ import type {
   ToolStatus,
   TranscriptItem,
   TreeInfo,
+  TpsSplit,
   UiRequest,
   ActivityKind,
   OmpMode,
@@ -48,7 +49,7 @@ export interface SimHost {
 type Active =
   | { k: "think"; itemId: string; start: number; ms: number; text: string; shown: number }
   | { k: "say"; itemId: string; text: string; shown: number; rate: number }
-  | { k: "tool"; itemId: string; start: number; spec: ToolSpec; outShown: number; output: string; subIds: string[] }
+  | { k: "tool"; itemId: string; start: number; spec: ToolSpec; outShown: number; output: string; subIds: string[]; irc: Map<string, string> }
   | { k: "wait"; until: number };
 
 interface PendingUi {
@@ -59,6 +60,9 @@ interface PendingUi {
 }
 
 const CHARS_PER_SEC = 160; // ≈ 40 tok/s
+/** The advisor reviews each finished reply/tool with a reviewer model (omp `modelRoles.advisor`). */
+const ADVISOR_MODEL = MODELS.find((m) => m.id === "gpt-5.5");
+type Spender = keyof TpsSplit;
 const TODO_STATUS_LABEL: Record<string, string> = { completed: "✓", inProgress: "●", pending: "○", blocked: "◆", abandoned: "✗" };
 
 export class AgentSim {
@@ -70,7 +74,7 @@ export class AgentSim {
   private queue: Step[] = [];
   private cur: Active | null = null;
   pending: PendingUi | null = null;
-  private tokenLog: { at: number; n: number }[] = [];
+  private tokenLog: { at: number; n: number; src: Spender }[] = [];
   private ctxTokens: number;
   private window: number;
   files: ChangedFile[];
@@ -84,12 +88,20 @@ export class AgentSim {
   mode: OmpMode = "normal";
   goal?: GoalInfo;
   caps: Capabilities;
-  costUsd: number;
+  /** USD billed by the main agent's own calls and by its advisor; subagents bill through their rows. */
+  mainUsd: number;
+  advisorUsd: number;
+  /** The advisor is reviewing (streaming its notes) until then, at `advisorRate` tok/s. */
+  private advisorUntil = 0;
+  private advisorRate = 0;
   tokensIn = 0;
   tokensOut = 0;
   private lastPulseTool = 0;
   /** Simulates a quiet stretch (no events) while still working. */
   private silentSince: number | null = null;
+  /** Main-agent output this turn, and the last finished turn's average (`SessionMeta.tps`). */
+  private turnOut = 0;
+  private lastTurnTps: number | undefined;
 
   constructor(
     private readonly host: SimHost,
@@ -105,7 +117,9 @@ export class AgentSim {
     this.thinking = def.thinking;
     this.window = m?.contextWindow ?? 200_000;
     this.ctxTokens = Math.round(((def.ctxPct ?? 10) / 100) * this.window);
-    this.costUsd = def.cost ?? 0;
+    // Seeded history: a slice of the def's spend went to the advisor (omp agents only).
+    this.advisorUsd = this.omp ? (def.cost ?? 0) * 0.07 : 0;
+    this.mainUsd = (def.cost ?? 0) - this.advisorUsd;
     // Changed files accumulate from the seeded history's edit calls (see seeds.ts), not from the def.
     this.files = [];
     this.todos = structuredClone(def.todos ?? []);
@@ -169,12 +183,29 @@ export class AgentSim {
       mode: this.mode,
       goal: this.goal,
       context: { tokens: this.ctxTokens, window: this.window, pct: Math.min(100, Math.round((this.ctxTokens / this.window) * 100)) },
-      cost: { usd: round2(this.costUsd), input: this.tokensIn + 380_000, output: this.tokensOut + 36_000, cacheRead: 1_240_000, cacheWrite: 88_000 },
+      cost: this.costInfo(),
       todos: tasks.length
         ? { done: tasks.filter((t) => t.status === "completed").length, total: tasks.length, current: tasks.find((t) => t.status === "inProgress")?.content }
         : undefined,
-      subagents: this.subagents.length ? { live, total: this.subagents.length } : undefined,
+      subagents: this.subagents.length ? { live, total: this.subagents.length, completionPct: meanCompletion(this.subagents) } : undefined,
       queue: { steering: [...this.queueSteer], followUp: [...this.queueFollow] },
+    };
+  }
+
+  /** omp's subagent spend: every subagent row's own bill. */
+  private subagentUsd(): number {
+    return this.subagents.reduce((n, s) => n + (s.costUsd ?? 0), 0);
+  }
+
+  private costInfo(): NonNullable<NonNullable<Agent["omp"]>["cost"]> {
+    const subagents = this.subagentUsd();
+    return {
+      usd: round3(this.mainUsd + subagents + this.advisorUsd),
+      input: this.tokensIn + 380_000,
+      output: this.tokensOut + 36_000,
+      cacheRead: 1_240_000,
+      cacheWrite: 88_000,
+      split: { main: round3(this.mainUsd), subagents: round3(subagents), advisor: round3(this.advisorUsd) },
     };
   }
 
@@ -192,7 +223,7 @@ export class AgentSim {
       goal: this.goal,
       context: a.omp?.context,
       cost: a.omp?.cost,
-      tps: a.live.tps,
+      tps: this.lastTurnTps,
       todos: this.todos,
       subagents: this.subagents,
       files: this.branchFiles(),
@@ -276,15 +307,20 @@ export class AgentSim {
     this.host.agentChanged(this.agent.id);
   }
 
-  private tokens(n: number): void {
+  private tokens(n: number, src: Spender = "main"): void {
     const now = this.host.now();
-    this.tokenLog.push({ at: now, n });
+    this.tokenLog.push({ at: now, n, src });
     this.tokensOut += n;
-    this.ctxTokens = Math.min(this.window * 0.97, this.ctxTokens + n);
-    const m = MODELS.find((x) => x.id === this.model?.id);
+    if (src === "main") this.ctxTokens = Math.min(this.window * 0.97, this.ctxTokens + n);
+    const m = src === "advisor" ? ADVISOR_MODEL : MODELS.find((x) => x.id === this.model?.id);
     const usd = (n * (m?.outPerM ?? 10)) / 1e6;
-    this.costUsd += usd;
-    this.host.usage(0, n, usd);
+    if (src === "advisor") this.advisorUsd += usd;
+    else if (src === "main") {
+      this.mainUsd += usd;
+      this.turnOut += n;
+    }
+    // Subagent output is billed by their rows (`subagentRow` cost), counted in `tick`.
+    if (src !== "subagents") this.host.usage(0, n, usd);
   }
 
   private inputTokens(n: number): void {
@@ -292,14 +328,31 @@ export class AgentSim {
     this.ctxTokens = Math.min(this.window * 0.97, this.ctxTokens + Math.round(n * 0.15));
     const m = MODELS.find((x) => x.id === this.model?.id);
     const usd = (n * (m?.inPerM ?? 3) * 0.25) / 1e6; // mostly cache reads
-    this.costUsd += usd;
+    this.mainUsd += usd;
     this.host.usage(n, 0, usd);
   }
 
-  private tps(now: number): number | undefined {
+  /** The advisor starts reviewing the latest step: it reads the context and streams a short note. */
+  private advise(now: number): void {
+    const rng = this.host.rng;
+    const read = 6000 + rng.int(0, 6000);
+    const usd = (read * (ADVISOR_MODEL?.inPerM ?? 3) * 0.25) / 1e6;
+    this.advisorUsd += usd;
+    this.tokensIn += read;
+    this.host.usage(read, 0, usd);
+    this.advisorUntil = now + rng.range(1500, 3200);
+    this.advisorRate = rng.range(45, 75);
+  }
+
+  /** Rolling output tok/s over the last 3 s, per spender (same window as tf-hostd's main rate). */
+  private tps(now: number): { tps?: number; split?: TpsSplit } {
     this.tokenLog = this.tokenLog.filter((x) => now - x.at <= 3000);
-    const n = this.tokenLog.reduce((s, x) => s + x.n, 0);
-    return n > 0 ? Math.round((n / 3) * 10) / 10 : undefined;
+    const split: TpsSplit = { main: 0, subagents: 0, advisor: 0 };
+    for (const x of this.tokenLog) split[x.src] += x.n / 3;
+    const total = split.main + split.subagents + split.advisor;
+    if (total <= 0) return {};
+    const r = (v: number) => Math.round(v * 10) / 10;
+    return { tps: r(total), split: { main: r(split.main), subagents: r(split.subagents), advisor: r(split.advisor) } };
   }
 
   // ---------------------------------------------------------------- seeding (instant)
@@ -339,6 +392,7 @@ export class AgentSim {
           }
         }
         this.put(this.finishedTool(this.id(), at, spec, output ?? "", spec.error ? "error" : "ok", at), false);
+        this.emitIrc(spec, at - spec.ms, Number.POSITIVE_INFINITY, new Map(), false);
         for (const f of spec.files ?? []) this.addFile(f);
         break;
       }
@@ -399,6 +453,7 @@ export class AgentSim {
     this.cur = null;
     this.setState("working");
     if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now };
+    this.turnOut = 0;
     this.inputTokens(4000 + this.host.rng.int(0, 9000));
     this.host.metaChanged(this.agent.id);
   }
@@ -451,7 +506,7 @@ export class AgentSim {
     a.column = state === "blocked" ? "needs" : state === "working" ? "running" : a.archived ? "done" : "review";
     if (state !== "blocked") a.needs = undefined;
     if (state !== "working") {
-      a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined };
+      a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined };
     }
     if (prevColumn !== a.column) this.host.pulse(a.id, "state", 1);
     this.refreshDerived();
@@ -511,7 +566,7 @@ export class AgentSim {
     a.stateSince = at;
     a.column = "needs";
     a.needs = needs;
-    a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, line: spec.message?.split("\n")[0] ?? spec.title };
+    a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined, line: spec.message?.split("\n")[0] ?? spec.title };
     if (live) {
       this.host.session(a.id, { k: "ui", request });
       this.host.pulse(a.id, "state", 1);
@@ -597,6 +652,8 @@ export class AgentSim {
   private endTurn(notify: boolean): void {
     const now = this.host.now();
     this.agent.turns += 1;
+    const started = this.agent.omp?.turnStartedAt;
+    if (started !== undefined && now - started > 200 && this.turnOut > 0) this.lastTurnTps = Math.round((this.turnOut / ((now - started) / 1000)) * 10) / 10;
     if (this.agent.omp) this.agent.omp = { ...this.agent.omp, lastTurnEndedAt: now };
     const lastSay = [...this.items].reverse().find((x) => x.kind === "assistant");
     const summary = lastSay?.kind === "assistant" ? firstSentence(lastSay.text) : "Turn finished";
@@ -619,7 +676,9 @@ export class AgentSim {
     if (!this.omp) return;
     if (this.state !== "working") return;
     const now = this.host.now();
-    const costBefore = this.costUsd;
+    const subBefore = this.subagentUsd();
+    const costBefore = this.mainUsd + subBefore + this.advisorUsd;
+    if (now < this.advisorUntil) this.tokens(Math.max(1, Math.round((this.advisorRate * dt) / 1000)), "advisor");
     let budget = 4; // steps that may complete within one tick
     while (budget-- > 0) {
       if (!this.cur) {
@@ -637,13 +696,15 @@ export class AgentSim {
       if (!this.advance(now, dt)) break; // still running
       this.cur = null;
     }
-    if (Math.round(this.costUsd * 1000) !== Math.round(costBefore * 1000)) {
+    const subAfter = this.subagentUsd();
+    if (subAfter > subBefore) this.host.usage(0, 0, subAfter - subBefore);
+    if (Math.round((this.mainUsd + subAfter + this.advisorUsd) * 1000) !== Math.round(costBefore * 1000)) {
       // Cost/context tick visibly on the card (rounded to a tenth of a cent).
       this.refreshDerived();
       this.host.agentChanged(this.agent.id);
     }
     const live = this.agent.live;
-    const tps = this.tps(now);
+    const { tps, split } = this.tps(now);
     const c = this.cur as Active | null;
     const nextLive = {
       ...live,
@@ -651,6 +712,7 @@ export class AgentSim {
       thinking: c?.k === "think" || c?.k === "wait",
       tool: c?.k === "tool" ? { name: c.spec.tool, label: c.spec.title, startedAt: c.start } : undefined,
       tps,
+      tpsSplit: split,
       lastEventAt: this.silentSince !== null ? this.silentSince : live.lastEventAt,
     };
     if (
@@ -658,6 +720,7 @@ export class AgentSim {
       nextLive.thinking !== live.thinking ||
       nextLive.tool?.label !== live.tool?.label ||
       nextLive.tps !== live.tps ||
+      JSON.stringify(nextLive.tpsSplit) !== JSON.stringify(live.tpsSplit) ||
       nextLive.line !== live.line ||
       nextLive.lastEventAt !== live.lastEventAt
     ) {
@@ -702,7 +765,7 @@ export class AgentSim {
           truncated: false,
           view: spec.view?.type === "bash" ? { ...spec.view, output: "" } : spec.subagents ? { type: "task", agents: [] } : undefined,
         });
-        this.cur = { k: "tool", itemId, start: now, spec, outShown: 0, output: "", subIds: [] };
+        this.cur = { k: "tool", itemId, start: now, spec, outShown: 0, output: "", subIds: [], irc: new Map() };
         this.agent.live = { ...this.agent.live, line: spec.title };
         this.termLine(`\r\n\x1b[36m⏺ ${spec.tool}\x1b[0m ${spec.title}\r\n`);
         if (spec.silent) this.silentSince = now;
@@ -786,15 +849,16 @@ export class AgentSim {
         if (c.shown < c.text.length) return false;
         const item = this.byId.get(c.itemId);
         if (item?.kind === "assistant") this.put({ ...item, text: c.text, streaming: false, usage: usageFor(c.text.length), stopReason: "stop" });
+        this.advise(now);
         this.termLine("\r\n");
         return true;
       }
       case "tool":
-        return this.advanceTool(c, now);
+        return this.advanceTool(c, now, dt);
     }
   }
 
-  private advanceTool(c: Extract<Active, { k: "tool" }>, now: number): boolean {
+  private advanceTool(c: Extract<Active, { k: "tool" }>, now: number, dt: number): boolean {
     const spec = c.spec;
     const elapsed = now - c.start;
     const lines = spec.output ?? [];
@@ -810,8 +874,9 @@ export class AgentSim {
       }
     }
     if (spec.subagents) {
-      // Subagents burn tokens too: keep the cost ticker moving while they work.
-      if (this.subagents.some((s) => c.subIds.includes(s.id) && s.status === "running")) this.inputTokens(400);
+      // Each running subagent streams its own replies; their bill shows on their rows.
+      const running = this.subagents.filter((s) => c.subIds.includes(s.id) && s.status === "running").length;
+      if (running) this.tokens(Math.max(1, Math.round((running * this.host.rng.range(28, 46) * dt) / 1000)), "subagents");
       let changed = false;
       spec.subagents.forEach((sub, i) => {
         const sid = c.subIds[i] as string;
@@ -820,7 +885,7 @@ export class AgentSim {
         const prev = this.subagents[idx] as Subagent;
         if (prev.status !== "running") return;
         const row = subagentRow(sub, sid, c.start, now);
-        if (row.line !== prev.line || row.status !== prev.status || Math.abs((row.progress ?? 0) - (prev.progress ?? 0)) >= 0.05) {
+        if (row.line !== prev.line || row.status !== prev.status || row.completionPct !== prev.completionPct || Math.abs((row.context?.pct ?? 0) - (prev.context?.pct ?? 0)) >= 0.5) {
           this.subagents[idx] = row;
           changed = true;
           if (row.status === "done") this.host.activity(this.agent.id, "finished", `${sub.name} (subagent of ${this.agent.name}) finished`, sub.description);
@@ -832,6 +897,7 @@ export class AgentSim {
         this.refreshDerived();
         this.host.metaChanged(this.agent.id);
       }
+      this.emitIrc(spec, c.start, elapsed, c.irc, true);
     } else if (!spec.silent && now - this.lastPulseTool > 450) {
       this.lastPulseTool = now;
       this.touch("tool", 1);
@@ -845,11 +911,15 @@ export class AgentSim {
         this.termLine(`${l}\r\n`);
       }
     }
-    if (spec.subagents) this.endSubagents("done");
+    if (spec.subagents) {
+      this.emitIrc(spec, c.start, Number.POSITIVE_INFINITY, c.irc, true);
+      this.endSubagents("done");
+    }
     for (const f of spec.files ?? []) this.addFile(f);
     const status: ToolStatus = spec.error ? "error" : "ok";
     this.put(this.finishedTool(c.itemId, c.start, spec, c.output.replace(/\n$/, ""), status, now));
     this.inputTokens(1500 + this.host.rng.int(0, 5000));
+    this.advise(now);
     if (spec.files?.length) this.host.metaChanged(this.agent.id);
     if (spec.error) this.host.activity(this.agent.id, "toolError", `${this.agent.name}: ${spec.title} failed`, spec.error);
     if (spec.tool === "bash" && /git commit/.test(spec.title)) this.host.activity(this.agent.id, "committed", `${this.agent.name} committed`, spec.title);
@@ -862,12 +932,47 @@ export class AgentSim {
     this.subagents = this.subagents.map((s) => {
       if (s.status !== "running") return s;
       changed = true;
-      return { ...s, status, endedAt: now, progress: status === "done" ? 1 : s.progress };
+      // omp only reports the completion estimate while a subagent runs.
+      return { ...s, status, endedAt: now, completionPct: undefined };
     });
     if (changed) {
       this.refreshDerived();
       this.host.metaChanged(this.agent.id);
     }
+  }
+
+  /**
+   * The subagents' scripted IRC `elapsed` ms into a task call that started at `start`: their
+   * messages as inbound rows, the parent's answers as `write agent://<name>` sends (running, then
+   * delivered). `sent` remembers what was emitted (key → row id) across ticks.
+   */
+  private emitIrc(spec: ToolSpec, start: number, elapsed: number, sent: Map<string, string>, live: boolean): void {
+    spec.subagents?.forEach((sub, i) =>
+      sub.irc?.forEach((m, j) => {
+        const key = `${i}.${j}`;
+        if (elapsed >= m.at && !sent.has(`${key}<`)) {
+          const id = this.id();
+          sent.set(`${key}<`, id);
+          const at = start + m.at;
+          this.put({ kind: "irc", id, at, message: { direction: "in", peer: sub.name, text: m.text, messageId: at.toString(16), broadcast: false, wakeRelay: m.relay ?? false, fromParent: false, receipts: [] } }, live);
+          if (live) this.termLine(`\r\n\x1b[35mIRC ← ${sub.name}\x1b[0m ${firstSentence(m.text)}\r\n`);
+        }
+        const r = m.reply;
+        if (!r || elapsed < m.at + r.after) return;
+        const delivered = elapsed >= m.at + r.after + 700;
+        const at = start + m.at + r.after;
+        const id = sent.get(`${key}>`);
+        if (!id) {
+          const nid = this.id();
+          sent.set(`${key}>`, nid);
+          this.put(ircSend(nid, at, sub.name, r.text, delivered), live);
+          if (live) this.termLine(`\r\n\x1b[36m⏺ write\x1b[0m agent://${sub.name}\r\n`);
+        } else if (delivered && !sent.has(`${key}✓`)) {
+          this.put(ircSend(id, at, sub.name, r.text, true), live);
+        }
+        if (delivered) sent.set(`${key}✓`, "");
+      }),
+    );
   }
 
   private finishedTool(id: string, start: number, spec: ToolSpec, output: string, status: ToolStatus, end: number): TranscriptItem {
@@ -966,6 +1071,10 @@ export class AgentSim {
     this.ctxTokens = 3000;
     this.todos = [];
     this.subagents = [];
+    this.mainUsd = 0;
+    this.advisorUsd = 0;
+    this.advisorUntil = 0;
+    this.lastTurnTps = undefined;
     this.files = [];
     this.refreshDerived();
     this.host.session(this.agent.id, { k: "reset", snapshot: this.snapshot(200) });
@@ -984,12 +1093,21 @@ export class AgentSim {
       if (it.kind === "user") out.push(`\x1b[1;35m❯\x1b[0m ${it.text}`);
       else if (it.kind === "assistant") out.push(`\x1b[35m●\x1b[0m ${it.text}`);
       else if (it.kind === "thinking") out.push(`\x1b[2m✻ Thought for ${Math.round((it.durationMs ?? 0) / 1000)}s\x1b[0m`);
-      else if (it.kind === "tool") out.push(`\x1b[36m⏺ ${it.tool}\x1b[0m ${it.title} \x1b[2m${it.status}\x1b[0m`);
-      else if (it.kind === "notice") out.push(`\x1b[33m! ${it.text}\x1b[0m`);
+      else if (it.kind === "tool") {
+        out.push(`\x1b[36m⏺ ${it.tool}\x1b[0m ${it.title} \x1b[2m${it.status}\x1b[0m`);
+        // omp's task rows: `· 40%` (completion estimate, live only) then `· 2.4%/272K` (context).
+        if (it.view?.type === "task") for (const s of it.view.agents) out.push(`  ${s.status === "running" ? "\x1b[36m◆" : "\x1b[32m✓"}\x1b[0m ${s.name}${s.completionPct != null ? ` · \x1b[36m${s.completionPct}%\x1b[0m` : ""}${s.context ? `\x1b[2m · ${s.context.pct.toFixed(1)}%/${Math.round(s.context.window / 1000)}K\x1b[0m` : ""}`);
+      } else if (it.kind === "notice") out.push(`\x1b[33m! ${it.text}\x1b[0m`);
     }
     const lines = out.join("\n").split("\n").slice(-(rows - 3));
     return lines.join("\r\n");
   }
+}
+
+/** Mean of the running subagents' completion estimates, as tf-hostd summarises them for the board. */
+function meanCompletion(subs: Subagent[]): number | undefined {
+  const est = subs.flatMap((s) => (s.completionPct != null ? [s.completionPct] : []));
+  return est.length ? est.reduce((a, b) => a + b, 0) / est.length : undefined;
 }
 
 function capsFor(live: boolean, readOnly: boolean): Capabilities {
@@ -1027,6 +1145,10 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
 function firstSentence(text: string): string {
   const plain = text.replace(/[*`|#]/g, "").replace(/\s+/g, " ").trim();
   const m = plain.match(/^(.{1,120}?[.!?])(\s|$)/);
@@ -1038,4 +1160,22 @@ function lastFragment(text: string): string {
   const parts = plain.split(/(?<=[.!?:])\s/);
   const last = parts[parts.length - 1] ?? plain;
   return last.length > 80 ? `…${last.slice(-79)}` : last;
+}
+
+/** The parent's `write agent://<peer>` send, as hostd normalizes it (running → delivered). */
+function ircSend(id: string, at: number, peer: string, text: string, delivered: boolean): TranscriptItem {
+  return {
+    kind: "tool",
+    id,
+    at,
+    callId: `call_${id}`,
+    tool: "write",
+    title: `agent://${peer}`,
+    args: { path: `agent://${peer}`, content: text },
+    status: delivered ? "ok" : "running",
+    durationMs: delivered ? 40 : undefined,
+    output: delivered ? `Delivered to ${peer}.` : undefined,
+    truncated: false,
+    view: { type: "irc", direction: "out", peer, text, broadcast: false, wakeRelay: false, fromParent: false, receipts: delivered ? [{ to: peer, outcome: "injected" }] : [] },
+  };
 }

@@ -2,6 +2,9 @@
 @import "@fontsource-variable/sora/wght.css";
 @import "@fontsource-variable/manrope/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
+/* Terminal: Fira Code text + Nerd Font icons (src/features/terminal/theme.ts TERM_FONT_FAMILY). */
+@import "@fontsource-variable/fira-code/wght.css";
+@import "../../assets/fonts/symbols-nerd-font/symbols-nerd-font.css";
 @import "tailwindcss";
 @import "./tokens.css";
 @import "./base.css";

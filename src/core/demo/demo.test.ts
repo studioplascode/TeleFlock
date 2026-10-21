@@ -205,12 +205,14 @@ describe("demo engine", () => {
       branch: "feat/offline-cache-2",
       existing: false,
       trust: false,
-      agent: { kind: "omp", plan: false, prompt: "Cache the last snapshot" },
+      agent: { kind: "omp", name: "offline-cache", plan: false, prompt: "Cache the last snapshot" },
     });
+    // Fresh until omp is ready and the prompt is submitted (Dispatch shows "Starting agent").
+    expect(r.state.agents[agentKey("forge", res.agent?.agentId as string)]).toMatchObject({ name: "offline-cache", state: "idle", turns: 0 });
     r.clock.advance(3000);
     expect(r.state.hosts.forge?.state.workspaces.some((w) => w.id === res.workspaceId && w.worktree?.primaryWorkspaceId === "w1")).toBe(true);
     expect(res.agent?.agentId).toBeDefined();
-    expect(r.state.agents[agentKey("forge", res.agent?.agentId as string)]?.column).toBe("running");
+    expect(r.state.agents[agentKey("forge", res.agent?.agentId as string)]).toMatchObject({ column: "running", title: "Cache the last snapshot" });
     await expect(r.call("forge", "worktree.create", { cwd: "/home/demo/code/untrusted-fork", branch: "x", existing: false, trust: false })).rejects.toMatchObject({ code: "herdr_error" });
     const trusted = await r.call<{ path: string }>("forge", "worktree.create", { cwd: "/home/demo/code/untrusted-fork", branch: "x", existing: false, trust: true });
     expect(trusted.path).toBe("/home/demo/.herdr/worktrees/untrusted-fork/x");

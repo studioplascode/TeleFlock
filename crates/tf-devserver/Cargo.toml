@@ -3,6 +3,7 @@ name = "tf-devserver"
 description = "WebSocket bridge exposing tf-client to a browser, plus static serving of the built UI"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

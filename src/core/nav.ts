@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 /** Hash routes (single router for the whole app). */
 export type Route =
   | { name: "board" }
+  | { name: "dispatch" }
   | { name: "agent"; hostId: string; agentId: string }
   | { name: "terminal"; hostId: string; paneId?: string; agentId?: string }
   | { name: "review"; hostId: string; workspaceId: string }
@@ -18,6 +19,7 @@ export type RouteName = Route["name"];
 
 const SIMPLE: Record<string, Route> = {
   board: { name: "board" },
+  dispatch: { name: "dispatch" },
   inbox: { name: "inbox" },
   activity: { name: "activity" },
   usage: { name: "usage" },

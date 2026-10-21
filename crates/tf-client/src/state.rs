@@ -102,6 +102,7 @@ pub(crate) mod fixtures {
                 thinking: false,
                 tool: None,
                 tps: None,
+                tps_split: None,
                 line: None,
             },
             needs: None,

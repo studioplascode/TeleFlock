@@ -33,7 +33,8 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
   const openDialog = useUi((s) => s.openDialog);
 
   return (
-    <div className={cn("flex min-w-0 items-center gap-2", className)}>
+    // Wraps onto a second row in narrow boards (small window, open split) instead of squeezing every control.
+    <div className={cn("flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2", className)}>
       <h1 className="mr-2 shrink-0 font-display text-xl font-bold text-ink">Board</h1>
       {profiles.length > 1 && (
         <Select

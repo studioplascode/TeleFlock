@@ -1,5 +1,5 @@
 import { useColumnKeys } from "@/core";
-import { AgentGlyph, CardFlight, EmptyState, LayoutGroup, StatusOrb } from "@/design";
+import { AgentGlyph, CardFlight, EmptyState, LayoutGroup, StatusOrb, cn } from "@/design";
 import { AgentCard } from "./AgentCard";
 import { useBoard } from "./boardStore";
 import { onCardClick } from "./Kanban";
@@ -47,13 +47,20 @@ function RepoLaneSection({ repo, filter, column, selectedKey }: { repo: string; 
 }
 
 function RepoColumn({ repo, filter, selectedKey }: { repo: string; filter: RepoFilter; selectedKey: string | null }) {
+  // room under the last card for the floating selection bar (same as the status lanes)
+  const selecting = useBoard((s) => s.picked.length > 0);
   return (
-    <section aria-label={`Repo ${repo}`} className="flex min-h-0 w-[300px] shrink-0 flex-col rounded-tile bg-white/[0.018] shadow-hairline">
+    <section aria-label={`Repo ${repo}`} className="flex min-h-0 max-w-[440px] min-w-[280px] flex-[1_0_300px] flex-col rounded-tile bg-white/[0.018] shadow-hairline">
       <header className="flex items-center gap-2 px-4 pt-3.5 pb-2.5">
         <AgentGlyph name={repo} size={18} />
-        <h3 className="truncate font-display text-sm font-bold text-ink">{repo}</h3>
+        <h3 className="min-w-0 truncate font-display text-sm font-bold text-ink">{repo}</h3>
       </header>
-      <div className="no-scrollbar flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2.5 pb-3">
+      <div
+        className={cn(
+          "no-scrollbar -mt-2 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2.5 pt-2 pb-3 [mask-image:linear-gradient(to_bottom,transparent,#000_8px,#000_calc(100%-10px),transparent)]",
+          selecting && "pb-[calc(var(--tf-selbar-h,48px)+24px)]",
+        )}
+      >
         {LANES.map((l) => (
           <RepoLaneSection key={l.column} repo={repo} filter={filter} column={l} selectedKey={selectedKey} />
         ))}
@@ -67,7 +74,8 @@ export function RepoBoard({ repos, filter, selectedKey }: { repos: string[]; fil
   if (repos.length === 0) return <EmptyState title="No repositories yet" description="Agents running inside a git repository are grouped here." className="flex-1" />;
   return (
     <LayoutGroup id="board-repos">
-      <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-1">
+      {/* Bleeds into the board padding like the status lanes, so scrolled columns reach the window edge. */}
+      <div className="-mx-4 flex min-h-0 flex-1 gap-3 overflow-x-auto px-4 pb-1 short:-mx-3 short:px-3">
         {repos.map((r) => (
           <RepoColumn key={r} repo={r} filter={filter} selectedKey={selectedKey} />
         ))}

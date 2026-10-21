@@ -125,6 +125,7 @@ A client sees one `snapshot` on hello, then patches.
 | `ops/agent.rs`, `inject.rs` | HostdCore | All `agent.*` and `session.*` methods. Bridge first, collab second, injection last. |
 | `bridge.rs` | BridgeExt | Extension socket server and typed control calls |
 | `ops/{fs,git,gh,workspace,worktree,host,term}.rs` | HostdOps | fs.*, git.*, gh.*, workspace.*, worktree.*, host.*, term.* |
+| `ops/limits.rs` | HostdOps | `host.limits`: subscription limits from `omp usage --json` / `--history --json` (see below) |
 
 **Dispatcher contract.** HostdCore owns it. `clients.rs` parses `HostMethod::parse(method, params)`. For each method family it calls an async handler fn:
 
@@ -142,6 +143,8 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
 
 HostdOps implements `ops::{fs,git,gh,workspace,worktree,host,term}::handle(ctx, req, client)` against that `Ctx`.
 
+**Subscription limits (`host.limits`).** omp already knows each connected account's quota windows: it fetches per-account reports from the provider usage endpoints (Claude `api/oauth/usage`, ChatGPT/Codex `backend-api`, Copilot, Gemini, …), caches them ~5 min ±25 % per account in `~/.omp/agent/agent.db` (`cache` rows `usage_cache:report:…`), refreshes the window rows from live response headers at most once a minute, and appends hourly `usage_history` rows. `ops/limits.rs` never calls a provider and never sees a token: it runs `omp usage --json` (60 s hostd cache, `refresh: true` → 10 s) and `omp usage --history --json --days 8` (10 min cache), keeps its own per-poll readings, and returns `AccountLimits { fetchedAt, accounts: LimitAccount[], sessions: LimitSession[], error? }`. Each `LimitAccount` (`key` = `provider|email:…|org:…`) carries `plan`, `fetchedAt`, `resetsAvailable`, `error`/`disabled` (omp's `accountsWithoutUsage` / `disabledCredentials`) and `LimitWindow`s (`used` fraction, `resetsAt`, `durationMs`, `tier`, `status`, ≤ 120 `samples` of the current window period). `sessions` maps each live omp session to the account omp pinned it to: `agent.db` `cache` row `session:sticky:<provider>:<sessionId>` → `credentialId` → `auth_credentials.identity_key` (read-only; the credential `data` column is never selected); a provider with one account needs no pin. The client (`src/core/limits.ts`) computes the pace (used-fraction change per hour over a fifth of the window, 30 min … 24 h) and projects "runs out in ~X" vs "resets first".
+
 ### 3.5 Board mapping and liveness (state store)
 
 **Columns:**
@@ -156,7 +159,8 @@ HostdOps implements `ops::{fs,git,gh,workspace,worktree,host,term}::handle(ctx, 
 - `lastEventAt` comes from any guest event; for non-omp agents it comes from herdr `pane_updated`.
 - `streaming`/`thinking` reflect `message_update` deltas.
 - `tool` is the open `tool_execution_*` call.
-- `tps` is a 3-second rolling count of output tokens (approximated as streamed chars / 4).
+- `tps` sums every spender's output rate, split in `tpsSplit {main, subagents, advisor}`. The main agent's rate is a 3-second rolling count of its streamed deltas (chars / 4). Subagents and advisors stream nowhere a guest can see, so each of their finished replies (read from the session's artifacts dir, below) is replayed at its real decode rate, `usage.output / (duration − ttft)`, from the moment tf-hostd reads it: the sparkline's area is exact, its timing one reply late. Replies that ended over a minute ago are not replayed, and `tps` is absent when nothing produces output.
+- `cost` (`OmpInfo.cost`, `SessionMeta.cost`) is omp's status-line total `$main (+subagents) + advisor`, split in `cost.split`. Main: the main agent's assistant `usage.cost.total` (collab entries) plus `model_usage` side calls (journal). Subagents: `max` of completed `task` results (`details.usage`), the artifact tree and the live `progress.cost` sum. Advisor: `__advisor*.jsonl` at the top of the artifacts dir. Collab mirrors neither advisor turns nor subagent transcripts, so tf-hostd tails `<session>/` (the dir next to `<session>.jsonl`, found under `<omp agent dir>/sessions/*/`) with `tf_collab::ArtifactLedger`: top-level `__advisor*.jsonl` bill the advisor, every other session transcript (subagents, nested subagents and their advisors) bills the subagent tree, counting only assistant turns and `model_usage` entries so nothing is counted twice. The host usage ledger (board "today") accounts the growth of this total with a high-water mark per session.
 - `line` uses the active tool label, else the last assistant sentence fragment (≤ 80 chars).
 - Pulses carry kind and intensity per agent at ≤ 10 Hz.
 
@@ -263,12 +267,17 @@ pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Lat
   - Host methods require `host_id` and are forwarded to that host's hostd.
   - App methods are handled locally.
 - **`Platform` trait:**
-  - `notify(&Notification, host)`
+  - `notify(host, &Notification, style)` (one live OS notification per agent; a newer one replaces it)
+  - `retract(host_id, &Notification)` (remove it unless a newer one of the agent replaced it)
   - `open_external(url)`
   - `set_keep_alive(bool)`
   - `device_name()`
-  - `data_dir()`
-  - `set_badge(count)`
+  - `set_badge(BadgeState)`
+- **Notification sync** ("handled in one place = done everywhere"). The engine remembers the last 100 notifications per host with their state (posted to the OS, read, resolved) and reports changes as `AppEvent::NotifyDone { hostId, ids, resolved }`:
+  - **Needs-you, from host state.** After every snapshot/patch, a needs-you notification whose request left the state (the agent's `needs.requestId` went away or changed, or the agent is gone or archived) is resolved, whoever handled it: inline card, toast, board quick answer, Answer-next HUD, OS action or reply, another device, the omp TUI, cancel/stop. Resolution needs the request to have been seen pending first (hostd publishes the state before the notification). Its OS notification is retracted and the UI dismisses the toast and shows the list item as resolved.
+  - **Read.** `app.notifyRead { hostId, agentId? }` (the UI calls it when an agent's session is viewed with the app in front, on "mark all read" and on "clear"), an OS body tap (`notification_action` without action) and an OS dismissal (`notification_dismissed`) mark notifications read; read ones are retracted from the OS, except needs-you ones whose request is still pending. The UI dismisses read toasts except pending needs-you ones.
+  - **Fail safe.** OS answers (`notification_action` with an action or reply) to a needs-you notification whose request is resolved or no longer the pending one fail with `stale` instead of reaching the next request.
+  - Removing a host retracts all its notifications. Cross-device sync is what host state carries: needs-you resolution; read state is per device. The ring lives in memory, so OS notifications left by a previous process (Android) are not retracted.
 - **Per-host connection state machine.** Phases: connecting → authenticating → (authRequired) → deploying → starting → online. On failure: reconnecting with backoff 1, 2, 4 … 30 s plus jitter, reset after 60 s online. It resumes immediately on `hosts.connect`, network changes and foreground.
 - **Deploy:**
   1. Run `uname -sm` to pick the embedded hostd for that arch.
@@ -309,10 +318,10 @@ pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Lat
 - **Windows:**
   - Custom chrome via `TitleBar`; Snap Layouts via `tauri-plugin-snap-layout`.
   - Tray icon with the needs-you count, taskbar overlay badge, single instance, deep link `teleflock://`.
-  - Toast notifications with actions.
+  - Toast notifications with actions; retracted from Action Center (tag + group) when handled elsewhere, user dismissal reported to the engine.
 - **Android.** A Kotlin plugin provides:
   - a foreground service (`remoteMessaging`) holding the core alive while `keepAlive`;
-  - notifications with action buttons (≤ 3) and inline reply, routed back to `agent.answer` / `agent.prompt`;
+  - notifications with action buttons (≤ 3) and inline reply, routed back to `agent.answer` / `agent.prompt`; cancelled by tag + id when handled elsewhere (group summary follows), swipe-away reported over JNI;
   - `POST_NOTIFICATIONS` permission flow and haptics.
 - **Builds.** Windows NSIS via cargo-xwin; signed APK (`docs/build.md`). `scripts/build-hostd.sh` builds tf-hostd for `x86_64/aarch64-unknown-linux-musl` (zigbuild) and `x86_64-pc-windows-msvc` before the app.
 
@@ -383,12 +392,14 @@ It must exercise every UI state, including disconnected, stale and auth-required
 | FrontSession | `src/features/session/**` | Session view on desktop and mobile: virtualized transcript, streaming markdown with highlighting, tool cards, ask/approval/plan-review cards, composer (slash palette, @files, images, steer/follow-up queue), model/thinking/plan/goal/fast controls, inspector (context, cost, tps, todos, subagents, files, tree, actions), btw, non-omp terminal-first view, mobile agent pager |
 | FrontTerminal | `src/features/terminal/**` | xterm.js WebGL terminal (frames, input, resize, scroll), tabs, send-keys bar, mobile extra keys (sticky Ctrl/Alt), embeddable `<TerminalPane>` for split view and session |
 | FrontOps | `src/features/{worktree,workspace,review,preview,history}/**` | New worktree/agent wizard with remote folder browser, workspace ops, review and ship (git diff viewer, commit/push/PR/merge), preview tunnels, past sessions and resume |
+| Dispatch | `src/features/dispatch/**` | Dispatch screen: per-repo chat thread where each message creates a worktree + omp agent, with live reply cards |
 | FrontCore | `src/core/**` (except `gen/`) | §6.1 |
 
 Shared UI building blocks come from `@/design` only. A feature that needs a cross-cutting primitive asks FrontShell (for layout) or adds it in its own folder.
 
 Routes (hash router, `src/app/router.ts`):
 - `#/board` and `#/` (home)
+- `#/dispatch`
 - `#/agent/:hostId/:agentId` (session)
 - `#/terminal/:hostId[/:termTarget]`
 - `#/review/:hostId/:workspaceId`

@@ -7,7 +7,7 @@ import { isFullBleed, RouteView, routeKey } from "@/app/routes";
 import { PullToRefresh } from "./PullToRefresh";
 
 /** Bottom-nav tabs, in order (direction of the slide between them). */
-export const MOBILE_TABS = ["board", "inbox", "terminal", "more"] as const satisfies readonly Route["name"][];
+export const MOBILE_TABS = ["board", "dispatch", "inbox", "terminal", "more"] as const satisfies readonly Route["name"][];
 
 interface Boundary {
   error: Error | null;
@@ -64,7 +64,7 @@ function Loading() {
   );
 }
 
-const TAB_INDEX: Partial<Record<Route["name"], number>> = { board: 0, inbox: 1, terminal: 2, more: 3 };
+const TAB_INDEX: Partial<Record<Route["name"], number>> = { board: 0, dispatch: 1, inbox: 2, terminal: 3, more: 4 };
 
 /** Slide direction for the transition from `prev` to `next`: 1 forward (from the right), -1 back. */
 function direction(prev: Route, next: Route): number {

@@ -1,23 +1,28 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, MessageSquareDashed } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import { getTranscript, loadOlder, useAgent, useSession, useSessionItem } from "@/core";
 import type { TranscriptItem } from "@/core/gen";
 import { cn, Elapsed, EmptyState, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
+import { useSessionUi } from "../state";
 import { Row } from "./rows";
 
 const STICK_PX = 56;
 const LOAD_OLDER_PX = 480;
 const ROW_GAP = 12;
+/** Phone spacing: rows sit closer so more of the conversation fits. */
+const ROW_GAP_DENSE = 8;
+/** Reading measure on very wide windows (the ask card and composer line up with it). */
+export const TRANSCRIPT_MAX_WIDTH = 1120;
 /** Typical row heights before measurement (tool cards with output dominate). */
 const ROW_ESTIMATE: Partial<Record<TranscriptItem["kind"], number>> = { tool: 320, assistant: 140, user: 88, thinking: 56 };
 const ROW_ESTIMATE_DEFAULT = 48;
 /** Growth larger than this while following is a jump (session switch, big paste), not a glide. */
 const GLIDE_MAX_PX = 900;
 
-export interface TranscriptProps {
-  agentKey: string;
+/** Layout knobs shared by the session transcript and other transcript lists (subagents). */
+export interface TranscriptLayout {
   className?: string;
   /** Padding around the rows (px). */
   padX?: number;
@@ -30,16 +35,94 @@ export interface TranscriptProps {
    * The first paint renders at most 2, so opening a session lays out little more than a screenful.
    */
   overscan?: number;
+  /** Phone spacing: tighter row gaps and edge padding. */
+  dense?: boolean;
+}
+
+export interface TranscriptProps extends TranscriptLayout {
+  agentKey: string;
 }
 
 /**
- * Virtualised, append-only transcript. Rows subscribe to their own item; this component only
- * re-renders when the id list changes. Sticks to the bottom while streaming, offers a
- * "jump to latest" pill when scrolled up, and pages older rows in at the top without a jump.
+ * Virtualised, append-only transcript of a session. Rows subscribe to their own item; this
+ * component only re-renders when the id list changes.
  */
-export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gutter = 38, overscan = 8 }: TranscriptProps) {
+export function Transcript({ agentKey, ...layout }: TranscriptProps) {
   const session = useSession(agentKey);
+  const focus = useSessionUi((s) => s.focus[agentKey]);
   const ids = session.itemIds;
+  // Per-kind estimates keep the first (pre-measure) render close to one screenful of rows.
+  const kinds = useMemo(() => {
+    const byId = new Map(getTranscript(agentKey).items.map((it) => [it.id, it.kind]));
+    return ids.map((id) => byId.get(id));
+  }, [agentKey, ids]);
+  return (
+    <TranscriptLog
+      {...layout}
+      ids={ids}
+      kinds={kinds}
+      loading={session.status === "loading"}
+      hasMore={session.hasMore}
+      onLoadOlder={() => loadOlder(agentKey)}
+      renderRow={(id, prevId, nextId, rail) => <Row agentKey={agentKey} itemId={id} prevId={prevId} nextId={nextId} rail={rail} />}
+      empty={<EmptyState className="mt-16" icon={<MessageSquareDashed />} title="No messages yet" description="Send a prompt to get this agent going." />}
+      footer={<WorkingFooter agentKey={agentKey} lastId={ids[ids.length - 1]} />}
+      jumpLabel={(unseen) => <JumpLabel agentKey={agentKey} unseen={unseen} />}
+      focus={focus}
+    />
+  );
+}
+
+export interface TranscriptLogProps extends TranscriptLayout {
+  /** Row ids, oldest first. Pass the same array while the id list is unchanged. */
+  ids: string[];
+  /** Item kind per id (same order), for size estimates before rows are measured. */
+  kinds: readonly (TranscriptItem["kind"] | undefined)[];
+  /** One row; `rail` = draw the gutter timeline. */
+  renderRow: (id: string, prevId: string | undefined, nextId: string | undefined, rail: boolean) => ReactNode;
+  /** First load in flight: a skeleton while there are no rows yet. */
+  loading?: boolean;
+  /** Shown once loaded without rows. */
+  empty: ReactNode;
+  /** Under the last row (e.g. a "working" heartbeat). */
+  footer?: ReactNode;
+  /** Older rows exist above the first one; `onLoadOlder` pages them in. */
+  hasMore?: boolean;
+  onLoadOlder?: () => Promise<unknown>;
+  /** Content of the "jump to latest" pill shown while scrolled up. */
+  jumpLabel: (unseen: number) => ReactNode;
+  ariaLabel?: string;
+  /** Scroll this row into view and flash it (a new `nonce` re-triggers). */
+  focus?: { itemId: string; nonce: number };
+  /** A new non-zero value sticks to the bottom and scrolls there (e.g. after the user sent a message). */
+  followSignal?: number;
+}
+
+/**
+ * The transcript list itself, independent of where rows come from. Sticks to the bottom while
+ * streaming, offers a "jump to latest" pill when scrolled up, and pages older rows in at the top
+ * without a jump.
+ */
+export function TranscriptLog({
+  ids,
+  kinds,
+  renderRow,
+  loading = false,
+  empty,
+  footer,
+  hasMore = false,
+  onLoadOlder,
+  jumpLabel,
+  ariaLabel = "Transcript",
+  focus,
+  followSignal = 0,
+  className,
+  padX = 20,
+  dense = false,
+  padBottom = dense ? 12 : 24,
+  gutter = 38,
+  overscan = 8,
+}: TranscriptLogProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -54,11 +137,6 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
   const settledRef = useRef(settled);
   settledRef.current = settled;
 
-  // Per-kind estimates keep the first (pre-measure) render close to one screenful of rows.
-  const kinds = useMemo(() => {
-    const byId = new Map(getTranscript(agentKey).items.map((it) => [it.id, it.kind]));
-    return ids.map((id) => byId.get(id));
-  }, [agentKey, ids]);
   const estimate = (i: number) => {
     const kind = kinds[i];
     return (kind && ROW_ESTIMATE[kind]) ?? ROW_ESTIMATE_DEFAULT;
@@ -69,11 +147,12 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     estimateSize: estimate,
     getItemKey: (i) => ids[i] ?? i,
     overscan: settled ? overscan : Math.min(overscan, 2),
-    gap: ROW_GAP,
+    gap: dense ? ROW_GAP_DENSE : ROW_GAP,
+    // Phones float the pager dots over this strip.
     paddingStart: 16,
     // First render already sits at the bottom (where the layout effect scrolls to), so opening a
     // session builds only the last screenful of rows instead of the top ones and then the bottom.
-    initialOffset: () => ids.reduce((sum, _, i) => sum + estimate(i) + ROW_GAP, 0),
+    initialOffset: () => ids.reduce((sum, _, i) => sum + estimate(i) + (dense ? ROW_GAP_DENSE : ROW_GAP), 0),
     initialRect: { width: 0, height: typeof window === "undefined" ? 800 : window.innerHeight },
   });
 
@@ -151,6 +230,38 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     } else if (ids.length > prev) setUnseen((n) => n + (ids.length - prev));
   }, [ids]);
 
+  // Jump to a row (Chat tab): unstick, centre it, then flash it once it has rendered. Only
+  // requests made while mounted count: a remount (session switch) must not replay an old jump.
+  const handledFocus = useRef(focus?.nonce);
+  const idsRef = useRef(ids);
+  idsRef.current = ids;
+  useEffect(() => {
+    if (!focus || focus.nonce === handledFocus.current) return;
+    handledFocus.current = focus.nonce;
+    const idx = ids.indexOf(focus.itemId);
+    if (idx < 0) return;
+    setStick(false);
+    virtualizer.scrollToIndex(idx, { align: "center" });
+    const t = window.setTimeout(() => {
+      // Rows above may have measured (or an older page loaded) since: re-resolve, settle, flash.
+      const now = idsRef.current.indexOf(focus.itemId);
+      if (now < 0) return;
+      virtualizer.scrollToIndex(now, { align: "center" });
+      const el = scrollRef.current?.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(focus.itemId)}"]`);
+      el?.animate([{ backgroundColor: "rgb(163 92 240 / 0.16)", borderRadius: "18px" }, { backgroundColor: "transparent", borderRadius: "18px" }], { duration: 1400, easing: "ease-out" });
+    }, 220);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new focus request jumps
+  }, [focus?.nonce]);
+
+  // The user just sent something: follow the conversation again, even if they had scrolled up.
+  useEffect(() => {
+    if (!followSignal) return;
+    setStick(true);
+    toBottom(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new signal jumps
+  }, [followSignal]);
+
   // Unsticking is driven by user input (wheel, touch, keys, scrollbar) only: the virtualizer moves
   // scrollTop on its own while rows measure, which would read as the user scrolling up.
   const onScroll = () => {
@@ -159,12 +270,12 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (fromBottom <= STICK_PX && !stick.current) setStick(true);
 
-    if (el.scrollTop < LOAD_OLDER_PX && session.hasMore && !loadingOlder && ids.length > 0) {
+    if (el.scrollTop < LOAD_OLDER_PX && hasMore && onLoadOlder && !loadingOlder && ids.length > 0) {
       const first = virtualizer.getVirtualItems().find((v) => v.end > el.scrollTop);
       const id = first ? ids[first.index] : undefined;
       if (first && id) anchor.current = { id, delta: el.scrollTop - first.start };
       setLoadingOlder(true);
-      loadOlder(agentKey).finally(() => setLoadingOlder(false));
+      void onLoadOlder().finally(() => setLoadingOlder(false));
     }
   };
 
@@ -177,7 +288,6 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
   };
 
   const items = virtualizer.getVirtualItems();
-  const lastId = ids[ids.length - 1];
 
   return (
     <div className={cn("relative flex min-h-0 flex-1 flex-col", className)}>
@@ -194,22 +304,26 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
           const el = scrollRef.current;
           if (el && el.scrollHeight - el.scrollTop - el.clientHeight > STICK_PX && stick.current) setStick(false);
         }}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable] [-webkit-mask-image:linear-gradient(transparent,#000_28px)]"
+        className={cn(
+          "min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]",
+          dense ? "[-webkit-mask-image:linear-gradient(transparent,#000_20px)]" : "[-webkit-mask-image:linear-gradient(transparent,#000_28px)]",
+        )}
         role="log"
-        aria-label="Transcript"
-        aria-busy={session.status === "loading"}
+        aria-label={ariaLabel}
+        aria-busy={loading}
         style={{ ["--tf-gutter" as string]: `${gutter}px` }}
       >
-        <div ref={contentRef} style={{ paddingLeft: padX, paddingRight: padX, paddingBottom: padBottom }}>
-          {session.hasMore && (
-            <div className="flex justify-center pt-3 text-2xs font-semibold text-mute-2">
+        <div ref={contentRef} className="mx-auto w-full" style={{ maxWidth: TRANSCRIPT_MAX_WIDTH, paddingLeft: padX, paddingRight: padX, paddingBottom: padBottom }}>
+          {hasMore && (
+            // Dense (phone): clears the pager dots floated over the top edge.
+            <div className={cn("flex justify-center text-2xs font-semibold text-mute-2", dense ? "pt-6" : "pt-3")}>
               {loadingOlder ? <Shimmer>Loading earlier messages…</Shimmer> : "Scroll up for earlier messages"}
             </div>
           )}
-          {session.status === "loading" && ids.length === 0 ? (
+          {loading && ids.length === 0 ? (
             <TranscriptSkeleton />
           ) : ids.length === 0 ? (
-            <EmptyState className="mt-16" icon={<MessageSquareDashed />} title="No messages yet" description="Send a prompt to get this agent going." />
+            empty
           ) : (
             <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
               {items.map((v) => {
@@ -219,17 +333,18 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
                   <div
                     key={v.key}
                     data-index={v.index}
+                    data-row-id={id}
                     ref={virtualizer.measureElement}
                     className="absolute top-0 left-0 w-full [contain:layout_style]"
                     style={{ transform: `translateY(${v.start}px)` }}
                   >
-                    <Row agentKey={agentKey} itemId={id} prevId={ids[v.index - 1]} nextId={ids[v.index + 1]} rail={gutter > 0} />
+                    {renderRow(id, ids[v.index - 1], ids[v.index + 1], gutter > 0)}
                   </div>
                 );
               })}
             </div>
           )}
-          <WorkingFooter agentKey={agentKey} lastId={lastId} />
+          {footer}
         </div>
       </div>
       <AnimatePresence>
@@ -245,7 +360,7 @@ export function Transcript({ agentKey, className, padX = 20, padBottom = 24, gut
             }}
             className="focus-ring absolute bottom-4 left-1/2 z-raised flex -translate-x-1/2 items-center gap-2 rounded-full glass px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
           >
-            <JumpLabel agentKey={agentKey} unseen={unseen} />
+            {jumpLabel(unseen)}
             <ArrowDown className="size-3.5" />
           </motion.button>
         )}

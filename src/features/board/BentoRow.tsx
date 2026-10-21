@@ -137,7 +137,7 @@ function HeroWaiting({ agentKey }: { agentKey: string }) {
   const agent = useAgent(agentKey);
   if (!agent?.needs) return null;
   return (
-    <span className="ml-auto truncate text-xs font-bold opacity-90">
+    <span className="ml-auto min-w-0 truncate text-xs font-bold opacity-90">
       {agent.name} · waiting <Elapsed since={agent.needs.since} />
     </span>
   );
@@ -151,7 +151,7 @@ function HeroBody({ agentKey }: { agentKey: string }) {
   return (
     <>
       <button type="button" className="mt-2.5 text-left focus-ring rounded-sm" onClick={() => openAgent(agentKey)}>
-        <h3 className="line-clamp-2 max-w-xl font-display text-[21px] leading-tight font-bold short:line-clamp-1 short:text-lg">{n.question || n.title}</h3>
+        <h3 className="line-clamp-2 max-w-xl font-display text-[21px] leading-tight font-bold wrap-break-word short:line-clamp-1 short:text-lg">{n.question || n.title}</h3>
       </button>
       <p className="mt-1 truncate text-xs font-semibold opacity-85 short:hidden">
         {agent.repo ?? agent.name}
@@ -238,7 +238,7 @@ export function HealthTile({ className }: { className?: string }) {
     <TiltCard className={cn("rounded-tile", className)}>
       <Tile className={cn("flex h-(--bento-h) flex-col p-5 short:p-4", stale && "grayscale-[0.6]")}>
         <div className="flex items-center gap-2">
-          <span className="kicker truncate">{profile?.name ?? state?.info.hostname ?? "No host"}</span>
+          <span className="kicker min-w-0 truncate">{profile?.name ?? state?.info.hostname ?? "No host"}</span>
           <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-bold text-mute">
             <StatusOrb status={stale ? "idle" : "done"} size={6} label={null} />
             {stale ? (status?.phase ?? "offline") : status?.latencyMs !== undefined ? `${status.latencyMs} ms` : "online"}
@@ -291,11 +291,11 @@ export function LiveTerminalTile({ className }: { className?: string }) {
           {agent ? (
             <>
               <AgentGlyph name={agent.name} size={20} />
-              <button type="button" className="truncate text-ink hover:underline focus-ring rounded-xs" onClick={() => leader && openAgent(leader)}>
+              <button type="button" className="min-w-0 truncate rounded-xs text-ink focus-ring hover:underline" onClick={() => leader && openAgent(leader)}>
                 {agent.name}
               </button>
-              <span className="font-mono text-2xs text-mute-2">{agent.paneId}</span>
-              <span className="ml-auto flex items-center gap-1.5 font-display text-[10px] tracking-[0.12em] text-mute uppercase">
+              <span className="shrink-0 font-mono text-2xs text-mute-2">{agent.paneId}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-1.5 font-display text-[10px] tracking-[0.12em] text-mute uppercase">
                 <StatusOrb status="running" size={6} label={null} activity="busy" /> live
               </span>
               <IconButton label="Open terminal" size="sm" onClick={() => leader && openTerminal(leader, false)}>

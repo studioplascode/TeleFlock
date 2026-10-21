@@ -11,7 +11,7 @@ use tauri::{
     plugin::{PermissionState, PluginHandle, mobile::PluginInvokeError},
 };
 
-use crate::{NativeEvent, NotificationAction, Notify};
+use crate::{NativeEvent, NotificationAction, NotificationRef, Notify};
 
 pub struct TeleFlockAndroid<R: Runtime>(pub PluginHandle<R>);
 
@@ -22,9 +22,11 @@ struct KeepAlive<'a> {
 }
 
 #[derive(Serialize)]
-struct Cancel<'a> {
+#[serde(rename_all = "camelCase")]
+struct Retract<'a> {
     id: i32,
     tag: &'a str,
+    notification_id: &'a str,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,8 +51,10 @@ impl<R: Runtime> TeleFlockAndroid<R> {
     pub fn notify(&self, n: &Notify) -> Result<(), PluginInvokeError> {
         self.0.run_mobile_plugin("showNotification", n)
     }
-    pub fn cancel(&self, id: i32, tag: &str) -> Result<(), PluginInvokeError> {
-        self.0.run_mobile_plugin("cancel", Cancel { id, tag })
+    /// Removes the notification `(tag, id)` if it still shows `notification_id` (a newer one of
+    /// the same agent stays), and updates or removes the group summary.
+    pub fn retract(&self, id: i32, tag: &str, notification_id: &str) -> Result<(), PluginInvokeError> {
+        self.0.run_mobile_plugin("retract", Retract { id, tag, notification_id })
     }
     pub fn notification_permission(&self) -> Result<Permission, PluginInvokeError> {
         self.0.run_mobile_plugin("notificationPermission", ())
@@ -78,6 +82,34 @@ impl<R: Runtime> TeleFlockAndroid<R> {
     pub fn open_url(&self, url: &str) -> Result<(), PluginInvokeError> {
         self.0.run_mobile_plugin("openUrl", serde_json::json!({ "url": url }))
     }
+    /// Hands a downloaded APK (a file under the app cache dir) to the system package installer.
+    /// Without the "install unknown apps" permission the installer is not started; with
+    /// `open_settings` the permission screen for this package opens instead.
+    pub fn install_apk(&self, path: &str, open_settings: bool) -> Result<ApkInstall, PluginInvokeError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args<'a> {
+            path: &'a str,
+            open_settings: bool,
+        }
+        #[derive(Deserialize)]
+        struct Res {
+            status: ApkInstall,
+        }
+        self.0
+            .run_mobile_plugin::<Res>("installApk", Args { path, open_settings })
+            .map(|r| r.status)
+    }
+}
+
+/// Outcome of [`TeleFlockAndroid::install_apk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApkInstall {
+    /// The system install prompt is showing.
+    Started,
+    /// `canRequestPackageInstalls()` is false: the user has to allow installs from TeleFlock.
+    NeedsPermission,
 }
 
 pub trait TeleFlockAndroidExt<R: Runtime> {
@@ -117,6 +149,28 @@ pub extern "system" fn Java_dev_teleflock_android_RustBridge_onNotificationActio
         }
         Err(e) => {
             log::warn!("teleflock-android: bad notification action payload: {e}");
+            JNI_FALSE
+        }
+    }
+}
+
+/// `RustBridge.onNotificationDismissed(json)`: the user swiped one of our notifications away.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_teleflock_android_RustBridge_onNotificationDismissed(
+    mut env: JNIEnv,
+    _class: JClass,
+    json: JString,
+) -> jboolean {
+    let Ok(json) = env.get_string(&json) else { return JNI_FALSE };
+    let json: String = json.into();
+    let Some(sink) = SINK.get() else { return JNI_FALSE };
+    match serde_json::from_str::<NotificationRef>(&json) {
+        Ok(r) => {
+            sink(NativeEvent::Dismissed(r));
+            JNI_TRUE
+        }
+        Err(e) => {
+            log::warn!("teleflock-android: bad notification dismissal payload: {e}");
             JNI_FALSE
         }
     }

@@ -41,6 +41,7 @@
   - a footer with host health
 - **Views**
   - **Board** (home)
+  - **Dispatch**: a chat-like task launcher (pick a repo, every message becomes a worktree + omp agent)
   - **Session**, with a right-hand inspector
   - **Terminal**
   - **Review** (diff & ship)
@@ -51,7 +52,7 @@
 - **Overlays.** Command palette, New worktree/agent wizard, quick-answer HUD, notification center, toasts.
 
 ### Mobile (Android)
-- **Bottom nav:** Flock · Inbox · Terminal · More (hosts, usage, settings).
+- **Bottom nav:** Flock · Dispatch · Inbox · Terminal · More (hosts, usage, settings).
 - **Flock home:**
   - bento widgets: needs-you count, running count with heartbeat, today's cost
   - needs-you cards with inline answers
@@ -176,6 +177,9 @@ Cost and tokens per agent, per day, and per model; budget hints; a "today" ticke
 ### Fan-out (P2)
 Spawn N worktree agents from one prompt with different models or approaches, then compare them in Review.
 
+### Dispatch
+Fire tasks at a repository like messages in a chat. Pick a host and repo (recent repos from open workspaces, or browse) and a base branch; each message creates a `dispatch/<slug>` worktree with an omp agent whose first prompt is the message. Sends run independently, so many tasks go out back to back. The thread (per host + repo, kept across restarts) shows each message with a live reply card: launch steps, then status, streaming line, inline answers for Needs-you, Open / Terminal / Review, and readable failures with fixes (trust the repo, retry). Per-dispatch options: template or model + thinking, plan mode.
+
 ### Session history (P2)
 Browse past omp sessions on a host and resume one in a new pane.
 
@@ -194,6 +198,7 @@ A single-agent zen view: just the stream and the composer.
 - `A` answer
 - `T` terminal
 - `N` new worktree
+- `D` dispatch
 - `Esc` stop (in session) / close overlay
 - `Ctrl+Enter` send
 - `Alt+Enter` queue follow-up

@@ -23,4 +23,9 @@ mutedAgents: Array<string>,
 /**
  * Saved agent presets for the new-agent / new-worktree / fan-out flows.
  */
-templates: Array<AgentTemplate>, };
+templates: Array<AgentTemplate>, 
+/**
+ * Check GitHub releases on launch and install a newer version (Tauri app only).
+ * Settings files written before this field existed load with `true`.
+ */
+autoUpdate: boolean, };

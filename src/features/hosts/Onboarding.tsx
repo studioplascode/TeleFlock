@@ -43,7 +43,7 @@ export function Onboarding() {
     <div className="relative h-full overflow-y-auto overscroll-contain">
       <AmbientGlow mood="running" />
       <FlockSky className="fixed" />
-      <div className="grid min-h-full place-items-center px-5 pt-[max(40px,env(safe-area-inset-top))] pb-[max(40px,env(safe-area-inset-bottom))]">
+      <div className="grid min-h-full place-items-center px-5 pt-[max(40px,env(safe-area-inset-top))] pb-[max(40px,env(safe-area-inset-bottom))] md:[@media(max-height:720px)]:py-6">
       <div className="flex w-full max-w-[760px] flex-col items-center text-center">
         <motion.div initial={{ scale: 0.4, opacity: 0, rotate: -12 }} animate={{ scale: 1, opacity: 1, rotate: 0 }} transition={spring.bouncy} className="relative">
           <span className="absolute inset-0 -z-10 rounded-full bg-accent/40 blur-3xl tf-loop animate-pulse" aria-hidden />
@@ -53,7 +53,7 @@ export function Onboarding() {
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ ...spring.smooth, delay: 0.12 }}
-          className="mt-6 font-display text-hero font-bold md:text-mega"
+          className="mt-6 font-display text-hero font-bold md:text-mega md:[@media(max-height:720px)]:mt-4"
         >
           Your agents, <span className="text-omp">herded.</span>
         </motion.h1>
@@ -78,7 +78,7 @@ export function Onboarding() {
           ))}
         </motion.ul>
 
-        <div className="mt-9 grid w-full gap-4 md:grid-cols-2">
+        <div className="mt-9 grid w-full gap-4 md:grid-cols-2 md:[@media(max-height:720px)]:mt-6">
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.42 }}>
             <TiltCard className="h-full rounded-tile">
               <button

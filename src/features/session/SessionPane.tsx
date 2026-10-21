@@ -12,7 +12,8 @@ import { FocusHeader } from "./header/FocusHeader";
 import { SessionHeader } from "./header/SessionHeader";
 import { LinkGate } from "./LinkGate";
 import { NonOmpView } from "./NonOmpView";
-import { Transcript, TranscriptSkeleton } from "./transcript/Transcript";
+import { SubagentViewer } from "./subagents/SubagentViewer";
+import { Transcript, TRANSCRIPT_MAX_WIDTH, TranscriptSkeleton } from "./transcript/Transcript";
 
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
@@ -82,7 +83,7 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
 
   return (
     <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
-      <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col gap-3", className)}>
+      <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", mobile || compact ? "gap-2" : "gap-3", compact && "p-2", className)}>
         {agent.omp == null ? (
           <NonOmpView agentKey={agentKey} />
         ) : (
@@ -104,7 +105,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { age
     <>
       <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && !focus && "rounded-tile glass")}>
         {ready ? (
-          <Transcript agentKey={agentKey} padX={mobile ? 12 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} overscan={mobile ? 3 : 8} />
+          <Transcript agentKey={agentKey} padX={mobile ? 10 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} overscan={mobile ? 3 : 8} dense={mobile} />
         ) : (
           <div className="px-3" aria-busy>
             <TranscriptSkeleton />
@@ -118,7 +119,8 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { age
             initial={{ opacity: 0, y: 40, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
             exit={{ opacity: 0, y: 24, scale: 0.97, transition: { duration: 0.2 } }}
-            className="relative z-raised flex max-h-[62%] shrink-0 flex-col"
+            className="relative z-raised mx-auto flex max-h-[62%] w-full shrink-0 flex-col"
+            style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
           >
             {/* Sunset bloom: flares as the card lands, then settles into a glow spilling over the transcript. */}
             <motion.span
@@ -134,10 +136,11 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { age
           </motion.div>
         )}
       </AnimatePresence>
-      <div className={cn(focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}>
+      <div className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")} style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}>
         <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
       </div>
       <SessionDialogs agentKey={agentKey} />
+      <SubagentViewer agentKey={agentKey} />
     </>
   );
 }

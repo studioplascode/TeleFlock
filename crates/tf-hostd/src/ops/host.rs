@@ -43,6 +43,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
             let days = p.days.clamp(1, 366);
             to_value(tokio::task::spawn_blocking(move || usage(&stats_db(), days)).await.map_err(join_err)??)
         }
+        HostMethod::HostLimits(p) => to_value(crate::ops::limits::limits(ctx, p.refresh.unwrap_or(false)).await?),
         HostMethod::HostModels(_) => to_value(models().await?),
         HostMethod::HostSessions(p) => to_value(sessions(ctx, &p).await?),
         HostMethod::HostResume(p) => to_value(resume(ctx, p).await?),
@@ -71,7 +72,7 @@ fn stats_db() -> PathBuf {
     home_dir().join(".omp").join("stats.db")
 }
 
-fn omp_bin() -> Option<PathBuf> {
+pub(crate) fn omp_bin() -> Option<PathBuf> {
     resolve_bin("omp")
 }
 
@@ -208,7 +209,7 @@ mod platform {
 
 // ───────────────────────────── usage ─────────────────────────────
 
-fn open_ro(path: &Path) -> Result<Option<rusqlite::Connection>, ApiError> {
+pub(crate) fn open_ro(path: &Path) -> Result<Option<rusqlite::Connection>, ApiError> {
     if !path.exists() {
         return Ok(None);
     }

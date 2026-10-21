@@ -48,6 +48,13 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   `TermEvent::Closed{reason}` (`terminal attach taken over`, `detached`, …). Disconnect detaches.
 - **host.usage**: `~/.omp/stats.db` opened `?mode=ro` (as fresh as omp's last stats sync); days
   are host-local and zero-filled; `input` = input + cache read + cache write tokens.
+- **host.limits** (`limits.rs`): `omp usage --json` (hostd cache 60 s, `refresh` 10 s; omp itself caches
+  each account ~5 min, so provider usage endpoints are not hit more often than omp's own TUI does) +
+  `omp usage --history --json --days 8` (10 min). Readings of each window's current period (omp history
+  + hostd's own polls, reset drops cut) ride along as `samples` for the client's pace math. Session →
+  account from `agent.db` read-only: `cache` `session:sticky:<provider>:<sessionId>` → `credentialId`
+  → `auth_credentials.identity_key` (never the `data` column). A failed refresh keeps the last snapshot
+  and sets `error`.
 - **host.models**: `omp config get modelRoles --json` + headless `omp --mode rpc --no-ui
   --no-session` `get_available_models` (fallback `omp models --json`); cached 5 min.
 - **host.sessions**: scans `<omp agent dir>/sessions/*/*.jsonl` (newest first), titles from

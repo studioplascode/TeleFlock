@@ -53,9 +53,9 @@ export function dismissToast(id: number): void {
 }
 
 /**
- * Toast host; mount once (DesignProvider does). Desktop: bottom-right, swipe right.
- * Phone: compact heads-up banners from the top (one line, action on the right, at most two
- * stacked so they never bury the screen's header), swipe up to dismiss.
+ * Toast host; mount once (DesignProvider does). Desktop: bottom-right (lifted by `--tf-toast-lift`), swipe right.
+ * Phone: compact heads-up banners just below the screen header (one line, action on the right, at
+ * most two stacked; one, at the top edge, while a sheet is open), swipe up to dismiss.
  */
 export function Toaster() {
   const toasts = useToastStore((s) => s.toasts);
@@ -124,7 +124,13 @@ export function Toaster() {
       <RadixToast.Viewport
         className={cn(
           "fixed z-toast flex flex-col gap-2 outline-none",
-          mobile ? "inset-x-2.5 top-[max(8px,env(safe-area-inset-top))]" : "right-5 bottom-5 w-[380px]",
+          // --tf-toast-lift: floating bars along the bottom edge (board selection bar) raise the stack clear of them.
+          // Phone: banners drop in below the 48px screen header. While a sheet/dialog is open its scrim already
+          // covers that header, so the banner moves back up to the safe-area edge (clear of a tall sheet's top)
+          // and only the newest one shows; z-toast keeps it above the sheet either way.
+          mobile
+            ? "inset-x-2.5 top-[calc(env(safe-area-inset-top)+52px)] transition-[top] duration-200 [body:has([role=dialog][data-state=open])_&]:top-[max(8px,env(safe-area-inset-top))] [body:has([role=dialog][data-state=open])_&>li:not(:last-child)]:hidden"
+            : "right-5 bottom-[calc(20px+var(--tf-toast-lift,0px))] w-[380px] max-w-[calc(100vw-40px)] transition-[bottom] duration-300",
         )}
       />
     </RadixToast.Provider>

@@ -12,6 +12,7 @@ import { classifyHerdrError, describeError } from "../workspace/shared/errors";
 import { basename, shellQuote, tildify } from "../workspace/shared/paths";
 import { ResponsiveDialog } from "../workspace/shared/ResponsiveDialog";
 import { templateSummary } from "../workspace/shared/templates";
+import { slugFromPrompt, slugify } from "../workspace/shared/slug";
 import { useDialogSession } from "../workspace/shared/useDialogSession";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
 import { FolderBrowser, type FolderPick } from "./FolderBrowser";
@@ -31,23 +32,6 @@ const MIN_VARIANTS = 2;
 const MAX_VARIANTS = 5;
 const CUSTOM = "__custom";
 const DEFAULT = "default";
-
-/** Lowercase `[a-z0-9-]` slug, at most `max` chars. */
-function slugify(s: string, max: number): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, max)
-    .replace(/-+$/, "");
-}
-
-const STOP = new Set(["a", "an", "the", "to", "and", "or", "of", "in", "on", "for", "with", "make", "add", "please", "it", "this", "that", "so"]);
-/** "Add offline caching to the client" → "offline-caching-client". */
-function slugFromPrompt(prompt: string): string {
-  const words = prompt.toLowerCase().match(/[a-z0-9]+/g)?.filter((w) => !STOP.has(w)) ?? [];
-  return slugify(words.slice(0, 3).join("-"), 24);
-}
 
 interface Variant {
   id: number;
@@ -292,7 +276,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
           Back
         </Button>
       )}
-      <span className="flex-1" />
+      {!mobile && <span className="flex-1" />}
       {!launched ? (
         step === 0 ? (
           <Button variant="primary" trailing={<ArrowRight />} disabled={!valid[0]} onClick={() => setStep(1)} className={mobile ? "flex-1" : undefined}>
@@ -331,7 +315,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
       maxHeight="94dvh"
       footer={footer}
     >
-      <div className="flex flex-col gap-5 md:min-h-[480px]">
+      <div className="flex flex-col gap-5 md:min-h-[min(480px,calc(100dvh-264px))]">
         <StepRail steps={STEPS} current={step} reachable={launched ? step : maxReachable} onJump={(i) => !launched && setStep(i)} />
         <AnimatePresence mode="popLayout" initial={false}>
           <motion.div key={step} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }} transition={spring.smooth} className="flex flex-col gap-4">

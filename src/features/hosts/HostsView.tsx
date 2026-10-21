@@ -113,10 +113,10 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
   const Kind = KIND_META[profile.kind].icon;
   return (
     <motion.div {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }} layout className="min-w-0">
-      <Tile className="flex flex-col gap-4 p-4 sm:p-5">
+      <Tile className="flex flex-col gap-4 p-5 max-md:gap-3 max-md:p-3.5">
         <div className="flex items-start gap-3">
           <span
-            className="relative grid size-11 shrink-0 place-items-center rounded-lg text-white shadow-d1 [&_svg]:size-5"
+            className="relative grid size-11 shrink-0 place-items-center rounded-lg text-white shadow-d1 max-md:size-10 [&_svg]:size-5"
             style={{ background: `linear-gradient(135deg, ${profile.color ?? "#a35cf0"}, rgb(255 255 255 / 0.08))` }}
           >
             <Kind />
@@ -124,7 +124,7 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-              <h3 className="max-w-full min-w-0 truncate font-display text-xl font-bold">{profile.name}</h3>
+              <h3 className="max-w-full min-w-0 truncate font-display text-xl font-bold max-md:text-lg">{profile.name}</h3>
               <Badge>{KIND_META[profile.kind].short}</Badge>
               {profile.autoConnect && <Badge tone="accent">Auto</Badge>}
             </div>
@@ -178,10 +178,10 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
             <Counts hostId={profile.id} />
             <Health hostId={profile.id} />
             <Versions hostId={profile.id} />
-            <div className="border-t border-line pt-3">
+            <div className="border-t border-line pt-3 max-md:pt-1">
               <button
                 type="button"
-                className="flex w-full items-center gap-2 rounded-sm text-left text-sm font-bold text-ink-2 focus-ring"
+                className="flex w-full items-center gap-2 rounded-sm text-left text-sm font-bold text-ink-2 focus-ring max-md:min-h-10"
                 aria-expanded={setupOpen}
                 onClick={() => setSetupOpen((o) => !o)}
               >
@@ -219,9 +219,9 @@ export function HostsView() {
   );
   const online = profiles.filter((p) => status[p.id]?.phase === "online").length;
   return (
-    <div className="flex min-h-full flex-col">
+    <div className={cn("flex min-h-full flex-col", !mobile && "@container")}>
       {mobile && <MobileHeader title="Hosts" subtitle={`${profiles.length} saved`} back actions={add} />}
-      <div className={cn("mx-auto grid w-full flex-1 content-start gap-4", mobile ? "px-3 pb-6" : "max-w-[1200px] px-8 pt-7 pb-10 xl:grid-cols-2")}>
+      <div className={cn("mx-auto grid w-full flex-1 content-start", mobile ? "gap-3 px-3 pt-1 pb-5" : "max-w-[1200px] gap-4 px-8 pt-7 pb-10 @[64rem]:grid-cols-2")}>
         {!mobile && (
           <PageHeader
             className="col-span-full mb-1"

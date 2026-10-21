@@ -10,10 +10,12 @@
 //! the (mutable) message lazily, so `message` may already be ahead of the delta (observed in
 //! samples 01/02/11). Prefix-diffing is exact in both cases and makes mid-turn joins work too.
 //!
-//! **Ids** are stable across snapshot and live frames: user `u<ts>`, assistant/thinking blocks
-//! `a<ts>.<block>`, tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction
-//! `c<entryId>`, notices `n<seq>`, retry streaks `r<seq>`.
+//! **Ids** are stable across snapshot and live frames: user (and inbound IRC) `u<ts>`,
+//! assistant/thinking blocks `a<ts>.<block>`, tools `t:<toolCallId>`, model/thinking markers
+//! `m<entryId>`, compaction `c<entryId>`, notices `n<seq>`, retry streaks `r<seq>`.
 
+mod irc;
+mod spend;
 mod tools;
 mod ui;
 mod util;
@@ -22,17 +24,19 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 use tf_proto::{
-    ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, FileStatus, HistoryPage,
-    Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
-    SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase,
-    TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo,
+    ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, CostSplit, FileStatus,
+    HistoryPage, Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
+    SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase, TpsSplit,
+    TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo, IrcItem,
 };
 
 use crate::frame::{AgentSnapshot, HostFrame, SessionHeader, SessionState, UiRequestFrame};
 use crate::guest::{EndReason, GuestEvent, Snapshot};
 use util::{arr, b, clip, content_images, content_text, f, first_line, non_empty, s, ts, u};
 
+pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, Spend};
 pub use ui::UiReply;
+use spend::Playback;
 
 /// Rows carried by the `reset` event; older rows page through [`Replica::history`].
 pub const RESET_LIMIT: usize = 300;
@@ -120,7 +124,8 @@ struct SubState {
     parent_tool: Option<String>,
 }
 
-/// What the main session journal says that collab does not mirror (`mode_change`, `custom`).
+/// What the main session journal says that collab does not mirror (`mode_change`, `custom`,
+/// `model_usage`).
 #[derive(Debug, Clone)]
 struct Journal {
     /// Next byte offset of the main session JSONL to read.
@@ -129,12 +134,21 @@ struct Journal {
     mode: OmpMode,
     /// Latest `/todo` edit by the user (`custom user_todo_edit`), until a newer todo tool result.
     todo_edit: Option<Vec<TodoPhase>>,
+    /// The main agent's side calls (`model_usage`: judges, title, compaction helpers…).
+    side: Spend,
 }
 
 impl Default for Journal {
     fn default() -> Self {
-        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None }
+        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None, side: Spend::default() }
     }
+}
+
+/// Spend tf-hostd read from the session's artifacts dir ([`ArtifactLedger`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Artifacts {
+    subagents: Spend,
+    advisor: Spend,
 }
 
 /// omp `Goal` (`mode_change.data.goal`) → `GoalInfo`; `None` once complete.
@@ -195,7 +209,14 @@ pub struct Replica {
     seq: u64,
     retry: Option<RetryStreak>,
     counted: HashSet<String>,
-    cost: Option<CostInfo>,
+    /// The main agent's assistant turns (`None` until the first usage record).
+    main_spend: Option<Spend>,
+    /// Completed `task` results (`details.usage`): the floor of the subagent spend.
+    task_spend: Spend,
+    /// Artifact transcripts (subagent tree, advisor), kept across resyncs of the same session.
+    artifacts: Option<Artifacts>,
+    /// Subagent/advisor replies being replayed for `Liveness.tps`.
+    playback: Vec<Playback>,
     subs: BTreeMap<String, SubState>,
     ui: ui::UiState,
     ended: bool,
@@ -240,7 +261,10 @@ impl Replica {
             seq: 0,
             retry: None,
             counted: HashSet::new(),
-            cost: None,
+            main_spend: None,
+            task_spend: Spend::default(),
+            artifacts: None,
+            playback: Vec::new(),
             subs: BTreeMap::new(),
             ui: ui::UiState::default(),
             ended: false,
@@ -333,8 +357,64 @@ impl Replica {
         self.turn_started_at.filter(|_| self.running)
     }
 
+    /// Session spend as omp's status line totals it: main (assistant turns + journal
+    /// `model_usage`) + subagents (`max` of task results, artifact tree, live progress) +
+    /// advisor. `None` until anything was billed. See [`spend`] for the sources.
     pub fn usage(&self) -> Option<CostInfo> {
-        self.cost.clone()
+        let mut main = self.main_spend.unwrap_or_default();
+        main.add(&self.journal.side);
+        let subagents = self.subagent_spend();
+        let advisor = self.artifacts.map(|a| a.advisor).unwrap_or_default();
+        if self.main_spend.is_none() && main.is_empty() && subagents.is_empty() && advisor.is_empty() {
+            return None;
+        }
+        let mut total = main;
+        total.add(&subagents);
+        total.add(&advisor);
+        Some(CostInfo {
+            usd: total.usd,
+            input: total.input,
+            output: total.output,
+            cache_read: total.cache_read,
+            cache_write: total.cache_write,
+            split: Some(CostSplit { main: main.usd, subagents: subagents.usd, advisor: advisor.usd }),
+        })
+    }
+
+    /// omp: `max(subagent tree, completed task results)`. Without artifact access (tests, a
+    /// remote omp) the live `progress.cost` sum stands in for the tree; with it, progress still
+    /// covers a subagent whose transcript is not on disk yet. Progress has no token split.
+    fn subagent_spend(&self) -> Spend {
+        let progress = Spend { usd: self.subs.values().filter_map(|s| s.progress.as_ref().and_then(|p| f(p, "cost"))).filter(|c| c.is_finite()).sum(), ..Spend::default() };
+        let tree = self.artifacts.map(|a| a.subagents).unwrap_or_default();
+        [self.task_spend, tree, progress].into_iter().fold(Spend::default(), |best, s| if s.usd > best.usd { s } else { best })
+    }
+
+    /// Folds what tf-hostd read from the session's artifacts dir: the ledger's running totals and
+    /// the calls that just completed (replayed for throughput when recent).
+    pub fn apply_artifacts(&mut self, ledger: &ArtifactLedger, calls: &[ArtifactCall], now: Millis) -> Update {
+        let mut out = Update::default();
+        let before = self.meta.clone();
+        self.artifacts = Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() });
+        self.playback.retain(|p| p.end > now);
+        self.playback.extend(calls.iter().filter_map(|c| Playback::of(c, now)));
+        self.refresh_meta();
+        if self.meta != before {
+            out.meta_changed = true;
+            out.events.push(SessionEvent::Meta { meta: self.meta.clone() });
+        }
+        out
+    }
+
+    /// The replica's artifact totals differ from `ledger`'s (first scan, a resync of another
+    /// session, a rewritten transcript).
+    pub fn artifacts_stale(&self, ledger: &ArtifactLedger) -> bool {
+        self.artifacts != Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() })
+    }
+
+    /// A subagent/advisor reply is still being replayed into `Liveness.tps` at `now`.
+    pub fn replaying(&self, now: Millis) -> bool {
+        self.playback.iter().any(|p| p.end > now)
     }
 
     pub fn ui(&self) -> Option<&UiRequest> {
@@ -355,24 +435,37 @@ impl Replica {
     }
 
     pub fn liveness(&self, now: Millis) -> Liveness {
-        let tps = self.tps(now);
         let k = self.live_key();
+        let split = self.tps_split(now);
+        let total = split.main + split.subagents + split.advisor;
         Liveness {
             last_event_at: self.last_event_at,
             streaming: k.streaming,
             thinking: k.thinking,
             tool: self.active_tools.last().map(|(_, t)| t.clone()),
-            tps,
+            tps: (total > 0.0).then_some(total),
+            tps_split: (total > 0.0).then_some(split),
             line: k.line,
         }
     }
 
-    fn tps(&self, now: Millis) -> Option<f32> {
-        if !self.running {
-            return None;
+    /// Output tok/s per spender at `now`: the main agent's streamed deltas over the last 3 s
+    /// (chars / 4), plus every subagent/advisor reply being replayed.
+    fn tps_split(&self, now: Millis) -> TpsSplit {
+        let main = if self.running {
+            let chars: u32 = self.rate.iter().filter(|(t, _)| now - t <= TPS_WINDOW_MS).map(|(_, n)| n).sum();
+            chars as f32 / 4.0 / (TPS_WINDOW_MS as f32 / 1000.0)
+        } else {
+            0.0
+        };
+        let mut split = TpsSplit { main, subagents: 0.0, advisor: 0.0 };
+        for p in self.playback.iter().filter(|p| p.start <= now && now < p.end) {
+            match p.kind {
+                ArtifactKind::Subagent => split.subagents += p.rate,
+                ArtifactKind::Advisor => split.advisor += p.rate,
+            }
         }
-        let chars: u32 = self.rate.iter().filter(|(t, _)| now - t <= TPS_WINDOW_MS).map(|(_, n)| n).sum();
-        (chars > 0).then(|| chars as f32 / 4.0 / (TPS_WINDOW_MS as f32 / 1000.0))
+        split
     }
 
     fn live_key(&self) -> LiveKey {
@@ -465,10 +558,16 @@ impl Replica {
         // Journal state survives a resync of the same session (not a rotation).
         let same_session = self.header.as_ref().is_some_and(|h| h.id == snap.welcome.header.id);
         let journal = if same_session { std::mem::take(&mut self.journal) } else { Journal::default() };
+        // So does what tf-hostd read from the artifacts dir (it may land before the first snapshot).
+        let keep_artifacts = same_session || self.header.is_none();
+        let artifacts = if keep_artifacts { self.artifacts.take() } else { None };
+        let playback = if keep_artifacts { std::mem::take(&mut self.playback) } else { Vec::new() };
         *self = Replica::new(agent_id);
         self.authors = authors;
         self.expected_authors = expected;
         self.journal = journal;
+        self.artifacts = artifacts;
+        self.playback = playback;
         self.meta.goal = self.journal.goal.clone();
         self.meta.mode = self.journal.mode;
         self.now = out_now(self.now, snap);
@@ -936,6 +1035,15 @@ impl Replica {
         }
         let t = entry_ts.or_else(|| ts(msg)).unwrap_or(self.now);
         let id = format!("u{t}");
+        if let Some(message) = irc::incoming(role, custom_type, msg) {
+            let is_new = !self.items.contains_key(&id);
+            let (text, peer) = (message.text.clone(), message.peer.clone());
+            self.upsert(TranscriptItem::Irc(IrcItem { id, at: t, message }), out);
+            if is_new && self.emit {
+                out.signals.push(Signal::Prompted { text, author: Some(format!("{peer} via IRC")) });
+            }
+            return;
+        }
         let text = match custom_type {
             Some("advisor") => advisor_text(msg).unwrap_or_else(|| content_text(msg.get("content"))),
             _ => content_text(msg.get("content")),
@@ -1256,6 +1364,9 @@ impl Replica {
                         if !skip {
                             self.tool_result(msg, out);
                         }
+                        if s(msg, "toolName") == Some("task") {
+                            self.count_task_cost(&entry_id, msg);
+                        }
                     }
                     Some(_) => self.user_message(msg, None, out),
                     None => {}
@@ -1309,9 +1420,10 @@ impl Replica {
     }
 
     /// Ingest a slice of the main session's JSONL journal (a `fetch_transcript(main, journal_offset())`
-    /// reply). omp's collab host mirrors neither `mode_change` nor `custom` entries, so goal and plan
-    /// mode (`meta.goal`, `meta.mode`) and user `/todo` edits come from here. Keep fetching while
-    /// the reply's text is non-empty (replies are capped at 4 MiB).
+    /// reply). omp's collab host mirrors neither `mode_change`, `custom` nor `model_usage` entries,
+    /// so goal and plan mode (`meta.goal`, `meta.mode`), user `/todo` edits and the main agent's
+    /// side-call spend come from here. Keep fetching while the reply's text is non-empty (replies
+    /// are capped at 4 MiB).
     pub fn apply_journal(&mut self, chunk: &crate::guest::TranscriptChunk) -> Update {
         let mut out = Update::default();
         if chunk.error.is_some() {
@@ -1324,12 +1436,20 @@ impl Replica {
         }
         for line in chunk.text.lines() {
             if let Ok(entry) = serde_json::from_str::<Value>(line) {
-                if matches!(s(&entry, "type"), Some("mode_change" | "custom")) {
-                    self.journal_entry(&entry);
+                match s(&entry, "type") {
+                    Some("mode_change" | "custom") => self.journal_entry(&entry),
+                    // Side calls billed to the main agent (omp `entryUsage`); collab never mirrors them.
+                    Some("model_usage") => {
+                        if let Some(usage) = entry.get("usage") {
+                            self.journal.side.add_usage(usage);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
         self.journal.offset = chunk.new_size;
+        self.meta.cost = self.usage();
         if self.meta != before {
             out.meta_changed = true;
             out.events.push(SessionEvent::Meta { meta: self.meta.clone() });
@@ -1375,12 +1495,17 @@ impl Replica {
             return;
         }
         let Some(usage) = msg.get("usage") else { return };
-        let c = self.cost.get_or_insert(CostInfo { usd: 0.0, input: 0, output: 0, cache_read: 0, cache_write: 0 });
-        c.input += u(usage, "input").unwrap_or(0);
-        c.output += u(usage, "output").unwrap_or(0);
-        c.cache_read += u(usage, "cacheRead").unwrap_or(0);
-        c.cache_write += u(usage, "cacheWrite").unwrap_or(0);
-        c.usd += usage.get("cost").and_then(|c| f(c, "total")).unwrap_or(0.0);
+        self.main_spend.get_or_insert_default().add_usage(usage);
+    }
+
+    /// A completed `task` result carries its children's spend (`details.usage`; absent for async
+    /// spawns, whose children only show up in the artifact tree and `progress`).
+    fn count_task_cost(&mut self, entry_id: &str, msg: &Value) {
+        let Some(usage) = msg.get("details").and_then(|d| d.get("usage")).filter(|u| u.is_object()) else { return };
+        if entry_id.is_empty() || !self.counted.insert(entry_id.to_owned()) {
+            return;
+        }
+        self.task_spend.add_usage(usage);
     }
 
     // ── subagents ──────────────────────────────────────────────────────
@@ -1426,6 +1551,7 @@ impl Replica {
     fn refresh_meta(&mut self) {
         let cwd = self.session_cwd();
         let subagents = self.subagents();
+        let cost = self.usage();
         let st = &self.state;
         let m = &mut self.meta;
         m.session_id = self.header.as_ref().map(|h| h.id.clone()).filter(|s| !s.is_empty());
@@ -1445,8 +1571,8 @@ impl Replica {
             let pct = c.percent.unwrap_or(if window > 0.0 { tokens / window * 100.0 } else { 0.0 });
             Some(ContextUsage { tokens: tokens as u64, window: window as u64, pct: pct as f32 })
         });
-        m.cost = self.cost.clone();
-        // Average of the last finished turn; the live rate is in `Liveness.tps`.
+        m.cost = cost;
+        // Average of the main agent's last finished turn; the live rate is in `Liveness.tps`.
         m.tps = self.turn_tps;
         m.subagents = subagents;
         m.started_at = self.header.as_ref().and_then(|h| util::parse_rfc3339(&h.timestamp));
@@ -1663,7 +1789,8 @@ fn subagent_view(id: &str, st: &SubState) -> Subagent {
         tokens: p.and_then(|p| u(p, "tokens")),
         model: p.and_then(|p| non_empty(p, "resolvedModel")).map(str::to_owned),
         line,
-        progress: None,
+        completion_pct: p.and_then(|p| tools::completion_pct(p, status)),
+        context: p.and_then(tools::subagent_context),
         tool_count: p.and_then(|p| u(p, "toolCount")).map(|n| n as u32),
         parent_id: snap.and_then(|a| a.parent_id.clone()).or_else(|| st.parent_tool.clone()),
     }

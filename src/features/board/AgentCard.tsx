@@ -67,7 +67,7 @@ const BURST_STATUS = { running: "running", needs: "needs-you", review: "review",
 
 function ArrivalBurst({ lane }: { lane: Column }) {
   return (
-    <span data-status={BURST_STATUS[lane]} aria-hidden className="pointer-events-none absolute inset-0 z-20">
+    <span data-status={BURST_STATUS[lane]} aria-hidden className="pointer-events-none absolute inset-0 z-raised">
       <motion.span
         className="absolute inset-0 rounded-xl shadow-[0_0_0_2px_var(--st-solid),0_0_30px_4px_rgb(var(--st-rgb)/0.6)]"
         initial={{ opacity: 1, scale: 0.96 }}
@@ -140,6 +140,21 @@ function ContextMeter({ pct }: { pct: number }) {
   );
 }
 
+/** Running subagents' own completion estimate (mean when several): the % omp's terminal shows on their rows. */
+function SubagentsDone({ pct, live }: { pct: number; live: number }) {
+  const label = live > 1 ? `Subagents about ${Math.round(pct)}% done` : `Subagent about ${Math.round(pct)}% done`;
+  return (
+    <Tooltip content={<span className="block max-w-64">{`${label}: ${live > 1 ? "the average of the running subagents' own estimates" : "its own estimate"} of how far along the task is. omp asks every few minutes.`}</span>}>
+      <span className="inline-flex shrink-0 items-center gap-1">
+        <ProgressRing done={pct} total={100} size={12} stroke={2} label={null} ariaLabel={label} />
+        <span className="font-mono text-2xs font-bold text-accent-hi tabular">{Math.round(pct)}%</span>
+        {/* the word only fits beside the context meter, diff stat and model on roomier cards */}
+        <span className="hidden text-2xs text-mute-2 @min-[300px]/card:inline">{live > 1 ? "subagents" : "subagent"}</span>
+      </span>
+    </Tooltip>
+  );
+}
+
 export interface AgentCardProps {
   agentKey: string;
   /** Lane the card is rendered in (may lead the host state during an optimistic drop). */
@@ -189,7 +204,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
     const n = agent.needs;
     body = (
       <>
-        <p className="mt-2 text-sm leading-snug font-bold text-ink">“{n.question || n.title}”</p>
+        <p className="mt-2 text-sm leading-snug font-bold wrap-break-word text-ink">“{n.question || n.title}”</p>
         {n.detail && <p className="mt-1 line-clamp-2 text-xs text-mute">{n.detail}</p>}
         {n.command && !n.question.includes(n.command) && (
           <pre className="mt-2 max-h-20 overflow-hidden rounded-sm well px-2.5 py-1.5 font-mono text-2xs whitespace-pre-wrap text-ink-2">{n.command}</pre>
@@ -270,7 +285,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
       data-morph-key={floating ? undefined : agentKey}
       selected={selected || picked}
       className={cn(
-        "group/card relative flex flex-col rounded-xl p-3.5 outline-none",
+        "group/card relative flex flex-col rounded-xl p-3.5 outline-none @container/card",
         lane === "needs" && "st-border-grad",
         lane === "done" && "py-3",
         stale && "opacity-70 grayscale-[0.65]",
@@ -292,8 +307,9 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
               Ready to review
             </span>
           )}
+          {/* the ring avatar already shows done/total: the words only appear when the card has room for them */}
           {todos && todos.total > 0 && (
-            <span className="min-w-0 truncate text-2xs font-semibold text-mute">
+            <span className="hidden min-w-0 truncate text-2xs font-semibold text-mute @min-[290px]/card:inline">
               {todos.done}/{todos.total} todos
             </span>
           )}
@@ -334,7 +350,13 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           <div className="flex min-w-0 items-center gap-1.5 text-xs">
             {lane === "running" && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
             {multiHost && <HostDot hostId={agent.hostId} />}
-            <span data-morph={floating ? undefined : "name"} data-morph-key={floating ? undefined : agentKey} className="shrink-0 font-extrabold text-ink">
+            {/* long names truncate too, but the repo/branch gives way first (shrinks 4× faster) */}
+            <span
+              data-morph={floating ? undefined : "name"}
+              data-morph-key={floating ? undefined : agentKey}
+              className="min-w-[4ch] truncate font-extrabold text-ink"
+              title={agent.name}
+            >
               {agent.name}
             </span>
             {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
@@ -344,7 +366,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
               </span>
             )}
             {(agent.repo || agent.branch) && (
-              <span className="min-w-0 truncate font-mono text-2xs text-mute-2">
+              <span className="min-w-0 shrink-[4] truncate font-mono text-2xs text-mute-2">
                 {agent.repo}
                 {agent.branch && ` · ${agent.branch}`}
               </span>
@@ -361,7 +383,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
               </span>
             )}
           </div>
-          <h4 className={cn("font-sans leading-snug font-bold text-ink", lane === "done" ? "line-clamp-1 text-xs" : "line-clamp-2 text-sm")}>{agent.title || agent.name}</h4>
+          <h4 className={cn("font-sans leading-snug font-bold wrap-break-word text-ink", lane === "done" ? "line-clamp-1 text-xs" : "line-clamp-2 text-sm")}>{agent.title || agent.name}</h4>
         </div>
       </div>
 
@@ -371,6 +393,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
       {lane !== "done" ? (
         <div className="mt-2.5 flex min-w-0 items-center gap-2.5 border-t border-line pt-2">
           {omp?.context && <ContextMeter pct={omp.context.pct} />}
+          {omp?.subagents?.completionPct != null && omp.subagents.live > 0 && <SubagentsDone pct={omp.subagents.completionPct} live={omp.subagents.live} />}
           {agent.diff && <DiffStat {...agent.diff} />}
           {omp?.link === "notShared" && (
             <button
@@ -445,7 +468,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             animate={{ scale: 1, rotate: 0 }}
             exit={{ scale: 0 }}
             transition={spring.bouncy}
-            className="absolute -top-1.5 -left-1.5 z-10 grid size-5 place-items-center rounded-full bg-accent text-white shadow-glow-accent"
+            className="absolute -top-1.5 -left-1.5 z-raised grid size-5 place-items-center rounded-full bg-accent text-white shadow-glow-accent"
           >
             <svg viewBox="0 0 12 12" className="size-3">
               <path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />

@@ -18,7 +18,6 @@ use tokio::sync::{Notify, mpsc, watch};
 use crate::deploy;
 use crate::engine::Inner;
 use crate::link::{Link, LinkSink};
-use crate::state::apply_patches;
 use crate::util::now_ms;
 
 pub(crate) enum ConnCmd {
@@ -38,13 +37,28 @@ pub(crate) struct HostView {
     pub live: bool,
     /// State changed since the last cache write.
     pub dirty: bool,
-    /// Recent notifications for `notification_action`.
-    pub notifications: VecDeque<Notification>,
+    /// Recent notifications (`notification_action`, cross-surface read/resolved sync).
+    pub notifications: VecDeque<Tracked>,
     /// Open sessions (`session.open` params by agent id), re-opened after a reconnect.
     pub sessions: HashMap<String, Value>,
     pub terms: HashSet<String>,
     /// Fingerprint the user confirmed with `hosts.trustKey`; consumed by the next attempt.
     pub approved_key: Option<String>,
+}
+
+/// A remembered notification and where it still demands attention.
+#[derive(Debug, Clone)]
+pub(crate) struct Tracked {
+    pub n: Notification,
+    /// Shown by the OS right now: posted, and not replaced (one per agent), retracted or
+    /// dismissed since.
+    pub posted: bool,
+    /// Needs-you: the request was seen pending in host state, so its absence later means it
+    /// was resolved (and not that the state has not caught up yet).
+    pub seen: bool,
+    pub read: bool,
+    /// Needs-you: the request was handled (answered anywhere, cancelled, agent gone).
+    pub resolved: bool,
 }
 
 pub(crate) struct HostRt {
@@ -149,16 +163,23 @@ impl HostRt {
         tokio::time::timeout(timeout, rx.wait_for(|o| *o)).await.is_ok_and(|r| r.is_ok())
     }
 
-    pub fn find_notification(&self, id: &str) -> Option<Notification> {
-        self.view.lock().unwrap().notifications.iter().find(|n| n.id == id).cloned()
+    pub fn find_notification(&self, id: &str) -> Option<Tracked> {
+        self.view.lock().unwrap().notifications.iter().find(|t| t.n.id == id).cloned()
     }
 
-    pub fn remember_notification(&self, n: Notification) {
+    /// Remembers a notification. A posted one replaces the OS notification of the same agent
+    /// (`Platform::notify` keeps one per agent), so older ones are no longer shown.
+    pub fn remember_notification(&self, t: Tracked) {
         let mut v = self.view.lock().unwrap();
+        if t.posted && !t.n.agent_id.is_empty() {
+            for old in v.notifications.iter_mut().filter(|o| o.n.agent_id == t.n.agent_id) {
+                old.posted = false;
+            }
+        }
         if v.notifications.len() == NOTIFICATION_RING {
             v.notifications.pop_front();
         }
-        v.notifications.push_back(n);
+        v.notifications.push_back(t);
     }
 
     /// `hosts.trustKey`: accept the key awaiting confirmation (phase `hostKey`) when the
@@ -187,30 +208,12 @@ struct Sink {
 impl LinkSink for Sink {
     fn snapshot(&self, rev: u64, state: HostState) {
         let (Some(inner), Some(rt)) = (self.inner.upgrade(), self.rt.upgrade()) else { return };
-        {
-            let _g = inner.emit_lock.lock().unwrap();
-            let mut v = rt.view.lock().unwrap();
-            v.state = Some((rev, state.clone()));
-            v.live = true;
-            v.dirty = true;
-            inner.send(AppEvent::HostSnapshot { host_id: rt.id.clone(), rev, state });
-        }
-        inner.refresh_badge();
+        inner.apply_snapshot(&rt, rev, state);
     }
 
     fn patch(&self, rev: u64, ops: Vec<StatePatch>) {
         let (Some(inner), Some(rt)) = (self.inner.upgrade(), self.rt.upgrade()) else { return };
-        {
-            let _g = inner.emit_lock.lock().unwrap();
-            let mut v = rt.view.lock().unwrap();
-            if let Some((r, s)) = v.state.as_mut() {
-                apply_patches(s, ops.clone());
-                *r = rev;
-            }
-            v.dirty = true;
-            inner.send(AppEvent::HostPatch { host_id: rt.id.clone(), rev, ops });
-        }
-        inner.refresh_badge();
+        inner.apply_patch(&rt, rev, ops);
     }
 
     fn push(&self, msg: ServerMsg) {

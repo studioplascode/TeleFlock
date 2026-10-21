@@ -27,23 +27,23 @@ export function MobileHeader({ title, subtitle, back = false, actions, className
   return (
     <header
       className={cn(
-        "sticky top-0 z-sticky flex min-h-14 items-center gap-1.5 bg-[rgb(11_11_16/0.72)] px-3 py-2 backdrop-blur-xl [mask-image:linear-gradient(#000_85%,transparent)]",
+        "sticky top-0 z-sticky flex min-h-12 items-center gap-1 bg-[rgb(11_11_16/0.72)] px-2.5 py-1 backdrop-blur-xl [mask-image:linear-gradient(#000_85%,transparent)]",
         className,
       )}
     >
       {back && (
-        <IconButton label="Back" size="lg" onClick={goBack} className="-ml-1.5">
+        <IconButton label="Back" size="lg" onClick={goBack} className="-ml-1">
           <ChevronLeft />
         </IconButton>
       )}
       <motion.div
-        className={cn("min-w-0 flex-1", !back && "pl-1")}
+        className={cn("min-w-0 flex-1", !back && "pl-1.5")}
         initial={{ opacity: 0, x: back ? 12 : 0, y: back ? 0 : 6 }}
         animate={{ opacity: 1, x: 0, y: 0 }}
         transition={spring.smooth}
       >
-        <h1 className="truncate font-display text-xl font-bold tracking-[-0.02em]">{title}</h1>
-        {subtitle && <div className="truncate text-xs text-mute">{subtitle}</div>}
+        <h1 className={cn("truncate font-display leading-tight font-bold tracking-[-0.02em]", back ? "text-lg" : "text-xl")}>{title}</h1>
+        {subtitle && <div className="truncate text-2xs leading-tight text-mute">{subtitle}</div>}
       </motion.div>
       {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
     </header>

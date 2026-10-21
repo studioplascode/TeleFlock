@@ -381,6 +381,9 @@ The main agent appears as `{"id":"Main","kind":"main",…}`.
 - Progress arrives on `bus` frames:
   - `task:subagent:lifecycle` = `{id, agent, status:"started"|"completed"|"failed"|"aborted", sessionFile, parentToolCallId, index, detached}`
   - `task:subagent:progress` = `{index, agent, task, assignment, progress:AgentProgress}`
+- The two percentages omp's TUI prints on a subagent row (`pi-tui/tools/agent-tree.ts` `renderAgentTreeRow`) both come from `AgentProgress`, on the bus frame and in the task tool's `details.progress[]`:
+  - `completionPercent` (0–100, accent `· 40%`, live rows only): the subagent's **own estimate** of how far along it is. omp's completion probe (`task/completion-probe.ts`) asks the running subagent in an ephemeral side turn at 2, 5, 10, 30, 60 min (then hourly), only in the interactive TUI and only for the main agent's direct subagents (`task.completionProbe`, default on). Reply `{"pct":40,"stage":"…"}`; `executor.ts` sets 99 once the subagent yields. Sample `17`.
+  - `contextTokens` / `contextWindow` (dim `· 2.4%/272K`): the subagent's context usage; the TUI computes `contextTokens / contextWindow * 100` (`formatAgentStatRun`). Sample `07`.
 - The roster arrives on `agents` frames.
 - Completion is delivered to the main agent as entry `custom_message`/`async-result`, which starts a new turn.
 
@@ -726,7 +729,7 @@ Collab plus a companion extension keeps the real TUI, gives about 95% of the str
 **Frame logs.** `NN-*.jsonl`: one decrypted frame per line, as `{seq, recvAt(ms), dir: "h2g"|"g2h"|"ctl", bytes (ciphertext envelope), decryptMs?, frame}`.
 - `ctl` rows are relay TEXT control messages (`room-closed`) and the PoC's own `ws-close` records.
 - `*.summary.json` files hold latency marks, frame counts, bytes and the herdr timeline.
-- Files: `00-join`, `01-prompt-text`, `01b-prompt-streaming-thinking`, `02-bash-tool`, `03-edit-tool`, `04-todo`, `05-ask-ui-response`, `05a-ask-wrong-label`, `06-abort`, `07-task-subagent`, `08-fetch-transcript`, `09-agent-cmd-chat`, `10-injected-switch-thinking`, `11-guest-slash-not-executed` (also the visible-thinking sample), `12-relay-restart`, `13-view-only-guest`, `14-session-rotation-bye`, `15-tui-typed-prompt-mirrored`, `16-tool-approval`.
+- Files: `00-join`, `01-prompt-text`, `01b-prompt-streaming-thinking`, `02-bash-tool`, `03-edit-tool`, `04-todo`, `05-ask-ui-response`, `05a-ask-wrong-label`, `06-abort`, `07-task-subagent`, `08-fetch-transcript`, `09-agent-cmd-chat`, `10-injected-switch-thinking`, `11-guest-slash-not-executed` (also the visible-thinking sample), `12-relay-restart`, `13-view-only-guest`, `14-session-rotation-bye`, `15-tui-typed-prompt-mirrored`, `16-tool-approval`, `17-task-completion-probe` (a ~3 min subagent: `completionPercent` from omp's completion probe).
 
 **Registry.**
 - `registry-list.json`, `registry-list-input-required.json`, `registry-list-after-new.json`

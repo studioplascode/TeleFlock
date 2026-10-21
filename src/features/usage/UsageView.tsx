@@ -7,6 +7,7 @@ import { AgentGlyph, EmptyState, NumberTicker, PageHeader, Skeleton, Tile, Toolt
 import { reportError } from "@/features/board/agentActions";
 import { useTodayUsage } from "@/features/board/BentoRow";
 import { MobileHeader } from "@/features/shell/MobileHeader";
+import { LimitsSection } from "./LimitsSection";
 
 const DAYS = 14;
 const REFRESH_MS = 60_000;
@@ -80,14 +81,15 @@ function TodayTile({ hostFilter }: { hostFilter: string }) {
   midnight.setHours(0, 0, 0, 0);
   const hours = Math.max(0.5, (now - midnight.getTime()) / 3_600_000);
   const pace = cost / hours;
+  const mobile = useIsMobile();
   return (
-    <Tile variant="omp" className="flex min-h-56 flex-col p-5">
+    <Tile variant="omp" className="flex min-h-56 flex-col p-5 max-md:min-h-0 max-md:p-4">
       <span className="kicker text-white/80">Today</span>
-      <NumberTicker value={cost} format={formatUsd} className="mt-2 font-display text-mega font-bold" />
+      <NumberTicker value={cost} format={formatUsd} className={cn("mt-2 font-display font-bold", mobile ? "mt-1 text-hero" : "text-hero @3xl:text-mega")} />
       <span className="mt-1 text-sm font-semibold text-white/85">
         <NumberTicker value={tokens} format={formatCompact} className="font-bold text-white" /> tokens
       </span>
-      <div className="mt-auto grid grid-cols-3 gap-3 pt-4 text-xs font-semibold text-white/80">
+      <div className="mt-auto grid grid-cols-3 gap-3 pt-4 text-xs font-semibold text-white/80 max-md:pt-3 [&>span]:min-w-0 [&_b]:truncate">
         <span>
           <b className="block font-display text-lg text-white">{formatCompact(io[0])}</b>in
         </span>
@@ -95,7 +97,8 @@ function TodayTile({ hostFilter }: { hostFilter: string }) {
           <b className="block font-display text-lg text-white">{formatCompact(io[1])}</b>out
         </span>
         <span title="Average spend per hour today, projected over 24 h">
-          <b className="block font-display text-lg text-white">{formatUsd(pace)}/h</b>~{formatUsd(pace * 24)} / day
+          <b className="block font-display text-lg text-white">{formatUsd(pace)}/h</b>
+          <span className="block truncate">~{formatUsd(pace * 24)} / day</span>
         </span>
       </div>
     </Tile>
@@ -108,34 +111,38 @@ function DaysChart({ days, todayLive, className }: { days: UsageDay[]; todayLive
   const max = Math.max(...values, 0.01);
   const total = values.reduce((a, b) => a + b, 0);
   return (
-    <Tile className={cn("flex min-h-56 flex-col p-5", className)}>
+    <Tile className={cn("flex min-h-56 flex-col p-5 max-md:min-h-0 max-md:p-4", className)}>
       <div className="flex items-baseline gap-2">
-        <span className="kicker">Last {days.length} days</span>
+        <span className="kicker">{days.length > 0 ? `Last ${days.length} days` : "Daily cost"}</span>
         <span className="ml-auto font-display text-lg font-bold text-ink">{formatUsd(total)}</span>
       </div>
-      <div className="mt-4 flex min-h-36 flex-1 items-end gap-1.5" role="img" aria-label={`Daily cost for the last ${days.length} days`}>
-        {days.map((d, i) => {
-          const v = values[i] ?? 0;
-          const today = d.day === todayKey;
-          return (
-            <Tooltip key={d.day} content={`${d.day} · ${formatUsd(v)} · ${formatCompact(d.tokens)} tokens`}>
-              <div className="group flex h-full flex-1 flex-col items-center justify-end gap-1.5">
-                <motion.div
-                  data-status={today ? "running" : "idle"}
-                  className={cn(
-                    "w-full min-h-[3px] rounded-t-[6px] rounded-b-[3px]",
-                    today ? "st-bg live-gradient shadow-glow-run" : "bg-white/10 group-hover:bg-accent/50",
-                  )}
-                  initial={{ height: 0 }}
-                  animate={{ height: `${(v / max) * 100}%` }}
-                  transition={{ ...spring.gentle, delay: i * 0.03 }}
-                />
-                <span className={cn("font-mono text-[9.5px] tabular", today ? "font-bold text-ink" : "text-mute-2")}>{d.day.slice(8)}</span>
-              </div>
-            </Tooltip>
-          );
-        })}
-      </div>
+      {days.length === 0 ? (
+        <p className="m-auto py-6 text-center text-sm text-mute">No history yet: daily totals appear once a host reports usage.</p>
+      ) : (
+        <div className="mt-4 flex min-h-36 flex-1 items-end gap-1.5 max-md:mt-3 max-md:min-h-28 max-md:gap-1" role="img" aria-label={`Daily cost for the last ${days.length} days`}>
+          {days.map((d, i) => {
+            const v = values[i] ?? 0;
+            const today = d.day === todayKey;
+            return (
+              <Tooltip key={d.day} content={`${d.day} · ${formatUsd(v)} · ${formatCompact(d.tokens)} tokens`}>
+                <div className="group flex h-full flex-1 flex-col items-center justify-end gap-1.5">
+                  <motion.div
+                    data-status={today ? "running" : "idle"}
+                    className={cn(
+                      "w-full min-h-[3px] rounded-t-[6px] rounded-b-[3px]",
+                      today ? "st-bg live-gradient shadow-glow-run" : "bg-white/10 group-hover:bg-accent/50",
+                    )}
+                    initial={{ height: 0 }}
+                    animate={{ height: `${(v / max) * 100}%` }}
+                    transition={{ ...spring.gentle, delay: i * 0.03 }}
+                  />
+                  <span className={cn("font-mono text-[9.5px] tabular", today ? "font-bold text-ink" : "text-mute-2")}>{d.day.slice(8)}</span>
+                </div>
+              </Tooltip>
+            );
+          })}
+        </div>
+      )}
     </Tile>
   );
 }
@@ -186,14 +193,14 @@ function ModelDonut({ models }: { models: UsageModel[] }) {
 function ModelsTile({ models, className }: { models: UsageModel[]; className?: string }) {
   const max = Math.max(...models.map((m) => m.costUsd), 0.01);
   return (
-    <Tile className={cn("flex flex-col p-5", className)}>
+    <Tile className={cn("flex flex-col p-5 max-md:p-4", className)}>
       <span className="kicker">By model</span>
       {models.length === 0 ? (
         <p className="mt-4 text-sm text-mute">No model usage recorded yet.</p>
       ) : (
         <>
           <ModelDonut models={models} />
-          <ul className="mt-5 flex flex-col gap-3">
+          <ul className="mt-5 flex flex-col gap-3 max-md:mt-4 max-md:gap-2.5">
             {models.map((m, i) => {
               const theme = agentGlyphTheme(m.model);
               return (
@@ -268,7 +275,7 @@ function AgentsTile({ hostFilter, className }: { hostFilter: string; className?:
   );
   const max = useCore((s) => (ranked[0] ? (s.agents[ranked[0]]?.omp?.cost?.usd ?? 0) : 0));
   return (
-    <Tile className={cn("flex flex-col p-5", className)}>
+    <Tile className={cn("flex flex-col p-5 max-md:p-4", className)}>
       <span className="kicker">Per agent · this session</span>
       {ranked.length === 0 ? (
         <p className="mt-4 text-sm text-mute">Cost appears once an omp agent has finished a turn.</p>
@@ -297,28 +304,31 @@ export function UsageView() {
     hostIds.length === 0 ? (
       <EmptyState title="No hosts connected" description="Usage is read from each host's omp sessions." className="mt-10" />
     ) : (
-      <div className={cn("grid gap-3", mobile ? "grid-cols-1" : "grid-cols-3")}>
-        <TodayTile hostFilter={filter} />
-        {loading && days.length === 0 ? (
-          <Skeleton className={cn("min-h-56 rounded-tile", !mobile && "col-span-2")} />
-        ) : (
-          <DaysChart days={days} todayLive={cost} className={cn(!mobile && "col-span-2")} />
-        )}
-        <ModelsTile models={models} />
-        <AgentsTile hostFilter={filter} className={cn(!mobile && "col-span-2")} />
+      <div className={cn("flex flex-col", mobile ? "gap-5" : "gap-7")}>
+        <div className={cn("grid", mobile ? "grid-cols-1 gap-2.5" : "grid-cols-2 gap-3 @3xl:grid-cols-3")}>
+          <TodayTile hostFilter={filter} />
+          {loading && days.length === 0 ? (
+            <Skeleton className={cn("min-h-56 rounded-tile", !mobile && "@3xl:col-span-2")} />
+          ) : (
+            <DaysChart days={days} todayLive={cost} className={cn(!mobile && "@3xl:col-span-2")} />
+          )}
+          <ModelsTile models={models} />
+          <AgentsTile hostFilter={filter} className={cn(!mobile && "@3xl:col-span-2")} />
+        </div>
+        <LimitsSection hostIds={hostIds} />
       </div>
     );
 
   if (mobile)
     return (
       <div className="flex min-h-full flex-col">
-        <MobileHeader title="Usage" subtitle="Cost and tokens" back />
-        <div className="px-4 pt-2 pb-6">{body}</div>
+        <MobileHeader title="Usage" subtitle="Cost, tokens and limits" back />
+        <div className="px-3 pt-1 pb-5">{body}</div>
       </div>
     );
   return (
-    <div className="mx-auto flex max-w-[1200px] flex-col gap-5 px-8 pt-7 pb-12">
-      <PageHeader kicker="Spend" title="Usage" description="Cost and tokens from every omp session on the hosts in view." />
+    <div className="@container mx-auto flex max-w-[1200px] flex-col gap-5 px-8 pt-7 pb-12">
+      <PageHeader kicker="Spend" title="Usage" description="Cost and tokens from every omp session on the hosts in view, and how much of each subscription is left." />
       {body}
     </div>
   );

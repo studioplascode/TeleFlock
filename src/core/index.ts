@@ -36,6 +36,7 @@ export {
   getAgentViews,
   getWorkspacesSnapshot,
   loadOlderActivity,
+  markAgentNotificationsRead,
   getTranscript,
   selectAgentKeys,
   useActivity,
@@ -53,6 +54,7 @@ export {
   isMuted,
   useIsMuted,
   useInbox,
+  useIrcEntries,
   useNotifications,
   useSession,
   useSessionItem,
@@ -61,6 +63,20 @@ export {
   useWorkspaces,
 } from "./hooks";
 export type { AgentFilter, HostsView, NotificationsView, SessionView, SettingsView } from "./hooks";
+export { ircOf, ircThreads, ircUnread } from "./irc";
+export type { IrcEntry, IrcThread } from "./irc";
+export {
+  describePace,
+  formatPct,
+  formatSpan,
+  projectWindow,
+  refreshLimits,
+  sessionLimits,
+  tightestWindow,
+  useAccountLimits,
+  windowsForModel,
+} from "./limits";
+export type { HostLimits, PaceOutcome, SessionLimits, WindowPace } from "./limits";
 export { navigate, useRoute, getRoute, parseHash, routeToHash } from "./nav";
 export type { Route, RouteName } from "./nav";
 export { useUi } from "./ui";

@@ -32,7 +32,7 @@ const CHIP: Record<QuickAnswerAppearance, { base: string; primary: string; neutr
     danger: "bg-[rgb(40_0_20/0.42)] text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.3)] hover:bg-[rgb(60_0_20/0.6)]",
   },
   big: {
-    base: "min-h-12 rounded-lg px-4 py-3 text-sm font-bold text-left",
+    base: "min-h-11 rounded-lg px-3.5 py-2.5 text-sm font-bold text-left",
     primary: "bg-sun text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-sun)]",
     neutral: "bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] active:bg-tile-5",
     danger: "bg-error/14 text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)] active:bg-error active:text-white",
@@ -213,7 +213,7 @@ export function QuickAnswer({
               className={cn(
                 "min-w-0 flex-1 rounded-sm px-2.5 text-xs font-semibold outline-none focus-ring",
                 appearance === "hero" ? "bg-white/90 text-[#3a0a1c] placeholder:text-[#3a0a1c]/50" : "well text-ink placeholder:text-mute-2",
-                appearance === "big" ? "min-h-12 text-sm" : "h-8",
+                appearance === "big" ? "min-h-11 text-sm" : "h-8",
               )}
             />
             <button type="submit" disabled={busy || !otherText.trim()} className={cn(chip.base, chip.primary, "pressable focus-ring disabled:opacity-50")}>

@@ -422,7 +422,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
         <div className="flex h-full flex-col">
           <MobileHeader
             back
-            title={<span className="font-mono text-lg">{open.path.slice(slash + 1)}</span>}
+            title={<span className="font-mono text-md">{open.path.slice(slash + 1)}</span>}
             subtitle={<span className="font-mono">{slash > 0 ? open.path.slice(0, slash) : ws.label}</span>}
             actions={
               <IconButton label={wrap ? "Don't wrap lines" : "Wrap lines"} size="sm" variant={wrap ? "secondary" : "ghost"} aria-pressed={wrap} onClick={() => setWrap((w) => !w)}>
@@ -433,8 +433,8 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
           <div className="min-h-0 flex-1 px-2">
             <DiffViewer key={open.path} files={[open]} layout="unified" wrap={wrap} collapsed={collapsed} onToggle={toggle} onWrap={() => setWrap(true)} compact busy={refreshing} className="h-full" />
           </div>
-          <nav className="flex shrink-0 items-center gap-2 px-3 pt-2 pb-3" aria-label="File navigation">
-            <IconButton label={prev ? `Previous: ${prev.path}` : "No previous file"} variant="secondary" disabled={!prev} onClick={() => prev && jump(prev.path)} className="size-11">
+          <nav className="flex shrink-0 items-center gap-2 px-3 pt-1.5 pb-2" aria-label="File navigation">
+            <IconButton label={prev ? `Previous: ${prev.path}` : "No previous file"} variant="secondary" disabled={!prev} onClick={() => prev && jump(prev.path)} className="size-10">
               <ChevronLeft />
             </IconButton>
             <button
@@ -443,7 +443,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
               aria-checked={seen}
               onClick={() => toggleViewed(open.path)}
               className={cn(
-                "pressable flex h-11 min-w-0 flex-1 items-center justify-center gap-2 rounded-md text-sm font-bold transition-colors focus-ring",
+                "pressable flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-md text-sm font-bold transition-colors focus-ring",
                 seen ? "bg-done/14 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.35)]" : "bg-tile-3 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]",
               )}
             >
@@ -460,7 +460,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
               variant={seen && next ? "primary" : "secondary"}
               disabled={!next}
               onClick={() => next && jump(next.path)}
-              className="size-11"
+              className="size-10"
             >
               <ChevronRight />
             </IconButton>
@@ -499,12 +499,12 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
         <div className="min-h-0 flex-1 px-3">
           {diffArea ?? <FileTree files={files} collapsed={collapsed} viewed={viewed} onSelect={jump} comfortable className="h-full" />}
         </div>
-        <div className="shrink-0 px-3 pt-2 pb-3">
+        <div className="shrink-0 px-3 pt-1.5 pb-2">
           <button
             type="button"
             onClick={() => setShipOpen(true)}
             disabled={!ship}
-            className="pressable glass flex w-full items-center gap-3 rounded-lg py-2.5 pr-3 pl-3.5 text-left focus-ring disabled:opacity-60"
+            className="pressable glass flex w-full items-center gap-3 rounded-lg py-2 pr-3 pl-3.5 text-left focus-ring disabled:opacity-60"
             aria-label={ship ? `Ship. Next: ${ship.next}` : "Ship"}
           >
             <span className="w-[140px] shrink-0">{ship ? <ShipStepper stage={ship.stage} blocked={!!ship.blocked} dots /> : <Skeleton className="h-5 rounded-full" />}</span>
@@ -581,17 +581,21 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
         <div className="grid size-10 shrink-0 place-items-center rounded-md bg-omp text-white shadow-glow-accent">
           <FileDiff className="size-5" />
         </div>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="@container flex min-w-0 flex-1 flex-col gap-1">
           <h1 className="truncate font-display text-2xl leading-tight font-bold" title={tildify(cwd ?? "", host?.info.home)}>
             Review <span className="text-accent-ink">{ws.label}</span>
           </h1>
-          <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex min-w-0 items-center gap-2.5 overflow-hidden">
             {branch && (
-              <Chip icon={<GitBranch />} className="max-w-56 shrink-0">
+              <Chip icon={<GitBranch />} className="max-w-56 min-w-0 shrink [&_svg]:shrink-0">
                 <span className="truncate">{branch}</span>
               </Chip>
             )}
-            {base && <BaseRef base={base} />}
+            {base && (
+              <span className="hidden min-w-0 @2xl:flex">
+                <BaseRef base={base} />
+              </span>
+            )}
             {hasFiles && (
               <span className="flex shrink-0 items-center gap-2 text-2xs text-mute">
                 <span className="text-line-3">·</span>
@@ -600,10 +604,10 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
               </span>
             )}
             {hasFiles && (
-              <>
+              <span className="hidden shrink-0 items-center gap-2.5 @md:flex">
                 <span className="text-2xs text-line-3">·</span>
                 <ViewedProgress done={viewed.size} total={files.length} />
-              </>
+              </span>
             )}
             {diff.data?.truncated && <Chip tone="needs-you">patch truncated</Chip>}
           </div>

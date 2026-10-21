@@ -55,7 +55,7 @@ export function Select({ options, placeholder = "Select…", className, id, ...r
                 key={o.value}
                 value={o.value}
                 disabled={o.disabled}
-                className="relative flex min-h-9 cursor-default items-center gap-2.5 rounded-sm py-1.5 pr-8 pl-2.5 text-sm font-semibold text-ink-2 outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-white/7 data-[highlighted]:text-ink data-[state=checked]:text-ink [&_svg]:size-4"
+                className="relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-sm py-1.5 pr-8 pl-2.5 text-sm font-semibold text-ink-2 outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-white/7 data-[highlighted]:text-ink data-[state=checked]:text-ink [&_svg]:size-4"
               >
                 {o.icon}
                 <span className="flex min-w-0 flex-col">

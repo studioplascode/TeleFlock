@@ -111,7 +111,15 @@ wire_struct! {
         /// Saved agent presets for the new-agent / new-worktree / fan-out flows.
         #[serde(default)]
         pub templates: Vec<AgentTemplate>,
+        /// Check GitHub releases on launch and install a newer version (Tauri app only).
+        /// Settings files written before this field existed load with `true`.
+        #[serde(default = "default_true")]
+        pub auto_update: bool,
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 wire_struct! {
@@ -182,6 +190,61 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// Self-update lifecycle of the app (Tauri shell, GitHub releases).
+    pub enum UpdatePhase {
+        Idle,
+        Checking,
+        UpToDate,
+        /// A newer release with this platform's assets exists (`UpdateStatus.latest`).
+        Available,
+        Downloading,
+        /// Windows: the installer is starting and the app exits. Android: the system install
+        /// prompt is showing.
+        Installing,
+        /// Android: TeleFlock may not install apps yet; the "install unknown apps" settings
+        /// screen was opened. The install resumes when the user comes back.
+        NeedsPermission,
+        Error,
+    }
+}
+
+wire_struct! {
+    pub struct UpdateStatus {
+        /// Running app version (`X.Y.Z[-pre]`).
+        pub current: String,
+        /// This build looks for new releases (Windows, Android, Linux AppImage / .deb and macOS
+        /// release builds).
+        pub supported: bool,
+        /// New versions are downloaded and installed by hand (macOS: no signed updater package):
+        /// never installed automatically, and `app.updateInstall` opens the download instead.
+        pub manual: bool,
+        /// Why `supported` is false, for Settings (e.g. installed with pacman, or a debug build).
+        pub unsupported_reason: Option<String>,
+        pub phase: UpdatePhase,
+        /// Newest release that is newer than `current` (no `v` prefix).
+        pub latest: Option<String>,
+        /// Download progress 0–100 while `downloading` (absent while the size is unknown).
+        pub progress: Option<u8>,
+        /// Last failure (`phase: error`), human readable.
+        pub error: Option<String>,
+        /// End of the last completed check.
+        pub checked_at: Option<Millis>,
+    }
+}
+
+wire_struct! {
+    pub struct UpdateCheckParams {
+        /// Launch check: runs once per process, only in release builds and only while
+        /// `settings.autoUpdate` is on; a newer release is installed right away.
+        #[serde(default)]
+        pub launch: bool,
+        /// Download and install right away when a newer release is found.
+        #[serde(default)]
+        pub install: bool,
+    }
+}
+
 /// Everything the app core pushes to the frontend over its single event channel.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -195,6 +258,12 @@ pub enum AppEvent {
     Session { host_id: String, agent_id: String, ev: SessionEvent },
     Term { host_id: String, term_id: String, ev: TermEvent },
     Notify { host_id: String, notification: Notification },
+    /// Notifications that no longer need attention, on every surface (in-app toast and list,
+    /// OS notification). `resolved`: the needs-you request they asked about was handled
+    /// anywhere (answered here, on another device or in omp, cancelled, the agent stopped or
+    /// went away), derived from host state. Otherwise they were read: acted on, opened, or
+    /// dismissed in the OS.
+    NotifyDone { host_id: String, ids: Vec<String>, resolved: bool },
     Tunnels { tunnels: Vec<TunnelInfo> },
     Settings { settings: Settings },
     /// Activated a notification action outside the app UI (Android notification button,
@@ -202,4 +271,6 @@ pub enum AppEvent {
     OpenAgent { host_id: String, agent_id: String },
     /// Tray / notification "Answer next": the frontend opens the Answer-next HUD.
     AnswerNext,
+    /// Self-update progress (emitted by the app shell; `app.updateStatus` returns the same).
+    Update { status: UpdateStatus },
 }

@@ -14,11 +14,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
-license = "UNLICENSED"
-authors = ["TeleFlock"]
+license = "MIT"
+authors = ["Studio Plascode"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

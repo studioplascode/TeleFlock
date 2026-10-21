@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "TeleFlock",
   "mainBinaryName": "teleflock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "dev.teleflock.app",
   "build": {
     "frontendDist": "../dist",
@@ -36,11 +36,17 @@
     "deep-link": {
       "desktop": { "schemes": ["teleflock"] },
       "mobile": [{ "scheme": ["teleflock"], "appLink": false }]
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyRDBCRTNFMUUyQzQ4MkEKUldRcVNDd2VQcjdRZ3NnNjlKMU5lOFVjZlVjeWxsd25Mb2tudjA0dWhTQ0N4VEFrVGVHNERTZzUK",
+      "requireSignedVersion": true,
+      "windows": { "installMode": "passive" }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "publisher": "TeleFlock",
     "copyright": "© 2026 TeleFlock",
     "category": "DeveloperTool",

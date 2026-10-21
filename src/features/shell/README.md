@@ -41,6 +41,6 @@ the host editor (`useUi().dialog.kind === "hostEditor"`), the shortcuts sheet (`
 
 ## Keyboard (desktop, spec §6)
 Global: `Ctrl+K` palette · `Ctrl+J` answer next · `Ctrl+1…6` board/inbox/activity/usage/hosts/settings ·
-`Ctrl+\` split · `Ctrl+B` sidebar · `N` new worktree · `?` shortcuts · `Esc` close overlay.
+`Ctrl+\` split · `Ctrl+B` sidebar · `N` new worktree · `D` dispatch · `?` shortcuts · `Esc` close overlay.
 Board-local keys (`J/K`, `Enter`, `A`, `T`) belong to the board; session keys (`Esc` stop, `Ctrl+Enter`,
 `Alt+Enter`) to the session. Global single-key shortcuts are ignored while typing in inputs.

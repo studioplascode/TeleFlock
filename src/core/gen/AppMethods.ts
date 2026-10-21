@@ -5,12 +5,15 @@ import type { Empty } from "./Empty";
 import type { HostProfile } from "./HostProfile";
 import type { HostRef } from "./HostRef";
 import type { HostsListResult } from "./HostsListResult";
+import type { NotifyReadParams } from "./NotifyReadParams";
 import type { Settings } from "./Settings";
 import type { TrustKeyParams } from "./TrustKeyParams";
 import type { TunnelInfo } from "./TunnelInfo";
 import type { TunnelListResult } from "./TunnelListResult";
 import type { TunnelOpenParams } from "./TunnelOpenParams";
 import type { TunnelRef } from "./TunnelRef";
+import type { UpdateCheckParams } from "./UpdateCheckParams";
+import type { UpdateStatus } from "./UpdateStatus";
 import type { UrlParams } from "./UrlParams";
 import type { WslDistrosResult } from "./WslDistrosResult";
 
@@ -18,6 +21,10 @@ export interface AppMethods {
   "app.info": { params: Empty; result: AppInfo };
   "app.openExternal": { params: UrlParams; result: Empty };
   "app.notifyTest": { params: Empty; result: Empty };
+  "app.notifyRead": { params: NotifyReadParams; result: Empty };
+  "app.updateStatus": { params: Empty; result: UpdateStatus };
+  "app.updateCheck": { params: UpdateCheckParams; result: UpdateStatus };
+  "app.updateInstall": { params: Empty; result: UpdateStatus };
   "hosts.list": { params: Empty; result: HostsListResult };
   "hosts.save": { params: HostProfile; result: HostProfile };
   "hosts.remove": { params: HostRef; result: Empty };

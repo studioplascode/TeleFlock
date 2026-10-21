@@ -12,6 +12,7 @@ import {
   Image as ImageIcon,
   ListTodo,
   MessageCircleQuestion,
+  MessagesSquare,
   NotebookText,
   Search,
   ShieldQuestion,
@@ -26,7 +27,8 @@ import type { BashView, ImageRef, Subagent, ToolItem, ToolView } from "@/core/ge
 import { Chip, cn, Elapsed, formatElapsed, Shimmer, spring, Spinner } from "@/design";
 import { languageFor } from "../lib/highlight";
 import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
-import { SubagentCard, SubagentDialog } from "../subagents/Subagents";
+import { useSessionUi } from "../state";
+import { SubagentCard } from "../subagents/Subagents";
 import { SessionCtx, useSessionRef } from "../context";
 import { AnsiText } from "./AnsiText";
 import { DiffStatText, FileDiffView } from "./DiffBody";
@@ -45,6 +47,7 @@ const ICON: Record<ViewType, typeof Wrench> = {
   image: ImageIcon,
   ask: MessageCircleQuestion,
   markdown: NotebookText,
+  irc: MessagesSquare,
   generic: Wrench,
 };
 
@@ -73,6 +76,7 @@ const TONE: Record<ViewType, string> = {
   image: "bg-omp-pink/15 text-omp-pink",
   ask: "bg-sun-1/15 text-sun-1",
   markdown: "bg-white/8 text-ink-2",
+  irc: "bg-omp-pink/15 text-omp-pink",
   generic: "bg-white/6 text-mute",
 };
 
@@ -88,6 +92,7 @@ const OPEN_BY_DEFAULT: Record<ViewType, boolean> = {
   image: true,
   ask: true,
   markdown: true,
+  irc: true,
   generic: false,
 };
 
@@ -205,8 +210,12 @@ function summary(item: ToolItem): ReactNode {
     case "task": {
       const live = v.agents.filter((a) => a.status === "running").length;
       const failed = v.agents.filter((a) => a.status === "failed").length;
+      const estimates = v.agents.flatMap((a) => (a.status === "running" && a.completionPct != null ? [a.completionPct] : []));
+      const done = estimates.length > 0 ? Math.round(estimates.reduce((s, p) => s + p, 0) / estimates.length) : undefined;
       return live > 0 ? (
-        <span className="text-accent-hi">{live} live</span>
+        <span className="text-accent-hi" title={done != null ? "The running subagents' own estimate of how far along their task is (omp asks every few minutes)" : undefined}>
+          {live} live{done != null && ` · ${estimates.length > 1 ? "~" : ""}${done}% done`}
+        </span>
       ) : failed > 0 ? (
         <span className="text-error">{failed} failed</span>
       ) : (
@@ -270,7 +279,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
         type="button"
         onClick={() => hasBody && setOpen(!open)}
         aria-expanded={hasBody ? open : undefined}
-        className={cn("focus-ring flex w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left", hasBody && "hover:bg-white/[0.025]")}
+        className={cn("focus-ring flex w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left max-md:gap-2 max-md:px-2.5 max-md:py-1.5", hasBody ? "hover:bg-white/[0.025]" : "cursor-default")}
       >
         <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px] transition-colors duration-500", live ? "st-soft" : failed ? "bg-error/14 text-error" : TONE[kind])}>
           <Icon className="size-3" />
@@ -282,7 +291,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
         <StatusMeta item={item} extra={summary(item)} settled={settled} />
         {hasBody && <ChevronDown className={cn("size-3.5 shrink-0 text-mute-2 transition-transform duration-300", !open && "-rotate-90")} />}
       </button>
-      {item.intent && open && <div className="-mt-1 px-3 pb-1.5 pl-[46px] text-xs text-mute italic">{item.intent}</div>}
+      {item.intent && open && <div className="-mt-1 px-3 pb-1.5 pl-[46px] text-xs text-mute italic max-md:-mt-0.5 max-md:pl-10">{item.intent}</div>}
       {open && hasBody && (
         <div className="border-t border-line">
           <ToolBody item={item} />
@@ -500,19 +509,19 @@ function ToolBody({ item }: { item: ToolItem }) {
       );
     case "markdown":
       return <Markdown text={v.text} streaming={live} className="px-3 py-2.5 text-[12.5px]" />;
+    // Transcript rows render IRC as chat bubbles (../irc/IrcBubble); this is the bare card body.
+    case "irc":
+      return <Markdown text={v.text} className="px-3 py-2.5 text-[12.5px]" />;
   }
 }
 
 function TaskBody({ agents }: { agents: Subagent[] }) {
   const { key } = useSessionRef();
-  const [openId, setOpenId] = useState<string | null>(null);
-  const sub = agents.find((a) => a.id === openId);
   return (
     <div className="flex flex-col gap-1.5 p-2">
       {agents.map((a) => (
-        <SubagentCard key={a.id} sub={a} onOpen={() => setOpenId(a.id)} />
+        <SubagentCard key={a.id} sub={a} onOpen={() => useSessionUi.getState().openSubagent(key, a.id, agents)} />
       ))}
-      <SubagentDialog agentKey={key} sub={sub} open={sub != null} onOpenChange={(o) => !o && setOpenId(null)} />
     </div>
   );
 }

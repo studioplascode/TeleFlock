@@ -22,7 +22,11 @@ export function AnswerNextHud(): JSX.Element | null;
 export function ActivityView(): JSX.Element;
 // src/features/activity/WhileAwayToast.tsx — reconnect digest (finished / needs / cost delta per host)
 export function WhileAwayToast(): null;
-// src/features/usage/UsageView.tsx — #/usage
+// src/features/usage/UsageView.tsx — #/usage: cost/tokens (`host.usage`) + "Subscriptions & limits"
+// (LimitsSection.tsx, `host.limits` via `useAccountLimits`): one tile per account (merged across hosts by
+// `LimitAccount.key`), each window's % left, reset countdown, %/h pace and "hit the limit in ~X" /
+// "resets before you run out"; striped bar = projected use at reset. `limitsUi.ts` (provider names,
+// tint) is shared with the inspector LimitsTile / header LimitsChip.
 export function UsageView(): JSX.Element;
 
 // src/features/board/QuickAnswer.tsx — reusable inline answer chips for a NeedsYou (agent.answer)

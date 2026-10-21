@@ -15,3 +15,8 @@ export function Markdown(props: { text: string; streaming?: boolean; className?:
 
 Keyboard (session owns): `Esc` stop (when the composer is empty / not in a popup), `Enter` / `Ctrl+Enter` send,
 `Alt+Enter` queue follow-up, `1–9` answer the sticky ask card, `/` slash palette, `@` file mention.
+
+Subagent viewer (`subagents/SubagentViewer`, one per session, mounted by `SessionPane`): open it with
+`useSessionUi.getState().openSubagent(agentKey, subagentId)` (inspector Subagents pane, task cards, IRC
+bubbles and threads); opening another subagent switches it. Right-side drawer on desktop, full-screen
+sheet on phones. `[` / `]` previous / next subagent, `Esc` close, `Enter` steer/message, `Shift+Enter` newline.

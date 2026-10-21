@@ -38,6 +38,7 @@ export function parseFanOutBranch(branch?: string): { slug: string; variant: str
 
 // Templates (Settings.templates): picker + "Save as template" live inside AgentFields (New worktree / New agent);
 // helpers in workspace/shared/templates.tsx (applyTemplate, matchingTemplate, saveDraftAsTemplate).
+// Branch/agent slugs from free text: workspace/shared/slug.ts (slugify, slugFromPrompt), used by Fan out and Dispatch.
 // Review shows a "Compare" sibling switcher (review/FanOutSiblings.tsx) for fanout/* branches.
 
 // @/features/review/ReviewView           route #/review/:hostId/:workspaceId

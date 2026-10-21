@@ -33,10 +33,12 @@ import type {
   WorktreeList,
 } from "@/core/gen";
 import { apiError } from "../errors";
+import { ircOf } from "../irc";
 import { OMP_COMMAND_NAMES, ompCommandName } from "../ompCommands";
 import { AgentSim, type SimHost } from "./agent";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
+import { demoLimits } from "./limits";
 import {
   AGENTS,
   type AgentDef,
@@ -132,6 +134,8 @@ export class DemoHost implements SimHost {
   private askKind = 0;
   /** When the director first saw each pending request (auto-answer from "another device" after 4 min). */
   private readonly seenRequests = new Map<string, number>();
+  /** Messages sent to each subagent (`agent.subagent` chat), replayed into its transcript. */
+  private readonly subSteers = new Map<string, { at: number; text: string }[]>();
   private promptIdx = 0;
   private nextWs = 20;
   private nextPane = 2;
@@ -734,8 +738,9 @@ export class DemoHost implements SimHost {
     }
     const p = (params ?? {}) as Record<string, unknown>;
     const out = this.dispatch(method, p);
-    // Small, realistic latency so spinners show briefly.
-    await new Promise<void>((resolve) => this.env.clock.after(method.startsWith("git.") || method.startsWith("gh.") ? 180 : 40, resolve));
+    // Small, realistic latency so spinners show briefly (creating a worktree takes a moment).
+    const latency = method === "worktree.create" ? 350 : method.startsWith("git.") || method.startsWith("gh.") ? 180 : 40;
+    await new Promise<void>((resolve) => this.env.clock.after(latency, resolve));
     return out;
   }
 
@@ -991,6 +996,8 @@ export class DemoHost implements SimHost {
         return this.health;
       case "host.usage":
         return this.usageReport(typeof p.days === "number" ? p.days : 14);
+      case "host.limits":
+        return demoLimits(this.id, this.now(), this.agentsList(), true);
       case "host.models":
         return { models: MODELS.map(({ inPerM: _i, outPerM: _o, ...m }) => m), roles: ROLES };
       case "host.sessions":
@@ -1163,15 +1170,18 @@ export class DemoHost implements SimHost {
     const action = this.str(p, "action");
     if (action === "kill") sim.subagents[i] = { ...sub, status: "aborted", endedAt: this.now() };
     else if (action === "revive") {
-      sim.subagents[i] = { ...sub, status: "running", endedAt: undefined, progress: 0, line: "revived" };
+      sim.subagents[i] = { ...sub, status: "running", endedAt: undefined, completionPct: undefined, line: "revived" };
       this.env.clock.after(20_000, () => {
         const j = sim.subagents.findIndex((s) => s.id === id);
-        if (j >= 0) sim.subagents[j] = { ...(sim.subagents[j] as typeof sub), status: "done", endedAt: this.now(), progress: 1, line: "done" };
+        if (j >= 0) sim.subagents[j] = { ...(sim.subagents[j] as typeof sub), status: "done", endedAt: this.now(), completionPct: undefined, line: "done" };
         sim.refreshDerived();
         this.agentChanged(sim.agent.id);
         this.metaChanged(sim.agent.id);
       });
-    } else sim.subagents[i] = { ...sub, line: `↳ ${String(p.message ?? "")}` };
+    } else {
+      sim.subagents[i] = { ...sub, line: `↳ ${String(p.message ?? "")}` };
+      this.subSteers.set(id, [...(this.subSteers.get(id) ?? []), { at: this.now(), text: String(p.message ?? "") }]);
+    }
     sim.refreshDerived();
     this.agentChanged(sim.agent.id);
     this.metaChanged(sim.agent.id);
@@ -1181,15 +1191,52 @@ export class DemoHost implements SimHost {
   private subagentTranscript(sim: AgentSim, subagentId: string): HistoryPage {
     const sub = sim.subagents.find((s) => s.id === subagentId);
     if (!sub) throw apiError("not_found", `subagent ${subagentId} not found`);
-    const t0 = sub.startedAt ?? this.now();
+    const now = this.now();
+    const t0 = sub.startedAt ?? now;
+    const running = sub.status === "running";
+    const files = this.repoFiles(sim.agent.id).files;
+    // The transcript grows while the subagent runs: one tool call every ~2.5 s, a note every 4 calls.
+    const calls = Math.min(60, Math.floor(((running ? now : (sub.endedAt ?? now)) - t0) / 2500) + 1);
     const items: TranscriptItem[] = [
       { kind: "user", id: `${subagentId}-u`, at: t0, text: sub.description ?? sub.name, images: [], steering: false, synthetic: true },
       { kind: "thinking", id: `${subagentId}-t`, at: t0 + 500, text: "Scoping the task and picking files to read.", streaming: false, durationMs: 2100, redacted: false },
-      ...[0, 1, 2].map(
-        (i): TranscriptItem => ({ kind: "tool", id: `${subagentId}-tool${i}`, at: t0 + 3000 + i * 4000, callId: `c${i}`, tool: i === 1 ? "grep" : "read", title: this.repoFiles(sim.agent.id).files[i + 3] ?? "README.md", args: {}, status: "ok", durationMs: 600 + i * 200, truncated: false }),
-      ),
-      { kind: "assistant", id: `${subagentId}-a`, at: t0 + 16_000, text: sub.status === "running" ? `Working: ${sub.line ?? ""}` : `Result: ${sub.line ?? "done"}.`, streaming: sub.status === "running" },
     ];
+    for (let i = 0; i < calls; i++) {
+      const at = t0 + 2600 + i * 2500;
+      const live = running && i === calls - 1;
+      const tool = ["read", "grep", "read", "bash"][i % 4] as string;
+      const file = files[(i + 3) % Math.max(1, files.length)] ?? "README.md";
+      items.push({
+        kind: "tool",
+        id: `${subagentId}-tool${i}`,
+        at,
+        callId: `c${i}`,
+        tool,
+        title: tool === "bash" ? `go test ./... -run ${sub.name}` : file,
+        args: {},
+        status: live ? "running" : "ok",
+        durationMs: live ? undefined : 600 + (i % 5) * 200,
+        output: tool === "bash" && !live ? `ok  \tgithub.com/acme/api-gateway/internal/db\t${(0.4 + i / 10).toFixed(2)}s` : undefined,
+        truncated: false,
+      });
+      if (i % 4 === 3 && !live) items.push({ kind: "assistant", id: `${subagentId}-n${i}`, at: at + 1200, text: `Checked \`${file}\`: ${i + 1} of the hot paths covered so far.`, streaming: false });
+    }
+    for (const [i, s] of (this.subSteers.get(subagentId) ?? []).entries()) items.push({ kind: "user", id: `${subagentId}-steer${i}`, at: s.at, text: s.text, images: [], steering: true, synthetic: false });
+    // The parent's IRC with this subagent, seen from the subagent: its sends to `Main`, Main's answers.
+    for (const row of sim.items) {
+      const e = ircOf(row);
+      if (!e || e.message.peer !== sub.name || e.message.wakeRelay || (e.status != null && e.status !== "ok")) continue;
+      const id = `${subagentId}-irc-${row.id}`;
+      const text = e.message.text;
+      if (e.message.direction === "out") {
+        items.push({ kind: "irc", id, at: e.at, message: { ...e.message, direction: "in", peer: "Main", fromParent: true, receipts: [] } });
+      } else {
+        const view = { type: "irc" as const, direction: "out" as const, peer: "Main", text, broadcast: false, wakeRelay: false, fromParent: false, receipts: [{ to: "Main", outcome: "injected" }] };
+        items.push({ kind: "tool", id, at: e.at, callId: id, tool: "write", title: "agent://Main", args: { path: "agent://Main", content: text }, status: "ok", durationMs: 40, output: "Delivered to Main.", truncated: false, view });
+      }
+    }
+    if (!running) items.push({ kind: "assistant", id: `${subagentId}-a`, at: Math.max(sub.endedAt ?? now, t0 + 2600 + calls * 2500), text: `Result: ${sub.line ?? "done"}.`, streaming: false });
+    items.sort((a, b) => a.at - b.at);
     return { items, hasMore: false };
   }
 
@@ -1224,7 +1271,8 @@ export class DemoHost implements SimHost {
     const name = requested ?? this.uniqueName(fallbackName);
     const model = typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
     const prompt = typeof spec.prompt === "string" && spec.prompt.trim() ? spec.prompt.trim() : undefined;
-    const def: AgentDef = { id: name, kind, workspace: wsId, title: prompt?.slice(0, 80) ?? name, column: "review", model: model ?? "opus-5", thinking: (spec.thinking as AgentDef["thinking"]) ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [] };
+    // A just-started session: zero turns until its first prompt runs (the UI shows "Ready" / "Starting").
+    const def: AgentDef = { id: name, kind, workspace: wsId, title: prompt?.slice(0, 80) ?? name, column: "review", model: model ?? "opus-5", thinking: (spec.thinking as AgentDef["thinking"]) ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [], fresh: true };
     const sim = this.addAgent(def, wsId, pane);
     sim.agent.state = "idle";
     sim.agent.stateSince = this.now();
