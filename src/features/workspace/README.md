@@ -19,13 +19,26 @@ export function openPastSessions(opts?: { hostId?: string; cwd?: string; workspa
 
 // @/features/workspace/workspaceActions
 export interface WorkspaceAction {
-  id: "review" | "newAgent" | "newShell" | "newWorktree" | "pastSessions" | "rename" | "close" | "removeWorktree";
-  label: string; icon: LucideIcon; danger?: boolean; group: "create" | "manage" | "danger";
+  id: "review" | "newAgent" | "newShell" | "newWorktree" | "pastSessions" | "rename" | "close" | "removeWorktree"
+    | `renameTab:${string}` | `closeTab:${string}` | `closePane:${string}`;
+  label: string; icon: LucideIcon; danger?: boolean; group: "create" | "manage" | "tabs" | "danger";
+  section?: string;                     // tab label for per-tab actions
   run(): Promise<void>;                 // owns its confirms/toasts/errors; never rejects
 }
 export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction[];   // pure
 export function WorkspaceActionsMenu(props: { hostId: string; workspace: Workspace; children: ReactNode; mode?: "dropdown" | "context"; home?: string }): JSX.Element;
 export function openReview / newAgentIn / newWorktreeFrom / revealPastSessions / newShell / renameWorkspace / closeWorkspace / removeWorktree: (hostId: string, ws: Workspace) => Promise<void>;
+export function renameTab(hostId: string, tab: Tab): Promise<void>;
+export function closeTab(hostId: string, ws: Workspace, tab: Tab): Promise<void>;   // group-close refusal → toast with "Close workspace…"
+export function closePane(hostId: string, pane: PaneInfo): Promise<void>;
+
+// @/features/worktree/FanOutDialog       kind "fanOut" { hostId?, cwd?, prompt? }
+export function FanOutDialog(): JSX.Element | null;   // N worktrees fanout/<slug>/<variant>, agents <slug>-<variant>; finishes on the board with q = slug
+export function parseFanOutBranch(branch?: string): { slug: string; variant: string } | null;
+
+// Templates (Settings.templates): picker + "Save as template" live inside AgentFields (New worktree / New agent);
+// helpers in workspace/shared/templates.tsx (applyTemplate, matchingTemplate, saveDraftAsTemplate).
+// Review shows a "Compare" sibling switcher (review/FanOutSiblings.tsx) for fanout/* branches.
 
 // @/features/review/ReviewView           route #/review/:hostId/:workspaceId
 export function ReviewView(props: { hostId: string; workspaceId: string }): JSX.Element;

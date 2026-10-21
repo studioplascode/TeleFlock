@@ -1,8 +1,28 @@
 import { useColumnKeys } from "@/core";
 import { AgentGlyph, CardFlight, EmptyState, LayoutGroup, StatusOrb } from "@/design";
 import { AgentCard } from "./AgentCard";
-import { openAgent } from "./agentActions";
+import { useBoard } from "./boardStore";
+import { onCardClick } from "./Kanban";
 import { LANES } from "./lanes";
+
+function RepoCard({ agentKey, lane, selected }: { agentKey: string; lane: (typeof LANES)[number]["column"]; selected: boolean }) {
+  const picked = useBoard((s) => s.picked.includes(agentKey));
+  return (
+    <CardFlight flightId={agentKey}>
+      <div
+        role="button"
+        tabIndex={-1}
+        aria-pressed={picked}
+        data-agent-key={agentKey}
+        onClick={(e) => onCardClick(e, agentKey)}
+        onMouseDown={(e) => e.shiftKey && e.preventDefault()}
+        className="cursor-pointer rounded-xl"
+      >
+        <AgentCard agentKey={agentKey} lane={lane} selected={selected} picked={picked} />
+      </div>
+    </CardFlight>
+  );
+}
 
 interface RepoFilter {
   hostId: string;
@@ -20,11 +40,7 @@ function RepoLaneSection({ repo, filter, column, selectedKey }: { repo: string; 
         <span className="text-mute-2 tabular">{keys.length}</span>
       </div>
       {keys.map((k) => (
-        <CardFlight key={k} flightId={k}>
-          <div role="button" tabIndex={-1} data-agent-key={k} onClick={() => openAgent(k)} className="cursor-pointer rounded-xl">
-            <AgentCard agentKey={k} lane={column.column} selected={k === selectedKey} />
-          </div>
-        </CardFlight>
+        <RepoCard key={k} agentKey={k} lane={column.column} selected={k === selectedKey} />
       ))}
     </div>
   );

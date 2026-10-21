@@ -5,6 +5,7 @@ import type {
   AppEvent,
   BranchInfo,
   ChangedFile,
+  CommandInfo,
   ConnPhase,
   ConnStatus,
   FsEntry,
@@ -32,6 +33,7 @@ import type {
   WorktreeList,
 } from "@/core/gen";
 import { apiError } from "../errors";
+import { OMP_COMMAND_NAMES, ompCommandName } from "../ompCommands";
 import { AgentSim, type SimHost } from "./agent";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
@@ -69,6 +71,13 @@ import { historyFor, longHistory } from "./seeds";
 import { DemoTerm } from "./term";
 
 export type HostVariant = "forge" | "studio";
+
+/** What `pi.getCommands()` returns on the demo host: a prompt template, a skill, an extension command. */
+const DEMO_CUSTOM_COMMANDS: CommandInfo[] = [
+  { name: "review", description: "Review the current diff for bugs and risky changes", source: "prompt" },
+  { name: "skill:release-notes", description: "Draft release notes from merged commits", source: "skill" },
+  { name: "deploy-preview", description: "Deploy this branch to a preview environment", source: "extension" },
+];
 
 export interface HostEnv {
   clock: DemoClock;
@@ -843,6 +852,16 @@ export class DemoHost implements SimHost {
         return this.btw(p);
       case "agent.slash":
         return this.slash(p);
+      case "agent.commands": {
+        const sim = this.ompSim(p.agentId);
+        if (!sim.caps.bridge) throw apiError("unsupported", "Listing custom commands needs the TeleFlock bridge extension in this omp session");
+        return { commands: DEMO_CUSTOM_COMMANDS };
+      }
+      case "agent.dequeue": {
+        const sim = this.ompSim(p.agentId);
+        if (!sim.caps.bridge) throw apiError("unsupported", "Pulling back queued messages needs the TeleFlock bridge extension in this omp session");
+        return { text: sim.dequeue() };
+      }
       case "agent.keys": {
         const sim = this.sim(p.agentId);
         const keys = Array.isArray(p.keys) ? (p.keys as string[]) : [];
@@ -893,6 +912,33 @@ export class DemoHost implements SimHost {
       }
       case "workspace.close":
         return this.workspaceClose(p);
+      case "tab.rename": {
+        const { tab, m } = this.findTab(this.str(p, "tabId"));
+        const label = this.str(p, "label").trim();
+        if (!label) throw apiError("invalid_params", "Tab label can't be empty");
+        tab.label = label;
+        this.dirtyWs.add(m.ws.id);
+        return {};
+      }
+      case "tab.close": {
+        const { tab, m } = this.findTab(this.str(p, "tabId"));
+        // Validate before touching anything: a refused close must leave every pane in place.
+        const others = m.ws.tabs.filter((t) => t !== tab).reduce((n, t) => n + t.panes.length, 0);
+        const linked = this.linkedOf(m);
+        if (others === 0 && linked.length) {
+          throw apiError("herdr_error", `workspace_group_close_required: closing the last tab closes ${m.ws.label}, which has ${linked.length} linked worktree workspace(s)`, { hint: "Close the whole workspace group instead" });
+        }
+        if (others === 0) this.closeWs(m);
+        else for (const pane of [...tab.panes]) this.closePaneIn(m, pane.id);
+        return {};
+      }
+      case "pane.close": {
+        const paneId = this.str(p, "paneId");
+        const m = [...this.wss.values()].find((x) => x.ws.tabs.some((t) => t.panes.some((pp) => pp.id === paneId)));
+        if (!m) throw apiError("not_found", `pane ${paneId} not found`);
+        this.closePaneIn(m, paneId);
+        return {};
+      }
       case "worktree.list":
         return this.worktreeList(this.str(p, "cwd"));
       case "worktree.create":
@@ -1031,11 +1077,21 @@ export class DemoHost implements SimHost {
   private slash(p: Record<string, unknown>): unknown {
     const sim = this.ompSim(p.agentId);
     const command = this.str(p, "command").trim();
-    const [cmd, ...rest] = command.split(/\s+/);
-    const arg = rest.join(" ");
-    switch (cmd) {
-      case "/model":
-      case "/switch": {
+    if (!command.startsWith("/") || /[\r\n]/.test(command)) throw apiError("invalid_params", "slash commands are one line and start with `/`");
+    // Same acceptance as hostd: builtins, `/skill:<name>`, and the session's own commands.
+    const name = ompCommandName(command);
+    const custom = DEMO_CUSTOM_COMMANDS.some((c) => c.name === name) || (name.startsWith("skill:") && name.length > 6);
+    if (!OMP_COMMAND_NAMES.has(name) && !custom) {
+      throw apiError("unsupported", `\`/${name}\` is not a known omp command`, { hint: "Unknown commands would be sent to the model as a prompt" });
+    }
+    const arg = command.slice(1 + name.length).replace(/^:/, "").trim();
+    switch (custom ? "" : name) {
+      case "model":
+      case "switch": {
+        if (!arg) {
+          this.control(sim, `Opened /${name} in the terminal`);
+          break;
+        }
         const m = modelByRef(arg);
         if (!m) throw apiError("invalid_params", `Unknown model ${arg}`);
         sim.model = { provider: m.provider, id: m.id, label: m.label };
@@ -1044,36 +1100,56 @@ export class DemoHost implements SimHost {
         this.control(sim, `Model: ${m.label}`);
         break;
       }
-      case "/effort":
-      case "/thinking":
+      case "effort":
+        if (!arg) {
+          this.control(sim, "Opened /effort in the terminal");
+          break;
+        }
         sim.thinking = arg as AgentSim["thinking"];
         this.control(sim, `Thinking: ${arg}`);
         break;
-      case "/fast":
+      case "fast":
         sim.fast = arg !== "off";
         this.control(sim, `Fast mode ${sim.fast ? "on" : "off"}`);
         break;
-      case "/plan":
+      case "plan":
         sim.mode = sim.mode === "plan" ? "planPaused" : sim.mode === "planPaused" ? "normal" : "plan";
         this.control(sim, `Plan mode: ${sim.mode}`);
+        if (arg && sim.mode === "plan") sim.startTurn(arg);
         break;
-      case "/compact":
+      case "compact":
         sim.compact(arg || undefined);
         break;
-      case "/rename":
+      case "rename":
         sim.agent.title = arg;
         this.control(sim, `Renamed: ${arg}`);
         break;
-      case "/goal":
-        sim.goal = { objective: arg, status: "active", tokensUsed: 0 };
-        this.control(sim, `Goal: ${arg}`);
+      case "goal": {
+        const [sub = "", ...rest] = arg.split(/\s+/);
+        if (!arg || ["show", "pause", "resume", "drop", "budget"].includes(sub)) {
+          this.control(sim, `Ran ${command}`);
+          break;
+        }
+        const objective = sub === "set" ? rest.join(" ") : arg;
+        sim.goal = { objective, status: "active", tokensUsed: 0 };
+        this.control(sim, `Goal: ${objective}`);
         break;
-      case "/new":
+      }
+      case "new":
         sim.newSession();
         break;
-      default:
+      case "queue":
+        if (!arg) throw apiError("invalid_params", "/queue needs a message");
+        if (sim.busy) sim.followUp(arg);
+        else sim.startTurn(arg);
+        break;
+      case "":
+        // Prompt templates, skills and extension commands expand into a prompt.
         if (sim.busy) sim.steer(command);
         else sim.startTurn(command);
+        break;
+      default:
+        this.control(sim, `Ran ${command}`);
     }
     return {};
   }
@@ -1250,6 +1326,46 @@ export class DemoHost implements SimHost {
     this.wss.delete(m.ws.id);
     this.removedWs.add(m.ws.id);
     this.dirtyWs.delete(m.ws.id);
+  }
+
+  private findTab(tabId: string): { tab: WsModel["ws"]["tabs"][number]; m: WsModel } {
+    for (const m of this.wss.values()) {
+      const tab = m.ws.tabs.find((t) => t.id === tabId);
+      if (tab) return { tab, m };
+    }
+    throw apiError("not_found", `tab ${tabId} not found`);
+  }
+
+  /**
+   * herdr semantics: closing a pane kills its process (agent included); an emptied tab goes away,
+   * and closing the last pane of a workspace closes the workspace (refused for a primary with
+   * linked worktrees, like `workspace.close` without `group`).
+   */
+  private closePaneIn(m: WsModel, paneId: string): void {
+    const total = m.ws.tabs.reduce((n, t) => n + t.panes.length, 0);
+    if (total <= 1) {
+      const linked = this.linkedOf(m);
+      if (linked.length) {
+        throw apiError("herdr_error", `workspace_group_close_required: closing the last pane closes ${m.ws.label}, which has ${linked.length} linked worktree workspace(s)`, { hint: "Close the whole workspace group instead" });
+      }
+      this.closeWs(m);
+      return;
+    }
+    const sim = [...this.sims.values()].find((s) => s.agent.paneId === paneId);
+    if (sim) {
+      this.removeAgent(sim.agent.id);
+      this.activity(sim.agent.id, "stopped", `${sim.agent.name} pane closed`);
+    }
+    for (const t of [...this.terms.values()]) {
+      if (t.paneId === paneId) {
+        t.close("pane closed");
+        this.terms.delete(t.termId);
+      }
+    }
+    for (const tab of m.ws.tabs) tab.panes = tab.panes.filter((pp) => pp.id !== paneId);
+    m.ws.tabs = m.ws.tabs.filter((t) => t.panes.length > 0);
+    m.shellPanes = m.shellPanes.filter((x) => x !== paneId);
+    this.dirtyWs.add(m.ws.id);
   }
 
   private workspaceClose(p: Record<string, unknown>): unknown {

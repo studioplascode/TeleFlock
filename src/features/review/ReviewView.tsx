@@ -27,6 +27,7 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { tildify } from "../workspace/shared/paths";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
 import { WorkspaceActionsMenu } from "../workspace/workspaceActions";
+import { FanOutSiblings } from "./FanOutSiblings";
 import { DiffBar, type DiffLayout, DiffViewer } from "./diff/DiffViewer";
 import { type DiffFile, mergeFiles, parsePatch } from "./diff/parse";
 import { FileTree } from "./FileTree";
@@ -492,6 +493,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             {hasFiles && <ViewedProgress done={viewed.size} total={files.length} />}
           </div>
           {diff.data?.truncated && <Chip tone="needs-you">Patch truncated: very large diff</Chip>}
+          <FanOutSiblings hostId={hostId} workspaceId={workspaceId} />
           <AnimatePresence>{working.length > 0 && <LiveBanner hostId={hostId} working={working} compact />}</AnimatePresence>
         </div>
         <div className="min-h-0 flex-1 px-3">
@@ -608,6 +610,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
         </div>
         {toolbar}
       </header>
+      <FanOutSiblings hostId={hostId} workspaceId={workspaceId} />
       <AnimatePresence>{working.length > 0 && <LiveBanner hostId={hostId} working={working} />}</AnimatePresence>
       <div ref={bodyRef} className="flex min-h-0 flex-1 gap-3">
         <AnimatePresence initial={false}>

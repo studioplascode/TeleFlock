@@ -190,6 +190,8 @@ type MainEditor = Component & {
 	getText(): string;
 	setText(text: string): void;
 	setDraft?: (text: string, images?: readonly unknown[]) => void;
+	/** Alt+Up: pops the last queued message and merges it ahead of the draft (`handleDequeue`). */
+	onDequeue?: () => void;
 	pendingImages: unknown[];
 	pendingImageLinks?: unknown[];
 };
@@ -790,6 +792,33 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 		return { settled };
 	};
 
+	/**
+	 * Pull the last queued message (last steer, else last follow-up) back out of the queue, as Alt+Up
+	 * does, but hand its text to the caller instead of the operator's composer: omp merges the popped
+	 * text ahead of the draft, so the draft (text + images) is put back exactly as it was.
+	 */
+	const dequeueLast = async (ctx: ExtensionContext): Promise<{ text?: string }> => {
+		const ed = await findEditor(ctx);
+		if (typeof ed.onDequeue !== "function") fail("unsupported", "this omp has no dequeue action");
+		const queued = readQueue();
+		if (queued.steering.length + queued.followUp.length === 0) return {};
+		const draft = ed.getText();
+		const images = [...ed.pendingImages];
+		const links = Array.isArray(ed.pendingImageLinks) ? [...ed.pendingImageLinks] : undefined;
+		ed.onDequeue!();
+		const merged = ed.getText();
+		let text = merged;
+		if (draft.trim() && merged.endsWith(draft)) text = merged.slice(0, merged.length - draft.length).replace(/\n\n$/, "");
+		ed.pendingImages = images;
+		if (links) {
+			ed.pendingImageLinks = links;
+			if ("imageLinks" in ed) ed.imageLinks = links;
+		}
+		if (ed.setDraft) ed.setDraft(draft, images);
+		else ed.setText(draft);
+		return text.trim() ? { text } : {};
+	};
+
 	/** Command context for navigateTree/branch/newSession; captured once by submitting /teleflock-attach. */
 	const ensureCmdCtx = async (ctx: ExtensionContext): Promise<ExtensionCommandContext> => {
 		if (cmdCtx) return cmdCtx;
@@ -1124,6 +1153,16 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 				return treeInfo(ctx);
 			case "getQueue":
 				return readQueue();
+			case "getCommands":
+				// Extension, prompt-template and skill commands (builtins are excluded by omp).
+				return {
+					commands: pi
+						.getCommands()
+						.filter(c => c.name !== ATTACH_COMMAND)
+						.map(c => ({ name: c.name, description: c.description, source: c.source })),
+				};
+			case "dequeue":
+				return dequeueLast(ctx);
 			default:
 				return fail("unknown_op", `unknown op ${op}`);
 		}

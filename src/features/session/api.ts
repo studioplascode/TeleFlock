@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { core, pulseBus, toApiError } from "@/core";
+import { core, pulseBus, toApiError, useIsMuted, useSettings } from "@/core";
 import type { Agent, HostMethods } from "@/core/gen";
 import { type Status, toast } from "@/design";
 
@@ -98,4 +98,24 @@ export async function fileToImageInput(file: File): Promise<PendingImage> {
   const mime = file.type || "image/png";
   const data = btoa(bin);
   return { mime, data, preview: `data:${mime};base64,${data}` };
+}
+
+export interface MuteState {
+  muted: boolean;
+  toggle(): Promise<void>;
+}
+
+/** Per-agent OS-notification mute (core `useIsMuted` / `setMuted`) with result toasts. */
+export function useMute(key: string): MuteState {
+  const muted = useIsMuted(key);
+  const setMuted = useSettings((s) => s.setMuted);
+  const toggle = async () => {
+    try {
+      await setMuted(key, !muted);
+      toast({ title: muted ? "Notifications unmuted" : "Notifications muted", description: muted ? undefined : "This agent won't raise OS notifications.", status: "done", duration: 2400 });
+    } catch (e) {
+      toast({ title: "Couldn't change mute", description: errorText(e).title, status: "error" });
+    }
+  };
+  return { muted, toggle };
 }

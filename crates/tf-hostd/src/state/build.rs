@@ -186,7 +186,11 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&SessionMeta>) -> OmpInfo {
         thinking: ctl.and_then(|c| c.thinking).or_else(|| meta.and_then(|m| m.thinking)),
         fast: ctl.map(|c| c.fast).or(meta.map(|m| m.fast)).unwrap_or(false),
         mode: ctl.map(|c| c.mode).or(meta.map(|m| m.mode)).unwrap_or(tf_proto::model::OmpMode::Normal),
-        goal: meta.and_then(|m| m.goal.clone()),
+        // The bridge is authoritative for goal state (including "no goal" after drop/complete).
+        goal: match ctl {
+            Some(c) => c.goal.clone(),
+            None => meta.and_then(|m| m.goal.clone()),
+        },
         context: ctl.and_then(|c| c.context.clone()).or_else(|| meta.and_then(|m| m.context.clone())),
         cost: meta.and_then(|m| m.cost.clone()),
         todos,
@@ -232,6 +236,7 @@ pub fn plan_review_options(review: &PlanReviewInfo) -> Vec<NeedsOption> {
     review
         .choices
         .iter()
+        .filter(|c| !c.disabled)
         .enumerate()
         .map(|(n, c)| {
             let lower = c.label.to_lowercase();
@@ -544,6 +549,57 @@ mod tests {
         let agent = build_agent(&i);
         assert_eq!(agent.column, Column::Done);
         assert!(agent.archived);
+    }
+
+    fn goal(status: &str) -> tf_proto::model::GoalInfo {
+        tf_proto::model::GoalInfo { objective: "ship it".into(), status: status.into(), tokens_used: Some(1200), budget: Some(50_000) }
+    }
+
+    fn bridged(goal: Option<tf_proto::model::GoalInfo>) -> BridgeSession {
+        BridgeSession {
+            pid: 7,
+            session_id: "s1".into(),
+            session_file: None,
+            cwd: "/tmp".into(),
+            omp_version: None,
+            bridge_version: "1".into(),
+            tui: true,
+            state: crate::bridge::CtlState { goal, ..Default::default() },
+            connected_at: 0,
+        }
+    }
+
+    #[test]
+    fn bridge_goal_reaches_board_and_session_meta() {
+        let mut a = herdr_agent(AgentStatus::Working);
+        a.agent = Some("omp".into());
+
+        // Active → paused: the board agent follows the bridge state.
+        for status in ["active", "paused"] {
+            let b = bridged(Some(goal(status)));
+            let mut i = inputs(&a);
+            i.bridge = Some(&b);
+            let g = build_agent(&i).omp.unwrap().goal.unwrap();
+            assert_eq!((g.objective.as_str(), g.status.as_str(), g.tokens_used, g.budget), ("ship it", status, Some(1200), Some(50_000)));
+        }
+
+        // Session meta: the overlay sets the goal, and a bridge saying "no goal" (drop/complete) clears it.
+        let mut meta = tf_collab::Replica::new("t").meta().clone();
+        let overlay = |g| crate::omp::MetaOverlay { bridge: true, goal: Some(g), ..Default::default() };
+        overlay(Some(goal("active"))).apply(&mut meta, true);
+        assert_eq!(meta.goal.as_ref().map(|g| g.status.as_str()), Some("active"));
+        overlay(None).apply(&mut meta, true);
+        assert_eq!(meta.goal, None);
+        // Without the bridge the replica's goal is kept.
+        meta.goal = Some(goal("active"));
+        crate::omp::MetaOverlay::default().apply(&mut meta, true);
+        assert!(meta.goal.is_some());
+
+        // Dropped/completed per the bridge: no goal on the board either.
+        let b = bridged(None);
+        let mut i = inputs(&a);
+        i.bridge = Some(&b);
+        assert_eq!(build_agent(&i).omp.unwrap().goal, None);
     }
 
     #[test]

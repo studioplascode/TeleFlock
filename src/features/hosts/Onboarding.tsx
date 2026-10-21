@@ -93,7 +93,7 @@ export function Onboarding() {
                   <Network />
                 </span>
                 <span className="font-display text-2xl font-bold">Add your herdr host</span>
-                <span className="text-sm text-white/85">Over Tailscale SSH, no keys to copy. On Windows also this PC or a WSL distro.</span>
+                <span className="text-sm text-white/85">Over Tailscale SSH, no keys to copy. On desktop also this computer, or a WSL distro on Windows.</span>
                 <span className="mt-auto inline-flex items-center gap-1.5 pt-2 text-sm font-extrabold">
                   Set it up <ArrowRight className="size-4 transition-transform group-hover:translate-x-1" />
                 </span>

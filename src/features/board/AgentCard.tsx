@@ -15,9 +15,13 @@ import {
   cn,
   formatAge,
   useCalmMotion,
+  spring,
   useNow,
 } from "@/design";
-import { openAgent, openTerminal, reportError, setArchived, stopAgent } from "./agentActions";
+import { BellOff } from "lucide-react";
+import { openAgent, openTerminal, reportError, stopAgent, useMuted } from "./agentActions";
+import { ArchiveButton } from "./ArchiveConfirm";
+import { CardContextMenu, CardMenuButton } from "./CardMenu";
 import { LANE_BY_COLUMN, NEEDS_LABEL } from "./lanes";
 import { AgentHeartbeat, AgentOrb, LiveLine, QuietChip, TpsSparkline, useQuiet } from "./LiveBits";
 import { QuickAnswer } from "./QuickAnswer";
@@ -141,19 +145,23 @@ export interface AgentCardProps {
   /** Lane the card is rendered in (may lead the host state during an optimistic drop). */
   lane: Column;
   selected?: boolean;
+  /** Part of the multi-selection (accent ring + lift). */
+  picked?: boolean;
   /** Rendered inside the dnd-kit DragOverlay. */
   floating?: boolean;
 }
 
 /** The kanban card: every liveness signal for one agent, plus lane-specific actions. */
-export function AgentCard({ agentKey, lane, selected = false, floating = false }: AgentCardProps) {
+export function AgentCard({ agentKey, lane, selected = false, picked = false, floating = false }: AgentCardProps) {
   const agent = useAgent(agentKey);
   const stale = useHostStale(agent?.hostId ?? "");
   const lastOnlineAt = useHosts((s) => (agent ? s.status[agent.hostId]?.lastOnlineAt : undefined));
   const reconnecting = useHosts((s) => (agent ? s.status[agent.hostId]?.phase === "reconnecting" || s.status[agent.hostId]?.phase === "connecting" : false));
   const multiHost = useHosts((s) => s.profiles.length > 1);
+  const muted = useMuted(agentKey);
   const silentMs = useQuiet(lane === "running" && !stale, agent?.live.lastEventAt);
-  const nudge = useNudge(lane === "needs" && !stale);
+  // a muted agent still waits visibly, it just stops tugging at your sleeve
+  const nudge = useNudge(lane === "needs" && !stale && !muted);
   const burst = useArrival(agentKey, lane, floating);
   // Live lanes render their clocks with <Elapsed>; the card itself only needs `now` for ages.
   const now = useNow(stale ? 1000 : lane === "done" || lane === "review" ? 30_000 : 60_000);
@@ -201,13 +209,12 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
           >
             Review diff
           </button>
-          <button
-            type="button"
+          <ArchiveButton
+            agentKey={agentKey}
             className="h-7 rounded-sm bg-tile-4 px-2.5 text-2xs font-bold text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] pressable focus-ring hover:bg-tile-5"
-            onClick={() => void setArchived(agentKey, true).catch(() => {})}
           >
             Archive
-          </button>
+          </ArchiveButton>
           <button
             type="button"
             className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink"
@@ -235,7 +242,7 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
       data-status={status}
       data-morph={floating ? undefined : "surface"}
       data-morph-key={floating ? undefined : agentKey}
-      selected={selected}
+      selected={selected || picked}
       className={cn(
         "group/card relative flex flex-col rounded-xl p-3.5 outline-none",
         lane === "needs" && "st-border-grad",
@@ -303,6 +310,11 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
               {agent.name}
             </span>
             {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
+            {muted && (
+              <span role="img" aria-label="Notifications muted" title="Notifications muted" className="shrink-0 text-mute-2">
+                <BellOff className="size-3" aria-hidden />
+              </span>
+            )}
             {(agent.repo || agent.branch) && (
               <span className="min-w-0 truncate font-mono text-2xs text-mute-2">
                 {agent.repo}
@@ -360,52 +372,84 @@ export function AgentCard({ agentKey, lane, selected = false, floating = false }
         )
       )}
 
-      {/* hover actions for running cards */}
-      {lane === "running" && !floating && (
+      {/* hover actions: quick tools for running cards, the ⋯ menu everywhere */}
+      {!floating && (
         <div
-          className="absolute top-2 right-2 flex gap-0.5 rounded-md glass p-0.5 opacity-0 transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100"
+          className="absolute top-2 right-2 flex gap-0.5 rounded-md glass p-0.5 opacity-0 transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100 has-[[data-state=open]]:opacity-100"
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <Tooltip content="Open session" shortcut="Enter">
-            <IconButton label="Open session" size="sm" onClick={() => openAgent(agentKey)}>
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-                <path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10M9 2h5v5M14 2 7.5 8.5" />
-              </svg>
-            </IconButton>
-          </Tooltip>
-          <Tooltip content="Terminal (split)" shortcut="T">
-            <IconButton label="Open terminal" size="sm" onClick={() => openTerminal(agentKey, false)}>
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-                <path d="m3 4.5 3 3-3 3M8 11.5h5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </IconButton>
-          </Tooltip>
-          <Tooltip content="Stop the current turn">
-            <IconButton label="Stop" size="sm" variant="danger" onClick={() => void stopAgent(agentKey)}>
-              <svg viewBox="0 0 16 16" aria-hidden>
-                <rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" />
-              </svg>
-            </IconButton>
-          </Tooltip>
+          {lane === "running" && (
+            <>
+              <Tooltip content="Open session" shortcut="Enter">
+                <IconButton label="Open session" size="sm" onClick={() => openAgent(agentKey)}>
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                    <path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10M9 2h5v5M14 2 7.5 8.5" />
+                  </svg>
+                </IconButton>
+              </Tooltip>
+              <Tooltip content="Terminal (split)" shortcut="T">
+                <IconButton label="Open terminal" size="sm" onClick={() => openTerminal(agentKey, false)}>
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                    <path d="m3 4.5 3 3-3 3M8 11.5h5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </IconButton>
+              </Tooltip>
+              <Tooltip content="Stop the current turn">
+                <IconButton label="Stop" size="sm" variant="danger" onClick={() => void stopAgent(agentKey)}>
+                  <svg viewBox="0 0 16 16" aria-hidden>
+                    <rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" />
+                  </svg>
+                </IconButton>
+              </Tooltip>
+            </>
+          )}
+          <CardMenuButton agentKey={agentKey} lane={lane} />
         </div>
       )}
+
+      {/* multi-select check */}
+      <AnimatePresence>
+        {picked && (
+          <motion.span
+            aria-hidden
+            initial={{ scale: 0, rotate: -60 }}
+            animate={{ scale: 1, rotate: 0 }}
+            exit={{ scale: 0 }}
+            transition={spring.bouncy}
+            className="absolute -top-1.5 -left-1.5 z-10 grid size-5 place-items-center rounded-full bg-accent text-white shadow-glow-accent"
+          >
+            <svg viewBox="0 0 12 12" className="size-3">
+              <path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </motion.span>
+        )}
+      </AnimatePresence>
     </Card>
   );
 
   const glowing = live && !stale && !quiet && !floating;
-  return (
+  const body2 = (
     <div ref={nudge} className="relative">
-      <TiltCard maxTilt={floating ? 0 : 4} disabled={floating} className="rounded-xl">
-        {glowing ? (
-          <GlowBorder status={status} radius={22} className="rounded-xl">
-            {card}
-          </GlowBorder>
-        ) : (
-          card
-        )}
-      </TiltCard>
+      <motion.div animate={{ y: picked ? -3 : 0, scale: picked ? 1.01 : 1 }} transition={spring.snappy}>
+        <TiltCard maxTilt={floating ? 0 : 4} disabled={floating} className="rounded-xl">
+          {glowing ? (
+            <GlowBorder status={status} radius={22} className="rounded-xl">
+              {card}
+            </GlowBorder>
+          ) : (
+            card
+          )}
+        </TiltCard>
+      </motion.div>
       <AnimatePresence>{burst && <ArrivalBurst key={burst} lane={burst} />}</AnimatePresence>
     </div>
+  );
+  return floating ? (
+    body2
+  ) : (
+    <CardContextMenu agentKey={agentKey} lane={lane}>
+      {body2}
+    </CardContextMenu>
   );
 }

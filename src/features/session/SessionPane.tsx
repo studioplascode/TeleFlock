@@ -1,13 +1,14 @@
 import { Bot } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
-import { navigate, openSession, parseAgentKey, useAgent, useSession } from "@/core";
+import { navigate, openSession, parseAgentKey, useAgent, useSession, useUi } from "@/core";
 import { Button, cn, EmptyState, spring } from "@/design";
 import { hostCall } from "./api";
 import { AskCard } from "./ask/AskCard";
 import { Composer } from "./composer/Composer";
 import { SessionCtx } from "./context";
 import { SessionDialogs } from "./header/Dialogs";
+import { FocusHeader } from "./header/FocusHeader";
 import { SessionHeader } from "./header/SessionHeader";
 import { LinkGate } from "./LinkGate";
 import { NonOmpView } from "./NonOmpView";
@@ -32,6 +33,8 @@ export interface SessionPaneProps {
   header?: boolean;
   /** Phone layout for the composer and ask card. */
   mobile?: boolean;
+  /** Focus mode: minimal header, frameless transcript, floating composer. */
+  focus?: boolean;
   className?: string;
 }
 
@@ -39,7 +42,7 @@ export interface SessionPaneProps {
  * One session: header, virtualised transcript, sticky ask card and composer. Used by the
  * desktop SessionView, the mobile pager and the split view.
  */
-export function SessionPane({ agentKey, compact = false, header = true, mobile = false, className }: SessionPaneProps) {
+export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, className }: SessionPaneProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const retry = useOpenSession(agentKey);
@@ -51,6 +54,8 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
     if (!hotkeys || !stoppable) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented || isEditable(e.target)) return;
+      // In focus mode Esc leaves focus (SessionView); the composer's Esc still stops the turn.
+      if (useUi.getState().focusMode) return;
       if (document.querySelector('[role="dialog"][data-state="open"], [role="menu"][data-state="open"], [cmdk-root]')) return;
       e.preventDefault();
       void hostCall(hostId, "agent.abort", { agentId }, { failure: "Stop failed" });
@@ -77,9 +82,9 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
           <NonOmpView agentKey={agentKey} />
         ) : (
           <>
-            {header && <SessionHeader agentKey={agentKey} compact={compact} />}
+            {header && (focus ? <FocusHeader agentKey={agentKey} /> : <SessionHeader agentKey={agentKey} compact={compact} />)}
             <LinkGate agentKey={agentKey} onRetry={retry}>
-              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} />
+              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} />
             </LinkGate>
           </>
         )}
@@ -88,12 +93,12 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
   );
 }
 
-function SessionBody({ agentKey, hotkeys, mobile, compact }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean }) {
+function SessionBody({ agentKey, hotkeys, mobile, compact, focus }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean }) {
   const { ui } = useSession(agentKey);
   return (
     <>
-      <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && "rounded-tile glass")}>
-        <Transcript agentKey={agentKey} padX={mobile ? 12 : compact ? 14 : 22} gutter={mobile ? 0 : 38} />
+      <div className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", !mobile && !focus && "rounded-tile glass")}>
+        <Transcript agentKey={agentKey} padX={mobile ? 12 : focus ? 8 : compact ? 14 : 22} gutter={mobile ? 0 : 38} />
       </div>
       <AnimatePresence mode="popLayout">
         {ui && (
@@ -118,7 +123,9 @@ function SessionBody({ agentKey, hotkeys, mobile, compact }: { agentKey: string;
           </motion.div>
         )}
       </AnimatePresence>
-      <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
+      <div className={cn(focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}>
+        <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
+      </div>
       <SessionDialogs agentKey={agentKey} />
     </>
   );

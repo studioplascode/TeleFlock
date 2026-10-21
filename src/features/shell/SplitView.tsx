@@ -61,7 +61,8 @@ function SplitBody({ split }: { split: SplitState }) {
  * the right behind a draggable, keyboard-resizable divider. The ratio persists.
  */
 export function SplitFrame({ children }: { children: ReactNode }) {
-  const split = useUi((s) => s.split);
+  // Focus mode hides the split (it comes back when focus ends).
+  const split = useUi((s) => (s.focusMode ? null : s.split));
   const [ratio, setRatio] = useState(readRatio);
   const [dragging, setDragging] = useState(false);
   const frame = useRef<HTMLDivElement>(null);

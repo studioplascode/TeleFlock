@@ -147,10 +147,16 @@ fn snapshot_from(rows: &[Row], resync: bool) -> Option<(Millis, Snapshot)> {
 
 /// Replay a scenario on top of the `00-join` snapshot (scenario slices start mid-session).
 fn run(name: &str) -> Run {
+    run_with(name, |_| {})
+}
+
+fn run_with(name: &str, setup: impl FnOnce(&mut Replica)) -> Run {
     let base = load("00-join");
     let (at0, snap) = snapshot_from(&base, false).unwrap();
+    let mut replica = Replica::new("agent");
+    setup(&mut replica);
     let mut r = Run {
-        replica: Replica::new("agent"),
+        replica,
         mirror: Mirror::default(),
         updates: Vec::new(),
         raw_h2g: 0,
@@ -243,6 +249,17 @@ fn s01_prompt_text() {
 }
 
 #[test]
+fn s01_prompt_attributed_to_sending_device() {
+    let r = run_with("01-prompt-text", |rep| {
+        rep.expect_prompt("something else", "laptop");
+        rep.expect_prompt("  Think briefly, then reply with exactly: pong\n", "pixel");
+    });
+    let user = r.rows().into_iter().find_map(|i| if let TranscriptItem::User(u) = i { Some(u) } else { None }).unwrap();
+    assert_eq!(user.author.as_deref(), Some("pixel"));
+    assert!(r.signals().iter().any(|s| matches!(s, Signal::Prompted { author: Some(a), .. } if a == "pixel")));
+}
+
+#[test]
 fn s01b_streaming_thinking_retries() {
     let r = run("01b-prompt-streaming-thinking");
     let rows = r.rows();
@@ -312,8 +329,21 @@ fn s03_edit_tool() {
     // The session's changed-files list folds every successful edit (relative to the cwd).
     let files = &r.replica.meta().files;
     assert_eq!(files.len(), 1, "{files:?}");
-    assert!(files[0].path.ends_with("notes.txt"));
+    assert_eq!(files[0].path, "notes.txt");
     assert_eq!((files[0].added, files[0].removed, files[0].status), (1, 1, FileStatus::Modified));
+}
+
+/// A fresh replica (hostd restarted) joining a session whose edits are already in the snapshot
+/// still lists changed files relative to the cwd.
+#[test]
+fn s03_edit_replayed_from_snapshot() {
+    let (at0, mut snap) = snapshot_from(&load("00-join"), false).unwrap();
+    snap.entries.extend(load("03-edit-tool").into_iter().filter(|r| r.dir == "h2g" && r.frame["t"] == "entry").map(|r| r.frame["entry"].clone()));
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap), at0);
+    let files = &rep.meta().files;
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].path, "notes.txt");
 }
 
 #[test]
@@ -671,4 +701,65 @@ fn ui_events_open_and_close() {
         let up = rep.apply(&GuestEvent::Frame(HostFrame::from_value(end.frame.clone())), end.at);
         assert!(up.events.iter().any(|e| matches!(e, SessionEvent::Ui { request: None })), "{name}: close");
     }
+}
+
+/// Goal / plan mode / `/todo` edits come from the main session journal (collab mirrors neither
+/// `mode_change` nor `custom` entries). Replays `omp-samples/session-lab1-main.jsonl` in
+/// line-sized `fetch-transcript` chunks.
+#[test]
+fn journal_goal_plan_and_todo_edits() {
+    let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/research/omp-samples/session-lab1-main.jsonl")).unwrap();
+    let base = load("00-join");
+    let (at0, snap) = snapshot_from(&base, false).unwrap();
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    assert_eq!(rep.main_agent_id(), Some("Main"));
+    let mut offset = 0u64;
+    let mut after: Vec<(usize, Option<GoalInfo>, OmpMode, usize, bool)> = Vec::new();
+    for (i, line) in raw.split_inclusive('\n').enumerate() {
+        assert_eq!(rep.journal_offset(), offset);
+        offset += line.len() as u64;
+        let up = rep.apply_journal(&crate::guest::TranscriptChunk { text: line.to_owned(), new_size: offset, error: None });
+        let meta = rep.meta();
+        assert_eq!(up.meta_changed, up.events.iter().any(|e| matches!(e, SessionEvent::Meta { .. })));
+        after.push((i + 1, meta.goal.clone(), meta.mode, meta.todos.len(), up.meta_changed));
+    }
+    let at = |line: usize| &after[line - 1];
+    assert_eq!(at(19).2, OmpMode::Plan);
+    assert!(at(19).4, "meta changed on plan");
+    assert_eq!(at(22).2, OmpMode::PlanPaused);
+    assert_eq!(at(23).2, OmpMode::Normal);
+    let g = at(24).1.clone().expect("goal active");
+    assert_eq!(g.objective, "Reply with the single word pong, then mark this goal complete.");
+    assert_eq!((g.status.as_str(), g.tokens_used, g.budget), ("active", Some(0), None));
+    assert_eq!(at(29).1.as_ref().unwrap().tokens_used, Some(8100));
+    assert!(at(31).1.is_none(), "status complete clears the goal");
+    assert!(at(35).1.is_none() && at(35).2 == OmpMode::Normal);
+    assert_eq!(at(36).3, 1, "user_todo_edit sets todos");
+    assert_eq!(rep.meta().todos[0].name, "Lab");
+    // Journal lines never become transcript rows.
+    assert_eq!(rep.len(), 2);
+
+    // Resync of the same session keeps journal state and offset; rotation resets it.
+    rep.apply(&GuestEvent::Snapshot(Snapshot { resync: true, ..snap.clone() }), at0);
+    assert_eq!(rep.journal_offset(), offset);
+    assert_eq!(rep.meta().todos[0].name, "Lab");
+    let mut rotated = snap.clone();
+    rotated.welcome.header.id = "other-session".into();
+    rep.apply(&GuestEvent::Snapshot(rotated), at0);
+    assert_eq!(rep.journal_offset(), 0);
+    assert!(rep.meta().todos.is_empty());
+
+    // goal_paused and budget-limited.
+    let mut rep = Replica::new("y");
+    let line = r#"{"type":"mode_change","mode":"goal_paused","data":{"goal":{"id":"g","objective":"o","status":"paused","tokensUsed":5,"tokenBudget":100,"timeUsedSeconds":1,"createdAt":1,"updatedAt":2}}}"#;
+    rep.apply_journal(&crate::guest::TranscriptChunk { text: format!("{line}\n"), new_size: 10, error: None });
+    let g = rep.meta().goal.clone().unwrap();
+    assert_eq!((g.status.as_str(), g.tokens_used, g.budget), ("paused", Some(5), Some(100)));
+    let line = line.replace("goal_paused", "goal").replace(r#""status":"paused""#, r#""status":"budget-limited""#);
+    rep.apply_journal(&crate::guest::TranscriptChunk { text: format!("{line}\n"), new_size: 20, error: None });
+    assert_eq!(rep.meta().goal.as_ref().unwrap().status, "budget-limited");
+    // Errors are ignored; the offset stays.
+    rep.apply_journal(&crate::guest::TranscriptChunk { text: String::new(), new_size: 0, error: Some("x".into()) });
+    assert_eq!(rep.journal_offset(), 20);
 }

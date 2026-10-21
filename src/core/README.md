@@ -61,7 +61,8 @@ transcript rows keep identity, so selectors re-render only what changed.
 | `useBtw(key)` | `Record<btwId, { text, done }>` (deltas accumulated) |
 | `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read}), unread, markRead(), clear() }` |
 | `useActivity(hostId?)` | `(ActivityEvent & {hostId})[]` newest first; loads `host.activity`, refreshes on lane changes/notifications while mounted. `loadOlderActivity(hostId)` pages |
-| `useSettings(sel?)` / `.getState()` | `Settings & { update(patch), loaded }` (optimistic, rolls back on error) |
+| `useSettings(sel?)` / `.getState()` | `Settings & { update(patch), setMuted(key, muted), saveTemplate(t), removeTemplate(id), loaded }` (optimistic, rolls back on error; `mutedAgents`/`templates` always present) |
+| `isMuted(key)` / `useIsMuted(key)` | agent muted in `settings.mutedAgents` → suppress needs-you toasts, sounds, OS notifications |
 | `useTunnels()` | `TunnelInfo[]` |
 | `useBackend()` | current backend |
 | `useCore(selector, equal?)` | raw `CoreState` access for aggregates (pass `shallow` for derived arrays/objects) |
@@ -105,7 +106,7 @@ Hashes: `#/board`, `#/agent/:h/:a`, `#/terminal/:h`, `#/terminal/:h/p/:paneId`,
 
 `useUi(sel?)` (zustand; `.getState()`): `dialog: UiDialog | null`, `openDialog`, `closeDialog`,
 `paletteOpen`/`setPalette`, `answerNextOpen`/`setAnswerNext` (AppEvent `answerNext` opens it),
-`split`/`setSplit`, `sidebarCollapsed`/`toggleSidebar` (persisted), `selectedKey`/`select`.
+`split`/`setSplit`, `sidebarCollapsed`/`toggleSidebar` (persisted), `selectedKey`/`select`, `focusMode`/`setFocusMode`. Dialog kinds include `fanOut { hostId?, cwd?, prompt? }`.
 AppEvent `openAgent` navigates to the session.
 
 ## Demo host (`src/core/demo`)
@@ -136,7 +137,7 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
   (hero has a ~4.7k-line diff; PR checks pending → passed in 10 s), terminals (fake shell with
   echo + commands; agent panes mirror the omp stream and Enter prompts the agent; takeover
   closes the previous lease), usage (14 days), models, past sessions, resume, setup/setupApply,
-  activity paging. App methods: hosts.*, wsl.distros, settings, tunnels (blob: preview page).
+  activity paging, tab.rename/tab.close/pane.close (last pane closes the workspace; refused for a primary with linked worktrees). Settings seed 3 templates. App methods: hosts.*, wsl.distros, settings, tunnels (blob: preview page).
 
 ## Tests
 

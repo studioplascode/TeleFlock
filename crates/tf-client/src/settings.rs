@@ -18,6 +18,8 @@ pub fn default_settings(device_name: String) -> Settings {
         default_thinking: None,
         default_plan: false,
         device_name,
+        muted_agents: Vec::new(),
+        templates: Vec::new(),
     }
 }
 
@@ -86,6 +88,11 @@ pub fn wants(s: &Settings, kind: NotifyKind) -> bool {
     }
 }
 
+/// The user muted this agent (`settings.mutedAgents` holds `<hostId>::<agentId>` keys).
+pub fn is_muted(s: &Settings, host_id: &str, agent_id: &str) -> bool {
+    s.muted_agents.iter().any(|k| k.split_once("::") == Some((host_id, agent_id)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +104,29 @@ mod tests {
         assert_eq!(parse_hhmm("24:00"), None);
         assert_eq!(parse_hhmm("12:60"), None);
         assert_eq!(parse_hhmm("1230"), None);
+    }
+
+    #[test]
+    fn legacy_settings_json_loads() {
+        // A settings.json written before mutedAgents/templates existed.
+        let mut v = serde_json::to_value(default_settings("d".into())).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("mutedAgents");
+        o.remove("templates");
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert!(s.muted_agents.is_empty());
+        assert!(s.templates.is_empty());
+        assert_eq!(s.device_name, "d");
+    }
+
+    #[test]
+    fn muting() {
+        let mut s = default_settings("d".into());
+        assert!(!is_muted(&s, "lab", "a1"));
+        s.muted_agents = vec!["lab::a1".into()];
+        assert!(is_muted(&s, "lab", "a1"));
+        assert!(!is_muted(&s, "lab", "a2"));
+        assert!(!is_muted(&s, "other", "a1"));
     }
 
     #[test]

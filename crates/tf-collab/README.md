@@ -141,6 +141,15 @@ impl Replica {
     pub fn usage(&self) -> Option<CostInfo>;
     pub fn is_streaming(&self) -> bool;  pub fn turn_started_at(&self) -> Option<Millis>;
     pub fn read_only(&self) -> bool;     pub fn ended(&self) -> bool;
+    // Journal: omp's collab host mirrors neither `mode_change` nor `custom` entries, so goal / plan mode /
+    // `/todo` edits are read from the main session JSONL via fetch-transcript:
+    pub fn main_agent_id(&self) -> Option<&str>;                    // AgentSnapshot kind "main" (usually "Main")
+    pub fn journal_offset(&self) -> u64;                             // from_byte for the next fetch
+    pub fn apply_journal(&mut self, chunk: &TranscriptChunk) -> Update;
+        // mode_change goal|goal_paused → meta.goal {objective, status active|paused|budget-limited, tokens_used, budget};
+        // none / status complete / custom goal-completed → None; plan|plan_paused → meta.mode; user_todo_edit → meta.todos.
+        // Emits Meta + meta_changed. Keep fetching while chunk.text is non-empty (4 MiB cap). Offset survives a
+        // same-session resync, resets on rotation.
 }
 pub struct Update {
     pub events: Vec<SessionEvent>,    // reset / upsert / append / remove / meta / ui / ended (compacted)

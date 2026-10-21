@@ -17,8 +17,9 @@ import {
   Zap,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { toast } from "@/design";
-import { core } from "@/core";
+import { agentKey, core, navigate, useUi } from "@/core";
+import { MOBILE_MAX_WIDTH, toast } from "@/design";
+import { runSlash } from "@/features/session/composer/slash";
 import type { Agent } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
@@ -163,7 +164,18 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
         title: "Slash command",
         placeholder: "/command arguments",
         submitLabel: "Run",
-        run: (command) => hostCall(`Ran ${command.split(" ")[0]}`, h.call("agent.slash", { agentId, command: command.startsWith("/") ? command : `/${command}` })),
+        run: (command) =>
+          runSlash(
+            {
+              hostId,
+              agentId,
+              key: agentKey(hostId, agentId),
+              meta: undefined,
+              openTerminal: () =>
+                window.innerWidth <= MOBILE_MAX_WIDTH ? navigate({ name: "terminal", hostId, agentId }) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId }),
+            },
+            command.startsWith("/") ? command : `/${command}`,
+          ),
       },
     },
   ];

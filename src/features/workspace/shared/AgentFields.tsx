@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useMemo } from "react";
 import type { AgentSpec, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
 import { Field, Input, Select, type SelectOption, Switch, Textarea, cn, spring } from "@/design";
+import { TemplatePicker } from "./templates";
 import { useHostQuery } from "./useHostQuery";
 
 /** Editable agent launch options shared by the New worktree and New agent flows. */
@@ -102,6 +103,7 @@ export function AgentFields({ hostId, draft, onChange, derivedName, takenNames, 
 
   const body = (
     <div className={cn("grid gap-3.5", compact ? "grid-cols-1" : "grid-cols-1 md:grid-cols-2")}>
+      <TemplatePicker draft={draft} onApply={onChange} className={compact ? undefined : "md:col-span-2"} />
       <Field label="Agent name" hint={draft.nameTouched ? undefined : "auto"} error={nameError}>
         {(id) => (
           <Input

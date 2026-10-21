@@ -1,6 +1,7 @@
 import { type RefObject, useEffect } from "react";
 import { useAgent, useUi } from "@/core";
 import { openAgent, openAnswerHud, openTerminal } from "./agentActions";
+import { useBoard } from "./boardStore";
 
 function typing(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -9,7 +10,8 @@ function typing(target: EventTarget | null): boolean {
 
 /**
  * Board keys (spec §6): J/K or ↓/↑ move within the flat card order, H/L or ←/→ jump lanes,
- * Enter opens, A answers (HUD at the card), T opens the terminal split, / focuses search, Esc clears.
+ * Enter opens, A answers (HUD at the card), T opens the terminal split, X toggles the card in the
+ * multi-selection, / focuses search, Esc clears the multi-selection, then the cursor.
  * `groups` is the visible order: one array of keys per lane/column.
  */
 export function useBoardKeys(groups: readonly (readonly string[])[], searchRef: RefObject<HTMLInputElement | null>): void {
@@ -55,6 +57,8 @@ export function useBoardKeys(groups: readonly (readonly string[])[], searchRef: 
       else if ((k === "a" || k === "A") && !cur) ui.setAnswerNext(true);
       else if ((k === "t" || k === "T") && cur) openTerminal(cur, false);
       else if (k === "/") searchRef.current?.focus();
+      else if ((k === "x" || k === "X") && cur) useBoard.getState().togglePick(cur);
+      else if (k === "Escape" && useBoard.getState().picked.length > 0) useBoard.getState().clearPicked();
       else if (k === "Escape" && cur) ui.select(null);
       else return;
       e.preventDefault();

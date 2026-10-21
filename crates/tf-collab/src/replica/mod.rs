@@ -25,7 +25,7 @@ use tf_proto::{
     ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, FileStatus, HistoryPage,
     Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
     SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase,
-    TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem,
+    TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo,
 };
 
 use crate::frame::{AgentSnapshot, HostFrame, SessionHeader, SessionState, UiRequestFrame};
@@ -120,6 +120,34 @@ struct SubState {
     parent_tool: Option<String>,
 }
 
+/// What the main session journal says that collab does not mirror (`mode_change`, `custom`).
+#[derive(Debug, Clone)]
+struct Journal {
+    /// Next byte offset of the main session JSONL to read.
+    offset: u64,
+    goal: Option<GoalInfo>,
+    mode: OmpMode,
+    /// Latest `/todo` edit by the user (`custom user_todo_edit`), until a newer todo tool result.
+    todo_edit: Option<Vec<TodoPhase>>,
+}
+
+impl Default for Journal {
+    fn default() -> Self {
+        Journal { offset: 0, goal: None, mode: OmpMode::Normal, todo_edit: None }
+    }
+}
+
+/// omp `Goal` (`mode_change.data.goal`) → `GoalInfo`; `None` once complete.
+fn goal_info(g: &Value, paused: bool) -> Option<GoalInfo> {
+    let objective = s(g, "objective")?.to_owned();
+    let status = match s(g, "status").unwrap_or("active") {
+        "complete" | "completed" | "dropped" => return None,
+        _ if paused => "paused".to_owned(),
+        other => other.to_owned(),
+    };
+    Some(GoalInfo { objective, status, tokens_used: u(g, "tokensUsed"), budget: u(g, "tokenBudget") })
+}
+
 #[derive(Debug, Clone)]
 struct RetryStreak {
     id: String,
@@ -173,6 +201,12 @@ pub struct Replica {
     ended: bool,
     /// Files each successful edit/write call changed (call id → files), for `SessionMeta.files`.
     file_edits: Vec<(String, Vec<ChangedFile>)>,
+    /// Prompts we sent, awaiting their echo: (trimmed text, author device).
+    expected_authors: VecDeque<(String, String)>,
+    /// User rows attributed to a device (row id → device), kept across snapshot reloads.
+    authors: HashMap<String, String>,
+    /// State read from the main session journal (entries collab does not mirror).
+    journal: Journal,
 }
 
 impl Replica {
@@ -211,11 +245,24 @@ impl Replica {
             ui: ui::UiState::default(),
             ended: false,
             file_edits: Vec::new(),
+            expected_authors: VecDeque::new(),
+            authors: HashMap::new(),
+            journal: Journal::default(),
         }
     }
 
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    /// Attributes the next echo of `text` (a collab prompt, or a plain user message for
+    /// prompts that went through herdr/the bridge) to `author`, the sending device. All
+    /// devices share TeleFlock's single guest, so omp's `details.from` can't tell them apart.
+    pub fn expect_prompt(&mut self, text: &str, author: &str) {
+        if self.expected_authors.len() >= 32 {
+            self.expected_authors.pop_front();
+        }
+        self.expected_authors.push_back((text.trim().to_owned(), author.to_owned()));
     }
 
     // ── public reads ───────────────────────────────────────────────────
@@ -413,7 +460,17 @@ impl Replica {
 
     fn load_snapshot(&mut self, snap: &Snapshot, out: &mut Update) {
         let agent_id = std::mem::take(&mut self.agent_id);
+        let authors = std::mem::take(&mut self.authors);
+        let expected = std::mem::take(&mut self.expected_authors);
+        // Journal state survives a resync of the same session (not a rotation).
+        let same_session = self.header.as_ref().is_some_and(|h| h.id == snap.welcome.header.id);
+        let journal = if same_session { std::mem::take(&mut self.journal) } else { Journal::default() };
         *self = Replica::new(agent_id);
+        self.authors = authors;
+        self.expected_authors = expected;
+        self.journal = journal;
+        self.meta.goal = self.journal.goal.clone();
+        self.meta.mode = self.journal.mode;
         self.now = out_now(self.now, snap);
         self.emit = false;
         self.header = Some(snap.welcome.header.clone());
@@ -433,6 +490,9 @@ impl Replica {
             }
         }
         self.msgs.values_mut().for_each(|m| m.done = true);
+        if let Some(todos) = self.journal.todo_edit.clone() {
+            self.meta.todos = todos;
+        }
         self.running = self.state.is_streaming;
         if self.running {
             self.phase = Phase::Waiting;
@@ -881,12 +941,6 @@ impl Replica {
             _ => content_text(msg.get("content")),
         };
         let images = content_images(msg.get("content"));
-        let (author, synthetic) = match (role, custom_type) {
-            (_, Some("collab-prompt")) => (msg.get("details").and_then(|d| non_empty(d, "from")).map(str::to_owned), false),
-            (_, Some(other)) => (Some(other.to_owned()), true),
-            ("developer", _) => (None, true),
-            _ => (None, b(msg, "synthetic")),
-        };
         if text.is_empty() && images.is_empty() {
             return;
         }
@@ -894,6 +948,21 @@ impl Replica {
             Some(TranscriptItem::User(u)) => u.steering,
             _ => self.emit && self.running && self.turn_output,
         };
+        let (mut author, synthetic) = match (role, custom_type) {
+            (_, Some("collab-prompt")) => (msg.get("details").and_then(|d| non_empty(d, "from")).map(str::to_owned), false),
+            (_, Some(other)) => (Some(other.to_owned()), true),
+            ("developer", _) => (None, true),
+            _ => (None, b(msg, "synthetic")),
+        };
+        if !synthetic {
+            if let Some(a) = self.authors.get(&id) {
+                author = Some(a.clone());
+            } else if let Some(i) = self.expected_authors.iter().position(|(t, _)| t == text.trim()) {
+                let (_, a) = self.expected_authors.remove(i).expect("position is in range");
+                self.authors.insert(id.clone(), a.clone());
+                author = Some(a);
+            }
+        }
         let is_new = !self.items.contains_key(&id);
         let item = TranscriptItem::User(UserItem { id, at: t, text: text.clone(), images, author: author.clone(), steering, synthetic });
         self.upsert(item, out);
@@ -1050,6 +1119,9 @@ impl Replica {
         }
         if let Some(phases) = tools::todo_phases(&name, details) {
             self.meta.todos = phases;
+            if self.emit {
+                self.journal.todo_edit = None;
+            }
         }
         if !is_error {
             self.record_file_edits(call_id, t.view.as_ref());
@@ -1069,7 +1141,8 @@ impl Replica {
     /// Folds a diff view into `SessionMeta.files` (paths relative to the session cwd).
     fn record_file_edits(&mut self, call_id: &str, view: Option<&tf_proto::ToolView>) {
         let Some(tf_proto::ToolView::Diff(d)) = view else { return };
-        let cwd = self.meta.cwd.as_deref().map(|c| format!("{}/", c.trim_end_matches('/')));
+        // `meta.cwd` is only refreshed after a snapshot replay, so read the source directly.
+        let cwd = self.session_cwd().map(|c| format!("{}/", c.trim_end_matches('/')));
         let files: Vec<ChangedFile> = d
             .files
             .iter()
@@ -1215,7 +1288,85 @@ impl Replica {
                 let summary = s(entry, "summary").unwrap_or("").to_owned();
                 self.upsert(TranscriptItem::Compaction(CompactionItem { id: format!("c{entry_id}"), at, summary, tokens_before: None }), out);
             }
+            "mode_change" | "custom" => {
+                self.journal_entry(entry);
+            }
             _ => {}
+        }
+    }
+
+    // ── journal (entries collab does not mirror) ───────────────────────
+
+    /// The main agent's id (`AgentSnapshot.kind == "main"`, usually `Main`): pass it to
+    /// [`crate::Guest::fetch_transcript`] to read the session journal.
+    pub fn main_agent_id(&self) -> Option<&str> {
+        self.subs.values().filter_map(|s| s.snapshot.as_ref()).find(|a| a.kind == "main").map(|a| a.id.as_str())
+    }
+
+    /// Byte offset of the main session journal read so far (`from_byte` for the next fetch).
+    pub fn journal_offset(&self) -> u64 {
+        self.journal.offset
+    }
+
+    /// Ingest a slice of the main session's JSONL journal (a `fetch_transcript(main, journal_offset())`
+    /// reply). omp's collab host mirrors neither `mode_change` nor `custom` entries, so goal and plan
+    /// mode (`meta.goal`, `meta.mode`) and user `/todo` edits come from here. Keep fetching while
+    /// the reply's text is non-empty (replies are capped at 4 MiB).
+    pub fn apply_journal(&mut self, chunk: &crate::guest::TranscriptChunk) -> Update {
+        let mut out = Update::default();
+        if chunk.error.is_some() {
+            return out;
+        }
+        let before = self.meta.clone();
+        if chunk.new_size < self.journal.offset {
+            // File replaced/truncated: the slice starts over.
+            self.journal = Journal { offset: 0, ..Journal::default() };
+        }
+        for line in chunk.text.lines() {
+            if let Ok(entry) = serde_json::from_str::<Value>(line) {
+                if matches!(s(&entry, "type"), Some("mode_change" | "custom")) {
+                    self.journal_entry(&entry);
+                }
+            }
+        }
+        self.journal.offset = chunk.new_size;
+        if self.meta != before {
+            out.meta_changed = true;
+            out.events.push(SessionEvent::Meta { meta: self.meta.clone() });
+        }
+        out
+    }
+
+    fn journal_entry(&mut self, entry: &Value) {
+        match s(entry, "type") {
+            Some("mode_change") => {
+                let mode = s(entry, "mode").unwrap_or("none");
+                let data = entry.get("data");
+                self.journal.mode = match mode {
+                    "plan" => OmpMode::Plan,
+                    "plan_paused" => OmpMode::PlanPaused,
+                    _ => OmpMode::Normal,
+                };
+                self.journal.goal = match mode {
+                    "goal" | "goal_paused" => data.and_then(|d| d.get("goal")).and_then(|g| goal_info(g, mode == "goal_paused")),
+                    _ => None,
+                };
+            }
+            Some("custom") => match s(entry, "customType") {
+                Some("goal-completed") => self.journal.goal = None,
+                Some("user_todo_edit") => {
+                    if let Some(phases) = tools::todo_phases("todo", entry.get("data")) {
+                        self.journal.todo_edit = Some(phases);
+                    }
+                }
+                _ => return,
+            },
+            _ => return,
+        }
+        self.meta.goal = self.journal.goal.clone();
+        self.meta.mode = self.journal.mode;
+        if let Some(t) = &self.journal.todo_edit {
+            self.meta.todos = t.clone();
         }
     }
 
@@ -1267,13 +1418,19 @@ impl Replica {
 
     // ── meta ───────────────────────────────────────────────────────────
 
+    /// Session working directory: live state first, then the session header.
+    fn session_cwd(&self) -> Option<String> {
+        (!self.state.cwd.is_empty()).then(|| self.state.cwd.clone()).or_else(|| self.header.as_ref().map(|h| h.cwd.clone()))
+    }
+
     fn refresh_meta(&mut self) {
+        let cwd = self.session_cwd();
         let subagents = self.subagents();
         let st = &self.state;
         let m = &mut self.meta;
         m.session_id = self.header.as_ref().map(|h| h.id.clone()).filter(|s| !s.is_empty());
         m.title = st.session_name.clone().or_else(|| self.header.as_ref().and_then(|h| h.title.clone()));
-        m.cwd = (!st.cwd.is_empty()).then(|| st.cwd.clone()).or_else(|| self.header.as_ref().map(|h| h.cwd.clone()));
+        m.cwd = cwd;
         m.model = st.model.as_ref().and_then(|mv| {
             Some(ModelRef {
                 provider: s(mv, "provider")?.to_owned(),

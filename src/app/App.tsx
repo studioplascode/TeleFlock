@@ -1,14 +1,16 @@
 import { Suspense, useEffect } from "react";
 import { AmbientGlow, DesignProvider, LogoMark, Shimmer, Spinner, TitleBar, useIsMobile, useMotionPreference } from "@/design";
-import { useHosts, useRoute, useSettings } from "@/core";
+import { useHosts, useRoute, useSettings, useUi } from "@/core";
 import { NewAgentDialog } from "@/features/workspace/NewAgentDialog";
 import { NewWorktreeDialog } from "@/features/worktree/NewWorktreeDialog";
 import { PastSessionsDialog } from "@/features/history/PastSessionsDialog";
+import { FanOutDialog } from "@/features/worktree/FanOutDialog";
 import { AnswerNextHud } from "@/features/inbox/AnswerNextHud";
 import { HostEditor } from "@/features/hosts/HostEditor";
 import { Onboarding } from "@/features/hosts/Onboarding";
 import { useNotifyBridge } from "@/features/notify/useNotifyBridge";
 import { CommandPalette } from "@/features/palette/CommandPalette";
+import { useOverlayBack } from "@/features/shell/backButton";
 import { DesktopShell } from "@/features/shell/DesktopShell";
 import { useGlobalShortcuts } from "@/features/shell/keyboard";
 import { useGlobalMood, useGlobalPulseFeed } from "@/features/shell/liveness";
@@ -26,6 +28,7 @@ function GlobalOverlays() {
       <NewWorktreeDialog />
       <NewAgentDialog />
       <PastSessionsDialog />
+      <FanOutDialog />
       <HostEditor />
       <ShortcutsSheet />
       <SheetHost />
@@ -60,10 +63,12 @@ function Frame() {
   const loaded = useHosts((h) => h.loaded);
   const hostCount = useHosts((h) => h.profiles.length);
   const mood = useGlobalMood();
+  const focus = useUi((s) => s.focusMode);
   useMotionSettingSync();
   useNotifyBridge();
   useGlobalPulseFeed();
   useGlobalShortcuts();
+  useOverlayBack(mobile);
 
   if (route.name === "design") {
     return (
@@ -101,7 +106,7 @@ function Frame() {
 
   return (
     <>
-      <AmbientGlow mood={mood} />
+      <AmbientGlow mood={mood} intensity={focus ? 0.35 : 1} />
       {mobile ? <MobileShell /> : <DesktopShell />}
       <GlobalOverlays />
     </>

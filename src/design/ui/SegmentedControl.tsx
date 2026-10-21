@@ -43,7 +43,7 @@ export function SegmentedControl<T extends string>({ value, onValueChange, optio
             value={o.value}
             disabled={o.disabled}
             className={cn(
-              "relative inline-flex items-center justify-center gap-1.5 rounded-sm font-bold whitespace-nowrap transition-colors focus-ring disabled:opacity-40 [&_svg]:size-3.5",
+              "relative inline-flex items-center justify-center gap-1.5 rounded-sm font-bold whitespace-nowrap transition-colors touch-hit focus-ring disabled:opacity-40 [&_svg]:size-3.5",
               size === "sm" ? "h-7 px-2.5 text-xs" : "h-8 px-3.5 text-sm",
               fill && "flex-1",
               on ? "text-ink" : "text-mute hover:text-ink",

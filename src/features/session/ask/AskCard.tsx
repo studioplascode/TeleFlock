@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { parseAgentKey, useAgent } from "@/core";
 import type { Answer, NeedsOption, UiRequest } from "@/core/gen";
 import { cn, Elapsed, Spinner, spring } from "@/design";
+import { haptic } from "@/features/shell/haptics";
 import { hostCall, usePending } from "../api";
 import { Markdown } from "../markdown/Markdown";
 
@@ -60,15 +61,17 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
     const full: Answer = { choices: [], cancel: false, chat: false, ...a };
     const res = await run(hostCall(hostId, "agent.answer", { agentId, requestId: request.id, answer: full }, { failure: "Answer not delivered" }));
     if (res.ok) {
+      haptic("success");
       setSent(label);
       onAnswered?.();
-    }
+    } else haptic("warning");
   };
 
   const choose = (o: NeedsOption) => {
     if (o.id === "__confirm") return answer({}, o.label);
     if (o.id === "__cancel") return answer({ cancel: true }, o.label);
     if (multi) {
+      haptic("select");
       setPicked((p) => (p.includes(o.id) ? p.filter((x) => x !== o.id) : [...p, o.id]));
       return;
     }
@@ -163,7 +166,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
             {multi ? "Pick any" : "Pick one"} · <span className="font-mono">1–{Math.min(n, 9)}</span>
           </span>
         )}
-        {(canSubmit || editor) && (
+        {(canSubmit || editor) && !compact && (
           <button
             type="button"
             onClick={() => void submit()}
@@ -314,6 +317,19 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
             </div>
           )}
         </div>
+      )}
+
+      {/* Phones: the send action sits under the options, full width, in the thumb zone. */}
+      {compact && (canSubmit || editor) && (
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy || !!sent || !canSubmit}
+          className="pressable focus-ring relative mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-white text-sm font-extrabold text-[#d21a5a] shadow-[0_12px_26px_-8px_rgb(80_0_30/0.55)] disabled:opacity-60"
+        >
+          {busy ? <Spinner size={14} label="Sending" /> : <Send className="size-4" />}
+          {editor ? "Submit" : multi && picked.length > 0 ? `Send ${picked.length} selected` : "Send answer"}
+        </button>
       )}
 
       {(request.allowChat || request.kind !== "planReview") && (

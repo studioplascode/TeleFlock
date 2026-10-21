@@ -12,7 +12,7 @@ export function Switch({ className, label, ...rest }: SwitchProps) {
     <RadixSwitch.Root
       aria-label={label}
       className={cn(
-        "group relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full bg-tile-4 shadow-[inset_0_0_0_1px_var(--color-line-2)] transition-[background-color,box-shadow] duration-300 focus-ring disabled:opacity-45 data-[state=checked]:bg-omp data-[state=checked]:shadow-[0_4px_12px_-4px_rgb(163_92_240/0.9)]",
+        "group relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full bg-tile-4 shadow-[inset_0_0_0_1px_var(--color-line-2)] transition-[background-color,box-shadow] duration-300 touch-hit focus-ring disabled:opacity-45 data-[state=checked]:bg-omp data-[state=checked]:shadow-[0_4px_12px_-4px_rgb(163_92_240/0.9)]",
         className,
       )}
       {...rest}

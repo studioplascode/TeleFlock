@@ -432,6 +432,16 @@ export class AgentSim {
     this.host.metaChanged(this.agent.id);
   }
 
+  /** Alt+Up in omp: pull the last queued message back out (last steer first, then last follow-up). */
+  dequeue(): string | undefined {
+    const text = this.queueSteer.length ? this.queueSteer.pop() : this.queueFollow.pop();
+    if (text === undefined) return undefined;
+    this.refreshDerived();
+    this.host.agentChanged(this.agent.id);
+    this.host.metaChanged(this.agent.id);
+    return text;
+  }
+
   setState(state: Agent["state"]): void {
     const a = this.agent;
     const now = this.host.now();

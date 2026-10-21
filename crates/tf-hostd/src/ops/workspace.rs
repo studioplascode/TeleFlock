@@ -1,5 +1,8 @@
-//! `workspace.*` methods (herdr workspaces) and the herdr → `ApiError` mapping shared with
-//! `worktree.*` and `term.*`.
+//! `workspace.*`, `tab.*` and `pane.close` methods (herdr layout) and the herdr → `ApiError`
+//! mapping shared with `worktree.*` and `term.*`.
+//!
+//! Closing the last pane of the last tab (or the last tab) closes the workspace: herdr does that
+//! itself and only refuses (`confirmation_required`) when it would close a worktree group.
 
 use serde_json::Value;
 use tf_herdr::HerdrError;
@@ -26,8 +29,39 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
             ctx.state.refresh();
             to_value(Empty {})
         }
-        other => Err(ApiError::new("unknown_method", format!("{} is not a workspace method", other.name()))),
+        HostMethod::TabRename(p) => {
+            let label = p.label.trim();
+            if label.is_empty() {
+                return Err(ApiError::new("invalid_params", "label is empty"));
+            }
+            ctx.herdr.tab_rename(&p.tab_id, label).await.map_err(map_herdr)?;
+            ctx.state.refresh();
+            to_value(Empty {})
+        }
+        HostMethod::TabClose(p) => {
+            ctx.herdr.tab_close(&p.tab_id).await.map_err(|e| map_close(e, "tab"))?;
+            ctx.state.refresh();
+            to_value(Empty {})
+        }
+        HostMethod::PaneClose(p) => {
+            ctx.herdr.pane_close(&p.pane_id).await.map_err(|e| map_close(e, "pane"))?;
+            ctx.state.refresh();
+            to_value(Empty {})
+        }
+        other => Err(ApiError::new("unknown_method", format!("{} is not a workspace/tab/pane method", other.name()))),
     }
+}
+
+/// `tab.close` / `pane.close` errors: herdr refuses with `confirmation_required` when the close
+/// would take down the workspace and with it a whole worktree group.
+fn map_close(e: HerdrError, what: &str) -> ApiError {
+    if e.code == "confirmation_required" {
+        return ApiError::new("confirmation_required", format!("closing this {what} would close its workspace and the whole worktree group"))
+            .with_hint(format!(
+                "It is the last {what} of a repository workspace that has linked worktree workspaces. Close the workspace group explicitly (Close workspace → whole group) if that is intended."
+            ));
+    }
+    map_herdr(e)
 }
 
 /// Validates `cwd` (herdr silently falls back to `$HOME` for missing paths) and creates an
@@ -137,6 +171,17 @@ mod tests {
         assert_eq!(map_herdr(he("workspace_group_close_required", "workspace has linked worktree workspaces; use --group")).code, "group_close_required");
         assert_eq!(map_herdr(he("worktree_create_failed", "fatal: '/x/feat-x' already exists")).code, "path_exists");
         assert_eq!(map_herdr(he("workspace_not_found", "no workspace w9")).code, "not_found");
+    }
+
+    #[test]
+    fn maps_tab_and_pane_close_errors() {
+        // herdr src/app/api/tabs.rs / panes.rs messages
+        let e = map_close(he("confirmation_required", "closing this tab would close a worktree group"), "tab");
+        assert_eq!(e.code, "confirmation_required");
+        assert!(e.message.contains("worktree group") && e.hint.unwrap().contains("whole group"));
+        assert_eq!(map_close(he("confirmation_required", "closing this pane would close a worktree group"), "pane").code, "confirmation_required");
+        assert_eq!(map_close(he("tab_not_found", "tab w9:t9 not found"), "tab").code, "not_found");
+        assert_eq!(map_close(he("pane_not_found", "pane w9:p9 not found"), "pane").code, "not_found");
     }
 
     #[test]

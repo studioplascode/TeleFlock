@@ -127,20 +127,22 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         title={
           <span className="flex min-w-0 items-center gap-2">
             <StatusOrb status={status} activity={tier} size={8} label={null} />
-            <span className="truncate">{agent?.name ?? agentId}</span>
+            <span data-morph="name" data-morph-key={key} className="truncate">
+              {agent?.name ?? agentId}
+            </span>
           </span>
         }
         subtitle={agent ? [agent.repo, agent.branch].filter(Boolean).join(" · ") || agent.title : undefined}
         actions={
           omp ? (
             <>
-              <IconButton label="Inspector" onClick={() => useSessionUi.getState().setSheet(key, true)}>
+              <IconButton label="Inspector" size="lg" onClick={() => useSessionUi.getState().setSheet(key, true)}>
                 <PanelBottomOpen />
               </IconButton>
               <ActionsMenu
                 agentKey={key}
                 trigger={
-                  <IconButton label="Session actions">
+                  <IconButton label="Session actions" size="lg">
                     <MoreVertical />
                   </IconButton>
                 }
@@ -174,7 +176,10 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           dragElastic={{ left: next ? 0.9 : 0.15, right: prev ? 0.9 : 0.15 }}
           onDragEnd={onDragEnd}
           style={{ x, opacity: fade }}
-          className="relative flex h-full min-h-0 flex-col px-3 pb-2"
+          // Horizontal pans belong to the pager. With `dragListener={false}` motion doesn't set
+          // touch-action itself, and nested scrollers re-enable every pan, so the browser would
+          // claim the swipe (pointercancel). Code blocks, tables and inputs keep native panning.
+          className="relative flex h-full min-h-0 flex-col px-3 pb-2 touch-pan-y [&_*]:touch-pan-y [&_:is(pre,table,textarea,input,[data-no-swipe])]:touch-auto [&_:is(pre,table,[data-no-swipe])_*]:touch-auto"
           onPointerDown={(e) => {
             // Page from anywhere except text inputs, so typing and selecting never swipe.
             const t = e.target as HTMLElement;

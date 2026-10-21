@@ -3,6 +3,7 @@ import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
 import { useShallow } from "zustand/react/shallow";
 import type {
+  AgentTemplate,
   Column,
   ConnStatus,
   HostProfile,
@@ -263,6 +264,13 @@ export function useSessionItem(key: string, itemId: string): TranscriptItem | un
   return useCore((s) => s.sessions[key]?.items[itemId]);
 }
 
+/** Loaded transcript rows of a session, oldest first (imperative; for one-shot actions like copy). */
+export function getTranscript(key: string): { items: TranscriptItem[]; hasMore: boolean } {
+  const e = coreStore.getState().sessions[key];
+  if (!e) return { items: [], hasMore: false };
+  return { items: e.itemIds.flatMap((id) => e.items[id] ?? []), hasMore: e.hasMore };
+}
+
 /** `/btw` side answers streamed for this session, by btw id. */
 export function useBtw(key: string): Record<string, BtwEntry> {
   return useCore((s) => s.sessions[key]?.btw ?? EMPTY_OBJ);
@@ -368,30 +376,88 @@ export const DEFAULT_SETTINGS: Settings = {
   confirmArchive: false,
   defaultPlan: false,
   deviceName: "TeleFlock",
+  mutedAgents: [],
+  templates: [],
 };
 
-export type SettingsView = Settings & { update(patch: Partial<Settings>): Promise<void>; loaded: boolean };
+export interface SettingsView extends Settings {
+  update(patch: Partial<Settings>): Promise<void>;
+  /** Mute/unmute OS notifications, toasts and sounds for one agent (`hostId::agentId`). */
+  setMuted(key: string, muted: boolean): Promise<void>;
+  /** Insert or replace a template by id. */
+  saveTemplate(template: AgentTemplate): Promise<void>;
+  removeTemplate(id: string): Promise<void>;
+  loaded: boolean;
+}
 
-async function updateSettings(patch: Partial<Settings>): Promise<void> {
-  const cur = coreStore.getState().settings ?? DEFAULT_SETTINGS;
-  const next = { ...cur, ...patch };
-  pushInternal({ type: "settings", settings: next });
-  try {
-    const saved = await core.app("settings.set", next);
-    pushInternal({ type: "settings", settings: saved });
-  } catch (err) {
-    pushInternal({ type: "settings", settings: cur });
-    throw err;
-  }
+/** Locally intended settings not yet confirmed by `settings.set` (read-your-writes for helpers). */
+let pendingSettings: Settings | null = null;
+/** `settings.set` calls run one at a time, in call order, so responses can't reorder. */
+let settingsChain: Promise<void> = Promise.resolve();
+
+/** Settings with every list present (older backends may omit newer fields), pending writes included. */
+function currentSettings(): Settings {
+  return pendingSettings ?? { ...DEFAULT_SETTINGS, ...coreStore.getState().settings };
+}
+
+function updateSettings(patch: Partial<Settings>): Promise<void> {
+  const prev = currentSettings();
+  const next = { ...prev, ...patch };
+  pendingSettings = next;
+  // Optimistic and synchronous: the UI and the next helper call see it immediately.
+  coreStore.setState({ settings: next });
+  const run = settingsChain.then(async () => {
+    try {
+      const saved = await core.app("settings.set", next);
+      if (pendingSettings === next) {
+        pendingSettings = null;
+        pushInternal({ type: "settings", settings: saved });
+      }
+    } catch (err) {
+      // Roll back only if nothing newer was written meanwhile (a newer write carries this patch too).
+      if (pendingSettings === next) {
+        pendingSettings = null;
+        pushInternal({ type: "settings", settings: prev });
+      }
+      throw err;
+    }
+  });
+  settingsChain = run.catch(() => {});
+  return run;
+}
+
+function setMuted(key: string, muted: boolean): Promise<void> {
+  const list = currentSettings().mutedAgents.filter((k) => k !== key);
+  return updateSettings({ mutedAgents: muted ? [...list, key] : list });
+}
+
+function saveTemplate(template: AgentTemplate): Promise<void> {
+  const list = currentSettings().templates;
+  const i = list.findIndex((t) => t.id === template.id);
+  return updateSettings({ templates: i < 0 ? [...list, template] : list.map((t, j) => (j === i ? template : t)) });
+}
+
+function removeTemplate(id: string): Promise<void> {
+  return updateSettings({ templates: currentSettings().templates.filter((t) => t.id !== id) });
 }
 
 let settingsCache: { src: Settings | null; out: SettingsView } | null = null;
 
 function settingsView(s: CoreState): SettingsView {
   if (settingsCache?.src === s.settings) return settingsCache.out;
-  const out: SettingsView = { ...(s.settings ?? DEFAULT_SETTINGS), update: updateSettings, loaded: s.settings !== null };
+  const out: SettingsView = { ...DEFAULT_SETTINGS, ...s.settings, update: updateSettings, setMuted, saveTemplate, removeTemplate, loaded: s.settings !== null };
   settingsCache = { src: s.settings, out };
   return out;
+}
+
+/** Non-reactive: is this agent muted (no needs-you toasts, sounds or OS notifications)? */
+export function isMuted(key: string): boolean {
+  return coreStore.getState().settings?.mutedAgents?.includes(key) ?? false;
+}
+
+/** Reactive variant of `isMuted` for a mute toggle / bell icon. */
+export function useIsMuted(key: string): boolean {
+  return useCore((s) => s.settings?.mutedAgents?.includes(key) ?? false);
 }
 
 export function useSettings(): SettingsView;

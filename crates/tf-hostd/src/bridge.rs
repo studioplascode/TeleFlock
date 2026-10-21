@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use tf_proto::{
-    ApiError, ContextUsage, ExportResult, ForkPlacement, GoalInfo, GoalOp, Millis, ModelRef,
-    OmpMode, QueueInfo, ThinkingLevel, TreeInfo,
+    ApiError, CommandList, ContextUsage, Dequeued, ExportResult, ForkPlacement, GoalInfo, GoalOp, Millis,
+    ModelRef, OmpMode, QueueInfo, ThinkingLevel, TreeInfo,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -659,6 +659,16 @@ impl BridgeHandle {
 
     pub async fn get_queue(&self, session_id: &str) -> Result<QueueInfo, BridgeError> {
         self.typed(session_id, "getQueue", json!({}), QUICK).await
+    }
+
+    /// Extension, prompt-template and skill commands of the session (`pi.getCommands()`).
+    pub async fn commands(&self, session_id: &str) -> Result<CommandList, BridgeError> {
+        self.typed(session_id, "getCommands", json!({}), QUICK).await
+    }
+
+    /// Pulls the last queued message back out of the queue (Alt+Up), returning its text.
+    pub async fn dequeue(&self, session_id: &str) -> Result<Dequeued, BridgeError> {
+        self.typed(session_id, "dequeue", json!({}), QUICK).await
     }
 
     /// Runs any single-line slash command through the TUI composer (as if typed + Enter).

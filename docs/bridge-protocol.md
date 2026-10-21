@@ -154,6 +154,8 @@ type TreeInfo = {                        // = tf_proto::TreeInfo
 | `abort` | – | `{}` | `ctx.abort()` | | 10 s |
 | `getTree` | – | `TreeInfo` | `sessionManager.getEntries()` | | 10 s |
 | `getQueue` | – | `{steering, followUp}` | TUI queue chip contents (empty without the TUI) | | 10 s |
+| `getCommands` | – | `{commands:[{name, description?, source}]}` | `pi.getCommands()`: extension, prompt-template and skill commands (`source` `extension`/`prompt`/`skill`; builtins excluded; the bridge's own `teleflock-attach` filtered out) | | 10 s |
+| `dequeue` | – | `{text?}` | TUI `editor.onDequeue()` (Alt+Up) pops the last queued message (steer first, then follow-up); the popped text is returned and the operator's draft and images are restored. `{}` when the queue is empty. Popped images are dropped | ✓ | 10 s |
 
 `{settled:false}` means that after 15 s the command was still waiting on a TUI dialog (for example "Exit plan mode?"). The operator must answer it in the terminal.
 

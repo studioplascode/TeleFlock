@@ -33,14 +33,14 @@ class ViewErrorBoundary extends Component<{ children: ReactNode; resetKey: strin
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className="grid h-full place-items-center p-8">
-        <div className="flex max-w-md flex-col items-center gap-3 text-center">
+      <div className="grid h-full place-items-center p-6">
+        <div className="flex w-full max-w-md min-w-0 flex-col items-center gap-3 text-center">
           <span className="grid size-12 place-items-center rounded-lg bg-error/14 text-error">
             <AlertOctagon className="size-6" />
           </span>
           <h2 className="font-display text-xl font-bold">This view hit a snag</h2>
-          <p className="text-sm text-mute">{error.message}</p>
-          <div className="flex gap-2">
+          <p className="max-w-full text-sm break-words text-mute">{error.message}</p>
+          <div className="flex flex-wrap justify-center gap-2">
             <Button variant="primary" icon={<RotateCcw />} onClick={() => this.setState({ error: null })}>
               Try again
             </Button>

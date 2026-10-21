@@ -1,6 +1,7 @@
-import { core, navigate, parseAgentKey, useUi } from "@/core";
+import { core, navigate, parseAgentKey, useSettings, useUi } from "@/core";
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
+import { haptic } from "@/features/shell/haptics";
 
 function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
@@ -17,7 +18,9 @@ export async function answerAgent(key: string, requestId: string, answer: Answer
   const { hostId, agentId } = parseAgentKey(key);
   try {
     await core.host(hostId).call("agent.answer", { agentId, requestId, answer });
+    haptic("success");
   } catch (err) {
+    haptic("warning");
     reportError(`Couldn't answer ${agentId}`, err);
     throw err;
   }
@@ -28,9 +31,41 @@ export async function setArchived(key: string, archived: boolean): Promise<void>
   const { hostId, agentId } = parseAgentKey(key);
   try {
     await core.host(hostId).call("agent.archive", { agentId, archived });
+    haptic("success");
   } catch (err) {
+    haptic("warning");
     reportError(archived ? `Couldn't archive ${agentId}` : `Couldn't reopen ${agentId}`, err);
     throw err;
+  }
+}
+
+/** Archive with an Undo toast (mobile swipe, bulk actions): no confirm step, one tap to revert. */
+export async function archiveWithUndo(keys: readonly string[]): Promise<void> {
+  const results = await Promise.allSettled(keys.map((k) => setArchived(k, true)));
+  const done = keys.filter((_, i) => results[i]?.status === "fulfilled");
+  if (done.length === 0) return;
+  const label = done.length === 1 ? parseAgentKey(done[0] ?? "").agentId : `${done.length} agents`;
+  toast({
+    title: `Archived ${label}`,
+    status: "done",
+    action: { label: "Undo", onClick: () => done.forEach((k) => void setArchived(k, false).catch(() => {})) },
+  });
+}
+
+/** Whether an agent's notifications are muted (`Settings.mutedAgents`). */
+export function useMuted(key: string): boolean {
+  return useSettings((s) => (s.mutedAgents ?? []).includes(key));
+}
+
+/** Mute or unmute agents: their needs-you cards stay on the board, but they stop pinging you. */
+export async function setMuted(keys: readonly string[], muted: boolean): Promise<void> {
+  const s = useSettings.getState();
+  const cur = s.mutedAgents ?? [];
+  const next = muted ? [...cur, ...keys.filter((k) => !cur.includes(k))] : cur.filter((k) => !keys.includes(k));
+  try {
+    await s.update({ mutedAgents: next });
+  } catch (err) {
+    reportError(muted ? "Couldn't mute" : "Couldn't unmute", err);
   }
 }
 

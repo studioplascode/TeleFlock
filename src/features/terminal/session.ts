@@ -24,8 +24,15 @@ export interface TermSessionOpts {
 }
 
 const TAKEN_OVER_RE = /taken over|takeover/i;
-/** No frame this long after attaching → nudge herdr with a resize, which forces a full repaint. */
-const FIRST_FRAME_NUDGE_MS = 1500;
+/**
+ * No frame this long after attaching → nudge herdr with a resize, which forces a full repaint.
+ * herdr only pushes a frame when the pane changes, so an idle pane re-attached at its current size
+ * would otherwise stay blank until something prints.
+ */
+export const FIRST_FRAME_NUDGE_MS = 250;
+
+/** Attachments of this window. Another one on the same pane is ours, not "another client". */
+const attached = new Set<TermSession>();
 
 /**
  * Imperative owner of one herdr terminal attachment: `term.open` → termBus frames → xterm,
@@ -57,6 +64,16 @@ export class TermSession {
   async open(takeover: boolean): Promise<void> {
     const gen = ++this.gen;
     this.detach(true);
+    // Moving a pane between views of this window (split → full view, …) races the old view's
+    // `term.close`: take the lease over from ourselves instead of reporting "in use".
+    if (!takeover && this.o.mode === "control") {
+      const t = this.o.target;
+      takeover = [...attached].some((a) => {
+        if (a === this || a.o.mode !== "control" || a.o.hostId !== this.o.hostId || a.phase.k !== "live") return false;
+        if (t.kind === "pane") return a.phase.paneId === t.paneId;
+        return t.kind === "agent" && a.o.target.kind === "agent" && a.o.target.agentId === t.agentId;
+      });
+    }
     this.setPhase({ k: "opening", takeover });
     const { cols, rows } = this.o.term;
     this.openedSize = { cols, rows };
@@ -77,6 +94,7 @@ export class TermSession {
     this.unsub = termBus.subscribe(this.o.hostId, opened.termId, (ev) => this.onEvent(gen, ev));
     if (gen !== this.gen) return; // a replayed `closed` already ended it
     this.setPhase({ k: "live", termId: opened.termId, paneId: opened.paneId, title: opened.title });
+    attached.add(this);
     this.nudge = window.setTimeout(() => {
       if (gen === this.gen && !this.gotFrame) this.resize(this.o.term.cols, this.o.term.rows);
     }, FIRST_FRAME_NUDGE_MS);
@@ -121,6 +139,7 @@ export class TermSession {
     clearTimeout(this.nudge);
     this.unsub?.();
     this.unsub = null;
+    attached.delete(this);
     const termId = this.termId;
     this.termId = null;
     if (release && termId) void core.host(this.o.hostId).call("term.close", { termId }).catch(() => {});
@@ -133,6 +152,7 @@ export class TermSession {
     this.unsub?.();
     this.unsub = null;
     this.termId = null;
+    attached.delete(this);
   }
 
   input(data: string) {

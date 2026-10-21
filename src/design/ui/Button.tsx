@@ -7,7 +7,7 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "suns
 export type ButtonSize = "sm" | "md" | "lg";
 
 const base =
-  "relative inline-flex items-center justify-center gap-2 font-bold whitespace-nowrap select-none pressable focus-ring disabled:pointer-events-none disabled:opacity-45 aria-disabled:pointer-events-none aria-disabled:opacity-45";
+  "relative inline-flex items-center justify-center gap-2 font-bold whitespace-nowrap select-none pressable touch-hit focus-ring disabled:pointer-events-none disabled:opacity-45 aria-disabled:pointer-events-none aria-disabled:opacity-45";
 
 const variants: Record<ButtonVariant, string> = {
   primary:

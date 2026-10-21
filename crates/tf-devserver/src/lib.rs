@@ -6,6 +6,9 @@
 //!   `{termIn: {hostId, termId, data}}` (no response).
 //! * server → client: `{id, result}` | `{id, error}` responses and `{event: AppEvent}`.
 //!   Each connection first receives a replay of the current state as events.
+//! * Every tab shares the engine's single hostd client per host, so session subscriptions are
+//!   reference-counted across tabs ([`Subs`]): a tab closing a session (or going away) only
+//!   unsubscribes once no other tab has it open, and a tab's terminals close with it.
 //!
 //! Access control lives in [`access`]: allow-listed `Host` on every route, and a per-launch token
 //! plus same-origin `Origin` on `/ws`. The served `index.html` carries the token as
@@ -13,9 +16,10 @@
 
 pub mod access;
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection};
@@ -79,13 +83,152 @@ struct AppState {
     engine: Engine,
     access: Arc<Access>,
     static_dir: Option<Arc<PathBuf>>,
+    subs: Arc<Mutex<Subs>>,
+    keepalive: Keepalive,
+}
+
+/// `(hostId, agentId)` of an open session, or `(hostId, termId)` of an open terminal.
+type SubKey = (String, String);
+
+/// Session subscriptions across tabs: how many tabs have each session open.
+#[derive(Default)]
+struct Subs {
+    sessions: HashMap<SubKey, usize>,
+}
+
+/// What one tab holds open.
+#[derive(Default)]
+struct ConnSubs {
+    sessions: HashSet<SubKey>,
+    terms: HashSet<SubKey>,
+    /// The tab is gone: anything opened from now on (in-flight requests) is released at once.
+    closed: bool,
+}
+
+/// Per-connection context for [`handle_frame`].
+#[derive(Clone)]
+struct Conn {
+    engine: Engine,
+    subs: Arc<Mutex<Subs>>,
+    mine: Arc<Mutex<ConnSubs>>,
+}
+
+impl Conn {
+    /// Records a successful `session.open` / `term.open`. Lock order: `subs` before `mine`.
+    /// When the tab already went away (the open was in flight), the result is released at once.
+    fn opened(&self, method: &str, host: &str, params: &Value, result: &Value) {
+        let release = match method {
+            "session.open" => {
+                let Some(agent) = params.get("agentId").and_then(Value::as_str) else { return };
+                let key = (host.to_string(), agent.to_string());
+                let mut subs = self.subs.lock().unwrap();
+                let mut mine = self.mine.lock().unwrap();
+                if mine.closed {
+                    // Only unsubscribe when no other tab shows it.
+                    (!subs.sessions.contains_key(&key)).then(|| ("session.close", json!({ "agentId": agent })))
+                } else {
+                    if mine.sessions.insert(key.clone()) {
+                        *subs.sessions.entry(key).or_default() += 1;
+                    }
+                    None
+                }
+            }
+            "term.open" => {
+                let Some(term) = result.get("termId").and_then(Value::as_str) else { return };
+                let mut mine = self.mine.lock().unwrap();
+                if mine.closed {
+                    Some(("term.close", json!({ "termId": term })))
+                } else {
+                    mine.terms.insert((host.to_string(), term.to_string()));
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((method, params)) = release {
+            spawn_release(self.engine.clone(), host.to_string(), method, params);
+        }
+    }
+
+    /// This tab drops `key`; true when no tab holds it any more (forward the close to hostd).
+    fn release_session(&self, key: &SubKey) -> bool {
+        let mut subs = self.subs.lock().unwrap();
+        if self.mine.lock().unwrap().sessions.remove(key)
+            && let Some(n) = subs.sessions.get_mut(key)
+        {
+            *n = n.saturating_sub(1);
+        }
+        match subs.sessions.get(key) {
+            Some(0) | None => {
+                subs.sessions.remove(key);
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// The tab went away: close its terminals and the sessions only it had open.
+    fn release_all(&self) {
+        let (sessions, terms) = {
+            let mut mine = self.mine.lock().unwrap();
+            mine.closed = true;
+            (std::mem::take(&mut mine.sessions), std::mem::take(&mut mine.terms))
+        };
+        let mut calls: Vec<(String, &'static str, Value)> =
+            terms.into_iter().map(|(h, t)| (h, "term.close", json!({ "termId": t }))).collect();
+        {
+            let mut subs = self.subs.lock().unwrap();
+            for key in sessions {
+                let last = subs.sessions.get_mut(&key).is_none_or(|n| {
+                    *n = n.saturating_sub(1);
+                    *n == 0
+                });
+                if last {
+                    subs.sessions.remove(&key);
+                    calls.push((key.0, "session.close", json!({ "agentId": key.1 })));
+                }
+            }
+        }
+        for (host, method, params) in calls {
+            spawn_release(self.engine.clone(), host, method, params);
+        }
+    }
+}
+
+fn spawn_release(engine: Engine, host: String, method: &'static str, params: Value) {
+    tokio::spawn(async move {
+        if let Err(e) = engine.call(Some(&host), method, params).await {
+            log::debug!("{method} on tab close: {}", e.message);
+        }
+    });
+}
+
+/// WebSocket liveness: the server pings every `ping_every`; a socket that sends nothing (not even
+/// the browser's automatic pong) for `timeout` is treated as gone, which releases its terminals
+/// and sessions even when the peer vanished without a close frame or FIN (sleep, network loss).
+#[derive(Debug, Clone, Copy)]
+pub struct Keepalive {
+    pub ping_every: std::time::Duration,
+    pub timeout: std::time::Duration,
+}
+
+impl Default for Keepalive {
+    fn default() -> Self {
+        Self { ping_every: std::time::Duration::from_secs(15), timeout: std::time::Duration::from_secs(45) }
+    }
 }
 
 /// Builds the HTTP app: `/ws` plus optional static files with an `index.html` SPA fallback (the
 /// index gets the token meta injected). Every route enforces `access`'s Host allow-list.
-pub fn router(engine: Engine, static_dir: Option<PathBuf>, access: Access) -> Router {
+pub fn router(engine: Engine, static_dir: Option<PathBuf>, access: Access, keepalive: Keepalive) -> Router {
     let access = Arc::new(access);
-    let state = AppState { engine, access: access.clone(), static_dir: static_dir.clone().map(Arc::new) };
+    let state = AppState {
+        engine,
+        access: access.clone(),
+        static_dir: static_dir.clone().map(Arc::new),
+        subs: Arc::default(),
+        keepalive,
+    };
     let mut app = Router::new().route("/ws", get(ws_handler));
     if let Some(dir) = static_dir {
         let index = get(index_html).with_state(state.clone());
@@ -152,15 +295,17 @@ async fn ws_handler(
         Some(p) => ws.protocols([p]),
         None => ws,
     };
-    let engine = st.engine;
-    ws.max_message_size(64 << 20).on_upgrade(move |socket| client(socket, engine))
+    let conn = Conn { engine: st.engine, subs: st.subs, mine: Arc::default() };
+    let keepalive = st.keepalive;
+    ws.max_message_size(64 << 20).on_upgrade(move |socket| client(socket, conn, keepalive))
 }
 
 fn event_frame(ev: &AppEvent) -> Message {
     Message::Text(json!({ "event": ev }).to_string().into())
 }
 
-async fn client(socket: WebSocket, engine: Engine) {
+async fn client(socket: WebSocket, conn: Conn, keepalive: Keepalive) {
+    let engine = conn.engine.clone();
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
     let (replay, mut events) = engine.subscribe_with_replay();
@@ -172,8 +317,15 @@ async fn client(socket: WebSocket, engine: Engine) {
                 return;
             }
         }
+        let mut ping = tokio::time::interval(keepalive.ping_every);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = ping.tick() => {
+                    if sink.send(Message::Ping(Default::default())).await.is_err() {
+                        break;
+                    }
+                }
                 out = out_rx.recv() => {
                     let Some(out) = out else { break };
                     if sink.send(Message::Text(out.into())).await.is_err() {
@@ -203,18 +355,33 @@ async fn client(socket: WebSocket, engine: Engine) {
         let _ = sink.close().await;
     });
 
-    while let Some(Ok(msg)) = stream.next().await {
+    // Any frame (including the browser's automatic pong) proves the peer is alive.
+    loop {
+        let msg = match tokio::time::timeout(keepalive.timeout, stream.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(e))) => {
+                log::debug!("ws read error: {e}");
+                break;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                log::info!("ws client silent for {}s; dropping it", keepalive.timeout.as_secs());
+                break;
+            }
+        };
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
             _ => continue,
         };
-        handle_frame(&engine, &out_tx, text.as_str());
+        handle_frame(&conn, &out_tx, text.as_str());
     }
     writer.abort();
+    conn.release_all();
 }
 
-fn handle_frame(engine: &Engine, out: &mpsc::UnboundedSender<String>, text: &str) {
+fn handle_frame(conn: &Conn, out: &mpsc::UnboundedSender<String>, text: &str) {
+    let engine = &conn.engine;
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -243,13 +410,70 @@ fn handle_frame(engine: &Engine, out: &mpsc::UnboundedSender<String>, text: &str
         None | Some(Value::Null) => json!({}),
         Some(p) => p.clone(),
     };
-    let engine = engine.clone();
+    // Another tab still shows this session: only this tab lets go.
+    if method == "session.close"
+        && let (Some(h), Some(agent)) = (&host, params.get("agentId").and_then(Value::as_str))
+        && !conn.release_session(&(h.clone(), agent.to_string()))
+    {
+        let _ = out.send(json!({ "id": id, "result": {} }).to_string());
+        return;
+    }
+    if method == "term.close"
+        && let (Some(h), Some(term)) = (&host, params.get("termId").and_then(Value::as_str))
+    {
+        conn.mine.lock().unwrap().terms.remove(&(h.clone(), term.to_string()));
+    }
+    let conn = conn.clone();
     let out = out.clone();
     tokio::spawn(async move {
-        let frame = match engine.call(host.as_deref(), &method, params).await {
-            Ok(result) => json!({ "id": id, "result": result }),
+        let frame = match conn.engine.call(host.as_deref(), &method, params.clone()).await {
+            Ok(result) => {
+                if let Some(h) = &host {
+                    conn.opened(&method, h, &params, &result);
+                }
+                json!({ "id": id, "result": result })
+            }
             Err(error) => json!({ "id": id, "error": error }),
         };
         let _ = out.send(frame.to_string());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sessions_are_shared_across_tabs() {
+        let data = tempfile::tempdir().unwrap();
+        let cfg = tf_client::EngineConfig {
+            data_dir: data.path().to_path_buf(),
+            platform_name: "linux".into(),
+            client_app: "teleflock-devserver".into(),
+            version: "0.0.0".into(),
+            hostd_bins_override: None,
+        };
+        let (engine, _rx) = Engine::start(cfg, Arc::new(DevPlatform)).await;
+        let subs: Arc<Mutex<Subs>> = Arc::default();
+        let tab = || Conn { engine: engine.clone(), subs: subs.clone(), mine: Arc::default() };
+        let (a, b) = (tab(), tab());
+        let key = ("lab".to_string(), "term_1".to_string());
+        let open = json!({ "agentId": "term_1" });
+        a.opened("session.open", "lab", &open, &json!({}));
+        a.opened("session.open", "lab", &open, &json!({})); // re-open after reconnect: still one
+        b.opened("session.open", "lab", &open, &json!({}));
+        b.opened("term.open", "lab", &json!({}), &json!({ "termId": "t1" }));
+        assert_eq!(subs.lock().unwrap().sessions[&key], 2);
+        assert!(!a.release_session(&key), "b still shows it");
+        assert!(!a.release_session(&key), "a's second close is a no-op");
+        b.release_all();
+        assert!(subs.lock().unwrap().sessions.is_empty());
+        assert!(b.mine.lock().unwrap().terms.is_empty());
+        assert!(a.release_session(&key), "nobody holds it: forward");
+        // Opens that were in flight when the tab went away are released, not tracked.
+        b.opened("term.open", "lab", &json!({}), &json!({ "termId": "t2" }));
+        assert!(b.mine.lock().unwrap().terms.is_empty());
+        b.opened("session.open", "lab", &json!({ "agentId": "term_9" }), &json!({}));
+        assert!(subs.lock().unwrap().sessions.is_empty(), "late session.open is not counted");
+    }
 }

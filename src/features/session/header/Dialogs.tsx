@@ -1,6 +1,6 @@
 import { Layers, Pause, Pencil, Play, Send, SquarePlus, Target, Trash2 } from "lucide-react";
-import { useState } from "react";
-import { parseAgentKey, useSession } from "@/core";
+import { type KeyboardEvent, useState } from "react";
+import { parseAgentKey, useAgent, useSession } from "@/core";
 import { Button, Dialog, DialogContent, Field, formatCompact, Input, ProgressRing, Textarea } from "@/design";
 import { hostCall, usePending } from "../api";
 import { useSessionUi } from "../state";
@@ -102,40 +102,70 @@ function GoalContent({ agentKey, close }: { agentKey: string; close: () => void 
   );
 }
 
+const HANDLE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
 function RenameContent({ agentKey, close }: { agentKey: string; close: () => void }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
+  const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
-  const [title, setTitle] = useState(meta?.title ?? "");
+  const initialTitle = meta?.title ?? agent?.title ?? "";
+  const initialHandle = agent?.name ?? "";
+  const [title, setTitle] = useState(initialTitle);
+  const [handle, setHandle] = useState(initialHandle);
   const [busy, run] = usePending();
+  const canTitle = meta?.caps.rename === true;
+  const titleChanged = canTitle && title.trim() !== "" && title.trim() !== initialTitle;
+  const handleChanged = handle !== initialHandle;
+  const handleError = handleChanged && !HANDLE_RE.test(handle) ? "Lowercase letter first, then a–z, 0–9, _ or - (max 32)" : undefined;
+  const canSubmit = (titleChanged || handleChanged) && !handleError && !busy;
   const submit = async () => {
-    if (!title.trim()) return;
-    const res = await run(hostCall(hostId, "agent.rename", { agentId, title: title.trim() }, { success: "Session renamed" }));
-    if (res.ok) close();
+    if (!canSubmit) return;
+    // Handle first: a herdr name clash should fail before the session title changes.
+    if (handleChanged) {
+      const res = await run(hostCall(hostId, "agent.renameHandle", { agentId, name: handle }, { success: `Handle → ${handle}`, failure: "Handle rename failed" }));
+      if (!res.ok) return;
+    }
+    if (titleChanged) {
+      const res = await run(hostCall(hostId, "agent.rename", { agentId, title: title.trim() }, { success: "Session renamed" }));
+      if (!res.ok) return;
+    }
+    close();
+  };
+  const onEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") void submit();
   };
   return (
     <DialogContent
       icon={<Pencil />}
-      title="Rename session"
+      title="Rename"
       width={480}
       footer={
-        <Button variant="primary" onClick={() => void submit()} disabled={!title.trim() || busy} loading={busy}>
+        <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit} loading={busy}>
           Rename
         </Button>
       }
     >
-      <Field label="Title">
-        {(id) => (
-          <Input
-            id={id}
-            value={title}
-            autoFocus
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void submit();
-            }}
-          />
-        )}
-      </Field>
+      <div className="flex flex-col gap-4">
+        <Field label="Session title" description={canTitle ? "Shown on the board and in omp's session list." : "This session can't be retitled right now."}>
+          {(id) => <Input id={id} value={title} autoFocus={canTitle} disabled={!canTitle} onChange={(e) => setTitle(e.target.value)} onKeyDown={onEnter} />}
+        </Field>
+        <Field label="Agent handle" hint="herdr" error={handleError} description={handleError ? undefined : "The herdr agent name used by CLI commands and notifications."}>
+          {(id) => (
+            <Input
+              id={id}
+              value={handle}
+              autoFocus={!canTitle}
+              invalid={handleError != null}
+              aria-invalid={handleError != null}
+              spellCheck={false}
+              autoCapitalize="none"
+              className="font-mono"
+              onChange={(e) => setHandle(e.target.value)}
+              onKeyDown={onEnter}
+            />
+          )}
+        </Field>
+      </div>
     </DialogContent>
   );
 }

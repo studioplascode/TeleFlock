@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, Pencil, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
+import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, Pencil, ShieldAlert, Sparkles, Split, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { core, navigate, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
@@ -33,7 +33,7 @@ type Submit =
   | { phase: "idle" }
   | { phase: "working"; since: number }
   | { phase: "failed"; failure: HerdrFailure }
-  | { phase: "done"; created: WorktreeCreated; name: string };
+  | { phase: "done"; created: WorktreeCreated };
 
 interface WizardProps {
   open: boolean;
@@ -123,8 +123,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
     setSubmit({ phase: "working", since: Date.now() });
     try {
       const created = await core.host(hostId).call("worktree.create", p);
-      // freeze the name: once the agent shows up in host state the derived name would de-dupe to `-2`
-      setSubmit({ phase: "done", created, name: p.agent?.name ?? agentName });
+      setSubmit({ phase: "done", created });
       if (!created.agent) {
         onClose();
         toast({
@@ -250,7 +249,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
           <LaunchSuccess
             hostId={hostId}
             started={submit.created.agent}
-            title={`${submit.name} is starting`}
+            title={(name) => (name ? `${name} is starting` : "Starting agent…")}
             subtitle={
               <>
                 <span className="flex items-center justify-center gap-1.5 text-ink-2">
@@ -352,14 +351,28 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                   />
                 )}
                 {step === 2 && hostId && (
-                  <AgentFields
-                    hostId={hostId}
-                    toggleable
-                    draft={agent}
-                    onChange={(patch) => setAgent((a) => ({ ...a, ...patch }))}
-                    derivedName={derivedName}
-                    takenNames={takenNames}
-                  />
+                  <div className="flex flex-col gap-3">
+                    <AgentFields
+                      hostId={hostId}
+                      toggleable
+                      draft={agent}
+                      onChange={(patch) => setAgent((a) => ({ ...a, ...patch }))}
+                      derivedName={derivedName}
+                      takenNames={takenNames}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => openDialog({ kind: "fanOut", hostId, cwd: repo?.path, prompt: agent.prompt.trim() || undefined })}
+                      className="group flex items-center gap-3 rounded-lg bg-white/[0.03] px-3.5 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-accent/[0.08]"
+                    >
+                      <Split className="size-4 text-accent transition-transform duration-500 ease-spring group-hover:rotate-90" />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="text-sm font-bold">Try N approaches</span>
+                        <span className="text-2xs text-mute">Fan out: run this task on 2–5 agents with different models, each in its own worktree</span>
+                      </span>
+                      <ArrowRight className="size-4 text-mute-2 transition-transform group-hover:translate-x-0.5" />
+                    </button>
+                  </div>
                 )}
                 {step === 3 && (
                   <div className="flex flex-col gap-4">

@@ -20,7 +20,7 @@ use crate::conn::{self, ConnCmd, HostRt};
 use crate::deploy::{Artifacts, HOSTD_VERSION};
 use crate::link::timeout_for;
 use crate::platform::{BadgeState, NotifyStyle, Platform};
-use crate::settings::{default_settings, in_quiet_hours, local_minutes_now, validate, wants};
+use crate::settings::{default_settings, in_quiet_hours, is_muted, local_minutes_now, validate, wants};
 use crate::state::{CacheRecord, counts};
 use crate::tunnel::Tunnels;
 use crate::util::{invalid, now_ms, rand_id, read_json, to_value, write_json};
@@ -203,7 +203,8 @@ impl Inner {
         }
     }
 
-    /// Notification policy: always forward to the UI; reach the OS per settings/quiet hours.
+    /// Notification policy: always forward to the UI; reach the OS per settings, per-agent
+    /// mute and quiet hours.
     pub fn on_notify(&self, rt: &HostRt, n: Notification) {
         self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n.clone() });
         rt.remember_notification(n.clone());
@@ -211,7 +212,7 @@ impl Inner {
             return;
         }
         let settings = self.settings();
-        if !wants(&settings, n.kind) {
+        if !wants(&settings, n.kind) || is_muted(&settings, &rt.id, &n.agent_id) {
             return;
         }
         let quiet = in_quiet_hours(&settings, local_minutes_now());
@@ -1132,5 +1133,41 @@ mod tests {
         assert!(in_quiet_hours(&s, local_minutes_now()));
         s.notify_errors = false;
         assert!(!wants(&s, NotifyKind::Quiet));
+    }
+
+    /// Muted agents still reach the UI (`AppEvent::Notify`) but never the OS (no toast, no sound).
+    #[tokio::test]
+    async fn muted_agents_skip_os_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Arc::new(TestPlatform::default());
+        let (engine, _rx) = Engine::start(cfg(dir.path()), platform.clone()).await;
+        let mut s = default_settings("d".into());
+        s.muted_agents = vec!["lab::a1".into()];
+        engine.call(None, "settings.set", to_value(&s).unwrap()).await.unwrap();
+        let mut rx = engine.subscribe();
+        let (rt, _cmd) = HostRt::new("lab".into(), None);
+        let note = |agent: &str| Notification {
+            id: format!("n-{agent}"),
+            at: 1,
+            kind: NotifyKind::Finished,
+            agent_id: agent.into(),
+            title: "t".into(),
+            body: "b".into(),
+            request_id: None,
+            actions: vec![],
+        };
+        engine.inner.on_notify(&rt, note("a1"));
+        engine.inner.on_notify(&rt, note("a2"));
+        let ids: Vec<String> = (0..2)
+            .map(|_| match rx.try_recv().unwrap() {
+                AppEvent::Notify { host_id, notification } if host_id == "lab" => notification.agent_id,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, ["a1", "a2"]);
+        let os = platform.notified.lock().unwrap();
+        assert_eq!(os.len(), 1);
+        assert_eq!(os[0].1.agent_id, "a2");
+        assert!(rt.find_notification("n-a1").is_some(), "muted notifications stay actionable");
     }
 }

@@ -91,7 +91,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
     match family {
         "state" => to_value(ctx.state.resend_snapshot(client)),
         "session" | "agent" => agent::handle(ctx, req, client).await,
-        "workspace" => workspace::handle(ctx, req, client).await,
+        "workspace" | "tab" | "pane" => workspace::handle(ctx, req, client).await,
         "worktree" => worktree::handle(ctx, req, client).await,
         "fs" => fs::handle(ctx, req, client).await,
         "git" => git::handle(ctx, req, client).await,

@@ -39,6 +39,7 @@ out({"t": "notify", "notification": {
     "id": "n1", "at": 1, "kind": "needs", "agentId": "a1", "title": "Question", "body": "Proceed?",
     "requestId": "r1", "actions": [{"id": "yes", "label": "Yes", "answer": {"choices": ["Yes"]}}]}})
 
+terms = 0
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -49,6 +50,8 @@ while True:
         out({"t": "pong", "ts": m["ts"]})
     elif t == "req":
         method, rid = m["method"], m["id"]
+        with open(os.path.join(HOME, "requests.log"), "a") as f:
+            f.write(json.dumps({"method": method, "params": m["params"]}) + "\n")
         if method == "host.health":
             sys.stderr.write("tf-hostd: exiting on request\n")
             sys.stderr.flush()
@@ -56,7 +59,8 @@ while True:
         elif method == "fs.home":
             out({"t": "res", "id": rid, "result": {"path": "/fake"}})
         elif method == "term.open":
-            out({"t": "res", "id": rid, "result": {"termId": "t1", "paneId": "w1:p1"}})
+            terms += 1
+            out({"t": "res", "id": rid, "result": {"termId": "t%d" % terms, "paneId": "w1:p1"}})
         elif method == "session.open" and second:
             out({"t": "res", "id": rid, "error": {"code": "not_found", "message": "agent gone"}})
         elif method == "agent.answer":

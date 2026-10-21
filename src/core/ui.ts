@@ -5,7 +5,8 @@ export type UiDialog =
   | { kind: "newAgent"; hostId?: string; workspaceId?: string }
   | { kind: "pastSessions"; hostId?: string }
   | { kind: "hostEditor"; hostId?: string }
-  | { kind: "shortcuts" };
+  | { kind: "shortcuts" }
+  | { kind: "fanOut"; hostId?: string; cwd?: string; prompt?: string };
 
 export type SplitState =
   | { kind: "terminal"; hostId: string; paneId?: string; agentId?: string }
@@ -26,6 +27,9 @@ export interface UiState {
   /** Board keyboard selection (agent key). */
   selectedKey: string | null;
   select(key: string | null): void;
+  /** Session focus mode: title bar stays, sidebar/split/bottom nav hide. */
+  focusMode: boolean;
+  setFocusMode(on: boolean): void;
 }
 
 const SIDEBAR_KEY = "tf.sidebarCollapsed";
@@ -61,4 +65,6 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   selectedKey: null,
   select: (selectedKey) => set({ selectedKey }),
+  focusMode: false,
+  setFocusMode: (focusMode) => set({ focusMode }),
 }));

@@ -57,6 +57,8 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentExport(p) => to_value(export(ctx, &p.agent_id).await?),
         M::AgentBtw(p) => to_value(btw(ctx, p).await?),
         M::AgentSlash(p) => unit(slash(ctx, p).await),
+        M::AgentCommands(p) => to_value(commands(ctx, &p.agent_id).await?),
+        M::AgentDequeue(p) => to_value(dequeue(ctx, &p.agent_id).await?),
         M::AgentKeys(p) => unit(keys(ctx, p).await),
         M::AgentSubagent(p) => unit(subagent(ctx, p)),
         M::AgentArchive(p) => unit(archive(ctx, p)),
@@ -137,6 +139,7 @@ pub fn push_meta_overlay(ctx: &Ctx, session_id: &str) {
             context: b.state.context.clone(),
             queue: Some(b.state.queue.clone()),
             tree: None,
+            goal: Some(b.state.goal.clone()),
         },
         None => MetaOverlay::default(),
     };
@@ -234,6 +237,10 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
     }
     let streaming = a.state == HerdrState::Working;
     info!(agent = %p.agent_id, device = %client.info().device, delivery = ?p.delivery, "prompt");
+    // Every device shares one collab guest; tell the replica who sent this prompt.
+    if let Some(s) = ctx.state.omp_session_of(&p.agent_id).and_then(|sid| ctx.omp.session(&sid)) {
+        s.expect_prompt(&p.text, &client.info().device);
+    }
     if p.delivery == Delivery::FollowUp && streaming {
         if !p.images.is_empty() {
             return Err(ApiError::new("unsupported", "follow-ups cannot carry images; send it as a steer or after the turn"));
@@ -296,11 +303,15 @@ async fn answer(ctx: &Ctx, p: AnswerParams) -> Result<(), ApiError> {
                 return Err(ApiError::new("invalid_params", "a plan review cannot be dismissed remotely")
                     .with_hint("Pick an option (keep, refine, …) or close it in the terminal"));
             }
-            let Some(choice) = p.answer.choices.first().cloned() else {
-                return Err(ApiError::new("invalid_params", "choose a plan review option"));
+            // "Other" (free text without a choice) is feedback for refining the plan.
+            let feedback = p.answer.text.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            let choice = match p.answer.choices.first() {
+                Some(c) => c.clone(),
+                None if feedback.is_some() => "refine".to_string(),
+                None => return Err(ApiError::new("invalid_params", "choose a plan review option")),
             };
             ctx.bridge
-                .resolve_plan_review(&sid, &review.review_id, &choice, p.answer.text.as_deref(), None)
+                .resolve_plan_review(&sid, &review.review_id, &choice, feedback, None)
                 .await
                 .map_err(bridge_err)?;
             ctx.state.record_activity(&p.agent_id, ActivityKind::Answered, format!("Plan review: {choice}"), None);
@@ -567,8 +578,22 @@ async fn btw(ctx: &Ctx, p: BtwParams) -> Result<BtwStarted, ApiError> {
 }
 
 async fn slash(ctx: &Ctx, p: SlashParams) -> Result<(), ApiError> {
-    inject::validate(&p.command)?;
-    if let Some(sid) = bridge_sid(ctx, &p.agent_id) {
+    let bridge = bridge_sid(ctx, &p.agent_id);
+    if let Err(e) = inject::validate(&p.command) {
+        // Not a builtin: extension, prompt-template and skill commands are known only to the
+        // session itself, so accept a name only when the session lists it.
+        let known = match (&bridge, e.code.as_str()) {
+            (Some(sid), "unsupported") => {
+                let name = inject::command_name(&p.command);
+                ctx.bridge.commands(sid).await.is_ok_and(|l| l.commands.iter().any(|c| c.name == name))
+            }
+            _ => false,
+        };
+        if !known {
+            return Err(e);
+        }
+    }
+    if let Some(sid) = bridge {
         ctx.bridge.slash(&sid, p.command.trim()).await.map_err(bridge_err)?;
     } else {
         omp_agent(ctx, &p.agent_id)?;
@@ -579,6 +604,21 @@ async fn slash(ctx: &Ctx, p: SlashParams) -> Result<(), ApiError> {
         ctx.omp.repoll();
     }
     Ok(())
+}
+
+/// Extension, prompt-template and skill commands of the session (builtins live in the client).
+async fn commands(ctx: &Ctx, agent_id: &str) -> Result<CommandList, ApiError> {
+    omp_agent(ctx, agent_id)?;
+    let sid = bridge_sid(ctx, agent_id).ok_or_else(|| needs_bridge("Listing custom commands"))?;
+    ctx.bridge.commands(&sid).await.map_err(bridge_err)
+}
+
+/// Pulls the last queued message back out of the queue so the client can edit or drop it.
+/// The queue chips update through the bridge's `queue_update` event.
+async fn dequeue(ctx: &Ctx, agent_id: &str) -> Result<Dequeued, ApiError> {
+    omp_agent(ctx, agent_id)?;
+    let sid = bridge_sid(ctx, agent_id).ok_or_else(|| needs_bridge("Pulling back queued messages"))?;
+    ctx.bridge.dequeue(&sid).await.map_err(bridge_err)
 }
 
 // ───────────────────────────── herdr ─────────────────────────────

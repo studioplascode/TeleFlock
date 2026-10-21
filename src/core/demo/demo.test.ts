@@ -267,6 +267,40 @@ describe("demo engine", () => {
     expect(r.state.status["studio-pc"]?.phase).toBe("online");
   });
 
+  test("tab.rename / pane.close / tab.close patch the board; last pane closes the workspace", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const ws = () => r.state.hosts.forge?.state.workspaces.find((w) => w.id === "w4");
+    await r.call("forge", "tab.rename", { tabId: "w4:t1", label: "board work" });
+    r.clock.advance(300);
+    expect(ws()?.tabs[0]?.label).toBe("board work");
+    await r.call("forge", "pane.close", { paneId: "w4:p2" });
+    r.clock.advance(300);
+    expect(ws()?.tabs[0]?.panes.map((p) => p.id)).toEqual(["w4:p1"]);
+    expect(r.state.agents[agentKey("forge", "kanban")]).toBeDefined();
+    await r.call("forge", "tab.close", { tabId: "w4:t1" });
+    r.clock.advance(300);
+    expect(ws()).toBeUndefined();
+    expect(r.state.agents[agentKey("forge", "kanban")]).toBeUndefined();
+    // Primary with linked worktrees refuses to lose its last pane.
+    await expect(r.call("forge", "pane.close", { paneId: "w3:p1" })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
+    // A refused tab close leaves every pane (and its agent) untouched.
+    await expect(r.call("forge", "tab.close", { tabId: "w1:t1" })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
+    r.clock.advance(300);
+    expect(r.state.hosts.forge?.state.workspaces.find((w) => w.id === "w1")?.tabs[0]?.panes.map((p) => p.id)).toEqual(["w1:p1", "w1:p2"]);
+    expect(r.state.agents[agentKey("forge", "docs")]).toBeDefined();
+    await expect(r.call("forge", "tab.close", { tabId: "nope" })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  test("settings seed three templates and no muted agents; settings.set persists", async () => {
+    const r = rig();
+    const s = await r.call<{ templates: { name: string }[]; mutedAgents: string[] }>(null, "settings.get");
+    expect(s.templates.map((t) => t.name)).toEqual(["Careful reviewer", "Fast fixer", "Explorer"]);
+    expect(s.mutedAgents).toEqual([]);
+    const saved = await r.call<{ mutedAgents: string[] }>(null, "settings.set", { ...s, mutedAgents: ["forge::push"] });
+    expect(saved.mutedAgents).toEqual(["forge::push"]);
+  });
+
   test("empty demo has no profiles; saving a demo host creates one", async () => {
     const r = rig({ empty: true });
     const list = await r.call<{ profiles: unknown[] }>(null, "hosts.list");

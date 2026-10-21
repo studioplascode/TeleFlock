@@ -1,9 +1,10 @@
 import "@xterm/xterm/css/xterm.css";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { AnimatePresence, motion } from "motion/react";
-import { ClipboardCopy, ClipboardPaste, Cpu, Eye, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
+import { ClipboardCopy, ClipboardPaste, Cpu, Search, Eye, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
 import { type CSSProperties, type Ref, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { openLink, useHosts, useSettings } from "@/core";
 import type { TermMode, TermOpened, TermTarget, TunnelInfo } from "@/core/gen";
@@ -34,6 +35,7 @@ import { PaneOverlay, closedCopy } from "./PaneOverlay";
 import { type TermPhase, TermSession } from "./session";
 import { COMPACT_FONT_SIZE, DEFAULT_FONT_SIZE, TERM_FONT_FAMILY, clampFontSize, termTheme } from "./theme";
 import { setTermRenderer, useTermRenderer } from "./renderer";
+import { SearchBar } from "./SearchBar";
 import { registerLiveTerm } from "./useLocalhostUrls";
 
 /** Imperative control of a mounted `TerminalPane` (toolbars, palette commands). */
@@ -43,6 +45,8 @@ export interface TerminalHandle {
   focus(): void;
   fit(): void;
   reopen(takeover: boolean): void;
+  /** Open the Ctrl+F search bar (no-op for compact tiles). */
+  openSearch(): void;
   readonly termId: string | null;
 }
 
@@ -72,6 +76,35 @@ const NO_MODS: ModState = { ctrl: 0, alt: 0 };
 const RESIZE_DEBOUNCE_MS = 70;
 const FLASH_MIN_GAP_MS = 90;
 const SWIPE_SLOP_PX = 8;
+/** Longest the first paint waits for the mono font (it re-measures when the font lands later). */
+const FONT_WAIT_MS = 120;
+
+/** Set once WebGL proved to draw nothing on this device; later panes go straight to the DOM renderer. */
+let webglBroken = false;
+
+/**
+ * Does the WebGL canvas show any glyph pixels? `null` while the screen has no text yet (nothing to
+ * judge). Runs inside xterm's render callback, before the drawing buffer is cleared.
+ */
+function webglHasInk(term: Terminal): boolean | null {
+  const buf = term.buffer.active;
+  let hasText = false;
+  for (let y = 0; y < term.rows && !hasText; y++) hasText = (buf.getLine(buf.viewportY + y)?.translateToString(true).trim().length ?? 0) > 0;
+  if (!hasText) return null;
+  const canvases = [...(term.element?.querySelectorAll<HTMLCanvasElement>("canvas:not(.xterm-link-layer)") ?? [])];
+  const gl = canvases.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+  if (!gl || gl.width === 0 || gl.height === 0) return null;
+  const probe = document.createElement("canvas");
+  probe.width = gl.width;
+  probe.height = gl.height;
+  const ctx = probe.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(gl, 0, 0);
+  const px = ctx.getImageData(0, 0, probe.width, probe.height).data;
+  // Any reasonably bright pixel is ink (the theme background is near-black).
+  for (let i = 0; i < px.length; i += 16) if ((px[i] ?? 0) + (px[i + 1] ?? 0) + (px[i + 2] ?? 0) > 180) return true;
+  return false;
+}
 /** The status chip shows its label this long after a state change, then collapses to its orb. */
 const CHIP_PEEK_MS = 2600;
 
@@ -112,8 +145,10 @@ export function TerminalPane({
   const flashRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const sessionRef = useRef<TermSession | null>(null);
-  const [ready, setReady] = useState(false);
+  const [inst, setInst] = useState<Terminal | null>(null);
   const [phase, setPhase] = useState<TermPhase>({ k: "idle" });
   const [gotFrame, setGotFrame] = useState(false);
   const [beat, setBeat] = useState(0);
@@ -165,7 +200,7 @@ export function TerminalPane({
       cursorStyle: "bar",
       cursorInactiveStyle: "outline",
       disableStdin: !interactive,
-      allowProposedApi: false,
+      allowProposedApi: true, // search match decorations
       macOptionIsMeta: true,
       rightClickSelectsWord: true,
       drawBoldTextInBrightColors: false,
@@ -181,58 +216,100 @@ export function TerminalPane({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon({ highlightLimit: 500 });
+    term.loadAddon(search);
+    searchRef.current = search;
     termRef.current = term;
     fitRef.current = fit;
 
-    void document.fonts
-      .load(`${fontSizeRef.current}px "JetBrains Mono Variable"`)
-      .catch(() => [])
-      .then(() => {
-        if (disposed) return;
-        term.open(el);
-        fit.fit();
-        setReady(true);
-      });
+    // Wait briefly for the mono font so the first cell measurement is right, but never hold the
+    // first paint on it: a slow font fetch must not delay the terminal by seconds.
+    const fontLoad = document.fonts.load(`${fontSizeRef.current}px "JetBrains Mono Variable"`).catch(() => []);
+    let fontReady = false;
+    void fontLoad.then(() => {
+      fontReady = true;
+      if (disposed || !term.element) return;
+      // Late font: re-measure cells (a changed family string forces xterm to re-measure) and re-fit.
+      term.options.fontFamily = `${TERM_FONT_FAMILY} `;
+      fit.fit();
+    });
+    // (Promise.withResolvers is ES2024; the Windows webview target is chrome105.)
+    let fontTimer: number | undefined;
+    const fontWait = new Promise<void>((resolve) => {
+      fontTimer = window.setTimeout(resolve, FONT_WAIT_MS);
+    });
+    void Promise.race([fontLoad, fontWait]).then(() => {
+      clearTimeout(fontTimer);
+      if (disposed) return;
+      term.open(el);
+      fit.fit();
+      if (fontReady) term.options.fontFamily = TERM_FONT_FAMILY;
+      setInst(term);
+    });
 
     return () => {
       disposed = true;
-      setReady(false);
+      // Release the attachment before its terminal goes away (the session effect only re-runs
+      // once the new instance is published).
+      sessionRef.current?.dispose();
+      setInst(null);
+      setSearchOpen(false);
+      searchRef.current = null;
       termRef.current = null;
       fitRef.current = null;
       term.dispose();
     };
-  }, [interactive, compact]);
+    // A fresh xterm per attachment (target / mode / host): retargeting a live instance with
+    // `reset()` left the WebGL renderer drawing nothing for the new pane.
+  }, [interactive, compact, hostId, targetKey, mode]);
 
   /* ---------- renderer: WebGL unless the user opted out (board tiles stay on DOM: browsers cap live WebGL contexts) ---------- */
   useEffect(() => {
     const term = termRef.current;
-    if (!ready || !term || compact || renderer !== "webgl") return;
+    if (!inst || !term || compact || renderer !== "webgl" || webglBroken) return;
     let webgl: WebglAddon | null = null;
-    try {
-      webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        // Falls back to the DOM renderer until the pane remounts.
-        webgl?.dispose();
-        webgl = null;
-      });
-      term.loadAddon(webgl);
-    } catch {
-      // No WebGL2: xterm's DOM renderer stays active.
-      webgl = null;
-    }
-    return () => {
+    const drop = () => {
       try {
         webgl?.dispose();
       } catch {
         // already disposed together with the terminal
       }
+      webgl = null;
     };
-  }, [ready, compact, renderer]);
+    try {
+      webgl = new WebglAddon();
+      // Falls back to the DOM renderer until the pane remounts.
+      webgl.onContextLoss(drop);
+      term.loadAddon(webgl);
+    } catch {
+      // No WebGL2: xterm's DOM renderer stays active.
+      webgl = null;
+    }
+    // Some GPUs/drivers (and headless Chromium) accept WebGL2 but draw nothing. Once the first
+    // non-empty screen is rendered, check the canvas has ink; if not, fall back to the DOM renderer
+    // for the rest of this app session.
+    let checked = !webgl;
+    const renderSub = term.onRender(() => {
+      if (checked || !webgl) return;
+      const verdict = webglHasInk(term);
+      if (verdict === null) return;
+      checked = true;
+      if (!verdict) {
+        webglBroken = true;
+        drop();
+        term.refresh(0, term.rows - 1);
+      }
+    });
+    return () => {
+      renderSub.dispose();
+      drop();
+    };
+  }, [inst, compact, renderer]);
 
   /* ---------- localhost links → preview tunnels ---------- */
   useEffect(() => {
     const term = termRef.current;
-    if (!ready || !term || compact) return;
+    if (!inst || !term || compact) return;
     const openPreview = async (port: number) => {
       haptic("select");
       const tunnel = await openTunnel(hostId, port);
@@ -267,7 +344,7 @@ export function TerminalPane({
       },
     });
     return () => sub.dispose();
-  }, [ready, compact, hostId]);
+  }, [inst, compact, hostId]);
 
   /* ---------- observe-mode scaling ---------- */
   const applyObserveScale = useCallback(() => {
@@ -283,11 +360,14 @@ export function TerminalPane({
     inner.style.transform = s < 0.999 || s > 1.001 ? `scale(${s})` : "";
   }, [mode, compact]);
 
+  const applyObserveScaleRef = useRef(applyObserveScale);
+  applyObserveScaleRef.current = applyObserveScale;
+
   /* ---------- session (open / frames / close) ---------- */
+  // Keyed on the instance only: every target/mode/host change creates a new instance first.
   useEffect(() => {
-    const term = termRef.current;
-    if (!ready || !term) return;
-    term.reset();
+    const term = inst;
+    if (!term) return;
     setGotFrame(false);
     let frames = 0;
     let lastFlash = 0;
@@ -324,7 +404,7 @@ export function TerminalPane({
         // Observe mode: frames are authoritative for size; scale the grid to fit the tile.
         if (mode === "observe" && (ev.cols !== term.cols || ev.rows !== term.rows) && ev.cols > 0 && ev.rows > 0) {
           term.resize(ev.cols, ev.rows);
-          requestAnimationFrame(applyObserveScale);
+          requestAnimationFrame(applyObserveScaleRef.current);
         }
         const now = performance.now();
         // Frame flash: a light sweep along the top edge per repaint (skipped with reduced motion).
@@ -371,7 +451,7 @@ export function TerminalPane({
       sessionRef.current = null;
       setPhase({ k: "idle" });
     };
-  }, [ready, hostId, targetKey, mode, applyObserveScale]);
+  }, [inst]);
 
   /* ---------- host reconnect ---------- */
   const prevOnline = useRef(hostOnline);
@@ -422,7 +502,7 @@ export function TerminalPane({
 
   useEffect(() => {
     const frame = frameRef.current;
-    if (!ready || !frame) return;
+    if (!inst || !frame) return;
     let raf = 0;
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
@@ -433,14 +513,14 @@ export function TerminalPane({
       ro.disconnect();
       cancelAnimationFrame(raf);
     };
-  }, [ready, refit]);
+  }, [inst, refit]);
 
   useEffect(() => {
     const term = termRef.current;
-    if (!ready || !term || term.options.fontSize === fontSize) return;
+    if (!inst || !term || term.options.fontSize === fontSize) return;
     term.options.fontSize = fontSize;
     refit();
-  }, [ready, fontSize, refit]);
+  }, [inst, fontSize, refit]);
 
   /* ---------- keyboard, wheel, clipboard ---------- */
   const copySelection = useCallback(async () => {
@@ -492,7 +572,7 @@ export function TerminalPane({
 
   useEffect(() => {
     const term = termRef.current;
-    if (!ready || !term) return;
+    if (!inst || !term) return;
     let acc = 0;
     term.attachCustomWheelEventHandler((e) => {
       if (e.ctrlKey && !compact) {
@@ -520,6 +600,11 @@ export function TerminalPane({
         void copySelection();
         return false;
       }
+      if (ctrl && !e.shiftKey && !e.altKey && k === "f" && !compact) {
+        e.preventDefault();
+        setSearchOpen(true);
+        return false;
+      }
       // Ctrl+V / Ctrl+Shift+V: let the browser fire `paste` on xterm's textarea (bracketed paste aware).
       if (ctrl && k === "v") return false;
       if (ctrl && !e.shiftKey && !e.altKey && (k === "=" || k === "+" || k === "-" || k === "0") && !compact) {
@@ -538,12 +623,12 @@ export function TerminalPane({
       e.stopPropagation();
       return true;
     });
-  }, [ready, compact, setFont, copySelection, queueScroll, cellHeight]);
+  }, [inst, compact, setFont, copySelection, queueScroll, cellHeight]);
 
   /* ---------- touch: swipe to scroll, pinch to zoom ---------- */
   useEffect(() => {
     const el = frameRef.current;
-    if (!ready || !el || compact) return;
+    if (!inst || !el || compact) return;
     let mode2: "none" | "swipe" | "pinch" | "pending" = "none";
     let startY = 0;
     let startX = 0;
@@ -622,7 +707,7 @@ export function TerminalPane({
       el.removeEventListener("touchend", onEnd);
       el.removeEventListener("touchcancel", onEnd);
     };
-  }, [ready, compact, queueScroll, cellHeight, showBadge]);
+  }, [inst, compact, queueScroll, cellHeight, showBadge]);
 
   /* ---------- soft keyboard (visualViewport) ---------- */
   useEffect(() => {
@@ -653,8 +738,8 @@ export function TerminalPane({
   /* ---------- focus ---------- */
   const shouldFocus = autoFocus ?? interactive;
   useEffect(() => {
-    if (ready && shouldFocus && phase.k === "live" && !coarse) termRef.current?.focus();
-  }, [ready, shouldFocus, phase.k, coarse]);
+    if (inst && shouldFocus && phase.k === "live" && !coarse) termRef.current?.focus();
+  }, [inst, shouldFocus, phase.k, coarse]);
 
   /* ---------- extra keys ---------- */
   const onExtraKey = useCallback((k: ExtraKey) => {
@@ -678,11 +763,12 @@ export function TerminalPane({
       focus: () => termRef.current?.focus(),
       fit: refit,
       reopen,
+      openSearch: () => !compact && setSearchOpen(true),
       get termId() {
         return sessionRef.current?.currentTermId ?? null;
       },
     }),
-    [refit, reopen],
+    [refit, reopen, compact],
   );
 
   const offline = !hostOnline;
@@ -740,6 +826,18 @@ export function TerminalPane({
             : "bg-omp shadow-[0_0_14px_rgb(163_92_240/0.9)]",
         )}
       />
+      <AnimatePresence>
+        {searchOpen && inst && searchRef.current && (
+          <SearchBar
+            search={searchRef.current}
+            frameTick={beat}
+            onClose={() => {
+              setSearchOpen(false);
+              termRef.current?.focus();
+            }}
+          />
+        )}
+      </AnimatePresence>
       <PaneOverlay
         phase={phase}
         compact={compact}
@@ -824,6 +922,9 @@ export function TerminalPane({
             </ContextMenuItem>
             <ContextMenuItem icon={<SquareMousePointer />} onSelect={() => termRef.current?.selectAll()}>
               Select all
+            </ContextMenuItem>
+            <ContextMenuItem icon={<Search />} shortcut="Ctrl F" onSelect={() => setSearchOpen(true)}>
+              Find…
             </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem icon={<Plus />} shortcut="Ctrl +" onSelect={() => setFont(fontSize + 1)}>

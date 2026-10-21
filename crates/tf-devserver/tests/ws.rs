@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tf_client::{Engine, EngineConfig};
-use tf_devserver::{Access, DevPlatform, router, serve};
+use tf_devserver::{Access, DevPlatform, Keepalive, router, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
@@ -33,7 +33,7 @@ async fn start_with(static_dir: Option<std::path::PathBuf>, allow_hosts: &[&str]
     let addr = listener.local_addr().unwrap();
     let hosts: Vec<String> = allow_hosts.iter().map(|h| h.to_string()).collect();
     let access = Access::new(TOKEN.into(), addr, &hosts, &[]).unwrap();
-    tokio::spawn(serve(listener, router(engine, static_dir, access)));
+    tokio::spawn(serve(listener, router(engine, static_dir, access, Keepalive::default())));
     (addr, data)
 }
 

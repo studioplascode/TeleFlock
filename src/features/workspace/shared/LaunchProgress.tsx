@@ -33,7 +33,8 @@ export function WorkingPanel({ label, detail, since }: { label: string; detail?:
 export interface LaunchSuccessProps {
   hostId: string;
   started: Started;
-  title: string;
+  /** Title from the real herdr agent name; `undefined` until the agent is in host state (show neutral text). */
+  title: (agentName: string | undefined) => string;
   subtitle?: ReactNode;
   /** Close the dialog (called right before navigation). */
   onClose: () => void;
@@ -45,10 +46,9 @@ export interface LaunchSuccessProps {
  */
 export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: LaunchSuccessProps) {
   const host = useHostState(hostId);
-  const agentId =
-    started.agentId && host?.agents.some((a) => a.id === started.agentId)
-      ? started.agentId
-      : host?.agents.find((a) => a.paneId === started.paneId)?.id;
+  const agent =
+    (started.agentId ? host?.agents.find((a) => a.id === started.agentId) : undefined) ?? host?.agents.find((a) => a.paneId === started.paneId);
+  const agentId = agent?.id;
   const [held, setHeld] = useState(false);
   const [late, setLate] = useState(false);
 
@@ -112,7 +112,7 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
         </motion.div>
       </div>
       <motion.div className="flex w-full min-w-0 flex-col gap-1" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.2 }}>
-        <p className="font-display text-2xl font-bold">{title}</p>
+        <p className="font-display text-2xl font-bold">{title(agent?.name)}</p>
         {subtitle && <div className="mx-auto flex max-w-full min-w-0 flex-col gap-0.5 font-mono text-xs text-mute">{subtitle}</div>}
       </motion.div>
       {!late || agentId ? (

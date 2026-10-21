@@ -86,6 +86,8 @@ pub struct OmpSession {
     pub guest: Guest,
     st: Mutex<SessionState>,
     closed: AtomicBool,
+    /// Wakes the journal reader (turn boundaries, prompts, snapshots).
+    journal_kick: Notify,
 }
 
 impl OmpSession {
@@ -194,6 +196,11 @@ impl OmpSession {
         Ok(())
     }
 
+    /// Attributes the echo of a prompt we're about to send to the sending device.
+    pub fn expect_prompt(&self, text: &str, device: &str) {
+        self.lock().replica.expect_prompt(text, device);
+    }
+
     pub fn view(&self, now: Millis) -> OmpView {
         let st = self.lock();
         OmpView {
@@ -256,6 +263,9 @@ pub struct MetaOverlay {
     pub context: Option<tf_proto::model::ContextUsage>,
     pub queue: Option<tf_proto::model::QueueInfo>,
     pub tree: Option<tf_proto::session::TreeInfo>,
+    /// `Some(goal)` when the bridge reports goal state (authoritative: `Some(None)` = no
+    /// active goal, e.g. after drop/complete); `None` = keep the replica's value.
+    pub goal: Option<Option<tf_proto::model::GoalInfo>>,
 }
 
 impl MetaOverlay {
@@ -284,6 +294,9 @@ impl MetaOverlay {
         }
         if let Some(v) = &self.tree {
             meta.tree = Some(v.clone());
+        }
+        if let Some(g) = &self.goal {
+            meta.goal = g.clone();
         }
     }
 }
@@ -738,13 +751,15 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
             tree_for: None,
         }),
         closed: AtomicBool::new(false),
+        journal_kick: Notify::new(),
     });
     let old = inner.sessions.write().unwrap_or_else(|p| p.into_inner()).insert(session_id.clone(), session.clone());
     if let Some(old) = old {
         old.end("session moved to a new room");
     }
     info!(session = %session_id, instance = %row.instance_id, generation = link.generation, pid = row.pid, "joined omp session");
-    tokio::spawn(pump(Arc::downgrade(inner), session, rx));
+    tokio::spawn(pump(Arc::downgrade(inner), session.clone(), rx));
+    tokio::spawn(journal_loop(Arc::downgrade(inner), session));
     Ok(())
 }
 
@@ -802,7 +817,13 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
             let _ = inner.updates.send(OmpUpdate::Pulses { session_id: sid.clone(), pulses: update.pulses.clone() });
         }
         if !update.signals.is_empty() {
+            if update.signals.iter().any(|s| matches!(s, Signal::TurnStarted | Signal::TurnEnded { .. } | Signal::Prompted { .. })) {
+                session.journal_kick.notify_one();
+            }
             let _ = inner.updates.send(OmpUpdate::Signals { session_id: sid.clone(), signals: update.signals.clone() });
+        }
+        if matches!(ev, GuestEvent::Snapshot(_)) {
+            session.journal_kick.notify_one();
         }
         if update.meta_changed || update.liveness_changed || !update.events.is_empty() || ended.is_some()
             || matches!(ev, GuestEvent::Snapshot(_) | GuestEvent::Reconnecting { .. })
@@ -823,6 +844,65 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
             return;
         }
     }
+}
+
+/// Every ~2 s while a turn streams (goal progress is rewritten each turn).
+const JOURNAL_EVERY: Duration = Duration::from_secs(2);
+
+/// Reads the main session journal through the guest: omp does not mirror `mode_change` /
+/// `custom` entries on the frame stream, so goal state (and plan mode, user todo edits)
+/// only reach the replica this way.
+async fn journal_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
+    loop {
+        let kicked = tokio::select! {
+            _ = session.journal_kick.notified() => true,
+            _ = tokio::time::sleep(JOURNAL_EVERY) => false,
+        };
+        if session.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(inner) = weak.upgrade() else { return };
+        if !kicked && !session.is_streaming() {
+            continue;
+        }
+        if let Err(e) = read_journal(&inner, &session).await {
+            debug!(session = %session.session_id, "journal read: {e}");
+        }
+    }
+}
+
+async fn read_journal(inner: &Arc<Inner>, session: &Arc<OmpSession>) -> Result<(), String> {
+    // Each reply is capped at 4 MiB; keep reading until caught up.
+    for _ in 0..64 {
+        let (main, offset) = {
+            let st = session.lock();
+            let Some(main) = st.replica.main_agent_id().map(str::to_string) else { return Ok(()) };
+            (main, st.replica.journal_offset())
+        };
+        let chunk = session.guest.fetch_transcript(&main, offset).await.map_err(|e| e.to_string())?;
+        let done = chunk.text.is_empty() || chunk.error.is_some();
+        let changed = {
+            let mut st = session.lock();
+            if st.replica.journal_offset() != offset {
+                // Raced with a resync/rotation that reset the offset; start over next time.
+                return Ok(());
+            }
+            let update = st.replica.apply_journal(&chunk);
+            st.pending.extend(update.events.iter().cloned());
+            schedule_flush(session, &mut st);
+            update.meta_changed || !update.events.is_empty()
+        };
+        if changed {
+            let _ = inner.updates.send(OmpUpdate::Changed { session_id: session.session_id.clone() });
+        }
+        if let Some(err) = chunk.error {
+            return Err(err);
+        }
+        if done {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 fn schedule_flush(session: &Arc<OmpSession>, st: &mut SessionState) {

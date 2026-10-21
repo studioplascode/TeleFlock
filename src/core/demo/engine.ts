@@ -31,6 +31,36 @@ const DEFAULT_SETTINGS: Settings = {
   defaultThinking: "high",
   defaultPlan: false,
   deviceName: "Demo browser",
+  mutedAgents: [],
+  templates: [
+    {
+      id: "tpl-careful-reviewer",
+      name: "Careful reviewer",
+      description: "Opus, high thinking, plans first and waits for approval",
+      model: "anthropic/claude-opus-5",
+      thinking: "high",
+      plan: true,
+      prompt: "Review the current branch against main. List risks, missing tests and edge cases before changing anything.",
+    },
+    {
+      id: "tpl-fast-fixer",
+      name: "Fast fixer",
+      description: "Luna on low thinking for small, cheap fixes",
+      model: "openai-codex/gpt-6-luna",
+      thinking: "low",
+      plan: false,
+      prompt: "",
+    },
+    {
+      id: "tpl-explorer",
+      name: "Explorer",
+      description: "GPT-5.5 on xhigh to map an unfamiliar codebase",
+      model: "openai/gpt-5.5",
+      thinking: "xhigh",
+      plan: false,
+      prompt: "Map this repository: entry points, data flow, build and test commands. Write the findings to docs/notes.md without changing code.",
+    },
+  ],
 };
 
 export const DEMO_PROFILES: HostProfile[] = [

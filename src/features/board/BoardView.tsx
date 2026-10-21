@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useColumnKeys, useCore, useHosts, useUi } from "@/core";
 import { cn, useMinWidth } from "@/design";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
@@ -11,6 +11,8 @@ import { RepoBoard } from "./RepoBoard";
 import { StaleHosts } from "./StaleHosts";
 import { useBoardKeys } from "./useBoardKeys";
 import { useBoardCommands } from "./useBoardCommands";
+import { ArchiveConfirmDialog } from "./CardMenu";
+import { SelectionBar } from "./SelectionBar";
 
 const COLUMN_RANK = { needs: 0, running: 1, review: 2, done: 3 } as const;
 
@@ -47,6 +49,8 @@ export function BoardView() {
   const searchRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const roomy = useMinWidth(rootRef, 1130);
+  // Beside an open split the board gets narrow: the bento row steps aside so the lanes keep their height.
+  const bento = useMinWidth(rootRef, 760);
 
   const filter = { hostId, repo: repo ?? undefined, q: q.trim() || undefined };
   const running = useColumnKeys("running", filter);
@@ -60,26 +64,34 @@ export function BoardView() {
   const shownRepos = repo ? repos.filter((r) => r === repo) : repos;
   const repoOrder = useRepoOrder(shownRepos, hostId, q);
   const statusOrder = useMemo(() => LANES.map((l) => view[l.column]), [view]);
-  useBoardKeys(groupBy === "repo" ? repoOrder : statusOrder, searchRef);
+  const groups = groupBy === "repo" ? repoOrder : statusOrder;
+  useBoardKeys(groups, searchRef);
   useBoardCommands(review, searchRef);
+  // Shift-click ranges follow what's on screen
+  useEffect(() => useBoard.getState().setOrder(groups.flat()), [groups]);
+  useEffect(() => () => useBoard.getState().clearPicked(), []);
 
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-3 p-4 [--bento-h:212px] short:gap-2.5 short:p-3 short:[--bento-h:178px]">
       <BoardToolbar searchRef={searchRef} />
       <StaleHosts />
       {/* Under ~1130px of board the live terminal tile steps aside (unmounted) so the hero keeps room. */}
-      <div className={cn("grid shrink-0 gap-3", roomy ? "grid-cols-[2.05fr_1fr_1fr_1.32fr]" : "grid-cols-[1.75fr_1fr_1fr]")}>
-        <NeedsHeroTile />
-        <StatsTile />
-        <HealthTile />
-        {roomy && <LiveTerminalTile />}
-      </div>
+      {bento && (
+        <div className={cn("grid shrink-0 gap-3", roomy ? "grid-cols-[2.05fr_1fr_1fr_1.32fr]" : "grid-cols-[1.75fr_1fr_1fr]")}>
+          <NeedsHeroTile />
+          <StatsTile />
+          <HealthTile />
+          {roomy && <LiveTerminalTile />}
+        </div>
+      )}
       {groupBy === "repo" ? (
         <RepoBoard repos={shownRepos} filter={{ hostId, q }} selectedKey={selectedKey} />
       ) : (
         <Kanban lanes={lanes} selectedKey={selectedKey} />
       )}
       <WhileAwayToast />
+      <SelectionBar />
+      <ArchiveConfirmDialog />
     </div>
   );
 }

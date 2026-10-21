@@ -20,7 +20,7 @@ export const KIND_META: Record<HostKind, KindMeta> = {
     label: "This computer",
     short: "Local",
     icon: Monitor,
-    blurb: "herdr running natively on this Windows machine.",
+    blurb: "herdr running natively on this machine.",
   },
   wsl: {
     label: "WSL",

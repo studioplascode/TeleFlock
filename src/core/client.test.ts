@@ -3,6 +3,7 @@ import { pulseBus } from "./buses";
 import { core, flushCoreEvents, openSession, pushInternal, refreshHost, selectBackend, startCoreWith } from "./client";
 import { ManualClock } from "./demo/clock";
 import type { AppEvent, HostProfile, HostState } from "./gen";
+import { isMuted, useSettings } from "./hooks";
 import { coreStore } from "./store/store";
 import type { CoreTransport } from "./transport/types";
 
@@ -23,19 +24,21 @@ const calls: { hostId: string | null; method: string }[] = [];
 let emit: (e: AppEvent) => void = () => {};
 const fake: CoreTransport = {
   kind: "ws",
-  async call(hostId, method) {
+  async call(hostId, method, params) {
     calls.push({ hostId, method });
     switch (method) {
       case "hosts.list":
         return { profiles: [lab, demoProfile], statuses: [{ hostId: "lab", status: { phase: "online", since: 1, attempt: 0 } }, { hostId: "try", status: { phase: "error", since: 1, attempt: 0 } }] };
       case "settings.get":
-        return { motion: "system", notifyNeeds: true, notifyFinished: true, notifyErrors: true, notifySound: false, keepAlive: true, terminalFontSize: 13, confirmArchive: false, defaultPlan: false, deviceName: "test" };
+        return { motion: "system", notifyNeeds: true, notifyFinished: true, notifyErrors: true, notifySound: false, keepAlive: true, terminalFontSize: 13, confirmArchive: false, defaultPlan: false, deviceName: "test", mutedAgents: ["lab::b"], templates: [] };
       case "tunnel.list":
         return { tunnels: [] };
       case "state.get":
         return labState(["a", "b", "c"]);
       case "session.open":
         return { agentId: "a", meta: { fast: false, mode: "normal", todos: [], subagents: [], files: [], queue: { steering: [], followUp: [] }, caps: {} }, items: [{ kind: "user", id: "u1", at: 1, text: "hi", images: [], steering: false, synthetic: false }], hasMore: false };
+      case "settings.set":
+        return params;
       default:
         return {};
     }
@@ -141,6 +144,33 @@ describe("client pipeline", () => {
     await demoCall(refreshHost("try"));
     flushCoreEvents();
     expect(calls.some((c) => c.hostId === "try")).toBe(false);
+  });
+
+  test("isMuted reads settings.mutedAgents; setMuted updates it through settings.set", async () => {
+    expect(isMuted("lab::b")).toBe(true);
+    expect(isMuted("lab::a")).toBe(false);
+    calls.length = 0;
+    await useSettings.getState().setMuted("lab::a", true);
+    flushCoreEvents();
+    expect(calls.some((c) => c.method === "settings.set")).toBe(true);
+    expect(isMuted("lab::a")).toBe(true);
+  });
+
+  test("back-to-back settings helpers build on each other (no lost writes)", async () => {
+    const s = useSettings.getState();
+    const a = s.setMuted("lab::x", true);
+    const b = s.setMuted("lab::y", true);
+    // Optimistic state is visible synchronously, before any flush or response.
+    expect(isMuted("lab::x") && isMuted("lab::y")).toBe(true);
+    await Promise.all([a, b]);
+    await s.saveTemplate({ id: "t1", name: "T", plan: false, prompt: "" });
+    await s.removeTemplate("t1");
+    await s.saveTemplate({ id: "t2", name: "T2", plan: true, prompt: "go" });
+    flushCoreEvents();
+    const st = coreStore.getState().settings;
+    expect(st?.mutedAgents).toContain("lab::x");
+    expect(st?.mutedAgents).toContain("lab::y");
+    expect(st?.templates.map((t) => t.id)).toEqual(["t2"]);
   });
 
   test("internal events share the ordered pipeline", () => {

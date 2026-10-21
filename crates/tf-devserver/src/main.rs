@@ -4,7 +4,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tf_client::{Engine, EngineConfig};
 use tf_devserver::access::{self, Access};
-use tf_devserver::{DevPlatform, router, serve};
+use tf_devserver::{DevPlatform, Keepalive, router, serve};
 
 /// WebSocket bridge exposing the TeleFlock app core to a browser, plus the built UI.
 #[derive(Parser, Debug)]
@@ -84,7 +84,7 @@ async fn main() -> std::io::Result<()> {
     log::info!("tf-devserver data {}", args.data_dir.display());
     let tok = access.token();
     println!("tf-devserver on http://{addr}/?token={tok} (ws://{addr}/ws?token={tok})");
-    let app = router(engine.clone(), args.static_dir, access);
+    let app = router(engine.clone(), args.static_dir, access, Keepalive::default());
     tokio::select! {
         r = serve(listener, app) => r?,
         _ = tokio::signal::ctrl_c() => log::info!("shutting down"),

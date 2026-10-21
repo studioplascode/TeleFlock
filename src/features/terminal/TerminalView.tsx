@@ -58,6 +58,7 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { COLUMN_STATUS, PHASE_LABEL, phaseBusy } from "@/features/shell/status";
 import { encodeKey, type NamedKey } from "./keys";
 import type { TermPhase } from "./session";
+import { TabActions } from "./TabActions";
 import { type TerminalHandle, TerminalPane } from "./TerminalPane";
 import { clampFontSize, DEFAULT_FONT_SIZE } from "./theme";
 import { useLocalhostUrls } from "./useLocalhostUrls";
@@ -600,17 +601,28 @@ function PaneTabs({
   };
   return (
     <div role="tablist" aria-label="Panes" onKeyDown={onKeyDown} className="flex min-w-0 items-center gap-1.5 overflow-x-auto p-0.5 [scrollbar-width:none]">
-      {panes.map((e, i) => (
-        <PaneTab
-          key={e.pane.id}
-          hostId={hostId}
-          entry={e}
-          active={e.pane.id === active}
-          divider={i > 0 && panes[i - 1]?.tabId !== e.tabId}
-          onPick={onPick}
-          compact={compact}
-        />
-      ))}
+      {panes.map((e, i) => {
+        const tabPaneIds = panes.filter((p) => p.tabId === e.tabId).map((p) => p.pane.id);
+        return (
+          <PaneTab
+            key={e.pane.id}
+            hostId={hostId}
+            entry={e}
+            active={e.pane.id === active}
+            divider={i > 0 && panes[i - 1]?.tabId !== e.tabId}
+            onPick={onPick}
+            compact={compact}
+            tabPaneIds={tabPaneIds}
+            onClosed={(closed) => {
+              // Closing the attached pane: move to the nearest survivor.
+              if (!active || !closed.includes(active)) return;
+              const rest = panes.filter((p) => !closed.includes(p.pane.id));
+              const next = rest[Math.min(i, rest.length - 1)];
+              if (next) onPick(next.pane.id);
+            }}
+          />
+        );
+      })}
       {shellPending && (
         <span className="inline-flex h-8 shrink-0 items-center gap-2 rounded-sm bg-tile-4 px-3 text-xs font-bold text-ink shadow-d1">
           <Spinner size={12} /> New shell
@@ -643,6 +655,8 @@ function PaneTab({
   divider,
   onPick,
   compact,
+  tabPaneIds,
+  onClosed,
 }: {
   hostId: string;
   entry: PaneEntry;
@@ -650,6 +664,8 @@ function PaneTab({
   divider: boolean;
   onPick(id: string): void;
   compact: boolean;
+  tabPaneIds: string[];
+  onClosed(paneIds: string[]): void;
 }) {
   const agent = useAgent(agentKey(hostId, entry.pane.agentId ?? ""));
   const status = agent ? COLUMN_STATUS[agent.column] : "idle";
@@ -657,27 +673,41 @@ function PaneTab({
   return (
     <>
       {divider && <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-line-2" />}
-      <button
-        type="button"
-        role="tab"
-        aria-selected={active}
-        tabIndex={active ? 0 : -1}
-        data-pane-id={entry.pane.id}
-        title={`${entry.tabLabel} · ${entry.pane.id}`}
-        onClick={() => onPick(entry.pane.id)}
-        className={cn(
-          "relative inline-flex shrink-0 items-center gap-2 rounded-sm px-3 text-xs font-bold whitespace-nowrap transition-colors focus-ring",
-          compact ? "h-9 max-w-44" : "h-8 max-w-56",
-          active ? "text-ink" : "text-mute hover:bg-white/5 hover:text-ink",
-        )}
+      <TabActions
+        hostId={hostId}
+        target={{
+          paneId: entry.pane.id,
+          tabId: entry.tabId,
+          tabLabel: entry.tabLabel,
+          label,
+          hasAgent: Boolean(entry.pane.agentId),
+          tabPaneCount: tabPaneIds.length,
+        }}
+        tabPaneIds={tabPaneIds}
+        onClosed={onClosed}
       >
-        {active && <motion.span layoutId={`term-tab-${hostId}`} transition={spring.snappy} aria-hidden className="absolute inset-0 rounded-sm bg-tile-4 shadow-d1" />}
-        <span className="relative">
-          {agent ? <StatusOrb status={status} activity={agent.column === "running" ? "busy" : "calm"} size={7} label={null} /> : <SquareTerminal className="size-3.5 text-mute-2" />}
-        </span>
-        <span className="relative truncate">{label}</span>
-        {!compact && <span className="relative font-mono text-2xs font-semibold text-mute-2">{entry.pane.id}</span>}
-      </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={active}
+          tabIndex={active ? 0 : -1}
+          data-pane-id={entry.pane.id}
+          title={`${entry.tabLabel} · ${entry.pane.id}`}
+          onClick={() => onPick(entry.pane.id)}
+          className={cn(
+            "relative inline-flex shrink-0 items-center gap-2 rounded-sm px-3 text-xs font-bold whitespace-nowrap transition-colors focus-ring",
+            compact ? "h-9 max-w-44" : "h-8 max-w-56",
+            active ? "text-ink" : "text-mute hover:bg-white/5 hover:text-ink",
+          )}
+        >
+          {active && <motion.span layoutId={`term-tab-${hostId}`} transition={spring.snappy} aria-hidden className="absolute inset-0 rounded-sm bg-tile-4 shadow-d1" />}
+          <span className="relative">
+            {agent ? <StatusOrb status={status} activity={agent.column === "running" ? "busy" : "calm"} size={7} label={null} /> : <SquareTerminal className="size-3.5 text-mute-2" />}
+          </span>
+          <span className="relative truncate">{label}</span>
+          {!compact && <span className="relative font-mono text-2xs font-semibold text-mute-2">{entry.pane.id}</span>}
+        </button>
+      </TabActions>
     </>
   );
 }

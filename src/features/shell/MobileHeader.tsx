@@ -32,7 +32,7 @@ export function MobileHeader({ title, subtitle, back = false, actions, className
       )}
     >
       {back && (
-        <IconButton label="Back" onClick={goBack} className="-ml-1">
+        <IconButton label="Back" size="lg" onClick={goBack} className="-ml-1.5">
           <ChevronLeft />
         </IconButton>
       )}

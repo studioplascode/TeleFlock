@@ -1,105 +1,29 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Bell, BellRing, Bot, Info, Keyboard, MonitorSmartphone, Sparkles, SquareTerminal } from "lucide-react";
-import { motion } from "motion/react";
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Button,
   cn,
-  fadeRise,
-  Input,
   isAndroid,
   isTauri,
   Kbd,
   PageHeader,
   SegmentedControl,
   Select,
-  spring,
   Switch,
-  Tile,
   toast,
   useIsMobile,
   useMotionPreference,
 } from "@/design";
-import { core, useHostIds, useHosts, useSettings, useUi } from "@/core";
-import type { ModelInfo, MotionPref, Settings, ThinkingLevel } from "@/core/gen";
+import { core, useSettings, useUi } from "@/core";
+import type { MotionPref, Settings, ThinkingLevel } from "@/core/gen";
 import { useAppInfo } from "@/features/hosts/appInfo";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { MobileHeader } from "@/features/shell/MobileHeader";
-
-const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
-
-function Section({ icon, title, description, children, index }: { icon: ReactNode; title: string; description?: string; children: ReactNode; index: number }) {
-  return (
-    <motion.section {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }}>
-      <Tile className="p-5">
-        <div className="mb-3 flex items-start gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-md bg-accent/16 text-accent-hi [&_svg]:size-4">{icon}</span>
-          <div>
-            <h2 className="font-display text-lg font-bold">{title}</h2>
-            {description && <p className="text-xs text-mute">{description}</p>}
-          </div>
-        </div>
-        <div className="flex flex-col divide-y divide-line">{children}</div>
-      </Tile>
-    </motion.section>
-  );
-}
-
-/** One setting. `wide` controls (segmented, selects, text) take the full row on phones. */
-function Row({ label, description, children, htmlFor, wide }: { label: string; description?: ReactNode; children: ReactNode; htmlFor?: string; wide?: boolean }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-1 last:pb-1">
-      <div className="min-w-0 flex-1 basis-56">
-        <label htmlFor={htmlFor} className="block text-sm font-bold text-ink">
-          {label}
-        </label>
-        {description && <div className="text-xs text-mute">{description}</div>}
-      </div>
-      <div className={cn("flex shrink-0 items-center gap-2", wide && "max-md:w-full max-md:[&>*]:w-full")}>{children}</div>
-    </div>
-  );
-}
-
-/** Text setting committed on blur / Enter (not per keystroke). */
-function CommitInput({ value, onCommit, ...rest }: { value: string; onCommit: (v: string) => void; id?: string; placeholder?: string; type?: string; className?: string; "aria-label"?: string }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  return (
-    <Input
-      {...rest}
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => draft !== value && onCommit(draft)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") e.currentTarget.blur();
-      }}
-    />
-  );
-}
-
-/** Models from the first online host (for the default-model picker). */
-function useModels(): ModelInfo[] {
-  const ids = useHostIds();
-  const { status } = useHosts();
-  const online = ids.find((id) => status[id]?.phase === "online");
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  useEffect(() => {
-    if (!online) return;
-    let live = true;
-    core
-      .host(online)
-      .call("host.models", {})
-      .then(
-        (c) => live && setModels(c.models),
-        () => {},
-      );
-    return () => {
-      live = false;
-    };
-  }, [online]);
-  return models;
-}
+import { MutedAgents } from "./MutedAgents";
+import { CommitInput, Row, Section, THINKING, useModels } from "./parts";
+import { Templates } from "./Templates";
 
 type PermState = "granted" | "denied" | "prompt" | "prompt-with-rationale";
 
@@ -262,6 +186,8 @@ export function SettingsView() {
           {isTauri() && isAndroid && <AndroidRows />}
         </Section>
 
+        <MutedAgents index={2} />
+
         <Section index={2} icon={<Bot />} title="New agents" description="Defaults for agents you start from TeleFlock.">
           <Row label="Model" htmlFor="tf-default-model" wide>
             <Select
@@ -288,6 +214,8 @@ export function SettingsView() {
             <Switch checked={settings.confirmArchive} onCheckedChange={(confirmArchive) => update({ confirmArchive })} label="Confirm before archiving" />
           </Row>
         </Section>
+
+        <Templates index={3} />
 
         <Section index={3} icon={<SquareTerminal />} title="Terminal">
           <Row label="Font size" description={<span className="font-mono" style={{ fontSize: settings.terminalFontSize }}>~/teleflock $ herdr agent list</span>}>

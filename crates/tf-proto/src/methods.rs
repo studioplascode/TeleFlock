@@ -184,6 +184,26 @@ wire_struct! {
 wire_struct! { pub struct BtwStarted { pub btw_id: String } }
 
 wire_struct! {
+    pub struct CommandInfo {
+        /// Name without the leading `/`, e.g. `deploy`, `skill:review`.
+        pub name: String,
+        pub description: Option<String>,
+        /// `extension` | `prompt` | `skill` (omp `SlashCommandSource`).
+        pub source: String,
+    }
+}
+
+wire_struct! { pub struct CommandList { pub commands: Vec<CommandInfo> } }
+
+wire_struct! {
+    pub struct Dequeued {
+        /// The message pulled back out of the queue (last steering, else last follow-up);
+        /// none when the queue was empty.
+        pub text: Option<String>,
+    }
+}
+
+wire_struct! {
     pub struct SlashParams {
         pub agent_id: String,
         /// Full slash command with arguments, e.g. `/switch openai/gpt-5.5:high`.
@@ -308,6 +328,17 @@ wire_struct! {
 }
 
 wire_struct! { pub struct WorkspaceRef { pub workspace_id: String } }
+
+wire_struct! { pub struct PaneRef { pub pane_id: String } }
+
+wire_struct! { pub struct TabRef { pub tab_id: String } }
+
+wire_struct! {
+    pub struct TabRenameParams {
+        pub tab_id: String,
+        pub label: String,
+    }
+}
 
 wire_struct! {
     pub struct WorkspaceRenameParams {
@@ -756,6 +787,8 @@ methods!(HostMethod, "HostMethods", {
     "agent.export" => AgentExport(AgentRef) -> ExportResult;
     "agent.btw" => AgentBtw(BtwParams) -> BtwStarted;
     "agent.slash" => AgentSlash(SlashParams) -> Empty;
+    "agent.commands" => AgentCommands(AgentRef) -> CommandList;
+    "agent.dequeue" => AgentDequeue(AgentRef) -> Dequeued;
     "agent.keys" => AgentKeys(KeysParams) -> Empty;
     "agent.subagent" => AgentSubagent(SubagentCmdParams) -> Empty;
     "agent.archive" => AgentArchive(ArchiveParams) -> Empty;
@@ -767,6 +800,9 @@ methods!(HostMethod, "HostMethods", {
     "workspace.create" => WorkspaceCreate(WorkspaceCreateParams) -> WorkspaceRef;
     "workspace.rename" => WorkspaceRename(WorkspaceRenameParams) -> Empty;
     "workspace.close" => WorkspaceClose(WorkspaceCloseParams) -> Empty;
+    "tab.rename" => TabRename(TabRenameParams) -> Empty;
+    "tab.close" => TabClose(TabRef) -> Empty;
+    "pane.close" => PaneClose(PaneRef) -> Empty;
     "worktree.list" => WorktreeListReq(CwdParams) -> WorktreeList;
     "worktree.create" => WorktreeCreate(WorktreeCreateParams) -> WorktreeCreated;
     "worktree.remove" => WorktreeRemove(WorktreeRemoveParams) -> Empty;

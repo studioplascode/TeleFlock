@@ -68,7 +68,7 @@ export function TabsTrigger({ value, className, children, badge, ...rest }: Tabs
     <RadixTabs.Trigger
       value={value}
       className={cn(
-        "relative inline-flex items-center gap-2 font-bold whitespace-nowrap transition-colors focus-ring [&_svg]:size-3.5",
+        "relative inline-flex items-center gap-2 font-bold whitespace-nowrap transition-colors touch-hit focus-ring [&_svg]:size-3.5",
         pill ? "h-8 rounded-sm px-3 text-xs" : "h-10 px-0.5 text-sm",
         on ? "text-ink" : "text-mute hover:text-ink",
         className,

@@ -105,6 +105,27 @@ wire_struct! {
         pub default_plan: bool,
         /// Device name shown as prompt author to other clients.
         pub device_name: String,
+        /// Agents whose OS notifications are muted (`<hostId>::<agentId>` keys).
+        #[serde(default)]
+        pub muted_agents: Vec<String>,
+        /// Saved agent presets for the new-agent / new-worktree / fan-out flows.
+        #[serde(default)]
+        pub templates: Vec<AgentTemplate>,
+    }
+}
+
+wire_struct! {
+    /// A saved agent preset ("template"): model, thinking, plan mode and a prompt.
+    pub struct AgentTemplate {
+        pub id: String,
+        pub name: String,
+        pub description: Option<String>,
+        /// `provider/id`.
+        pub model: Option<String>,
+        pub thinking: Option<ThinkingLevel>,
+        pub plan: bool,
+        /// Initial prompt (may be empty for a pure model preset).
+        pub prompt: String,
     }
 }
 

@@ -9,6 +9,7 @@ import {
   FolderGit2,
   FolderOpen,
   GitBranchPlus,
+  GitFork,
   History,
   Inbox,
   Keyboard,
@@ -131,6 +132,7 @@ function useEntries(): Entry[] {
   entries.push(
     { id: "act:new-worktree", title: "New worktree…", group: "Actions", keywords: ["create", "branch", "git", "agent"], icon: <GitBranchPlus />, shortcut: "N", run: () => ui.openDialog({ kind: "newWorktree", hostId: defaultHost }) },
     { id: "act:new-agent", title: "New agent…", group: "Actions", keywords: ["start", "omp", "spawn"], icon: <Bot />, run: () => ui.openDialog({ kind: "newAgent", hostId: defaultHost }) },
+    { id: "act:fan-out", title: "Fan out…", group: "Actions", keywords: ["parallel", "compare", "many agents", "models", "worktrees"], icon: <GitFork />, run: () => ui.openDialog({ kind: "fanOut", hostId: defaultHost }) },
     { id: "act:answer-next", title: "Answer next", group: "Actions", keywords: ["needs you", "reply", "unblock", "inbox"], icon: <Zap />, shortcut: "Ctrl J", run: () => ui.setAnswerNext(true) },
     { id: "act:past", title: "Past sessions…", group: "Actions", keywords: ["history", "resume"], icon: <History />, run: () => ui.openDialog({ kind: "pastSessions", hostId: defaultHost }) },
     { id: "act:open-folder", title: "Open folder as workspace…", group: "Actions", keywords: ["folder", "workspace", "directory", "browse"], icon: <FolderOpen />, run: () => openNewAgent({ hostId: defaultHost, openFolder: true }) },

@@ -10,6 +10,7 @@ import {
   FolderOpen,
   GitBranch,
   GitBranchPlus,
+  GitFork,
   History,
   Inbox,
   LayoutDashboard,
@@ -401,6 +402,7 @@ export function Sidebar() {
   const actions: { icon: LucideIcon; label: string; run: () => void }[] = [
     { icon: GitBranchPlus, label: "New worktree", run: () => openDialog({ kind: "newWorktree", hostId: host }) },
     { icon: Bot, label: "New agent", run: () => openDialog({ kind: "newAgent", hostId: host }) },
+    { icon: GitFork, label: "Fan out…", run: () => openDialog({ kind: "fanOut", hostId: host }) },
     { icon: FolderOpen, label: "Open folder", run: () => openNewAgent({ hostId: host, openFolder: true }) },
     { icon: History, label: "Past sessions", run: () => openDialog({ kind: "pastSessions", hostId: host }) },
   ];
@@ -469,7 +471,7 @@ export function Sidebar() {
         </ScrollArea>
       )}
 
-      <div className={cn("grid gap-0.5 border-t border-line p-2", collapsed ? "grid-cols-1 justify-items-center" : "grid-cols-2")}>
+      <div className={cn("grid gap-0.5 border-t border-line p-2", collapsed ? "grid-cols-1 justify-items-center" : "grid-cols-2 [&>*:last-child:nth-child(odd)]:col-span-2")}>
         {actions.map((a) => (
           <QuickAction key={a.label} icon={a.icon} label={a.label} onClick={a.run} collapsed={collapsed} />
         ))}

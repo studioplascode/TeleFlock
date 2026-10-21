@@ -38,4 +38,12 @@ declare module "bun:test" {
   export function afterEach(fn: () => void | Promise<void>): void;
   export function beforeAll(fn: () => void | Promise<void>): void;
   export function afterAll(fn: () => void | Promise<void>): void;
+  export const mock: {
+    module(specifier: string, factory: () => Record<string, unknown>): void;
+  };
+  export const vi: {
+    useFakeTimers(): void;
+    useRealTimers(): void;
+    advanceTimersByTime(ms: number): void;
+  };
 }

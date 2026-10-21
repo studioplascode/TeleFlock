@@ -1,5 +1,6 @@
+import { BellOff } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
 import { navigate, parseAgentKey, useAgent, useColumnKeys, useHostIds, useHostStale, useHosts } from "@/core";
 import type { Column } from "@/core/gen";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
@@ -22,7 +23,10 @@ import {
   useNow,
 } from "@/design";
 import { DiffStat } from "./AgentCard";
-import { openAgent, openAnswerHud, openTerminal, setArchived } from "./agentActions";
+import { archiveWithUndo, openAgent, openAnswerHud, openTerminal, setArchived, useMuted } from "./agentActions";
+import { ArchiveConfirmDialog } from "./CardMenu";
+import { FilterChip } from "./FilterChip";
+import { SelectionBar } from "./SelectionBar";
 import { useTodayUsage } from "./BentoRow";
 import { useBoard } from "./boardStore";
 import { LANE_BY_COLUMN, NEEDS_LABEL } from "./lanes";
@@ -61,7 +65,7 @@ function swipeActions(key: string, column: Column): SwipeAction[] {
   const out: SwipeAction[] = [];
   if (column === "needs") out.push({ id: "answer", label: "Answer", icon: ICON.answer, tone: "bg-sun text-white", run: () => openAnswerHud(key) });
   out.push({ id: "terminal", label: "Terminal", icon: ICON.terminal, tone: "bg-tile-5 text-ink", run: () => openTerminal(key, true) });
-  if (column === "review") out.push({ id: "archive", label: "Archive", icon: ICON.archive, tone: "bg-done text-[#1a2e05]", run: () => void setArchived(key, true).catch(() => {}) });
+  if (column === "review") out.push({ id: "archive", label: "Archive", icon: ICON.archive, tone: "bg-done text-[#1a2e05]", run: () => void archiveWithUndo([key]) });
   if (column === "done") out.push({ id: "reopen", label: "Reopen", icon: ICON.reopen, tone: "bg-review text-[#04262c]", run: () => void setArchived(key, false).catch(() => {}) });
   return out;
 }
@@ -112,15 +116,17 @@ function Widgets() {
 function NeedsCard({ agentKey }: { agentKey: string }) {
   const agent = useAgent(agentKey);
   const stale = useHostStale(agent?.hostId ?? "");
+  const muted = useMuted(agentKey);
   if (!agent?.needs) return null;
   const n = agent.needs;
   return (
-    <SwipeRow id={agentKey} actions={swipeActions(agentKey, "needs")} menuTitle={agent.name} onOpen={() => openAgent(agentKey)}>
-      <div data-status="needs-you" className={cn("card-surface st-border-grad rounded-xl p-4", stale && "opacity-70 grayscale-[0.6]")}>
+    <SwipeRow id={agentKey} actions={swipeActions(agentKey, "needs")} onOpen={() => openAgent(agentKey)}>
+      <div data-status="needs-you" data-morph="surface" data-morph-key={agentKey} className={cn("card-surface st-border-grad rounded-xl p-4", stale && "opacity-70 grayscale-[0.6]")}>
         <div className="flex items-center gap-2">
           <span data-status="needs-you" className="rounded-full st-bg px-2 py-0.5 font-display text-[10px] font-bold tracking-[0.12em] uppercase">
             {agent.name} · {NEEDS_LABEL[n.kind]}
           </span>
+          {muted && <BellOff className="size-3.5 shrink-0 text-mute-2" aria-label="Notifications muted" />}
           <span className="ml-auto text-xs font-bold text-[#ffb08a]">
             waiting <Elapsed since={n.since} />
           </span>
@@ -140,6 +146,7 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
 function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const agent = useAgent(agentKey);
   const stale = useHostStale(agent?.hostId ?? "");
+  const muted = useMuted(agentKey);
   const silent = useQuiet(column === "running" && !stale, agent?.live.lastEventAt);
   const now = useNow(30_000);
   if (!agent) return null;
@@ -147,8 +154,8 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const todos = agent.omp?.todos;
   const quiet = silent !== null;
   return (
-    <SwipeRow id={agentKey} actions={swipeActions(agentKey, column)} menuTitle={agent.name} onOpen={() => openAgent(agentKey)}>
-      <div data-status={status} className={cn("card-surface flex gap-3 rounded-xl p-3.5", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]")}>
+    <SwipeRow id={agentKey} actions={swipeActions(agentKey, column)} onOpen={() => openAgent(agentKey)}>
+      <div data-status={status} data-morph="surface" data-morph-key={agentKey} className={cn("card-surface flex gap-3 rounded-xl p-3.5", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]")}>
         {todos && todos.total > 0 ? (
           <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={40} stroke={3.5} />
         ) : (
@@ -157,7 +164,8 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             {column === "running" && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
-            <span className="truncate text-sm font-extrabold text-ink">{agent.name}</span>
+            <span data-morph="name" data-morph-key={agentKey} className="truncate text-sm font-extrabold text-ink">{agent.name}</span>
+            {muted && <BellOff className="size-3 shrink-0 text-mute-2" aria-label="Notifications muted" />}
             <span className="min-w-0 truncate font-mono text-2xs text-mute-2">{agent.repo}</span>
             <span className="ml-auto shrink-0 font-mono text-2xs text-mute tabular">
               {column === "running" ? <Elapsed since={agent.omp?.turnStartedAt ?? agent.stateSince} /> : formatAge(now - agent.stateSince)}
@@ -234,13 +242,15 @@ function HostPill() {
 /** Mobile home (spec §3 "Flock home"). */
 export function FlockHome() {
   const hostId = useHosts((s) => s.filter);
-  const needs = useColumnKeys("needs", { hostId });
-  const running = useColumnKeys("running", { hostId });
-  const review = useColumnKeys("review", { hostId });
-  const done = useColumnKeys("done", { hostId });
+  const q = useBoard((s) => s.q.trim()) || undefined;
+  const needs = useColumnKeys("needs", { hostId, q });
+  const running = useColumnKeys("running", { hostId, q });
+  const review = useColumnKeys("review", { hostId, q });
+  const done = useColumnKeys("done", { hostId, q });
   const doneOpen = useBoard((s) => s.doneOpen);
   const toggleDone = useBoard((s) => s.toggleDone);
   const empty = needs.length + running.length + review.length + done.length === 0;
+  useEffect(() => () => useBoard.getState().clearPicked(), []);
 
   return (
     <div className="flex min-h-full flex-col gap-5 px-4 pt-[max(14px,env(safe-area-inset-top))] pb-6">
@@ -254,9 +264,11 @@ export function FlockHome() {
           <HostPill />
         </header>
         <StaleHosts />
+        <FilterChip className="self-start" />
         <Widgets />
         <LayoutGroup id="flock">
-          {empty && (
+          {empty && q && <EmptyState title="No matches" description={`No agent matches “${q}”.`} />}
+          {empty && !q && (
             <EmptyState
               title="No agents yet"
               description="Start one from a worktree — it appears here with a live heartbeat."
@@ -327,6 +339,8 @@ export function FlockHome() {
           )}
         </LayoutGroup>
       </div>
+      <SelectionBar mobile />
+      <ArchiveConfirmDialog />
     </div>
   );
 }

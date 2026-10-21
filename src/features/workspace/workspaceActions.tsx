@@ -1,11 +1,12 @@
-import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PencilLine, SquareTerminal, Trash2, X } from "lucide-react";
+import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PanelTopClose, PencilLine, SquareTerminal, SquareX, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { core, navigate, useUi } from "@/core";
-import type { Workspace } from "@/core/gen";
+import type { PaneInfo, Tab, Workspace } from "@/core/gen";
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuTrigger,
   DropdownMenu,
@@ -22,14 +23,27 @@ import { classifyHerdrError, describeError } from "./shared/errors";
 import { confirmAction, promptText } from "./shared/overlays";
 import { tildify } from "./shared/paths";
 
-export type WorkspaceActionId = "review" | "newAgent" | "newShell" | "newWorktree" | "pastSessions" | "rename" | "close" | "removeWorktree";
+export type WorkspaceActionId =
+  | "review"
+  | "newAgent"
+  | "newShell"
+  | "newWorktree"
+  | "pastSessions"
+  | "rename"
+  | "close"
+  | "removeWorktree"
+  | `renameTab:${string}`
+  | `closeTab:${string}`
+  | `closePane:${string}`;
 
 export interface WorkspaceAction {
   id: WorkspaceActionId;
   label: string;
   icon: LucideIcon;
   danger?: boolean;
-  group: "create" | "manage" | "danger";
+  group: "create" | "manage" | "tabs" | "danger";
+  /** Sub-heading inside the group (the tab's label for per-tab actions). */
+  section?: string;
   /** Handles its own confirms, toasts and errors; never rejects. */
   run(): Promise<void>;
 }
@@ -174,6 +188,59 @@ export async function removeWorktree(hostId: string, ws: Workspace): Promise<voi
   }
 }
 
+export async function renameTab(hostId: string, tab: Tab): Promise<void> {
+  const label = await promptText({ title: "Rename tab", label: "Label", initial: tab.label, confirmLabel: "Rename" });
+  if (!label || label === tab.label) return;
+  try {
+    await core.host(hostId).call("tab.rename", { tabId: tab.id, label });
+    toast({ title: `Renamed tab to ${label}`, duration: 2500 });
+  } catch (e) {
+    failToast("Couldn't rename the tab", e);
+  }
+}
+
+export async function closeTab(hostId: string, ws: Workspace, tab: Tab): Promise<void> {
+  const agents = tab.panes.filter((p) => p.agentId).length;
+  const ok = await confirmAction({
+    title: `Close tab ${tab.label}?`,
+    body: `Closes its ${tab.panes.length} pane${tab.panes.length === 1 ? "" : "s"}${agents ? `, including ${agents} running agent${agents === 1 ? "" : "s"}` : ""}. Files on disk are untouched.`,
+    confirmLabel: "Close tab",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await core.host(hostId).call("tab.close", { tabId: tab.id });
+    toast({ title: `Closed tab ${tab.label}`, duration: 2500 });
+  } catch (e) {
+    if (classifyHerdrError(e).kind !== "groupCloseRequired") return failToast(`Couldn't close ${tab.label}`, e);
+    const d = describeError(e);
+    // herdr refuses to close the last tab of a primary workspace that still has linked worktrees.
+    toast({
+      title: `${tab.label} is the last tab of ${ws.label}`,
+      description: d.hint ?? "herdr closes this workspace together with its linked worktrees.",
+      status: "error",
+      action: { label: "Close workspace…", onClick: () => void closeWorkspace(hostId, ws) },
+    });
+  }
+}
+
+export async function closePane(hostId: string, pane: PaneInfo): Promise<void> {
+  const name = pane.title || pane.id;
+  const ok = await confirmAction({
+    title: `Close shell ${name}?`,
+    body: "Ends the shell and any command still running in it.",
+    confirmLabel: "Close pane",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await core.host(hostId).call("pane.close", { paneId: pane.id });
+    toast({ title: `Closed ${name}`, duration: 2500 });
+  } catch (e) {
+    failToast(`Couldn't close ${name}`, e);
+  }
+}
+
 /** Every action that applies to `ws`, in menu order. Pure; safe to call in render. */
 export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction[] {
   const bind = (fn: (h: string, w: Workspace) => Promise<void>) => () => fn(hostId, ws);
@@ -190,6 +257,24 @@ export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction
     { id: "rename", label: "Rename…", icon: PencilLine, group: "manage", run: bind(renameWorkspace) },
   );
   if (ws.worktree) actions.push({ id: "removeWorktree", label: "Remove worktree…", icon: Trash2, danger: true, group: "danger", run: bind(removeWorktree) });
+  for (const tab of ws.tabs) {
+    actions.push(
+      { id: `renameTab:${tab.id}`, label: "Rename tab…", icon: PencilLine, group: "tabs", section: tab.label, run: () => renameTab(hostId, tab) },
+      { id: `closeTab:${tab.id}`, label: "Close tab…", icon: PanelTopClose, danger: true, group: "tabs", section: tab.label, run: () => closeTab(hostId, ws, tab) },
+    );
+    for (const pane of tab.panes) {
+      if (pane.agentId) continue;
+      actions.push({
+        id: `closePane:${pane.id}`,
+        label: `Close shell ${pane.title || pane.id}…`,
+        icon: SquareX,
+        danger: true,
+        group: "tabs",
+        section: tab.label,
+        run: () => closePane(hostId, pane),
+      });
+    }
+  }
   actions.push({ id: "close", label: "Close workspace…", icon: X, danger: true, group: "danger", run: bind(closeWorkspace) });
   return actions;
 }
@@ -207,19 +292,24 @@ export interface WorkspaceActionsMenuProps {
 /** Ready-made menu of `workspaceActions` for the sidebar tree and board. */
 export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "dropdown", home }: WorkspaceActionsMenuProps) {
   const actions = workspaceActions(hostId, workspace);
-  const groups = (["create", "manage", "danger"] as const).map((g) => actions.filter((a) => a.group === g)).filter((g) => g.length > 0);
+  const groups = (["create", "manage", "tabs", "danger"] as const).map((g) => actions.filter((a) => a.group === g)).filter((g) => g.length > 0);
+  // Per-tab actions get the tab label as a heading before their first item.
+  const heading = (g: WorkspaceAction[], i: number) => (g[i]?.section && g[i]?.section !== g[i - 1]?.section ? g[i]?.section : undefined);
   if (mode === "context") {
     return (
       <ContextMenu>
         <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-        <ContextMenuContent>
+        <ContextMenuContent className="max-h-[min(560px,var(--radix-context-menu-content-available-height))] overflow-y-auto">
           {groups.map((g, i) => (
             <div key={g[0]?.group}>
               {i > 0 && <ContextMenuSeparator />}
-              {g.map((a) => (
-                <ContextMenuItem key={a.id} icon={<a.icon />} danger={a.danger} onSelect={() => void a.run()}>
-                  {a.label}
-                </ContextMenuItem>
+              {g.map((a, j) => (
+                <div key={a.id}>
+                  {heading(g, j) && <ContextMenuLabel className="truncate">Tab · {a.section}</ContextMenuLabel>}
+                  <ContextMenuItem icon={<a.icon />} danger={a.danger} onSelect={() => void a.run()}>
+                    {a.label}
+                  </ContextMenuItem>
+                </div>
               ))}
             </div>
           ))}
@@ -230,17 +320,20 @@ export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "drop
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
+      <DropdownMenuContent align="start" className="max-h-[min(560px,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto">
         <DropdownMenuLabel className="max-w-64 truncate normal-case tracking-normal">
           {workspace.label} <span className="font-mono font-normal text-mute-2">{tildify(workspace.cwd, home)}</span>
         </DropdownMenuLabel>
         {groups.map((g) => (
           <div key={g[0]?.group}>
             <DropdownMenuSeparator />
-            {g.map((a) => (
-              <DropdownMenuItem key={a.id} icon={<a.icon />} danger={a.danger} onSelect={() => void a.run()}>
-                {a.label}
-              </DropdownMenuItem>
+            {g.map((a, j) => (
+              <div key={a.id}>
+                {heading(g, j) && <DropdownMenuLabel className="truncate">Tab · {a.section}</DropdownMenuLabel>}
+                <DropdownMenuItem icon={<a.icon />} danger={a.danger} onSelect={() => void a.run()}>
+                  {a.label}
+                </DropdownMenuItem>
+              </div>
             ))}
           </div>
         ))}

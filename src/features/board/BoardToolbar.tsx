@@ -2,6 +2,7 @@ import type { Ref } from "react";
 import { useCore, useHosts, useUi } from "@/core";
 import { Button, Input, Kbd, SegmentedControl, Select, cn } from "@/design";
 import { type GroupBy, useBoard } from "./boardStore";
+import { FilterChip } from "./FilterChip";
 
 /** Distinct repo names across agents in view, sorted (newline-joined so the selector stays primitive). */
 export function useRepoNames(hostFilter: string): string[] {
@@ -70,6 +71,7 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
         trailing={<Kbd>/</Kbd>}
       />
       <SegmentedControl<GroupBy> size="sm" value={groupBy} onValueChange={setGroupBy} options={GROUPS} aria-label="Group by" className="shrink-0" />
+      <FilterChip />
       <span className="ml-auto hidden items-center gap-1.5 text-2xs font-semibold text-mute-2 min-[1700px]:flex">
         <Kbd>J</Kbd>
         <Kbd>K</Kbd> move · <Kbd>↵</Kbd> open · <Kbd>A</Kbd> answer · <Kbd>T</Kbd> terminal

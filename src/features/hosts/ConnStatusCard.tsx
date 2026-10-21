@@ -1,8 +1,8 @@
 import { Copy, ExternalLink, Fingerprint, KeyRound, Plug, RefreshCw, ServerCrash, ShieldCheck, WifiOff, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
-import { Button, cn, formatAge, Shimmer, Spinner, spring, toast, useNow } from "@/design";
-import { core } from "@/core";
+import { Button, cn, dismissToast, formatAge, Shimmer, Spinner, spring, toast, useNow } from "@/design";
+import { core, navigate, onAppEvent, useHosts } from "@/core";
 import type { ConnPhase, ConnStatus, HostKeyInfo } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
@@ -47,6 +47,47 @@ export function openExternal(url: string): void {
   core.app("app.openExternal", { url }).catch((err: unknown) => {
     toast({ title: `Couldn't open the browser: ${errorMessage(err)}`, description: url, status: "error" });
   });
+}
+
+/** Give up following a connection after this long (it stays visible on the host card). */
+const FOLLOW_MS = 120_000;
+
+/**
+ * Connect a freshly saved host and narrate it in one toast: "Connecting…" while in flight, then
+ * swapped for the outcome (online, needs sign-in / key check, or the error with its hint).
+ */
+export function connectAndFollow(hostId: string, name: string): void {
+  let id = toast({ title: `Connecting to ${name}…`, description: "Deploying and starting tf-hostd if needed.", status: "running", duration: Number.POSITIVE_INFINITY });
+  let done = false;
+  const finish = (phase: ConnPhase, status: ConnStatus | undefined) => {
+    if (done) return;
+    done = true;
+    unsub();
+    window.clearTimeout(timer);
+    dismissToast(id);
+    const open = { label: "Open hosts", onClick: () => navigate({ name: "hosts" }) };
+    if (phase === "online") {
+      haptic("success");
+      id = toast({ title: `${name} is online`, description: status?.latencyMs !== undefined ? `${Math.round(status.latencyMs)} ms` : undefined, status: "done" });
+    } else if (phase === "authRequired" || phase === "hostKey") {
+      id = toast({ title: `${name}: ${PHASE_LABEL[phase]}`, description: "Finish it on the host card.", status: "needs-you", action: open, duration: 12_000 });
+    } else if (phase === "error") {
+      const err = status?.error;
+      id = toast({ title: `Couldn't connect ${name}: ${err?.message ?? "connection failed"}`, description: err?.hint ?? (err ? CODE_HINTS[err.code] : undefined), status: "error", action: open });
+    }
+  };
+  const settle = (status: ConnStatus | undefined) => {
+    const phase = status?.phase;
+    if (phase === "online" || phase === "authRequired" || phase === "hostKey" || phase === "error") finish(phase, status);
+  };
+  const unsub = onAppEvent((e) => {
+    if (e.type === "hostStatus" && e.hostId === hostId) settle(e.status);
+  });
+  const timer = window.setTimeout(() => finish("reconnecting", undefined), FOLLOW_MS);
+  core.app("hosts.connect", { hostId }).then(
+    () => settle(useHosts.getState().status[hostId]),
+    (err: unknown) => finish("error", { phase: "error", since: Date.now(), attempt: 0, error: { code: "connect", message: errorMessage(err), hint: errorHint(err), retryable: true } }),
+  );
 }
 
 function Stepper({ phase, message }: { phase: ConnPhase; message?: string }) {

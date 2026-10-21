@@ -18,16 +18,19 @@ import {
   Target,
   X,
   Zap,
+  Bell,
+  BellOff,
+  Focus,
 } from "lucide-react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { type ButtonHTMLAttributes, type ReactNode, useState } from "react";
 import { parseAgentKey, useAgent, useSession, useUi } from "@/core";
 import type { ModelInfo, SessionMeta, ThinkingLevel } from "@/core/gen";
+import { fuzzyScore } from "@/features/palette/fuzzy";
 import type { SessionDialog } from "../state";
 import {
   BottomSheet,
   cn,
   Command,
-  CommandEmpty,
   CommandGroup,
   CommandInput,
   CommandItem,
@@ -39,6 +42,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   formatCompact,
+  useIsMobile,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -47,7 +51,7 @@ import {
   toast,
   Tooltip,
 } from "@/design";
-import { hostCall, usePending } from "../api";
+import { hostCall, useMute, usePending } from "../api";
 import { THINKING_LEVELS } from "../composer/slash";
 import { useSessionUi } from "../state";
 import { useModels } from "./useModels";
@@ -74,24 +78,128 @@ export function modelLabel(meta: SessionMeta | undefined): string {
 
 // ---------- model picker ----------
 
+const RECENT_MAX = 5;
+const recentKey = (hostId: string) => `tf.recentModels.${hostId}`;
+
+function readRecents(hostId: string): string[] {
+  try {
+    const v: unknown = JSON.parse(globalThis.localStorage?.getItem(recentKey(hostId)) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, RECENT_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushRecent(hostId: string, model: string): void {
+  try {
+    const next = [model, ...readRecents(hostId).filter((m) => m !== model)].slice(0, RECENT_MAX);
+    globalThis.localStorage?.setItem(recentKey(hostId), JSON.stringify(next));
+  } catch {
+    /* storage unavailable: recents just don't persist */
+  }
+}
+
+interface ModelRow {
+  /** Unique cmdk value (`group|selector`). */
+  value: string;
+  /** `provider/id[:level]` passed to setModel. */
+  selector: string;
+  title: string;
+  sub: string;
+  ctx?: number;
+  role?: string;
+}
+
+/**
+ * Searchable model list: fuzzy match on provider, id and label; with an empty query the current
+ * model, recents and role bindings are pinned above the per-provider catalog.
+ */
 function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const { catalog, error, loading } = useModels(hostId);
   const [busy, run] = usePending();
+  const [query, setQuery] = useState("");
+  const [sel, setSel] = useState("");
   const current = meta?.model ? `${meta.model.provider}/${meta.model.id}` : "";
+  const recents = readRecents(hostId);
+
   /** `provider/id[:level]` (role bindings carry a level). */
   const pick = async (selector: string) => {
     const [model = selector, level] = selector.split(":");
     const thinking = THINKING_LEVELS.find((l) => l === level);
     const res = await run(hostCall(hostId, "agent.setModel", { agentId, model, thinking }, { success: `Model → ${selector}`, failure: "Model change failed" }));
-    if (res.ok) onDone();
+    if (res.ok) {
+      pushRecent(hostId, model);
+      onDone();
+    }
   };
-  const byProvider = new Map<string, ModelInfo[]>();
-  for (const m of catalog?.models ?? []) byProvider.set(m.provider, [...(byProvider.get(m.provider) ?? []), m]);
+
+  const models = catalog?.models ?? [];
+  const info = (id: string): ModelInfo | undefined => models.find((m) => `${m.provider}/${m.id}` === id);
+  const modelRow = (group: string, m: ModelInfo): ModelRow => {
+    const id = `${m.provider}/${m.id}`;
+    return { value: `${group}|${id}`, selector: id, title: m.label ?? m.id, sub: id, ctx: m.contextWindow };
+  };
+  const roleRows: ModelRow[] = (catalog?.roles ?? []).map((r) => ({ value: `role|${r.role}`, selector: r.model, title: `@${r.role}`, sub: r.model, role: r.role }));
+
+  const q = query.trim();
+  const groups: { heading: string; rows: ModelRow[] }[] = [];
+  if (q) {
+    // Every query word must fuzzy-match one field on its own ("ant op" → anthropic + opus).
+    const words = q.split(/\s+/);
+    const score = (fields: string[]): number | null => {
+      let sum = 0;
+      for (const w of words) {
+        let best: number | null = null;
+        for (const f of fields) {
+          const s = fuzzyScore(w, f);
+          if (s !== null && (best === null || s > best)) best = s;
+        }
+        if (best === null) return null;
+        sum += best;
+      }
+      return sum / words.length;
+    };
+    const scored: [number, ModelRow][] = [];
+    for (const m of models) {
+      const s = score([m.label ?? m.id, m.id, m.provider]);
+      if (s !== null) scored.push([s, modelRow("match", m)]);
+    }
+    for (const r of roleRows) {
+      const s = score([r.title, r.role ?? "", r.sub]);
+      if (s !== null) scored.push([s * 0.95, r]);
+    }
+    groups.push({ heading: "Matches", rows: scored.sort((a, b) => b[0] - a[0]).map(([, r]) => r) });
+  } else {
+    const cur = info(current);
+    if (cur) groups.push({ heading: "Current", rows: [modelRow("current", cur)] });
+    const rec = recents.filter((id) => id !== current).flatMap((id) => {
+      const m = info(id);
+      return m ? [modelRow("recent", m)] : [];
+    });
+    if (rec.length) groups.push({ heading: "Recent", rows: rec });
+    if (roleRows.length) groups.push({ heading: "Roles", rows: roleRows });
+    const byProvider = new Map<string, ModelRow[]>();
+    for (const m of models) byProvider.set(m.provider, [...(byProvider.get(m.provider) ?? []), modelRow(m.provider, m)]);
+    for (const [provider, rows] of byProvider) groups.push({ heading: provider, rows });
+  }
+  const first = groups[0]?.rows[0]?.value ?? "";
+  const flat = groups.flatMap((g) => g.rows);
+  // Keep the highlighted row valid as the list changes under the query.
+  const active = flat.some((r) => r.value === sel) ? sel : first;
+
   return (
-    <Command loop className="max-h-[min(60vh,460px)]">
-      <CommandInput placeholder="Search models…" autoFocus />
+    <Command loop shouldFilter={false} value={active} onValueChange={setSel} className="max-h-[min(60vh,460px)]">
+      <CommandInput
+        placeholder={`Search ${models.length || ""} models · provider, id or name`}
+        autoFocus
+        value={query}
+        onValueChange={(v) => {
+          setQuery(v);
+          setSel("");
+        }}
+      />
       <CommandList className="max-h-none flex-1 overflow-y-auto">
         {loading && (
           <div className="flex items-center gap-2 px-4 py-6 text-sm text-mute">
@@ -99,26 +207,25 @@ function ModelList({ agentKey, onDone }: { agentKey: string; onDone: () => void 
           </div>
         )}
         {error && <div className="px-4 py-6 text-sm text-error">{error}</div>}
-        {catalog && <CommandEmpty>No model matches</CommandEmpty>}
-        {catalog && catalog.roles.length > 0 && (
-          <CommandGroup heading="Roles">
-            {catalog.roles.map((r) => (
-              <CommandItem key={r.role} value={`@${r.role} ${r.model}`} onSelect={() => void pick(r.model)} disabled={busy} icon={<Sparkles />}>
-                <span className="font-bold">@{r.role}</span>
-                <span className="ml-2 font-mono text-2xs text-mute">{r.model}</span>
-              </CommandItem>
-            ))}
-          </CommandGroup>
-        )}
-        {[...byProvider].map(([provider, models]) => (
-          <CommandGroup key={provider} heading={provider}>
-            {models.map((m) => {
-              const id = `${m.provider}/${m.id}`;
+        {catalog && flat.length === 0 && <div className="py-10 text-center text-sm text-mute">No model matches “{q}”</div>}
+        {groups.map((g) => (
+          <CommandGroup key={g.heading} heading={g.heading}>
+            {g.rows.map((r) => {
+              const isCurrent = !r.role && r.selector === current;
               return (
-                <CommandItem key={id} value={`${id} ${m.label ?? ""}`} onSelect={() => void pick(id)} disabled={busy} icon={id === current ? <Check className="text-accent-hi" /> : <span className="size-4" />}>
-                  <span className="font-bold">{m.label ?? m.id}</span>
-                  <span className="ml-2 font-mono text-2xs text-mute-2">{m.id}</span>
-                  {m.contextWindow != null && <span className="ml-2 text-2xs text-mute-2 tabular">{formatCompact(m.contextWindow)} ctx</span>}
+                <CommandItem
+                  key={r.value}
+                  value={r.value}
+                  onSelect={() => void pick(r.selector)}
+                  disabled={busy}
+                  aria-current={isCurrent || undefined}
+                  className={cn(isCurrent && "bg-accent/10 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]")}
+                  icon={r.role ? <Sparkles /> : isCurrent ? <Check className="text-accent-hi" /> : <span className="size-4" />}
+                >
+                  <span className="font-bold">{r.title}</span>
+                  <span className="ml-2 font-mono text-2xs text-mute-2">{r.sub}</span>
+                  {r.ctx != null && <span className="ml-2 text-2xs text-mute-2 tabular">{formatCompact(r.ctx)} ctx</span>}
+                  {isCurrent && <span className="ml-2 rounded-full bg-accent/20 px-1.5 text-[9.5px] font-bold tracking-wider text-accent-hi uppercase">current</span>}
                 </CommandItem>
               );
             })}
@@ -260,6 +367,8 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
   const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
   const caps = meta?.caps;
+  const mute = useMute(agentKey);
+  const mobile = useIsMobile();
   const open = (d: SessionDialog) => useSessionUi.getState().openDialog(agentKey, d);
   return (
     <DropdownMenu>
@@ -292,7 +401,7 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
         <DropdownMenuItem icon={<Columns2 />} onSelect={() => void hostCall(hostId, "agent.fork", { agentId, placement: "pane" }, { success: "Forked into a new pane" })} disabled={!caps?.fork}>
           Fork into new pane
         </DropdownMenuItem>
-        <DropdownMenuItem icon={<Pencil />} onSelect={() => open("rename")} disabled={!caps?.rename} shortcut="/rename">
+        <DropdownMenuItem icon={<Pencil />} onSelect={() => open("rename")} shortcut="/rename">
           Rename…
         </DropdownMenuItem>
         <DropdownMenuItem
@@ -307,6 +416,14 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
           New session…
         </DropdownMenuItem>
         <DropdownMenuSeparator />
+        <DropdownMenuItem icon={mute.muted ? <Bell /> : <BellOff />} onSelect={() => void mute.toggle()}>
+          {mute.muted ? "Unmute notifications" : "Mute notifications"}
+        </DropdownMenuItem>
+        {!mobile && (
+          <DropdownMenuItem icon={<Focus />} onSelect={() => useUi.getState().setFocusMode(!useUi.getState().focusMode)} shortcut="F">
+            Focus mode
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem icon={<Columns2 />} onSelect={() => useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId })} shortcut="Ctrl \">
           Open terminal in split
         </DropdownMenuItem>

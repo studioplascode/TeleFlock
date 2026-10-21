@@ -21,6 +21,7 @@ import type { DiagReport, HostKind, HostProfile, WslDistro } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { useAppInfo } from "./appInfo";
+import { connectAndFollow } from "./ConnStatusCard";
 import { Diagnostics } from "./Diagnostics";
 import { availableKinds, HOST_COLORS, KIND_META, newHostId } from "./kinds";
 
@@ -161,11 +162,11 @@ function EditorBody({ initial, onDone }: { initial: HostProfile; onDone: () => v
     const profile = normalize(p);
     core
       .app("hosts.save", profile)
-      .then(async (saved) => {
+      .then((saved) => {
         haptic("success");
         onDone();
-        toast({ title: editing ? `Saved ${saved.name}` : `Added ${saved.name}`, description: saved.autoConnect ? "Connecting…" : undefined, status: "done" });
-        if (saved.autoConnect) await core.app("hosts.connect", { hostId: saved.id });
+        if (saved.autoConnect) connectAndFollow(saved.id, saved.name);
+        else toast({ title: editing ? `Saved ${saved.name}` : `Added ${saved.name}`, status: "done" });
       })
       .catch((err: unknown) => {
         haptic("warning");

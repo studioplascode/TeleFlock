@@ -63,6 +63,8 @@ struct Track {
     needs_notified: Option<bool>,
     /// Last collab `TurnStarted` (exact turn boundaries for linked omp agents).
     turn_signal_at: Option<Millis>,
+    /// The last collab turn ended with `stopReason: aborted` (someone pressed stop).
+    turn_aborted: bool,
 }
 
 #[derive(Default)]
@@ -267,23 +269,30 @@ impl StateHandle {
 
     /// Archives / un-archives an agent (persisted, also keyed by its omp session).
     pub fn set_archived(&self, agent_id: &str, archived: bool) -> bool {
-        let (sid, name) = {
+        let (sids, name) = {
             let m = self.lock();
             if !m.mirror.agents.iter().any(|a| build::agent_id(a) == agent_id) {
                 return false;
             }
-            (m.omp_of.get(agent_id).cloned(), m.tracks.get(agent_id).map(|t| t.name.clone()))
+            // Both the resolved mapping and the session the last build used (herdr's
+            // `agentSession` fallback): un-archiving must clear whichever key the build reads,
+            // e.g. right after a daemon restart, before the omp registry resolved the pane.
+            let mut sids: Vec<String> = m.omp_of.get(agent_id).cloned().into_iter().collect();
+            if let Some(s) = m.tracks.get(agent_id).and_then(|t| t.omp_session.clone()).filter(|s| !sids.contains(s)) {
+                sids.push(s);
+            }
+            (sids, m.tracks.get(agent_id).map(|t| t.name.clone()))
         };
         let now = now_ms();
         self.inner.persist.session(&self.inner.session, |s| {
             if archived {
                 s.archived.insert(agent_id.to_string(), now);
-                if let Some(sid) = &sid {
+                for sid in &sids {
                     s.archived_sessions.insert(sid.clone(), now);
                 }
             } else {
                 s.archived.remove(agent_id);
-                if let Some(sid) = &sid {
+                for sid in &sids {
                     s.archived_sessions.remove(sid);
                 }
             }
@@ -351,6 +360,7 @@ impl StateHandle {
         let mut transitions: Vec<(Option<Column>, Agent, bool, bool)> = Vec::new();
         let mut seen = HashSet::new();
         let mut new_turns: Vec<String> = Vec::new();
+        let mut stopped_turns: HashSet<String> = HashSet::new();
         let mut started: Vec<(String, String)> = Vec::new();
         let mut model_changes: Vec<(String, String, String)> = Vec::new();
         let mut recheck = false;
@@ -382,6 +392,7 @@ impl StateHandle {
                 model: None,
                 needs_notified: None,
                 turn_signal_at: None,
+                turn_aborted: false,
             });
             track.name = name;
             track.omp_session = sid.clone();
@@ -414,6 +425,9 @@ impl StateHandle {
             if turn_ended {
                 track.last_turn_ended_at = Some(now);
                 new_turns.push(id.clone());
+                if std::mem::take(&mut track.turn_aborted) {
+                    stopped_turns.insert(id.clone());
+                }
             }
             let archived_at = persisted
                 .archived
@@ -511,8 +525,11 @@ impl StateHandle {
 
         // Persist turns, first-seen, auto-unarchive.
         if !new_turns.is_empty() || !unarchive.is_empty() || seen.iter().any(|id| !persisted.first_seen.contains_key(id)) {
-            let sids: HashMap<String, Option<String>> =
-                unarchive.iter().map(|id| (id.clone(), m.omp_of.get(id).cloned())).collect();
+            // `track.omp_session` is the key this build read (`omp_of` or herdr's fallback).
+            let sids: HashMap<String, Option<String>> = unarchive
+                .iter()
+                .map(|id| (id.clone(), m.tracks.get(id).and_then(|t| t.omp_session.clone()).or_else(|| m.omp_of.get(id).cloned())))
+                .collect();
             store.persist.session(&store.session, |s| {
                 for id in &new_turns {
                     *s.turns.entry(id.clone()).or_default() += 1;
@@ -584,8 +601,13 @@ impl StateHandle {
                 acts.push((agent.id.clone(), agent.name.clone(), ActivityKind::Asked, title, detail));
             }
             if new_turns.contains(&agent.id) && matches!(agent.column, Column::Review | Column::Done) {
-                notes.push(build::finished_notification(&agent, now));
-                acts.push((agent.id.clone(), agent.name.clone(), ActivityKind::Finished, agent.title.clone(), agent.live.line.clone()));
+                // A stopped turn isn't "finished": someone pressed stop, so no notification.
+                if stopped_turns.contains(&agent.id) {
+                    acts.push((agent.id.clone(), agent.name.clone(), ActivityKind::Stopped, "Turn stopped".into(), agent.live.line.clone()));
+                } else {
+                    notes.push(build::finished_notification(&agent, now));
+                    acts.push((agent.id.clone(), agent.name.clone(), ActivityKind::Finished, agent.title.clone(), agent.live.line.clone()));
+                }
             }
             if quiet {
                 let silent = agent.live.last_event_at.map(|t| now - t).unwrap_or(0);
@@ -632,14 +654,22 @@ impl StateHandle {
             let mut m = self.lock();
             let ids: Vec<String> =
                 m.omp_of.iter().filter(|(_, s)| s.as_str() == session_id).map(|(a, _)| a.clone()).collect();
-            let started = signals.iter().any(|s| matches!(s, Signal::TurnStarted));
             let now = now_ms();
             ids.into_iter()
                 .map(|a| {
                     let track = m.tracks.get_mut(&a);
                     let name = track.as_ref().map(|t| t.name.clone()).unwrap_or_else(|| a.clone());
-                    if let (true, Some(t)) = (started, track) {
-                        t.turn_signal_at = Some(now);
+                    if let Some(t) = track {
+                        for sig in signals {
+                            match sig {
+                                Signal::TurnStarted => {
+                                    t.turn_signal_at = Some(now);
+                                    t.turn_aborted = false;
+                                }
+                                Signal::TurnEnded { aborted, .. } => t.turn_aborted = *aborted,
+                                _ => {}
+                            }
+                        }
                     }
                     (a, name)
                 })

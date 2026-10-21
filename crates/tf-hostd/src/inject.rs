@@ -14,42 +14,52 @@ use tf_proto::ApiError;
 
 use crate::ops::{herdr_err, Ctx};
 
-/// omp TUI builtins that may be injected (`omp.md` §1.3). Anything else would reach the
-/// model as a prompt (rule I3).
+/// Every omp TUI builtin and alias (omp 18.12 `slash-commands/builtin-*.ts`, `omp.md` §1.3).
+/// Anything else would reach the model as a prompt (rule I3). Commands that open a selector,
+/// panel or dashboard are included: the client opens the agent's terminal next to them, and
+/// later injections refuse to run while the overlay is up (`preflight`).
 pub const CATALOG: &[&str] = &[
-    "switch", "effort", "fast", "slow", "plan", "plan-review", "goal", "guided-goal", "vibe", "loop", "queue",
-    "skillful", "extended-context", "computer", "prewalk", "modelpreset", "ratchet", "security", "new", "resume",
-    "fork", "rename", "handoff", "compact", "shake", "clear", "fresh", "tan", "seance", "pin", "todo", "jobs",
-    "export", "dump", "share", "move", "wt", "add-dir", "remove-dir", "dirs", "mcp", "memory", "skills", "advisor",
-    "collab", "join", "leave", "force", "forget-approvals", "marketplace", "plugins", "reload-plugins", "retry",
-    "restart", "exit", "quit", "q", "browser", "ssh", "btw",
+    // modes and model
+    "model", "models", "switch", "effort", "fast", "slow", "plan", "plan-review", "goal", "guided-goal", "vibe",
+    "loop", "queue", "skillful", "extended-context", "computer", "prewalk", "modelpreset", "ratchet", "security",
+    "settings", "setup", "providers",
+    // session
+    "new", "resume", "fork", "branch", "rewind", "tree", "rename", "handoff", "compact", "shake", "clear", "fresh",
+    "delete", "btw", "tan", "seance", "pin", "todo", "session", "context", "tools", "jobs", "usage", "changelog",
+    "hotkeys", "stats", "trace", "export", "dump", "share", "copy", "open", "agents", "hub", "extensions", "status",
+    "debug", "git", "move", "wt", "worktree", "add-dir", "remove-dir", "dirs", "login", "logout", "mcp", "memory",
+    "skills", "advisor", "collab", "join", "leave", "force", "pause", "live", "record", "forget-approvals",
+    "marketplace", "plugins", "plugin", "reload-plugins", "retry", "restart", "exit", "quit", "q", "browser", "ssh",
+    "omfg", "cleanse",
 ];
 
-/// Commands that open a selector, panel or overlay when given no arguments (or always)
-/// and therefore must not be injected bare.
-const NEEDS_ARGS: &[&str] = &["switch", "effort", "resume", "seance", "modelpreset", "btw"];
+/// The command name of `/name args` (`parseSlashCommand` splits at the first whitespace or `:`;
+/// `/skill:<name>` keeps its prefix).
+pub fn command_name(command: &str) -> &str {
+    let body = command.trim().trim_start_matches('/');
+    if let Some(rest) = body.strip_prefix("skill:") {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        return &body[..6 + end];
+    }
+    body.split([' ', '\t', ':']).next().unwrap_or_default()
+}
 
-/// Validates a full slash command against the catalog.
+/// Validates a full slash command against the builtin catalog.
 pub fn validate(command: &str) -> Result<(), ApiError> {
     let cmd = command.trim();
-    let Some(body) = cmd.strip_prefix('/') else {
+    if !cmd.starts_with('/') {
         return Err(ApiError::new("invalid_params", "slash commands start with `/`"));
-    };
-    if cmd.contains('\n') {
+    }
+    if cmd.contains(['\n', '\r']) {
         return Err(ApiError::new("invalid_params", "slash commands are one line"));
     }
-    // `parseSlashCommand` splits at the first whitespace or `:`.
-    let name = body.split([' ', '\t', ':']).next().unwrap_or_default();
-    if name.starts_with("skill") && body.starts_with("skill:") {
+    let name = command_name(cmd);
+    if name.starts_with("skill:") && name.len() > 6 {
         return Ok(());
     }
     if !CATALOG.contains(&name) {
         return Err(ApiError::new("unsupported", format!("`/{name}` is not a known omp command"))
             .with_hint("Unknown commands would be sent to the model as a prompt"));
-    }
-    let has_args = body.len() > name.len() && !body[name.len()..].trim().is_empty();
-    if NEEDS_ARGS.contains(&name) && !has_args {
-        return Err(ApiError::new("invalid_params", format!("`/{name}` needs arguments (it opens a selector otherwise)")));
     }
     Ok(())
 }
@@ -239,9 +249,22 @@ mod tests {
         assert!(validate("/effort high").is_ok());
         assert!(validate("/compact").is_ok());
         assert!(validate("/skill:review now").is_ok());
+        assert_eq!(validate("/skill:").unwrap_err().code, "unsupported");
         assert_eq!(validate("/thinking medium").unwrap_err().code, "unsupported");
-        assert_eq!(validate("/switch").unwrap_err().code, "invalid_params");
+        // Selector/panel commands are allowed bare: the client shows the terminal beside them.
+        assert!(validate("/switch").is_ok());
+        assert!(validate("/tree").is_ok());
+        assert!(validate("/rewind").is_ok());
         assert_eq!(validate("switch x").unwrap_err().code, "invalid_params");
+        assert_eq!(validate("/queue a\nb").unwrap_err().code, "invalid_params");
         assert_eq!(validate("/plan:on").map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn command_names() {
+        assert_eq!(command_name("/jobs kill all"), "jobs");
+        assert_eq!(command_name(" /force:bash ls"), "force");
+        assert_eq!(command_name("/skill:review now"), "skill:review");
+        assert_eq!(command_name("/deploy"), "deploy");
     }
 }

@@ -64,7 +64,7 @@ describe("FrameBatcher", () => {
       store.setState(reduceEvents(store.getState(), events).state, true);
     }, frames.schedule);
     for (let i = 0; i < 50; i++) b.push(status(i % 2 ? "online" : "offline", i));
-    b.push({ type: "settings", settings: { motion: "full", notifyNeeds: true, notifyFinished: true, notifyErrors: true, notifySound: false, keepAlive: true, terminalFontSize: 13, confirmArchive: false, defaultPlan: false, deviceName: "x" } });
+    b.push({ type: "settings", settings: { motion: "full", notifyNeeds: true, notifyFinished: true, notifyErrors: true, notifySound: false, keepAlive: true, terminalFontSize: 13, confirmArchive: false, defaultPlan: false, deviceName: "x", mutedAgents: [], templates: [] } });
     expect(updates).toBe(0);
     frames.frame();
     expect(updates).toBe(1);

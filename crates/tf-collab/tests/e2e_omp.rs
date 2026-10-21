@@ -278,6 +278,45 @@ async fn e2e_against_real_omp() {
     eprintln!("[bandwidth] relay h2g ciphertext {raw} B → compacted SessionEvents {out} B ({:.1}× smaller)", raw as f64 / out as f64);
     assert!(raw > out * 3);
 
+    // 8. goal mode via the journal: guests can't run slash commands, so inject `/goal set` through
+    //    herdr (as tf-hostd does without the bridge), then follow meta.goal through fetch-transcript.
+    let main = s.replica.main_agent_id().expect("main agent id").to_owned();
+    s.pump("idle before goal", 30, |s| !s.replica.is_streaming()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    herdr(&["agent", "prompt", "hc-omp", "/goal set Reply with the single word pong, then mark this goal complete."]).unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let _ = herdr(&["agent", "send-keys", "hc-omp", "enter"]);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let (mut saw_goal, mut cleared) = (None, false);
+    while Instant::now() < deadline && !cleared {
+        loop {
+            let chunk = s.guest.fetch_transcript(&main, s.replica.journal_offset()).await.expect("fetch journal");
+            let more = !chunk.text.is_empty();
+            let up = s.replica.apply_journal(&chunk);
+            if up.meta_changed {
+                eprintln!("[goal] meta.goal = {:?}", s.replica.meta().goal);
+            }
+            if let Some(g) = &s.replica.meta().goal {
+                saw_goal.get_or_insert_with(|| g.clone());
+            } else if saw_goal.is_some() {
+                cleared = true;
+            }
+            if !more {
+                break;
+            }
+        }
+        while let Ok(ev) = s.events.try_recv() {
+            let up = s.replica.apply(&ev, 0);
+            s.log.extend(up.events);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let g = saw_goal.expect("meta.goal set from the journal");
+    assert_eq!(g.objective, "Reply with the single word pong, then mark this goal complete.");
+    assert_eq!(g.status, "active");
+    assert!(cleared, "goal cleared after completion");
+    eprintln!("[goal] journal offset {} B", s.replica.journal_offset());
+
     s.guest.close();
     drop(lab);
     relay.shutdown().await;

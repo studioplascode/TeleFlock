@@ -49,6 +49,8 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
       { keys: ["Enter"], label: "Open agent" },
       { keys: ["A"], label: "Answer" },
       { keys: ["T"], label: "Terminal" },
+      { keys: ["X"], label: "Select card (multi-select)" },
+      { keys: ["Ctrl", "Click"], label: "Add card to selection" },
     ],
   },
   {
@@ -58,6 +60,23 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
       { keys: ["Alt", "Enter"], label: "Queue follow-up" },
       { keys: ["Esc"], label: "Stop the agent" },
       { keys: ["1", "…", "9"], label: "Pick an answer" },
+      { keys: ["F"], label: "Focus mode" },
+    ],
+  },
+  {
+    title: "Review",
+    items: [
+      { keys: ["J"], label: "Next file" },
+      { keys: ["K"], label: "Previous file" },
+      { keys: ["X"], label: "Collapse / expand file" },
+      { keys: ["V"], label: "Mark viewed, jump to next" },
+      { keys: ["S"], label: "Split / unified diff" },
+      { keys: ["W"], label: "Wrap lines" },
+      { keys: ["R"], label: "Reload diff" },
+      { keys: ["["], label: "Toggle file tree" },
+      { keys: ["]"], label: "Toggle ship panel" },
+      { keys: ["/"], label: "Filter files" },
+      { keys: ["Ctrl", "Enter"], label: "Commit (in the message box)" },
     ],
   },
 ];

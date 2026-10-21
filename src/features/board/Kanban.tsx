@@ -19,6 +19,7 @@ import type { Column } from "@/core/gen";
 import { AnimatePresence, CardFlight, CountBadge, EmptyState, LayoutGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion } from "@/design";
 import { AgentCard } from "./AgentCard";
 import { openAgent, setArchived } from "./agentActions";
+import { DropConfirm, type PendingDrop, useConfirmArchive } from "./ArchiveConfirm";
 import { useBoard } from "./boardStore";
 import { LANES, LANE_BY_COLUMN, type LaneMeta } from "./lanes";
 
@@ -69,9 +70,18 @@ export function applyMoves(lanes: LaneKeys, moves: Record<string, Column>): Lane
   return out;
 }
 
+/** Card click: Ctrl/⌘ toggles the multi-selection, Shift extends it, a plain click opens (or toggles while selecting). */
+export function onCardClick(e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }, agentKey: string): void {
+  const board = useBoard.getState();
+  useUi.getState().select(agentKey);
+  if (e.shiftKey) board.pickRange(agentKey);
+  else if (e.ctrlKey || e.metaKey || board.picked.length > 0) board.togglePick(agentKey);
+  else openAgent(agentKey);
+}
+
 function DraggableCard({ agentKey, lane, selected }: { agentKey: string; lane: Column; selected: boolean }) {
   const { setNodeRef, listeners, attributes, isDragging } = useDraggable({ id: agentKey, data: { lane } });
-  const select = useUi((s) => s.select);
+  const picked = useBoard((s) => s.picked.includes(agentKey));
   return (
     <CardFlight flightId={agentKey} grounded={isDragging} className={cn("relative", isDragging && "opacity-30")}>
       <div
@@ -81,14 +91,16 @@ function DraggableCard({ agentKey, lane, selected }: { agentKey: string; lane: C
         role="button"
         tabIndex={-1}
         aria-roledescription="Agent card. Drag between In review and Done to archive."
+        aria-pressed={picked}
         data-agent-key={agentKey}
-        onClick={() => {
-          select(agentKey);
-          openAgent(agentKey);
+        onClick={(e) => onCardClick(e, agentKey)}
+        onMouseDown={(e) => {
+          // Shift-click must not start a text selection across cards
+          if (e.shiftKey) e.preventDefault();
         }}
         className="cursor-pointer touch-manipulation rounded-xl outline-none"
       >
-        <AgentCard agentKey={agentKey} lane={lane} selected={selected} />
+        <AgentCard agentKey={agentKey} lane={lane} selected={selected} picked={picked} />
       </div>
     </CardFlight>
   );
@@ -138,7 +150,8 @@ function Lane({
           {refused.title}
         </motion.p>
       )}
-      <motion.div layoutScroll className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-2.5 pb-3">
+      {/* -mt/pt pair: headroom so a lifted (selected) card and its check badge aren't clipped by the scroller */}
+      <motion.div layoutScroll className="no-scrollbar -mt-2 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-2.5 pt-2 pb-3">
         <AnimatePresence initial={false}>
           {accepting && (
             <motion.div
@@ -178,8 +191,10 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const [drag, setDrag] = useState<{ key: string; from: Column } | null>(null);
   const [dropOk, setDropOk] = useState(false);
+  const [pending, setPending] = useState<PendingDrop | null>(null);
+  const confirmArchive = useConfirmArchive();
   const dragAgent = useAgent(drag?.key ?? "");
-  const view = applyMoves(lanes, moves);
+  const view = applyMoves(lanes, pending ? { ...moves, [pending.key]: "done" } : moves);
 
   const onStart = (e: DragStartEvent) => {
     const from = e.active.data.current?.lane as Column | undefined;
@@ -202,14 +217,29 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
       return;
     }
     const key = current.key;
+    if (to === "done" && confirmArchive) {
+      // hold the card in Done while the confirm popover (anchored at the drop point) decides
+      const start = e.activatorEvent as PointerEvent | null;
+      const x = (start?.clientX ?? window.innerWidth / 2) + e.delta.x;
+      const y = (start?.clientY ?? window.innerHeight / 2) + e.delta.y;
+      setPending({ key, name, x, y });
+      return;
+    }
     setMove(key, to);
     setArchived(key, to === "done").catch(() => setMove(key, null));
+  };
+  const resolvePending = (ok: boolean) => {
+    const p = pending;
+    setPending(null);
+    if (!p || !ok) return;
+    setMove(p.key, "done");
+    setArchived(p.key, true).catch(() => setMove(p.key, null));
   };
 
   return (
     <DndContext sensors={sensors} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => setDrag(null)}>
       <LayoutGroup id="board">
-        <div className="grid min-h-0 flex-1 grid-cols-4 gap-3">
+        <div className="grid min-h-0 flex-1 snap-x grid-cols-[repeat(4,minmax(264px,1fr))] gap-3 overflow-x-auto overscroll-x-contain [&>section]:snap-start">
           {LANES.map((meta) => (
             <Lane
               key={meta.column}
@@ -236,6 +266,7 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
         </DragOverlay>,
         document.body,
       )}
+      <DropConfirm pending={pending} onResolve={resolvePending} />
     </DndContext>
   );
 }

@@ -299,6 +299,23 @@
     transition-duration: 0.08s;
   }
 }
+/*
+ * touch-hit: on touch screens, grow the hit area to at least 48×48 px (Material's minimum) around
+ * the visual box without changing layout. Needs a positioned element; the pseudo layer is invisible.
+ */
+@utility touch-hit {
+  @media (hover: none) {
+    &::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 48px);
+      height: max(100%, 48px);
+      transform: translate(-50%, -50%);
+    }
+  }
+}
 @utility lift {
   transition: transform 0.35s var(--ease-spring), box-shadow 0.3s;
   @media (hover: hover) {

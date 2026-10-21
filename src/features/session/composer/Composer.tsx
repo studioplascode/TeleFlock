@@ -1,12 +1,13 @@
-import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Slash, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { core, parseAgentKey, useAgent, useSession, useUi } from "@/core";
-import type { ImageInput } from "@/core/gen";
+import { core, navigate, parseAgentKey, useAgent, useSession, useUi } from "@/core";
+import type { CommandInfo, ImageInput } from "@/core/gen";
+import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, GlowBorder, IconButton, Kbd, Spinner, spring, Textarea, toast } from "@/design";
 import { fileToImageInput, hostCall, type PendingImage, usePending } from "../api";
 import { useSessionUi } from "../state";
-import { matchCommands, runSlash, type SlashCommand } from "./slash";
+import { findCommand, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
 import { useDictation } from "./useDictation";
 
 export interface ComposerProps {
@@ -17,7 +18,10 @@ export interface ComposerProps {
   autoFocus?: boolean;
 }
 
-type Popup = { kind: "slash"; items: SlashCommand[] } | { kind: "mention"; query: string; start: number; items: string[]; loading: boolean };
+type Popup =
+  | { kind: "slash"; items: SlashCommand[] }
+  | { kind: "sub"; cmd: SlashCommand; items: OmpSubcommand[] }
+  | { kind: "mention"; query: string; start: number; items: string[]; loading: boolean };
 
 const MENTION_RE = /(^|\s)@([^\s@]*)$/;
 
@@ -84,20 +88,47 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     ta.current?.focus();
   }, [draft]);
 
-  const slashCtx = {
+  // The session's own commands (extensions, prompt templates, skills) for the palette.
+  const [custom, setCustom] = useState<CommandInfo[]>([]);
+  const canList = agent?.omp?.link === "live" && caps?.bridge === true;
+  const sessionId = meta?.sessionId;
+  useEffect(() => {
+    if (!canList) return;
+    let live = true;
+    core
+      .host(hostId)
+      .call("agent.commands", { agentId })
+      .then((r) => live && setCustom(r.commands))
+      .catch(() => live && setCustom([]));
+    return () => {
+      live = false;
+    };
+  }, [hostId, agentId, canList, sessionId]);
+
+  const slashCtx: SlashContext = {
     hostId,
     agentId,
     key: agentKey,
     meta,
-    openTerminal: () => useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId }),
+    custom,
+    openTerminal: () => (mobile ? navigate({ name: "terminal", hostId, agentId }) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId })),
   };
 
   const updatePopup = (value: string, caret: number) => {
     const before = value.slice(0, caret);
     const slash = /^\/(\S*)$/.exec(before);
     if (slash && value.indexOf("\n") < 0) {
-      setPopup({ kind: "slash", items: matchCommands(slash[1] ?? "") });
+      setPopup({ kind: "slash", items: matchCommands(slash[1] ?? "", custom) });
       setSel(0);
+      return;
+    }
+    // `/name <partial>`: offer the command's subcommands / argument choices.
+    const sub = /^\/(\S+?)[\s:](\S*)$/.exec(before);
+    const subCmd = sub && value.indexOf("\n") < 0 ? findCommand(parseSlash(before)?.name ?? "", custom) : undefined;
+    if (sub && subCmd?.subs) {
+      const items = matchSubs(subCmd, sub[2] ?? "");
+      setPopup(items.length ? { kind: "sub", cmd: subCmd, items } : null);
+      setSel(sub[2] ? 0 : -1);
       return;
     }
     const mention = MENTION_RE.exec(before);
@@ -125,7 +156,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   };
 
   const pickSlash = (c: SlashCommand) => {
-    if (c.instant) {
+    if (c.instant && !c.subs) {
       setText("");
       setPopup(null);
       void run(runSlash(slashCtx, `/${c.name}`));
@@ -133,7 +164,24 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     }
     const v = `/${c.name} `;
     setText(v);
+    setPopup(c.subs ? { kind: "sub", cmd: c, items: c.subs } : null);
+    setSel(-1);
+    requestAnimationFrame(() => {
+      ta.current?.focus();
+      ta.current?.setSelectionRange(v.length, v.length);
+    });
+  };
+
+  /** A subcommand without arguments runs right away; one with arguments is completed for typing. */
+  const pickSub = (cmd: SlashCommand, s: OmpSubcommand) => {
     setPopup(null);
+    if (!s.args) {
+      setText("");
+      void run(runSlash(slashCtx, `/${cmd.name} ${s.name}`));
+      return;
+    }
+    const v = `/${cmd.name} ${s.name} `;
+    setText(v);
     requestAnimationFrame(() => {
       ta.current?.focus();
       ta.current?.setSelectionRange(v.length, v.length);
@@ -204,14 +252,19 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSel((s) => (s - 1 + items.length) % items.length);
+        setSel((s) => (s <= 0 ? items.length - 1 : s - 1));
         return;
       }
-      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.altKey)) {
+      // Argument choices start unselected: Enter sends the command as typed (e.g. bare `/jobs`).
+      const choosing = popup.kind !== "sub" || sel >= 0;
+      if (e.key === "Tab" || (choosing && e.key === "Enter" && !e.shiftKey && !e.altKey)) {
         e.preventDefault();
         if (popup.kind === "slash") {
           const c = popup.items[sel];
           if (c) pickSlash(c);
+        } else if (popup.kind === "sub") {
+          const s = popup.items[Math.max(sel, 0)];
+          if (s) pickSub(popup.cmd, s);
         } else {
           const p = popup.items[sel];
           if (p) pickMention(p);
@@ -226,6 +279,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         setPopup(null);
         return;
       }
+      // Focus mode: Esc leaves focus (the Stop button still stops); the view's handler does it.
+      if (useUi.getState().focusMode) return;
       if (working && caps?.abort !== false) {
         e.preventDefault();
         e.stopPropagation();
@@ -282,6 +337,22 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   });
   // Holding Alt while the agent works previews follow-up mode on the send button and hints.
   const followMode = working && altHeld && caps?.followUp === true;
+  // omp's Alt+Up pops the last steer if any, else the last follow-up: highlight that chip.
+  const canDequeue = caps?.bridge === true && queued.length > 0;
+  const popIdx = queue?.steering.length ? queue.steering.length - 1 : queued.length - 1;
+  const dequeue = async (edit: boolean) => {
+    const r = await run(hostCall(hostId, "agent.dequeue", { agentId }, { failure: "Couldn't pull the message back" }));
+    if (!r.ok) return;
+    const t = r.value.text;
+    if (!t) {
+      toast({ title: "Already delivered", description: "The queue was empty by the time the request arrived.", status: "idle" });
+      return;
+    }
+    if (edit) {
+      setText((cur) => (cur.trim() ? `${t}\n\n${cur}` : t));
+      requestAnimationFrame(() => ta.current?.focus());
+    } else toast({ title: "Removed from the queue", description: t.length > 80 ? `${t.slice(0, 80)}…` : t, status: "done", duration: 2600 });
+  };
 
   return (
     <div
@@ -304,44 +375,79 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
             exit={{ opacity: 0, y: 4, transition: { duration: 0.12 } }}
             className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,#22222e,#181820)] shadow-[var(--shadow-d3),inset_0_0_0_1px_rgb(255_255_255/0.09)]"
             role="listbox"
-            aria-label={popup.kind === "slash" ? "Commands" : "Files"}
+            aria-label={popup.kind === "slash" ? "Commands" : popup.kind === "sub" ? `/${popup.cmd.name} arguments` : "Files"}
           >
             <div className="flex items-center gap-2 border-b border-line px-3 py-1.5 text-2xs font-bold text-mute-2">
-              {popup.kind === "slash" ? <Slash className="size-3" /> : <AtSign className="size-3" />}
-              {popup.kind === "slash" ? "Commands" : cwd ? `Files in ${cwd}` : "Files"}
+              {popup.kind === "mention" ? <AtSign className="size-3" /> : <Slash className="size-3" />}
+              {popup.kind === "slash" ? "Commands" : popup.kind === "sub" ? `/${popup.cmd.name} · pick an argument or keep typing` : cwd ? `Files in ${cwd}` : "Files"}
               {popup.kind === "mention" && popup.loading && <Spinner size={11} className="ml-auto" />}
               {!mobile && (
                 <span className="ml-auto flex items-center gap-1">
                   <Kbd>↑↓</Kbd>
                   <Kbd>Tab</Kbd>
+                  {popup.kind === "sub" && sel < 0 && <span className="ml-1 font-semibold">Enter sends as typed</span>}
                 </span>
               )}
             </div>
             <div className="max-h-[300px] overflow-y-auto p-1">
-              {popup.kind === "slash"
-                ? popup.items.map((c, i) => {
-                    const unavailable = c.cap != null && meta != null && !meta.caps[c.cap];
-                    return (
-                      <button
-                        key={c.name}
-                        type="button"
-                        role="option"
-                        aria-selected={i === sel}
-                        onMouseEnter={() => setSel(i)}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => pickSlash(c)}
-                        className={cn("flex w-full items-baseline gap-2 rounded-sm px-2.5 py-1.5 text-left text-[12.5px]", i === sel ? "bg-accent/18 text-ink" : "text-ink-2", unavailable && "opacity-45")}
-                      >
-                        <span className="font-mono font-bold text-accent-hi">/{c.name}</span>
-                        {c.args && <span className="font-mono text-[11px] text-mute-2">{c.args}</span>}
-                        <span className="ml-auto truncate pl-3 text-xs text-mute">{c.description}</span>
-                        {c.raw && <span className="shrink-0 rounded-full bg-white/6 px-1.5 text-[9.5px] font-bold tracking-wider text-mute-2 uppercase">omp</span>}
-                      </button>
-                    );
-                  })
-                : popup.items.length === 0
-                  ? !popup.loading && <div className="px-3 py-3 text-xs text-mute-2">No files match “{popup.query}”</div>
-                  : popup.items.map((p, i) => (
+              {popup.kind === "slash" ? (
+                popup.items.map((c, i) => {
+                  const unavailable = c.mode === "native" && c.cap != null && meta != null && !meta.caps[c.cap];
+                  const badge = c.source === "omp" || c.source === "teleflock" ? MODE_BADGE[c.mode] : c.source;
+                  return (
+                    <button
+                      key={c.name}
+                      type="button"
+                      role="option"
+                      aria-selected={i === sel}
+                      onMouseEnter={() => setSel(i)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pickSlash(c)}
+                      title={c.mode === "terminal" ? "Opens omp's own UI in the agent's terminal" : c.mode === "report" ? "omp prints the result in its terminal; TeleFlock opens it for you" : undefined}
+                      className={cn("flex w-full items-baseline gap-2 rounded-sm px-2.5 py-1.5 text-left text-[12.5px]", i === sel ? "bg-accent/18 text-ink" : "text-ink-2", unavailable && "opacity-45")}
+                    >
+                      <span className="shrink-0 font-mono font-bold whitespace-nowrap text-accent-hi">/{c.name}</span>
+                      {c.args && !mobile && <span className="truncate font-mono text-[11px] text-mute-2">{c.args}</span>}
+                      <span className="ml-auto truncate pl-3 text-xs text-mute">{c.description}</span>
+                      {badge && (
+                        <span
+                          className={cn(
+                            "shrink-0 rounded-full px-1.5 text-[9.5px] font-bold tracking-wider whitespace-nowrap uppercase",
+                            c.mode === "terminal" || c.mode === "report" ? "bg-accent/14 text-accent-hi" : "bg-white/6 text-mute-2",
+                          )}
+                        >
+                          {badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              ) : popup.kind === "sub" ? (
+                popup.items.map((s, i) => {
+                  const mode = popup.cmd.modeFor(s.name);
+                  const badge = MODE_BADGE[mode];
+                  return (
+                    <button
+                      key={s.name}
+                      type="button"
+                      role="option"
+                      aria-selected={i === sel}
+                      onMouseEnter={() => setSel(i)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pickSub(popup.cmd, s)}
+                      className={cn("flex w-full items-baseline gap-2 rounded-sm px-2.5 py-1.5 text-left text-[12.5px]", i === sel ? "bg-accent/18 text-ink" : "text-ink-2")}
+                    >
+                      <span className="font-mono font-bold text-accent-hi">{s.name}</span>
+                      {s.args && !mobile && <span className="truncate font-mono text-[11px] text-mute-2">{s.args}</span>}
+                      <span className="ml-auto truncate pl-3 text-xs text-mute">{s.description}</span>
+                      {badge && mode !== "direct" && <span className="shrink-0 rounded-full bg-accent/14 px-1.5 text-[9.5px] font-bold tracking-wider whitespace-nowrap text-accent-hi uppercase">{badge}</span>}
+                    </button>
+                  );
+                })
+              ) : popup.items.length === 0 ? (
+                !popup.loading && <div className="px-3 py-3 text-xs text-mute-2">No files match “{popup.query}”</div>
+              ) : (
+                popup.items.map((p, i) => (
                       <button
                         key={p}
                         type="button"
@@ -369,7 +475,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                           })()}
                         </span>
                       </button>
-                    ))}
+                ))
+              )}
             </div>
           </motion.div>
         )}
@@ -386,7 +493,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           >
             <span className="mr-0.5 text-[10px] font-extrabold tracking-[0.1em] text-mute-2 uppercase">Queued · {queued.length}</span>
             <AnimatePresence initial={false} mode="popLayout">
-              {queued.map((q) => (
+              {queued.map((q, i) => (
                 <motion.button
                   layout
                   key={q.id}
@@ -399,6 +506,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   className={cn(
                     "focus-ring flex max-w-[300px] items-center gap-1.5 rounded-full py-1 pr-2.5 pl-1 text-[11.5px] font-semibold shadow-hairline",
                     q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-white/5 text-ink-2",
+                    canDequeue && i === popIdx && "shadow-[inset_0_0_0_1px_var(--color-accent)]",
                   )}
                 >
                   <span
@@ -414,6 +522,16 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   <span className="tf-loop size-1.5 shrink-0 animate-breathe rounded-full bg-current opacity-70" aria-hidden />
                 </motion.button>
               ))}
+              {canDequeue && (
+                <motion.span key="dequeue" layout className="flex items-center gap-0.5">
+                  <IconButton label="Pull the highlighted message back into the composer to edit it" size="sm" disabled={sending} onClick={() => void dequeue(true)}>
+                    <Pencil />
+                  </IconButton>
+                  <IconButton label="Remove the highlighted message from the queue" size="sm" disabled={sending} onClick={() => void dequeue(false)}>
+                    <X />
+                  </IconButton>
+                </motion.span>
+              )}
             </AnimatePresence>
           </motion.div>
         )}

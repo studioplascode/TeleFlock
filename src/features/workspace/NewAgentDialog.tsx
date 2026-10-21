@@ -42,7 +42,7 @@ export function NewAgentDialog() {
 
 const ROLLUP_STATUS: Record<Workspace["rollup"], Status> = { working: "running", blocked: "needs-you", idle: "review", done: "review", unknown: "idle" };
 
-type Submit = { phase: "idle" } | { phase: "working"; since: number } | { phase: "failed"; title: string; hint?: string } | { phase: "done"; started: Started; name: string };
+type Submit = { phase: "idle" } | { phase: "working"; since: number } | { phase: "failed"; title: string; hint?: string } | { phase: "done"; started: Started };
 
 function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { open: boolean; initialHostId?: string; initialWorkspaceId?: string; onClose: () => void }) {
   const mobile = useIsMobile();
@@ -105,7 +105,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         return;
       }
       const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name }) });
-      setSubmit({ phase: "done", started, name });
+      setSubmit({ phase: "done", started });
     } catch (e) {
       const d = describeError(e);
       setSubmit({ phase: "failed", ...d });
@@ -183,7 +183,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         {hostIds.length === 0 ? (
           <EmptyState compact icon={<TriangleAlert />} title="No host connected" action={<Button onClick={() => openDialog({ kind: "hostEditor" })}>Add a host</Button>} />
         ) : submit.phase === "done" && hostId ? (
-          <LaunchSuccess hostId={hostId} started={submit.started} title={`${submit.name} is starting`} subtitle={ws ? ws.label : folder ? tildify(folder.path, home) : undefined} onClose={onClose} />
+          <LaunchSuccess hostId={hostId} started={submit.started} title={(n) => (n ? `${n} is starting` : "Starting agent…")} subtitle={ws ? ws.label : folder ? tildify(folder.path, home) : undefined} onClose={onClose} />
         ) : submit.phase === "working" ? (
           <WorkingPanel since={submit.since} label={startAgent ? `Starting ${name}` : "Opening folder"} detail={preview[0]?.argv.join(" ")} />
         ) : (

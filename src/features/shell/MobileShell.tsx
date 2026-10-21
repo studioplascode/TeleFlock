@@ -1,9 +1,10 @@
 import { Grid2x2, Inbox, LayoutGrid, type LucideIcon, SquareTerminal } from "lucide-react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import { cn, spring, toast } from "@/design";
-import { navigate, type Route, useHosts, useInbox, useNotifications, useRoute } from "@/core";
+import { navigate, type Route, useHosts, useInbox, useNotifications, useRoute, useUi } from "@/core";
 import { EdgeSwipeBack } from "./EdgeSwipeBack";
 import { haptic } from "./haptics";
+import { useSoftKeyboard } from "./softKeyboard";
 import { MOBILE_TABS, ViewStage } from "./ViewStage";
 
 type Tab = (typeof MOBILE_TABS)[number];
@@ -118,16 +119,34 @@ function BottomNav() {
   );
 }
 
-/** Phone frame: safe areas, routed views with push/pop transitions, bottom nav, edge-swipe back. */
+/** Nav in/out: springs for focus mode, instant when the soft keyboard takes the space (it animates itself). */
+const NAV_VARIANTS = {
+  hidden: (instant: boolean) => ({ height: 0, opacity: 0, transition: instant ? { duration: 0 } : spring.smooth }),
+  shown: { height: "auto", opacity: 1, transition: spring.smooth },
+};
+
+/**
+ * Phone frame: safe areas, routed views with push/pop transitions, bottom nav, edge-swipe back.
+ * The bottom nav steps aside in focus mode and while the soft keyboard is up, and the frame pads
+ * itself above a keyboard that overlays the webview, so the composer always sits on top of it.
+ */
 export function MobileShell() {
   const route = useRoute();
+  const focus = useUi((s) => s.focusMode);
+  const keyboard = useSoftKeyboard();
   const atRoot = route.name === "board" || route.name === "inbox" || route.name === "more" || (route.name === "terminal" && !route.agentId && !route.paneId);
   return (
-    <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
+    <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--kb-inset,0px)] pl-[env(safe-area-inset-left)]">
       <main className="relative min-h-0 flex-1">
         <ViewStage mobile />
       </main>
-      <BottomNav />
+      <AnimatePresence initial={false} custom={keyboard}>
+        {!focus && !keyboard && (
+          <motion.div key="nav" custom={keyboard} variants={NAV_VARIANTS} initial="hidden" animate="shown" exit="hidden" className="shrink-0 overflow-hidden">
+            <BottomNav />
+          </motion.div>
+        )}
+      </AnimatePresence>
       <EdgeSwipeBack enabled={!atRoot} />
     </div>
   );

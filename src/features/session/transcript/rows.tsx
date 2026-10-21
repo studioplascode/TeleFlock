@@ -1,6 +1,6 @@
 import { AlertTriangle, Brain, ChevronDown, CircleAlert, CornerDownRight, Info, Layers, Repeat2, Sparkles } from "lucide-react";
 import { memo, useState } from "react";
-import { useCore, useSessionItem } from "@/core";
+import { useCore, useSessionItem, useSettings } from "@/core";
 import type { AssistantItem, CompactionItem, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
 import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, LogoMark, Shimmer, Tooltip } from "@/design";
 import { Markdown } from "../markdown/Markdown";
@@ -75,7 +75,18 @@ export function ItemView({ item }: { item: TranscriptItem }) {
   }
 }
 
+/** hostd's collab guest name: prompts it sent without a known device (e.g. before a daemon restart). */
+const GUEST_NAME = "TeleFlock";
+
+/** Author chip text: null for prompts from this device (or typed on the host), else the sending device. */
+function useForeignAuthor(author: string | undefined): string | null {
+  const me = useSettings((s) => s.deviceName);
+  if (!author || author === me || author === GUEST_NAME) return null;
+  return author;
+}
+
 function UserRow({ item }: { item: UserItem }) {
+  const author = useForeignAuthor(item.author);
   if (item.synthetic) {
     return (
       <div className="flex justify-end">
@@ -92,7 +103,7 @@ function UserRow({ item }: { item: UserItem }) {
             steer
           </span>
         )}
-        {item.author ? <span className="rounded-full bg-white/6 px-2 py-0.5 text-[10.5px] text-ink-2 shadow-hairline">{item.author}</span> : <span>You</span>}
+        {author ? <span className="rounded-full bg-white/6 px-2 py-0.5 text-[10.5px] text-ink-2 shadow-hairline">{author}</span> : <span>You</span>}
         <span className="font-semibold tabular">{clock(item.at)}</span>
       </div>
       <div

@@ -309,7 +309,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
     >
       {submit.phase === "done" && hostId ? (
         <div className="flex h-full flex-col">
-          <LaunchSuccess hostId={hostId} started={submit.started} title={`Resuming ${submit.title}`} onClose={onClose} />
+          <LaunchSuccess hostId={hostId} started={submit.started} title={() => `Resuming ${submit.title}`} onClose={onClose} />
         </div>
       ) : submit.phase === "working" ? (
         <div className="flex h-full flex-col">

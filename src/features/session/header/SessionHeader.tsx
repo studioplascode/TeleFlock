@@ -1,7 +1,7 @@
-import { GitBranch, Square, SquareTerminal } from "lucide-react";
+import { BellOff, Focus, GitBranch, Square, SquareTerminal } from "lucide-react";
 import { parseAgentKey, useAgent, useSession, useUi } from "@/core";
 import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity } from "@/design";
-import { agentStatus, hostCall, useBeat } from "../api";
+import { agentStatus, hostCall, useBeat, useMute } from "../api";
 import { ActionsMenu, FastToggle, GoalChip, ModelPicker, PlanToggle, ThinkingPicker } from "./Controls";
 
 /** Desktop session header: identity, liveness, and every mode control. */
@@ -12,6 +12,7 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
   const beat = useBeat(agentKey);
   const { tier } = useActivity(beat);
   const status = agentStatus(agent);
+  const { muted } = useMute(agentKey);
   if (!agent) return null;
   const live = agent.omp?.link === "live";
   const working = agent.column === "running";
@@ -38,6 +39,11 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
             <StatusPill status={status} activity={tier} size="sm">
               {agent.needs ? agent.needs.title : undefined}
             </StatusPill>
+            {muted && (
+              <Tooltip content="Notifications muted for this agent">
+                <BellOff tabIndex={0} className="focus-ring size-3.5 shrink-0 rounded-xs text-mute" aria-label="Notifications muted" />
+              </Tooltip>
+            )}
             {working && (
               <span className="flex items-center gap-1 text-[11px] font-bold text-mute tabular">
                 <Elapsed since={agent.omp?.turnStartedAt ?? agent.stateSince} />
@@ -71,6 +77,11 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
             <span tabIndex={0} className="focus-ring shrink-0 rounded-full px-2 py-1 font-display text-sm font-bold text-ink-2 tabular">
               <NumberTicker value={cost} format={formatUsd} />
             </span>
+          </Tooltip>
+        )}
+        {!compact && (
+          <Tooltip content="Focus mode" shortcut="F">
+            <Button size="sm" variant="ghost" icon={<Focus />} onClick={() => useUi.getState().setFocusMode(true)} aria-label="Focus mode" />
           </Tooltip>
         )}
         <Tooltip content="Open terminal in split" shortcut="Ctrl \">
