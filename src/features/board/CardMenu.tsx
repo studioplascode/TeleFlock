@@ -1,18 +1,14 @@
-import { Archive, ArchiveRestore, Bell, BellOff, CheckSquare, ExternalLink, GitCompare, MessageSquare, MoreHorizontal, Square, SquareTerminal } from "lucide-react";
+import { ArchiveRestore, Bell, BellOff, CheckCheck, CheckSquare, ExternalLink, GitCompare, MessageSquare, MessageSquareReply, MoreHorizontal, Square, SquareTerminal, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
-import { create } from "zustand";
-import { navigate, parseAgentKey, useAgent, useSettings } from "@/core";
+import { navigate, useAgent, useCore } from "@/core";
 import type { Column } from "@/core/gen";
 import {
-  Button,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuTrigger,
-  Dialog,
-  DialogContent,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -21,54 +17,9 @@ import {
   DropdownMenuTrigger,
   IconButton,
 } from "@/design";
-import { archiveWithUndo, canReview, openAgent, openTerminal, promptAgent, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
+import { ACTIONS, isFresh } from "@/features/shell/vocab";
+import { archiveWithUndo, canReview, markDoneAndRemove, openAgent, openAnswerHud, openTerminal, promptAgent, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
 import { useBoard } from "./boardStore";
-
-/* ───────────── archive with optional confirm (menus, selection bar) ───────────── */
-
-const useArchiveAsk = create<{ keys: string[] | null; set(keys: string[] | null): void }>()((set) => ({ keys: null, set: (keys) => set({ keys }) }));
-
-/** Archive agents, asking first when `Settings.confirmArchive` is on. */
-export function requestArchive(keys: readonly string[]): void {
-  if (keys.length === 0) return;
-  if (useSettings.getState().confirmArchive) useArchiveAsk.getState().set([...keys]);
-  else if (keys.length === 1) void setArchived(keys[0] ?? "", true).catch(() => {});
-  else void archiveWithUndo(keys);
-}
-
-/** Confirm dialog for `requestArchive`; mount once per board surface. */
-export function ArchiveConfirmDialog() {
-  const keys = useArchiveAsk((s) => s.keys);
-  const set = useArchiveAsk((s) => s.set);
-  const first = useAgent(keys?.[0] ?? "");
-  const n = keys?.length ?? 0;
-  const label = n === 1 ? (first?.name ?? parseAgentKey(keys?.[0] ?? "").agentId) : `${n} agents`;
-  const confirm = () => {
-    const k = keys ?? [];
-    set(null);
-    if (k.length === 1) void setArchived(k[0] ?? "", true).catch(() => {});
-    else void archiveWithUndo(k);
-  };
-  return (
-    <Dialog open={keys !== null} onOpenChange={(o) => !o && set(null)}>
-      <DialogContent
-        width={420}
-        title={`Archive ${label}?`}
-        description="Archived agents move to Done. Drag them back to In review any time."
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => set(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" autoFocus onClick={confirm}>
-              Archive
-            </Button>
-          </>
-        }
-      />
-    </Dialog>
-  );
-}
 
 /* ───────────── the card menu (⋯ button and right-click) ───────────── */
 
@@ -77,6 +28,8 @@ interface Item {
   label: string;
   icon: ReactNode;
   shortcut?: string;
+  /** One line from ACTIONS, shown as the item's tooltip. */
+  description?: string;
   danger?: boolean;
   run(): void;
 }
@@ -85,37 +38,48 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
   const agent = useAgent(agentKey);
   const muted = useMuted(agentKey);
   const picked = useBoard((s) => s.picked.includes(agentKey));
+  // "Mark done & remove worktree…" only where there is a linked worktree to remove
+  const inWorktree = useCore((s) => {
+    const a = s.agents[agentKey];
+    return !!a && !!s.hosts[a.hostId]?.state.workspaces.find((w) => w.id === a.workspaceId)?.worktree;
+  });
   if (!agent) return [];
-  const items: Item[] = [
-    { id: "open", label: "Open session", icon: <ExternalLink />, shortcut: "↵", run: () => openAgent(agentKey) },
-    { id: "term", label: mobile ? "Terminal" : "Terminal (split)", icon: <SquareTerminal />, shortcut: "T", run: () => openTerminal(agentKey, mobile) },
-  ];
-  if (lane === "review" && agent.turns === 0) items.unshift({ id: "prompt", label: "Prompt…", icon: <MessageSquare />, run: () => promptAgent(agentKey) });
+  const { openSession, terminal, answer, review, markDone, markDoneRemove, reopen, stopTurn, mute, unmute, select } = ACTIONS;
+  const items: Item[] = [];
+  if (lane === "needs") items.push({ id: "answer", ...answer, icon: <MessageSquareReply />, run: () => openAnswerHud(agentKey) });
+  if (isFresh(agent)) items.push({ id: "prompt", label: "Prompt…", description: "Open the session with the composer focused", icon: <MessageSquare />, run: () => promptAgent(agentKey) });
+  items.push(
+    { id: "open", ...openSession, shortcut: mobile ? undefined : openSession.shortcut, icon: <ExternalLink />, run: () => openAgent(agentKey) },
+    { id: "term", ...terminal, shortcut: mobile ? undefined : terminal.shortcut, icon: <SquareTerminal />, run: () => openTerminal(agentKey, mobile) },
+  );
   if ((lane === "review" || lane === "done") && canReview(agent))
-    items.push({ id: "diff", label: "Review diff", icon: <GitCompare />, run: () => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId }) });
-  if (lane === "review") items.push({ id: "archive", label: "Archive", icon: <Archive />, run: () => requestArchive([agentKey]) });
-  if (lane === "done") items.push({ id: "reopen", label: "Reopen for review", icon: <ArchiveRestore />, run: () => void setArchived(agentKey, false).catch(() => {}) });
+    items.push({ id: "review", ...review, icon: <GitCompare />, run: () => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId }) });
+  if (lane === "review") {
+    items.push({ id: "markDone", ...markDone, icon: <CheckCheck />, run: () => void archiveWithUndo([agentKey]) });
+    if (inWorktree) items.push({ id: "markDoneRemove", ...markDoneRemove, icon: <Trash2 />, danger: true, run: () => void markDoneAndRemove(agentKey) });
+  }
+  if (lane === "done") items.push({ id: "reopen", ...reopen, icon: <ArchiveRestore />, run: () => void setArchived(agentKey, false).catch(() => {}) });
   if (lane === "running")
+    // reversible, so not styled as danger; its Esc key belongs to the session view, not the board
     items.push({
       id: "stop",
-      label: "Stop turn",
+      label: stopTurn.label,
+      description: stopTurn.description,
       icon: (
         <svg viewBox="0 0 16 16" aria-hidden>
           <rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" />
         </svg>
       ),
-      danger: true,
       run: () => void stopAgent(agentKey),
     });
   items.push(
-    muted
-      ? { id: "unmute", label: "Unmute notifications", icon: <Bell />, run: () => void setMuted([agentKey], false) }
-      : { id: "mute", label: "Mute notifications", icon: <BellOff />, run: () => void setMuted([agentKey], true) },
+    muted ? { id: "unmute", ...unmute, icon: <Bell />, run: () => void setMuted([agentKey], false) } : { id: "mute", ...mute, icon: <BellOff />, run: () => void setMuted([agentKey], true) },
     {
       id: "select",
-      label: picked ? "Deselect" : "Select",
+      ...select,
+      label: picked ? "Deselect" : select.label,
+      shortcut: mobile ? undefined : select.shortcut,
       icon: picked ? <Square /> : <CheckSquare />,
-      shortcut: "X",
       run: () => useBoard.getState().togglePick(agentKey),
     },
   );
@@ -137,7 +101,7 @@ export function CardMenuButton({ agentKey, lane, mobile = false }: { agentKey: s
         <DropdownMenuLabel>{name}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {items.map((it) => (
-          <DropdownMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} onSelect={it.run}>
+          <DropdownMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
             {it.label}
           </DropdownMenuItem>
         ))}
@@ -157,7 +121,7 @@ export function CardContextMenu({ agentKey, lane, children }: { agentKey: string
         <ContextMenuLabel>{name}</ContextMenuLabel>
         <ContextMenuSeparator />
         {items.map((it) => (
-          <ContextMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} onSelect={it.run}>
+          <ContextMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
             {it.label}
           </ContextMenuItem>
         ))}

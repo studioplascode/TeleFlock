@@ -39,8 +39,20 @@ Mounted once globally by the shell: FrontOps dialogs (`NewWorktreeDialog`, `NewA
 `PastSessionsDialog`), FrontBoard `AnswerNextHud`, the command palette, the notification center,
 the host editor (`useUi().dialog.kind === "hostEditor"`), the shortcuts sheet (`kind: "shortcuts"`) and the toaster.
 
+## Desktop sidebar
+Top to bottom: **＋ New task** (`D`, opens Dispatch) · launcher row (New worktree · New agent · Fan out ·
+Open folder · Past sessions; labelled from 240 px, wrapping onto a second or third row, icon-only below; drag the right edge to
+resize, double-click resets) · nav Board · Inbox · Activity · Usage (Inbox badge = needs count, dot =
+unread updates) · HOSTS (header "Manage ›" → Hosts; each row: orb · colour swatch · name · latency, then
+CPU sparkline + RAM bar, or the phase/reason and a Connect/Retry/Sign in/Verify button) · WORKSPACES tree
+(all remaining height) · footer ⚙ Settings + collapse. Labels, keys and tooltips come from `vocab.ts`.
+
 ## Keyboard (desktop, spec §6)
+`SHORTCUTS` in `keyboard.ts` feeds the `?` sheet and is built from `vocab.ts` (`ACTIONS`, `VIEWS`, `SEND_KEYS`);
+the sheet ends with the glossary's Terms.
 Global: `Ctrl+K` palette · `Ctrl+J` answer next · `Ctrl+1…6` board/inbox/activity/usage/hosts/settings ·
-`Ctrl+\` split · `Ctrl+B` sidebar · `N` new worktree · `D` dispatch · `?` shortcuts · `Esc` close overlay.
-Board-local keys (`J/K`, `Enter`, `A`, `T`) belong to the board; session keys (`Esc` stop, `Ctrl+Enter`,
-`Alt+Enter`) to the session. Global single-key shortcuts are ignored while typing in inputs.
+`Ctrl+\` split · `Ctrl+B` sidebar · `D` new task · `N` new worktree · `?` shortcuts · `Esc` close overlay →
+leave focus mode → stop turn. Message boxes: `Enter` send/steer · `Shift+Enter` newline · `Alt+Enter`
+follow-up while the agent works; multi-field forms submit with `Ctrl+Enter`.
+Board-local keys (`J/K`, `H/L`, `Enter`, `A`, `T`, `X`) belong to the board; session keys (`Esc` stop turn,
+`1…9`, Other = N+1) to the session. Global single-key shortcuts are ignored while typing in inputs.

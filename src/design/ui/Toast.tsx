@@ -1,6 +1,6 @@
 import * as RadixToast from "@radix-ui/react-toast";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import { type CSSProperties, type ReactNode, useLayoutEffect, useState } from "react";
 import { create } from "zustand";
 import { useIsMobile } from "../lib/hooks";
 import { cn } from "../lib/cn";
@@ -39,7 +39,11 @@ export const useToastStore = create<ToastStore>()((set) => ({
     set((s) => ({ toasts: [...s.toasts.slice(-4), { ...t, id, open: true }] }));
     return id;
   },
-  dismiss: (id) => set((s) => ({ toasts: s.toasts.map((t) => (t.id === id ? { ...t, open: false } : t)) })),
+  // closed toasts leave the list once their close animation has played, so a phone's queue moves on
+  dismiss: (id) => {
+    set((s) => ({ toasts: s.toasts.map((t) => (t.id === id ? { ...t, open: false } : t)) }));
+    setTimeout(() => useToastStore.getState().remove(id), 400);
+  },
   remove: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
 
@@ -53,18 +57,60 @@ export function dismissToast(id: number): void {
 }
 
 /**
+ * Phones: the toast sits just above the highest `[data-toast-anchor]` element along the bottom edge
+ * (tab bar, Flock "+" button, a session's composer dock), else above the safe-area edge. Re-measured
+ * when a toast shows, on resize and on navigation.
+ */
+function useBottomAnchor(active: boolean, toasts: readonly unknown[]): number | null {
+  const [bottom, setBottom] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    if (!active) return;
+    const measure = () => {
+      let top: number | null = null;
+      for (const el of document.querySelectorAll<HTMLElement>("[data-toast-anchor]")) {
+        const r = el.getBoundingClientRect();
+        // only visible anchors in the lower half of the screen count
+        if (r.height > 0 && r.top > window.innerHeight / 2) top = Math.min(top ?? r.top, r.top);
+      }
+      setBottom(top === null ? null : window.innerHeight - top + 8);
+    };
+    measure();
+    // a route change swaps the anchors once the new screen has slid in
+    let timer = 0;
+    const later = () => {
+      clearTimeout(timer);
+      timer = window.setTimeout(measure, 380);
+    };
+    window.addEventListener("resize", measure);
+    window.addEventListener("hashchange", later);
+    window.visualViewport?.addEventListener("resize", measure);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("hashchange", later);
+      window.visualViewport?.removeEventListener("resize", measure);
+    };
+  }, [active, toasts]);
+  return bottom;
+}
+
+/**
  * Toast host; mount once (DesignProvider does). Desktop: bottom-right (lifted by `--tf-toast-lift`), swipe right.
- * Phone: compact heads-up banners just below the screen header (one line, action on the right, at
- * most two stacked; one, at the top edge, while a sheet is open), swipe up to dismiss.
+ * Phone: one compact banner in the thumb zone, just above the tab bar / bottom controls (one line,
+ * action on the right), with a "+N" mark when more are waiting (they show as it goes); at the top
+ * edge while a sheet is open (the sheet owns the bottom). Swipe down to dismiss.
  */
 export function Toaster() {
   const toasts = useToastStore((s) => s.toasts);
   const dismiss = useToastStore((s) => s.dismiss);
-  const remove = useToastStore((s) => s.remove);
   const mobile = useIsMobile();
+  const bottom = useBottomAnchor(mobile && toasts.length > 0, toasts);
+  // Phones show one toast: the newest open one (else the one closing, so its exit plays); the rest wait.
+  const shown = mobile ? (toasts.findLast((t) => t.open) ?? toasts.at(-1)) : undefined;
+  const waiting = mobile ? toasts.filter((t) => t.open && t !== shown).length : 0;
   return (
-    <RadixToast.Provider swipeDirection={mobile ? "up" : "right"} duration={5000}>
-      {(mobile ? toasts.slice(-2) : toasts).map((t) => {
+    <RadixToast.Provider swipeDirection={mobile ? "down" : "right"} duration={5000}>
+      {(mobile ? (shown ? [shown] : []) : toasts).map((t) => {
         const loud = t.status === "needs-you";
         const action = t.action && (
           <RadixToast.Action altText={t.action.label} asChild>
@@ -87,10 +133,7 @@ export function Toaster() {
             open={t.open}
             duration={t.duration ?? (loud ? Number.POSITIVE_INFINITY : 5000)}
             onOpenChange={(o) => {
-              if (!o) {
-                dismiss(t.id);
-                setTimeout(() => remove(t.id), 400);
-              }
+              if (!o) dismiss(t.id);
             }}
             data-status={t.status}
             className={cn(
@@ -101,6 +144,14 @@ export function Toaster() {
             )}
           >
             {t.status && <StatusOrb status={t.status} size={9} className={mobile ? undefined : "mt-1.5"} label={null} />}
+            {waiting > 0 && (
+              <span
+                className="absolute -top-2 left-3 rounded-full bg-tile-5 px-1.5 py-px text-[10px] leading-none font-extrabold text-ink shadow-[0_0_0_1.5px_rgb(36_31_44)] tabular"
+                aria-label={`${waiting} more`}
+              >
+                +{waiting}
+              </span>
+            )}
             <div className="min-w-0 flex-1">
               <RadixToast.Title className={cn("font-extrabold text-ink", mobile ? "truncate text-[13.5px]" : "text-sm")}>{t.title}</RadixToast.Title>
               {t.description && <RadixToast.Description className={cn("mt-0.5 text-xs text-mute", mobile && "truncate")}>{t.description}</RadixToast.Description>}
@@ -122,14 +173,15 @@ export function Toaster() {
         );
       })}
       <RadixToast.Viewport
+        style={mobile && bottom !== null ? ({ "--tf-toast-bottom": `${bottom}px` } as CSSProperties) : undefined}
         className={cn(
           "fixed z-toast flex flex-col gap-2 outline-none",
           // --tf-toast-lift: floating bars along the bottom edge (board selection bar) raise the stack clear of them.
-          // Phone: banners drop in below the 48px screen header. While a sheet/dialog is open its scrim already
-          // covers that header, so the banner moves back up to the safe-area edge (clear of a tall sheet's top)
-          // and only the newest one shows; z-toast keeps it above the sheet either way.
+          // Phone: above the bottom controls (--tf-toast-bottom, measured from the screen top so it already clears the
+          // safe area), else above the safe-area edge. While a sheet/dialog is open it owns the bottom, so the banner
+          // moves to the safe-area top edge; z-toast keeps it above the sheet either way.
           mobile
-            ? "inset-x-2.5 top-[calc(env(safe-area-inset-top)+52px)] transition-[top] duration-200 [body:has([role=dialog][data-state=open])_&]:top-[max(8px,env(safe-area-inset-top))] [body:has([role=dialog][data-state=open])_&>li:not(:last-child)]:hidden"
+            ? "inset-x-2.5 bottom-[var(--tf-toast-bottom,calc(12px+env(safe-area-inset-bottom)))] transition-[bottom] duration-200 [body:has([role=dialog][data-state=open])_&]:top-[max(8px,env(safe-area-inset-top))] [body:has([role=dialog][data-state=open])_&]:bottom-auto"
             : "right-5 bottom-[calc(20px+var(--tf-toast-lift,0px))] w-[380px] max-w-[calc(100vw-40px)] transition-[bottom] duration-300",
         )}
       />

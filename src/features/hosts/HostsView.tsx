@@ -1,6 +1,6 @@
 import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -29,8 +29,9 @@ import { useHealthHistory } from "@/features/shell/healthHistory";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { connSummary, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ConnStatusCard, disconnect } from "./ConnStatusCard";
-import { KIND_META, profileAddress } from "./kinds";
+import { hostAccent, KIND_META, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
+import { setupFromHash, useSetupFocus } from "./setupFocus";
 
 function gb(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(bytes >= 100 * 1024 ** 3 ? 0 : 1)}`;
@@ -65,8 +66,9 @@ function Health({ hostId }: { hostId: string }) {
         <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/8">
           <motion.div className="h-full rounded-full bg-done" initial={{ width: 0 }} animate={{ width: `${diskPct}%` }} transition={spring.gentle} />
         </div>
-        <div className="mt-1 font-mono text-2xs text-mute-2">
-          load {health.load1.toFixed(2)} · up {formatElapsed(health.uptimeS * 1000)}
+        <div className="mt-1 font-mono text-2xs text-mute-2" title="Load average over the last minute, against the number of CPU cores">
+          load {health.load1.toFixed(2)}
+          {health.cores > 0 && <> / {health.cores} cores</>} · up {formatElapsed(health.uptimeS * 1000)}
         </div>
       </div>
     </div>
@@ -81,7 +83,7 @@ function Counts({ hostId }: { hostId: string }) {
     <div className="flex flex-wrap gap-1.5">
       <Badge tone="running">{running} running</Badge>
       {needs > 0 && <Badge tone="needs-you">{needs} need you</Badge>}
-      <Badge tone="review">{review} in review</Badge>
+      <Badge tone="review">{review} to review</Badge>
     </div>
   );
 }
@@ -103,21 +105,52 @@ function Versions({ hostId }: { hostId: string }) {
   );
 }
 
+/** "2 recommended · 1 optional": setup items left, in accent (warn when one is an error), never needs-you. */
+function SetupBadge({ issues }: { issues: readonly { recommended: boolean; severity: string }[] }) {
+  if (issues.length === 0) return <Badge tone="done">All set</Badge>;
+  const recommended = issues.filter((i) => i.recommended).length;
+  const optional = issues.length - recommended;
+  const warn = issues.some((i) => i.severity === "error");
+  const parts = [recommended > 0 && `${recommended} recommended`, optional > 0 && `${optional} optional`].filter(Boolean);
+  return (
+    <Badge tone="accent" className={cn(warn && "bg-warn/16 text-warn")}>
+      {parts.join(" · ")}
+    </Badge>
+  );
+}
+
 function HostCard({ profile, status, index }: { profile: HostProfile; status: ConnStatus | undefined; index: number }) {
   const { openDialog } = useUi();
   const [setupOpen, setSetupOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   const phase = status?.phase ?? "idle";
   const online = phase === "online";
   const active = phase !== "idle" && phase !== "offline" && phase !== "error";
-  const issues = useHostState(profile.id)?.info.setup.issues.length ?? 0;
+  const issues = useHostState(profile.id)?.info.setup.issues;
+  const issueCount = issues?.length ?? 0;
+  const known = issues !== undefined;
+  const pending = useSetupFocus((s) => s.pending[profile.id] === true);
+  const seen = useSetupFocus((s) => s.seen[profile.id] === true);
+  // Host setup opens by itself the first time a host shows up with open items, right after Add host,
+  // and for `#/hosts?setup=<id>` (the board strip's Fix…); afterwards it stays as the user leaves it.
+  useEffect(() => {
+    if (!online || !known) return;
+    const focus = useSetupFocus.getState();
+    if (pending) {
+      setSetupOpen(true);
+      focus.consume(profile.id);
+      requestAnimationFrame(() => ref.current?.scrollIntoView({ block: "start", behavior: "smooth" }));
+    } else if (!seen && issueCount > 0) setSetupOpen(true);
+    if (!seen) focus.markSeen(profile.id);
+  }, [online, known, pending, seen, issueCount, profile.id]);
   const Kind = KIND_META[profile.kind].icon;
   return (
-    <motion.div {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }} layout className="min-w-0">
+    <motion.div ref={ref} {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }} layout className="min-w-0 scroll-mt-4">
       <Tile className="flex flex-col gap-4 p-5 max-md:gap-3 max-md:p-3.5">
         <div className="flex items-start gap-3">
           <span
             className="relative grid size-11 shrink-0 place-items-center rounded-lg text-white shadow-d1 max-md:size-10 [&_svg]:size-5"
-            style={{ background: `linear-gradient(135deg, ${profile.color ?? "#a35cf0"}, rgb(255 255 255 / 0.08))` }}
+            style={{ background: `linear-gradient(135deg, ${hostAccent(profile.color)}, rgb(255 255 255 / 0.08))` }}
           >
             <Kind />
             <StatusOrb status={PHASE_STATUS[phase]} size={10} className="absolute -right-1 -bottom-1 rounded-full ring-3 ring-tile-2" label={PHASE_LABEL[phase]} />
@@ -187,7 +220,7 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
               >
                 <ShieldCheck className="size-4 text-accent-hi" />
                 Host setup
-                {issues > 0 ? <Badge tone="needs-you">{issues} to review</Badge> : <Badge tone="done">All set</Badge>}
+                <SetupBadge issues={issues ?? []} />
                 <ChevronDown className={cn("ml-auto size-4 text-mute transition-transform", setupOpen && "rotate-180")} />
               </button>
               <AnimatePresence initial={false}>
@@ -212,6 +245,19 @@ export function HostsView() {
   const { profiles, status } = useHosts();
   const { openDialog } = useUi();
   const mobile = useIsMobile();
+  // `#/hosts?setup=<hostId>` (board strip "Fix…"): queue that host's setup to open, then drop the
+  // query so the same link works again next time.
+  useEffect(() => {
+    const take = () => {
+      const id = setupFromHash(window.location.hash);
+      if (!id) return;
+      useSetupFocus.getState().request(id);
+      window.history.replaceState(window.history.state, "", "#/hosts");
+    };
+    take();
+    window.addEventListener("hashchange", take);
+    return () => window.removeEventListener("hashchange", take);
+  }, []);
   const add = (
     <Button variant="primary" size={mobile ? "sm" : "md"} icon={<Plus />} onClick={() => openDialog({ kind: "hostEditor" })}>
       Add host

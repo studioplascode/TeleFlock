@@ -59,7 +59,7 @@ transcript rows keep identity, so selectors re-render only what changed.
 | `useSession(key)` | `{ status, meta?, itemIds, ui?, hasMore, error?, endedReason? }` — `ui` is `UiRequest \| null` once loaded |
 | `useSessionItem(key, itemId)` | one `TranscriptItem` (per-row subscription) |
 | `useBtw(key)` | `Record<btwId, { text, done }>` (deltas accumulated) |
-| `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read, resolved?}), unread, markRead(), clear() }`; `markRead`/`clear` and `markAgentNotificationsRead(hostId, agentId)` also call `app.notifyRead` so the core retracts OS notifications; `notifyDone` events mark items read / resolved |
+| `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read, resolved?}), unread, markRead(), clear() }`; `markRead`/`clear` and `markAgentNotificationsRead(hostId, agentId)` also call `app.notifyRead` so the core retracts OS notifications; `markNotificationRead(hostId, id)` marks one item read on this surface only (the wire has no per-item read); `notifyDone` events mark items read / resolved |
 | `useActivity(hostId?)` | `(ActivityEvent & {hostId})[]` newest first; loads `host.activity`, refreshes on lane changes/notifications while mounted. `loadOlderActivity(hostId)` pages |
 | `useAccountLimits(hostIds)` | `Record<hostId, { data?: AccountLimits, error?, loading, receivedAt? }>`; one shared `host.limits` poll per host (60 s) while anything is mounted; `refreshLimits(hostId)` forces one. Pure helpers in `limits.ts`: `projectWindow` (pace + `runsOut`/`resetsFirst`/`idle`/`exhausted`/`reset`/`unknown`), `tightestWindow`, `windowsForModel` (tier windows only for models naming the tier), `sessionLimits(data, sessionId, model, now)`, `describePace`, `formatSpan`, `formatPct` |
 | `useSettings(sel?)` / `.getState()` | `Settings & { update(patch), setMuted(key, muted), saveTemplate(t), removeTemplate(id), loaded }` (optimistic, rolls back on error; `mutedAgents`/`templates` always present) |
@@ -140,6 +140,32 @@ Hashes: `#/board`, `#/dispatch`, `#/agent/:h/:a`, `#/terminal/:h`, `#/terminal/:
 `split`/`setSplit`, `sidebarCollapsed`/`toggleSidebar` (persisted), `selectedKey`/`select`, `focusMode`/`setFocusMode`. Dialog kinds include `fanOut { hostId?, cwd?, prompt? }`.
 AppEvent `openAgent` navigates to the session.
 
+## AI naming & drafting (`ai.ts`)
+
+The only API UI code uses for AI. Every helper calls `ai.complete` on the host (omp's `tiny` model
+role; see `docs/architecture.md` §3.8) and resolves to `null` whenever the caller should use its
+deterministic fallback: Settings → AI naming off (`usePrefs().aiNaming`), host unavailable, offline,
+timeout, error or junk output. Show AI-made values with a small ✨ and "Named by omp's tiny model".
+
+| Function | Result |
+|---|---|
+| `useAiNaming(hostId)` / `aiNamingEnabled(hostId)` | `prefs.aiNaming` && host not marked unavailable (hook / non-hook) |
+| `suggestBranch(hostId, task, opts?)` | kebab slug, 2–5 words, ≤ 40 chars, starts with a letter, no prefix |
+| `suggestAgentName(hostId, task, taken, opts?)` | kebab, 1–3 words, ≤ 24 chars, unique vs `taken` (`-2`, `-3`, …) |
+| `suggestTitle(hostId, text, opts?)` | ≤ 6 words, sentence case, no quotes / trailing period |
+| `suggestCommitMessage(hostId, { files, patch?, hint? }, opts?)` | `{ subject (≤ 72 chars), body? }` |
+| `suggestPullRequest(hostId, { branch, base, commits, files, patch? }, opts?)` | `{ title (≤ 72 chars), body (markdown) }` |
+| `suggestTemplateName(hostId, { model?, thinking?, plan?, prompt? }, opts?)` | ≤ 4 words, sentence case |
+| `useAiSuggestion(hostId, key, run, { debounceMs? = 900 })` | `{ value, loading }` for the current `key` (null = nothing to suggest); `loading` from the first keystroke until the debounced run settles; results for an older key are dropped |
+
+`opts`: `{ timeoutMs?, cwd? }` (host budget; defaults 12 s for names, 25 s for commit/PR drafts, capped
+at 28 s to stay inside the app core's 30 s request timeout; the client gives up 5 s after it). Inputs are clipped (task text 2 000 chars, file list 4 000, patch
+12 000, 30 commits). Results are cached 10 min per host + task + input (memory only); identical
+in-flight calls share one request; `unknown_method` (older hostd) or `ai_unavailable` marks the host
+unavailable for 10 min. Model output is sanitized (labels like `branch:`, `dispatch/`/`feat/`
+prefixes, quotes, backticks, chatter lines, Title Case, trailing periods); the sanitizers and
+parsers are exported for tests, and `aiTesting` swaps the transport and clock.
+
 ## Demo host (`src/core/demo`)
 
 Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests).
@@ -168,12 +194,12 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
   (hero has a ~4.7k-line diff; PR checks pending → passed in 10 s), terminals (fake shell with
   echo + commands; agent panes mirror the omp stream and Enter prompts the agent; takeover
   closes the previous lease), usage (14 days), models, past sessions, resume, setup/setupApply,
-  activity paging, tab.rename/tab.close/pane.close (last pane closes the workspace; refused for a primary with linked worktrees). Settings seed 3 templates. App methods: hosts.*, wsl.distros, settings, tunnels (blob: preview page).
+  activity paging, tab.rename/tab.close/pane.close (last pane closes the workspace; refused for a primary with linked worktrees), `ai.complete` (`demo/ai.ts`: deterministic answers per task derived from the prompt after 600–1400 ms; works offline). Settings seed 3 templates. App methods: hosts.*, wsl.distros, settings, tunnels (blob: preview page).
 - Agents started with a spec (`worktree.create{agent}`, `agent.start`) begin fresh (idle, `turns: 0`, link
   `connecting`); ~1.4 s later the link goes live and the spec's prompt starts a streamed turn, after which
   they move through the lanes like the seeded agents. `worktree.create` answers after ~350 ms.
 
 ## Tests
 
-`bun test src/core` — reducers (patch, rev gap, sessions), per-frame batching, demo invariants.
+`bun test src/core` — reducers (patch, rev gap, sessions), per-frame batching, demo invariants, AI sanitizers / cache / dedupe / demo answers.
 `src/core/test/bun-test.d.ts` types `bun:test` for the app tsconfig without `@types/bun` globals.

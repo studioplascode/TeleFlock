@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { BookmarkPlus, Check, LayoutTemplate, X } from "lucide-react";
-import { draftKey, drafts, useSettings } from "@/core";
+import { aiNamingEnabled, draftKey, drafts, suggestTemplateName, useSettings } from "@/core";
 import type { AgentTemplate } from "@/core/gen";
 import { Button, IconButton, cn, spring, toast } from "@/design";
 import type { AgentDraft } from "./AgentFields";
@@ -36,8 +36,8 @@ async function persist(write: Promise<void>): Promise<boolean> {
   }
 }
 
-/** Ask for a name and store the draft's model/thinking/plan/prompt as a new template. */
-export async function saveDraftAsTemplate(d: Pick<AgentDraft, "model" | "thinking" | "plan" | "prompt">): Promise<AgentTemplate | null> {
+/** Ask for a name and store the draft's model/thinking/plan/prompt as a new template (the name is prefilled by the tiny model on `hostId`, when on). */
+export async function saveDraftAsTemplate(d: Pick<AgentDraft, "model" | "thinking" | "plan" | "prompt">, hostId?: string): Promise<AgentTemplate | null> {
   const existing = useSettings.getState().templates;
   const key = draftKey("template.saveAs");
   const name = await promptText({
@@ -47,6 +47,16 @@ export async function saveDraftAsTemplate(d: Pick<AgentDraft, "model" | "thinkin
     draftKey: key,
     confirmLabel: "Save template",
     validate: (v) => (!v.trim() ? "Give it a name" : existing.some((t) => t.name.toLowerCase() === v.trim().toLowerCase()) ? "A template with that name exists" : null),
+    prefill:
+      hostId && aiNamingEnabled(hostId)
+        ? () =>
+            suggestTemplateName(hostId, {
+              model: d.model === DEFAULT ? undefined : d.model,
+              thinking: d.thinking === DEFAULT ? undefined : d.thinking,
+              plan: d.plan,
+              prompt: d.prompt.trim() || undefined,
+            })
+        : undefined,
   });
   if (!name) return null;
   const t: AgentTemplate = {
@@ -69,13 +79,15 @@ async function deleteTemplate(t: AgentTemplate) {
 }
 
 export interface TemplatePickerProps {
+  /** Host whose tiny model names a new template. */
+  hostId?: string;
   draft: AgentDraft;
   onApply: (patch: Partial<AgentDraft>) => void;
   className?: string;
 }
 
 /** Template chips that prefill the agent form, plus "Save as template". */
-export function TemplatePicker({ draft, onApply, className }: TemplatePickerProps) {
+export function TemplatePicker({ hostId, draft, onApply, className }: TemplatePickerProps) {
   const templates = useSettings((s) => s.templates);
   const active = matchingTemplate(templates, draft);
   return (
@@ -83,7 +95,7 @@ export function TemplatePicker({ draft, onApply, className }: TemplatePickerProp
       <div className="flex items-center gap-1.5">
         <LayoutTemplate className="size-3.5 text-mute-2" />
         <span className="text-2xs font-bold tracking-[0.02em] text-mute">Templates</span>
-        <Button size="sm" variant="ghost" icon={<BookmarkPlus />} className="ml-auto h-7" onClick={() => void saveDraftAsTemplate(draft)}>
+        <Button size="sm" variant="ghost" icon={<BookmarkPlus />} className="ml-auto h-7" onClick={() => void saveDraftAsTemplate(draft, hostId)}>
           Save as template
         </Button>
       </div>

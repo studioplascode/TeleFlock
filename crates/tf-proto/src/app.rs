@@ -99,7 +99,6 @@ wire_struct! {
         /// Android: keep host connections alive in a foreground service while backgrounded.
         pub keep_alive: bool,
         pub terminal_font_size: u16,
-        pub confirm_archive: bool,
         pub default_model: Option<String>,
         pub default_thinking: Option<ThinkingLevel>,
         pub default_plan: bool,

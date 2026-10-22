@@ -610,7 +610,7 @@ export class AgentSim {
     }
     this.host.session(this.agent.id, { k: "ui", request: null });
     const kind: ActivityKind = approval ? (allowed ? "approved" : "denied") : "answered";
-    const detail = answer.text ?? (answer.choices.join(", ") || (answer.chat ? "Chat about this" : answer.cancel ? "Dismissed" : ""));
+    const detail = answer.text ?? (answer.choices.join(", ") || (answer.chat ? "Chat about this" : answer.cancel ? "Skipped" : ""));
     this.host.activity(this.agent.id, kind, `${author ?? "You"} ${kind} ${this.agent.name}`, detail);
     if (answer.chat) this.put({ kind: "user", id: this.id(), at: now, text: "Let's chat about this first.", images: [], author, steering: false, synthetic: false });
     this.queue = [...p.then(answer), ...this.queue];

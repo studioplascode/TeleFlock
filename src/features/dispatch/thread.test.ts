@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Agent, Workspace } from "@/core/gen";
 import type { DispatchEntry } from "./store";
-import { baseSlug, recentRepos, resolveAgent, slimThreads, uniqueSlug } from "./thread";
+import { baseSlug, cleanSuggestion, nameDispatch, prefetchKey, recentRepos, resolveAgent, slimThreads, uniqueSlug } from "./thread";
 
 const agent = (p: Partial<Agent>): Agent => ({
   id: "a",
@@ -43,6 +43,51 @@ describe("dispatch naming", () => {
     expect(uniqueSlug("fix-ci", new Set())).toBe("fix-ci");
     expect(uniqueSlug("fix-ci", new Set(["fix-ci"]))).toBe("fix-ci-2");
     expect(uniqueSlug("fix-ci", new Set(["dispatch/fix-ci", "fix-ci-2"]))).toBe("fix-ci-3");
+  });
+
+  test("names stay within herdr's 32-char agent-name limit, suffix included", () => {
+    const long = "implement-websocket-reconnection-backoff";
+    expect(uniqueSlug(long, new Set())).toBe("implement-websocket-reconnection");
+    expect(uniqueSlug(long, new Set(["implement-websocket-reconnection"]))).toBe("implement-websocket-reconnecti-2");
+    const base = "a".repeat(32);
+    expect(uniqueSlug(base, new Set([base]))).toBe(`${"a".repeat(30)}-2`);
+    const taken = new Set<string>([base]);
+    for (let i = 2; i < 12; i++) taken.add(`${"a".repeat(32 - `-${i}`.length)}-${i}`);
+    expect(uniqueSlug(base, taken)).toBe(`${"a".repeat(29)}-12`);
+  });
+
+  test("AI suggestions are cleaned to a dispatch name or rejected", () => {
+    expect(cleanSuggestion("offline-cache-client")).toBe("offline-cache-client");
+    expect(cleanSuggestion("dispatch/Offline Cache")).toBe("offline-cache");
+    expect(cleanSuggestion("  Offline_Cache!  ")).toBe("offline-cache");
+    expect(cleanSuggestion("2fa-login")).toBeNull();
+    expect(cleanSuggestion("")).toBeNull();
+    expect(cleanSuggestion(null)).toBeNull();
+    // ≤ 28 chars, cut at a word boundary (a single long word is cut short)
+    expect(cleanSuggestion("implement-websocket-reconnection-backoff")).toBe("implement-websocket");
+    expect(cleanSuggestion("add-offline-caching-to-client-x")).toBe("add-offline-caching-to");
+    expect(cleanSuggestion("add-offline-caching-to-clien")).toBe("add-offline-caching-to-clien");
+    expect(cleanSuggestion("a".repeat(60))).toBe("a".repeat(28));
+  });
+
+  test("naming phase: AI slug when usable, else the prompt's slug", async () => {
+    const prompt = "Add offline caching to the client";
+    expect(await nameDispatch(prompt, async () => "service-worker-cache")).toEqual({ slug: "service-worker-cache", ai: true });
+    expect(await nameDispatch(prompt, async () => null)).toEqual({ slug: "offline-caching-client", ai: false });
+    expect(await nameDispatch(prompt, async () => "!!!")).toEqual({ slug: "offline-caching-client", ai: false });
+    expect(
+      await nameDispatch(prompt, async () => {
+        throw new Error("timeout");
+      }),
+    ).toEqual({ slug: "offline-caching-client", ai: false });
+    expect(await nameDispatch(prompt, null)).toEqual({ slug: "offline-caching-client", ai: false });
+  });
+
+  test("prefetch only once the draft has a few words", () => {
+    expect(prefetchKey("fix")).toBeNull();
+    expect(prefetchKey("fix the  ")).toBeNull();
+    expect(prefetchKey("  fix the flaky ci  ")).toBe("fix the flaky ci");
+    expect(prefetchKey("fix — ci")).toBeNull();
   });
 });
 

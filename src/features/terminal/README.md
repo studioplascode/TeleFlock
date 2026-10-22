@@ -29,8 +29,15 @@ export interface TerminalHandle {
   readonly termId: string | null;
 }
 
-// src/features/terminal/TerminalView.tsx — the full route view (#/terminal/:hostId[/:target])
+// src/features/terminal/TerminalView.tsx — the full route view (#/terminal/:hostId[/:target]).
+// Phones: the bare route (no pane/agent) is the Terminal tab's "Attach to…" chooser (TerminalChooser.tsx):
+// agents in lane order with status orbs, then shell panes of online hosts.
 export function TerminalView(props: { hostId: string; paneId?: string; agentId?: string }): JSX.Element;
+
+// src/features/terminal/lastTerminal.ts — what the phone Terminal tab reopens (persisted, `tf.terminal.last`)
+export const useLastTerminal: UseBoundStore<{ last: TermSpot | null; lastSession: { hostId; agentId } | null; tabRoot: string | null; … }>;
+export function terminalTabTarget(): TerminalRoute | null; // last terminal (agent preferred) → last session's agent → null (chooser); stale memory falls through
+export function terminalRouteKey(r: { hostId; agentId?; paneId? }): string;
 
 // src/features/terminal/useLocalhostUrls.ts — for PreviewButton (FrontOps)
 export interface LocalhostUrl { url: string; host: string; port: number; seenAt: number }
@@ -60,8 +67,14 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - Renderer: WebGL by default; the context menu switches to xterm's DOM renderer (per device, `localStorage["tf.terminal.renderer"]`). Board tiles (`compact`) always use the DOM renderer.
 - Keys inside the terminal go to the pane, except Ctrl+K, Ctrl+1…6 and Ctrl+Shift+(not C/V), which bubble to the app shell.
 - Mode is always visible: control = purple liveness, observe = cyan liveness + a "Read-only" ribbon (it replaces the
-  mobile extra keys). The status chip collapses to its orb while live and re-expands on every state change / hover;
+  mobile extra keys). Phones label the toggle "Type" / "Watch". The status chip collapses to its orb while live and re-expands on every state change / hover;
   the orb's activity pulse is the only output indicator (no per-frame flash: frames arrive ~10×/s while omp streams).
+- Phone Terminal tab: reopens the last terminal attached (remembered when a pane goes live), else the agent of the last
+  session viewed, else the chooser; tapping it again on a terminal returns to the chooser. The screen the tab opened has
+  no back chevron (it is the tab's root; `tabRoot` clears once you leave the terminal routes).
+- Chooser "New shell" (one row per online host; a primary button for a host with no panes): `openNewShell` pushes
+  `#/terminal/<host>?shell=<nonce>` (the router ignores the query) and TerminalView opens the shell from the in-memory
+  request; Back returns to the chooser, a reload shows the chooser.
 - Keyboard focus draws an inset accent ring.
 - `localhost:PORT` links in the output are clickable: they open a preview tunnel (`@/features/preview` store), then the
   browser (desktop) or the in-app preview sheet (mobile).

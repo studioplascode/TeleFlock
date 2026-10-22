@@ -11,7 +11,7 @@ quietStart?: string, quietEnd?: string,
 /**
  * Android: keep host connections alive in a foreground service while backgrounded.
  */
-keepAlive: boolean, terminalFontSize: number, confirmArchive: boolean, defaultModel?: string, defaultThinking?: ThinkingLevel, defaultPlan: boolean, 
+keepAlive: boolean, terminalFontSize: number, defaultModel?: string, defaultThinking?: ThinkingLevel, defaultPlan: boolean, 
 /**
  * Device name shown as prompt author to other clients.
  */

@@ -138,7 +138,7 @@ export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onR
       ),
     };
   } else if (attaching) {
-    const label = phase.k === "opening" && phase.takeover ? "Taking over" : phase.k === "live" ? "Waiting for first frame" : "Attaching";
+    const label = phase.k === "opening" && phase.takeover ? "Taking over" : phase.k === "live" ? "Attached, waiting for output" : "Attaching";
     view = {
       key: "attaching",
       node: (

@@ -17,7 +17,7 @@ export { DesignProvider } from "./DesignProvider";
 
 // motion & liveness
 export { spring, tween, pressMotion, fadeRise, popIn } from "./motion/springs";
-export { MotionProvider, useCalmMotion } from "./motion/MotionProvider";
+export { MotionProvider, useCalmMotion, useLivelyMotion } from "./motion/MotionProvider";
 export { useMotionPreference, applyInitialMotionAttribute } from "./motion/preference";
 export type { MotionPreference } from "./motion/preference";
 export { useActivity, tierForRate, BREATH_SECONDS } from "./motion/activity";

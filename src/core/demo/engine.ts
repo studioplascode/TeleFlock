@@ -27,7 +27,6 @@ const DEFAULT_SETTINGS: Settings = {
   notifySound: false,
   keepAlive: true,
   terminalFontSize: 13,
-  confirmArchive: false,
   defaultModel: "anthropic/claude-opus-5",
   defaultThinking: "high",
   defaultPlan: false,
@@ -66,8 +65,8 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 export const DEMO_PROFILES: HostProfile[] = [
-  { id: "forge", name: "forge", kind: "demo", herdrSession: "default", color: "#a35cf0", autoConnect: true },
-  { id: "studio-pc", name: "studio-pc", kind: "demo", herdrSession: "default", color: "#22d3ee", autoConnect: true },
+  { id: "forge", name: "forge", kind: "demo", herdrSession: "default", color: "#a99cc2", autoConnect: true },
+  { id: "studio-pc", name: "studio-pc", kind: "demo", herdrSession: "default", color: "#86b3aa", autoConnect: true },
 ];
 
 /**
@@ -329,7 +328,11 @@ export class DemoEngine {
 function loadSettings(): Settings {
   try {
     const raw = globalThis.localStorage?.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    if (raw) {
+      // `confirmArchive` was removed in 0.4.0; older saved demo settings still carry it.
+      const { confirmArchive: _removed, ...stored } = JSON.parse(raw) as Partial<Settings> & { confirmArchive?: unknown };
+      return { ...DEFAULT_SETTINGS, ...stored };
+    }
   } catch {
     /* ignore corrupt / unavailable storage */
   }

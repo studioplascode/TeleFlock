@@ -2,7 +2,72 @@ import { AlertTriangle, Check, CircleSlash, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { cn, Shimmer, Spinner, spring } from "@/design";
-import type { DiagReport, DiagStatus, HostKind } from "@/core/gen";
+import type { DiagReport, DiagStatus, DiagStep, HostKind } from "@/core/gen";
+import type { GlossaryId } from "@/features/shell/glossary";
+import { Term } from "@/features/shell/Term";
+import { CopyCommand, ExtLink } from "./CopyCommand";
+import { HERDR_URL, OMP_MIN_VERSION, OMP_URL, TAILSCALE_SSH_COMMAND, versionBelow } from "./kinds";
+
+const TAILSCALE_SSH_DOCS = "https://tailscale.com/kb/1193/tailscale-ssh";
+
+/** Step labels that start with a term get its glossary tooltip ("tf-hostd 0.4.0", "Collab relay :47466"). */
+const LABEL_TERMS: readonly [string, GlossaryId][] = [
+  ["tf-hostd", "hostd"],
+  ["Collab relay", "collab"],
+];
+
+function StepLabel({ label }: { label: string }) {
+  const hit = LABEL_TERMS.find(([word]) => label.startsWith(word));
+  if (!hit) return <>{label}</>;
+  return (
+    <>
+      <Term id={hit[1]}>{hit[0]}</Term>
+      {label.slice(hit[0].length)}
+    </>
+  );
+}
+
+interface Fix {
+  text: string;
+  command?: string;
+  link?: { href: string; label: string };
+}
+
+/** The usual fix for a failed step (and for an omp older than TeleFlock needs), or null. */
+function fixFor(step: DiagStep, kind: HostKind): Fix | null {
+  const where = kind === "tailscaleSsh" ? "On the host" : kind === "wsl" ? "In the distro" : "On this machine";
+  if (step.id === "omp" && step.status !== "fail" && step.status !== "skip" && versionBelow(step.detail, OMP_MIN_VERSION)) {
+    return { text: `${where}, update omp to ${OMP_MIN_VERSION} or newer:`, command: "omp update" };
+  }
+  if (step.status !== "fail") return null;
+  switch (step.id) {
+    case "resolve":
+      return kind === "tailscaleSsh" ? { text: "Is Tailscale up on this device?", command: "tailscale up" } : null;
+    case "ssh":
+      if (kind === "tailscaleSsh") return { text: "If Tailscale SSH isn't on yet, run on the host:", command: TAILSCALE_SSH_COMMAND };
+      if (kind === "wsl") return { text: "No usable distro? Install one:", command: "wsl --install" };
+      return null;
+    case "auth":
+      return kind === "tailscaleSsh" ? { text: "Your tailnet policy must let this device SSH to the host as this user.", link: { href: TAILSCALE_SSH_DOCS, label: "Tailscale SSH docs" } } : null;
+    case "herdr":
+      return { text: `${where}, install herdr:`, link: { href: HERDR_URL, label: "herdr.dev" } };
+    case "omp":
+      return { text: `${where}, install omp ${OMP_MIN_VERSION} or newer:`, link: { href: OMP_URL, label: "oh-my-pi" } };
+    default:
+      return null;
+  }
+}
+
+function FixLine({ fix }: { fix: Fix }) {
+  return (
+    <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-mute">
+      <span className="font-bold text-ink-2">Fix:</span>
+      <span>{fix.text}</span>
+      {fix.command && <CopyCommand command={fix.command} />}
+      {fix.link && <ExtLink href={fix.link.href}>{fix.link.label}</ExtLink>}
+    </p>
+  );
+}
 
 /** Steps hosts.test runs, in order, per host kind (shown as the "probing" sequence while it runs). */
 const PLANNED: Record<HostKind, readonly { id: string; label: string }[]> = {
@@ -124,30 +189,42 @@ export function Diagnostics({ kind, report, running }: DiagnosticsProps) {
                     <span className={cn("size-1.5 rounded-full", state === "passed" ? "bg-accent-hi" : "bg-white/25")} />
                   </span>
                 )}
-                {state === "active" ? <Shimmer className="font-semibold">{s.label}…</Shimmer> : <span className="font-semibold text-ink-2">{s.label}</span>}
+                {state === "active" ? (
+                  <Shimmer className="font-semibold">{s.label}…</Shimmer>
+                ) : (
+                  <span className="font-semibold text-ink-2">
+                    <StepLabel label={s.label} />
+                  </span>
+                )}
               </motion.li>
             );
           })}
         {!running &&
-          report?.steps.slice(0, revealed).map((s) => (
-            <motion.li
-              key={s.id}
-              layout
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={spring.smooth}
-              className={cn("flex min-h-9 items-start gap-3 rounded-sm px-1 py-1.5 text-sm", s.status === "fail" && "bg-error/8")}
-            >
-              <StatusIcon status={s.status} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className={cn("font-semibold", s.status === "skip" ? "text-mute-2" : "text-ink")}>{s.label}</span>
-                  {s.ms !== undefined && <span className="ml-auto font-mono text-2xs text-mute-2 tabular">{s.ms} ms</span>}
+          report?.steps.slice(0, revealed).map((s) => {
+            const fix = fixFor(s, kind);
+            return (
+              <motion.li
+                key={s.id}
+                layout
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={spring.smooth}
+                className={cn("flex min-h-9 items-start gap-3 rounded-sm px-1 py-1.5 text-sm", s.status === "fail" && "bg-error/8")}
+              >
+                <StatusIcon status={s.status} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className={cn("font-semibold", s.status === "skip" ? "text-mute-2" : "text-ink")}>
+                      <StepLabel label={s.label} />
+                    </span>
+                    {s.ms !== undefined && <span className="ml-auto font-mono text-2xs text-mute-2 tabular">{s.ms} ms</span>}
+                  </div>
+                  {s.detail && <p className={cn("mt-0.5 text-xs break-words", s.status === "fail" ? "text-[#ff9aae]" : "text-mute")}>{s.detail}</p>}
+                  {fix && <FixLine fix={fix} />}
                 </div>
-                {s.detail && <p className={cn("mt-0.5 text-xs break-words", s.status === "fail" ? "text-[#ff9aae]" : "text-mute")}>{s.detail}</p>}
-              </div>
-            </motion.li>
-          ))}
+              </motion.li>
+            );
+          })}
       </ol>
       <AnimatePresence>
         {done && (

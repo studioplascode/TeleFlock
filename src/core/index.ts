@@ -37,6 +37,7 @@ export {
   getWorkspacesSnapshot,
   loadOlderActivity,
   markAgentNotificationsRead,
+  markNotificationRead,
   getTranscript,
   selectAgentKeys,
   useActivity,
@@ -81,6 +82,20 @@ export { navigate, useRoute, getRoute, parseHash, routeToHash } from "./nav";
 export type { Route, RouteName } from "./nav";
 export { useUi } from "./ui";
 export type { UiDialog, SplitState, UiState } from "./ui";
+export { usePrefs } from "./prefs";
+export type { Prefs } from "./prefs";
+export {
+  aiNamingEnabled,
+  suggestAgentName,
+  suggestBranch,
+  suggestCommitMessage,
+  suggestPullRequest,
+  suggestTemplateName,
+  suggestTitle,
+  useAiNaming,
+  useAiSuggestion,
+} from "./ai";
+export type { AiCallOptions, AiTask } from "./ai";
 export { DRAFT_LIMITS, draftKey, draftKeyParts, drafts, flushDrafts, pruneDrafts, useDraft, useDraftState, useDrafts } from "./drafts";
 export type { DraftEntry, DraftLimits, DraftSetter } from "./drafts";
 export { useDraftImages } from "./draftImages";

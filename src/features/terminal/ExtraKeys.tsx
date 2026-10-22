@@ -213,6 +213,8 @@ export function ExtraKeys({ mods, onKey, onSetMod, onPaste, className }: ExtraKe
     <div
       role="toolbar"
       aria-label="Extra keys"
+      // phone toasts sit above the keys, never over them
+      data-toast-anchor
       className={cn(
         "flex items-center gap-1 py-1 pr-[max(0.25rem,env(safe-area-inset-right))] pl-[max(0.375rem,env(safe-area-inset-left))]",
         className,

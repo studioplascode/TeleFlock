@@ -124,7 +124,7 @@ export function ActionsSection() {
           <Button variant="primary" icon={<Plus />}>
             New worktree
           </Button>
-          <Button variant="secondary">Review diff</Button>
+          <Button variant="secondary">Review</Button>
           <Button variant="ghost">Cancel</Button>
           <Button variant="danger" icon={<Square />}>
             Stop
@@ -178,7 +178,7 @@ export function ActionsSection() {
           </Chip>
           <Chip tone="review">48 tests passed</Chip>
           <Badge tone="needs-you">Question</Badge>
-          <Badge tone="review">Ready to review</Badge>
+          <Badge tone="review">To review</Badge>
           <Badge tone="accent">Plan</Badge>
           <Badge>Draft</Badge>
           <CountBadge count={2} />

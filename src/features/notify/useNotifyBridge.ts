@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { dismissToast, toast } from "@/design";
+import { useEffect, useRef } from "react";
+import { dismissToast, toast, useIsMobile } from "@/design";
 import { agentKey, core, getRoute, isMuted, markAgentNotificationsRead, navigate, onAppEvent, useRoute, useSettings, useUi } from "@/core";
 import { haptic } from "@/features/shell/haptics";
 import { inQuietHours, playChime } from "./chime";
@@ -23,7 +23,8 @@ function inFront(): boolean {
  * Bridges core events into the UI (mount once):
  * - `notify` → an in-app toast (needs-you toasts offer the first answer inline), a haptic and,
  *   where the OS doesn't play one, a chime; muted agents get none of these (the bell still lists
- *   them). A newer notification of the same agent replaces its toast;
+ *   them). A newer notification of the same agent replaces its toast. On phones, needs-you toasts
+ *   stay quiet while a session is open (its "Next waiting" chip shows them);
  * - `notifyDone` (the request was handled anywhere, or the notification was read on another
  *   surface) → its toast disappears (needs-you toasts only once resolved); the store marks the list
  *   item read / resolved;
@@ -33,6 +34,9 @@ function inFront(): boolean {
 export function useNotifyBridge(): void {
   const setAnswerNext = useUi((s) => s.setAnswerNext);
   const route = useRoute();
+  const isMobile = useIsMobile();
+  const mobile = useRef(isMobile);
+  mobile.current = isMobile;
   const viewHost = route.name === "agent" ? route.hostId : undefined;
   const viewAgent = route.name === "agent" ? route.agentId : undefined;
 
@@ -45,6 +49,17 @@ export function useNotifyBridge(): void {
     document.addEventListener("visibilitychange", read);
     return () => document.removeEventListener("visibilitychange", read);
   }, [viewHost, viewAgent]);
+
+  // Opening a session on a phone hands the waiting asks to its "Next waiting" chip.
+  const inSession = viewAgent !== undefined;
+  useEffect(() => {
+    if (!isMobile || !inSession) return;
+    for (const [id, t] of openToasts) {
+      if (!t.needs) continue;
+      dismissToast(t.toast);
+      openToasts.delete(id);
+    }
+  }, [isMobile, inSession]);
 
   useEffect(
     () =>
@@ -85,6 +100,9 @@ export function useNotifyBridge(): void {
           if (inFront()) markAgentNotificationsRead(n.hostId, n.agentId);
           return;
         }
+        // In a phone session the "Next waiting" chip above the composer carries other agents' asks;
+        // a banner on top would only stack over it (the haptic and chime above still fire).
+        if (n.kind === "needs" && mobile.current && route.name === "agent") return;
         const id = toast({
           title: n.title,
           description: n.body,

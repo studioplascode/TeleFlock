@@ -28,7 +28,7 @@ export interface StatusMeta {
 export const STATUS: Record<Status, StatusMeta> = {
   running: { label: "Running", c1: "#a35cf0", c2: "#4f8bff", solid: "#9b6cf7", rgb: "155 108 247", ink: "#ffffff", live: true, loud: false },
   "needs-you": { label: "Needs you", c1: "#ff7a18", c2: "#ff3d77", solid: "#ff3d77", rgb: "255 61 119", ink: "#ffffff", live: true, loud: true },
-  review: { label: "In review", c1: "#22d3ee", c2: "#0ea5e9", solid: "#22d3ee", rgb: "34 211 238", ink: "#04262c", live: false, loud: false },
+  review: { label: "Review", c1: "#22d3ee", c2: "#0ea5e9", solid: "#22d3ee", rgb: "34 211 238", ink: "#04262c", live: false, loud: false },
   done: { label: "Done", c1: "#a3e635", c2: "#4ade80", solid: "#a3e635", rgb: "163 230 53", ink: "#1a2e05", live: false, loud: false },
   idle: { label: "Idle", c1: "#94a3b8", c2: "#64748b", solid: "#8a94a6", rgb: "138 148 166", ink: "#0b0b10", live: false, loud: false },
   error: { label: "Error", c1: "#ff4d5e", c2: "#e11d48", solid: "#ff4d5e", rgb: "255 77 94", ink: "#ffffff", live: false, loud: true },

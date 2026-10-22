@@ -338,6 +338,16 @@ export function markAgentNotificationsRead(hostId: string, agentId: string): voi
   readWhere((n) => n.hostId === hostId && n.agentId === agentId, [[hostId, agentId]]);
 }
 
+/**
+ * One notification read on this surface only: the wire marks read per agent, so its OS
+ * notification and other surfaces keep it until the agent's notifications are read.
+ */
+export function markNotificationRead(hostId: string, id: string): void {
+  const s = coreStore.getState();
+  const hit = (n: HostNotification) => n.hostId === hostId && n.id === id && !n.read;
+  if (s.notifications.some(hit)) coreStore.setState({ notifications: s.notifications.map((n) => (hit(n) ? { ...n, read: true } : n)) });
+}
+
 let notifCache: NotificationsView | null = null;
 
 function notificationsView(s: CoreState): NotificationsView {
@@ -416,7 +426,6 @@ export const DEFAULT_SETTINGS: Settings = {
   notifySound: false,
   keepAlive: true,
   terminalFontSize: 13,
-  confirmArchive: false,
   defaultPlan: false,
   deviceName: "TeleFlock",
   mutedAgents: [],

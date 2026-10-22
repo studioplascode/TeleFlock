@@ -1,15 +1,17 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, ArrowRight, Check, GitBranch, LayoutDashboard, Plus, RotateCcw, ShieldAlert, Sparkles, Split, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
-import { core, draftKey, navigate, useDraft, useDraftState, useHostIds, useHostState, useHosts, useSettings } from "@/core";
+import { useEffect, useRef, useState } from "react";
+import { core, draftKey, navigate, suggestBranch, useAiNaming, useAiSuggestion, useDraft, useDraftState, useHostIds, useHostState, useHosts, useSettings } from "@/core";
 import type { AgentSpec, AgentTemplate, Started, ThinkingLevel, WorktreeCreateParams } from "@/core/gen";
 import { Button, Chip, Field, IconButton, Input, Select, type SelectOption, SegmentedControl, Shimmer, Switch, Textarea, cn, spring, useIsMobile } from "@/design";
 import { useBoard } from "@/features/board/boardStore";
+import { ACTIONS } from "@/features/shell/vocab";
+import { AiMark } from "../workspace/shared/ai";
 import { useModelCatalog } from "../workspace/shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "../workspace/shared/CommandPreview";
 import { herdrArgv } from "../workspace/shared/commands";
 import { classifyHerdrError, describeError } from "../workspace/shared/errors";
-import { basename, shellQuote, tildify } from "../workspace/shared/paths";
+import { AGENT_NAME_MAX, basename, clipName, shellQuote, tildify } from "../workspace/shared/paths";
 import { ResponsiveDialog } from "../workspace/shared/ResponsiveDialog";
 import { templateSummary } from "../workspace/shared/templates";
 import { slugFromPrompt, slugify } from "../workspace/shared/slug";
@@ -30,6 +32,8 @@ export function parseFanOutBranch(branch: string | undefined): { slug: string; v
 const STEPS = ["Repository", "Task & variants", "Launch"] as const;
 const MIN_VARIANTS = 2;
 const MAX_VARIANTS = 5;
+/** Variant keys: short enough that `<slug>-<key>` keeps a useful slug within herdr's 32-char names. */
+const MAX_KEY = 16;
 const CUSTOM = "__custom";
 const DEFAULT = "default";
 
@@ -103,10 +107,12 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   /** The fan-out name at launch: the rows and the board filter keep it after the drafts clear. */
   const [launchedSlug, setLaunchedSlug] = useState("");
 
-  // A task handed over by the caller (New worktree's "Try N approaches") replaces the stored one.
+  // A task handed over by the caller (New worktree's "Try N approaches", Dispatch) replaces the stored
+  // one, and follows the user (with their edits) to whichever repository they pick.
+  const handed = useRef(initialPrompt ?? "");
   useEffect(() => {
-    if (initialPrompt) setPrompt(initialPrompt);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (initialPrompt) setPrompt(handed.current);
+  }, [hostId, repo?.path]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!hostId && hostIds[0]) setHostId(hostIds[0]);
@@ -132,14 +138,24 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
 
   const branches = useHostQuery(hostId, "git.branches", repo ? { cwd: repo.path } : null);
   const baseRef = base || branches.data?.defaultBranch || "HEAD";
-  const effSlug = slugTouched ? slugify(slug, 24) : slugFromPrompt(prompt);
+  const task = prompt.trim();
+  // untouched name: the tiny model's slug for the task, else the task's own words
+  const aiOn = useAiNaming(hostId);
+  const aiKey = aiOn && hostId && !slugTouched && task ? `${hostId}\n${repo?.path ?? ""}\n${task}` : null;
+  const aiSlugRaw = useAiSuggestion(hostId, aiKey, () => (hostId ? suggestBranch(hostId, task, { cwd: repo?.path }) : Promise.resolve(null)), { debounceMs: 700 });
+  // whole words only: the tiny model's slug may be up to 40 chars, fan-out names stay ≤ 24
+  const aiFull = aiKey && aiSlugRaw.value ? slugify(aiSlugRaw.value, 40) : "";
+  const aiSlug = aiFull.length <= 24 ? aiFull : aiFull.slice(0, 25).replace(/-?[^-]*$/, "");
+  const effSlug = slugTouched ? slugify(slug, 24) : aiSlug || slugFromPrompt(prompt);
   const takenNames = host?.agents.map((a) => a.name) ?? [];
   const existingBranches = new Set(branches.data?.branches.map((b) => b.name));
   const branchOf = (v: Variant) => `${FANOUT_PREFIX}${effSlug}/${v.key}`;
-  const nameOf = (v: Variant) => `${effSlug}-${v.key}`;
+  // herdr agent names stay ≤ 32: the slug gives way (at a word boundary), the variant key never does
+  const nameOf = (v: Variant) => `${clipName(effSlug, AGENT_NAME_MAX - 1 - v.key.length)}-${v.key}`;
 
   const variantErrors = variants.map((v) => {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(v.key)) return "Lowercase letters, digits and - only";
+    if (v.key.length > MAX_KEY) return `At most ${MAX_KEY} characters`;
     if (variants.filter((x) => x.key === v.key).length > 1) return "Two variants share this name";
     if (effSlug && existingBranches.has(branchOf(v))) return `${branchOf(v)} already exists`;
     if (effSlug && takenNames.includes(nameOf(v))) return `An agent named ${nameOf(v)} is running`;
@@ -326,7 +342,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
       open={open}
       onOpenChange={(o) => !o && (!launched || done) && onClose()}
       title="Fan out"
-      description={repo && step > 0 ? <span className="font-mono">{tildify(repo.path, home)}</span> : "One task, several agents, each in its own worktree. Compare and keep the best."}
+      description={repo && step > 0 ? <span className="font-mono">{tildify(repo.path, home)}</span> : ACTIONS.fanOut.description}
       icon={<Split />}
       width={800}
       maxHeight="94dvh"
@@ -374,7 +390,10 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                       id={id}
                       autoFocus={!mobile}
                       value={prompt}
-                      onChange={(e) => setPrompt(e.target.value)}
+                      onChange={(e) => {
+                        handed.current = e.target.value;
+                        setPrompt(e.target.value);
+                      }}
                       placeholder="What should the agents build? Each variant gets the same prompt."
                       className="min-h-[3lh]"
                       maxHeight={160}
@@ -382,12 +401,27 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                   )}
                 </Field>
                 <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
-                  <Field label="Fan-out name" hint={slugTouched ? undefined : "auto"} description={effSlug ? `Branches ${FANOUT_PREFIX}${effSlug}/<variant>` : undefined}>
+                  <Field
+                    label="Fan-out name"
+                    hint={
+                      slugTouched ? undefined : aiSlug ? (
+                        <span className="flex items-center gap-1">
+                          auto <AiMark />
+                        </span>
+                      ) : aiKey && aiSlugRaw.loading ? (
+                        "naming…"
+                      ) : (
+                        "auto"
+                      )
+                    }
+                    description={effSlug ? `Branches ${FANOUT_PREFIX}${effSlug}/<variant>` : undefined}
+                  >
                     {(id) => (
                       <Input
                         id={id}
                         value={slugTouched ? slug : effSlug}
                         placeholder="derived from the task"
+                        trailing={!slugTouched && aiSlug ? <AiMark /> : undefined}
                         onChange={(e) => setSlug(e.target.value)}
                         className="font-mono text-xs"
                         spellCheck={false}

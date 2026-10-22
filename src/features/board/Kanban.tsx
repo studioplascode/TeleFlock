@@ -11,15 +11,16 @@ import {
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
+import { ArrowRight } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { useAgent, useUi } from "@/core";
+import { navigate, useAgent, useUi } from "@/core";
 import type { Column } from "@/core/gen";
 import { AnimatePresence, CardFlight, CountBadge, EmptyState, LayoutGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion, z } from "@/design";
+import { ACTIONS } from "@/features/shell/vocab";
 import { AgentCard } from "./AgentCard";
-import { openAgent, setArchived } from "./agentActions";
-import { DropConfirm, type PendingDrop, useConfirmArchive } from "./ArchiveConfirm";
+import { archiveWithUndo, openAgent, setArchived } from "./agentActions";
 import { useBoard } from "./boardStore";
 import { LANES, LANE_BY_COLUMN, type LaneMeta } from "./lanes";
 
@@ -38,7 +39,7 @@ function refusal(from: Column, to: Column, name: string): { title: string; descr
   if (LANE_BY_COLUMN[from].live)
     return {
       title: `${name} is still ${from === "running" ? "working" : "waiting on you"}`,
-      description: from === "running" ? "Stop it or let it finish; finished agents move to In review by themselves." : "Answer its question first; then you can review and archive it.",
+      description: from === "running" ? "Stop it or let it finish; finished agents move to Review by themselves." : "Answer its question first; then you can review it and mark it done.",
     };
   return null;
 }
@@ -79,7 +80,7 @@ export function onCardClick(e: { ctrlKey: boolean; metaKey: boolean; shiftKey: b
   else openAgent(agentKey);
 }
 
-function DraggableCard({ agentKey, lane, selected }: { agentKey: string; lane: Column; selected: boolean }) {
+function DraggableCard({ agentKey, lane, selected, hero }: { agentKey: string; lane: Column; selected: boolean; hero: boolean }) {
   const { setNodeRef, listeners, attributes, isDragging } = useDraggable({ id: agentKey, data: { lane } });
   const picked = useBoard((s) => s.picked.includes(agentKey));
   return (
@@ -90,7 +91,7 @@ function DraggableCard({ agentKey, lane, selected }: { agentKey: string; lane: C
         {...attributes}
         role="button"
         tabIndex={-1}
-        aria-roledescription="Agent card. Drag between In review and Done to archive."
+        aria-roledescription="Agent card. Drag between Review and Done to mark it done or reopen it."
         aria-pressed={picked}
         data-agent-key={agentKey}
         onClick={(e) => onCardClick(e, agentKey)}
@@ -100,7 +101,7 @@ function DraggableCard({ agentKey, lane, selected }: { agentKey: string; lane: C
         }}
         className="cursor-pointer touch-manipulation rounded-xl outline-none active:cursor-grabbing"
       >
-        <AgentCard agentKey={agentKey} lane={lane} selected={selected} picked={picked} />
+        <AgentCard agentKey={agentKey} lane={lane} selected={selected} picked={picked} hero={hero} />
       </div>
     </CardFlight>
   );
@@ -140,13 +141,27 @@ function Lane({
     >
       <header className="flex items-center gap-2 px-4 pt-3.5 pb-2.5">
         <StatusOrb status={meta.status} size={8} label={null} activity={keys.length > 2 ? "busy" : "steady"} />
-        <h3 className="font-display text-sm font-bold text-ink">{meta.title}</h3>
-        {meta.column === "needs" && keys.length > 0 ? (
-          <CountBadge count={keys.length} />
+        {meta.column === "needs" ? (
+          // the lane is the board's answer list; its header leads to the full Inbox (agent said, option details)
+          <button
+            type="button"
+            onClick={() => navigate({ name: "inbox" })}
+            title="Open the Inbox"
+            className="group/needs -mx-1 flex shrink-0 items-center gap-2 rounded-sm px-1 focus-ring hover:bg-white/6"
+          >
+            <h3 className="font-display text-sm font-bold text-ink">{meta.title}</h3>
+            {keys.length > 0 ? <CountBadge count={keys.length} /> : <NumberTicker value={0} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />}
+            <ArrowRight className="size-3.5 text-mute transition-transform group-hover/needs:translate-x-0.5 group-hover/needs:text-ink" aria-hidden />
+          </button>
         ) : (
-          <NumberTicker value={keys.length} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />
+          <>
+            <h3 className="font-display text-sm font-bold text-ink">{meta.title}</h3>
+            <NumberTicker value={keys.length} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />
+          </>
         )}
-        <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2">{meta.hint}</span>
+        <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2" title={meta.legend}>
+          {meta.legend}
+        </span>
       </header>
       {refused && isOver && (
         <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mx-3 mb-2 rounded-md bg-error/10 px-3 py-2 text-2xs font-semibold text-[#ff9fb2]">
@@ -177,12 +192,13 @@ function Lane({
                 isOver ? "border-[rgb(var(--st-rgb)/0.9)] bg-[rgb(var(--st-rgb)/0.12)] st-text" : "border-[rgb(var(--st-rgb)/0.35)] text-mute",
               )}
             >
-              {meta.column === "done" ? "Drop to archive" : "Drop to reopen for review"}
+              {meta.column === "done" ? `Drop to ${ACTIONS.markDone.label.toLowerCase()}` : "Drop to reopen for review"}
             </motion.div>
           )}
         </AnimatePresence>
-        {keys.map((k) => (
-          <DraggableCard key={k} agentKey={k} lane={meta.column} selected={k === selectedKey} />
+        {keys.map((k, i) => (
+          // the oldest question leads the board with the sunset treatment (it replaces the old hero tile)
+          <DraggableCard key={k} agentKey={k} lane={meta.column} selected={k === selectedKey} hero={meta.column === "needs" && i === 0} />
         ))}
         {keys.length === 0 &&
           (q.trim() ? (
@@ -190,12 +206,23 @@ function Lane({
           ) : (
             <EmptyState compact title={meta.empty.title} description={meta.empty.description} className="col-span-full my-6" />
           ))}
+        {meta.column === "done" && (
+          // the other homes of "finished": the activity log and closed panes
+          <p className="col-span-full flex flex-wrap justify-center gap-x-3 gap-y-1 pt-1 text-2xs font-semibold text-mute-2">
+            <button type="button" className="rounded-xs focus-ring hover:text-ink hover:underline" onClick={() => navigate({ name: "activity" })}>
+              Older → Activity
+            </button>
+            <button type="button" className="rounded-xs focus-ring hover:text-ink hover:underline" onClick={() => useUi.getState().openDialog({ kind: "pastSessions" })}>
+              Closed panes → {ACTIONS.pastSessions.label}
+            </button>
+          </p>
+        )}
       </motion.div>
     </section>
   );
 }
 
-/** Four status lanes with card flights and Review ↔ Done drag-to-archive. */
+/** Four status lanes with card flights and Review ↔ Done drag to mark done / reopen. */
 export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: string | null }) {
   const moves = useBoard((s) => s.moves);
   const setMove = useBoard((s) => s.setMove);
@@ -203,10 +230,8 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const [drag, setDrag] = useState<{ key: string; from: Column } | null>(null);
   const [dropOk, setDropOk] = useState(false);
-  const [pending, setPending] = useState<PendingDrop | null>(null);
-  const confirmArchive = useConfirmArchive();
   const dragAgent = useAgent(drag?.key ?? "");
-  const view = applyMoves(lanes, pending ? { ...moves, [pending.key]: "done" } : moves);
+  const view = applyMoves(lanes, moves);
   // Whole-document grabbing cursor while a card is in flight (lanes and cards underneath would show their own).
   const dragging = drag !== null;
   useEffect(() => {
@@ -238,23 +263,9 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
       return;
     }
     const key = current.key;
-    if (to === "done" && confirmArchive) {
-      // hold the card in Done while the confirm popover (anchored at the drop point) decides
-      const start = e.activatorEvent as PointerEvent | null;
-      const x = (start?.clientX ?? window.innerWidth / 2) + e.delta.x;
-      const y = (start?.clientY ?? window.innerHeight / 2) + e.delta.y;
-      setPending({ key, name, x, y });
-      return;
-    }
     setMove(key, to);
-    setArchived(key, to === "done").catch(() => setMove(key, null));
-  };
-  const resolvePending = (ok: boolean) => {
-    const p = pending;
-    setPending(null);
-    if (!p || !ok) return;
-    setMove(p.key, "done");
-    setArchived(p.key, true).catch(() => setMove(p.key, null));
+    if (to === "done") void archiveWithUndo([key]).then((done) => done.length === 0 && setMove(key, null));
+    else setArchived(key, false).catch(() => setMove(key, null));
   };
 
   return (
@@ -288,7 +299,6 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
         </DragOverlay>,
         document.body,
       )}
-      <DropConfirm pending={pending} onResolve={resolvePending} />
     </DndContext>
   );
 }

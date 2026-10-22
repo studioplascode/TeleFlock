@@ -1,21 +1,26 @@
 import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Sparkles } from "lucide-react";
 import { forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef } from "react";
-import { useDraft, useSettings } from "@/core";
+import { useAiNaming, useAiSuggestion, useDraft, useSettings } from "@/core";
 import type { ThinkingLevel } from "@/core/gen";
 import { IconButton, Kbd, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn } from "@/design";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
 import { templateSummary } from "@/features/workspace/shared/templates";
-import type { DispatchOptions } from "./store";
+import { type DispatchOptions, suggestDispatchName } from "./store";
+import { prefetchKey } from "./thread";
 
 const DEFAULT = "default";
 const LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 export interface DispatchComposerHandle {
   focus(): void;
+  /** The unsent task text. */
+  text(): string;
 }
 
 export interface DispatchComposerProps {
   hostId?: string;
+  /** The thread's repository: with AI naming on, the task's name is fetched while the user pauses typing. */
+  repo?: string | null;
   /** Draft key of the task text (per host + repo), so an unsent task survives navigation and reload. */
   draftKey: string;
   options: DispatchOptions;
@@ -34,14 +39,22 @@ export interface DispatchComposerProps {
  * footer holds the per-dispatch options: template or model + thinking, and plan mode.
  */
 export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchComposerProps>(function DispatchComposer(
-  { hostId, draftKey, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
+  { hostId, repo, draftKey, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
   ref,
 ) {
   const [text, setText, clearText] = useDraft(draftKey);
   const ta = useRef<HTMLTextAreaElement>(null);
-  useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus() }), []);
+  const latest = useRef(text);
+  latest.current = text;
+  useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus(), text: () => latest.current }), []);
   const disabled = !!disabledReason;
   const canSend = !disabled && !!text.trim();
+
+  // Name the task ahead of the send (same call as the send's, cached by ai.ts): after a pause of
+  // ~1.2 s with a few words typed, so most sends skip the "Naming…" wait.
+  const ai = useAiNaming(hostId);
+  const prefetch = ai && hostId && repo && !disabled ? prefetchKey(text) : null;
+  useAiSuggestion(hostId, prefetch, () => (hostId && repo && prefetch ? suggestDispatchName(hostId, repo, prefetch) : Promise.resolve(null)), { debounceMs: 1200 });
 
   const send = () => {
     if (!canSend) return;

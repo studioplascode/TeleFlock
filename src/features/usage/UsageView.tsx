@@ -292,7 +292,7 @@ function AgentsTile({ hostFilter, className }: { hostFilter: string; className?:
   );
 }
 
-/** Cost and tokens: today ticker, 14-day bars, models, per-agent (spec §5 Usage). */
+/** Spend and limits: today next to subscription limits, then 14-day bars, models, per-agent (spec §5 Usage). */
 export function UsageView() {
   const filter = useHosts((s) => s.filter);
   const ids = useHostIds();
@@ -306,18 +306,18 @@ export function UsageView() {
     hostIds.length === 0 ? (
       <EmptyState title="No hosts connected" description="Usage is read from each host's omp sessions." className="mt-10" />
     ) : (
-      <div className={cn("flex flex-col", mobile ? "gap-5" : "gap-7")}>
-        <div className={cn("grid", mobile ? "grid-cols-1 gap-2.5" : "grid-cols-2 gap-3 @3xl:grid-cols-3")}>
-          <TodayTile hostFilter={filter} />
+      <div className={cn("grid items-start", mobile ? "grid-cols-1 gap-5" : "grid-cols-2 gap-x-3 gap-y-7 @3xl:grid-cols-3")}>
+        <TodayTile hostFilter={filter} />
+        <LimitsSection hostIds={hostIds} className={cn(!mobile && "@3xl:col-span-2")} />
+        <div className={cn("grid", mobile ? "grid-cols-1 gap-2.5" : "col-span-2 grid-cols-2 gap-3 @3xl:col-span-3 @3xl:grid-cols-3")}>
           {loading && days.length === 0 ? (
-            <Skeleton className={cn("min-h-56 rounded-tile", !mobile && "@3xl:col-span-2")} />
+            <Skeleton className={cn("min-h-56 rounded-tile", !mobile && "col-span-2")} />
           ) : (
-            <DaysChart days={days} todayLive={cost} className={cn(!mobile && "@3xl:col-span-2")} />
+            <DaysChart days={days} todayLive={cost} className={cn(!mobile && "col-span-2")} />
           )}
           <ModelsTile models={models} />
-          <AgentsTile hostFilter={filter} className={cn(!mobile && "@3xl:col-span-2")} />
+          <AgentsTile hostFilter={filter} className={cn(!mobile && "@3xl:col-span-3")} />
         </div>
-        <LimitsSection hostIds={hostIds} />
       </div>
     );
 

@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21. Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,18 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension · I = herdr keystroke injection (guarded by §3.6, idle-only) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.4.0 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| AI naming and drafts through omp's tiny role | Dispatch (prefetch while typing, "Naming…" phase), wizard "Name it from the task", New agent name, Fan out name, Rename / workspace rename / template "✨ Suggest", Review "✨ Write it" (commit) and "✨ Write title & description" (PR) | same dialogs and sheets | `ai.complete` → hostd `ops/ai.rs` (`omp --mode json … --model @tiny`, `smol` retry, 3 at once) · `src/core/ai.ts` (cache, dedupe, unavailable memo, fallback) | ✅ demo + unit tests (`ai.test.ts`, `ops/ai.rs`); ✅ real omp 18.12.3 tiny role on Linux (ignored test, ~4 s) |
+| One vocabulary (lanes, states, actions, send keys) | `features/shell/vocab.ts` everywhere: board, sidebar, palette, menus, `?` sheet | Flock, More, sheets | — | ✅ demo |
+| Glossary terms + self-retiring hints | `<Term>` (tooltip), `useFirstUse` captions, `?` sheet Terms section, Settings → Hints | `<Term>` (tap popover), pager hint | `glossary.ts`, `hints.tsx`, `usePrefs` | ✅ demo |
+| First steps checklist | board summary row (demo + new hosts; retires) | — | `board/firstSteps.ts` | ✅ demo |
+| Motion budget (Calm default / Lively / Reduced) | Settings → Motion; `html[data-motion]` | same | `useLivelyMotion`, design CSS | ✅ demo |
+| Inbox = needs you + unread updates; bell = peek | Inbox, bell | Inbox tab (More → Notifications removed) | `useNotifications` | ✅ demo |
+| Setup gaps on the board | `SetupGaps` strip → `#/hosts?setup=<id>` (Host setup opens itself) | Flock strip | `HostInfo.setup` | ✅ demo |
 
 ## Before → after (this audit)
 
@@ -34,7 +46,7 @@ What closed the ❌ and ⚠️ rows:
 | Local host | HostEditor kind "Local" | — (Android: SSH + demo only, by spec) | `hosts.save/connect` | L `tf-transport/local.rs` | ⚠️ Windows build not run here |
 | WSL host + distro picker | HostEditor kind "WSL" → distro select | — (by spec) | `wsl.distros`, `hosts.save` | L `tf-transport/wsl.rs` (`wsl.exe -d`) | ⚠️ needs Windows |
 | Demo host | HostEditor kind "Demo" | same | all host methods | `src/core/demo` | ✅ demo |
-| Multi-host aggregate + filter | Title-bar host pill, BoardToolbar host select | Flock host pill only navigates to Hosts | `useHosts().setFilter` | frontend | ⚠️ desktop ✅ demo; **mobile has no filter control** (handed to MobileUx) |
+| Multi-host aggregate + filter | Title-bar host pill (worst orb, "1/2 online"), sidebar host row click | Flock host chip → filter sheet (worst orb, "1/2 online") | `useHosts().setFilter`, `hostsHealth()` | frontend | ✅ demo |
 | herdr session per host | HostEditor → Advanced "herdr session" | same sheet | `hosts.save` → attach `--session` | L `conn.rs`, hostd `daemon.rs` | ✅ (lab sessions use it) |
 | Several devices on one host (desktop + phone, apps on different versions) | automatic | automatic | — | L `deploy.rs` never replaces a newer tf-hostd; hostd `attach --replace` / `stop` only move the host forward (architecture §3.2) | ✅ real binaries: a 0.2.0 app reconnecting to a newer daemon attaches to it instead of restarting it; upgrades drop older clients once |
 | Phases + Open browser + host-key trust | ConnStatusCard (Open browser, Trust and connect) | More → inline card | `app.openExternal`, `hosts.trustKey` | L `conn.rs` | ✅ demo (simulated auth + fingerprint) |
@@ -42,49 +54,49 @@ What closed the ❌ and ⚠️ rows:
 | Resume on foreground/network | automatic | automatic (Android network callback) | `Engine::resume` | L `src-tauri/lib.rs` | ⚠️ needs a device |
 | Offline-first stale cache | board/sidebar stale treatment | StaleHosts strip | cached `HostState` | L `engine.rs` | ✅ demo (studio-pc host is stale) |
 | Setup checklist + one-tap fixes | Hosts → Host setup | More → Hosts | `host.setup/setupApply` | H/B `ops/host.rs` | ⚠️ 8 rows, there is no separate "SSH OK" row; a relay that is down cannot be fixed with one tap (hostd owns the port) |
-| Host health | Hosts view, sidebar footer, bento tile | More → Hosts | state push (`host.health` exists but is not called directly) | L `ops/host.rs` | ✅ demo |
+| Host health | Hosts view, sidebar host rows (CPU sparkline + RAM bar), board Hosts tile (one row per host, load) | More → Hosts | state push (`host.health` exists but is not called directly) | L `ops/host.rs` | ✅ demo |
 
 ## §3 Information architecture
 
 | Capability | Desktop | Mobile | Status |
 |---|---|---|---|
-| Title bar (logo, host pill, heartbeat, Ctrl+K, needs counter, window controls/Snap) | DesktopShell/TitleBar | — (More shows heartbeat + Search) | ✅ demo |
-| Sidebar tree + quick actions + health footer | Sidebar | — (actions via palette) | ✅ demo |
+| Title bar (logo, host pill, heartbeat, Ctrl+K, needs pill → Answer next, notification peek, window controls/Snap) | DesktopShell/TitleBar | — (More shows Search) | ✅ demo |
+| Sidebar: New task, launchers with descriptions, Board · Inbox · Activity · Usage, hosts with health and actions, workspace tree, Settings | Sidebar | — (FAB sheet + palette) | ✅ demo |
 | Board / Session+inspector / Terminal / Review / Activity / Usage / Settings | sidebar | bottom nav + More | ✅ demo |
 | Split session+terminal, session+session | Ctrl+\\, "Terminal beside" / "Open beside" | — (mobile opens the full terminal view instead) | ✅ demo (desktop) |
-| Palette, wizards, answer HUD, notification center, toasts | global overlays | More → Search / Notifications | ✅ demo |
+| Palette (descriptions + synonyms), wizards, answer HUD, notification peek, toasts | global overlays | More → Search; Inbox (updates); toasts at the bottom, one at a time | ✅ demo |
 | Mobile: bottom nav, Flock widgets, session pager, inspector sheet, terminal extra keys + pinch, swipe rows, long-press, pull-to-refresh, haptics | — | MobileShell, FlockHome, MobileSession, ExtraKeys, SwipeRow | ⚠️ pull-to-refresh skips full-bleed routes; haptics are tied to actions, not every state change (MobileUx scope) |
 
 ## §4 Liveness
 
-Board cards, Flock rows and the session header render every encoding listed in the spec table: streaming, tool ring, thinking, swarm, needs-you glow, quiet chip, done flight, calm, stale, global heartbeat/glow/tray. ✅ demo on desktop. On mobile it is ⚠️: there is no sparkline, burst ring or per-agent last-seen on Flock rows.
+Board cards, Flock rows and the session header render every encoding listed in the spec table: streaming, tool ring, thinking, swarm, needs-you glow, quiet chip, done flight, calm, stale, global heartbeat/glow/tray. ✅ demo on desktop and phone (412×892 / Pixel 5): Flock rows show the heartbeat with its last-event age, the tok/s sparkline, subagent % done, the diff and the quiet chip. The default motion is Calm (spec §4 motion budget); Lively shows every encoding at once.
 
 ## §5 Features
 
 | Capability | Desktop entry | Mobile entry | Frontend → method | hostd path | Status |
 |---|---|---|---|---|---|
-| Board columns, drag Review↔Done, live-lane bounce | Kanban | Flock sections + swipe Archive/Reopen | `agent.archive` | state persist | ✅ demo |
-| Card contents, quick answers, approvals | AgentCard/QuickAnswer | Flock needs cards | `agent.answer` | C | ✅ demo |
-| Review card: Review diff / Archive | AgentCard | Flock card | route + `agent.archive` | — | ⚠️ no "Open PR" on the card (it lives in Review → Ship) |
-| Bento row | BentoRow | Flock widgets | state | — | ✅ demo |
-| Filters/search/group/J-K | BoardToolbar, useBoardKeys | — | frontend | — | ⚠️ desktop only |
-| Multi-select (P1) | — | — | — | — | ❌ not built (P1) |
+| Board columns Needs you · Running · Review · Done, drag Review↔Done, live-lane bounce | Kanban | Flock sections + swipe Mark done/Reopen + ⋯ | `agent.archive` | state persist | ✅ demo |
+| Card contents (five zones), quick answers, approvals, input requests ("Answer…" → HUD) | AgentCard/QuickAnswer | Flock needs cards | `agent.answer` | C | ✅ demo |
+| Review card: next ship step (Commit N files / Push / Open PR / Merge), Mark done, Open | AgentCard (`shipMemo` from Review) | Flock row: Mark done / Review | route + `agent.archive` | — | ✅ demo; ⚠️ the PR stepper needs Review to have seen the PR once (no per-card `gh` polling) |
+| Summary row (first steps, spend + tightest limit, hosts, live terminal; one strip on short windows) | BentoRow | Flock tiles (Answer →, running ↓, today ›) | state | — | ✅ demo |
+| Filters/search/group/J-K/H-L | BoardToolbar, useBoardKeys | host filter sheet | frontend | — | ✅ demo |
+| Multi-select (P1) | `X` / Ctrl+click → SelectionBar (Mark done, Reopen, Stop turn, Mute) | long-press → SelectionBar | `agent.archive`, `agent.abort`, settings | — | ✅ demo |
 | Transcript, tool cards, thinking | SessionPane | MobileSession pager | `session.open/history` | C replica | ✅ demo |
 | Ask card: select/multi/editor/confirm/input | AskCard | same | `agent.answer` | C ui-response | ✅ demo |
 | Plan review answer | AskCard (planReview) | same | `agent.answer` | B `resolvePlanReview` (ids execute/compact/keep/refine/save) | ✅ code + test. Fixed here: "Other" text → `refine` + feedback; disabled choices hidden; Dismiss is hidden for plan reviews and hostd rejects `cancel` with a hint |
 | Prompt / steer | Composer Enter | Composer send | `agent.prompt` (auto) | C → B → I | ✅ demo |
 | Queue follow-up | Alt+Enter, `/queue` | queue button | `agent.prompt` (followUp) / `agent.slash /queue` | B `/queue` → I `ctrl+q` | ✅ demo |
 | **Edit / remove queued chips** | ✎ / ✕ next to the queue chips (on the chip omp pops next, highlighted) | same | **`agent.dequeue` (new)** | B `editor.onDequeue()` (operator draft preserved) | ✅ demo (pull back → composer; remove). Sessions without the bridge get a "needs the bridge" error |
-| Stop | Esc, header Stop | composer Stop | `agent.abort` | C → B → I `esc` | ✅ demo |
+| Stop turn | Esc, header "Stop turn" | composer Stop, ⋯ sheet, swipe | `agent.abort` | C → B → I `esc` | ✅ demo |
 | `/` palette | Composer | Composer | see the slash table below | | ✅ demo + test |
 | `@` mention | Composer | Composer | `fs.search` | G | ✅ demo |
 | Image paste/drop | Composer | attach button | `agent.prompt{images}` | C `prompt.images` | ⚠️ needs a collab link; follow-ups with images are rejected (omp's TUI queue has no remote image path) |
 | Drafts: every text field keeps its value (composers, answers, dialogs, filters) + composer images | everywhere | same | `drafts` / `useDraft` (localStorage `tf.drafts`), images in IndexedDB | — | ✅ demo (survives view switches and reloads; cleared on a successful send/submit) |
 | Image viewer: zoom (wheel, pinch, double-click/tap, 1:1), pan, gallery | click a transcript attachment, a tool image or a composer thumbnail | tap; pinch, swipe, swipe down to close | `Lightbox` (`@/design`); transcript images without an inline payload: **`session.image` (new)** | omp blob store (`<agent dir>/blobs/<sha256>`) | ✅ demo; `session.image` run against a real blob store, the journal heal is covered by a replica test. Opens at most at actual size (no blurry upscale). Images the journal or history pages hold as `blob:sha256:` refs, and payloads collab cut from entries over 1 MiB (healed from the journal within seconds), load the full original from the host. Markdown images are not rendered (the parser has no `![]()`) |
 | Voice dictation | — | mic (Web Speech) | text → `agent.prompt` | — | ⚠️ depends on the WebView's SpeechRecognition |
-| Header model/thinking/plan/fast | Controls | header chips | `agent.setModel/setThinking/setPlan/setFast` | B → I | ✅ demo |
+| Header model/thinking/plan/fast (on/off shown) | Controls | one "model · thinking" chip + Plan/Fast/Goal chips | `agent.setModel/setThinking/setPlan/setFast` | B → I | ✅ demo |
 | Goal (objective + budget) | Goal chip → dialog | same | `agent.goal` | B `/goal …` | ⚠️ the call works; **the goal chip state is read from collab meta only**: the bridge `CtlState.goal` is not in `MetaOverlay` (`omp.rs`); HostdCore owns this |
-| Inspector: context, cost, tok/s, todos, files | Inspector | inspector sheet | session meta | C/B | ✅ demo |
+| Inspector: can-it-keep-going (ctx used / limit left), spend, throughput, todos, files | Inspector | inspector sheet (labelled tabs) + composer status pill | session meta | C/B | ✅ demo |
 | Subagents steer/kill/revive/transcript | Inspector → Subagents | sheet | `agent.subagent`, `session.subagentTranscript` | C `agent-cmd`, `fetch-transcript` | ✅ demo; ⚠️ real host needs collab |
 | Agent chat (omp IRC): inline chat bubbles (inbound left, sends right with delivery state, grouped), Chat tab grouped by peer with unread, jump-to-row, open subagent, direct message | Transcript rows; Inspector → Agent chat | sheet → chat tab | `TranscriptItem::Irc`, `ToolView::Irc`; direct message = `agent.subagent` chat | C replica (`irc:incoming`, parent `<irc>` steer, `write agent://`, `wait`) | ✅ demo + real host (golden samples 18/18b). Direct messages land as the user's message in the subagent, not as IRC (no external IRC endpoint); agent↔agent relays between subagents aren't visible (omp doesn't mirror them) |
 | Subagent completion estimate + context % (omp TUI `· 40%` / `· 2.4%/272K`) | Subagents panel, task tool card (+ header "1 live · 40% done"), subagent viewer, board card footer (mean of running subagents) | same | `Subagent.completionPct` / `Subagent.context`, `SubagentSummary.completionPct` | C `AgentProgress.completionPercent` / `contextTokens` / `contextWindow` | ✅ demo + real host (estimate first arrives after ~2 min, interactive omp TUI only) |
@@ -93,30 +105,30 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Rename herdr handle | — | — | `agent.renameHandle` (no UI caller) | H `agent rename` | ❌ **no UI**: the method exists; needs a field in the Rename dialog (FrontSession) |
 | Non-omp agents: terminal-first + send-keys | NonOmpView | same | `agent.keys` | H | ✅ demo |
 | Terminal attach, pane tabs, takeover, send-keys, copy/paste, font | TerminalView/Pane | Terminal tab + ExtraKeys | `term.*` | H `terminal session control` | ✅ demo |
-| Terminal search (P1) | — | — | — | — | ❌ no xterm search addon |
+| Terminal search (P1) | Ctrl+F / tab menu / palette "Terminal: Find on screen" | same | `@xterm/addon-search` (visible screen) | — | ✅ demo |
 | New shell pane (tab / split right / down) | TerminalView "New shell" | same | `term.open{shell,split}` | H | ✅ demo |
-| Close a shell pane / rename tab / close tab | — (agent panes: "Close pane" = `agent.stop closePane`) | — | — | H has `pane.close`, `tab.rename/close` (`tf-herdr/api.rs`) | ❌ **blocked on tf-proto**: needs `pane.close`, `tab.rename`, `tab.close` host methods (orchestrator) |
+| Close a shell pane / rename tab / close tab | tab strip right-click → Rename tab… / Close tab… / Close pane… (confirmed) | long-press a tab | `tab.rename`, `tab.close`, `pane.close` | H | ✅ demo |
 | Worktree wizard (browser, badges, recents, new/existing branch, base, path, label, agent, preview) | NewWorktreeDialog | responsive sheet | `fs.list`, `git.branches`, `worktree.create{existing}` | G + H `worktree create` | ✅ demo; ⚠️ an *already checked-out* worktree is opened via "Open folder", not `worktree.open` |
 | Open folder / agent in workspace | NewAgentDialog | palette | `workspace.create`, `agent.start` | H | ✅ demo |
-| Dispatch: one message → worktree + omp agent, live thread per repo | Sidebar Dispatch, `D`, palette | Dispatch tab | `git.branches`, `fs.list`, `worktree.create{agent}`, `agent.answer` | H `worktree create` + agent start | ✅ demo; ✅ real stack (tf-devserver + herdr/omp) |
+| Dispatch: one message → named worktree + omp agent, live thread per repo | sidebar "New task", `D`, palette | Dispatch tab, FAB "New task" | `ai.complete`, `git.branches`, `fs.list`, `worktree.create{agent}`, `agent.answer` | H `worktree create` + agent start | ✅ demo; ✅ real stack (tf-devserver + herdr/omp) |
 | Remove worktree (dirty/force), close workspace (+group), rename workspace | Sidebar workspace menu | Review → Workspace actions | `worktree.remove`, `workspace.close{group}`, `workspace.rename` | H | ✅ demo (desktop) |
-| Inbox, Answer-next HUD (Ctrl+J) | Inbox, Ctrl+J | Inbox tab, palette | `agent.answer` | C | ✅ demo |
+| Inbox (needs you + updates), Answer-next HUD (Ctrl+J, needs pill) | Inbox, Ctrl+J, title-bar pill | Inbox tab, Flock "Answer →" tile, palette | `agent.answer` | C | ✅ demo |
 | Notifications with actions / inline reply | Windows toast actions | Android action buttons + reply | `agent.answer` from `NotifyAction` | L `platform.rs`, `Notifications.kt` | ⚠️ needs a device |
 | Quiet hours | Settings | Settings | `settings.set` | L `settings.rs` | ✅ code |
-| Per-agent mute (P1) | — | — | — | — | ❌ not built |
+| Per-agent mute (P1) | card ⋯ / session ⋯ / palette; Settings → Muted agents | row ⋯, long-press bar | `settings.set` (`mutedAgents`) | L | ✅ demo |
 | Command palette | Ctrl+K | More → Search | — | — | ✅ demo; raw "Run a slash command…" now goes through the same router as the composer |
-| Review & ship (diff, commit, ask agent, push, PR create/checks/merge) | Review + ShipPanel | Review | `git.*`, `gh.*` | G | ✅ demo; ⚠️ archive on merge is a manual button |
+| Review & ship (diff, commit with ✨ draft or ask agent, push, PR create with ✨ draft, checks, merge, Mark done) | Review + ShipPanel (stepper strip + next-step button below 1360 px) | Review | `git.*`, `gh.*`, `ai.complete` | G | ✅ demo |
 | Activity + while-away | Activity | More → Activity | `host.activity` | state | ✅ demo |
-| Usage | Usage | More → Usage | `host.usage` | `omp stats` | ✅ demo; ⚠️ no budget hints |
+| Usage (limits first) | Usage | More → Usage | `host.usage` | `omp stats` | ✅ demo; ⚠️ no budget hints |
 | Subscription limits (per account/window, reset countdown, pace projection; inspector tile + header chip < 20 % left) | Usage → Subscriptions & limits; inspector Session pane; session header | More → Usage; session inspector | `host.limits` | `omp usage --json` + `--history --json`, `agent.db` session pin (read-only) | ✅ demo; ✅ real stack (omp 18.12.3, 3 Claude + 1 Codex account) |
 | Preview tunnels | link buttons in transcript/terminal | same (in-app webview) | `tunnel.open` | L SSH forward | ✅ demo |
 | Session history + resume in new pane | Past sessions | palette | `host.sessions/resume` | G scan + H start `--resume` | ✅ demo |
-| Fan-out (P2), templates (P2), focus mode (P2) | — | — | — | — | ❌ stretch, not built (prompt templates are reachable as custom `/` commands) |
-| Settings honoured | Settings | Settings | `settings.set` | L | ✅ except **`confirmArchive` ❌ (stored, no consumer)** |
+| Fan-out (P2), templates (P2), focus mode (P2) | Fan out dialog, templates in every start dialog, Focus mode (`F`) | Fan out sheet, templates | `worktree.create` ×N | H | ✅ demo |
+| Settings honoured | Settings (Motion, Hints, AI naming, notifications, quiet hours, muted, templates, updates) | Settings | `settings.set`, `usePrefs` | L | ✅ demo |
 
 ## §6 Keyboard map
 
-Ctrl+K, Ctrl+J, Ctrl+1…6, J/K, Enter, A, T, N, D, Esc, Ctrl+Enter, Alt+Enter, Ctrl+\\, Ctrl+B and ? are all handled (`shell/keyboard.ts`, `useBoardKeys.ts`, `Composer.tsx`, `SessionPane.tsx`). ✅ demo on desktop. Mobile has no keyboard map, by design.
+Ctrl+K, Ctrl+J, Ctrl+1…6, J/K, H/L, Enter, A, T, X, N, D, 1…9, Esc, Enter / Shift+Enter / Alt+Enter, Ctrl+Enter (forms), Ctrl+\\, Ctrl+B and ? are all handled (`shell/keyboard.ts`, `useBoardKeys.ts`, `Composer.tsx`, `SessionPane.tsx`) and listed in the `?` sheet from `vocab.ts`. ✅ demo on desktop. Mobile has no keyboard map, by design.
 
 ## omp §1: slash commands (all 87 builtins)
 
@@ -184,10 +196,7 @@ Verification: demo at 1440×900 and 412×892. The sessions exercised the followi
 
 ## Remaining gaps and their blockers
 
-1. **`pane.close`, `tab.rename`, `tab.close`.** These need new tf-proto methods (orchestrator). hostd/herdr support exists in `tf-herdr/src/api.rs`.
-2. **Goal chip with the bridge only.** Add `goal` to `MetaOverlay` in `tf-hostd/src/omp.rs` (HostdCore). The call itself works.
-3. **Herdr handle rename UI.** `agent.renameHandle` works; it needs a field in the session Rename dialog (FrontSession).
-4. **`confirmArchive` setting.** It needs a consumer in `board/agentActions.setArchived` (FrontBoard).
-5. **Mobile host filter on Flock.** Handed to MobileUx.
-6. **Not built.** Terminal search (P1), multi-select (P1), per-agent mute (P1), fan-out / templates / focus mode (P2). None of these block daily use; prompt templates are already reachable as custom commands.
-7. **Needs real devices or hosts.** Windows local/WSL, Android notification actions and the real SSH connect stay ⚠️ until they are run on a device or host.
+1. **Goal chip with the bridge only.** Add `goal` to `MetaOverlay` in `tf-hostd/src/omp.rs` (HostdCore). The call itself works.
+2. **Herdr handle rename UI.** `agent.renameHandle` works; it needs a field in the session Rename dialog (FrontSession).
+3. **AI naming on non-Linux hosts.** `ai.complete` was exercised against a real omp 18.12.3 tiny role on Linux; macOS and Windows hosts (npm `omp.cmd` shim) are covered by code and tests only.
+4. **Needs real devices or hosts.** Windows local/WSL, Android notification actions and the real SSH connect stay ⚠️ until they are run on a device or host.

@@ -1,6 +1,6 @@
 import type { Agent, HostState, Workspace } from "@/core/gen";
 import { basename } from "@/features/workspace/shared/paths";
-import { slugFromPrompt } from "@/features/workspace/shared/slug";
+import { slugFromPrompt, slugify } from "@/features/workspace/shared/slug";
 import type { DispatchEntry } from "./store";
 
 /** Dispatch branches are `dispatch/<name>`; the agent and its workspace are called `<name>`. */
@@ -13,11 +13,71 @@ export function baseSlug(prompt: string): string {
   return /^[a-z]/.test(s) ? s : `t-${s}`.slice(0, 24).replace(/-+$/, "");
 }
 
-/** `slug`, else `slug-2`, `slug-3`… — free as an agent name and as `dispatch/<name>`. */
+/** herdr refuses agent names longer than this; a dispatch's name is its agent name. */
+export const MAX_AGENT_NAME = 32;
+
+/**
+ * `slug`, else `slug-2`, `slug-3`… — free as an agent name and as `dispatch/<name>`, and never
+ * longer than herdr's agent-name limit (the base gives way to the suffix).
+ */
 export function uniqueSlug(base: string, taken: ReadonlySet<string>): string {
   const free = (n: string) => !taken.has(n) && !taken.has(`${BRANCH_PREFIX}${n}`);
-  if (free(base)) return base;
-  for (let i = 2; ; i++) if (free(`${base}-${i}`)) return `${base}-${i}`;
+  const first = base.slice(0, MAX_AGENT_NAME).replace(/-+$/, "");
+  if (free(first)) return first;
+  for (let i = 2; ; i++) {
+    const suffix = `-${i}`;
+    const n = `${base.slice(0, MAX_AGENT_NAME - suffix.length).replace(/-+$/, "")}${suffix}`;
+    if (free(n)) return n;
+  }
+}
+
+/** Asks omp's tiny model for a branch slug; null = no usable answer (use the prompt's slug). */
+export type BranchSuggester = (prompt: string) => Promise<string | null>;
+
+/** Longest AI-made dispatch name: herdr's 32-char agent-name limit, with room for `uniqueSlug`'s `-N`. */
+const MAX_AI_SLUG = 28;
+
+/**
+ * A suggested slug as a dispatch name: kebab `[a-z0-9-]`, ≤ 28 chars (cut at a word boundary),
+ * starts with a letter, no `dispatch/`. Unusable → null.
+ */
+export function cleanSuggestion(s: string | null | undefined): string | null {
+  if (!s) return null;
+  let slug = slugify(s.trim().replace(/^(refs\/heads\/)?dispatch\//i, ""), 200);
+  if (slug.length > MAX_AI_SLUG) {
+    const cut = slug.slice(0, MAX_AI_SLUG + 1);
+    const at = cut.lastIndexOf("-");
+    // Whole words when there is a boundary; a single over-long word is cut short.
+    slug = (at > 0 ? cut.slice(0, at) : cut.slice(0, MAX_AI_SLUG)).replace(/-+$/, "");
+  }
+  return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug) ? slug : null;
+}
+
+/**
+ * Phase `naming`: the AI slug when the suggester gives a usable one, else the prompt's slug. Not
+ * yet unique: the caller dedupes it synchronously right after the await, so sends whose answers
+ * arrive together (identical prompts share one call) still see each other's names.
+ * A suggester that fails or throws counts as no answer.
+ */
+export async function nameDispatch(prompt: string, suggest?: BranchSuggester | null): Promise<{ slug: string; ai: boolean }> {
+  let ai: string | null = null;
+  if (suggest) {
+    try {
+      ai = cleanSuggestion(await suggest(prompt));
+    } catch {
+      ai = null;
+    }
+  }
+  return { slug: ai ?? baseSlug(prompt), ai: ai !== null };
+}
+
+/** Words a task needs before its name is fetched ahead of sending. */
+const PREFETCH_MIN_WORDS = 3;
+
+/** The exact text a send would name (the composer sends it trimmed), or null while it's too short to bother. */
+export function prefetchKey(draft: string): string | null {
+  const t = draft.trim();
+  return t.split(/\s+/).filter((w) => /[a-z0-9]/i.test(w)).length >= PREFETCH_MIN_WORDS ? t : null;
 }
 
 /** The newest `maxEntries` entries across all threads, prompts clipped to `maxPrompt` characters (persisted copy). */

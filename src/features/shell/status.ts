@@ -9,13 +9,6 @@ export const COLUMN_STATUS: Record<Column, Status> = {
   done: "done",
 };
 
-export const COLUMN_SHORT: Record<Column, string> = {
-  running: "Run",
-  needs: "You",
-  review: "Review",
-  done: "Done",
-};
-
 /** Connection phase → orb status: healthy is lime, in-flight is animated purple, auth needs you. */
 export const PHASE_STATUS: Record<ConnPhase, Status> = {
   idle: "idle",
@@ -50,11 +43,43 @@ export function phaseBusy(phase: ConnPhase | undefined): boolean {
   return phase === "connecting" || phase === "authenticating" || phase === "deploying" || phase === "starting" || phase === "reconnecting";
 }
 
-/** Short latency/phase text for pills: "14 ms" online, otherwise the phase label. */
+/**
+ * Hosts in view → one orb: the worst phase wins (sign-in/key > error > connecting > degraded > online).
+ * Degraded = some host offline/idle while another is online, so it is never green over a dead host.
+ */
+export function hostsHealth(phases: readonly ConnPhase[]): { orb: Status; degraded: boolean; online: number; total: number } {
+  const online = phases.filter((p) => p === "online").length;
+  const degraded = online > 0 && phases.some((p) => p === "offline" || p === "idle");
+  const orb: Status =
+    phases.includes("authRequired") || phases.includes("hostKey")
+      ? "needs-you"
+      : phases.includes("error")
+        ? "error"
+        : phases.some(phaseBusy)
+          ? "running"
+          : online > 0 && !degraded
+            ? "done"
+            : "idle";
+  return { orb, degraded, online, total: phases.length };
+}
+
+/** Two-word reasons for the stable connection error codes ("Error · unreachable"). */
+const ERROR_REASON: Record<string, string> = {
+  not_connected: "unreachable",
+  timeout: "timed out",
+  auth_required: "sign-in needed",
+  permission_denied: "login refused",
+  version_mismatch: "version mismatch",
+  herdr_error: "herdr not answering",
+  io_error: "I/O error",
+};
+
+/** Short latency/phase text for pills: "14 ms" online, "Error · unreachable", otherwise the phase label. */
 export function connSummary(status: ConnStatus | undefined): string {
   if (!status) return PHASE_LABEL.idle;
   if (status.phase === "online") return status.latencyMs !== undefined ? `${Math.round(status.latencyMs)} ms` : "Online";
-  return PHASE_LABEL[status.phase];
+  const reason = status.phase === "error" && status.error ? ERROR_REASON[status.error.code] : undefined;
+  return reason ? `${PHASE_LABEL.error} · ${reason}` : PHASE_LABEL[status.phase];
 }
 
 /** Breath speed for an agent orb from its liveness (cheap, state-derived; no pulse subscription). */

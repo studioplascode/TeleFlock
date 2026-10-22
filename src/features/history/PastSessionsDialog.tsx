@@ -5,6 +5,7 @@ import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useStat
 import { core, draftKey, navigate, useDraft, useHostIds, useHostState, useHosts, useUi } from "@/core";
 import type { PastSession, Started, StartTarget, Workspace } from "@/core/gen";
 import { Button, EmptyState, Input, Kbd, SegmentedControl, Select, Skeleton, Spinner, StatusOrb, cn, formatAge, spring, useIsMobile, useNow } from "@/design";
+import { ACTIONS } from "@/features/shell/vocab";
 import { describeError } from "../workspace/shared/errors";
 import { LaunchSuccess, WorkingPanel } from "../workspace/shared/LaunchProgress";
 import { basename, tildify } from "../workspace/shared/paths";
@@ -301,7 +302,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
       open={open}
       onOpenChange={(o) => !o && !busy && onClose()}
       title="Past sessions"
-      description="Resume any omp session on the host in a new pane"
+      description={ACTIONS.pastSessions.description}
       icon={<History />}
       width={760}
       maxHeight="94dvh"

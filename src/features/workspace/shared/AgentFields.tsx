@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import { useDraftState } from "@/core";
 import type { AgentSpec, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
 import { Field, Input, Select, type SelectOption, Switch, Textarea, cn, spring } from "@/design";
+import { AiMark } from "./ai";
+import { AGENT_NAME_MAX, uniqueAgentName } from "./paths";
 import { TemplatePicker } from "./templates";
 import { useHostQuery } from "./useHostQuery";
 
@@ -68,25 +70,24 @@ export function toAgentSpec(d: AgentDraft): AgentSpec {
   };
 }
 
-/** herdr agent names must be unique among live agents and shell-safe. */
+/** herdr agent names must be unique among live agents, shell-safe and at most 32 chars. */
 export function agentNameError(name: string, taken: readonly string[]): string | null {
   const n = name.trim();
   if (!n) return null;
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(n)) return "Letters, digits, . _ - only";
+  if (n.length > AGENT_NAME_MAX) return `At most ${AGENT_NAME_MAX} characters`;
   if (taken.includes(n)) return `An agent named “${n}” is already running`;
   return null;
 }
 
 /**
- * A derived (not typed) name that doesn't collide with a running agent: `docs` → `docs-2`. Without
- * this the dialog would silently refuse to launch with the auto name.
+ * The auto name of an untyped agent: the tiny model's suggestion when herdr accepts it (made unique),
+ * else `fallback` (today's derivation). `ai` says which one won.
  */
-export function uniqueAgentName(base: string, taken: readonly string[]): string {
-  if (!base || !taken.includes(base)) return base;
-  for (let i = 2; ; i++) {
-    const candidate = `${base}-${i}`;
-    if (!taken.includes(candidate)) return candidate;
-  }
+export function autoAgentName(suggestion: string | null, fallback: string, taken: readonly string[]): { name: string; ai: boolean } {
+  const s = suggestion?.trim();
+  if (s && !agentNameError(s, [])) return { name: uniqueAgentName(s, taken), ai: true };
+  return { name: fallback, ai: false };
 }
 
 export function useModelCatalog(hostId: string | undefined): ModelCatalog | undefined {
@@ -99,13 +100,15 @@ export interface AgentFieldsProps {
   onChange: (patch: Partial<AgentDraft>) => void;
   /** Placeholder for the name when not typed (derived from branch/folder). */
   derivedName?: string;
+  /** The tiny model's name for the typed prompt (placeholder `auto · ✨ <name>` while the name is untyped). */
+  suggestedName?: string | null;
   takenNames: readonly string[];
   /** Show the "start an agent" switch (worktree flow). */
   toggleable?: boolean;
   compact?: boolean;
 }
 
-export function AgentFields({ hostId, draft, onChange, derivedName, takenNames, toggleable, compact }: AgentFieldsProps) {
+export function AgentFields({ hostId, draft, onChange, derivedName, suggestedName, takenNames, toggleable, compact }: AgentFieldsProps) {
   const catalog = useModelCatalog(hostId);
   const defaultRole = catalog?.roles.find((r) => r.role === "default")?.model;
 
@@ -126,13 +129,25 @@ export function AgentFields({ hostId, draft, onChange, derivedName, takenNames, 
 
   const body = (
     <div className={cn("grid gap-3.5", compact ? "grid-cols-1" : "grid-cols-1 md:grid-cols-2")}>
-      <TemplatePicker draft={draft} onApply={onChange} className={compact ? undefined : "md:col-span-2"} />
-      <Field label="Agent name" hint={draft.nameTouched ? undefined : "auto"} error={nameError}>
+      <TemplatePicker hostId={hostId} draft={draft} onApply={onChange} className={compact ? undefined : "md:col-span-2"} />
+      <Field
+        label="Agent name"
+        hint={
+          draft.nameTouched ? undefined : suggestedName ? (
+            <span className="flex items-center gap-1">
+              auto <AiMark />
+            </span>
+          ) : (
+            "auto"
+          )
+        }
+        error={nameError}
+      >
         {(id) => (
           <Input
             id={id}
             value={draft.name}
-            placeholder={derivedName || "derived from the branch"}
+            placeholder={suggestedName ? `auto · ✨ ${suggestedName}` : derivedName || "derived from the branch"}
             invalid={!!nameError}
             onChange={(e) => onChange({ name: e.target.value, nameTouched: e.target.value !== "" })}
             spellCheck={false}

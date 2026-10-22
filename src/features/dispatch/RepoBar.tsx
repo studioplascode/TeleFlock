@@ -1,5 +1,5 @@
 import { Check, ChevronDown, FolderGit2, FolderSearch, GitBranch, Server } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useHosts } from "@/core";
 import type { BranchList } from "@/core/gen";
 import {
@@ -49,13 +49,18 @@ export function HostPicker({ hostId, hostIds, onChange, className }: { hostId: s
   );
 }
 
-/** Repo chip: recent repositories of the host, plus "Browse…" (folder browser in repo mode). */
+/**
+ * Repo chip: recent repositories of the host, plus "Browse…" (folder browser in repo mode).
+ * `onFocusAfterPick` runs once the menu / browser has closed after a pick (instead of focus
+ * returning to the chip, where a typed `n` would open the New worktree wizard).
+ */
 export function RepoPicker({
   hostId,
   repo,
   recents,
   home,
   onChange,
+  onFocusAfterPick,
   className,
 }: {
   hostId: string;
@@ -63,17 +68,13 @@ export function RepoPicker({
   recents: readonly RecentRepo[];
   home?: string;
   onChange(root: string): void;
+  onFocusAfterPick?(): void;
   className?: string;
 }) {
   const mobile = useIsMobile();
   const [browsing, setBrowsing] = useState(false);
-  const [pick, setPick] = useState<FolderPick | null>(null);
+  const picked = useRef(false);
   const current = recents.find((r) => r.root === repo);
-  const confirm = (p: FolderPick | null) => {
-    if (!p) return;
-    onChange(p.path);
-    setBrowsing(false);
-  };
   return (
     <>
       <DropdownMenu>
@@ -83,10 +84,26 @@ export function RepoPicker({
           {repo && !mobile && <span className="min-w-0 truncate font-mono text-2xs font-medium text-mute-2 max-lg:hidden">{tildify(repo, home)}</span>}
           <ChevronDown className="text-mute" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))] w-[min(380px,calc(100vw-24px))] overflow-y-auto">
+        <DropdownMenuContent
+          align="start"
+          className="max-h-[min(420px,var(--radix-dropdown-menu-content-available-height))] w-[min(380px,calc(100vw-24px))] overflow-y-auto"
+          onCloseAutoFocus={(e) => {
+            if (!picked.current) return;
+            picked.current = false;
+            e.preventDefault();
+            onFocusAfterPick?.();
+          }}
+        >
           {recents.length > 0 && <DropdownMenuLabel>Recent repositories</DropdownMenuLabel>}
           {recents.map((r) => (
-            <DropdownMenuItem key={r.root} icon={<FolderGit2 />} onSelect={() => onChange(r.root)}>
+            <DropdownMenuItem
+              key={r.root}
+              icon={<FolderGit2 />}
+              onSelect={() => {
+                picked.current = true;
+                onChange(r.root);
+              }}
+            >
               <span className="flex min-w-0 flex-1 flex-col">
                 <span className="truncate">{r.name}</span>
                 <span className="truncate font-mono text-2xs font-medium text-mute-2">{tildify(r.root, home)}</span>
@@ -95,41 +112,77 @@ export function RepoPicker({
             </DropdownMenuItem>
           ))}
           {recents.length > 0 && <DropdownMenuSeparator />}
-          <DropdownMenuItem
-            icon={<FolderSearch />}
-            onSelect={() => {
-              setPick(repo ? { path: repo } : null);
-              setBrowsing(true);
-            }}
-          >
+          <DropdownMenuItem icon={<FolderSearch />} onSelect={() => setBrowsing(true)}>
             Browse…
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <ResponsiveDialog
-        open={browsing}
-        onOpenChange={setBrowsing}
-        title="Pick a repository"
-        description="Every message you dispatch creates a new worktree of it."
-        icon={<FolderGit2 />}
-        width={640}
-        tall
-        footer={
-          <div className="flex w-full items-center justify-end gap-2">
-            {!mobile && (
-              <Button variant="ghost" onClick={() => setBrowsing(false)}>
-                Cancel
-              </Button>
-            )}
-            <Button variant="primary" disabled={!pick} onClick={() => confirm(pick)} className={mobile ? "flex-1" : undefined}>
-              {pick ? `Use ${pick.path.split(/[\\/]/).pop()}` : "Select a repository"}
-            </Button>
-          </div>
-        }
-      >
-        {browsing && <FolderBrowser hostId={hostId} mode="repo" value={pick?.path} initialPath={repo ?? undefined} autoFocus={!mobile} onSelect={setPick} onConfirm={confirm} />}
-      </ResponsiveDialog>
+      <RepoBrowser hostId={hostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={onChange} onFocusAfterPick={onFocusAfterPick} />
     </>
+  );
+}
+
+/** "Pick a repository": the folder browser in repo mode, in a dialog (sheet on phones). */
+export function RepoBrowser({
+  hostId,
+  repo,
+  open,
+  onOpenChange,
+  onPick,
+  onFocusAfterPick,
+}: {
+  hostId: string;
+  repo: string | null;
+  open: boolean;
+  onOpenChange(open: boolean): void;
+  onPick(root: string): void;
+  onFocusAfterPick?(): void;
+}) {
+  const mobile = useIsMobile();
+  const [pick, setPick] = useState<FolderPick | null>(null);
+  const picked = useRef(false);
+  // Each opening starts at the current repo.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setPick(repo ? { path: repo } : null);
+  }
+  const confirm = (p: FolderPick | null) => {
+    if (!p) return;
+    picked.current = true;
+    onPick(p.path);
+    onOpenChange(false);
+  };
+  return (
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Pick a repository"
+      description="Every message you dispatch creates a new worktree of it."
+      icon={<FolderGit2 />}
+      width={640}
+      tall
+      onCloseAutoFocus={(e) => {
+        if (!picked.current) return;
+        picked.current = false;
+        e.preventDefault();
+        onFocusAfterPick?.();
+      }}
+      footer={
+        <div className="flex w-full items-center justify-end gap-2">
+          {!mobile && (
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+          )}
+          <Button variant="primary" disabled={!pick} onClick={() => confirm(pick)} className={mobile ? "flex-1" : undefined}>
+            {pick ? `Use ${pick.path.split(/[\\/]/).pop()}` : "Select a repository"}
+          </Button>
+        </div>
+      }
+    >
+      {open && <FolderBrowser hostId={hostId} mode="repo" value={pick?.path} initialPath={repo ?? undefined} autoFocus={!mobile} onSelect={setPick} onConfirm={confirm} />}
+    </ResponsiveDialog>
   );
 }
 

@@ -4,6 +4,8 @@ import {
   ArchiveRestore,
   ArrowLeft,
   BarChart3,
+  Bell,
+  BellOff,
   Bot,
   CornerDownLeft,
   FolderGit2,
@@ -15,6 +17,7 @@ import {
   Keyboard,
   LayoutDashboard,
   Columns2,
+  MessageSquareReply,
   PanelLeft,
   Plug,
   PlugZap,
@@ -22,6 +25,7 @@ import {
   Server,
   Settings2,
   Sparkles,
+  Square,
   SquareTerminal,
   Zap,
 } from "lucide-react";
@@ -47,18 +51,20 @@ import {
   getAgentViews,
   getWorkspacesSnapshot,
   navigate,
-  type Route,
   useHosts,
   useRoute,
   useSettings,
   useUi,
 } from "@/core";
 import type { MotionPref, ThinkingLevel } from "@/core/gen";
+import { archiveWithUndo, openAnswerHud, setArchived, setMuted, stopAgent } from "@/features/board/agentActions";
 import { connect } from "@/features/hosts/ConnStatusCard";
+import { MOTION_COPY } from "@/features/settings/parts";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { toggleSplit } from "@/features/shell/keyboard";
 import { toggleSidebar } from "@/features/shell/sidebarState";
 import { COLUMN_STATUS, PHASE_STATUS } from "@/features/shell/status";
+import { ACTIONS, type ActionDef, VIEWS } from "@/features/shell/vocab";
 import { rankItem } from "./fuzzy";
 import { type PaletteCommand, useContributed, useRecents } from "./registry";
 import { hostCall, type PalettePage, sessionCommands } from "./sessionCommands";
@@ -105,51 +111,80 @@ function useEntries(): Entry[] {
     for (const c of sessionCommands(ctxAgent.hostId, ctxAgent)) {
       entries.push({ id: `session:${c.id}`, title: c.title, group: "This session", keywords: [...c.keywords, name], icon: c.icon, hint: c.hint, run: c.run, page: c.page });
     }
+    if (ctxAgent.column === "needs") {
+      entries.push({ id: "session:answer", title: `${ACTIONS.answer.label} ${name}`, group: "This session", keywords: ["answer", "question", "reply", "approve"], icon: <MessageSquareReply />, hint: ACTIONS.answer.description, run: () => openAnswerHud(ctxAgent.key) });
+    }
+    if (ctxAgent.column === "running") {
+      entries.push({ id: "session:stop", title: ACTIONS.stopTurn.label, group: "This session", keywords: ["stop", "interrupt", "cancel", "esc", name], icon: <Square />, hint: ACTIONS.stopTurn.description, run: () => stopAgent(ctxAgent.key) });
+    }
+    const muted = (settings.mutedAgents ?? []).includes(ctxAgent.key);
+    const muteDef = muted ? ACTIONS.unmute : ACTIONS.mute;
+    entries.push({ id: "session:mute", title: muteDef.label, group: "This session", keywords: ["mute", "unmute", "silence", "quiet", "notifications", name], icon: muted ? <Bell /> : <BellOff />, hint: muteDef.description, run: () => setMuted([ctxAgent.key], !muted) });
     entries.push(
       {
         id: "session:terminal",
-        title: `Open ${name}'s terminal`,
+        title: `${ACTIONS.terminal.label}: ${name}`,
         group: "This session",
         keywords: ["terminal", "pane", "tty"],
         icon: <SquareTerminal />,
-        shortcut: "T",
+        shortcut: ACTIONS.terminal.shortcut,
+        hint: ACTIONS.terminal.description,
         run: () => navigate({ name: "terminal", hostId: ctxAgent.hostId, agentId: ctxAgent.id }),
       },
-      {
-        id: "session:archive",
-        title: ctxAgent.archived ? `Unarchive ${name}` : `Archive ${name}`,
-        group: "This session",
-        keywords: ["archive", "done", "hide"],
-        icon: ctxAgent.archived ? <ArchiveRestore /> : <Archive />,
-        run: () =>
-          hostCall(
-            ctxAgent.archived ? "Unarchived" : "Archived",
-            core.host(ctxAgent.hostId).call("agent.archive", { agentId: ctxAgent.id, archived: !ctxAgent.archived }),
-          ),
-      },
+      ctxAgent.archived
+        ? {
+            id: "session:reopen",
+            title: `${ACTIONS.reopen.label} ${name}`,
+            group: "This session",
+            keywords: ["unarchive", "reopen", "restore"],
+            icon: <ArchiveRestore />,
+            hint: ACTIONS.reopen.description,
+            run: () => setArchived(ctxAgent.key, false),
+          }
+        : {
+            id: "session:mark-done",
+            title: `${ACTIONS.markDone.label}: ${name}`,
+            group: "This session",
+            keywords: ["archive", "done", "hide", "finish"],
+            icon: <Archive />,
+            hint: ACTIONS.markDone.description,
+            run: () => archiveWithUndo([ctxAgent.key]),
+          },
     );
   }
 
+  const action = (id: string, def: ActionDef, icon: ReactNode, keywords: string[], run: () => void | Promise<unknown>): Entry => ({
+    id,
+    title: def.label,
+    group: "Actions",
+    keywords,
+    icon,
+    shortcut: def.shortcut,
+    hint: def.description,
+    run,
+  });
   entries.push(
-    { id: "act:new-worktree", title: "New worktree…", group: "Actions", keywords: ["create", "branch", "git", "agent"], icon: <GitBranchPlus />, shortcut: "N", run: () => ui.openDialog({ kind: "newWorktree", hostId: defaultHost }) },
-    { id: "act:new-agent", title: "New agent…", group: "Actions", keywords: ["start", "omp", "spawn"], icon: <Bot />, run: () => ui.openDialog({ kind: "newAgent", hostId: defaultHost }) },
-    { id: "act:fan-out", title: "Fan out…", group: "Actions", keywords: ["parallel", "compare", "many agents", "models", "worktrees"], icon: <GitFork />, run: () => ui.openDialog({ kind: "fanOut", hostId: defaultHost }) },
-    { id: "act:answer-next", title: "Answer next", group: "Actions", keywords: ["needs you", "reply", "unblock", "inbox"], icon: <Zap />, shortcut: "Ctrl J", run: () => ui.setAnswerNext(true) },
-    { id: "act:past", title: "Past sessions…", group: "Actions", keywords: ["history", "resume"], icon: <History />, run: () => ui.openDialog({ kind: "pastSessions", hostId: defaultHost }) },
-    { id: "act:open-folder", title: "Open folder as workspace…", group: "Actions", keywords: ["folder", "workspace", "directory", "browse"], icon: <FolderOpen />, run: () => openNewAgent({ hostId: defaultHost, openFolder: true }) },
-    { id: "act:split", title: ui.split ? "Close split view" : "Split view", group: "Actions", keywords: ["side by side", "terminal", "pane"], icon: <Columns2 />, shortcut: "Ctrl \\", run: () => toggleSplit(ui, route) },
+    action("act:new-task", ACTIONS.newTask, <Send />, ["task", "start", "branch", "dispatch", "send", "worktree", "quick"], () => navigate({ name: "dispatch" })),
+    action("act:new-worktree", ACTIONS.newWorktree, <GitBranchPlus />, ["task", "start", "branch", "create", "git", "agent"], () => ui.openDialog({ kind: "newWorktree", hostId: defaultHost })),
+    action("act:new-agent", ACTIONS.newAgent, <Bot />, ["start", "omp", "spawn"], () => ui.openDialog({ kind: "newAgent", hostId: defaultHost })),
+    action("act:fan-out", ACTIONS.fanOut, <GitFork />, ["parallel", "compare", "many agents", "models", "worktrees"], () => ui.openDialog({ kind: "fanOut", hostId: defaultHost })),
+    action("act:answer-next", ACTIONS.answerNext, <Zap />, ["answer", "question", "needs you", "reply", "unblock", "inbox"], () => ui.setAnswerNext(true)),
+    action("act:past", ACTIONS.pastSessions, <History />, ["history", "resume"], () => ui.openDialog({ kind: "pastSessions", hostId: defaultHost })),
+    action("act:open-folder", ACTIONS.openFolder, <FolderOpen />, ["folder", "workspace", "directory", "browse"], () => openNewAgent({ hostId: defaultHost, openFolder: true })),
+    { id: "act:split", title: ui.split ? "Close split view" : "Split view", group: "Actions", keywords: ["side by side", "terminal", "pane"], icon: <Columns2 />, shortcut: ACTIONS.terminalBeside.shortcut, hint: ACTIONS.terminalBeside.description, run: () => toggleSplit(ui, route) },
     { id: "act:sidebar", title: "Toggle sidebar", group: "Actions", keywords: ["panel", "show", "hide"], icon: <PanelLeft />, shortcut: "Ctrl B", run: toggleSidebar },
-    { id: "act:add-host", title: "Add a host…", group: "Actions", keywords: ["connect", "tailscale", "ssh", "wsl", "local"], icon: <Server />, run: () => ui.openDialog({ kind: "hostEditor" }) },
-    { id: "act:shortcuts", title: "Keyboard shortcuts", group: "Actions", keywords: ["keys", "help", "?"], icon: <Keyboard />, shortcut: "?", run: () => ui.openDialog({ kind: "shortcuts" }) },
+    { id: "act:add-host", title: "Add a host…", group: "Actions", keywords: ["connect", "tailscale", "ssh", "wsl", "local"], icon: <Server />, hint: "Connect a machine over Tailscale SSH, locally or in WSL", run: () => ui.openDialog({ kind: "hostEditor" }) },
+    { id: "act:shortcuts", title: "Keyboard shortcuts", group: "Actions", keywords: ["keys", "help", "?", "terms", "glossary"], icon: <Keyboard />, shortcut: "?", hint: "Every key, and what TeleFlock's words mean", run: () => ui.openDialog({ kind: "shortcuts" }) },
   );
-  for (const m of ["full", "reduced", "system"] as const satisfies readonly MotionPref[]) {
+  for (const m of ["system", "full", "reduced"] as const satisfies readonly MotionPref[]) {
     if (m === settings.motion) continue;
     entries.push({
       id: `act:motion-${m}`,
-      title: m === "full" ? "Motion: full animation" : m === "reduced" ? "Motion: reduce animation" : "Motion: follow the system",
+      title: `Motion: ${MOTION_COPY[m].label}`,
       group: "Actions",
-      keywords: ["animation", "reduced motion", "accessibility", "settings"],
+      keywords: ["animation", "reduced motion", "accessibility", "settings", "calm", "lively"],
       icon: <Sparkles />,
+      hint: MOTION_COPY[m].description,
       run: () => {
         setMotion(m);
         return settings.update({ motion: m });
@@ -157,16 +192,19 @@ function useEntries(): Entry[] {
     });
   }
 
-  const views: { title: string; route: Route; icon: ReactNode; keys: string[]; shortcut?: string }[] = [
-    { title: "Board", route: { name: "board" }, icon: <LayoutDashboard />, keys: ["home", "kanban", "flock"], shortcut: "Ctrl 1" },
-    { title: "Dispatch", route: { name: "dispatch" }, icon: <Send />, keys: ["send", "fire", "tasks", "many agents", "worktree", "quick"], shortcut: "D" },
-    { title: "Inbox", route: { name: "inbox" }, icon: <Inbox />, keys: ["needs you", "questions"], shortcut: "Ctrl 2" },
-    { title: "Activity", route: { name: "activity" }, icon: <Activity />, keys: ["timeline", "feed", "history"], shortcut: "Ctrl 3" },
-    { title: "Usage", route: { name: "usage" }, icon: <BarChart3 />, keys: ["cost", "tokens", "spend"], shortcut: "Ctrl 4" },
-    { title: "Hosts", route: { name: "hosts" }, icon: <Server />, keys: ["machines", "connections"], shortcut: "Ctrl 5" },
-    { title: "Settings", route: { name: "settings" }, icon: <Settings2 />, keys: ["preferences", "options"], shortcut: "Ctrl 6" },
+  const views: { id: keyof typeof VIEWS; icon: ReactNode; keys: string[] }[] = [
+    { id: "board", icon: <LayoutDashboard />, keys: ["home", "kanban", "flock", "lanes"] },
+    { id: "dispatch", icon: <Send />, keys: ["send", "fire", "tasks", "many agents", "worktree", "quick"] },
+    { id: "inbox", icon: <Inbox />, keys: ["needs you", "questions", "updates", "notifications"] },
+    { id: "activity", icon: <Activity />, keys: ["timeline", "feed", "history"] },
+    { id: "usage", icon: <BarChart3 />, keys: ["cost", "tokens", "spend", "limits", "subscription"] },
+    { id: "hosts", icon: <Server />, keys: ["machines", "connections"] },
+    { id: "settings", icon: <Settings2 />, keys: ["preferences", "options"] },
   ];
-  for (const v of views) entries.push({ id: `view:${v.route.name}`, title: v.title, group: "Views", keywords: v.keys, icon: v.icon, shortcut: v.shortcut, run: () => navigate(v.route) });
+  for (const v of views) {
+    const def = VIEWS[v.id];
+    entries.push({ id: `view:${v.id}`, title: def.label, group: "Views", keywords: v.keys, icon: v.icon, shortcut: def.shortcut, hint: def.description, run: () => navigate({ name: v.id }) });
+  }
   if (defaultHost) {
     entries.push({ id: "view:terminal", title: "Terminal", group: "Views", keywords: ["shell", "tty", "herdr"], icon: <SquareTerminal />, run: () => navigate({ name: "terminal", hostId: defaultHost }) });
   }

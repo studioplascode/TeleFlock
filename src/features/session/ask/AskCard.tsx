@@ -1,10 +1,14 @@
-import { Check, MessageCircle, PenLine, Send, SquareTerminal, X } from "lucide-react";
+import { Check, MessageCircle, PenLine, Send, SquareTerminal } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { answerDraftKey, drafts, parseAgentKey, useAgent, useDraft } from "@/core";
-import type { Answer, NeedsOption, UiRequest } from "@/core/gen";
-import { cn, Elapsed, Spinner, spring } from "@/design";
+import type { Answer, NeedsKind, NeedsOption, UiRequest } from "@/core/gen";
+import { cn, Elapsed, Spinner } from "@/design";
+import { OptionTile, SkipButton, isTyping, optionFrame } from "@/features/inbox/AnswerParts";
+import { CONFIRM_OPTIONS, optionAnswer, otherAnswer } from "@/features/inbox/answers";
+import { askText } from "@/features/inbox/askText";
 import { haptic } from "@/features/shell/haptics";
+import { NEEDS_WORD } from "@/features/shell/vocab";
 import { hostCall, usePending } from "../api";
 import { Markdown } from "../markdown/Markdown";
 
@@ -16,18 +20,6 @@ export interface AskCardProps {
   /** Listen for 1–9 / Enter globally (only the focused session's card should). */
   hotkeys?: boolean;
   onAnswered?: () => void;
-}
-
-const KIND_LABEL: Record<string, string> = {
-  ask: "omp asks · blocking",
-  approval: "Approval needed",
-  planReview: "Review plan",
-  confirm: "Confirm",
-  input: "omp needs input",
-};
-
-function isEditable(t: EventTarget | null): boolean {
-  return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
 }
 
 /**
@@ -46,9 +38,11 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   const [otherText, setOtherText] = useDraft(otherKey);
   const [otherOpen, setOtherOpen] = useState(false);
   const other = otherOpen || otherText !== "" ? otherText : null;
+  // On a multi-select a typed answer replaces the ticks: the host takes text only without choices.
   const setOther = (v: string | null) => {
     setOtherOpen(v != null);
     setOtherText(v ?? "");
+    if (v != null) setPicked([]);
   };
   const [text, setText] = useDraft(textKey, request.initial ?? "");
   const [sent, setSent] = useState<string | null>(null);
@@ -57,14 +51,8 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   const otherRef = useRef<HTMLInputElement>(null);
   const multi = request.kind === "multiSelect";
   const editor = request.kind === "editor" || request.kind === "input";
-  const options: NeedsOption[] =
-    request.options.length > 0 || editor
-      ? request.options
-      : [
-          { id: "__confirm", label: "Confirm", recommended: true, tone: "primary" },
-          { id: "__cancel", label: "Cancel", recommended: false, tone: "danger" },
-        ];
-  const kindKey = request.kind === "planReview" ? "planReview" : (needs?.kind ?? (request.kind === "confirm" ? "confirm" : editor ? "input" : "ask"));
+  const options: readonly NeedsOption[] = request.options.length > 0 || editor ? request.options : CONFIRM_OPTIONS;
+  const kindKey: NeedsKind = request.kind === "planReview" ? "planReview" : (needs?.kind ?? (request.kind === "confirm" ? "confirm" : editor ? "input" : "ask"));
 
   const answer = async (a: Partial<Answer>, label: string) => {
     if (busy || sent) return;
@@ -80,20 +68,19 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   };
 
   const choose = (o: NeedsOption) => {
-    if (o.id === "__confirm") return answer({}, o.label);
-    if (o.id === "__cancel") return answer({ cancel: true }, o.label);
     if (multi) {
+      if (other != null) return;
       haptic("select");
       setPicked((p) => (p.includes(o.id) ? p.filter((x) => x !== o.id) : [...p, o.id]));
       return;
     }
     setChoosing(o.id);
-    return answer({ choices: [o.id] }, o.label);
+    return answer(optionAnswer(o.id), o.label);
   };
 
   const submit = () => {
     if (editor) return answer({ text }, "Submitted");
-    if (other != null && other.trim()) return answer({ choices: multi ? picked : [], text: other.trim() }, other.trim());
+    if (other != null && other.trim()) return answer(otherAnswer(other), other.trim());
     if (multi && picked.length > 0) return answer({ choices: picked }, `${picked.length} selected`);
   };
 
@@ -105,7 +92,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
     const onKey = (e: KeyboardEvent) => {
       // Digits pass through from an empty composer so the card answers without leaving the keyboard.
       const fromEmptyComposer = e.target instanceof HTMLTextAreaElement && e.target.hasAttribute("data-composer") && e.target.value === "";
-      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || (isEditable(e.target) && !fromEmptyComposer)) return;
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || (isTyping(e.target) && !fromEmptyComposer)) return;
       if (fromEmptyComposer && e.key === "Enter") {
         e.preventDefault();
         if (canSubmit && !editor) void submit();
@@ -132,19 +119,8 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
 
   const n = options.length + (request.allowOther ? 1 : 0);
   // omp often titles dialogs generically ("Question", "Continue?") and puts the real question in
-  // the message: promote it to the headline. Approval messages repeat the command and the title.
-  const genericTitle = /^(question|ask|input|confirm|continue\??)$/i.test(request.title.trim());
-  const message = request.message
-    ?.split("\n")
-    .filter((l) => {
-      const t = l.trim();
-      return !(needs?.command && t === needs.command.trim()) && !(kindKey === "approval" && /^allow tool:/i.test(t));
-    })
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  const headline = genericTitle && message ? message : request.title;
-  const body = genericTitle && message ? null : message;
+  // the message; an approval's command shows once, in its code block.
+  const { headline, body } = askText({ title: request.title, message: request.message, command: needs?.command, approval: kindKey === "approval" });
   return (
     <motion.section
       layout
@@ -166,7 +142,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
             <span className="tf-loop absolute inset-0 animate-ping-soft rounded-full bg-white" />
             <span className="relative size-2 rounded-full bg-white" />
           </span>
-          {KIND_LABEL[kindKey] ?? KIND_LABEL.ask}
+          {NEEDS_WORD[kindKey]}
           {needs?.since != null && (
             <span className="font-semibold opacity-80">
               · <Elapsed since={needs.since} />
@@ -235,78 +211,40 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       )}
 
       {options.length > 0 && (
-        <div className={cn("relative mt-2 grid", compact ? "grid-cols-1 gap-1.5" : "grid-cols-1 gap-2 sm:grid-cols-2")} role={multi ? "group" : "radiogroup"} aria-label="Options">
-          {options.map((o, i) => {
-            const on = picked.includes(o.id) || sent === o.label;
-            return (
-              <motion.button
-                key={o.id}
-                type="button"
-                role={multi ? "checkbox" : "radio"}
-                aria-checked={on}
-                disabled={busy || (!!sent && sent !== o.label)}
-                onClick={() => void choose(o)}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0, transition: { ...spring.smooth, delay: 0.03 * i } }}
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-                className={cn(
-                  "focus-ring group/opt flex items-start gap-2.5 rounded-lg px-3 py-2.5 text-left transition-colors duration-200",
-                  on
-                    ? "bg-white text-[#2a0b16] shadow-[0_12px_26px_-8px_rgb(80_0_30/0.55)]"
-                    : o.tone === "danger"
-                      ? "bg-[rgb(45_0_22/0.34)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.28)] hover:bg-[rgb(45_0_22/0.48)]"
-                      : "bg-[rgb(45_0_22/0.22)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.2)] hover:bg-[rgb(45_0_22/0.34)]",
-                  busy && !on && "opacity-70",
-                )}
-              >
-                <span
-                  className={cn(
-                    "mt-px grid size-[18px] shrink-0 place-items-center transition-shadow",
-                    multi ? "rounded-[6px]" : "rounded-full",
-                    on ? "bg-sun text-white" : "shadow-[inset_0_0_0_2px_rgb(255_255_255/0.7)]",
-                  )}
-                >
-                  {on && <Check className="size-3" strokeWidth={3.5} />}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13.5px] font-extrabold">
-                    {o.label}
-                    {o.recommended && (
-                      <span className={cn("rounded-full px-[7px] py-[2px] text-[9.5px] tracking-[0.08em] uppercase", on ? "bg-sun text-white" : "bg-white/25")}>Recommended</span>
-                    )}
-                  </span>
-                  {o.description && <span className={cn("mt-0.5 block text-[11.5px] leading-[1.35]", on ? "opacity-70" : "opacity-[0.88]")}>{o.description}</span>}
-                </span>
-                {busy && choosing === o.id ? (
-                  <Spinner size={13} label="Sending" className="shrink-0" />
-                ) : (
-                  !compact && i < 9 && <kbd className={cn("shrink-0 rounded-xs px-1.5 font-mono text-[10px] font-bold", on ? "bg-black/10" : "bg-white/15")}>{i + 1}</kbd>
-                )}
-              </motion.button>
-            );
-          })}
-          {request.allowOther && (
-            <div
-              className={cn(
-                "flex items-start gap-2.5 rounded-lg px-3 py-2.5 text-left transition-colors",
-                other != null ? "bg-white text-[#2a0b16]" : "bg-[rgb(45_0_22/0.22)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.2)] hover:bg-[rgb(45_0_22/0.34)]",
-              )}
-            >
-              <PenLine className="mt-0.5 size-4 shrink-0" />
-              {other == null ? (
-                <button
-                  type="button"
-                  className="focus-ring flex-1 rounded-xs text-left text-[13.5px] font-extrabold"
-                  onClick={() => {
-                    setOther("");
-                    window.setTimeout(() => otherRef.current?.focus(), 0);
-                  }}
-                >
-                  Other…
-                  <span className="mt-0.5 block text-[11.5px] font-normal opacity-85">Type your own answer</span>
-                </button>
-              ) : (
+        <div className={cn("relative mt-2 grid", compact ? "grid-cols-1 gap-1.5" : "grid-cols-1 gap-2 sm:grid-cols-2")} role="group" aria-label="Options">
+          {options.map((o, i) => (
+            <OptionTile
+              key={o.id}
+              skin="sun"
+              option={o}
+              number={!compact && i < 9 ? i + 1 : undefined}
+              multi={multi}
+              on={picked.includes(o.id) || sent === o.label}
+              pending={busy && choosing === o.id}
+              describe="full"
+              disabled={busy || (!!sent && sent !== o.label) || (multi && other != null)}
+              enter={i}
+              onClick={() => void choose(o)}
+            />
+          ))}
+          {request.allowOther &&
+            (other == null ? (
+              <OptionTile
+                skin="sun"
+                option={{ label: "Other…", description: "Type your own answer" }}
+                number={!compact && options.length < 9 ? options.length + 1 : undefined}
+                icon={compact ? <PenLine /> : undefined}
+                describe="full"
+                disabled={busy || !!sent}
+                enter={options.length}
+                onClick={() => {
+                  setOther("");
+                  window.setTimeout(() => otherRef.current?.focus(), 0);
+                }}
+              />
+            ) : (
+              <div className={optionFrame("sun", { on: true })}>
+                <PenLine className="mt-0.5 size-4 shrink-0" />
                 <input
                   ref={otherRef}
                   value={other}
@@ -321,13 +259,11 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
                     }
                   }}
                   aria-label="Other answer"
-                  placeholder="Type your own answer"
+                  placeholder={multi ? "Your own answer (replaces the ticks)" : "Type your own answer"}
                   className="w-full border-0 border-b border-dashed border-[#8a5a6a] bg-transparent py-0.5 text-[13px] font-semibold outline-none placeholder:text-[#8a5a6a]"
                 />
-              )}
-              {!compact && other == null && options.length < 9 && <kbd className="shrink-0 rounded-xs bg-white/15 px-1.5 font-mono text-[10px] font-bold">{options.length + 1}</kbd>}
-            </div>
-          )}
+              </div>
+            ))}
         </div>
       )}
 
@@ -357,16 +293,8 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
               Chat about this
             </button>
           )}
-          {request.options.length > 0 || editor ? (
-            <button
-              type="button"
-              disabled={busy || !!sent}
-              onClick={() => void answer({ cancel: true }, "Dismissed")}
-              className="pressable focus-ring ml-auto flex items-center gap-1.5 rounded-full px-2.5 py-1.5 opacity-80 hover:bg-black/20 hover:opacity-100"
-            >
-              <X className="size-3.5" />
-              Dismiss
-            </button>
+          {request.kind !== "planReview" && (request.options.length > 0 || editor) ? (
+            <SkipButton sunset className="ml-auto" disabled={busy || !!sent} onClick={() => void answer({ cancel: true }, "Skipped")} />
           ) : null}
           {sent && (
             <motion.span initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} className="flex items-center gap-1 rounded-full bg-white/25 px-2.5 py-1">

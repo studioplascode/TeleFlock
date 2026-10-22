@@ -144,8 +144,11 @@ function AccountTile({ row, hostNames, now }: { row: AccountRow; hostNames: Reco
   );
 }
 
-/** "Subscriptions & limits": every connected account's quota windows, as omp reports them, with a pace projection. */
-export function LimitsSection({ hostIds }: { hostIds: string[] }) {
+/**
+ * "Subscriptions & limits": every connected account's quota windows, as omp reports them, with a pace
+ * projection. Sits beside Today on Usage, so its tiles use one column there and two on wide pages.
+ */
+export function LimitsSection({ hostIds, className }: { hostIds: string[]; className?: string }) {
   const byHost = useAccountLimits(hostIds);
   const profiles = useHosts((s) => s.profiles);
   const hostNames = Object.fromEntries(profiles.filter((p) => hostIds.includes(p.id)).map((p) => [p.id, p.name]));
@@ -162,8 +165,10 @@ export function LimitsSection({ hostIds }: { hostIds: string[] }) {
     void Promise.allSettled(hostIds.map((id) => refreshLimits(id))).finally(() => setSpinning(false));
   };
 
+  const grid = cn("grid gap-3", mobile ? "grid-cols-1 gap-2.5" : "grid-cols-1 @3xl:grid-cols-2");
+
   return (
-    <section aria-label="Subscriptions and limits" className="flex flex-col gap-3">
+    <section aria-label="Subscriptions and limits" className={cn("flex min-w-0 flex-col gap-3", className)}>
       <div className="flex items-end gap-3">
         <div className="min-w-0">
           <div className="kicker flex items-center gap-1.5">
@@ -187,7 +192,7 @@ export function LimitsSection({ hostIds }: { hostIds: string[] }) {
         </div>
       ))}
       {loading ? (
-        <div className={cn("grid gap-3", mobile ? "grid-cols-1" : "grid-cols-2 @3xl:grid-cols-3")}>
+        <div className={grid}>
           <Skeleton className="min-h-56 rounded-tile" />
           <Skeleton className="min-h-56 rounded-tile" />
         </div>
@@ -199,7 +204,7 @@ export function LimitsSection({ hostIds }: { hostIds: string[] }) {
           />
         )
       ) : (
-        <div className={cn("grid gap-3", mobile ? "grid-cols-1 gap-2.5" : "grid-cols-2 @3xl:grid-cols-3")}>
+        <div className={grid}>
           {rows.map((r) => (
             <AccountTile key={r.account.key} row={r} hostNames={hostNames} now={now} />
           ))}

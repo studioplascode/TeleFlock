@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Eraser, FolderGit2, MoreHorizontal, Send, Server } from "lucide-react";
+import { Eraser, FolderGit2, FolderSearch, MoreHorizontal, Send, Server } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { draftKey, navigate, useHostIds, useHostState, useHosts, useSettings } from "@/core";
+import { draftKey, navigate, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import {
   Button,
   DropdownMenu,
@@ -15,13 +15,23 @@ import {
   spring,
   useIsMobile,
 } from "@/design";
+import { ACTIONS } from "@/features/shell/vocab";
 import { confirmAction } from "@/features/workspace/shared/overlays";
 import { tildify } from "@/features/workspace/shared/paths";
 import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
-import { BasePicker, HostPicker, RepoPicker } from "./RepoBar";
-import { type DispatchEntry, type DispatchOptions, dispatchTask, isInFlight, onDispatchSettled, retryDispatch, threadKey, useDispatch } from "./store";
+import { BasePicker, HostPicker, RepoBrowser, RepoPicker } from "./RepoBar";
+import {
+  type DispatchEntry,
+  type DispatchOptions,
+  dispatchTask,
+  isInFlight,
+  onDispatchSettled,
+  retryDispatch,
+  threadKey,
+  useDispatch,
+} from "./store";
 import { recentRepos, resolveAgent } from "./thread";
 
 const EMPTY: DispatchEntry[] = [];
@@ -123,11 +133,25 @@ export function DispatchView() {
     [hostId, repo, home, mobile, online, retry, dismiss],
   );
 
+  // After a repo pick the task box gets focus (not the chip or button that picked it, where a
+  // typed `n` would open the New worktree wizard).
+  const focusComposer = useCallback(() => composer.current?.focus(), []);
+  const focusAfterPick = useRef(false);
   const pickRepo = (root: string) => {
     if (!hostId) return;
+    focusAfterPick.current = true;
     select(hostId, root);
-    requestAnimationFrame(() => composer.current?.focus());
   };
+  useEffect(() => {
+    if (!repo || !focusAfterPick.current) return;
+    focusAfterPick.current = false;
+    requestAnimationFrame(focusComposer);
+  }, [repo, focusComposer]);
+  const refocusAfterPick = useCallback(() => {
+    focusAfterPick.current = false;
+    focusComposer();
+  }, [focusComposer]);
+  const [browsing, setBrowsing] = useState(false);
 
   const counts = useMemo(() => {
     const c = { running: 0, needs: 0, review: 0 };
@@ -145,7 +169,15 @@ export function DispatchView() {
   const pickers = hostId && (
     <>
       {hostIds.length > 1 && <HostPicker hostId={hostId} hostIds={hostIds} onChange={(id) => select(id)} className={mobile ? "max-w-[26%]" : undefined} />}
-      <RepoPicker hostId={hostId} repo={repo} recents={recents} home={home} onChange={pickRepo} className={mobile ? "min-w-0 flex-1" : "max-w-[min(440px,50%)]"} />
+      <RepoPicker
+        hostId={hostId}
+        repo={repo}
+        recents={recents}
+        home={home}
+        onChange={pickRepo}
+        onFocusAfterPick={refocusAfterPick}
+        className={mobile ? "min-w-0 flex-1" : "max-w-[min(440px,50%)]"}
+      />
       {repo && <BasePicker value={base} branches={branches.data} onChange={(b) => key && useDispatch.getState().setBase(key, b)} className={mobile ? "max-w-[32%]" : undefined} />}
     </>
   );
@@ -199,15 +231,17 @@ export function DispatchView() {
       title="Fire tasks at a repository"
       description="Pick a repository. Every message you send here gets a fresh worktree with its own omp agent — send as many as you like, they run side by side."
       action={
-        recents.length > 0 ? (
-          <div className="flex max-w-md flex-wrap justify-center gap-2">
-            {recents.slice(0, 4).map((r) => (
-              <Button key={r.root} size="sm" icon={<FolderGit2 />} onClick={() => pickRepo(r.root)}>
-                {r.name}
-              </Button>
-            ))}
-          </div>
-        ) : undefined
+        <div className="flex max-w-md flex-wrap justify-center gap-2">
+          {recents.slice(0, 4).map((r) => (
+            <Button key={r.root} size="sm" icon={<FolderGit2 />} onClick={() => pickRepo(r.root)}>
+              {r.name}
+            </Button>
+          ))}
+          <Button size="sm" variant={recents.length > 0 ? "ghost" : "primary"} icon={<FolderSearch />} onClick={() => setBrowsing(true)}>
+            {recents.length > 0 ? "Browse…" : "Browse for a repository…"}
+          </Button>
+          <RepoBrowser hostId={hostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={pickRepo} onFocusAfterPick={refocusAfterPick} />
+        </div>
       }
     />
   ) : (
@@ -218,6 +252,7 @@ export function DispatchView() {
     <DispatchComposer
       ref={composer}
       hostId={hostId}
+      repo={repo}
       draftKey={draftKey("dispatch.task", hostId ?? "", repo ?? "")}
       options={options}
       onOptionsChange={useDispatch.getState().setOptions}
@@ -228,6 +263,26 @@ export function DispatchView() {
     />
   );
 
+  // The other launchers, for when Dispatch's one-message flow isn't what's needed.
+  const link = "font-bold text-accent-hi rounded-[3px] hover:underline focus-ring";
+  const alternatives = hostId && (
+    <p className={cn("truncate px-2 text-[11px] font-semibold text-mute-2", mobile ? "mt-1" : "mt-1.5")}>
+      Need a specific branch or model?{" "}
+      <button type="button" className={link} title={ACTIONS.newWorktree.description} onClick={() => useUi.getState().openDialog({ kind: "newWorktree", hostId, cwd: repo ?? undefined })}>
+        {ACTIONS.newWorktree.label}
+      </button>
+      {" · "}Several attempts?{" "}
+      <button
+        type="button"
+        className={link}
+        title={ACTIONS.fanOut.description}
+        onClick={() => useUi.getState().openDialog({ kind: "fanOut", hostId, cwd: repo ?? undefined, prompt: composer.current?.text().trim() || undefined })}
+      >
+        {ACTIONS.fanOut.label}
+      </button>
+    </p>
+  );
+
   if (mobile) {
     return (
       <div className="flex h-full min-h-0 flex-col">
@@ -236,7 +291,10 @@ export function DispatchView() {
           <span className="shrink-0">{menu}</span>
         </header>
         {thread}
-        <div className="shrink-0 px-2 pt-1 pb-2">{composerEl}</div>
+        <div className="shrink-0 px-2 pt-1 pb-2">
+          {composerEl}
+          {entries.length === 0 && alternatives}
+        </div>
       </div>
     );
   }
@@ -244,11 +302,16 @@ export function DispatchView() {
   return (
     <div className="relative flex h-full min-h-0 flex-col items-center gap-3 p-4 pt-3">
       <header className="flex w-full max-w-[920px] min-w-0 flex-wrap items-center gap-2">
-        <span className="mr-1 flex shrink-0 items-center gap-2">
-          <span className="grid size-8 place-items-center rounded-md bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]">
+        <span className="mr-1 flex min-w-0 shrink-0 items-center gap-2">
+          <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]">
             <Send className="size-4" />
           </span>
-          <h1 className="font-display text-lg font-bold tracking-[-0.01em] text-ink">Dispatch</h1>
+          <span className="flex min-w-0 flex-col">
+            <h1 className="font-display text-lg leading-tight font-bold tracking-[-0.01em] text-ink">Dispatch</h1>
+            <p className="max-w-[340px] truncate text-[11px] font-semibold text-mute-2" title={ACTIONS.newTask.description}>
+              {ACTIONS.newTask.description}
+            </p>
+          </span>
         </span>
         {pickers}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
@@ -283,6 +346,7 @@ export function DispatchView() {
           </p>
         )}
         {composerEl}
+        {alternatives}
       </div>
     </div>
   );

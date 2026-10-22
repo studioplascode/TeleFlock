@@ -63,6 +63,8 @@ import { TabActions } from "./TabActions";
 import { type TerminalHandle, TerminalPane } from "./TerminalPane";
 import { clampFontSize, DEFAULT_FONT_SIZE } from "./theme";
 import { useLocalhostUrls } from "./useLocalhostUrls";
+import { type ShellRequest, terminalRouteKey, useLastTerminal, useShellRequest } from "./lastTerminal";
+import { TerminalChooser } from "./TerminalChooser";
 
 export interface TerminalViewProps {
   hostId: string;
@@ -117,8 +119,19 @@ function urlLabel(url: string, port: number): string {
   return `:${port}${path === "/" ? "" : path}`;
 }
 
-/** Full terminal screen: pane tabs, send-keys, mode, takeover, previews; desktop + mobile layouts. */
-export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
+/**
+ * Full terminal screen: pane tabs, send-keys, mode, takeover, previews; desktop + mobile layouts.
+ * On phones the bare route (no pane or agent) is the Terminal tab's "Attach to…" chooser, or the
+ * new shell picked there (`?shell=<nonce>`, see `openNewShell`).
+ */
+export function TerminalView(props: TerminalViewProps) {
+  const isMobile = useIsMobile();
+  const shell = useShellRequest(props.hostId);
+  if (isMobile && !props.paneId && !props.agentId) return shell ? <TerminalScreen {...props} shell={shell} /> : <TerminalChooser />;
+  return <TerminalScreen {...props} />;
+}
+
+function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & { shell?: ShellRequest }) {
   const isMobile = useIsMobile();
   const workspaces = useWorkspaces(hostId);
   const agent = useAgent(agentKey(hostId, agentId ?? ""));
@@ -127,7 +140,7 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
   const fontSize = useSettings((s) => s.terminalFontSize);
 
   // Selection follows the route props; local switches (tabs, new shell) override until they change.
-  const propsKey = `${hostId}|${paneId ?? ""}|${agentId ?? ""}`;
+  const propsKey = `${hostId}|${paneId ?? ""}|${agentId ?? ""}|${shell?.nonce ?? ""}`;
   const [sel, setSel] = useState<{ key: string; sel: Selection | null }>({ key: "", sel: null });
   const [wsPick, setWsPick] = useState<{ key: string; id: string } | null>(null);
   const initial: Selection | null = paneId
@@ -136,7 +149,9 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
       ? agent?.paneId
         ? { kind: "pane", paneId: agent.paneId }
         : { kind: "agent", agentId }
-      : null;
+      : shell
+        ? { kind: "shell", workspaceId: shell.workspaceId, cwd: shell.cwd, split: "tab", nonce: shell.nonce }
+        : null;
   const selection = sel.key === propsKey ? sel.sel : initial;
   const select = useCallback((s: Selection) => setSel({ key: propsKey, sel: s }), [propsKey]);
 
@@ -266,7 +281,17 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
   const sessionAgentId = currentEntry?.pane.agentId ?? agentId;
   const paneAgent = useAgent(agentKey(hostId, currentEntry?.pane.agentId ?? ""));
   const paneLabel =
-    paneAgent?.name ?? (currentEntry ? entryLabel(currentEntry) : effective?.kind === "shell" ? "New shell" : (agent?.name ?? highlighted ?? "Terminal"));
+    paneAgent?.name ??
+    (currentEntry ? entryLabel(currentEntry) : effective?.kind === "shell" ? "New shell" : (agent?.name ?? agentId ?? highlighted ?? "Terminal"));
+  // The phone Terminal tab reopens whatever was attached last (the agent when the pane is an agent's).
+  const attachedAgentId = currentEntry ? currentEntry.pane.agentId : effective?.kind === "agent" ? effective.agentId : undefined;
+  const attachedPaneId = phase.k === "live" ? opened?.paneId : undefined;
+  useEffect(() => {
+    if (attachedPaneId) useLastTerminal.getState().remember({ hostId, agentId: attachedAgentId, paneId: attachedPaneId });
+  }, [hostId, attachedAgentId, attachedPaneId]);
+  // Opened by the Terminal tab itself: this screen is the tab's root, so no back chevron. A new
+  // shell from the chooser is pushed on top of it (Back returns to the chooser).
+  const tabRoot = useLastTerminal((s) => !shell && s.tabRoot === terminalRouteKey({ hostId, paneId, agentId }));
 
   const tabs = (
     <PaneTabs
@@ -325,9 +350,10 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
       aria-label="Terminal mode"
       value={mode}
       onValueChange={changeMode}
+      // Phones say what each mode does in one word (type into the pane / watch it read-only).
       options={[
-        { value: "control", label: <span className={isMobile ? "sr-only" : "@max-[860px]:sr-only"}>Control</span>, icon: <Keyboard /> },
-        { value: "observe", label: <span className={isMobile ? "sr-only" : "@max-[860px]:sr-only"}>Observe</span>, icon: <Eye /> },
+        { value: "control", label: isMobile ? "Type" : <span className="@max-[860px]:sr-only">Control</span>, icon: <Keyboard /> },
+        { value: "observe", label: isMobile ? "Watch" : <span className="@max-[860px]:sr-only">Observe</span>, icon: <Eye /> },
       ]}
       className={cn(mode === "observe" && "shadow-[inset_0_0_0_1px_rgb(34_211_238/0.35)]")}
     />
@@ -359,7 +385,7 @@ export function TerminalView({ hostId, paneId, agentId }: TerminalViewProps) {
     return (
       <div className="flex h-full min-h-0 flex-col">
         <MobileHeader
-          back
+          back={!tabRoot}
           title={
             <span className="flex min-w-0 items-center gap-2">
               <StatusOrb status={orb} activity={live ? "steady" : "silent"} size={8} label={null} />

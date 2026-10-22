@@ -868,6 +868,33 @@ wire_struct! {
     }
 }
 
+// ───────────────────────────── ai ─────────────────────────────
+
+wire_struct! {
+    /// One completion from omp's model role on the host (`omp --mode json`, no tools).
+    pub struct AiCompleteParams {
+        /// `branch` | `agentName` | `title` | `commit` | `pr` | `templateName`: logs and the demo only.
+        pub task: String,
+        pub system: String,
+        /// Sent on omp's stdin.
+        pub prompt: String,
+        /// omp model role (default `tiny`).
+        pub role: Option<String>,
+        /// Default 20 000, clamped to 2 000..=60 000; queue time counts.
+        pub timeout_ms: Option<u32>,
+        pub cwd: Option<String>,
+    }
+}
+
+wire_struct! {
+    pub struct AiCompleteResult {
+        /// Final assistant text, thinking stripped, trimmed.
+        pub text: String,
+        pub model: Option<String>,
+        pub ms: u32,
+    }
+}
+
 methods!(HostMethod, "HostMethods", {
     "state.get" => StateGet(Empty) -> HostState;
     "session.open" => SessionOpen(SessionOpenParams) -> SessionSnapshot;
@@ -941,6 +968,8 @@ methods!(HostMethod, "HostMethods", {
     "host.setup" => HostSetup(Empty) -> SetupStatus;
     "host.setupApply" => HostSetupApply(SetupApplyParams) -> SetupStatus;
     "host.activity" => HostActivity(ActivityParams) -> ActivityPage;
+
+    "ai.complete" => AiComplete(AiCompleteParams) -> AiCompleteResult;
 });
 
 // ───────────────────────────── app methods ─────────────────────────────

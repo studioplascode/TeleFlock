@@ -1,8 +1,7 @@
 import { type RefObject, useMemo } from "react";
 import { useUi } from "@/core";
-import { toast } from "@/design";
 import { usePaletteCommands } from "@/features/palette/registry";
-import { setArchived } from "./agentActions";
+import { archiveWithUndo } from "./agentActions";
 import { useBoard } from "./boardStore";
 
 /** Board-contextual palette commands (registered while the board is mounted). */
@@ -45,19 +44,10 @@ export function useBoardCommands(reviewKeys: readonly string[], searchRef: RefOb
         ? [
             {
               id: "board.archiveReviewed",
-              title: `Archive all ${reviewKeys.length} reviewed agent${reviewKeys.length === 1 ? "" : "s"}`,
+              title: `Mark all ${reviewKeys.length} agent${reviewKeys.length === 1 ? "" : "s"} in Review done`,
               group: "Board",
-              keywords: ["done", "clean up"],
-              run: async () => {
-                const keys = [...reviewKeys];
-                const results = await Promise.allSettled(keys.map((k) => setArchived(k, true)));
-                const ok = results.filter((r) => r.status === "fulfilled").length;
-                toast({
-                  title: `Archived ${ok} agent${ok === 1 ? "" : "s"}`,
-                  status: "done",
-                  action: { label: "Undo", onClick: () => keys.forEach((k) => void setArchived(k, false).catch(() => {})) },
-                });
-              },
+              keywords: ["done", "archive", "clean up"],
+              run: () => archiveWithUndo([...reviewKeys]),
             },
           ]
         : []),

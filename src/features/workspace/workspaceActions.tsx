@@ -1,6 +1,6 @@
 import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PanelTopClose, PencilLine, SquareTerminal, SquareX, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { core, draftKey, drafts, navigate, useUi } from "@/core";
+import { aiNamingEnabled, core, draftKey, drafts, getAgentViews, navigate, suggestTitle, useUi } from "@/core";
 import type { PaneInfo, Tab, Workspace } from "@/core/gen";
 import {
   ContextMenu,
@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
   toast,
 } from "@/design";
+import { ACTIONS } from "@/features/shell/vocab";
 import { openPastSessions } from "../history/PastSessionsDialog";
 import { openNewAgent } from "./NewAgentDialog";
 import { classifyHerdrError, describeError } from "./shared/errors";
@@ -40,6 +41,8 @@ export interface WorkspaceAction {
   id: WorkspaceActionId;
   label: string;
   icon: LucideIcon;
+  /** One-line explanation (menu item tooltip), from `ACTIONS` where the action is a shared one. */
+  description?: string;
   danger?: boolean;
   group: "create" | "manage" | "tabs" | "danger";
   /** Sub-heading inside the group (the tab's label for per-tab actions). */
@@ -87,9 +90,24 @@ export async function newShell(hostId: string, ws: Workspace): Promise<void> {
   }
 }
 
+/** What the workspace is about, for the tiny model: its agents' titles (session title or first prompt), then branch and label. */
+function workspaceAbout(hostId: string, ws: Workspace): string {
+  const titles = getAgentViews()
+    .filter((a) => a.hostId === hostId && a.workspaceId === ws.id && a.title.trim())
+    .map((a) => a.title.trim());
+  return [...titles, ws.worktree?.branch ?? ws.repo?.branch, ws.label].filter(Boolean).join("\n");
+}
+
 export async function renameWorkspace(hostId: string, ws: Workspace): Promise<void> {
   const key = draftKey("workspace.rename", hostId, ws.id);
-  const label = await promptText({ title: "Rename workspace", label: "Label", initial: ws.label, draftKey: key, confirmLabel: "Rename" });
+  const label = await promptText({
+    title: "Rename workspace",
+    label: "Label",
+    initial: ws.label,
+    draftKey: key,
+    confirmLabel: "Rename",
+    suggest: aiNamingEnabled(hostId) ? () => suggestTitle(hostId, workspaceAbout(hostId, ws)) : undefined,
+  });
   if (!label || label === ws.label) return;
   try {
     await core.host(hostId).call("workspace.rename", { workspaceId: ws.id, label });
@@ -130,12 +148,17 @@ export async function closeWorkspace(hostId: string, ws: Workspace): Promise<voi
   }
 }
 
-export async function removeWorktree(hostId: string, ws: Workspace): Promise<void> {
+/**
+ * Remove a linked worktree: confirm, then `worktree.remove` (a second, explicit confirm to force when it has
+ * uncommitted changes; a trust prompt for repos owned by another user). Toasts its own outcome and never
+ * rejects; resolves true once the worktree is gone. `confirm` overrides the first dialog's title and button.
+ */
+export async function removeWorktree(hostId: string, ws: Workspace, confirm?: { title: string; confirmLabel: string }): Promise<boolean> {
   const path = ws.worktree?.path ?? ws.cwd;
   const branch = ws.worktree?.branch;
   const dirty = ws.repo?.dirty ?? 0;
   const ok = await confirmAction({
-    title: `Remove worktree ${branch ?? ws.label}?`,
+    title: confirm?.title ?? `Remove worktree ${branch ?? ws.label}?`,
     body: (
       <>
         Deletes the checkout at <span className="font-mono">{path}</span> and closes its workspace.
@@ -148,17 +171,17 @@ export async function removeWorktree(hostId: string, ws: Workspace): Promise<voi
         {dirty > 0 && <span className="mt-2 block font-semibold text-warn">{dirty} uncommitted change{dirty === 1 ? "" : "s"} will need a force remove.</span>}
       </>
     ),
-    confirmLabel: "Remove worktree",
+    confirmLabel: confirm?.confirmLabel ?? "Remove worktree",
     danger: true,
   });
-  if (!ok) return;
+  if (!ok) return false;
   let force = false;
   let trust = false;
   for (;;) {
     try {
       await core.host(hostId).call("worktree.remove", { workspaceId: ws.id, force, trust });
       toast({ title: `Removed worktree ${branch ?? ws.label}`, description: force ? "Forced — local changes were discarded." : undefined, duration: 3000 });
-      return;
+      return true;
     } catch (e) {
       const f = classifyHerdrError(e);
       if (f.kind === "dirtyNeedsForce" && !force) {
@@ -173,7 +196,7 @@ export async function removeWorktree(hostId: string, ws: Workspace): Promise<voi
           confirmLabel: "Force remove",
           danger: true,
         });
-        if (!force) return;
+        if (!force) return false;
         continue;
       }
       if (f.kind === "untrusted" && !trust) {
@@ -182,10 +205,11 @@ export async function removeWorktree(hostId: string, ws: Workspace): Promise<voi
           body: "git refuses to touch it (“dubious ownership”). Trusting it passes -c safe.directory for this removal only; your gitconfig is not changed.",
           confirmLabel: "Trust & remove",
         });
-        if (!trust) return;
+        if (!trust) return false;
         continue;
       }
-      return failToast(`Couldn't remove ${branch ?? ws.label}`, e);
+      failToast(`Couldn't remove ${branch ?? ws.label}`, e);
+      return false;
     }
   }
 }
@@ -249,18 +273,19 @@ export async function closePane(hostId: string, pane: PaneInfo): Promise<void> {
 export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction[] {
   const bind = (fn: (h: string, w: Workspace) => Promise<void>) => () => fn(hostId, ws);
   const actions: WorkspaceAction[] = [
-    { id: "newAgent", label: "New agent here", icon: Bot, group: "create", run: bind(newAgentIn) },
+    { id: "newAgent", label: "New agent here", description: ACTIONS.newAgent.description, icon: Bot, group: "create", run: bind(newAgentIn) },
     { id: "newShell", label: "New shell", icon: SquareTerminal, group: "create", run: bind(newShell) },
   ];
   if (ws.repo) {
-    actions.push({ id: "newWorktree", label: "New worktree from this repo", icon: GitBranchPlus, group: "create", run: bind(newWorktreeFrom) });
-    actions.push({ id: "review", label: "Review & ship changes", icon: FileDiff, group: "manage", run: bind(openReview) });
+    actions.push({ id: "newWorktree", label: "New worktree from this repo", description: ACTIONS.newWorktree.description, icon: GitBranchPlus, group: "create", run: bind(newWorktreeFrom) });
+    actions.push({ id: "review", label: ACTIONS.review.label, description: ACTIONS.review.description, icon: FileDiff, group: "manage", run: bind(openReview) });
   }
   actions.push(
-    { id: "pastSessions", label: "Past sessions…", icon: History, group: "manage", run: bind(revealPastSessions) },
+    { id: "pastSessions", label: "Past sessions…", description: ACTIONS.pastSessions.description, icon: History, group: "manage", run: bind(revealPastSessions) },
     { id: "rename", label: "Rename…", icon: PencilLine, group: "manage", run: bind(renameWorkspace) },
   );
-  if (ws.worktree) actions.push({ id: "removeWorktree", label: "Remove worktree…", icon: Trash2, danger: true, group: "danger", run: bind(removeWorktree) });
+  if (ws.worktree)
+    actions.push({ id: "removeWorktree", label: "Remove worktree…", icon: Trash2, danger: true, group: "danger", run: async () => void (await removeWorktree(hostId, ws)) });
   for (const tab of ws.tabs) {
     actions.push(
       { id: `renameTab:${tab.id}`, label: "Rename tab…", icon: PencilLine, group: "tabs", section: tab.label, run: () => renameTab(hostId, tab) },
@@ -310,7 +335,7 @@ export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "drop
               {g.map((a, j) => (
                 <div key={a.id}>
                   {heading(g, j) && <ContextMenuLabel className="truncate">Tab · {a.section}</ContextMenuLabel>}
-                  <ContextMenuItem icon={<a.icon />} danger={a.danger} onSelect={() => void a.run()}>
+                  <ContextMenuItem icon={<a.icon />} danger={a.danger} title={a.description} onSelect={() => void a.run()}>
                     {a.label}
                   </ContextMenuItem>
                 </div>
@@ -334,7 +359,7 @@ export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "drop
             {g.map((a, j) => (
               <div key={a.id}>
                 {heading(g, j) && <DropdownMenuLabel className="truncate">Tab · {a.section}</DropdownMenuLabel>}
-                <DropdownMenuItem icon={<a.icon />} danger={a.danger} onSelect={() => void a.run()}>
+                <DropdownMenuItem icon={<a.icon />} danger={a.danger} title={a.description} onSelect={() => void a.run()}>
                   {a.label}
                 </DropdownMenuItem>
               </div>

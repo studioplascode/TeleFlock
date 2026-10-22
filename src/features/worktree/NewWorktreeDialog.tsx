@@ -1,18 +1,21 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, ArrowRight, Cpu, FolderGit2, GitBranch, GitBranchPlus, Pencil, ShieldAlert, Sparkles, Split, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import { core, draftKey, navigate, useDraftState, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
+import { core, draftKey, navigate, suggestAgentName, suggestBranch, useAiNaming, useAiSuggestion, useDraftState, useHostIds, useHostState, useHosts, usePrefs, useSettings, useUi } from "@/core";
 import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
-import { Button, Chip, EmptyState, Kbd, SegmentedControl, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
-import { AgentFields, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName, useAgentDraft, useModelCatalog } from "../workspace/shared/AgentFields";
+import { Button, Chip, EmptyState, Input, Kbd, SegmentedControl, Shimmer, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
+import { ACTIONS } from "@/features/shell/vocab";
+import { AiMark, within } from "../workspace/shared/ai";
+import { AgentFields, agentNameError, autoAgentName, initialAgentDraft, toAgentSpec, useAgentDraft, useModelCatalog } from "../workspace/shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "../workspace/shared/CommandPreview";
 import { agentLaunchLines, herdrArgv } from "../workspace/shared/commands";
 import { type HerdrFailure, classifyHerdrError } from "../workspace/shared/errors";
 import { LaunchSuccess, WorkingPanel } from "../workspace/shared/LaunchProgress";
-import { agentNameFromBranch, basename, branchNameError, branchSlug, joinPath, shellQuote, tildify } from "../workspace/shared/paths";
+import { agentNameFromBranch, basename, branchNameError, branchSlug, joinPath, shellQuote, tildify, uniqueAgentName } from "../workspace/shared/paths";
 import { ResponsiveDialog } from "../workspace/shared/ResponsiveDialog";
 import { useDialogSession } from "../workspace/shared/useDialogSession";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
+import { autoBranchName } from "./autoName";
 import { type BranchDraft, BranchStep } from "./BranchStep";
 import { FolderBrowser, type FolderPick } from "./FolderBrowser";
 import { StepRail } from "./StepRail";
@@ -23,6 +26,11 @@ const STEPS = ["Repository", "Branch", "Agent", "Create"] as const;
 const HERDR_WORKTREES_DIR = ".herdr/worktrees";
 
 const NO_BRANCH: BranchDraft = { mode: "new", name: "", base: "", existing: "", customPath: false, path: "", label: "" };
+
+/** Longest the Create step shows "Naming…" before the deterministic names take over. */
+const NAMING_MS = 5000;
+const NO_TASK = "Type a branch name: there's no task to name it from";
+const MISSING_BRANCH = "Type a branch name";
 
 /** Mounted once by the shell; renders while `useUi().dialog.kind === "newWorktree"`. */
 export function NewWorktreeDialog() {
@@ -63,6 +71,8 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   const [agent, patchAgent, clearAgent] = useAgentDraft(draftKey("worktree.agent", hostId ?? "", repo?.path ?? ""), () => initialAgentDraft(settings));
   const [trust, setTrust] = useState(false);
   const [submit, setSubmit] = useState<Submit>({ phase: "idle" });
+  /** Why the wizard bounced back to the Branch step (shown under the name until it changes). */
+  const [branchNotice, setBranchNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!hostId && hostIds[0]) setHostId(hostIds[0]);
@@ -74,21 +84,64 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   // repo name: the primary worktree root's basename (herdr's repo_name)
   const repoRoot = repo?.path ?? "";
   const repoName = basename(host?.workspaces.find((w) => w.repo?.root === repoRoot)?.repo?.root ?? repoRoot);
-  const effectiveBranch = (branch.mode === "new" ? branch.name : branch.existing).trim();
-  const defaultPath = home ? joinPath(home, HERDR_WORKTREES_DIR, repoName, branchSlug(effectiveBranch) || "") : `~/${HERDR_WORKTREES_DIR}/${repoName}/${branchSlug(effectiveBranch)}`;
   const takenNames = useMemo(() => host?.agents.map((a) => a.name) ?? [], [host?.agents]);
+  // every name git already has, local or as a remote-tracking branch's local name
+  const takenBranches = useMemo(
+    () => new Set((branches.data?.branches ?? []).flatMap((b) => (b.remote ? [b.name, b.name.replace(/^[^/]+\//, "")] : [b.name]))),
+    [branches.data],
+  );
+
+  // Auto naming: an empty new-branch name (switch on) and/or agent name come from the agent's task;
+  // prefetched while the task is typed, resolved at the Create step (≤ NAMING_MS, then the fallback).
+  // The switch follows Settings → AI naming, not the host's AI health: once chosen, a host that
+  // can't do AI still gets a branch named from the task (deterministic `baseSlug`).
+  const aiOn = useAiNaming(hostId);
+  const autoOffered = usePrefs((s) => s.aiNaming);
+  const autoName = autoOffered && branch.mode === "new" && branch.autoName !== false;
+  const task = agent.start ? agent.prompt.trim() : "";
+  const needBranch = autoName && !branch.name.trim();
+  const needAgent = aiOn && agent.start && !agent.name.trim() && !!task;
+  /** The auto-named branch as edited inline on the Create step (null = untouched; "" = cleared). */
+  const [inlineBranch, setInlineBranch] = useState<string | null>(null);
+  const taskKey = hostId && repo && task ? `${hostId}\n${repoRoot}\n${task}` : null;
+  const branchAi = () => (hostId ? suggestBranch(hostId, task, { cwd: repoRoot }) : Promise.resolve(null));
+  const agentAi = () => (hostId ? suggestAgentName(hostId, task, takenNames) : Promise.resolve(null));
+  useAiSuggestion(hostId, needBranch ? taskKey : null, branchAi, { debounceMs: 800 });
+  const agentPrefetch = useAiSuggestion(hostId, needAgent ? taskKey : null, agentAi, { debounceMs: 800 });
+  const askBranch = aiOn && needBranch;
+  const resolveKey = taskKey && (askBranch || needAgent) ? `${taskKey}\n${askBranch}\n${needAgent}` : null;
+  const [named, setNamed] = useState<{ key: string; branch: string | null; agent: string | null } | null>(null);
+  const fresh = named && named.key === resolveKey ? named : null;
+  const naming = step === 3 && !!resolveKey && !fresh;
+  useEffect(() => {
+    if (!naming || !resolveKey) return;
+    let live = true;
+    void Promise.all([askBranch ? within(branchAi(), NAMING_MS) : null, needAgent ? within(agentAi(), NAMING_MS) : null]).then(([b, a]) => {
+      if (live) setNamed({ key: resolveKey, branch: b, agent: a });
+    });
+    return () => {
+      live = false;
+    };
+  }, [naming, resolveKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // shown from the Create step on (earlier steps keep the "named from the task" placeholder)
+  const autoBranch = needBranch && task && step === 3 ? autoBranchName(aiOn ? (fresh?.branch ?? null) : null, task, takenBranches) : null;
+
+  const effectiveBranch = (branch.mode === "new" ? branch.name.trim() || (needBranch ? (inlineBranch ?? autoBranch?.name ?? "") : "") : branch.existing).trim();
+  const defaultPath = home ? joinPath(home, HERDR_WORKTREES_DIR, repoName, branchSlug(effectiveBranch) || "") : `~/${HERDR_WORKTREES_DIR}/${repoName}/${branchSlug(effectiveBranch)}`;
   const derivedName = uniqueAgentName(agentNameFromBranch(effectiveBranch), takenNames);
-  const agentName = agent.name.trim() || derivedName;
+  const agentSuggestion = needAgent ? (fresh ? fresh.agent : agentPrefetch.value) : null;
+  const autoAgent = needAgent ? autoAgentName(agentSuggestion, derivedName, takenNames) : { name: derivedName, ai: false };
+  const agentName = agent.name.trim() || autoAgent.name;
 
   const localBranch = branches.data?.branches.find((b) => !b.remote && b.name === effectiveBranch);
   const nameError =
     branch.mode === "new"
-      ? (branchNameError(branch.name) ?? (localBranch ? (localBranch.worktreePath ? "Already checked out in another worktree" : "A branch with this name exists") : null))
+      ? (branchNameError(effectiveBranch) ?? (localBranch ? (localBranch.worktreePath ? "Already checked out in another worktree" : "A branch with this name exists") : null))
       : null;
 
   const valid = [
     !!repo && !!hostId,
-    branch.mode === "new" ? !nameError : !!branch.existing,
+    branch.mode === "new" ? needBranch || !nameError : !!branch.existing,
     !agent.start || !agentNameError(agentName, takenNames),
     true,
   ];
@@ -96,18 +149,33 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   const maxReachable = reachable === -1 ? STEPS.length - 1 : reachable;
   const busy = submit.phase === "working" || submit.phase === "done";
 
-  const goTo = (i: number) => {
-    if (busy || i > maxReachable) return;
+  const goTo = (target: number) => {
+    if (busy) return;
+    // Past an invalid step: land on that step (it shows what's missing) instead of doing nothing.
+    const i = Math.min(target, maxReachable);
+    if (i === step && target > step) {
+      if (step === 1) setBranchNotice(MISSING_BRANCH);
+      return;
+    }
+    if (i === 1 && target > 1 && branch.mode === "new" && !needBranch) setBranchNotice(MISSING_BRANCH);
+    // auto name without a task: nothing to name the branch from
+    if (i === 3 && needBranch && !task) {
+      setBranchNotice(NO_TASK);
+      setDir(-1);
+      setStep(1);
+      return;
+    }
     setDir(i > step ? 1 : -1);
     setStep(i);
     if (submit.phase === "failed") setSubmit({ phase: "idle" });
   };
+
   const next = () => (step < STEPS.length - 1 ? goTo(step + 1) : void create());
 
   // The Base select shows the default branch when untouched; send exactly what it shows.
   const baseRef = branch.base || branches.data?.defaultBranch || "HEAD";
   const params: WorktreeCreateParams | null =
-    repo && effectiveBranch
+    repo && effectiveBranch && !naming
       ? {
           cwd: repo.path,
           branch: effectiveBranch,
@@ -121,7 +189,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
       : null;
 
   const create = async (override?: Partial<WorktreeCreateParams>) => {
-    if (!params || !hostId || busy) return;
+    if (!params || !hostId || busy || nameError) return;
     const p = { ...params, ...override };
     setSubmit({ phase: "working", since: Date.now() });
     try {
@@ -219,11 +287,11 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
             variant={submit.phase === "failed" && submit.failure.kind !== "other" ? "secondary" : "primary"}
             icon={<Sparkles />}
             onClick={() => void create()}
-            loading={submit.phase === "working"}
-            disabled={!params}
+            loading={submit.phase === "working" || naming}
+            disabled={!params || !!nameError}
             className={mobile ? "flex-1" : undefined}
           >
-            {submit.phase === "failed" ? "Try again" : agent.start ? "Create & start agent" : "Create worktree"}
+            {naming ? "Naming…" : submit.phase === "failed" ? "Try again" : agent.start ? "Create & start agent" : "Create worktree"}
           </Button>
         )}
       </div>
@@ -234,7 +302,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
       open={open}
       onOpenChange={(o) => !o && !busy && onClose()}
       title={title}
-      description={repo && step > 0 ? <span className="font-mono">{tildify(repo.path, home)}</span> : "Isolated checkout + its own agent, in one go"}
+      description={repo && step > 0 ? <span className="font-mono">{tildify(repo.path, home)}</span> : ACTIONS.newWorktree.description}
       icon={<GitBranchPlus />}
       width={760}
       maxHeight="94dvh"
@@ -347,12 +415,18 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                     loading={branches.loading || branches.waiting}
                     error={branches.waiting ? undefined : branches.error?.message}
                     draft={branch}
-                    onChange={(patch) => setBranch((b) => ({ ...b, ...patch }))}
+                    onChange={(patch) => {
+                      setBranchNotice(null);
+                      setInlineBranch(null);
+                      setBranch((b) => ({ ...b, ...patch }));
+                    }}
                     filterKey={draftKey("worktree.branchFilter", hostId ?? "", repoRoot)}
                     branch={effectiveBranch}
                     defaultPath={defaultPath}
                     nameError={nameError}
                     home={home}
+                    aiNaming={autoOffered}
+                    notice={branchNotice}
                     onSubmit={() => valid[1] && next()}
                   />
                 )}
@@ -363,7 +437,8 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                       toggleable
                       draft={agent}
                       onChange={patchAgent}
-                      derivedName={derivedName}
+                      derivedName={needBranch && !effectiveBranch ? "named from the task" : derivedName}
+                      suggestedName={autoAgent.ai ? autoAgent.name : null}
                       takenNames={takenNames}
                     />
                     <button
@@ -374,7 +449,9 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                       <Split className="size-4 text-accent transition-transform duration-500 ease-spring group-hover:rotate-90" />
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="text-sm font-bold">Try N approaches</span>
-                        <span className="text-2xs text-mute">Fan out: run this task on 2–5 agents with different models, each in its own worktree</span>
+                        <span className="text-2xs text-mute">
+                          {ACTIONS.fanOut.label}: {ACTIONS.fanOut.description}
+                        </span>
                       </span>
                       <ArrowRight className="size-4 text-mute-2 transition-transform group-hover:translate-x-0.5" />
                     </button>
@@ -388,9 +465,33 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                       mode={branch.mode}
                       base={branch.mode === "new" ? baseRef : undefined}
                       path={tildify(params?.path ?? defaultPath, home)}
-                      agent={agent.start ? agentName : null}
+                      agent={agent.start ? (naming && needAgent ? "Naming…" : agentName) : null}
+                      agentAi={agent.start && !agent.name.trim() && autoAgent.ai}
                       model={agent.model === "default" ? "host default" : (catalog?.models.find((m) => `${m.provider}/${m.id}` === agent.model)?.label ?? agent.model)}
                       onEdit={goTo}
+                      branchEdit={
+                        needBranch ? (
+                          naming && askBranch && inlineBranch === null ? (
+                            <Shimmer className="flex h-8 items-center font-mono text-xs font-semibold">Naming…</Shimmer>
+                          ) : (
+                            <span className="flex flex-col gap-1">
+                              <Input
+                                value={inlineBranch ?? autoBranch?.name ?? ""}
+                                onChange={(e) => setInlineBranch(e.target.value)}
+                                aria-label="Branch name"
+                                invalid={!!nameError}
+                                trailing={inlineBranch === null && autoBranch?.ai ? <AiMark /> : undefined}
+                                boxClassName="h-8 px-2"
+                                className="font-mono text-xs font-semibold"
+                                spellCheck={false}
+                                autoCapitalize="off"
+                                autoCorrect="off"
+                              />
+                              {nameError && <span className="text-2xs font-semibold text-error">{nameError}</span>}
+                            </span>
+                          )
+                        ) : undefined
+                      }
                     />
                     {submit.phase === "working" ? (
                       <WorkingPanel
@@ -450,9 +551,11 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                         {submit.phase === "idle" && (
                           <ol className="grid grid-cols-1 gap-x-4 gap-y-2 md:grid-cols-2" aria-label="What happens">
                             {[
-                              branch.mode === "new" ? `git creates ${effectiveBranch} from ${baseRef}` : `git checks out ${effectiveBranch}`,
+                              branch.mode === "new" ? `git creates ${effectiveBranch || "the new branch"} from ${baseRef}` : `git checks out ${effectiveBranch}`,
                               "herdr opens the checkout as a workspace",
-                              ...(agent.start ? [`omp starts as ${agentName}, shared with TeleFlock`, "You land in its session"] : ["You can start an agent there any time"]),
+                              ...(agent.start
+                                ? [`omp starts as ${naming && needAgent ? "the named agent" : agentName}, shared with TeleFlock`, "You land in its session"]
+                                : ["You can start an agent there any time"]),
                             ].map((text, i) => (
                               <motion.li
                                 key={text}
@@ -488,8 +591,10 @@ function Summary({
   base,
   path,
   agent,
+  agentAi,
   model,
   onEdit,
+  branchEdit,
 }: {
   repo: string;
   branch: string;
@@ -497,39 +602,65 @@ function Summary({
   base?: string;
   path: string;
   agent: string | null;
+  /** The agent name is the tiny model's (✨). */
+  agentAi?: boolean;
   model: string;
   onEdit: (step: number) => void;
+  /** Inline editor for an auto-named branch (replaces the jump-to-step row). */
+  branchEdit?: ReactNode;
 }) {
-  const rows = [
+  const rows: { icon: typeof Cpu; k: string; v: string; step: number; ai?: boolean; edit?: ReactNode }[] = [
     { icon: FolderGit2, k: "Repository", v: repo, step: 0 },
-    { icon: mode === "new" ? GitBranchPlus : GitBranch, k: mode === "new" ? `New branch from ${base}` : "Existing branch", v: branch, step: 1 },
+    { icon: mode === "new" ? GitBranchPlus : GitBranch, k: mode === "new" ? `New branch from ${base}` : "Existing branch", v: branch, step: 1, edit: branchEdit },
     { icon: FolderGit2, k: "Checkout", v: path, step: 1 },
-    { icon: Cpu, k: "Agent", v: agent ? `${agent} · ${model}` : "none", step: 2 },
+    { icon: Cpu, k: "Agent", v: agent ? `${agent} · ${model}` : "none", step: 2, ai: agentAi },
   ];
+  const tile = (r: (typeof rows)[number]) => (
+    <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-accent/12 text-accent shadow-[inset_0_0_0_1px_rgb(163_92_240/0.25)]">
+      <r.icon className="size-4" />
+    </span>
+  );
   return (
     <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-      {rows.map((r, i) => (
-        <motion.button
-          key={r.k}
-          type="button"
-          onClick={() => onEdit(r.step)}
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ ...spring.smooth, delay: i * 0.04 }}
-          title={r.v}
-          aria-label={`${r.k}: ${r.v}. Edit`}
-          className="group flex items-center gap-3 rounded-md bg-white/4 px-3 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-white/7"
-        >
-          <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-accent/12 text-accent shadow-[inset_0_0_0_1px_rgb(163_92_240/0.25)]">
-            <r.icon className="size-4" />
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="text-2xs font-bold text-mute-2">{r.k}</span>
-            <span className="truncate font-mono text-xs font-semibold text-ink">{r.v}</span>
-          </span>
-          <Pencil className="size-3.5 shrink-0 text-mute-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-60" aria-hidden />
-        </motion.button>
-      ))}
+      {rows.map((r, i) =>
+        r.edit ? (
+          <motion.div
+            key={r.k}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ ...spring.smooth, delay: i * 0.04 }}
+            className="flex items-center gap-3 rounded-md bg-white/4 px-3 py-2 shadow-hairline"
+          >
+            {tile(r)}
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="text-2xs font-bold text-mute-2">{r.k}</span>
+              {r.edit}
+            </span>
+          </motion.div>
+        ) : (
+          <motion.button
+            key={r.k}
+            type="button"
+            onClick={() => onEdit(r.step)}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ ...spring.smooth, delay: i * 0.04 }}
+            title={r.v}
+            aria-label={`${r.k}: ${r.v}. Edit`}
+            className="group flex items-center gap-3 rounded-md bg-white/4 px-3 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-white/7"
+          >
+            {tile(r)}
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="text-2xs font-bold text-mute-2">{r.k}</span>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-mono text-xs font-semibold text-ink">{r.v}</span>
+                {r.ai && <AiMark />}
+              </span>
+            </span>
+            <Pencil className="size-3.5 shrink-0 text-mute-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-60" aria-hidden />
+          </motion.button>
+        ),
+      )}
     </div>
   );
 }

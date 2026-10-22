@@ -2,6 +2,7 @@ import type {
   ActivityEvent,
   ActivityKind,
   Agent,
+  AiCompleteResult,
   AppEvent,
   BranchInfo,
   ChangedFile,
@@ -36,6 +37,7 @@ import { apiError } from "../errors";
 import { ircOf } from "../irc";
 import { OMP_COMMAND_NAMES, ompCommandName } from "../ompCommands";
 import { AgentSim, type SimHost } from "./agent";
+import { demoAiComplete, demoAiLatency } from "./ai";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
 import { demoLimits } from "./limits";
@@ -737,11 +739,22 @@ export class DemoHost implements SimHost {
       throw apiError("not_connected", `${this.info.hostname} is ${this.status.phase}`, { hint: this.status.phase === "authRequired" ? "Approve the Tailscale check-mode link, then retry" : "Reconnect the host and retry", retryable: true });
     }
     const p = (params ?? {}) as Record<string, unknown>;
+    if (method === "ai.complete") return this.aiComplete(p);
     const out = this.dispatch(method, p);
     // Small, realistic latency so spinners show briefly (creating a worktree takes a moment).
     const latency = method === "worktree.create" ? 350 : method.startsWith("git.") || method.startsWith("gh.") ? 180 : 40;
     await new Promise<void>((resolve) => this.env.clock.after(latency, resolve));
     return out;
+  }
+
+  /** `ai.complete`: deterministic answers after 600–1400 ms (`./ai`). */
+  private async aiComplete(p: Record<string, unknown>): Promise<AiCompleteResult> {
+    const task = this.str(p, "task");
+    const prompt = this.str(p, "prompt");
+    this.str(p, "system");
+    const ms = demoAiLatency(prompt);
+    await new Promise<void>((resolve) => this.env.clock.after(ms, resolve));
+    return { ...demoAiComplete(task, prompt), ms };
   }
 
   private sim(agentId: unknown): AgentSim {

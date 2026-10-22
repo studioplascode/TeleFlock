@@ -21,7 +21,7 @@ export function openPastSessions(opts?: { hostId?: string; cwd?: string; workspa
 export interface WorkspaceAction {
   id: "review" | "newAgent" | "newShell" | "newWorktree" | "pastSessions" | "rename" | "close" | "removeWorktree"
     | `renameTab:${string}` | `closeTab:${string}` | `closePane:${string}`;
-  label: string; icon: LucideIcon; danger?: boolean; group: "create" | "manage" | "tabs" | "danger";
+  label: string; icon: LucideIcon; description?: string /* menu tooltip, from ACTIONS */; danger?: boolean; group: "create" | "manage" | "tabs" | "danger";
   section?: string;                     // tab label for per-tab actions
   run(): Promise<void>;                 // owns its confirms/toasts/errors; never rejects
 }
@@ -39,6 +39,12 @@ export function parseFanOutBranch(branch?: string): { slug: string; variant: str
 // Templates (Settings.templates): picker + "Save as template" live inside AgentFields (New worktree / New agent);
 // helpers in workspace/shared/templates.tsx (applyTemplate, matchingTemplate, saveDraftAsTemplate).
 // Branch/agent slugs from free text: workspace/shared/slug.ts (slugify, slugFromPrompt), used by Fan out and Dispatch.
+// AI naming (omp's tiny model via @/core ai.ts; marks/buttons in workspace/shared/ai.tsx), each with its deterministic fallback:
+//   New worktree: "Name it from the task" (new branch, empty name) → suggestBranch at Create (worktree/autoName.ts dedupes
+//   vs existing branches; fallback baseSlug), agent name → suggestAgentName (fallback: from the branch);
+//   New agent: suggestAgentName placeholder, used on Start (≤ 2 s wait); Fan out: suggestBranch for the untouched slug;
+//   Rename workspace / session: "✨ Suggest" → suggestTitle; Save as template: name prefilled by suggestTemplateName.
+//   promptText({ suggest?, prefill? }) in shared/overlays.tsx carries the last two.
 // Review shows a "Compare" sibling switcher (review/FanOutSiblings.tsx) for fanout/* branches.
 
 // @/features/review/ReviewView           route #/review/:hostId/:workspaceId

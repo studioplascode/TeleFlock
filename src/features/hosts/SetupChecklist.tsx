@@ -1,11 +1,45 @@
 import { AlertTriangle, Check, ChevronDown, ShieldCheck, Wrench, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Badge, Button, cn, Skeleton, spring, Switch, toast } from "@/design";
 import { core, useHostState } from "@/core";
 import type { SetupIssue, SetupStatus } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
+import { Term } from "@/features/shell/Term";
+import { ExtLink } from "./CopyCommand";
+import { OMP_MIN_VERSION, OMP_URL } from "./kinds";
+
+/**
+ * One name and one consequence per setup item, shared by the checklist rows and the issue cards so
+ * the same thing is never called two names. The consequence leads; config paths stay in "What exactly changes?".
+ */
+const ITEMS: Record<string, { name: ReactNode; consequence: ReactNode }> = {
+  "enable-global-sharing": {
+    name: (
+      <>
+        <Term id="collab">Share sessions</Term> with TeleFlock
+      </>
+    ),
+    consequence: "Without this, omp sessions you start by hand (or that herdr restores) won't appear on the board.",
+  },
+  "install-herdr-integration": {
+    name: "herdr's omp integration",
+    consequence: "Without this, herdr can't tell whether an agent is working, blocked or idle, so lanes and needs-you alerts go wrong.",
+  },
+  "install-global-bridge": {
+    name: (
+      <>
+        TeleFlock <Term id="bridge">bridge</Term> for every session
+      </>
+    ),
+    consequence: "Without this, sessions TeleFlock didn't start get typed slash commands instead of exact model, thinking and plan controls.",
+  },
+  "omp-missing": {
+    name: `omp ≥ ${OMP_MIN_VERSION}`,
+    consequence: "Without omp there are no agents for TeleFlock to show on this host.",
+  },
+};
 
 /**
  * Global opt-ins change files outside TeleFlock's own directory, so each needs explicit consent
@@ -28,7 +62,7 @@ const CONSENT: Record<string, { what: string; why: string }> = {
 
 interface CheckRow {
   id: string;
-  label: string;
+  label: ReactNode;
   ok: boolean | null;
   detail?: string;
 }
@@ -67,6 +101,7 @@ function IssueRow({
   onToggle: (on: boolean) => void;
 }) {
   const consent = CONSENT[issue.id];
+  const item = ITEMS[issue.id];
   const [open, setOpen] = useState(false);
   return (
     <motion.li layout transition={spring.smooth} className={cn("rounded-lg p-3 transition-colors", selected ? "bg-accent/10 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.03] shadow-hairline")}>
@@ -74,10 +109,17 @@ function IssueRow({
         <AlertTriangle className={cn("mt-0.5 size-4 shrink-0", issue.severity === "error" ? "text-error" : issue.severity === "warn" ? "text-warn" : "text-mute")} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-bold text-ink">{issue.title}</span>
+            <span className="text-sm font-bold text-ink">{item?.name ?? issue.title}</span>
+            {item && /^update\b/i.test(issue.title) && <Badge>Update</Badge>}
             {issue.recommended && <Badge tone="accent">Recommended</Badge>}
           </div>
-          <p className="mt-0.5 text-xs text-mute">{issue.detail}</p>
+          <p className={cn("mt-0.5 text-xs", item ? "text-ink-2" : "text-mute")}>{item?.consequence ?? issue.detail}</p>
+          {item && <p className="mt-0.5 text-xs text-mute">{issue.detail}</p>}
+          {issue.id === "omp-missing" && (
+            <ExtLink href={OMP_URL} className="mt-1 inline-block text-xs">
+              Install omp
+            </ExtLink>
+          )}
           {consent && (
             <>
               <button
@@ -155,13 +197,22 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
   const info = state?.info;
   const rows: CheckRow[] = [
     { id: "reach", label: "Host reachable", ok: info ? true : null, detail: info ? `${info.hostname} · ${info.os}/${info.arch}` : undefined },
-    { id: "hostd", label: "tf-hostd running", ok: info ? true : null, detail: info?.hostdVersion },
+    {
+      id: "hostd",
+      label: (
+        <>
+          <Term id="hostd">tf-hostd</Term> running
+        </>
+      ),
+      ok: info ? true : null,
+      detail: info?.hostdVersion,
+    },
     { id: "herdr", label: "herdr version", ok: info?.herdr ? info.herdr.ok : info ? false : null, detail: info?.herdr?.version ?? (info ? "not found" : undefined) },
-    { id: "omp", label: "omp version", ok: info?.omp ? info.omp.ok : info ? false : null, detail: info?.omp?.version ?? (info ? "not found" : undefined) },
-    { id: "integration", label: "herdr omp integration", ok: status ? status.herdrIntegration : null },
-    { id: "relay", label: "TeleFlock relay", ok: status ? status.relay : null, detail: info ? `127.0.0.1:${info.relayPort}` : undefined },
-    { id: "sharing", label: "Session sharing (global)", ok: status ? status.globalSharing : null },
-    { id: "bridge", label: "Companion extension (global)", ok: status ? status.globalBridge : null },
+    { id: "omp", label: `omp ≥ ${OMP_MIN_VERSION}`, ok: info?.omp ? info.omp.ok : info ? false : null, detail: info?.omp?.version ?? (info ? "not found" : undefined) },
+    { id: "integration", label: ITEMS["install-herdr-integration"]?.name, ok: status ? status.herdrIntegration : null },
+    { id: "relay", label: <Term id="collab">Collab relay</Term>, ok: status ? status.relay : null, detail: info ? `127.0.0.1:${info.relayPort}` : undefined },
+    { id: "sharing", label: ITEMS["enable-global-sharing"]?.name, ok: status ? status.globalSharing : null },
+    { id: "bridge", label: ITEMS["install-global-bridge"]?.name, ok: status ? status.globalBridge : null },
   ];
 
   const chosen = status?.issues.filter((i) => selected.has(i.id)) ?? [];

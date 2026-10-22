@@ -22,8 +22,10 @@ import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { useAppInfo } from "./appInfo";
 import { connectAndFollow } from "./ConnStatusCard";
+import { CopyCommand, ExtLink } from "./CopyCommand";
 import { Diagnostics } from "./Diagnostics";
-import { availableKinds, HOST_COLORS, KIND_META, newHostId } from "./kinds";
+import { availableKinds, defaultHostName, HERDR_URL, HOST_COLORS, hostAccent, KIND_META, newHostId, OMP_MIN_VERSION, OMP_URL, TAILSCALE_SSH_COMMAND } from "./kinds";
+import { requestSetup } from "./setupFocus";
 
 function blankProfile(kind: HostKind): HostProfile {
   return { id: "", name: "", kind, herdrSession: "default", autoConnect: true, port: 22, color: HOST_COLORS[0] };
@@ -32,7 +34,7 @@ function blankProfile(kind: HostKind): HostProfile {
 /** Validation errors per field (empty when valid). */
 function validate(p: HostProfile): Partial<Record<"name" | "address" | "port" | "herdrSession" | "relayPort", string>> {
   const e: Partial<Record<"name" | "address" | "port" | "herdrSession" | "relayPort", string>> = {};
-  if (!p.name.trim()) e.name = "Give the host a name.";
+  if (!p.name.trim() && !defaultHostName(p)) e.name = "Give the host a name.";
   if (p.kind === "tailscaleSsh") {
     const a = p.address?.trim() ?? "";
     if (!a) e.address = "MagicDNS name or tailnet IP, e.g. forge or 100.64.0.7.";
@@ -46,7 +48,7 @@ function validate(p: HostProfile): Partial<Record<"name" | "address" | "port" | 
 
 /** Remove empty optional strings so the saved profile is clean. */
 function normalize(p: HostProfile): HostProfile {
-  const out: HostProfile = { ...p, name: p.name.trim(), herdrSession: p.herdrSession.trim() || "default" };
+  const out: HostProfile = { ...p, name: p.name.trim() || defaultHostName(p), herdrSession: p.herdrSession.trim() || "default" };
   if (p.kind !== "tailscaleSsh") {
     delete out.address;
     delete out.user;
@@ -97,6 +99,34 @@ function WslPicker({ value, onChange }: { value?: string; onChange: (v: string) 
         />
       )}
     </Field>
+  );
+}
+
+/** What must already be on the machine for a kind to work, said before the first failed connect. */
+function Prerequisites({ kind }: { kind: HostKind }) {
+  if (kind === "demo") return null;
+  const tools = (
+    <>
+      <ExtLink href={HERDR_URL}>herdr</ExtLink> and <ExtLink href={OMP_URL}>omp</ExtLink> ≥ {OMP_MIN_VERSION}
+    </>
+  );
+  return (
+    <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-mute-2">
+      <span className="font-bold text-mute">Before you start:</span>
+      {kind === "tailscaleSsh" ? (
+        <>
+          <span>On the host:</span>
+          <span className="inline-flex min-w-0 items-center">
+            <CopyCommand command={TAILSCALE_SSH_COMMAND} />,
+          </span>
+          <span>plus {tools}</span>
+        </>
+      ) : (
+        <span>
+          {tools} installed {kind === "wsl" ? "in the distro" : "on this machine"}
+        </span>
+      )}
+    </p>
   );
 }
 
@@ -167,6 +197,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
         haptic("success");
         clearDraft();
         onDone();
+        if (!editing) requestSetup(saved.id);
         if (saved.autoConnect) connectAndFollow(saved.id, saved.name);
         else toast({ title: editing ? `Saved ${saved.name}` : `Added ${saved.name}`, status: "done" });
       })
@@ -204,31 +235,35 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
       <div className="flex flex-col gap-2">
         <SegmentedControl<HostKind> value={p.kind} onValueChange={(kind) => set({ kind })} options={kindOptions} fill aria-label="Connection kind" />
         <AnimatePresence mode="wait" initial={false}>
-          <motion.p key={p.kind} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.15 }} className="text-xs text-mute">
-            {KIND_META[p.kind].blurb}
-          </motion.p>
+          <motion.div key={p.kind} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.15 }} className="flex flex-col gap-1">
+            <p className="text-xs text-mute">{KIND_META[p.kind].blurb}</p>
+            <Prerequisites kind={p.kind} />
+          </motion.div>
         </AnimatePresence>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-        <Field label="Name" error={shown.name}>
-          {(id) => <Input id={id} value={p.name} onChange={(e) => set({ name: e.target.value })} placeholder={p.kind === "demo" ? "Demo flock" : "forge"} autoFocus={!mobile} invalid={!!shown.name} />}
+        <Field label="Name" hint={p.name.trim() ? undefined : defaultHostName(p) ? "from the address" : undefined} error={shown.name}>
+          {(id) => <Input id={id} value={p.name} onChange={(e) => set({ name: e.target.value })} placeholder={defaultHostName(p) || "forge"} autoFocus={!mobile} invalid={!!shown.name} />}
         </Field>
         <Field label="Colour">
           {() => (
             <div className="flex h-10 items-center gap-1.5" role="radiogroup" aria-label="Host colour">
-              {HOST_COLORS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  role="radio"
-                  aria-checked={p.color === c}
-                  aria-label={c}
-                  onClick={() => set({ color: c })}
-                  className={cn("size-5 rounded-full pressable focus-ring transition-transform", p.color === c && "scale-125 shadow-[0_0_0_2px_var(--color-bg),0_0_0_3.5px_currentColor]")}
-                  style={{ background: c, color: c }}
-                />
-              ))}
+              {HOST_COLORS.map((c) => {
+                const on = hostAccent(p.color) === c;
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    aria-label={c}
+                    onClick={() => set({ color: c })}
+                    className={cn("size-5 rounded-full pressable focus-ring transition-transform", on && "scale-125 shadow-[0_0_0_2px_var(--color-bg),0_0_0_3.5px_currentColor]")}
+                    style={{ background: hostAccent(c), color: hostAccent(c) }}
+                  />
+                );
+              })}
             </div>
           )}
         </Field>

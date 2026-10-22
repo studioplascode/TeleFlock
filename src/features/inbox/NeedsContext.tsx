@@ -1,7 +1,8 @@
 import { useAgent } from "@/core";
 import { AgentGlyph, Elapsed, Shimmer, cn } from "@/design";
 import { HostTag } from "@/features/board/AgentCard";
-import { NEEDS_LABEL } from "@/features/board/lanes";
+import { NEEDS_WORD } from "@/features/shell/vocab";
+import { askText } from "./askText";
 import { useLastAssistant } from "./useLastAssistant";
 
 const TAIL_CHARS = 700;
@@ -18,7 +19,7 @@ export function NeedsHeader({ agentKey, className }: { agentKey: string; classNa
           <span className="font-extrabold text-ink">{agent.name}</span>
           {agent.needs && (
             <span data-status="needs-you" className="rounded-full st-bg px-2 py-px font-display text-[9.5px] font-bold tracking-[0.12em] uppercase">
-              {NEEDS_LABEL[agent.needs.kind]}
+              {NEEDS_WORD[agent.needs.kind]}
             </span>
           )}
         </div>
@@ -58,26 +59,17 @@ export function LastAssistantText({ agentKey, enabled = true, className }: { age
   );
 }
 
-/** The question itself, with option descriptions and any command under approval. */
+/** The question itself and any command under approval (option descriptions live in the option buttons). */
 export function NeedsQuestion({ agentKey, className }: { agentKey: string; className?: string }) {
   const n = useAgent(agentKey)?.needs;
   if (!n) return null;
-  const described = n.options.filter((o) => o.description);
+  const { headline, body } = askText({ title: n.title, message: n.question, command: n.command, approval: n.kind === "approval" });
   return (
     <div className={cn("flex flex-col gap-2", className)}>
-      {n.title && n.question && n.title !== n.question && <span className="text-xs font-bold text-mute">{n.title}</span>}
-      <p className="font-display text-xl leading-snug font-bold text-ink max-md:text-lg">{n.question || n.title}</p>
+      {headline && <p className="font-display text-xl leading-snug font-bold text-ink max-md:text-lg">{headline}</p>}
+      {body && <p className="text-sm whitespace-pre-wrap text-ink-2">{body}</p>}
       {n.detail && <p className="text-sm whitespace-pre-wrap text-ink-2">{n.detail}</p>}
       {n.command && <pre className="overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs whitespace-pre-wrap text-ink">{n.command}</pre>}
-      {described.length > 0 && (
-        <ul className="flex flex-col gap-1 text-xs text-mute">
-          {described.map((o) => (
-            <li key={o.id}>
-              <b className="text-ink-2">{o.label}</b> — {o.description}
-            </li>
-          ))}
-        </ul>
-      )}
       {!n.answerable && <p className="text-xs font-semibold text-warn">This prompt can only be answered in the terminal.</p>}
     </div>
   );

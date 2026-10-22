@@ -73,6 +73,17 @@ html[data-motion="reduced"] .tf-fade-ok * {
   transition-duration: 0.2s !important; /* opacity-only fades are fine with reduced motion */
 }
 
+/* ---------- calm motion (default) ----------
+ * Only what needs you and what just changed moves. Running things hold still: orbs are static state
+ * dots, todo rings drop their comet, subagent swarms stop orbiting. The heartbeat trace, the tool ring
+ * (rendered only while a tool runs), needs-you breath/ping/glow and arrival bursts keep moving.
+ * Settings → Motion → Lively sets data-motion="full" and restores every loop. */
+html[data-motion="calm"] .tf-orb:not([data-status="needs-you"]):not([data-status="error"]) .tf-orb__halo { display: none; }
+html[data-motion="calm"] .tf-orb[data-status="running"] .tf-orb__core { animation: none; }
+html[data-motion="calm"] .tf-ring__comet { display: none; }
+html[data-motion="calm"] .tf-swarm__orbit { animation: none; }
+html[data-motion="calm"] .live-gradient { animation: none; }
+
 @layer components {
 /* ---------- StatusOrb ---------- */
 .tf-orb {
@@ -383,9 +394,6 @@ html[data-motion="reduced"] .live-gradient { animation: none; }
 @keyframes tf-toast-in {
   from { opacity: 0; transform: translateY(16px) scale(0.96); }
 }
-@keyframes tf-toast-in-top {
-  from { opacity: 0; transform: translateY(-120%); }
-}
 @keyframes tf-toast-out {
   to { opacity: 0; transform: scale(0.95); }
 }
@@ -443,9 +451,6 @@ html[data-motion="reduced"] .tf-sky__bird path { animation: none; }
 .tf-dialog[data-state="open"] { animation: tf-dialog-in 0.42s var(--ease-spring); }
 .tf-dialog[data-state="closed"] { animation: tf-dialog-out 0.16s ease-in forwards; }
 .tf-toast[data-state="open"] { animation: tf-toast-in 0.45s var(--ease-spring); }
-@media (max-width: 767px) {
-  .tf-toast[data-state="open"] { animation-name: tf-toast-in-top; }
-}
 .tf-toast[data-state="closed"] { animation: tf-toast-out 0.18s ease-in forwards; }
 .tf-toast[data-swipe="move"] { transform: translate(var(--radix-toast-swipe-move-x, 0), var(--radix-toast-swipe-move-y, 0)); }
 .tf-toast[data-swipe="cancel"] { transform: translate(0, 0); transition: transform 0.3s var(--ease-spring); }

@@ -1,8 +1,9 @@
 import { AlertTriangle, PencilLine } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { useDraft } from "@/core";
-import { Button, Input } from "@/design";
+import { Button, Input, Spinner } from "@/design";
+import { AiMark, SuggestButton } from "./ai";
 import { ResponsiveDialog } from "./ResponsiveDialog";
 
 /*
@@ -31,6 +32,8 @@ interface PromptRequest {
   draftKey: string;
   confirmLabel: string;
   validate?: (value: string) => string | null;
+  suggest?: () => Promise<string | null>;
+  prefill?: () => Promise<string | null>;
   resolve: (value: string | null) => void;
 }
 
@@ -61,6 +64,10 @@ export function promptText(opts: {
   draftKey: string;
   confirmLabel?: string;
   validate?: (value: string) => string | null;
+  /** "✨ Suggest" beside the field: fills it with the result (never submits). */
+  suggest?: () => Promise<string | null>;
+  /** Runs on open; replaces the shown value with the result unless the user typed first (marked ✨). */
+  prefill?: () => Promise<string | null>;
 }): Promise<string | null> {
   return new Promise((resolve) =>
     enqueue({ id: nextId++, type: "prompt", initial: opts.initial ?? "", confirmLabel: opts.confirmLabel ?? "Save", ...opts, resolve }),
@@ -102,8 +109,28 @@ function ConfirmOverlay({ req }: { req: ConfirmRequest }) {
 }
 
 function PromptOverlay({ req }: { req: PromptRequest }) {
-  const [value, setValue] = useDraft(req.draftKey, req.initial);
+  const [draft, setDraft] = useDraft(req.draftKey, req.initial);
   const [touched, setTouched] = useState(false);
+  /** The tiny model's value, shown until the user types (kept out of the draft: only typed text persists). */
+  const [aiValue, setAiValue] = useState<string | null>(null);
+  const value = aiValue ?? draft;
+  // A restored draft counts as typed: the prefill never replaces the user's own text.
+  const typed = useRef(draft !== req.initial);
+  const [prefilling, setPrefilling] = useState(!!req.prefill && !typed.current);
+  const { prefill } = req;
+  useEffect(() => {
+    if (!prefill || typed.current) return;
+    let live = true;
+    prefill()
+      .then((v) => {
+        if (live && v?.trim() && !typed.current) setAiValue(v.trim());
+      })
+      .catch(() => {})
+      .finally(() => live && setPrefilling(false));
+    return () => {
+      live = false;
+    };
+  }, [prefill]);
   const error = req.validate?.(value) ?? (value.trim() ? null : `${req.label} can't be empty`);
   const finish = (v: string | null) => {
     req.resolve(v);
@@ -139,15 +166,30 @@ function PromptOverlay({ req }: { req: PromptRequest }) {
         }}
       >
         {req.body && <div className="text-sm text-mute">{req.body}</div>}
-        <label className="text-2xs font-bold tracking-[0.02em] text-mute" htmlFor="ops-prompt">
-          {req.label}
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="text-2xs font-bold tracking-[0.02em] text-mute" htmlFor="ops-prompt">
+            {req.label}
+          </label>
+          {req.suggest && (
+            <SuggestButton
+              className="ml-auto h-7"
+              run={req.suggest}
+              current={value}
+              onValue={setAiValue}
+            />
+          )}
+        </div>
         <Input
           id="ops-prompt"
           autoFocus
           value={value}
           invalid={touched && !!error}
-          onChange={(e) => setValue(e.target.value)}
+          trailing={aiValue !== null ? <AiMark /> : prefilling && !typed.current ? <Spinner size={14} label="Naming…" /> : undefined}
+          onChange={(e) => {
+            typed.current = true;
+            setAiValue(null);
+            setDraft(e.target.value);
+          }}
           onFocus={(e) => e.currentTarget.select()}
         />
         {touched && error && <p className="text-xs font-semibold text-error">{error}</p>}

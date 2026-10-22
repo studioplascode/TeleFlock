@@ -1,8 +1,10 @@
 import { Bot } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useState } from "react";
-import { navigate, openSession, parseAgentKey, useAgent, useSession, useUi } from "@/core";
-import { Button, cn, EmptyState, spring } from "@/design";
+import { type ReactNode, useEffect, useState } from "react";
+import { navigate, openSession, parseAgentKey, useAgent, useHosts, useSession, useUi } from "@/core";
+import { Button, cn, EmptyState, spring, StatusOrb } from "@/design";
+import { ConnStatusCard } from "@/features/hosts/ConnStatusCard";
+import { PHASE_LABEL, PHASE_STATUS, phaseBusy } from "@/features/shell/status";
 import { hostCall } from "./api";
 import { AskCard } from "./ask/AskCard";
 import { Composer } from "./composer/Composer";
@@ -41,14 +43,53 @@ export interface SessionPaneProps {
    * phone can mount the rows after its slide-in. Default true.
    */
   ready?: boolean;
+  /** The inspector rail is on screen beside this pane (the header then leaves the cost to it). */
+  inspector?: boolean;
+  /** Docked just above the composer (the phone's "Next waiting" chip). */
+  dock?: ReactNode;
   className?: string;
 }
+
+/**
+ * Deep link to an agent the app doesn't know (yet). While its host isn't online that is expected,
+ * so say what the connection is doing; "not found" only once the host is online without it.
+ */
+function MissingAgent({ hostId }: { hostId: string }) {
+  const status = useHosts((h) => h.status[hostId]);
+  const name = useHosts((h) => h.profiles.find((p) => p.id === hostId)?.name);
+  if (name && status?.phase !== "online") {
+    const phase = status?.phase ?? "idle";
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+        <div>
+          <div className="flex items-center justify-center gap-2 font-display text-xl font-bold text-ink">
+            <StatusOrb status={PHASE_STATUS[phase]} size={9} label={null} />
+            Waiting for {name} · {PHASE_LABEL[phase]}
+            {phaseBusy(phase) && "…"}
+          </div>
+          <div className="mt-1 text-sm text-mute">The agent shows up here as soon as {name} is online.</div>
+        </div>
+        <ConnStatusCard hostId={hostId} status={status} className="w-full max-w-[460px] text-left" />
+      </div>
+    );
+  }
+  return (
+    <EmptyState
+      className="flex-1"
+      icon={<Bot />}
+      title="Agent not found"
+      description={name ? `It may have exited; ${name} is online but doesn't list it.` : "Its host isn't in your host list."}
+      action={<Button onClick={() => navigate({ name: "board" })}>Back to board</Button>}
+    />
+  );
+}
+
 
 /**
  * One session: header, virtualised transcript, sticky ask card and composer. Used by the
  * desktop SessionView, the mobile pager and the split view.
  */
-export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, ready = true, className }: SessionPaneProps) {
+export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, ready = true, inspector = false, dock, className }: SessionPaneProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const retry = useOpenSession(agentKey);
@@ -70,16 +111,7 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
     return () => window.removeEventListener("keydown", onKey);
   }, [hotkeys, stoppable, hostId, agentId]);
 
-  if (!agent)
-    return (
-      <EmptyState
-        className="flex-1"
-        icon={<Bot />}
-        title="Agent not found"
-        description="It may have exited, or its host isn't connected."
-        action={<Button onClick={() => navigate({ name: "board" })}>Back to board</Button>}
-      />
-    );
+  if (!agent) return <MissingAgent hostId={hostId} />;
 
   return (
     <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
@@ -88,9 +120,9 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
           <NonOmpView agentKey={agentKey} />
         ) : (
           <>
-            {header && (focus ? <FocusHeader agentKey={agentKey} /> : <SessionHeader agentKey={agentKey} compact={compact} />)}
+            {header && (focus ? <FocusHeader agentKey={agentKey} /> : <SessionHeader agentKey={agentKey} compact={compact} inspector={inspector} />)}
             <LinkGate agentKey={agentKey} onRetry={retry}>
-              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} ready={ready} />
+              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} ready={ready} dock={dock} />
             </LinkGate>
           </>
         )}
@@ -99,7 +131,7 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
   );
 }
 
-function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean; ready: boolean }) {
+function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean; ready: boolean; dock?: ReactNode }) {
   const { ui } = useSession(agentKey);
   return (
     <>
@@ -137,7 +169,12 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready }: { age
           </motion.div>
         )}
       </AnimatePresence>
-      <div className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")} style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}>
+      {dock}
+      <div
+        data-toast-anchor={mobile ? "" : undefined}
+        className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}
+        style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
+      >
         <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
       </div>
       <SessionDialogs agentKey={agentKey} />

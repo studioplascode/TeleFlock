@@ -1,24 +1,80 @@
 import { useEffect, useState } from "react";
+import { core, useAgent } from "@/core";
 import type { ActiveTool, Liveness } from "@/core/gen";
 import {
   Elapsed,
   Heartbeat,
+  ProgressRing,
   Shimmer,
   Sparkline,
   StatusOrb,
   StreamText,
   type Status,
+  Tooltip,
   cn,
   formatAge,
   useActivity,
+  useLivelyMotion,
   useNow,
 } from "@/design";
+import { reportError } from "./agentActions";
 import { QUIET_AFTER_MS } from "./lanes";
 import { useBeat } from "./useBeat";
 
+/** Context meter `ctx 61%`: neutral fill, warn from 80 %. */
+export function ContextMeter({ pct }: { pct: number }) {
+  const hot = pct >= 80;
+  return (
+    <Tooltip content={`Context window ${Math.round(pct)}% used`}>
+      <span className="inline-flex shrink-0 items-center gap-1.5">
+        <span className={cn("font-mono text-2xs tabular", hot ? "text-warn" : "text-mute")}>
+          ctx <b className={cn("font-bold", hot ? "text-warn" : "text-ink-2")}>{Math.round(pct)}%</b>
+        </span>
+        <span className="h-1 w-8 overflow-hidden rounded-full bg-white/8" aria-hidden>
+          <span className={cn("block h-full rounded-full transition-[width] duration-700", hot ? "bg-warn" : "bg-white/35")} style={{ width: `${Math.min(100, pct)}%` }} />
+        </span>
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Running subagents' own completion estimate `subs 59%` (mean when several): the % omp's terminal shows on their rows. */
+export function SubagentsDone({ pct, live }: { pct: number; live: number }) {
+  const label = live > 1 ? `${live} subagents about ${Math.round(pct)}% done` : `Subagent about ${Math.round(pct)}% done`;
+  return (
+    <Tooltip content={<span className="block max-w-64">{`${label}: ${live > 1 ? "the average of the running subagents' own estimates" : "its own estimate"} of how far along the task is. omp asks every few minutes.`}</span>}>
+      <span className="inline-flex shrink-0 items-center gap-1 font-mono text-2xs text-mute tabular">
+        <ProgressRing done={pct} total={100} size={12} stroke={2} status="idle" label={null} ariaLabel={label} />
+        subs <b className="font-bold text-ink-2">{Math.round(pct)}%</b>
+      </span>
+    </Tooltip>
+  );
+}
+
+/** "Connect" pill for an omp session that isn't shared with TeleFlock yet (injects /collab while idle). */
+export function ConnectLinkButton({ agentKey }: { agentKey: string }) {
+  const agent = useAgent(agentKey);
+  if (agent?.omp?.link !== "notShared") return null;
+  return (
+    <Tooltip content="This omp session isn't shared with TeleFlock yet. Connect injects /collab while idle.">
+      <button
+        type="button"
+        className="shrink-0 rounded-full bg-accent/14 px-2 py-px text-2xs font-bold text-accent-ink pressable focus-ring hover:bg-accent/25"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          void core.host(agent.hostId).call("agent.connect", { agentId: agent.id }).catch((err) => reportError(`Couldn't connect ${agent.name}`, err));
+        }}
+      >
+        Connect
+      </button>
+    </Tooltip>
+  );
+}
+
 /**
- * Status orb whose breath follows the agent's measured pulse rate, wrapped in a rotating conic
- * ring while a tool runs (spec §4 "tool running").
+ * Status orb whose breath follows the agent's measured pulse rate (Lively motion; Calm holds it still),
+ * wrapped in a rotating conic ring while a tool runs (spec §4 "tool running", kept in Calm).
  */
 export function AgentOrb({
   agentKey,
@@ -54,7 +110,7 @@ export function AgentOrb({
   );
 }
 
-/** ECG heartbeat bound to the agent's pulses. Flatlines after 90 s of silence while working. */
+/** ECG heartbeat bound to the agent's pulses, labelled "last event 4s ago". Flatlines after 90 s of silence while working. */
 export function AgentHeartbeat({
   agentKey,
   status,
@@ -79,6 +135,7 @@ export function AgentHeartbeat({
       status={status}
       height={height}
       showAge={showAge}
+      agePrefix="last event"
       staleAfterMs={QUIET_AFTER_MS}
       flatAfterMs={QUIET_AFTER_MS}
       className={className}
@@ -112,8 +169,9 @@ export function QuietChip({ silentMs, className }: { silentMs: number; className
   );
 }
 
-/** Mono tool chip with a ticking timer: `bash  bun test src/board · 0:12`. */
+/** Mono tool chip with a ticking timer: `bash  bun test src/board · 0:12`. The spinner only turns in Lively motion: the timer already ticks. */
 export function ToolChip({ tool, className }: { tool: ActiveTool; className?: string }) {
+  const lively = useLivelyMotion();
   return (
     <span className={cn("flex min-w-0 items-center gap-2 rounded-sm well px-2 py-1 font-mono text-2xs", className)}>
       <span data-status="running" className="shrink-0 rounded-xs st-soft px-1.5 py-px font-bold">
@@ -121,7 +179,7 @@ export function ToolChip({ tool, className }: { tool: ActiveTool; className?: st
       </span>
       <span className="min-w-0 flex-1 truncate text-ink-2">{tool.label}</span>
       <Elapsed since={tool.startedAt} className="shrink-0 text-mute tabular" />
-      <span className="tf-loop size-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-tool/25 border-t-tool" aria-hidden />
+      {lively && <span className="tf-loop size-2.5 shrink-0 animate-spin rounded-full border-[1.5px] border-tool/25 border-t-tool" aria-hidden />}
     </span>
   );
 }
@@ -174,7 +232,7 @@ export function TpsSparkline({ tps, status, className }: { tps: number | undefin
   return (
     <div className={cn("flex items-center gap-1.5", className)}>
       <Sparkline values={values} status={status} height={18} className="w-14" aria-label="Tokens per second" />
-      <span className="w-12 shrink-0 font-mono text-2xs text-mute tabular">{Math.round(latest)} t/s</span>
+      <span className="shrink-0 font-mono text-2xs whitespace-nowrap text-mute tabular">{Math.round(latest)} tok/s</span>
     </div>
   );
 }

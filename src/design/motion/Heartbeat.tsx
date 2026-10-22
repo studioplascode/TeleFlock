@@ -14,8 +14,10 @@ export interface HeartbeatProps {
   status?: Status;
   /** Canvas height in px (default 28). Width fills the container. */
   height?: number;
-  /** Show the "last event 4s ago" label (default true). */
+  /** Show the "4s ago" label (default true). */
   showAge?: boolean;
+  /** Words before the age, e.g. "last event" → "last event 4s ago" (default none). */
+  agePrefix?: string;
   /** After this much silence the age label turns amber (default 45s). */
   staleAfterMs?: number;
   /** Silence after which the trace has fully decayed to flat (default 20s). */
@@ -76,6 +78,7 @@ export function Heartbeat({
   status = "running",
   height = 28,
   showAge = true,
+  agePrefix,
   staleAfterMs = 45_000,
   flatAfterMs = 20_000,
   className,
@@ -251,7 +254,7 @@ export function Heartbeat({
           className={cn("shrink-0 font-mono text-2xs tabular transition-colors", stale ? "text-warn" : "text-mute")}
           title={stale ? "No events for a while" : "Last event"}
         >
-          {formatAge(age)}
+          {agePrefix ? `${agePrefix} ${formatAge(age)}` : formatAge(age)}
         </span>
       )}
     </div>

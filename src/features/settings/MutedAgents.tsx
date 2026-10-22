@@ -41,9 +41,9 @@ export function MutedAgents({ index }: { index: number }) {
     setMuted(key, false).catch((err: unknown) => toast({ title: `Couldn't unmute: ${errorMessage(err)}`, status: "error" }));
   };
   return (
-    <Section index={index} icon={<BellOff />} title="Muted agents" description="These agents never notify you or play a sound. Their cards still show on the board.">
+    <Section index={index} icon={<BellOff />} title="Muted agents" description="No sound or notification from these agents; their cards still show. Mute a noisy agent from its card or session menu.">
       {muted.length === 0 ? (
-        <p className="py-2 text-sm text-mute-2">No muted agents. Mute a noisy one from its card or session menu.</p>
+        <p className="py-2 text-sm text-mute-2">No muted agents.</p>
       ) : (
         <ul className="flex flex-col divide-y divide-line">
           <AnimatePresence initial={false}>

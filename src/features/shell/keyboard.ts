@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { toast } from "@/design";
 import { navigate, parseAgentKey, type Route, type UiState, useRoute, useUi } from "@/core";
 import { toggleSidebar } from "./sidebarState";
+import { ACTIONS, SEND_KEYS, VIEWS } from "./vocab";
 
 export interface ShortcutDef {
   keys: string[];
@@ -13,29 +14,25 @@ export interface ShortcutGroup {
   items: ShortcutDef[];
 }
 
-/** Ctrl+1…6 view order. */
-export const VIEW_KEYS: readonly { route: Route; label: string }[] = [
-  { route: { name: "board" }, label: "Board" },
-  { route: { name: "inbox" }, label: "Inbox" },
-  { route: { name: "activity" }, label: "Activity" },
-  { route: { name: "usage" }, label: "Usage" },
-  { route: { name: "hosts" }, label: "Hosts" },
-  { route: { name: "settings" }, label: "Settings" },
-];
+/** Ctrl+1…6 view order: the sidebar nav (Board · Inbox · Activity · Usage), then Hosts and Settings. */
+export const VIEW_KEYS = (["board", "inbox", "activity", "usage", "hosts", "settings"] as const).map((name) => ({ route: { name } as Route, label: VIEWS[name].label }));
 
-/** Everything the `?` sheet lists (spec §6). */
+/** "Ctrl J" → ["Ctrl", "J"] for the sheet's key caps. */
+const caps = (shortcut: string): string[] => shortcut.split(" ");
+
+/** Everything the `?` sheet lists (spec §6). Labels and keys come from the vocabulary. */
 export const SHORTCUTS: readonly ShortcutGroup[] = [
   {
     title: "Global",
     items: [
       { keys: ["Ctrl", "K"], label: "Command palette" },
-      { keys: ["Ctrl", "J"], label: "Answer next" },
-      { keys: ["Ctrl", "\\"], label: "Toggle split view" },
+      { keys: caps(ACTIONS.answerNext.shortcut), label: ACTIONS.answerNext.label },
+      { keys: caps(ACTIONS.newTask.shortcut), label: ACTIONS.newTask.label },
+      { keys: caps(ACTIONS.newWorktree.shortcut), label: ACTIONS.newWorktree.label },
+      { keys: caps(ACTIONS.terminalBeside.shortcut), label: "Split view (terminal beside)" },
       { keys: ["Ctrl", "B"], label: "Toggle sidebar" },
-      { keys: ["N"], label: "New worktree" },
-      { keys: ["D"], label: "Dispatch" },
       { keys: ["?"], label: "Keyboard shortcuts" },
-      { keys: ["Esc"], label: "Close overlay" },
+      { keys: ["Esc"], label: "Close overlay → leave focus mode → stop turn" },
     ],
   },
   {
@@ -43,25 +40,35 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
     items: VIEW_KEYS.map((v, i) => ({ keys: ["Ctrl", String(i + 1)], label: v.label })),
   },
   {
+    title: "Typing",
+    items: [
+      { keys: caps(SEND_KEYS.send), label: "Send / steer" },
+      { keys: caps(SEND_KEYS.newline), label: "New line" },
+      { keys: caps(SEND_KEYS.followUp), label: "Follow-up (while the agent works)" },
+      { keys: caps(SEND_KEYS.submitForm), label: "Submit forms (wizards, commit, pull request)" },
+    ],
+  },
+  {
     title: "Board",
     items: [
       { keys: ["J"], label: "Next card" },
       { keys: ["K"], label: "Previous card" },
-      { keys: ["Enter"], label: "Open agent" },
-      { keys: ["A"], label: "Answer" },
-      { keys: ["T"], label: "Terminal" },
-      { keys: ["X"], label: "Select card (multi-select)" },
+      { keys: ["H"], label: "Previous lane" },
+      { keys: ["L"], label: "Next lane" },
+      { keys: caps(ACTIONS.openSession.shortcut), label: ACTIONS.openSession.label },
+      { keys: caps(ACTIONS.answer.shortcut), label: "Answer the selected card" },
+      { keys: caps(ACTIONS.terminal.shortcut), label: ACTIONS.terminal.label },
+      { keys: caps(ACTIONS.select.shortcut), label: ACTIONS.select.label },
       { keys: ["Ctrl", "Click"], label: "Add card to selection" },
     ],
   },
   {
     title: "Session",
     items: [
-      { keys: ["Ctrl", "Enter"], label: "Send" },
-      { keys: ["Alt", "Enter"], label: "Queue follow-up" },
-      { keys: ["Esc"], label: "Stop the agent" },
+      { keys: caps(ACTIONS.stopTurn.shortcut), label: ACTIONS.stopTurn.label },
       { keys: ["1", "…", "9"], label: "Pick an answer" },
-      { keys: ["F"], label: "Focus mode" },
+      { keys: ["N+1"], label: "Other… (the number after the last option)" },
+      { keys: caps(ACTIONS.focusMode.shortcut), label: ACTIONS.focusMode.label },
     ],
   },
   {
@@ -77,7 +84,6 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
       { keys: ["["], label: "Toggle file tree" },
       { keys: ["]"], label: "Toggle ship panel" },
       { keys: ["/"], label: "Filter files" },
-      { keys: ["Ctrl", "Enter"], label: "Commit (in the message box)" },
     ],
   },
 ];

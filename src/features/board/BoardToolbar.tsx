@@ -1,6 +1,6 @@
 import type { Ref } from "react";
-import { useCore, useHosts, useUi } from "@/core";
-import { Button, Input, Kbd, SegmentedControl, Select, cn } from "@/design";
+import { useCore, useHosts } from "@/core";
+import { Input, Kbd, SegmentedControl, Select, cn } from "@/design";
 import { type GroupBy, useBoard } from "./boardStore";
 import { FilterChip } from "./FilterChip";
 
@@ -19,10 +19,12 @@ const GROUPS = [
   { value: "repo", label: "Repo" },
 ] as const;
 
+/**
+ * Board header: repo filter, search and grouping. The host filter is the title-bar pill; "New task"
+ * is the sidebar's primary button (always on screen, also in the collapsed rail), so it isn't repeated here.
+ */
 export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInputElement>; className?: string }) {
-  const profiles = useHosts((s) => s.profiles);
   const filter = useHosts((s) => s.filter);
-  const setFilter = useHosts((s) => s.setFilter);
   const repo = useBoard((s) => s.repo);
   const setRepo = useBoard((s) => s.setRepo);
   const q = useBoard((s) => s.q);
@@ -30,20 +32,11 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
   const groupBy = useBoard((s) => s.groupBy);
   const setGroupBy = useBoard((s) => s.setGroupBy);
   const repos = useRepoNames(filter);
-  const openDialog = useUi((s) => s.openDialog);
 
   return (
     // Wraps onto a second row in narrow boards (small window, open split) instead of squeezing every control.
     <div className={cn("flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2", className)}>
       <h1 className="mr-2 shrink-0 font-display text-xl font-bold text-ink">Board</h1>
-      {profiles.length > 1 && (
-        <Select
-          value={filter}
-          onValueChange={setFilter}
-          className="h-9 w-36 min-w-24 shrink"
-          options={[{ value: "all", label: "All hosts" }, ...profiles.map((p) => ({ value: p.id, label: p.name }))]}
-        />
-      )}
       <Select
         value={repo ?? "*"}
         onValueChange={(v) => setRepo(v === "*" ? null : v)}
@@ -77,15 +70,6 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
         <Kbd>J</Kbd>
         <Kbd>K</Kbd> move · <Kbd>↵</Kbd> open · <Kbd>A</Kbd> answer · <Kbd>T</Kbd> terminal
       </span>
-      <Button
-        size="sm"
-        variant="primary"
-        className="ml-auto shrink-0 min-[1700px]:ml-0"
-        onClick={() => openDialog({ kind: "newWorktree", hostId: filter !== "all" ? filter : undefined })}
-        trailing={<Kbd>N</Kbd>}
-      >
-        New worktree
-      </Button>
     </div>
   );
 }

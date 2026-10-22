@@ -262,6 +262,26 @@
   background: linear-gradient(180deg, var(--color-tile-3), var(--color-tile-2));
   box-shadow: var(--shadow-d1);
 }
+/*
+ * Needs-you hero card (top card of the Needs-you lane): the sunset surface on a regular card, with the
+ * text/line tokens re-mapped so everything inside stays legible. `!important` because it must beat
+ * `card-surface` / `st-border-grad` backgrounds whatever order Tailwind emits utilities in.
+ */
+@utility card-sunset {
+  --color-ink: #ffffff;
+  --color-ink-2: rgb(255 255 255 / 0.94);
+  --color-mute: rgb(255 255 255 / 0.84);
+  --color-mute-2: rgb(255 255 255 / 0.72);
+  --color-line: rgb(255 255 255 / 0.2);
+  --color-line-2: rgb(255 255 255 / 0.28);
+  --color-well: rgb(40 0 20 / 0.3);
+  color: #ffffff;
+  border: 0 !important;
+  background:
+    radial-gradient(120% 130% at 100% 0%, rgb(255 61 119 / 0.95) 0%, transparent 60%),
+    radial-gradient(90% 120% at 0% 100%, #ff7a18 0%, transparent 70%),
+    linear-gradient(135deg, #ff7a18, #ff3d77) !important;
+}
 @utility glass {
   background: rgb(27 27 37 / 0.72);
   backdrop-filter: blur(24px) saturate(150%);

@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { motion } from "motion/react";
 import { type ReactNode, useContext, useMemo, useState } from "react";
-import { linkProps, useAgent } from "@/core";
+import { linkProps, useAgent, useSession } from "@/core";
 import type { BashView, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
 import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner } from "@/design";
 import { languageFor } from "../lib/highlight";
@@ -251,6 +251,28 @@ export function ToolCard({ item }: { item: ToolItem }) {
   const open = openState ?? (OPEN_BY_DEFAULT[type] || failed);
   const Icon = ICON[kind];
   const hasBody = item.view != null || item.output != null || item.args != null || item.error != null;
+  // While the pinned ask card under the transcript is open, its tool call is one line pointing there.
+  const sessionKey = useContext(SessionCtx)?.key;
+  const pinned = useSession(kind === "ask" && live && sessionKey ? sessionKey : "").ui;
+  if (pinned && (pinned.callId == null || pinned.callId === item.callId) && openState === null)
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-expanded={false}
+        className="focus-ring flex w-full min-w-0 items-center gap-2.5 rounded-[16px] bg-[rgb(10_10_16/0.5)] px-3 py-1.5 text-left shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)] hover:bg-white/[0.025] max-md:gap-2 max-md:px-2.5"
+      >
+        <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px]", TONE.ask)}>
+          <Icon className="size-3" />
+        </span>
+        <span className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
+        <span className="flex min-w-0 items-center gap-1 truncate text-[11.5px] font-semibold text-sun-1">
+          · answering below
+          <ArrowDown className="size-3 shrink-0" />
+        </span>
+        <ChevronDown className="ml-auto size-3.5 shrink-0 -rotate-90 text-mute-2" />
+      </button>
+    );
   return (
     <div
       data-status={live ? "running" : failed ? "error" : undefined}

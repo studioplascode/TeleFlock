@@ -3,10 +3,11 @@ import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { Button, cn, dismissToast, formatAge, Shimmer, Spinner, spring, toast, useNow } from "@/design";
 import { core, navigate, onAppEvent, useHosts } from "@/core";
-import type { ConnPhase, ConnStatus, HostKeyInfo } from "@/core/gen";
+import type { ConnPhase, ConnStatus, HostKeyInfo, SetupIssue } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
+import { setupHash } from "./setupFocus";
 
 /** The forward path of a connection, shown as a stepper while connecting. */
 const PATH: readonly ConnPhase[] = ["connecting", "authenticating", "deploying", "starting", "online"];
@@ -49,6 +50,36 @@ export function openExternal(url: string): void {
   });
 }
 
+/** The one verb a host that isn't online offers (shared by the Flock strip, More, Sidebar and board strip). */
+export interface ConnAction {
+  label: "Retry" | "Sign in" | "Verify" | "Connect";
+  run: () => void;
+}
+
+/**
+ * What to do about a host's connection right now, or null while it is online or mid-handshake.
+ * Sign in opens the Tailscale approval page directly; Verify opens Hosts, where the fingerprint is.
+ */
+export function connAction(status: ConnStatus | undefined, hostId: string): ConnAction | null {
+  const phase = status?.phase ?? "idle";
+  switch (phase) {
+    case "authRequired": {
+      const url = status?.authUrl;
+      return { label: "Sign in", run: () => (url ? openExternal(url) : navigate({ name: "hosts" })) };
+    }
+    case "hostKey":
+      return { label: "Verify", run: () => navigate({ name: "hosts" }) };
+    case "error":
+    case "reconnecting":
+      return { label: "Retry", run: () => void connect(hostId) };
+    case "idle":
+    case "offline":
+      return { label: "Connect", run: () => void connect(hostId) };
+    default:
+      return null;
+  }
+}
+
 /** Give up following a connection after this long (it stays visible on the host card). */
 const FOLLOW_MS = 120_000;
 
@@ -68,7 +99,23 @@ export function connectAndFollow(hostId: string, name: string): void {
     const open = { label: "Open hosts", onClick: () => navigate({ name: "hosts" }) };
     if (phase === "online") {
       haptic("success");
-      id = toast({ title: `${name} is online`, description: status?.latencyMs !== undefined ? `${Math.round(status.latencyMs)} ms` : undefined, status: "done" });
+      const latency = status?.latencyMs !== undefined ? `${Math.round(status.latencyMs)} ms` : undefined;
+      // Offer "Finish setup" when the host still has open setup items (asked briefly; never holds the toast long).
+      const issues = core
+        .host(hostId)
+        .call("host.setup", {})
+        .then(
+          (s) => s.issues,
+          (): SetupIssue[] => [],
+        );
+      const late = new Promise<SetupIssue[]>((resolve) => window.setTimeout(() => resolve([]), 2500));
+      void Promise.race([issues, late]).then((open) => {
+        const recommended = open.filter((i) => i.recommended).length;
+        const items = recommended || open.length;
+        const setup = items > 0 ? `${items} setup item${items > 1 ? "s" : ""} ${recommended ? "recommended" : "open"}` : undefined;
+        const finish = { label: "Finish setup", onClick: () => void (window.location.hash = setupHash(hostId)) };
+        id = toast({ title: `${name} is online`, description: [latency, setup].filter(Boolean).join(" · ") || undefined, status: "done", ...(setup ? { action: finish } : {}) });
+      });
     } else if (phase === "authRequired" || phase === "hostKey") {
       id = toast({ title: `${name}: ${PHASE_LABEL[phase]}`, description: "Finish it on the host card.", status: "needs-you", action: open, duration: 12_000 });
     } else if (phase === "error") {
@@ -130,9 +177,7 @@ function AuthRequired({ hostId, url }: { hostId: string; url?: string }) {
         </span>
         <div className="min-w-0 flex-1">
           <h4 className="font-display text-lg font-bold">Sign in to continue</h4>
-          <p className="mt-0.5 text-sm text-white/85">
-            Tailscale SSH is in check mode for this host. Approve the login in your browser; TeleFlock keeps waiting and finishes on its own.
-          </p>
+          <p className="mt-0.5 text-sm text-white/85">Your tailnet asks you to confirm SSH logins for this host (Tailscale check mode). Open the browser, approve, and TeleFlock continues.</p>
         </div>
       </div>
       {url && (
@@ -219,7 +264,7 @@ function HostKey({ hostId, info }: { hostId: string; info?: HostKeyInfo }) {
           <h4 className="font-display text-lg font-bold text-ink">Verify the host key</h4>
           <p className="mt-0.5 text-sm text-mute">
             This is the first connection to a host outside your tailnet, so its identity isn't vouched for. Compare the fingerprint with{" "}
-            <code className="font-mono text-xs text-ink-2">ssh-keygen -lf</code> on the host before trusting it.
+            <code className="font-mono text-xs text-ink-2">ssh-keygen -lf</code> on the host before trusting it. If it doesn't match, Cancel: something else is answering at this address.
           </p>
         </div>
       </div>

@@ -1,15 +1,15 @@
-import { Archive, ArchiveRestore, Bell, BellOff, Columns2, X } from "lucide-react";
+import { ArchiveRestore, Bell, BellOff, CheckCheck, Columns2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useEffect, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useCore, useSettings, useUi } from "@/core";
 import { Kbd, NumberTicker, cn, spring } from "@/design";
 import { haptic } from "@/features/shell/haptics";
-import { openAgent, setArchived, setMuted, stopAgent } from "./agentActions";
+import { ACTIONS } from "@/features/shell/vocab";
+import { archiveWithUndo, openAgent, setArchived, setMuted, stopAgent } from "./agentActions";
 import { useBoard } from "./boardStore";
-import { requestArchive } from "./CardMenu";
 
-function BarButton({ label, count, icon, onClick, tone = "neutral", mobile }: { label: string; count?: number; icon: ReactNode; onClick(): void; tone?: "neutral" | "danger" | "accent"; mobile: boolean }) {
+function BarButton({ label, count, icon, onClick, tone = "neutral", mobile }: { label: string; count?: number; icon: ReactNode; onClick(): void; tone?: "neutral" | "accent"; mobile: boolean }) {
   return (
     <button
       type="button"
@@ -17,7 +17,7 @@ function BarButton({ label, count, icon, onClick, tone = "neutral", mobile }: { 
       className={cn(
         "flex shrink-0 items-center gap-1.5 rounded-md font-bold whitespace-nowrap pressable focus-ring [&_svg]:size-4",
         mobile ? "h-12 flex-col justify-center gap-0.5 px-2.5 text-[10.5px]" : "h-9 px-3 text-xs",
-        tone === "danger" ? "text-[#ff8aa5] hover:bg-error/15" : tone === "accent" ? "text-accent-ink hover:bg-accent/20" : "text-ink hover:bg-white/8",
+        tone === "accent" ? "text-accent-ink hover:bg-accent/20" : "text-ink hover:bg-white/8",
       )}
     >
       {icon}
@@ -30,7 +30,7 @@ function BarButton({ label, count, icon, onClick, tone = "neutral", mobile }: { 
 }
 
 /**
- * Floating bar for the board's multi-selection: archive / unarchive, stop, mute, open in split.
+ * Floating bar for the board's multi-selection: mark done / reopen, stop turn, mute, open in split.
  * Springs up from the bottom while anything is selected. Esc clears (desktop keys live in useBoardKeys).
  */
 export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
@@ -86,6 +86,7 @@ export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
           key="selection-bar"
           role="toolbar"
           aria-label={`${picked.length} selected`}
+          data-toast-anchor={mobile ? "" : undefined}
           initial={{ y: 80, opacity: 0, scale: 0.94 }}
           animate={{ y: 0, opacity: 1, scale: 1 }}
           exit={{ y: 80, opacity: 0, scale: 0.94 }}
@@ -105,16 +106,15 @@ export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
             <NumberTicker value={picked.length} />
             {!mobile && " selected"}
           </span>
-          {review.length > 0 && <BarButton mobile={mobile} label="Archive" count={review.length} icon={<Archive />} onClick={run(() => requestArchive(review))} />}
+          {review.length > 0 && <BarButton mobile={mobile} label={ACTIONS.markDone.label} count={review.length} icon={<CheckCheck />} onClick={run(() => void archiveWithUndo(review))} />}
           {done.length > 0 && (
-            <BarButton mobile={mobile} label="Unarchive" count={done.length} icon={<ArchiveRestore />} onClick={run(() => done.forEach((k) => void setArchived(k, false).catch(() => {})))} />
+            <BarButton mobile={mobile} label={ACTIONS.reopen.label} count={done.length} icon={<ArchiveRestore />} onClick={run(() => done.forEach((k) => void setArchived(k, false).catch(() => {})))} />
           )}
           {running.length > 0 && (
             <BarButton
               mobile={mobile}
-              label="Stop"
+              label={ACTIONS.stopTurn.label}
               count={running.length}
-              tone="danger"
               icon={
                 <svg viewBox="0 0 16 16" aria-hidden>
                   <rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" />

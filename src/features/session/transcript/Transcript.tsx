@@ -1,11 +1,12 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDown, MessageSquareDashed } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type KeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import { getTranscript, loadOlder, useAgent, useSession, useSessionItem } from "@/core";
 import type { TranscriptItem } from "@/core/gen";
-import { cn, Elapsed, EmptyState, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
+import { cn, Elapsed, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
 import { useSessionUi } from "../state";
+import { EmptyTranscript } from "./FreshStart";
 import { Row } from "./rows";
 
 const STICK_PX = 56;
@@ -65,7 +66,7 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
       hasMore={session.hasMore}
       onLoadOlder={() => loadOlder(agentKey)}
       renderRow={(id, prevId, nextId, rail) => <Row agentKey={agentKey} itemId={id} prevId={prevId} nextId={nextId} rail={rail} />}
-      empty={<EmptyState className="mt-16" icon={<MessageSquareDashed />} title="No messages yet" description="Send a prompt to get this agent going." />}
+      empty={<EmptyTranscript agentKey={agentKey} />}
       footer={<WorkingFooter agentKey={agentKey} lastId={ids[ids.length - 1]} />}
       jumpLabel={(unseen) => <JumpLabel agentKey={agentKey} unseen={unseen} />}
       focus={focus}

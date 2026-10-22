@@ -6,6 +6,8 @@ import { core, useUi } from "@/core";
 import type { HostProfile } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
+import { ExtLink } from "./CopyCommand";
+import { HERDR_URL, HOST_COLORS, OMP_URL } from "./kinds";
 
 const DEMO_PROFILE: HostProfile = {
   id: "demo",
@@ -13,7 +15,7 @@ const DEMO_PROFILE: HostProfile = {
   kind: "demo",
   herdrSession: "default",
   autoConnect: true,
-  color: "#f053d0",
+  color: HOST_COLORS[7],
 };
 
 const FEATURES = [
@@ -58,7 +60,7 @@ export function Onboarding() {
           Your agents, <span className="text-omp">herded.</span>
         </motion.h1>
         <motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.2 }} className="mt-3 max-w-md text-md text-mute">
-          TeleFlock is a live window into the omp agents running in herdr on your machines, on your desk and in your pocket.
+          TeleFlock is a live window into the <ExtLink href={OMP_URL}>omp</ExtLink> agents running in <ExtLink href={HERDR_URL}>herdr</ExtLink> on your machines, on your desk and in your pocket.
         </motion.p>
         <motion.ul
           initial="hidden"
@@ -112,7 +114,7 @@ export function Onboarding() {
                   <FlaskConical />
                 </span>
                 <span className="font-display text-2xl font-bold text-ink">Try the demo</span>
-                <span className="text-sm text-mute">A simulated flock of ten agents streaming, asking and shipping. Nothing leaves the app.</span>
+                <span className="text-sm text-mute">A simulated flock of a dozen agents streaming, asking and shipping. Nothing leaves the app.</span>
                 <span className="mt-auto inline-flex items-center gap-1.5 pt-2 text-sm font-extrabold text-accent-hi">
                   {starting ? "Hatching the flock…" : "Take a look"} <ArrowRight className="size-4 transition-transform group-hover:translate-x-1" />
                 </span>

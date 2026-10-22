@@ -66,15 +66,40 @@ export function branchSlug(branch: string): string {
   return branch.trim().replace(/[\\/]+/g, "-").replace(/\s+/g, "-");
 }
 
+/** herdr refuses agent names longer than this (tf-hostd `start_agent`). */
+export const AGENT_NAME_MAX = 32;
+
+/** A kebab name cut to `max` chars at a word boundary (one over-long word is cut hard). */
+export function clipName(name: string, max: number): string {
+  if (name.length <= max) return name;
+  return name.slice(0, max + 1).replace(/-?[^-]*$/, "") || name.slice(0, max).replace(/-+$/, "");
+}
+
 /** herdr agent names: short, lowercase, `[a-z0-9-]`. Derived from the last branch segment. */
 export function agentNameFromBranch(branch: string): string {
   const last = branch.trim().split("/").filter(Boolean).pop() ?? "";
-  return last
+  const name = last
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 32);
+    .replace(/^-|-$/g, "");
+  return clipName(name, AGENT_NAME_MAX);
+}
+
+/**
+ * A derived (not typed) name that doesn't collide with a running agent: `docs` → `docs-2`, with the
+ * suffix always within herdr's 32 chars (the base is cut at a word boundary to make room). Without
+ * this the dialog would silently refuse to launch with the auto name.
+ */
+export function uniqueAgentName(base: string, taken: readonly string[]): string {
+  if (!base) return base;
+  const head = clipName(base, AGENT_NAME_MAX);
+  if (!taken.includes(head)) return head;
+  for (let i = 2; ; i++) {
+    const suffix = `-${i}`;
+    const candidate = `${clipName(base, AGENT_NAME_MAX - suffix.length)}${suffix}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
 }
 
 /** Validate a new git branch name (subset of `git check-ref-format`). Returns an error message or null. */

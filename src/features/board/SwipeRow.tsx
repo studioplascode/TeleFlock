@@ -25,9 +25,10 @@ const LONG_PRESS_MS = 450;
 const MOVE_SLOP = 10;
 
 /**
- * Thumb-first row: swipe left to reveal actions (Answer · Terminal · Archive), tap to open.
- * Long-press enters multi-select (the board's selection bar takes over); while selecting, taps
- * toggle rows and swipes are off.
+ * Thumb-first row: swipe left to reveal actions (Answer · Terminal · Stop turn · Mark done ·
+ * Reopen, labelled from `ACTIONS`), tap to open. Long-press enters multi-select (the board's
+ * selection bar takes over); while selecting, taps toggle rows and swipes are off. Gestures are
+ * accelerators only: every action they reach also sits on the row or in its ⋯ menu.
  */
 export function SwipeRow({
   id,

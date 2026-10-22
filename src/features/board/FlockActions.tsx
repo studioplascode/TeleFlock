@@ -1,13 +1,26 @@
-import { Bot, Check, ChevronDown, FolderOpen, GitBranchPlus, GitFork, History, Plus, Server } from "lucide-react";
+import { Bot, Check, ChevronDown, FolderOpen, GitBranchPlus, GitFork, History, Plus, Send, Server } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
-import { navigate, useHostIds, useHosts, useHostStale, useUi } from "@/core";
-import { cn, spring, StatusOrb, useCalmMotion } from "@/design";
+import { navigate, useHostIds, useHosts, useUi } from "@/core";
+import type { ConnPhase, ConnStatus } from "@/core/gen";
+import { cn, formatAge, spring, StatusOrb, useCalmMotion } from "@/design";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { haptic } from "@/features/shell/haptics";
 import { closeSheet, openSheet } from "@/features/shell/sheets";
-import { connSummary, PHASE_STATUS } from "@/features/shell/status";
+import { connSummary, hostsHealth, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
+import { ACTIONS } from "@/features/shell/vocab";
 import { useBoard } from "./boardStore";
+
+/**
+ * A host that is not online, in a few words for one-line strips (Flock, More):
+ * "offline · 3h ago", "reconnecting in 12s", "sign-in required".
+ */
+export function connWords(status: ConnStatus | undefined, now: number): string {
+  if (!status) return PHASE_LABEL.idle.toLowerCase();
+  if (status.phase === "reconnecting" && status.nextRetryAt) return `reconnecting in ${Math.max(0, Math.ceil((status.nextRetryAt - now) / 1000))}s`;
+  const word = PHASE_LABEL[status.phase].toLowerCase();
+  return status.lastOnlineAt && status.phase !== "online" ? `${word} · ${formatAge(now - status.lastOnlineAt)}` : word;
+}
 
 /** Big-tap sheet row: icon tile, label, hint, optional trailing mark. */
 function SheetRow({ icon, label, hint, trailing, selected, onClick }: { icon: ReactNode; label: string; hint?: string; trailing?: ReactNode; selected?: boolean; onClick: () => void }) {
@@ -24,7 +37,8 @@ function SheetRow({ icon, label, hint, trailing, selected, onClick }: { icon: Re
       <span className="grid size-8 shrink-0 place-items-center rounded-md bg-white/[0.06] text-accent-hi [&_svg]:size-4.5">{icon}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-md font-bold text-ink">{label}</span>
-        {hint && <span className="block truncate text-xs text-mute">{hint}</span>}
+        {/* hints are one-line descriptions; two lines on a narrow phone rather than cut off */}
+        {hint && <span className="line-clamp-2 block text-xs text-mute">{hint}</span>}
       </span>
       {trailing}
     </button>
@@ -42,13 +56,26 @@ function CreateActions() {
     closeSheet();
     run(host);
   };
+  const row = (id: "newWorktree" | "newAgent" | "fanOut" | "openFolder" | "pastSessions", icon: ReactNode, run: (hostId: string | undefined) => void) => (
+    <SheetRow icon={icon} label={ACTIONS[id].label} hint={ACTIONS[id].description} onClick={act(run)} />
+  );
   return (
     <div className="flex flex-col gap-1">
-      <SheetRow icon={<GitBranchPlus />} label="New worktree" hint="Branch off a repo and start an agent in it" onClick={act((hostId) => openDialog({ kind: "newWorktree", hostId }))} />
-      <SheetRow icon={<Bot />} label="New agent" hint="In an existing workspace or folder" onClick={act((hostId) => openDialog({ kind: "newAgent", hostId }))} />
-      <SheetRow icon={<GitFork />} label="Fan out" hint="One prompt, several agents side by side" onClick={act((hostId) => openDialog({ kind: "fanOut", hostId }))} />
-      <SheetRow icon={<FolderOpen />} label="Open folder" hint="A workspace without an agent" onClick={act((hostId) => openNewAgent({ hostId, openFolder: true }))} />
-      <SheetRow icon={<History />} label="Past sessions" hint="Resume an earlier omp session" onClick={act((hostId) => openDialog({ kind: "pastSessions", hostId }))} />
+      <SheetRow
+        icon={<Send />}
+        label={ACTIONS.newTask.label}
+        hint={ACTIONS.newTask.description}
+        onClick={() => {
+          haptic("select");
+          closeSheet();
+          navigate({ name: "dispatch" });
+        }}
+      />
+      {row("newWorktree", <GitBranchPlus />, (hostId) => openDialog({ kind: "newWorktree", hostId }))}
+      {row("newAgent", <Bot />, (hostId) => openDialog({ kind: "newAgent", hostId }))}
+      {row("fanOut", <GitFork />, (hostId) => openDialog({ kind: "fanOut", hostId }))}
+      {row("openFolder", <FolderOpen />, (hostId) => openNewAgent({ hostId, openFolder: true }))}
+      {row("pastSessions", <History />, (hostId) => openDialog({ kind: "pastSessions", hostId }))}
     </div>
   );
 }
@@ -68,6 +95,7 @@ export function FlockFab() {
           type="button"
           aria-label="Create"
           aria-haspopup="dialog"
+          data-toast-anchor
           onClick={() => {
             haptic("tick");
             openSheet({ title: "Create", description: "Start something on your flock", content: <CreateActions /> });
@@ -141,29 +169,45 @@ function HostFilterList() {
 
 /**
  * Flock header host chip. One host: its health, tapping opens Hosts. Several: the current filter
- * ("All hosts" or one host), tapping opens the host-filter sheet.
+ * ("All hosts" or one host), tapping opens the host-filter sheet. The orb is honest, like the
+ * desktop HostPill: the worst phase across the hosts in view, amber with "1/2 online" when a host
+ * is down; never green over a dead host.
  */
 export function HostChip() {
   const ids = useHostIds();
   const filter = useHosts((s) => s.filter);
   const hostId = filter !== "all" ? filter : ids[0];
   const name = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
-  const latency = useHosts((s) => (hostId ? s.status[hostId]?.latencyMs : undefined));
-  const stale = useHostStale(hostId ?? "");
+  const status = useHosts((s) => (hostId ? s.status[hostId] : undefined));
+  // joined so the selector stays primitive
+  const packed = useHosts((s) => ids.map((id) => s.status[id]?.phase ?? "idle").join(","));
   if (!hostId) return null;
   const multi = ids.length > 1;
   const all = multi && filter === "all";
+  const health = hostsHealth(packed.split(",") as ConnPhase[]);
+  const phase = status?.phase ?? "idle";
+  const orb = all ? health.orb : PHASE_STATUS[phase];
+  const down = all ? health.online < health.total : phase !== "online";
+  const bad = all ? health.orb === "error" || health.orb === "needs-you" || health.online === 0 : orb === "error" || orb === "needs-you";
+  const detail = all ? (down ? `${health.online}/${health.total} online` : `${health.total}`) : connSummary(status);
   return (
     <button
       type="button"
       aria-haspopup={multi ? "dialog" : undefined}
-      aria-label={multi ? `Host filter: ${all ? "all hosts" : name}` : `${name}, open hosts`}
+      aria-label={multi ? `Host filter: ${all ? "all hosts" : name}, ${detail}` : `${name}, ${detail}, open hosts`}
       onClick={() => (multi ? openSheet({ title: "Hosts", description: "Show agents from", content: <HostFilterList /> }) : navigate({ name: "hosts" }))}
-      className="flex min-h-9 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit"
+      className={cn(
+        "flex min-h-9 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit",
+        down && (bad ? "shadow-[inset_0_0_0_1px_rgb(255_77_94/0.45)]" : "shadow-[inset_0_0_0_1px_rgb(251_191_36/0.4)]"),
+      )}
     >
-      <StatusOrb status={stale ? "idle" : "done"} size={7} label={null} />
-      {all ? `All hosts` : name}
-      {all ? <span className="text-mute">{ids.length}</span> : <span className="text-mute">{stale ? "offline" : latency !== undefined ? `${latency} ms` : ""}</span>}
+      {all && health.degraded ? (
+        <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-warn shadow-[0_0_6px_rgb(251_191_36/0.7)]" />
+      ) : (
+        <StatusOrb status={orb} size={7} label={null} />
+      )}
+      {all ? "All hosts" : name}
+      <span className={cn("tabular", !down ? "text-mute" : bad ? "text-[#ff9fb2]" : "text-warn")}>{detail}</span>
       {multi && <ChevronDown className="size-3.5 text-mute" aria-hidden />}
     </button>
   );

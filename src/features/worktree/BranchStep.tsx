@@ -1,6 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion } from "motion/react";
-import { Check, CloudDownload, FolderTree, GitBranch, GitBranchPlus, GitFork, Lock, Search, Tag, TriangleAlert, Wand2 } from "lucide-react";
+import { Check, CloudDownload, FolderTree, GitBranch, GitBranchPlus, GitFork, Lock, Search, Sparkles, Tag, TriangleAlert, Wand2 } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useDraft } from "@/core";
 import type { BranchInfo, BranchList } from "@/core/gen";
@@ -18,6 +18,8 @@ export interface BranchDraft {
   customPath: boolean;
   path: string;
   label: string;
+  /** Name a new branch from the agent's task when the name is left empty (shown while AI naming is on; undefined = on). */
+  autoName?: boolean;
 }
 
 export interface BranchStepProps {
@@ -34,6 +36,10 @@ export interface BranchStepProps {
   defaultPath: string;
   nameError: string | null;
   home?: string;
+  /** Settings → AI naming is on: offer "Name it from the task" (the tiny model's name, else the task's words). */
+  aiNaming: boolean;
+  /** Why the wizard sent the user back here (e.g. nothing to name the branch from). */
+  notice?: string | null;
   onSubmit: () => void;
 }
 
@@ -67,7 +73,8 @@ function nextFreeName(name: string, taken: ReadonlySet<string>): string {
   }
 }
 
-export function BranchStep({ branches, loading, error, draft, onChange, filterKey, branch, defaultPath, nameError, home, onSubmit }: BranchStepProps) {
+export function BranchStep({ branches, loading, error, draft, onChange, filterKey, branch, defaultPath, nameError, home, aiNaming, notice, onSubmit }: BranchStepProps) {
+  const autoName = aiNaming && draft.autoName !== false;
   const [q, setQ] = useDraft(filterKey);
   const [active, setActive] = useState(0);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -161,7 +168,16 @@ export function BranchStep({ branches, loading, error, draft, onChange, filterKe
         <div className="grid grid-cols-1 gap-3.5 md:grid-cols-[1.3fr_1fr]">
           <Field
             label="Branch name"
-            error={draft.name ? nameError : undefined}
+            hint={
+              aiNaming ? (
+                <span className="flex items-center gap-1.5 font-semibold">
+                  <Sparkles className="size-3 text-accent-hi" aria-hidden />
+                  Name it from the task
+                  <Switch checked={autoName} onCheckedChange={(v) => onChange({ autoName: v })} label="Name it from the task" />
+                </span>
+              ) : undefined
+            }
+            error={draft.name ? nameError : notice}
             description={
               !draft.name ? (
                 <span className="flex flex-wrap items-center gap-1.5">
@@ -188,7 +204,7 @@ export function BranchStep({ branches, loading, error, draft, onChange, filterKe
                 id={id}
                 autoFocus
                 value={draft.name}
-                placeholder="feat/my-change"
+                placeholder={autoName ? "named from the task" : "feat/my-change"}
                 leading={<GitBranchPlus />}
                 invalid={!!draft.name && !!nameError}
                 trailing={

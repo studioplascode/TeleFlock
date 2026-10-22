@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
+  PanelRightOpen,
   Plus,
   RefreshCw,
   Rows3,
@@ -23,6 +24,7 @@ import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { draftKey, navigate, useHostState, useUi, useWorkspaces } from "@/core";
 import type { Agent } from "@/core/gen";
 import { BottomSheet, Button, Chip, EmptyState, IconButton, SegmentedControl, Shimmer, Skeleton, StatusOrb, Tooltip, cn, spring, useIsMobile } from "@/design";
+import { rememberShip } from "@/features/board/shipMemo";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { tildify } from "../workspace/shared/paths";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
@@ -31,7 +33,7 @@ import { FanOutSiblings } from "./FanOutSiblings";
 import { DiffBar, type DiffLayout, DiffViewer } from "./diff/DiffViewer";
 import { type DiffFile, mergeFiles, parsePatch } from "./diff/parse";
 import { FileTree } from "./FileTree";
-import { ShipPanel, ShipStepper, ShipStrip, shipState, usePrStatus } from "./ShipPanel";
+import { SHIP_STAGES, ShipPanel, ShipStepper, ShipStrip, shipState, usePrStatus } from "./ShipPanel";
 
 /** Generated/lock files start collapsed; they're noise in review. */
 const NOISY = /(^|\/)(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|go\.sum|composer\.lock)$|\.min\.(js|css)$|\.snap$/;
@@ -227,6 +229,8 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   const [scrollTo, setScrollTo] = useState<{ path: string; nonce: number }>();
   const [topFile, setTopFile] = useState<string>();
   const [shipOpen, setShipOpen] = useState(false);
+  /** The stage the ship panel opens at (header next-step button, strip); cleared when it closes. */
+  const [shipFocus, setShipFocus] = useState<{ stage: number; nonce: number }>();
   const effectiveLayout = mobile ? "unified" : layout;
   // Side-by-side halves can't share one horizontal scroll, so split view always wraps.
   const effectiveWrap = wrap || effectiveLayout === "split";
@@ -255,6 +259,14 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
       return next;
     });
   }, []);
+  const shipShown = mobile ? shipOpen : shipRail;
+  useEffect(() => {
+    if (!shipShown) setShipFocus(undefined);
+  }, [shipShown]);
+  const openShipAt = (stage: number) => {
+    setShipFocus({ stage, nonce: Date.now() });
+    setRail("ship", true);
+  };
 
   // ---- mobile drill-in: a history entry per open file, so Back (and Android back) returns to the list
   const [openFile, setOpenFile] = useState<string | null>(() => (window.history.state as { tfReviewFile?: string } | null)?.tfReviewFile ?? null);
@@ -298,6 +310,8 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
     if (mobile) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target)) return;
+      // Focus on a ship-panel button (Write it, Mark done…): only `]` (close the panel) stays live.
+      if (e.key !== "]" && e.target instanceof Element && e.target.closest("[data-ship-panel]")) return;
       if (document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"]')) return;
       const s = live.current;
       const i = s.files.findIndex((f) => f.path === s.topFile);
@@ -350,6 +364,14 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
     return () => window.removeEventListener("keydown", onKey);
   }, [mobile]);
 
+  // Board review cards show the ship stepper + next step from what Review last saw.
+  const ship = status.data ? shipState(status.data, pr.data?.pr) : undefined;
+  const prNumber = pr.data?.pr?.number;
+  const [shipStage, shipBlocked, shipNext] = [ship?.stage, !!ship?.blocked, ship?.next];
+  useEffect(() => {
+    if (shipStage !== undefined && shipNext !== undefined) rememberShip(hostId, workspaceId, { stage: shipStage, blocked: shipBlocked, next: shipNext, pr: prNumber });
+  }, [hostId, workspaceId, shipStage, shipBlocked, shipNext, prNumber]);
+
   if (!ws) {
     return (
       <div className="grid h-full place-items-center p-6">
@@ -370,7 +392,6 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   const branch = status.data?.branch ?? ws.worktree?.branch ?? ws.repo?.branch;
   const base = diff.data?.base ?? status.data?.base;
   const refreshing = status.loading || diff.loading;
-  const ship = status.data ? shipState(status.data, pr.data?.pr) : undefined;
   const hasFiles = files.length > 0;
 
   const diffArea = diff.error ? (
@@ -398,7 +419,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   ) : null;
 
   const shipBody: ReactNode = status.data && cwd ? (
-    <ShipPanel hostId={hostId} workspace={ws} cwd={cwd} status={status.data} pr={pr} agents={agents} onChanged={reload} />
+    <ShipPanel hostId={hostId} workspace={ws} cwd={cwd} status={status.data} pr={pr} agents={agents} diff={diff.data} focus={shipFocus} onChanged={reload} />
   ) : status.error ? (
     <EmptyState compact icon={<TriangleAlert className="text-warn" />} title="Couldn't read git status" description={status.error.hint ?? status.error.message} action={<Button size="sm" onClick={status.reload}>Retry</Button>} />
   ) : (
@@ -612,8 +633,27 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             )}
             {diff.data?.truncated && <Chip tone="needs-you">patch truncated</Chip>}
           </div>
+          {!shipRail && (
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="kicker shrink-0 text-[10px]">Ship</span>
+              {ship ? (
+                <ShipStrip state={ship} onOpen={openShipAt} />
+              ) : status.error ? (
+                <span className="truncate text-2xs text-warn">Couldn't read git status</span>
+              ) : (
+                <Skeleton className="h-6 w-80 rounded-full" />
+              )}
+            </div>
+          )}
         </div>
         {toolbar}
+        {!shipRail && ship && (
+          <Tooltip content={`Open the ship panel at ${SHIP_STAGES[ship.stage]?.label ?? "the next step"}`} shortcut="]">
+            <Button size="sm" variant={ship.blocked ? "secondary" : "primary"} trailing={<PanelRightOpen />} onClick={() => openShipAt(ship.stage)} className="max-w-64 shrink-0">
+              <span className="truncate">{ship.next}</span>
+            </Button>
+          </Tooltip>
+        )}
       </header>
       <FanOutSiblings hostId={hostId} workspaceId={workspaceId} />
       <AnimatePresence>{working.length > 0 && <LiveBanner hostId={hostId} working={working} />}</AnimatePresence>
@@ -655,13 +695,14 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             />
           )}
         </div>
-        {shipRail ? (
+        {shipRail && (
           <motion.aside
             key="ship"
             initial={{ opacity: 0, x: 16 }}
             animate={{ opacity: 1, x: 0 }}
             transition={spring.smooth}
             className="tile flex w-[332px] shrink-0 flex-col"
+            data-ship-panel
             aria-label="Ship"
           >
             <div className="flex items-center gap-2 px-4 pt-3 pb-1">
@@ -675,10 +716,6 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-1 pb-3">{shipBody}</div>
           </motion.aside>
-        ) : ship ? (
-          <ShipStrip state={ship} onOpen={() => setRail("ship", true)} />
-        ) : (
-          <Skeleton className="w-[52px] shrink-0 rounded-tile" />
         )}
       </div>
     </div>

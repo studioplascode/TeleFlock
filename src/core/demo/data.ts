@@ -15,6 +15,7 @@ export const MODELS: (ModelInfo & { label: string; inPerM: number; outPerM: numb
 export const ROLES: RoleBinding[] = [
   { role: "default", model: "anthropic/claude-opus-5:high" },
   { role: "smol", model: "openai-codex/gpt-6-luna:low" },
+  { role: "tiny", model: "openai-codex/gpt-6-luna:minimal" },
   { role: "slow", model: "openai/gpt-5.5:xhigh" },
   { role: "plan", model: "anthropic/claude-opus-5:xhigh" },
   { role: "task", model: "anthropic/claude-sonnet-5:medium" },

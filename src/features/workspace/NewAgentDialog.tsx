@@ -1,17 +1,19 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Bot, Columns2, FolderOpen, FolderPlus, Layers, PanelTop, Rows2, Sparkles, TriangleAlert, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { core, draftKey, useDraft, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
+import { core, draftKey, suggestAgentName, useAiNaming, useAiSuggestion, useDraft, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { Split, Started, StartTarget, Workspace } from "@/core/gen";
 import { Button, Chip, EmptyState, Field, IconButton, Input, Kbd, SegmentedControl, StatusOrb, type Status, Switch, cn, spring, toast, useIsMobile } from "@/design";
+import { ACTIONS } from "@/features/shell/vocab";
 import { FolderBrowser, type FolderPick } from "../worktree/FolderBrowser";
-import { AgentFields, agentNameError, initialAgentDraft, toAgentSpec, uniqueAgentName, useAgentDraft } from "./shared/AgentFields";
+import { within } from "./shared/ai";
+import { AgentFields, agentNameError, autoAgentName, initialAgentDraft, toAgentSpec, useAgentDraft } from "./shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "./shared/CommandPreview";
 import { agentLaunchLines, herdrArgv } from "./shared/commands";
 import { describeError } from "./shared/errors";
 import { LaunchSuccess, WorkingPanel } from "./shared/LaunchProgress";
 import { OpsOverlayHost } from "./shared/overlays";
-import { agentNameFromBranch, basename, shellQuote, tildify } from "./shared/paths";
+import { agentNameFromBranch, basename, shellQuote, tildify, uniqueAgentName } from "./shared/paths";
 import { ResponsiveDialog } from "./shared/ResponsiveDialog";
 import { useDialogSession } from "./shared/useDialogSession";
 
@@ -86,15 +88,35 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
     mode === "workspace" ? agentNameFromBranch(ws?.worktree?.branch ?? ws?.label ?? "") : agentNameFromBranch(folder ? basename(folder.path) : ""),
     takenNames,
   );
-  const name = agent.name.trim() || derived;
   const startAgent = mode === "workspace" || agent.start;
+  // empty name + a typed task: the tiny model names the agent (placeholder now, used on Start)
+  const aiOn = useAiNaming(hostId);
+  const task = agent.prompt.trim();
+  const askAi = aiOn && !!hostId && startAgent && !agent.name.trim() && !!task;
+  const suggestName = () => (hostId ? suggestAgentName(hostId, task, takenNames) : Promise.resolve(null));
+  const aiName = useAiSuggestion(hostId, askAi ? `${hostId}\n${task}` : null, suggestName, { debounceMs: 600 });
+  const auto = askAi ? autoAgentName(aiName.value, derived, takenNames) : { name: derived, ai: false };
+  const name = agent.name.trim() || auto.name;
   const target: StartTarget | null =
     mode === "workspace" ? (workspaceId ? { kind: "workspace", workspaceId, split } : null) : folder ? { kind: "cwd", cwd: folder.path, label: label.trim() || null } : null;
   const valid = !!hostId && !!target && (!startAgent || !agentNameError(name, takenNames));
-  const busy = submit.phase === "working" || submit.phase === "done";
+  const [naming, setNaming] = useState(false);
+  const busy = naming || submit.phase === "working" || submit.phase === "done";
+
+  /** The name to start with: typed, else the suggestion (waiting ≤ 2 s for one still in flight), else derived. */
+  const finalName = async (): Promise<string> => {
+    if (!askAi || aiName.value) return name;
+    setNaming(true);
+    try {
+      return autoAgentName(await within(suggestName(), 2000), derived, takenNames).name;
+    } finally {
+      setNaming(false);
+    }
+  };
 
   const run = async () => {
     if (!valid || !hostId || !target || busy) return;
+    const startName = startAgent ? await finalName() : name;
     setSubmit({ phase: "working", since: Date.now() });
     try {
       if (!startAgent && target.kind === "cwd") {
@@ -109,7 +131,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         });
         return;
       }
-      const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name }) });
+      const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name: startName }) });
       if (target.kind === "cwd") clearLabel();
       clearAgent();
       setSubmit({ phase: "done", started });
@@ -138,7 +160,8 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
           ]
         : [];
 
-  const primaryLabel = submit.phase === "failed" ? "Try again" : !target ? (mode === "workspace" ? "Pick a workspace" : "Pick a folder") : startAgent ? "Start agent" : "Open folder";
+  const primaryLabel =
+    submit.phase === "failed" ? "Try again" : !target ? (mode === "workspace" ? "Pick a workspace" : "Pick a folder") : naming ? "Naming…" : startAgent ? "Start agent" : "Open folder";
   const footer =
     submit.phase === "done" ? undefined : (
       <div className="flex w-full items-center gap-2">
@@ -157,7 +180,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
           icon={startAgent ? <Sparkles /> : <FolderOpen />}
           onClick={() => void run()}
           disabled={!valid}
-          loading={submit.phase === "working"}
+          loading={naming || submit.phase === "working"}
           className={mobile ? "flex-1" : undefined}
         >
           {primaryLabel}
@@ -170,7 +193,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
       open={open}
       onOpenChange={(o) => !o && !busy && onClose()}
       title={intent?.openFolder && !agent.start ? "Open folder" : "New agent"}
-      description={mode === "workspace" ? "Start omp next to your existing work" : "Open any folder on the host as a workspace"}
+      description={intent?.openFolder && !agent.start ? ACTIONS.openFolder.description : ACTIONS.newAgent.description}
       icon={<Bot />}
       width={720}
       maxHeight="94dvh"
@@ -307,7 +330,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                 <AnimatePresence initial={false}>
                   {startAgent && hostId && (
                     <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="overflow-hidden">
-                      <AgentFields hostId={hostId} draft={agent} onChange={patchAgent} derivedName={derived} takenNames={takenNames} />
+                      <AgentFields hostId={hostId} draft={agent} onChange={patchAgent} derivedName={derived} suggestedName={auto.ai ? auto.name : null} takenNames={takenNames} />
                     </motion.div>
                   )}
                 </AnimatePresence>

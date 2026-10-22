@@ -5,9 +5,11 @@ import { type AgentView, agentKey, navigate, useAgent } from "@/core";
 import type { Column } from "@/core/gen";
 import { AgentGlyph, Elapsed, Shimmer, StatusPill, type Status, cn, formatAge, spring, useNow } from "@/design";
 import { canReview, openAgent, openTerminal } from "@/features/board/agentActions";
-import { LANE_BY_COLUMN, NEEDS_LABEL } from "@/features/board/lanes";
+import { LANE_BY_COLUMN } from "@/features/board/lanes";
 import { AgentOrb, LiveLine, QuietChip, useQuiet } from "@/features/board/LiveBits";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
+import { ACTIONS, agentStateWord, isFresh } from "@/features/shell/vocab";
+import { AiMark } from "@/features/workspace/shared/ai";
 import { tildify } from "@/features/workspace/shared/paths";
 import { type DispatchEntry, isInFlight, threadKey, useDispatch } from "./store";
 import { APPEAR_GRACE_MS, START_TIMEOUT_MS } from "./thread";
@@ -30,15 +32,15 @@ const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2
 const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 /** Launch steps after the request leaves the composer. */
-type Step = "queued" | "creating" | "starting";
+type Step = "naming" | "queued" | "creating" | "starting";
 
-const STEP_LABEL: Record<Step, string> = { queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
+const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
 const SEGMENTS = [
   { step: "creating", label: "Creating worktree" },
   { step: "starting", label: "Starting agent" },
   { step: "running", label: "Running" },
 ] as const;
-const STEP_INDEX: Record<Step, number> = { queued: -1, creating: 0, starting: 1 };
+const STEP_INDEX: Record<Step, number> = { naming: -1, queued: -1, creating: 0, starting: 1 };
 
 /** What the reply card shows, derived from the entry, whether its request is in flight, and host state. */
 type Shown =
@@ -51,6 +53,8 @@ type Shown =
 
 function shownOf(entry: DispatchEntry, agent: AgentView | undefined, now: number): Shown {
   const inFlight = isInFlight(entry.id);
+  // `naming` shows as such even after a reload: the view resumes it under the fallback name.
+  if (entry.phase === "naming") return { k: "step", step: "naming" };
   if (inFlight && (entry.phase === "queued" || entry.phase === "creating")) return { k: "step", step: entry.phase };
   if (entry.phase === "failed") return { k: "failed" };
   const since = entry.startedAt ?? entry.createdAt;
@@ -72,7 +76,7 @@ function statusOf(shown: Shown, entry: DispatchEntry): Status {
     case "step":
       return "running";
     case "live":
-      return shown.agent.column === "review" && shown.agent.turns === 0 ? "idle" : LANE_BY_COLUMN[shown.agent.column].status;
+      return isFresh(shown.agent) ? "idle" : LANE_BY_COLUMN[shown.agent.column].status;
     case "gone":
       return entry.last?.column === "done" || entry.last?.column === "review" ? "done" : "idle";
   }
@@ -157,7 +161,14 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
       >
         <header className="flex min-w-0 items-center gap-2">
           {live && key && <AgentOrb agentKey={key} status={status} tool={live.live.tool} size={8} />}
-          <span className="min-w-0 truncate font-mono text-[13px] font-bold text-ink">{agent?.name ?? entry.name}</span>
+          {entry.phase === "naming" ? (
+            <Shimmer className="min-w-0 truncate text-[13px] font-extrabold">Naming…</Shimmer>
+          ) : (
+            <span className="flex min-w-0 items-center gap-1">
+              <span className="min-w-0 truncate text-[13px] font-extrabold text-ink">{agent?.name ?? entry.name}</span>
+              {entry.aiNamed && (agent?.name ?? entry.name) === entry.name && <AiMark />}
+            </span>
+          )}
           <Badge shown={shown} entry={entry} status={status} online={ctx.online} mobile={ctx.mobile} />
           <span className="ml-auto shrink-0 text-2xs font-bold text-mute tabular">
             {live?.column === "running" ? (
@@ -174,10 +185,10 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
         <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-2xs text-mute-2">
           <GitBranch className="size-3 shrink-0" />
           <span className="min-w-0 truncate" title={entry.path ? tildify(entry.path, ctx.home) : undefined}>
-            {entry.branch}
+            {entry.phase === "naming" ? "dispatch/…" : entry.branch}
             {entry.base && <span className="opacity-70"> ← {entry.base}</span>}
           </span>
-          {summary && <span className="shrink-0 font-sans font-semibold max-sm:hidden">· {summary}</span>}
+          {summary && <span className="shrink-0 font-sans font-semibold max-sm:hidden">· sent with: {summary}</span>}
         </div>
         <Body shown={shown} entry={entry} agentKey={key} ctx={ctx} />
       </div>
@@ -203,9 +214,8 @@ function Badge({ shown, entry, status, online, mobile }: { shown: Shown; entry: 
       return null;
     case "live": {
       const a = shown.agent;
-      if (a.column === "needs" && a.needs) return <StatusPill status="needs-you" size="sm">{NEEDS_LABEL[a.needs.kind]}</StatusPill>;
-      if (a.column === "review") return <StatusPill status={status} size="sm">{a.turns > 0 ? "Ready to review" : "Ready"}</StatusPill>;
-      if (a.column === "done") return <StatusPill status="done" size="sm">{a.archived ? "Archived" : "Done"}</StatusPill>;
+      if (a.column === "needs" || a.column === "review") return <StatusPill status={a.column === "needs" ? "needs-you" : status} size="sm">{agentStateWord(a)}</StatusPill>;
+      if (a.column === "done") return <StatusPill status="done" size="sm">{agentStateWord(a)}</StatusPill>;
       // Phones: the orb and live line already say "running"; the name gets the room.
       return mobile ? null : <StatusPill status={status} size="sm" />;
     }
@@ -284,15 +294,20 @@ function Body({ shown, entry, agentKey: key, ctx }: { shown: Shown; entry: Dispa
 
   const buttons = (
     <>
-      <button type="button" className={secondary} onClick={() => openAgent(key)}>
-        Open
+      <button type="button" className={secondary} onClick={() => openAgent(key)} title={ACTIONS.openSession.description}>
+        {ACTIONS.openSession.label}
       </button>
-      <button type="button" className={ghost} onClick={() => openTerminal(key, ctx.mobile)}>
-        <SquareTerminal /> Terminal
+      <button type="button" className={ghost} onClick={() => openTerminal(key, ctx.mobile)} title={ACTIONS.terminal.description}>
+        <SquareTerminal /> {ACTIONS.terminal.label}
       </button>
       {canReview(agent) && (
-        <button type="button" className={ghost} onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}>
-          Review
+        <button
+          type="button"
+          className={ghost}
+          title={ACTIONS.review.description}
+          onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}
+        >
+          {ACTIONS.review.label}
         </button>
       )}
     </>
@@ -323,7 +338,7 @@ function Body({ shown, entry, agentKey: key, ctx }: { shown: Shown; entry: Dispa
         {buttons}
         {agent.column === "done" && (
           <span className="ml-auto inline-flex items-center gap-1 text-2xs font-bold text-done">
-            <Check className="size-3.5" /> {agent.archived ? "Archived" : "Done"}
+            <Check className="size-3.5" /> {agentStateWord(agent)}
           </span>
         )}
       </Actions>

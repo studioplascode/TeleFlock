@@ -1,10 +1,12 @@
+import { ChevronRight } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
-import { type HostActivityEvent, type HostNotification, loadOlderActivity, navigate, useActivity, useCore, useHosts, useNotifications } from "@/core";
+import { type HostActivityEvent, type HostNotification, loadOlderActivity, navigate, type Route, useActivity, useCore, useHosts, useNotifications } from "@/core";
 import type { ActivityKind, NotifyKind } from "@/core/gen";
 import { AgentGlyph, Button, EmptyState, NumberTicker, PageHeader, SegmentedControl, Sparkline, StatusOrb, type Status, cn, formatAge, spring, useIsMobile, useNow } from "@/design";
 import { HostTag } from "@/features/board/AgentCard";
 import { MobileHeader } from "@/features/shell/MobileHeader";
+import { STATE_WORD, VIEWS } from "@/features/shell/vocab";
 
 type Group = "all" | "finished" | "needs" | "problems" | "git" | "lifecycle";
 
@@ -55,19 +57,20 @@ const KIND_LABEL: Record<ActivityKind, string> = {
   committed: "Committed",
   started: "Started",
   prompted: "Prompted",
-  archived: "Archived",
+  archived: "Marked done",
   unarchived: "Reopened",
-  stopped: "Stopped",
+  stopped: "Turn stopped",
   compacted: "Compacted",
   modelChanged: "Model changed",
 };
 
 const NOTIFY_STATUS: Record<NotifyKind, Status> = { needs: "needs-you", finished: "review", error: "error", quiet: "idle", info: "idle" };
 
+/** Filter chips, in the board's words: finished turns are what the Review lane holds, asks are Needs you. */
 const GROUPS = [
   { value: "all", label: "All" },
   { value: "finished", label: "Finished" },
-  { value: "needs", label: "Asks" },
+  { value: "needs", label: STATE_WORD.needs },
   { value: "problems", label: "Problems" },
   { value: "git", label: "Git" },
   { value: "lifecycle", label: "Lifecycle" },
@@ -142,10 +145,11 @@ function EventRow({ row, now }: { row: Row; now: number }) {
   );
 }
 
-const PULSE: readonly { group: Group; label: string; status: Status }[] = [
+/** Today's tallies; Finished and Needs you also link to where those agents wait now (Review lane, Inbox). */
+const PULSE: readonly { group: Group; label: string; status: Status; link?: { label: string; route: Route } }[] = [
   { group: "all", label: "Last hour", status: "running" },
-  { group: "finished", label: "Finished today", status: "review" },
-  { group: "needs", label: "Asks today", status: "needs-you" },
+  { group: "finished", label: "Finished today", status: "review", link: { label: VIEWS.board.label, route: { name: "board" } } },
+  { group: "needs", label: `${STATE_WORD.needs} today`, status: "needs-you", link: { label: VIEWS.inbox.label, route: { name: "inbox" } } },
   { group: "problems", label: "Problems today", status: "error" },
 ];
 
@@ -171,39 +175,53 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
         const on = group === t.group && t.group !== "all";
         const n = tally[t.group];
         return (
-          <motion.button
+          <motion.div
             key={t.group}
-            type="button"
             data-status={t.status}
-            aria-pressed={on}
-            onClick={() => onPick(on || t.group === "all" ? "all" : t.group)}
             initial={{ opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             transition={{ ...spring.smooth, delay: 0.06 + i * 0.05 }}
-            className={cn(
-              "card-surface group relative flex flex-col overflow-hidden rounded-lg text-left pressable focus-ring lift",
-              mobile ? "h-[88px] p-3" : "h-[104px] p-3.5",
-              on && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.6),0_10px_30px_-12px_rgb(var(--st-rgb)/0.6)]",
-            )}
+            className="relative"
           >
-            <span className="flex items-center gap-1.5 text-2xs font-bold text-mute">
-              <StatusOrb status={n > 0 ? t.status : "idle"} size={6} label={null} activity={t.group === "all" && n > 0 ? "busy" : "silent"} />
-              {t.label}
-            </span>
-            <NumberTicker value={n} className={cn("mt-1 font-display font-bold", mobile ? "text-2xl" : "text-3xl", n > 0 ? "text-ink" : "text-mute-2")} />
-            {t.group === "all" ? (
-              <Sparkline values={buckets} status="running" height={22} className="mt-auto" aria-label="Events per 5 minutes over the last hour" />
-            ) : (
-              <span className="mt-auto h-1 overflow-hidden rounded-full bg-white/6">
-                <motion.span
-                  className="block h-full rounded-full st-bg"
-                  initial={{ width: 0 }}
-                  animate={{ width: `${Math.min(100, n * 10)}%` }}
-                  transition={{ ...spring.gentle, delay: 0.15 + i * 0.05 }}
-                />
+            <button
+              type="button"
+              aria-pressed={on}
+              onClick={() => onPick(on || t.group === "all" ? "all" : t.group)}
+              className={cn(
+                "card-surface group relative flex w-full flex-col overflow-hidden rounded-lg text-left pressable focus-ring lift",
+                mobile ? "h-[88px] p-3" : "h-[104px] p-3.5",
+                on && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.6),0_10px_30px_-12px_rgb(var(--st-rgb)/0.6)]",
+              )}
+            >
+              <span className="flex items-center gap-1.5 pr-14 text-2xs font-bold text-mute">
+                <StatusOrb status={n > 0 ? t.status : "idle"} size={6} label={null} activity={t.group === "all" && n > 0 ? "busy" : "silent"} />
+                {t.label}
               </span>
+              <NumberTicker value={n} className={cn("mt-1 font-display font-bold", mobile ? "text-2xl" : "text-3xl", n > 0 ? "text-ink" : "text-mute-2")} />
+              {t.group === "all" ? (
+                <Sparkline values={buckets} status="running" height={22} className="mt-auto" aria-label="Events per 5 minutes over the last hour" />
+              ) : (
+                <span className="mt-auto h-1 overflow-hidden rounded-full bg-white/6">
+                  <motion.span
+                    className="block h-full rounded-full st-bg"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${Math.min(100, n * 10)}%` }}
+                    transition={{ ...spring.gentle, delay: 0.15 + i * 0.05 }}
+                  />
+                </span>
+              )}
+            </button>
+            {t.link && (
+              <button
+                type="button"
+                onClick={() => t.link && navigate(t.link.route)}
+                className="absolute top-2 right-2 flex h-6 items-center gap-0.5 rounded-sm px-1.5 text-2xs font-bold text-mute transition-colors focus-ring hover:bg-white/8 hover:text-ink"
+              >
+                {t.link.label}
+                <ChevronRight className="size-3" />
+              </button>
             )}
-          </motion.button>
+          </motion.div>
         );
       })}
     </div>

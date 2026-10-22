@@ -1,14 +1,56 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type ClipboardEvent, type DragEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useSession, useUi } from "@/core";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import type { OmpSubcommand } from "@/core/ompCommands";
-import { cn, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
+import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
+import { useFirstUse } from "@/features/shell/hints";
 import { fileToImageInput, hostCall, usePending } from "../api";
 import { composerDraftKey, useSessionUi } from "../state";
+import { todoCounts } from "../tools/TodoList";
 import { findCommand, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
 import { useDictation } from "./useDictation";
+
+/**
+ * First-use caption while the agent works (mounted only then, so idle sessions don't use up its
+ * showings). Hands its `done` to the composer, which retires it on the first follow-up.
+ */
+function SteerHint({ doneRef }: { doneRef: RefObject<(() => void) | null> }) {
+  const { show, done } = useFirstUse("composer.steer");
+  useEffect(() => {
+    doneRef.current = done;
+  });
+  if (!show) return null;
+  return <div className="mb-1.5 px-2 text-2xs leading-snug text-mute">Steer lands mid-turn; a follow-up waits for the turn to end.</div>;
+}
+
+/** Phone: context, cost and todos at a glance in the composer's icon row; opens the inspector sheet. */
+function StatusPill({ agentKey }: { agentKey: string }) {
+  const agent = useAgent(agentKey);
+  const { meta } = useSession(agentKey);
+  const ctx = meta?.context ?? agent?.omp?.context;
+  const cost = meta?.cost ?? agent?.omp?.cost;
+  const todos = meta?.todos.length ? todoCounts(meta.todos) : agent?.omp?.todos;
+  return (
+    <button
+      type="button"
+      onClick={() => useSessionUi.getState().setSheet(agentKey, true)}
+      aria-label={`Inspector: context ${ctx ? `${Math.round(ctx.pct)}% used` : "unknown"}${cost ? `, ${formatUsd(cost.usd)} spent` : ""}${todos?.total ? `, ${todos.done} of ${todos.total} todos done` : ""}`}
+      className="pressable focus-ring flex h-8 shrink-0 items-center gap-1 rounded-full bg-white/[0.05] px-2.5 text-[11px] font-bold whitespace-nowrap text-ink-2 tabular shadow-hairline"
+    >
+      <span data-status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined} className={cn(ctx && ctx.pct >= 65 && "st-text")}>
+        ctx {ctx ? `${Math.round(ctx.pct)}%` : "—"}
+      </span>
+      {cost && <span className="text-mute max-[359px]:hidden">· {formatUsd(cost.usd)}</span>}
+      {todos?.total ? (
+        <span className="text-mute">
+          · {todos.done}/{todos.total}
+        </span>
+      ) : null}
+    </button>
+  );
+}
 
 export interface ComposerProps {
   agentKey: string;
@@ -48,6 +90,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const ta = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const searchSeq = useRef(0);
+  /** Retires the "steer vs follow-up" caption (set while it is mounted). */
+  const steerDone = useRef<(() => void) | null>(null);
 
   const caps = meta?.caps;
   const working = agent?.column === "running" || agent?.live.streaming === true || agent?.live.tool != null;
@@ -233,7 +277,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
       setImages((cur) => cur.filter((i) => !sentImages.includes(i)));
       setPopup(null);
-      if (delivery === "followUp") toast({ title: "Queued follow-up", description: prompt.slice(0, 80), status: "running", duration: 2200 });
+      if (delivery === "followUp") {
+        toast({ title: "Queued follow-up", description: prompt.slice(0, 80), status: "running", duration: 2200 });
+        steerDone.current?.();
+      }
     }
   };
 
@@ -528,7 +575,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                     )}
                   >
                     {q.kind === "steer" ? <CornerDownRight className="size-2.5" /> : <ListPlus className="size-2.5" />}
-                    {q.kind === "steer" ? "steer" : "next"}
+                    {q.kind === "steer" ? "steer" : "follow-up"}
                   </span>
                   <span className="truncate">{q.t}</span>
                   <span className="tf-loop size-1.5 shrink-0 animate-breathe rounded-full bg-current opacity-70" aria-hidden />
@@ -549,6 +596,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         )}
       </AnimatePresence>
 
+      {working && !disabledReason && <SteerHint doneRef={steerDone} />}
       <GlowBorder
         status="running"
         active={working && !disabledReason}
@@ -634,6 +682,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   {dictation.listening ? <MicOff /> : <Mic />}
                 </IconButton>
               )}
+              {mobile && agent?.omp?.link === "live" && <StatusPill agentKey={agentKey} />}
               {disabledReason ? (
                 inline ? null : (
                   <span className="flex min-w-0 items-center gap-1.5 truncate text-2xs font-semibold text-mute-2">
@@ -658,15 +707,23 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                       <Kbd>Enter</Kbd>
                       {working ? "steer" : "send"}
                     </span>
-                    <span className={cn("flex items-center gap-1 transition-colors", followMode && "text-ink")}>
-                      <Kbd>Alt</Kbd>
-                      <Kbd>Enter</Kbd>
-                      follow-up
-                    </span>
+                    {working ? (
+                      <span className={cn("flex items-center gap-1 transition-colors", followMode && "text-ink")}>
+                        <Kbd>Alt</Kbd>
+                        <Kbd>Enter</Kbd>
+                        follow-up
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1">
+                        <Kbd>Shift</Kbd>
+                        <Kbd>Enter</Kbd>
+                        newline
+                      </span>
+                    )}
                     {working && !hasContent && (
                       <span className="flex items-center gap-1">
                         <Kbd>Esc</Kbd>
-                        stop
+                        stop turn
                       </span>
                     )}
                   </span>
@@ -680,7 +737,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   </IconButton>
                 )}
                 {working && (!hasContent || mobile) && caps?.abort !== false && (
-                  <IconButton label="Stop (Esc)" size={mobile ? "lg" : "sm"} variant="danger" onClick={abort} disabled={sending}>
+                  <IconButton label="Stop turn (Esc)" size={mobile ? "lg" : "sm"} variant="danger" onClick={abort} disabled={sending}>
                     <Square className="fill-current" />
                   </IconButton>
                 )}

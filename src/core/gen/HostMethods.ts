@@ -3,6 +3,8 @@ import type { AccountLimits } from "./AccountLimits";
 import type { ActivityPage } from "./ActivityPage";
 import type { ActivityParams } from "./ActivityParams";
 import type { AgentRef } from "./AgentRef";
+import type { AiCompleteParams } from "./AiCompleteParams";
+import type { AiCompleteResult } from "./AiCompleteResult";
 import type { AnswerParams } from "./AnswerParams";
 import type { ArchiveParams } from "./ArchiveParams";
 import type { BranchList } from "./BranchList";
@@ -149,4 +151,5 @@ export interface HostMethods {
   "host.setup": { params: Empty; result: SetupStatus };
   "host.setupApply": { params: SetupApplyParams; result: SetupStatus };
   "host.activity": { params: ActivityParams; result: ActivityPage };
+  "ai.complete": { params: AiCompleteParams; result: AiCompleteResult };
 }

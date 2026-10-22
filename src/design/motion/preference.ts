@@ -25,11 +25,19 @@ export function resolveReduced(preference: MotionPreference, systemReduced: bool
   return preference === "reduced" || (preference === "system" && systemReduced);
 }
 
+/**
+ * html[data-motion]: "reduced" (nothing loops), "calm" (default: only needs-you and changes move;
+ * running things hold still) or "full" (Settings → Motion → Lively: every glow, breath and orbit).
+ */
+export function motionAttribute(preference: MotionPreference, systemReduced: boolean): "reduced" | "calm" | "full" {
+  if (resolveReduced(preference, systemReduced)) return "reduced";
+  return preference === "full" ? "full" : "calm";
+}
+
 /** Sets html[data-motion] before first paint so CSS loops respect the preference immediately. */
 export function applyInitialMotionAttribute(): void {
   const systemReduced = window.matchMedia(REDUCED_QUERY).matches;
-  const reduced = resolveReduced(useMotionPreference.getState().preference, systemReduced);
-  document.documentElement.dataset.motion = reduced ? "reduced" : "full";
+  document.documentElement.dataset.motion = motionAttribute(useMotionPreference.getState().preference, systemReduced);
 }
 
 export { REDUCED_QUERY };

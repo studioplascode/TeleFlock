@@ -74,6 +74,8 @@ export interface TerminalPaneProps {
 
 const NO_MODS: ModState = { ctrl: 0, alt: 0 };
 const RESIZE_DEBOUNCE_MS = 70;
+/** How long an empty first screen keeps the "Attaching…" overlay before it is taken at face value. */
+const BLANK_GRACE_MS = 2500;
 const SWIPE_SLOP_PX = 8;
 /** Longest the first paint waits for the terminal fonts (it re-measures when they land later). */
 const FONT_WAIT_MS = 120;
@@ -388,6 +390,21 @@ export function TerminalPane({
     if (!term) return;
     setGotFrame(false);
     let frames = 0;
+    // A first frame can be an empty screen with the output still on its way: keep "Attaching…" up
+    // until something is drawn, or BLANK_GRACE_MS has passed (a screen that really is empty).
+    let shown = false;
+    let blankTimer: number | undefined;
+    const reveal = () => {
+      if (shown) return;
+      shown = true;
+      clearTimeout(blankTimer);
+      setGotFrame(true);
+    };
+    const screenHasText = () => {
+      const buf = term.buffer.active;
+      for (let y = 0; y < term.rows; y++) if (buf.getLine(buf.viewportY + y)?.translateToString(true).trim()) return true;
+      return false;
+    };
     let beatTimer: number | undefined;
     let prev: TermPhase = { k: "idle" };
     let unregister: (() => void) | null = null;
@@ -413,7 +430,13 @@ export function TerminalPane({
       },
       onFrame: (ev) => {
         frames++;
-        if (frames === 1) setGotFrame(true);
+        if (!shown) {
+          blankTimer ??= window.setTimeout(reveal, BLANK_GRACE_MS);
+          // the frame is parsed asynchronously: look once it has been drawn
+          requestAnimationFrame(() => {
+            if (screenHasText()) reveal();
+          });
+        }
         beatTimer ??= window.setTimeout(() => {
           beatTimer = undefined;
           setBeat(frames);
@@ -446,6 +469,7 @@ export function TerminalPane({
 
     return () => {
       clearTimeout(beatTimer);
+      clearTimeout(blankTimer);
       clearTimeout(resizeTimer);
       dataSub.dispose();
       binSub.dispose();
@@ -957,6 +981,7 @@ export function TerminalPane({
       {mode === "observe" && !compact && (
         <div
           role="status"
+          data-toast-anchor
           className="flex shrink-0 items-center gap-2 border-t border-[rgb(34_211_238/0.22)] bg-[linear-gradient(90deg,rgb(34_211_238/0.14),rgb(34_211_238/0.03)_70%)] py-1.5 pr-1.5 pl-3 text-xs"
         >
           <Eye className="size-3.5 shrink-0 text-review" aria-hidden />

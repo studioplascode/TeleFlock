@@ -1,11 +1,11 @@
+import { BellOff, Brain, Sparkles } from "lucide-react";
 import { AnimatePresence, motion, useAnimate } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
-import { core, navigate, useAgent, useHostStale, useHosts } from "@/core";
-import type { Column } from "@/core/gen";
+import { navigate, useAgent, useCore, useHostStale, useHosts } from "@/core";
+import type { Agent, Column } from "@/core/gen";
 import {
   AgentGlyph,
   Card,
-  Elapsed,
   GlowBorder,
   IconButton,
   ProgressRing,
@@ -14,17 +14,20 @@ import {
   Tooltip,
   cn,
   formatAge,
-  useCalmMotion,
   spring,
+  useCalmMotion,
+  useLivelyMotion,
   useNow,
 } from "@/design";
-import { BellOff } from "lucide-react";
-import { canReview, openAgent, openTerminal, promptAgent, reportError, stopAgent, useMuted } from "./agentActions";
-import { ArchiveButton } from "./ArchiveConfirm";
+import { hostAccent } from "@/features/hosts/kinds";
+import { ShipStepper } from "@/features/review/ShipPanel";
+import { ACTIONS, type AgentStateId, agentStateId, agentStateWord, stateTime } from "@/features/shell/vocab";
+import { archiveWithUndo, canReview, openAgent, openTerminal, promptAgent, stopAgent, useMuted } from "./agentActions";
 import { CardContextMenu, CardMenuButton } from "./CardMenu";
-import { LANE_BY_COLUMN, NEEDS_LABEL } from "./lanes";
-import { AgentHeartbeat, AgentOrb, LiveLine, QuietChip, TpsSparkline, useQuiet } from "./LiveBits";
+import { LANE_BY_COLUMN } from "./lanes";
+import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { QuickAnswer } from "./QuickAnswer";
+import { useShipMemo } from "./shipMemo";
 
 const NUDGE_EVERY_MS = 20_000;
 
@@ -90,68 +93,105 @@ function ArrivalBurst({ lane }: { lane: Column }) {
   );
 }
 
-/** `+412 −38 · 9f` */
-export function DiffStat({ added, removed, files, className }: { added: number; removed: number; files?: number; className?: string }) {
+/** `+412 −38 · 9 files`. `muted` (Done cards) dims the counts so the green `+` doesn't read as the done check. */
+export function DiffStat({ added, removed, files, muted = false, className }: { added: number; removed: number; files?: number; muted?: boolean; className?: string }) {
   return (
-    <span className={cn("inline-flex items-center gap-1 font-mono text-2xs tabular", className)}>
-      <span className="text-add">+{added}</span>
-      <span className="text-del">−{removed}</span>
-      {files !== undefined && <span className="text-mute-2">{files}f</span>}
+    <span className={cn("inline-flex shrink-0 items-center gap-1 font-mono text-2xs whitespace-nowrap tabular", className)}>
+      <span className={cn("inline-flex gap-1", muted && "opacity-70")}>
+        <span className="text-add">+{added}</span>
+        <span className="text-del">−{removed}</span>
+      </span>
+      {files !== undefined && (
+        <span className="text-mute">
+          · {files} file{files === 1 ? "" : "s"}
+        </span>
+      )}
     </span>
   );
 }
 
-/** Host colour tag for compact rows (name in the tooltip). */
-function HostDot({ hostId }: { hostId: string }) {
-  const profile = useHosts((s) => s.profiles.find((p) => p.id === hostId));
-  const color = profile?.color ?? "var(--color-accent)";
-  return (
-    <span
-      role="img"
-      aria-label={`Host ${profile?.name ?? hostId}`}
-      title={profile?.name ?? hostId}
-      className="h-3 w-[3px] shrink-0 rounded-full"
-      style={{ background: color, boxShadow: `0 0 6px ${color}` }}
-    />
-  );
-}
-
-/** Host colour dot + name (multi-host boards). */
+/** Host name chip with the host's identity swatch (multi-host boards, Activity rows). */
 export function HostTag({ hostId, className }: { hostId: string; className?: string }) {
   const profile = useHosts((s) => s.profiles.find((p) => p.id === hostId));
-  const color = profile?.color ?? "var(--color-accent)";
+  const name = profile?.name ?? hostId;
   return (
-    <span className={cn("inline-flex min-w-0 items-center gap-1 text-2xs font-bold text-mute", className)} title={`Host ${profile?.name ?? hostId}`}>
-      <span className="size-1.5 shrink-0 rounded-full" style={{ background: color, boxShadow: `0 0 6px ${color}` }} />
-      <span className="truncate">{profile?.name ?? hostId}</span>
+    <span className={cn("inline-flex max-w-full min-w-0 shrink-0 items-center gap-1 rounded-xs bg-white/6 py-px pr-1.5 pl-1 text-2xs font-bold text-ink-2", className)} title={`Host ${name}`}>
+      <span className="h-2.5 w-1 shrink-0 rounded-full" style={{ background: hostAccent(profile?.color) }} aria-hidden />
+      <span className="truncate">{name}</span>
     </span>
   );
 }
 
-function ContextMeter({ pct }: { pct: number }) {
-  const hot = pct >= 80;
-  return (
-    <span className="inline-flex items-center gap-1.5" title={`Context ${Math.round(pct)}% used`}>
-      <span className="h-1 w-8 overflow-hidden rounded-full bg-white/8">
-        <span className={cn("block h-full rounded-full transition-[width] duration-700", hot ? "bg-warn" : "bg-run")} style={{ width: `${Math.min(100, pct)}%` }} />
+const PILL: Record<AgentStateId, string> = {
+  needs: "st-bg",
+  running: "st-soft",
+  fresh: "bg-white/6 text-mute",
+  review: "st-soft",
+  done: "st-soft",
+};
+
+/** Zone 1, right: the state's time with its verb ("turn 27:24", "waiting 6:13", "finished 25m ago"). Ticks on its own. */
+function StateTime({ agent, state, stale, className }: { agent: Agent & { hostId: string }; state: AgentStateId; stale: boolean; className?: string }) {
+  const lastOnlineAt = useHosts((s) => s.status[agent.hostId]?.lastOnlineAt);
+  const reconnecting = useHosts((s) => s.status[agent.hostId]?.phase === "reconnecting" || s.status[agent.hostId]?.phase === "connecting");
+  const ticking = !stale && (state === "running" || state === "needs");
+  const now = useNow(ticking ? 1000 : 30_000);
+  if (stale)
+    return (
+      <span className={cn(className, reconnecting && "tf-shimmer-text")} title="Last seen while the host was online">
+        last seen {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}
       </span>
-      <span className={cn("font-mono text-2xs tabular", hot ? "text-warn" : "text-mute")}>{Math.round(pct)}%</span>
-    </span>
-  );
+    );
+  const since = state === "needs" ? agent.needs?.since : state === "running" ? (agent.omp?.turnStartedAt ?? agent.stateSince) : agent.stateSince;
+  return <span className={className}>{stateTime(state, since, now)}</span>;
 }
 
-/** Running subagents' own completion estimate (mean when several): the % omp's terminal shows on their rows. */
-function SubagentsDone({ pct, live }: { pct: number; live: number }) {
-  const label = live > 1 ? `Subagents about ${Math.round(pct)}% done` : `Subagent about ${Math.round(pct)}% done`;
+/** Review card zone 4: the next ship step as the primary button (from host state, or what Review last saw), Mark done, Open. */
+function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; agentKey: string }) {
+  const repo = useCore((s) => s.hosts[agent.hostId]?.state.workspaces.find((w) => w.id === agent.workspaceId)?.repo);
+  const memo = useShipMemo((s) => s.byWorkspace[`${agent.hostId}/${agent.workspaceId}`]);
+  const dirty = repo?.dirty ?? 0;
+  const ahead = repo?.ahead ?? 0;
+  // uncommitted / unpushed work always comes first; past that only Review's last reading knows the PR stage
+  const next =
+    dirty > 0 ? `Commit ${dirty} file${dirty === 1 ? "" : "s"}` : ahead > 0 ? `Push ${ahead} commit${ahead === 1 ? "" : "s"}` : memo?.pr !== undefined ? memo.next : ACTIONS.review.label;
+  const stage = dirty > 0 ? 0 : ahead > 0 ? 1 : (memo?.stage ?? 0);
+  const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
   return (
-    <Tooltip content={<span className="block max-w-64">{`${label}: ${live > 1 ? "the average of the running subagents' own estimates" : "its own estimate"} of how far along the task is. omp asks every few minutes.`}</span>}>
-      <span className="inline-flex shrink-0 items-center gap-1">
-        <ProgressRing done={pct} total={100} size={12} stroke={2} label={null} ariaLabel={label} />
-        <span className="font-mono text-2xs font-bold text-accent-hi tabular">{Math.round(pct)}%</span>
-        {/* the word only fits beside the context meter, diff stat and model on roomier cards */}
-        <span className="hidden text-2xs text-mute-2 @min-[300px]/card:inline">{live > 1 ? "subagents" : "subagent"}</span>
-      </span>
-    </Tooltip>
+    <>
+      <LiveLine live={agent.live} running={false} className="mt-2" />
+      {memo?.pr !== undefined && (
+        <div className="mt-2 w-36" title={`Ship: ${memo.next}`}>
+          <ShipStepper stage={stage} blocked={memo.blocked && stage === memo.stage} dots />
+        </div>
+      )}
+      <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={stop} onPointerDown={stop}>
+        {canReview(agent) && (
+          <Tooltip content={ACTIONS.review.description}>
+            <button
+              type="button"
+              data-status="review"
+              className="h-7 max-w-full truncate rounded-sm st-bg px-2.5 text-2xs font-extrabold pressable focus-ring hover:brightness-110"
+              onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}
+            >
+              {next}
+            </button>
+          </Tooltip>
+        )}
+        <Tooltip content={ACTIONS.markDone.description}>
+          <button
+            type="button"
+            className="h-7 rounded-sm bg-tile-4 px-2.5 text-2xs font-bold text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] pressable focus-ring hover:bg-tile-5"
+            onClick={() => void archiveWithUndo([agentKey])}
+          >
+            {ACTIONS.markDone.label}
+          </button>
+        </Tooltip>
+        <button type="button" className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink" onClick={() => openAgent(agentKey)}>
+          Open
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -164,43 +204,48 @@ export interface AgentCardProps {
   picked?: boolean;
   /** Rendered inside the dnd-kit DragOverlay. */
   floating?: boolean;
+  /** Top card of the Needs-you lane: the sunset treatment. */
+  hero?: boolean;
 }
 
-/** The kanban card: every liveness signal for one agent, plus lane-specific actions. */
-export function AgentCard({ agentKey, lane, selected = false, picked = false, floating = false }: AgentCardProps) {
+/**
+ * The kanban card. Five fixed zones on every lane (Density P1): (1) state strip with the timed verb,
+ * (2) identity, (3) title, (4) lane body, (5) labelled meters in one fixed order that wrap instead of hiding.
+ */
+export function AgentCard({ agentKey, lane, selected = false, picked = false, floating = false, hero = false }: AgentCardProps) {
   const agent = useAgent(agentKey);
   const stale = useHostStale(agent?.hostId ?? "");
-  const lastOnlineAt = useHosts((s) => (agent ? s.status[agent.hostId]?.lastOnlineAt : undefined));
-  const reconnecting = useHosts((s) => (agent ? s.status[agent.hostId]?.phase === "reconnecting" || s.status[agent.hostId]?.phase === "connecting" : false));
   const multiHost = useHosts((s) => s.profiles.length > 1);
   const muted = useMuted(agentKey);
+  const lively = useLivelyMotion();
   const silentMs = useQuiet(lane === "running" && !stale, agent?.live.lastEventAt);
   // a muted agent still waits visibly, it just stops tugging at your sleeve
   const nudge = useNudge(lane === "needs" && !stale && !muted);
   const burst = useArrival(agentKey, lane, floating);
-  // Live lanes render their clocks with <Elapsed>; the card itself only needs `now` for ages.
-  const now = useNow(stale ? 1000 : lane === "done" || lane === "review" ? 30_000 : 60_000);
   if (!agent) return null;
 
-  const meta = LANE_BY_COLUMN[lane];
-  const ready = lane === "review" && agent.turns === 0;
+  // the lane leads the host state during an optimistic drop
+  const state: AgentStateId = lane === "review" ? agentStateId({ ...agent, column: "review" }) : lane;
+  const fresh = state === "fresh";
   // a fresh agent that never ran sits calmly (idle), not in review cyan
-  const status = ready ? "idle" : meta.status;
+  const status = fresh ? "idle" : LANE_BY_COLUMN[lane].status;
   const quiet = silentMs !== null;
   const omp = agent.omp;
   const todos = omp?.todos;
   const subs = omp?.subagents?.live ?? 0;
   const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
   const live = lane === "running" || lane === "needs";
+  const isHero = hero && lane === "needs" && !stale && !floating;
+  const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
 
-  const avatar =
-    todos && todos.total > 0 ? (
-      <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={36} stroke={3.5} />
-    ) : (
-      <AgentGlyph name={agent.name} size={36} status={live ? status : undefined} />
-    );
+  const ring = todos && todos.total > 0;
+  const avatar = ring ? (
+    <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={36} stroke={3.5} ariaLabel={`${todos.done} of ${todos.total} todos done`} />
+  ) : (
+    <AgentGlyph name={agent.name} size={36} status={live ? status : undefined} />
+  );
 
-  let body: ReactNode;
+  let body: ReactNode = null;
   if (lane === "needs" && agent.needs) {
     const n = agent.needs;
     body = (
@@ -210,15 +255,14 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         {n.command && !n.question.includes(n.command) && (
           <pre className="mt-2 max-h-20 overflow-hidden rounded-sm well px-2.5 py-1.5 font-mono text-2xs whitespace-pre-wrap text-ink-2">{n.command}</pre>
         )}
-        <QuickAnswer agentKey={agentKey} className="mt-2.5" max={4} chat={false} />
+        <QuickAnswer agentKey={agentKey} appearance={isHero ? "hero" : "card"} className="mt-2.5" max={4} chat={false} />
       </>
     );
-  } else if (lane === "review" && ready) {
-    // fresh agent: nothing to review yet, it's waiting for its first prompt
+  } else if (fresh) {
     body = (
       <>
-        <p className="mt-2 text-xs text-mute">Waiting for a prompt{agent.repo ? "" : agent.cwd ? ` in ${agent.cwd}` : ""}.</p>
-        <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+        <p className="mt-2 text-xs text-mute">Nothing to review yet: it's waiting for its first prompt{agent.repo || !agent.cwd ? "." : ` in ${agent.cwd}.`}</p>
+        <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={stop} onPointerDown={stop}>
           <button
             type="button"
             className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
@@ -226,59 +270,63 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           >
             Prompt…
           </button>
-          <button
-            type="button"
-            className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink"
-            onClick={() => openTerminal(agentKey, false)}
-          >
-            Terminal
-          </button>
+          <Tooltip content={ACTIONS.terminal.description} shortcut={ACTIONS.terminal.shortcut}>
+            <button
+              type="button"
+              className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink"
+              onClick={() => openTerminal(agentKey, false)}
+            >
+              {ACTIONS.terminal.label}
+            </button>
+          </Tooltip>
         </div>
       </>
     );
   } else if (lane === "review") {
-    body = (
-      <>
-        <LiveLine live={agent.live} running={false} className="mt-2" />
-        <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-          {canReview(agent) && (
-            <button
-              type="button"
-              data-status="review"
-              className="h-7 rounded-sm st-bg px-2.5 text-2xs font-extrabold pressable focus-ring hover:brightness-110"
-              onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}
-            >
-              Review diff
-            </button>
-          )}
-          <ArchiveButton
-            agentKey={agentKey}
-            className="h-7 rounded-sm bg-tile-4 px-2.5 text-2xs font-bold text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] pressable focus-ring hover:bg-tile-5"
-          >
-            Archive
-          </ArchiveButton>
-          {/* the card itself opens the session: on a narrow card the redundant button gives way so the row never wraps */}
-          <button
-            type="button"
-            className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink @max-[12.5rem]/card:hidden"
-            onClick={() => openAgent(agentKey)}
-          >
-            Open
-          </button>
-        </div>
-      </>
-    );
+    body = <ReviewBody agent={agent} agentKey={agentKey} />;
   } else if (lane === "running") {
     body = (
       <>
-        <LiveLine live={agent.live} running={!stale} turnStartedAt={omp?.turnStartedAt ?? agent.stateSince} className="mt-2" />
-        <div className="mt-2 flex items-center gap-2">
-          <AgentHeartbeat agentKey={agentKey} status={quiet ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={20} className="min-w-0 flex-1" />
+        <LiveLine live={agent.live} running={!stale} className="mt-2" />
+        <div className="mt-2 flex min-w-0 items-center gap-2">
+          {/* when quiet, the chip replaces the age label: one signal per fact */}
+          <AgentHeartbeat agentKey={agentKey} status={quiet ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={20} showAge={!quiet} className="min-w-0 flex-1" />
           {quiet ? <QuietChip silentMs={silentMs} /> : <TpsSparkline tps={agent.live.tps} status={status} />}
         </div>
       </>
     );
+  } else if (lane === "done" && agent.live.line) {
+    body = <p className="mt-1.5 line-clamp-1 text-xs text-mute">{agent.live.line}</p>;
   }
+
+  const model = omp?.model;
+  const thinking = omp?.thinking && omp.thinking !== "off" ? omp.thinking : undefined;
+  const meters =
+    omp?.context || subPct != null || agent.diff || omp?.link === "notShared" || model || thinking ? (
+      // fixed order; wraps onto a second line on narrow cards instead of hiding anything
+      <div className="mt-2.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-line pt-2">
+        {omp?.context && <ContextMeter pct={omp.context.pct} />}
+        {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
+        {agent.diff && <DiffStat {...agent.diff} muted={lane === "done"} />}
+        <ConnectLinkButton agentKey={agentKey} />
+        {model && (
+          <Tooltip content="Model">
+            <span className="inline-flex max-w-full min-w-0 items-center gap-1 font-mono text-2xs text-mute">
+              <Sparkles className="size-3 shrink-0 text-mute-2" aria-hidden />
+              <span className="truncate">{model.label ?? model.id}</span>
+            </span>
+          </Tooltip>
+        )}
+        {thinking && (
+          <Tooltip content="Thinking level">
+            <span className="inline-flex shrink-0 items-center gap-1 font-mono text-2xs text-mute">
+              <Brain className="size-3 text-mute-2" aria-hidden />
+              {thinking}
+            </span>
+          </Tooltip>
+        )}
+      </div>
+    ) : null;
 
   const card = (
     <Card
@@ -289,178 +337,102 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
       className={cn(
         "group/card relative flex flex-col rounded-xl p-3.5 outline-none @container/card",
         lane === "needs" && "st-border-grad",
-        lane === "done" && "py-3",
+        isHero && "card-sunset sun-pulse",
         stale && "opacity-70 grayscale-[0.65]",
         quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]",
         floating && "shadow-[var(--shadow-d3)]",
       )}
     >
-      {/* header: lane badge (needs / review only) */}
-      {(lane === "needs" || lane === "review") && (
-        <div className="mb-2.5 flex items-center gap-2 whitespace-nowrap">
-          {lane === "needs" && agent.needs ? (
-            <span data-status="needs-you" className="rounded-full st-bg px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase">
-              {NEEDS_LABEL[agent.needs.kind]}
-            </span>
-          ) : ready ? (
-            <span className="rounded-full bg-white/6 px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] text-mute uppercase">Ready</span>
-          ) : (
-            <span data-status="review" className="rounded-full st-soft px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase">
-              Ready to review
-            </span>
+      {/* (1) state strip: state word (+ tool) left, timed verb right — the same place on every lane */}
+      <div className="mb-2 flex min-w-0 items-center gap-2 pr-1 whitespace-nowrap">
+        <span
+          data-status={status}
+          className={cn(
+            "min-w-0 truncate rounded-full px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase",
+            isHero ? "bg-[rgb(40_0_20/0.28)] text-white" : PILL[state],
           )}
-          {/* the ring avatar already shows done/total: the words only appear when the card has room for them */}
-          {todos && todos.total > 0 && (
-            <span className="hidden min-w-0 truncate text-2xs font-semibold text-mute @min-[290px]/card:inline">
-              {todos.done}/{todos.total} todos
-            </span>
-          )}
-          <span className="ml-auto shrink-0 text-2xs font-bold text-mute tabular">
-            {stale ? (
-              <span className={cn(reconnecting && "tf-shimmer-text")} title="Last seen while the host was online">
-                {/* beside the "Ready to review" badge a narrow card only has room for the age */}
-                <span className="@max-[15rem]/card:hidden">last seen </span>
-                {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}
-              </span>
-            ) : lane === "needs" && agent.needs ? (
-              <span className="text-[#ffb08a]">
-                waiting <Elapsed since={agent.needs.since} />
-              </span>
-            ) : (
-              formatAge(now - agent.stateSince)
-            )}
-          </span>
-        </div>
-      )}
+        >
+          {agentStateWord({ ...agent, column: lane })}
+          {lane === "running" && agent.live.tool && !stale && <span className="normal-case tracking-normal"> · {agent.live.tool.name}</span>}
+        </span>
+        <StateTime agent={agent} state={state} stale={stale} className={cn("ml-auto shrink-0 text-2xs font-bold tabular", lane === "needs" && !isHero ? "text-[#ffb08a]" : "text-mute")} />
+      </div>
 
-      {/* identity + title */}
+      {/* (2) identity + (3) title */}
       <div className="flex items-start gap-3">
-        {lane === "done" ? (
-          <span data-status="done" className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full st-soft">
-            <svg viewBox="0 0 12 12" className="size-3" aria-hidden>
-              <path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
-        ) : (
-          <span data-morph={floating ? undefined : "glyph"} data-morph-key={floating ? undefined : agentKey} className="shrink-0">
-            {subs > 0 ? (
-              <Swarm count={subs} size={36} status={status}>
-                {avatar}
-              </Swarm>
-            ) : (
-              avatar
-            )}
-          </span>
-        )}
+        <span data-morph={floating ? undefined : "glyph"} data-morph-key={floating ? undefined : agentKey} className="flex shrink-0 flex-col items-center gap-0.5">
+          {subs > 0 ? (
+            <Swarm count={subs} size={36} status={status}>
+              {avatar}
+            </Swarm>
+          ) : (
+            avatar
+          )}
+          {ring && <span className="text-[9px] font-bold text-mute-2">todos</span>}
+        </span>
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1.5 text-xs">
-            {lane === "running" && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
-            {multiHost && <HostDot hostId={agent.hostId} />}
-            {/* long names truncate too, but the repo/branch gives way first: it only fills the room the name leaves
-                (zero basis), and it is hidden outright on narrow cards */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+            {lane === "running" && <AgentOrb agentKey={agentKey} status={status} tool={stale ? undefined : agent.live.tool} quiet={quiet} size={7} />}
             <span
               data-morph={floating ? undefined : "name"}
               data-morph-key={floating ? undefined : agentKey}
-              className="min-w-[4ch] truncate font-extrabold text-ink"
+              className="max-w-full min-w-[4ch] truncate font-extrabold text-ink"
               title={agent.name}
             >
               {agent.name}
             </span>
-            {agent.kind !== "omp" && (
-              <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase @max-[11.5rem]/card:hidden">{agent.kind}</span>
-            )}
+            {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
             {muted && (
               <span role="img" aria-label="Notifications muted" title="Notifications muted" className="shrink-0 text-mute-2">
                 <BellOff className="size-3" aria-hidden />
               </span>
             )}
+            {multiHost && <HostTag hostId={agent.hostId} />}
             {(agent.repo || agent.branch) && (
-              <span className="min-w-0 flex-[1_1_0] truncate font-mono text-2xs text-mute-2 @max-[13.5rem]/card:hidden">
+              <span className="max-w-full min-w-0 truncate font-mono text-2xs text-mute-2" title={[agent.repo, agent.branch].filter(Boolean).join(" · ")}>
                 {agent.repo}
-                {agent.branch && ` · ${agent.branch}`}
-              </span>
-            )}
-            {(lane === "running" || lane === "done") && (
-              <span className="ml-auto shrink-0 pl-1 text-2xs font-bold text-mute tabular">
-                {stale ? (
-                  <span className={cn(reconnecting && "tf-shimmer-text")} title="Last seen while the host was online">
-                    <span className="@max-[13.5rem]/card:hidden">seen </span>
-                    {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}
-                  </span>
-                ) : lane === "running" ? (
-                  <Elapsed since={omp?.turnStartedAt ?? agent.stateSince} />
-                ) : (
-                  formatAge(now - agent.stateSince)
-                )}
+                {agent.repo && agent.branch && " · "}
+                {agent.branch}
               </span>
             )}
           </div>
-          <h4 className={cn("font-sans leading-snug font-bold wrap-break-word text-ink", lane === "done" ? "line-clamp-1 text-xs" : "line-clamp-2 text-sm")}>{agent.title || agent.name}</h4>
+          <h4 className={cn("mt-0.5 font-sans leading-snug font-bold wrap-break-word text-ink", lane === "done" ? "line-clamp-1 text-xs" : "line-clamp-2 text-sm")}>
+            {agent.title || (fresh ? "New session" : agent.name)}
+          </h4>
         </div>
       </div>
 
+      {/* (4) lane body */}
       {body}
 
-      {/* footer */}
-      {lane !== "done" ? (
-        <div className="mt-2.5 flex min-w-0 items-center gap-2.5 border-t border-line pt-2">
-          {omp?.context && <ContextMeter pct={omp.context.pct} />}
-          {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
-          {agent.diff && <DiffStat {...agent.diff} />}
-          {omp?.link === "notShared" && (
-            <button
-              type="button"
-              className="rounded-full bg-accent/14 px-2 py-px text-2xs font-bold text-accent-ink pressable focus-ring hover:bg-accent/25"
-              title="This omp session isn't shared with TeleFlock yet. Connect injects /collab while idle."
-              onClick={(e) => {
-                e.stopPropagation();
-                void core.host(agent.hostId).call("agent.connect", { agentId: agent.id }).catch((err) => reportError(`Couldn't connect ${agent.name}`, err));
-              }}
-            >
-              Connect
-            </button>
-          )}
-          {omp?.model && (
-            // beside the subagent estimate and a diff stat a narrow card has no room for more than a letter of the model
-            <span className={cn("ml-auto min-w-0 truncate font-mono text-2xs text-mute", subPct != null && agent.diff && "@max-[13.5rem]/card:hidden")}>
-              {omp.model.label ?? omp.model.id}
-              {omp.thinking && omp.thinking !== "off" && ` · ${omp.thinking}`}
-            </span>
-          )}
-        </div>
-      ) : (
-        agent.diff && (
-          <div className="mt-1 flex items-center gap-2 pl-8">
-            <DiffStat {...agent.diff} />
-          </div>
-        )
-      )}
+      {/* (5) meters */}
+      {meters}
 
       {/* hover actions: quick tools for running cards, the ⋯ menu everywhere */}
       {!floating && (
         <div
           className="absolute top-2 right-2 flex gap-0.5 rounded-md glass p-0.5 opacity-0 transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100 has-[[data-state=open]]:opacity-100"
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
+          onClick={stop}
+          onPointerDown={stop}
         >
           {lane === "running" && (
             <>
-              <Tooltip content="Open session" shortcut="Enter">
-                <IconButton label="Open session" size="sm" onClick={() => openAgent(agentKey)}>
+              <Tooltip content={ACTIONS.openSession.label} shortcut={ACTIONS.openSession.shortcut}>
+                <IconButton label={ACTIONS.openSession.label} size="sm" onClick={() => openAgent(agentKey)}>
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
                     <path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10M9 2h5v5M14 2 7.5 8.5" />
                   </svg>
                 </IconButton>
               </Tooltip>
-              <Tooltip content="Terminal (split)" shortcut="T">
-                <IconButton label="Open terminal" size="sm" onClick={() => openTerminal(agentKey, false)}>
+              <Tooltip content={ACTIONS.terminal.description} shortcut={ACTIONS.terminal.shortcut}>
+                <IconButton label={ACTIONS.terminal.label} size="sm" onClick={() => openTerminal(agentKey, false)}>
                   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
                     <path d="m3 4.5 3 3-3 3M8 11.5h5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 </IconButton>
               </Tooltip>
-              <Tooltip content="Stop the current turn">
-                <IconButton label="Stop" size="sm" variant="danger" onClick={() => void stopAgent(agentKey)}>
+              <Tooltip content={ACTIONS.stopTurn.description}>
+                <IconButton label={ACTIONS.stopTurn.label} size="sm" onClick={() => void stopAgent(agentKey)}>
                   <svg viewBox="0 0 16 16" aria-hidden>
                     <rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" />
                   </svg>
@@ -492,7 +464,8 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
     </Card>
   );
 
-  const glowing = live && !stale && !quiet && !floating;
+  // Motion budget: needs-you always glows (the hero glows through its sunset pulse); running cards glow only in Lively.
+  const glowing = !isHero && !stale && !quiet && !floating && (lane === "needs" || (lane === "running" && lively));
   const body2 = (
     <div ref={nudge} className="relative">
       <motion.div animate={{ y: picked ? -3 : 0, scale: picked ? 1.01 : 1 }} transition={spring.snappy}>

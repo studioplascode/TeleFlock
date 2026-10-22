@@ -13,7 +13,6 @@ pub fn default_settings(device_name: String) -> Settings {
         quiet_end: None,
         keep_alive: true,
         terminal_font_size: 13,
-        confirm_archive: false,
         default_model: None,
         default_thinking: None,
         default_plan: false,
@@ -109,12 +108,14 @@ mod tests {
 
     #[test]
     fn legacy_settings_json_loads() {
-        // A settings.json written before mutedAgents/templates/autoUpdate existed.
+        // A settings.json written before mutedAgents/templates/autoUpdate existed, and with the
+        // `confirmArchive` key that 0.4.0 removed (unknown keys are ignored).
         let mut v = serde_json::to_value(default_settings("d".into())).unwrap();
         let o = v.as_object_mut().unwrap();
         o.remove("mutedAgents");
         o.remove("templates");
         o.remove("autoUpdate");
+        o.insert("confirmArchive".into(), serde_json::Value::Bool(true));
         let s: Settings = serde_json::from_value(v).unwrap();
         assert!(s.muted_agents.is_empty());
         assert!(s.templates.is_empty());

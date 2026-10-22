@@ -1,8 +1,9 @@
-import { core, navigate, parseAgentKey, useSettings, useUi } from "@/core";
+import { core, getAgentViews, getWorkspacesSnapshot, navigate, parseAgentKey, useSettings, useUi } from "@/core";
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
 import { haptic } from "@/features/shell/haptics";
 import { useSessionUi } from "@/features/session/state";
+import { removeWorktree } from "@/features/workspace/workspaceActions";
 
 function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
@@ -27,7 +28,7 @@ export async function answerAgent(key: string, requestId: string, answer: Answer
   }
 }
 
-/** `agent.archive` (Review → Done when true, Done → Review when false). */
+/** `agent.archive` (Mark done: Review → Done when true; Reopen: Done → Review when false). */
 export async function setArchived(key: string, archived: boolean): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
   try {
@@ -35,22 +36,43 @@ export async function setArchived(key: string, archived: boolean): Promise<void>
     haptic("success");
   } catch (err) {
     haptic("warning");
-    reportError(archived ? `Couldn't archive ${agentId}` : `Couldn't reopen ${agentId}`, err);
+    reportError(archived ? `Couldn't mark ${agentId} done` : `Couldn't reopen ${agentId}`, err);
     throw err;
   }
 }
 
-/** Archive with an Undo toast (mobile swipe, bulk actions): no confirm step, one tap to revert. */
-export async function archiveWithUndo(keys: readonly string[]): Promise<void> {
+/**
+ * Mark done with an Undo toast (cards, menus, drops, swipes, bulk): no confirm step, one click to revert.
+ * Resolves to the keys that were marked done (failures toast on their own).
+ */
+export async function archiveWithUndo(keys: readonly string[]): Promise<string[]> {
   const results = await Promise.allSettled(keys.map((k) => setArchived(k, true)));
   const done = keys.filter((_, i) => results[i]?.status === "fulfilled");
-  if (done.length === 0) return;
+  if (done.length === 0) return done;
   const label = done.length === 1 ? parseAgentKey(done[0] ?? "").agentId : `${done.length} agents`;
   toast({
-    title: `Archived ${label}`,
+    title: `Marked ${label} done`,
     status: "done",
     action: { label: "Undo", onClick: () => done.forEach((k) => void setArchived(k, false).catch(() => {})) },
   });
+  return done;
+}
+
+/**
+ * Mark done & remove worktree: the shared `removeWorktree` flow (confirm, force confirm when dirty, trust
+ * prompt), then archives the agent if its card is still around. Handles its own errors; never rejects.
+ */
+export async function markDoneAndRemove(key: string): Promise<void> {
+  const { hostId } = parseAgentKey(key);
+  const agent = getAgentViews().find((a) => a.key === key);
+  const ws = agent ? getWorkspacesSnapshot().find((w) => w.hostId === hostId && w.ws.id === agent.workspaceId)?.ws : undefined;
+  if (!agent || !ws?.worktree) {
+    toast({ title: "No worktree to remove", description: `${agent?.name ?? "This agent"} doesn't run in a linked worktree. Use Mark done instead.`, status: "error" });
+    return;
+  }
+  const removed = await removeWorktree(hostId, ws, { title: `Mark ${agent.name} done and remove its worktree?`, confirmLabel: "Mark done & remove" });
+  // Removing the worktree usually closes the agent's pane with it; archive only what is still on the board.
+  if (removed && getAgentViews().some((a) => a.key === key)) await setArchived(key, true).catch(() => {});
 }
 
 /** Whether an agent's notifications are muted (`Settings.mutedAgents`). */

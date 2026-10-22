@@ -1,13 +1,31 @@
 import { BellOff, Focus, GitBranch, Square, SquareTerminal } from "lucide-react";
+import type { Agent } from "@/core/gen";
 import { parseAgentKey, useAgent, useSession, useUi } from "@/core";
-import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity } from "@/design";
+import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
+import { Term } from "@/features/shell/Term";
+import { ACTIONS, agentStateWord, stateTime } from "@/features/shell/vocab";
 import { agentStatus, hostCall, useBeat, useMute } from "../api";
 import { CostTooltip } from "../spend";
 import { ActionsMenu, FastToggle, GoalChip, ModelPicker, PlanToggle, ThinkingPicker } from "./Controls";
 import { LimitsChip } from "./LimitsChip";
 
-/** Desktop session header: identity, liveness, and every mode control. */
-export function SessionHeader({ agentKey, compact = false }: { agentKey: string; compact?: boolean }) {
+/** The header pill's words: the state ("Question", "Running", "To review"), plus the wait while it needs you. */
+export function StateWord({ agent }: { agent: Agent }) {
+  const now = useNow(agent.needs ? 1000 : 60_000);
+  const wait = agent.needs ? stateTime("needs", agent.needs.since, now) : null;
+  return (
+    <>
+      {agentStateWord(agent)}
+      {wait && <span className="font-semibold opacity-85"> · {wait}</span>}
+    </>
+  );
+}
+
+/**
+ * Desktop session header: identity, liveness, and every mode control. `inspector`: the inspector
+ * rail is on screen beside it, so the session cost lives there instead of here.
+ */
+export function SessionHeader({ agentKey, compact = false, inspector = false }: { agentKey: string; compact?: boolean; inspector?: boolean }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
@@ -40,7 +58,7 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
               {agent.name}
             </h2>
             <StatusPill status={status} activity={tier} size="sm" className="hidden shrink-0 @min-[9.5rem]/id:inline-flex">
-              {agent.needs ? agent.needs.title : undefined}
+              <StateWord agent={agent} />
             </StatusPill>
             {muted && (
               <Tooltip content="Notifications muted for this agent">
@@ -49,7 +67,7 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
             )}
             {working && (
               <span className="hidden shrink-0 items-center gap-1 text-[11px] font-bold text-mute tabular @min-[14rem]/id:flex">
-                <Elapsed since={agent.omp?.turnStartedAt ?? agent.stateSince} />
+                turn <Elapsed since={agent.omp?.turnStartedAt ?? agent.stateSince} />
               </span>
             )}
           </div>
@@ -67,41 +85,56 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
                 {agent.branch}
               </span>
             )}
-            <span className="shrink-0 text-mute-2">{agent.paneId}</span>
+            <Term id="pane" className="shrink-0 text-mute-2">
+              pane {agent.paneId}
+            </Term>
           </div>
         </div>
         {!compact && (
-          <div className="hidden w-[132px] shrink-0 @min-[50rem]/hdr:block">
+          <div className="hidden w-[112px] shrink-0 @min-[36rem]/hdr:block">
             <Heartbeat beat={beat} lastEventAt={agent.live.lastEventAt} status={status} height={26} />
           </div>
         )}
-        <LimitsChip agentKey={agentKey} />
-        {cost && (
+        {cost && !inspector && (
           <Tooltip content={<CostTooltip cost={cost} />}>
-            <span tabIndex={0} className="focus-ring shrink-0 rounded-full px-2 py-1 font-display text-sm font-bold text-ink-2 tabular">
+            <span tabIndex={0} className="focus-ring flex shrink-0 items-baseline gap-1 rounded-full px-2 py-1 font-display text-sm font-bold text-ink-2 tabular">
               <NumberTicker value={cost.usd} format={formatUsd} />
+              <span className="font-sans text-[11px] font-semibold text-mute">session</span>
             </span>
           </Tooltip>
         )}
         {!compact && (
-          <Tooltip content="Focus mode" shortcut="F">
-            <Button size="sm" variant="ghost" icon={<Focus />} onClick={() => useUi.getState().setFocusMode(true)} aria-label="Focus mode" />
+          <Tooltip content={ACTIONS.focusMode.description} shortcut={ACTIONS.focusMode.shortcut}>
+            <Button size="sm" variant="ghost" icon={<Focus />} onClick={() => useUi.getState().setFocusMode(true)} aria-label={ACTIONS.focusMode.label} className="shrink-0">
+              <span className="hidden @min-[46rem]/hdr:inline">Focus</span>
+            </Button>
           </Tooltip>
         )}
-        <Tooltip content="Open terminal in split" shortcut="Ctrl \">
-          <Button size="sm" variant="ghost" icon={<SquareTerminal />} onClick={() => useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId })} aria-label="Open terminal in split" />
-        </Tooltip>
-        {working && live && (
+        <Tooltip content={ACTIONS.terminalBeside.description} shortcut={ACTIONS.terminalBeside.shortcut}>
           <Button
             size="sm"
-            variant="danger"
-            icon={<Square className="fill-current" />}
-            onClick={() => void hostCall(hostId, "agent.abort", { agentId }, { failure: "Stop failed" })}
-            trailing={<Kbd className="hidden @min-[40rem]/hdr:inline-flex">Esc</Kbd>}
+            variant="ghost"
+            icon={<SquareTerminal />}
+            onClick={() => useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId })}
+            aria-label={ACTIONS.terminalBeside.label}
             className="shrink-0"
           >
-            Stop
+            <span className={cn("hidden", !compact && "@min-[46rem]/hdr:inline")}>{ACTIONS.terminal.label}</span>
           </Button>
+        </Tooltip>
+        {working && live && (
+          <Tooltip content={ACTIONS.stopTurn.description} shortcut={ACTIONS.stopTurn.shortcut}>
+            <Button
+              size="sm"
+              variant="danger"
+              icon={<Square className="fill-current" />}
+              onClick={() => void hostCall(hostId, "agent.abort", { agentId }, { success: "Turn stopped", failure: "Stop failed" })}
+              trailing={<Kbd className="hidden @min-[40rem]/hdr:inline-flex">Esc</Kbd>}
+              className="shrink-0"
+            >
+              {ACTIONS.stopTurn.label}
+            </Button>
+          </Tooltip>
         )}
       </div>
       {live && (
@@ -109,10 +142,12 @@ export function SessionHeader({ agentKey, compact = false }: { agentKey: string;
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto no-scrollbar">
             <ModelPicker agentKey={agentKey} />
             <ThinkingPicker agentKey={agentKey} />
+            <span className="mx-0.5 h-4 w-px shrink-0 bg-line-2" aria-hidden />
             <PlanToggle agentKey={agentKey} compact={compact} />
             <FastToggle agentKey={agentKey} compact={compact} />
             <GoalChip agentKey={agentKey} compact={compact} />
           </div>
+          <LimitsChip agentKey={agentKey} />
           <ActionsMenu agentKey={agentKey} />
         </div>
       )}

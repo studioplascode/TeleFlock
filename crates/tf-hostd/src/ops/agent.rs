@@ -340,7 +340,7 @@ async fn answer(ctx: &Ctx, p: AnswerParams) -> Result<(), ApiError> {
     let s = guest(ctx, &p.agent_id)?;
     s.answer(&p.request_id, &p.answer)?;
     let label = if p.answer.cancel {
-        "Dismissed".to_string()
+        "Skipped".to_string()
     } else if p.answer.chat {
         "Chat about this".to_string()
     } else if let Some(t) = &p.answer.text {

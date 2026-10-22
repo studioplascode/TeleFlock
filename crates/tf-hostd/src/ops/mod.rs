@@ -18,6 +18,7 @@ use crate::paths::Paths;
 use crate::state::subs::SessionSubs;
 use crate::state::StateHandle;
 
+pub mod ai;
 pub mod agent;
 pub mod fs;
 pub mod gh;
@@ -99,6 +100,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
         "gh" => gh::handle(ctx, req, client).await,
         "term" => term::handle(ctx, req, client).await,
         "host" => host::handle(ctx, req, client).await,
+        "ai" => ai::handle(ctx, req, client).await,
         _ => Err(ApiError::new("unknown_method", format!("unknown method `{}`", req.name()))),
     }
 }

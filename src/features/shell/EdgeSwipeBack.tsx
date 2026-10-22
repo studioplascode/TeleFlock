@@ -1,7 +1,7 @@
 import { ChevronLeft } from "lucide-react";
 import { animate, motion, useMotionValue, useTransform } from "motion/react";
 import { useEffect } from "react";
-import { spring } from "@/design";
+import { isAndroid, spring } from "@/design";
 import { haptic } from "./haptics";
 import { goBack } from "./MobileHeader";
 
@@ -9,10 +9,13 @@ const EDGE = 22;
 const TRIGGER = 84;
 
 /**
- * Android-style edge swipe: drag from the left edge and a glowing back bubble follows your thumb;
- * release past the threshold to go back. Disabled on root tabs.
+ * Edge swipe (web, iOS): drag from the left edge and a glowing back bubble follows your thumb;
+ * release past the threshold to go back. Disabled on root tabs, and on Android, where the system
+ * back gesture already claims the edge and maps to history back (`backButton.ts`): one swipe, one
+ * meaning.
  */
-export function EdgeSwipeBack({ enabled }: { enabled: boolean }) {
+export function EdgeSwipeBack({ enabled: wanted }: { enabled: boolean }) {
+  const enabled = wanted && !isAndroid;
   const dx = useMotionValue(0);
   const y = useMotionValue(0);
   const x = useTransform(dx, [0, TRIGGER, 200], [-44, 10, 22]);

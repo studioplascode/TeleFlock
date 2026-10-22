@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { type CoreState, core, navigate, useCore } from "@/core";
+import { type CoreState, core, navigate, useCore, useUi } from "@/core";
 import type { ConnStatus } from "@/core/gen";
 import { formatAge, formatUsd, toast } from "@/design";
 
@@ -89,6 +89,9 @@ async function digest(hostId: string, since: number, costBefore: number | null, 
     description: `${parts.join(" · ")} — over the last ${formatAge(Date.now() - since).replace(/ ago$/, "")}.`,
     status: needsNow > 0 ? "needs-you" : finished > 0 ? "review" : "running",
     duration: 14_000,
-    action: { label: needsNow > 0 ? "Answer next" : "Activity", onClick: () => navigate({ name: needsNow > 0 ? "inbox" : "activity" }) },
+    action:
+      needsNow > 0
+        ? { label: "Answer next", onClick: () => useUi.getState().setAnswerNext(true) }
+        : { label: "Activity", onClick: () => navigate({ name: "activity" }) },
   });
 }

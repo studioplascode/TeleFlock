@@ -41,13 +41,21 @@ TeleFlock is a native desktop and phone app for the [omp](https://github.com/can
 
 ### The board: is everything alive?
 
-Four lanes, **Running · Needs you · In review · Done**, with every omp agent on every host. Cards fly between lanes and keep a live heartbeat: the streaming line, tool timers, a todo ring, context, cost and the subagent swarm. Agents that go quiet while working are called out. The board also gives you the day's spend, host load and a live terminal tile. Questions and approvals are answered right on the card. You can drag cards to archive, multi-select, filter, and drive everything from the keyboard (`J`/`K`, `Enter`, `A` answer, `T` terminal).
+Four lanes, **Needs you · Running · Review · Done**, with every omp agent on every host. Needs you comes first, and its oldest question sits on top, answerable right on the card. Every card has the same layout in every lane: the state and its time on top (`turn 27:24`, `waiting 6:13`, `finished 25m ago`), then who and where, the task, what it is doing right now, and labelled meters (`ctx 61%`, `subs 59%`, `+188 −74 · 3 files`, model, thinking). Running cards keep a live heartbeat with the streaming line, tool timers and tokens per second, and agents that go quiet while working are called out. Above the lanes sit today's spend with the subscription limit you will hit first, every host's health and a live terminal tile. Mark a reviewed card done (with Undo), drag it back to reopen, multi-select, filter, and drive everything from the keyboard (`J`/`K`, `Enter`, `A` answer, `T` terminal).
 
-<img src="docs/assets/readme/board.webp" alt="Board with Running, Needs you, In review and Done lanes" width="100%">
+<img src="docs/assets/readme/board.webp" alt="Board with Needs you, Running, Review and Done lanes" width="100%">
+
+### Easy to start, nothing hidden
+
+New to omp and herdr? The board's **First steps** checklist walks you through the demo flock (answer a question, approve a command, steer an agent, review, dispatch, the palette) and retires itself. Dotted terms such as *pane*, *steer*, *follow-up*, *worktree* or *compact* explain themselves on hover or tap, short hints beside the composer and the phone pager retire after a few sightings, and every launcher and palette action says what it does. Each fact is shown once, in one place, with its unit. Motion is calm by default: only changes and what needs you move, and Settings → Motion → Lively brings back the full show.
+
+### AI naming with omp's tiny model
+
+TeleFlock uses the **tiny model role** you set up in omp (`modelRoles.tiny`, falling back to `smol`) as its AI provider, on the host and through your own omp login. It names Dispatch worktrees and branches, wizard branches and agents, fan-out runs and templates, suggests a name when you rename a session or workspace, and drafts commit messages and pull request titles and descriptions in Review. AI-made names carry a ✨, are always editable, and fall back to names made from your own text when the model is slow or switched off (Settings → AI naming). Nothing is stored: the text goes only to your own model provider, through omp.
 
 ### A native session for every agent
 
-A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. Click any image to open it full screen, then zoom and pan (wheel, pinch, double-click) and page through the rest of the message. When the agent asks, its question becomes a card you answer with a click or `1`–`9`. The composer steers the running turn or queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, and images. Whatever you type, anywhere in the app, stays put: drafts and pasted images survive switching agents, closing dialogs and restarts until you send them. Model, thinking, plan, goal and fast mode sit in the header. The inspector shows context, cost, throughput, todos, changed files, the session tree (branch, fork, navigate) and more.
+A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. Click any image to open it full screen, then zoom and pan (wheel, pinch, double-click) and page through the rest of the message. When the agent asks, its question becomes a card you answer with a click or `1`–`9`, with each option's trade-off written inside its button (Skip answers nothing). `Enter` sends, or steers the running turn, and `Alt+Enter` queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, and images. Whatever you type, anywhere in the app, stays put: drafts and pasted images survive switching agents, closing dialogs and restarts until you send them. Model, thinking, plan, goal and fast mode sit in the header and say whether they are on. The inspector shows how much context is used and how much of your subscription is left, spend by source, throughput, todos, changed files, the session tree (branch, fork, navigate) and more. A fresh agent offers starter prompts.
 
 | Ask cards | Approvals |
 |---|---|
@@ -55,7 +63,7 @@ A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, b
 
 ### Dispatch: fire tasks into fresh worktrees
 
-Pick a repository and send tasks like chat messages. Each one gets its own `dispatch/<slug>` worktree and omp agent, and they all run side by side. A thread per repo shows every agent's progress live: queued, creating the worktree, starting, then the agent's status and streaming line. You can answer its questions inline and jump to its session, terminal or review. Templates, model, thinking and plan mode are set per message. Up to three worktrees are created at once; the rest queue.
+Pick a repository and send tasks like chat messages. omp's tiny model names each one (`dispatch/offline-board-cache`), and each gets its own worktree and omp agent; they all run side by side. A thread per repo shows every agent's progress live: naming, creating the worktree, starting, then the agent's status and streaming line. You can answer its questions inline and jump to its session, terminal or review. Templates, model, thinking and plan mode are set per message. Up to three worktrees are created at once; the rest queue. Need a specific branch or several attempts? New worktree and Fan out are one click away, with the repository filled in.
 
 <img src="docs/assets/readme/dispatch.webp" alt="Dispatch thread with three tasks, each in its own worktree" width="100%">
 
@@ -75,7 +83,7 @@ Every agent's spend counts its subagents and the advisor too, broken down by sou
 
 ### Review and ship
 
-A diff viewer (unified or split) for any worktree. From there you commit (or ask the agent to write the message), push, open a PR, watch the checks and merge.
+A diff viewer (unified or split) for any worktree. From there you commit (✨ let the tiny model draft the message, or ask the agent), push, open a PR (✨ title and description), watch the checks and merge. A ship stepper shows where the worktree stands and its next step, even on a laptop screen, and Review cards on the board show that next step too.
 
 <img src="docs/assets/readme/review.webp" alt="Review screen with file list and split diff" width="100%">
 
@@ -87,13 +95,13 @@ xterm.js attached to any herdr pane, in **Fira Code** with **Nerd Font** icons. 
 
 ### In your pocket
 
-The phone layout is built for one thumb. You get a Flock home with what needs you, swipeable sessions, an inbox, Dispatch and the terminal with extra keys. Bottom sheets, edge-swipe back, pull to refresh and haptics come with it.
+The phone layout is built for one thumb: **Flock · Inbox · Dispatch · Terminal · More**. Flock home puts what needs you first, with each option's trade-off on the card, tiles that take you somewhere (Answer →, running ↓, today's spend ›) and a ⋯ menu on every row. Sessions swipe between agents, and a Next chip jumps to the next one waiting; the Terminal tab reopens the terminal you used last. Bottom sheets, pull to refresh and haptics come with it.
 
-<img src="docs/assets/readme/phones.webp" alt="Four phone screens: Flock home, a question, a session with subagents, the inbox" width="100%">
+<img src="docs/assets/readme/phones.webp" alt="Four phone screens: Flock home, a question, a multi-select question with the Next chip, the inbox" width="100%">
 
 ### Notifications that clear themselves
 
-When an agent needs you, you get an OS notification you can act on: a Windows toast with buttons and inline reply, or an Android notification with up to three actions and inline reply. Once a question is handled anywhere (the card, the toast, the board, `Ctrl+J` "answer next", another device or the omp TUI itself), its notification disappears everywhere. Read ones are retracted too. Desktop also has a tray icon with a live badge, a taskbar overlay on Windows, and per-agent mute and quiet hours. Linux and macOS have no OS notifications yet; there the inbox and the tray badge carry the same information.
+When an agent needs you, you get an OS notification you can act on: a Windows toast with buttons and inline reply, or an Android notification with up to three actions and inline reply. Once a question is handled anywhere (the card, the toast, the board, `Ctrl+J` "answer next", another device or the omp TUI itself), its notification disappears everywhere. Read ones are retracted too. The **Inbox** holds what needs you first, then unread updates (finished, errors, quiet agents); the bell is a quick peek at the same list. Desktop also has a tray icon with a live badge, a taskbar overlay on Windows, and per-agent mute and quiet hours. Linux and macOS have no OS notifications yet; there the inbox and the tray badge carry the same information.
 
 ### Updates
 
@@ -111,7 +119,7 @@ Desktop packages are verified against the release signing key and the release ve
 
 ### And more
 
-Command palette (`Ctrl+K`), an activity feed with a "while you were away" digest, a usage dashboard, agent templates, fan-out (N approaches in parallel), worktree and agent wizards with a remote folder browser, past sessions and resume, offline-first cached state, and the built-in demo host.
+Command palette (`Ctrl+K`) with a one-line description for every action, an activity feed with a "while you were away" digest, a usage dashboard, agent templates, fan-out (N approaches in parallel), worktree and agent wizards with a remote folder browser, past sessions and resume, offline-first cached state, and the built-in demo host.
 
 ## Install
 
@@ -148,13 +156,15 @@ On the machine that runs herdr and omp:
    - Make sure your tailnet policy lets your devices SSH to this host as your user.
    - If the policy uses `check` mode, TeleFlock shows an **Open browser** card to finish the login.
 2. **herdr and omp** must be installed (`herdr --version`, `omp --version`; omp ≥ 18.12).
-3. **In TeleFlock:** Hosts → **Add host** → Tailscale SSH (MagicDNS name or 100.x IP, user), Local, or WSL (pick a distro) → **Test** → **Save**. TeleFlock deploys `tf-hostd` to `~/.teleflock/` and connects.
-4. **Host setup checklist** (Hosts → Host setup) offers one-tap fixes. Each runs only when you tick its consent box:
-   - `install-herdr-integration`: herdr's omp integration, which gives accurate working/blocked/idle states.
-   - `enable-global-sharing`: sets `collab.autoStart: control` and `collab.relayUrl: ws://127.0.0.1:47466` in omp's global config. Every omp session, including ones you start by hand or herdr restores, then appears live in TeleFlock.
-   - `install-global-bridge`: copies the TeleFlock extension into `~/.omp/agent/extensions/` so precise controls work for every session.
+3. **In TeleFlock:** **Add host** (first launch, or the **+** next to HOSTS in the sidebar) → Tailscale SSH (MagicDNS name or 100.x IP, user), Local, or WSL (pick a distro) → **Test** → **Add host**. The dialog lists what the host needs, and a failed test shows the command that fixes it. TeleFlock deploys `tf-hostd` to `~/.teleflock/` and connects.
+4. **Host setup** (on the Hosts page, which opens it by itself while items are open; the board shows a **Fix…** strip too) offers one-tap fixes, each explained by what goes wrong without it. Each runs only when you tick its consent box:
+   - **herdr's omp integration** (`install-herdr-integration`): accurate working/blocked/idle states.
+   - **Share sessions with TeleFlock** (`enable-global-sharing`): sets `collab.autoStart: control` and `collab.relayUrl: ws://127.0.0.1:47466` in omp's global config. Every omp session, including ones you start by hand or herdr restores, then appears live in TeleFlock.
+   - **TeleFlock bridge for every session** (`install-global-bridge`): copies the TeleFlock extension into `~/.omp/agent/extensions/` so precise controls work for every session.
 
    You can skip all three. Agents started from TeleFlock are shared and bridged per process anyway, and an unshared session can be connected with one click (**Connect** injects `/collab` into it).
+
+5. **AI naming** needs nothing extra: it uses omp's `tiny` model role (or `smol`) on the host. Check it with `omp config get modelRoles`.
 
 Phones connect over Tailscale SSH only. Your tailnet identity is the login, so no keys or passwords are stored. Desktops can also use **Local** (herdr on this machine) and, on Windows, **WSL**.
 
@@ -171,6 +181,7 @@ flowchart LR
     omp["omp TUIs in herdr panes"]
     herdr[("herdr server")]
     gh["GitHub (git · gh)"]
+    tiny["omp one-shot<br/>(tiny model role)"]
   end
   desk -- "Tailscale SSH · Local · WSL" --> hostd
   phone -- "Tailscale SSH" --> hostd
@@ -178,6 +189,7 @@ flowchart LR
   omp -. "teleflock-bridge extension" .-> hostd
   hostd <-- "local API" --> herdr
   hostd --> gh
+  hostd -- "naming and drafts" --> tiny
 ```
 
 - omp keeps running as its normal TUI inside herdr, so herdr's state tracking and the real terminal keep working.
@@ -186,6 +198,7 @@ flowchart LR
 - `tf-hostd` joins each omp session as a private collab guest on a loopback relay. Room keys never leave the host.
 - A companion omp extension adds structured controls (model, thinking, tree, queue, …).
 - herdr is driven through its local API; git and `gh` run on the host for review and shipping.
+- AI naming runs `omp --mode json` once per request on the host with the `tiny` role (no tools, no session), reads the answer and stops the process.
 - The UI is React, rendered by the system webview through Tauri 2. Desktop and Android share all of it.
 
 Details: [`docs/architecture.md`](docs/architecture.md) · spec: [`docs/spec.md`](docs/spec.md) · feature coverage: [`docs/coverage.md`](docs/coverage.md) · bridge protocol: [`docs/bridge-protocol.md`](docs/bridge-protocol.md).
@@ -232,7 +245,8 @@ cargo run -p tf-devserver -- --static dist --bind 127.0.0.1:7420 --hostd-bin tar
 What has been verified, and how:
 
 - **Test suites:** the Rust workspace tests, the frontend unit tests and the typecheck.
-- **Real omp + herdr, on Linux:** the full stack was exercised end to end through the UI in herdr lab sessions, via `tf-devserver` with the local transport, including subscription limits against real Claude and Codex accounts.
+- **Real omp + herdr, on Linux:** the full stack was exercised end to end through the UI in herdr lab sessions, via `tf-devserver` with the local transport, including subscription limits against real Claude and Codex accounts. AI naming (`ai.complete`) was run against omp 18.12.3's real `tiny` model role (an answer in about 4 s).
+- **0.4.0 interface:** the changed screens were walked in the demo at 1440×900, 1280×720 and on a Pixel 5 profile, and the whole change went through a code review.
 - **Packages:** the Windows installer, the signed APK and the Linux .deb, AppImage and Arch package build from this tree. The Linux app was smoke-run: the window renders, the tray starts, a second launch hands its `teleflock://` link to the first, and the .deb installs and runs on a clean Ubuntu 22.04.
 
 **Not yet exercised:**

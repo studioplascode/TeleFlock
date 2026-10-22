@@ -9,6 +9,8 @@ export type * from "./Agent";
 export type * from "./AgentRef";
 export type * from "./AgentSpec";
 export type * from "./AgentTemplate";
+export type * from "./AiCompleteParams";
+export type * from "./AiCompleteResult";
 export type * from "./Answer";
 export type * from "./AnswerParams";
 export type * from "./ApiError";

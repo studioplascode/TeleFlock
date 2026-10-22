@@ -1,23 +1,11 @@
-import { Bot, Coins, FileCode2, GitBranch, GitFork, GitMerge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Send, Workflow } from "lucide-react";
+import { Bot, FileCode2, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Send, Workflow } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useDraft, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
 import type { TreeInfo, TreeNode } from "@/core/gen";
-import {
-  cn,
-  EmptyState,
-  formatCompact,
-  formatUsd,
-  IconButton,
-  Input,
-  NumberTicker,
-  ProgressRing,
-  SegmentedControl,
-  Shimmer,
-  Sparkline,
-  Spinner,
-  useNow,
-} from "@/design";
+import { cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Sparkline, Spinner, useNow } from "@/design";
+import { Term } from "@/features/shell/Term";
+import { ACTIONS } from "@/features/shell/vocab";
 import { hostCall, usePending } from "../api";
 import { ChatThreads, useIrcUnreadCount } from "../irc/ChatThreads";
 import { Markdown } from "../markdown/Markdown";
@@ -25,12 +13,12 @@ import { type InspectorTab, useSessionUi } from "../state";
 import { SubagentCard } from "../subagents/Subagents";
 import { DiffStatText } from "../tools/DiffBody";
 import { TodoPhases, todoCounts } from "../tools/TodoList";
-import { SpendBreakdown } from "../spend";
-import { LimitsTile } from "./LimitsTile";
+import { SPENDERS, SpendTile } from "../spend";
+import { LimitsMeter, Meter } from "./LimitsTile";
 
-function Pane({ id, title, aside, children, className }: { id: InspectorTab; title: ReactNode; aside?: ReactNode; children: ReactNode; className?: string }) {
+function Pane({ id, title, label, aside, children, className }: { id: InspectorTab; title: ReactNode; label?: string; aside?: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <section data-panel={id} className={cn("rounded-[22px] glass px-4 py-3.5 transition-shadow duration-500", className)} aria-label={typeof title === "string" ? title : undefined}>
+    <section data-panel={id} className={cn("rounded-[22px] glass px-4 py-3.5 transition-shadow duration-500", className)} aria-label={label ?? (typeof title === "string" ? title : undefined)}>
       <div className="mb-2.5 flex items-center justify-between gap-2">
         <div className="kicker">{title}</div>
         {aside && <span className="text-[11px] font-bold text-mute">{aside}</span>}
@@ -40,15 +28,8 @@ function Pane({ id, title, aside, children, className }: { id: InspectorTab; tit
   );
 }
 
-function Mini({ k, v, s, className }: { k: ReactNode; v: ReactNode; s?: ReactNode; className?: string }) {
-  return (
-    <div className={cn("rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline", className)}>
-      <div className="text-[10.5px] font-bold text-mute">{k}</div>
-      <div className="mt-0.5 font-display text-xl font-bold tracking-[-0.03em] text-ink tabular">{v}</div>
-      {s && <div className="text-[10.5px] font-semibold text-mute-2 tabular">{s}</div>}
-    </div>
-  );
-}
+/** Tile chrome inside the Session pane. */
+const TILE = "rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline";
 
 /** Rolling tok/s history: one sample per second of the latest value, 60 s (only while mounted). */
 function useTpsHistory(value: number | undefined): number[] {
@@ -68,72 +49,52 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
   const { meta } = useSession(agentKey);
   // Every spender's live output (main + subagents + advisor), as tf-hostd sums it.
   const tps = agent?.live.tps;
+  const split = agent?.live.tpsSplit;
   const hist = useTpsHistory(tps);
   const ctx = meta?.context ?? agent?.omp?.context;
   const cost = meta?.cost ?? agent?.omp?.cost;
-  const todos = todoCounts(meta?.todos ?? []);
   const producing = tps != null && tps > 0;
   const peak = Math.max(0, ...hist);
-  const ctxStatus = ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : "running";
   return (
-    <Pane
-      id="overview"
-      title="Session"
-      aside={
-        <span className={cn("tabular", producing && "text-accent-hi")}>
-          {producing ? `${Math.round(tps)} tok/s` : meta?.tps != null ? `last turn ${Math.round(meta.tps)} tok/s` : "—"}
-        </span>
-      }
-    >
-      <div className="grid grid-cols-2 gap-2">
-        <div className="col-span-2 flex items-center gap-3 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline">
-          <ProgressRing done={ctx?.pct ?? 0} total={100} size={48} stroke={4.5} status={ctxStatus} label={<span className="text-[11px] font-bold">{ctx ? `${Math.round(ctx.pct)}%` : "—"}</span>} />
-          <div className="min-w-0 flex-1">
-            <div className="text-[10.5px] font-bold text-mute">Context</div>
-            <div className="font-display text-xl font-bold tracking-[-0.03em] text-ink tabular">
-              {ctx ? formatCompact(ctx.tokens) : "—"} <span className="text-sm text-mute">/ {ctx ? formatCompact(ctx.window) : "—"}</span>
-            </div>
-          </div>
+    <Pane id="overview" title="Session">
+      <div className="flex flex-col gap-2">
+        {/* Can it keep going: context used and subscription left, as bars that say which way they count. */}
+        <div className={cn(TILE, "flex flex-wrap gap-x-4 gap-y-2.5")} aria-label="Can it keep going">
+          <Meter
+            term={<Term id="context">ctx</Term>}
+            reading={ctx ? `${Math.round(ctx.pct)}% used` : "—"}
+            fill={ctx?.pct ?? 0}
+            status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined}
+            label={ctx ? `Context ${Math.round(ctx.pct)}% used` : "Context unknown"}
+            detail={ctx ? `${formatCompact(ctx.tokens)} / ${formatCompact(ctx.window)}` : undefined}
+          />
+          <LimitsMeter agentKey={agentKey} tps={tps ?? undefined} />
         </div>
-        <Mini
-          k={
-            <span className="flex items-center gap-1">
-              <Coins className="size-3" /> Cost
+        <SpendTile cost={cost} />
+        <div className={cn(TILE, "pt-2 pb-1.5")} aria-label="Throughput">
+          <div className="flex items-baseline justify-between gap-2 text-[10.5px] font-bold text-mute">
+            <span>Throughput · 60s</span>
+            <span className="text-mute-2 tabular">
+              {producing ? <span className="text-accent-hi">now {Math.round(tps)} tok/s</span> : meta?.tps != null ? `last turn ${Math.round(meta.tps)} tok/s` : "now 0"}
+              {peak > 0 && ` · peak ${Math.round(peak)}`}
             </span>
-          }
-          v={cost ? <NumberTicker value={cost.usd} format={formatUsd} /> : "—"}
-          s={cost ? `${formatCompact(cost.input)} in / ${formatCompact(cost.output)} out` : undefined}
-        />
-        <Mini
-          k={
-            <span className="flex items-center gap-1">
-              <ListTodo className="size-3" /> Todos
-            </span>
-          }
-          v={todos.total ? `${todos.done}/${todos.total}` : "—"}
-          s={
-            todos.total ? (
-              <span className="mt-1 flex items-center gap-2">
-                <span className="relative h-1 flex-1 overflow-hidden rounded-full bg-white/8" role="progressbar" aria-valuemin={0} aria-valuemax={todos.total} aria-valuenow={todos.done} aria-label="Todos done">
-                  <span className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-accent to-done transition-[width] duration-700 ease-out" style={{ width: `${(100 * todos.done) / todos.total}%` }} />
-                </span>
-                {todos.blocked > 0 && <span className="text-sun-1">{todos.blocked} blocked</span>}
-              </span>
-            ) : undefined
-          }
-        />
-        <div className="col-span-2 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 pt-2 pb-1 shadow-hairline">
-          <div className="flex items-center justify-between text-[10.5px] font-bold text-mute">
-            <span>Throughput</span>
-            <span className="text-mute-2 tabular">{peak > 0 ? `peak ${Math.round(peak)} tok/s · 60s` : "60s"}</span>
           </div>
           <div className="relative">
             <Sparkline values={hist.length > 1 ? hist : [0, 0]} height={34} live={producing} status={producing ? "running" : "idle"} />
             {!producing && peak === 0 && <span className="absolute inset-0 grid place-items-center text-[10.5px] font-semibold text-mute-2">idle · no tokens in the last minute</span>}
           </div>
+          {split && (
+            <div className="flex flex-wrap gap-x-3 text-[10.5px] font-semibold text-mute-2 tabular" aria-label="Throughput by source">
+              {SPENDERS.map((s) => (
+                <span key={s.key} className="flex items-center gap-1">
+                  <span className={cn("size-1.5 rounded-full", s.dot)} />
+                  {s.term}
+                  <span className={split[s.key] > 0 ? "text-accent-hi" : undefined}>{split[s.key] > 0 ? Math.round(split[s.key]) : "—"}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
-        <SpendBreakdown cost={cost} tps={agent?.live.tpsSplit} />
-        <LimitsTile agentKey={agentKey} tps={tps ?? undefined} />
       </div>
     </Pane>
   );
@@ -145,7 +106,16 @@ export function TodosPanel({ agentKey }: { agentKey: string }) {
   const c = todoCounts(todos);
   if (todos.length === 0) return null;
   return (
-    <Pane id="todos" title="Todos" aside={`${c.done}/${c.total}`}>
+    <Pane
+      id="todos"
+      title="Todos"
+      aside={
+        <span className="tabular">
+          {c.done}/{c.total}
+          {c.blocked > 0 && <span className="text-sun-1"> · {c.blocked} blocked</span>}
+        </span>
+      }
+    >
       <TodoPhases phases={todos} />
     </Pane>
   );
@@ -157,7 +127,16 @@ export function SubagentsPanel({ agentKey }: { agentKey: string }) {
   if (subs.length === 0) return null;
   const live = subs.filter((s) => s.status === "running").length;
   return (
-    <Pane id="agents" title="Subagents" aside={live ? <span className="text-accent-hi">{live} live</span> : `${subs.length} done`}>
+    <Pane
+      id="agents"
+      title={
+        <Term id="subagent" className="[text-transform:inherit]">
+          Subagents
+        </Term>
+      }
+      label="Subagents"
+      aside={live ? <span className="text-accent-hi">{live} live</span> : `${subs.length} done`}
+    >
       <div className="flex flex-col gap-1">
         {subs.map((s) => (
           <SubagentCard key={s.id} sub={s} dense onOpen={() => useSessionUi.getState().openSubagent(agentKey, s.id)} />
@@ -197,7 +176,7 @@ export function FilesPanel({ agentKey }: { agentKey: string }) {
         ))}
       </div>
       <button type="button" onClick={review} className="pressable focus-ring mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-white/[0.05] py-2 text-xs font-bold text-ink-2 shadow-hairline hover:bg-white/[0.09]">
-        <GitMerge className="size-3.5" /> Review & ship
+        <GitMerge className="size-3.5" /> {ACTIONS.review.label}
       </button>
     </Pane>
   );
@@ -328,7 +307,19 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
   };
   const disabled = meta ? !meta.caps.btw : true;
   return (
-    <Pane id="btw" title="btw · side question" aside={<MessageCircleQuestion className="size-3.5" aria-label="Answered from the session's context without adding to it" />}>
+    <Pane
+      id="btw"
+      title={
+        <>
+          <Term id="btw" className="[text-transform:inherit]">
+            btw
+          </Term>{" "}
+          · side question
+        </>
+      }
+      label="btw · side question"
+      aside={<MessageCircleQuestion className="size-3.5" aria-label="Answered from the session's context without adding to it" />}
+    >
       <div className="flex flex-col gap-2.5">
         {[...asked].reverse().map((b) => {
           const a = answers[b.id];
@@ -399,8 +390,8 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
       <OverviewPanel agentKey={agentKey} />
       <TodosPanel agentKey={agentKey} />
       <SubagentsPanel agentKey={agentKey} />
-      <ChatPanel agentKey={agentKey} />
       <FilesPanel agentKey={agentKey} />
+      <ChatPanel agentKey={agentKey} />
       <BtwPanel agentKey={agentKey} />
       <TreePanel agentKey={agentKey} />
     </aside>
@@ -408,36 +399,22 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
   );
 }
 
-const TABS: { value: InspectorTab; label: ReactNode }[] = [
-  { value: "overview", label: "Overview" },
-  { value: "todos", label: <ListTodo className="size-4" aria-label="Todos" /> },
-  { value: "agents", label: <Bot className="size-4" aria-label="Subagents" /> },
-  { value: "chat", label: <MessagesSquare className="size-4" aria-label="Agent chat" /> },
-  { value: "files", label: <FileCode2 className="size-4" aria-label="Files" /> },
-  { value: "tree", label: <Workflow className="size-4" aria-label="Tree" /> },
-  { value: "btw", label: <MessageCircleQuestion className="size-4" aria-label="btw" /> },
+const TABS: { value: InspectorTab; label: string; icon: ReactNode }[] = [
+  { value: "overview", label: "Session", icon: <Gauge /> },
+  { value: "todos", label: "Todos", icon: <ListTodo /> },
+  { value: "agents", label: "Agents", icon: <Bot /> },
+  { value: "files", label: "Files", icon: <FileCode2 /> },
+  { value: "chat", label: "Chat", icon: <MessagesSquare /> },
+  { value: "btw", label: "btw", icon: <MessageCircleQuestion /> },
+  { value: "tree", label: "Tree", icon: <Workflow /> },
 ];
 
-/** Mobile inspector body (inside a BottomSheet): one panel at a time. */
+/** Mobile inspector body (inside a BottomSheet): one panel at a time, picked from labelled tabs. */
 export function InspectorTabs({ agentKey }: { agentKey: string }) {
   const tab = useSessionUi((s) => s.tab[agentKey]) ?? "overview";
-  const setTab = (t: InspectorTab) => useSessionUi.getState().setTab(agentKey, t);
   const { meta } = useSession(agentKey);
   const chats = useIrcEntries(agentKey).length;
   const unread = useIrcUnreadCount(agentKey);
-  const tabs = TABS.map((t) =>
-    t.value === "chat" && unread > 0
-      ? {
-          ...t,
-          label: (
-            <span className="relative">
-              {t.label}
-              <span className="absolute -top-1 -right-1.5 size-2 rounded-full bg-accent shadow-[0_0_6px_rgb(163_92_240/0.9)]" aria-label={`${unread} unread`} />
-            </span>
-          ),
-        }
-      : t,
-  );
   const empty =
     (tab === "todos" && !meta?.todos.length) ||
     (tab === "agents" && !meta?.subagents.length) ||
@@ -446,7 +423,30 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
   return (
     <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
     <div className="flex flex-col gap-3 pb-2">
-      <SegmentedControl value={tab} onValueChange={setTab} options={tabs} fill size="sm" />
+      <div role="tablist" aria-label="Inspector" className="grid grid-cols-7 gap-0.5 rounded-md well p-1">
+        {TABS.map((t) => {
+          const on = t.value === tab;
+          return (
+            <button
+              key={t.value}
+              type="button"
+              role="tab"
+              aria-selected={on}
+              onClick={() => useSessionUi.getState().setTab(agentKey, t.value)}
+              className={cn(
+                "relative flex min-h-11 min-w-0 flex-col items-center justify-center gap-0.5 rounded-sm px-0.5 text-[10px] font-bold transition-colors focus-ring [&_svg]:size-4",
+                on ? "bg-tile-4 text-ink shadow-d1" : "text-mute",
+              )}
+            >
+              {t.icon}
+              <span className="max-w-full truncate">{t.label}</span>
+              {t.value === "chat" && unread > 0 && (
+                <span className="absolute top-1 right-1.5 size-2 rounded-full bg-accent shadow-[0_0_6px_rgb(163_92_240/0.9)]" aria-label={`${unread} unread`} />
+              )}
+            </button>
+          );
+        })}
+      </div>
       {tab === "overview" && <OverviewPanel agentKey={agentKey} />}
       {tab === "todos" && <TodosPanel agentKey={agentKey} />}
       {tab === "agents" && <SubagentsPanel agentKey={agentKey} />}

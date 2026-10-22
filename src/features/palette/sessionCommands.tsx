@@ -22,7 +22,9 @@ import { MOBILE_MAX_WIDTH, toast } from "@/design";
 import { runSlash } from "@/features/session/composer/slash";
 import type { Agent } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
+import { GLOSSARY } from "@/features/shell/glossary";
 import { haptic } from "@/features/shell/haptics";
+import { ACTIONS } from "@/features/shell/vocab";
 
 /** A palette sub-page that collects an argument. */
 export type PalettePage =
@@ -76,6 +78,7 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
       title: plan ? "Leave plan mode" : "Enter plan mode",
       keywords: ["/plan", "mode"],
       icon: <ClipboardList />,
+      hint: GLOSSARY.plan.text,
       run: () => hostCall(plan ? "Plan mode off" : "Plan mode on", h.call("agent.setPlan", { agentId, on: !plan })),
     },
     {
@@ -83,6 +86,7 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
       title: omp.fast ? "Turn fast mode off" : "Turn fast mode on",
       keywords: ["/fast", "speed"],
       icon: <Zap />,
+      hint: GLOSSARY.fast.text,
       run: () => hostCall(omp.fast ? "Fast mode off" : "Fast mode on", h.call("agent.setFast", { agentId, on: !omp.fast })),
     },
     {
@@ -90,6 +94,7 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
       title: goal ? "Change goal…" : "Set a goal…",
       keywords: ["/goal", "objective", "budget"],
       icon: <Target />,
+      hint: GLOSSARY.goal.text,
       page: {
         kind: "text",
         title: "Goal",
@@ -108,10 +113,10 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
       : []),
     {
       id: "compact",
-      title: "Compact context…",
+      title: ACTIONS.compact.label,
       keywords: ["/compact", "summarize", "context"],
       icon: <Minimize2 />,
-      hint: omp.context ? `${Math.round(omp.context.pct)}% used` : undefined,
+      hint: [omp.context ? `${Math.round(omp.context.pct)}% used` : undefined, ACTIONS.compact.description].filter(Boolean).join(" · "),
       page: {
         kind: "text",
         title: "Compact",
@@ -121,39 +126,76 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
         run: (instructions) => hostCall("Compacting", h.call("agent.compact", { agentId, instructions: instructions || undefined })),
       },
     },
-    { id: "fork-pane", title: "Fork into a new pane", keywords: ["/fork", "branch", "copy"], icon: <GitFork />, run: () => hostCall("Forked into a new pane", h.call("agent.fork", { agentId, placement: "pane" })) },
-    { id: "fork-here", title: "Fork in place", keywords: ["/fork", "branch"], icon: <GitFork />, run: () => hostCall("Forked", h.call("agent.fork", { agentId, placement: "inPlace" })) },
+    {
+      id: "fork-pane",
+      title: ACTIONS.forkNewPane.label,
+      keywords: ["/fork", "branch", "copy"],
+      icon: <GitFork />,
+      hint: ACTIONS.forkNewPane.description,
+      run: () => hostCall("Forked into a new pane", h.call("agent.fork", { agentId, placement: "pane" })),
+    },
+    {
+      id: "fork-here",
+      title: ACTIONS.forkInPlace.label,
+      keywords: ["/fork", "branch"],
+      icon: <GitFork />,
+      hint: ACTIONS.forkInPlace.description,
+      run: () => hostCall("Forked", h.call("agent.fork", { agentId, placement: "inPlace" })),
+    },
     {
       id: "rename",
-      title: "Rename session…",
+      title: ACTIONS.rename.label,
       keywords: ["/rename", "title"],
       icon: <SquarePen />,
-      hint: agent.title,
+      hint: agent.title || ACTIONS.rename.description,
       page: { kind: "text", title: "Rename", placeholder: agent.title || "New session title", submitLabel: "Rename", run: (title) => hostCall("Renamed", h.call("agent.rename", { agentId, title })) },
     },
     {
       id: "handoff",
-      title: "Hand off to a fresh session…",
-      keywords: ["/handoff", "new context"],
+      title: ACTIONS.handoff.label,
+      keywords: ["/handoff", "hand off", "new context"],
       icon: <Rocket />,
+      hint: ACTIONS.handoff.description,
       page: {
         kind: "text",
-        title: "Handoff",
+        title: "Hand off",
         placeholder: "Optional: what the next session should focus on",
         submitLabel: "Hand off",
         allowEmpty: true,
         run: (instructions) => hostCall("Handing off", h.call("agent.handoff", { agentId, instructions: instructions || undefined })),
       },
     },
-    { id: "export", title: "Export session", keywords: ["/export", "html", "save"], icon: <FileDown />, run: () => hostCall("Exported", h.call("agent.export", { agentId }), (r) => `Exported to ${r.path}`) },
+    {
+      id: "export",
+      title: ACTIONS.exportHtml.label,
+      keywords: ["/export", "html", "save", "export session"],
+      icon: <FileDown />,
+      hint: ACTIONS.exportHtml.description,
+      run: () => hostCall("Exported", h.call("agent.export", { agentId }), (r) => `Exported to ${r.path}`),
+    },
     {
       id: "btw",
       title: "Ask on the side (/btw)…",
       keywords: ["/btw", "side question", "aside"],
       icon: <MessageCircleQuestion />,
+      hint: GLOSSARY.btw.text,
       page: { kind: "text", title: "By the way", placeholder: "A quick side question that won't derail the agent", submitLabel: "Ask", run: (question) => hostCall("Side question sent", h.call("agent.btw", { agentId, question })) },
     },
-    { id: "new-session", title: "Start a new session", keywords: ["/new", "clear", "reset"], icon: <SquarePlus />, run: () => hostCall("New session started", h.call("agent.newSession", { agentId })) },
+    {
+      id: "new-session",
+      title: ACTIONS.newSession.label,
+      keywords: ["/new", "clear", "reset", "start a new session"],
+      icon: <SquarePlus />,
+      hint: ACTIONS.newSession.description,
+      page: {
+        kind: "text",
+        title: "New session",
+        placeholder: "Press Enter to start over in this pane",
+        submitLabel: "Start a new session",
+        allowEmpty: true,
+        run: () => hostCall("New session started", h.call("agent.newSession", { agentId })),
+      },
+    },
     {
       id: "slash",
       title: "Run a slash command…",

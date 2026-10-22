@@ -2,9 +2,16 @@ import { motion } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { cn, fadeRise, Input, spring, Tile } from "@/design";
 import { core, useHostIds, useHosts } from "@/core";
-import type { ModelInfo, ThinkingLevel } from "@/core/gen";
+import type { ModelInfo, MotionPref, ThinkingLevel } from "@/core/gen";
 
 export const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
+
+/** The three motion budgets, as Settings and the palette name them (stored values unchanged). */
+export const MOTION_COPY: Record<MotionPref, { label: string; description: string }> = {
+  system: { label: "Calm", description: "Only changes and what needs you move." },
+  full: { label: "Lively", description: "Every running agent breathes and glows." },
+  reduced: { label: "Reduced", description: "No motion; meaning stays as colour and text." },
+};
 
 /** A settings card: icon, title, description and divided rows. */
 export function Section({ icon, title, description, children, index, action }: { icon: ReactNode; title: string; description?: string; children: ReactNode; index: number; action?: ReactNode }) {

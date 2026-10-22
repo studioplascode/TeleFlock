@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Bell, BellRing, Bot, Info, Keyboard, MonitorSmartphone, Sparkles, SquareTerminal } from "lucide-react";
+import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, Sparkles, SquareTerminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -15,16 +15,21 @@ import {
   useIsMobile,
   useMotionPreference,
 } from "@/design";
-import { core, useSettings, useUi } from "@/core";
+import { core, usePrefs, useSettings, useUi } from "@/core";
 import type { MotionPref, Settings, ThinkingLevel } from "@/core/gen";
 import { useAppInfo } from "@/features/hosts/appInfo";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
+import { resetFirstUses } from "@/features/shell/hints";
 import { MobileHeader } from "@/features/shell/MobileHeader";
+import { Term } from "@/features/shell/Term";
 import { MutedAgents } from "./MutedAgents";
-import { CommitInput, Row, Section, THINKING, useModels } from "./parts";
+import { CommitInput, MOTION_COPY, Row, Section, THINKING, useModels } from "./parts";
 import { Templates } from "./Templates";
 import { Updates } from "./Updates";
+
+/** Calm (the default, stored as `system`) first, then Lively, then Reduced. */
+const MOTION_ORDER: readonly MotionPref[] = ["system", "full", "reduced"];
 
 type PermState = "granted" | "denied" | "prompt" | "prompt-with-rationale";
 
@@ -116,6 +121,7 @@ export function SettingsView() {
   const info = useAppInfo();
   const models = useModels();
   const [testing, setTesting] = useState(false);
+  const { hints, aiNaming, setHints, setAiNaming } = usePrefs();
 
   const update = (patch: Partial<Settings>) => {
     haptic("tick");
@@ -138,22 +144,59 @@ export function SettingsView() {
       {mobile && <MobileHeader title="Settings" back />}
       <div className={cn("mx-auto grid w-full max-w-[880px] grid-cols-[minmax(0,1fr)] content-start", mobile ? "gap-3 px-3 pt-1 pb-6" : "gap-4 px-8 pt-7 pb-12")}>
         {!mobile && <PageHeader kicker="Preferences" title="Settings" description="How TeleFlock moves, notifies and starts new agents on this device." className="mb-2" />}
-        <Section index={0} icon={<Sparkles />} title="Motion" description="Animation is how TeleFlock shows that work is alive. Reduced keeps every meaning with calm, static colour.">
-          <Row label="Animation" wide>
+        <Section index={0} icon={<Sparkles />} title="Motion" description="How much TeleFlock moves. Meaning never depends on motion: every state is also colour and text.">
+          <Row
+            label="Animation"
+            wide
+            description={
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {MOTION_ORDER.map((m) => (
+                  <li key={m} className={cn(settings.motion === m && "text-ink-2")}>
+                    <b className="font-bold">{MOTION_COPY[m].label}</b> · {MOTION_COPY[m].description}
+                  </li>
+                ))}
+              </ul>
+            }
+          >
             <SegmentedControl<MotionPref>
               value={settings.motion}
               onValueChange={(motion) => {
                 setMotion(motion);
                 update({ motion });
               }}
-              options={[
-                { value: "system", label: "System" },
-                { value: "full", label: "Full" },
-                { value: "reduced", label: "Reduced" },
-              ]}
+              options={MOTION_ORDER.map((m) => ({ value: m, label: MOTION_COPY[m].label }))}
               aria-label="Animation"
               fill={mobile}
             />
+          </Row>
+        </Section>
+
+        <Section index={1} icon={<Lightbulb />} title="Help and AI" description="How much TeleFlock explains, and whether omp names things for you.">
+          <Row label="Hints" description="One-line captions beside controls the first few times you see them. Each retires on its own.">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<RotateCcw />}
+              disabled={!hints}
+              onClick={() => {
+                resetFirstUses();
+                toast({ title: "Hints will show again", status: "done" });
+              }}
+            >
+              Show hints again
+            </Button>
+            <Switch checked={hints} onCheckedChange={setHints} label="Show hints" />
+          </Row>
+          <Row
+            label="AI naming"
+            description={
+              <>
+                Uses omp's <Term id="tinyModel">tiny model</Term> on each host to name branches, agents and titles, and to draft commit and pull request messages. Always
+                editable. Off: names come from your text.
+              </>
+            }
+          >
+            <Switch checked={aiNaming} onCheckedChange={setAiNaming} label="AI naming" />
           </Row>
         </Section>
 
@@ -241,9 +284,6 @@ export function SettingsView() {
           </Row>
           <Row label="Start in plan mode" description="The agent proposes a plan before touching files.">
             <Switch checked={settings.defaultPlan} onCheckedChange={(defaultPlan) => update({ defaultPlan })} label="Start in plan mode" />
-          </Row>
-          <Row label="Confirm before archiving">
-            <Switch checked={settings.confirmArchive} onCheckedChange={(confirmArchive) => update({ confirmArchive })} label="Confirm before archiving" />
           </Row>
         </Section>
 

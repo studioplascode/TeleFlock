@@ -1,7 +1,8 @@
 import { Layers, Pause, Pencil, Play, Send, SquarePlus, Target, Trash2 } from "lucide-react";
-import type { KeyboardEvent } from "react";
-import { draftKey, drafts, parseAgentKey, useAgent, useDraft, useSession } from "@/core";
+import { type KeyboardEvent, useState } from "react";
+import { draftKey, drafts, getTranscript, parseAgentKey, suggestTitle, useAgent, useAiNaming, useDraft, useSession } from "@/core";
 import { Button, Dialog, DialogContent, Field, formatCompact, Input, ProgressRing, Textarea } from "@/design";
+import { AiMark, SuggestButton } from "@/features/workspace/shared/ai";
 import { hostCall, usePending } from "../api";
 import { useSessionUi } from "../state";
 
@@ -113,16 +114,31 @@ function GoalContent({ agentKey, close }: { agentKey: string; close: () => void 
 
 const HANDLE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
+/** What the session is about, for the tiny model: its first prompt, the current titles, the handle. */
+function sessionAbout(agentKey: string, agent: { title: string; name: string } | undefined, metaTitle: string | undefined): string {
+  let first: string | undefined;
+  for (const it of getTranscript(agentKey).items) {
+    if (it.kind === "user" && !it.synthetic && it.text.trim()) {
+      first = it.text.trim().slice(0, 2000);
+      break;
+    }
+  }
+  return [...new Set([first, metaTitle, agent?.title, agent?.name].map((t) => t?.trim()).filter(Boolean))].join("\n");
+}
+
 function RenameContent({ agentKey, close }: { agentKey: string; close: () => void }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
+  const aiOn = useAiNaming(hostId);
   const initialTitle = meta?.title ?? agent?.title ?? "";
   const initialHandle = agent?.name ?? "";
   const titleKey = draftKey("dialog.rename.title", agentKey);
   const handleKey = draftKey("dialog.rename.handle", agentKey);
   const [title, setTitle] = useDraft(titleKey, initialTitle);
   const [handle, setHandle] = useDraft(handleKey, initialHandle);
+  /** The title field holds the tiny model's suggestion (cleared by typing). */
+  const [aiTitle, setAiTitle] = useState(false);
   const [busy, run] = usePending();
   const canTitle = meta?.caps.rename === true;
   const titleChanged = canTitle && title.trim() !== "" && title.trim() !== initialTitle;
@@ -159,8 +175,37 @@ function RenameContent({ agentKey, close }: { agentKey: string; close: () => voi
       }
     >
       <div className="flex flex-col gap-4">
-        <Field label="Session title" description={canTitle ? "Shown on the board and in omp's session list." : "This session can't be retitled right now."}>
-          {(id) => <Input id={id} value={title} autoFocus={canTitle} disabled={!canTitle} onChange={(e) => setTitle(e.target.value)} onKeyDown={onEnter} />}
+        <Field
+          label="Session title"
+          hint={
+            canTitle && aiOn ? (
+              <SuggestButton
+                className="-my-1.5 h-7"
+                current={title}
+                run={() => suggestTitle(hostId, sessionAbout(agentKey, agent, meta?.title))}
+                onValue={(v) => {
+                  setTitle(v);
+                  setAiTitle(true);
+                }}
+              />
+            ) : undefined
+          }
+          description={canTitle ? "Shown on the board and in omp's session list." : "This session can't be retitled right now."}
+        >
+          {(id) => (
+            <Input
+              id={id}
+              value={title}
+              autoFocus={canTitle}
+              disabled={!canTitle}
+              trailing={aiTitle ? <AiMark /> : undefined}
+              onChange={(e) => {
+                setAiTitle(false);
+                setTitle(e.target.value);
+              }}
+              onKeyDown={onEnter}
+            />
+          )}
         </Field>
         <Field label="Agent handle" hint="herdr" error={handleError} description={handleError ? undefined : "The herdr agent name used by CLI commands and notifications."}>
           {(id) => (

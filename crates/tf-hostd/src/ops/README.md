@@ -1,4 +1,4 @@
-# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`)
+# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`)
 
 Owner: HostdOps. Every family exposes
 `pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError>`
@@ -65,6 +65,15 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   (`omp config set collab.autoStart control` + `collab.relayUrl ws://127.0.0.1:<port>`),
   `install-global-bridge` (atomic copy of `~/.teleflock/ext/teleflock-bridge.ts` into
   `<omp agent dir>/extensions/`).
+- **ai.complete** (`ai.rs`): `omp --mode json --no-session --no-tools --no-extensions --no-skills
+  --no-rules --no-lsp --no-title --model @<role> --system-prompt <system>`, prompt on stdin,
+  `NO_COLOR=1`, cwd = `cwd` if it is a dir, else home. Line breaks in `system` become spaces
+  (Windows refuses CR/LF in arguments to `omp.cmd`). Answer = last assistant message of
+  `agent_end` (`text` parts joined, thinking ignored; assistant `message_end` if the stream ends
+  first); the child is killed as soon as it is in. Role default `tiny` (`^[a-z][a-z0-9-]{0,31}$`),
+  one retry with `smol` after a failed attempt when ≥ 1.5 s remain. `timeoutMs` default 20 000,
+  clamped 2 000–60 000, semaphore queue included → `timeout` (retryable). 3 omp processes per
+  daemon. Prompt and system text are never logged or returned; logs: task, role, model, ms, outcome.
 
 ## Error codes (beyond `tf_proto::ApiError`'s list)
 | code | when | hint tells the user |
@@ -77,8 +86,12 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
 | `not_git_repo` | worktree op outside a repo | pick a repo folder |
 | `group_close_required` | closing a primary workspace with linked worktrees | `group: true` |
 | `busy` | `term.open` while another client controls it; resuming a live session | `takeover: true` / open the agent |
+| `ai_unavailable` | `ai.complete` without omp, or omp has neither the requested role nor `smol` | install omp ≥ 18.12 / assign the tiny role |
+| `ai_failed` | omp exited, reported an error or answered nothing (message: ≤ 300 chars of stderr/error) | — |
 
 ## Tests
 `cargo test -p tf-hostd ops::` — parsers (porcelain v2, numstat/name-status `-z`, worktree
-porcelain, refs, gh JSON, herdr error samples), a git fixture repo in a tempdir (status, diff,
-branches, commit, worktree branch planning, badges), stats.db fixture, session scan.
+porcelain, refs, gh JSON, herdr error samples, omp JSONL answers), a git fixture repo in a tempdir
+(status, diff, branches, commit, worktree branch planning, badges), stats.db fixture, session scan.
+`cargo test -p tf-hostd ai -- --ignored --nocapture` calls the real omp (needs a tiny role) and
+prints the slug, model and ms.

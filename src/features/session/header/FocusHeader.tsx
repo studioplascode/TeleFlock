@@ -2,6 +2,7 @@ import { Minimize2 } from "lucide-react";
 import { useAgent, useUi } from "@/core";
 import { AgentGlyph, Badge, Heartbeat, IconButton, Kbd, StatusOrb, useActivity } from "@/design";
 import { agentStatus, useBeat } from "../api";
+import { StateWord } from "./SessionHeader";
 
 /** Focus mode's minimal header: glyph, name, liveness heartbeat, needs-you badge, exit. */
 export function FocusHeader({ agentKey }: { agentKey: string }) {
@@ -19,7 +20,11 @@ export function FocusHeader({ agentKey }: { agentKey: string }) {
         {agent.name}
       </h2>
       <StatusOrb status={status} activity={tier} size={8} />
-      {agent.needs && <Badge tone="needs-you">{agent.needs.title}</Badge>}
+      {agent.needs && (
+        <Badge tone="needs-you">
+          <StateWord agent={agent} />
+        </Badge>
+      )}
       <div className="ml-auto w-[160px] shrink-0 opacity-80">
         <Heartbeat beat={beat} lastEventAt={agent.live.lastEventAt} status={status} height={22} />
       </div>

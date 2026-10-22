@@ -19,11 +19,13 @@ export interface ResponsiveDialogProps {
    */
   tall?: boolean;
   className?: string;
+  /** Desktop only: where focus goes on close (preventDefault to place it yourself). */
+  onCloseAutoFocus?: (e: Event) => void;
   children: ReactNode;
 }
 
 /** Desktop: centered Dialog. Phone: drag-to-dismiss BottomSheet. Same content, same a11y wiring. */
-export function ResponsiveDialog({ open, onOpenChange, title, description, icon, footer, width, maxHeight, tall, className, children }: ResponsiveDialogProps) {
+export function ResponsiveDialog({ open, onOpenChange, title, description, icon, footer, width, maxHeight, tall, className, onCloseAutoFocus, children }: ResponsiveDialogProps) {
   const mobile = useIsMobile();
   if (mobile) {
     return (
@@ -41,6 +43,7 @@ export function ResponsiveDialog({ open, onOpenChange, title, description, icon,
         footer={footer}
         width={width}
         className={cn(tall && "h-[min(800px,calc(100dvh-48px))]", className)}
+        onCloseAutoFocus={onCloseAutoFocus}
         onEscapeKeyDown={(e) => {
           // Esc in a filter box that has text clears it (the field's own handler) instead of closing
           const t = e.target;

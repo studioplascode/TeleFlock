@@ -1,8 +1,8 @@
 import { Focus } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { agentKey, useAgent, useUi } from "@/core";
-import { spring, useCalmMotion, useIsMobile } from "@/design";
+import { spring, useCalmMotion, useIsMobile, useMinWidth } from "@/design";
 import { usePaletteCommands } from "@/features/palette/registry";
 import { Inspector } from "./inspector/Inspector";
 import { MobileSession } from "./mobile/MobileSession";
@@ -11,6 +11,9 @@ import { SessionPane } from "./SessionPane";
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
 }
+
+/** Narrower than this, the inspector rail leaves (e.g. beside a terminal split). */
+const RAIL_MIN_PX = 864;
 
 /**
  * Route view for `#/agent/:hostId/:agentId`. Desktop: session + inspector rail; the rail
@@ -24,6 +27,8 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
   const agent = useAgent(key);
   const focus = useUi((s) => s.focusMode) && !mobile;
   const calm = useCalmMotion();
+  const box = useRef<HTMLDivElement>(null);
+  const wide = useMinWidth(box, RAIL_MIN_PX);
 
   // Focus mode is a desktop session state: leaving the view (or going mobile) ends it.
   useEffect(() => {
@@ -70,16 +75,16 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
   usePaletteCommands(commands);
 
   if (mobile) return <MobileSession hostId={hostId} agentId={agentId} />;
-  const rail = agent?.omp?.link === "live" && !focus;
+  const rail = agent?.omp?.link === "live" && !focus && wide;
   const transition = calm ? { duration: 0 } : spring.smooth;
   return (
-    <div className="@container relative flex h-full min-h-0 gap-5 p-4 pt-3" data-focus={focus || undefined}>
+    <div ref={box} className="@container relative flex h-full min-h-0 gap-5 p-4 pt-3" data-focus={focus || undefined}>
       <motion.div
         layout
         transition={transition}
         className={focus ? "mx-auto flex h-full min-h-0 w-full max-w-[860px] flex-col pb-2" : "flex min-h-0 min-w-0 flex-1 flex-col"}
       >
-        <SessionPane key={key} agentKey={key} focus={focus} />
+        <SessionPane key={key} agentKey={key} focus={focus} inspector={rail} />
       </motion.div>
       <AnimatePresence initial={false}>
         {rail && (
@@ -89,7 +94,7 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
             initial={calm ? { opacity: 0 } : { opacity: 0, x: 48 }}
             animate={{ opacity: 1, x: 0, transition }}
             exit={calm ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, x: 48, transition: { duration: 0.18 } }}
-            className="hidden min-h-0 w-[336px] shrink-0 @min-[54rem]:flex"
+            className="flex min-h-0 w-[336px] shrink-0"
           >
             <Inspector agentKey={key} className="w-full" />
           </motion.div>

@@ -73,5 +73,69 @@ export function newHostId(name: string): string {
   return `${slug || "host"}-${rand}`;
 }
 
-/** Accent swatches offered for a host. */
-export const HOST_COLORS = ["#a35cf0", "#4f8bff", "#22d3ee", "#a3e635", "#fbbf24", "#ff7a18", "#ff3d77", "#f053d0"] as const;
+/** Where herdr and omp come from (linked from onboarding, the editor and diagnostics). */
+export const HERDR_URL = "https://herdr.dev";
+export const OMP_URL = "https://github.com/can1357/oh-my-pi";
+/** Oldest omp TeleFlock works with; mirrors `MIN_OMP` in crates/tf-hostd/src/ops/host.rs. */
+export const OMP_MIN_VERSION = "18.12";
+/** Turns on Tailscale SSH on a host. */
+export const TAILSCALE_SSH_COMMAND = "sudo tailscale set --ssh";
+
+/** True when the first `x.y[.z]` version in `text` is older than `min` (`"18.12"`); false if none is found. */
+export function versionBelow(text: string | null | undefined, min: string): boolean {
+  const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(text ?? "");
+  if (!m) return false;
+  const have = [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
+  const want = min.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const a = have[i] ?? 0;
+    const b = want[i] ?? 0;
+    if (a !== b) return a < b;
+  }
+  return false;
+}
+
+/**
+ * The name a host gets when the Name field is left empty: the MagicDNS host label (`forge` for
+ * `forge.tail1234.ts.net`), the IP as typed, the WSL distro, or the kind's label. Empty when there
+ * is nothing to derive it from yet.
+ */
+export function defaultHostName(p: Pick<HostProfile, "kind" | "address" | "distro">): string {
+  switch (p.kind) {
+    case "tailscaleSsh": {
+      const a = p.address?.trim() ?? "";
+      if (!a || /^[\d.]+$/.test(a) || a.includes(":")) return a;
+      return a.split(".")[0] ?? a;
+    }
+    case "wsl":
+      return p.distro?.trim() || "WSL";
+    case "local":
+      return "This computer";
+    case "demo":
+      return "Demo flock";
+  }
+}
+
+/**
+ * Host identity swatches: muted tones that share no hue with the status colours (purple running,
+ * sunset needs-you, cyan review, lime done, amber warn), so a host never reads as a state.
+ */
+export const HOST_COLORS = ["#a99cc2", "#8ea9c4", "#86b3aa", "#a7b08c", "#c8b48e", "#c4a07e", "#c79f9f", "#bfa0c0"] as const;
+
+/** Swatches offered before 0.4.0 (the status hues) → their muted replacement, in the same order. */
+const LEGACY_HOST_COLORS: Record<string, string> = {
+  "#a35cf0": "#a99cc2",
+  "#4f8bff": "#8ea9c4",
+  "#22d3ee": "#86b3aa",
+  "#a3e635": "#a7b08c",
+  "#fbbf24": "#c8b48e",
+  "#ff7a18": "#c4a07e",
+  "#ff3d77": "#c79f9f",
+  "#f053d0": "#bfa0c0",
+};
+
+/** The colour to draw a host's identity with (saved legacy status-hue colours map to their muted twin). */
+export function hostAccent(color: string | null | undefined): string {
+  if (!color) return HOST_COLORS[0];
+  return LEGACY_HOST_COLORS[color.toLowerCase()] ?? color;
+}

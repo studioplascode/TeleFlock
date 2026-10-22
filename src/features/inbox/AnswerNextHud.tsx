@@ -1,9 +1,12 @@
 import { AnimatePresence, motion } from "motion/react";
 import { type KeyboardEvent, useEffect, useState } from "react";
-import { useAgent, useInbox, useUi } from "@/core";
+import { navigate, useAgent, useInbox, useUi } from "@/core";
 import { Dialog, DialogContent, Kbd, NumberTicker, cn, spring, useIsMobile } from "@/design";
 import { openAgent } from "@/features/board/agentActions";
-import { QuickAnswer, sendOption } from "@/features/board/QuickAnswer";
+import { QuickAnswer } from "@/features/board/QuickAnswer";
+import { VIEWS } from "@/features/shell/vocab";
+import { isTyping } from "./AnswerParts";
+import { needsOptions } from "./answers";
 import { LastAssistantText, NeedsHeader, NeedsQuestion } from "./NeedsContext";
 
 type Dir = 1 | -1 | 0;
@@ -16,10 +19,6 @@ const slide = {
       ? { opacity: 0, y: -60, scale: 0.9, filter: "blur(6px)", transition: { duration: 0.38, ease: [0.4, 0, 0.2, 1] as const } }
       : { opacity: 0, x: -dir * 70, filter: "blur(4px)", transition: { duration: 0.2 } },
 };
-
-function typing(t: EventTarget | null): boolean {
-  return t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
-}
 
 /** Burst ring when an answer lands. */
 function AnswerBurst() {
@@ -37,7 +36,7 @@ function AnswerBurst() {
 
 /**
  * Ctrl+J "answer next" overlay: cycles blocked agents oldest-first with their context.
- * 1–9 answer · Tab/J/K move · Enter opens the session · Esc closes.
+ * 1…N answer (Other is N+1) · Tab/J/K move · Enter opens the session · Esc closes.
  */
 export function AnswerNextHud() {
   const open = useUi((s) => s.answerNextOpen);
@@ -48,7 +47,6 @@ export function AnswerNextHud() {
   const [lastIdx, setLastIdx] = useState(0);
   const [dir, setDir] = useState<Dir>(1);
   const [answered, setAnswered] = useState(0);
-  const [sent, setSent] = useState<{ key: string; label: string } | null>(null);
   // the agent on screen: the picked one while it still waits, else whoever took its place
   const cur = picked && inbox.includes(picked) ? picked : (inbox[Math.min(lastIdx, inbox.length - 1)] ?? null);
   const agent = useAgent(cur ?? "");
@@ -59,7 +57,6 @@ export function AnswerNextHud() {
   useEffect(() => {
     if (!open) {
       setPicked(null);
-      setSent(null);
       return;
     }
     const sel = useUi.getState().selectedKey;
@@ -99,25 +96,20 @@ export function AnswerNextHud() {
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (isTyping(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
     if (k === "Tab" || k === "j" || k === "J" || k === "ArrowDown") move(e.shiftKey && k === "Tab" ? -1 : 1);
     else if (k === "k" || k === "K" || k === "ArrowUp") move(-1);
     else if (k === "Enter" && cur && !(e.target instanceof HTMLButtonElement)) {
       setOpen(false);
       openAgent(cur);
-    } else if (/^[1-9]$/.test(k) && cur && agent?.needs) {
-      const opt = agent.needs.options[Number(k) - 1];
-      if (!opt || agent.needs.multi) return;
-      const key = cur;
-      setSent({ key, label: opt.label });
-      void sendOption(key, agent.needs, opt.id).then((ok) => {
-        if (!ok) setSent(null);
-      });
     } else return;
     e.preventDefault();
   };
 
+  const needs = agent?.needs;
+  // number keys: the options plus Other (N+1); none for input requests or terminal-only prompts
+  const keyCount = needs?.answerable ? needsOptions(needs).length + (needs.allowOther ? 1 : 0) : 0;
   const index = cur ? inbox.indexOf(cur) : -1;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -126,7 +118,7 @@ export function AnswerNextHud() {
         onKeyDown={onKeyDown}
         aria-describedby={undefined}
         onOpenAutoFocus={(e) => {
-          // keep focus on the HUD itself so 1–9 / Enter act on the question, not the close button
+          // keep focus on the HUD itself so number keys / Enter act on the question, not the close button
           e.preventDefault();
           (e.currentTarget as HTMLElement | null)?.focus();
         }}
@@ -145,7 +137,7 @@ export function AnswerNextHud() {
             )}
           </span>
         }
-        description={mobile ? undefined : "Oldest question first. Answer with 1–9, Tab moves, Enter opens the session."}
+        description={mobile ? undefined : "Oldest question first. Number keys answer, Tab moves, Enter opens the session."}
         className={cn(mobile && "p-5")}
       >
         <div className="relative min-h-72 overflow-hidden">
@@ -165,16 +157,7 @@ export function AnswerNextHud() {
                 <NeedsHeader agentKey={cur} />
                 <LastAssistantText agentKey={cur} />
                 <NeedsQuestion agentKey={cur} />
-                {sent?.key === cur ? (
-                  <motion.p initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} transition={spring.bouncy} className="flex items-center gap-2 text-sm font-bold text-done">
-                    <svg viewBox="0 0 12 12" className="size-4" aria-hidden>
-                      <path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                    Sent · {sent.label}
-                  </motion.p>
-                ) : (
-                  <QuickAnswer agentKey={cur} appearance={mobile ? "big" : "card"} numbered={!mobile} mobile={mobile} />
-                )}
+                <QuickAnswer agentKey={cur} appearance={mobile ? "big" : "card"} full numbered={!mobile} hotkeys={!mobile} mobile={mobile} />
               </motion.div>
             ) : (
               <motion.div
@@ -204,20 +187,45 @@ export function AnswerNextHud() {
             )}
           </AnimatePresence>
         </div>
-        {!mobile && inbox.length > 0 && (
-          <div className="mt-4 flex items-center gap-3 border-t border-line pt-3 text-2xs font-semibold text-mute-2">
-            <span>
-              <Kbd>1</Kbd>–<Kbd>9</Kbd> answer
-            </span>
-            <span>
-              <Kbd>Tab</Kbd> <Kbd>J</Kbd> <Kbd>K</Kbd> move
-            </span>
-            <span>
-              <Kbd>↵</Kbd> open session
-            </span>
-            <span className="ml-auto">
-              <Kbd>Esc</Kbd> close
-            </span>
+        {(inbox.length > 0 || !mobile) && (
+          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-3 text-2xs font-semibold text-mute-2">
+            {!mobile && inbox.length > 0 && (
+              <>
+                {keyCount > 0 && (
+                  <span>
+                    <Kbd>1</Kbd>
+                    {keyCount > 1 && (
+                      <>
+                        –<Kbd>{Math.min(keyCount, 9)}</Kbd>
+                      </>
+                    )}{" "}
+                    answer
+                  </span>
+                )}
+                <span>
+                  <Kbd>Tab</Kbd> <Kbd>J</Kbd> <Kbd>K</Kbd> move
+                </span>
+                <span>
+                  <Kbd>↵</Kbd> open session
+                </span>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                navigate({ name: "inbox" });
+              }}
+              className="ml-auto flex items-center gap-1.5 rounded-xs font-bold text-accent-ink hover:text-ink focus-ring"
+            >
+              All in {VIEWS.inbox.label}
+              {!mobile && <span className="font-semibold text-mute-2">· {VIEWS.inbox.shortcut}</span>}
+            </button>
+            {!mobile && (
+              <span>
+                <Kbd>Esc</Kbd> close
+              </span>
+            )}
           </div>
         )}
       </DialogContent>

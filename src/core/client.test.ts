@@ -30,7 +30,7 @@ const fake: CoreTransport = {
       case "hosts.list":
         return { profiles: [lab, demoProfile], statuses: [{ hostId: "lab", status: { phase: "online", since: 1, attempt: 0 } }, { hostId: "try", status: { phase: "error", since: 1, attempt: 0 } }] };
       case "settings.get":
-        return { motion: "system", notifyNeeds: true, notifyFinished: true, notifyErrors: true, notifySound: false, keepAlive: true, terminalFontSize: 13, confirmArchive: false, defaultPlan: false, deviceName: "test", mutedAgents: ["lab::b"], templates: [], autoUpdate: true };
+        return { motion: "system", notifyNeeds: true, notifyFinished: true, notifyErrors: true, notifySound: false, keepAlive: true, terminalFontSize: 13, defaultPlan: false, deviceName: "test", mutedAgents: ["lab::b"], templates: [], autoUpdate: true };
       case "tunnel.list":
         return { tunnels: [] };
       case "state.get":

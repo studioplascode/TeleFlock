@@ -8,6 +8,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  formatAge,
   Heartbeat,
   Kbd,
   NumberTicker,
@@ -15,33 +16,25 @@ import {
   StatusOrb,
   type Status,
   Tooltip,
+  useNow,
 } from "@/design";
 import { navigate, useHosts, useUi } from "@/core";
 import { connect, disconnect } from "@/features/hosts/ConnStatusCard";
 import { useFlockCounts, useGlobalMood, useGlobalPulse } from "./liveness";
-import { connSummary, PHASE_LABEL, PHASE_STATUS } from "./status";
+import { connSummary, hostsHealth, PHASE_LABEL, PHASE_STATUS } from "./status";
+import { ACTIONS } from "./vocab";
 
 /** Host switcher: the current host filter with its live orb + latency; menu to switch/connect/manage. */
 export function HostPill() {
   const { profiles, status, filter, setFilter } = useHosts();
   const { openDialog } = useUi();
   const current = filter === "all" ? undefined : profiles.find((p) => p.id === filter);
-  const online = profiles.filter((p) => status[p.id]?.phase === "online").length;
-  // "All hosts": the worst phase wins the orb (auth > error > connecting > online).
-  const phases = profiles.map((p) => status[p.id]?.phase ?? "idle");
-  const orb: Status = current
-    ? PHASE_STATUS[status[current.id]?.phase ?? "idle"]
-    : phases.includes("authRequired") || phases.includes("hostKey")
-      ? "needs-you"
-      : phases.includes("error")
-        ? "error"
-        : phases.some((p) => p === "connecting" || p === "reconnecting" || p === "authenticating" || p === "deploying" || p === "starting")
-          ? "running"
-          : online > 0
-            ? "done"
-            : "idle";
+  // "All hosts": the worst phase wins the orb, and it is never green while a host is down.
+  const all = hostsHealth(profiles.map((p) => status[p.id]?.phase ?? "idle"));
+  const online = all.online;
+  const orb: Status = current ? PHASE_STATUS[status[current.id]?.phase ?? "idle"] : all.orb;
   const label = current ? current.name : profiles.length === 1 ? (profiles[0]?.name ?? "No host") : "All hosts";
-  const detail = current ? connSummary(status[current.id]) : profiles.length === 1 && profiles[0] ? connSummary(status[profiles[0].id]) : `${online}/${profiles.length} online`;
+  const detail = current ? connSummary(status[current.id]) : profiles.length === 1 && profiles[0] ? connSummary(status[profiles[0].id]) : `${online}/${all.total} online`;
 
   return (
     <DropdownMenu>
@@ -117,11 +110,15 @@ export function GlobalHeartbeat({ className }: { className?: string }) {
   const { beat, lastAt } = useGlobalPulse();
   const mood = useGlobalMood();
   const { running } = useFlockCounts();
+  const now = useNow(1000);
   const status: Status = mood === "attention" ? "needs-you" : mood === "error" ? "error" : mood === "running" ? "running" : "idle";
+  const age = lastAt !== undefined ? `last event ${formatAge(Math.max(0, now - lastAt))}` : "no events yet";
+  const stale = running > 0 && lastAt !== undefined && now - lastAt > 120_000;
   return (
-    <Tooltip content={running ? `${running} agent${running === 1 ? "" : "s"} running` : "The flock is resting"}>
-      <div className={cn("flex w-[150px] items-center", className)} role="img" aria-label={`Global heartbeat: ${running} running`}>
-        <Heartbeat beat={beat} lastEventAt={lastAt} status={status} height={22} staleAfterMs={120_000} className="w-full" />
+    <Tooltip content={running ? `${running} agent${running === 1 ? "" : "s"} running · ${age}` : `The flock is resting · ${age}`}>
+      <div className={cn("flex items-center gap-2", className)} role="img" aria-label={`Global heartbeat: ${running} running, ${age}`}>
+        <Heartbeat beat={beat} lastEventAt={lastAt} status={status} height={22} showAge={false} staleAfterMs={120_000} className="w-[110px]" />
+        <span className={cn("shrink-0 font-mono text-2xs tabular transition-colors", stale ? "text-warn" : "text-mute")}>{age}</span>
       </div>
     </Tooltip>
   );
@@ -149,7 +146,7 @@ export function SearchField() {
   );
 }
 
-/** Needs-you counter: sunset pill that pulses while anything waits on you; opens the inbox. */
+/** Needs-you counter: sunset pill that pulses while anything waits on you; opens the Answer-next HUD. */
 export function NeedsCounter() {
   const { needs } = useFlockCounts();
   const { setAnswerNext } = useUi();
@@ -157,13 +154,12 @@ export function NeedsCounter() {
     <AnimatePresence initial={false}>
       {needs > 0 && (
         <motion.div {...popIn} key="needs">
-          <Tooltip content="Open the inbox" shortcut="Ctrl J">
+          <Tooltip content={ACTIONS.answerNext.label} shortcut={ACTIONS.answerNext.shortcut}>
             <button
               type="button"
-              onClick={() => navigate({ name: "inbox" })}
-              onDoubleClick={() => setAnswerNext(true)}
+              onClick={() => setAnswerNext(true)}
               className="sun-pulse flex h-7 items-center gap-1.5 rounded-full bg-sun pr-3 pl-2 text-xs font-extrabold text-white pressable focus-ring"
-              aria-label={`${needs} agent${needs === 1 ? "" : "s"} need you`}
+              aria-label={`${needs} agent${needs === 1 ? "" : "s"} need you: ${ACTIONS.answerNext.label}`}
             >
               <span className="relative grid size-4 place-items-center">
                 <span className="tf-loop absolute inset-0 animate-ping rounded-full bg-white/60" />

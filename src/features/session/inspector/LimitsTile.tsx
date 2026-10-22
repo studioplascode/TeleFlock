@@ -1,7 +1,8 @@
 import { Gauge } from "lucide-react";
+import type { ReactNode } from "react";
 import { describePace, formatPct, formatSpan, parseAgentKey, type SessionLimits, sessionLimits, tightestWindow, useAccountLimits, useAgent, type WindowPace } from "@/core";
 import type { LimitWindow } from "@/core/gen";
-import { cn, formatAge, ProgressRing, Tooltip, useNow } from "@/design";
+import { cn, formatAge, type Status, Tooltip, useNow } from "@/design";
 import { PROVIDER_NAMES, paceStatus } from "@/features/usage/limitsUi";
 
 export interface SessionLimitsView {
@@ -43,11 +44,11 @@ function estimateText(v: SessionLimitsView, tps: number | undefined): string {
   return lines.join(" ");
 }
 
-/** Short time-left phrase for the tile / header chip. */
+/** Short time-left phrase for the meter / header chip. */
 export function timeLeftText(pace: WindowPace): string {
   switch (pace.outcome) {
     case "runsOut":
-      return `~${formatSpan(pace.etaMs ?? 0)} at this pace`;
+      return `runs out in ~${formatSpan(pace.etaMs ?? 0)} at this pace`;
     case "exhausted":
       return pace.resetsInMs != null ? `resets in ${formatSpan(pace.resetsInMs)}` : "limit reached";
     case "resetsFirst":
@@ -60,14 +61,36 @@ export function timeLeftText(pace: WindowPace): string {
   }
 }
 
-/** Inspector Session pane: % left of the session account's tightest window + time left at the current pace. */
-export function LimitsTile({ agentKey, tps }: { agentKey: string; tps?: number }) {
+/**
+ * One labelled bar of the inspector's "can it keep going" row. The reading always carries its
+ * direction ("61% used", "41% left"); the fill is neutral until `status` turns it warm.
+ */
+export function Meter({ term, reading, fill, status, detail, label }: { term: ReactNode; reading: ReactNode; fill: number; status?: Status; detail?: ReactNode; label: string }) {
+  return (
+    <div data-status={status} className="min-w-0 flex-1">
+      <div className="flex items-baseline justify-between gap-2 text-[10.5px] font-bold text-mute">
+        <span className="truncate">{term}</span>
+        <span className="shrink-0 font-display text-[15px] font-bold tracking-[-0.02em] whitespace-nowrap text-ink tabular">{reading}</span>
+      </div>
+      <div className="relative mt-1 h-1.5 overflow-hidden rounded-full bg-white/8" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill)} aria-label={label}>
+        <span
+          className={cn("absolute inset-y-0 left-0 rounded-full transition-[width] duration-700 ease-out", status ? "st-fill" : "bg-ink-2/60")}
+          style={{ width: `${Math.max(0, Math.min(100, fill))}%` }}
+        />
+      </div>
+      {detail && <div className="mt-1 text-[10.5px] leading-snug font-semibold text-mute-2 tabular">{detail}</div>}
+    </div>
+  );
+}
+
+/** "limit 41% left": the session account's tightest window, as a bar of what is left, plus time left at the current pace. */
+export function LimitsMeter({ agentKey, tps }: { agentKey: string; tps?: number }) {
   const v = useSessionLimits(agentKey);
   const { limits, tight } = v;
   if (!limits || !tight) {
     if (v.unpinned < 2) return null;
     return (
-      <div className="col-span-2 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2 text-[10.5px] font-semibold text-mute-2 shadow-hairline">
+      <div className="min-w-0 flex-1 text-[10.5px] font-semibold text-mute-2">
         <Gauge className="mr-1 inline size-3" />
         omp hasn't pinned this session to one of its {v.unpinned} accounts yet — see Usage for all limits.
       </div>
@@ -78,23 +101,23 @@ export function LimitsTile({ agentKey, tps }: { agentKey: string; tps?: number }
   const remaining = pace.remaining ?? 0;
   return (
     <Tooltip content={estimateText(v, tps)} className="max-w-80">
-      <div data-limits-tile className="col-span-2 flex items-center gap-3 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline">
-        <ProgressRing done={Math.round(remaining * 100)} total={100} size={48} stroke={4.5} status={status} label={<span className="text-[11px] font-bold">{formatPct(remaining)}</span>} ariaLabel={`${formatPct(remaining)} of ${window.label} left`} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1 text-[10.5px] font-bold text-mute">
-            <Gauge className="size-3" />
-            <span className="truncate">
-              {window.label} · {limits.account.label}
-            </span>
-          </div>
-          <div className="font-display text-xl font-bold tracking-[-0.03em] text-ink tabular">
-            {formatPct(remaining)} <span className="text-sm text-mute">left</span>
-          </div>
-          <div data-status={status} className={cn("truncate text-[10.5px] font-semibold tabular", pace.outcome === "runsOut" || pace.outcome === "exhausted" ? "st-text" : "text-mute-2")}>
-            {timeLeftText(pace)}
-            {limits.stale && " · stale"}
-          </div>
-        </div>
+      <div data-limits-tile tabIndex={0} className="focus-ring min-w-0 flex-1 rounded-sm">
+        <Meter
+          term="limit"
+          reading={`${formatPct(remaining)} left`}
+          fill={remaining * 100}
+          status={status === "needs-you" || status === "error" ? status : undefined}
+          label={`${formatPct(remaining)} of ${window.label} left`}
+          detail={
+            <>
+              <span className={cn("block", (pace.outcome === "runsOut" || pace.outcome === "exhausted") && "text-ink-2")}>
+                {timeLeftText(pace)}
+                {limits.stale && " · stale"}
+              </span>
+              <span className="block truncate">{window.label}</span>
+            </>
+          }
+        />
         <span className="sr-only">{describePace(pace)}</span>
       </div>
     </Tooltip>
