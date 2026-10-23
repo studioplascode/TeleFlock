@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0) and for 0.4.1 on 2026-10-23. Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -53,7 +53,7 @@ What closed the ❌ and ⚠️ rows:
 | Backoff countdown, Retry now, latency | ConnStatusCard, host pill | same | `hosts.connect` | L `conn.rs` | ✅ demo |
 | Resume on foreground/network | automatic | automatic (Android network callback) | `Engine::resume` | L `src-tauri/lib.rs` | ⚠️ needs a device |
 | Offline-first stale cache | board/sidebar stale treatment | StaleHosts strip | cached `HostState` | L `engine.rs` | ✅ demo (studio-pc host is stale) |
-| Setup checklist + one-tap fixes | Hosts → Host setup | More → Hosts | `host.setup/setupApply` | H/B `ops/host.rs` | ⚠️ 8 rows, there is no separate "SSH OK" row; a relay that is down cannot be fixed with one tap (hostd owns the port) |
+| Setup checklist + one-tap fixes | Hosts → Host setup | More → Hosts | `host.setup/setupApply` | H/B `ops/host.rs`, `ops/scope.rs` | ⚠️ 9 rows, there is no separate "SSH OK" row; a relay that is down cannot be fixed with one tap (hostd owns the port). `move-herdr-out-of-login-session` (0.4.1): run on a throwaway herdr lab session started from a login scope, all of its processes moved into a new scope and kept running |
 | Host health | Hosts view, sidebar host rows (CPU sparkline + RAM bar), board Hosts tile (one row per host, load) | More → Hosts | state push (`host.health` exists but is not called directly) | L `ops/host.rs` | ✅ demo |
 
 ## §3 Information architecture
@@ -78,21 +78,21 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Board columns Needs you · Running · Review · Done, drag Review↔Done, live-lane bounce | Kanban | Flock sections + swipe Mark done/Reopen + ⋯ | `agent.archive` | state persist | ✅ demo |
 | Card contents (five zones), quick answers, approvals, input requests ("Answer…" → HUD) | AgentCard/QuickAnswer | Flock needs cards | `agent.answer` | C | ✅ demo |
 | Review card: next ship step (Commit N files / Push / Open PR / Merge), Mark done, Open | AgentCard (`shipMemo` from Review) | Flock row: Mark done / Review | route + `agent.archive` | — | ✅ demo; ⚠️ the PR stepper needs Review to have seen the PR once (no per-card `gh` polling) |
-| Summary row (first steps, spend + tightest limit, hosts, live terminal; one strip on short windows) | BentoRow | Flock tiles (Answer →, running ↓, today ›) | state | — | ✅ demo |
+| Summary row (first steps, spend + tightest limit, hosts, live terminal; one strip on short windows) | BentoRow | Flock tiles (Answer →, running ↓, today ›) | state | — | ✅ demo + lab (0.4.1: the tile observes the pane at its real size, fills the tile's width and keeps the newest rows at every window size) |
 | Filters/search/group/J-K/H-L | BoardToolbar, useBoardKeys | host filter sheet | frontend | — | ✅ demo |
 | Multi-select (P1) | `X` / Ctrl+click → SelectionBar (Mark done, Reopen, Stop turn, Mute) | long-press → SelectionBar | `agent.archive`, `agent.abort`, settings | — | ✅ demo |
 | Transcript, tool cards, thinking | SessionPane | MobileSession pager | `session.open/history` | C replica | ✅ demo |
 | Ask card: select/multi/editor/confirm/input | AskCard | same | `agent.answer` | C ui-response | ✅ demo |
 | Plan review answer | AskCard (planReview) | same | `agent.answer` | B `resolvePlanReview` (ids execute/compact/keep/refine/save) | ✅ code + test. Fixed here: "Other" text → `refine` + feedback; disabled choices hidden; Dismiss is hidden for plan reviews and hostd rejects `cancel` with a hint |
-| Prompt / steer | Composer Enter | Composer send | `agent.prompt` (auto) | C → B → I | ✅ demo |
-| Queue follow-up | Alt+Enter, `/queue` | queue button | `agent.prompt` (followUp) / `agent.slash /queue` | B `/queue` → I `ctrl+q` | ✅ demo |
+| Prompt / steer | Composer Enter | Composer send | `agent.prompt` (auto) | C → B → I | ✅ demo + lab (0.4.1: a steer shows as a queued chip at once and stays until its row lands; hostd lists collab-guest steers itself because omp's queue band misses them) |
+| Queue follow-up | Alt+Enter, `/queue` | queue button | `agent.prompt` (followUp) / `agent.slash /queue` | B `/queue` → I `ctrl+q` | ✅ demo (queued chip at once, "Sending…" until the host accepts it) |
 | **Edit / remove queued chips** | ✎ / ✕ next to the queue chips (on the chip omp pops next, highlighted) | same | **`agent.dequeue` (new)** | B `editor.onDequeue()` (operator draft preserved) | ✅ demo (pull back → composer; remove). Sessions without the bridge get a "needs the bridge" error |
 | Stop turn | Esc, header "Stop turn" | composer Stop, ⋯ sheet, swipe | `agent.abort` | C → B → I `esc` | ✅ demo |
 | `/` palette | Composer | Composer | see the slash table below | | ✅ demo + test |
 | `@` mention | Composer | Composer | `fs.search` | G | ✅ demo |
 | Image paste/drop | Composer | attach button | `agent.prompt{images}` | C `prompt.images` | ⚠️ needs a collab link; follow-ups with images are rejected (omp's TUI queue has no remote image path) |
 | Drafts: every text field keeps its value (composers, answers, dialogs, filters) + composer images | everywhere | same | `drafts` / `useDraft` (localStorage `tf.drafts`), images in IndexedDB | — | ✅ demo (survives view switches and reloads; cleared on a successful send/submit) |
-| Image viewer: zoom (wheel, pinch, double-click/tap, 1:1), pan, gallery | click a transcript attachment, a tool image or a composer thumbnail | tap; pinch, swipe, swipe down to close | `Lightbox` (`@/design`); transcript images without an inline payload: **`session.image` (new)** | omp blob store (`<agent dir>/blobs/<sha256>`) | ✅ demo; `session.image` run against a real blob store, the journal heal is covered by a replica test. Opens at most at actual size (no blurry upscale). Images the journal or history pages hold as `blob:sha256:` refs, and payloads collab cut from entries over 1 MiB (healed from the journal within seconds), load the full original from the host. Markdown images are not rendered (the parser has no `![]()`) |
+| Image viewer: zoom (wheel, pinch, double-click/tap, 1:1), pan, gallery | click a transcript attachment, a tool image or a composer thumbnail | tap; pinch, swipe, swipe down to close | `Lightbox` (`@/design`); transcript images without an inline payload: **`session.image` (new)**; originals: `session.image {original, agentId}` | omp blob store (`<agent dir>/blobs/<sha256>`); hostd `originals/` | ✅ demo; `session.image` run against a real blob store, the journal heal is covered by a replica test. Opens at most at actual size (no blurry upscale). Images the journal or history pages hold as `blob:sha256:` refs, and payloads collab cut from entries over 1 MiB (healed from the journal within seconds), load the full original from the host. 0.4.1: omp downscales images queued while it works (and TUI pastes) before saving them; the viewer swaps in the original when it opens (hostd keeps what TeleFlock sent for 30 days, at most 1 GiB; TUI pastes use the file omp records). Markdown images are not rendered (the parser has no `![]()`) |
 | Voice dictation | — | mic (Web Speech) | text → `agent.prompt` | — | ⚠️ depends on the WebView's SpeechRecognition |
 | Header model/thinking/plan/fast (on/off shown) | Controls | one "model · thinking" chip + Plan/Fast/Goal chips | `agent.setModel/setThinking/setPlan/setFast` | B → I | ✅ demo |
 | Goal (objective + budget) | Goal chip → dialog | same | `agent.goal` | B `/goal …` | ⚠️ the call works; **the goal chip state is read from collab meta only**: the bridge `CtlState.goal` is not in `MetaOverlay` (`omp.rs`); HostdCore owns this |
@@ -101,10 +101,10 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Agent chat (omp IRC): inline chat bubbles (inbound left, sends right with delivery state, grouped), Chat tab grouped by peer with unread, jump-to-row, open subagent, direct message | Transcript rows; Inspector → Agent chat | sheet → chat tab | `TranscriptItem::Irc`, `ToolView::Irc`; direct message = `agent.subagent` chat | C replica (`irc:incoming`, parent `<irc>` steer, `write agent://`, `wait`) | ✅ demo + real host (golden samples 18/18b). Direct messages land as the user's message in the subagent, not as IRC (no external IRC endpoint); agent↔agent relays between subagents aren't visible (omp doesn't mirror them) |
 | Subagent completion estimate + context % (omp TUI `· 40%` / `· 2.4%/272K`) | Subagents panel, task tool card (+ header "1 live · 40% done"), subagent viewer, board card footer (mean of running subagents) | same | `Subagent.completionPct` / `Subagent.context`, `SubagentSummary.completionPct` | C `AgentProgress.completionPercent` / `contextTokens` / `contextWindow` | ✅ demo + real host (estimate first arrives after ~2 min, interactive omp TUI only) |
 | Session tree navigate/branch/fork-from | Inspector → Tree | sheet | `agent.navigate/branch/fork` | B | ✅ demo; ⚠️ fork-from-entry needs the bridge |
-| Compact / handoff / export / rename / new / btw | Actions menu + dialogs | Session actions | `agent.compact/handoff/export/rename/newSession/btw` | B → I | ✅ demo |
+| Compact / handoff / export / rename / new / btw | Actions menu + dialogs; Inspector → BTW | Session actions | `agent.compact/handoff/export/rename/newSession/btw`, `agent.btwCancel`, `agent.btwHistory` | B → I; btw = omp's own `/btw` (composer submit, history panel follow-up) | ✅ demo + lab (0.4.1: GUI btws appear in the omp TUI and `/btw` history, follow-ups continue them from either side, TUI btws show in the GUI) |
 | Rename herdr handle | — | — | `agent.renameHandle` (no UI caller) | H `agent rename` | ❌ **no UI**: the method exists; needs a field in the Rename dialog (FrontSession) |
 | Non-omp agents: terminal-first + send-keys | NonOmpView | same | `agent.keys` | H | ✅ demo |
-| Terminal attach, pane tabs, takeover, send-keys, copy/paste, font | TerminalView/Pane | Terminal tab + ExtraKeys | `term.*` | H `terminal session control` | ✅ demo |
+| Terminal attach, pane tabs, takeover, send-keys, copy/paste, font | TerminalView/Pane | Terminal tab + ExtraKeys | `term.*` | H `terminal session control`; observers open at the pane's PTY size (`TIOCGWINSZ`, Unix) | ✅ demo + lab |
 | Terminal search (P1) | Ctrl+F / tab menu / palette "Terminal: Find on screen" | same | `@xterm/addon-search` (visible screen) | — | ✅ demo |
 | New shell pane (tab / split right / down) | TerminalView "New shell" | same | `term.open{shell,split}` | H | ✅ demo |
 | Close a shell pane / rename tab / close tab | tab strip right-click → Rename tab… / Close tab… / Close pane… (confirmed) | long-press a tab | `tab.rename`, `tab.close`, `pane.close` | H | ✅ demo |

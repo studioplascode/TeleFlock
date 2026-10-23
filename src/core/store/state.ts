@@ -37,9 +37,16 @@ export interface HostEntry {
 
 export type SessionStatus = "idle" | "loading" | "live" | "ended" | "error";
 
-export interface BtwEntry {
+/** One turn of a side conversation as streamed (`question` arrives with its first event). */
+export interface BtwTurnView {
+  question?: string;
   text: string;
   done: boolean;
+}
+
+/** One `/btw` side conversation: the question, then its follow-ups. Turns never seen live are holes. */
+export interface BtwEntry {
+  turns: (BtwTurnView | undefined)[];
 }
 
 export interface SessionEntry {

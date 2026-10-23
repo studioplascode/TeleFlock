@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use tf_proto::*;
 
-use super::{Replica, Signal, Update};
+use super::{KeptOriginal, Replica, Signal, Update};
 use crate::frame::{HostFrame, SnapshotChunk, Welcome};
 use crate::guest::{GuestEvent, Snapshot};
 
@@ -959,6 +959,97 @@ fn cut_images_take_the_journal_blob() {
     assert_eq!((u.images[0].blob.as_deref(), u.images[0].data.as_deref()), (Some(hash), None));
 }
 
+/// A TUI paste: omp sends the model a downscaled copy and records the pasted file in a hidden
+/// `image-attachment` companion sharing the user row's timestamp. The row's image gets that file
+/// as its `original`, whichever of the two arrives first (live entries or the journal).
+#[test]
+fn tui_paste_takes_the_attachment_source_as_original() {
+    let base = load("00-join");
+    let (at0, snap) = snapshot_from(&base, false).unwrap();
+    let path = "/tmp/shots/orig-3000x2000.png";
+    let notice = serde_json::json!({
+        "type": "custom_message", "id": "n1", "customType": "image-attachment", "display": false, "attribution": "user",
+        "content": "The user attached an image…", "details": { "index": 1, "path": path }, "timestamp": "2026-10-21T17:11:08.264Z",
+    });
+    let message = serde_json::json!({
+        "type": "message", "id": "m1", "timestamp": "2026-10-21T17:11:08.264Z",
+        "message": { "role": "user", "timestamp": 1792602668264u64,
+            "content": [{ "type": "text", "text": "[Image #1, 1568x1045] look" }, { "type": "image", "mimeType": "image/webp", "data": "UklGRg==" }] },
+    });
+    let image = |rep: &Replica| match rep.item("u1792602668264") {
+        Some(TranscriptItem::User(u)) => u.images[0].clone(),
+        other => panic!("no user row: {other:?}"),
+    };
+
+    // Notice first (omp publishes it just before the message).
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: notice.clone() }), at0);
+    assert!(rep.item("u1792602668264").is_none(), "the notice itself is no row");
+    rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: message.clone() }), at0);
+    let img = image(&rep);
+    assert_eq!((img.data.as_deref(), img.original.as_deref()), (Some("UklGRg=="), Some(path)));
+
+    // Row first, notice from the journal: the row is upserted with its original.
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap), at0);
+    rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: message }), at0);
+    assert_eq!(image(&rep).original, None);
+    let journal = format!("{notice}\n");
+    let up = rep.apply_journal(&crate::guest::TranscriptChunk { text: journal.clone(), new_size: journal.len() as u64, error: None });
+    assert!(
+        up.events.iter().any(|e| matches!(e, SessionEvent::Upsert { item: TranscriptItem::User(u) } if u.images[0].original.as_deref() == Some(path))),
+        "{:?}",
+        up.events
+    );
+}
+
+/// Images TeleFlock sends while omp streams are queued, and omp keeps only a downscaled copy:
+/// tf-hostd stores the originals and the echo links those that differ from what omp kept.
+#[test]
+fn kept_originals_link_to_the_echo_unless_omp_kept_the_original() {
+    use sha2::Digest as _;
+    let base = load("00-join");
+    let (at0, snap) = snapshot_from(&base, false).unwrap();
+    let shown = "UklGRg==";
+    let shown_sha = crate::relay::hex(&sha2::Sha256::digest(b"RIFF"));
+    let entry = serde_json::json!({
+        "type": "custom_message", "id": "e1", "customType": "collab-prompt", "display": true,
+        "details": { "from": "TeleFlock" }, "attribution": "user", "timestamp": "2026-10-21T17:11:08.264Z",
+        "content": [{ "type": "text", "text": "steer with a shot" },
+            { "type": "image", "mimeType": "image/webp", "data": shown }, { "type": "image", "mimeType": "image/png", "data": shown }],
+    });
+    let kept = |sha: &str, path: &str| KeptOriginal { sha256: sha.into(), path: path.into() };
+    let originals = |rep: &Replica| match rep.item("u1792602668264") {
+        Some(TranscriptItem::User(u)) => u.images.iter().map(|i| i.original.clone()).collect::<Vec<_>>(),
+        other => panic!("no user row: {other:?}"),
+    };
+
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    // The second image reached omp as is (same bytes): it needs no original.
+    rep.expect_originals("  steer with a shot\n", vec![kept(&"a".repeat(64), "/h/originals/a.png"), kept(&shown_sha, "/h/originals/b.png")]);
+    let up = rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: entry.clone() }), at0);
+    let want = vec![Some("/h/originals/a.png".to_owned()), None];
+    assert_eq!(originals(&rep), want);
+    assert!(up.signals.contains(&Signal::OriginalsKept { id: "u1792602668264".into(), originals: want.clone() }), "{:?}", up.signals);
+
+    // After a tf-hostd restart the persisted link is handed back before the rows replay.
+    let mut rep = Replica::new("x");
+    rep.keep_originals("u1792602668264", want.clone());
+    rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry: entry.clone() }), at0);
+    assert_eq!(originals(&rep), want);
+
+    // Nothing differs (omp was idle and kept both as sent): no link, no signal.
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap), at0);
+    rep.expect_originals("steer with a shot", vec![kept(&shown_sha, "/h/a"), kept(&shown_sha, "/h/b")]);
+    let up = rep.apply(&GuestEvent::Frame(HostFrame::Entry { entry }), at0);
+    assert_eq!(originals(&rep), vec![None, None]);
+    assert!(!up.signals.iter().any(|s| matches!(s, Signal::OriginalsKept { .. })));
+}
+
 fn irc_rows(rows: &[TranscriptItem]) -> Vec<(String, IrcMessage, Option<ToolStatus>)> {
     rows.iter()
         .filter_map(|i| match i {
@@ -1033,4 +1124,50 @@ fn irc_subagent_transcript() {
     assert_eq!((irc[0].1.direction, irc[0].1.peer.as_str(), irc[0].1.text.as_str()), (IrcDirection::Out, "Main", "ping from Pinger: what is 3+3?"));
     assert_eq!((irc[1].1.direction, irc[1].1.peer.as_str(), irc[1].1.text.as_str()), (IrcDirection::In, "Main", "pong from Main: 6"));
     assert!(irc[1].1.from_parent);
+}
+
+/// Prompts TeleFlock steers into a streaming session list in `meta.queue` until their row lands,
+/// and the rest clear once omp is idle with nothing queued.
+#[test]
+fn queued_prompts_until_they_land() {
+    let base = load("00-join");
+    let (at0, mut snap) = snapshot_from(&base, false).unwrap();
+    snap.welcome.state.is_streaming = true;
+    let mut rep = Replica::new("x");
+    rep.apply(&GuestEvent::Snapshot(snap), at0);
+    let state = |streaming: bool, queued: u32| {
+        GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "state", "state": { "isStreaming": streaming, "queuedMessageCount": queued, "cwd": "/w" } })))
+    };
+    let queue = |rep: &Replica| (rep.meta().queue.steering.clone(), rep.meta().queue.follow_up.clone());
+    assert!(rep.expect_queued("  fix the\nflaky test ", false, at0));
+    assert!(rep.expect_queued("then ship it", true, at0));
+    assert!(rep.expect_queued("drop me", false, at0));
+    assert_eq!(queue(&rep), (vec!["fix the\nflaky test".to_string(), "drop me".into()], vec!["then ship it".to_string()]));
+    // Not yet counted by omp (or live-steered): still listed while it streams.
+    rep.apply(&state(true, 0), at0 + 100);
+    assert_eq!(rep.meta().queue.steering.len(), 2);
+    assert!(rep.forget_queued("drop  me"));
+    let land = |text: &str, at: i64| {
+        GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "event", "event": { "type": "message_start", "message": {
+            "role": "custom", "customType": "collab-prompt", "content": text, "display": true,
+            "details": { "from": "teleflock" }, "attribution": "user", "timestamp": at } } })))
+    };
+    rep.apply(&land("fix the\nflaky test", at0 + 2000), at0 + 2000);
+    assert_eq!(queue(&rep), (vec![], vec!["then ship it".to_string()]));
+    // Idle with nothing queued: the follow-up was aborted away.
+    rep.apply(&GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "event", "event": { "type": "agent_end", "messages": [] } }))), at0 + 3000);
+    rep.apply(&state(false, 0), at0 + 3100);
+    assert_eq!(queue(&rep), (vec![], vec![]));
+    // Sent while idle: starts a turn, never queued.
+    assert!(!rep.expect_queued("hello", false, at0 + 4000));
+    assert!(rep.meta().queue.steering.is_empty());
+}
+
+#[test]
+fn merge_queue_dedupes_bridge_chips() {
+    let bridge = QueueInfo { steering: vec!["a ↵ b".into()], follow_up: vec!["later".into()] };
+    let sent = QueueInfo { steering: vec!["a\nb".into(), "new".into()], follow_up: vec!["later".into(), "later".into()] };
+    let m = super::merge_queue(&bridge, &sent);
+    assert_eq!(m.steering, vec!["a ↵ b".to_string(), "new".into()]);
+    assert_eq!(m.follow_up, vec!["later".to_string(), "later".into()]);
 }

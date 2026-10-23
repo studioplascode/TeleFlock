@@ -73,7 +73,7 @@ export function Updates({ index }: { index: number }) {
               icon={<RefreshCw />}
               loading={busy}
               disabled={busy}
-              onClick={() => run(core.app("app.updateCheck", { launch: false, install: autoUpdate }))}
+              onClick={() => run(core.app("app.updateCheck", { install: autoUpdate }))}
             >
               Check for updates
             </Button>
@@ -83,8 +83,8 @@ export function Updates({ index }: { index: number }) {
         label="Automatic updates"
         description={
           status.manual
-            ? "Check when TeleFlock starts. On macOS you install new versions yourself from the downloaded .dmg."
-            : "Check when TeleFlock starts and install new versions right away."
+            ? "Check at launch, hourly and when TeleFlock comes back to the front. On macOS you install new versions yourself from the downloaded .dmg."
+            : "Check at launch, hourly and when TeleFlock comes back to the front, and install new versions right away."
         }
       >
         <Switch

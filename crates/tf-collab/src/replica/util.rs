@@ -120,6 +120,7 @@ pub(crate) fn content_images(content: Option<&Value>) -> Vec<tf_proto::ImageRef>
                 data: raw.filter(|d| blob.is_none() && is_base64(d)).map(str::to_owned),
                 url: None,
                 blob: blob.map(str::to_ascii_lowercase),
+                original: None,
                 width: None,
                 height: None,
             }
@@ -129,6 +130,20 @@ pub(crate) fn content_images(content: Option<&Value>) -> Vec<tf_proto::ImageRef>
 
 fn is_base64(d: &str) -> bool {
     !d.is_empty() && d.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'\r' | b'\n'))
+}
+
+/// sha256 hex of the bytes an image row shows: its omp blob's name, else its inline payload's
+/// digest (the same address omp files it under). None for cut payloads and URLs.
+pub(crate) fn shown_sha256(img: &tf_proto::ImageRef) -> Option<String> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    if let Some(blob) = &img.blob {
+        return Some(blob.clone());
+    }
+    let raw = img.data.as_deref()?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let bytes = if raw.contains(['\r', '\n']) { engine.decode(raw.replace(['\r', '\n'], "")) } else { engine.decode(raw) }.ok()?;
+    Some(crate::relay::hex(&sha2::Sha256::digest(&bytes)))
 }
 
 /// Truncate to at most `max` chars (by char), appending `…`.

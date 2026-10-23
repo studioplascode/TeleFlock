@@ -127,7 +127,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
   - Rich tool cards: read, edit/write (inline diff), bash (ANSI output, exit code, duration), grep/glob/find (match counts, expandable), lsp, web_search (sources), browser (screenshot), eval (cell + output), task (subagent cards with live progress), todo (phase checklist), ask (resolved answer), github, and a generic JSON fallback.
 - **Ask card.** Single or multi select (options numbered 1…N, Other = N+1, recommended marked with ★), Other with free text, editor requests, approvals, Skip (answer nothing). It stays sticky until answered. The same option control renders on cards, the Inbox, the HUD and the phone.
 - **Composer**
-  - `Enter` sends while idle and **steers** while running; `Alt+Enter` queues a **follow-up**; `Shift+Enter` is a newline. Queued chips can be edited and removed.
+  - `Enter` sends while idle and **steers** while running; `Alt+Enter` queues a **follow-up**; `Shift+Enter` is a newline. A steer or follow-up shows as a queued chip the moment it is sent and stays until it lands in the transcript; queued chips can be edited and removed.
   - Stop turn (Esc).
   - `/` slash palette with argument hints.
   - `@` file mention with remote file search.
@@ -141,7 +141,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
   - todos by phase (with the blocked count)
   - subagents (steer · kill · revive · view transcript)
   - changed files ± (→ Review)
-  - agent chat, BTW, session tree (fork / branch from any message)
+  - agent chat, BTW (omp's own `/btw`: the same conversations as the TUI and its `/btw` history, including ones asked in the terminal, each with follow-ups and cancel), session tree (fork / branch from any message)
   - actions (⋯ menu, each with a one-line description): compact, hand off, fork, rename, export, new session, mute, stop turn, end session (exit omp / close pane, which asks first)
 - **Fresh agents** show starter prompts (they fill the composer; nothing is sent) and a one-line legend of the header controls.
 - **Non-omp agents.** A terminal-first session view: herdr state plus the embedded terminal plus quick send-keys.

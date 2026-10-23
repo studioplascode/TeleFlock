@@ -8,7 +8,7 @@ Owner: HostdHerdr. Everything is `async` (tokio); `HerdrClient` is `Clone` (an `
 ```rust
 HerdrClient::discover(session: Option<&str>) -> Result<HerdrClient>          // None = default session
 HerdrClient::discover_with(session, DiscoverOptions { bin, socket, request_timeout }) -> Result<HerdrClient>
-client.ensure_server() -> Result<Pong>     // ping; else spawn `herdr [--session S] server` detached (setsid, </dev/null), wait ≤15 s
+client.ensure_server() -> Result<Pong>     // ping; else spawn `herdr [--session S] server` detached (setsid, </dev/null; own systemd scope, see below), wait ≤15 s
 client.ping() -> Result<Pong>              // running server's version/protocol/capabilities (cached: client.server())
 client.server_at_least((0, 9, 2)) -> bool
 client.status() -> Result<Status>          // `herdr status --json`
@@ -24,6 +24,11 @@ client.session() / binary() / endpoint()
 - Inherited pane env (`HERDR_SOCKET_PATH`, `HERDR_SESSION`, ...) is stripped from every spawned CLI, so the target
   session is always explicit.
 - A stopped server is not a discovery error; requests then fail with `server_not_running`.
+- `durable::Scope::plan(prefix)`: on Linux with systemd, `ensure_server` starts the server through
+  `systemd-run --scope --collect --unit=teleflock-herdr-<session>-<pid>-<ms>.scope` (system manager for root;
+  `--user` only when the user lingers), so it and its agents survive the login session that started it. When
+  `systemd-run` cannot create the unit (it exits non-zero before exec'ing) the server is started plainly.
+  `durable::{cgroup_path, login_session, process_cgroup}` read `/proc/<pid>/cgroup` (tf-hostd uses them too).
 
 ## Raw requests and errors
 

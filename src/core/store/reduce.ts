@@ -320,7 +320,8 @@ function applySession(
       ui: ev.snapshot.ui ?? null,
       hasMore: ev.snapshot.hasMore,
       cursor: ev.snapshot.cursor,
-      btw: cur?.btw ?? {},
+      // Side conversations belong to one omp session: a rotation (/new, /resume, /fork) drops them.
+      btw: cur && cur.meta?.sessionId === ev.snapshot.meta.sessionId ? cur.btw : {},
     });
     return;
   }
@@ -365,8 +366,13 @@ function applySession(
       break;
     case "btw": {
       sess.btw = tx.own(sess.btw);
-      const prev = sess.btw[ev.btwId];
-      sess.btw[ev.btwId] = { text: (prev?.text ?? "") + ev.text, done: ev.done };
+      const turns = [...(sess.btw[ev.btwId]?.turns ?? [])];
+      const i = ev.turn ?? 0; // hosts before follow-ups send no turn
+      while (turns.length <= i) turns.push(undefined);
+      const prev = turns[i];
+      // A finished turn stays finished: hostd's question announcement may trail the answer.
+      turns[i] = { question: ev.question ?? prev?.question, text: (prev?.text ?? "") + ev.text, done: ev.done || prev?.done === true };
+      sess.btw[ev.btwId] = { turns };
       break;
     }
     case "ended":

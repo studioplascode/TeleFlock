@@ -386,6 +386,12 @@ without `latest.json` (v0.1.0) is never offered to Windows or Linux; one without
 update themselves. macOS never installs anything by itself: the `.dmg` is built in CI, which has
 no updater key, and is never signed with it (§13).
 
+When apps look: a running app checks about 8 s after launch, then about hourly (1 h + up to
+10 min jitter) and when it comes back to the front if its last check is 20 min old, so a
+published release reaches running apps within roughly an hour (sooner when the user brings the
+app up). Failures back off (30 min doubling to 12 h). That is at most ~3 anonymous API requests
+per hour and device, far below GitHub's 60 per hour and IP.
+
 Checks before an update installs:
 - Windows / Linux: `latest.json` must announce exactly the release tag's version, the
   package must carry a valid minisign signature from the key in `plugins.updater.pubkey`, and
@@ -396,7 +402,7 @@ Checks before an update installs:
   with `PackageManager.getPackageArchiveInfo`: same package name, the same set of signing
   certificate SHA-256 digests as the installed app, and a higher `versionCode`. Otherwise the
   file is deleted and the update ends in `error`. Android enforces the signing key again at install.
-- The launch check runs only when `settings.autoUpdate` can be read and is on.
+- Automatic checks run only when `settings.autoUpdate` can be read and is on.
 
 Which Linux copies update themselves (`Target::current` in `src-tauri/src/update/release.rs`,
 unit-tested): an AppImage started by its runtime (`$APPIMAGE`), and the `.deb`'s binary when

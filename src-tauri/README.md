@@ -24,7 +24,7 @@ are pushed as `{type:"update", status: UpdateStatus}` on the `core_events` chann
 | Method | Params | Result |
 |---|---|---|
 | `app.updateStatus` | `{}` | `UpdateStatus` `{ current, supported, manual, unsupportedReason?, phase, latest?, progress?, error?, checkedAt? }` |
-| `app.updateCheck` | `{ launch, install }` | `UpdateStatus` once discovery is done. `launch`: once per process, skipped while `settings.autoUpdate` is off, installs what it finds. `install`: install right away |
+| `app.updateCheck` | `{ install }` | `UpdateStatus` once discovery is done. `install`: install a newer release right away |
 | `app.updateInstall` | `{}` | `UpdateStatus`; starts download + install of the last found release (`not_found` before a check found one). `manual` (macOS): opens the release's `.dmg` in the browser instead |
 
 `phase`: `idle` → `checking` → `upToDate` \| `available` → `downloading` (`progress` 0–100) →
@@ -33,6 +33,17 @@ shown in Settings, never toasted). `supported` is false in debug builds, for the
 (pacman owns it) and for any Linux copy that is neither a running AppImage nor dpkg's `.deb`
 install; `unsupportedReason` says why and Settings shows it.
 
+- Automatic checks (`schedule.rs`, unit-tested) run in the shell, so they also work on Android
+  while the keep-alive service keeps the process up without an activity (and its webview): 8 s
+  after setup, then whenever the last completed check (manual ones included) is older than 1 h
+  plus 0–10 min of random jitter (compared on the wall clock every 5 min, so a laptop that slept
+  catches up), and when the app comes back to the front (desktop window focus,
+  `MainActivity.onResume`) if it is older than 20 min. Never while a check or install runs or
+  waits for the user (`needsPermission`, Android installer prompt), only while
+  `settings.autoUpdate` is on, never for unsupported copies. Failed checks, failed installs and
+  dismissed Android install prompts back off (30 min doubling to 12 h, at least the period); a
+  clean result resets it. At most about 3 API requests per hour and device (GitHub allows 60
+  anonymous ones per IP). What they find installs like `{ install: true }`.
 - Discovery (`release.rs`, unit-tested): `GET https://api.github.com/repos/studioplascode/TeleFlock/releases?per_page=30`
   anonymously (rustls + webpki roots, 10 s connect / 20 s request timeouts); highest semver
   `vX.Y.Z[-pre]` tag, drafts skipped, that has this platform's assets, if newer than the app.
@@ -47,17 +58,20 @@ install; `unsupportedReason` says why and Settings shows it.
   `pkexec dpkg -i` for the `.deb`; then `request_restart()` exits through `RunEvent::Exit` and
   starts the new version.
 - macOS (`manual: true`): discovery looks for the release's `TeleFlock_<v>_universal.dmg` (built
-  by `macos.yml`, never signed with the updater key); the launch check never installs, the UI
-  shows a one-time "vX is available" toast and Settings a **Download** button, both calling
+  by `macos.yml`, never signed with the updater key); automatic checks never install, the UI
+  shows one "vX is available" toast per new version and Settings a **Download** button, both calling
   `app.updateInstall`, which opens the `.dmg` URL (`Platform::open_external` → `open`).
 - Android: `<cacheDir>/updates/TeleFlock_<v>_universal.apk`, SHA-256 checked against the release's
   `.sha256` (a verified file is reused), then the plugin's `installApk` (below), which rejects and
   deletes an APK that isn't this package, signed by the installed app's certificates, with a
-  higher versionCode. On
+  higher versionCode. The installer only starts while the app is in front (`MainActivity`
+  reports `onResume` / `onPause`); an APK verified in the background stays `available` and its
+  prompt opens on the next resume. On
   `needsPermission` the shell retries when the app comes back to the front (`MainActivity.onResume`); a dismissed system prompt
   falls back to `available`.
-- UI: `src/features/updates/updates.tsx` (`useAutoUpdate`, mounted in `App`: launch check after
-  4 s, progress toast) and Settings → Updates (`src/features/settings/Updates.tsx`).
+- UI: `src/features/updates/updates.tsx` (`useAutoUpdate`, mounted in `App`: progress toast,
+  macOS availability toast) and Settings → Updates (`src/features/settings/Updates.tsx`; "checked
+  …" includes automatic checks).
 
 Release assets, keys and publishing: `docs/build.md` §11.
 
@@ -110,12 +124,12 @@ notification taps use it too.
 | Badge | tray icon (orbiting comet while running, pink count when needs-you) + taskbar overlay + progress bar + flash | keep-alive notice text "3 running · 2 need you" |
 | Keep-alive | window close hides to tray | `remoteMessaging` foreground service while `settings.keepAlive` and a host is connected |
 | App closed from recents | — | the keep-alive service keeps the process and the core running without an activity. `MainActivity` reports its lifecycle over JNI (`RustBridge`): Kotlin commands are skipped meanwhile (Tauri can't reach plugins without an activity), so agent notifications are not posted until the app is opened again, and the next activity gets the main window rebuilt (`restore_main_window`; Tauri creates windows once per process, tauri-apps/tauri#15671), Wry's back handler (Tauri's is bound to the first activity) and its launch intent forwarded to the plugins (deep links) |
-| Reconnect hints | window focus → `engine.resume()` | `MainActivity.onResume` (Tauri's `RunEvent::Resumed` never fires on Android) → `engine.resume()`, keep-alive start/stop retry, pending update install; default-network change → `engine.resume()` |
+| Reconnect hints | window focus → `engine.resume()`, update check if due | `MainActivity.onResume` (Tauri's `RunEvent::Resumed` never fires on Android) → `engine.resume()`, keep-alive start/stop retry, pending update install or an update check if due (`onPause` marks the app as not in front); default-network change → `engine.resume()` |
 
 Linux and macOS: no OS notifications (`supports_notifications() == false`: the engine keeps them
 in the app, i.e. the inbox, tray badge and tooltip; a test notification answers `unsupported`).
 Tray icon with the same badge and menu (Linux: libayatana-appindicator / StatusNotifierItem; the
-comet stays still there), window close hides to the tray, focus → `engine.resume()`; macOS also
+comet stays still there), window close hides to the tray, focus → `engine.resume()` and an update check if due; macOS also
 reopens the hidden window from the Dock (`RunEvent::Reopen`). `open_external` uses `xdg-open` /
 `open`.
 

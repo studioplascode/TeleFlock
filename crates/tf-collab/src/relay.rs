@@ -214,7 +214,7 @@ async fn probe_healthz(addr: SocketAddr, nonce: &str) -> io::Result<(u16, String
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

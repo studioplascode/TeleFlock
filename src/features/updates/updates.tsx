@@ -6,12 +6,10 @@ import type { UpdatePhase, UpdateStatus } from "@/core/gen";
 
 /**
  * App self-update (Tauri backend only; src-tauri/src/update). The shell answers the
- * `app.update*` methods and pushes `{ type: "update" }` events; this module mirrors them.
+ * `app.update*` methods, checks by itself (launch, hourly, back in front) and pushes
+ * `{ type: "update" }` events; this module mirrors them.
  */
 export const useUpdateStatus = create<{ status: UpdateStatus | null }>()(() => ({ status: null }));
-
-/** Wait after launch before checking, so the check never competes with startup. */
-const LAUNCH_DELAY_MS = 4000;
 
 let watching = false;
 
@@ -63,35 +61,34 @@ function syncToast(status: UpdateStatus | null): void {
   }
 }
 
+/** Versions already announced by `announceManual` (the shell re-reports them on every check). */
+const announced = new Set<string>();
+
+/** Manual platforms (macOS) never install by themselves: point at the download once per version. */
+function announceManual(status: UpdateStatus | null): void {
+  if (!status?.manual || status.phase !== "available" || status.latest === undefined || announced.has(status.latest)) return;
+  announced.add(status.latest);
+  toast({
+    title: `TeleFlock v${status.latest} is available`,
+    description: "Download it and replace the app in Applications.",
+    action: { label: "Download", onClick: () => void core.app("app.updateInstall", {}).catch(() => {}) },
+    duration: 15_000,
+  });
+}
+
 /**
- * Mount once (App). Tauri backend only: a few seconds after launch asks the shell for its
- * launch check (once per process, release builds, `settings.autoUpdate`), and shows a progress
- * toast while an update downloads and installs.
+ * Mount once (App). Tauri backend only: shows a progress toast while an update downloads and
+ * installs, and on macOS one "vX is available" toast per new version. The checks themselves run
+ * in the shell (release builds, `settings.autoUpdate`), with or without a webview.
  */
 export function useAutoUpdate(): void {
   useEffect(() => {
     if (core.backend !== "tauri") return;
+    const unsub = useUpdateStatus.subscribe((s) => {
+      syncToast(s.status);
+      announceManual(s.status);
+    });
     watchUpdates();
-    const unsub = useUpdateStatus.subscribe((s) => syncToast(s.status));
-    const timer = setTimeout(() => {
-      core.app("app.updateCheck", { launch: true, install: false }).then(
-        // Manual platforms (macOS) never install by themselves: point at the download once.
-        (s) => {
-          if (s.manual && s.phase === "available") {
-            toast({
-              title: `TeleFlock v${s.latest} is available`,
-              description: "Download it and replace the app in Applications.",
-              action: { label: "Download", onClick: () => void core.app("app.updateInstall", {}).catch(() => {}) },
-              duration: 15_000,
-            });
-          }
-        },
-        (err: unknown) => console.warn("[update] launch check failed", err),
-      );
-    }, LAUNCH_DELAY_MS);
-    return () => {
-      clearTimeout(timer);
-      unsub();
-    };
+    return unsub;
   }, []);
 }

@@ -38,7 +38,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         }
         M::SessionHistory(p) => to_value(session_history(ctx, p)?),
         M::SubagentTranscript(p) => to_value(subagent_transcript(ctx, p).await?),
-        M::SessionImage(p) => to_value(session_image(p).await?),
+        M::SessionImage(p) => to_value(session_image(ctx, p).await?),
 
         M::AgentPrompt(p) => unit(prompt(ctx, p, client).await),
         M::AgentAbort(p) => unit(abort(ctx, &p.agent_id).await),
@@ -57,6 +57,8 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentHandoff(p) => unit(handoff(ctx, p).await),
         M::AgentExport(p) => to_value(export(ctx, &p.agent_id).await?),
         M::AgentBtw(p) => to_value(btw(ctx, p).await?),
+        M::AgentBtwCancel(p) => unit(btw_cancel(ctx, p).await),
+        M::AgentBtwHistory(p) => to_value(btw_history(ctx, &p.agent_id).await?),
         M::AgentSlash(p) => unit(slash(ctx, p).await),
         M::AgentCommands(p) => to_value(commands(ctx, &p.agent_id).await?),
         M::AgentDequeue(p) => to_value(dequeue(ctx, &p.agent_id).await?),
@@ -229,19 +231,36 @@ async fn subagent_transcript(ctx: &Ctx, p: SubagentRef) -> Result<HistoryPage, A
 /// Largest image `session.image` sends (its base64 must fit a client line, 64 MiB).
 const IMAGE_MAX: u64 = 32 * 1024 * 1024;
 
-/// A transcript image's full bytes from omp's content-addressed blob store.
-async fn session_image(p: ImageParams) -> Result<ImageBlob, ApiError> {
+/// A transcript image in full: an omp blob (content-addressed store), or an image original
+/// (`ImageRef.original`, see [`crate::originals`]; sent with its sniffed mime).
+async fn session_image(ctx: &Ctx, p: ImageParams) -> Result<ImageBlob, ApiError> {
     use base64::Engine as _;
-    if p.blob.len() != 64 || !p.blob.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err(ApiError::new("invalid_params", "blob must be a sha256 hex digest"));
-    }
-    let path = crate::ops::host::omp_agent_dir().join("blobs").join(p.blob.to_ascii_lowercase());
+    let is_original = p.original.is_some();
+    let path = match (p.original, p.blob) {
+        (Some(original), _) => {
+            let sid = match &p.agent_id {
+                Some(agent_id) if original.starts_with("local://") => Some(session_id(ctx, agent_id)?),
+                _ => None,
+            };
+            tokio::task::spawn_blocking(move || crate::originals::resolve(&original, sid.as_deref()))
+                .await
+                .map_err(|e| ApiError::new("internal", e.to_string()))??
+        }
+        (None, Some(blob)) if blob.len() == 64 && blob.bytes().all(|c| c.is_ascii_hexdigit()) => {
+            crate::ops::host::omp_agent_dir().join("blobs").join(blob.to_ascii_lowercase())
+        }
+        _ => return Err(ApiError::new("invalid_params", "pass a blob (sha256 hex digest) or an original")),
+    };
     let meta = tokio::fs::metadata(&path).await.map_err(|e| crate::ops::fs::io_error(e, &path))?;
     if meta.len() > IMAGE_MAX {
         return Err(ApiError::new("too_large", format!("image is {} MiB", meta.len() >> 20)));
     }
     let bytes = tokio::fs::read(&path).await.map_err(|e| crate::ops::fs::io_error(e, &path))?;
-    Ok(ImageBlob { data: base64::engine::general_purpose::STANDARD.encode(bytes) })
+    let mime = crate::originals::sniff_mime(&bytes).map(str::to_owned);
+    if mime.is_none() && is_original {
+        return Err(ApiError::new("unsupported", format!("{} is not an image", path.display())));
+    }
+    Ok(ImageBlob { data: base64::engine::general_purpose::STANDARD.encode(bytes), mime })
 }
 
 // ───────────────────────────── collab-first ─────────────────────────────
@@ -257,7 +276,8 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
     let streaming = a.state == HerdrState::Working;
     info!(agent = %p.agent_id, device = %client.info().device, delivery = ?p.delivery, "prompt");
     // Every device shares one collab guest; tell the replica who sent this prompt.
-    if let Some(s) = ctx.state.omp_session_of(&p.agent_id).and_then(|sid| ctx.omp.session(&sid)) {
+    let session = ctx.state.omp_session_of(&p.agent_id).and_then(|sid| ctx.omp.session(&sid));
+    if let Some(s) = &session {
         s.expect_prompt(&p.text, &client.info().device);
     }
     if p.delivery == Delivery::FollowUp && streaming {
@@ -266,18 +286,40 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
         }
         if let Some(sid) = bridge_sid(ctx, &p.agent_id) {
             ctx.bridge.follow_up(&sid, &p.text).await.map_err(bridge_err)?;
-            return Ok(());
+        } else {
+            inject::follow_up(ctx, &p.agent_id, &p.text).await?;
         }
-        return inject::follow_up(ctx, &p.agent_id, &p.text).await;
+        if let Some(s) = &session {
+            s.expect_queued(&p.text, true);
+        }
+        ctx.state.mark_dirty();
+        return Ok(());
     }
     match guest(ctx, &p.agent_id) {
         Ok(s) => {
-            let images = p
-                .images
-                .into_iter()
-                .map(|i| tf_collab::ImageContent { kind: "image".into(), data: i.data, mime_type: i.mime })
-                .collect();
-            s.guest.prompt(p.text, images).map_err(guest_err)
+            // omp downscales images it queues (a prompt sent mid-turn) and keeps only that copy:
+            // keep the originals here and let the replica link them to the echo.
+            let mut images = p.images;
+            if !images.is_empty() && (streaming || s.is_streaming()) {
+                let dir = crate::originals::dir(&ctx.paths.home);
+                let (back, kept) = tokio::task::spawn_blocking(move || {
+                    let kept = crate::originals::store(&dir, &images);
+                    (images, kept)
+                })
+                .await
+                .map_err(|e| ApiError::new("internal", e.to_string()))?;
+                images = back;
+                if let Some(kept) = kept {
+                    s.expect_originals(&p.text, kept);
+                }
+            }
+            let images = images.into_iter().map(|i| tf_collab::ImageContent { kind: "image".into(), data: i.data, mime_type: i.mime }).collect();
+            s.guest.prompt(p.text.clone(), images).map_err(guest_err)?;
+            // omp queues a guest prompt sent mid-turn as a steer; its TUI band (what the bridge
+            // reads) doesn't show it, so list it ourselves until it lands.
+            s.expect_queued(&p.text, false);
+            ctx.state.mark_dirty();
+            Ok(())
         }
         Err(e) if e.code == "not_connected" => {
             // Not shared: submit through herdr (Enter while streaming steers).
@@ -586,14 +628,47 @@ async fn export(ctx: &Ctx, agent_id: &str) -> Result<ExportResult, ApiError> {
     Err(ApiError::new("timeout", "omp did not report the export path").retryable())
 }
 
+/// First bridge whose `btw` is omp's own `/btw` and takes `btwId` follow-ups.
+const BTW_FOLLOWUP_BRIDGE: &str = "1.1.0";
+
 async fn btw(ctx: &Ctx, p: BtwParams) -> Result<BtwStarted, ApiError> {
     if p.question.trim().is_empty() {
         return Err(ApiError::new("invalid_params", "empty question"));
     }
     omp_agent(ctx, &p.agent_id)?;
     let sid = bridge_sid(ctx, &p.agent_id).ok_or_else(|| needs_bridge("Side questions"))?;
-    let btw_id = ctx.bridge.btw(&sid, &p.question).await.map_err(bridge_err)?;
-    Ok(BtwStarted { btw_id })
+    // omp loads its bridge once per process: a session started before bridge 1.1.0 keeps the old
+    // `btw`, which ignores `btwId` and would open a new hidden side turn instead of following up.
+    let followups = |v: &str| tf_proto::version::cmp_semver(v, BTW_FOLLOWUP_BRIDGE).is_some_and(|o| o.is_ge());
+    if p.btw_id.is_some() && ctx.bridge.by_session(&sid).is_some_and(|s| !followups(&s.bridge_version)) {
+        return Err(ApiError::new("unsupported", "this session's TeleFlock bridge can't follow up on side questions")
+            .with_hint("Restart the agent (resume its session) to load the current bridge."));
+    }
+    let started = ctx.bridge.btw(&sid, &p.question, p.btw_id.as_deref()).await.map_err(bridge_err)?;
+    // Every client (other devices too) sees the question at once; bridges before 1.1.0 stream
+    // the answer without it.
+    if let Some(s) = ctx.omp.session(&sid) {
+        s.send_extra(tf_proto::session::SessionEvent::Btw {
+            btw_id: started.btw_id.clone(),
+            turn: started.turn,
+            question: Some(p.question.clone()),
+            text: String::new(),
+            done: false,
+        });
+    }
+    Ok(started)
+}
+
+async fn btw_cancel(ctx: &Ctx, p: BtwRef) -> Result<(), ApiError> {
+    omp_agent(ctx, &p.agent_id)?;
+    let sid = bridge_sid(ctx, &p.agent_id).ok_or_else(|| needs_bridge("Side questions"))?;
+    ctx.bridge.btw_cancel(&sid, &p.btw_id).await.map_err(bridge_err)
+}
+
+async fn btw_history(ctx: &Ctx, agent_id: &str) -> Result<BtwHistory, ApiError> {
+    omp_agent(ctx, agent_id)?;
+    let sid = bridge_sid(ctx, agent_id).ok_or_else(|| needs_bridge("Side questions"))?;
+    ctx.bridge.btw_history(&sid).await.map_err(bridge_err)
 }
 
 async fn slash(ctx: &Ctx, p: SlashParams) -> Result<(), ApiError> {
@@ -633,11 +708,17 @@ async fn commands(ctx: &Ctx, agent_id: &str) -> Result<CommandList, ApiError> {
 }
 
 /// Pulls the last queued message back out of the queue so the client can edit or drop it.
-/// The queue chips update through the bridge's `queue_update` event.
+/// The queue chips update through the bridge's `queue_update` event (and the prompts we listed
+/// ourselves drop the pulled-back text).
 async fn dequeue(ctx: &Ctx, agent_id: &str) -> Result<Dequeued, ApiError> {
     omp_agent(ctx, agent_id)?;
     let sid = bridge_sid(ctx, agent_id).ok_or_else(|| needs_bridge("Pulling back queued messages"))?;
-    ctx.bridge.dequeue(&sid).await.map_err(bridge_err)
+    let out = ctx.bridge.dequeue(&sid).await.map_err(bridge_err)?;
+    if let (Some(text), Some(s)) = (&out.text, ctx.omp.session(&sid)) {
+        s.forget_queued(text);
+        ctx.state.mark_dirty();
+    }
+    Ok(out)
 }
 
 // ───────────────────────────── herdr ─────────────────────────────

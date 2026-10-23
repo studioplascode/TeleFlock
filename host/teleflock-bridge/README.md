@@ -21,7 +21,7 @@ cp teleflock-bridge.ts ~/.omp/agent/extensions/ # global install (needs the user
 | **Events → hostd** | `hello` (sent again on session switch), `state` (model, thinking, fast, plan mode, goal, title, idle, context, leaf, queue, plan review), `queue_update`, `plan_review_requested`, `plan_review_resolved`, `btw_delta` |
 | **Model and modes** | `setModel`, `setThinking`, `setFast`, `setPlan`, `goal` |
 | **Session ops** | `compact`, `rename`, `followUp`, `navigateTree`, `branch`, `fork`, `newSession`, `handoff`, `export` |
-| **Interaction** | `resolvePlanReview`, `btw` (streamed `ctx.runEphemeralTurn`), `btwCancel`, `slash`, `dequeue`, `abort` |
+| **Interaction** | `resolvePlanReview`, `btw` (omp's own `/btw`: in the TUI and its BTW history; `btwId` follows up), `btwCancel`, `getBtwHistory`, `slash`, `dequeue`, `abort` |
 | **Reads** | `getTree`, `getQueue`, `getCommands`, `getState`, `ping` |
 
 TUI-only commands run through the composer's own submit handler, so no herdr keystroke injection is needed and the operator's draft is preserved. Tree, branch and new-session control use a command context, which the extension captures once through its hidden `/teleflock-attach` command. See the protocol doc's "TUI mechanics" section.

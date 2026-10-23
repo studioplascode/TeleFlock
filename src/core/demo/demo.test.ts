@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AppEvent, Column, TermEvent } from "../gen";
+import type { AppEvent, Column, SessionSnapshot, TermEvent } from "../gen";
 import { agentKey } from "../keys";
 import { reduceEvents } from "../store/reduce";
 import { type CoreEvent, type CoreState, initialCoreState } from "../store/state";
@@ -101,6 +101,58 @@ describe("demo engine", () => {
     expect(pool.hasMore).toBe(true);
     const page = await r.call<{ items: unknown[] }>("forge", "session.history", { agentId: "pool", cursor: pool.cursor, limit: 30 });
     expect(page.items).toHaveLength(30);
+  });
+
+  test("btw: history, streamed answer, follow-up on the same conversation, cancel", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const snapshot = await r.call<SessionSnapshot>("forge", "session.open", { agentId: "kanban" });
+    const from = r.events.length;
+    // The session as a client that opened it sees it (the rig's store tracks no open sessions).
+    const btwOf = (id: string) => {
+      const open: CoreEvent = { type: "session", hostId: "forge", agentId: "kanban", ev: { k: "reset", snapshot } };
+      const s = reduceEvents(initialCoreState("demo"), [open, ...(r.events.slice(from) as CoreEvent[])]).state;
+      return s.sessions[agentKey("forge", "kanban")]?.btw[id]?.turns;
+    };
+    type History = { threads: { btwId: string; turns: { question: string; status: string }[] }[] };
+    // One conversation was asked earlier in omp's TUI.
+    const before = await r.call<History>("forge", "agent.btwHistory", { agentId: "kanban" });
+    expect(before.threads).toHaveLength(1);
+    const asked = await r.call<{ btwId: string; turn: number }>("forge", "agent.btw", { agentId: "kanban", question: "Where is the store?" });
+    expect(asked.turn).toBe(0);
+    // One side question at a time, like omp.
+    await expect(r.call("forge", "agent.btw", { agentId: "kanban", question: "Another?" })).rejects.toMatchObject({ code: "busy" });
+    r.clock.advance(10_000);
+    const first = btwOf(asked.btwId)?.[0];
+    expect(first).toMatchObject({ question: "Where is the store?", done: true });
+    expect(first?.text).toContain("Quick side answer");
+    const follow = await r.call<{ btwId: string; turn: number }>("forge", "agent.btw", { agentId: "kanban", question: "And its tests?", btwId: asked.btwId });
+    expect(follow).toEqual({ btwId: asked.btwId, turn: 1 });
+    await r.call("forge", "agent.btwCancel", { agentId: "kanban", btwId: asked.btwId });
+    const second = btwOf(asked.btwId)?.[1];
+    expect(second).toMatchObject({ question: "And its tests?", done: true });
+    expect(second?.text).toContain("⚠ cancelled");
+    const after = await r.call<History>("forge", "agent.btwHistory", { agentId: "kanban" });
+    expect(after.threads.map((t) => t.turns.map((x) => x.status))).toEqual([["complete"], ["complete", "cancelled"]]);
+  });
+
+  test("a steer is queued until the next step boundary, then lands as a steering row", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const key = agentKey("forge", "kanban");
+    expect(r.state.agents[key]?.column).toBe("running");
+    await r.call("forge", "session.open", { agentId: "kanban" });
+    const before = r.events.length;
+    await r.call("forge", "agent.prompt", { agentId: "kanban", text: "Keep the lane order stable", images: [], delivery: "auto" });
+    const landed = () =>
+      r.events
+        .slice(before)
+        .some((e) => e.type === "session" && e.agentId === "kanban" && e.ev.k === "upsert" && e.ev.item.kind === "user" && e.ev.item.text === "Keep the lane order stable" && e.ev.item.steering);
+    expect(r.state.agents[key]?.omp?.queue.steering).toEqual(["Keep the lane order stable"]);
+    expect(landed()).toBe(false);
+    r.clock.advance(15_000);
+    expect(r.state.agents[key]?.omp?.queue.steering).toEqual([]);
+    expect(landed()).toBe(true);
   });
 
   test("pulses beat for running agents, and the prompt path streams a reply", async () => {

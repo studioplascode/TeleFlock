@@ -223,6 +223,8 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
     let shutdown = CancellationToken::new();
     let persist = crate::state::persist::Persist::load(paths.state_file.clone());
     persist.spawn_saver(shutdown.child_token());
+    let originals = crate::originals::dir(&paths.home);
+    tokio::task::spawn_blocking(move || crate::originals::prune(&originals));
     let omp = OmpHandle::start(relay_port, persist.clone(), shutdown.clone()).await;
     let bridge = match BridgeHandle::start(&paths) {
         Ok(b) => b,

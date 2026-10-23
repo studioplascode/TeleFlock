@@ -12,6 +12,7 @@
 
 mod api;
 mod client;
+pub mod durable;
 mod error;
 mod events;
 pub mod model;

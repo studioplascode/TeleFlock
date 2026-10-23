@@ -10,7 +10,7 @@ The real terminal escape hatch: xterm.js (WebGL, falls back to DOM) attached to 
 export function TerminalPane(props: {
   hostId: string;
   target: TermTarget;            // from @/core/gen
-  mode?: TermMode;               // "control" (default) | "observe" (read-only, crops, never resizes)
+  mode?: TermMode;               // "control" (default) | "observe" (read-only, shows the driver's grid, never resizes)
   compact?: boolean;             // board tiles: tiny font, no chrome, no banners, no input
   takeover?: boolean;            // initial open evicts another client's input lease (default false)
   autoFocus?: boolean;           // focus xterm after open (default: !compact && mode === "control")
@@ -55,6 +55,10 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
   width) keeps the current grid and never resizes the pane. A control resize sizes the real PTY and herdr keeps it
   after the client lets go, so a collapsed size would leave the agent re-wrapped at 2 columns for every later viewer
   (observers, such as the board's live tile, show the pane at its driver's size).
+- Observe: frames come at the pane's own PTY grid (hostd attaches at it and re-attaches when the driver resizes the
+  pane), and the view only scales that grid (`observeScale.ts`): the full view shows all of it (shrunk to fit, centred,
+  never above the font size), a board tile fills its width and keeps the bottom rows (latest output, an agent's editor).
+  Window, sidebar or DPR changes never reopen the observer or reach herdr.
 - Font size comes from `useSettings().terminalFontSize`; pinch-zoom (mobile) and Ctrl +/−/0 (desktop) persist it.
 - Font (every surface, `TERM_FONT_FAMILY` in `theme.ts`): bundled Fira Code (`@fontsource-variable/fira-code`, OFL,
   `src/assets/fonts/fira-code/LICENSE`), then bundled Symbols Nerd Font Mono (Nerd Fonts v3.5.1 symbols-only, MIT + icon-set

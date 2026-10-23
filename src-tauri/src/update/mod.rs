@@ -17,25 +17,32 @@
 //! Copies that must not replace themselves (debug builds, the Arch package, a bare binary) report
 //! `supported: false` with the reason (`release::Target::current`).
 //!
+//! Automatic checks run here, not in the webview (which is gone on Android while the keep-alive
+//! service keeps the process up without an activity): shortly after launch, about hourly, and
+//! when the app comes back to the front (window focus, `MainActivity.onResume`) if the last
+//! check is 20 minutes old (`schedule`). They only run while `settings.autoUpdate` is on and
+//! install what they find like a manual check with install does. Android starts the installer
+//! only while the app is in front; otherwise the verified APK waits for the next resume.
+//!
 //! The webview drives it through `core_call` app methods answered here instead of the engine
 //! (`app.updateStatus`, `app.updateCheck`, `app.updateInstall`); progress is pushed as
 //! `AppEvent::Update` on the regular event channel. Failures never surface on their own: they
-//! are logged and kept in the status for Settings.
+//! are logged and kept in the status for Settings, and automatic checks back off.
 
 mod net;
 pub mod release;
+mod schedule;
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
 use semver::Version;
 use serde_json::Value;
 use tauri::{AppHandle, Wry};
 use tf_proto::{ApiError, AppEvent, AppMethod, Settings, UpdateCheckParams, UpdatePhase, UpdateStatus};
+use tokio::sync::Notify;
 
 use self::release::{Candidate, Target};
+use self::schedule::{Outcome, Schedule, Trigger};
 use crate::core::CoreState;
 
 /// App methods answered by the shell (see the module docs).
@@ -52,15 +59,21 @@ pub struct Updater {
     target: Option<Target>,
     user_agent: String,
     state: Mutex<State>,
-    launch_checked: AtomicBool,
+    /// Wakes the automatic checks: the app came back to the front.
+    foreground: Notify,
 }
 
 struct State {
     status: UpdateStatus,
     candidate: Option<Candidate>,
+    schedule: Schedule,
     /// Android: the verified APK waiting for the install permission / the system prompt.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     apk: Option<std::path::PathBuf>,
+    /// Android: the APK was ready while the app was in the background; the installer starts on
+    /// the next resume.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    prompt_pending: bool,
 }
 
 fn busy(p: UpdatePhase) -> bool {
@@ -102,9 +115,44 @@ impl Updater {
             target: target.ok(),
             app,
             core,
-            state: Mutex::new(State { status, candidate: None, apk: None }),
-            launch_checked: AtomicBool::new(false),
+            state: Mutex::new(State {
+                status,
+                candidate: None,
+                schedule: Schedule::default(),
+                apk: None,
+                prompt_pending: false,
+            }),
+            foreground: Notify::new(),
         })
+    }
+
+    /// Starts the automatic checks (module docs); nothing for copies that can't update.
+    pub fn start(self: &Arc<Self>) {
+        if self.target.is_none() {
+            return;
+        }
+        let me = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            schedule::run(schedule::TIMING, &me.foreground, |t| me.auto_check(t)).await;
+        });
+    }
+
+    /// The app is in front again (window focused, activity resumed): may trigger a check.
+    pub fn foreground(&self) {
+        self.foreground.notify_one();
+    }
+
+    /// One automatic check if it is due and `settings.autoUpdate` is on.
+    async fn auto_check(self: &Arc<Self>, trigger: Trigger) {
+        let due = {
+            let s = self.lock();
+            s.schedule.due(trigger, now_ms(), s.status.phase)
+        };
+        if !due || !self.auto_update_enabled().await {
+            return;
+        }
+        log::info!("update: automatic check ({trigger:?})");
+        self.check(UpdateCheckParams { install: true }).await;
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -132,6 +180,7 @@ impl Updater {
             s.status.phase = UpdatePhase::Error;
             s.status.progress = None;
             s.status.error = Some(e);
+            s.schedule.failed();
         })
     }
 
@@ -151,7 +200,7 @@ impl Updater {
         match self.core.engine.call(None, "settings.get", Value::Null).await {
             Ok(v) => serde_json::from_value::<Settings>(v).is_ok_and(|s| s.auto_update),
             Err(e) => {
-                log::warn!("update: can't read settings ({e}); skipping the launch update");
+                log::warn!("update: can't read settings ({e}); skipping the automatic update");
                 false
             }
         }
@@ -160,14 +209,6 @@ impl Updater {
     /// Looks for a newer release; resolves once discovery is done (the install, if any, runs on).
     pub async fn check(self: &Arc<Self>, p: UpdateCheckParams) -> UpdateStatus {
         let Some(target) = self.target else { return self.status() };
-        let install = if p.launch {
-            if self.launch_checked.swap(true, Ordering::AcqRel) || !self.auto_update_enabled().await {
-                return self.status();
-            }
-            true
-        } else {
-            p.install
-        };
         {
             let mut s = self.lock();
             if busy(s.status.phase) {
@@ -191,6 +232,7 @@ impl Updater {
                     s.status.phase = UpdatePhase::Error;
                     s.status.error = Some(format!("update check failed: {e}"));
                     s.status.checked_at = Some(now_ms());
+                    s.schedule.checked(now_ms(), Outcome::Failed, schedule::jitter());
                 });
             }
         };
@@ -199,14 +241,17 @@ impl Updater {
             Some(c) => log::info!("update: {} available (running {})", c.tag, self.current),
             None => log::info!("update: {} is up to date", self.current),
         }
+        // Manual platforms only report the new version; the user downloads it (install()).
+        let install = available && p.install && self.target != Some(Target::MacOs);
         let status = self.update(|s| {
             s.status.phase = if available { UpdatePhase::Available } else { UpdatePhase::UpToDate };
             s.status.latest = found.as_ref().map(|c| c.version.to_string());
             s.status.checked_at = Some(now_ms());
             s.candidate = found;
+            let outcome = if install { Outcome::Installing } else { Outcome::Done };
+            s.schedule.checked(now_ms(), outcome, schedule::jitter());
         });
-        // Manual platforms only report the new version; the user downloads it (install()).
-        if available && install && !status.manual { self.install().unwrap_or(status) } else { status }
+        if install { self.install().unwrap_or(status) } else { status }
     }
 
     /// Starts downloading + installing the release found by the last check. Manual platforms
@@ -346,8 +391,20 @@ impl Updater {
         // Cache dir = Context.getCacheDir(), exposed by the app's FileProvider (`res/xml/file_paths.xml`).
         let dest = self.app.path().app_cache_dir().map_err(|e| e.to_string())?.join("updates").join(apk_name);
         net::download_verified(&client, apk_url, &dest, &sha256, self.progress()).await?;
+        let in_front = tauri_plugin_teleflock_android::in_foreground();
         self.lock().apk = Some(dest);
-        self.launch_apk(true)
+        if in_front {
+            return self.launch_apk(true);
+        }
+        // The installer can't start from the background (no activity, or not in front): keep the
+        // verified APK and prompt on the next resume.
+        log::info!("update: downloaded in the background; installing when TeleFlock is opened");
+        self.update(|s| {
+            s.prompt_pending = true;
+            s.status.progress = None;
+            s.status.phase = UpdatePhase::Available;
+        });
+        Ok(())
     }
 
     /// Hands the verified APK to the system installer. The plugin first checks the archive
@@ -357,7 +414,11 @@ impl Updater {
     #[cfg(target_os = "android")]
     fn launch_apk(&self, open_settings: bool) -> Result<(), String> {
         use tauri_plugin_teleflock_android::{ApkInstall, TeleFlockAndroidExt};
-        let path = self.lock().apk.clone().ok_or("no downloaded update")?;
+        let path = {
+            let mut s = self.lock();
+            s.prompt_pending = false;
+            s.apk.clone().ok_or("no downloaded update")?
+        };
         let r = self.app.teleflock_android().install_apk(&path.to_string_lossy(), open_settings).map_err(|e| {
             // A rejected APK is gone (deleted by the plugin); don't offer it again.
             self.lock().apk = None;
@@ -374,23 +435,34 @@ impl Updater {
     }
 
     /// Android: the activity is in front again (back from the permission screen or the system
-    /// installer). A granted permission continues the install; a dismissed installer leaves the
-    /// update available (a completed install replaces this process instead).
+    /// installer, or opened again). A granted permission continues the install, an APK
+    /// downloaded in the background gets its installer prompt now; a dismissed installer leaves
+    /// the update available (a completed install replaces this process instead) and backs the
+    /// automatic checks off. Otherwise an automatic check may be due.
     #[cfg(target_os = "android")]
     pub fn resumed(self: &Arc<Self>) {
-        match self.status().phase {
-            UpdatePhase::NeedsPermission => {
-                let me = Arc::clone(self);
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = me.launch_apk(false) {
-                        me.fail(e);
-                    }
-                });
-            }
+        let (phase, prompt_pending) = {
+            let s = self.lock();
+            (s.status.phase, s.prompt_pending)
+        };
+        let open_settings = match phase {
+            UpdatePhase::NeedsPermission => false,
+            // Error: a later check failed; the verified APK still waits.
+            UpdatePhase::Available | UpdatePhase::Error if prompt_pending => true,
             UpdatePhase::Installing => {
-                self.update(|s| s.status.phase = UpdatePhase::Available);
+                self.update(|s| {
+                    s.status.phase = UpdatePhase::Available;
+                    s.schedule.failed();
+                });
+                return;
             }
-            _ => {}
-        }
+            _ => return self.foreground(),
+        };
+        let me = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = me.launch_apk(open_settings) {
+                me.fail(e);
+            }
+        });
     }
 }

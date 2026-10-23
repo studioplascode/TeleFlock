@@ -83,10 +83,29 @@ pub struct AgentSnapshot {
     pub status: String,
     #[serde(default)]
     pub has_session_file: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_millis")]
     pub created_at: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_millis")]
     pub last_activity: i64,
+}
+
+/// Epoch milliseconds as omp sends them: JS numbers. Agents restored from disk carry file times
+/// (`birthtimeMs`, `mtimeMs`), which are fractional; `null` reads as 0 (unknown).
+fn lenient_millis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let n = Option::<serde_json::Number>::deserialize(d)?;
+    Ok(n.and_then(|n| n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.round() as i64))).unwrap_or(0))
+}
+
+/// An agent this build can't read is dropped, not the frame carrying it: a rejected `welcome`
+/// is ignored by the guest, and its join would time out on every retry.
+fn lenient_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AgentSnapshot>, D::Error> {
+    let raw = Option::<Vec<Value>>::deserialize(d)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| {
+            serde_json::from_value(v).map_err(|e| log::warn!("collab: skipping an unreadable agent snapshot: {e}")).ok()
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,7 +114,7 @@ pub struct Welcome {
     pub proto: u32,
     pub header: SessionHeader,
     pub state: SessionState,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_agents")]
     pub agents: Vec<AgentSnapshot>,
     #[serde(default)]
     pub entry_count: u64,
@@ -217,13 +236,28 @@ enum KnownHost {
     Event { event: Value },
     State { state: SessionState },
     Bus { channel: String, #[serde(default)] data: Value },
-    Agents { agents: Vec<AgentSnapshot> },
+    Agents { #[serde(deserialize_with = "lenient_agents")] agents: Vec<AgentSnapshot> },
     UiRequest { request: UiRequestFrame },
     UiRequestEnd { req_id: u64 },
     Transcript(TranscriptFrame),
     Bye { #[serde(default)] reason: String },
     Error { #[serde(default)] message: String },
 }
+
+const KNOWN_TAGS: &[&str] = &[
+    "welcome",
+    "snapshot-chunk",
+    "entry",
+    "event",
+    "state",
+    "bus",
+    "agents",
+    "ui-request",
+    "ui-request-end",
+    "transcript",
+    "bye",
+    "error",
+];
 
 impl HostFrame {
     /// Parse decrypted frame JSON. Fails only on invalid JSON / non-object payloads.
@@ -235,7 +269,16 @@ impl HostFrame {
     pub fn from_value(value: Value) -> HostFrame {
         match serde_json::from_value::<KnownHost>(value.clone()) {
             Ok(k) => k.into(),
-            Err(_) => HostFrame::Unknown(value),
+            Err(e) => {
+                // An unknown `t` is a newer omp's business; a known one that no longer parses is
+                // ignored by every consumer (a `welcome` stalls the join), so say why, a few times.
+                static WARNED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let tag = value.get("t").and_then(Value::as_str).unwrap_or("");
+                if KNOWN_TAGS.contains(&tag) && WARNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                    log::warn!("collab: {tag} frame doesn't match this build: {e}");
+                }
+                HostFrame::Unknown(value)
+            }
         }
     }
 
@@ -425,6 +468,27 @@ mod tests {
         let f = HostFrame::parse(br#"{"t":"ui-request","request":{"reqId":3,"kind":"wizard"}}"#).unwrap();
         assert!(matches!(f, HostFrame::Unknown(_)));
         assert!(HostFrame::parse(b"not json").is_err());
+    }
+
+    /// omp 18.12 restores a resumed session's subagents with file times (`mtimeMs`), which are
+    /// fractional; the whole welcome used to fail and every join timed out.
+    #[test]
+    fn welcome_with_restored_agents_parses() {
+        let f = HostFrame::parse(
+            br#"{"t":"welcome","proto":3,"header":{"id":"s","timestamp":"2026-10-22T11:44:46.293Z","cwd":"/r"},
+                "state":{"isStreaming":false,"cwd":"/r","participants":[{"name":"root","role":"host"}]},
+                "agents":[{"id":"Main","kind":"main","status":"running","createdAt":1792739916162,"lastActivity":1792739916200},
+                          {"id":"Sub","kind":"sub","status":"parked","createdAt":null,"lastActivity":1792671289132.6322,"hasSessionFile":true},
+                          {"kind":"sub","status":"parked"}],
+                "entryCount":1176}"#,
+        )
+        .unwrap();
+        let HostFrame::Welcome(w) = f else { panic!("not a welcome: {f:?}") };
+        assert_eq!(w.entry_count, 1176);
+        assert_eq!(w.agents.len(), 2, "the agent without an id is dropped, not the welcome");
+        assert_eq!((w.agents[1].created_at, w.agents[1].last_activity), (0, 1792671289133));
+        let f = HostFrame::parse(br#"{"t":"agents","agents":[{"id":"Sub","lastActivity":1.5e12}]}"#).unwrap();
+        assert!(matches!(&f, HostFrame::Agents { agents } if agents[0].last_activity == 1_500_000_000_000));
     }
 
     /// Every frame in every golden sample parses into a known variant and re-serializes.

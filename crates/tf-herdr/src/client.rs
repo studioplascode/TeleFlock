@@ -171,37 +171,69 @@ impl HerdrClient {
         serde_json::from_slice::<L>(&out).map(|l| l.sessions).map_err(|e| HerdrError::protocol("session list --json", e))
     }
 
-    /// Make sure the session server runs: ping, else spawn it detached
-    /// (`setsid`, stdin from `/dev/null`) and wait until it answers.
+    /// Make sure the session server runs: ping, else spawn it detached (`setsid`, stdin from
+    /// `/dev/null`; on Linux with systemd in its own transient scope, see [`crate::durable`]) and
+    /// wait until it answers.
     pub async fn ensure_server(&self) -> Result<Pong> {
         match self.ping().await {
             Ok(p) => return Ok(p),
             Err(e) if e.is_server_not_running() => {}
             Err(e) => return Err(e),
         }
-        log::info!("starting herdr server for session {:?}", self.session().unwrap_or("default"));
-        self.spawn_server()?;
+        let session = self.session().unwrap_or("default");
+        let mut scope = crate::durable::Scope::plan(&format!("teleflock-herdr-{session}"));
+        match &scope {
+            Some(s) => log::info!("starting herdr server for session {session:?} in {}", s.unit),
+            None => log::info!("starting herdr server for session {session:?}"),
+        }
+        let mut child = self.spawn_server(scope.as_ref())?;
         let deadline = tokio::time::Instant::now() + SERVER_START_TIMEOUT;
         let mut last = None;
+        let mut up = None;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(100)).await;
             match self.ping().await {
-                Ok(p) => return Ok(p),
+                Ok(p) => {
+                    up = Some(p);
+                    break;
+                }
                 Err(e) => last = Some(e),
             }
+            // systemd-run exits non-zero without exec'ing when it cannot create the scope.
+            if let Some(s) = &scope
+                && let Ok(Some(status)) = child.try_wait()
+                && !status.success()
+            {
+                log::warn!("systemd-run could not start herdr in {} ({status}); starting it directly", s.unit);
+                scope = None;
+                child = self.spawn_server(None)?;
+            }
         }
-        Err(HerdrError::new(
-            code::SERVER_NOT_RUNNING,
-            format!(
-                "herdr server did not come up within {}s{}",
-                SERVER_START_TIMEOUT.as_secs(),
-                last.map(|e| format!(" (last error: {e})")).unwrap_or_default()
-            ),
-        ))
+        // Reap it if it ever exits while we live; it is otherwise fully detached.
+        std::thread::Builder::new()
+            .name("herdr-server-reaper".into())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .map_err(|e| HerdrError::transport("spawn reaper thread", e))?;
+        up.ok_or_else(|| {
+            HerdrError::new(
+                code::SERVER_NOT_RUNNING,
+                format!(
+                    "herdr server did not come up within {}s{}",
+                    SERVER_START_TIMEOUT.as_secs(),
+                    last.map(|e| format!(" (last error: {e})")).unwrap_or_default()
+                ),
+            )
+        })
     }
 
-    fn spawn_server(&self) -> Result<()> {
-        let mut cmd = std::process::Command::new(&self.inner.bin);
+    /// `herdr [--session S] server`, detached; inside `scope` when given.
+    fn spawn_server(&self, scope: Option<&crate::durable::Scope>) -> Result<std::process::Child> {
+        let mut cmd = match scope {
+            Some(s) => s.command(&self.inner.bin, &format!("herdr server (session {}) started by TeleFlock", self.session().unwrap_or("default"))),
+            None => std::process::Command::new(&self.inner.bin),
+        };
         cmd.args(self.session_args()).arg("server");
         for k in PANE_ENV {
             cmd.env_remove(k);
@@ -215,6 +247,7 @@ impl HerdrClient {
             use std::os::unix::process::CommandExt;
             // SAFETY: setsid is async-signal-safe; it detaches the server from our session
             // and controlling terminal so it survives us (herdr.md §2: setsid + </dev/null).
+            // systemd-run execs the server in place, so the new session carries over.
             unsafe {
                 cmd.pre_exec(|| {
                     libc::setsid();
@@ -229,15 +262,14 @@ impl HerdrClient {
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         }
-        let mut child = cmd.spawn().map_err(|e| HerdrError::transport(&format!("spawn {} server", self.inner.bin.display()), e))?;
-        // Reap it if it ever exits while we live; it is otherwise fully detached.
-        std::thread::Builder::new()
-            .name("herdr-server-reaper".into())
-            .spawn(move || {
-                let _ = child.wait();
-            })
-            .map_err(|e| HerdrError::transport("spawn reaper thread", e))?;
-        Ok(())
+        match cmd.spawn() {
+            Ok(c) => Ok(c),
+            Err(e) if scope.is_some() => {
+                log::warn!("cannot run systemd-run ({e}); starting herdr directly");
+                self.spawn_server(None)
+            }
+            Err(e) => Err(HerdrError::transport(&format!("spawn {} server", self.inner.bin.display()), e)),
+        }
     }
 
     /// Raw request: `{"id","method","params"}` on a fresh connection. `T = serde_json::Value`
@@ -366,7 +398,7 @@ pub fn default_socket_path(session: Option<&str>) -> PathBuf {
     }
 }
 
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     let Ok(md) = std::fs::metadata(p) else { return false };
     if !md.is_file() {
         return false;

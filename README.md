@@ -105,7 +105,7 @@ When an agent needs you, you get an OS notification you can act on: a Windows to
 
 ### Updates
 
-The app finds new versions on GitHub releases by itself:
+The app finds new versions on GitHub releases by itself: shortly after launch, about every hour while it keeps running, and when you come back to it after 20 minutes or more. On Android, an update found in the background asks to install the next time you open the app.
 
 | Platform | How it updates |
 |---|---|
@@ -161,8 +161,9 @@ On the machine that runs herdr and omp:
    - **herdr's omp integration** (`install-herdr-integration`): accurate working/blocked/idle states.
    - **Share sessions with TeleFlock** (`enable-global-sharing`): sets `collab.autoStart: control` and `collab.relayUrl: ws://127.0.0.1:47466` in omp's global config. Every omp session, including ones you start by hand or herdr restores, then appears live in TeleFlock.
    - **TeleFlock bridge for every session** (`install-global-bridge`): copies the TeleFlock extension into `~/.omp/agent/extensions/` so precise controls work for every session.
+   - **herdr outside login sessions** (`move-herdr-out-of-login-session`, Linux with systemd, root): appears when the running herdr server still lives in the login session that started it. systemd kills everything in a login session's scope when logind tears the session down (on logout with `KillUserProcesses=yes`, or when a restarted logind cleans up sessions that already ended), and every agent goes with it. The fix moves herdr and all its processes into a scope of their own; nothing is stopped or restarted. Non-root users see what to do instead (`loginctl enable-linger`).
 
-   You can skip all three. Agents started from TeleFlock are shared and bridged per process anyway, and an unshared session can be connected with one click (**Connect** injects `/collab` into it).
+   You can skip all of them. Agents started from TeleFlock are shared and bridged per process anyway, an unshared session can be connected with one click (**Connect** injects `/collab` into it), and on Linux with systemd the herdr servers TeleFlock starts get their own scope from the start.
 
 5. **AI naming** needs nothing extra: it uses omp's `tiny` model role (or `smol`) on the host. Check it with `omp config get modelRoles`.
 
@@ -195,6 +196,7 @@ flowchart LR
 - omp keeps running as its normal TUI inside herdr, so herdr's state tracking and the real terminal keep working.
 - The app's Rust core uploads and starts a small host daemon, `tf-hostd`, over SSH (or locally), and speaks one protocol to it whatever the transport.
 - All your devices share that daemon. When they run different app versions, the host keeps the newest `tf-hostd` and older apps attach to it instead of replacing it, so one device never knocks the other off.
+- On Linux with systemd, `tf-hostd` and any herdr server it starts run in transient scopes of their own (root: the system manager; other users: their user manager when lingering is on), so the SSH login that started them can end, or be cleaned up, without taking the agents down.
 - `tf-hostd` joins each omp session as a private collab guest on a loopback relay. Room keys never leave the host.
 - A companion omp extension adds structured controls (model, thinking, tree, queue, …).
 - herdr is driven through its local API; git and `gh` run on the host for review and shipping.
@@ -247,6 +249,7 @@ What has been verified, and how:
 - **Test suites:** the Rust workspace tests, the frontend unit tests and the typecheck.
 - **Real omp + herdr, on Linux:** the full stack was exercised end to end through the UI in herdr lab sessions, via `tf-devserver` with the local transport, including subscription limits against real Claude and Codex accounts. AI naming (`ai.complete`) was run against omp 18.12.3's real `tiny` model role (an answer in about 4 s).
 - **0.4.0 interface:** the changed screens were walked in the demo at 1440×900, 1280×720 and on a Pixel 5 profile, and the whole change went through a code review.
+- **0.4.1 fixes:** each was reproduced first and re-checked after the fix: the collab join of resumed sessions against a live omp 18.12.3 room (joined in about 1 s instead of timing out every 30 s), queued steers, omp's own `/btw` with follow-ups, kept image originals and the observed terminal size in herdr lab sessions, the systemd scopes and the herdr move on a throwaway process tree, and the update schedule in unit tests plus a live run against GitHub. The Android lifecycle hook for updates was compiled only in the release build.
 - **Packages:** the Windows installer, the signed APK and the Linux .deb, AppImage and Arch package build from this tree. The Linux app was smoke-run: the window renders, the tray starts, a second launch hands its `teleflock://` link to the first, and the .deb installs and runs on a clean Ubuntu 22.04.
 
 **Not yet exercised:**

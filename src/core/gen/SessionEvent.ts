@@ -8,4 +8,4 @@ import type { UiRequest } from "./UiRequest";
 /**
  * Live update for an open session (`session.open` subscribes the client).
  */
-export type SessionEvent = { "k": "reset", snapshot: SessionSnapshot, } | { "k": "upsert", item: TranscriptItem, } | { "k": "append", id: string, field: AppendField, text: string, } | { "k": "remove", id: string, } | { "k": "meta", meta: SessionMeta, } | { "k": "ui", request: UiRequest | null, } | { "k": "btw", btwId: string, text: string, done: boolean, } | { "k": "ended", reason: string, };
+export type SessionEvent = { "k": "reset", snapshot: SessionSnapshot, } | { "k": "upsert", item: TranscriptItem, } | { "k": "append", id: string, field: AppendField, text: string, } | { "k": "remove", id: string, } | { "k": "meta", meta: SessionMeta, } | { "k": "ui", request: UiRequest | null, } | { "k": "btw", btwId: string, turn: number, question?: string, text: string, done: boolean, } | { "k": "ended", reason: string, };

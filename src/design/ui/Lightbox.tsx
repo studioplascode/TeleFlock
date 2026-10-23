@@ -158,6 +158,12 @@ function Frame({ image, index, count, go, close }: FrameProps) {
     const reported = image.width && image.height;
     const w = (reported ? image.width : img.naturalWidth) || 800;
     const h = (reported ? image.height : img.naturalHeight) || 600;
+    if (natural && natural.w !== w) {
+      // A sharper copy replaced the one shown (an original fetched after the preview): a zoomed view
+      // keeps its on-screen size; a fitted one re-fits by itself.
+      const k = natural.w / w;
+      setStored((s) => (s.view ? { view: { ...s.view, scale: s.view.scale * k }, animate: false } : s));
+    }
     setNatural((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
   };
   // Cached images can finish before React attaches onLoad.

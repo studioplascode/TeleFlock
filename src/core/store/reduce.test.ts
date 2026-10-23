@@ -186,12 +186,24 @@ describe("sessions", () => {
     s = reduceEvents(s, [
       { type: "session", hostId: "h", agentId: "a", ev: { k: "meta", meta: { ...snap([]).meta, fast: true } } },
       { type: "session", hostId: "h", agentId: "a", ev: { k: "ui", request: ui } },
-      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b1", text: "Hi ", done: false } },
-      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b1", text: "there", done: true } },
+      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b1", turn: 0, question: "Why?", text: "Hi ", done: false } },
+      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b1", turn: 0, text: "there", done: true } },
+      // A follow-up: a new turn of the same conversation.
+      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b1", turn: 1, question: "And?", text: "So", done: false } },
+      // Asked before this client opened the session: earlier turns stay holes.
+      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b2", turn: 2, question: "Third?", text: "", done: false } },
+      // An older bridge streams no question; hostd's announcement of it can land after `done`.
+      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b3", turn: 0, text: "Four", done: true } },
+      { type: "session", hostId: "h", agentId: "a", ev: { k: "btw", btwId: "b3", turn: 0, question: "2+2?", text: "", done: false } },
     ]).state;
     expect(s.sessions["h::a"]?.meta?.fast).toBe(true);
     expect(s.sessions["h::a"]?.ui?.id).toBe("r1");
-    expect(s.sessions["h::a"]?.btw.b1).toEqual({ text: "Hi there", done: true });
+    expect(s.sessions["h::a"]?.btw.b1?.turns).toEqual([
+      { question: "Why?", text: "Hi there", done: true },
+      { question: "And?", text: "So", done: false },
+    ]);
+    expect(s.sessions["h::a"]?.btw.b2?.turns).toEqual([undefined, undefined, { question: "Third?", text: "", done: false }]);
+    expect(s.sessions["h::a"]?.btw.b3?.turns).toEqual([{ question: "2+2?", text: "Four", done: true }]);
     s = reduceEvents(s, [
       { type: "session", hostId: "h", agentId: "a", ev: { k: "ui", request: null } },
       { type: "session", hostId: "h", agentId: "a", ev: { k: "ended", reason: "pane closed" } },

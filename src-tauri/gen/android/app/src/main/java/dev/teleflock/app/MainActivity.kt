@@ -49,6 +49,11 @@ class MainActivity : TauriActivity() {
     RustBridge.activityResumed(!hasWebView)
   }
 
+  override fun onPause() {
+    RustBridge.activityPaused()
+    super.onPause()
+  }
+
   override fun onDestroy() {
     // Before super, which reports the window destroyed: from now on Rust must not reach this
     // activity (plugin calls) or wait for it to come back.

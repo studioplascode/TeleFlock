@@ -11,6 +11,7 @@ object RustBridge {
     @JvmStatic private external fun onActivityCreated(id: Int)
     @JvmStatic private external fun onActivityDestroyed(id: Int)
     @JvmStatic private external fun onActivityResumed(needsWindow: Boolean): Boolean
+    @JvmStatic private external fun onActivityPaused()
 
     /** false = the Rust core is not loaded (cold process from a notification) or not ready. */
     fun deliverAction(json: String): Boolean = try {
@@ -60,5 +61,13 @@ object RustBridge {
         onActivityResumed(needsWindow)
     } catch (_: UnsatisfiedLinkError) {
         false
+    }
+
+    /** `MainActivity.onPause`: the app left the front (Rust defers the update installer prompt). */
+    fun activityPaused() {
+        try {
+            onActivityPaused()
+        } catch (_: UnsatisfiedLinkError) {
+        }
     }
 }

@@ -149,7 +149,8 @@ async fn wait_released(paths: &Paths, max: Duration) -> bool {
 }
 
 async fn start_and_connect(paths: &Paths, relay_port: u16) -> Result<(ipc::BoxRead, ipc::BoxWrite), String> {
-    let mut child = spawn_daemon(paths, relay_port).map_err(|e| format!("cannot start daemon: {e}"))?;
+    let mut scope = tf_herdr::durable::Scope::plan("teleflock-hostd");
+    let mut child = spawn_daemon(paths, relay_port, scope.as_ref()).map_err(|e| format!("cannot start daemon: {e}"))?;
     let deadline = Instant::now() + START_WAIT;
     let mut exited: Option<i32> = None;
     while Instant::now() < deadline {
@@ -165,7 +166,17 @@ async fn start_and_connect(paths: &Paths, relay_port: u16) -> Result<(ipc::BoxRe
                 // Code 3: another daemon won the race; keep waiting for its socket.
                 let code = status.code().unwrap_or(-1);
                 if code != 3 {
-                    return Err(format!("daemon exited with status {code}"));
+                    match scope.take() {
+                        // systemd-run exits with 1 without exec'ing when it cannot create the
+                        // scope (no bus, no permission). A daemon that failed on its own fails
+                        // the direct retry the same way.
+                        Some(s) => {
+                            eprintln!("tf-hostd: systemd-run could not start the daemon in {} (status {code}); starting it directly", s.unit);
+                            child = spawn_daemon(paths, relay_port, None).map_err(|e| format!("cannot start daemon: {e}"))?;
+                            continue;
+                        }
+                        None => return Err(format!("daemon exited with status {code}")),
+                    }
                 }
                 exited = Some(code);
             }
@@ -175,9 +186,14 @@ async fn start_and_connect(paths: &Paths, relay_port: u16) -> Result<(ipc::BoxRe
     Err("daemon not ready after 10 s".into())
 }
 
-fn spawn_daemon(paths: &Paths, relay_port: u16) -> std::io::Result<std::process::Child> {
+/// Starts `tf-hostd daemon` detached, inside `scope` when given (Linux with systemd: outside the
+/// login session that runs this attach, so tearing that session down spares the daemon).
+fn spawn_daemon(paths: &Paths, relay_port: u16, scope: Option<&tf_herdr::durable::Scope>) -> std::io::Result<std::process::Child> {
     let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = match scope {
+        Some(s) => s.command(&exe, "TeleFlock host daemon (tf-hostd)"),
+        None => std::process::Command::new(&exe),
+    };
     cmd.arg("daemon")
         .arg("--relay-port")
         .arg(relay_port.to_string())
@@ -193,14 +209,21 @@ fn spawn_daemon(paths: &Paths, relay_port: u16) -> std::io::Result<std::process:
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is async-signal-safe; called between fork and exec.
+        // SAFETY: setsid is async-signal-safe; called between fork and exec. systemd-run execs
+        // the daemon in place, so the new session carries over.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
                 Ok(())
             });
         }
-        cmd.spawn()
+        match cmd.spawn() {
+            Err(e) if scope.is_some() => {
+                eprintln!("tf-hostd: cannot run systemd-run ({e}); starting the daemon directly");
+                spawn_daemon(paths, relay_port, None)
+            }
+            r => r,
+        }
     }
     #[cfg(windows)]
     {

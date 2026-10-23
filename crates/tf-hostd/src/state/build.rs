@@ -199,10 +199,13 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&SessionMeta>) -> OmpInfo {
         cost: meta.and_then(|m| m.cost.clone()),
         todos,
         subagents,
-        queue: ctl
-            .map(|c| c.queue.clone())
-            .or_else(|| meta.map(|m| m.queue.clone()))
-            .unwrap_or(tf_proto::model::QueueInfo { steering: vec![], follow_up: vec![] }),
+        // The session meta carries the bridge's queue merged with the prompts we queued.
+        queue: match (ctl, meta) {
+            (Some(c), Some(m)) => tf_collab::replica::merge_queue(&c.queue, &m.queue),
+            (Some(c), None) => c.queue.clone(),
+            (None, Some(m)) => m.queue.clone(),
+            (None, None) => tf_proto::model::QueueInfo { steering: vec![], follow_up: vec![] },
+        },
         turn_started_at: i.turn_started_at,
         last_turn_ended_at: i.last_turn_ended_at,
     }

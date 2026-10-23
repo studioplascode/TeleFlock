@@ -5631,7 +5631,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-teleflock-android"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "jni 0.21.1",
  "log",
@@ -5776,7 +5776,7 @@ dependencies = [
 
 [[package]]
 name = "teleflock"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "log",
  "percent-encoding",
@@ -5836,7 +5836,7 @@ dependencies = [
 
 [[package]]
 name = "tf-client"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -5856,7 +5856,7 @@ dependencies = [
 
 [[package]]
 name = "tf-collab"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
@@ -5876,7 +5876,7 @@ dependencies = [
 
 [[package]]
 name = "tf-devserver"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "clap",
@@ -5895,7 +5895,7 @@ dependencies = [
 
 [[package]]
 name = "tf-herdr"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -5907,7 +5907,7 @@ dependencies = [
 
 [[package]]
 name = "tf-hostd"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5919,6 +5919,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sysinfo",
  "tempfile",
  "tf-collab",
@@ -5933,7 +5934,7 @@ dependencies = [
 
 [[package]]
 name = "tf-proto"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5943,7 +5944,7 @@ dependencies = [
 
 [[package]]
 name = "tf-transport"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "bytes",

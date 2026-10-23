@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use jni::{
     JNIEnv,
@@ -17,11 +20,20 @@ use crate::{NativeEvent, NotificationAction, NotificationRef, Notify};
 /// Ids (`WryActivity.id`) of this process's live activities, reported by `MainActivity`.
 static ACTIVITIES: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 
+/// `MainActivity` is resumed (between `onResume` and `onPause`).
+static FOREGROUND: AtomicBool = AtomicBool::new(false);
+
 /// Whether an activity is alive. Kotlin commands (and windows) need one, but the keep-alive
 /// service keeps the process and its Rust core running after the last activity is destroyed
 /// (swiped away from recents).
 pub fn has_activity() -> bool {
     !ACTIVITIES.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+}
+
+/// Whether the app is in front (an activity is resumed). Starting another activity, e.g. the
+/// system package installer, only works then (background activity starts are blocked).
+pub fn in_foreground() -> bool {
+    FOREGROUND.load(Ordering::Acquire) && has_activity()
 }
 
 pub struct TeleFlockAndroid<R: Runtime>(pub PluginHandle<R>);
@@ -165,7 +177,11 @@ pub extern "system" fn Java_dev_teleflock_android_RustBridge_onActivityCreated(_
 /// changes: the replacement keeps the id, its window and its WebView).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_teleflock_android_RustBridge_onActivityDestroyed(_env: JNIEnv, _class: JClass, id: jint) {
-    ACTIVITIES.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+    let mut activities = ACTIVITIES.lock().unwrap_or_else(|p| p.into_inner());
+    activities.remove(&id);
+    if activities.is_empty() {
+        FOREGROUND.store(false, Ordering::Release);
+    }
 }
 
 /// `RustBridge.onActivityResumed(needsWindow)` from `MainActivity.onResume`: the app is in front.
@@ -177,6 +193,7 @@ pub extern "system" fn Java_dev_teleflock_android_RustBridge_onActivityResumed(
     _class: JClass,
     needs_window: jboolean,
 ) -> jboolean {
+    FOREGROUND.store(true, Ordering::Release);
     match SINK.get() {
         Some(sink) => {
             sink(NativeEvent::ActivityResumed { needs_window: needs_window != JNI_FALSE });
@@ -184,6 +201,12 @@ pub extern "system" fn Java_dev_teleflock_android_RustBridge_onActivityResumed(
         }
         None => JNI_FALSE,
     }
+}
+
+/// `RustBridge.onActivityPaused()` from `MainActivity.onPause`: the app left the front.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_teleflock_android_RustBridge_onActivityPaused(_env: JNIEnv, _class: JClass) {
+    FOREGROUND.store(false, Ordering::Release);
 }
 
 /// `RustBridge.onNotificationAction(json)`: a button or inline reply on one of our notifications.

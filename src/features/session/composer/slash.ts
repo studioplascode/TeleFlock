@@ -230,12 +230,8 @@ const NATIVE: Record<string, Native> = {
     run: async (c, a) => {
       if (!a) return inspector(c, "btw");
       const r = await hostCall(c.hostId, "agent.btw", { agentId: c.agentId, question: a });
-      if (r.ok) {
-        const ui = useSessionUi.getState();
-        ui.addBtw(c.key, r.value.btwId, a);
-        ui.setTab(c.key, "btw");
-        ui.setSheet(c.key, true);
-      }
+      // The conversation (question included) streams into the session's btw state.
+      if (r.ok) await inspector(c, "btw");
       return r.ok;
     },
   },

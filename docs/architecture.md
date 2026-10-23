@@ -93,12 +93,15 @@ Every Rust crate is a workspace member (`crates/*`). Each agent compiles with it
 | `~/.teleflock/hostd.log` | Rolling log. |
 | `~/.teleflock/ext/teleflock-bridge.ts` | Companion extension, uploaded by the app. |
 | `~/.teleflock/omp-overlay.yml` | Per-process collab overlay, uploaded by the app. |
+| `~/.teleflock/originals/<sha256>.<ext>` | Full-size originals of images TeleFlock sent while omp was working (omp saves only a downscaled copy then), served by `session.image {original}`; 0600, pruned after 30 days and above 1 GiB, oldest first. |
+
+**Processes outlive the login that started them.** On Linux with systemd, a process started from an SSH command lives in that login's `session-*.scope`, and systemd kills everything in the scope when logind tears the session down (logout with `KillUserProcesses=yes`, or a restarted logind cleaning up sessions that already ended). So the daemon (`attach`) and every herdr server it starts (`tf_herdr::durable`) each run in a fresh transient scope: `systemd-run --scope` of the system manager for root (`teleflock-hostd-*.scope`, `teleflock-herdr-<session>-*.scope` in `system.slice`), of the user manager for other users only when lingering is enabled (without it the user manager stops with the last session). herdr has its own scope, so replacing or stopping the daemon never touches herdr and its agents. When `systemd-run` is missing or cannot create the unit (no bus, no permission), and on macOS, Windows and Linux without systemd, both are started plainly (`setsid`, null stdio). A herdr server that already runs in a login-session scope is a setup issue (`move-herdr-out-of-login-session`, §3.4 `ops::scope`); for root, `host.setupApply` moves it and its live process tree into a new scope without stopping anything.
 
 ### 3.2 Commands
 - `tf-hostd daemon`: the long-running daemon.
   - Binds the relay port and the sockets; refuses to start if another instance holds the lock.
   - Logs to `~/.teleflock/hostd.log`.
-- `tf-hostd attach [--session <herdr-session>]`: connects stdio to `hostd.sock`, starting the daemon detached (`setsid -f`, `</dev/null`) if needed, and waits up to 10 s for the socket. This is the **only** thing the app runs for the data channel.
+- `tf-hostd attach [--session <herdr-session>]`: connects stdio to `hostd.sock`, starting the daemon detached (`setsid`, `</dev/null`; in its own systemd scope where §3.1 applies) if needed, and waits up to 10 s for the socket. This is the **only** thing the app runs for the data channel.
 - `tf-hostd stop [--force]`: graceful shutdown. A daemon that is replaced by a newer binary gets `stop` from `attach --replace`.
 - **Several devices, one daemon.** Every device of the user attaches to the same daemon, and their apps update at different times. A host therefore only moves forward (`tf_proto::version`: semver, then protocol):
   - `attach --replace` replaces an older daemon (its clients reconnect to the new one), never a newer one, and another build of the same version only when no client is connected.
@@ -131,6 +134,7 @@ A client sees one `snapshot` on hello, then patches.
 | `ops/{fs,git,gh,workspace,worktree,host,term}.rs` | HostdOps | fs.*, git.*, gh.*, workspace.*, worktree.*, host.*, term.* |
 | `ops/limits.rs` | HostdOps | `host.limits`: subscription limits from `omp usage --json` / `--history --json` (see below) |
 | `ops/ai.rs` | HostdOps | `ai.complete`: one short completion from omp's `tiny` model role (see §3.8) |
+| `ops/scope.rs` | HostdOps | Setup issue + fix `move-herdr-out-of-login-session`: a herdr server (`SO_PEERCRED` on its socket) in a `session-*.scope` is moved with its process tree into a new scope (`StartTransientUnit`, see §3.1) |
 
 **Dispatcher contract.** HostdCore owns it. `clients.rs` parses `HostMethod::parse(method, params)`. For each method family it calls an async handler fn:
 
@@ -244,12 +248,13 @@ without a shell, reads the JSONL events and answers with the last assistant text
   - `plan_review_requested` / `plan_review_resolved`
   - `model` / `thinking` changes
   - `queue_update`
-  - `btw_delta`
+  - `btw_delta` (per conversation turn; also for `/btw` typed in omp's TUI)
 - **Requests** (hostd → extension), answered with `res`:
   - `setModel`, `setThinking`, `setFast`, `setPlan`
   - `goal`, `compact`, `rename`
   - `followUp`, `navigateTree`, `branch`, `fork`, `newSession`
-  - `resolvePlanReview`, `btw`, `export`, `handoff`
+  - `resolvePlanReview`, `export`, `handoff`
+  - `btw` (omp's own `/btw`, shown in the TUI and its BTW history; `btwId` follows up), `btwCancel`, `getBtwHistory`
   - `getTree`, `getQueue`
 
 ## 5. App side

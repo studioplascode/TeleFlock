@@ -201,6 +201,28 @@ impl OmpSession {
         self.lock().replica.expect_prompt(text, device);
     }
 
+    /// Links the echo of a prompt we're about to send to the originals kept of its images.
+    pub fn expect_originals(&self, text: &str, kept: Vec<tf_collab::replica::KeptOriginal>) {
+        self.lock().replica.expect_originals(text, kept);
+    }
+
+    /// Lists a prompt sent while omp streams in the queue until it lands (see
+    /// [`tf_collab::replica::Replica::expect_queued`]).
+    pub fn expect_queued(&self, text: &str, follow_up: bool) {
+        let mut st = self.lock();
+        if st.replica.expect_queued(text, follow_up, crate::util::now_ms()) {
+            emit_meta_locked(&mut st);
+        }
+    }
+
+    /// Unlists a queued prompt that was pulled back out of omp's queue.
+    pub fn forget_queued(&self, text: &str) {
+        let mut st = self.lock();
+        if st.replica.forget_queued(text) {
+            emit_meta_locked(&mut st);
+        }
+    }
+
     pub fn view(&self, now: Millis) -> OmpView {
         let st = self.lock();
         OmpView {
@@ -290,7 +312,9 @@ impl MetaOverlay {
             meta.context = Some(v.clone());
         }
         if let Some(v) = &self.queue {
-            meta.queue = v.clone();
+            // The bridge reads omp's TUI band, which omp does not refresh for collab-guest
+            // steers: keep the prompts we queued that it doesn't list (yet).
+            meta.queue = tf_collab::replica::merge_queue(v, &meta.queue);
         }
         if let Some(v) = &self.tree {
             meta.tree = Some(v.clone());
@@ -731,6 +755,10 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
     let relay_url = verify_room_relay(own, inner.relay_port, &link.link.ws_url).await?;
     let room = link.link.with_relay(&relay_url).map_err(|e| e.to_string())?;
     let (guest, rx) = Guest::connect(room, GUEST_NAME).await.map_err(|e| e.to_string())?;
+    let mut replica = Replica::new(session_id.clone());
+    for (id, slots) in inner.persist.read(|d| d.originals.get(&session_id).cloned()).unwrap_or_default() {
+        replica.keep_originals(&id, slots);
+    }
     let session = Arc::new(OmpSession {
         session_id: session_id.clone(),
         instance_id: row.instance_id.clone(),
@@ -738,7 +766,7 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
         pid: row.pid,
         guest,
         st: Mutex::new(SessionState {
-            replica: Replica::new(session_id.clone()),
+            replica,
             link: LinkState::Connecting,
             link_error: None,
             pending: Vec::new(),
@@ -762,6 +790,15 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
     tokio::spawn(journal_loop(Arc::downgrade(inner), session.clone()));
     tokio::spawn(artifact_loop(Arc::downgrade(inner), session));
     Ok(())
+}
+
+/// Keeps the image originals the replica linked across restarts (see [`crate::originals`]).
+fn persist_originals(inner: &Inner, session_id: &str, signals: &[Signal]) {
+    for signal in signals {
+        if let Signal::OriginalsKept { id, originals } = signal {
+            inner.persist.update(|d| d.originals.entry(session_id.to_owned()).or_default().insert(id.clone(), originals.clone()));
+        }
+    }
 }
 
 async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::mpsc::UnboundedReceiver<GuestEvent>) {
@@ -811,6 +848,7 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
             let _ = inner.updates.send(OmpUpdate::Pulses { session_id: sid.clone(), pulses: update.pulses.clone() });
         }
         if !update.signals.is_empty() {
+            persist_originals(&inner, &sid, &update.signals);
             if update.signals.iter().any(|s| matches!(s, Signal::TurnStarted | Signal::TurnEnded { .. } | Signal::Prompted { .. })) {
                 session.journal_kick.notify_one();
             }

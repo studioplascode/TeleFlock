@@ -50,11 +50,12 @@ The TUI shows exactly one thing: a dim `⇄ teleflock` status-line notice while 
 {"t":"hello","v":1,"reason":"connect","previousSessionId":null,
  "pid":254512,"sessionId":"01a15b7f-298b-7641-aa67-c71874a55647",
  "sessionFile":"/root/.omp/agent/sessions/-tmp-w/2026-…_01a15b7f-….jsonl","cwd":"/tmp/w",
- "ompVersion":"18.12.3","bridgeVersion":"1.0.0","tui":true,
+ "ompVersion":"18.12.3","bridgeVersion":"1.1.0","tui":true,
  "state":{ …CtlState… }}
 ```
 - `reason`: `connect` (new connection) or `switch` (same connection, new omp session).
 - `tui`: omp runs the interactive TUI (`ctx.mode === "tui"`). Ops marked **TUI** below need it.
+- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent.
 - hostd keys sessions by `sessionId`. The latest `hello` wins if two connections claim the same id.
 
 ### `event`
@@ -66,10 +67,10 @@ hostd attributes events to the connection's current session (from its last `hell
 | `event` | `data` | When |
 |---|---|---|
 | `state` | `CtlState` | Any field changed: model, thinking, fast, mode, goal, title, idle, context, leaf, queue, plan review, attached. Covers architecture §4's `model` / `thinking` change events. Checked once per second and after events. |
-| `queue_update` | `{steering:string[], followUp:string[]}` | The TUI queue chip changed. |
+| `queue_update` | `{steering:string[], followUp:string[]}` | The TUI queue chip changed. omp redraws that band before it queues a collab-guest prompt, so steers TeleFlock sends through collab are missing from it until something else redraws it; hostd merges its own list of prompts it queued (kept until their user row lands) into `meta.queue` / `omp.queue`. |
 | `plan_review_requested` | `PlanReviewInfo` | omp opened its interactive plan review. |
 | `plan_review_resolved` | `{reviewId, choice: string\|null, by:"local"\|"extension"}` | The review closed. `choice` is `null` when it was dismissed or cancelled. |
-| `btw_delta` | `{btwId, text, done, error?}` | Side-question stream. While `done:false`, `text` is a **delta**. The single `done:true` frame carries the **full final reply** in `text`, or `error`. |
+| `btw_delta` | `{btwId, turn, question?, text, done, error?}` | Side-question stream, per turn of a `/btw` conversation (`turn` 0 is the question, then one per follow-up; older bridges omit it). `question` comes with the turn's first frame. While `done:false`, `text` is a **delta**. The single `done:true` frame carries the **full final reply** in `text`, or `error` (`cancelled`, `interrupted`, or the failure). Sent for side questions asked through TeleFlock **and** for `/btw` typed in omp's TUI. |
 
 ### `res`
 ```json
@@ -146,8 +147,9 @@ type TreeInfo = {                        // = tf_proto::TreeInfo
 | `fork` | `entryId?`, `placement`: `inPlace\|pane` | `{sessionId, sessionFile}` | Optional `navigateTree(entryId)`, then `/fork` or `/fork pane`. Needs the agent idle. | ✓ | 30 s |
 | `newSession` | – | `{sessionId, sessionFile}` | `cmdCtx.newSession` | ✓ | 30 s |
 | `resolvePlanReview` | `reviewId`, `choice`, `feedback?` (required for `refine`), `role?` (approvals only; a `tiers[].role`) | `{}` | `ctx.resolvePlanReview` | | 10 s |
-| `btw` | `question` | `{btwId}` immediately; the answer arrives as `btw_delta` events | `ctx.runEphemeralTurn` (not saved to the session; can run while streaming) | | 10 s |
-| `btwCancel` | `btwId` | `{}` | aborts the side turn (its final `btw_delta` carries `error`) | | 10 s |
+| `btw` | `question`, `btwId?` (follow up on that conversation) | `{btwId, turn}` once omp started the turn; the answer arrives as `btw_delta` events | omp's own `/btw` (see "Side questions") | | 30 s |
+| `btwCancel` | `btwId` | `{}` once omp marked the turn cancelled (its final `btw_delta` carries `error: "cancelled"`) | omp's Esc on the `/btw` panel | | 10 s |
+| `getBtwHistory` | – | `{threads:[{btwId, at, turns:[{question, answer, status, error?, at}]}]}`, oldest first; `status` `running\|complete\|cancelled\|error\|interrupted` | the session's BTW history files, overlaid with live turns | | 10 s |
 | `export` | `path?` (default `<artifacts dir>/teleflock-export-<sessionId>-<ms>.html`; no whitespace) | `{path}` | `/export <path>`, then waits up to 15 s for the file | ✓ | 30 s |
 | `handoff` | `focus?` | `{settled}` | `/handoff [focus]`. Needs the agent idle. | ✓ | 600 s |
 | `slash` | `command` (single line, starts with `/`) | `{settled}` | Any slash command through the composer | ✓ | 30 s |
@@ -155,7 +157,7 @@ type TreeInfo = {                        // = tf_proto::TreeInfo
 | `getTree` | – | `TreeInfo` | `sessionManager.getEntries()` | | 10 s |
 | `getQueue` | – | `{steering, followUp}` | TUI queue chip contents (empty without the TUI) | | 10 s |
 | `getCommands` | – | `{commands:[{name, description?, source}]}` | `pi.getCommands()`: extension, prompt-template and skill commands (`source` `extension`/`prompt`/`skill`; builtins excluded; the bridge's own `teleflock-attach` filtered out) | | 10 s |
-| `dequeue` | – | `{text?}` | TUI `editor.onDequeue()` (Alt+Up) pops the last queued message (steer first, then follow-up); the popped text is returned and the operator's draft and images are restored. `{}` when the queue is empty. Popped images are dropped | ✓ | 10 s |
+| `dequeue` | – | `{text?}` | TUI `editor.onDequeue()` (Alt+Up) pops the last queued message (steer first, then follow-up); the popped text is returned and the operator's draft and images are restored. Tried when the band lists something or `ctx.hasPendingMessages()` (the band can lag guest steers); `{}` when nothing was popped. Popped images are dropped | ✓ | 10 s |
 
 `{settled:false}` means that after 15 s the command was still waiting on a TUI dialog (for example "Exit plan mode?"). The operator must answer it in the terminal.
 
@@ -164,9 +166,9 @@ type TreeInfo = {                        // = tf_proto::TreeInfo
 | `code` | Meaning | `ApiError` (hostd) |
 |---|---|---|
 | `invalid_params` | missing or ill-typed param, unknown level, choice or placement | `invalid_params` |
-| `not_found` | unknown model, entry id, plan review, or btw id | `not_found` |
-| `unsupported` | not in the TUI, no ephemeral turns, fast tier unavailable, plan mode refused | `unsupported` |
-| `busy` | needs idle, or plan mode is waiting for a terminal confirmation | `busy` (retryable) |
+| `not_found` | unknown model, entry id, plan review, btw conversation, or no running btw | `not_found` |
+| `unsupported` | not in the TUI, no ephemeral turns, fast tier unavailable, plan mode refused, a btw that only omp's TUI can cancel | `unsupported` |
+| `busy` | needs idle, plan mode is waiting for a terminal confirmation, or another `/btw` is still answering (omp runs one at a time) | `busy` (retryable) |
 | `auth_required` | model has no credentials | `auth_required` |
 | `nothing_to_compact` | the session is too small or already compacted | `omp_error` (message kept) |
 | `cancelled` | an extension hook cancelled the navigation, branch or new session | `omp_error` |
@@ -184,6 +186,16 @@ hostd-side failures: `NotConnected` → `not_connected` (retryable, hint: start 
 - **Finding the composer.** The extension reaches the TUI once by opening and immediately closing an empty `ctx.ui.custom()` component, restoring keyboard focus to whatever had it, and then locates the composer in the component tree.
 - **Command context.** `navigateTree`, `branch` and `newSession` need an `ExtensionCommandContext`. The extension captures it once by submitting its own hidden command `/teleflock-attach` through the composer. After that, `state.attached` is `true` for the life of the process.
 - **Focused subagent.** If the operator has focused a subagent in the TUI, composer submissions go to that subagent (omp behaviour).
+
+## Side questions (`/btw`)
+
+A TeleFlock side question is omp's own `/btw`, so it shows in the TUI, lands in the session's BTW history and can be continued from either side. `btwId` is omp's history topic id.
+
+- **Ask.** `/btw <question>` (whitespace collapsed to one line) goes through the composer like the other TUI commands. omp shows its inline answer panel and checkpoints the topic to `<artifacts>/btw-history/entry-<id>.json`; the op returns once that file exists.
+- **Follow up.** omp continues a conversation only from its BTW history panel (`f` on an answer opens the same composer). The extension opens the panel with `/btw` when it is closed, calls its `openFollowUp(btwId)`, pastes the question and submits it. The panel stays open in the TUI showing the conversation, exactly as after a follow-up typed there; Esc closes it (Esc while it still answers cancels, as in omp).
+- **Streaming.** Three sources feed `btw_delta`, whichever comes first: the history files (read on every 1 s tick: turn start and end, also for `/btw` asked in the TUI), the inline answer panel and the history panel (the extension wraps their update methods on the instance; omp's originals always run first and wrapper failures are swallowed). The first scan of a session only learns the existing history.
+- **Cancel.** The operator's Esc where omp listens for it: the history panel when open (`x` with native rendering), else the composer's Esc handler, which a visible `/btw` panel owns first.
+- **Fallback.** Without the TUI, or for a session with no artifacts directory, `btw` runs a private `ctx.runEphemeralTurn` with omp's btw prompt, replaying the conversation's earlier turns (one provider lineage per run of successful turns, as in omp). Those conversations live in the extension's memory only (ids `tf-btw-…`), are listed by `getBtwHistory`, and are aborted when hostd disconnects.
 
 ## Safety rules (extension)
 

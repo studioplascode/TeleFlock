@@ -2,11 +2,6 @@
 
 export type UpdateCheckParams = { 
 /**
- * Launch check: runs once per process, only in release builds and only while
- * `settings.autoUpdate` is on; a newer release is installed right away.
- */
-launch: boolean, 
-/**
  * Download and install right away when a newer release is found.
  */
 install: boolean, };

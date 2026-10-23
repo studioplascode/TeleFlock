@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use tf_proto::{
-    ApiError, CommandList, ContextUsage, Dequeued, ExportResult, ForkPlacement, GoalInfo, GoalOp, Millis,
-    ModelRef, OmpMode, QueueInfo, ThinkingLevel, TreeInfo,
+    ApiError, BtwHistory, BtwStarted, CommandList, ContextUsage, Dequeued, ExportResult, ForkPlacement, GoalInfo,
+    GoalOp, Millis, ModelRef, OmpMode, QueueInfo, ThinkingLevel, TreeInfo,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -197,11 +197,14 @@ pub enum BridgeEvent {
         session_id: String,
         queue: QueueInfo,
     },
-    /// Side-question stream: while `done` is false `text` is a delta; the `done` event carries the
-    /// full final reply in `text` (or `error`).
+    /// Side-question stream, per conversation turn: while `done` is false `text` is a delta; the
+    /// `done` event carries the full final reply in `text` (or `error`). `question` comes with the
+    /// turn's first event (also for `/btw` asked in omp's TUI).
     BtwDelta {
         session_id: String,
         btw_id: String,
+        turn: u32,
+        question: Option<String>,
         text: String,
         done: bool,
         error: Option<String>,
@@ -620,22 +623,27 @@ impl BridgeHandle {
             .await
     }
 
-    /// Starts a side question; the answer streams as [`BridgeEvent::BtwDelta`]. Returns the btw id.
-    pub async fn btw(&self, session_id: &str, question: &str) -> Result<String, BridgeError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Started {
-            btw_id: String,
-        }
-        let started: Started = self
-            .typed(session_id, "btw", json!({ "question": question }), QUICK)
-            .await?;
-        Ok(started.btw_id)
+    /// Asks a side question through omp's own `/btw` (a follow-up when `btw_id` names an existing
+    /// conversation); the answer streams as [`BridgeEvent::BtwDelta`].
+    pub async fn btw(
+        &self,
+        session_id: &str,
+        question: &str,
+        btw_id: Option<&str>,
+    ) -> Result<BtwStarted, BridgeError> {
+        self.typed(session_id, "btw", json!({ "question": question, "btwId": btw_id }), TUI)
+            .await
     }
 
+    /// Cancels the running turn of a side conversation (its final `BtwDelta` carries `error`).
     pub async fn btw_cancel(&self, session_id: &str, btw_id: &str) -> Result<(), BridgeError> {
         self.unit(session_id, "btwCancel", json!({ "btwId": btw_id }), QUICK)
             .await
+    }
+
+    /// The session's `/btw` history (omp's `btw-history` sidecar), oldest first.
+    pub async fn btw_history(&self, session_id: &str) -> Result<BtwHistory, BridgeError> {
+        self.typed(session_id, "getBtwHistory", json!({}), QUICK).await
     }
 
     /// HTML export. Without `path` the file lands in the session's artifacts dir.
@@ -915,6 +923,10 @@ struct ResError {
 struct BtwFrame {
     btw_id: String,
     #[serde(default)]
+    turn: u32,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
     text: String,
     #[serde(default)]
     done: bool,
@@ -1123,6 +1135,8 @@ fn on_event(shared: &Shared, conn_id: u64, msg: Value) {
             Ok(b) => Some(BridgeEvent::BtwDelta {
                 session_id,
                 btw_id: b.btw_id,
+                turn: b.turn,
+                question: b.question,
                 text: b.text,
                 done: b.done,
                 error: b.error,
@@ -1484,25 +1498,36 @@ mod tests {
         assert_eq!((choice, by.as_str()), (None, "local"));
         assert!(h.by_session("s1").unwrap().state.plan_review.is_none());
 
-        for (text, done) in [("Hel", false), ("lo", false), ("Hello", true)] {
-            ext.send(
-                json!({ "t": "event", "event": "btw_delta", "sessionId": "s1",
-                "data": { "btwId": "b1", "text": text, "done": done } }),
-            )
-            .await;
+        for (i, (text, done)) in [("Hel", false), ("lo", false), ("Hello", true)].into_iter().enumerate() {
+            let mut data = json!({ "btwId": "b1", "turn": 1, "text": text, "done": done });
+            if i == 0 {
+                data["question"] = json!("and then?");
+            }
+            ext.send(json!({ "t": "event", "event": "btw_delta", "sessionId": "s1", "data": data }))
+                .await;
         }
         let mut got = Vec::new();
         for _ in 0..3 {
             let BridgeEvent::BtwDelta {
-                btw_id, text, done, ..
+                btw_id, turn, question, text, done, ..
             } = next_event(&mut events).await
             else {
                 panic!()
             };
-            assert_eq!(btw_id, "b1");
-            got.push((text, done));
+            assert_eq!((btw_id.as_str(), turn), ("b1", 1));
+            got.push((question, text, done));
         }
-        assert_eq!(got.last().unwrap(), &("Hello".to_string(), true));
+        assert_eq!(got[0].0.as_deref(), Some("and then?"));
+        assert_eq!(got[1].0, None);
+        assert_eq!((got[2].1.as_str(), got[2].2), ("Hello", true));
+        // Frames from older bridges carry no turn: it defaults to the first one.
+        ext.send(json!({ "t": "event", "event": "btw_delta", "sessionId": "s1",
+            "data": { "btwId": "b2", "text": "x", "done": true } }))
+            .await;
+        let BridgeEvent::BtwDelta { turn, question, .. } = next_event(&mut events).await else {
+            panic!()
+        };
+        assert_eq!((turn, question), (0, None));
     }
 
     #[tokio::test]

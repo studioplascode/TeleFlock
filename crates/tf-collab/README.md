@@ -42,6 +42,9 @@ pub enum HostFrame { Welcome(Welcome), SnapshotChunk(SnapshotChunk), Entry { ent
     Bye { reason: String }, Error { message: String }, Unknown(Value) }
 impl HostFrame { pub fn parse(json: &[u8]) -> Result<HostFrame, serde_json::Error>; pub fn from_value(Value) -> HostFrame;
                  pub fn to_json(&self) -> Vec<u8>; pub fn tag(&self) -> &str }   // unknown `t` / shape → Unknown(Value)
+// A known `t` that no longer parses is logged (warn, first 20). Agent snapshots are lenient: timestamps
+// take any JS number (restored subagents carry fractional file times) and an unreadable agent is
+// dropped instead of the `welcome` / `agents` frame carrying it (a dropped welcome stalls the join).
 pub enum GuestFrame { Hello { proto, name, write_token }, Prompt { text, images: Vec<ImageContent> },
     UiResponse { req_id: u64, value: Option<String> }, Abort {}, AgentCmd { cmd: AgentCmdKind, agent_id, text },
     FetchTranscript { req_id, agent_id, from_byte } }

@@ -11,7 +11,7 @@
 //!   the app's FileProvider (`REQUEST_INSTALL_PACKAGES`, "install unknown apps" grant flow).
 //! * Default-network changes (Wi-Fi ↔ cellular, VPN up) are reported through the same sink so
 //!   the core can reconnect immediately.
-//! * Activity lifecycle ([`has_activity`], [`NativeEvent::ActivityResumed`]): the keep-alive
+//! * Activity lifecycle ([`has_activity`], [`in_foreground`], [`NativeEvent::ActivityResumed`]): the keep-alive
 //!   service can keep the process running after its activity is destroyed (swiped away from
 //!   recents). Kotlin commands are skipped while no activity is alive, and an activity created in
 //!   such a process asks for a window, which Tauri only creates once per process. Resumes are
@@ -29,7 +29,7 @@ use tauri::{
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
-pub use android::{ApkInstall, Permission, TeleFlockAndroid, TeleFlockAndroidExt, has_activity, set_sink};
+pub use android::{ApkInstall, Permission, TeleFlockAndroid, TeleFlockAndroidExt, has_activity, in_foreground, set_sink};
 
 /// A user action on one of our notifications, delivered from the Kotlin `ActionReceiver`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -2,6 +2,8 @@
 
 /**
  * `control` resizes the real pane and holds the single input lease;
- * `observe` is read-only and crops instead of resizing.
+ * `observe` is read-only and never resizes: its frames come at the pane's own grid
+ * (hostd attaches at the PTY size and re-attaches when the driver resizes it; where the
+ * tty is unreadable, e.g. Windows, herdr crops the pane to the `term.open` size).
  */
 export type TermMode = "control" | "observe";

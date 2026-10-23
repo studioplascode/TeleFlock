@@ -1,7 +1,7 @@
 import { ImageIcon } from "lucide-react";
 import { useContext, useEffect, useMemo, useState } from "react";
-import { core } from "@/core";
-import type { ImageRef } from "@/core/gen";
+import { CoreError, core } from "@/core";
+import type { ImageParams, ImageRef } from "@/core/gen";
 import { cn, Shimmer } from "@/design";
 import { SessionCtx } from "../context";
 
@@ -12,7 +12,7 @@ export type ImageSource =
   | { state: "loading" }
   | { state: "unavailable" };
 
-/** Fetched omp blobs as data URLs by `${hostId}:${blob}`, most recently used last, bounded by size. */
+/** Fetched images as data URLs by `${hostId}:${blob or original}`, most recently used last, bounded by size. */
 const CACHE_CHARS = 96 * 1024 * 1024;
 const cache = new Map<string, string>();
 let cacheChars = 0;
@@ -37,15 +37,14 @@ function remember(key: string, src: string): void {
   }
 }
 
-function fetchBlob(hostId: string, blob: string, mime: string): Promise<string> {
-  const key = `${hostId}:${blob}`;
+function fetchImage(hostId: string, key: string, params: ImageParams, mime: string): Promise<string> {
   let p = inflight.get(key);
   if (!p) {
     p = core
       .host(hostId)
-      .call("session.image", { blob })
+      .call("session.image", params)
       .then((r) => {
-        const src = `data:${mime};base64,${r.data}`;
+        const src = `data:${r.mime ?? mime};base64,${r.data}`;
         remember(key, src);
         return src;
       })
@@ -72,10 +71,11 @@ export function useImageSources(images: readonly ImageRef[]): ImageSource[] {
     for (const img of images) {
       const blob = img.blob;
       if (img.data || img.url || !blob) continue;
-      const hit = cached(`${hostId}:${blob}`);
+      const key = `${hostId}:${blob}`;
+      const hit = cached(key);
       const done = (src: string) => alive && setFetched((m) => (m.get(blob) === src ? m : new Map(m).set(blob, src)));
       if (hit !== undefined) done(hit);
-      else fetchBlob(hostId, blob, img.mime).then(done, () => alive && setFailed((s) => new Set(s).add(blob)));
+      else fetchImage(hostId, key, { blob }, img.mime).then(done, () => alive && setFailed((s) => new Set(s).add(blob)));
     }
     return () => {
       alive = false;
@@ -93,6 +93,41 @@ export function useImageSources(images: readonly ImageRef[]): ImageSource[] {
     if (hit) return { state: "ready", src: hit };
     return !hostId || failed.has(img.blob) ? { state: "unavailable" } : { state: "loading" };
   });
+}
+
+/** Originals the host no longer has (pruned from its store, file deleted), by cache key: not asked for again. */
+const missingOriginals = new Set<string>();
+
+/**
+ * The full-resolution original behind a downscaled image (`ImageRef.original`: omp keeps only a
+ * small copy of images it queues, and of TUI pastes), for the viewer: fetched from the host only
+ * when asked for (pass the image the lightbox shows, `undefined` while closed) and cached like
+ * blobs. Undefined while loading, when there is none, or when the host can't supply it (no toast,
+ * no retry): the viewer keeps showing the copy it has.
+ */
+export function useOriginal(img: ImageRef | undefined): string | undefined {
+  const session = useContext(SessionCtx);
+  const hostId = session?.hostId;
+  const agentId = session?.agentId;
+  const original = img?.original;
+  const mime = img?.mime ?? "image/png";
+  const key = hostId && original ? `${hostId}:${original}` : undefined;
+  const [loaded, setLoaded] = useState<{ key: string; src: string }>();
+
+  useEffect(() => {
+    if (!hostId || !original || !key || missingOriginals.has(key) || cached(key) !== undefined) return;
+    let alive = true;
+    fetchImage(hostId, key, { original, agentId }, mime).then(
+      (src) => alive && setLoaded({ key, src }),
+      (e: unknown) => e instanceof CoreError && !e.retryable && missingOriginals.add(key),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [hostId, agentId, original, key, mime]);
+
+  if (!key) return undefined;
+  return loaded?.key === key ? loaded.src : cache.get(key);
 }
 
 /** Stand-in tile for an image that is loading or can't be shown. */

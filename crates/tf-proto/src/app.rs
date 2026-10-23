@@ -110,7 +110,8 @@ wire_struct! {
         /// Saved agent presets for the new-agent / new-worktree / fan-out flows.
         #[serde(default)]
         pub templates: Vec<AgentTemplate>,
-        /// Check GitHub releases on launch and install a newer version (Tauri app only).
+        /// Check GitHub releases while the app runs (launch, hourly, back in front) and install a
+        /// newer version (Tauri app only).
         /// Settings files written before this field existed load with `true`.
         #[serde(default = "default_true")]
         pub auto_update: bool,
@@ -234,10 +235,6 @@ wire_struct! {
 
 wire_struct! {
     pub struct UpdateCheckParams {
-        /// Launch check: runs once per process, only in release builds and only while
-        /// `settings.autoUpdate` is on; a newer release is installed right away.
-        #[serde(default)]
-        pub launch: bool,
         /// Download and install right away when a newer release is found.
         #[serde(default)]
         pub install: bool,

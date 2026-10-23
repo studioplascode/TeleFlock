@@ -1108,8 +1108,8 @@ async fn omp_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<OmpUpdate>) {
 async fn bridge_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<BridgeEvent>) {
     let h = ctx.state.clone();
     // btw: deltas stream first, then `done` carries the full reply; clients append, so
-    // only the not-yet-sent suffix goes out.
-    let mut btw_sent: HashMap<String, String> = HashMap::new();
+    // only the not-yet-sent suffix goes out. Keyed per conversation turn.
+    let mut btw_sent: HashMap<(String, u32), String> = HashMap::new();
     loop {
         let ev = tokio::select! {
             _ = ctx.cancel.cancelled() => return,
@@ -1136,8 +1136,9 @@ async fn bridge_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<BridgeEvent>
                     s.send_extra(tf_proto::session::SessionEvent::Ui { request: ui });
                 }
             }
-            BridgeEvent::BtwDelta { session_id, btw_id, text, done, error } if mapped(session_id) => {
-                let sent = btw_sent.entry(btw_id.clone()).or_default();
+            BridgeEvent::BtwDelta { session_id, btw_id, turn, question, text, done, error } if mapped(session_id) => {
+                let key = (btw_id.clone(), *turn);
+                let sent = btw_sent.entry(key.clone()).or_default();
                 let mut delta = if *done {
                     text.strip_prefix(sent.as_str()).map(str::to_string).unwrap_or_default()
                 } else {
@@ -1146,13 +1147,19 @@ async fn bridge_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<BridgeEvent>
                 if !*done {
                     sent.push_str(text);
                 } else {
-                    btw_sent.remove(btw_id);
+                    btw_sent.remove(&key);
                 }
                 if let (Some(e), true) = (error, *done) {
                     delta.push_str(&format!("\n\n⚠ {e}"));
                 }
                 if let Some(s) = ctx.omp.session(session_id) {
-                    s.send_extra(tf_proto::session::SessionEvent::Btw { btw_id: btw_id.clone(), text: delta, done: *done });
+                    s.send_extra(tf_proto::session::SessionEvent::Btw {
+                        btw_id: btw_id.clone(),
+                        turn: *turn,
+                        question: question.clone(),
+                        text: delta,
+                        done: *done,
+                    });
                 }
             }
             BridgeEvent::State { session_id, .. } | BridgeEvent::QueueUpdate { session_id, .. } if mapped(session_id) => {

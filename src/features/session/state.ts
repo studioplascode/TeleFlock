@@ -15,8 +15,6 @@ interface SessionUiState {
   tab: Record<string, InspectorTab>;
   /** Mobile inspector sheet open, per agent key. */
   sheet: Record<string, boolean>;
-  /** Pending btw ids started from this client, newest last. */
-  btw: Record<string, { id: string; question: string; at: number }[]>;
   /** Composer focus requests (nonce), consumed by the composer once it has focused. */
   composerFocus: Record<string, number | undefined>;
   /** Transcript row to scroll to and flash (Chat tab "jump to message"). */
@@ -29,7 +27,6 @@ interface SessionUiState {
   openDialog(key: string, d: SessionDialog): void;
   setTab(key: string, t: InspectorTab): void;
   setSheet(key: string, open: boolean): void;
-  addBtw(key: string, id: string, question: string): void;
   /** Focus the composer (now, or when it mounts) without touching its draft. */
   focusComposer(key: string): void;
   consumeComposerFocus(key: string): void;
@@ -44,14 +41,12 @@ export const useSessionUi = create<SessionUiState>()((set) => ({
   dialog: {},
   tab: {},
   sheet: {},
-  btw: {},
   composerFocus: {},
   focus: {},
   subagent: {},
   openDialog: (key, d) => set((s) => ({ dialog: { ...s.dialog, [key]: d } })),
   setTab: (key, t) => set((s) => ({ tab: { ...s.tab, [key]: t } })),
   setSheet: (key, open) => set((s) => ({ sheet: { ...s.sheet, [key]: open } })),
-  addBtw: (key, id, question) => set((s) => ({ btw: { ...s.btw, [key]: [...(s.btw[key] ?? []).slice(-9), { id, question, at: Date.now() }] } })),
   focusComposer: (key) => set((s) => ({ composerFocus: { ...s.composerFocus, [key]: (s.composerFocus[key] ?? 0) + 1 } })),
   consumeComposerFocus: (key) => set((s) => (s.composerFocus[key] ? { composerFocus: { ...s.composerFocus, [key]: undefined } } : s)),
   focusItem: (key, itemId) => set((s) => ({ focus: { ...s.focus, [key]: { itemId, nonce: (s.focus[key]?.nonce ?? 0) + 1 } } })),

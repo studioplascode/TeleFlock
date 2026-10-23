@@ -5,7 +5,7 @@ import type { AssistantItem, CompactionItem, ImageRef, ModeItem, NoticeItem, Thi
 import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, Lightbox, LightboxTrigger, LogoMark, Shimmer, Tooltip } from "@/design";
 import { IrcBubble } from "../irc/IrcBubble";
 import { Markdown } from "../markdown/Markdown";
-import { ImagePlaceholder, useImageSources } from "../lib/images";
+import { ImagePlaceholder, useImageSources, useOriginal } from "../lib/images";
 import { ToolCard } from "../tools/ToolCard";
 
 /** `in:<peer>` / `out:<peer>` for IRC rows (consecutive rows with the same key group), else null. */
@@ -164,13 +164,22 @@ function UserRow({ item }: { item: UserItem }) {
   );
 }
 
-/** A message's attachments; each opens the lightbox (full original) paging through the ones that loaded. */
+/**
+ * A message's attachments; each opens the lightbox paging through the ones that loaded. The viewer
+ * swaps in the full-resolution original of the open one (`ImageRef.original`) once the host sends it.
+ */
 function UserImages({ images }: { images: ImageRef[] }) {
   // The open attachment by its position in the message: the lightbox pages through loaded images only, so a
   // group index would land on another attachment once an earlier one finishes loading.
   const [open, setOpen] = useState<number | null>(null);
   const sources = useImageSources(images);
-  const group = sources.flatMap((s, i) => (s.state === "ready" ? [{ src: s.src, alt: `attachment ${i + 1}`, width: images[i]?.width, height: images[i]?.height, at: i }] : []));
+  const original = useOriginal(open == null ? undefined : images[open]);
+  const group = sources.flatMap((s, i) => {
+    if (s.state !== "ready") return [];
+    const alt = `attachment ${i + 1}`;
+    // The original's size is its own: let the viewer measure it.
+    return [i === open && original ? { src: original, alt, at: i } : { src: s.src, alt, width: images[i]?.width, height: images[i]?.height, at: i }];
+  });
   const shown = group.findIndex((g) => g.at === open);
   return (
     <div className="mt-2 flex flex-wrap gap-1.5">

@@ -49,6 +49,9 @@ pub struct PersistData {
     pub version: u32,
     pub sessions: BTreeMap<String, SessionData>,
     pub usage: UsageLedger,
+    /// Image originals tf-hostd kept, linked to their user rows: omp session id → row id → one
+    /// slot per image (`Signal::OriginalsKept`, handed back to the replica when it joins).
+    pub originals: HashMap<String, BTreeMap<String, Vec<Option<String>>>>,
 }
 
 impl UsageLedger {

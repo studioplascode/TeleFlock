@@ -31,6 +31,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 base64 = "0.22"
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.3"
+# Image originals (originals.rs)
+sha2 = "0.11"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk"] }

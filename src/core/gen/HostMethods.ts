@@ -8,7 +8,9 @@ import type { AiCompleteResult } from "./AiCompleteResult";
 import type { AnswerParams } from "./AnswerParams";
 import type { ArchiveParams } from "./ArchiveParams";
 import type { BranchList } from "./BranchList";
+import type { BtwHistory } from "./BtwHistory";
 import type { BtwParams } from "./BtwParams";
+import type { BtwRef } from "./BtwRef";
 import type { BtwStarted } from "./BtwStarted";
 import type { CommandList } from "./CommandList";
 import type { CommandOutput } from "./CommandOutput";
@@ -107,6 +109,8 @@ export interface HostMethods {
   "agent.handoff": { params: CompactParams; result: Empty };
   "agent.export": { params: AgentRef; result: ExportResult };
   "agent.btw": { params: BtwParams; result: BtwStarted };
+  "agent.btwCancel": { params: BtwRef; result: Empty };
+  "agent.btwHistory": { params: AgentRef; result: BtwHistory };
   "agent.slash": { params: SlashParams; result: Empty };
   "agent.commands": { params: AgentRef; result: CommandList };
   "agent.dequeue": { params: AgentRef; result: Dequeued };

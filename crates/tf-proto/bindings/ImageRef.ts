@@ -10,8 +10,14 @@ data?: string,
  */
 url?: string, 
 /**
- * … or an omp blob (sha256 hex) holding the full image: fetch it with `session.image`.
+ * … or an omp blob (sha256 hex) holding the image omp kept: fetch it with `session.image`.
  * None of the three: the payload was cut from a collab frame (entries are capped at 1 MiB)
  * and the journal, which keeps it as a blob, has not caught up yet.
  */
-blob?: string, width?: number, height?: number, };
+blob?: string, 
+/**
+ * Full-resolution original on the host when the image above is omp's downscaled copy (omp
+ * resizes images it queues for the model, and TUI pastes): an absolute path, or a
+ * `local://` URL of the agent's omp session. Fetch it with `session.image` (`original`).
+ */
+original?: string, width?: number, height?: number, };

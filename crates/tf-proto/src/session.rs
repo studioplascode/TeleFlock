@@ -147,10 +147,14 @@ wire_struct! {
         pub data: Option<String>,
         /// … or a URL the client can load …
         pub url: Option<String>,
-        /// … or an omp blob (sha256 hex) holding the full image: fetch it with `session.image`.
+        /// … or an omp blob (sha256 hex) holding the image omp kept: fetch it with `session.image`.
         /// None of the three: the payload was cut from a collab frame (entries are capped at 1 MiB)
         /// and the journal, which keeps it as a blob, has not caught up yet.
         pub blob: Option<String>,
+        /// Full-resolution original on the host when the image above is omp's downscaled copy (omp
+        /// resizes images it queues for the model, and TUI pastes): an absolute path, or a
+        /// `local://` URL of the agent's omp session. Fetch it with `session.image` (`original`).
+        pub original: Option<String>,
         pub width: Option<u32>,
         pub height: Option<u32>,
     }
@@ -542,8 +546,18 @@ pub enum SessionEvent {
     Meta { meta: SessionMeta },
     /// Pending dialog changed (`null` = none).
     Ui { request: Option<UiRequest> },
-    /// Side-question (`agent.btw`) answer stream.
-    Btw { btw_id: String, text: String, done: bool },
+    /// Side-question (`agent.btw`, or `/btw` asked in omp's TUI) answer stream, per turn of the
+    /// conversation. `text` is appended; `question` comes with the turn's first event.
+    Btw {
+        btw_id: String,
+        #[serde(default)]
+        turn: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        question: Option<String>,
+        text: String,
+        done: bool,
+    },
     /// The session ended or rotated (`/new`, `/resume`, `/fork`); re-open the agent.
     Ended { reason: String },
 }

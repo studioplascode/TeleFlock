@@ -39,13 +39,17 @@ const ITEMS: Record<string, { name: ReactNode; consequence: ReactNode }> = {
     name: `omp ≥ ${OMP_MIN_VERSION}`,
     consequence: "Without omp there are no agents for TeleFlock to show on this host.",
   },
+  "move-herdr-out-of-login-session": {
+    name: "herdr outside login sessions",
+    consequence: "Without this, every agent on this host dies when the login session that started herdr is torn down (for example when systemd-logind restarts).",
+  },
 };
 
 /**
  * Global opt-ins change files outside TeleFlock's own directory, so each needs explicit consent
  * with a plain explanation of what changes.
  */
-const CONSENT: Record<string, { what: string; why: string }> = {
+const CONSENT: Record<string, { what: string; why: string; undo?: string }> = {
   "enable-global-sharing": {
     what: "Runs `omp config set` to add `collab.autoStart: control` and `collab.relayUrl: ws://127.0.0.1:<relay port>` to your global omp config (~/.omp/agent/config.yml).",
     why: "Every omp session on this host (including ones you start by hand and ones herdr restores) then shares itself on the private TeleFlock relay, so it shows up live in the app. The relay only listens on 127.0.0.1 of this host.",
@@ -57,6 +61,11 @@ const CONSENT: Record<string, { what: string; why: string }> = {
   "install-herdr-integration": {
     what: "Installs herdr's omp integration (~/.omp/agent/extensions/herdr-omp-agent-state.ts) using herdr's own installer.",
     why: "Lets herdr track omp's working / blocked / idle state, which drives the board columns and needs-you alerts.",
+  },
+  "move-herdr-out-of-login-session": {
+    what: "Asks systemd (as root) to move the running herdr server and every process under it (pane shells, omp agents and their tools) out of its login-session scope into a new scope of its own, teleflock-herdr-<session>-….scope. Nothing is stopped or restarted.",
+    why: "systemd stops a login-session scope, killing everything in it, when logind tears the session down: on logout with KillUserProcesses=yes, or when a restarted logind cleans up sessions that already ended. In their own scope the agents keep running until herdr exits.",
+    undo: "Nothing to undo: the scope ends by itself when herdr exits, and herdr servers TeleFlock starts get their own scope anyway.",
   },
 };
 
@@ -149,7 +158,7 @@ function IssueRow({
                         <span className="font-bold text-ink-2">Why: </span>
                         <span className="text-mute">{consent.why}</span>
                       </p>
-                      <p className="text-mute-2">You can undo it at any time by removing the setting or the file.</p>
+                      <p className="text-mute-2">{consent.undo ?? "You can undo it at any time by removing the setting or the file."}</p>
                     </div>
                   </motion.div>
                 )}

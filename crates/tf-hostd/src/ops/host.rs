@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use crate::clients::ClientHandle;
 use crate::ops::fs::{home_dir, resolve_path};
 use crate::ops::git::{resolve_bin, run_cmd};
+use crate::ops::scope::{self, FIX_HERDR_SCOPE};
 use crate::ops::{herdr_err, to_value, Ctx};
 
 pub const FIX_HERDR_INTEGRATION: &str = "install-herdr-integration";
@@ -662,12 +663,12 @@ async fn herdr_integration(ctx: &Ctx) -> IntegrationState {
 pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
     let port = ctx.relay_port;
     let omp = omp_bin();
-    let (integration, sharing) = tokio::join!(herdr_integration(ctx), async {
+    let (integration, sharing, login_bound) = tokio::join!(herdr_integration(ctx), async {
         let bin = omp.as_ref()?;
         let (auto, url) = tokio::join!(omp_config_get(bin, "collab.autoStart"), omp_config_get(bin, "collab.relayUrl"));
         let get = |r: Result<Value, ApiError>| r.ok().and_then(|v| v.get("value").and_then(Value::as_str).map(str::to_string));
         Some((get(auto), get(url)))
-    });
+    }, scope::herdr_in_login_session(&ctx.herdr.endpoint().socket));
     let installed = bridge_install_path();
     let bridge_installed = installed.is_file();
     let bridge_current = bridge_installed && std::fs::read(&installed).ok() == std::fs::read(&ctx.paths.ext).ok();
@@ -740,6 +741,7 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
             recommended: true,
         });
     }
+    issues.extend(login_bound.map(|b| scope::issue(&b, &ctx.herdr_session)));
     issues.extend(ctx.omp.relay_issue());
     SetupStatus { herdr_integration: integration == IntegrationState::Current, global_sharing, global_bridge: bridge_installed, relay, issues }
 }
@@ -749,7 +751,7 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
 pub async fn setup_apply(ctx: &Ctx, fixes: &[String]) -> Result<SetupStatus, ApiError> {
     for fix in fixes {
         match fix.as_str() {
-            FIX_HERDR_INTEGRATION | FIX_GLOBAL_SHARING | FIX_GLOBAL_BRIDGE => {}
+            FIX_HERDR_INTEGRATION | FIX_GLOBAL_SHARING | FIX_GLOBAL_BRIDGE | FIX_HERDR_SCOPE => {}
             other => return Err(ApiError::new("invalid_params", format!("unknown setup fix `{other}`"))),
         }
     }
@@ -778,6 +780,19 @@ pub async fn setup_apply(ctx: &Ctx, fixes: &[String]) -> Result<SetupStatus, Api
                 let src = ctx.paths.ext.clone();
                 let dst = bridge_install_path();
                 tokio::task::spawn_blocking(move || install_file(&src, &dst)).await.map_err(join_err)??;
+            }
+            FIX_HERDR_SCOPE => {
+                // Already out of a login session (or gone): nothing to do.
+                let Some(bound) = scope::herdr_in_login_session(&ctx.herdr.endpoint().socket).await else { continue };
+                if !scope::can_adopt() {
+                    return Err(ApiError::new("unsupported", "moving the herdr server needs root and systemd's busctl on this host")
+                        .with_hint("See the setup item's details for what you can do instead."));
+                }
+                let session = ctx.herdr_session.clone();
+                let unit = tokio::task::spawn_blocking(move || scope::adopt(bound.pid, &session)).await.map_err(join_err)?.map_err(|e| {
+                    ApiError::new("io_error", e).with_hint("Nothing was stopped; the processes that did not move still run where they were.")
+                })?;
+                tracing::info!(pid = bound.pid, %unit, "moved the herdr server out of login session {}", bound.session);
             }
             _ => unreachable!("validated above"),
         }

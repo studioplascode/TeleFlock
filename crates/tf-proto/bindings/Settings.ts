@@ -25,7 +25,8 @@ mutedAgents: Array<string>,
  */
 templates: Array<AgentTemplate>, 
 /**
- * Check GitHub releases on launch and install a newer version (Tauri app only).
+ * Check GitHub releases while the app runs (launch, hourly, back in front) and install a
+ * newer version (Tauri app only).
  * Settings files written before this field existed load with `true`.
  */
 autoUpdate: boolean, };

@@ -24,6 +24,7 @@ export type { PulseListener, PulseAllListener, TermListener } from "./buses";
 export type {
   AgentView,
   BtwEntry,
+  BtwTurnView,
   CoreState,
   HostActivityEvent,
   HostEntry,

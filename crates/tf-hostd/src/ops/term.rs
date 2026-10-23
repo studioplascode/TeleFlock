@@ -56,6 +56,12 @@ impl TermRegistry {
         if map.get(term_id).map(|e| e.client_id == client_id).unwrap_or(false) { map.remove(term_id) } else { None }
     }
 
+    /// Swap the input handle of a re-attached terminal; returns the previous one.
+    fn replace_input(&self, term_id: &str, input: TerminalInput) -> Option<TerminalInput> {
+        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        map.get_mut(term_id).map(|e| std::mem::replace(&mut e.input, input))
+    }
+
     fn drain_client(&self, client_id: &str) -> Vec<TermEntry> {
         let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let ids: Vec<String> = map.iter().filter(|(_, e)| e.client_id == client_id).map(|(k, _)| k.clone()).collect();
@@ -214,36 +220,83 @@ fn pane_title(ctx: &Ctx, pane_id: &str) -> Option<String> {
     snap.workspaces.iter().flat_map(|w| w.tabs.iter()).flat_map(|t| t.panes.iter()).find(|p| p.id == pane_id).and_then(|p| p.title.clone())
 }
 
-pub async fn open(ctx: &Ctx, p: TermOpenParams, client: &ClientHandle) -> Result<TermOpened, ApiError> {
-    let pane_id = resolve_target(ctx, &p.target).await?;
-    let mode = match p.mode {
-        TermMode::Control => TerminalMode::Control,
-        TermMode::Observe => TerminalMode::Observe,
-    };
-    let opts = TerminalOptions { target: pane_id.clone(), mode, cols: p.cols.max(2), rows: p.rows.max(1), takeover: p.takeover };
-    let session = ctx.herdr.terminal_session(opts).await.map_err(|e| {
+/// How often an open observer re-reads its pane's PTY grid (one `ioctl`, no herdr traffic).
+const GRID_CHECK: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn start_session(herdr: &tf_herdr::HerdrClient, pane_id: &str, mode: TerminalMode, (cols, rows): (u16, u16), takeover: bool) -> Result<tf_herdr::TerminalSession, ApiError> {
+    let opts = TerminalOptions { target: pane_id.to_string(), mode, cols: cols.max(2), rows: rows.max(1), takeover };
+    herdr.terminal_session(opts).await.map_err(|e| {
         if e.code == tf_herdr::code::STREAM_CONFLICT || e.message.contains("already has an attached client") {
             ApiError::new("busy", "another client controls this terminal")
                 .with_hint("Open it with takeover to take control, or open it read-only.")
         } else {
             map_herdr(e)
         }
-    })?;
+    })
+}
+
+pub async fn open(ctx: &Ctx, p: TermOpenParams, client: &ClientHandle) -> Result<TermOpened, ApiError> {
+    let pane_id = resolve_target(ctx, &p.target).await?;
+    let mode = match p.mode {
+        TermMode::Control => TerminalMode::Control,
+        TermMode::Observe => TerminalMode::Observe,
+    };
+    // herdr frames an observer at the size it asked for: the PTY's top-left crop, blank beyond
+    // it. Observers therefore attach at the pane's own grid (when its tty is readable) and
+    // re-attach when the driver resizes it; the client scales that grid to its box.
+    let grid = match mode {
+        TerminalMode::Observe => grid::PaneGrid::open(ctx, &pane_id).await,
+        TerminalMode::Control => None,
+    };
+    let mut size = grid.as_ref().and_then(grid::PaneGrid::size).unwrap_or((p.cols, p.rows));
+    let session = start_session(&ctx.herdr, &pane_id, mode, size, p.takeover).await?;
     let (mut events, input) = session.split();
     let term_id = crate::util::new_id("t");
     let stop = CancellationToken::new();
     ctx.terms.insert(term_id.clone(), TermEntry { client_id: client.id().to_string(), pane_id: pane_id.clone(), input, stop: stop.clone() });
 
     let registry = ctx.terms.clone();
+    let herdr = ctx.herdr.clone();
     let client = client.clone();
     let tid = term_id.clone();
+    let pid = pane_id.clone();
     let daemon_cancel = ctx.cancel.clone();
     tokio::spawn(async move {
+        let mut check = tokio::time::interval(GRID_CHECK);
+        check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // A new grid must read the same twice in a row: a drag-resize re-attaches once.
+        let mut seen: Option<(u16, u16)> = None;
         let reason = loop {
             tokio::select! {
                 _ = stop.cancelled() => break None,
                 _ = client.closed() => break None,
                 _ = daemon_cancel.cancelled() => break Some("host daemon stopping".to_string()),
+                _ = check.tick(), if grid.is_some() => {
+                    let now = grid.as_ref().and_then(grid::PaneGrid::size);
+                    let Some(now) = now.filter(|&n| n != size) else {
+                        seen = None;
+                        continue;
+                    };
+                    if seen != Some(now) {
+                        seen = Some(now);
+                        continue;
+                    }
+                    seen = None;
+                    size = now;
+                    match start_session(&herdr, &pid, mode, now, false).await {
+                        Ok(s) => {
+                            let (next, input) = s.split();
+                            let Some(old) = registry.replace_input(&tid, input.clone()) else {
+                                // closed while re-attaching
+                                let _ = input.release();
+                                break None;
+                            };
+                            let _ = old.release();
+                            events = next;
+                        }
+                        Err(e) => tracing::debug!(term = %tid, pane = %pid, error = %e.message, "observer re-attach failed"),
+                    }
+                }
                 ev = events.recv() => match ev {
                     Some(TerminalEvent::Frame(f)) => {
                         let msg = ServerMsg::Term {
@@ -268,4 +321,74 @@ pub async fn open(ctx: &Ctx, p: TermOpenParams, client: &ClientHandle) -> Result
     });
 
     Ok(TermOpened { term_id, title: pane_title(ctx, &pane_id), pane_id })
+}
+
+/// The real PTY grid of a pane. herdr's API has no pane width (layout rects include the
+/// scrollbar gutter and ignore sizes set by control clients), so this reads the window size of
+/// the pane shell's tty (`TIOCGWINSZ`). Unix only; elsewhere observers keep the size they asked for.
+mod grid {
+    use crate::ops::Ctx;
+
+    pub struct PaneGrid {
+        #[cfg(unix)]
+        tty: std::fs::File,
+    }
+
+    impl PaneGrid {
+        #[cfg(unix)]
+        pub async fn open(ctx: &Ctx, pane_id: &str) -> Option<Self> {
+            let pid = ctx.herdr.pane_process_info(pane_id).await.ok()?.shell_pid?;
+            for path in tty_paths(pid).await {
+                let Ok(tty) = open_tty(&path) else { continue };
+                let grid = Self { tty };
+                if grid.size().is_some() {
+                    return Some(grid);
+                }
+            }
+            None
+        }
+
+        #[cfg(not(unix))]
+        pub async fn open(_ctx: &Ctx, _pane_id: &str) -> Option<Self> {
+            None
+        }
+
+        /// `(cols, rows)`; `None` once the tty is gone.
+        #[cfg(unix)]
+        pub fn size(&self) -> Option<(u16, u16)> {
+            use std::os::fd::AsRawFd;
+            // SAFETY: `ws` is a valid, writable winsize; the fd stays open for the call.
+            let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+            let r = unsafe { libc::ioctl(self.tty.as_raw_fd(), libc::TIOCGWINSZ as _, &mut ws) };
+            (r == 0 && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col, ws.ws_row))
+        }
+
+        #[cfg(not(unix))]
+        pub fn size(&self) -> Option<(u16, u16)> {
+            None
+        }
+    }
+
+    /// Never becomes our controlling terminal, never blocks.
+    #[cfg(unix)]
+    fn open_tty(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(path)
+    }
+
+    /// Where the shell's terminal can be opened: its std fds through procfs (Linux), else the
+    /// device `ps` names.
+    #[cfg(unix)]
+    async fn tty_paths(pid: u32) -> Vec<std::path::PathBuf> {
+        let proc = std::path::PathBuf::from(format!("/proc/{pid}/fd"));
+        if proc.is_dir() {
+            return (0..3).map(|fd| proc.join(fd.to_string())).collect();
+        }
+        let out = tokio::process::Command::new("ps").args(["-o", "tty=", "-p", &pid.to_string()]).kill_on_drop(true).output().await;
+        let name = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        if name.is_empty() || name.starts_with('?') {
+            return Vec::new();
+        }
+        vec![std::path::Path::new("/dev").join(name)]
+    }
 }

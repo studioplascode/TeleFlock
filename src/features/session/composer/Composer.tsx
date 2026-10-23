@@ -1,7 +1,7 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
-import { core, drafts, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useSession, useUi } from "@/core";
+import { core, drafts, getTranscript, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useSession, useUi } from "@/core";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
@@ -9,6 +9,7 @@ import { useFirstUse } from "@/features/shell/hints";
 import { fileToImageInput, hostCall, usePending } from "../api";
 import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
+import { useQueueChips, usePendingQueue, userRowsWithText } from "./queue";
 import { findCommand, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
 import { useDictation } from "./useDictation";
 
@@ -270,17 +271,23 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     const delivery = followUp ? "followUp" : working && caps && !caps.steer && caps.followUp ? "followUp" : "auto";
     const sentImages = images;
     const imgs: ImageInput[] = sentImages.map(({ mime, data }) => ({ mime, data }));
+    // Into a working agent this queues (steer or follow-up): show it in the strip right away.
+    const queuedKind = !working || !prompt.trim() ? null : delivery === "followUp" ? "follow" : "steer";
+    const pendingId = queuedKind
+      ? usePendingQueue.getState().add(agentKey, { text: prompt, kind: queuedKind, before: userRowsWithText(getTranscript(agentKey).items, prompt) })
+      : null;
     const res = await run(hostCall(hostId, "agent.prompt", { agentId, text: prompt, images: imgs, delivery }, { failure: "Prompt not delivered" }));
+    if (pendingId !== null) {
+      if (res.ok) usePendingQueue.getState().sent(agentKey, pendingId);
+      else usePendingQueue.getState().remove(agentKey, pendingId);
+    }
     if (res.ok) {
       // Only what was sent: anything typed or attached while sending stays in the draft.
       const cur = drafts.get(draftKey);
       drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
       setImages((cur) => cur.filter((i) => !sentImages.includes(i)));
       setPopup(null);
-      if (delivery === "followUp") {
-        toast({ title: "Queued follow-up", description: prompt.slice(0, 80), status: "running", duration: 2200 });
-        steerDone.current?.();
-      }
+      if (delivery === "followUp") steerDone.current?.();
     }
   };
 
@@ -386,19 +393,14 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         : mobile
           ? "Message omp · / commands"
           : "Message omp · / commands · @ files";
-  const occurrences = new Map<string, number>();
-  const queued = [...(queue?.steering ?? []).map((t) => ({ t, kind: "steer" as const })), ...(queue?.followUp ?? []).map((t) => ({ t, kind: "follow" as const }))].map((q) => {
-    // Stable keys (text + occurrence) so a delivered message animates out instead of re-keying the rest.
-    const base = `${q.kind}:${q.t}`;
-    const n = (occurrences.get(base) ?? 0) + 1;
-    occurrences.set(base, n);
-    return { ...q, id: `${base}#${n}` };
-  });
+  // Host queue plus this client's just-sent messages (until the host lists them or they land).
+  const queued = useQueueChips(agentKey, queue, working);
   // Holding Alt while the agent works previews follow-up mode on the send button and hints.
   const followMode = working && altHeld && caps?.followUp === true;
   // omp's Alt+Up pops the last steer if any, else the last follow-up: highlight that chip.
   const canDequeue = caps?.bridge === true && queued.length > 0;
-  const popIdx = queue?.steering.length ? queue.steering.length - 1 : queued.length - 1;
+  const lastSteer = queued.findLastIndex((q) => q.kind === "steer");
+  const popIdx = lastSteer >= 0 ? lastSteer : queued.length - 1;
   const dequeue = async (edit: boolean) => {
     const r = await run(hostCall(hostId, "agent.dequeue", { agentId }, { failure: "Couldn't pull the message back" }));
     if (!r.ok) return;
@@ -407,6 +409,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       toast({ title: "Already delivered", description: "The queue was empty by the time the request arrived.", status: "idle" });
       return;
     }
+    usePendingQueue.getState().forget(agentKey, t);
     if (edit) {
       setText((cur) => (cur.trim() ? `${t}\n\n${cur}` : t));
       requestAnimationFrame(() => ta.current?.focus());
@@ -560,11 +563,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   initial={{ opacity: 0, scale: 0.8, y: 6 }}
                   animate={{ opacity: 1, scale: 1, y: 0, transition: spring.bouncy }}
                   exit={{ opacity: 0, scale: 0.85, y: -10, transition: { duration: 0.22 } }}
-                  title={`${q.kind === "steer" ? "Steering: lands mid-turn" : "Follow-up: runs after this turn"}\n${q.t}\nClick to copy into the composer`}
-                  onClick={() => setText(q.t)}
+                  title={`${q.sending ? "Sending… " : ""}${q.kind === "steer" ? "Steering: lands mid-turn" : "Follow-up: runs after this turn"}\n${q.text}\nClick to copy into the composer`}
+                  onClick={() => setText(q.text)}
+                  data-pending={q.pending || undefined}
                   className={cn(
                     "focus-ring flex max-w-[300px] items-center gap-1.5 rounded-full py-1 pr-2.5 pl-1 text-[11.5px] font-semibold shadow-hairline",
                     q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-white/5 text-ink-2",
+                    q.sending && "opacity-70",
                     canDequeue && i === popIdx && "shadow-[inset_0_0_0_1px_var(--color-accent)]",
                   )}
                 >
@@ -577,7 +582,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                     {q.kind === "steer" ? <CornerDownRight className="size-2.5" /> : <ListPlus className="size-2.5" />}
                     {q.kind === "steer" ? "steer" : "follow-up"}
                   </span>
-                  <span className="truncate">{q.t}</span>
+                  <span className="truncate">{q.text}</span>
                   <span className="tf-loop size-1.5 shrink-0 animate-breathe rounded-full bg-current opacity-70" aria-hidden />
                 </motion.button>
               ))}

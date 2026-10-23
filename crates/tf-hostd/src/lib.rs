@@ -10,6 +10,7 @@ pub mod ipc;
 pub mod logging;
 pub mod omp;
 pub mod ops;
+pub mod originals;
 pub mod paths;
 pub mod secure;
 pub mod state;

@@ -1,12 +1,12 @@
-import { Bot, FileCode2, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Send, Workflow } from "lucide-react";
+import { Bot, FileCode2, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Reply, Send, Square, Workflow } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useDraft, useIrcEntries, useSession } from "@/core";
+import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useDraft, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
-import type { TreeInfo, TreeNode } from "@/core/gen";
-import { cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Sparkline, Spinner, useNow } from "@/design";
+import type { BtwThread, BtwTurn, TreeInfo, TreeNode } from "@/core/gen";
+import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Sparkline, Spinner, useNow } from "@/design";
 import { Term } from "@/features/shell/Term";
 import { ACTIONS } from "@/features/shell/vocab";
-import { hostCall, usePending } from "../api";
+import { errorText, hostCall, usePending } from "../api";
 import { ChatThreads, useIrcUnreadCount } from "../irc/ChatThreads";
 import { Markdown } from "../markdown/Markdown";
 import { type InspectorTab, useSessionUi } from "../state";
@@ -286,26 +286,78 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
   );
 }
 
+/** One side conversation as shown: omp's `/btw` history overlaid by what streamed live, oldest turn first. */
+interface BtwRow {
+  id: string;
+  turns: BtwTurnView[];
+}
+
+function historyTurn(t: BtwTurn): BtwTurnView {
+  // Same wording as a live turn that ended badly (hostd appends `⚠ <error>`).
+  const trouble = t.status === "complete" || t.status === "running" ? "" : `⚠ ${t.error ?? t.status}`;
+  return { question: t.question, text: trouble ? `${t.answer}${t.answer ? "\n\n" : ""}${trouble}` : t.answer, done: t.status !== "running" };
+}
+
+/** History conversations (oldest first), then ones seen only live (newer); returned newest first. */
+function btwRows(history: BtwThread[], live: Record<string, BtwEntry>): BtwRow[] {
+  const rows: BtwRow[] = [];
+  const known = new Set<string>();
+  for (const th of history) {
+    known.add(th.btwId);
+    const streamed = live[th.btwId]?.turns ?? [];
+    const turns: BtwTurnView[] = [];
+    for (let i = 0; i < Math.max(th.turns.length, streamed.length); i++) {
+      const s = streamed[i];
+      const h = th.turns[i];
+      const t = s ? { ...s, question: s.question ?? h?.question } : h && historyTurn(h);
+      if (t) turns.push(t);
+    }
+    rows.push({ id: th.btwId, turns });
+  }
+  for (const [id, e] of Object.entries(live)) {
+    if (!known.has(id)) rows.push({ id, turns: e.turns.filter((t): t is BtwTurnView => t !== undefined) });
+  }
+  return rows.reverse();
+}
+
 export function BtwPanel({ agentKey }: { agentKey: string }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
-  const asked = useSessionUi((s) => s.btw[agentKey]) ?? [];
-  const answers = useBtw(agentKey);
+  const live = useBtw(agentKey);
   const key = draftKey("btw.question", agentKey);
   const [q, setQ] = useDraft(key);
   const [busy, run] = usePending();
+  const enabled = meta?.caps.btw ?? false;
+  const sessionId = meta?.sessionId;
+  // omp's /btw history: earlier conversations, asked here or in the terminal.
+  const [history, setHistory] = useState<{ sessionId?: string; threads: BtwThread[]; error?: string }>({ threads: [] });
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    core
+      .host(hostId)
+      .call("agent.btwHistory", { agentId })
+      .then(
+        (h) => alive && setHistory({ sessionId, threads: h.threads }),
+        (e: unknown) => alive && setHistory({ sessionId, threads: [], error: errorText(e).title }),
+      );
+    return () => {
+      alive = false;
+    };
+  }, [hostId, agentId, enabled, sessionId]);
+  const rows = btwRows(history.sessionId === sessionId ? history.threads : [], live);
+  // omp answers one side question at a time.
+  const running = rows.some((r) => r.turns.some((t) => !t.done));
   const ask = async () => {
     const question = q.trim();
     if (!question) return;
     const res = await run(hostCall(hostId, "agent.btw", { agentId, question }, { failure: "btw failed" }));
     if (res.ok) {
-      useSessionUi.getState().addBtw(agentKey, res.value.btwId, question);
       // Only what was asked: anything typed while asking stays in the draft.
       const cur = drafts.get(key);
       drafts.set(key, cur.startsWith(q) ? cur.slice(q.length).trimStart() : cur);
     }
   };
-  const disabled = meta ? !meta.caps.btw : true;
   return (
     <Pane
       id="btw"
@@ -318,44 +370,101 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
         </>
       }
       label="btw · side question"
-      aside={<MessageCircleQuestion className="size-3.5" aria-label="Answered from the session's context without adding to it" />}
+      aside={<MessageCircleQuestion className="size-3.5" aria-label="Answered from the session's context without adding to it; also in omp's /btw" />}
     >
       <div className="flex flex-col gap-2.5">
-        {[...asked].reverse().map((b) => {
-          const a = answers[b.id];
-          return (
-            <div key={b.id} className="rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2 shadow-hairline">
-              <div className="text-xs font-bold text-ink">{b.question}</div>
-              <div className="mt-1">
-                {a && a.text ? (
-                  <Markdown text={a.text} streaming={!a.done} className="text-[12.5px]" />
-                ) : (
-                  <Shimmer className="text-xs">{a?.done ? "No answer" : "Thinking…"}</Shimmer>
-                )}
-              </div>
-            </div>
-          );
-        })}
         <Input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              void ask();
+              if (!running) void ask();
             }
           }}
-          disabled={disabled}
-          placeholder={disabled ? "btw unavailable for this session" : "Ask without interrupting…"}
+          disabled={!enabled}
+          placeholder={!enabled ? "btw unavailable for this session" : "Ask without interrupting…"}
           aria-label="Side question"
           trailing={
-            <IconButton label="Ask" size="sm" onClick={() => void ask()} disabled={disabled || !q.trim() || busy}>
+            <IconButton label={running ? "Wait for the side question that is answering" : "Ask"} size="sm" onClick={() => void ask()} disabled={!enabled || !q.trim() || busy || running}>
               {busy ? <Spinner size={13} /> : <Send />}
             </IconButton>
           }
         />
+        {rows.map((row) => (
+          <BtwConversation key={row.id} row={row} hostId={hostId} agentId={agentId} canFollowUp={enabled && !running} />
+        ))}
+        {history.error && history.sessionId === sessionId && <div className="text-[11px] text-mute-2">Earlier side questions unavailable: {history.error}</div>}
       </div>
     </Pane>
+  );
+}
+
+/** One side conversation: its turns, then Cancel while answering or a follow-up box (omp's `f`). */
+function BtwConversation({ row, hostId, agentId, canFollowUp }: { row: BtwRow; hostId: string; agentId: string; canFollowUp: boolean }) {
+  const [reply, setReply] = useState<string | null>(null);
+  const [busy, run] = usePending();
+  const answering = row.turns.some((t) => !t.done);
+  const send = async () => {
+    const question = reply?.trim();
+    if (!question) return;
+    const res = await run(hostCall(hostId, "agent.btw", { agentId, question, btwId: row.id }, { failure: "Follow-up failed" }));
+    if (res.ok) setReply(null);
+  };
+  return (
+    <div className="rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2 shadow-hairline" data-btw={row.id}>
+      {row.turns.map((t, i) => (
+        <div key={i} className={cn(i > 0 && "mt-2 border-t border-white/6 pt-2")}>
+          <div className="text-xs font-bold text-ink">
+            {i > 0 && <span className="text-mute">↳ </span>}
+            {t.question ?? "…"}
+          </div>
+          <div className="mt-1">
+            {t.text ? (
+              <Markdown text={t.text} streaming={!t.done} className="text-[12.5px]" />
+            ) : (
+              <Shimmer className="text-xs">{t.done ? "No answer" : "Thinking…"}</Shimmer>
+            )}
+          </div>
+        </div>
+      ))}
+      {answering ? (
+        <div className="mt-1 flex justify-end">
+          <Button size="sm" variant="ghost" icon={<Square />} loading={busy} onClick={() => void run(hostCall(hostId, "agent.btwCancel", { agentId, btwId: row.id }, { failure: "Cancel failed" }))}>
+            Cancel
+          </Button>
+        </div>
+      ) : reply === null ? (
+        <div className="mt-1 flex justify-end">
+          <Button size="sm" variant="ghost" icon={<Reply />} disabled={!canFollowUp} onClick={() => setReply("")}>
+            Follow up
+          </Button>
+        </div>
+      ) : (
+        <Input
+          autoFocus
+          className="mt-2"
+          value={reply}
+          onChange={(e) => setReply(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void send();
+            } else if (e.key === "Escape") {
+              e.stopPropagation();
+              setReply(null);
+            }
+          }}
+          placeholder="Follow up on this answer…"
+          aria-label="Follow-up question"
+          trailing={
+            <IconButton label="Send follow-up" size="sm" onClick={() => void send()} disabled={!canFollowUp || !reply.trim() || busy}>
+              {busy ? <Spinner size={13} /> : <Send />}
+            </IconButton>
+          }
+        />
+      )}
+    </div>
   );
 }
 

@@ -5,6 +5,8 @@ import type {
   AiCompleteResult,
   AppEvent,
   BranchInfo,
+  BtwStatus,
+  BtwThread,
   ChangedFile,
   CommandInfo,
   ConnPhase,
@@ -93,6 +95,8 @@ export interface HostEnv {
 
 const OTHER_DEVICE = "Pixel 9";
 const TICK = 100;
+/** PTY grid of a demo pane nobody controls yet (the user's own herdr TUI sized it). */
+const DEMO_PANE_GRID = { cols: 110, rows: 32 };
 const OFFLINE: ConnPhase[] = ["offline", "error", "reconnecting", "authRequired", "hostKey", "idle"];
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -102,6 +106,15 @@ interface WsModel {
   /** Linked worktree path, when a worktree workspace. */
   path: string;
   shellPanes: string[];
+}
+
+/** One simulated `/btw` conversation (omp's BTW history topic). `stop` cancels the turn answering. */
+interface DemoBtw {
+  id: string;
+  sessionId?: string;
+  at: number;
+  turns: { question: string; answer: string; status: BtwStatus; at: number }[];
+  stop?: () => void;
 }
 
 /**
@@ -117,6 +130,8 @@ export class DemoHost implements SimHost {
   private readonly wss = new Map<string, WsModel>();
   private readonly subscribed = new Set<string>();
   private readonly terms = new Map<string, DemoTerm>();
+  /** Each pane's PTY grid: set by the controlling terminal, followed by observers (like hostd). */
+  private readonly paneGrids = new Map<string, { cols: number; rows: number }>();
   private readonly dirtyAgents = new Set<string>();
   private readonly dirtyMeta = new Set<string>();
   private readonly removedAgents = new Set<string>();
@@ -138,6 +153,8 @@ export class DemoHost implements SimHost {
   private readonly seenRequests = new Map<string, number>();
   /** Messages sent to each subagent (`agent.subagent` chat), replayed into its transcript. */
   private readonly subSteers = new Map<string, { at: number; text: string }[]>();
+  /** `/btw` conversations per agent, oldest first (seeded with one asked "in the terminal"). */
+  private readonly btws = new Map<string, DemoBtw[]>();
   private promptIdx = 0;
   private nextWs = 20;
   private nextPane = 2;
@@ -172,6 +189,15 @@ export class DemoHost implements SimHost {
             issues: [
               { id: "enable-global-sharing", severity: "warn", title: "Share every omp session with TeleFlock", detail: "Sets collab.autoStart: control and collab.relayUrl: ws://127.0.0.1:47466 in ~/.omp/agent/config.yml, so sessions you start by hand (or that herdr restores) appear here with full controls.", fixable: true, recommended: true },
               { id: "install-global-bridge", severity: "info", title: "Install the TeleFlock companion extension", detail: "Copies teleflock-bridge.ts into ~/.omp/agent/extensions for precise model/thinking/plan controls without keystroke injection.", fixable: true, recommended: true },
+              {
+                id: "move-herdr-out-of-login-session",
+                severity: "warn",
+                title: "Move herdr out of its login session",
+                detail:
+                  "The herdr server of session default (pid 4894) and 23 processes under it (pane shells, omp agents and their tools) run in login session c16 (session-c16.scope). When logind tears that session down (on logout with KillUserProcesses=yes, or when a restarted logind cleans up sessions that already ended), systemd stops the scope and every agent in it dies. Moves them, still running, into their own systemd scope (teleflock-herdr-…); nothing is stopped or restarted.",
+                fixable: true,
+                recommended: true,
+              },
             ],
           }
         : { herdrIntegration: false, globalSharing: false, globalBridge: false, relay: true, issues: [{ id: "install-herdr-integration", severity: "error", title: "herdr omp integration missing", detail: "herdr can't tell when omp is working or blocked. Installs ~/.omp/agent/extensions/herdr-omp-agent-state.ts.", fixable: true, recommended: true }] };
@@ -868,6 +894,13 @@ export class DemoHost implements SimHost {
         return { path: `${HOME}/.omp/agent/exports/${this.ompSim(p.agentId).agent.id}-${this.now()}.html` };
       case "agent.btw":
         return this.btw(p);
+      case "agent.btwCancel":
+        return this.btwCancel(p);
+      case "agent.btwHistory": {
+        const sim = this.ompSim(p.agentId);
+        const threads: BtwThread[] = this.btwsOf(sim).map((b) => ({ btwId: b.id, at: b.at, turns: b.turns.map((t) => ({ ...t })) }));
+        return { threads };
+      }
       case "agent.slash":
         return this.slash(p);
       case "agent.commands": {
@@ -991,7 +1024,12 @@ export class DemoHost implements SimHost {
         return this.termOpen(p);
       case "term.resize": {
         const t = this.term(p.termId);
-        t.resize(Number(p.cols) || t.cols, Number(p.rows) || t.rows);
+        const grid = { cols: Number(p.cols) || t.cols, rows: Number(p.rows) || t.rows };
+        t.resize(grid.cols, grid.rows);
+        if (t.mode === "control") {
+          this.paneGrids.set(t.paneId, grid);
+          for (const o of this.terms.values()) if (o.paneId === t.paneId && o.mode === "observe" && !o.isClosed) o.resize(grid.cols, grid.rows);
+        }
         return {};
       }
       case "term.scroll":
@@ -1077,21 +1115,75 @@ export class DemoHost implements SimHost {
     return {};
   }
 
+  /** This session's `/btw` conversations; the first look seeds one asked earlier in omp's TUI. */
+  private btwsOf(sim: AgentSim): DemoBtw[] {
+    const sessionId = sim.agent.omp?.sessionId;
+    let all = this.btws.get(sim.agent.id);
+    if (!all) {
+      const at = this.now() - 6 * 60_000;
+      const file = this.repoFiles(sim.agent.id).files[0] ?? "src";
+      all = [
+        {
+          id: `btw-${this.rng.hex(6)}`,
+          sessionId,
+          at,
+          turns: [{ question: "Which file does this change start from?", answer: `\`${file}\`: everything else in the diff follows from it.`, status: "complete", at }],
+        },
+      ];
+      this.btws.set(sim.agent.id, all);
+    }
+    return all.filter((b) => b.sessionId === sessionId);
+  }
+
+  /** omp's `/btw`: one side question at a time; `btwId` continues a conversation (omp's `f`). */
   private btw(p: Record<string, unknown>): unknown {
     const sim = this.ompSim(p.agentId);
-    const question = this.str(p, "question");
-    const btwId = `btw-${this.rng.hex(6)}`;
-    const answer = `Quick side answer (doesn't interrupt the main turn): ${question.endsWith("?") ? "yes — " : ""}the ${sim.agent.repo ?? "repo"} keeps that in \`${this.repoFiles(sim.agent.id).files[2] ?? "src"}\`, and nothing in the current change touches it.`;
-    let shown = 0;
+    const question = this.str(p, "question").trim();
+    if (!question) throw apiError("invalid_params", "empty question");
+    const mine = this.btwsOf(sim);
+    if (mine.some((b) => b.stop)) throw apiError("busy", "a /btw question is still running; wait for it or cancel it");
+    let th: DemoBtw;
+    if (typeof p.btwId === "string") {
+      const found = mine.find((b) => b.id === p.btwId);
+      if (!found) throw apiError("not_found", `no side conversation ${p.btwId}`);
+      th = found;
+    } else {
+      th = { id: `btw-${this.rng.hex(6)}`, sessionId: sim.agent.omp?.sessionId, at: this.now(), turns: [] };
+      this.btws.get(sim.agent.id)!.push(th);
+    }
+    const turn = th.turns.length;
+    const answer =
+      turn === 0
+        ? `Quick side answer (doesn't interrupt the main turn): ${question.endsWith("?") ? "yes — " : ""}the ${sim.agent.repo ?? "repo"} keeps that in \`${this.repoFiles(sim.agent.id).files[2] ?? "src"}\`, and nothing in the current change touches it.`
+        : `Following up on "${th.turns[turn - 1]!.question}": same place — and the tests next to it cover that case too.`;
+    const entry = { question, answer: "", status: "running" as BtwStatus, at: this.now() };
+    th.turns.push(entry);
+    const thread = th;
+    this.session(sim.agent.id, { k: "btw", btwId: thread.id, turn, question, text: "", done: false });
     const step = () => {
-      const n = 12 + this.rng.int(0, 10);
-      const chunk = answer.slice(shown, shown + n);
-      shown += chunk.length;
-      this.session(sim.agent.id, { k: "btw", btwId, text: chunk, done: shown >= answer.length });
-      if (shown < answer.length) this.env.clock.after(90, step);
+      const chunk = answer.slice(entry.answer.length, entry.answer.length + 12 + this.rng.int(0, 10));
+      entry.answer += chunk;
+      const done = entry.answer.length >= answer.length;
+      if (done) {
+        entry.status = "complete";
+        thread.stop = undefined;
+      } else thread.stop = this.env.clock.after(90, step);
+      this.session(sim.agent.id, { k: "btw", btwId: thread.id, turn, text: chunk, done });
     };
-    this.env.clock.after(400, step);
-    return { btwId };
+    thread.stop = this.env.clock.after(400, step);
+    return { btwId: thread.id, turn };
+  }
+
+  private btwCancel(p: Record<string, unknown>): unknown {
+    const sim = this.ompSim(p.agentId);
+    const th = this.btwsOf(sim).find((b) => b.id === p.btwId && b.stop);
+    if (!th?.stop) throw apiError("not_found", `no running btw ${String(p.btwId)}`);
+    th.stop();
+    th.stop = undefined;
+    const turn = th.turns.length - 1;
+    th.turns[turn]!.status = "cancelled";
+    this.session(sim.agent.id, { k: "btw", btwId: th.id, turn, text: "\n\n⚠ cancelled", done: true });
+    return {};
   }
 
   private slash(p: Record<string, unknown>): unknown {
@@ -1763,6 +1855,13 @@ export class DemoHost implements SimHost {
         this.terms.delete(holder.termId);
       }
     }
+    // Control sizes the pane; an observer is framed at the pane's grid (the user's herdr TUI by default).
+    const asked = { cols: Number(p.cols) || 100, rows: Number(p.rows) || 30 };
+    const grid = mode === "control" ? asked : (this.paneGrids.get(paneId) ?? DEMO_PANE_GRID);
+    if (mode === "control") {
+      this.paneGrids.set(paneId, grid);
+      for (const o of this.terms.values()) if (o.paneId === paneId && o.mode === "observe" && !o.isClosed) o.resize(grid.cols, grid.rows);
+    }
     const termId = `t${this.nextTerm++}-${this.id}`;
     const wsm = ws as WsModel;
     const sim = agentId ? this.sims.get(agentId) : undefined;
@@ -1771,8 +1870,8 @@ export class DemoHost implements SimHost {
       paneId,
       agentId,
       mode,
-      Number(p.cols) || 100,
-      Number(p.rows) || 30,
+      grid.cols,
+      grid.rows,
       {
         hostname: this.info.hostname,
         cwd: wsm.path,

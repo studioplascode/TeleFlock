@@ -31,6 +31,7 @@ import { PHASE_LABEL } from "@/features/shell/status";
 import { localhostUrlRanges } from "./frames";
 import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraKeys";
 import { applyMods, encodeKey } from "./keys";
+import { observeTransform } from "./observeScale";
 import { PaneOverlay, closedCopy } from "./PaneOverlay";
 import { type TermPhase, TermSession } from "./session";
 import { COMPACT_FONT_SIZE, DEFAULT_FONT_SIZE, TERM_FONT_FAMILY, clampFontSize, isTermFontFace, loadTermFonts, termTheme } from "./theme";
@@ -53,7 +54,7 @@ export interface TerminalHandle {
 export interface TerminalPaneProps {
   hostId: string;
   target: TermTarget;
-  /** `control` resizes the pane and owns input; `observe` is read-only and crops. */
+  /** `control` resizes the pane and owns input; `observe` is read-only and shows the driver's grid, scaled to the box. */
   mode?: TermMode;
   /** Board tiles: tiny font, no chrome, no input. */
   compact?: boolean;
@@ -367,21 +368,24 @@ export function TerminalPane({
   }, [inst, compact, hostId]);
 
   /* ---------- observe-mode scaling ---------- */
+  // An observer's grid is the driver's (frames set it): scale it uniformly to the box. Board tiles
+  // fill their width at any window size and keep the bottom rows; full views show the whole grid,
+  // shrunk when it is bigger than the view, centred when smaller.
   const applyObserveScale = useCallback(() => {
-    const frame = frameRef.current;
     const inner = hostRef.current;
     const screen = inner?.querySelector<HTMLElement>(".xterm-screen");
-    if (!frame || !screen || !inner) return;
+    if (!screen || !inner) return;
     if (mode !== "observe") {
       inner.style.transform = "";
       return;
     }
-    const s = Math.min(frame.clientWidth / Math.max(1, screen.offsetWidth), frame.clientHeight / Math.max(1, screen.offsetHeight), compact ? 1.6 : 1);
-    inner.style.transform = s < 0.999 || s > 1.001 ? `scale(${s})` : "";
+    inner.style.transform = observeTransform(
+      { width: inner.clientWidth, height: inner.clientHeight },
+      { width: screen.offsetWidth, height: screen.offsetHeight },
+      compact ? Number.POSITIVE_INFINITY : 1,
+      compact ? "tail" : "contain",
+    );
   }, [mode, compact]);
-
-  const applyObserveScaleRef = useRef(applyObserveScale);
-  applyObserveScaleRef.current = applyObserveScale;
 
   /* ---------- session (open / frames / close) ---------- */
   // Keyed on the instance only: every target/mode/host change creates a new instance first.
@@ -428,7 +432,7 @@ export function TerminalPane({
           cbRef.current.onOpened?.({ termId: p.termId, paneId: p.paneId, title: p.title });
         } else cbRef.current.onOpened?.(null);
       },
-      onFrame: (ev) => {
+      onFrame: () => {
         frames++;
         if (!shown) {
           blankTimer ??= window.setTimeout(reveal, BLANK_GRACE_MS);
@@ -441,11 +445,6 @@ export function TerminalPane({
           beatTimer = undefined;
           setBeat(frames);
         }, 250);
-        // Observe mode: frames are authoritative for size; scale the grid to fit the tile.
-        if (mode === "observe" && (ev.cols !== term.cols || ev.rows !== term.rows) && ev.cols > 0 && ev.rows > 0) {
-          term.resize(ev.cols, ev.rows);
-          requestAnimationFrame(applyObserveScaleRef.current);
-        }
       },
     });
     sessionRef.current = session;
@@ -502,36 +501,29 @@ export function TerminalPane({
   }, [hostOnline, mode]);
 
   /* ---------- sizing ---------- */
-  const observeReopen = useRef<number | undefined>(undefined);
-  useEffect(() => () => clearTimeout(observeReopen.current), []);
+  // Control: the box decides the grid (and so the pane's PTY). Observe: the driver's grid comes with
+  // the frames and the box only rescales it, so a resize never reaches herdr.
   const refit = useCallback(() => {
     const term = termRef.current;
     const fit = fitRef.current;
     if (!term || !fit || !term.element) return;
-    const grid = proposeGrid(fit);
-    if (!grid) return;
-    const { cols, rows } = grid;
-    const s = sessionRef.current;
-    if (mode === "observe" && s?.openedSize && s.phase.k === "live") {
-      // Observers can't resize; their crop is fixed at open. Re-attach at the new size once it settles.
-      clearTimeout(observeReopen.current);
-      if (cols !== s.openedSize.cols || rows !== s.openedSize.rows) {
-        observeReopen.current = window.setTimeout(() => {
-          term.resize(cols, rows);
-          void s.open(false);
-        }, 450);
+    if (mode === "control") {
+      const grid = proposeGrid(fit);
+      if (grid && (grid.cols !== term.cols || grid.rows !== term.rows)) {
+        term.resize(grid.cols, grid.rows);
+        if (!compact) showBadge(`${grid.cols}×${grid.rows}`);
       }
-    } else if (cols !== term.cols || rows !== term.rows) {
-      term.resize(cols, rows);
-      if (!compact) showBadge(`${cols}×${rows}`);
     }
-    requestAnimationFrame(applyObserveScale);
+    applyObserveScale();
   }, [mode, compact, showBadge, applyObserveScale]);
   const refitRef = useRef(refit);
   refitRef.current = refit;
 
+  // The box (window, sidebar, split drag) and the drawn grid (new observer size, late font, DPR
+  // change re-measuring the cells): either one changing re-fits once per animation frame.
   useEffect(() => {
     const frame = frameRef.current;
+    const screen = hostRef.current?.querySelector<HTMLElement>(".xterm-screen");
     if (!inst || !frame) return;
     let raf = 0;
     const ro = new ResizeObserver(() => {
@@ -539,6 +531,7 @@ export function TerminalPane({
       raf = requestAnimationFrame(refit);
     });
     ro.observe(frame);
+    if (screen) ro.observe(screen);
     return () => {
       ro.disconnect();
       cancelAnimationFrame(raf);

@@ -64,7 +64,12 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   `install-herdr-integration` (herdr `integration.install omp`), `enable-global-sharing`
   (`omp config set collab.autoStart control` + `collab.relayUrl ws://127.0.0.1:<port>`),
   `install-global-bridge` (atomic copy of `~/.teleflock/ext/teleflock-bridge.ts` into
-  `<omp agent dir>/extensions/`).
+  `<omp agent dir>/extensions/`), `move-herdr-out-of-login-session` (`scope.rs`: the herdr server
+  behind the session's socket, found via `SO_PEERCRED`, runs in a logind `session-*.scope`; root on
+  systemd only: `busctl … StartTransientUnit` with `PIDs` = the server into
+  `teleflock-herdr-<session>-<pid>-<ms>.scope` (Delegate, TasksMax=infinity), then
+  `AttachProcessesToUnit` for its process tree still in login sessions, parents first, a few passes
+  for processes forked meanwhile; never stops anything. Non-root gets an explanation instead).
 - **ai.complete** (`ai.rs`): `omp --mode json --no-session --no-tools --no-extensions --no-skills
   --no-rules --no-lsp --no-title --model @<role> --system-prompt <system>`, prompt on stdin,
   `NO_COLOR=1`, cwd = `cwd` if it is a dir, else home. Line breaks in `system` become spaces

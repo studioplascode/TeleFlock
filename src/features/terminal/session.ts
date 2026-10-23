@@ -26,7 +26,7 @@ export interface TermSessionOpts {
   mode: TermMode;
   term: Terminal;
   onPhase(phase: TermPhase): void;
-  /** Every frame after it has been written (liveness, observe-mode sizing). */
+  /** Every frame after it has been written (liveness). */
   onFrame(ev: FrameEvent): void;
   /** Defaults to the real `@/core` exports. */
   deps?: TermDeps;
@@ -55,8 +55,6 @@ export class TermSession {
   private gotFrame = false;
   private disposed = false;
   phase: TermPhase = { k: "idle" };
-  /** Grid size sent with the latest `term.open` (observers crop to it). */
-  openedSize: { cols: number; rows: number } | null = null;
 
   private readonly d: TermDeps;
 
@@ -89,7 +87,6 @@ export class TermSession {
     }
     this.setPhase({ k: "opening", takeover });
     const { cols, rows } = this.o.term;
-    this.openedSize = { cols, rows };
     let opened;
     try {
       opened = await this.d.core.host(this.o.hostId).call("term.open", { target: this.o.target, cols, rows, mode: this.o.mode, takeover });
@@ -128,6 +125,11 @@ export class TermSession {
     switch (ev.k) {
       case "frame":
         this.gotFrame = true;
+        // An observer is framed at the pane's own grid (hostd follows the driver's resizes):
+        // take that size before drawing; the view scales it to its box.
+        if (this.o.mode === "observe" && ev.cols > 0 && ev.rows > 0 && (ev.cols !== this.o.term.cols || ev.rows !== this.o.term.rows)) {
+          this.o.term.resize(ev.cols, ev.rows);
+        }
         this.o.term.write(decodeBase64(ev.data), this.pinViewport);
         this.o.onFrame(ev);
         break;
@@ -172,7 +174,7 @@ export class TermSession {
     if (this.termId && this.o.mode === "control") this.d.core.termInput(this.o.hostId, this.termId, data);
   }
 
-  /** Control only: hostd answers `unsupported` for observers (their crop size is fixed at open). */
+  /** Control only: an observer never sizes the pane (hostd answers `unsupported`); it follows the driver's grid. */
   resize(cols: number, rows: number) {
     if (!this.termId || this.o.mode !== "control") return;
     void this.d.core.host(this.o.hostId).call("term.resize", { termId: this.termId, cols, rows }).catch(() => {});

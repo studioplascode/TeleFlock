@@ -178,10 +178,48 @@ wire_struct! {
     pub struct BtwParams {
         pub agent_id: String,
         pub question: String,
+        /// Follow up on this side conversation (omp `/btw` history topic) instead of starting one.
+        pub btw_id: Option<String>,
     }
 }
 
-wire_struct! { pub struct BtwStarted { pub btw_id: String } }
+wire_struct! {
+    pub struct BtwStarted {
+        /// The omp `/btw` history topic id (same for every follow-up of the conversation).
+        pub btw_id: String,
+        /// Turn index in the conversation: 0 is the first question, then one per follow-up.
+        #[serde(default)]
+        pub turn: u32,
+    }
+}
+
+wire_struct! { pub struct BtwRef { pub agent_id: String, pub btw_id: String } }
+
+wire_enum! { pub enum BtwStatus { Running, Complete, Cancelled, Error, Interrupted } }
+
+wire_struct! {
+    pub struct BtwTurn {
+        pub question: String,
+        pub answer: String,
+        pub status: BtwStatus,
+        pub error: Option<String>,
+        pub at: Millis,
+    }
+}
+
+wire_struct! {
+    /// One `/btw` side conversation: the question and its follow-ups, oldest first.
+    pub struct BtwThread {
+        pub btw_id: String,
+        pub at: Millis,
+        pub turns: Vec<BtwTurn>,
+    }
+}
+
+wire_struct! {
+    /// The session's `/btw` history (asked in the GUI or in omp's TUI), oldest first.
+    pub struct BtwHistory { pub threads: Vec<BtwThread> }
+}
 
 wire_struct! {
     pub struct CommandInfo {
@@ -317,13 +355,19 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// `ImageRef.blob` of a transcript image.
-    pub struct ImageParams { pub blob: String }
+    /// A transcript image in full: its omp `blob` (`ImageRef.blob`), or its `original`
+    /// (`ImageRef.original`; `agentId` resolves `local://` URLs against that agent's omp session).
+    pub struct ImageParams {
+        pub blob: Option<String>,
+        pub original: Option<String>,
+        pub agent_id: Option<String>,
+    }
 }
 
 wire_struct! {
-    /// The full image, base64 (the client already has the mime from its `ImageRef`).
-    pub struct ImageBlob { pub data: String }
+    /// The image, base64, and its type sniffed from the bytes: an original's format can differ
+    /// from its `ImageRef`'s (a PNG behind omp's WebP copy).
+    pub struct ImageBlob { pub data: String, pub mime: Option<String> }
 }
 
 wire_struct! { pub struct ExportResult { pub path: String } }
@@ -920,6 +964,8 @@ methods!(HostMethod, "HostMethods", {
     "agent.handoff" => AgentHandoff(CompactParams) -> Empty;
     "agent.export" => AgentExport(AgentRef) -> ExportResult;
     "agent.btw" => AgentBtw(BtwParams) -> BtwStarted;
+    "agent.btwCancel" => AgentBtwCancel(BtwRef) -> Empty;
+    "agent.btwHistory" => AgentBtwHistory(AgentRef) -> BtwHistory;
     "agent.slash" => AgentSlash(SlashParams) -> Empty;
     "agent.commands" => AgentCommands(AgentRef) -> CommandList;
     "agent.dequeue" => AgentDequeue(AgentRef) -> Dequeued;

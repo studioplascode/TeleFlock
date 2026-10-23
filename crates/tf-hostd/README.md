@@ -13,6 +13,9 @@ tf-hostd --version                                           # "tf-hostd 0.1.0 p
 - `TF_HOSTD_HOME` overrides `~/.teleflock` (lab: `/tmp/tf-lab-core-home`). Layout in `src/paths.rs`.
 - `attach` starts the daemon detached (`setsid`, stdio null; Windows `DETACHED_PROCESS`) and waits ≤ 10 s
   for the socket. stdout carries protocol lines only; diagnostics go to stderr as `tf-hostd: …`.
+  On Linux with systemd the daemon runs in its own transient scope (`teleflock-hostd-<pid>-<ms>.scope`,
+  `tf_herdr::durable`; root, or a lingering user), so tearing down the attaching login session spares it;
+  if `systemd-run` cannot create the unit, `attach` starts the daemon plainly.
 - Several devices share one daemon, and their apps update at different times, so a host only moves
   forward (`tf_proto::version::cmp_lines`: semver, then protocol):
   - `attach --replace` (the app just installed its build) stops a running daemon whose binary identity

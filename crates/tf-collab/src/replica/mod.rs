@@ -32,7 +32,7 @@ use tf_proto::{
 
 use crate::frame::{AgentSnapshot, HostFrame, SessionHeader, SessionState, UiRequestFrame};
 use crate::guest::{EndReason, GuestEvent, Snapshot};
-use util::{arr, b, clip, content_images, content_text, f, first_line, non_empty, s, ts, u};
+use util::{arr, b, clip, content_images, content_text, f, first_line, non_empty, s, shown_sha256, ts, u};
 
 pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, Spend};
 pub use ui::UiReply;
@@ -43,6 +43,53 @@ pub const RESET_LIMIT: usize = 300;
 /// Cap for a tool row's `output` (the tail is kept).
 pub const OUTPUT_CAP: usize = 256 * 1024;
 const TPS_WINDOW_MS: i64 = 3000;
+/// `customType` of omp's hidden companion to a TUI-pasted image (`details: {index, path}`, sharing
+/// the user row's timestamp): `path` is the file as pasted, before omp downscaled it.
+const IMAGE_ATTACHMENT: &str = "image-attachment";
+
+/// A full-resolution copy tf-hostd kept of an image it sent ([`Replica::expect_originals`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeptOriginal {
+    /// sha256 hex of the original's bytes (equal to the row's image when omp kept it as is).
+    pub sha256: String,
+    /// Where tf-hostd stored it (→ `ImageRef.original`).
+    pub path: String,
+}
+
+/// A prompt TeleFlock queued while omp streamed ([`Replica::expect_queued`]).
+#[derive(Debug, Clone)]
+struct QueuedSent {
+    text: String,
+    follow_up: bool,
+    /// When it was sent (host epoch ms): only a user row from then on can be its echo.
+    at: Millis,
+}
+
+/// Comparison key of a queued message: omp's queue chips flatten line breaks (` ↵ `) and the
+/// bridge reads them back from the rendered band, so whitespace and `↵` don't count.
+pub fn queue_key(text: &str) -> String {
+    text.split(|c: char| c.is_whitespace() || c == '↵').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// `primary` (omp's own queue, read by the bridge) plus every message of `extra` (prompts
+/// TeleFlock queued) it does not list yet, compared by [`queue_key`] across both lists.
+pub fn merge_queue(primary: &QueueInfo, extra: &QueueInfo) -> QueueInfo {
+    let mut out = primary.clone();
+    let mut listed: Vec<String> = primary.steering.iter().chain(&primary.follow_up).map(|t| queue_key(t)).collect();
+    for (texts, follow_up) in [(&extra.steering, false), (&extra.follow_up, true)] {
+        for t in texts {
+            let key = queue_key(t);
+            if let Some(i) = listed.iter().position(|k| *k == key) {
+                listed.swap_remove(i);
+            } else if follow_up {
+                out.follow_up.push(t.clone());
+            } else {
+                out.steering.push(t.clone());
+            }
+        }
+    }
+    out
+}
 
 /// Discrete things that happened, for activity feeds and notifications.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +107,9 @@ pub enum Signal {
     Compacted { tokens_before: Option<u64> },
     Retry { attempt: u32, max: u32, error: String },
     Ended { reason: String },
+    /// A user row's images got originals tf-hostd kept ([`Replica::expect_originals`]), one slot
+    /// per image; tf-hostd persists them and hands them back with [`Replica::keep_originals`].
+    OriginalsKept { id: String, originals: Vec<Option<String>> },
 }
 
 /// Result of [`Replica::apply`].
@@ -227,8 +277,16 @@ pub struct Replica {
     file_edits: Vec<(String, Vec<ChangedFile>)>,
     /// Prompts we sent, awaiting their echo: (trimmed text, author device).
     expected_authors: VecDeque<(String, String)>,
+    /// Prompts TeleFlock sent while omp was streaming, listed in `meta.queue` until their
+    /// user row lands (or omp goes idle with nothing queued: aborted, dequeued, dropped).
+    queued_sent: VecDeque<QueuedSent>,
     /// User rows attributed to a device (row id → device), kept across snapshot reloads.
     authors: HashMap<String, String>,
+    /// Full-resolution originals of user rows' images (row id → one slot per image): TUI pastes'
+    /// source files and copies tf-hostd kept. Kept across snapshot reloads.
+    originals: HashMap<String, Vec<Option<String>>>,
+    /// Prompts with images we sent, awaiting their echo: (trimmed text, kept originals).
+    expected_originals: VecDeque<(String, Vec<KeptOriginal>)>,
     /// State read from the main session journal (entries collab does not mirror).
     journal: Journal,
 }
@@ -273,7 +331,10 @@ impl Replica {
             ended: false,
             file_edits: Vec::new(),
             expected_authors: VecDeque::new(),
+            queued_sent: VecDeque::new(),
             authors: HashMap::new(),
+            originals: HashMap::new(),
+            expected_originals: VecDeque::new(),
             journal: Journal::default(),
         }
     }
@@ -290,6 +351,48 @@ impl Replica {
             self.expected_authors.pop_front();
         }
         self.expected_authors.push_back((text.trim().to_owned(), author.to_owned()));
+    }
+
+    /// Links the next echo of `text` to the originals tf-hostd kept of its images (one per image,
+    /// in order). The row's images that are not byte-identical to theirs get `ImageRef.original`.
+    pub fn expect_originals(&mut self, text: &str, originals: Vec<KeptOriginal>) {
+        if originals.is_empty() {
+            return;
+        }
+        if self.expected_originals.len() >= 32 {
+            self.expected_originals.pop_front();
+        }
+        self.expected_originals.push_back((text.trim().to_owned(), originals));
+    }
+
+    /// Restores originals linked earlier (persisted from [`Signal::OriginalsKept`]).
+    pub fn keep_originals(&mut self, id: &str, originals: Vec<Option<String>>) {
+        self.originals.insert(id.to_owned(), originals);
+    }
+
+    /// Lists `text` in `meta.queue` (as a steer, or a follow-up) until its user row lands. Ignored
+    /// while omp is idle (the prompt starts a turn instead of queuing). Returns whether meta changed.
+    pub fn expect_queued(&mut self, text: &str, follow_up: bool, now: Millis) -> bool {
+        let text = text.trim();
+        if text.is_empty() || self.ended || !(self.running || self.state.is_streaming) {
+            return false;
+        }
+        if self.queued_sent.len() >= 32 {
+            self.queued_sent.pop_front();
+        }
+        self.queued_sent.push_back(QueuedSent { text: text.to_owned(), follow_up, at: now });
+        self.refresh_meta();
+        true
+    }
+
+    /// Drops the newest queued prompt matching `text` (pulled back out of omp's queue). Returns
+    /// whether meta changed.
+    pub fn forget_queued(&mut self, text: &str) -> bool {
+        let key = queue_key(text);
+        let Some(i) = self.queued_sent.iter().rposition(|q| queue_key(&q.text) == key) else { return false };
+        self.queued_sent.remove(i);
+        self.refresh_meta();
+        true
     }
 
     // ── public reads ───────────────────────────────────────────────────
@@ -558,6 +661,8 @@ impl Replica {
         let agent_id = std::mem::take(&mut self.agent_id);
         let authors = std::mem::take(&mut self.authors);
         let expected = std::mem::take(&mut self.expected_authors);
+        let originals = std::mem::take(&mut self.originals);
+        let expected_originals = std::mem::take(&mut self.expected_originals);
         // Journal state survives a resync of the same session (not a rotation).
         let same_session = self.header.as_ref().is_some_and(|h| h.id == snap.welcome.header.id);
         let journal = if same_session { std::mem::take(&mut self.journal) } else { Journal::default() };
@@ -565,9 +670,13 @@ impl Replica {
         let keep_artifacts = same_session || self.header.is_none();
         let artifacts = if keep_artifacts { self.artifacts.take() } else { None };
         let playback = if keep_artifacts { std::mem::take(&mut self.playback) } else { Vec::new() };
+        let queued_sent = if same_session { std::mem::take(&mut self.queued_sent) } else { VecDeque::new() };
         *self = Replica::new(agent_id);
         self.authors = authors;
         self.expected_authors = expected;
+        self.originals = originals;
+        self.expected_originals = expected_originals;
+        self.queued_sent = queued_sent;
         self.journal = journal;
         self.artifacts = artifacts;
         self.playback = playback;
@@ -1033,11 +1142,15 @@ impl Replica {
     fn user_message(&mut self, msg: &Value, entry_ts: Option<Millis>, out: &mut Update) {
         let role = s(msg, "role").unwrap_or("");
         let custom_type = s(msg, "customType");
+        let t = entry_ts.or_else(|| ts(msg)).unwrap_or(self.now);
+        let id = format!("u{t}");
+        if custom_type == Some(IMAGE_ATTACHMENT) {
+            self.attachment_source(id, msg, out);
+            return;
+        }
         if (role == "custom" || custom_type.is_some()) && msg.get("display").and_then(Value::as_bool) == Some(false) {
             return;
         }
-        let t = entry_ts.or_else(|| ts(msg)).unwrap_or(self.now);
-        let id = format!("u{t}");
         if let Some(message) = irc::incoming(role, custom_type, msg) {
             let is_new = !self.items.contains_key(&id);
             let (text, peer) = (message.text.clone(), message.peer.clone());
@@ -1057,6 +1170,12 @@ impl Replica {
         }
         if text.is_empty() && images.is_empty() {
             return;
+        }
+        if !images.is_empty() && !self.originals.contains_key(&id) {
+            self.link_kept_originals(&id, text.trim(), &images, out);
+        }
+        if let Some(slots) = self.originals.get(&id) {
+            apply_originals(&mut images, slots);
         }
         let steering = match self.items.get(&id) {
             Some(TranscriptItem::User(u)) => u.steering,
@@ -1078,10 +1197,55 @@ impl Replica {
             }
         }
         let is_new = !self.items.contains_key(&id);
+        if is_new && !synthetic && !self.queued_sent.is_empty() {
+            // A snapshot replays old rows too: only one at or after the send can be the echo.
+            let key = queue_key(&text);
+            if let Some(i) = self.queued_sent.iter().position(|q| t + 5_000 >= q.at && queue_key(&q.text) == key) {
+                self.queued_sent.remove(i);
+            }
+        }
         let item = TranscriptItem::User(UserItem { id, at: t, text: text.clone(), images, author: author.clone(), steering, synthetic });
         self.upsert(item, out);
         if is_new && self.emit {
             out.signals.push(Signal::Prompted { text, author });
+        }
+    }
+
+    /// The echo of a prompt whose originals tf-hostd kept: link those its images don't already show.
+    fn link_kept_originals(&mut self, id: &str, text: &str, images: &[ImageRef], out: &mut Update) {
+        let Some(i) = self.expected_originals.iter().position(|(t, kept)| t == text && kept.len() == images.len()) else { return };
+        let (_, kept) = self.expected_originals.remove(i).expect("position is in range");
+        let slots: Vec<Option<String>> =
+            images.iter().zip(kept).map(|(img, k)| (shown_sha256(img).as_deref() != Some(k.sha256.as_str())).then_some(k.path)).collect();
+        if slots.iter().any(Option::is_some) {
+            out.signals.push(Signal::OriginalsKept { id: id.to_owned(), originals: slots.clone() });
+            self.originals.insert(id.to_owned(), slots);
+        }
+    }
+
+    /// omp's hidden `image-attachment` companion of a TUI-pasted image: the pasted file is the
+    /// original of image `details.index` (1-based) of the user row sharing its timestamp.
+    fn attachment_source(&mut self, id: String, msg: &Value, out: &mut Update) {
+        let Some(details) = msg.get("details") else { return };
+        let (Some(index), Some(path)) = (u(details, "index"), non_empty(details, "path")) else { return };
+        let Some(slot) = (index as usize).checked_sub(1).filter(|i| *i < 64) else { return };
+        let slots = self.originals.entry(id.clone()).or_default();
+        if slots.get(slot).is_some_and(|o| o.as_deref() == Some(path)) {
+            return;
+        }
+        if slots.len() <= slot {
+            slots.resize(slot + 1, None);
+        }
+        slots[slot] = Some(path.to_owned());
+        let patched = match (self.items.get(&id), self.originals.get(&id)) {
+            (Some(TranscriptItem::User(u)), Some(slots)) => {
+                let mut item = u.clone();
+                apply_originals(&mut item.images, slots).then_some(item)
+            }
+            _ => None,
+        };
+        if let Some(item) = patched {
+            self.upsert(TranscriptItem::User(item), out);
         }
     }
 
@@ -1451,6 +1615,11 @@ impl Replica {
                         }
                     }
                     // Same timestamps as `entry` uses for the row id.
+                    Some("custom_message") if s(&entry, "customType") == Some(IMAGE_ATTACHMENT) => {
+                        if let Some(t) = ts(&entry) {
+                            self.attachment_source(format!("u{t}"), &entry, &mut out);
+                        }
+                    }
                     Some("custom_message") => self.journal_images(&entry, ts(&entry), &mut out),
                     Some("message") => {
                         if let Some(msg) = entry.get("message").filter(|m| !matches!(s(m, "role"), Some("assistant" | "toolResult"))) {
@@ -1629,9 +1798,12 @@ impl Replica {
             subagents: w,
             bridge: false,
         };
-        if self.state.queued_message_count == 0 {
-            m.queue = QueueInfo { steering: Vec::new(), follow_up: Vec::new() };
+        // omp idle with nothing queued: what we listed was delivered, aborted or dropped.
+        if self.ended || (!self.running && !st.is_streaming && st.queued_message_count == 0) {
+            self.queued_sent.clear();
         }
+        let listed = |follow_up: bool| self.queued_sent.iter().filter(|q| q.follow_up == follow_up).map(|q| q.text.clone()).collect();
+        m.queue = QueueInfo { steering: listed(false), follow_up: listed(true) };
     }
 
     // ── row store ──────────────────────────────────────────────────────
@@ -1659,8 +1831,8 @@ impl Replica {
     }
 }
 
-/// Images collab cut (no payload, url or blob left) take the journal's copy of the same row.
-/// Returns whether anything changed.
+/// Images collab cut (no payload, url or blob left) take the journal's copy of the same row
+/// (keeping their `original`). Returns whether anything changed.
 fn fill_cut_images(images: &mut [ImageRef], full: &[ImageRef]) -> bool {
     if images.len() != full.len() {
         return false;
@@ -1668,7 +1840,19 @@ fn fill_cut_images(images: &mut [ImageRef], full: &[ImageRef]) -> bool {
     let mut changed = false;
     for (img, j) in images.iter_mut().zip(full) {
         if img.data.is_none() && img.url.is_none() && img.blob.is_none() && j.blob.is_some() {
-            *img = j.clone();
+            *img = ImageRef { original: img.original.take(), ..j.clone() };
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Sets each image's `original` from its slot. Returns whether anything changed.
+fn apply_originals(images: &mut [ImageRef], originals: &[Option<String>]) -> bool {
+    let mut changed = false;
+    for (img, original) in images.iter_mut().zip(originals) {
+        if original.is_some() && img.original != *original {
+            img.original = original.clone();
             changed = true;
         }
     }

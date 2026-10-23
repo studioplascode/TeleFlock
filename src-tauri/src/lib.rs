@@ -89,7 +89,9 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
     let core = Core::new(engine, initial);
     app.manage(Arc::clone(&core));
     app.manage(Arc::clone(&platform));
-    app.manage(update::Updater::new(handle.clone(), Arc::clone(&core)));
+    let updater = update::Updater::new(handle.clone(), Arc::clone(&core));
+    updater.start();
+    app.manage(updater);
 
     #[cfg(windows)]
     {
@@ -230,7 +232,8 @@ fn install_android_sink() -> Arc<std::sync::OnceLock<AppHandle<Wry>>> {
 
 /// Android: the app came to the front (`MainActivity.onResume`; Tauri's `RunEvent::Resumed`
 /// never fires there). Verifies the links, retries a foreground-service start or stop refused
-/// earlier, resumes a pending update install, and gives a new activity its window back.
+/// earlier, resumes a pending update install (or checks for one), and gives a new activity its
+/// window back.
 /// Event loop thread.
 #[cfg(target_os = "android")]
 fn activity_resumed(app: &AppHandle<Wry>, needs_window: bool) {
@@ -311,6 +314,11 @@ pub fn run() {
                 let _ = window.hide();
             }
             tauri::WindowEvent::Focused(true) => {
+                // Android: `activity_resumed` tells the updater instead.
+                #[cfg(desktop)]
+                if let Some(u) = window.try_state::<update::UpdaterState>() {
+                    u.foreground();
+                }
                 if let Some(core) = window.try_state::<CoreState>() {
                     core.engine.resume();
                 }

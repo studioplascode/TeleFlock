@@ -20,7 +20,8 @@ import type {
 	PlanReviewRequestedEvent,
 } from "@oh-my-pi/pi-coding-agent";
 
-const BRIDGE_VERSION = "1.0.0";
+/** 1.1.0: `btw` runs omp's own /btw (follow-ups via `btwId`), `getBtwHistory`. */
+const BRIDGE_VERSION = "1.1.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -192,10 +193,18 @@ type MainEditor = Component & {
 	setDraft?: (text: string, images?: readonly unknown[]) => void;
 	/** Alt+Up: pops the last queued message and merges it ahead of the draft (`handleDequeue`). */
 	onDequeue?: () => void;
+	/** omp's Esc handler; a visible /btw panel owns it first (cancel, else close). */
+	onEscape?: () => void;
 	pendingImages: unknown[];
 	pendingImageLinks?: unknown[];
 };
-type TuiLike = Component & { getFocused?: () => unknown; setFocus?: (c: unknown) => void };
+type TuiLike = Component & {
+	getFocused?: () => unknown;
+	setFocus?: (c: unknown) => void;
+	overlayStack?: Array<{ component?: unknown }>;
+	/** "Tern" native rendering: /btw has no inline panel there, its history sheet streams instead. */
+	nativeRendering?: boolean;
+};
 
 const isMainEditor = (c: unknown): c is MainEditor =>
 	!!c &&
@@ -231,6 +240,113 @@ function walk(node: unknown, pred: (c: unknown) => boolean, depth = 0): Componen
 	}
 	return undefined;
 }
+
+function walkAll(node: unknown, pred: (c: unknown) => boolean, out: Component[], depth = 0): void {
+	if (!node || typeof node !== "object" || depth > 16) return;
+	if (pred(node)) {
+		out.push(node as Component);
+		return;
+	}
+	const kids = "children" in node ? node.children : undefined;
+	if (Array.isArray(kids)) for (const k of kids) walkAll(k, pred, out, depth + 1);
+}
+
+const hasMethods = (c: unknown, names: readonly string[]): boolean =>
+	!!c && typeof c === "object" && names.every(n => typeof (c as Record<string, unknown>)[n] === "function");
+
+// ─── /btw records ──────────────────────────────────────────────────────────────────────────────
+// omp keeps every /btw conversation ("topic") as `<artifacts>/btw-history/entry-<id>.json`:
+// `{id, leafId, question, answer, status, createdAt, updatedAt, error?, followUps?: turn[]}`,
+// checkpointed when a turn starts and when it ends (omp session/btw-history.ts).
+
+type BtwStatus = "running" | "complete" | "cancelled" | "error" | "interrupted";
+const BTW_STATUSES: Record<string, true> = { running: true, complete: true, cancelled: true, error: true, interrupted: true };
+
+interface BtwTurnRec {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	error?: string;
+}
+interface BtwRec extends BtwTurnRec {
+	id: string;
+	followUps: BtwTurnRec[];
+}
+
+function parseBtwTurn(v: unknown): BtwTurnRec | undefined {
+	if (!v || typeof v !== "object") return undefined;
+	const o = v as Record<string, unknown>;
+	if (typeof o.question !== "string" || typeof o.answer !== "string") return undefined;
+	if (typeof o.status !== "string" || !BTW_STATUSES[o.status]) return undefined;
+	const ms = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+	return {
+		question: o.question,
+		answer: o.answer,
+		status: o.status as BtwStatus,
+		createdAt: ms(o.createdAt),
+		updatedAt: ms(o.updatedAt),
+		error: typeof o.error === "string" ? o.error : undefined,
+	};
+}
+
+function parseBtwRecord(v: unknown): BtwRec | undefined {
+	const head = parseBtwTurn(v);
+	const o = v as Record<string, unknown>;
+	if (!head || typeof o.id !== "string" || !o.id) return undefined;
+	const followUps: BtwTurnRec[] = [];
+	for (const f of Array.isArray(o.followUps) ? o.followUps : []) {
+		const turn = parseBtwTurn(f);
+		if (!turn) return undefined;
+		followUps.push(turn);
+	}
+	return { ...head, id: o.id, followUps };
+}
+
+/** Whitespace-insensitive question key: panel titles collapse whitespace. */
+const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
+/** The error a finished turn reports to hostd (`undefined` for a complete answer). */
+const btwErrorOf = (t: Pick<BtwTurnRec, "status" | "error">): string | undefined =>
+	t.status === "complete" || t.status === "running" ? undefined : t.status === "error" ? t.error || "failed" : t.status;
+
+/** pi-tui's BtwPanelComponent: the inline `/btw` answer panel above the composer. */
+type BtwPanel = Component & { title?: unknown; describe?: () => unknown };
+const isBtwPanel = (c: unknown): c is BtwPanel =>
+	hasMethods(c, ["appendText", "setAnswer", "markComplete", "markAborted", "markError", "getCopyText", "isBranchable", "close"]);
+
+/** pi-tui's BtwHistoryPanel: the full-screen `/btw` history overlay with its follow-up composer. */
+type BtwHistoryPanel = Component & {
+	update(records: readonly unknown[]): void;
+	openFollowUp(recordId: string): boolean;
+	showRecord(recordId: string): void;
+	handleInput(data: string): void;
+	pasteText?: (text: string) => void;
+};
+const isBtwHistoryPanel = (c: unknown): c is BtwHistoryPanel =>
+	hasMethods(c, ["update", "openFollowUp", "showRecord", "handleInput", "markCopied"]);
+
+/** The question a panel shows (`/btw <question>`, whitespace collapsed by the panel). */
+function btwPanelQuestion(panel: BtwPanel): string | undefined {
+	const title = typeof panel.title === "string" ? panel.title : "";
+	if (!title.startsWith("/btw ")) return undefined;
+	return oneLine(title.slice(5).replace(/ ✓ Copied$/, ""));
+}
+
+/** The answer a panel shows right now: its native description's markdown body. */
+function btwPanelAnswer(panel: BtwPanel): string | undefined {
+	try {
+		const node = panel.describe?.() as { c?: Array<{ k?: unknown; p?: { text?: unknown } }> } | undefined;
+		const body = node?.c?.[1];
+		return body?.k === "md" && typeof body.p?.text === "string" ? body.p.text : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** omp's btw-user prompt (prompts/system/btw-user.md), for the no-TUI fallback. */
+const btwPrompt = (question: string): string =>
+	`<btw>\nEphemeral side question for current interactive session.\nAnswer briefly, directly; use conversation context already provided.\nNEVER use tools.\nNEVER ask follow-up questions.\nQuestion:\n${question}\n</btw>`;
 
 interface CtlState {
 	model?: { provider: string; id: string; label?: string };
@@ -325,7 +441,35 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 	let editorRef: MainEditor | undefined;
 	let goalFromEvent: CtlState["goal"] | null | undefined; // undefined = derive from entries
 	let pendingReview: ReviewInfo | undefined;
-	const btws = new Map<string, AbortController>();
+	// /btw (see "─── /btw" below). One live entry per conversation turn, keyed `<btwId>:<turn>`.
+	interface BtwLive {
+		sid: string;
+		id: string;
+		turn: number;
+		question: string;
+		/** The answer as far as we know it; `sent` is the prefix hostd already has. */
+		text: string;
+		sent: string;
+		announced: boolean;
+		done: boolean;
+		final?: { status: BtwStatus; error?: string };
+		panel?: object;
+	}
+	const btwLive = new Map<string, BtwLive>();
+	const btwRecords = new Map<string, BtwRec>(); // omp history of `btwSid`, by topic id
+	const btwFileSigs = new Map<string, string>(); // history file → `mtime:size` last parsed
+	const btwHooked = new WeakSet<object>();
+	let btwSid: string | undefined;
+	let btwBaseline = false; // the first scan of a session only learns what is already there
+	let btwScan: Promise<void> | undefined;
+	// No-TUI fallback: private side turns kept in memory (not in omp's history).
+	interface SideThread {
+		id: string;
+		at: number;
+		turns: BtwTurnRec[];
+		ac?: AbortController;
+	}
+	const sideThreads = new Map<string, SideThread>();
 	let btwSeq = 0;
 	let statusShown: boolean | undefined;
 
@@ -536,8 +680,8 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 		connected = false;
 		connecting = false;
 		helloSessionId = undefined;
-		for (const ac of btws.values()) ac.abort(new Error("bridge disconnected"));
-		btws.clear();
+		// Private fallback side turns stream only to hostd; omp's own /btw keeps running.
+		for (const th of sideThreads.values()) th.ac?.abort(new Error("bridge disconnected"));
 		if (s) {
 			try {
 				s.destroy();
@@ -663,6 +807,7 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 				return;
 			}
 			sync();
+			btwTick();
 		} catch (err) {
 			bridgeLog(`tick: ${String(err)}`);
 		}
@@ -800,8 +945,10 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 	const dequeueLast = async (ctx: ExtensionContext): Promise<{ text?: string }> => {
 		const ed = await findEditor(ctx);
 		if (typeof ed.onDequeue !== "function") fail("unsupported", "this omp has no dequeue action");
+		// The band lags collab-guest steers (omp refreshes it before queuing them), so ask the
+		// session too; a pop that finds nothing leaves the draft as is and is reported as empty.
 		const queued = readQueue();
-		if (queued.steering.length + queued.followUp.length === 0) return {};
+		if (queued.steering.length + queued.followUp.length === 0 && !ctx.hasPendingMessages()) return {};
 		const draft = ed.getText();
 		const images = [...ed.pendingImages];
 		const links = Array.isArray(ed.pendingImageLinks) ? [...ed.pendingImageLinks] : undefined;
@@ -909,6 +1056,400 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 		}
 		for (const n of nodes) n.children = childCount.get(n.id) ?? 0;
 		return { nodes, leafId: nearestIncluded(leafId) };
+	};
+
+	// ─── /btw ─────────────────────────────────────────────────────────────────────────────────
+	// A TeleFlock side question is omp's own /btw: `/btw <question>` goes through the composer and a
+	// follow-up through the BTW history panel's composer, exactly as the operator would, so it shows in
+	// the TUI, lands in the session's BTW history and continues the same lineage. The btw id is omp's
+	// history topic id. Answers reach hostd from three sources, whichever is first: the history files
+	// (turn start and end, also for /btw asked in the TUI), the inline answer panel (streaming) and the
+	// history panel (streaming while it is open). Without the TUI (or an on-disk session) a private
+	// ephemeral side turn answers instead (not in omp's history).
+
+	const btwDir = (ctx: ExtensionContext): string | undefined => {
+		try {
+			const dir = ctx.sessionManager.getArtifactsDir();
+			return dir ? path.join(dir, "btw-history") : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+
+	/** Send what hostd does not have yet: the question once, text deltas, then one final frame. */
+	const pushBtw = (t: BtwLive, done: boolean, final?: { status: BtwStatus; error?: string }): void => {
+		if (t.done || !connected) return;
+		const data: Record<string, unknown> = { btwId: t.id, turn: t.turn };
+		if (!t.announced) data.question = t.question;
+		if (done) {
+			t.done = true;
+			t.final = final ?? { status: "complete" };
+			data.text = t.text;
+			data.done = true;
+			const error = btwErrorOf(t.final);
+			if (error) data.error = error;
+		} else {
+			const delta = t.text.startsWith(t.sent) ? t.text.slice(t.sent.length) : "";
+			if (!delta && t.announced) return;
+			data.text = delta;
+			data.done = false;
+			t.sent += delta;
+		}
+		t.announced = true;
+		send({ t: "event", event: "btw_delta", sessionId: t.sid, data });
+	};
+
+	/** Fold a history record into the live turns; `announce: false` (first scan) only learns them. */
+	const absorbBtw = (sid: string, rec: BtwRec, announce: boolean): void => {
+		[rec, ...rec.followUps].forEach((turn, i) => {
+			const key = `${rec.id}:${i}`;
+			let t = btwLive.get(key);
+			if (!t) {
+				t = { sid, id: rec.id, turn: i, question: turn.question, text: turn.answer, sent: "", announced: false, done: false };
+				btwLive.set(key, t);
+				if (!announce) {
+					// A turn still "running" on disk at that point belongs to an earlier process.
+					t.done = t.announced = true;
+					t.sent = turn.answer;
+					t.final = { status: turn.status === "running" ? "interrupted" : turn.status, error: turn.error };
+					return;
+				}
+			}
+			if (t.done) return;
+			if (turn.answer.length > t.text.length && turn.answer.startsWith(t.text)) t.text = turn.answer;
+			if (turn.status === "running") {
+				pushBtw(t, false);
+				return;
+			}
+			if (turn.answer) t.text = turn.answer;
+			pushBtw(t, true, { status: turn.status, error: turn.error });
+		});
+	};
+
+	/** Read new or changed history files (all of them, silently, on a session's first scan). */
+	const scanBtw = (ctx: ExtensionContext): Promise<void> => {
+		btwScan ??= (async () => {
+			const sid = ctx.sessionManager.getSessionId();
+			if (sid !== btwSid) {
+				for (const t of btwLive.values()) t.done = true; // the old session's panels stop streaming
+				btwLive.clear();
+				btwRecords.clear();
+				btwFileSigs.clear();
+				btwSid = sid;
+				btwBaseline = false;
+			}
+			const dir = btwDir(ctx);
+			const names = dir ? await fs.promises.readdir(dir).catch(() => [] as string[]) : [];
+			for (const name of names.sort()) {
+				if (!dir || !name.startsWith("entry-") || !name.endsWith(".json")) continue;
+				const file = path.join(dir, name);
+				const st = await fs.promises.stat(file).catch(() => undefined);
+				if (!st) continue;
+				const sig = `${st.mtimeMs}:${st.size}`;
+				if (btwFileSigs.get(file) === sig) continue;
+				btwFileSigs.set(file, sig);
+				const raw: unknown = await fs.promises
+					.readFile(file, "utf8")
+					.then(JSON.parse)
+					.catch(() => undefined);
+				const rec = parseBtwRecord(raw);
+				if (!rec || btwSid !== sid) continue;
+				btwRecords.set(rec.id, rec);
+				absorbBtw(sid, rec, btwBaseline);
+			}
+			if (btwSid === sid) btwBaseline = true;
+		})()
+			.catch((err: unknown) => bridgeLog(`btw scan: ${String(err)}`))
+			.finally(() => {
+				btwScan = undefined;
+			});
+		return btwScan;
+	};
+
+	/** Poll the history (and `probe`) until `probe` yields something or `ms` passes. */
+	const untilBtw = async <T>(ctx: ExtensionContext, probe: () => T | undefined, ms: number): Promise<T | undefined> => {
+		const end = Date.now() + ms;
+		for (;;) {
+			await scanBtw(ctx);
+			const hit = probe();
+			if (hit !== undefined || Date.now() >= end) return hit;
+			await new Promise<void>(r => {
+				const t = setTimeout(r, 100);
+				t.unref?.();
+			});
+		}
+	};
+
+	const runningBtw = (): BtwLive | undefined => {
+		for (const t of btwLive.values()) if (!t.done) return t;
+		return undefined;
+	};
+
+	/** Stream an inline answer panel: wrap its update methods on the instance (originals run first). */
+	const hookBtwPanel = (panel: BtwPanel, t: BtwLive): void => {
+		btwHooked.add(panel);
+		t.panel = panel;
+		const shown = btwPanelAnswer(panel);
+		if (shown && shown.length > t.text.length) t.text = shown;
+		let closed = false;
+		const methods = panel as Record<string, unknown>;
+		const after = (name: string, fn: (arg: unknown) => void): void => {
+			const orig = methods[name] as (...args: unknown[]) => unknown;
+			methods[name] = function (this: unknown, ...args: unknown[]) {
+				const result = orig.apply(this, args);
+				try {
+					if (!closed) fn(args[0]);
+				} catch (err) {
+					bridgeLog(`btw panel: ${String(err)}`);
+				}
+				return result;
+			};
+		};
+		after("appendText", d => {
+			if (typeof d !== "string") return;
+			t.text += d;
+			pushBtw(t, false);
+		});
+		after("setAnswer", s => {
+			if (typeof s !== "string") return;
+			t.text = s;
+			pushBtw(t, false);
+		});
+		after("markComplete", () => pushBtw(t, true, { status: "complete" }));
+		after("markAborted", () => pushBtw(t, true, { status: "cancelled" }));
+		after("markError", m => pushBtw(t, true, { status: "error", error: typeof m === "string" ? m : undefined }));
+		after("close", () => {
+			closed = true;
+		});
+		pushBtw(t, false);
+	};
+
+	/** Attach unhooked inline panels to the running turn that asks their question. */
+	const hookBtwPanels = (): void => {
+		const tui = tuiRef;
+		if (!tui || ![...btwLive.values()].some(t => !t.done && !t.panel)) return;
+		const panels: Component[] = [];
+		walkAll(tui, isBtwPanel, panels);
+		for (const panel of panels as BtwPanel[]) {
+			if (btwHooked.has(panel)) continue;
+			const q = btwPanelQuestion(panel);
+			let match: BtwLive | undefined;
+			for (const t of btwLive.values()) if (!t.done && !t.panel && oneLine(t.question) === q) match = t; // newest wins
+			if (match) hookBtwPanel(panel, match);
+		}
+	};
+
+	/** The open BTW history overlay (hooked so its record updates stream), if any. */
+	const btwHistoryPanel = (): BtwHistoryPanel | undefined => {
+		const stack = tuiRef?.overlayStack;
+		if (!Array.isArray(stack)) return undefined;
+		for (let i = stack.length - 1; i >= 0; i--) {
+			const panel = stack[i]?.component;
+			if (!isBtwHistoryPanel(panel)) continue;
+			if (!btwHooked.has(panel)) {
+				btwHooked.add(panel);
+				const methods = panel as unknown as Record<string, unknown>;
+				const update = methods.update as (records: unknown) => unknown;
+				methods.update = function (this: unknown, records: unknown) {
+					const result = update.call(this, records);
+					try {
+						const sid = btwSid;
+						if (sid && btwBaseline && Array.isArray(records)) {
+							for (const raw of records) {
+								const id: unknown = raw && typeof raw === "object" && "id" in raw ? raw.id : undefined;
+								const followUps = raw && typeof raw === "object" && "followUps" in raw && Array.isArray(raw.followUps) ? raw.followUps.length : 0;
+								if (typeof id !== "string" || btwLive.get(`${id}:${followUps}`)?.done) continue;
+								const rec = parseBtwRecord(raw);
+								if (rec) absorbBtw(sid, rec, true);
+							}
+						}
+					} catch (err) {
+						bridgeLog(`btw history panel: ${String(err)}`);
+					}
+					return result;
+				};
+			}
+			return panel;
+		}
+		return undefined;
+	};
+
+	/** Every tick: pick up history changes, then panels for turns that stream without one yet. */
+	const btwTick = (): void => {
+		const ctx = ctxRef;
+		if (!ctx || btwScan) return;
+		void scanBtw(ctx).then(() => {
+			try {
+				// A /btw typed in the TUI before any TeleFlock TUI op: locate the TUI to stream it.
+				if (!tuiRef && ctx.mode === "tui" && runningBtw()) void findEditor(ctx).catch(() => {});
+				hookBtwPanels();
+				btwHistoryPanel();
+			} catch (err) {
+				bridgeLog(`btw tick: ${String(err)}`);
+			}
+		});
+	};
+
+	const askBtw = async (ctx: ExtensionContext, question: string): Promise<{ btwId: string; turn: number }> => {
+		await scanBtw(ctx);
+		if (runningBtw()) fail("busy", "a /btw question is still running; wait for it or cancel it");
+		const known = new Set(btwRecords.keys());
+		const want = oneLine(question);
+		await submit(ctx, `/btw ${want}`);
+		const rec = await untilBtw(
+			ctx,
+			() => [...btwRecords.values()].find(r => !known.has(r.id) && oneLine(r.question) === want),
+			5_000,
+		);
+		if (!rec) return fail("busy", "omp did not start the side question (another /btw may be running, or no model is set)");
+		hookBtwPanels();
+		btwHistoryPanel();
+		return { btwId: rec.id, turn: 0 };
+	};
+
+	const followUpBtw = async (ctx: ExtensionContext, btwId: string, question: string): Promise<{ btwId: string; turn: number }> => {
+		await scanBtw(ctx);
+		const rec = btwRecords.get(btwId) ?? fail("not_found", `no side conversation ${btwId}`);
+		if (runningBtw()) fail("busy", "a /btw question is still running; wait for it or cancel it");
+		const turn = rec.followUps.length + 1;
+		await findEditor(ctx);
+		// omp follows up from its BTW history panel (`f` on an answer opens the same composer).
+		let panel = btwHistoryPanel();
+		if (!panel) {
+			await submit(ctx, "/btw");
+			panel = btwHistoryPanel() ?? fail("unsupported", "could not open omp's /btw history");
+		}
+		if (!panel.openFollowUp(btwId)) fail("busy", "omp cannot follow up on this side conversation right now");
+		const text = oneLine(question);
+		if (typeof panel.pasteText === "function") panel.pasteText(text);
+		else for (const ch of text) panel.handleInput(ch);
+		panel.handleInput("\n");
+		const started = await untilBtw(ctx, () => btwLive.get(`${btwId}:${turn}`), 5_000);
+		if (!started) fail("omp_error", "omp did not start the follow-up");
+		return { btwId, turn };
+	};
+
+	const cancelBtw = async (ctx: ExtensionContext, btwId: string): Promise<Record<string, never>> => {
+		const side = sideThreads.get(btwId);
+		if (side) {
+			(side.ac ?? fail("not_found", `no running btw ${btwId}`)).abort(new Error("cancelled"));
+			return {};
+		}
+		await scanBtw(ctx);
+		let t: BtwLive | undefined;
+		for (const x of btwLive.values()) if (x.id === btwId && !x.done) t = x;
+		if (!t) return fail("not_found", `no running btw ${btwId}`);
+		// The operator's Esc, delivered where omp listens for it: the history panel when open, else
+		// the composer, whose Esc handler gives a visible /btw panel first say (cancel).
+		await findEditor(ctx);
+		const history = btwHistoryPanel();
+		const inline = t.panel;
+		if (history) {
+			history.showRecord(btwId);
+			history.handleInput(tuiRef?.nativeRendering ? "x" : "\x1b");
+		} else if (inline && tuiRef && walk(tuiRef, c => c === inline) && typeof editorRef?.onEscape === "function") {
+			editorRef.onEscape();
+		} else {
+			fail("unsupported", "this side question can only be cancelled in omp's TUI (Esc)");
+		}
+		const live = t;
+		if (!(await untilBtw(ctx, () => (live.done ? live : undefined), 3_000))) fail("omp_error", "omp did not cancel the side question");
+		return {};
+	};
+
+	const btwHistory = async (ctx: ExtensionContext) => {
+		await scanBtw(ctx);
+		const threads = [...btwRecords.values()].map(rec => ({
+			btwId: rec.id,
+			at: rec.createdAt,
+			turns: [rec, ...rec.followUps].map((turn, i) => {
+				const live = btwLive.get(`${rec.id}:${i}`);
+				if (turn.status !== "running" || !live) {
+					return { question: turn.question, answer: turn.answer, status: turn.status, error: turn.error, at: turn.createdAt };
+				}
+				// The file still says running: the live turn knows better (streamed text, final status).
+				const status = live.done ? (live.final?.status ?? "interrupted") : "running";
+				return { question: turn.question, answer: live.text, status, error: live.final?.error, at: turn.createdAt };
+			}),
+		}));
+		for (const th of sideThreads.values()) {
+			threads.push({
+				btwId: th.id,
+				at: th.at,
+				turns: th.turns.map(turn => ({ question: turn.question, answer: turn.answer, status: turn.status, error: turn.error, at: turn.createdAt })),
+			});
+		}
+		threads.sort((a, b) => a.at - b.at);
+		return { threads };
+	};
+
+	/** Fallback without omp's TUI /btw: a private ephemeral side turn, replaying the thread's turns. */
+	const sideBtw = (ctx: ExtensionContext, question: string, btwId: string | undefined): { btwId: string; turn: number } => {
+		const run = ctx.runEphemeralTurn ?? fail("unsupported", "this omp has no ephemeral side turns");
+		const model = ctx.model ?? fail("unsupported", "no active model available for /btw");
+		const sid = sessionId() ?? fail("not_ready", "session not initialised yet");
+		for (const th of sideThreads.values()) if (th.ac) fail("busy", "a side question is still running; wait for it or cancel it");
+		let th: SideThread;
+		if (btwId) th = sideThreads.get(btwId) ?? fail("not_found", `no side conversation ${btwId}`);
+		else {
+			th = { id: `tf-btw-${process.pid}-${Date.now().toString(36)}-${(++btwSeq).toString(36)}`, at: Date.now(), turns: [] };
+			sideThreads.set(th.id, th);
+		}
+		// Same shape as omp's btw-turn.ts: earlier turns replayed as context, one provider lineage
+		// per run of successful turns.
+		const history: unknown[] = [];
+		for (const turn of th.turns) {
+			history.push({ role: "user", content: [{ type: "text", text: btwPrompt(turn.question) }], attribution: "agent", timestamp: turn.createdAt });
+			if (!turn.answer) continue;
+			history.push({
+				role: "assistant",
+				content: [{ type: "text", text: turn.answer }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "stop",
+				timestamp: turn.updatedAt,
+			});
+		}
+		const epoch = th.turns.findLastIndex(turn => turn.status !== "complete") + 1;
+		const now = Date.now();
+		const turn: BtwTurnRec = { question, answer: "", status: "running", createdAt: now, updatedAt: now };
+		const index = th.turns.push(turn) - 1;
+		const t: BtwLive = { sid, id: th.id, turn: index, question, text: "", sent: "", announced: false, done: false };
+		const ac = new AbortController();
+		const thread = th;
+		thread.ac = ac;
+		pushBtw(t, false);
+		const finish = (status: BtwStatus, error?: string) => {
+			Object.assign(turn, { status, error, answer: t.text, updatedAt: Date.now() });
+			thread.ac = undefined;
+			pushBtw(t, true, { status, error });
+		};
+		Promise.resolve()
+			.then(() =>
+				run.call(ctx, {
+					promptText: btwPrompt(question),
+					history: history as never,
+					conversationKey: `btw:${thread.id}:${epoch}`,
+					replyMaxBytes: Number.POSITIVE_INFINITY,
+					signal: ac.signal,
+					onTextDelta: (delta: string) => {
+						t.text += delta;
+						pushBtw(t, false);
+					},
+				}),
+			)
+			.then(
+				res => {
+					t.text = res.replyText;
+					finish("complete");
+				},
+				(err: unknown) =>
+					ac.signal.aborted ? finish("cancelled") : finish("error", err instanceof Error ? err.message : String(err)),
+			)
+			.catch(() => {});
+		return { btwId: thread.id, turn: index };
 	};
 
 	async function handle(op: string, p: Params): Promise<unknown> {
@@ -1073,38 +1614,15 @@ export default function teleflockBridge(pi: ExtensionAPI) {
 				return {};
 			}
 			case "btw": {
-				const question = str(p, "question", true);
-				const run = ctx.runEphemeralTurn ?? fail("unsupported", "this omp has no ephemeral side turns");
-				const btwId = `btw-${process.pid}-${Date.now().toString(36)}-${(++btwSeq).toString(36)}`;
-				const ac = new AbortController();
-				btws.set(btwId, ac);
-				const sid = sessionId();
-				const emitBtw = (data: Record<string, unknown>) => {
-					if (sid) send({ t: "event", event: "btw_delta", sessionId: sid, data: { btwId, ...data } });
-				};
-				Promise.resolve()
-					.then(() =>
-						run.call(ctx, {
-							promptText: question,
-							signal: ac.signal,
-							onTextDelta: (delta: string) => emitBtw({ text: delta, done: false }),
-						}),
-					)
-					.then(
-						res => emitBtw({ text: res.replyText, done: true }),
-						(err: unknown) =>
-							emitBtw({ text: "", done: true, error: err instanceof Error ? err.message : String(err) }),
-					)
-					.catch(() => {})
-					.finally(() => btws.delete(btwId));
-				return { btwId };
+				const question = str(p, "question", true).trim();
+				const btwId = str(p, "btwId");
+				if ((btwId && sideThreads.has(btwId)) || ctx.mode !== "tui" || !btwDir(ctx)) return sideBtw(ctx, question, btwId);
+				return btwId ? followUpBtw(ctx, btwId, question) : askBtw(ctx, question);
 			}
-			case "btwCancel": {
-				const btwId = str(p, "btwId", true);
-				const ac = btws.get(btwId) ?? fail("not_found", `no running btw ${btwId}`);
-				ac.abort(new Error("cancelled"));
-				return {};
-			}
+			case "btwCancel":
+				return cancelBtw(ctx, str(p, "btwId", true));
+			case "getBtwHistory":
+				return btwHistory(ctx);
 			case "export": {
 				requireTui(ctx);
 				let out = str(p, "path");

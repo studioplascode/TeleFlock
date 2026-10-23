@@ -60,6 +60,8 @@ interface PendingUi {
 }
 
 const CHARS_PER_SEC = 160; // ≈ 40 tok/s
+/** A queued steer waits at least this long for a step boundary (omp delivers between steps). */
+const STEER_LAND_MS = 2500;
 /** The advisor reviews each finished reply/tool with a reviewer model (omp `modelRoles.advisor`). */
 const ADVISOR_MODEL = MODELS.find((m) => m.id === "gpt-5.5");
 type Spender = keyof TpsSplit;
@@ -81,6 +83,10 @@ export class AgentSim {
   todos: TodoPhase[];
   subagents: Subagent[] = [];
   queueSteer: string[] = [];
+  /** Who sent each `queueSteer` entry (other devices' steers carry their name). */
+  private steerAuthors: (string | undefined)[] = [];
+  /** When the oldest queued steer was sent. */
+  private steerSince = 0;
   queueFollow: string[] = [];
   model?: ModelRef;
   thinking?: ThinkingLevel;
@@ -467,17 +473,30 @@ export class AgentSim {
 
   private backdate = 0;
 
+  /** Queued like omp's steering queue: listed in `queue.steering` until the next step boundary. */
   steer(text: string, author?: string): void {
-    const now = this.host.now();
-    this.put({ kind: "user", id: this.id(), at: now, text, images: [], author, steering: true, synthetic: false });
+    if (!this.queueSteer.length) this.steerSince = this.host.now();
     this.queueSteer.push(text);
+    this.steerAuthors.push(author);
     this.refreshDerived();
+    this.host.agentChanged(this.agent.id);
     this.host.metaChanged(this.agent.id);
-    // Picked up at the next step boundary.
+  }
+
+  /** The queued steers reach the model: they land as user rows and the agent folds them in. */
+  private landSteers(now: number): void {
+    const steers = this.queueSteer.map((text, i) => ({ text, author: this.steerAuthors[i] }));
+    this.queueSteer = [];
+    this.steerAuthors = [];
+    for (const s of steers) this.put({ kind: "user", id: this.id(), at: now, text: s.text, images: [], author: s.author, steering: true, synthetic: false });
+    const text = steers.map((s) => s.text).join(" / ");
     this.queue.unshift(
       { t: "think", ms: 1800, text: `The user wants me to adjust course: "${text}". Folding that in before continuing.` },
       { t: "say", text: `Got it: ${text.length > 80 ? `${text.slice(0, 80)}…` : text}. Adjusting.` },
     );
+    this.refreshDerived();
+    this.host.agentChanged(this.agent.id);
+    this.host.metaChanged(this.agent.id);
   }
 
   followUp(text: string): void {
@@ -490,6 +509,7 @@ export class AgentSim {
   /** Alt+Up in omp: pull the last queued message back out (last steer first, then last follow-up). */
   dequeue(): string | undefined {
     const text = this.queueSteer.length ? this.queueSteer.pop() : this.queueFollow.pop();
+    if (this.steerAuthors.length > this.queueSteer.length) this.steerAuthors.pop();
     if (text === undefined) return undefined;
     this.refreshDerived();
     this.host.agentChanged(this.agent.id);
@@ -643,6 +663,7 @@ export class AgentSim {
     this.cur = null;
     this.queue = [];
     this.queueSteer = [];
+    this.steerAuthors = [];
     this.put({ kind: "notice", id: this.id(), at: now, level: "warn", text: reason, source: "omp" });
     this.host.activity(this.agent.id, "stopped", `${this.agent.name} stopped`, reason);
     this.termLine(`\r\n\x1b[33m■ ${reason}\x1b[0m\r\n`);
@@ -682,12 +703,13 @@ export class AgentSim {
     let budget = 4; // steps that may complete within one tick
     while (budget-- > 0) {
       if (!this.cur) {
+        // Queued steers reach the model at a step boundary (after a beat, so the queue shows).
+        if (this.queueSteer.length && (this.queue.length === 0 || now - this.steerSince >= STEER_LAND_MS)) this.landSteers(now);
         const step = this.queue.shift();
         if (!step) {
           this.endTurn(true);
           return;
         }
-        if (this.queueSteer.length && step.t !== "think") this.queueSteer = [];
         const startAt = now - this.backdate;
         this.backdate = 0;
         if (!this.begin(step, startAt)) continue; // instant step done
