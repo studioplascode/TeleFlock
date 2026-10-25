@@ -33,6 +33,9 @@ wire_struct! {
         pub auto_connect: bool,
         /// Override for the relay port on the host.
         pub relay_port: Option<u16>,
+        /// Host group label (trimmed, non-empty). Hosts sharing a group form a pool that
+        /// Dispatch's Auto mode spreads tasks over by their current workload.
+        pub group: Option<String>,
     }
 }
 
@@ -115,6 +118,11 @@ wire_struct! {
         /// Settings files written before this field existed load with `true`.
         #[serde(default = "default_true")]
         pub auto_update: bool,
+        /// Mark done closes the agent's herdr pane (and its worktree workspace when nothing else
+        /// runs there) once it is idle; the agent stays in Done and resumes with
+        /// `omp --resume` when it is needed again. Files without the field load with `true`.
+        #[serde(default = "default_true")]
+        pub close_done: bool,
     }
 }
 

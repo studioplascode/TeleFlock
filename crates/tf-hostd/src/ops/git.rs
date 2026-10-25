@@ -817,7 +817,7 @@ pub async fn branches(cwd: &Path) -> Result<BranchList, ApiError> {
             }
         })
         .collect();
-    Ok(BranchList { branches, default_branch: default_branch(&root).await.map(|(n, _)| n) })
+    Ok(BranchList { branches, default_branch: default_branch(&root).await.map(|(n, _)| n), default_base: None })
 }
 
 pub async fn diff(p: &GitDiffParams) -> Result<GitDiffResult, ApiError> {

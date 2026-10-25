@@ -54,6 +54,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
             let (events, has_more) = ctx.state.activity_page(p.before, p.limit.unwrap_or(50).clamp(1, 500) as usize, p.agent_id.as_deref());
             to_value(ActivityPage { events, has_more })
         }
+        HostMethod::HostToolsUpdate(_) | HostMethod::HostToolsConfig(_) => crate::ops::tools::handle(ctx, req).await,
         other => Err(ApiError::new("unknown_method", format!("{} is not a host method", other.name()))),
     }
 }
@@ -611,7 +612,7 @@ pub async fn resume(ctx: &Ctx, p: ResumeParams) -> Result<Started, ApiError> {
         return Err(ApiError::new("busy", format!("this session is open in agent {name}"))
             .with_hint("Resuming a live session would fork it. Open that agent instead."));
     }
-    let spec = AgentSpec { name: None, kind: "omp".into(), model: None, thinking: None, plan: false, prompt: None };
+    let spec = AgentSpec { name: None, kind: "omp".into(), model: None, thinking: None, plan: false, prompt: None, images: Vec::new() };
     crate::ops::agent::start_agent(ctx, p.target, &spec, Some(&file_s)).await
 }
 
@@ -905,6 +906,8 @@ pub async fn probe_info(ctx: &Ctx) -> HostInfo {
         herdr_sessions,
         relay_port: ctx.relay_port,
         setup,
+        tools: None,
+        pruned: Vec::new(),
     }
 }
 

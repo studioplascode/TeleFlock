@@ -20,13 +20,16 @@ use crate::state::StateHandle;
 
 pub mod ai;
 pub mod agent;
+pub mod automation;
 pub mod fs;
 pub mod gh;
 pub mod git;
 pub mod host;
 pub mod limits;
+pub mod omp_config;
 pub mod scope;
 pub mod term;
+pub mod tools;
 pub mod workspace;
 pub mod worktree;
 
@@ -101,6 +104,8 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
         "gh" => gh::handle(ctx, req, client).await,
         "term" => term::handle(ctx, req, client).await,
         "host" => host::handle(ctx, req, client).await,
+        "omp" => omp_config::handle(ctx, req, client).await,
+        "automation" => automation::handle(ctx, req, client).await,
         "ai" => ai::handle(ctx, req, client).await,
         _ => Err(ApiError::new("unknown_method", format!("unknown method `{}`", req.name()))),
     }

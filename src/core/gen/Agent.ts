@@ -5,11 +5,13 @@ import type { HerdrState } from "./HerdrState";
 import type { Liveness } from "./Liveness";
 import type { NeedsYou } from "./NeedsYou";
 import type { OmpInfo } from "./OmpInfo";
+import type { Parked } from "./Parked";
 
 export type Agent = { 
 /**
  * Stable id for the lifetime of the hosting pane's terminal (herdr terminal id,
- * falling back to the pane id). Survives pane moves.
+ * falling back to the pane id). Survives pane moves. A parked agent keeps the id it had
+ * when its pane was closed.
  */
 id: string, 
 /**
@@ -19,7 +21,11 @@ name: string,
 /**
  * herdr agent kind: `omp`, `claude`, `codex`, …
  */
-kind: string, paneId: string, tabId: string, workspaceId: string, state: HerdrState, stateSince: number, column: Column, archived: boolean, 
+kind: string, 
+/**
+ * Empty for a parked agent (no pane).
+ */
+paneId: string, tabId: string, workspaceId: string, state: HerdrState, stateSince: number, column: Column, archived: boolean, 
 /**
  * Completed turns observed since TeleFlock started tracking this agent.
  */
@@ -27,4 +33,9 @@ turns: number,
 /**
  * Task title: omp session title, else first prompt, else herdr label.
  */
-title: string, cwd?: string, repo?: string, branch?: string, startedAt?: number, omp?: OmpInfo, live: Liveness, needs?: NeedsYou, diff?: DiffStat, };
+title: string, cwd?: string, repo?: string, branch?: string, startedAt?: number, omp?: OmpInfo, live: Liveness, needs?: NeedsYou, diff?: DiffStat, 
+/**
+ * Marked done and its herdr pane closed: lives in Done until resumed (`agent.resume`,
+ * or prompting it), or until its omp session file is deleted (then `HostInfo.pruned`).
+ */
+parked?: Parked, };

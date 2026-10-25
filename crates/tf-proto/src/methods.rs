@@ -8,7 +8,7 @@
 //! `{ params; result }`.
 
 use crate::app::{DiagReport, HostProfile, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
-use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, UsageTotals};
+use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates, UsageTotals};
 use crate::session::{ChangedFile, HistoryPage, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
 use crate::{Empty, Millis};
@@ -279,6 +279,10 @@ wire_struct! {
     pub struct ArchiveParams {
         pub agent_id: String,
         pub archived: bool,
+        /// With `archived`: close the agent's herdr pane (and its worktree workspace when nothing
+        /// else runs there) after a short undo window, once the agent is idle; it stays in Done as
+        /// parked (`Agent.parked`). Unarchiving a parked agent resumes it. Absent = keep the pane.
+        pub close: Option<bool>,
     }
 }
 
@@ -306,6 +310,10 @@ wire_struct! {
         pub plan: bool,
         /// Initial prompt, submitted once the agent is ready.
         pub prompt: Option<String>,
+        /// Images sent with the initial prompt (an image-only first message is allowed).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<ImageInput>>", optional)]
+        pub images: Vec<ImageInput>,
     }
 }
 
@@ -430,7 +438,8 @@ wire_struct! {
         /// Repository (or any path inside it).
         pub cwd: String,
         pub branch: String,
-        /// Base ref for a new branch (default `HEAD`).
+        /// Base ref for a new branch. Default: `BranchList.default_base` (`origin/<default>`,
+        /// fetched first), so new worktrees fork from the remote, not a stale local branch.
         pub base: Option<String>,
         /// Checkout path (default `<worktrees.directory>/<repo>/<branch-slug>`).
         pub path: Option<String>,
@@ -574,6 +583,9 @@ wire_struct! {
     pub struct BranchList {
         pub branches: Vec<BranchInfo>,
         pub default_branch: Option<String>,
+        /// What new worktrees fork from by default: `origin/<default>` when that remote-tracking
+        /// branch exists, else the default branch.
+        pub default_base: Option<String>,
     }
 }
 
@@ -939,6 +951,221 @@ wire_struct! {
     }
 }
 
+// ───────────────────────────── omp settings ─────────────────────────────
+
+wire_struct! {
+    pub struct OmpSettingOption {
+        pub value: String,
+        pub label: String,
+        pub description: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One omp setting as omp's own schema declares it (`config/all-settings` of the omp build on
+    /// the host), with its current value.
+    pub struct OmpSetting {
+        /// Dotted key, as `omp config get/set` take it (`compaction.enabled`).
+        pub id: String,
+        /// `string` | `number` | `boolean` | `enum` | `array` | `record`.
+        #[serde(rename = "type")]
+        pub kind: String,
+        /// Current value (omp's global config, else the default); absent when unset with no
+        /// default, and always for credentials.
+        #[ts(type = "unknown")]
+        pub value: Option<serde_json::Value>,
+        #[ts(type = "unknown")]
+        pub default: Option<serde_json::Value>,
+        /// Allowed values of an `enum`.
+        pub values: Option<Vec<String>>,
+        /// omp `/settings` tab (`model`, `interaction`, `appearance`, …); absent = not in omp's
+        /// settings UI (edited in config.yml or with `omp config set`).
+        pub tab: Option<String>,
+        pub group: Option<String>,
+        pub label: Option<String>,
+        pub description: Option<String>,
+        /// Labelled choices omp's settings UI offers (enum values, or presets of a number/string).
+        pub options: Option<Vec<OmpSettingOption>>,
+        /// omp computes the choices at runtime (themes, composer shapes): enter the value as text.
+        #[serde(default)]
+        pub runtime_options: bool,
+        /// omp shows it only when this holds (`macOS`, `vimModeEnabled`, …).
+        pub condition: Option<String>,
+        pub warning: Option<String>,
+        /// `json`: edit as JSON.
+        pub editor: Option<String>,
+        /// A secret (API key, token): its value never leaves the host; `redacted` says one is set.
+        #[serde(default)]
+        pub credential: bool,
+        #[serde(default)]
+        pub redacted: bool,
+        /// Environment variable that overrides it.
+        pub env: Option<String>,
+        /// Item schema of an `array`, when omp declares one.
+        #[ts(type = "unknown")]
+        pub items: Option<serde_json::Value>,
+    }
+}
+
+wire_struct! {
+    pub struct OmpSettings {
+        /// omp version the schema was read from.
+        pub version: String,
+        /// `schema`: omp's full settings schema (labels, tabs, choices); `cli`: only what
+        /// `omp config list --json` reports (older omp).
+        pub source: String,
+        pub settings: Vec<OmpSetting>,
+        /// omp's global config file.
+        pub config_path: Option<String>,
+    }
+}
+
+wire_struct! {
+    pub struct OmpSettingsParams {
+        /// Read the schema again instead of the cached one.
+        pub refresh: Option<bool>,
+    }
+}
+
+wire_struct! {
+    pub struct OmpSettingChange {
+        pub key: String,
+        /// New value; absent / `null` resets the key to omp's default (`omp config reset`).
+        #[ts(type = "unknown")]
+        pub value: Option<serde_json::Value>,
+    }
+}
+
+wire_struct! {
+    /// `omp.settingsSet`: writes omp's global config through `omp config set|reset`, in order.
+    pub struct OmpSettingsSetParams { pub changes: Vec<OmpSettingChange> }
+}
+
+// ───────────────────────────── tool updates ─────────────────────────────
+
+wire_struct! {
+    pub struct ToolsUpdateParams {
+        /// `omp` | `herdr`; absent = both.
+        pub tool: Option<String>,
+        /// Only look for a newer version.
+        #[serde(default)]
+        pub check_only: bool,
+    }
+}
+
+wire_struct! { pub struct ToolsConfigParams { pub auto: bool } }
+
+// ───────────────────────────── automations ─────────────────────────────
+
+wire_struct! {
+    /// A scheduled task on the host: at every `schedule` tick tf-hostd starts an omp agent with
+    /// `prompt`, in a fresh worktree of `cwd` (forked from `origin/<default>`) or in `cwd`
+    /// itself. Stored in `~/.teleflock/automations.json`; runs whether or not an app is connected.
+    pub struct Automation {
+        pub id: String,
+        pub name: String,
+        pub enabled: bool,
+        /// 5-field cron expression (minute hour day-of-month month day-of-week) in the host's
+        /// local time, e.g. `0 9 * * 1-5`.
+        pub schedule: String,
+        /// Repository (worktree mode) or folder the agent starts in.
+        pub cwd: String,
+        /// A fresh worktree per run (`automation/<slug>-<yyyymmdd-hhmm>`); false = in `cwd`.
+        pub worktree: bool,
+        pub prompt: String,
+        pub model: Option<String>,
+        pub thinking: Option<ThinkingLevel>,
+        pub plan: bool,
+        /// Run once when the host comes back after missing scheduled runs (it was off, …).
+        pub catch_up: bool,
+        /// herdr session the agents start in.
+        pub herdr_session: String,
+        pub created_at: Millis,
+        pub updated_at: Millis,
+        /// Next scheduled run; absent while disabled.
+        pub next_run_at: Option<Millis>,
+        pub last_run: Option<AutomationRun>,
+    }
+}
+
+wire_enum! { pub enum AutomationTrigger { Schedule, Manual, CatchUp } }
+
+wire_enum! { pub enum AutomationRunStatus { Started, Failed, Skipped } }
+
+wire_struct! {
+    pub struct AutomationRun {
+        pub id: String,
+        pub automation_id: String,
+        pub at: Millis,
+        pub trigger: AutomationTrigger,
+        pub status: AutomationRunStatus,
+        pub agent_id: Option<String>,
+        pub workspace_id: Option<String>,
+        pub branch: Option<String>,
+        pub path: Option<String>,
+        /// Why it failed or was skipped.
+        pub error: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// What keeps automations running on this host.
+    pub struct AutomationScheduler {
+        /// `systemd`: a systemd timer brings tf-hostd back after reboots and crashes (Linux with
+        /// systemd: root, or lingering users); `daemon`: runs while tf-hostd runs (it starts when
+        /// a TeleFlock app connects).
+        pub kind: String,
+        /// The systemd timer is installed and active.
+        pub persistent: bool,
+        /// What is missing and how to fix it (e.g. `loginctl enable-linger`).
+        pub note: Option<String>,
+        /// The host's local time zone (IANA name, else UTC offset), which schedules use.
+        pub timezone: String,
+    }
+}
+
+wire_struct! {
+    pub struct AutomationList {
+        /// Automations of the client's herdr session.
+        pub automations: Vec<Automation>,
+        /// Their recent runs, newest first (≤ 100).
+        pub runs: Vec<AutomationRun>,
+        pub scheduler: AutomationScheduler,
+    }
+}
+
+wire_struct! {
+    /// `automation.save`: create (no `id`) or replace an automation.
+    pub struct AutomationDraft {
+        pub id: Option<String>,
+        pub name: String,
+        pub enabled: bool,
+        pub schedule: String,
+        pub cwd: String,
+        pub worktree: bool,
+        pub prompt: String,
+        pub model: Option<String>,
+        pub thinking: Option<ThinkingLevel>,
+        pub plan: bool,
+        pub catch_up: bool,
+    }
+}
+
+wire_struct! { pub struct AutomationRef { pub id: String } }
+
+wire_struct! { pub struct SchedulePreviewParams { pub schedule: String } }
+
+wire_struct! {
+    pub struct SchedulePreview {
+        pub valid: bool,
+        pub error: Option<String>,
+        /// The next run times (≤ 5).
+        pub next: Vec<Millis>,
+        /// Plain-English reading, e.g. `At 09:00, Monday through Friday`.
+        pub description: Option<String>,
+    }
+}
+
 methods!(HostMethod, "HostMethods", {
     "state.get" => StateGet(Empty) -> HostState;
     "session.open" => SessionOpen(SessionOpenParams) -> SessionSnapshot;
@@ -976,6 +1203,7 @@ methods!(HostMethod, "HostMethods", {
     "agent.start" => AgentStart(StartParams) -> Started;
     "agent.stop" => AgentStop(StopParams) -> Empty;
     "agent.renameHandle" => AgentRenameHandle(HandleParams) -> Empty;
+    "agent.resume" => AgentResume(AgentRef) -> Started;
 
     "workspace.create" => WorkspaceCreate(WorkspaceCreateParams) -> WorkspaceRef;
     "workspace.rename" => WorkspaceRename(WorkspaceRenameParams) -> Empty;
@@ -1014,6 +1242,17 @@ methods!(HostMethod, "HostMethods", {
     "host.setup" => HostSetup(Empty) -> SetupStatus;
     "host.setupApply" => HostSetupApply(SetupApplyParams) -> SetupStatus;
     "host.activity" => HostActivity(ActivityParams) -> ActivityPage;
+    "host.toolsUpdate" => HostToolsUpdate(ToolsUpdateParams) -> ToolUpdates;
+    "host.toolsConfig" => HostToolsConfig(ToolsConfigParams) -> ToolUpdates;
+
+    "omp.settings" => OmpSettingsGet(OmpSettingsParams) -> OmpSettings;
+    "omp.settingsSet" => OmpSettingsSet(OmpSettingsSetParams) -> OmpSettings;
+
+    "automation.list" => AutomationListReq(Empty) -> AutomationList;
+    "automation.save" => AutomationSave(AutomationDraft) -> Automation;
+    "automation.delete" => AutomationDelete(AutomationRef) -> Empty;
+    "automation.run" => AutomationRunNow(AutomationRef) -> AutomationRun;
+    "automation.preview" => AutomationPreview(SchedulePreviewParams) -> SchedulePreview;
 
     "ai.complete" => AiComplete(AiCompleteParams) -> AiCompleteResult;
 });

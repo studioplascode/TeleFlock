@@ -130,6 +130,7 @@ pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
         live,
         needs,
         diff,
+        parked: None,
     }
 }
 
@@ -363,6 +364,7 @@ pub fn build_workspaces(
                             cwd: p.foreground_cwd.clone().or_else(|| p.cwd.clone()),
                             agent_id: agent_by_pane.get(&p.pane_id).cloned(),
                             focused: p.focused,
+                            process: None,
                         })
                         .collect(),
                 })

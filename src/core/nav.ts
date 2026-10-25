@@ -13,7 +13,11 @@ export type Route =
   | { name: "hosts" }
   | { name: "settings" }
   | { name: "more" }
-  | { name: "design" };
+  | { name: "design" }
+  /** Scheduled agent runs of one host (`hostId` absent: the first / last used host). */
+  | { name: "automations"; hostId?: string }
+  /** omp's own settings (models, roles, tools, …) of one host. */
+  | { name: "omp"; hostId?: string };
 
 export type RouteName = Route["name"];
 
@@ -42,6 +46,9 @@ export function routeToHash(route: Route): string {
       return `#/terminal/${enc(route.hostId)}`;
     case "review":
       return `#/review/${enc(route.hostId)}/${enc(route.workspaceId)}`;
+    case "automations":
+    case "omp":
+      return route.hostId ? `#/${route.name}/${enc(route.hostId)}` : `#/${route.name}`;
     default:
       return `#/${route.name}`;
   }
@@ -69,6 +76,7 @@ export function parseHash(hash: string): Route {
   const c = dec(parts[3]);
   if (head === "agent" && a && b) return { name: "agent", hostId: a, agentId: b };
   if (head === "review" && a && b) return { name: "review", hostId: a, workspaceId: b };
+  if (head === "automations" || head === "omp") return a ? { name: head, hostId: a } : { name: head };
   if (head === "terminal" && a) {
     if (b === "a" && c) return { name: "terminal", hostId: a, agentId: c };
     if (b === "p" && c) return { name: "terminal", hostId: a, paneId: c };

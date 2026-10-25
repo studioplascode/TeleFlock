@@ -6,6 +6,7 @@ import {
   Bot,
   Check,
   ChevronRight,
+  Clock3,
   Columns2,
   FolderGit2,
   FolderOpen,
@@ -81,11 +82,12 @@ function ActionTip({ def }: { def: ActionDef }) {
 }
 
 /** Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer. */
-const NAV: readonly { id: "board" | "inbox" | "activity" | "usage"; icon: LucideIcon }[] = [
+const NAV: readonly { id: "board" | "inbox" | "activity" | "usage" | "automations"; icon: LucideIcon }[] = [
   { id: "board", icon: LayoutDashboard },
   { id: "inbox", icon: Inbox },
   { id: "activity", icon: Activity },
   { id: "usage", icon: BarChart3 },
+  { id: "automations", icon: Clock3 },
 ];
 
 function NavItem({ id, icon: Icon, collapsed, active, badge, unread }: { id: Route["name"] & keyof typeof VIEWS; icon: LucideIcon; collapsed: boolean; active: boolean; badge?: number; unread?: number }) {

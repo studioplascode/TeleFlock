@@ -781,6 +781,8 @@ fn initial_info(session: &str, relay_port: u16, relay: bool) -> HostInfo {
             relay,
             issues: vec![],
         },
+        tools: None,
+        pruned: Vec::new(),
     }
 }
 

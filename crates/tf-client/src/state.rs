@@ -69,6 +69,8 @@ pub(crate) mod fixtures {
                     relay: true,
                     issues: vec![],
                 },
+                tools: None,
+                pruned: Vec::new(),
             },
             health: None,
             workspaces: vec![],
@@ -106,6 +108,7 @@ pub(crate) mod fixtures {
                 line: None,
             },
             needs: None,
+            parked: None,
             diff: None,
         }
     }

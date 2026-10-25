@@ -19,6 +19,8 @@ const SessionView = lazy(() => import("@/features/session/SessionView").then((m)
 const TerminalView = lazy(() => import("@/features/terminal/TerminalView").then((m) => ({ default: m.TerminalView })));
 const ReviewView = lazy(() => import("@/features/review/ReviewView").then((m) => ({ default: m.ReviewView })));
 const DispatchView = lazy(() => import("@/features/dispatch/DispatchView").then((m) => ({ default: m.DispatchView })));
+const AutomationsView = lazy(() => import("@/features/automations/AutomationsView").then((m) => ({ default: m.AutomationsView })));
+const OmpSettingsView = lazy(() => import("@/features/ompSettings/OmpSettingsView").then((m) => ({ default: m.OmpSettingsView })));
 const DesignGallery = lazy(() => import("./routes/design/DesignGallery"));
 
 /** Stable key per screen (agent/terminal/review include their ids so switching agents re-animates). */
@@ -66,5 +68,9 @@ export function RouteView({ route, mobile }: { route: Route; mobile: boolean }) 
       return mobile ? <MoreView /> : <SettingsView />;
     case "design":
       return <DesignGallery />;
+    case "automations":
+      return <AutomationsView hostId={route.hostId} />;
+    case "omp":
+      return <OmpSettingsView hostId={route.hostId} />;
   }
 }

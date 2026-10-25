@@ -20,6 +20,7 @@ pub fn default_settings(device_name: String) -> Settings {
         muted_agents: Vec::new(),
         templates: Vec::new(),
         auto_update: true,
+        close_done: true,
     }
 }
 

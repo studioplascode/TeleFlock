@@ -25,4 +25,9 @@ color?: string, autoConnect: boolean,
 /**
  * Override for the relay port on the host.
  */
-relayPort?: number, };
+relayPort?: number, 
+/**
+ * Host group label (trimmed, non-empty). Hosts sharing a group form a pool that
+ * Dispatch's Auto mode spreads tasks over by their current workload.
+ */
+group?: string, };

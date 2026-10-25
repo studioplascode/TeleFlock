@@ -99,6 +99,56 @@ wire_struct! {
         pub herdr_sessions: Vec<String>,
         pub relay_port: u16,
         pub setup: SetupStatus,
+        /// tf-hostd keeping omp and herdr up to date (absent from older daemons).
+        pub tools: Option<ToolUpdates>,
+        /// Agents removed because their omp session file was deleted (omp's cleanup or by hand),
+        /// newest first, last 30 days (≤ 200). Clients drop what they keep about them (dispatch
+        /// entries, notifications, drafts). Carried in `HostInfo` so older apps ignore it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<PrunedAgent>>", optional)]
+        pub pruned: Vec<PrunedAgent>,
+    }
+}
+
+wire_struct! {
+    /// An agent removed because its omp session file is gone.
+    pub struct PrunedAgent {
+        pub agent_id: String,
+        pub session_id: Option<String>,
+        pub at: Millis,
+    }
+}
+
+wire_struct! {
+    /// One tool tf-hostd keeps up to date.
+    pub struct ToolUpdate {
+        /// `omp` | `herdr`.
+        pub tool: String,
+        /// Installed version (`omp --version` / `herdr --version`).
+        pub current: Option<String>,
+        /// Newer version the last check found; absent when up to date or unknown.
+        pub latest: Option<String>,
+        pub checked_at: Option<Millis>,
+        /// Last time tf-hostd installed an update of this tool.
+        pub updated_at: Option<Millis>,
+        /// A check or install runs right now.
+        pub updating: bool,
+        /// Last check / install failure.
+        pub error: Option<String>,
+        /// Context for the user, e.g. `Installed with Homebrew: update it with brew` or
+        /// `The herdr server keeps running 0.9.0 until it restarts`.
+        pub note: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// Automatic updates of omp (`omp update`) and herdr (`herdr update`, no live handoff) on
+    /// this host: checked at daemon start and every 6 hours while `auto` is on.
+    pub struct ToolUpdates {
+        pub auto: bool,
+        pub omp: ToolUpdate,
+        pub herdr: ToolUpdate,
+        pub next_check_at: Option<Millis>,
     }
 }
 
@@ -150,6 +200,8 @@ wire_struct! {
         /// Agent occupying this pane, if any.
         pub agent_id: Option<String>,
         pub focused: bool,
+        /// Foreground process of the pane's terminal (`zsh`, `vim`, `bun`), when herdr reports it.
+        pub process: Option<String>,
     }
 }
 
@@ -377,12 +429,14 @@ wire_struct! {
 wire_struct! {
     pub struct Agent {
         /// Stable id for the lifetime of the hosting pane's terminal (herdr terminal id,
-        /// falling back to the pane id). Survives pane moves.
+        /// falling back to the pane id). Survives pane moves. A parked agent keeps the id it had
+        /// when its pane was closed.
         pub id: String,
         /// herdr agent name (unique among live agents) or derived label.
         pub name: String,
         /// herdr agent kind: `omp`, `claude`, `codex`, …
         pub kind: String,
+        /// Empty for a parked agent (no pane).
         pub pane_id: String,
         pub tab_id: String,
         pub workspace_id: String,
@@ -402,6 +456,19 @@ wire_struct! {
         pub live: Liveness,
         pub needs: Option<NeedsYou>,
         pub diff: Option<DiffStat>,
+        /// Marked done and its herdr pane closed: lives in Done until resumed (`agent.resume`,
+        /// or prompting it), or until its omp session file is deleted (then `HostInfo.pruned`).
+        pub parked: Option<Parked>,
+    }
+}
+
+wire_struct! {
+    /// A finished agent whose pane TeleFlock closed when it was marked done.
+    pub struct Parked {
+        /// When the pane was closed.
+        pub at: Millis,
+        /// omp session file `agent.resume` reopens with `omp --resume=<file>`.
+        pub session_file: String,
     }
 }
 

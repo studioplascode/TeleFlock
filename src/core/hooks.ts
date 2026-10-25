@@ -431,6 +431,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mutedAgents: [],
   templates: [],
   autoUpdate: true,
+  closeDone: true,
 };
 
 export interface SettingsView extends Settings {

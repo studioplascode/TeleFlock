@@ -7,6 +7,7 @@ import {
   Bell,
   BellOff,
   Bot,
+  Clock3,
   CornerDownLeft,
   FolderGit2,
   FolderOpen,
@@ -200,6 +201,8 @@ function useEntries(): Entry[] {
     { id: "usage", icon: <BarChart3 />, keys: ["cost", "tokens", "spend", "limits", "subscription"] },
     { id: "hosts", icon: <Server />, keys: ["machines", "connections"] },
     { id: "settings", icon: <Settings2 />, keys: ["preferences", "options"] },
+    { id: "automations", icon: <Clock3 />, keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
+    { id: "omp", icon: <Bot />, keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },
   ];
   for (const v of views) {
     const def = VIEWS[v.id];

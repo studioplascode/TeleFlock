@@ -42,6 +42,7 @@ async fn main() {
         color: None,
         auto_connect: false,
         relay_port: None,
+        group: None,
     };
     let mut known_hosts = std::env::temp_dir().join("tf-probe-known_hosts");
     let mut forward: Option<(String, u16)> = None;

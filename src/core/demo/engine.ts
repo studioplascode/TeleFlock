@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS: Settings = {
   deviceName: "Demo browser",
   mutedAgents: [],
   autoUpdate: true,
+  closeDone: true,
   templates: [
     {
       id: "tpl-careful-reviewer",

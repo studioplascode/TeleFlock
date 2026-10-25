@@ -1,4 +1,4 @@
-import { Activity, BarChart3, ChevronRight, type LucideIcon, Plus, Search, Settings2 } from "lucide-react";
+import { Activity, BarChart3, Bot, ChevronRight, Clock3, type LucideIcon, Plus, Search, Settings2 } from "lucide-react";
 import { motion } from "motion/react";
 import { Button, fadeRise, IconButton, spring, StatusOrb, Tile, useNow } from "@/design";
 import { navigate, type Route, useHosts, useUi } from "@/core";
@@ -112,6 +112,8 @@ export function MoreView() {
           <Tile className="divide-y divide-line overflow-hidden">
             <LinkRow icon={BarChart3} label={VIEWS.usage.label} hint={VIEWS.usage.description} route={{ name: "usage" }} />
             <LinkRow icon={Activity} label={VIEWS.activity.label} hint={VIEWS.activity.description} route={{ name: "activity" }} />
+            <LinkRow icon={Clock3} label={VIEWS.automations.label} hint={VIEWS.automations.description} route={{ name: "automations" }} />
+            <LinkRow icon={Bot} label={VIEWS.omp.label} hint={VIEWS.omp.description} route={{ name: "omp" }} />
             <LinkRow icon={Settings2} label={VIEWS.settings.label} hint={VIEWS.settings.description} route={{ name: "settings" }} />
           </Tile>
         </motion.div>

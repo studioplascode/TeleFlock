@@ -14,8 +14,8 @@ export interface ShortcutGroup {
   items: ShortcutDef[];
 }
 
-/** Ctrl+1…6 view order: the sidebar nav (Board · Inbox · Activity · Usage), then Hosts and Settings. */
-export const VIEW_KEYS = (["board", "inbox", "activity", "usage", "hosts", "settings"] as const).map((name) => ({ route: { name } as Route, label: VIEWS[name].label }));
+/** Ctrl+1…8 view order: the sidebar nav (Board · Inbox · Activity · Usage), Hosts, Settings, then Automations and omp settings. */
+export const VIEW_KEYS = (["board", "inbox", "activity", "usage", "hosts", "settings", "automations", "omp"] as const).map((name) => ({ route: { name } as Route, label: VIEWS[name].label }));
 
 /** "Ctrl J" → ["Ctrl", "J"] for the sheet's key caps. */
 const caps = (shortcut: string): string[] => shortcut.split(" ");

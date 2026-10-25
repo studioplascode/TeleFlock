@@ -23,6 +23,7 @@ async fn local(ev: &Events) -> std::sync::Arc<dyn Transport> {
         color: None,
         auto_connect: false,
         relay_port: None,
+        group: None,
     };
     connect(&p, &ConnectOptions::new(std::env::temp_dir().join("tf-unused-known-hosts")), ev.tx.clone()).await.unwrap()
 }

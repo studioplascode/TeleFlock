@@ -401,6 +401,7 @@ pub fn profile(addr: SocketAddr) -> HostProfile {
         color: None,
         auto_connect: false,
         relay_port: None,
+        group: None,
     }
 }
 
