@@ -254,6 +254,7 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
         ctxs: tokio::sync::Mutex::new(HashMap::new()),
     });
 
+    crate::automations::start(&daemon);
     spawn_signal_handler(shutdown.clone());
 
     let mut conns = tokio::task::JoinSet::new();

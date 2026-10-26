@@ -2,6 +2,7 @@
 
 pub mod artifacts;
 pub mod attach;
+pub mod automations;
 pub mod bridge;
 pub mod clients;
 pub mod daemon;

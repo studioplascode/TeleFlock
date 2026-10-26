@@ -198,6 +198,9 @@ Fire tasks at a repository like messages in a chat. Pick a host — or a host gr
 ### AI assistance (P1)
 TeleFlock's AI provider is omp itself: `ai.complete` runs one `omp --mode json` completion on the host with the `tiny` model role (falling back to `smol`), without tools, session, extensions or title, and stops the process as soon as the answer is in. It names Dispatch worktrees, wizard branches and agents, fan-out runs and templates, suggests renames, and drafts commit messages and PR titles/descriptions. Results are marked ✨, always editable, cached for 10 minutes, and replaced by a name from the user's own words when AI naming is off (Settings), unavailable or slow. Prompts are never logged or stored.
 
+### Automations (P1)
+Scheduled agents per host: a name, a repository or folder, a fresh worktree per run (`automation/<slug>-<yyyymmdd-hhmm>` from the remote default branch) or in place, a prompt, model/thinking/plan and a schedule (presets every N minutes/hours, daily, weekdays, weekly, or custom cron in the host's time zone, with a live preview of the next runs). tf-hostd starts the agent at each tick whether or not an app is connected and notifies devices; catch-up runs once after a missed tick; a run is skipped while the previous run's agent is still working or needs you. On Linux with systemd a timer keeps tf-hostd running across reboots (root, or users with lingering); elsewhere automations run while tf-hostd runs. The list shows next run, last run (opens its agent), Run now, enable switch and run history.
+
 ### Session history (P2)
 Browse past omp sessions on a host and resume one in a new pane.
 

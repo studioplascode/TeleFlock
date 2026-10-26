@@ -40,6 +40,7 @@ import { ircOf } from "../irc";
 import { OMP_COMMAND_NAMES, ompCommandName } from "../ompCommands";
 import { AgentSim, type SimHost } from "./agent";
 import { demoAiComplete, demoAiLatency } from "./ai";
+import { DemoAutomations } from "./automations";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
 import { demoLimits } from "./limits";
@@ -229,6 +230,8 @@ export class DemoHost implements SimHost {
     activity: (id, kind, title, detail) => this.activity(id, kind, title, detail),
     notify: (id, kind, title, body) => this.notify(id, kind, title, body),
   });
+  /** tf-hostd's automations (`./automations`); studio-pc plays a host whose tf-hostd predates them. */
+  private automations?: DemoAutomations;
 
   constructor(
     private readonly env: HostEnv,
@@ -876,6 +879,7 @@ export class DemoHost implements SimHost {
   private dispatch(method: string, p: Record<string, unknown>): unknown {
     const parked = this.parking.call(method, p);
     if (parked !== undefined) return parked;
+    if (method.startsWith("automation.")) return (this.automations ??= new DemoAutomations({ supported: this.variant === "forge", now: () => this.now(), herdrSession: this.info.herdrSession, call: (m, q) => this.dispatch(m, q) })).call(method, p);
     switch (method) {
       case "state.get":
         return this.hostState();

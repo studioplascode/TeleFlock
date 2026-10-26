@@ -1,4 +1,4 @@
-# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`, `tools`)
+# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`, `tools`, `omp`, `automation`)
 
 Owner: HostdOps. Every family exposes
 `pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError>`
@@ -125,6 +125,15 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   needs the server restarted (herdr declines without a terminal) and a stale running herdr server
   become `note`s; failures become `error`s (permission denied explained). `toolsUpdate` joins a
   running run that covers it, answers when done or after 20 s; `checkOnly` never installs.
+- **automation.\*** (`automation.rs` → `crate::automations`, architecture §3.11): `list` returns the
+  client's herdr session's automations (with `nextRunAt`, `lastRun`), their runs (newest first)
+  and the scheduler status; `save` validates (name ≤ 80 chars, 5-field cron that fires at least
+  once, absolute existing folder — inside a git repo in worktree mode, prompt unless `plan`) →
+  `invalid_params` with a user-facing message; `delete`/`run` only see the session's automations
+  (`not_found` otherwise); `run` launches now and answers the recorded `AutomationRun`
+  (`failed` runs carry the error, not an `ApiError`); `preview` is pure (parse, next 5 runs in the
+  host's time zone, plain-English description). `unavailable` (retryable) before the scheduler
+  started.
 
 ## Error codes (beyond `tf_proto::ApiError`'s list)
 | code | when | hint tells the user |
@@ -149,3 +158,6 @@ it, explicit bases, offline remote, push of the new branch), stats.db fixture, s
 `cargo test -p tf-hostd ai -- --ignored --nocapture` calls the real omp (needs a tiny role) and
 prints the slug, model and ms. `cargo test -p tf-hostd tools` parses captured omp/herdr outputs and
 drives the updater against fake `omp`/`herdr`/`curl` scripts in a tempdir (never the real updaters).
+`cargo test -p tf-hostd automations` — cron parsing, next/latest fire times across DST jumps (a
+POSIX-TZ zone), descriptions, the scheduler's fire/catch-up/pass decision, the skip-if-busy guard,
+store validation and round trip (0600, run cap, corrupt file set aside), systemd unit contents.

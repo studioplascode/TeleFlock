@@ -95,6 +95,8 @@ Every Rust crate is a workspace member (`crates/*`). Each agent compiles with it
 | `~/.teleflock/omp-overlay.yml` | Per-process collab overlay, uploaded by the app. |
 | `~/.teleflock/originals/<sha256>.<ext>` | Full-size originals of images TeleFlock sent while omp was working (omp saves only a downscaled copy then), served by `session.image {original}`; 0600, pruned after 30 days and above 1 GiB, oldest first. |
 | `~/.teleflock/tools.json` | Tool updater status (§3.9): the per-host `auto` switch, last check/install per tool. |
+| `~/.teleflock/automations.json` | Automations (definitions per herdr session), their last ≤ 100 runs and per-automation schedule cursors (§3.11); 0600, atomic writes. |
+| `/etc/systemd/system/teleflock-hostd-<hash>.{service,timer}` (root) or `~/.config/systemd/user/…` (lingering users) | Keepalive units, present only while an automation is enabled (§3.11). `<hash>` = FNV-1a of the hostd home, so lab homes get their own pair. |
 
 **Processes outlive the login that started them.** On Linux with systemd, a process started from an SSH command lives in that login's `session-*.scope`, and systemd kills everything in the scope when logind tears the session down (logout with `KillUserProcesses=yes`, or a restarted logind cleaning up sessions that already ended). So the daemon (`attach`) and every herdr server it starts (`tf_herdr::durable`) each run in a fresh transient scope: `systemd-run --scope` of the system manager for root (`teleflock-hostd-*.scope`, `teleflock-herdr-<session>-*.scope` in `system.slice`), of the user manager for other users only when lingering is enabled (without it the user manager stops with the last session). herdr has its own scope, so replacing or stopping the daemon never touches herdr and its agents. When `systemd-run` is missing or cannot create the unit (no bus, no permission), and on macOS, Windows and Linux without systemd, both are started plainly (`setsid`, null stdio). A herdr server that already runs in a login-session scope is a setup issue (`move-herdr-out-of-login-session`, §3.4 `ops::scope`); for root, `host.setupApply` moves it and its live process tree into a new scope without stopping anything.
 
@@ -104,6 +106,7 @@ Every Rust crate is a workspace member (`crates/*`). Each agent compiles with it
   - Logs to `~/.teleflock/hostd.log`.
 - `tf-hostd attach [--session <herdr-session>]`: connects stdio to `hostd.sock`, starting the daemon detached (`setsid`, `</dev/null`; in its own systemd scope where §3.1 applies) if needed, and waits up to 10 s for the socket. This is the **only** thing the app runs for the data channel.
 - `tf-hostd stop [--force]`: graceful shutdown. A daemon that is replaced by a newer binary gets `stop` from `attach --replace`.
+- `tf-hostd ensure`: starts the daemon detached (same scope path as `attach`) unless it is running, then exits. The automations keepalive timer runs it (§3.11).
 - **Several devices, one daemon.** Every device of the user attaches to the same daemon, and their apps update at different times. A host therefore only moves forward (`tf_proto::version`: semver, then protocol):
   - `attach --replace` replaces an older daemon (its clients reconnect to the new one), never a newer one, and another build of the same version only when no client is connected.
   - While clients are connected, the daemon refuses `stop` from an older build, and from builds that predate this rule (they send no version with `stop`); that build's `attach` then connects to the running daemon. An idle daemon always stops.
@@ -138,6 +141,7 @@ A client sees one `snapshot` on hello, then patches.
 | `ops/scope.rs` | HostdOps | Setup issue + fix `move-herdr-out-of-login-session`: a herdr server (`SO_PEERCRED` on its socket) in a `session-*.scope` is moved with its process tree into a new scope (`StartTransientUnit`, see §3.1) |
 | `ops/tools.rs` | HostdOps | omp/herdr updater (one per daemon), `host.toolsUpdate`, `host.toolsConfig`, `HostInfo.tools` (see §3.9) |
 | `ops/omp_config.rs` | OmpSettings | `omp.settings` / `omp.settingsSet`: omp's own settings schema + global config (see §3.10) |
+| `automations/`, `ops/automation.rs` | Automations | Store, cron/next-run, scheduler loop, run recipe, systemd keepalive; `automation.*` (§3.11) |
 
 **Dispatcher contract.** HostdCore owns it. `clients.rs` parses `HostMethod::parse(method, params)`. For each method family it calls an async handler fn:
 
@@ -283,6 +287,35 @@ and the companion extension's schema-dump mode (§4) writes the definitions ther
 
 **Writes.** `omp.settingsSet` checks every key against the current settings first (one unknown key → `invalid_params`, nothing written), then runs `omp config set -- <key> <text>` / `omp config reset -- <key>` one at a time without a shell (writes are serialized per daemon). Text per type: strings as-is unless omp's parser would alter them (surrounding whitespace, leading `"`, line breaks: then JSON-quoted, which omp unquotes exactly), numbers/booleans as text, arrays/records as compact JSON. omp validates (enum values, item vocabularies, shapes); its message (`Invalid value: x. Valid values: …`) comes back as `invalid_params`, earlier changes of the batch stay applied. A `modelRoles` write also drops the `host.models` cache. Logs carry keys and outcomes only, never values. The answer is the fresh `OmpSettings`.
 
+### 3.11 Automations (`automations/`, `ops/automation.rs`)
+
+Scheduled omp agents: at every tick of a 5-field cron schedule tf-hostd starts an agent with the configured prompt, whether or not an app is connected.
+
+**Storage.** `~/.teleflock/automations.json` (0600, tmp + rename after every change): `automations` (the `Automation` wire type minus `nextRunAt`/`lastRun`, which `automation.list` computes), `runs` (newest first, ≤ 100 for the whole host) and `scheduledThrough` (automation id → the latest schedule time already handled). An unreadable file is renamed to `automations.json.bad-<ms>` and the daemon starts empty. An automation belongs to the herdr session of the client that created it (`herdrSession`); `automation.list|save|delete|run` only see the caller's session.
+
+**Schedules** (`automations/cron.rs`, `jiff` for the zone). Fields `min hour dom month dow` with `*`, `a`, `a-b`, `*/n`, `a-b/n`, `a/n`, lists, month/day names, `0`/`7` = Sunday, macros `@hourly|@daily|@midnight|@weekly|@monthly|@yearly|@annually`; restricted dom and dow match with OR (classic cron). Times are the host's local zone (`AutomationScheduler.timezone`: IANA name, else `UTC±hh:mm`). DST as Vixie cron: a specific time inside the skipped spring hour runs once right after the jump; every-hour jobs simply skip the missing hour; in the repeated autumn hour specific times run once (the first), every-hour jobs run in both. `automation.preview` returns the next 5 times and a description (`At 09:00, Monday through Friday`); a schedule that never fires (`0 0 30 2 *`) is invalid.
+
+**Scheduler** (one per daemon, started in `daemon::async_main`). It sleeps until the earliest next fire time (at most 60 s, so suspend and clock changes are noticed) or a change (save/delete). Per enabled automation it decides from its cursor (`automations::decide`):
+- next time in the future → wait;
+- due, and the latest due time is ≤ 2 min old → run (`trigger: schedule`);
+- older (the daemon was down, the machine slept) → only the latest missed time counts: with `catchUp` it runs once (`trigger: catchUp`), otherwise it is passed over. Several missed times never run more than once.
+
+The cursor moves before the run starts, so a crash never repeats a run; saving an automation sets it to now (edits and re-enabling never fire past times).
+
+**Pile-up guard.** A scheduled or catch-up run is recorded as `skipped` when the agent of the automation's last started run is still `working` or `blocked` (needs you), or when the previous launch is still in progress. `Run now` (`manual`) skips only the in-progress case.
+
+**Run recipe** (`Automations::launch`). `daemon.ctx_for(herdrSession)` (creates the context and starts the herdr server when needed), then with `AgentSpec { name: unique "auto-<slug>", kind: omp, model, thinking, plan, prompt }`:
+- worktree mode: `ops::worktree::create` with branch `automation/<slug>-<yyyymmdd-hhmm>` (host local time; `-2`…`-5` when it exists), `base: None` (the default base, §`worktree.create`), label = the automation's name, and the agent in the new workspace;
+- in place: `ops::agent::start_agent(StartTarget::Cwd { cwd, label })`.
+
+Both follow §3.7. The run (agent, workspace, branch, path, or the error) is stored, an activity event goes to the agent's feed, and the session's clients get a `Notification { kind: info, title: "Automation <name> started <agent>" }` (failures: `… failed` with the error; skips don't notify). Nothing else is published.
+
+**systemd keepalive** (`automations/systemd.rs`). Schedules only fire while the daemon runs, so on Linux with systemd, while at least one automation is enabled, hostd installs `teleflock-hostd-<hash>.service` (`Type=oneshot`, `Environment=TF_HOSTD_HOME=…` plus the installing daemon's `HOME`, `PATH`, `USER`, `LANG`, `ExecStart=<this binary> ensure --relay-port <port>`) and `.timer` (`OnBootSec=1min`, `OnUnitActiveSec=10min`, `WantedBy=timers.target`), runs `daemon-reload` when they changed and `enable --now` the timer; it removes both (`disable --now`, delete, `daemon-reload`) when none is enabled. Root uses the system manager (`/etc/systemd/system`); other users their user manager (`~/.config/systemd/user`) only with lingering — without it the user manager neither starts at boot nor survives logout, so `scheduler.note` asks for `loginctl enable-linger <user>`. `ensure` starts the daemon in its own transient scope (§3.1), so the oneshot service's cgroup teardown does not kill it. Elsewhere (macOS, Windows, no systemd) `scheduler.kind` is `daemon`: automations run while tf-hostd runs, which starts when an app connects and keeps running after it disconnects, until the host restarts.
+
+Reported `AutomationList.scheduler`: `systemd` + `persistent` while the timer is active; `systemd` without `persistent` and without a note while nothing is enabled (no timer needed yet); `systemd` with a note when lingering is missing or installing failed; `daemon` + note elsewhere. Reconciling runs at daemon start and inside `automation.save|delete` before they answer, so the next `automation.list` is current.
+
+**Security.** Automations run only what the user configured through an authenticated client of this host (same trust as `agent.start`): a prompt, a folder, model/thinking/plan. hostd never runs commands from the store other than `herdr`/`git`/`omp` through the regular launch path; the store is owner-only. The keepalive units run only `tf-hostd ensure` from the installing binary's path, as the same user.
+
 ## 4. Companion extension `teleflock-bridge.ts` (owner: BridgeExt)
 
 **Connection.** At load it connects to `bridge.sock` and retries every 5 s while hostd is absent. It never throws into omp: every timer goes through `ctx.setInterval`, and every handler is wrapped in try/catch.
@@ -303,7 +336,7 @@ and the companion extension's schema-dump mode (§4) writes the definitions ther
   - `btw` (omp's own `/btw`, shown in the TUI and its BTW history; `btwId` follows up), `btwCancel`, `getBtwHistory`
   - `getTree`, `getQueue`
 
-**Schema dump mode** (bridge ≥ 1.2.0). With `TF_OMP_SCHEMA_OUT=<file>` in its environment at load, the extension does nothing else: it imports `@oh-my-pi/pi-coding-agent/config/all-settings` (literal specifier; older omp builds without it report `error`), writes `{bridgeVersion, ompVersion, settings: <definition>[] | null, error?}` atomically to the file (functions dropped by JSON) and exits right after loading. Only tf-hostd's throwaway omp (§3.9) sets the variable.
+**Schema dump mode** (bridge ≥ 1.2.0). With `TF_OMP_SCHEMA_OUT=<file>` in its environment at load, the extension does nothing else: it imports `@oh-my-pi/pi-coding-agent/config/all-settings` (literal specifier; older omp builds without it report `error`), writes `{bridgeVersion, ompVersion, settings: <definition>[] | null, error?}` atomically to the file (functions dropped by JSON) and exits right after loading. Only tf-hostd's throwaway omp (§3.10) sets the variable.
 
 ## 5. App side
 
@@ -479,7 +512,7 @@ It must exercise every UI state, including disconnected, stale and auth-required
 | FrontTerminal | `src/features/terminal/**` | xterm.js WebGL terminal (frames, input, resize, scroll), tabs, send-keys bar, mobile extra keys (sticky Ctrl/Alt), embeddable `<TerminalPane>` for split view and session |
 | FrontOps | `src/features/{worktree,workspace,review,preview,history}/**` | New worktree/agent wizard with remote folder browser, workspace ops, review and ship (git diff viewer, commit/push/PR/merge), preview tunnels, past sessions and resume |
 | Dispatch | `src/features/dispatch/**` | Dispatch screen: per-repo chat thread where each message creates a worktree + omp agent, with live reply cards |
-| OmpSettings | `src/features/ompSettings/**` | Per-host omp settings page: omp's tabs/groups/labels, search, per-type controls, model-roles editor, Other tab for keys omp's panel lacks (§3.9) |
+| OmpSettings | `src/features/ompSettings/**` | Per-host omp settings page: omp's tabs/groups/labels, search, per-type controls, model-roles editor, Other tab for keys omp's panel lacks (§3.10) |
 | FrontCore | `src/core/**` (except `gen/`) | §6.1 |
 
 Shared UI building blocks come from `@/design` only. A feature that needs a cross-cutting primitive asks FrontShell (for layout) or adds it in its own folder.

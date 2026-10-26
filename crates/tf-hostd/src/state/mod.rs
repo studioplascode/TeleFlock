@@ -225,6 +225,12 @@ impl StateHandle {
         self.push_activity(agent_id, &name, kind, title, detail);
     }
 
+    /// Broadcasts a host notification (an automation run) to every client of this session.
+    pub fn broadcast_notification(&self, n: Notification) {
+        let mut m = self.lock();
+        self.notify(&mut m, n);
+    }
+
     fn push_activity(&self, agent_id: &str, agent_name: &str, kind: ActivityKind, title: String, detail: Option<String>) {
         let ev = ActivityEvent {
             id: new_id("a"),

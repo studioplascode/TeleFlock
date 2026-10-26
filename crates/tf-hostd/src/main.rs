@@ -37,6 +37,9 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Start the daemon detached unless it is running, then exit (the automations keepalive
+    /// timer runs this).
+    Ensure,
 }
 
 fn main() {
@@ -53,8 +56,9 @@ fn main() {
             tf_hostd::attach::run(paths, &session, replace, cli.relay_port)
         }
         Some(Cmd::Stop { force }) => tf_hostd::attach::stop(paths, force),
+        Some(Cmd::Ensure) => tf_hostd::attach::ensure(paths, cli.relay_port),
         None => {
-            eprintln!("tf-hostd: missing command (daemon | attach | stop | --version)");
+            eprintln!("tf-hostd: missing command (daemon | attach | ensure | stop | --version)");
             Ok(2)
         }
     };

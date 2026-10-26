@@ -34,6 +34,8 @@ pub struct Paths {
     pub overlay: PathBuf,
     /// `<home>/bin`.
     pub bin: PathBuf,
+    /// Automations and their run history `<home>/automations.json`.
+    pub automations: PathBuf,
 }
 
 impl Paths {
@@ -63,6 +65,7 @@ impl Paths {
             ext: home.join("ext").join("teleflock-bridge.ts"),
             overlay: home.join("omp-overlay.yml"),
             bin: home.join("bin"),
+            automations: home.join("automations.json"),
             run,
             home,
         }
@@ -85,6 +88,12 @@ impl Paths {
     /// Display form of the client endpoint (socket path or pipe name).
     pub fn endpoint(&self) -> String {
         if cfg!(windows) { self.pipe.clone() } else { self.sock.display().to_string() }
+    }
+
+    /// Stem of this instance's systemd keepalive units: `teleflock-hostd-<hash of home>`
+    /// (one pair per home, so lab instances never touch the real daemon's units).
+    pub fn unit_stem(&self) -> String {
+        format!("teleflock-hostd-{:08x}", fnv1a(self.home.to_string_lossy().as_bytes()))
     }
 }
 

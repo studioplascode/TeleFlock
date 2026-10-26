@@ -78,6 +78,30 @@ pub fn stop(paths: Paths, force: bool) -> anyhow::Result<i32> {
     })
 }
 
+/// `tf-hostd ensure` (the automations keepalive timer runs it): starts the daemon detached when
+/// it is not running, through the same transient-scope path as `attach`, then exits.
+pub fn ensure(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    rt.block_on(async move {
+        paths.ensure_dirs()?;
+        if InstanceLock::is_held(&paths) {
+            eprintln!("tf-hostd: running");
+            return Ok(0);
+        }
+        eprintln!("tf-hostd: starting daemon");
+        match start_and_connect(&paths, relay_port).await {
+            Ok(_) => {
+                eprintln!("tf-hostd: started");
+                Ok(0)
+            }
+            Err(msg) => {
+                eprintln!("tf-hostd: {msg}; see {}", paths.log.display());
+                Ok(1)
+            }
+        }
+    })
+}
+
 /// Sends one control line (`info` / `stop`) and returns the JSON reply. Every line carries
 /// this build's version line: the daemon judges `stop` requests by it.
 pub async fn control(paths: &Paths, op: &str, force: bool) -> Option<serde_json::Value> {
