@@ -29,4 +29,10 @@ templates: Array<AgentTemplate>,
  * newer version (Tauri app only).
  * Settings files written before this field existed load with `true`.
  */
-autoUpdate: boolean, };
+autoUpdate: boolean, 
+/**
+ * Mark done closes the agent's herdr pane (and its worktree workspace when nothing else
+ * runs there) once it is idle; the agent stays in Done and resumes with
+ * `omp --resume` when it is needed again. Files without the field load with `true`.
+ */
+closeDone: boolean, };

@@ -8,4 +8,8 @@ id: string, terminalId?: string, title?: string, cwd?: string,
 /**
  * Agent occupying this pane, if any.
  */
-agentId?: string, focused: boolean, };
+agentId?: string, focused: boolean, 
+/**
+ * Foreground process of the pane's terminal (`zsh`, `vim`, `bun`), when herdr reports it.
+ */
+process?: string, };

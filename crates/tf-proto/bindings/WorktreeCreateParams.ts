@@ -7,7 +7,8 @@ export type WorktreeCreateParams = {
  */
 cwd: string, branch: string, 
 /**
- * Base ref for a new branch (default `HEAD`).
+ * Base ref for a new branch. Default: `BranchList.default_base` (`origin/<default>`,
+ * fetched first), so new worktrees fork from the remote, not a stale local branch.
  */
 base?: string, 
 /**
