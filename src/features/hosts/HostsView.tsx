@@ -29,7 +29,7 @@ import { useHealthHistory } from "@/features/shell/healthHistory";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { connSummary, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ConnStatusCard, disconnect } from "./ConnStatusCard";
-import { hostAccent, KIND_META, profileAddress } from "./kinds";
+import { hostAccent, KIND_META, normalizeGroup, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
 import { setupFromHash, useSetupFocus } from "./setupFocus";
 import { ToolUpdatesRow } from "./ToolUpdates";
@@ -292,8 +292,21 @@ export function HostsView() {
             actions={add}
           />
         )}
-        {profiles.map((p, i) => (
-          <HostCard key={p.id} profile={p} status={status[p.id]} index={i} />
+        {hostSections(profiles).map((section) => (
+          <section key={section.group ?? ""} className="contents" aria-label={section.group ? `Group ${section.group}` : undefined}>
+            {section.label && (
+              <h2 className="col-span-full -mb-1 flex items-center gap-2 px-1 pt-2 text-xs font-bold text-mute">
+                <span className={cn("kicker", section.group && "text-accent-hi")}>{section.label}</span>
+                <span className="font-semibold text-mute-2 tabular">
+                  {section.profiles.filter((p) => status[p.id]?.phase === "online").length}/{section.profiles.length} online
+                </span>
+                {section.group && <span className="truncate font-semibold text-mute-2 max-sm:hidden">· Dispatch Auto spreads tasks over these hosts</span>}
+              </h2>
+            )}
+            {section.profiles.map((p) => (
+              <HostCard key={p.id} profile={p} status={status[p.id]} index={profiles.indexOf(p)} />
+            ))}
+          </section>
         ))}
         {profiles.length === 0 && (
           <EmptyState
@@ -307,4 +320,30 @@ export function HostsView() {
       </div>
     </div>
   );
+}
+
+/**
+ * Host cards in sections: one per group (alphabetical, case-insensitive match), then the ungrouped
+ * hosts. Without any group there is one unlabelled section, as before groups existed.
+ */
+function hostSections(profiles: readonly HostProfile[]): { group?: string; label?: string; profiles: HostProfile[] }[] {
+  const groups = new Map<string, { group: string; profiles: HostProfile[] }>();
+  const loose: HostProfile[] = [];
+  for (const p of profiles) {
+    const g = normalizeGroup(p.group);
+    if (!g) {
+      loose.push(p);
+      continue;
+    }
+    const k = g.toLowerCase();
+    const cur = groups.get(k);
+    if (cur) cur.profiles.push(p);
+    else groups.set(k, { group: g, profiles: [p] });
+  }
+  if (groups.size === 0) return [{ profiles: loose }];
+  const out: { group?: string; label?: string; profiles: HostProfile[] }[] = [...groups.values()]
+    .sort((a, b) => a.group.localeCompare(b.group))
+    .map((s) => ({ group: s.group, label: s.group, profiles: s.profiles }));
+  if (loose.length) out.push({ label: "Other hosts", profiles: loose });
+  return out;
 }

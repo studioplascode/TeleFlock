@@ -1,9 +1,9 @@
 import { motion } from "motion/react";
-import { Check, GitBranch, Play, RotateCcw, ShieldCheck, SquareTerminal, X } from "lucide-react";
-import { createContext, memo, type ReactNode, useContext, useEffect } from "react";
+import { Check, GitBranch, ImageOff, Play, RotateCcw, Server, ShieldCheck, SquareTerminal, X } from "lucide-react";
+import { createContext, memo, type ReactNode, useContext, useEffect, useState } from "react";
 import { type AgentView, agentKey, navigate, useAgent, useCore, useResuming } from "@/core";
 import type { Column } from "@/core/gen";
-import { AgentGlyph, Elapsed, Shimmer, StatusPill, type Status, cn, formatAge, spring, useNow } from "@/design";
+import { AgentGlyph, Elapsed, Lightbox, LightboxTrigger, Shimmer, StatusPill, type Status, cn, formatAge, spring, useNow } from "@/design";
 import { canReview, openAgent, openTerminal, resumeParked } from "@/features/board/agentActions";
 import { LANE_BY_COLUMN } from "@/features/board/lanes";
 import { AgentOrb, LiveLine, QuietChip, useQuiet } from "@/features/board/LiveBits";
@@ -11,17 +11,22 @@ import { QuickAnswer } from "@/features/board/QuickAnswer";
 import { ACTIONS, agentStateWord, isFresh } from "@/features/shell/vocab";
 import { AiMark } from "@/features/workspace/shared/ai";
 import { tildify } from "@/features/workspace/shared/paths";
-import { type DispatchEntry, isInFlight, threadKey, useDispatch } from "./store";
+import { useEntryImages } from "./images";
+import { type DispatchEntry, entryHost, isInFlight, useDispatch } from "./store";
 import { APPEAR_GRACE_MS, START_TIMEOUT_MS } from "./thread";
 
 /** Thread-wide handlers and facts the items need (kept out of props so items stay memoised). */
 export interface ThreadContext {
-  hostId: string;
-  repo: string;
-  home?: string;
+  /** The thread's store key; each entry's host comes from it or the entry (`entryHost`). */
+  threadKey: string;
+  /** An Auto thread: entries show which host they went to and why. */
+  auto: boolean;
+  /** Home folder per host (paths are shown with `~`). */
+  homes: Readonly<Record<string, string | undefined>>;
+  /** Host state is live (not a cached snapshot), per host. */
+  online: Readonly<Record<string, boolean>>;
+  hostName(hostId: string): string;
   mobile: boolean;
-  /** Host state is live (not a cached snapshot). */
-  online: boolean;
   retry(id: string, trust: boolean): void;
   dismiss(id: string): void;
 }
@@ -87,7 +92,7 @@ function optionsSummary(e: DispatchEntry): string {
   return [o.model === "default" ? null : (o.model.split("/").pop() ?? o.model), o.thinking === "default" ? null : o.thinking, o.plan && "plan"].filter(Boolean).join(" · ");
 }
 
-/** One dispatch: the message as a user bubble, then the agent's live reply card. */
+/** One dispatch: the message (images, text) as a user bubble, then the agent's live reply card. */
 export const DispatchItem = memo(function DispatchItem({ entry, agentId }: { entry: DispatchEntry; agentId?: string }) {
   const ctx = useContext(ThreadCtx);
   if (!ctx) return null;
@@ -99,14 +104,17 @@ export const DispatchItem = memo(function DispatchItem({ entry, agentId }: { ent
           <span>You</span>
           <span className="font-semibold tabular">{(today ? timeFmt : dayFmt).format(entry.createdAt)}</span>
         </div>
-        <div
-          className={cn(
-            "max-w-[min(720px,88%)] rounded-[20px] rounded-tr-[8px] bg-tile-4 text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.06),var(--shadow-d1)] whitespace-pre-wrap [overflow-wrap:anywhere]",
-            ctx.mobile ? "px-3.5 py-2 text-[14px] leading-[1.5]" : "px-4 py-2.5 text-[13.5px] leading-[1.55]",
-          )}
-        >
-          {entry.prompt}
-        </div>
+        {!!entry.images && <EntryImages id={entry.id} count={entry.images} mobile={ctx.mobile} />}
+        {entry.prompt.trim() && (
+          <div
+            className={cn(
+              "max-w-[min(720px,88%)] rounded-[20px] rounded-tr-[8px] bg-tile-4 text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.06),var(--shadow-d1)] whitespace-pre-wrap [overflow-wrap:anywhere]",
+              ctx.mobile ? "px-3.5 py-2 text-[14px] leading-[1.5]" : "px-4 py-2.5 text-[13.5px] leading-[1.55]",
+            )}
+          >
+            {entry.prompt}
+          </div>
+        )}
       </div>
       <Reply entry={entry} agentId={agentId} ctx={ctx} />
     </motion.li>
@@ -121,10 +129,38 @@ function parkedKeyOf(agents: Record<string, AgentView>, hostId: string, entry: D
   return Object.values(agents).find((a) => a.hostId === hostId && a.parked && a.omp?.sessionId === entry.sessionId)?.key;
 }
 
+/** The images sent with a task (from IndexedDB): thumbnails that open the lightbox. */
+function EntryImages({ id, count, mobile }: { id: string; count: number; mobile: boolean }) {
+  const images = useEntryImages(id, count);
+  const [viewing, setViewing] = useState<number | null>(null);
+  const size = mobile ? "size-16" : "size-20";
+  if (images === null) {
+    return (
+      <span className="flex items-center gap-1.5 pr-1 text-2xs font-semibold text-mute-2">
+        <ImageOff className="size-3.5" /> {count === 1 ? "1 image" : `${count} images`} (not on this device)
+      </span>
+    );
+  }
+  return (
+    <div className="flex max-w-[min(720px,88%)] flex-wrap justify-end gap-1.5" aria-label={count === 1 ? "1 image" : `${count} images`}>
+      {images
+        ? images.map((img, i) => (
+            <LightboxTrigger key={i} label={`View image ${i + 1}`} onClick={() => setViewing(i)}>
+              <img src={img.preview} alt={`image ${i + 1}`} className={cn(size, "rounded-[14px] object-cover shadow-[inset_0_1px_0_rgb(255_255_255/0.06),var(--shadow-d1)]")} />
+            </LightboxTrigger>
+          ))
+        : Array.from({ length: count }, (_, i) => <span key={i} className={cn(size, "animate-pulse rounded-[14px] bg-tile-4")} />)}
+      {images && <Lightbox images={images.map((img, i) => ({ src: img.preview, alt: `image ${i + 1}` }))} index={viewing !== null && viewing < images.length ? viewing : null} onIndexChange={setViewing} />}
+    </div>
+  );
+}
+
 function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string; ctx: ThreadContext }) {
-  const key = agentId ? agentKey(ctx.hostId, agentId) : undefined;
+  const hostId = entryHost(ctx.threadKey, entry);
+  const online = ctx.online[hostId] === true;
+  const key = agentId ? agentKey(hostId, agentId) : undefined;
   const agent = useAgent(key ?? "");
-  const parkedKey = useCore((s) => (agent ? undefined : parkedKeyOf(s.agents, ctx.hostId, entry)));
+  const parkedKey = useCore((s) => (agent ? undefined : parkedKeyOf(s.agents, hostId, entry)));
   const launching = entry.phase !== "failed" && (!agent || (agent.turns === 0 && agent.state === "idle"));
   const now = useNow(launching ? 1000 : 60_000);
 
@@ -138,8 +174,8 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
   useEffect(() => {
     if (!column || title === undefined || turns === undefined) return;
     if (last && last.column === column && last.title === title && last.turns === turns && (!sessionId || entry.sessionId === sessionId)) return;
-    useDispatch.getState().patch(threadKey(ctx.hostId, ctx.repo), entry.id, { last: { column, title, turns, at: Date.now() }, ...(sessionId ? { sessionId } : {}) });
-  }, [column, title, turns, sessionId, last, entry.id, entry.sessionId, ctx.hostId, ctx.repo]);
+    useDispatch.getState().patch(ctx.threadKey, entry.id, { last: { column, title, turns, at: Date.now() }, ...(sessionId ? { sessionId } : {}) });
+  }, [column, title, turns, sessionId, last, entry.id, entry.sessionId, ctx.threadKey]);
 
   const shown = shownOf(entry, agent, now);
   const status = statusOf(shown, entry);
@@ -180,7 +216,7 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
               {entry.aiNamed && (agent?.name ?? entry.name) === entry.name && <AiMark />}
             </span>
           )}
-          <Badge shown={shown} entry={entry} status={status} online={ctx.online} mobile={ctx.mobile} />
+          <Badge shown={shown} entry={entry} status={status} online={online} mobile={ctx.mobile} />
           <span className="ml-auto shrink-0 text-2xs font-bold text-mute tabular">
             {live?.column === "running" ? (
               <Elapsed since={live.omp?.turnStartedAt ?? live.stateSince} />
@@ -195,13 +231,20 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
         </header>
         <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-2xs text-mute-2">
           <GitBranch className="size-3 shrink-0" />
-          <span className="min-w-0 truncate" title={entry.path ? tildify(entry.path, ctx.home) : undefined}>
+          <span className="min-w-0 truncate" title={entry.path ? tildify(entry.path, ctx.homes[hostId]) : undefined}>
             {entry.phase === "naming" ? "dispatch/…" : entry.branch}
-            {entry.base && <span className="opacity-70"> ← {entry.base}</span>}
+            {(entry.base ?? entry.baseLabel) && <span className="opacity-70"> ← {entry.base ?? entry.baseLabel}</span>}
           </span>
           {summary && <span className="shrink-0 font-sans font-semibold max-sm:hidden">· sent with: {summary}</span>}
         </div>
-        <Body shown={shown} entry={entry} agentKey={key} parkedKey={parkedKey} ctx={ctx} />
+        {ctx.auto && (
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs font-semibold text-mute-2" title={entry.placed}>
+            <Server className="size-3 shrink-0" />
+            <span className="shrink-0 text-mute">on {ctx.hostName(hostId)}</span>
+            {entry.placed && <span className="min-w-0 truncate">· {entry.placed}</span>}
+          </div>
+        )}
+        <Body shown={shown} entry={entry} agentKey={key} parkedKey={parkedKey} ctx={ctx} online={online} />
       </div>
     </div>
   );
@@ -238,9 +281,9 @@ const primary = `${action} bg-accent text-white shadow-glow-accent hover:bg-acce
 const secondary = `${action} bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5`;
 const ghost = `${action} text-mute hover:bg-white/6 hover:text-ink`;
 
-function Body({ shown, entry, agentKey: key, parkedKey, ctx }: { shown: Shown; entry: DispatchEntry; agentKey?: string; parkedKey?: string; ctx: ThreadContext }) {
+function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: Shown; entry: DispatchEntry; agentKey?: string; parkedKey?: string; ctx: ThreadContext; online: boolean }) {
   const agent = shown.k === "live" ? shown.agent : undefined;
-  const silentMs = useQuiet(agent?.column === "running" && ctx.online, agent?.live.lastEventAt);
+  const silentMs = useQuiet(agent?.column === "running" && online, agent?.live.lastEventAt);
 
   if (shown.k === "unconfirmed") {
     return (
@@ -253,7 +296,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx }: { shown: Shown; e
           anything new.
         </p>
         <Actions>
-          <button type="button" className={primary} onClick={() => ctx.retry(entry.id, false)} disabled={!ctx.online}>
+          <button type="button" className={primary} onClick={() => ctx.retry(entry.id, false)} disabled={!online}>
             <RotateCcw /> Check & retry
           </button>
           <button type="button" className={ghost} onClick={() => ctx.dismiss(entry.id)}>
@@ -274,11 +317,11 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx }: { shown: Shown; e
         </p>
         <Actions>
           {untrusted && (
-            <button type="button" className={primary} onClick={() => ctx.retry(entry.id, true)} disabled={!ctx.online}>
+            <button type="button" className={primary} onClick={() => ctx.retry(entry.id, true)} disabled={!online}>
               <ShieldCheck /> Trust repository & retry
             </button>
           )}
-          <button type="button" className={untrusted ? secondary : primary} onClick={() => ctx.retry(entry.id, false)} disabled={!ctx.online}>
+          <button type="button" className={untrusted ? secondary : primary} onClick={() => ctx.retry(entry.id, false)} disabled={!online}>
             <RotateCcw /> Retry
           </button>
           <button type="button" className={ghost} onClick={() => ctx.dismiss(entry.id)}>
@@ -291,12 +334,12 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx }: { shown: Shown; e
 
   if (shown.k === "step") return <Progress step={shown.step} />;
 
-  if (shown.k === "gone" && parkedKey && ctx.online) return <Parked parkedKey={parkedKey} />;
+  if (shown.k === "gone" && parkedKey && online) return <Parked parkedKey={parkedKey} />;
 
   if (shown.k === "gone" || !agent || !key) {
     return (
       <p className="mt-2 text-xs text-mute">
-        {!ctx.online
+        {!online
           ? "The host is offline; this is the last state seen."
           : entry.last && entry.last.title && !entry.prompt.startsWith(entry.last.title)
             ? `“${entry.last.title}” — the agent has been closed since.`
@@ -344,7 +387,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx }: { shown: Shown; e
   return (
     <>
       <div className="mt-2 flex min-w-0 items-center gap-2">
-        <LiveLine live={agent.live} running={agent.column === "running" && ctx.online} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="min-w-0 flex-1" />
+        <LiveLine live={agent.live} running={agent.column === "running" && online} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="min-w-0 flex-1" />
         {silentMs !== null && <QuietChip silentMs={silentMs} />}
       </div>
       <Actions>

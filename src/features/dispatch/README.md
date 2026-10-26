@@ -10,45 +10,97 @@ sidebar item next to Board, phone bottom-nav tab, palette view "Dispatch", globa
 // src/features/dispatch/DispatchView.tsx — route screen (desktop + phone, full-bleed)
 export function DispatchView(): JSX.Element;
 
-// src/features/dispatch/store.ts — persisted threads (zustand persist, localStorage "tf.dispatch")
-export const useDispatch: UseBoundStore<…>;      // { threads, lastHost, lastRepo, bases, trusted, options, select, setBase, setOptions, trust, add, patch, remove, clear }
-export function threadKey(hostId: string, repo: string): string;   // one thread per host + repo root
-export function dispatchTask(args: { hostId; repo; prompt; base?; options: DispatchOptions; taken: Iterable<string>; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on
+// src/features/dispatch/store.ts — persisted threads (zustand persist, localStorage "tf.dispatch", v2)
+export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (target), lastRepo, bases, legacyBases, trusted, options, remotes, select, setBase, setOptions, trust, learnRemotes, add, patch, remove, clear }
+export function threadKey(target: string, repo: string): string;  // target = host id or "auto:<group>"; repo = root (host) or repo id (Auto)
+export function entryHost(key, entry): string;                    // the host an entry went to (entry.hostId, else the thread's host)
+export function entryRepo(key, entry): string;                    // that host's checkout root (entry.repo, else the thread's repo)
+export function dispatchTask(args: { key?; hostId; repo; prompt; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; lookupBranches?; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text
+export function pendingByHost(threads, runningAgentIds, now): Record<string, number>; // dispatches on their way to each host (Auto's workload)
 export function suggestDispatchName(hostId, repo, prompt): Promise<string | null>; // the send's suggestBranch call (the composer prefetches through it)
 export function resumeInterruptedNaming(): void; // every `naming` entry cut short by a reload (any thread) goes ahead under the fallback name once its host answers; runs after hydration, call at startup
-export function retryDispatch(args: { hostId; repo; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // checks before re-creating
+export function retryDispatch(args: { key; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // on the entry's own host; checks before re-creating
 export function isInFlight(entryId: string): boolean;               // request queued / in flight in this tab
 export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create settles
-export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries of agents whose omp session was deleted (HostInfo.pruned)
-export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live
+export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted (HostInfo.pruned), and their images
+export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live
 export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean }
+
+// src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
+export const MAX_TASK_IMAGES = 8; export const MAX_TASK_IMAGE_CHARS = 12 MiB; // base64 per task (relay messages cap at 16 MiB)
+export function saveEntryImages(id, images): Promise<void>; export function loadEntryImages(id): Promise<ImageInput[] | null>;
+export function useEntryImages(id, count): DraftImage[] | null | undefined; // undefined while loading, null = not on this device
+export function deleteEntryImages(ids): void; export function sweepEntryImages(liveIds): Promise<void>;
+
+// src/features/dispatch/auto.ts — host groups as one target (auto.test.ts)
+export function autoTarget(group): string; export function groupOf(target): string | null; export function groupHosts(profiles, group): HostProfile[];
+export function canonicalRemote(url): string | null;              // git@github.com:O/r.git, https://github.com/o/r, ssh://git@github.com:22/o/r → "github.com/o/r"
+export function repoIdOf(hostId, root, remotes): string;           // canonical remote, else "local:<host>:<root>"
+export function groupRepos(hosts: { hostId; recents }[], remotes): GroupRepo[]; // { id, name, roots: { [hostId]: root }, at }
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)
 export const BRANCH_PREFIX = "dispatch/";
-export function baseSlug(prompt: string): string;                  // "Add offline caching to the client" → "offline-caching-client"
+export function baseSlug(prompt: string): string;                  // slugFromPrompt or "task": "Add offline caching to the client" → "offline-caching-client"; "Fix the following points and release 0.5.0 when you are done. - … - …" → "release-0-5-0-fixes"
 export function uniqueSlug(base: string, taken: ReadonlySet<string>): string; // -2, -3… vs names and dispatch/<name> branches; result ≤ 32 chars (herdr's agent-name limit)
 export function cleanSuggestion(s): string | null;                 // an AI slug as a dispatch name (≤ 28 chars, whole words), or null (unusable)
 export function nameDispatch(prompt, suggest?): Promise<{ slug; ai }>; // AI slug else prompt slug; the caller dedupes synchronously after the await
 export function prefetchKey(draft: string): string | null;         // trimmed draft once it has 3+ words
-export function recentRepos(state, dispatched): RecentRepo[];       // workspace repo roots + dispatched repos, most recent first
+export function threadBase(list, stored, legacy): { shown; param?; untouched }; // see Behaviour → Base
+export function recentRepos(state, dispatched): RecentRepo[];       // workspace repo roots (+ remoteUrl) + dispatched repos, most recent first
 export function resolveAgent(entry, agents, scope: { repo; workspaces }): Agent | undefined; // agentId → pane (same name) → name; always inside the entry's worktree
 export function slimThreads(threads, maxEntries, maxPrompt): Record<string, DispatchEntry[]>; // persisted copy
 ```
 
+Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | dataTransfer)` reads
+`items` *and* `files`, deduplicated — WebKitGTK puts pasted screenshots only in `items`;
+`dragHasFiles`; `shrinkImage` scales images > 3 MB to ≤ 2560 px), `@/core/workload` (`hostLoad`,
+`rankHosts`, `pickHost`, `describeLoad`).
+
 ## Behaviour
-- Top bar: host chip (more than one host), repo chip (recent repos of the host: workspace repo roots,
-  linked worktrees folded into their repo, plus repos dispatched to before; "Browse…" opens the
-  FolderBrowser in repo mode), base-branch chip (default branch from `git.branches`, remembered per
-  thread). The last host and the last repo per host are remembered. Picking a repo (chip menu,
-  empty-state chips, Browse…) puts focus in the task box. With no recent repos the empty state
-  offers "Browse for a repository…". Under the composer: "New worktree" / "Fan out" open those
-  dialogs prefilled with the host, repo (and the current draft for Fan out).
-- A dispatch is one `worktree.create { cwd: repo, branch: "dispatch/<slug>", base, label: slug,
-  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt } }`. A
-  template's prompt frames the message (as in Fan out). With Settings → AI naming on (and the host's
-  omp able to answer), the entry first goes through `naming`: omp's tiny model suggests the slug
-  (`suggestBranch`, 10 s cap, "Naming…" on the card, ✨ beside the result); otherwise, on no answer,
-  or after a reload mid-naming, the slug comes from the prompt (whole words, starts with a letter).
+- Top bar: target chip (more than one host, or any host group): single hosts and every host group
+  as "Auto · <group>" with each member's current load; repo chip (recent repos of the host:
+  workspace repo roots, linked worktrees folded into their repo, plus repos dispatched to before;
+  "Browse…" opens the FolderBrowser in repo mode — single hosts only), base-branch chip. The last
+  target and the last repo per target are remembered. Picking a repo (chip menu, empty-state chips,
+  Browse…) puts focus in the task box. With no recent repos the empty state offers "Browse for a
+  repository…". Under the composer: "New worktree" / "Fan out" open those dialogs prefilled with the
+  host, repo (and the current draft for Fan out).
+- Base: the host's default base, `BranchList.defaultBase` (`origin/<default>` when that
+  remote-tracking branch exists), shown on the chip, in the composer hint and on each entry
+  (`← origin/main`). Untouched, the send carries no `base`, so a 0.5 hostd fetches and forks from
+  `defaultBase`; an older hostd (no `defaultBase`) gets its default branch spelled out. A pick
+  (another branch, HEAD) is remembered per thread and sent as is. A base remembered before 0.5 that
+  equals the local default branch counts as untouched (`legacyBases`, store v2 migration).
+- Images: attach button, paste (clipboard `items` + `files`) or drop into the composer; thumbnails
+  with remove and a lightbox; persisted with the draft (`useDraftImages` on the target + repo draft
+  key). At most 8 per task and ~9 MB in total (base64 ≤ 12 MiB, under the relay's 16 MiB message
+  cap); images over 3 MB are scaled down first; a clear toast says what was left out. Image-only
+  tasks are fine (named `image-task`, no AI naming). The images go to the host as
+  `worktree.create { agent: { images } }` and hostd delivers them with the agent's first prompt.
+  Each entry keeps its images in IndexedDB (`images.ts`) for the thread's thumbnails and for
+  retries; they are deleted when the entry leaves the threads (dismiss, clear, cap, pruned) and
+  swept at startup. A host daemon older than 0.5 ignores `agent.images`, so sends with images to
+  one are refused with an "update the host" toast. Images no longer on this device (another
+  device's thread, cleared storage) show as "N images (not on this device)" and a retry fails
+  with a clear error instead of sending without them.
+- Auto (host groups, `HostProfile.group`, set in the host editor): the repo chip lists the union of
+  the group hosts' repositories, matched by canonical `origin` URL (scp/https/ssh, `.git`, case
+  and ports normalised; learned from workspaces into `remotes`) — each host keeps its own checkout
+  root. Every send picks the least busy online host that has the repo (`@/core/workload`: running
+  agents and dispatches on their way count 1 each, needs-you 0.3, CPU pressure — max of CPU% and
+  load/cores — ×2, memory above 85 % steeply; ties → fewer agents on the way, lower CPU, profile
+  order), so consecutive sends alternate between equal hosts. The entry records `hostId`, that
+  host's `repo` root and `placed` ("least busy of 2: 1 running · CPU 34% (studio-pc: …)"), shown on
+  the card as "on <host> · why". Items, retries, trust (`trusted[host + root]`) and naming use the
+  entry's host. The composer hint names the group's hosts and the next pick. No host with the
+  repo, or none online → the composer says so and sends nothing.
+- A dispatch is one `worktree.create { cwd: root, branch: "dispatch/<slug>", base?, label: slug,
+  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt, images? } }`.
+  A template's prompt frames the message (as in Fan out). With Settings → AI naming on (and the
+  host's omp able to answer), the entry first goes through `naming`: omp's tiny model suggests the
+  slug (`suggestBranch`, 10 s cap, "Naming…" on the card, ✨ beside the result); otherwise, on no
+  answer, an agent-like answer ("I need to inspect the repository" is rejected by the sanitizer),
+  or after a reload mid-naming, the slug comes from the prompt's lead sentence (`slugFromPrompt`).
   The composer asks for the name ahead of time (after ~1.2 s idle with 3+ words; ai.ts caches it),
   so most sends skip the wait. Either way the slug is deduped against existing branches, live agent
   names and every live dispatch on the host (herdr agent names are unique per host, so other repos'

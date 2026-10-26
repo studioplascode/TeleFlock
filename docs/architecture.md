@@ -225,7 +225,7 @@ herdr --session S agent start <name> --kind omp --pane <pane> -- \
 
 Once the agent is idle and `link=live`:
 - `plan: true` → bridge `setPlan`, or inject `/plan`;
-- an initial prompt → collab `prompt`.
+- an initial prompt and/or `images` (`AgentSpec.images`, image-only allowed) → collab `prompt` with the images as `ImageContent` (same mapping as `agent.prompt`). If the link never comes up (45 s), the text goes in through herdr and the images, which herdr cannot type, are reported as an `error` activity ("Image not delivered") instead of being dropped silently.
 
 The new agent appears through herdr events. The response returns `Started{paneId, workspaceId, agentId?}`.
 
@@ -245,6 +245,8 @@ omp --mode json --no-session --no-tools --no-extensions --no-skills --no-rules -
 ```
 
 without a shell, reads the JSONL events and answers with the last assistant text of `agent_end` (text parts only, thinking dropped; the assistant `message_end` if the stream ends first). The child is killed as soon as the answer is in: the reply takes ~4–8 s and omp would otherwise linger ~8 s more. The client sanitizes the text (first usable line, labels/quotes/prefixes stripped, kebab case or sentence case, word and length caps) and returns `null` for junk, so every caller keeps a deterministic fallback.
+
+**Naming prompts.** omp appends its own agent instructions ("each response MUST advance the task", verify before yielding) and, with `cwd` in a repo, that repo's context files to every system prompt, even a custom one, so a tiny model easily answers a long task as if it had to do it ("I need to inspect the repository" → `need-inspect-repository`). The naming prompts (`branch`, `agentName`, `title`, `templateName`) therefore put the user's text between tags (`<task>…</task>`, a closing tag inside it is dropped), state that it is text to label and not an instruction, ask for the overall goal of multi-point tasks, and end with "Branch slug for the task above:". The sanitizer rejects agent-speak (first person, "let me", apologies, refusals, requests for details) and slugs that start with `i`/`need`/`sure`/… or are about looking at the repository (unless the task is), so the caller falls back to `slugFromPrompt`, which names the lead sentence's goal ("Fix the following points and release 0.5.0 when you are done. - … - …" → `release-0-5-0-fixes`). A version (`0-5-0`) counts as one word.
 
 **Limits.** Role default `tiny` (validated `^[a-z][a-z0-9-]{0,31}$`); a failed attempt (exit, error event, empty text) is retried once with `smol` while ≥ 1.5 s remain. Timeout default 20 s, clamped 2–60 s, queue time included → `timeout` (retryable). At most 3 omp processes per daemon (semaphore). Errors: omp missing or no such role → `ai_unavailable`; anything else → `ai_failed` with ≤ 300 chars of stderr/error text. The client treats `ai_unavailable` and `unknown_method` (older hostd) as "skip this host for 10 min".
 
@@ -445,6 +447,8 @@ Errors reject with `ApiError`.
 - `pulseBus.subscribe(key, cb)`.
 - `termBus.subscribe(hostId, termId, cb)`.
 - `useUi()`: navigation (view, selected agent, split, palette, sheets, mobile tab, pager).
+- `@/core/clipboardImages`: `imageFiles(clipboardData | dataTransfer)` reads `items` (WebKitGTK puts pasted screenshots only there) and `files`, deduplicated; `shrinkImage` scales images over 3 MB down to ≤ 2560 px. Used by the session composer and Dispatch.
+- `@/core/workload`: per-host load for Dispatch Auto (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`): running agents and dispatches on their way, needs-you agents, CPU pressure (max of CPU% and load/cores), memory above 85 %; offline hosts never picked.
 
 **Parked and pruned agents** (`store/lifecycle.ts` pure, `agentLifecycle.ts` effects):
 - Mark done sends `agent.archive {archived: true, close: Settings.closeDone}`; the Undo toast unarchives (inside the host's 10 s window that just cancels the close, after it the host resumes the parked agent). Older hosts ignore `close`.

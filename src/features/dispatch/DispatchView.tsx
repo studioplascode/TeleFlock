@@ -1,7 +1,9 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Eraser, FolderGit2, FolderSearch, MoreHorizontal, Send, Server } from "lucide-react";
+import { Eraser, FolderGit2, FolderSearch, MoreHorizontal, Send, Server, Shuffle } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { draftKey, navigate, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
+import { type DraftImage, draftKey, navigate, useHostIds, useHostStates, useHosts, useSettings, useUi } from "@/core";
+import type { ConnStatus, HostState } from "@/core/gen";
+import { describeLoad, type HostLoad, hostLoad, pickHost, rankHosts } from "@/core/workload";
 import {
   Button,
   DropdownMenu,
@@ -13,69 +15,147 @@ import {
   StatusPill,
   cn,
   spring,
+  toast,
   useIsMobile,
 } from "@/design";
+import { hostGroups, versionBelow } from "@/features/hosts/kinds";
 import { ACTIONS } from "@/features/shell/vocab";
 import { confirmAction } from "@/features/workspace/shared/overlays";
-import { tildify } from "@/features/workspace/shared/paths";
+import { basename, tildify } from "@/features/workspace/shared/paths";
 import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
+import { autoTarget, canonicalRemote, groupHosts, groupOf, groupRepos, remoteKey } from "./auto";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
-import { BasePicker, HostPicker, RepoBrowser, RepoPicker } from "./RepoBar";
+import { BasePicker, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
 import {
   type DispatchEntry,
   type DispatchOptions,
   dispatchTask,
+  entryHost,
+  entryRepo,
   isInFlight,
   onDispatchSettled,
+  pendingByHost,
   retryDispatch,
   threadKey,
   useDispatch,
 } from "./store";
-import { recentRepos, resolveAgent } from "./thread";
+import { recentRepos, resolveAgent, threadBase } from "./thread";
 
 const EMPTY: DispatchEntry[] = [];
+const NO_HOSTS: string[] = [];
 /** Entries rendered before "Show earlier". */
 const PAGE = 60;
 const COUNT_LABEL = { needs: "need you", running: "running", review: "to review" } as const;
+/** Image prompts need hostd 0.5 (older daemons ignore `agent.images`). */
+const IMAGES_MIN_HOSTD = "0.5";
+
+/** Current load of `ids` (Auto): health, agents, and the dispatches on their way to each. */
+function loadsOf(ids: readonly string[], states: Readonly<Record<string, HostState>>, status: Readonly<Record<string, ConnStatus>>, threads: Readonly<Record<string, DispatchEntry[]>>): HostLoad[] {
+  const running = new Set<string>();
+  for (const h of ids) for (const a of states[h]?.agents ?? []) if (a.column === "running") running.add(a.id);
+  const pending = pendingByHost(threads, running, Date.now());
+  return ids.map((h) => {
+    const agents = states[h]?.agents ?? [];
+    return hostLoad({
+      hostId: h,
+      online: status[h]?.phase === "online",
+      health: states[h]?.health,
+      running: agents.filter((a) => a.column === "running").length,
+      needs: agents.filter((a) => a.column === "needs").length,
+      pending: pending[h] ?? 0,
+    });
+  });
+}
 
 /**
  * `#/dispatch`: pick a repo, then every message creates a fresh worktree (`dispatch/<slug>`) with
- * an omp agent running it. The thread shows each message with its agent's live reply card.
+ * an omp agent running it. The thread shows each message with its agent's live reply card. The
+ * target is one host, or a host group in Auto mode (each task goes to its least busy host).
  */
 export function DispatchView() {
   const mobile = useIsMobile();
   const hostIds = useHostIds();
-  const lastHost = useDispatch((s) => s.lastHost);
-  const hostId = lastHost && hostIds.includes(lastHost) ? lastHost : hostIds[0];
-  const repo = useDispatch((s) => (hostId ? (s.lastRepo[hostId] ?? null) : null));
-  const select = useDispatch((s) => s.select);
-  const host = useHostState(hostId ?? "");
-  const online = useHosts((s) => (hostId ? s.status[hostId]?.phase === "online" : false));
-  const hostName = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
-  const home = host?.info.home;
-  const key = hostId && repo ? threadKey(hostId, repo) : null;
-  const entries = useDispatch((s) => (key ? (s.threads[key] ?? EMPTY) : EMPTY));
+  const profiles = useHosts((s) => s.profiles);
+  const status = useHosts((s) => s.status);
+  const states = useHostStates();
   const threads = useDispatch((s) => s.threads);
+  const remotes = useDispatch((s) => s.remotes);
+  const lastHost = useDispatch((s) => s.lastHost);
+  const select = useDispatch((s) => s.select);
+  const nameOf = useCallback((id: string) => profiles.find((p) => p.id === id)?.name ?? id, [profiles]);
 
-  // Recent repos: the host's workspaces plus repos dispatched to before.
+  // Target: the last host or group used, else the first host.
+  const groups = useMemo(() => hostGroups(profiles), [profiles]);
+  const lastGroup = groupOf(lastHost)?.toLowerCase();
+  const auto = lastGroup ? (groups.find((g) => g.toLowerCase() === lastGroup) ?? null) : null;
+  const target = auto ? autoTarget(auto) : lastHost && hostIds.includes(lastHost) ? lastHost : hostIds[0];
+  const members = useMemo(() => (auto ? groupHosts(profiles, auto).map((p) => p.id) : NO_HOSTS), [auto, profiles]);
+  const repo = useDispatch((s) => (target ? (s.lastRepo[target] ?? null) : null));
+  const key = target && repo ? threadKey(target, repo) : null;
+  const entries = useDispatch((s) => (key ? (s.threads[key] ?? EMPTY) : EMPTY));
+
+  // Clones are matched across hosts by their origin remote, learned from workspaces.
+  useEffect(() => {
+    const found: Record<string, string> = {};
+    for (const [h, st] of Object.entries(states)) {
+      for (const ws of st.workspaces) {
+        const id = canonicalRemote(ws.repo?.remoteUrl);
+        if (ws.repo && id) found[remoteKey(h, ws.repo.root)] = id;
+      }
+    }
+    useDispatch.getState().learnRemotes(found);
+  }, [states]);
+
+  // Repos dispatched to, per host (single-host and Auto threads alike).
   const dispatched = useMemo(() => {
-    const out: Record<string, number> = {};
-    const prefix = threadKey(hostId ?? "", "");
-    for (const [k, list] of Object.entries(threads)) if (k.startsWith(prefix) && list.length) out[k.slice(prefix.length)] = list[list.length - 1]?.createdAt ?? 0;
+    const out: Record<string, Record<string, number>> = {};
+    for (const [k, list] of Object.entries(threads)) {
+      for (const e of list) {
+        const per = (out[entryHost(k, e)] ??= {});
+        const root = entryRepo(k, e);
+        per[root] = Math.max(per[root] ?? 0, e.createdAt);
+      }
+    }
     return out;
-  }, [threads, hostId]);
-  const workspaces = host?.workspaces;
-  const agents = host?.agents;
-  const recents = useMemo(() => recentRepos(workspaces && agents ? { workspaces, agents } : undefined, dispatched), [workspaces, agents, dispatched]);
+  }, [threads]);
 
-  // Base branch: remembered per thread, else the repo's default branch.
-  const branches = useHostQuery(hostId, "git.branches", repo ? { cwd: repo } : null);
+  // Single host: its recent repos. Auto: the union over the group, one row per repository.
+  const hostId = auto ? null : (target ?? null);
+  const single = hostId ? states[hostId] : undefined;
+  const home = single?.info.home;
+  const recents = useMemo(() => (hostId ? recentRepos(single, dispatched[hostId] ?? {}) : []), [hostId, single, dispatched]);
+  const pooled = useMemo(
+    () => (auto ? groupRepos(members.map((h) => ({ hostId: h, recents: recentRepos(states[h], dispatched[h] ?? {}) })), remotes) : []),
+    [auto, members, states, dispatched, remotes],
+  );
+  const autoRepo = auto && repo ? pooled.find((r) => r.id === repo) : undefined;
+  const candidates = useMemo(() => (autoRepo ? members.filter((h) => autoRepo.roots[h]) : NO_HOSTS), [autoRepo, members]);
+  const repoChoices = useMemo<RepoChoice[]>(
+    () =>
+      auto
+        ? pooled.map((r) => ({ id: r.id, name: r.name, detail: members.filter((h) => r.roots[h]).map(nameOf).join(" · ") }))
+        : recents.map((r) => ({ id: r.root, name: r.name, detail: tildify(r.root, home) })),
+    [auto, pooled, members, nameOf, recents, home],
+  );
+
+  // Workload: each group's hosts for the picker; the repo's hosts for Auto sends (`preview` = the
+  // host the next send would go to; its branches and naming stand in for the group's).
+  const groupChoices = useMemo<GroupChoice[]>(
+    () => groups.map((g) => ({ group: g, loads: rankHosts(loadsOf(groupHosts(profiles, g).map((p) => p.id), states, status, threads)) })),
+    [groups, profiles, states, status, threads],
+  );
+  const preview = useMemo(() => (candidates.length ? pickHost(loadsOf(candidates, states, status, threads)) : null), [candidates, states, status, threads]);
+  const workHost = hostId ?? preview?.hostId ?? candidates[0];
+  const workRepo = hostId ? repo : workHost ? autoRepo?.roots[workHost] : undefined;
+
+  // Base branch: remembered per thread, else the host's default base (`origin/<default>`).
+  const branches = useHostQuery(workHost, "git.branches", workRepo ? { cwd: workRepo } : null);
   const reloadBranches = branches.reload;
   useEffect(() => onDispatchSettled(reloadBranches), [reloadBranches]);
   const storedBase = useDispatch((s) => (key ? s.bases[key] : undefined));
-  const known = !branches.data || storedBase === "HEAD" || branches.data.branches.some((b) => b.name === storedBase);
-  const base = (storedBase && known ? storedBase : undefined) ?? branches.data?.defaultBranch ?? "HEAD";
+  const legacyBase = useDispatch((s) => (key ? s.legacyBases[key] === true : false));
+  const base = threadBase(branches.data, storedBase, legacyBase);
 
   // Composer options: last used, else the Settings defaults.
   const settings = useSettings();
@@ -85,62 +165,116 @@ export function DispatchView() {
     return { templateId: null, model: settings.defaultModel ?? "default", thinking: settings.defaultThinking ?? "default", plan: settings.defaultPlan };
   }, [stored, settings.templates, settings.defaultModel, settings.defaultThinking, settings.defaultPlan]);
 
-  // Names that are not free: existing branches and live agents (the store adds the host's dispatches).
+  // Names that are not free on the single host: existing branches and live agents (the store adds
+  // the host's dispatches; Auto sends look the picked host's branches up themselves).
   const taken = useRef<string[]>([]);
-  taken.current = [...(branches.data?.branches.map((b) => b.name) ?? []), ...(agents?.map((a) => a.name) ?? [])];
-  const hostSnapshot = useRef({ agents: agents ?? [], workspaces: workspaces ?? [] });
-  hostSnapshot.current = { agents: agents ?? [], workspaces: workspaces ?? [] };
+  taken.current = hostId ? [...(branches.data?.branches.map((b) => b.name) ?? []), ...(single?.agents.map((a) => a.name) ?? [])] : [];
+  const statesRef = useRef(states);
+  statesRef.current = states;
 
-  // Link entries to their agents, only ever inside the entry's own worktree (the id can arrive
-  // after `worktree.create` returns; reloads and timeouts lose it).
-  const resolved = useMemo(() => {
-    const out: Record<string, string> = {};
-    if (!agents || !workspaces || !repo) return out;
+  // Link entries to their agents on each entry's own host, only ever inside the entry's own
+  // worktree (the id can arrive after `worktree.create` returns; reloads and timeouts lose it).
+  const { resolved, counts } = useMemo(() => {
+    const ids: Record<string, string> = {};
+    const c = { running: 0, needs: 0, review: 0 };
+    if (!key) return { resolved: ids, counts: c };
     for (const e of entries) {
-      const a = resolveAgent(e, agents, { repo, workspaces });
-      if (a) out[e.id] = a.id;
+      const st = states[entryHost(key, e)];
+      if (!st) continue;
+      const a = resolveAgent(e, st.agents, { repo: entryRepo(key, e), workspaces: st.workspaces });
+      if (!a) continue;
+      ids[e.id] = a.id;
+      if (a.column === "running" || a.column === "needs" || (a.column === "review" && a.turns > 0)) c[a.column]++;
     }
-    return out;
-  }, [entries, agents, workspaces, repo]);
+    return { resolved: ids, counts: c };
+  }, [entries, states, key]);
   useEffect(() => {
-    if (!key || !agents) return;
+    if (!key) return;
     const { patch } = useDispatch.getState();
     for (const e of entries) {
-      const a = resolved[e.id] ? agents.find((x) => x.id === resolved[e.id]) : undefined;
+      const a = resolved[e.id] ? states[entryHost(key, e)]?.agents.find((x) => x.id === resolved[e.id]) : undefined;
       if (!a || e.phase === "failed" || isInFlight(e.id)) continue;
       // Interrupted by a reload, or unconfirmed after a timeout: the agent turned up after all.
       const recovered = e.phase === "queued" || e.phase === "creating" || e.phase === "unknown";
       if (e.agentId === a.id && e.paneId === a.paneId && e.workspaceId === a.workspaceId && !recovered) continue;
       patch(key, e.id, { agentId: a.id, paneId: a.paneId, workspaceId: a.workspaceId, ...(recovered ? { phase: "started" as const, error: undefined, startedAt: e.startedAt ?? Date.now() } : {}) });
     }
-  }, [key, entries, agents, resolved]);
+  }, [key, entries, states, resolved]);
+
+  const repoName = repo ? (auto ? autoRepo?.name : recents.find((r) => r.root === repo)?.name) ?? basename(repo) : null;
 
   const composer = useRef<DispatchComposerHandle>(null);
-  const send = (prompt: string) => {
-    if (!hostId || !repo) return;
-    dispatchTask({ hostId, repo, prompt, base: base === "HEAD" ? undefined : base, options, taken: taken.current });
+  const send = (prompt: string, images: readonly DraftImage[]): boolean => {
+    if (!target || !repo || !key) return false;
+    let to = hostId;
+    let root = repo;
+    let placed: string | undefined;
+    if (auto) {
+      if (!autoRepo || !candidates.length) {
+        toast({ title: `No host of ${auto} has ${repoName}`, description: "Pick another repository, or a single host to browse for it.", status: "error" });
+        return false;
+      }
+      // Fresh numbers: the dispatches just sent count against their host right away.
+      const ranked = rankHosts(loadsOf(candidates, states, status, useDispatch.getState().threads));
+      const pick = pickHost(ranked);
+      if (!pick) {
+        toast({ title: `No host of ${auto} with ${repoName} is online`, description: candidates.map(nameOf).join(", "), status: "error" });
+        return false;
+      }
+      to = pick.hostId;
+      root = autoRepo.roots[pick.hostId] ?? repo;
+      const others = ranked.filter((l) => l !== pick && l.available).map((l) => `${nameOf(l.hostId)}: ${describeLoad(l)}`);
+      placed = `least busy of ${candidates.length}: ${describeLoad(pick)}${others.length ? ` (${others.join("; ")})` : ""}`;
+    }
+    if (!to) return false;
+    const profile = profiles.find((p) => p.id === to);
+    if (images.length && profile?.kind !== "demo" && versionBelow(states[to]?.info.hostdVersion, IMAGES_MIN_HOSTD)) {
+      toast({ title: `${nameOf(to)} can't take images yet`, description: `Its TeleFlock host daemon (${states[to]?.info.hostdVersion}) is older than ${IMAGES_MIN_HOSTD}: update it from Hosts, or send the task without images.`, status: "error" });
+      return false;
+    }
+    dispatchTask({
+      key,
+      hostId: to,
+      repo: root,
+      prompt,
+      images,
+      base: base.param,
+      baseLabel: base.shown,
+      placed,
+      options,
+      taken: auto ? (states[to]?.agents.map((a) => a.name) ?? []) : taken.current,
+      lookupBranches: !!auto,
+    });
+    return true;
   };
 
   const retry = useCallback(
     (id: string, trust: boolean) => {
-      if (hostId && repo) void retryDispatch({ hostId, repo, id, trust, taken: taken.current, host: hostSnapshot.current });
+      if (!key) return;
+      const e = useDispatch.getState().threads[key]?.find((x) => x.id === id);
+      if (!e) return;
+      const st = statesRef.current[entryHost(key, e)];
+      const host = { agents: st?.agents ?? [], workspaces: st?.workspaces ?? [] };
+      void retryDispatch({ key, id, trust, taken: host.agents.map((a) => a.name), host });
     },
-    [hostId, repo],
+    [key],
   );
   const dismiss = useCallback((id: string) => key && useDispatch.getState().remove(key, [id]), [key]);
+  const homes = useMemo(() => Object.fromEntries(Object.entries(states).map(([h, st]) => [h, st.info.home])), [states]);
+  const online = useMemo(() => Object.fromEntries(Object.entries(status).map(([h, s]) => [h, s.phase === "online"])), [status]);
   const ctx = useMemo<ThreadContext | null>(
-    () => (hostId && repo ? { hostId, repo, home, mobile, online, retry, dismiss } : null),
-    [hostId, repo, home, mobile, online, retry, dismiss],
+    () => (key && target ? { threadKey: key, auto: !!auto, homes, online, hostName: nameOf, mobile, retry, dismiss } : null),
+    [key, target, auto, homes, online, nameOf, mobile, retry, dismiss],
   );
 
   // After a repo pick the task box gets focus (not the chip or button that picked it, where a
   // typed `n` would open the New worktree wizard).
   const focusComposer = useCallback(() => composer.current?.focus(), []);
   const focusAfterPick = useRef(false);
-  const pickRepo = (root: string) => {
-    if (!hostId) return;
+  const pickRepo = (id: string) => {
+    if (!target) return;
     focusAfterPick.current = true;
-    select(hostId, root);
+    select(target, id);
   };
   useEffect(() => {
     if (!repo || !focusAfterPick.current) return;
@@ -153,32 +287,36 @@ export function DispatchView() {
   }, [focusComposer]);
   const [browsing, setBrowsing] = useState(false);
 
-  const counts = useMemo(() => {
-    const c = { running: 0, needs: 0, review: 0 };
-    for (const id of Object.values(resolved)) {
-      const a = agents?.find((x) => x.id === id);
-      const col = a?.column;
-      if (col === "running" || col === "needs" || (col === "review" && (a?.turns ?? 0) > 0)) c[col]++;
-    }
-    return c;
-  }, [resolved, agents]);
+  const autoOnline = candidates.some((h) => online[h]);
+  const disabledReason = !target
+    ? "Add a host first"
+    : !repo
+      ? "Pick a repository first"
+      : auto
+        ? !autoRepo
+          ? `No host of ${auto} has ${repoName} now`
+          : autoOnline
+            ? null
+            : `No host of ${auto} with ${repoName} is online`
+        : hostId && !online[hostId]
+          ? `${nameOf(hostId)} is offline`
+          : null;
 
-  const disabledReason = !hostId ? "Add a host first" : !repo ? "Pick a repository first" : !online ? `${hostName} is offline` : null;
-  const repoName = repo ? (recents.find((r) => r.root === repo)?.name ?? repo.split(/[\\/]/).pop()) : null;
-
-  const pickers = hostId && (
+  const pickers = target && (
     <>
-      {hostIds.length > 1 && <HostPicker hostId={hostId} hostIds={hostIds} onChange={(id) => select(id)} className={mobile ? "max-w-[26%]" : undefined} />}
+      {(hostIds.length > 1 || groups.length > 0) && (
+        <HostPicker target={target} hostIds={hostIds} groups={groupChoices} onChange={(t) => select(t)} className={mobile ? "max-w-[30%]" : undefined} />
+      )}
       <RepoPicker
-        hostId={hostId}
+        browseHostId={hostId}
         repo={repo}
-        recents={recents}
-        home={home}
+        repos={repoChoices}
+        emptyHint={auto ? `No repositories on ${auto}'s hosts yet. Pick a single host to browse for one; once it has a worktree or dispatch there, Auto offers it.` : undefined}
         onChange={pickRepo}
         onFocusAfterPick={refocusAfterPick}
         className={mobile ? "min-w-0 flex-1" : "max-w-[min(440px,50%)]"}
       />
-      {repo && <BasePicker value={base} branches={branches.data} onChange={(b) => key && useDispatch.getState().setBase(key, b)} className={mobile ? "max-w-[32%]" : undefined} />}
+      {repo && <BasePicker value={base.shown} branches={branches.data} onChange={(b) => key && useDispatch.getState().setBase(key, b)} className={mobile ? "max-w-[32%]" : undefined} />}
     </>
   );
 
@@ -216,7 +354,7 @@ export function DispatchView() {
     </DropdownMenu>
   );
 
-  const thread = !hostId ? (
+  const thread = !target ? (
     <EmptyState
       className="flex-1"
       icon={<Server />}
@@ -227,48 +365,56 @@ export function DispatchView() {
   ) : !repo || !ctx ? (
     <EmptyState
       className="flex-1"
-      icon={<Send />}
-      title="Fire tasks at a repository"
-      description="Pick a repository. Every message you send here gets a fresh worktree with its own omp agent — send as many as you like, they run side by side."
+      icon={auto ? <Shuffle /> : <Send />}
+      title={auto ? `Fire tasks at ${auto}` : "Fire tasks at a repository"}
+      description={
+        auto
+          ? `Pick a repository. Each message goes to the least busy online host of ${auto} that has it, in a fresh worktree with its own omp agent.`
+          : "Pick a repository. Every message you send here gets a fresh worktree with its own omp agent — send as many as you like, they run side by side."
+      }
       action={
         <div className="flex max-w-md flex-wrap justify-center gap-2">
-          {recents.slice(0, 4).map((r) => (
-            <Button key={r.root} size="sm" icon={<FolderGit2 />} onClick={() => pickRepo(r.root)}>
+          {repoChoices.slice(0, 4).map((r) => (
+            <Button key={r.id} size="sm" icon={<FolderGit2 />} onClick={() => pickRepo(r.id)}>
               {r.name}
             </Button>
           ))}
-          <Button size="sm" variant={recents.length > 0 ? "ghost" : "primary"} icon={<FolderSearch />} onClick={() => setBrowsing(true)}>
-            {recents.length > 0 ? "Browse…" : "Browse for a repository…"}
-          </Button>
-          <RepoBrowser hostId={hostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={pickRepo} onFocusAfterPick={refocusAfterPick} />
+          {hostId && (
+            <>
+              <Button size="sm" variant={repoChoices.length > 0 ? "ghost" : "primary"} icon={<FolderSearch />} onClick={() => setBrowsing(true)}>
+                {repoChoices.length > 0 ? "Browse…" : "Browse for a repository…"}
+              </Button>
+              <RepoBrowser hostId={hostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={pickRepo} onFocusAfterPick={refocusAfterPick} />
+            </>
+          )}
         </div>
       }
     />
   ) : (
-    <Thread key={key} entries={entries} resolved={resolved} ctx={ctx} base={base} repoName={repoName ?? ""} mobile={mobile} />
+    <Thread key={key} entries={entries} resolved={resolved} ctx={ctx} base={base.shown} repoName={repoName ?? ""} mobile={mobile} />
   );
 
   const composerEl = (
     <DispatchComposer
       ref={composer}
-      hostId={hostId}
-      repo={repo}
-      draftKey={draftKey("dispatch.task", hostId ?? "", repo ?? "")}
+      hostId={workHost}
+      repo={workRepo}
+      draftKey={draftKey("dispatch.task", target ?? "", repo ?? "")}
       options={options}
       onOptionsChange={useDispatch.getState().setOptions}
       onSend={send}
       disabledReason={disabledReason}
-      placeholder={repo ? `Describe a task for ${repoName}…` : "Pick a repository to dispatch to"}
+      placeholder={repo ? `Describe a task for ${repoName}… (paste or drop images)` : "Pick a repository to dispatch to"}
       mobile={mobile}
     />
   );
 
   // The other launchers, for when Dispatch's one-message flow isn't what's needed.
   const link = "font-bold text-accent-hi rounded-[3px] hover:underline focus-ring";
-  const alternatives = hostId && (
+  const alternatives = workHost && (
     <p className={cn("truncate px-2 text-[11px] font-semibold text-mute-2", mobile ? "mt-1" : "mt-1.5")}>
       Need a specific branch or model?{" "}
-      <button type="button" className={link} title={ACTIONS.newWorktree.description} onClick={() => useUi.getState().openDialog({ kind: "newWorktree", hostId, cwd: repo ?? undefined })}>
+      <button type="button" className={link} title={ACTIONS.newWorktree.description} onClick={() => useUi.getState().openDialog({ kind: "newWorktree", hostId: workHost, cwd: workRepo ?? undefined })}>
         {ACTIONS.newWorktree.label}
       </button>
       {" · "}Several attempts?{" "}
@@ -276,12 +422,27 @@ export function DispatchView() {
         type="button"
         className={link}
         title={ACTIONS.fanOut.description}
-        onClick={() => useUi.getState().openDialog({ kind: "fanOut", hostId, cwd: repo ?? undefined, prompt: composer.current?.text().trim() || undefined })}
+        onClick={() => useUi.getState().openDialog({ kind: "fanOut", hostId: workHost, cwd: workRepo ?? undefined, prompt: composer.current?.text().trim() || undefined })}
       >
         {ACTIONS.fanOut.label}
       </button>
     </p>
   );
+
+  const hint =
+    repo &&
+    (auto ? (
+      <>
+        Each message → the least busy of <span className="font-semibold text-mute">{candidates.map(nameOf).join(", ") || "no host"}</span>
+        {preview && <> (next: {nameOf(preview.hostId)})</>} · from <span className="font-mono">{base.shown}</span> + an omp agent
+      </>
+    ) : (
+      home && (
+        <>
+          Each message → a worktree of <span className="font-mono">{tildify(repo, home)}</span> from <span className="font-mono">{base.shown}</span> + an omp agent
+        </>
+      )
+    ));
 
   if (mobile) {
     return (
@@ -340,11 +501,7 @@ export function DispatchView() {
       </header>
       <div className="flex min-h-0 w-full max-w-[920px] flex-1 flex-col overflow-hidden rounded-tile glass">{thread}</div>
       <div className="w-full max-w-[920px] shrink-0">
-        {repo && home && (
-          <p className="mb-1.5 truncate px-2 text-[11px] font-semibold text-mute-2 [@media(max-height:700px)]:hidden">
-            Each message → a worktree of <span className="font-mono">{tildify(repo, home)}</span> from <span className="font-mono">{base}</span> + an omp agent
-          </p>
-        )}
+        {hint && <p className="mb-1.5 truncate px-2 text-[11px] font-semibold text-mute-2 [@media(max-height:700px)]:hidden">{hint}</p>}
         {composerEl}
         {alternatives}
       </div>
@@ -417,9 +574,9 @@ function Thread({
       {count === 0 ? (
         <EmptyState
           className="h-full"
-          icon={<Send />}
+          icon={ctx.auto ? <Shuffle /> : <Send />}
           title={`Nothing dispatched to ${repoName} yet`}
-          description={`Each message becomes a dispatch/<slug> branch from ${base}, in its own worktree, with an omp agent working on it.`}
+          description={`Each message becomes a dispatch/<slug> branch from ${base}, in its own worktree, with an omp agent working on it.${ctx.auto ? " Auto sends each one to the least busy host that has the repository." : ""}`}
         />
       ) : (
         <ThreadCtx.Provider value={ctx}>

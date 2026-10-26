@@ -57,14 +57,18 @@ function titleOf(text: string, max = 6): string {
   return sentenceCase(words.join(" "));
 }
 
+/** The user's text a naming prompt wraps in `<tag>…</tag>` (`@/core/ai`'s `delimit`); the whole prompt when unwrapped. */
+function inner(prompt: string, tag: string): string {
+  return prompt.match(new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`))?.[1] ?? prompt;
+}
+
 function branch(prompt: string): string {
-  const w = salient(prompt).slice(0, 3);
+  const w = salient(inner(prompt, "task")).slice(0, 3);
   return w.length >= 2 ? w.join("-") : ["update", ...w, "task"].slice(0, 3).join("-");
 }
 
 function agentName(prompt: string): string {
-  const task = prompt.split("\n\nNames already taken:")[0] ?? prompt;
-  const words = salient(task);
+  const words = salient(inner(prompt, "task"));
   const nouns = words.filter((w) => !VERBS[w]);
   return (nouns.length ? nouns : words).slice(0, 2).join("-") || "helper";
 }
@@ -99,7 +103,7 @@ function templateName(prompt: string): string {
   const model = (line(prompt, "Model") ?? "").split("/").pop()?.split(":")[0] ?? "";
   const thinking = (line(prompt, "Thinking") ?? "").toLowerCase();
   const plan = line(prompt, "Plan mode") === "on";
-  const task = (line(prompt, "Prompt") ?? "").toLowerCase();
+  const task = (prompt.includes("<prompt>") ? inner(prompt, "prompt") : "").toLowerCase();
   const gpt = model.match(/gpt-[\d.]+/)?.[0];
   const family = gpt ? gpt.toUpperCase() : ["opus", "sonnet", "haiku", "luna", "gemini"].find((f) => model.includes(f));
   const who = family ? (gpt ? family : sentenceCase(family)) : "";
@@ -116,6 +120,6 @@ export function demoAiComplete(task: string, prompt: string): Omit<AiCompleteRes
     : task === "commit" ? commit(prompt)
     : task === "pr" ? pr(prompt)
     : task === "templateName" ? templateName(prompt)
-    : titleOf(prompt);
+    : titleOf(inner(prompt, "text"));
   return { text, model: MODEL };
 }

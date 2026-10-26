@@ -1,7 +1,21 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { aiTesting, suggestBranch } from "@/core/ai";
 import type { Agent, Workspace } from "@/core/gen";
+import { usePrefs } from "@/core/prefs";
 import type { DispatchEntry } from "./store";
-import { baseSlug, cleanSuggestion, nameDispatch, prefetchKey, recentRepos, resolveAgent, slimThreads, uniqueSlug } from "./thread";
+import { baseSlug, cleanSuggestion, nameDispatch, prefetchKey, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
+
+/** The 0.4.1 task Dispatch named `need-inspect-repository`, as typed (one line, inline points)… */
+const FAILING_INLINE =
+  "Fix the following points and release 0.5.0 when you are done. Feedback from my Linux user : - cant see currently running shells without opening a new one - can paste images in dispatch - laggy on monitors with different scaling - marking an agent done should close its pane - new worktrees should start from origin/main - dispatch named my task need-inspect-repository - want to group hosts - omp and herdr updates should be automatic - edit omp settings from the app - scheduled automations - deleted sessions keep showing up - the terminal scrolls back to top";
+/** …and as a list. */
+const FAILING_LIST = FAILING_INLINE.replace(" Feedback from my Linux user : - ", "\nFeedback from my Linux user :\n- ").replaceAll(" - ", "\n- ");
+
+afterEach(() => {
+  aiTesting.setComplete(null);
+  aiTesting.reset();
+  usePrefs.setState({ aiNaming: true });
+});
 
 const agent = (p: Partial<Agent>): Agent => ({
   id: "a",
@@ -37,6 +51,57 @@ describe("dispatch naming", () => {
     expect(baseSlug("Add offline caching to the client")).toBe("offline-caching-client");
     expect(baseSlug("2fa for the login")).toBe("t-2fa-login");
     expect(baseSlug("!!!")).toBe("task");
+  });
+
+  test("long multi-point tasks are named after their goal, not the noise", () => {
+    expect(baseSlug(FAILING_INLINE)).toBe("release-0-5-0-fixes");
+    expect(baseSlug(FAILING_LIST)).toBe("release-0-5-0-fixes");
+    expect(baseSlug("Fix the following:\n- login crash on resume\n- slow sync")).toBe("login-crash-fixes");
+    expect(baseSlug("Please address these issues:\n- flaky reconnect\n- stale badge")).toBe("flaky-reconnect-fixes");
+    expect(baseSlug("Implement the following features:\n- dark mode\n- export")).toBe("dark-mode-features");
+    expect(baseSlug("Could you add dark mode to settings when you're done, thanks")).toBe("dark-mode-settings");
+    expect(baseSlug("Bump to 1.2.3 and tag it")).toBe("bump-1-2-3-tag");
+  });
+
+  test("the failing task never becomes need-inspect-repository", async () => {
+    for (const reply of ["I need to inspect the repository", "I need to inspect the repository first.", "i-need-inspect-repository", "need-inspect-repository"]) {
+      aiTesting.reset();
+      aiTesting.setComplete(async () => ({ text: reply, ms: 5 }));
+      for (const task of [FAILING_INLINE, FAILING_LIST]) {
+        const named = await nameDispatch(task, (p) => suggestBranch("h", p));
+        expect(named).toEqual({ slug: "release-0-5-0-fixes", ai: false });
+      }
+    }
+    aiTesting.reset();
+    aiTesting.setComplete(async () => ({ text: "linux-feedback-release", ms: 5 }));
+    expect(await nameDispatch(FAILING_LIST, (p) => suggestBranch("h", p))).toEqual({ slug: "linux-feedback-release", ai: true });
+  });
+
+  describe("base", () => {
+    const list = (p: { defaultBase?: string; defaultBranch?: string; names?: string[] } = {}) => ({
+      branches: (p.names ?? ["main", "origin/main", "dev"]).map((name) => ({ name, current: false, remote: name.startsWith("origin/") })),
+      defaultBranch: p.defaultBranch ?? "main",
+      ...(p.defaultBase ? { defaultBase: p.defaultBase } : {}),
+    });
+    test("untouched → origin/<default> shown, nothing sent (the host fetches and forks from it)", () => {
+      expect(threadBase(list({ defaultBase: "origin/main" }), undefined, false)).toEqual({ shown: "origin/main", untouched: true });
+    });
+    test("a pre-0.5 remembered local default branch counts as untouched", () => {
+      expect(threadBase(list({ defaultBase: "origin/main" }), "main", true)).toEqual({ shown: "origin/main", untouched: true });
+      // Picked on purpose since 0.5: the local branch is sent.
+      expect(threadBase(list({ defaultBase: "origin/main" }), "main", false)).toEqual({ shown: "main", param: "main", untouched: false });
+    });
+    test("a picked branch or HEAD is sent; one the repo lost falls back to the default", () => {
+      expect(threadBase(list({ defaultBase: "origin/main" }), "dev", false)).toEqual({ shown: "dev", param: "dev", untouched: false });
+      expect(threadBase(list({ defaultBase: "origin/main" }), "HEAD", false)).toEqual({ shown: "HEAD", param: "HEAD", untouched: false });
+      expect(threadBase(list({ defaultBase: "origin/main" }), "gone", false)).toEqual({ shown: "origin/main", untouched: true });
+    });
+    test("older hosts (no defaultBase) get their default branch spelled out (absent meant HEAD there)", () => {
+      expect(threadBase(list(), undefined, false)).toEqual({ shown: "main", param: "main", untouched: true });
+    });
+    test("before the branch list arrives", () => {
+      expect(threadBase(undefined, undefined, false)).toEqual({ shown: "default branch", untouched: true });
+    });
   });
 
   test("dedupes against agent names and dispatch branches", () => {

@@ -343,7 +343,7 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
                     s.expect_originals(&p.text, kept);
                 }
             }
-            let images = images.into_iter().map(|i| tf_collab::ImageContent { kind: "image".into(), data: i.data, mime_type: i.mime }).collect();
+            let images = image_contents(images);
             s.guest.prompt(p.text.clone(), images).map_err(guest_err)?;
             // omp queues a guest prompt sent mid-turn as a steer; its TUI band (what the bridge
             // reads) doesn't show it, so list it ourselves until it lands.
@@ -1142,13 +1142,14 @@ pub async fn start_agent(ctx: &Ctx, target: StartTarget, spec: &AgentSpec, resum
     ctx.state.refresh();
     ctx.omp.repoll();
 
-    if kind == "omp" && (spec.plan || spec.prompt.as_deref().is_some_and(|p| !p.trim().is_empty())) {
+    if kind == "omp" && needs_after_launch(spec) {
         let ctx = ctx.arc();
         let agent_id = agent_id.clone();
         let plan = spec.plan;
         let prompt = spec.prompt.clone();
+        let images = spec.images.clone();
         tokio::spawn(async move {
-            if let Err(e) = after_launch(&ctx, &agent_id, plan, prompt).await {
+            if let Err(e) = after_launch(&ctx, &agent_id, plan, prompt, images).await {
                 warn!(agent = %agent_id, "post-launch setup failed: {e}");
                 ctx.state.record_activity(&agent_id, ActivityKind::Error, "Initial setup failed".into(), Some(e.to_string()));
             }
@@ -1158,8 +1159,20 @@ pub async fn start_agent(ctx: &Ctx, target: StartTarget, spec: &AgentSpec, resum
     Ok(Started { agent_id: Some(agent_id), pane_id, workspace_id })
 }
 
-/// Waits for idle + `link=live`, then applies plan mode and submits the initial prompt.
-async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option<String>) -> Result<(), ApiError> {
+/// Plan mode, a prompt or images to hand over once the agent is up.
+fn needs_after_launch(spec: &AgentSpec) -> bool {
+    spec.plan || spec.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) || !spec.images.is_empty()
+}
+
+/// Prompt images as collab image content (`agent.prompt` and the first prompt of a launch).
+fn image_contents(images: Vec<ImageInput>) -> Vec<tf_collab::ImageContent> {
+    images.into_iter().map(|i| tf_collab::ImageContent { kind: "image".into(), data: i.data, mime_type: i.mime }).collect()
+}
+
+/// Waits for idle + `link=live`, then applies plan mode and submits the initial prompt with its
+/// images. Without a live link the text still goes in through herdr, but images cannot (herdr
+/// only types text): that is reported as a failure instead of dropping them silently.
+async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option<String>, images: Vec<ImageInput>) -> Result<(), ApiError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     let mut live = false;
     while tokio::time::Instant::now() < deadline {
@@ -1185,16 +1198,34 @@ async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option
         }
         set_plan(ctx, ToggleParams { agent_id: agent_id.to_string(), on: true }).await?;
     }
-    if let Some(text) = prompt.filter(|t| !t.trim().is_empty()) {
-        if live {
-            guest(ctx, agent_id)?.guest.prompt(text, vec![]).map_err(guest_err)?;
-        } else {
-            let a = agent(ctx, agent_id)?;
-            warn!(agent = %agent_id, "link not live after launch; submitting the prompt through herdr");
-            ctx.herdr.agent_prompt(&a.pane_id, &text, None).await.map_err(herdr_err)?;
-        }
+    let text = prompt.filter(|t| !t.trim().is_empty());
+    if text.is_none() && images.is_empty() {
+        return Ok(());
     }
+    if live {
+        guest(ctx, agent_id)?.guest.prompt(text.unwrap_or_default(), image_contents(images)).map_err(guest_err)?;
+        return Ok(());
+    }
+    if let Some(text) = &text {
+        let a = agent(ctx, agent_id)?;
+        warn!(agent = %agent_id, "link not live after launch; submitting the prompt through herdr");
+        ctx.herdr.agent_prompt(&a.pane_id, text, None).await.map_err(herdr_err)?;
+    }
+    if images.is_empty() {
+        return Ok(());
+    }
+    warn!(agent = %agent_id, count = images.len(), "link not live after launch; images not delivered");
+    let (title, detail) = undelivered_images(images.len(), text.is_some());
+    ctx.state.record_activity(agent_id, ActivityKind::Error, title, Some(detail));
     Ok(())
+}
+
+/// Activity `(title, detail)` for first-prompt images that could not be handed over (omp's
+/// collab link never came up; herdr can only type text).
+fn undelivered_images(count: usize, text_sent: bool) -> (String, String) {
+    let title = if count == 1 { "Image not delivered".to_string() } else { format!("{count} images not delivered") };
+    let sent = if text_sent { " The task text was sent without them." } else { "" };
+    (title, format!("The agent's collab link never came up, so the first prompt's images could not be attached.{sent} Attach them again from the session once the agent is live."))
 }
 
 /// Resolves a start target to an idle shell pane: `(pane, workspace, cwd)`.
@@ -1270,5 +1301,49 @@ mod tests {
         assert!(check_model("openai-codex/gpt-6-luna").is_ok());
         assert!(check_model("gpt").is_err());
         assert!(check_model("a/ b").is_err());
+    }
+
+    fn spec(prompt: Option<&str>, images: usize, plan: bool) -> AgentSpec {
+        AgentSpec {
+            name: None,
+            kind: "omp".into(),
+            model: None,
+            thinking: None,
+            plan,
+            prompt: prompt.map(str::to_string),
+            images: (0..images).map(|i| ImageInput { mime: "image/png".into(), data: format!("AAA{i}") }).collect(),
+        }
+    }
+
+    #[test]
+    fn first_prompt_trigger() {
+        assert!(!needs_after_launch(&spec(None, 0, false)));
+        assert!(!needs_after_launch(&spec(Some("  "), 0, false)));
+        assert!(needs_after_launch(&spec(Some("fix it"), 0, false)));
+        assert!(needs_after_launch(&spec(None, 0, true)));
+        // Image-only first prompts are delivered too.
+        assert!(needs_after_launch(&spec(None, 1, false)));
+        assert!(needs_after_launch(&spec(Some(""), 2, false)));
+    }
+
+    #[test]
+    fn images_become_collab_image_content() {
+        let out = image_contents(spec(None, 2, false).images);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, "image");
+        assert_eq!(out[0].mime_type, "image/png");
+        assert_eq!(out[1].data, "AAA1");
+        let wire = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "type": "image", "data": "AAA0", "mimeType": "image/png" }));
+    }
+
+    #[test]
+    fn undelivered_images_are_explained() {
+        let (title, detail) = undelivered_images(1, true);
+        assert_eq!(title, "Image not delivered");
+        assert!(detail.contains("text was sent without them"));
+        let (title, detail) = undelivered_images(3, false);
+        assert_eq!(title, "3 images not delivered");
+        assert!(!detail.contains("text was sent"));
     }
 }

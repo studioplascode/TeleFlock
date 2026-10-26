@@ -435,6 +435,9 @@ fn stale_request() -> ApiError {
     ApiError::new("stale", "this request was already handled").with_hint("Open the agent to see what it needs now")
 }
 
+/// Longest host group label (characters).
+const MAX_GROUP_LEN: usize = 40;
+
 fn validate_profile(mut p: HostProfile, platform: &str) -> Result<HostProfile, ApiError> {
     p.id = p.id.trim().to_string();
     if p.id.is_empty() {
@@ -458,6 +461,8 @@ fn validate_profile(mut p: HostProfile, platform: &str) -> Result<HostProfile, A
     p.user = trim(p.user);
     p.distro = trim(p.distro);
     p.color = trim(p.color);
+    // Host group (Dispatch Auto pool): inner whitespace collapsed, capped at a label's length.
+    p.group = trim(p.group).map(|g| g.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_GROUP_LEN).collect::<String>().trim_end().to_string());
     if p.port == Some(0) {
         return Err(invalid("port must be 1-65535"));
     }
@@ -1156,6 +1161,15 @@ mod tests {
         let mut bad = profile(HostKind::Local);
         bad.herdr_session = "a b".into();
         assert!(validate_profile(bad, "linux").is_err());
+        let mut g = profile(HostKind::Local);
+        g.group = Some("  build   farm ".into());
+        assert_eq!(validate_profile(g, "linux").unwrap().group.as_deref(), Some("build farm"));
+        let mut g = profile(HostKind::Local);
+        g.group = Some("   ".into());
+        assert_eq!(validate_profile(g, "linux").unwrap().group, None);
+        let mut g = profile(HostKind::Local);
+        g.group = Some("x".repeat(100));
+        assert_eq!(validate_profile(g, "linux").unwrap().group.map(|s| s.chars().count()), Some(MAX_GROUP_LEN));
     }
 
     #[tokio::test]

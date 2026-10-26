@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import type { DispatchEntry } from "./store";
 
 // The store persists to localStorage, which bun doesn't provide: an in-memory stand-in.
 const mem: Record<string, string> = {};
@@ -44,5 +45,56 @@ describe("dispatch naming phase", () => {
       ["fix-flaky-login-test", "dispatch/fix-flaky-login-test", true],
       ["fix-flaky-login-test-2", "dispatch/fix-flaky-login-test-2", true],
     ]);
+  });
+});
+
+describe("hosts, images and workload", () => {
+  const options = { templateId: null, model: "default", thinking: "default" as const, plan: false };
+  const img = { mime: "image/png", data: "iVBORw0KGgo=", preview: "data:image/png;base64,iVBORw0KGgo=" };
+
+  test("an image-only task is named after its images and keeps them with the entry", async () => {
+    const { dispatchTask, threadKey, useDispatch } = await import("./store");
+    const { loadEntryImages } = await import("./images");
+    const e = dispatchTask({ hostId: "h2", repo: "/r/app", prompt: "", images: [img], options, taken: [], suggest: null });
+    expect(e).toMatchObject({ name: "image-task", branch: "dispatch/image-task", images: 1, hostId: "h2", repo: "/r/app" });
+    expect(await loadEntryImages(e.id)).toEqual([{ mime: "image/png", data: "iVBORw0KGgo=" }]);
+    // Dismissed → its images go too.
+    useDispatch.getState().remove(threadKey("h2", "/r/app"), [e.id]);
+    expect(await loadEntryImages(e.id)).toBeNull();
+  });
+
+  test("Auto entries live in the group thread but belong to (and reserve names on) their host", async () => {
+    const { dispatchTask, entryHost, entryRepo, threadKey, useDispatch } = await import("./store");
+    const key = threadKey("auto:farm", "github.com/acme/app");
+    const a = dispatchTask({ key, hostId: "h3", repo: "/home/a/app", prompt: "fix the login page", options, taken: [], suggest: null });
+    expect(useDispatch.getState().threads[key]?.map((x) => x.id)).toEqual([a.id]);
+    expect(entryHost(key, a)).toBe("h3");
+    expect(entryRepo(key, a)).toBe("/home/a/app");
+    // Same host, another (single-host) thread: the Auto entry's name is taken there.
+    const b = dispatchTask({ hostId: "h3", repo: "/home/a/app", prompt: "fix the login page", options, taken: [], suggest: null });
+    expect(b.name).toBe(`${a.name}-2`);
+    // Another host of the group: free.
+    const c = dispatchTask({ key, hostId: "h4", repo: "/srv/app", prompt: "fix the login page", options, taken: [], suggest: null });
+    expect(c.name).toBe(a.name);
+    // Entries from before 0.5 (no hostId / repo) belong to the thread's host and repo.
+    expect(entryHost(threadKey("old", "/x"), { hostId: undefined })).toBe("old");
+    expect(entryRepo(threadKey("old", "/x"), { repo: undefined })).toBe("/x");
+  });
+
+  test("dispatches on their way count per host", async () => {
+    const { pendingByHost } = await import("./store");
+    const entry = (p: Pick<DispatchEntry, "phase"> & Partial<DispatchEntry>): DispatchEntry => ({ id: Math.random().toString(36), prompt: "x", createdAt: 1_000, branch: "dispatch/x", name: "x", options, ...p });
+    const threads: Record<string, DispatchEntry[]> = {
+      "auto:farm\u0000repo": [
+        entry({ phase: "naming", hostId: "a" }),
+        entry({ phase: "started", startedAt: 50_000, hostId: "a", agentId: "ag1" }),
+        entry({ phase: "started", startedAt: 50_000, hostId: "b", agentId: "ag2" }),
+        entry({ phase: "started", startedAt: 1_000, hostId: "b" }),
+        entry({ phase: "failed", hostId: "b" }),
+      ],
+      "c\u0000/r": [entry({ phase: "naming" })],
+    };
+    // ag2 is already running (counted as an agent), the old start is past the window.
+    expect(pendingByHost(threads, new Set(["ag2"]), 70_000)).toEqual({ a: 2, c: 1 });
   });
 });

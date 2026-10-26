@@ -1,4 +1,4 @@
-import type { Agent, HostState, Workspace } from "@/core/gen";
+import type { Agent, BranchList, HostState, Workspace } from "@/core/gen";
 import { basename } from "@/features/workspace/shared/paths";
 import { slugFromPrompt, slugify } from "@/features/workspace/shared/slug";
 import type { DispatchEntry } from "./store";
@@ -97,11 +97,29 @@ export const APPEAR_GRACE_MS = 20_000;
 /** After this long without a first turn, a fresh agent is shown as is ("Ready") rather than "Starting". */
 export const START_TIMEOUT_MS = 90_000;
 
+/**
+ * The base a thread shows and sends. Untouched (nothing remembered, the default picked, or a
+ * pre-0.5 remembered local default branch) → the host's default base: `param` absent, so a 0.5
+ * host forks from `origin/<default>` after fetching; an older host (no `defaultBase`) gets its
+ * default branch spelled out (absent meant HEAD there). A remembered branch the repo no longer
+ * has falls back to the default too.
+ */
+export function threadBase(list: BranchList | undefined, stored: string | undefined, legacy: boolean): { shown: string; param?: string; untouched: boolean } {
+  const def = list?.defaultBase ?? list?.defaultBranch;
+  const known = !list || stored === "HEAD" || list.branches.some((b) => b.name === stored);
+  const untouched = !stored || stored === def || (legacy && stored === list?.defaultBranch) || !known;
+  if (!untouched && stored) return { shown: stored, param: stored, untouched };
+  const param = list && !list.defaultBase ? list.defaultBranch : undefined;
+  return { shown: def ?? "default branch", ...(param ? { param } : {}), untouched };
+}
+
 export interface RecentRepo {
   root: string;
   name: string;
   /** Last activity (agent start / state change, or last dispatch); 0 = unknown. */
   at: number;
+  /** `origin` URL, when a workspace of the repo reported it (Auto mode matches clones across hosts by it). */
+  remoteUrl?: string;
 }
 
 /**
@@ -110,16 +128,19 @@ export interface RecentRepo {
  */
 export function recentRepos(state: Pick<HostState, "workspaces" | "agents"> | undefined, dispatched: Readonly<Record<string, number>>): RecentRepo[] {
   const byRoot = new Map<string, RecentRepo>();
-  const touch = (root: string, name: string, at: number) => {
+  const touch = (root: string, name: string, at: number, remoteUrl?: string) => {
     const cur = byRoot.get(root);
-    if (!cur) byRoot.set(root, { root, name, at });
-    else if (at > cur.at) cur.at = at;
+    if (!cur) byRoot.set(root, remoteUrl ? { root, name, at, remoteUrl } : { root, name, at });
+    else {
+      if (at > cur.at) cur.at = at;
+      if (remoteUrl && !cur.remoteUrl) cur.remoteUrl = remoteUrl;
+    }
   };
   const wsRoot = new Map<string, string>();
   for (const ws of state?.workspaces ?? []) {
     if (!ws.repo) continue;
     wsRoot.set(ws.id, ws.repo.root);
-    touch(ws.repo.root, ws.repo.name, 0);
+    touch(ws.repo.root, ws.repo.name, 0, ws.repo.remoteUrl);
   }
   for (const a of state?.agents ?? []) {
     const root = wsRoot.get(a.workspaceId);

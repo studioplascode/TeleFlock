@@ -2,6 +2,7 @@ import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, 
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
+import { dragHasFiles, imageFiles } from "@/core/clipboardImages";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import { openTerminal } from "@/features/board/agentActions";
 import type { OmpSubcommand } from "@/core/ompCommands";
@@ -373,8 +374,9 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   };
 
   const onPaste = (e: ClipboardEvent) => {
-    const files = [...e.clipboardData.files];
-    if (files.some((f) => f.type.startsWith("image/"))) {
+    // `items` too: WebKitGTK (Linux) lists pasted screenshots only there.
+    const files = imageFiles(e.clipboardData);
+    if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
     }
@@ -382,10 +384,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onDrop = (e: DragEvent) => {
     setDragging(false);
-    if (e.dataTransfer.files.length > 0) {
-      e.preventDefault();
-      void addFiles(e.dataTransfer.files);
-    }
+    // Any file: never let the webview navigate to it; images are attached.
+    if (dragHasFiles(e.dataTransfer) || e.dataTransfer.files.length > 0) e.preventDefault();
+    const files = imageFiles(e.dataTransfer);
+    if (files.length > 0) void addFiles(files);
   };
 
   const hasContent = text.trim() !== "" || images.length > 0;
@@ -432,7 +434,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     <div
       className={cn("relative", className)}
       onDragOver={(e) => {
-        if ([...e.dataTransfer.items].some((i) => i.kind === "file")) {
+        if (dragHasFiles(e.dataTransfer)) {
           e.preventDefault();
           setDragging(true);
         }

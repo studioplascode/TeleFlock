@@ -1,6 +1,7 @@
 import type { AppEvent, DiagReport, HostProfile, HostStatusEntry, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
 import { type DemoClock, realClock } from "./clock";
+import { DEMO_GROUP } from "./dispatchAuto";
 import { DemoHost, type HostVariant } from "./host";
 import { NotifySync } from "./notifySync";
 
@@ -66,8 +67,8 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 export const DEMO_PROFILES: HostProfile[] = [
-  { id: "forge", name: "forge", kind: "demo", herdrSession: "default", color: "#a99cc2", autoConnect: true },
-  { id: "studio-pc", name: "studio-pc", kind: "demo", herdrSession: "default", color: "#86b3aa", autoConnect: true },
+  { id: "forge", name: "forge", kind: "demo", herdrSession: "default", color: "#a99cc2", autoConnect: true, group: DEMO_GROUP },
+  { id: "studio-pc", name: "studio-pc", kind: "demo", herdrSession: "default", color: "#86b3aa", autoConnect: true, group: DEMO_GROUP },
 ];
 
 /**

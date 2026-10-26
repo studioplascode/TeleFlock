@@ -73,6 +73,25 @@ export function newHostId(name: string): string {
   return `${slug || "host"}-${rand}`;
 }
 
+/** Longest host group label; mirrors `MAX_GROUP_LEN` in crates/tf-client/src/engine.rs. */
+export const MAX_GROUP_LEN = 40;
+
+/** A host group label as saved: whitespace collapsed, ≤ 40 chars; blank → undefined (no group). */
+export function normalizeGroup(group: string | null | undefined): string | undefined {
+  const g = (group ?? "").trim().split(/\s+/).join(" ").slice(0, MAX_GROUP_LEN).trimEnd();
+  return g || undefined;
+}
+
+/** Distinct group labels of the profiles (first spelling wins, case-insensitive), sorted. */
+export function hostGroups(profiles: readonly Pick<HostProfile, "group">[]): string[] {
+  const seen = new Map<string, string>();
+  for (const p of profiles) {
+    const g = normalizeGroup(p.group);
+    if (g && !seen.has(g.toLowerCase())) seen.set(g.toLowerCase(), g);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
+
 /** Where herdr and omp come from (linked from onboarding, the editor and diagnostics). */
 export const HERDR_URL = "https://herdr.dev";
 export const OMP_URL = "https://github.com/can1357/oh-my-pi";

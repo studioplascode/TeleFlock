@@ -24,7 +24,7 @@ import { useAppInfo } from "./appInfo";
 import { connectAndFollow } from "./ConnStatusCard";
 import { CopyCommand, ExtLink } from "./CopyCommand";
 import { Diagnostics } from "./Diagnostics";
-import { availableKinds, defaultHostName, HERDR_URL, HOST_COLORS, hostAccent, KIND_META, newHostId, OMP_MIN_VERSION, OMP_URL, TAILSCALE_SSH_COMMAND } from "./kinds";
+import { availableKinds, defaultHostName, HERDR_URL, HOST_COLORS, hostAccent, hostGroups, KIND_META, MAX_GROUP_LEN, newHostId, normalizeGroup, OMP_MIN_VERSION, OMP_URL, TAILSCALE_SSH_COMMAND } from "./kinds";
 import { requestSetup } from "./setupFocus";
 
 function blankProfile(kind: HostKind): HostProfile {
@@ -59,6 +59,9 @@ function normalize(p: HostProfile): HostProfile {
     else out.user = p.user.trim();
   }
   if (p.kind !== "wsl") delete out.distro;
+  const group = normalizeGroup(p.group);
+  if (group) out.group = group;
+  else delete out.group;
   if (!out.id) out.id = newHostId(out.name);
   return out;
 }
@@ -269,6 +272,8 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
         </Field>
       </div>
 
+      <GroupField value={p.group ?? ""} onChange={(group) => set({ group })} />
+
       <AnimatePresence initial={false} mode="popLayout">
         {p.kind === "tailscaleSsh" && (
           <motion.div key="ts" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="overflow-hidden">
@@ -354,6 +359,40 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
         </Button>
       </div>
     </form>
+  );
+}
+
+/** Host group: free text, existing groups offered as chips. Hosts in one group form a Dispatch Auto pool. */
+function GroupField({ value, onChange }: { value: string; onChange(v: string): void }) {
+  const profiles = useHosts((s) => s.profiles);
+  const groups = hostGroups(profiles);
+  const current = normalizeGroup(value)?.toLowerCase();
+  return (
+    <Field label="Group" hint="optional" description="Hosts in the same group share work: Dispatch's Auto mode sends each task to the least busy one.">
+      {(id) => (
+        <div className="flex flex-col gap-2">
+          <Input id={id} value={value} onChange={(e) => onChange(e.target.value)} placeholder="e.g. build farm" maxLength={MAX_GROUP_LEN + 8} autoCapitalize="off" spellCheck={false} />
+          {groups.length > 0 && (
+            <div className="flex flex-wrap gap-1.5" aria-label="Existing groups">
+              {groups.map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  aria-pressed={g.toLowerCase() === current}
+                  onClick={() => onChange(g.toLowerCase() === current ? "" : g)}
+                  className={cn(
+                    "h-6 rounded-full px-2.5 text-2xs font-bold pressable focus-ring",
+                    g.toLowerCase() === current ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.05] text-mute hover:text-ink",
+                  )}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Field>
   );
 }
 

@@ -44,6 +44,7 @@ import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
 import { demoLimits } from "./limits";
 import { DemoOmpSettings } from "./ompSettings";
+import { demoFirstPrompt } from "./dispatchAuto";
 import {
   AGENTS,
   type AgentDef,
@@ -1454,7 +1455,7 @@ export class DemoHost implements SimHost {
     if (requested && [...this.sims.values()].some((s) => s.agent.name === requested)) throw apiError("herdr_error", `agent name '${requested}' is already taken`);
     const name = requested ?? this.uniqueName(fallbackName);
     const model = typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
-    const prompt = typeof spec.prompt === "string" && spec.prompt.trim() ? spec.prompt.trim() : undefined;
+    const prompt = demoFirstPrompt(spec);
     // A just-started session: zero turns until its first prompt runs (the UI shows "Ready" / "Starting").
     const def: AgentDef = { id: name, kind, workspace: wsId, title: prompt?.slice(0, 80) ?? name, column: "review", model: model ?? "opus-5", thinking: (spec.thinking as AgentDef["thinking"]) ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [], fresh: true };
     const sim = this.addAgent(def, wsId, pane);
