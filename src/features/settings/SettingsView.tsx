@@ -263,7 +263,7 @@ export function SettingsView() {
 
         <MutedAgents index={2} />
 
-        <Section index={2} icon={<Bot />} title="New agents" description="Defaults for agents you start from TeleFlock.">
+        <Section index={2} icon={<Bot />} title="New agents" description="Defaults for agents you start from TeleFlock, and what Mark done does to them.">
           <Row label="Model" htmlFor="tf-default-model" wide>
             <Select
               id="tf-default-model"
@@ -284,6 +284,9 @@ export function SettingsView() {
           </Row>
           <Row label="Start in plan mode" description="The agent proposes a plan before touching files.">
             <Switch checked={settings.defaultPlan} onCheckedChange={(defaultPlan) => update({ defaultPlan })} label="Start in plan mode" />
+          </Row>
+          <Row label="Close panes of done agents" description="Mark done closes the agent's pane (and its worktree workspace) once it's idle; it resumes with omp --resume when you need it again.">
+            <Switch checked={settings.closeDone} onCheckedChange={(closeDone) => update({ closeDone })} label="Close panes of done agents" />
           </Row>
           <Row label="omp settings" description="Model roles, tools, compaction and every other omp setting, per host.">
             <Button size="sm" variant="secondary" icon={<SlidersHorizontal />} onClick={() => navigate({ name: "omp" })}>

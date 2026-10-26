@@ -75,6 +75,7 @@ import {
 } from "./scripts";
 import { historyFor, longHistory } from "./seeds";
 import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
+import { DemoParking } from "./parking";
 import { DemoTerm } from "./term";
 import { DemoTools } from "./tools";
 
@@ -172,6 +173,61 @@ export class DemoHost implements SimHost {
   private everOnline = false;
   private readonly tools: DemoTools;
   private readonly ompSettings = new DemoOmpSettings();
+  /** Done agents' lifecycle (`./parking`): Mark done closes panes, parked agents resume, pruned ones go. */
+  private readonly parking = new DemoParking({
+    now: () => this.now(),
+    after: (ms, fn) => this.env.clock.after(ms, fn),
+    online: () => this.online,
+    sims: this.sims,
+    seedSim: (def, wsId) => this.addAgent(def, wsId, this.addPane(wsId, null)),
+    closePane: (agentId, wsId, paneId) => {
+      for (const t of [...this.terms.values()]) {
+        if (t.agentId !== agentId) continue;
+        t.close("pane closed");
+        this.terms.delete(t.termId);
+      }
+      const m = this.wss.get(wsId);
+      if (!m) return;
+      for (const tab of m.ws.tabs) for (const p of tab.panes) if (p.id === paneId) p.agentId = undefined;
+      try {
+        this.closePaneIn(m, paneId);
+      } catch {
+        // a primary with linked worktrees keeps its last pane: it stays as a shell
+        for (const tab of m.ws.tabs) for (const p of tab.panes) if (p.id === paneId) p.title = "zsh";
+        m.shellPanes.push(paneId);
+        this.dirtyWs.add(m.ws.id);
+      }
+    },
+    openPane: (agentId, place) => {
+      const kept = place.workspaceId ? this.wss.get(place.workspaceId) : undefined;
+      const m = kept ?? this.addWorkspace(place.repo, place.branch, place.worktree, this.wss.size, undefined, false, place.cwd);
+      const paneId = kept ? this.addPane(m.ws.id, null) : (m.ws.tabs[0]?.panes[0]?.id as string);
+      const tab = m.ws.tabs.find((t) => t.panes.some((p) => p.id === paneId));
+      for (const p of tab?.panes ?? []) if (p.id === paneId) Object.assign(p, { agentId, title: "omp" });
+      this.dirtyWs.add(m.ws.id);
+      return { paneId, tabId: tab?.id ?? "", workspaceId: m.ws.id };
+    },
+    rekey: (sim, id) => {
+      const old = sim.agent.id;
+      this.sims.delete(old);
+      this.removedAgents.add(old);
+      this.dirtyAgents.delete(old);
+      this.subscribed.delete(old);
+      sim.agent.id = id;
+      this.sims.set(id, sim);
+      this.agentChanged(id);
+    },
+    remove: (id) => this.removeAgent(id),
+    setPruned: (pruned) => {
+      this.info = { ...this.info, pruned };
+      if (!this.online) return;
+      this.rev += 1;
+      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
+    },
+    changed: (id) => this.agentChanged(id),
+    activity: (id, kind, title, detail) => this.activity(id, kind, title, detail),
+    notify: (id, kind, title, body) => this.notify(id, kind, title, body),
+  });
 
   constructor(
     private readonly env: HostEnv,
@@ -268,6 +324,7 @@ export class DemoHost implements SimHost {
       this.prs.set("w6", { number: 142, url: "https://github.com/demo/teleflock/pull/142", title: "Auto-reconnect SSH and resume herdr attach", state: "OPEN", draft: true, mergeable: true, checks: { passed: 9, failed: 0, pending: 0 }, createdAt: now - 1_500_000 });
       this.seedActivity(defs);
       this.usageTotals = { costUsd: 18.42, tokens: 2_310_000, input: 2_080_000, output: 230_000 };
+      this.parking.seed();
     } else {
       this.usageTotals = { costUsd: 1.31, tokens: 160_000, input: 140_000, output: 20_000 };
       this.sims.get("render")?.resume(renderTurn());
@@ -816,6 +873,8 @@ export class DemoHost implements SimHost {
   }
 
   private dispatch(method: string, p: Record<string, unknown>): unknown {
+    const parked = this.parking.call(method, p);
+    if (parked !== undefined) return parked;
     switch (method) {
       case "state.get":
         return this.hostState();

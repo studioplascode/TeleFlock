@@ -56,6 +56,7 @@ import { usePaletteCommands, type PaletteCommand } from "@/features/palette/regi
 import { PreviewButton } from "@/features/preview/PreviewButton";
 import { PreviewList } from "@/features/preview/PreviewList";
 import { usePreviewStore } from "@/features/preview/store";
+import { ParkedNotice } from "@/features/session/ParkedGate";
 import { haptic } from "@/features/shell/haptics";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { COLUMN_STATUS, PHASE_LABEL, phaseBusy } from "@/features/shell/status";
@@ -327,7 +328,13 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
     />
   );
 
-  const pane = target ? (
+  // A parked agent (pane closed when it was marked done) has nothing to attach to until it resumes;
+  // once it does, the route follows it to its new id.
+  const pane = agent?.parked && effective?.kind === "agent" ? (
+    <div className="grid h-full place-items-center p-6">
+      <ParkedNotice agentKey={agent.key} terminal={false} />
+    </div>
+  ) : target ? (
     <TerminalPane
       key={`${mode}|${effective?.kind === "shell" ? effective.nonce : ""}`}
       hostId={hostId}

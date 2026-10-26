@@ -3,6 +3,7 @@ import type { Agent } from "@/core/gen";
 import { parseAgentKey, useAgent, useSession, useUi } from "@/core";
 import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
 import { Term } from "@/features/shell/Term";
+import { openTerminal } from "@/features/board/agentActions";
 import { ACTIONS, agentStateWord, stateTime } from "@/features/shell/vocab";
 import { agentStatus, hostCall, useBeat, useMute } from "../api";
 import { CostTooltip } from "../spend";
@@ -85,9 +86,11 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
                 {agent.branch}
               </span>
             )}
-            <Term id="pane" className="shrink-0 text-mute-2">
-              pane {agent.paneId}
-            </Term>
+            {agent.paneId && (
+              <Term id="pane" className="shrink-0 text-mute-2">
+                pane {agent.paneId}
+              </Term>
+            )}
           </div>
         </div>
         {!compact && (
@@ -115,7 +118,8 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
             size="sm"
             variant="ghost"
             icon={<SquareTerminal />}
-            onClick={() => useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId })}
+            // a parked agent resumes first, then its new pane opens beside
+            onClick={() => (agent.parked ? openTerminal(agent.key, false) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId }))}
             aria-label={ACTIONS.terminalBeside.label}
             className="shrink-0"
           >

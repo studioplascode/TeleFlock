@@ -15,8 +15,10 @@ import type {
   Workspace,
 } from "@/core/gen";
 import type { ApiError, SessionMeta } from "@/core/gen";
+import { onAgentsPruned, startAgentLifecycle } from "./agentLifecycle";
 import { activityWatchers, core, loadActivity, pushInternal, startCore } from "./client";
 import { type IrcEntry, ircOf } from "./irc";
+import { resolveSuccessor } from "./store/lifecycle";
 import type { AgentView, BtwEntry, CoreState, HostActivityEvent, HostNotification, SessionStatus } from "./store/state";
 import { coreStore } from "./store/store";
 import type { Backend } from "./transport/types";
@@ -26,7 +28,10 @@ const EMPTY_OBJ: Record<string, never> = {};
 
 // Importing the hooks in the browser starts the core (idempotent; the app also calls startCore()
 // before rendering). Never started from inside a render, so no store update happens mid-render.
-if (typeof window !== "undefined") startCore();
+if (typeof window !== "undefined") {
+  startCore();
+  startAgentLifecycle();
+}
 
 /**
  * Selector access to the raw data store (cross-host aggregates). Selectors returning new
@@ -162,6 +167,14 @@ export function getWorkspacesSnapshot(): { hostId: string; ws: Workspace }[] {
 
 export function useAgent(key: string): AgentView | undefined {
   return useCore((s) => s.agents[key]);
+}
+
+/**
+ * The key a parked agent lives on after it was resumed under a new id (undefined while it never
+ * moved). Views on the old key follow it on their own (route, split); use this for the rest.
+ */
+export function useSuccessor(key: string): string | undefined {
+  return useCore((s) => resolveSuccessor(s.successors, key));
 }
 
 export interface AgentFilter {
@@ -484,6 +497,13 @@ function setMuted(key: string, muted: boolean): Promise<void> {
   const list = currentSettings().mutedAgents.filter((k) => k !== key);
   return updateSettings({ mutedAgents: muted ? [...list, key] : list });
 }
+
+// An agent whose omp session was deleted can't be muted anymore: drop it from the list.
+onAgentsPruned((gone) => {
+  const keys = new Set(gone.flatMap((g) => g.keys));
+  const muted = currentSettings().mutedAgents;
+  if (coreStore.getState().settings && muted.some((k) => keys.has(k))) void updateSettings({ mutedAgents: muted.filter((k) => !keys.has(k)) }).catch(() => {});
+});
 
 function saveTemplate(template: AgentTemplate): Promise<void> {
   const list = currentSettings().templates;

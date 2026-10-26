@@ -37,6 +37,7 @@ import { useBoard } from "./boardStore";
 import { connWords, FlockFab, HostChip } from "./FlockActions";
 import { LANE_BY_COLUMN, QUIET_AFTER_MS } from "./lanes";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
+import { ParkedChip } from "./ParkedChip";
 import { SetupGaps } from "./StaleHosts";
 import { QuickAnswer } from "./QuickAnswer";
 import { type SwipeAction, SwipeRow } from "./SwipeRow";
@@ -295,6 +296,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
               {agent.name}
             </span>
             {muted && <BellOff className="size-3 shrink-0 text-mute-2" aria-label="Notifications muted" />}
+            {agent.parked && <ParkedChip agentKey={agentKey} />}
             <span className="min-w-0 flex-[1_1_0] truncate font-mono text-2xs text-mute-2">{agent.repo}</span>
             <span className="shrink-0 font-mono text-2xs text-mute tabular">
               {column === "running" ? (

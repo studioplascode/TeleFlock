@@ -26,6 +26,7 @@ import { archiveWithUndo, canReview, openAgent, openTerminal, promptAgent, stopA
 import { CardContextMenu, CardMenuButton } from "./CardMenu";
 import { LANE_BY_COLUMN } from "./lanes";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
+import { ParkedChip } from "./ParkedChip";
 import { QuickAnswer } from "./QuickAnswer";
 import { useShipMemo } from "./shipMemo";
 
@@ -387,6 +388,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
                 <BellOff className="size-3" aria-hidden />
               </span>
             )}
+            {agent.parked && <ParkedChip agentKey={agentKey} />}
             {multiHost && <HostTag hostId={agent.hostId} />}
             {(agent.repo || agent.branch) && (
               <span className="max-w-full min-w-0 truncate font-mono text-2xs text-mute-2" title={[agent.repo, agent.branch].filter(Boolean).join(" · ")}>

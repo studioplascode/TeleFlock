@@ -22,3 +22,9 @@ Subagent viewer (`subagents/SubagentViewer`, one per session, mounted by `Sessio
 `useSessionUi.getState().openSubagent(agentKey, subagentId)` (inspector Subagents pane, task cards, IRC
 bubbles and threads); opening another subagent switches it. Right-side drawer on desktop, full-screen
 sheet on phones. `[` / `]` previous / next subagent, `Esc` close, `Enter` steer/message, `Shift+Enter` newline.
+
+Parked agents (`Agent.parked`: Mark done closed the pane): `LinkGate` hands over to `ParkedGate`. With the read-only
+snapshot `session.open` returns, the transcript shows under a "Done and closed" strip with Resume; when it fails
+(`parked`), `ParkedNotice` (also used by the terminal view) explains it and offers Resume / Terminal. The composer
+keeps working on a parked agent: sending calls `agent.prompt` (the host resumes it with the prompt), the composer
+says "Resuming…" (`useResuming`) until the new agent appears, and the core redirects the route to it.

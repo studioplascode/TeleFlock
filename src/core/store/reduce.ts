@@ -1,5 +1,6 @@
 import type { Agent, HostState, SessionEvent, StatePatch, TranscriptItem } from "@/core/gen";
 import { agentKey } from "../keys";
+import { agentGone, agentSeen, dropPruned, newlyPruned, noteSuccessor } from "./lifecycle";
 import {
   type AgentView,
   type CoreEvent,
@@ -22,9 +23,9 @@ export interface ReduceResult {
 /**
  * Applies a batch of events in order and returns the next state with structural sharing:
  * untouched hosts, agents, sessions and transcript rows keep their identity, so fine-grained
- * selectors only re-render what changed.
+ * selectors only re-render what changed. `now` dates parked agents leaving (resume following).
  */
-export function reduceEvents(prev: CoreState, events: readonly CoreEvent[]): ReduceResult {
+export function reduceEvents(prev: CoreState, events: readonly CoreEvent[], now = Date.now()): ReduceResult {
   const tx = new Tx();
   const effects: Effect[] = [];
   let s = prev;
@@ -60,11 +61,11 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[]): Red
         break;
       }
       case "hostSnapshot":
-        replaceHost(tx, draft(), e.hostId, e.state, e.rev, effects);
+        replaceHost(tx, draft(), e.hostId, e.state, e.rev, effects, now);
         break;
       case "$stateGet": {
         const rev = s.hosts[e.hostId]?.rev ?? null;
-        replaceHost(tx, draft(), e.hostId, e.state, rev, effects);
+        replaceHost(tx, draft(), e.hostId, e.state, rev, effects, now);
         break;
       }
       case "hostPatch": {
@@ -77,7 +78,7 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[]): Red
         if (host.rev !== null && e.rev <= host.rev) break; // duplicate / stale
         const gap = host.rev !== null && e.rev !== host.rev + 1;
         if (gap) effects.push({ kind: "resync", hostId: e.hostId });
-        applyPatch(tx, draft(), e.hostId, e.rev, e.ops, effects);
+        applyPatch(tx, draft(), e.hostId, e.rev, e.ops, effects, now);
         break;
       }
       case "session":
@@ -139,6 +140,8 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[]): Red
       }
       case "notify": {
         if (s.notifications.some((n) => n.id === e.notification.id && n.hostId === e.hostId)) break;
+        // a late notification about an agent whose session was deleted
+        if (s.hosts[e.hostId]?.state.info.pruned?.some((p) => p.agentId === e.notification.agentId)) break;
         const d = draft();
         const n: HostNotification = { ...e.notification, hostId: e.hostId, read: false };
         d.notifications = [n, ...d.notifications].slice(0, MAX_NOTIFICATIONS);
@@ -181,6 +184,9 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[]): Red
       case "openAgent":
         effects.push({ kind: "openAgent", hostId: e.hostId, agentId: e.agentId });
         break;
+      case "$successor":
+        noteSuccessor(tx, draft(), e.hostId, e.from, e.to);
+        break;
       case "answerNext":
         effects.push({ kind: "answerNext" });
         break;
@@ -210,8 +216,10 @@ function replaceHost(
   state: HostState,
   rev: number | null,
   effects: Effect[],
+  now: number,
 ): void {
   d.hosts = tx.own(d.hosts);
+  const pruned = newlyPruned(d.hosts[hostId]?.state.info.pruned, state.info.pruned);
   d.hosts[hostId] = { rev, state };
   d.agents = tx.own(d.agents);
   const prefix = `${hostId}::`;
@@ -225,13 +233,17 @@ function replaceHost(
     if (!old || old.column !== a.column) lanesChanged = true;
     relinkIfLive(d, hostId, old, a, effects);
     d.agents[key] = viewOf(hostId, a);
+    agentSeen(tx, d, hostId, a, now);
   }
   for (const key of Object.keys(d.agents)) {
-    if (key.startsWith(prefix) && !keep.has(key)) {
+    const old = d.agents[key];
+    if (old && key.startsWith(prefix) && !keep.has(key)) {
       delete d.agents[key];
+      agentGone(tx, d, old, now);
       lanesChanged = true;
     }
   }
+  dropPruned(tx, d, hostId, pruned);
   if (lanesChanged) effects.push({ kind: "lanes", hostId });
 }
 
@@ -250,7 +262,7 @@ function upsertById<T extends { id: string }>(list: T[], id: string, value: T | 
   return next;
 }
 
-function applyPatch(tx: Tx, d: CoreState, hostId: string, rev: number, ops: StatePatch[], effects: Effect[]): void {
+function applyPatch(tx: Tx, d: CoreState, hostId: string, rev: number, ops: StatePatch[], effects: Effect[], now: number): void {
   d.hosts = tx.own(d.hosts);
   const prevEntry = d.hosts[hostId];
   if (!prevEntry) return;
@@ -262,6 +274,7 @@ function applyPatch(tx: Tx, d: CoreState, hostId: string, rev: number, ops: Stat
   for (const op of ops) {
     switch (op.op) {
       case "info":
+        dropPruned(tx, d, hostId, newlyPruned(st.info.pruned, op.info.pruned));
         st.info = op.info;
         break;
       case "health":
@@ -281,12 +294,14 @@ function applyPatch(tx: Tx, d: CoreState, hostId: string, rev: number, ops: Stat
         if (op.value === null) {
           if (old) {
             delete d.agents[key];
+            agentGone(tx, d, old, now);
             effects.push({ kind: "lanes", hostId });
           }
         } else {
           if (!old || old.column !== op.value.column) effects.push({ kind: "lanes", hostId });
           relinkIfLive(d, hostId, old, op.value, effects);
           d.agents[key] = viewOf(hostId, op.value);
+          agentSeen(tx, d, hostId, op.value, now);
         }
         break;
       }

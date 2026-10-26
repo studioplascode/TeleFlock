@@ -44,12 +44,15 @@ function refusal(from: Column, to: Column, name: string): { title: string; descr
   return null;
 }
 
-/** Clears an optimistic lane override once the host state agrees (or after a grace period). */
+/**
+ * Clears an optimistic lane override once the host state agrees (or after a grace period), or once
+ * the agent is gone (a parked agent dropped back into Review resumes under a new id).
+ */
 function MoveWatcher({ agentKey, target }: { agentKey: string; target: Column }) {
   const column = useAgent(agentKey)?.column;
   const setMove = useBoard((s) => s.setMove);
   useEffect(() => {
-    if (column === target) setMove(agentKey, null);
+    if (column === target || column === undefined) setMove(agentKey, null);
   }, [column, target, agentKey, setMove]);
   useEffect(() => {
     const t = window.setTimeout(() => setMove(agentKey, null), 6000);

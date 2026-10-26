@@ -230,6 +230,7 @@ Once the agent is idle and `link=live`:
 The new agent appears through herdr events. The response returns `Started{paneId, workspaceId, agentId?}`.
 
 **Resuming a parked agent** (`agent.resume`; also `agent.prompt` and `agent.archive {archived:false}` on a parked card, and `host.resume` of its session file). Live agents fail with `invalid_params`; a second concurrent resume of the same card fails with `busy`; a missing session file prunes the card and fails with `not_found`. Target: a new tab in its old workspace when that is still open at the same folder; else, for a linked git worktree (from the record, else `git rev-parse --git-dir --git-common-dir`), herdr `worktree.open {cwd: <repo root>, path: <checkout>}` so the workspace is grouped under its repo again (falls back to a plain workspace when herdr refuses); else a new workspace at its folder (a missing folder fails with `not_found` and a hint). The launch above runs with the parked name (deduped against live names), model and thinking level, `--resume=<file>`, and, for a prompt, `spec.prompt`/`spec.images` delivered once linked. The archive marks are cleared, so the agent lands in Review; the parked card is dropped in the same patch that first shows the new agent (a start that never shows up gives the card back after 90 s). Activity: `unarchived` "Resumed X".
+
 **Worktree base (`worktree.create`, `ops/worktree.rs`).** A new branch forks from the given `base`, else from `git.branches`' `defaultBase`: `origin/<default>` when that remote-tracking ref exists (else the local default's remote upstream, else the local default), never herdr's implicit HEAD, which is usually a local `main` that only moves when someone pulls. Before forking from a remote-tracking base hostd runs `git fetch <remote> refs/heads/<branch>` (no hooks, no prompts: `GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`; 30 s; single-flight per repo + branch with a 20 s answer cache for fan-outs); a failure is logged and creation continues from the ref it has, so offline hosts still create worktrees. herdr's `git worktree add -b B P origin/main` makes `B` track `origin/main`; hostd then removes that upstream, so ahead/behind and review don't compare against main and the first `git.push` publishes `B` under its own name (`--set-upstream origin HEAD`). Review's merge-base uses the default branch's local and remote refs together (`git merge-base HEAD main origin/main`), so it is the real fork point whichever one the branch came from. Clients send no `base` when the Base select is untouched (they show `defaultBase`); older hosts without `defaultBase` get the shown ref, as before.
 
 ### 3.8 AI through omp's tiny role (`ai.complete`, `ops/ai.rs`)
@@ -445,13 +446,22 @@ Errors reject with `ApiError`.
 - `termBus.subscribe(hostId, termId, cb)`.
 - `useUi()`: navigation (view, selected agent, split, palette, sheets, mobile tab, pager).
 
+**Parked and pruned agents** (`store/lifecycle.ts` pure, `agentLifecycle.ts` effects):
+- Mark done sends `agent.archive {archived: true, close: Settings.closeDone}`; the Undo toast unarchives (inside the host's 10 s window that just cancels the close, after it the host resumes the parked agent). Older hosts ignore `close`.
+- A parked agent (`Agent.parked`: column done, no pane/tab/workspace, same id) shows a quiet "closed" chip on the board and in Dispatch, and has no workspace in the sidebar tree. Resume (`resumeAgent(key)` → `agent.resume`), Reopen (unarchive) and a prompt (`agent.prompt`) all resume it; Terminal resumes first, then opens the new pane. While it resumes, `useResuming(key)` says "Resuming…".
+- Following a resume: the resumed agent has a new id and the same omp session. The reducer links old key → new key in `CoreState.successors`, from `Started.agentId` (`$successor`) or by matching `omp.sessionId`/`sessionFile` against a parked agent that left the list within 30 s (either patch order, or the new agent first). Once the new agent is in host state the core redirects the route (agent and terminal, `replace`), the split and the board cursor; `onAgentMoved` listeners move the unsent drafts (text and images) and the Terminal tab's memory. `useSuccessor(key)` resolves the chain for anything else.
+- Session view on a parked agent: `session.open` may return a read-only snapshot (caps all false except `prompt`): the transcript shows under a "Done and closed" strip with Resume; if it fails (`parked`), a notice with Resume replaces the transcript. The composer stays usable either way: sending resumes the agent with the prompt. The terminal view of a parked agent shows the same notice.
+- Pruned (`HostInfo.pruned` gained entries, earlier ids before resumes included): the reducer drops the agents' notifications and session caches and ignores late `notify`s about them; `onAgentsPruned` listeners (replayed to late registrants, idempotent) drop drafts and draft images, the mute entry, toasts, Dispatch entries (`pruneAgents`, by agent id or the `sessionId` captured while live) and the Terminal tab's memory; a route, split or board cursor on the agent goes back to the board.
+- Older hosts: no `parked`, `agent.resume` → `unknown_method` (Resume is only offered on parked agents; the toast says to update the host).
+
 **Demo host.** A rich live simulation of the draft data:
 - 10 agents across 4 repos, every column populated;
 - streaming tokens around 40 tok/s with thinking;
 - tool calls including diffs and bash output;
 - asks and approvals that can be answered;
 - todos progressing, subagents, a cost ticker, health jitter;
-- fake terminal frames (ANSI).
+- fake terminal frames (ANSI);
+- done agents' lifecycle (`demo/parking.ts`): Mark done with close parks an idle agent after 10 s, resume/prompt/unarchive brings it back under a new id with the same session, `tokens` is seeded parked, and `spike` (seeded parked) is pruned 60 s after start.
 
 It must exercise every UI state, including disconnected, stale and auth-required on a second demo host.
 

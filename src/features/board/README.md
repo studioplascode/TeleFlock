@@ -46,9 +46,11 @@ export function UsageView(): JSX.Element;
 export function QuickAnswer(props: { agentKey: string; appearance?: "card" | "hero" | "big"; max?: number; full?: boolean; numbered?: boolean; hotkeys?: boolean; mobile?: boolean; chat?: boolean; onAnswered?(): void; className?: string }): JSX.Element | null;
 
 // src/features/board/agentActions.ts — shared agent actions (board, phone, review, palette)
-export function archiveWithUndo(keys: readonly string[]): Promise<void>; // Mark done + Undo toast (no confirm)
+export function archiveWithUndo(keys: readonly string[]): Promise<void>; // Mark done (+ close: Settings.closeDone) + Undo toast (no confirm)
 export function markDoneAndRemove(key: string): Promise<void>; // confirm → worktree.remove (dirty → force confirm, trust prompt) → archive; never rejects
-// also: setArchived, answerAgent, stopAgent, openAgent, promptAgent, openTerminal, openAnswerHud, canReview, setMuted, useMuted
+export function resumeParked(key: string): Promise<string | null>; // agent.resume of a parked agent → new key (failures toast; old hosts: "update")
+// also: setArchived (unarchiving a parked agent resumes it), answerAgent, stopAgent, openAgent, promptAgent,
+// openTerminal (parked: resume first, then the new pane), openAnswerHud, canReview, setMuted, useMuted
 
 // src/features/board/StaleHosts.tsx — host strips above the lanes
 export function StaleHosts(): JSX.Element; // offline/snapshot strip per host (connAction verb) + SetupGaps
@@ -73,6 +75,11 @@ Five fixed zones on every lane: (1) state strip (`agentStateWord` + tool, `state
 ring/glyph · name · host chip when > 1 host · repo · branch), (3) title, (4) lane body, (5) meters in one order that
 wraps (`ctx` · `subs` · diff · ✦ model · 🧠 thinking). Motion budget: in Calm (default) running cards keep only the
 heartbeat trace and the tool ring; needs-you keeps its glow and 20 s nudge; Lively restores glow/breath/orbits.
+
+**Parked agents** (Mark done closed their pane, `Agent.parked`): a quiet "closed" chip (`ParkedChip`, "resuming…"
+while it resumes) on the card and the phone row; the ⋯ menu offers Open, Resume, Terminal (resumes first) and
+Reopen (resumes too); no Review (the worktree workspace may be gone), no Connect. Dragging one back to Review
+resumes it; the card then reappears under the new id (the optimistic move clears when the old one leaves).
 
 ## Board keyboard (desktop, only while the board is mounted and focus is not in a text field)
 `J`/`K` (or arrows) move selection (`useUi().select`), `H`/`L` jump lanes, `Enter` open session, `A` answer (opens the

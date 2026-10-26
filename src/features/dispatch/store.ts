@@ -82,6 +82,8 @@ export interface DispatchEntry {
   path?: string;
   error?: DispatchError;
   last?: LastSeen;
+  /** The agent's omp session, captured while it is live: finds it again once resumed under a new id, or pruned. */
+  sessionId?: string;
 }
 
 /** Persisted thread key: one thread per host + repository root. */
@@ -509,4 +511,25 @@ export async function retryDispatch(args: {
     if (recreate) void run(hostId, repo, e.id);
     else settled(e.id);
   }
+}
+
+/**
+ * Agents whose omp session was deleted (`HostInfo.pruned`) vanish from Dispatch: every entry of
+ * theirs on that host goes, matched by agent id or omp session (the id changes when a parked agent
+ * resumes).
+ */
+export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds: readonly string[] = []): void {
+  const ids = new Set(agentIds);
+  const sessions = new Set(sessionIds);
+  const gone = (e: DispatchEntry) => (e.agentId !== undefined && ids.has(e.agentId)) || (e.sessionId !== undefined && sessions.has(e.sessionId));
+  const prefix = threadKey(hostId, "");
+  useDispatch.setState((s) => {
+    let threads: Record<string, DispatchEntry[]> | null = null;
+    for (const [key, list] of Object.entries(s.threads)) {
+      if (!key.startsWith(prefix) || !list.some(gone)) continue;
+      threads ??= { ...s.threads };
+      threads[key] = list.filter((e) => !gone(e));
+    }
+    return threads ? { threads } : s;
+  });
 }

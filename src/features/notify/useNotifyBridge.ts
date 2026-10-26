@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
 import { dismissToast, toast, useIsMobile } from "@/design";
-import { agentKey, core, getRoute, isMuted, markAgentNotificationsRead, navigate, onAppEvent, useRoute, useSettings, useUi } from "@/core";
+import { agentKey, core, getRoute, isMuted, markAgentNotificationsRead, navigate, onAgentMoved, onAgentsPruned, onAppEvent, parseAgentKey, type PrunedGone, useRoute, useSettings, useUi } from "@/core";
+import { pruneAgents } from "@/features/dispatch/store";
 import { haptic } from "@/features/shell/haptics";
+import { useLastTerminal } from "@/features/terminal/lastTerminal";
 import { inQuietHours, playChime } from "./chime";
 import { KIND_STATUS, runAnswer } from "./NotificationCenter";
 
@@ -17,6 +19,40 @@ const openToasts = new Map<string, { agent: string; toast: number; needs: boolea
 /** The app is in front: looking at an agent here means its notifications were seen. */
 function inFront(): boolean {
   return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
+/**
+ * An agent whose omp session was deleted vanishes from the GUI. The core drops its notifications,
+ * drafts, mute, route, split and selection; this drops its toasts, its Dispatch entries and the
+ * Terminal tab's memory of it.
+ */
+function forgetPruned(gone: PrunedGone[]): void {
+  const keys = new Set(gone.flatMap((g) => g.keys));
+  for (const [id, t] of openToasts) {
+    if (!keys.has(t.agent)) continue;
+    dismissToast(t.toast);
+    openToasts.delete(id);
+  }
+  const byHost = new Map<string, { ids: string[]; sessions: string[] }>();
+  for (const g of gone) {
+    const host = byHost.get(g.hostId) ?? { ids: [], sessions: [] };
+    host.ids.push(...g.keys.map((k) => parseAgentKey(k).agentId));
+    if (g.sessionId) host.sessions.push(g.sessionId);
+    byHost.set(g.hostId, host);
+  }
+  for (const [hostId, h] of byHost) pruneAgents(hostId, h.ids, h.sessions);
+  const { last, lastSession } = useLastTerminal.getState();
+  const lastGone = last?.agentId !== undefined && keys.has(agentKey(last.hostId, last.agentId));
+  const sessionGone = lastSession !== null && keys.has(agentKey(lastSession.hostId, lastSession.agentId));
+  if (lastGone || sessionGone) useLastTerminal.setState({ ...(lastGone ? { last: null } : {}), ...(sessionGone ? { lastSession: null } : {}) });
+}
+
+/** A parked agent resumed under a new id: the Terminal tab's memory follows it. */
+function followMoved(from: string, to: string): void {
+  const { last, lastSession } = useLastTerminal.getState();
+  const { agentId } = parseAgentKey(to);
+  if (last?.agentId !== undefined && agentKey(last.hostId, last.agentId) === from) useLastTerminal.setState({ last: { hostId: last.hostId, agentId } });
+  if (lastSession && agentKey(lastSession.hostId, lastSession.agentId) === from) useLastTerminal.setState({ lastSession: { hostId: lastSession.hostId, agentId } });
 }
 
 /**
@@ -60,6 +96,9 @@ export function useNotifyBridge(): void {
       openToasts.delete(id);
     }
   }, [isMobile, inSession]);
+
+  useEffect(() => onAgentsPruned(forgetPruned), []);
+  useEffect(() => onAgentMoved(followMoved), []);
 
   useEffect(
     () =>

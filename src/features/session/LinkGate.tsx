@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { navigate, parseAgentKey, useAgent, useSession, useUi } from "@/core";
 import { Button, EmptyState, Shimmer, Skeleton, Spinner } from "@/design";
 import { hostCall, usePending } from "./api";
+import { ParkedGate } from "./ParkedGate";
 
 function openTerminal(agentKey: string, paneId?: string) {
   const { hostId, agentId } = parseAgentKey(agentKey);
@@ -25,6 +26,9 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
     </Button>
   );
   if (!agent) return null;
+
+  // Marked done and its pane closed: read-only until it resumes (a message resumes it too).
+  if (agent.parked) return <ParkedGate agentKey={agentKey}>{children}</ParkedGate>;
 
   if (link === "connecting")
     return (

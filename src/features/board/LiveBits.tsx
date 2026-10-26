@@ -54,7 +54,8 @@ export function SubagentsDone({ pct, live }: { pct: number; live: number }) {
 /** "Connect" pill for an omp session that isn't shared with TeleFlock yet (injects /collab while idle). */
 export function ConnectLinkButton({ agentKey }: { agentKey: string }) {
   const agent = useAgent(agentKey);
-  if (agent?.omp?.link !== "notShared") return null;
+  // a parked agent has no running omp to connect (it resumes instead)
+  if (agent?.omp?.link !== "notShared" || agent.parked) return null;
   return (
     <Tooltip content="This omp session isn't shared with TeleFlock yet. Connect injects /collab while idle.">
       <button

@@ -552,7 +552,7 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
         key: "terminalBeside",
         icon: <SquareTerminal />,
         def: ACTIONS.terminalBeside,
-        run: () => useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId }),
+        run: () => (agent?.parked ? openTerminal(agentKey, false) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId })),
       },
     );
   groups.push({ items: view });

@@ -82,6 +82,22 @@ export interface CoreState {
   activity: Record<string, ActivityEntry>;
   settings: Settings | null;
   tunnels: TunnelInfo[];
+  /**
+   * Parked agents resumed under a new id: old key → new key (follow with `resolveSuccessor`).
+   * Views showing the old key redirect to the new one.
+   */
+  successors: Record<string, string>;
+  /** Parked agents that just left their host's list, waiting for the agent resuming their session. */
+  departed: Departed[];
+}
+
+/** A parked agent gone from host state; matched by session to the agent that resumed it (≤ 30 s). */
+export interface Departed {
+  key: string;
+  hostId: string;
+  sessionId?: string;
+  sessionFile?: string;
+  at: number;
 }
 
 /** Synthetic events the client feeds through the same ordered pipeline as AppEvents. */
@@ -93,7 +109,9 @@ export type InternalEvent =
   | { type: "$sessionLoading"; hostId: string; agentId: string }
   | { type: "$sessionError"; hostId: string; agentId: string; error: ApiError }
   | { type: "$sessionDrop"; hostId: string; agentId: string }
-  | { type: "$activity"; hostId: string; page: ActivityPage; append: boolean };
+  | { type: "$activity"; hostId: string; page: ActivityPage; append: boolean }
+  /** `agent.resume` answered: the parked agent `from` lives on as `to` (`Started.agentId`). */
+  | { type: "$successor"; hostId: string; from: string; to: string };
 
 export type CoreEvent = AppEvent | InternalEvent;
 
@@ -122,6 +140,8 @@ export function initialCoreState(backend: Backend): CoreState {
     activity: {},
     settings: null,
     tunnels: [],
+    successors: {},
+    departed: [],
   };
 }
 

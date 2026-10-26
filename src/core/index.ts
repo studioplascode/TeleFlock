@@ -16,6 +16,8 @@ export {
   flushCoreEvents,
 } from "./client";
 export { agentKey, parseAgentKey } from "./keys";
+export { markResuming, onAgentMoved, onAgentsPruned, resumeAgent, useResuming } from "./agentLifecycle";
+export type { PrunedGone } from "./agentLifecycle";
 export { linkProps, openLink, safeHref } from "./links";
 export type { LinkProps } from "./links";
 export { CoreError, apiError, isApiError, toApiError } from "./errors";
@@ -61,6 +63,7 @@ export {
   useSession,
   useSessionItem,
   useSettings,
+  useSuccessor,
   useTunnels,
   useWorkspaces,
 } from "./hooks";

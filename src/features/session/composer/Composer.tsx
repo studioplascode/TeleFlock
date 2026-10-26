@@ -1,8 +1,9 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
-import { core, drafts, getTranscript, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useSession, useUi } from "@/core";
+import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
 import type { CommandInfo, ImageInput } from "@/core/gen";
+import { openTerminal } from "@/features/board/agentActions";
 import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
 import { useFirstUse } from "@/features/shell/hints";
@@ -114,19 +115,25 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       setAltHeld(false);
     };
   }, [working, mobile]);
+  // A parked agent (pane closed when it was marked done) takes prompts: the host resumes it first.
+  const resuming = useResuming(agentKey);
   const disabledReason = !agent
     ? "Agent not found"
-    : agent.omp?.link !== "live"
-      ? "Not connected to this session"
-      : !caps
-        ? "Loading session…"
-        : !caps.prompt && !(working && (caps.steer || caps.followUp))
-          ? agent.needs?.answerable === false
-            ? "omp is showing a dialog only the terminal can answer"
-            : agent.needs
-              ? "Answer the question above first"
-              : "This session can't take prompts right now"
-          : null;
+    : agent.parked
+      ? resuming
+        ? "Resuming…"
+        : null
+      : agent.omp?.link !== "live"
+        ? "Not connected to this session"
+        : !caps
+          ? "Loading session…"
+          : !caps.prompt && !(working && (caps.steer || caps.followUp))
+            ? agent.needs?.answerable === false
+              ? "omp is showing a dialog only the terminal can answer"
+              : agent.needs
+                ? "Answer the question above first"
+                : "This session can't take prompts right now"
+            : null;
 
   const dictation = useDictation((phrase) => setText((t) => (t && !t.endsWith(" ") ? `${t} ${phrase}` : t + phrase)));
 
@@ -162,7 +169,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     key: agentKey,
     meta,
     custom,
-    openTerminal: () => (mobile ? navigate({ name: "terminal", hostId, agentId }) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId })),
+    openTerminal: () =>
+      agent?.parked ? openTerminal(agentKey, mobile) : mobile ? navigate({ name: "terminal", hostId, agentId }) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId }),
   };
 
   const updatePopup = (value: string, caret: number) => {
@@ -282,6 +290,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       else usePendingQueue.getState().remove(agentKey, pendingId);
     }
     if (res.ok) {
+      // the host resumes a parked agent with this prompt; the view follows it to its new id
+      if (agent?.parked) markResuming(agentKey, true);
       // Only what was sent: anything typed or attached while sending stays in the draft.
       const cur = drafts.get(draftKey);
       drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
@@ -384,15 +394,17 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const inline = mobile && !hasContent && !dictation.listening && !dictation.error;
   const placeholder = disabledReason
     ? disabledReason
-    : agent?.needs
-      ? "Answer above, or steer…"
-      : working
-        ? mobile
-          ? "Steer the agent…"
-          : "Steer the agent · Alt+Enter queues a follow-up"
-        : mobile
-          ? "Message omp · / commands"
-          : "Message omp · / commands · @ files";
+    : agent?.parked
+      ? "Message it to resume the session"
+      : agent?.needs
+        ? "Answer above, or steer…"
+        : working
+          ? mobile
+            ? "Steer the agent…"
+            : "Steer the agent · Alt+Enter queues a follow-up"
+          : mobile
+            ? "Message omp · / commands"
+            : "Message omp · / commands · @ files";
   // Host queue plus this client's just-sent messages (until the host lists them or they land).
   const queued = useQueueChips(agentKey, queue, working);
   // Holding Alt while the agent works previews follow-up mode on the send button and hints.

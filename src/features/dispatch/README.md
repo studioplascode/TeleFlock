@@ -19,7 +19,8 @@ export function resumeInterruptedNaming(): void; // every `naming` entry cut sho
 export function retryDispatch(args: { hostId; repo; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // checks before re-creating
 export function isInFlight(entryId: string): boolean;               // request queued / in flight in this tab
 export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create settles
-export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last? } // phase: naming | queued | creating | started | failed | unknown
+export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries of agents whose omp session was deleted (HostInfo.pruned)
+export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live
 export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean }
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)

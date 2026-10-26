@@ -108,11 +108,14 @@ export interface DraftImageBackend {
   read(key: string): Promise<StoredDraft | undefined>;
   /** `null` deletes the key. */
   write(key: string, value: StoredDraft | null): void;
+  /** Every stored key (absent: storage can't list, memory only). */
+  keys?(): Promise<string[]>;
 }
 
 const indexedDbBackend: DraftImageBackend = {
   read: (key) => request<StoredDraft | undefined>("readonly", (s) => s.get(key) as IDBRequest<StoredDraft | undefined>),
   write: (key, value) => void (value ? request("readwrite", (s) => s.put(value, key)) : request("readwrite", (s) => s.delete(key))),
+  keys: async () => ((await request("readonly", (s) => s.getAllKeys())) ?? []).filter((k): k is string => typeof k === "string"),
 };
 
 let backend: DraftImageBackend = indexedDbBackend;
@@ -173,6 +176,13 @@ export function hydrateDraftImages(key: string): Promise<void> {
 
 export function getDraftImages(key: string): DraftImage[] {
   return useImages.getState().images[key] ?? [];
+}
+
+/** Keys holding draft images, in memory or stored (to find the drafts of a gone agent). */
+export async function draftImageKeys(): Promise<string[]> {
+  const stored = (await backend.keys?.().catch(() => [])) ?? [];
+  const inMemory = Object.entries(useImages.getState().images).filter(([, imgs]) => imgs.length > 0).map(([k]) => k);
+  return [...new Set([...inMemory, ...stored])];
 }
 
 /**

@@ -111,6 +111,9 @@ const [images, setImages, clearImages] = useDraftImages(key);                   
 - Answers: `answerDraftKey(agentKey, requestId, field)` (`"other"` is shared by the ask card, board
   quick answer and answer-next HUD). `startDraftSweep()` (called at boot) drops them once the
   agent's online host no longer lists that pending request (30 s grace for fresh typing).
+- Agents: drafts whose key holds an agent key move to the new key when a parked agent resumes under a new id
+  (`onAgentMoved`), and are deleted (text and images) when the agent is pruned (`onAgentsPruned`); both wired in
+  `startDraftSweep()`. Parked/pruned agents themselves: architecture §6.1 and `agentLifecycle.ts`.
 
 ## Imperative buses (no React state)
 

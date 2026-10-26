@@ -106,6 +106,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
   - Each lane header carries its legend (sort order + what the card time means).
 - Drag and drop:
   - Review ↔ Done (mark done / reopen). Mark done has an Undo toast, no confirmation; "Mark done & remove worktree…" asks first.
+  - Mark done also closes the agent's pane (and its worktree workspace when nothing else runs there) once it is idle, after a 10 s undo window (Settings › "Close panes of done agents", on by default). The card stays in Done with a quiet "closed" chip; Resume, Reopen, Terminal or a message resumes it (`omp --resume`) under a new id, and open views follow it. An agent whose omp session file is deleted disappears from every view.
   - Dropping into a live lane bounces back with an explanation.
   - Done state is persisted per host.
 - Cards: five fixed zones in every lane.

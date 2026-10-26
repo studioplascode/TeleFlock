@@ -1,10 +1,10 @@
 import { motion } from "motion/react";
-import { Check, GitBranch, RotateCcw, ShieldCheck, SquareTerminal, X } from "lucide-react";
+import { Check, GitBranch, Play, RotateCcw, ShieldCheck, SquareTerminal, X } from "lucide-react";
 import { createContext, memo, type ReactNode, useContext, useEffect } from "react";
-import { type AgentView, agentKey, navigate, useAgent } from "@/core";
+import { type AgentView, agentKey, navigate, useAgent, useCore, useResuming } from "@/core";
 import type { Column } from "@/core/gen";
 import { AgentGlyph, Elapsed, Shimmer, StatusPill, type Status, cn, formatAge, spring, useNow } from "@/design";
-import { canReview, openAgent, openTerminal } from "@/features/board/agentActions";
+import { canReview, openAgent, openTerminal, resumeParked } from "@/features/board/agentActions";
 import { LANE_BY_COLUMN } from "@/features/board/lanes";
 import { AgentOrb, LiveLine, QuietChip, useQuiet } from "@/features/board/LiveBits";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
@@ -113,22 +113,33 @@ export const DispatchItem = memo(function DispatchItem({ entry, agentId }: { ent
   );
 });
 
+/** A parked agent behind the entry (its pane closed when marked done): by id, else by omp session. */
+function parkedKeyOf(agents: Record<string, AgentView>, hostId: string, entry: DispatchEntry): string | undefined {
+  const byId = entry.agentId ? agents[agentKey(hostId, entry.agentId)] : undefined;
+  if (byId?.parked) return byId.key;
+  if (!entry.sessionId) return undefined;
+  return Object.values(agents).find((a) => a.hostId === hostId && a.parked && a.omp?.sessionId === entry.sessionId)?.key;
+}
+
 function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string; ctx: ThreadContext }) {
   const key = agentId ? agentKey(ctx.hostId, agentId) : undefined;
   const agent = useAgent(key ?? "");
+  const parkedKey = useCore((s) => (agent ? undefined : parkedKeyOf(s.agents, ctx.hostId, entry)));
   const launching = entry.phase !== "failed" && (!agent || (agent.turns === 0 && agent.state === "idle"));
   const now = useNow(launching ? 1000 : 60_000);
 
-  // Remember the agent's lane so the entry still reads right once the agent is gone.
+  // Remember the agent's lane so the entry still reads right once the agent is gone, and its omp
+  // session to find it again once it resumes under a new id (or is pruned).
   const column = agent?.column;
   const title = agent?.title;
   const turns = agent?.turns;
+  const sessionId = agent?.omp?.sessionId;
   const last = entry.last;
   useEffect(() => {
     if (!column || title === undefined || turns === undefined) return;
-    if (last && last.column === column && last.title === title && last.turns === turns) return;
-    useDispatch.getState().patch(threadKey(ctx.hostId, ctx.repo), entry.id, { last: { column, title, turns, at: Date.now() } });
-  }, [column, title, turns, last, entry.id, ctx.hostId, ctx.repo]);
+    if (last && last.column === column && last.title === title && last.turns === turns && (!sessionId || entry.sessionId === sessionId)) return;
+    useDispatch.getState().patch(threadKey(ctx.hostId, ctx.repo), entry.id, { last: { column, title, turns, at: Date.now() }, ...(sessionId ? { sessionId } : {}) });
+  }, [column, title, turns, sessionId, last, entry.id, entry.sessionId, ctx.hostId, ctx.repo]);
 
   const shown = shownOf(entry, agent, now);
   const status = statusOf(shown, entry);
@@ -190,7 +201,7 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
           </span>
           {summary && <span className="shrink-0 font-sans font-semibold max-sm:hidden">· sent with: {summary}</span>}
         </div>
-        <Body shown={shown} entry={entry} agentKey={key} ctx={ctx} />
+        <Body shown={shown} entry={entry} agentKey={key} parkedKey={parkedKey} ctx={ctx} />
       </div>
     </div>
   );
@@ -227,7 +238,7 @@ const primary = `${action} bg-accent text-white shadow-glow-accent hover:bg-acce
 const secondary = `${action} bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5`;
 const ghost = `${action} text-mute hover:bg-white/6 hover:text-ink`;
 
-function Body({ shown, entry, agentKey: key, ctx }: { shown: Shown; entry: DispatchEntry; agentKey?: string; ctx: ThreadContext }) {
+function Body({ shown, entry, agentKey: key, parkedKey, ctx }: { shown: Shown; entry: DispatchEntry; agentKey?: string; parkedKey?: string; ctx: ThreadContext }) {
   const agent = shown.k === "live" ? shown.agent : undefined;
   const silentMs = useQuiet(agent?.column === "running" && ctx.online, agent?.live.lastEventAt);
 
@@ -279,6 +290,8 @@ function Body({ shown, entry, agentKey: key, ctx }: { shown: Shown; entry: Dispa
   }
 
   if (shown.k === "step") return <Progress step={shown.step} />;
+
+  if (shown.k === "gone" && parkedKey && ctx.online) return <Parked parkedKey={parkedKey} />;
 
   if (shown.k === "gone" || !agent || !key) {
     return (
@@ -348,6 +361,24 @@ function Body({ shown, entry, agentKey: key, ctx }: { shown: Shown; entry: Dispa
 
 function Actions({ children }: { children: ReactNode }) {
   return <div className="mt-2.5 flex flex-wrap items-center gap-1.5">{children}</div>;
+}
+
+/** The agent was marked done and its pane closed: it resumes (omp --resume) when needed. */
+function Parked({ parkedKey }: { parkedKey: string }) {
+  const resuming = useResuming(parkedKey);
+  return (
+    <>
+      <p className="mt-2 text-xs text-mute">Its pane closed when it was marked done. Resume picks the session up in a new pane.</p>
+      <Actions>
+        <button type="button" className={secondary} onClick={() => void resumeParked(parkedKey)} disabled={resuming}>
+          <Play /> {resuming ? "Resuming…" : ACTIONS.resume.label}
+        </button>
+        <button type="button" className={ghost} onClick={() => openAgent(parkedKey)} title={ACTIONS.openSession.description}>
+          {ACTIONS.openSession.label}
+        </button>
+      </Actions>
+    </>
+  );
 }
 
 /** Queued → Creating worktree → Starting agent → Running, as three filling segments. */

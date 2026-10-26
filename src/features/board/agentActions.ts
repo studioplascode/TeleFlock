@@ -1,4 +1,4 @@
-import { core, getAgentViews, getWorkspacesSnapshot, navigate, parseAgentKey, useSettings, useUi } from "@/core";
+import { core, getAgentViews, getWorkspacesSnapshot, markResuming, navigate, parseAgentKey, resumeAgent, useSettings, useUi } from "@/core";
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
 import { haptic } from "@/features/shell/haptics";
@@ -28,16 +28,40 @@ export async function answerAgent(key: string, requestId: string, answer: Answer
   }
 }
 
-/** `agent.archive` (Mark done: Review → Done when true; Reopen: Done → Review when false). */
+/**
+ * `agent.archive` (Mark done: Review → Done when true; Reopen: Done → Review when false). Mark done
+ * also closes the pane once the agent is idle (`Settings.closeDone`; the agent stays in Done,
+ * parked); reopening a parked agent resumes it under a new id (views follow it).
+ */
 export async function setArchived(key: string, archived: boolean): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
+  const parked = !archived && getAgentViews().some((a) => a.key === key && a.parked);
+  if (parked) markResuming(key, true);
   try {
-    await core.host(hostId).call("agent.archive", { agentId, archived });
+    await core.host(hostId).call("agent.archive", archived ? { agentId, archived, close: useSettings.getState().closeDone } : { agentId, archived });
     haptic("success");
   } catch (err) {
+    if (parked) markResuming(key, false);
     haptic("warning");
     reportError(archived ? `Couldn't mark ${agentId} done` : `Couldn't reopen ${agentId}`, err);
     throw err;
+  }
+}
+
+/**
+ * Resume a parked agent (its pane was closed when it was marked done): omp --resume in a new pane.
+ * Resolves to the new agent's key (null when it failed or never showed up; failures toast).
+ */
+export async function resumeParked(key: string): Promise<string | null> {
+  try {
+    const next = await resumeAgent(key);
+    haptic("success");
+    return next;
+  } catch (err) {
+    haptic("warning");
+    if (isApiError(err) && err.code === "unknown_method") toast({ title: "This host can't resume closed agents", description: "Update TeleFlock on the host, or reopen it from Past sessions.", status: "error" });
+    else reportError(`Couldn't resume ${parseAgentKey(key).agentId}`, err);
+    return null;
   }
 }
 
@@ -123,8 +147,15 @@ export function canReview(agent: { repo?: string; diff?: { files: number }; turn
   return !!agent.repo && ((agent.diff?.files ?? 0) > 0 || agent.turns > 0);
 }
 
-/** Desktop: open the agent's terminal in the split pane. Mobile: the full terminal view. */
+/**
+ * Desktop: open the agent's terminal in the split pane. Mobile: the full terminal view. A parked
+ * agent has no pane: it resumes first, then its new pane opens.
+ */
 export function openTerminal(key: string, mobile: boolean): void {
+  if (getAgentViews().some((a) => a.key === key && a.parked)) {
+    void resumeParked(key).then((next) => next && openTerminal(next, mobile));
+    return;
+  }
   const { hostId, agentId } = parseAgentKey(key);
   if (mobile) navigate({ name: "terminal", hostId, agentId });
   else useUi.getState().setSplit({ kind: "terminal", hostId, agentId });
