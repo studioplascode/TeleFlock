@@ -701,9 +701,11 @@ pub(crate) async fn remote_tracking(root: &Path, r: &str) -> Option<(String, Str
 
 /// Fetches one branch of a remote: `git fetch <remote> refs/heads/<branch>` updates
 /// `refs/remotes/<remote>/<branch>` through the remote's configured refspec. Never prompts
-/// (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`), runs without hooks, gives up after `timeout`.
-/// Single-flight per repository + branch; an attempt within [`FETCH_FRESH`] answers for itself.
-/// `Err` carries git's message (offline, auth, unknown branch, timeout).
+/// (`GIT_TERMINAL_PROMPT=0`, an empty `GIT_ASKPASS` so neither `core.askPass` nor
+/// `SSH_ASKPASS` dialogs open, `SSH_ASKPASS_REQUIRE=never`, ssh `BatchMode` and
+/// `ConnectTimeout`), runs without hooks, gives up after `timeout`. Single-flight per
+/// repository and branch; an attempt within [`FETCH_FRESH`] answers for itself. `Err` carries
+/// git's message (offline, auth, unknown branch, timeout).
 pub(crate) async fn fetch_branch(root: &Path, remote: &str, branch: &str, timeout: Duration) -> Result<(), String> {
     type Slot = std::sync::Arc<tokio::sync::Mutex<Option<(std::time::Instant, Result<(), String>)>>>;
     static SLOTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Slot>>> = std::sync::LazyLock::new(Default::default);
@@ -715,7 +717,8 @@ pub(crate) async fn fetch_branch(root: &Path, remote: &str, branch: &str, timeou
             return res.clone();
         }
     let ssh = batch_ssh_command(root).await;
-    let env: Vec<(&str, &str)> = ssh.as_deref().map(|s| ("GIT_SSH_COMMAND", s)).into_iter().collect();
+    let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS_REQUIRE", "never")];
+    env.extend(ssh.as_deref().map(|s| ("GIT_SSH_COMMAND", s)));
     let refspec = format!("refs/heads/{branch}");
     let res = match git_run(root, &["fetch", "--quiet", remote, &refspec], None, &env, timeout).await {
         Ok(out) if out.ok() => Ok(()),
@@ -726,27 +729,35 @@ pub(crate) async fn fetch_branch(root: &Path, remote: &str, branch: &str, timeou
     res
 }
 
-/// `GIT_SSH_COMMAND` that can never prompt (passwords, passphrases, unknown host keys): the ssh
-/// command git would run (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `GIT_SSH`, else `ssh`)
-/// plus `-o BatchMode=yes`. `None` (leave git's choice alone) when that program is not OpenSSH's
+/// `GIT_SSH_COMMAND` that can never prompt (passwords, passphrases, unknown host keys) nor hang
+/// on an unreachable host: the ssh command git would run (`GIT_SSH_COMMAND`, else
+/// `core.sshCommand`, else the `GIT_SSH` program, else `ssh`) plus `-o BatchMode=yes -o
+/// ConnectTimeout=5`. `None` (leave git's choice alone) when that program is not OpenSSH's
 /// `ssh` (plink, wrapper scripts): other programs may not take `-o`.
 async fn batch_ssh_command(root: &Path) -> Option<String> {
-    let configured = match std::env::var("GIT_SSH_COMMAND") {
-        Ok(c) if !c.trim().is_empty() => c,
-        _ => {
-            let c = git(root, &["config", "--get", "core.sshCommand"], QUICK).await.map(|o| o.line()).unwrap_or_default();
-            if !c.trim().is_empty() {
-                c
-            } else if std::env::var_os("GIT_SSH").is_some_and(|v| !v.is_empty()) {
-                return None;
-            } else {
-                "ssh".to_string()
-            }
-        }
+    let env_command = std::env::var("GIT_SSH_COMMAND").ok();
+    let config = match env_command.as_deref().filter(|c| !c.trim().is_empty()) {
+        Some(_) => None,
+        None => Some(git(root, &["config", "--get", "core.sshCommand"], QUICK).await.map(|o| o.line()).unwrap_or_default()),
     };
-    let program = configured.split_whitespace().next()?;
-    let name = Path::new(program).file_name()?.to_str()?;
-    matches!(name, "ssh" | "ssh.exe").then(|| format!("{configured} -o BatchMode=yes"))
+    ssh_batch_command(env_command.as_deref(), config.as_deref(), std::env::var_os("GIT_SSH").as_deref().and_then(|s| s.to_str()))
+}
+
+/// [`batch_ssh_command`] from its inputs: `GIT_SSH_COMMAND`, `core.sshCommand`, `GIT_SSH`.
+fn ssh_batch_command(env_command: Option<&str>, config: Option<&str>, git_ssh: Option<&str>) -> Option<String> {
+    const BATCH: &str = "-o BatchMode=yes -o ConnectTimeout=5";
+    let is_ssh = |program: &str| Path::new(program).file_name().and_then(|n| n.to_str()).is_some_and(|n| matches!(n, "ssh" | "ssh.exe"));
+    let shell_command = env_command.filter(|c| !c.trim().is_empty()).or(config.filter(|c| !c.trim().is_empty()));
+    if let Some(c) = shell_command {
+        // A shell command line: its first word is the program.
+        return is_ssh(c.split_whitespace().next()?).then(|| format!("{c} {BATCH}"));
+    }
+    match git_ssh.filter(|p| !p.is_empty()) {
+        // `GIT_SSH` is a program path run without a shell; `GIT_SSH_COMMAND` (which wins over
+        // it) is a shell command, so the path is single-quoted.
+        Some(p) => is_ssh(p).then(|| format!("'{}' {BATCH}", p.replace('\'', r"'\''"))),
+        None => Some(format!("ssh {BATCH}")),
+    }
 }
 
 /// Reads the branch of a checkout straight from `HEAD` (no process): `ref: refs/heads/<b>`
@@ -1095,23 +1106,45 @@ pub async fn commit(p: &GitCommitParams) -> Result<GitCommitResult, ApiError> {
 
 pub async fn push(cwd: &Path) -> Result<CommandOutput, ApiError> {
     let root = toplevel(cwd).await?;
-    let has_upstream = git(&root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], QUICK).await?.ok();
-    let args: Vec<String> = if has_upstream {
-        vec!["push".into()]
-    } else {
-        let remotes = git_ok(&root, &["remote"], QUICK).await?.stdout_str();
-        let remotes: Vec<&str> = remotes.lines().filter(|l| !l.is_empty()).collect();
-        let remote = if remotes.contains(&"origin") { "origin" } else { remotes.first().copied().unwrap_or("") };
-        if remote.is_empty() {
-            return Err(ApiError::new("git_error", "this repository has no remote").with_hint("Add a remote first: git remote add origin <url>."));
+    let local = git(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"], QUICK).await?;
+    let local = local.ok().then(|| local.line()).filter(|l| !l.is_empty());
+    let upstream = match &local {
+        Some(b) => {
+            let out = git(&root, &["for-each-ref", "--format=%(upstream:remotename)%00%(upstream:remoteref)", &format!("refs/heads/{b}")], QUICK).await?;
+            out.ok().then(|| out.line()).and_then(|l| l.split_once('\0').map(|(r, m)| (r.to_string(), m.to_string()))).filter(|(r, m)| !r.is_empty() && !m.is_empty())
         }
-        vec!["push".into(), "--set-upstream".into(), remote.into(), "HEAD".into()]
+        None => None,
     };
+    let remotes = git_ok(&root, &["remote"], QUICK).await?.stdout_str();
+    let remotes: Vec<&str> = remotes.lines().filter(|l| !l.is_empty()).collect();
+    let args = push_args(local.as_deref(), upstream.as_ref().map(|(r, m)| (r.as_str(), m.as_str())), &remotes).ok_or_else(|| {
+        ApiError::new("git_error", "this repository has no remote").with_hint("Add a remote first: git remote add origin <url>.")
+    })?;
     let out = git(&root, &args, NETWORK).await?;
     if !out.ok() {
         return Err(git_failure(&out, "push"));
     }
     Ok(CommandOutput { code: out.code, stdout: out.stdout_str(), stderr: out.stderr })
+}
+
+/// `git push` arguments. A branch whose upstream is its namesake on a remote pushes plainly.
+/// Otherwise (no upstream, a local upstream, or one with another name: a branch forked from
+/// `origin/main` that still tracks it) it publishes under its own name and tracks that, on the
+/// upstream's remote or else `origin` / the first remote, so it never pushes into the base.
+/// `None`: no remote at all.
+fn push_args(local: Option<&str>, upstream: Option<(&str, &str)>, remotes: &[&str]) -> Option<Vec<String>> {
+    let upstream = upstream.filter(|(remote, _)| *remote != ".");
+    if let (Some(b), Some((_, merge))) = (local, upstream)
+        && merge.strip_prefix("refs/heads/") == Some(b)
+    {
+        return Some(vec!["push".into()]);
+    }
+    let remote = match upstream {
+        Some((r, _)) => r,
+        None if remotes.contains(&"origin") => "origin",
+        None => remotes.first().copied()?,
+    };
+    Some(vec!["push".into(), "--set-upstream".into(), remote.into(), "HEAD".into()])
 }
 
 #[cfg(test)]
@@ -1339,11 +1372,38 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         }
         let td = fixture();
         let d = td.path();
-        assert_eq!(batch_ssh_command(d).await.as_deref(), Some("ssh -o BatchMode=yes"));
+        assert_eq!(batch_ssh_command(d).await.as_deref(), Some("ssh -o BatchMode=yes -o ConnectTimeout=5"));
         sh(d, &["config", "core.sshCommand", "/usr/bin/ssh -i /k"]);
-        assert_eq!(batch_ssh_command(d).await.as_deref(), Some("/usr/bin/ssh -i /k -o BatchMode=yes"));
+        assert_eq!(batch_ssh_command(d).await.as_deref(), Some("/usr/bin/ssh -i /k -o BatchMode=yes -o ConnectTimeout=5"));
         sh(d, &["config", "core.sshCommand", "plink -batch"]);
         assert_eq!(batch_ssh_command(d).await, None, "non-OpenSSH programs are left alone");
+    }
+
+    #[test]
+    fn ssh_command_follows_gits_precedence() {
+        let b = "-o BatchMode=yes -o ConnectTimeout=5";
+        // GIT_SSH_COMMAND beats core.sshCommand beats GIT_SSH.
+        assert_eq!(ssh_batch_command(Some("ssh -p 2"), Some("plink"), Some("/x/plink")), Some(format!("ssh -p 2 {b}")));
+        assert_eq!(ssh_batch_command(Some(" "), Some("/usr/bin/ssh"), Some("/x/plink")), Some(format!("/usr/bin/ssh {b}")));
+        // GIT_SSH alone: an OpenSSH program path gets BatchMode too (quoted: it may hold spaces).
+        assert_eq!(ssh_batch_command(None, Some(""), Some("/opt/my tools/ssh")), Some(format!("'/opt/my tools/ssh' {b}")));
+        assert_eq!(ssh_batch_command(None, None, Some("/o'k/ssh")), Some(format!(r"'/o'\''k/ssh' {b}")));
+        assert_eq!(ssh_batch_command(None, None, Some(r"C:\Program Files\PuTTY\plink.exe")), None);
+        assert_eq!(ssh_batch_command(None, None, None), Some(format!("ssh {b}")));
+    }
+
+    #[test]
+    fn push_publishes_under_the_branch_name() {
+        let args = |l, u, r: &[&str]| push_args(l, u, r).map(|a| a.join(" "));
+        let remotes = ["upstream", "origin"];
+        assert_eq!(args(Some("feat/x"), Some(("origin", "refs/heads/feat/x")), &remotes).as_deref(), Some("push"));
+        // Forked from origin/main and still tracking it: never a plain push into main.
+        assert_eq!(args(Some("feat/x"), Some(("origin", "refs/heads/main")), &remotes).as_deref(), Some("push --set-upstream origin HEAD"));
+        assert_eq!(args(Some("feat/x"), Some(("upstream", "refs/heads/main")), &remotes).as_deref(), Some("push --set-upstream upstream HEAD"));
+        // Tracking a local branch, or nothing: origin (else the first remote).
+        assert_eq!(args(Some("feat/x"), Some((".", "refs/heads/main")), &remotes).as_deref(), Some("push --set-upstream origin HEAD"));
+        assert_eq!(args(Some("feat/x"), None, &["fork"]).as_deref(), Some("push --set-upstream fork HEAD"));
+        assert_eq!(args(Some("feat/x"), None, &[]), None);
     }
 
     #[tokio::test]

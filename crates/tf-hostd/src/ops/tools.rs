@@ -42,6 +42,8 @@ const JITTER: Millis = 10 * MIN;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long an installing run waits for another daemon's run (two installs plus checks).
+const LOCK_WAIT: Duration = Duration::from_secs(12 * 60);
 /// `host.toolsUpdate` answers once its run is done or after this long (the app's request
 /// timeout is 30 s); progress keeps arriving through `HostInfo.tools`.
 const REPLY_WITHIN: Duration = Duration::from_secs(20);
@@ -158,20 +160,26 @@ struct Inner {
     file: PathBuf,
     bins: Resolver,
     status: watch::Sender<ToolUpdates>,
-    /// One run at a time.
+    /// One run at a time (in this daemon; [`InstallLock`] across daemons).
     run: tokio::sync::Mutex<()>,
     /// The newest started run (running or queued) and its completion flag.
     active: Mutex<Option<(Scope, watch::Receiver<bool>)>>,
     reschedule: Notify,
+    /// Held from status snapshot to rename, so an older snapshot never lands after a newer one.
+    saving: Mutex<()>,
+    /// Cross-process install lock file (shared by every daemon of this user).
+    lock_file: PathBuf,
 }
 
 impl Tools {
-    /// Loads `<home>/tools.json` (auto updates default on).
-    pub fn load(file: PathBuf) -> Tools {
-        Self::with_bins(file, Box::new(Bins::resolve))
+    /// Loads `<home>/tools.json`. Without a saved choice, auto updates default on for the real
+    /// home (`~/.teleflock`) and off for other homes (lab / dev daemons must not update the machine's
+    /// omp and herdr by themselves).
+    pub fn load(file: PathBuf, default_auto: bool) -> Tools {
+        Self::with_bins(file, default_auto, install_lock_path(), Box::new(Bins::resolve))
     }
 
-    pub fn with_bins(file: PathBuf, bins: Resolver) -> Tools {
+    pub fn with_bins(file: PathBuf, default_auto: bool, lock_file: PathBuf, bins: Resolver) -> Tools {
         let mut status = std::fs::read(&file)
             .ok()
             .and_then(|b| match serde_json::from_slice::<ToolUpdates>(&b) {
@@ -181,7 +189,7 @@ impl Tools {
                     None
                 }
             })
-            .unwrap_or_else(|| ToolUpdates { auto: true, omp: blank("omp"), herdr: blank("herdr"), next_check_at: None });
+            .unwrap_or_else(|| ToolUpdates { auto: default_auto, omp: blank("omp"), herdr: blank("herdr"), next_check_at: None });
         status.omp.updating = false;
         status.herdr.updating = false;
         status.next_check_at = first_check(&status, now_ms());
@@ -193,6 +201,8 @@ impl Tools {
             run: tokio::sync::Mutex::new(()),
             active: Mutex::new(None),
             reschedule: Notify::new(),
+            saving: Mutex::new(()),
+            lock_file,
         }))
     }
 
@@ -304,11 +314,29 @@ impl Tools {
     async fn execute(&self, scope: Scope) {
         let bins = (self.0.bins)();
         info!(?scope, "tool update run");
+        // Installs never overlap with another daemon's (the real one and lab instances share the
+        // user's omp and herdr). Checks alone need no lock.
+        let _lock = if scope.install {
+            match InstallLock::acquire(&self.0.lock_file, LOCK_WAIT).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    warn!(file = %self.0.lock_file.display(), "tool update skipped: {e}");
+                    self.0.status.send_modify(|s| {
+                        for t in [Tool::Omp, Tool::Herdr] {
+                            if t.in_scope(scope) {
+                                t.of(s).error = Some(e.clone());
+                            }
+                        }
+                    });
+                    self.persist();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         for tool in [Tool::Omp, Tool::Herdr] {
-            if !(match tool {
-                Tool::Omp => scope.omp,
-                Tool::Herdr => scope.herdr,
-            }) {
+            if !tool.in_scope(scope) {
                 continue;
             }
             self.0.status.send_modify(|s| tool.of(s).updating = true);
@@ -331,6 +359,7 @@ impl Tools {
     }
 
     fn persist(&self) {
+        let _one = self.0.saving.lock().unwrap_or_else(|p| p.into_inner());
         let mut s = self.status();
         s.omp.updating = false;
         s.herdr.updating = false;
@@ -341,6 +370,40 @@ impl Tools {
                 }
             }
             Err(e) => warn!("encode tools status: {e}"),
+        }
+    }
+}
+
+/// The user-wide install lock: `~/.cache/teleflock-tools.lock` (per user, not per hostd home,
+/// so the real daemon and lab daemons of one user exclude each other).
+pub fn install_lock_path() -> PathBuf {
+    crate::paths::home_dir().join(".cache").join("teleflock-tools.lock")
+}
+
+/// Exclusive OS file lock on [`install_lock_path`]; released on drop (also when the process dies).
+struct InstallLock {
+    _file: std::fs::File,
+}
+
+impl InstallLock {
+    /// Waits up to `max` for the lock (another daemon's run holds it).
+    async fn acquire(path: &Path, max: Duration) -> Result<InstallLock, String> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let deadline = tokio::time::Instant::now() + max;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(InstallLock { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err("Another TeleFlock daemon on this host is updating omp / herdr; try again in a few minutes.".into());
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(format!("install lock {}: {e}", path.display())),
+            }
         }
     }
 }
@@ -389,6 +452,13 @@ impl Tool {
         match self {
             Tool::Omp => "omp",
             Tool::Herdr => "herdr",
+        }
+    }
+
+    fn in_scope(self, scope: Scope) -> bool {
+        match self {
+            Tool::Omp => scope.omp,
+            Tool::Herdr => scope.herdr,
         }
     }
 
@@ -798,7 +868,9 @@ async fn exec(bin: &Path, args: &[&str], timeout: Duration, tool: Tool) -> Resul
 }
 
 /// Runs a tool without a shell, stdin closed (interactive prompts take their non-interactive
-/// default), in the temp dir (omp reads project settings from its cwd), `NO_COLOR=1`.
+/// default), in the temp dir (omp reads project settings from its cwd), `NO_COLOR=1`. The tool
+/// runs in its own process group: on timeout (or when the run is dropped) the whole group goes,
+/// installers it started included (`bun install -g`, `npm i -g`, …).
 async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) -> Result<Out, String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
@@ -811,6 +883,8 @@ async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) 
     for k in env_remove {
         cmd.env_remove(k);
     }
+    #[cfg(unix)]
+    cmd.process_group(0);
     #[cfg(windows)]
     {
         // CREATE_NO_WINDOW: never flash a console window from the background daemon.
@@ -818,14 +892,57 @@ async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) 
     }
     let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let child = cmd.spawn().map_err(|e| format!("couldn't run {name}: {e}"))?;
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => {
+    let pid = child.id();
+    let wait = child.wait_with_output();
+    tokio::pin!(wait);
+    // Declared after `wait`, so it also drops first when the run is cancelled: the tree is
+    // killed while the leader still exists.
+    let mut tree = TreeGuard(pid);
+    let result = tokio::select! {
+        r = &mut wait => r,
+        _ = tokio::time::sleep(timeout) => {
+            drop(tree);
+            return Err(format!("{name} {} timed out after {} s", args.join(" "), timeout.as_secs()));
+        }
+    };
+    // Exited (and reaped): leave whatever it deliberately left running alone.
+    tree.0 = None;
+    match result {
+        Ok(out) => {
             let stdout = strip_ansi(&String::from_utf8_lossy(&out.stdout));
             let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
             Ok(Out { code: out.status.code().unwrap_or(-1), text: format!("{stdout}\n{stderr}"), stdout })
         }
-        Ok(Err(e)) => Err(format!("{name} {}: {e}", args.join(" "))),
-        Err(_) => Err(format!("{name} {} timed out after {} s", args.join(" "), timeout.as_secs())),
+        Err(e) => Err(format!("{name} {}: {e}", args.join(" "))),
+    }
+}
+
+/// Kills a still-running tool and everything it started when dropped while armed: unix, its
+/// process group (it leads one: `process_group(0)`); Windows, best effort `taskkill /T` of its
+/// process tree.
+struct TreeGuard(Option<u32>);
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.0.take() else { return };
+        #[cfg(unix)]
+        if let Ok(pgid) = libc::pid_t::try_from(pid) {
+            // SAFETY: plain syscall; the child is not reaped yet, so the group id is still ours.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x0800_0000)
+                .status();
+        }
     }
 }
 
@@ -1094,9 +1211,14 @@ printf '{"version":"%s","protocol":22,"endpoint_generation":%s}' "$(cat "$d/herd
                 self.get("calls").lines().map(str::to_string).collect()
             }
             pub fn tools(&self) -> Tools {
+                self.tools_with(true)
+            }
+            pub fn tools_with(&self, default_auto: bool) -> Tools {
                 let d = self.dir.path().to_path_buf();
                 Tools::with_bins(
                     d.join("tools.json"),
+                    default_auto,
+                    d.join("tools.lock"),
                     Box::new(move || Bins { omp: Some(d.join("omp")), herdr: Some(d.join("herdr")), curl: Some(d.join("curl")) }),
                 )
             }
@@ -1246,6 +1368,57 @@ printf '{"version":"%s","protocol":22,"endpoint_generation":%s}' "$(cat "$d/herd
         let reloaded = lab.tools().status();
         assert!(!reloaded.auto && reloaded.next_check_at.is_none());
         assert!(tools.set_auto(true).next_check_at.is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lab_homes_default_to_manual_and_installs_wait_for_other_daemons() {
+        let lab = Lab::new();
+        // No tools.json: a lab-home daemon starts with auto off; a saved choice wins.
+        let manual = lab.tools_with(false).status();
+        assert!(!manual.auto && manual.next_check_at.is_none());
+        lab.tools().set_auto(true);
+        assert!(lab.tools_with(false).status().auto);
+
+        // Another daemon holds the user-wide install lock: checks run, installs wait for it.
+        lab.set("omp.latest", "18.12.6");
+        let other = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(lab.dir.path().join("tools.lock")).unwrap();
+        other.lock().unwrap();
+        let tools = lab.tools();
+        let s = tools.run(Scope { install: false, ..OMP_ONLY }).await;
+        assert_eq!(s.omp.latest.as_deref(), Some("18.12.6"));
+        let mut done = tools.start(OMP_ONLY);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!*done.borrow() && !lab.calls().iter().any(|c| c == "omp update"), "{:?}", lab.calls());
+        other.unlock().unwrap();
+        done.wait_for(|d| *d).await.unwrap();
+        assert_eq!(tools.status().omp.current.as_deref(), Some("18.12.6"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeouts_kill_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let tool = dir.path().join("slow");
+        let pidfile = dir.path().join("child.pid");
+        // An "installer" in the background, then the tool itself hangs.
+        std::fs::write(&tool, format!("#!/bin/sh\nsleep 30 &\necho $! > {}\nsleep 30\n", pidfile.display())).unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Err(err) = run(&tool, &[], Duration::from_millis(700), &[]).await else { panic!("the hung tool did not time out") };
+        assert!(err.contains("timed out"), "{err}");
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let mut gone = false;
+        for _ in 0..50 {
+            // Dead (or a zombie waiting for init): no longer in state S/R.
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if stat.is_empty() || stat.rsplit(')').next().is_some_and(|r| r.trim_start().starts_with('Z')) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(gone, "the background installer survived the timeout");
     }
 
     #[cfg(unix)]

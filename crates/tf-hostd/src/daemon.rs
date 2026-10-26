@@ -235,7 +235,8 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
             return Err(anyhow::anyhow!("bridge socket: {e}"));
         }
     };
-    let tools = crate::ops::tools::Tools::load(paths.home.join("tools.json"));
+    // Automatic tool updates default on for the real daemon (`~/.teleflock`), off for lab homes.
+    let tools = crate::ops::tools::Tools::load(paths.home.join("tools.json"), paths.is_default_home());
     tools.spawn(shutdown.child_token());
     let mut listener = Listener::bind(&paths).with_context(|| format!("bind {}", paths.endpoint()))?;
     info!(endpoint = %paths.endpoint(), "listening");

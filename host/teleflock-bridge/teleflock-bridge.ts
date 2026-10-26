@@ -21,8 +21,9 @@ import type {
 } from "@oh-my-pi/pi-coding-agent";
 
 /** 1.1.0: `btw` runs omp's own /btw (follow-ups via `btwId`), `getBtwHistory`.
- *  1.2.0: schema-dump mode (`TF_OMP_SCHEMA_OUT`, used by tf-hostd `omp.settings`). */
-const BRIDGE_VERSION = "1.2.0";
+ *  1.2.0: schema-dump mode (`TF_OMP_SCHEMA_OUT`, used by tf-hostd `omp.settings`).
+ *  1.3.0: settings-write mode (`TF_OMP_SETTINGS_IN`, used by tf-hostd `omp.settingsSet` for credentials). */
+const BRIDGE_VERSION = "1.3.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -458,10 +459,93 @@ function plainDefinition(def: unknown): unknown {
 	}
 }
 
+/** One `config set|reset` of the settings-write input: `text` as `omp config set <key> <text>` takes it; absent / null resets. */
+type SettingWrite = { key: string; text?: string | null };
+/** The slice of omp's setting objects (`orderedSettings()`) the write mode uses. */
+type WritableSetting = { id: string; parse(text: string): unknown; set(s: unknown, v: unknown): void; unset(s: unknown): void };
+
+/**
+ * Settings-write mode (`TF_OMP_SETTINGS_IN=<file>` + `TF_OMP_SETTINGS_OUT=<file>`; docs/bridge-protocol.md
+ * "Settings write"): tf-hostd starts a throwaway headless omp with this extension to write settings whose
+ * values must not appear in any command line (credentials). Reads `{changes: SettingWrite[]}` from the
+ * owner-only input file and deletes it at once, then applies the changes in order through omp's own
+ * Settings API exactly like `omp config set|reset` (`parse` → `set` / `unset`, then `flush`), stopping at
+ * the first failure. Writes `{bridgeVersion, results: {key, ok, error?}[], error?}` atomically to the
+ * output file and exits. Values are never echoed.
+ */
+async function writeSettings(input: string, out: string): Promise<void> {
+	const results: { key: string; ok: boolean; error?: string }[] = [];
+	let error: string | undefined;
+	let changes: SettingWrite[] | undefined;
+	try {
+		const req = JSON.parse(fs.readFileSync(input, "utf8")) as { changes?: unknown };
+		if (!Array.isArray(req.changes)) throw new Error("no `changes` array");
+		changes = req.changes as SettingWrite[];
+	} catch (e) {
+		error = `settings input: ${e instanceof Error ? e.message : String(e)}`;
+	} finally {
+		try {
+			fs.rmSync(input, { force: true });
+		} catch {
+			// tf-hostd removes it as well
+		}
+	}
+	if (changes) {
+		try {
+			// Dynamic for the same reasons as the schema dump (older omp builds, literal specifiers).
+			const settingsMod: { Settings?: { instance?: { flush(): Promise<void> } } } = await import(
+				"@oh-my-pi/pi-coding-agent/config/settings"
+			);
+			const all: { orderedSettings?: () => readonly WritableSetting[] } = await import(
+				"@oh-my-pi/pi-coding-agent/config/all-settings"
+			);
+			const store = settingsMod.Settings?.instance;
+			if (!store) throw new Error("omp settings are not initialized");
+			if (typeof all.orderedSettings !== "function") throw new Error("orderedSettings() not exported");
+			const byId = new Map(all.orderedSettings().map((s) => [s.id, s]));
+			for (const c of changes) {
+				const key = typeof c?.key === "string" ? c.key : "";
+				const setting = byId.get(key);
+				if (!setting) {
+					results.push({ key, ok: false, error: `Unknown setting: ${key}` });
+					break;
+				}
+				try {
+					if (typeof c.text === "string") setting.set(store, setting.parse(c.text));
+					else setting.unset(store);
+					results.push({ key, ok: true });
+				} catch (e) {
+					results.push({ key, ok: false, error: e instanceof Error ? e.message : String(e) });
+					break;
+				}
+			}
+			await store.flush();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+	let code = 0;
+	try {
+		const json = JSON.stringify({ bridgeVersion: BRIDGE_VERSION, results, error });
+		const tmp = `${out}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, json, { mode: 0o600 });
+		fs.renameSync(tmp, out);
+	} catch {
+		code = 1;
+	}
+	setTimeout(() => process.exit(code), 0);
+}
+
 export default async function teleflockBridge(pi: ExtensionAPI) {
 	const schemaOut = process.env.TF_OMP_SCHEMA_OUT;
 	if (schemaOut) {
 		await dumpSchema(pi, schemaOut);
+		return;
+	}
+	const settingsIn = process.env.TF_OMP_SETTINGS_IN;
+	const settingsOut = process.env.TF_OMP_SETTINGS_OUT;
+	if (settingsIn && settingsOut) {
+		await writeSettings(settingsIn, settingsOut);
 		return;
 	}
 	bridge(pi);

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use tf_herdr::{AgentStart, PaneSplit, SplitDirection, TabCreate, WorkspaceCreate, WorktreeOpen, WorktreeScope, WorktreeTarget};
@@ -786,10 +787,13 @@ async fn archive(ctx: &Ctx, p: ArchiveParams) -> Result<(), ApiError> {
                     _ = ctx.cancel.cancelled() => return,
                     _ = tokio::time::sleep(PARK_GRACE) => {}
                 }
-                if !ctx.state.end_park_wait(&agent_id, generation) {
+                if !ctx.state.park_due(&agent_id, generation) {
                     return;
                 }
-                if let Err(e) = park(&ctx, &agent_id).await {
+                // The wait stays pending until the close is done: an Undo now still cancels it.
+                let res = park(&ctx, &agent_id, &cancel).await;
+                ctx.state.finish_park_wait(&agent_id, generation);
+                if let Err(e) = res {
                     warn!(agent = %agent_id, "closing a done agent failed: {e}");
                     ctx.state.record_activity(&agent_id, ActivityKind::Error, "Closing the pane failed".into(), Some(e.to_string()));
                 }
@@ -803,9 +807,10 @@ async fn archive(ctx: &Ctx, p: ArchiveParams) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// End of the undo window: parks the agent and closes its pane, if it is still archived, idle,
-/// an omp agent and its session file exists. Otherwise the pane stays open.
-async fn park(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
+/// End of the undo window: parks the agent and closes its pane, if it is still archived (not
+/// undone: `undo` not cancelled), idle, an omp agent and its session file exists. Otherwise
+/// the pane stays open.
+async fn park(ctx: &Ctx, agent_id: &str, undo: &CancellationToken) -> Result<(), ApiError> {
     let Some(a) = ctx.state.agent(agent_id).filter(|a| a.parked.is_none()) else { return Ok(()) };
     let Some(file) = parked::parkable(&a).map(str::to_string) else {
         info!(agent = %agent_id, state = ?a.state, archived = a.archived, "done agent not idle (or not omp); keeping its pane");
@@ -821,12 +826,22 @@ async fn park(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
         let wt = w.worktree.as_ref()?;
         Some(ParkedWorktree { path: wt.path.clone(), repo_root: w.repo.as_ref().map(|r| r.root.clone()).unwrap_or_default() })
     });
-    let archived_at = ctx.state.archived_at(agent_id).unwrap_or_else(now_ms);
+    let Some(archived_at) = ctx.state.archived_at(agent_id) else { return Ok(()) };
     let Some(rec) = parked::record_from_agent(&a, archived_at, now_ms(), worktree, ws.map(|w| w.cwd.clone())) else { return Ok(()) };
+    if undo.is_cancelled() {
+        return Ok(());
+    }
     ctx.state.park(rec);
-    if let Err(e) = parked::close_agent(ctx, &a).await {
-        ctx.state.unpark(agent_id);
-        return Err(herdr_err(e));
+    match parked::close_agent(ctx, &a, Some(undo)).await {
+        Ok(true) => {}
+        Ok(false) => {
+            ctx.state.unpark(agent_id);
+            return Ok(());
+        }
+        Err(e) => {
+            ctx.state.unpark(agent_id);
+            return Err(herdr_err(e));
+        }
     }
     ctx.state.record_activity(agent_id, ActivityKind::Stopped, format!("Closed {} (done)", a.name), Some("Pane closed; resume it from Done".into()));
     Ok(())
@@ -852,11 +867,24 @@ pub(crate) async fn resume_parked(
         ApiError::new("busy", format!("{} is already being resumed", rec.name)).retryable()
     })?;
     let file = rec.session_file.clone();
-    if !tokio::fs::metadata(&file).await.is_ok_and(|m| m.is_file()) {
-        drop(claim);
-        ctx.state.prune_parked(agent_id);
-        return Err(ApiError::new("not_found", format!("the omp session file {file} was deleted"))
-            .with_hint("Nothing left to resume; the agent was removed from Done"));
+    let check = {
+        let file = file.clone();
+        tokio::task::spawn_blocking(move || parked::check_file(Path::new(&file))).await
+    };
+    match check {
+        Ok(parked::FileCheck::Present) => {}
+        Ok(parked::FileCheck::Missing) => {
+            drop(claim);
+            ctx.state.prune_parked(agent_id);
+            return Err(ApiError::new("not_found", format!("the omp session file {file} was deleted"))
+                .with_hint("Nothing left to resume; the agent was removed from Done"));
+        }
+        Ok(parked::FileCheck::Unknown(why)) => {
+            return Err(ApiError::new("io_error", format!("cannot read the omp session file: {why}"))
+                .with_hint("The agent stays in Done; try again once the file is reachable")
+                .retryable());
+        }
+        Err(e) => return Err(ApiError::new("internal", format!("checking the session file: {e}"))),
     }
     let target = match target {
         Some(t) => t,
@@ -1261,23 +1289,24 @@ async fn resolve_pane(ctx: &Ctx, target: &StartTarget) -> Result<(String, String
             Ok((pane.pane_id, pane.workspace_id, cwd))
         }
         StartTarget::Cwd { cwd, label } => {
-            let path = crate::paths::expand_tilde(cwd);
-            if !path.is_dir() {
-                return Err(ApiError::new("not_found", format!("{} is not a folder", path.display())));
-            }
-            let created = ctx
-                .herdr
-                .workspace_create(&WorkspaceCreate {
-                    cwd: Some(path.display().to_string()),
-                    label: label.clone(),
-                    focus: false,
-                    ..Default::default()
-                })
-                .await
-                .map_err(herdr_err)?;
-            Ok((created.root_pane.pane_id, created.workspace.workspace_id, Some(path.display().to_string())))
+            let (pane, workspace, cwd) = open_workspace(ctx, cwd, label.clone()).await?;
+            Ok((pane, workspace, Some(cwd)))
         }
     }
+}
+
+/// A new (unfocused) workspace at `cwd`: `(root pane, workspace, cwd)`.
+pub(crate) async fn open_workspace(ctx: &Ctx, cwd: &str, label: Option<String>) -> Result<(String, String, String), ApiError> {
+    let path = crate::paths::expand_tilde(cwd);
+    if !path.is_dir() {
+        return Err(ApiError::new("not_found", format!("{} is not a folder", path.display())));
+    }
+    let created = ctx
+        .herdr
+        .workspace_create(&WorkspaceCreate { cwd: Some(path.display().to_string()), label, focus: false, ..Default::default() })
+        .await
+        .map_err(herdr_err)?;
+    Ok((created.root_pane.pane_id, created.workspace.workspace_id, path.display().to_string()))
 }
 
 #[cfg(test)]

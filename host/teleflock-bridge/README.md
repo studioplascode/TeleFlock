@@ -28,6 +28,8 @@ TUI-only commands run through the composer's own submit handler, so no herdr key
 
 **Schema dump mode** (1.2.0). With `TF_OMP_SCHEMA_OUT=<file>` set, the extension skips all of the above: it writes omp's settings schema (`config/all-settings` → `orderedSettings()` definitions) to `<file>` and exits. tf-hostd uses it for `omp.settings` (protocol doc "Schema dump").
 
+**Settings-write mode** (1.3.0). With `TF_OMP_SETTINGS_IN=<in>` and `TF_OMP_SETTINGS_OUT=<out>` set, the extension likewise skips all of the above: it reads the changes from the owner-only `<in>` (deleting it at once), applies them through omp's Settings API exactly like `omp config set|reset`, writes the per-key results to `<out>` and exits. tf-hostd uses it for credential writes, so secrets never appear in a command line (protocol doc "Settings write").
+
 ## Safety
 
 The extension must never take omp down:

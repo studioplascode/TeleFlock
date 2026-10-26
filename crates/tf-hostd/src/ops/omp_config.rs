@@ -6,16 +6,23 @@
 //!   schema-dump mode (`TF_OMP_SCHEMA_OUT`, docs/bridge-protocol.md "Schema dump"). Cached per omp
 //!   binary (path + size + mtime) in memory and in `<home>/cache/omp-settings-schema.json`.
 //! - **Values**: `omp config list --json` (global config, else defaults; credentials redacted by
-//!   omp itself), cached [`VALUES_TTL`] and dropped after every write.
+//!   omp itself), cached [`VALUES_TTL`] and dropped after every write (a list that started before
+//!   a write never fills the cache).
 //! - **Writes**: `omp config set|reset -- <key> [<value>]`, one change at a time, never through a
 //!   shell. omp validates (enum values, item vocabularies, JSON shapes); its message comes back as
-//!   `invalid_params`.
+//!   `invalid_params`. A batch that sets a **credential** never uses argv (readable by every local
+//!   user): a throwaway omp runs the companion extension's settings-write mode
+//!   (`TF_OMP_SETTINGS_IN`, docs/bridge-protocol.md "Settings write"), which applies the batch
+//!   through omp's Settings API from an owner-only file it deletes on read. Without that mode
+//!   (extension < 1.3.0) credential writes are refused (`unsupported`, hint: the env override).
 //! - Without a readable schema (older omp or companion extension) the answer is `source: "cli"`,
-//!   built from `config list` alone: every key is still listed and editable, without labels.
+//!   built from `config list` alone: every key is still listed and editable, without labels; keys
+//!   named like secrets (`…token`, `…apiKey`, `…password`, …) count as credentials there.
 //!
-//! Credential values never leave the host: not in answers, not in logs (writes log keys only).
+//! Credential values never leave the host: not in answers, not in logs (writes log keys only),
+//! not in any command line.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -41,6 +48,10 @@ const CACHE_FORMAT: u32 = 1;
 /// Present in companion extensions that know the schema-dump mode (bridge ≥ 1.2.0). Older ones
 /// would run as a normal bridge inside the throwaway omp, so they are never started for a dump.
 const DUMP_MARKER: &str = "TF_OMP_SCHEMA_OUT";
+/// Settings-write mode (bridge ≥ 1.3.0): the input file (also the marker, as above) and the
+/// result file.
+const WRITE_MARKER: &str = "TF_OMP_SETTINGS_IN";
+const WRITE_OUT: &str = "TF_OMP_SETTINGS_OUT";
 
 pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
@@ -89,6 +100,13 @@ impl Omp {
             let code = if e.kind() == std::io::ErrorKind::TimedOut { "timeout" } else { "omp_error" };
             ApiError::new(code, format!("omp {}: {e}", args.iter().take(2).copied().collect::<Vec<_>>().join(" ")))
         })
+    }
+
+    /// A fresh path in the owner-only run dir (`<stem>-<pid>-<nanos>.json`).
+    fn scratch(&self, stem: &str) -> Result<PathBuf, String> {
+        std::fs::create_dir_all(&self.run_dir).map_err(|e| format!("{}: {e}", self.run_dir.display()))?;
+        let nanos = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        Ok(self.run_dir.join(format!("{stem}-{}-{nanos}.json", std::process::id())))
     }
 }
 
@@ -176,18 +194,32 @@ async fn dump_schema(omp: &Omp) -> Result<(Option<String>, Vec<Value>), String> 
     if !ext.contains(DUMP_MARKER) {
         return Err("the companion extension predates the schema dump (bridge < 1.2.0)".into());
     }
-    std::fs::create_dir_all(&omp.run_dir).map_err(|e| format!("{}: {e}", omp.run_dir.display()))?;
-    let nanos = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let out = omp.run_dir.join(format!("omp-schema-{}-{nanos}.json", std::process::id()));
+    let out = omp.scratch("omp-schema")?;
+    parse_dump(&run_ext_mode(omp, &[(DUMP_MARKER, &out)], &out, "its settings schema").await?)
+}
+
+/// argv of a throwaway omp running the companion extension in a one-shot mode: headless, no
+/// session, nothing else loaded. Never carries a setting value (those go through a 0600 file).
+fn ext_mode_args(ext: &Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> =
+        ["--mode", "rpc", "--no-session", "--no-skills", "--no-rules", "--no-lsp", "--no-tools", "--no-extensions", "-e"].iter().map(Into::into).collect();
+    args.push(ext.as_os_str().to_owned());
+    args
+}
+
+/// Runs the companion extension in a one-shot mode (`env`: the mode's file variables), waits
+/// for it to write `out`, kills the child and returns `out`'s bytes (the file is removed).
+async fn run_ext_mode(omp: &Omp, env: &[(&str, &Path)], out: &Path, what: &str) -> Result<Vec<u8>, String> {
     let mut cmd = tokio::process::Command::new(&omp.bin);
-    cmd.args(["--mode", "rpc", "--no-session", "--no-skills", "--no-rules", "--no-lsp", "--no-tools", "--no-extensions", "-e"])
-        .arg(&omp.ext)
+    cmd.args(ext_mode_args(&omp.ext))
         .current_dir(home_dir())
-        .env(DUMP_MARKER, &out)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     for (k, v) in omp.env() {
         cmd.env(k, v);
     }
@@ -198,22 +230,22 @@ async fn dump_schema(omp: &Omp) -> Result<(Option<String>, Vec<Value>), String> 
     let mut exited = None;
     while !out.exists() {
         if let Some(status) = exited {
-            let _ = std::fs::remove_file(&out);
-            return Err(format!("omp exited ({status}) without writing the schema"));
+            let _ = std::fs::remove_file(out);
+            return Err(format!("omp exited ({status}) without writing {what}"));
         }
         if Instant::now() >= deadline {
             let _ = child.kill().await;
-            let _ = std::fs::remove_file(&out);
-            return Err(format!("omp did not write its settings schema within {}s", SCHEMA_TIMEOUT.as_secs()));
+            let _ = std::fs::remove_file(out);
+            return Err(format!("omp did not write {what} within {}s", SCHEMA_TIMEOUT.as_secs()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         // One more look at the file after the child is gone (it writes, then exits).
         exited = child.try_wait().ok().flatten();
     }
     let _ = child.kill().await;
-    let bytes = std::fs::read(&out).map_err(|e| format!("read schema dump: {e}"));
-    let _ = std::fs::remove_file(&out);
-    parse_dump(&bytes?)
+    let bytes = std::fs::read(out).map_err(|e| format!("read {what}: {e}"));
+    let _ = std::fs::remove_file(out);
+    bytes
 }
 
 /// Parses the extension's dump `{bridgeVersion, ompVersion, settings, error?}`.
@@ -238,11 +270,16 @@ struct ValuesCache {
 }
 
 static VALUES: LazyLock<std::sync::Mutex<Option<ValuesCache>>> = LazyLock::new(|| std::sync::Mutex::new(None));
+/// Bumped by every write: a `config list` that started before a write never fills the cache
+/// (it may hold the old values).
+static VALUES_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Serializes writes (each `omp config set` rewrites config.yml).
 static WRITES: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn drop_values() {
-    *VALUES.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    let mut cache = VALUES.lock().unwrap_or_else(|p| p.into_inner());
+    VALUES_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *cache = None;
 }
 
 async fn values(omp: &Omp, refresh: bool) -> Result<Arc<Entries>, ApiError> {
@@ -253,12 +290,16 @@ async fn values(omp: &Omp, refresh: bool) -> Result<Arc<Entries>, ApiError> {
             return Ok(c.entries.clone());
         }
     }
+    let generation = VALUES_GEN.load(std::sync::atomic::Ordering::SeqCst);
     let out = omp.run(&["config", "list", "--json"]).await?;
     if !out.ok() {
         return Err(ApiError::new("omp_error", format!("omp config list: {}", omp_message(&out.message()))));
     }
     let entries = Arc::new(parse_list(&out.stdout).map_err(|e| ApiError::new("omp_error", format!("omp config list output: {e}")))?);
-    *VALUES.lock().unwrap_or_else(|p| p.into_inner()) = Some(ValuesCache { config, at: Instant::now(), entries: entries.clone() });
+    let mut cache = VALUES.lock().unwrap_or_else(|p| p.into_inner());
+    if VALUES_GEN.load(std::sync::atomic::Ordering::SeqCst) == generation {
+        *cache = Some(ValuesCache { config, at: Instant::now(), entries: entries.clone() });
+    }
     Ok(entries)
 }
 
@@ -438,13 +479,85 @@ fn plan<'a>(changes: &'a [OmpSettingChange], kinds: &HashMap<&str, &str>) -> Res
         .collect()
 }
 
-async fn set(omp: &Omp, changes: &[OmpSettingChange]) -> Result<OmpSettings, ApiError> {
-    let _writing = WRITES.lock().await;
-    let current = settings(omp, false).await?;
-    let kinds: HashMap<&str, &str> = current.settings.iter().map(|s| (s.id.as_str(), s.kind.as_str())).collect();
-    let writes = plan(changes, &kinds)?;
-    let mut failure = None;
-    for w in &writes {
+/// Credential values never go into a command line (any local user can read
+/// `/proc/<pid>/cmdline`): a batch that sets one is written by the companion extension's
+/// settings-write mode instead of `omp config set`.
+fn needs_bridge(writes: &[Write<'_>], credentials: &HashSet<&str>) -> bool {
+    writes.iter().any(|w| matches!(w, Write::Set(key, _) if credentials.contains(key)))
+}
+
+/// Keys that are credentials: flagged by omp's schema; without a schema (`source: "cli"`) also
+/// every key named like a secret, since omp's list only marks those already set.
+fn credential_keys(current: &OmpSettings) -> HashSet<&str> {
+    current
+        .settings
+        .iter()
+        .filter(|s| s.credential || (current.source != "schema" && looks_secret(&s.id)))
+        .map(|s| s.id.as_str())
+        .collect()
+}
+
+fn looks_secret(key: &str) -> bool {
+    let last = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
+    ["token", "apikey", "api_key", "secret", "password", "passwd", "credential"].iter().any(|w| last.contains(w))
+}
+
+/// The settings-write input `{changes: [{key, text}]}` (`text: null` resets).
+fn write_request(writes: &[Write<'_>]) -> Vec<u8> {
+    let changes: Vec<Value> = writes
+        .iter()
+        .map(|w| match w {
+            Write::Set(key, text) => serde_json::json!({ "key": key, "text": text }),
+            Write::Reset(key) => serde_json::json!({ "key": key, "text": null }),
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "changes": changes })).unwrap_or_default()
+}
+
+/// Parses the settings-write result `{bridgeVersion, results: [{key, ok, error?}], error?}`:
+/// per applied change its key and failure, in order.
+fn parse_write(bytes: &[u8]) -> Result<Vec<(String, Option<String>)>, String> {
+    let v: Value = serde_json::from_slice(bytes).map_err(|e| format!("settings write result: {e}"))?;
+    if let Some(e) = v.get("error").and_then(Value::as_str) {
+        return Err(e.to_string());
+    }
+    let results = v.get("results").and_then(Value::as_array).ok_or("settings write result: no results")?;
+    Ok(results
+        .iter()
+        .map(|r| {
+            let key = str_of(r.get("key")).unwrap_or_default();
+            let failed = (!flag(r.get("ok"))).then(|| str_of(r.get("error")).unwrap_or_else(|| "omp refused the value".into()));
+            (key, failed)
+        })
+        .collect())
+}
+
+enum BridgeWrite {
+    /// The deployed extension cannot do it (missing, or older than 1.3.0): nothing was written.
+    Unavailable(String),
+    Failed(String),
+}
+
+/// Writes `writes` through a throwaway omp running the extension's settings-write mode: the
+/// values travel in an owner-only file under `<home>/run` that the extension deletes on read
+/// (and hostd right after), never in argv or the environment.
+async fn write_via_bridge(omp: &Omp, writes: &[Write<'_>]) -> Result<Vec<(String, Option<String>)>, BridgeWrite> {
+    let ext = std::fs::read_to_string(&omp.ext).map_err(|e| BridgeWrite::Unavailable(format!("companion extension {}: {e}", omp.ext.display())))?;
+    if !ext.contains(WRITE_MARKER) {
+        return Err(BridgeWrite::Unavailable("the deployed companion extension predates credential writes (bridge < 1.3.0)".into()));
+    }
+    let input = omp.scratch("omp-settings-in").map_err(BridgeWrite::Failed)?;
+    let out = omp.scratch("omp-settings-out").map_err(BridgeWrite::Failed)?;
+    crate::paths::write_atomic(&input, &write_request(writes)).map_err(|e| BridgeWrite::Failed(format!("{}: {e}", input.display())))?;
+    let res = run_ext_mode(omp, &[(WRITE_MARKER, &input), (WRITE_OUT, &out)], &out, "the settings").await;
+    let _ = std::fs::remove_file(&input);
+    parse_write(&res.map_err(BridgeWrite::Failed)?).map_err(BridgeWrite::Failed)
+}
+
+/// Applies `writes` in order with `omp config set|reset -- <key> [<text>]` (no credential values:
+/// see [`needs_bridge`]); stops at the first failure.
+async fn write_via_cli(omp: &Omp, writes: &[Write<'_>]) -> Result<(), ApiError> {
+    for w in writes {
         let (args, key) = match w {
             Write::Set(key, text) => (vec!["config", "set", "--", *key, text.as_str()], *key),
             Write::Reset(key) => (vec!["config", "reset", "--", *key], *key),
@@ -454,24 +567,65 @@ async fn set(omp: &Omp, changes: &[OmpSettingChange]) -> Result<OmpSettings, Api
         tracing::info!(key, reset = matches!(w, Write::Reset(_)), ok, "omp config write");
         match res {
             Ok(o) if o.ok() => {}
-            Ok(o) => {
-                failure = Some(ApiError::new("invalid_params", format!("{key}: {}", omp_message(&o.message()))));
-                break;
-            }
-            Err(e) => {
-                failure = Some(e);
-                break;
-            }
+            Ok(o) => return Err(ApiError::new("invalid_params", format!("{key}: {}", omp_message(&o.message())))),
+            Err(e) => return Err(e),
         }
     }
+    Ok(())
+}
+
+async fn write_credentials(omp: &Omp, writes: &[Write<'_>], current: &OmpSettings, credentials: &HashSet<&str>) -> Result<(), ApiError> {
+    let results = match write_via_bridge(omp, writes).await {
+        Ok(r) => r,
+        Err(BridgeWrite::Unavailable(reason)) => {
+            tracing::warn!("credential write refused: {reason}");
+            let keys: Vec<&str> = writes.iter().filter_map(|w| match w {
+                Write::Set(k, _) if credentials.contains(k) => Some(*k),
+                _ => None,
+            }).collect();
+            let envs: Vec<String> = current.settings.iter().filter(|s| keys.contains(&s.id.as_str())).filter_map(|s| s.env.as_ref().map(|e| format!("${e}"))).collect();
+            let env_hint = if envs.is_empty() { String::new() } else { format!(", or set {} in omp's environment on the host", envs.join(" / ")) };
+            return Err(ApiError::new(
+                "unsupported",
+                format!("{} is a credential: TeleFlock writes credentials only through its companion extension, which is not available here ({reason}). Nothing was saved.", keys.join(", ")),
+            )
+            .with_hint(format!("Reconnect with the current TeleFlock app so it deploys the new extension{env_hint}.")));
+        }
+        Err(BridgeWrite::Failed(e)) => return Err(ApiError::new("omp_error", format!("omp settings write: {e}"))),
+    };
+    for (i, w) in writes.iter().enumerate() {
+        let key = match w {
+            Write::Set(k, _) | Write::Reset(k) => *k,
+        };
+        let failed = match results.get(i) {
+            Some((k, failed)) if k == key => failed.clone(),
+            _ => Some("omp stopped before this change".into()),
+        };
+        tracing::info!(key, reset = matches!(w, Write::Reset(_)), ok = failed.is_none(), via = "bridge", "omp config write");
+        if let Some(msg) = failed {
+            return Err(ApiError::new("invalid_params", format!("{key}: {msg}")));
+        }
+    }
+    Ok(())
+}
+
+async fn set(omp: &Omp, changes: &[OmpSettingChange]) -> Result<OmpSettings, ApiError> {
+    let _writing = WRITES.lock().await;
+    let current = settings(omp, false).await?;
+    let kinds: HashMap<&str, &str> = current.settings.iter().map(|s| (s.id.as_str(), s.kind.as_str())).collect();
+    let credentials = credential_keys(&current);
+    let writes = plan(changes, &kinds)?;
+    let written = if needs_bridge(&writes, &credentials) {
+        write_credentials(omp, &writes, &current, &credentials).await
+    } else {
+        write_via_cli(omp, &writes).await
+    };
     drop_values();
     if changes.iter().any(|c| c.key == "modelRoles") {
         crate::ops::host::invalidate_models().await;
     }
-    match failure {
-        Some(e) => Err(e),
-        None => settings(omp, false).await,
-    }
+    written?;
+    settings(omp, false).await
 }
 
 #[cfg(test)]
@@ -612,18 +766,117 @@ mod tests {
         assert_eq!(omp_message("Unknown setting: nope\n\nRun 'omp config list' to see available keys"), "Unknown setting: nope");
     }
 
-    /// Real omp on this machine, in a throwaway agent dir (the user's config is never touched):
-    /// `cargo test -p tf-hostd omp_config -- --ignored --nocapture`.
+    #[test]
+    fn credentials_go_through_the_bridge_never_argv() {
+        let all = real();
+        let current = OmpSettings { version: "18.12.3".into(), source: "schema".into(), settings: all, config_path: None };
+        let creds = credential_keys(&current);
+        assert!(creds.contains("auth.broker.token") && creds.contains("searxng.basicPassword"));
+        assert!(!creds.contains("theme.dark"));
+        let kinds: HashMap<&str, &str> = current.settings.iter().map(|s| (s.id.as_str(), s.kind.as_str())).collect();
+        let plain = vec![OmpSettingChange { key: "theme.dark".into(), value: Some(json!("titanium")) }];
+        assert!(!needs_bridge(&plan(&plain, &kinds).unwrap(), &creds));
+        // Resetting a credential carries no value: the CLI may do it.
+        let reset = vec![OmpSettingChange { key: "auth.broker.token".into(), value: None }];
+        assert!(!needs_bridge(&plan(&reset, &kinds).unwrap(), &creds));
+        let mixed = vec![plain[0].clone(), OmpSettingChange { key: "auth.broker.token".into(), value: Some(json!("s3cr3t")) }];
+        let writes = plan(&mixed, &kinds).unwrap();
+        assert!(needs_bridge(&writes, &creds), "a batch with a credential goes whole through the bridge");
+        // The value is only in the request file, never in the throwaway omp's argv.
+        let req: Value = serde_json::from_slice(&write_request(&writes)).unwrap();
+        assert_eq!(req, json!({"changes": [{"key": "theme.dark", "text": "titanium"}, {"key": "auth.broker.token", "text": "s3cr3t"}]}));
+        let argv: Vec<String> = ext_mode_args(Path::new("/h/ext/teleflock-bridge.ts")).iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!argv.iter().any(|a| a.contains("s3cr3t")) && argv.last().map(String::as_str) == Some("/h/ext/teleflock-bridge.ts"));
+        // Without a schema (`config list` alone marks only credentials already set), keys named
+        // like secrets count as credentials too.
+        let unset_key = map_cli_entry("providers.exampleApiKey", &json!({"value": null, "type": "string"})).unwrap();
+        assert!(!unset_key.credential);
+        let mut cli = OmpSettings { source: "cli".into(), ..current };
+        cli.settings.push(unset_key);
+        assert!(credential_keys(&cli).contains("providers.exampleApiKey") && credential_keys(&cli).contains("auth.broker.token"));
+        assert!(!credential_keys(&cli).contains("theme.dark"));
+        assert!(looks_secret("x.apiKey") && looks_secret("searxng.basicPassword") && !looks_secret("statusLine.leftSegments"));
+    }
+
+    #[test]
+    fn write_results() {
+        let ok = parse_write(br#"{"bridgeVersion":"1.3.0","results":[{"key":"a","ok":true},{"key":"b","ok":false,"error":"Invalid value"}]}"#).unwrap();
+        assert_eq!(ok, vec![("a".to_string(), None), ("b".to_string(), Some("Invalid value".to_string()))]);
+        assert_eq!(parse_write(br#"{"results":[],"error":"omp settings are not initialized"}"#).unwrap_err(), "omp settings are not initialized");
+        assert!(parse_write(b"{}").is_err());
+    }
+
+    #[cfg(unix)]
+    fn fake_omp(dir: &Path, body: &str) -> Omp {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("omp");
+        std::fs::write(&bin, format!("#!/bin/sh\nD={}\n{body}", dir.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ext = dir.join("ext.ts");
+        std::fs::write(&ext, "// TF_OMP_SCHEMA_OUT TF_OMP_SETTINGS_IN").unwrap();
+        Omp { bin, ext, cache_dir: dir.join("cache"), run_dir: dir.join("run"), agent_dir: Some(dir.join("agent")) }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bridge_write_hands_the_value_over_in_a_private_file() {
+        let td = tempfile::tempdir().unwrap();
+        let omp = fake_omp(
+            td.path(),
+            r#"echo "$@" > "$D/argv"
+stat -c %a "$TF_OMP_SETTINGS_IN" > "$D/mode"
+cp "$TF_OMP_SETTINGS_IN" "$D/seen.json"
+rm -f "$TF_OMP_SETTINGS_IN"
+printf '{"bridgeVersion":"1.3.0","results":[{"key":"auth.broker.token","ok":true}]}' > "$TF_OMP_SETTINGS_OUT"
+sleep 5
+"#,
+        );
+        let writes = vec![Write::Set("auth.broker.token", "s3cr3t-value".into())];
+        let Ok(results) = write_via_bridge(&omp, &writes).await else { panic!("bridge write failed") };
+        assert_eq!(results, vec![("auth.broker.token".to_string(), None)]);
+        let read = |f: &str| std::fs::read_to_string(td.path().join(f)).unwrap();
+        assert!(!read("argv").contains("s3cr3t"), "argv: {}", read("argv"));
+        assert_eq!(read("mode").trim(), "600");
+        assert!(read("seen.json").contains("s3cr3t-value"));
+        assert!(std::fs::read_dir(&omp.run_dir).unwrap().next().is_none(), "input and result files are gone");
+
+        // An extension without the mode is never started for it.
+        std::fs::write(&omp.ext, "// TF_OMP_SCHEMA_OUT only").unwrap();
+        std::fs::remove_file(td.path().join("argv")).unwrap();
+        assert!(matches!(write_via_bridge(&omp, &writes).await, Err(BridgeWrite::Unavailable(_))));
+        assert!(!td.path().join("argv").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_list_older_than_a_write_is_not_cached() {
+        let td = tempfile::tempdir().unwrap();
+        let omp = fake_omp(td.path(), "sleep 0.4\necho '{\"a\":{\"value\":1,\"type\":\"number\",\"description\":\"\"}}'\n");
+        // A write lands while `config list` runs: its (old) answer is used, not cached.
+        let (listed, ()) = tokio::join!(values(&omp, true), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop_values();
+        });
+        assert_eq!(listed.unwrap().len(), 1);
+        assert!(VALUES.lock().unwrap().is_none(), "a list older than the write must not fill the cache");
+        values(&omp, true).await.unwrap();
+        assert!(VALUES.lock().unwrap().is_some());
+        drop_values();
+    }
+
+    /// Real omp on this machine, in a throwaway agent dir (the user's config is never touched;
+    /// `TF_LAB_OMP_AGENT_DIR` picks a lab dir): `cargo test -p tf-hostd omp_config -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore = "needs omp ≥ 18.12 on PATH"]
     async fn real_omp_schema_and_round_trip() {
         let td = tempfile::tempdir().unwrap();
-        let agent = td.path().join("agent");
+        let agent = std::env::var_os("TF_LAB_OMP_AGENT_DIR").map(PathBuf::from).unwrap_or_else(|| td.path().join("agent"));
+        assert!(!agent.starts_with(home_dir().join(".omp")), "never the user's omp config");
         std::fs::create_dir_all(&agent).unwrap();
         let ext = td.path().join("ext").join("teleflock-bridge.ts");
         std::fs::create_dir_all(ext.parent().unwrap()).unwrap();
         std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../../host/teleflock-bridge/teleflock-bridge.ts"), &ext).unwrap();
-        let omp = Omp { bin: omp_bin().expect("omp"), ext, cache_dir: td.path().join("cache"), run_dir: td.path().join("run"), agent_dir: Some(agent.clone()) };
+        let omp = Omp { bin: omp_bin().expect("omp"), ext: ext.clone(), cache_dir: td.path().join("cache"), run_dir: td.path().join("run"), agent_dir: Some(agent.clone()) };
 
         let started = Instant::now();
         let s = settings(&omp, true).await.unwrap();
@@ -658,10 +911,65 @@ mod tests {
         let dark = find(&s.settings, "theme.dark");
         assert_eq!(dark.value, dark.default);
 
-        // A credential: write-only.
-        let s = set(&omp, &[OmpSettingChange { key: "auth.broker.token".into(), value: Some(json!("sekrit")) }]).await.unwrap();
+        // A credential: write-only, and never in any process's command line while it is written.
+        // Positive control: a process carrying a marker in its argv is seen by the same scan.
+        let secret = format!("tf-lab-secret-{}", std::process::id());
+        let control = format!("tf-lab-control-{}", std::process::id());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let scanner = {
+            let (stop, secret, control) = (stop.clone(), secret.clone(), control.clone());
+            std::thread::spawn(move || {
+                let (mut scans, mut hits, mut seen_control) = (0u64, Vec::new(), false);
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for p in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+                        let Ok(cmd) = std::fs::read(p.path().join("cmdline")) else { continue };
+                        let cmd = String::from_utf8_lossy(&cmd).replace('\0', " ");
+                        seen_control |= cmd.contains(&control);
+                        if cmd.contains(&secret) {
+                            hits.push(cmd);
+                        }
+                    }
+                    scans += 1;
+                }
+                (scans, hits, seen_control)
+            })
+        };
+        let mut control_proc = std::process::Command::new("sh").args(["-c", "sleep 1", &control]).spawn().unwrap();
+        let s = set(&omp, &[
+            OmpSettingChange { key: "theme.dark".into(), value: Some(json!("titanium")) },
+            OmpSettingChange { key: "auth.broker.token".into(), value: Some(json!(secret)) },
+        ])
+        .await
+        .unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = control_proc.wait();
+        let (scans, hits, seen_control) = scanner.join().unwrap();
+        println!("credential write: {scans} scans of /proc/*/cmdline, control seen: {seen_control}, secret hits: {}", hits.len());
+        assert!(seen_control, "the scan must see argv markers");
+        assert!(scans > 10 && hits.is_empty(), "secret in argv: {hits:?}");
         let token = find(&s.settings, "auth.broker.token");
         assert!(token.redacted && token.value.is_none());
-        assert!(!serde_json::to_string(&s).unwrap().contains("sekrit"));
+        assert_eq!(find(&s.settings, "theme.dark").value, Some(json!("titanium")), "the rest of the batch landed too");
+        assert!(!serde_json::to_string(&s).unwrap().contains(&secret));
+        let yml = std::fs::read_to_string(agent.join("config.yml")).unwrap();
+        assert!(yml.contains(&secret), "the token reached omp's config");
+        assert!(std::fs::read_dir(td.path().join("run")).unwrap().next().is_none(), "no input file left behind");
+        // A bad value inside a credential batch: omp's message, the batch stops there.
+        let err = set(&omp, &[
+            OmpSettingChange { key: "auth.broker.token".into(), value: Some(json!("x")) },
+            OmpSettingChange { key: "providers.tinyModelDevice".into(), value: Some(json!("bogus")) },
+        ])
+        .await
+        .unwrap_err();
+        println!("bridge enum error: {}", err.message);
+        assert!(err.code == "invalid_params" && err.message.contains("Valid values"), "{err:?}");
+
+        // An older extension (no write mode): refused, nothing written, the hint names the env override.
+        std::fs::write(&ext, std::fs::read_to_string(&ext).unwrap().replace(WRITE_MARKER, "TF_OMP_NOPE")).unwrap();
+        let err = set(&omp, &[OmpSettingChange { key: "auth.broker.token".into(), value: Some(json!("never-written")) }]).await.unwrap_err();
+        println!("old extension: {} / {:?}", err.message, err.hint);
+        assert_eq!(err.code, "unsupported");
+        assert!(err.hint.as_deref().is_some_and(|h| h.contains("$OMP_AUTH_BROKER_TOKEN")));
+        assert!(!std::fs::read_to_string(agent.join("config.yml")).unwrap().contains("never-written"));
     }
 }

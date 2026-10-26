@@ -36,6 +36,8 @@ pub const LATE_MS: Millis = 2 * 60_000;
 const MAX_SLEEP: Duration = Duration::from_secs(60);
 /// Attempts at a free branch name when a run's branch already exists.
 const BRANCH_ATTEMPTS: u32 = 5;
+/// Attempts at a free agent name when herdr says it is taken (a concurrent launch won it).
+const NAME_ATTEMPTS: usize = 4;
 
 static GLOBAL: OnceLock<Arc<Automations>> = OnceLock::new();
 
@@ -56,6 +58,33 @@ pub struct Automations {
     keepalive: tokio::sync::Mutex<()>,
     /// Automations whose run is launching right now.
     inflight: Mutex<HashSet<String>>,
+    /// `(herdr session, agent name)` claimed by launches in flight: runs that fire together
+    /// never pick the same name from the same board snapshot.
+    names: Arc<Mutex<HashSet<(String, String)>>>,
+}
+
+/// A claimed agent name; released on drop.
+struct NameClaim {
+    names: Arc<Mutex<HashSet<(String, String)>>>,
+    key: (String, String),
+}
+
+impl Drop for NameClaim {
+    fn drop(&mut self) {
+        self.names.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.key);
+    }
+}
+
+/// A free agent name for `base`: not on the board, not claimed by another launch, not refused
+/// by herdr already (`avoid`).
+pub fn pick_name(base: &str, board: &[String], claimed: &HashSet<String>, avoid: &[String]) -> String {
+    let taken: Vec<String> = board.iter().chain(claimed.iter()).chain(avoid).cloned().collect();
+    crate::ops::agent::derive_handle(base, &taken)
+}
+
+/// herdr refused the agent name (`agent_name_taken`).
+fn name_taken(e: &ApiError) -> bool {
+    e.message.starts_with(tf_herdr::code::AGENT_NAME_TAKEN)
 }
 
 /// Loads the store and starts the scheduler and keepalive tasks (once per process).
@@ -75,6 +104,7 @@ pub fn start(daemon: &Arc<Daemon>) -> Arc<Automations> {
         kick: tokio::sync::Notify::new(),
         keepalive: tokio::sync::Mutex::new(()),
         inflight: Mutex::new(HashSet::new()),
+        names: Arc::new(Mutex::new(HashSet::new())),
     });
     if GLOBAL.set(a.clone()).is_err() {
         warn!("automations already started");
@@ -120,10 +150,11 @@ pub fn decide(cron: &Cron, through: Millis, now: Millis, catch_up: bool, tz: &ji
     }
 }
 
-/// Why a scheduled run must not start: the previous run's agent is still busy (pile-up guard).
-pub fn skip_reason(previous: Option<&AutomationRun>, agent: Option<&Agent>) -> Option<String> {
+/// Why a scheduled run must not start: the agent the previous run started is still busy
+/// (pile-up guard). `previous`: that agent's id.
+pub fn skip_reason(previous: Option<&str>, agent: Option<&Agent>) -> Option<String> {
     let previous = previous?;
-    let agent = agent.filter(|a| Some(&a.id) == previous.agent_id.as_ref())?;
+    let agent = agent.filter(|a| a.id == previous)?;
     match agent.state {
         HerdrState::Working => Some(format!("{} from the previous run is still working", agent.name)),
         HerdrState::Blocked => Some(format!("{} from the previous run needs you", agent.name)),
@@ -353,9 +384,9 @@ impl Automations {
     /// Runs one automation in `ctx`, records the run and tells the session's clients.
     async fn execute(&self, ctx: &Ctx, def: &Automation, trigger: AutomationTrigger) -> AutomationRun {
         if trigger != AutomationTrigger::Manual {
-            let previous = self.data.lock().unwrap().last_started(&def.id).cloned();
-            let agent = previous.as_ref().and_then(|p| p.agent_id.as_deref()).and_then(|id| ctx.state.agent(id));
-            if let Some(why) = skip_reason(previous.as_ref(), agent.as_ref()) {
+            let previous = self.data.lock().unwrap().last_started(&def.id).map(|s| s.agent_id.clone());
+            let agent = previous.as_deref().and_then(|id| ctx.state.agent(id));
+            if let Some(why) = skip_reason(previous.as_deref(), agent.as_ref()) {
                 let run = AutomationRun { error: Some(why), agent_id: agent.map(|a| a.id), ..self.new_run(def, trigger, AutomationRunStatus::Skipped) };
                 return self.record(Some(ctx), def, run);
             }
@@ -369,14 +400,39 @@ impl Automations {
         self.record(Some(ctx), def, run)
     }
 
+    /// Claims a free agent name for `base` in the context's herdr session.
+    fn claim_name(&self, ctx: &Ctx, base: &str, avoid: &[String]) -> NameClaim {
+        let board: Vec<String> = ctx.state.snapshot().agents.into_iter().map(|a| a.name).collect();
+        let mut names = self.names.lock().unwrap_or_else(|p| p.into_inner());
+        let claimed: HashSet<String> = names.iter().filter(|(s, _)| *s == ctx.herdr_session).map(|(_, n)| n.clone()).collect();
+        let key = (ctx.herdr_session.clone(), pick_name(base, &board, &claimed, avoid));
+        names.insert(key.clone());
+        NameClaim { names: self.names.clone(), key }
+    }
+
+    /// Starts the run's agent in `pane_id` under a free `base`-derived name, retrying with the
+    /// next one when herdr says a concurrent launch took it.
+    async fn start_named(&self, ctx: &Ctx, pane_id: &str, spec: &AgentSpec, base: &str) -> Result<tf_proto::Started, ApiError> {
+        let mut avoid = Vec::new();
+        loop {
+            let claim = self.claim_name(ctx, base, &avoid);
+            let spec = AgentSpec { name: Some(claim.key.1.clone()), ..spec.clone() };
+            match crate::ops::agent::start_agent(ctx, StartTarget::Pane { pane_id: pane_id.to_string() }, &spec, None).await {
+                Err(e) if name_taken(&e) && avoid.len() + 1 < NAME_ATTEMPTS => avoid.push(claim.key.1.clone()),
+                other => return other,
+            }
+        }
+    }
+
     /// The run recipe: a fresh worktree (`automation/<slug>-<yyyymmdd-hhmm>` from the default
-    /// base) with the agent in it, or the agent in a new workspace at `cwd`.
+    /// base) with the agent in it, or the agent in a new workspace at `cwd`. A worktree whose
+    /// agent fails to start is kept (the run names it); an empty workspace is closed again.
     async fn launch(&self, ctx: &Ctx, def: &Automation, trigger: AutomationTrigger) -> AutomationRun {
         let mut run = self.new_run(def, trigger, AutomationRunStatus::Started);
         let slug = store::slug(&def.name);
-        let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().map(|a| a.name).collect();
+        let name_base = format!("auto-{slug}");
         let spec = AgentSpec {
-            name: Some(crate::ops::agent::derive_handle(&format!("auto-{slug}"), &taken)),
+            name: None,
             kind: "omp".into(),
             model: def.model.clone(),
             thinking: def.thinking,
@@ -387,7 +443,7 @@ impl Automations {
         let result = if def.worktree {
             let base = format!("automation/{slug}-{}", cron::stamp(run.at, &cron::local_tz()));
             let mut attempt = 1;
-            loop {
+            let checkout = loop {
                 let branch = if attempt == 1 { base.clone() } else { format!("{base}-{attempt}") };
                 let params = WorktreeCreateParams {
                     cwd: def.cwd.clone(),
@@ -397,32 +453,44 @@ impl Automations {
                     label: Some(def.name.clone()),
                     existing: false,
                     trust: false,
-                    agent: Some(spec.clone()),
+                    agent: None,
                 };
-                match crate::ops::worktree::create(ctx, params).await {
+                match crate::ops::worktree::checkout(ctx, &params).await {
                     Err(e) if e.code == "branch_exists" && attempt < BRANCH_ATTEMPTS => attempt += 1,
-                    Err(e) => break Err(e),
-                    Ok(w) => {
-                        run.branch = Some(w.branch);
-                        run.path = Some(w.path);
-                        run.workspace_id = Some(w.workspace_id);
-                        break Ok(w.agent);
-                    }
+                    other => break other,
+                }
+            };
+            match checkout {
+                Err(e) => Err(e),
+                Ok((w, root_pane)) => {
+                    run.branch = Some(w.branch.clone());
+                    run.path = Some(w.path.clone());
+                    run.workspace_id = Some(w.workspace_id.clone());
+                    self.start_named(ctx, &root_pane, &spec, &name_base).await.map_err(|mut e| {
+                        e.message = format!("{} — the worktree {} (branch {}) was kept: start an agent there or remove it", e.message, w.path, w.branch);
+                        e
+                    })
                 }
             }
         } else {
             run.path = Some(def.cwd.clone());
-            crate::ops::agent::start_agent(ctx, StartTarget::Cwd { cwd: def.cwd.clone(), label: Some(def.name.clone()) }, &spec, None)
-                .await
-                .map(Some)
+            match crate::ops::agent::open_workspace(ctx, &def.cwd, Some(def.name.clone())).await {
+                Err(e) => Err(e),
+                Ok((pane_id, workspace_id, _)) => {
+                    run.workspace_id = Some(workspace_id.clone());
+                    let started = self.start_named(ctx, &pane_id, &spec, &name_base).await;
+                    if started.is_err() && close_if_empty(ctx, &workspace_id).await {
+                        run.workspace_id = None;
+                    }
+                    started
+                }
+            }
         };
         match result {
-            Ok(started) => {
-                if let Some(s) = started {
-                    run.agent_id = s.agent_id;
-                    if !s.workspace_id.is_empty() {
-                        run.workspace_id = Some(s.workspace_id);
-                    }
+            Ok(s) => {
+                run.agent_id = s.agent_id;
+                if !s.workspace_id.is_empty() {
+                    run.workspace_id = Some(s.workspace_id);
                 }
             }
             Err(e) => {
@@ -436,13 +504,17 @@ impl Automations {
         run
     }
 
-    /// Stores the run, logs it to the activity feed and notifies the session's clients.
+    /// Stores the run, logs it to the activity feed and notifies the session's clients. A skip
+    /// folded into the previous one (same reason, see [`StoreData::push_run`]) is not logged again.
     fn record(&self, ctx: Option<&Ctx>, def: &Automation, run: AutomationRun) -> AutomationRun {
-        {
+        let fresh_id = run.id.clone();
+        let run = {
             let mut data = self.data.lock().unwrap();
-            data.push_run(run.clone());
+            let stored = data.push_run(run);
             self.persist(&data);
-        }
+            stored
+        };
+        let repeat = run.id != fresh_id;
         info!(id = %def.id, name = %def.name, status = ?run.status, agent = ?run.agent_id, error = ?run.error, "automation run");
         let Some(ctx) = ctx else { return run };
         let agent_id = run.agent_id.clone().unwrap_or_default();
@@ -455,7 +527,7 @@ impl Automations {
             AutomationRunStatus::Failed => (format!("Automation {} failed", def.name), run.error.clone().unwrap_or_default()),
             AutomationRunStatus::Skipped => (format!("Automation {} skipped", def.name), run.error.clone().unwrap_or_default()),
         };
-        if !agent_id.is_empty() {
+        if !agent_id.is_empty() && !repeat {
             let kind = match run.status {
                 AutomationRunStatus::Started => ActivityKind::Started,
                 _ => ActivityKind::Error,
@@ -476,6 +548,25 @@ impl Automations {
             });
         }
         run
+    }
+}
+
+/// Closes a workspace this run created for its agent when it holds nothing else (the agent did
+/// not start). True when closed.
+async fn close_if_empty(ctx: &Ctx, workspace_id: &str) -> bool {
+    let empty = ctx.herdr.workspace_get(workspace_id).await.is_ok_and(|w| w.pane_count <= 1 && w.tab_count <= 1);
+    if !empty {
+        return false;
+    }
+    match ctx.herdr.workspace_close(workspace_id, false).await {
+        Ok(()) => {
+            ctx.state.refresh();
+            true
+        }
+        Err(e) => {
+            warn!(workspace = workspace_id, "automation: closing the empty workspace failed: {e}");
+            false
+        }
     }
 }
 
@@ -544,26 +635,45 @@ mod tests {
 
     #[test]
     fn skips_while_previous_agent_busy() {
-        let prev = AutomationRun {
-            id: "r1".into(),
-            automation_id: "au1".into(),
-            at: 1,
-            trigger: AutomationTrigger::Schedule,
-            status: AutomationRunStatus::Started,
-            agent_id: Some("ag1".into()),
-            workspace_id: None,
-            branch: None,
-            path: None,
-            error: None,
-        };
+        let prev = Some("ag1");
         assert_eq!(skip_reason(None, None), None);
-        assert_eq!(skip_reason(Some(&prev), None), None, "agent gone: run");
-        assert!(skip_reason(Some(&prev), Some(&agent("ag1", HerdrState::Working))).unwrap().contains("still working"));
-        assert!(skip_reason(Some(&prev), Some(&agent("ag1", HerdrState::Blocked))).unwrap().contains("needs you"));
-        assert_eq!(skip_reason(Some(&prev), Some(&agent("ag1", HerdrState::Idle))), None);
-        assert_eq!(skip_reason(Some(&prev), Some(&agent("ag1", HerdrState::Done))), None);
+        assert_eq!(skip_reason(prev, None), None, "agent gone: run");
+        assert!(skip_reason(prev, Some(&agent("ag1", HerdrState::Working))).unwrap().contains("still working"));
+        assert!(skip_reason(prev, Some(&agent("ag1", HerdrState::Blocked))).unwrap().contains("needs you"));
+        assert_eq!(skip_reason(prev, Some(&agent("ag1", HerdrState::Idle))), None);
+        assert_eq!(skip_reason(prev, Some(&agent("ag1", HerdrState::Done))), None);
         // Another agent (pane reused): not ours.
-        assert_eq!(skip_reason(Some(&prev), Some(&agent("ag2", HerdrState::Working))), None);
+        assert_eq!(skip_reason(prev, Some(&agent("ag2", HerdrState::Working))), None);
+    }
+
+    #[test]
+    fn concurrent_launches_pick_distinct_names() {
+        // "Nightly dependency audit – api" / "– web": the 24-char slugs are the same.
+        let (a, b) = (store::slug("Nightly dependency audit – api"), store::slug("Nightly dependency audit – web"));
+        assert_eq!(a, b);
+        let base = format!("auto-{a}");
+        let board = vec!["lab".to_string()];
+        let mut claimed = HashSet::new();
+        let first = pick_name(&base, &board, &claimed, &[]);
+        claimed.insert(first.clone());
+        let second = pick_name(&base, &board, &claimed, &[]);
+        assert_ne!(first, second, "a name claimed by a launch in flight is not handed out again");
+        assert!(crate::ops::agent::valid_handle(&first) && crate::ops::agent::valid_handle(&second));
+        // herdr refused a name (another daemon / client won it): the retry skips it.
+        claimed.insert(second.clone());
+        let third = pick_name(&base, &board, &claimed, &[format!("{first}-3")]);
+        assert_eq!(third, format!("{first}-4"));
+        assert!(name_taken(&ApiError::new("herdr_error", "agent_name_taken: agent name `auto-x` is already used")));
+        assert!(!name_taken(&ApiError::new("herdr_error", "pane_not_found: gone")));
+    }
+
+    #[test]
+    fn name_claims_release_on_drop() {
+        let names = Arc::new(Mutex::new(HashSet::new()));
+        let key = ("s".to_string(), "auto-x".to_string());
+        names.lock().unwrap().insert(key.clone());
+        drop(NameClaim { names: names.clone(), key });
+        assert!(names.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -19,8 +19,13 @@ use crate::ops::{to_value, Ctx};
 /// Per-worktree budget for the dirty count in `worktree.list`.
 const DIRTY_BUDGET: Duration = Duration::from_secs(2);
 const QUICK: Duration = Duration::from_secs(10);
-/// Budget for fetching a new branch's remote base; past it the worktree forks from the ref as is.
-const FETCH_BASE: Duration = Duration::from_secs(30);
+/// Budget for fetching a new branch's remote base; past it the worktree forks from the ref as
+/// is. Short: `worktree.create` (fetch + herdr checkout + agent start) must answer well within
+/// the app's 30 s request timeout even when the remote silently drops traffic (ssh also gets
+/// `ConnectTimeout=5`).
+const FETCH_BASE: Duration = Duration::from_secs(8);
+/// Attempts at dropping the base upstream (parallel creations contend for `.git/config.lock`).
+const UPSTREAM_ATTEMPTS: u32 = 4;
 
 pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
@@ -154,21 +159,58 @@ async fn plan_branch(root: &Path, p: &WorktreeCreateParams) -> Result<BranchPlan
 /// git can make a branch created from a remote-tracking ref track it (`branch.autoSetupMerge`:
 /// `git branch` does by default; `git worktree add -b` with `--track`, or depending on the git
 /// version and config): `feat/x` forked from `origin/main` would then `git push` into main and
-/// count ahead/behind against it. Drops that upstream (only that one); the first `git.push` then
-/// publishes `feat/x` under its own name.
+/// count ahead/behind against it. Drops that upstream (only that one), retrying while parallel
+/// creations hold `.git/config.lock`, and verifies it is gone. Should it stay, `git.push` still
+/// publishes `feat/x` under its own name (it never pushes to an upstream of another name).
 async fn drop_base_upstream(root: &Path, branch: &str, base: &str) {
-    let up = git::git(root, &["for-each-ref", "--format=%(upstream:short)", &format!("refs/heads/{branch}")], QUICK).await;
-    if !up.is_ok_and(|o| o.ok() && o.line() == base) {
-        return;
+    let tracks_base = || async {
+        let up = git::git(root, &["for-each-ref", "--format=%(upstream:short)", &format!("refs/heads/{branch}")], QUICK).await;
+        up.is_ok_and(|o| o.ok() && o.line() == base)
+    };
+    let mut last = String::new();
+    for attempt in 0..UPSTREAM_ATTEMPTS {
+        if !tracks_base().await {
+            return;
+        }
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(150 * u64::from(attempt))).await;
+        }
+        last = match git::git(root, &["branch", "--unset-upstream", branch], QUICK).await {
+            Ok(o) if o.ok() => continue,
+            Ok(o) => o.message(),
+            Err(e) => e.message,
+        };
     }
-    match git::git(root, &["branch", "--unset-upstream", branch], QUICK).await {
-        Ok(o) if o.ok() => {}
-        Ok(o) => tracing::warn!(branch, "could not drop the upstream {base}: {}", o.message()),
-        Err(e) => tracing::warn!(branch, "could not drop the upstream {base}: {}", e.message),
+    if tracks_base().await {
+        tracing::warn!(branch, "could not drop the upstream {base}: {last}");
     }
 }
 
 pub async fn create(ctx: &Ctx, p: WorktreeCreateParams) -> Result<WorktreeCreated, ApiError> {
+    let (created, root_pane) = checkout(ctx, &p).await?;
+    let WorktreeCreated { workspace_id, path: checkout, branch, .. } = created;
+    let agent = match &p.agent {
+        Some(spec) => {
+            let target = StartTarget::Pane { pane_id: root_pane };
+            match crate::ops::agent::start_agent(ctx, target, spec, None).await {
+                Ok(started) => Some(started),
+                Err(mut e) => {
+                    e.hint = Some(format!(
+                        "The worktree was created at {checkout} (workspace {workspace_id}), but the agent did not start{}. Start one from the workspace.",
+                        e.hint.as_deref().map(|h| format!(": {h}")).unwrap_or_default()
+                    ));
+                    return Err(e);
+                }
+            }
+        }
+        None => None,
+    };
+    Ok(WorktreeCreated { workspace_id, path: checkout, branch, agent })
+}
+
+/// The worktree part of `worktree.create` (`p.agent` is not looked at): the new checkout opened
+/// as a workspace, and that workspace's root pane (an idle shell).
+pub(crate) async fn checkout(ctx: &Ctx, p: &WorktreeCreateParams) -> Result<(WorktreeCreated, String), ApiError> {
     let cwd = existing_dir(&p.cwd)?;
     let root = match git::toplevel(Path::new(&cwd)).await {
         Ok(r) => r,
@@ -188,7 +230,7 @@ pub async fn create(ctx: &Ctx, p: WorktreeCreateParams) -> Result<WorktreeCreate
     let plan = if p.trust && !git::git(&root, &["rev-parse", "--git-dir"], QUICK).await.map(|o| o.ok()).unwrap_or(false) {
         BranchPlan { branch: p.branch.trim().to_string(), base: p.base.clone(), from_remote: false }
     } else {
-        plan_branch(&root, &p).await?
+        plan_branch(&root, p).await?
     };
     let path = match p.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => Some(resolve_path(s)?.display().to_string()),
@@ -216,23 +258,7 @@ pub async fn create(ctx: &Ctx, p: WorktreeCreateParams) -> Result<WorktreeCreate
         && let Some(base) = &plan.base {
             drop_base_upstream(&root, &branch, base).await;
         }
-    let agent = match &p.agent {
-        Some(spec) => {
-            let target = StartTarget::Pane { pane_id: created.root_pane.pane_id.clone() };
-            match crate::ops::agent::start_agent(ctx, target, spec, None).await {
-                Ok(started) => Some(started),
-                Err(mut e) => {
-                    e.hint = Some(format!(
-                        "The worktree was created at {checkout} (workspace {workspace_id}), but the agent did not start{}. Start one from the workspace.",
-                        e.hint.as_deref().map(|h| format!(": {h}")).unwrap_or_default()
-                    ));
-                    return Err(e);
-                }
-            }
-        }
-        None => None,
-    };
-    Ok(WorktreeCreated { workspace_id, path: checkout, branch, agent })
+    Ok((WorktreeCreated { workspace_id, path: checkout, branch, agent: None }, created.root_pane.pane_id))
 }
 
 pub async fn remove(ctx: &Ctx, p: &WorktreeRemoveParams) -> Result<Empty, ApiError> {

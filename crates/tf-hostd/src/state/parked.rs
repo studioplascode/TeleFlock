@@ -310,16 +310,19 @@ impl StateHandle {
         }
     }
 
-    /// The undo window ended: drops the wait if it is still the given one. False when it was
-    /// cancelled or replaced meanwhile.
-    pub fn end_park_wait(&self, agent_id: &str, generation: u64) -> bool {
+    /// The undo window ended: true when this wait is still the pending one (not cancelled or
+    /// replaced meanwhile). The entry stays until [`finish_park_wait`](Self::finish_park_wait),
+    /// so an Undo arriving while the pane is being closed still finds and cancels it.
+    pub fn park_due(&self, agent_id: &str, generation: u64) -> bool {
+        let m = self.lock();
+        matches!(m.life.waits.get(agent_id), Some((g, t)) if *g == generation && !t.is_cancelled())
+    }
+
+    /// The close after the undo window is over: drops the wait if it is still the given one.
+    pub fn finish_park_wait(&self, agent_id: &str, generation: u64) {
         let mut m = self.lock();
-        match m.life.waits.get(agent_id) {
-            Some((g, t)) if *g == generation && !t.is_cancelled() => {
-                m.life.waits.remove(agent_id);
-                true
-            }
-            _ => false,
+        if m.life.waits.get(agent_id).is_some_and(|(g, _)| *g == generation) {
+            m.life.waits.remove(agent_id);
         }
     }
 
@@ -455,10 +458,52 @@ pub(super) fn merge_into(h: &StateHandle, m: &mut super::Inner, persisted: &Sess
 
 // ───────────────────────────── herdr side ─────────────────────────────
 
-/// Closes an agent's pane per [`close_scope`].
-pub async fn close_agent(ctx: &Ctx, a: &Agent) -> Result<(), tf_herdr::HerdrError> {
-    let scope = close_scope(a, &ctx.state.snapshot().workspaces);
-    info!(agent = %a.id, ?scope, "closing done agent");
+/// Checks the board's [`close_scope`] against herdr itself right before closing (the board may
+/// lag: a pane opened seconds ago, or the agent's pane id reused). `pane`: `pane.get` of the
+/// agent's pane; `ws`: `workspace.get` of the workspace the scope names. `None`: the pane is no
+/// longer the agent's (or herdr could not say), so nothing is closed. A workspace is closed only
+/// when herdr reports exactly one tab with one pane: this one; otherwise just the pane.
+pub fn verify_close(
+    scope: CloseScope,
+    agent_id: &str,
+    pane: Option<&tf_herdr::PaneInfo>,
+    ws: Option<&tf_herdr::WorkspaceInfo>,
+) -> Option<CloseScope> {
+    let pane = pane?;
+    let owner = if pane.terminal_id.is_empty() { &pane.pane_id } else { &pane.terminal_id };
+    if owner != agent_id {
+        return None;
+    }
+    let alone_in = |id: &str| ws.is_some_and(|w| w.workspace_id == id && pane.workspace_id == id && w.pane_count == 1 && w.tab_count == 1);
+    Some(match scope {
+        CloseScope::Workspace(id) if alone_in(&id) => CloseScope::Workspace(id),
+        CloseScope::PaneKeepWorkspace { workspace_id, .. } if ws.is_some_and(|w| w.workspace_id == workspace_id && w.pane_count > 1) => {
+            CloseScope::Pane(pane.pane_id.clone())
+        }
+        keep @ CloseScope::PaneKeepWorkspace { .. } => keep,
+        CloseScope::Workspace(_) | CloseScope::Pane(_) => CloseScope::Pane(pane.pane_id.clone()),
+    })
+}
+
+/// Closes a done agent's pane per [`close_scope`], verified against herdr ([`verify_close`]).
+/// Re-checks right before closing that the agent is still archived and, with `undo`, that the
+/// *Mark done* was not undone meanwhile. `Ok(false)`: nothing was closed.
+pub async fn close_agent(ctx: &Ctx, a: &Agent, undo: Option<&CancellationToken>) -> Result<bool, tf_herdr::HerdrError> {
+    let board = close_scope(a, &ctx.state.snapshot().workspaces);
+    let pane = ctx.herdr.pane_get(&a.pane_id).await.ok();
+    let ws = match &board {
+        CloseScope::Workspace(w) | CloseScope::PaneKeepWorkspace { workspace_id: w, .. } => ctx.herdr.workspace_get(w).await.ok(),
+        CloseScope::Pane(_) => None,
+    };
+    let Some(scope) = verify_close(board.clone(), &a.id, pane.as_ref(), ws.as_ref()) else {
+        info!(agent = %a.id, pane = %a.pane_id, "done agent's pane is gone or reused; closing nothing");
+        return Ok(false);
+    };
+    if undo.is_some_and(CancellationToken::is_cancelled) || ctx.state.archived_at(&a.id).is_none() {
+        info!(agent = %a.id, "done agent un-archived meanwhile; keeping its pane");
+        return Ok(false);
+    }
+    info!(agent = %a.id, ?board, ?scope, "closing done agent");
     match scope {
         CloseScope::Workspace(ws) => ctx.herdr.workspace_close(&ws, false).await?,
         CloseScope::Pane(p) => ctx.herdr.pane_close(&p).await?,
@@ -468,16 +513,102 @@ pub async fn close_agent(ctx: &Ctx, a: &Agent) -> Result<(), tf_herdr::HerdrErro
         }
     }
     ctx.state.refresh();
-    Ok(())
+    Ok(true)
+}
+
+/// What a stat says about a session file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileCheck {
+    Present,
+    /// `NotFound` while its folder (or, the folder deleted too, the sessions root above it)
+    /// stats fine: deleted.
+    Missing,
+    /// Anything else (permissions, I/O, a stale or unmounted file system): no verdict, never
+    /// prunes.
+    Unknown(String),
+}
+
+pub fn check_file(path: &Path) -> FileCheck {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => FileCheck::Present,
+        Ok(_) => FileCheck::Unknown(format!("{} is not a file", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // omp keeps sessions in `<sessions>/<folder slug>/<file>`: the file's folder must be
+            // a folder, or, when that is gone too, the sessions root a folder that still holds
+            // something (an unmounted mount point is an empty folder).
+            for (level, dir) in path.ancestors().skip(1).take(2).enumerate() {
+                match std::fs::metadata(dir) {
+                    Ok(d) if d.is_dir() && level == 0 => return FileCheck::Missing,
+                    Ok(d) if d.is_dir() => {
+                        return match std::fs::read_dir(dir).map(|mut it| it.next().is_some()) {
+                            Ok(true) => FileCheck::Missing,
+                            Ok(false) => FileCheck::Unknown(format!("{} is empty (unmounted?)", dir.display())),
+                            Err(e) => FileCheck::Unknown(format!("{}: {e}", dir.display())),
+                        };
+                    }
+                    Ok(_) => return FileCheck::Unknown(format!("{} is not a folder", dir.display())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return FileCheck::Unknown(format!("{}: {e}", dir.display())),
+                }
+            }
+            FileCheck::Unknown(format!("{}: its folders are gone too (unmounted?)", path.display()))
+        }
+        Err(e) => FileCheck::Unknown(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Prune bookkeeping across passes (not persisted).
+#[derive(Debug, Default)]
+pub struct PruneMemory {
+    /// Session files of live agents seen on disk: omp writes a session file lazily, so a live
+    /// agent is pruned only once its file existed and then vanished.
+    known: HashSet<String>,
+    /// Consecutive passes a known live agent's file was missing.
+    misses: HashMap<String, u32>,
+}
+
+/// Misses in a row before an archived live agent's pane is closed.
+pub const LIVE_MISSES: u32 = 2;
+
+/// Which agents one pass prunes: parked agents whose file is missing, archived live agents
+/// whose known file was missing on [`LIVE_MISSES`] passes in a row. Any file without a verdict
+/// skips the whole pass (`None`, memory untouched): a file system that errors may err for all.
+pub fn plan_prune(
+    parked: &[(String, String)],
+    live: &[(String, String)],
+    checks: &HashMap<String, FileCheck>,
+    mem: &mut PruneMemory,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let check = |f: &str| checks.get(f).cloned().unwrap_or_else(|| FileCheck::Unknown("not checked".into()));
+    if parked.iter().chain(live).any(|(_, f)| matches!(check(f), FileCheck::Unknown(_))) {
+        return None;
+    }
+    let gone_parked = parked.iter().filter(|(_, f)| check(f) == FileCheck::Missing).map(|(id, _)| id.clone()).collect();
+    let mut gone_live = Vec::new();
+    let mut known = HashSet::new();
+    let mut misses = HashMap::new();
+    for (id, f) in live {
+        if check(f) == FileCheck::Present {
+            known.insert(f.clone());
+        } else if mem.known.contains(f) {
+            let n = mem.misses.get(f).copied().unwrap_or(0) + 1;
+            if n >= LIVE_MISSES {
+                gone_live.push(id.clone());
+            }
+            // Kept until the pane is gone (a failed close retries next pass).
+            known.insert(f.clone());
+            misses.insert(f.clone(), n);
+        }
+    }
+    *mem = PruneMemory { known, misses };
+    Some((gone_parked, gone_live))
 }
 
 /// Checks session files at start and every [`PRUNE_EVERY`].
 pub(super) async fn prune_loop(ctx: Arc<Ctx>) {
-    // Session files seen on disk: omp writes a session file lazily, so a live agent is pruned
-    // only once its file existed and then vanished.
-    let mut known: HashSet<String> = HashSet::new();
+    let mut mem = PruneMemory::default();
     loop {
-        prune_pass(&ctx, &mut known).await;
+        prune_pass(&ctx, &mut mem).await;
         tokio::select! {
             _ = ctx.cancel.cancelled() => return,
             _ = tokio::time::sleep(PRUNE_EVERY) => {}
@@ -485,47 +616,40 @@ pub(super) async fn prune_loop(ctx: Arc<Ctx>) {
     }
 }
 
-async fn prune_pass(ctx: &Ctx, known: &mut HashSet<String>) {
+async fn prune_pass(ctx: &Ctx, mem: &mut PruneMemory) {
     let h = &ctx.state;
     h.trim_pruned();
-    let parked = h.parked_all();
+    let parked: Vec<(String, String)> = h.parked_all().into_iter().map(|r| (r.agent_id, r.session_file)).collect();
     let live: Vec<Agent> = h
         .snapshot()
         .agents
         .into_iter()
         .filter(|a| a.parked.is_none() && parkable(a).is_some())
         .collect();
-    let files: Vec<String> = parked
-        .iter()
-        .map(|r| r.session_file.clone())
-        .chain(live.iter().filter_map(|a| parkable(a).map(str::to_string)))
-        .collect();
-    let exists: HashSet<String> = match tokio::task::spawn_blocking(move || files.into_iter().filter(|f| Path::new(f).is_file()).collect()).await {
-        Ok(set) => set,
+    let live_files: Vec<(String, String)> = live.iter().filter_map(|a| Some((a.id.clone(), parkable(a)?.to_string()))).collect();
+    let files: Vec<String> = parked.iter().chain(&live_files).map(|(_, f)| f.clone()).collect();
+    let checks: HashMap<String, FileCheck> = match tokio::task::spawn_blocking(move || files.into_iter().map(|f| { let c = check_file(Path::new(&f)); (f, c) }).collect()).await {
+        Ok(c) => c,
         Err(_) => return,
     };
-    for r in &parked {
-        if !exists.contains(&r.session_file) && !h.lock().life.resuming.contains_key(&r.agent_id) {
-            h.prune_parked(&r.agent_id);
+    let Some((gone_parked, gone_live)) = plan_prune(&parked, &live_files, &checks, mem) else {
+        let why: Vec<&String> = checks.values().filter_map(|c| match c { FileCheck::Unknown(e) => Some(e), _ => None }).take(3).collect();
+        warn!(?why, "prune: session files unreadable; skipping this pass");
+        return;
+    };
+    for id in gone_parked {
+        if !h.lock().life.resuming.contains_key(&id) {
+            h.prune_parked(&id);
         }
     }
-    let mut still: HashSet<String> = HashSet::new();
-    for a in &live {
-        let Some(file) = parkable(a) else { continue };
-        if exists.contains(file) {
-            still.insert(file.to_string());
-            continue;
-        }
-        if !known.contains(file) {
-            continue;
-        }
+    for a in live.iter().filter(|a| gone_live.contains(&a.id)) {
         let sid = a.omp.as_ref().and_then(|o| o.session_id.clone());
-        match close_agent(ctx, a).await {
-            Ok(()) => h.prune(&a.id, sid.as_deref()),
+        match close_agent(ctx, a, None).await {
+            Ok(true) => h.prune(&a.id, sid.as_deref()),
+            Ok(false) => {}
             Err(e) => warn!(agent = %a.id, "prune: closing the pane failed: {e}"),
         }
     }
-    *known = still;
 }
 
 #[cfg(test)]
@@ -751,14 +875,122 @@ mod tests {
         // Undo within the window.
         assert!(h.set_archived("term_1", false));
         assert!(token.is_cancelled());
-        assert!(!h.end_park_wait("term_1", first), "a cancelled window never parks");
+        assert!(!h.park_due("term_1", first), "a cancelled window never parks");
         // Marked done twice: only the latest window may park.
         let (g1, t1) = h.schedule_park("term_1");
-        let (g2, _t2) = h.schedule_park("term_1");
+        let (g2, t2) = h.schedule_park("term_1");
         assert!(t1.is_cancelled());
-        assert!(!h.end_park_wait("term_1", g1));
-        assert!(h.end_park_wait("term_1", g2));
-        assert!(!h.cancel_park("term_1"), "nothing pending after the window ended");
+        assert!(!h.park_due("term_1", g1));
+        assert!(h.park_due("term_1", g2));
+        // Undo right after the window, while the pane is being closed: still cancels it.
+        assert!(h.set_archived("term_1", false));
+        assert!(t2.is_cancelled() && h.archived_at("term_1").is_none());
+        h.finish_park_wait("term_1", g2);
+        // A window that ran its course is gone once the close is done.
+        h.set_archived("term_1", true);
+        let (g3, _t3) = h.schedule_park("term_1");
+        assert!(h.park_due("term_1", g3));
+        h.finish_park_wait("term_1", g3);
+        assert!(!h.cancel_park("term_1"), "nothing pending after the close");
+    }
+
+    fn herdr_pane(pane: &str, terminal: &str, ws: &str) -> tf_herdr::PaneInfo {
+        tf_herdr::PaneInfo { pane_id: pane.into(), terminal_id: terminal.into(), workspace_id: ws.into(), ..Default::default() }
+    }
+
+    fn herdr_ws(id: &str, panes: u32, tabs: u32) -> tf_herdr::WorkspaceInfo {
+        tf_herdr::WorkspaceInfo { workspace_id: id.into(), pane_count: panes, tab_count: tabs, ..Default::default() }
+    }
+
+    #[test]
+    fn closes_only_what_herdr_confirms() {
+        let ws_scope = || CloseScope::Workspace("w2".into());
+        let mine = herdr_pane("w2:p1", "term_7", "w2");
+        // herdr agrees: one tab, one pane, ours.
+        assert_eq!(verify_close(ws_scope(), "term_7", Some(&mine), Some(&herdr_ws("w2", 1, 1))), Some(ws_scope()));
+        // A pane (or tab) opened since the board was built: just our pane.
+        assert_eq!(verify_close(ws_scope(), "term_7", Some(&mine), Some(&herdr_ws("w2", 2, 1))), Some(CloseScope::Pane("w2:p1".into())));
+        assert_eq!(verify_close(ws_scope(), "term_7", Some(&mine), Some(&herdr_ws("w2", 1, 2))), Some(CloseScope::Pane("w2:p1".into())));
+        // herdr could not describe the workspace: never close it whole.
+        assert_eq!(verify_close(ws_scope(), "term_7", Some(&mine), None), Some(CloseScope::Pane("w2:p1".into())));
+        // The pane moved to another workspace.
+        let moved = herdr_pane("w2:p1", "term_7", "w5");
+        assert_eq!(verify_close(ws_scope(), "term_7", Some(&moved), Some(&herdr_ws("w2", 1, 1))), Some(CloseScope::Pane("w2:p1".into())));
+        // The pane id now belongs to another terminal, or is gone: close nothing.
+        let reused = herdr_pane("w2:p1", "term_9", "w2");
+        assert_eq!(verify_close(ws_scope(), "term_7", Some(&reused), Some(&herdr_ws("w2", 1, 1))), None);
+        assert_eq!(verify_close(CloseScope::Pane("w2:p1".into()), "term_7", Some(&reused), None), None);
+        assert_eq!(verify_close(ws_scope(), "term_7", None, Some(&herdr_ws("w2", 1, 1))), None);
+        // Agents without a terminal id go by pane id.
+        assert_eq!(verify_close(CloseScope::Pane("w2:p1".into()), "w2:p1", Some(&herdr_pane("w2:p1", "", "w2")), None), Some(CloseScope::Pane("w2:p1".into())));
+        // Group primary: the keep-open tab only when ours is still the only pane.
+        let keep = || CloseScope::PaneKeepWorkspace { pane_id: "w2:p1".into(), workspace_id: "w2".into() };
+        assert_eq!(verify_close(keep(), "term_7", Some(&mine), Some(&herdr_ws("w2", 1, 1))), Some(keep()));
+        assert_eq!(verify_close(keep(), "term_7", Some(&mine), None), Some(keep()));
+        assert_eq!(verify_close(keep(), "term_7", Some(&mine), Some(&herdr_ws("w2", 3, 2))), Some(CloseScope::Pane("w2:p1".into())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_not_found_in_a_healthy_folder_counts_as_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let sessions = td.path().join("sessions");
+        let slug = sessions.join("-tmp-lab");
+        std::fs::create_dir_all(&slug).unwrap();
+        let file = slug.join("a.jsonl");
+        std::fs::write(&file, "{}").unwrap();
+        assert_eq!(check_file(&file), FileCheck::Present);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(check_file(&file), FileCheck::Missing);
+        // The folder deleted too, the sessions root still holds others: deleted.
+        std::fs::create_dir_all(sessions.join("-tmp-other")).unwrap();
+        std::fs::remove_dir(&slug).unwrap();
+        assert_eq!(check_file(&file), FileCheck::Missing);
+        // An empty root (an unmounted mount point) or no root at all: no verdict.
+        std::fs::remove_dir(sessions.join("-tmp-other")).unwrap();
+        assert!(matches!(check_file(&file), FileCheck::Unknown(_)));
+        assert!(matches!(check_file(&td.path().join("gone/x/y/a.jsonl")), FileCheck::Unknown(_)));
+        // A folder that cannot be read (root ignores permissions: skip there).
+        std::fs::create_dir_all(&slug).unwrap();
+        std::fs::set_permissions(&slug, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&slug).is_err() {
+            assert!(matches!(check_file(&file), FileCheck::Unknown(_)));
+        }
+        std::fs::set_permissions(&slug, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Not a file.
+        assert!(matches!(check_file(&slug), FileCheck::Unknown(_)));
+    }
+
+    #[test]
+    fn prune_needs_verdicts_and_two_misses_for_live_agents() {
+        let pair = |id: &str, f: &str| (id.to_string(), f.to_string());
+        let parked = vec![pair("p1", "/s/p1"), pair("p2", "/s/p2")];
+        let live = vec![pair("l1", "/s/l1"), pair("l2", "/s/l2")];
+        let checks = |v: &[(&str, FileCheck)]| v.iter().map(|(f, c)| (f.to_string(), c.clone())).collect::<HashMap<_, _>>();
+        use FileCheck::{Missing, Present};
+        let mut mem = PruneMemory::default();
+
+        // l2 has no file yet (omp writes it lazily): never pruned on that.
+        let all = checks(&[("/s/p1", Present), ("/s/p2", Missing), ("/s/l1", Present), ("/s/l2", Missing)]);
+        assert_eq!(plan_prune(&parked, &live, &all, &mut mem), Some((vec!["p2".to_string()], vec![])));
+        // l1's file vanished: one miss is not enough…
+        let gone = checks(&[("/s/p1", Present), ("/s/p2", Present), ("/s/l1", Missing), ("/s/l2", Missing)]);
+        assert_eq!(plan_prune(&parked, &live, &gone, &mut mem), Some((vec![], vec![])));
+        // …an unreadable file system skips the pass (nothing pruned, nothing forgotten)…
+        let flaky = checks(&[("/s/p1", FileCheck::Unknown("EIO".into())), ("/s/p2", Present), ("/s/l1", Missing), ("/s/l2", Missing)]);
+        assert_eq!(plan_prune(&parked, &live, &flaky, &mut mem), None);
+        // …the second miss in a row closes it.
+        assert_eq!(plan_prune(&parked, &live, &gone, &mut mem), Some((vec![], vec!["l1".to_string()])));
+
+        // A file that comes back resets the count.
+        let mut mem = PruneMemory::default();
+        plan_prune(&[], &live, &checks(&[("/s/l1", Present), ("/s/l2", Present)]), &mut mem);
+        plan_prune(&[], &live, &checks(&[("/s/l1", Missing), ("/s/l2", Present)]), &mut mem);
+        plan_prune(&[], &live, &checks(&[("/s/l1", Present), ("/s/l2", Present)]), &mut mem);
+        assert_eq!(plan_prune(&[], &live, &checks(&[("/s/l1", Missing), ("/s/l2", Present)]), &mut mem), Some((vec![], vec![])));
+        // A file never checked is no verdict either.
+        assert_eq!(plan_prune(&parked, &[], &HashMap::new(), &mut mem), None);
     }
 
     #[cfg(unix)]

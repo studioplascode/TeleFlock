@@ -280,7 +280,14 @@ fn main() {
         std::fs::create_dir_all(format!("{home}/ext")).unwrap();
         std::fs::copy(src, format!("{home}/ext/teleflock-bridge.ts")).expect("deploy extension");
     }
-    // A repository with a linked worktree (what Dispatch creates).
+    // A repository with a linked worktree (what Dispatch creates). `--work` is wiped first, so
+    // it must be a lab folder in /tmp too.
+    let work = Path::new(&a.work);
+    assert!(
+        work.is_absolute() && work.starts_with("/tmp") && work.components().count() > 2 && !a.work.contains(".."),
+        "--work must be a folder inside /tmp (it is deleted first): {}",
+        a.work
+    );
     let _ = std::fs::remove_dir_all(&a.work);
     let repo = format!("{}/repo", a.work);
     let wt = format!("{}/repo-wt", a.work);
@@ -380,7 +387,8 @@ fn main() {
     let t0 = Instant::now();
     c.wait_state("parked pruned", 150, |s| !has(s, &third_id, |_| true));
     println!("  parked agent pruned after {:.0?}", t0.elapsed());
-    c.wait_state("archived live agent pruned", 150, |s| !has(s, &other, |_| true));
+    // A live agent goes only after two consecutive misses (one prune pass a minute).
+    c.wait_state("archived live agent pruned", 210, |s| !has(s, &other, |_| true));
     println!("  archived live agent pruned (pane closed) after {:.0?}", t0.elapsed());
     c.drain(1_000);
     println!("  info.pruned: {}", short(&c.state["info"]["pruned"], 300));

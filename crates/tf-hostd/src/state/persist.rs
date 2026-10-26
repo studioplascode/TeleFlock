@@ -156,6 +156,8 @@ pub struct Persist {
     path: PathBuf,
     data: Mutex<PersistData>,
     dirty: AtomicBool,
+    /// Held from snapshot to rename, so an older snapshot never lands after a newer one.
+    saving: Mutex<()>,
 }
 
 impl Persist {
@@ -171,7 +173,7 @@ impl Persist {
             }),
             Err(_) => PersistData::default(),
         };
-        Arc::new(Self { path, data: Mutex::new(data), dirty: AtomicBool::new(false) })
+        Arc::new(Self { path, data: Mutex::new(data), dirty: AtomicBool::new(false), saving: Mutex::new(()) })
     }
 
     /// Mutates and schedules a save.
@@ -191,6 +193,7 @@ impl Persist {
     }
 
     pub fn save_now(&self) {
+        let _one = self.saving.lock().unwrap_or_else(|p| p.into_inner());
         if !self.dirty.swap(false, Ordering::Relaxed) {
             return;
         }

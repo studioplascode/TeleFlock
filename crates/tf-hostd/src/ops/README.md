@@ -15,7 +15,7 @@ ops::git::repo_info(&Path).await -> Option<RepoInfo>
 ops::term::TermRegistry                             // Ctx.terms (Default + Clone)
 ops::term::input(ctx, client, term_id, data).await  // ClientMsg::TermIn
 ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
-ops::tools::Tools::load(<home>/tools.json)          // daemon: one updater; .spawn(cancel) schedules runs
+ops::tools::Tools::load(<home>/tools.json, paths.is_default_home()) // daemon: one updater (auto on by default for ~/.teleflock, off for lab homes); .spawn(cancel)
 ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish HostInfo.tools for that session
 ```
 
@@ -47,18 +47,23 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   `defaultBase` = what new worktrees fork from: `origin/<default>` when that ref exists, else the
   local default's remote-tracking upstream (repos without `origin`), else the local branch.
 - **git.commit** (`all` = `git add -A`) records a `committed` activity on agents in that checkout.
-  **git.push** without an upstream runs `git push --set-upstream <origin, else the first remote> HEAD`
-  (publishes the branch under its own name and tracks it).
+  **git.push** pushes plainly only when the branch's upstream is its namesake on a remote; otherwise
+  (no upstream, a local one, or another name such as the `origin/main` a worktree forked from) it runs
+  `git push --set-upstream <the upstream's remote, else origin, else the first remote> HEAD`
+  (publishes the branch under its own name and tracks it; never pushes into the base).
 - **worktree.create** (new branch): `base` absent → `defaultBase`. A base naming a branch of a
   configured remote (`origin/main`; a local branch spelled the same stays local) is fetched first:
   `git fetch <remote> refs/heads/<branch>` (updates the remote-tracking ref through the configured
-  refspec), hookless, `GIT_TERMINAL_PROMPT=0`, ssh `-o BatchMode=yes` appended to the ssh command git
-  would use (`GIT_SSH_COMMAND` / `core.sshCommand` / `ssh`; other programs are left alone), 30 s.
-  Single-flight per repo + branch, and an attempt answers for 20 s (fan-outs fork from one commit and
-  pay one timeout). A failed fetch is logged and creation continues from the existing ref; a base that
-  does not exist locally is `invalid_params`. herdr then runs `git worktree add -b <branch> <path>
-  <base>`, which makes the branch track a remote base (`branch.autoSetupMerge`); hostd drops exactly
-  that upstream, so ahead/behind, review and the first `git.push` (own name) are right. Existing-branch
+  refspec), hookless, `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=` (empty: no `core.askPass` /
+  `SSH_ASKPASS` dialog), `SSH_ASKPASS_REQUIRE=never`, ssh `-o BatchMode=yes -o ConnectTimeout=5`
+  appended to the ssh command git would use (`GIT_SSH_COMMAND` / `core.sshCommand` / an OpenSSH
+  `GIT_SSH` program (quoted) / `ssh`; other programs are left alone), 8 s (the whole create must fit
+  the app's 30 s request timeout). Single-flight per repo + branch, and an attempt answers for 20 s
+  (fan-outs fork from one commit and pay one timeout). A failed fetch is logged and creation
+  continues from the existing ref; a base that does not exist locally is `invalid_params`. herdr then
+  runs `git worktree add -b <branch> <path> <base>`, which makes the branch track a remote base
+  (`branch.autoSetupMerge`); hostd drops exactly that upstream (retried while parallel creations hold
+  `.git/config.lock`, then verified), so ahead/behind and review are right. Existing-branch
   mode is unchanged (a remote-only branch becomes a local branch tracking it). Untrusted repos
   (`trust`, git refuses to read them) skip all of this: an absent base is herdr's HEAD there.
 - **gh.\***: `gh pr view --json number,url,title,state,isDraft,mergeable,statusCheckRollup`;
@@ -105,7 +110,12 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   `<home>/cache/omp-settings-schema.json`) + values from `omp config list --json` (10 s);
   `source: "cli"` from the list alone when the schema can't be read. Writes: keys checked first,
   then `omp config set|reset -- <key> [<text>]` in order, omp's validation message →
-  `invalid_params`. Credentials never leave the host. Real-omp test (temp `PI_CODING_AGENT_DIR`):
+  `invalid_params`. A batch setting a credential (schema flag; secret-like key names in `cli` mode)
+  never uses argv: the extension's settings-write mode (`TF_OMP_SETTINGS_IN`/`_OUT`, bridge ≥ 1.3.0)
+  applies it from a 0600 file under `<home>/run` (deleted on read); an older extension → `unsupported`
+  (hint: the env override), nothing written. Values cache: a `config list` older than a write never
+  fills it. Credentials never leave the host. Real-omp test (temp `PI_CODING_AGENT_DIR`, or
+  `TF_LAB_OMP_AGENT_DIR`; scans `/proc/*/cmdline` during the credential write):
   `cargo test -p tf-hostd omp_config -- --ignored --nocapture`.
 - **ai.complete** (`ai.rs`): `omp --mode json --no-session --no-tools --no-extensions --no-skills
   --no-rules --no-lsp --no-title --model @<role> --system-prompt <system>`, prompt on stdin,
@@ -117,7 +127,9 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   clamped 2 000–60 000, semaphore queue included → `timeout` (retryable). 3 omp processes per
   daemon. Prompt and system text are never logged or returned; logs: task, role, model, ms, outcome.
 - **host.toolsUpdate / host.toolsConfig** (`tools.rs`, architecture §3.9): one updater per daemon,
-  first run 2 min after start, then every 6 h + jitter while `auto` (default on, `tools.json`).
+  first run 2 min after start, then every 6 h + jitter while `auto` (`tools.json`; default on for
+  `~/.teleflock`, off for other (lab / dev) homes). Installing runs hold `~/.cache/teleflock-tools.lock` (one installer per user
+  across daemons); each tool runs in its own process group, killed whole on timeout.
   omp: `omp update --check` → `omp update` (5 min) → `omp --version`. herdr: `herdr --version`,
   `herdr status`, stable manifest via `curl https://herdr.dev/latest.json` → plain `herdr update`
   (5 min; stdin closed, `HERDR_ENV`/`HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`/`HERDR_SESSION`
@@ -148,6 +160,8 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
 | `busy` | `term.open` while another client controls it; resuming a live session | `takeover: true` / open the agent |
 | `ai_unavailable` | `ai.complete` without omp, or omp has neither the requested role nor `smol` | install omp ≥ 18.12 / assign the tiny role |
 | `ai_failed` | omp exited, reported an error or answered nothing (message: ≤ 300 chars of stderr/error) | — |
+| `unsupported` | `omp.settingsSet` setting a credential while the deployed extension lacks the settings-write mode | reconnect with the current app, or the setting's `$ENV` override |
+| `io_error` (retryable) | resuming a parked agent whose session file cannot be read (not definitely deleted) | try again once it is reachable |
 
 ## Tests
 `cargo test -p tf-hostd ops::` — parsers (porcelain v2, numstat/name-status `-z`, worktree
@@ -157,7 +171,10 @@ fixture whose clone is behind (new worktree forks from the fetched `origin/main`
 it, explicit bases, offline remote, push of the new branch), stats.db fixture, session scan.
 `cargo test -p tf-hostd ai -- --ignored --nocapture` calls the real omp (needs a tiny role) and
 prints the slug, model and ms. `cargo test -p tf-hostd tools` parses captured omp/herdr outputs and
-drives the updater against fake `omp`/`herdr`/`curl` scripts in a tempdir (never the real updaters).
-`cargo test -p tf-hostd automations` — cron parsing, next/latest fire times across DST jumps (a
-POSIX-TZ zone), descriptions, the scheduler's fire/catch-up/pass decision, the skip-if-busy guard,
-store validation and round trip (0600, run cap, corrupt file set aside), systemd unit contents.
+drives the updater against fake `omp`/`herdr`/`curl` scripts in a tempdir (never the real updaters),
+including the install lock held by "another daemon" and a timed-out tool whose background child dies
+with its process group. `cargo test -p tf-hostd automations` — cron parsing, next/latest fire times
+across DST jumps (a POSIX-TZ zone), descriptions, the scheduler's fire/catch-up/pass decision, the
+skip-if-busy guard (kept outside the run cap, collapsed repeat skips), distinct agent names for
+launches in flight, store validation and round trip (0600, run cap, corrupt file set aside), systemd
+unit contents and unit removal without a running user manager.

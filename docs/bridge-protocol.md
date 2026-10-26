@@ -55,7 +55,7 @@ The TUI shows exactly one thing: a dim `⇄ teleflock` status-line notice while 
 ```
 - `reason`: `connect` (new connection) or `switch` (same connection, new omp session).
 - `tui`: omp runs the interactive TUI (`ctx.mode === "tui"`). Ops marked **TUI** below need it.
-- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent. 1.2.0 adds the schema-dump mode (see "Schema dump"); the socket protocol is unchanged.
+- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent. 1.2.0 adds the schema-dump mode (see "Schema dump"); 1.3.0 the settings-write mode (see "Settings write"); the socket protocol is unchanged.
 - hostd keys sessions by `sessionId`. The latest `hello` wins if two connections claim the same id.
 
 ### `event`
@@ -206,6 +206,16 @@ Not a socket protocol: a one-shot mode tf-hostd uses for `omp.settings` (archite
 3. exits the process right after loading (omp refuses `process.exit` during extension loading, so the exit is scheduled for the next tick).
 
 hostd starts it as `omp --mode rpc --no-session --no-skills --no-rules --no-lsp --no-tools --no-extensions -e <home>/ext/teleflock-bridge.ts` with stdin at EOF (no model call, no session file), waits ≤ 20 s for the file and kills the child either way. hostd only does this when the deployed file contains the `TF_OMP_SCHEMA_OUT` marker: an older bridge would ignore the variable and run as a normal bridge.
+
+## Settings write (`TF_OMP_SETTINGS_IN`, bridge ≥ 1.3.0)
+
+Not a socket protocol either: a one-shot mode tf-hostd uses for `omp.settingsSet` batches that set a credential (architecture §3.10), so the value never appears in a command line. When both `TF_OMP_SETTINGS_IN=<in>` and `TF_OMP_SETTINGS_OUT=<out>` are set at load (paths only; values never travel in the environment), the extension opens no socket, registers nothing and only:
+
+1. reads `<in>`, `{changes: [{key, text}]}` (`text`: the string `omp config set <key> <text>` would get, `null` = reset; hostd writes the file 0600 under `<home>/run`), and deletes it right away, read or not;
+2. imports `@oh-my-pi/pi-coding-agent/config/settings` and `…/config/all-settings` (literal specifiers, as above) and applies the changes in order to `Settings.instance` exactly as omp's `config set|reset` does: `setting.set(store, setting.parse(text))` or `setting.unset(store)`, stopping at the first failure, then `store.flush()`;
+3. writes `{bridgeVersion, results: [{key, ok, error?}], error?}` to `<out>.<pid>.tmp` (mode 0600), renames it to `<out>` and exits like the dump. `error` (input unreadable, modules missing, flush failed) means nothing can be assumed written. Values are never echoed.
+
+hostd starts the same throwaway omp as for the dump, waits ≤ 20 s for `<out>`, kills the child, and removes both files either way. It only does this when the deployed file contains the `TF_OMP_SETTINGS_IN` marker; with an older bridge the credential write is refused (`unsupported`, hint: the setting's environment override) and nothing is written.
 
 ## Safety rules (extension)
 

@@ -36,6 +36,8 @@ pub struct Paths {
     pub bin: PathBuf,
     /// Automations and their run history `<home>/automations.json`.
     pub automations: PathBuf,
+    /// `$TF_HOSTD_HOME` home (lab / dev instance), not the default `~/.teleflock`.
+    pub custom: bool,
 }
 
 impl Paths {
@@ -66,6 +68,7 @@ impl Paths {
             overlay: home.join("omp-overlay.yml"),
             bin: home.join("bin"),
             automations: home.join("automations.json"),
+            custom,
             run,
             home,
         }
@@ -94,6 +97,17 @@ impl Paths {
     /// (one pair per home, so lab instances never touch the real daemon's units).
     pub fn unit_stem(&self) -> String {
         format!("teleflock-hostd-{:08x}", fnv1a(self.home.to_string_lossy().as_bytes()))
+    }
+
+    /// The user's real daemon home (`~/.teleflock`), as opposed to a lab / dev home. Not the same
+    /// as `custom`: `attach` always starts the daemon with `TF_HOSTD_HOME` set, also for the
+    /// default home.
+    pub fn is_default_home(&self) -> bool {
+        let default = home_dir().join(".teleflock");
+        match (std::fs::canonicalize(&self.home), std::fs::canonicalize(&default)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => self.home == default,
+        }
     }
 }
 
@@ -179,14 +193,25 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
 }
 
 /// Writes `bytes` to `path` atomically (tmp file + rename); the result is owner-only (0600
-/// on unix).
+/// on unix). Every call writes its own temp file (`.<name>.<pid>.<n>.tmp`), so concurrent
+/// writers never interleave in one file; the last rename wins (callers that need ordering
+/// serialize snapshot + write themselves).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut file = private_options().write(true).create(true).truncate(true).open(&tmp)?;
-    restrict_open(&file)?;
-    file.write_all(bytes)?;
-    drop(file);
-    std::fs::rename(&tmp, path)
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = private_options().write(true).create_new(true).open(&tmp)?;
+        restrict_open(&file)?;
+        file.write_all(bytes)?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -200,6 +225,15 @@ mod tests {
         assert_eq!(p.ext, PathBuf::from("/tmp/x/ext/teleflock-bridge.ts"));
         assert!(p.pipe.starts_with(r"\\.\pipe\teleflock-hostd-"));
         assert_ne!(p.pipe, Paths::new(PathBuf::from("/tmp/y"), true).pipe);
+    }
+
+    #[test]
+    fn default_home_is_told_apart_from_lab_homes() {
+        // `attach` starts every daemon with TF_HOSTD_HOME set (custom = true), also for the real
+        // home: the real-home check must look at the path, not at `custom`.
+        assert!(Paths::new(home_dir().join(".teleflock"), true).is_default_home());
+        assert!(Paths::new(home_dir().join(".teleflock"), false).is_default_home());
+        assert!(!Paths::new(PathBuf::from("/tmp/tf-lab-x"), true).is_default_home());
     }
 
     #[cfg(unix)]
@@ -244,6 +278,22 @@ mod tests {
         write_atomic(&state, b"{\"v\":1}").unwrap();
         assert_eq!(mode(&state), 0o600);
         assert_eq!(std::fs::read(&state).unwrap(), b"{\"v\":1}");
+        // Concurrent writers: each renames in a complete file of its own, no temp file left.
+        let writers: Vec<_> = (0..8u8)
+            .map(|i| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        write_atomic(&state, &vec![b'a' + i; 4096]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        writers.into_iter().for_each(|w| w.join().unwrap());
+        let body = std::fs::read(&state).unwrap();
+        assert!(body.len() == 4096 && body.iter().all(|b| *b == body[0]), "a mixed file was renamed in");
+        let leftovers: Vec<_> = std::fs::read_dir(td.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp") && e.file_name() != "state.tmp").collect();
+        assert!(leftovers.is_empty());
 
         let log = td.path().join("hostd.log");
         drop(open_private_append(&log).unwrap());

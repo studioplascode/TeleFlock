@@ -28,8 +28,9 @@ const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(20);
 pub enum Target {
     System { dir: PathBuf },
     User { dir: PathBuf, runtime_dir: PathBuf },
-    /// systemd user units would work, but the user has no lingering.
-    NeedsLinger { user: String },
+    /// systemd user units would work, but the user has no lingering. Units installed while it
+    /// was on still live in `dir` (and the user manager, while one runs, at `runtime_dir`).
+    NeedsLinger { user: String, dir: PathBuf, runtime_dir: PathBuf },
     /// No systemd here.
     None,
 }
@@ -59,14 +60,15 @@ fn detect() -> Target {
     }
     let Some(user) = tf_herdr::durable::user_name(uid) else { return Target::None };
     let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
-    if !Path::new("/var/lib/systemd/linger").join(&user).exists() || !runtime_dir.is_dir() {
-        return Target::NeedsLinger { user };
-    }
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::paths::home_dir().join(".config"));
-    Target::User { dir: config.join("systemd").join("user"), runtime_dir }
+    let dir = config.join("systemd").join("user");
+    if !Path::new("/var/lib/systemd/linger").join(&user).exists() || !runtime_dir.is_dir() {
+        return Target::NeedsLinger { user, dir, runtime_dir };
+    }
+    Target::User { dir, runtime_dir }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -192,6 +194,33 @@ fn write_if_changed(path: &Path, bytes: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Disables and deletes this home's units in `dir` (also the `timers.target.wants` link
+/// `enable` made). `manager`: the systemd instance to tell, when one runs; without it the
+/// files alone go (a user manager that starts later never sees them).
+async fn remove_units(manager: Option<&Target>, dir: &Path, stem: &str) {
+    let service = format!("{stem}.service");
+    let timer = format!("{stem}.timer");
+    let wants = dir.join("timers.target.wants").join(&timer);
+    let files = [dir.join(&timer), dir.join(&service), wants];
+    if !files.iter().any(|f| f.symlink_metadata().is_ok()) {
+        return;
+    }
+    if let Some(m) = manager
+        && let Err(e) = systemctl(m, &["disable", "--now", &timer]).await
+    {
+        warn!("automations: {e}");
+    }
+    for f in &files {
+        let _ = std::fs::remove_file(f);
+    }
+    if let Some(m) = manager
+        && let Err(e) = systemctl(m, &["daemon-reload"]).await
+    {
+        warn!("automations: {e}");
+    }
+    info!(unit = %timer, "automations: systemd keepalive removed");
+}
+
 /// Installs (`want`) or removes the keepalive units and reports the resulting scheduler kind.
 pub async fn reconcile(paths: &Paths, relay_port: u16, want: bool) -> AutomationScheduler {
     let timezone = super::cron::tz_name(&super::cron::local_tz());
@@ -203,7 +232,12 @@ pub async fn reconcile(paths: &Paths, relay_port: u16, want: bool) -> Automation
                 "Automations run while tf-hostd runs on this host: it starts when a TeleFlock app connects and keeps running after the app disconnects, until the host restarts.",
             );
         }
-        Target::NeedsLinger { user } => {
+        Target::NeedsLinger { user, dir, runtime_dir } => {
+            if !want {
+                // Installed while lingering was on: the timer would keep running `ensure`.
+                let manager = runtime_dir.is_dir().then(|| Target::User { dir: dir.clone(), runtime_dir: runtime_dir.clone() });
+                remove_units(manager.as_ref(), dir, &paths.unit_stem()).await;
+            }
             return AutomationScheduler {
                 kind: "systemd".into(),
                 persistent: false,
@@ -216,6 +250,10 @@ pub async fn reconcile(paths: &Paths, relay_port: u16, want: bool) -> Automation
         Target::System { .. } | Target::User { .. } => {}
     }
     let dir = target.dir().expect("systemd target has a unit dir").to_path_buf();
+    if !want {
+        remove_units(Some(&target), &dir, &paths.unit_stem()).await;
+        return AutomationScheduler { kind: "systemd".into(), persistent: false, note: None, timezone };
+    }
     let Some(exe) = exe_path() else {
         return daemon_only("Cannot locate the tf-hostd binary to install the systemd timer.");
     };
@@ -223,20 +261,6 @@ pub async fn reconcile(paths: &Paths, relay_port: u16, want: bool) -> Automation
     let service_path = dir.join(units.service_name());
     let timer_path = dir.join(units.timer_name());
     let timer = units.timer_name();
-    if !want {
-        if service_path.exists() || timer_path.exists() {
-            if let Err(e) = systemctl(&target, &["disable", "--now", &timer]).await {
-                warn!("automations: {e}");
-            }
-            let _ = std::fs::remove_file(&timer_path);
-            let _ = std::fs::remove_file(&service_path);
-            if let Err(e) = systemctl(&target, &["daemon-reload"]).await {
-                warn!("automations: {e}");
-            }
-            info!(unit = %timer, "automations: systemd keepalive removed");
-        }
-        return AutomationScheduler { kind: "systemd".into(), persistent: false, note: None, timezone };
-    }
     let changed = match (write_if_changed(&service_path, &units.service), write_if_changed(&timer_path, &units.timer)) {
         (Ok(a), Ok(b)) => a || b,
         (Err(e), _) | (_, Err(e)) => {
@@ -310,5 +334,26 @@ mod tests {
         assert_eq!(quote("/a b/x"), "\"/a b/x\"");
         assert_eq!(quote("50%"), "50%%");
         assert_eq!(quote("a\"b c"), "\"a\\\"b c\"");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn units_go_without_a_running_manager() {
+        // Lingering turned off after install: no user manager to tell, the files still go.
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path();
+        let stem = Paths::new(PathBuf::from("/tmp/tf lab"), true).unit_stem();
+        let other = dir.join("teleflock-hostd-0000beef.timer");
+        std::fs::create_dir_all(dir.join("timers.target.wants")).unwrap();
+        for f in [format!("{stem}.service"), format!("{stem}.timer")] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        std::fs::write(&other, "x").unwrap();
+        let link = dir.join("timers.target.wants").join(format!("{stem}.timer"));
+        std::os::unix::fs::symlink(dir.join(format!("{stem}.timer")), &link).unwrap();
+        remove_units(None, dir, &stem).await;
+        assert!(!dir.join(format!("{stem}.service")).exists() && !dir.join(format!("{stem}.timer")).exists());
+        assert!(link.symlink_metadata().is_err(), "the enable link is gone too");
+        assert!(other.exists(), "another home's units stay");
     }
 }
