@@ -33,13 +33,32 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
 - **fs.read**: default 512 KiB, max 8 MiB; text when UTF-8 without NULs, else base64; `mime` by
   extension.
 - **git.status**: porcelain v2 + numstat vs `HEAD` (untracked files get their line count),
-  default branch (`origin/HEAD` → `init.defaultBranch` → main/master/trunk/develop; local branch
-  preferred over `origin/…`), `base` = merge-base with it.
+  default branch (`origin/HEAD` → `init.defaultBranch` → main/master/trunk/develop, as a local
+  branch or `origin/…`), `base` = merge-base of HEAD with the default branch's local *and*
+  remote-tracking refs together (`git merge-base HEAD main origin/main`: the latest fork point from
+  either, so a branch forked from a fresher `origin/main` doesn't count commits a stale local
+  `main` lacks).
 - **git.diff**: working tree vs base (default: that merge-base) = committed + staged + unstaged +
   untracked (synthesized new-file hunks, ≤ 200 files). Patch capped at 2 MiB (`truncated`).
   A `base` branch name diffs against its merge-base with HEAD.
+- **git.branches**: local + remote-tracking branches (newest first), `defaultBranch` (`main`) and
+  `defaultBase` = what new worktrees fork from: `origin/<default>` when that ref exists, else the
+  local default's remote-tracking upstream (repos without `origin`), else the local branch.
 - **git.commit** (`all` = `git add -A`) records a `committed` activity on agents in that checkout.
-  **git.push** sets upstream on first push (`origin`, else the only remote).
+  **git.push** without an upstream runs `git push --set-upstream <origin, else the first remote> HEAD`
+  (publishes the branch under its own name and tracks it).
+- **worktree.create** (new branch): `base` absent → `defaultBase`. A base naming a branch of a
+  configured remote (`origin/main`; a local branch spelled the same stays local) is fetched first:
+  `git fetch <remote> refs/heads/<branch>` (updates the remote-tracking ref through the configured
+  refspec), hookless, `GIT_TERMINAL_PROMPT=0`, ssh `-o BatchMode=yes` appended to the ssh command git
+  would use (`GIT_SSH_COMMAND` / `core.sshCommand` / `ssh`; other programs are left alone), 30 s.
+  Single-flight per repo + branch, and an attempt answers for 20 s (fan-outs fork from one commit and
+  pay one timeout). A failed fetch is logged and creation continues from the existing ref; a base that
+  does not exist locally is `invalid_params`. herdr then runs `git worktree add -b <branch> <path>
+  <base>`, which makes the branch track a remote base (`branch.autoSetupMerge`); hostd drops exactly
+  that upstream, so ahead/behind, review and the first `git.push` (own name) are right. Existing-branch
+  mode is unchanged (a remote-only branch becomes a local branch tracking it). Untrusted repos
+  (`trust`, git refuses to read them) skip all of this: an absent base is herdr's HEAD there.
 - **gh.\***: `gh pr view --json number,url,title,state,isDraft,mergeable,statusCheckRollup`;
   "no pull requests found" → `{ pr: null }`.
 - **term.open**: `Shell` targets default to a new **tab** (never shrinks existing panes);
@@ -97,6 +116,8 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
 ## Tests
 `cargo test -p tf-hostd ops::` — parsers (porcelain v2, numstat/name-status `-z`, worktree
 porcelain, refs, gh JSON, herdr error samples, omp JSONL answers), a git fixture repo in a tempdir
-(status, diff, branches, commit, worktree branch planning, badges), stats.db fixture, session scan.
+(status, diff, branches, commit, worktree branch planning, badges, default base), a bare-`origin`
+fixture whose clone is behind (new worktree forks from the fetched `origin/main` without tracking
+it, explicit bases, offline remote, push of the new branch), stats.db fixture, session scan.
 `cargo test -p tf-hostd ai -- --ignored --nocapture` calls the real omp (needs a tiny role) and
 prints the slug, model and ms.

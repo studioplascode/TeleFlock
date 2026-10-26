@@ -16,6 +16,7 @@ import { ResponsiveDialog } from "../workspace/shared/ResponsiveDialog";
 import { useDialogSession } from "../workspace/shared/useDialogSession";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
 import { autoBranchName } from "./autoName";
+import { baseParam, fetchPreview, shownBase } from "./base";
 import { type BranchDraft, BranchStep } from "./BranchStep";
 import { FolderBrowser, type FolderPick } from "./FolderBrowser";
 import { StepRail } from "./StepRail";
@@ -172,14 +173,15 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
 
   const next = () => (step < STEPS.length - 1 ? goTo(step + 1) : void create());
 
-  // The Base select shows the default branch when untouched; send exactly what it shows.
-  const baseRef = branch.base || branches.data?.defaultBranch || "HEAD";
+  // The Base select shows the host's default base when untouched (`origin/main`); see `base.tsx`.
+  const baseRef = shownBase(branches.data, branch.base);
+  const fetchLine = branch.mode === "new" ? fetchPreview(branches.data, baseRef) : null;
   const params: WorktreeCreateParams | null =
     repo && effectiveBranch && !naming
       ? {
           cwd: repo.path,
           branch: effectiveBranch,
-          base: branch.mode === "new" && baseRef !== "HEAD" ? baseRef : undefined,
+          base: branch.mode === "new" ? baseParam(branches.data, branch.base) : undefined,
           path: branch.customPath && branch.path.trim() ? branch.path.trim() : undefined,
           label: branch.label.trim() || undefined,
           existing: branch.mode === "existing",
@@ -229,6 +231,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   const session = host?.info.herdrSession;
   const preview: PreviewLine[] = params
     ? [
+        ...(fetchLine ? [fetchLine] : []),
         {
           argv: herdrArgv(
             session,
@@ -238,8 +241,8 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
             shellQuote(tildify(params.cwd, home)),
             "--branch",
             shellQuote(params.branch),
-            params.base && "--base",
-            params.base && shellQuote(params.base),
+            branch.mode === "new" && "--base",
+            branch.mode === "new" && shellQuote(baseRef),
             params.path && "--path",
             params.path && shellQuote(params.path),
             params.label && "--label",
@@ -551,7 +554,9 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                         {submit.phase === "idle" && (
                           <ol className="grid grid-cols-1 gap-x-4 gap-y-2 md:grid-cols-2" aria-label="What happens">
                             {[
-                              branch.mode === "new" ? `git creates ${effectiveBranch || "the new branch"} from ${baseRef}` : `git checks out ${effectiveBranch}`,
+                              branch.mode === "new"
+                                ? `git ${fetchLine ? `fetches ${baseRef}, then ` : ""}creates ${effectiveBranch || "the new branch"} from ${fetchLine ? "it" : baseRef}`
+                                : `git checks out ${effectiveBranch}`,
                               "herdr opens the checkout as a workspace",
                               ...(agent.start
                                 ? [`omp starts as ${naming && needAgent ? "the named agent" : agentName}, shared with TeleFlock`, "You land in its session"]

@@ -5,7 +5,7 @@
 //! that a running agent may need), `GIT_TERMINAL_PROMPT=0` (never hang on credentials),
 //! `LC_ALL=C` (stable parseable messages) and a hard timeout (the child is killed on expiry).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -264,9 +264,22 @@ pub(crate) async fn git_with_input<S: AsRef<OsStr>>(
     stdin: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<CmdOut, ApiError> {
+    git_run(cwd, args, stdin, &[], timeout).await
+}
+
+/// [`git_with_input`] with extra environment on top of [`GIT_ENV`].
+async fn git_run<S: AsRef<OsStr>>(
+    cwd: &Path,
+    args: &[S],
+    stdin: Option<&[u8]>,
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<CmdOut, ApiError> {
     let bin = git_bin()?;
     let full = hardened_args(args);
-    run_cmd(&bin, &full, Some(cwd), GIT_ENV, stdin, timeout).await.map_err(|e| match e.kind() {
+    let env: std::borrow::Cow<[(&str, &str)]> =
+        if extra_env.is_empty() { GIT_ENV.into() } else { GIT_ENV.iter().chain(extra_env).copied().collect::<Vec<_>>().into() };
+    run_cmd(&bin, &full, Some(cwd), &env, stdin, timeout).await.map_err(|e| match e.kind() {
         io::ErrorKind::TimedOut => ApiError::new("timeout", format!("git {} timed out", first_arg(args))).retryable(),
         io::ErrorKind::NotFound if !cwd.exists() => {
             ApiError::new("not_found", format!("{} does not exist", cwd.display()))
@@ -583,19 +596,47 @@ pub(crate) async fn toplevel(cwd: &Path) -> Result<PathBuf, ApiError> {
     Ok(PathBuf::from(out.line()))
 }
 
-/// Default branch: `(name, ref used for merge-base)`. Prefers the local branch so that
-/// agent worktrees forked from local `main` diff against it; falls back to `origin/<name>`.
-pub(crate) async fn default_branch(cwd: &Path) -> Option<(String, String)> {
-    let refs = git(cwd, &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"], QUICK).await.ok()?;
-    let set: HashSet<String> = refs.stdout_str().lines().map(str::to_string).collect();
-    let pick = |name: &str| -> Option<(String, String)> {
-        if set.contains(&format!("refs/heads/{name}")) {
-            Some((name.to_string(), name.to_string()))
-        } else if set.contains(&format!("refs/remotes/origin/{name}")) {
-            Some((name.to_string(), format!("origin/{name}")))
+/// The repository's default branch (`origin/HEAD` → `init.defaultBranch` → main/master/trunk/develop,
+/// as a local branch or as `origin/<name>`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DefaultBranch {
+    /// Branch name (`main`).
+    pub name: String,
+    /// Refs carrying its history: the local branch and/or its remote-tracking branch. Merge-bases
+    /// are taken against all of them at once, so a branch forked from a fresher `origin/main`
+    /// does not count the commits a stale local `main` has not caught up with yet (and a branch
+    /// forked from local `main` with unpushed commits does not count those either).
+    pub refs: Vec<String>,
+    /// What new worktrees fork from (`BranchList.default_base`): `origin/<name>` when that
+    /// remote-tracking branch exists, else the local branch's remote-tracking upstream (repos
+    /// without an `origin`), else the local branch.
+    pub base: String,
+}
+
+pub(crate) async fn default_branch(cwd: &Path) -> Option<DefaultBranch> {
+    let refs = git(cwd, &["for-each-ref", "--format=%(refname)%00%(upstream)", "refs/heads", "refs/remotes"], QUICK).await.ok()?;
+    let refs = refs.stdout_str();
+    let mut upstream: HashMap<&str, &str> = HashMap::new();
+    for line in refs.lines() {
+        let (name, up) = line.split_once('\0').unwrap_or((line, ""));
+        upstream.insert(name, up);
+    }
+    let pick = |name: &str| -> Option<DefaultBranch> {
+        let local = format!("refs/heads/{name}");
+        let has_local = upstream.contains_key(local.as_str());
+        let remote = if upstream.contains_key(format!("refs/remotes/origin/{name}").as_str()) {
+            Some(format!("origin/{name}"))
         } else {
-            None
+            upstream
+                .get(local.as_str())
+                .and_then(|up| up.strip_prefix("refs/remotes/").filter(|_| upstream.contains_key(up)))
+                .map(str::to_string)
+        };
+        if !has_local && remote.is_none() {
+            return None;
         }
+        let refs: Vec<String> = has_local.then(|| name.to_string()).into_iter().chain(remote.clone()).collect();
+        Some(DefaultBranch { name: name.to_string(), base: remote.unwrap_or_else(|| name.to_string()), refs })
     };
     if let Ok(o) = git(cwd, &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"], QUICK).await
         && o.ok() {
@@ -623,9 +664,89 @@ async fn empty_tree(cwd: &Path) -> Result<String, ApiError> {
     Ok(git_ok(cwd, &["hash-object", "-t", "tree", "--stdin"], QUICK).await?.line())
 }
 
-pub(crate) async fn merge_base(cwd: &Path, a: &str, b: &str) -> Option<String> {
-    let o = git(cwd, &["merge-base", a, b], QUICK).await.ok()?;
+/// Best common ancestor of `a` and the history of all `others` together (`git merge-base a b c`
+/// merges `b` and `c` hypothetically): the latest point where `a` forked from any of them.
+pub(crate) async fn merge_base<S: AsRef<str>>(cwd: &Path, a: &str, others: &[S]) -> Option<String> {
+    if others.is_empty() {
+        return None;
+    }
+    let mut args = vec!["merge-base", a];
+    args.extend(others.iter().map(AsRef::as_ref));
+    let o = git(cwd, &args, QUICK).await.ok()?;
     o.ok().then(|| o.line()).filter(|s| !s.is_empty())
+}
+
+/// A base fetched (or failed to fetch) this recently is not fetched again: fan-outs create several
+/// worktrees from the same base within seconds; they should fork from the same commit, and an
+/// unreachable remote should cost one timeout, not one per worktree.
+const FETCH_FRESH: Duration = Duration::from_secs(20);
+
+/// `(remote, branch)` when `r` names a branch of a configured remote (`origin/main`,
+/// `upstream/feat/x`), fetched before or not. A local branch spelled the same wins, as in git's
+/// own ref resolution.
+pub(crate) async fn remote_tracking(root: &Path, r: &str) -> Option<(String, String)> {
+    let local = git(root, &["show-ref", "--verify", "-q", &format!("refs/heads/{r}")], QUICK).await.ok()?;
+    if local.ok() {
+        return None;
+    }
+    let remotes = git(root, &["remote"], QUICK).await.ok()?.stdout_str();
+    remotes
+        .lines()
+        .filter_map(|remote| {
+            let branch = r.strip_prefix(remote)?.strip_prefix('/')?;
+            (!remote.is_empty() && !branch.is_empty()).then(|| (remote.to_string(), branch.to_string()))
+        })
+        .max_by_key(|(remote, _)| remote.len())
+}
+
+/// Fetches one branch of a remote: `git fetch <remote> refs/heads/<branch>` updates
+/// `refs/remotes/<remote>/<branch>` through the remote's configured refspec. Never prompts
+/// (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`), runs without hooks, gives up after `timeout`.
+/// Single-flight per repository + branch; an attempt within [`FETCH_FRESH`] answers for itself.
+/// `Err` carries git's message (offline, auth, unknown branch, timeout).
+pub(crate) async fn fetch_branch(root: &Path, remote: &str, branch: &str, timeout: Duration) -> Result<(), String> {
+    type Slot = std::sync::Arc<tokio::sync::Mutex<Option<(std::time::Instant, Result<(), String>)>>>;
+    static SLOTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Slot>>> = std::sync::LazyLock::new(Default::default);
+    let key = format!("{}\0{remote}\0{branch}", root.display());
+    let slot = SLOTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone();
+    let mut last = slot.lock().await;
+    if let Some((at, res)) = last.as_ref()
+        && at.elapsed() < FETCH_FRESH {
+            return res.clone();
+        }
+    let ssh = batch_ssh_command(root).await;
+    let env: Vec<(&str, &str)> = ssh.as_deref().map(|s| ("GIT_SSH_COMMAND", s)).into_iter().collect();
+    let refspec = format!("refs/heads/{branch}");
+    let res = match git_run(root, &["fetch", "--quiet", remote, &refspec], None, &env, timeout).await {
+        Ok(out) if out.ok() => Ok(()),
+        Ok(out) => Err(out.message()),
+        Err(e) => Err(e.message),
+    };
+    *last = Some((std::time::Instant::now(), res.clone()));
+    res
+}
+
+/// `GIT_SSH_COMMAND` that can never prompt (passwords, passphrases, unknown host keys): the ssh
+/// command git would run (`GIT_SSH_COMMAND`, else `core.sshCommand`, else `GIT_SSH`, else `ssh`)
+/// plus `-o BatchMode=yes`. `None` (leave git's choice alone) when that program is not OpenSSH's
+/// `ssh` (plink, wrapper scripts): other programs may not take `-o`.
+async fn batch_ssh_command(root: &Path) -> Option<String> {
+    let configured = match std::env::var("GIT_SSH_COMMAND") {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => {
+            let c = git(root, &["config", "--get", "core.sshCommand"], QUICK).await.map(|o| o.line()).unwrap_or_default();
+            if !c.trim().is_empty() {
+                c
+            } else if std::env::var_os("GIT_SSH").is_some_and(|v| !v.is_empty()) {
+                return None;
+            } else {
+                "ssh".to_string()
+            }
+        }
+    };
+    let program = configured.split_whitespace().next()?;
+    let name = Path::new(program).file_name()?.to_str()?;
+    matches!(name, "ssh" | "ssh.exe").then(|| format!("{configured} -o BatchMode=yes"))
 }
 
 /// Reads the branch of a checkout straight from `HEAD` (no process): `ref: refs/heads/<b>`
@@ -741,7 +862,7 @@ pub async fn status(cwd: &Path) -> Result<GitStatusResult, ApiError> {
 
     let def = default_branch(&root).await;
     let base = match (&def, head_exists) {
-        (Some((_, r)), true) => merge_base(&root, "HEAD", r).await,
+        (Some(d), true) => merge_base(&root, "HEAD", &d.refs).await,
         _ => None,
     };
     Ok(GitStatusResult {
@@ -750,7 +871,7 @@ pub async fn status(cwd: &Path) -> Result<GitStatusResult, ApiError> {
         upstream: st.upstream.clone(),
         ahead: st.ahead,
         behind: st.behind,
-        default_branch: def.map(|(n, _)| n),
+        default_branch: def.map(|d| d.name),
         base,
         files,
     })
@@ -817,7 +938,8 @@ pub async fn branches(cwd: &Path) -> Result<BranchList, ApiError> {
             }
         })
         .collect();
-    Ok(BranchList { branches, default_branch: default_branch(&root).await.map(|(n, _)| n), default_base: None })
+    let def = default_branch(&root).await;
+    Ok(BranchList { branches, default_base: def.as_ref().map(|d| d.base.clone()), default_branch: def.map(|d| d.name) })
 }
 
 pub async fn diff(p: &GitDiffParams) -> Result<GitDiffResult, ApiError> {
@@ -832,12 +954,12 @@ pub async fn diff(p: &GitDiffParams) -> Result<GitDiffResult, ApiError> {
                 return Err(ApiError::new("invalid_params", format!("unknown base ref `{b}`")));
             }
             // A branch name means "what this branch changed since it forked from it".
-            if head_exists { merge_base(&root, "HEAD", b).await.unwrap_or_else(|| v.line()) } else { v.line() }
+            if head_exists { merge_base(&root, "HEAD", &[b]).await.unwrap_or_else(|| v.line()) } else { v.line() }
         }
         _ => {
             let def = default_branch(&root).await;
             match (def, head_exists) {
-                (Some((_, r)), true) => match merge_base(&root, "HEAD", &r).await {
+                (Some(d), true) => match merge_base(&root, "HEAD", &d.refs).await {
                     Some(mb) => mb,
                     None => git_ok(&root, &["rev-parse", "HEAD"], QUICK).await?.line(),
                 },
@@ -1163,6 +1285,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         sh(td.path(), &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap(), "main"]);
         let b = branches(td.path()).await.unwrap();
         assert_eq!(b.default_branch.as_deref(), Some("main"));
+        assert_eq!(b.default_base.as_deref(), Some("main"), "no remote: new worktrees fork from the local default");
         let feat = b.branches.iter().find(|x| x.name == "feat").unwrap();
         assert!(feat.current && feat.last_commit_at.is_some());
         let side = b.branches.iter().find(|x| x.name == "side").unwrap();
@@ -1179,6 +1302,48 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert!(err.hint.is_some());
         let nr = tempfile::tempdir().unwrap();
         assert_eq!(status(nr.path()).await.unwrap_err().code, "not_found");
+    }
+
+    #[tokio::test]
+    async fn default_base_prefers_the_remote_tracking_branch() {
+        let td = fixture();
+        let d = td.path();
+        let def = |refs: &[&str], base: &str| DefaultBranch { name: "main".into(), refs: refs.iter().map(|r| r.to_string()).collect(), base: base.into() };
+        assert_eq!(default_branch(d).await, Some(def(&["main"], "main")));
+        // no origin: the local default's remote-tracking upstream
+        sh(d, &["remote", "add", "upstream", "https://example.invalid/up.git"]);
+        sh(d, &["update-ref", "refs/remotes/upstream/main", "main"]);
+        sh(d, &["config", "branch.main.remote", "upstream"]);
+        sh(d, &["config", "branch.main.merge", "refs/heads/main"]);
+        assert_eq!(default_branch(d).await, Some(def(&["main", "upstream/main"], "upstream/main")));
+        sh(d, &["remote", "add", "origin", "https://example.invalid/x.git"]);
+        sh(d, &["update-ref", "refs/remotes/origin/main", "main"]);
+        assert_eq!(default_branch(d).await, Some(def(&["main", "origin/main"], "origin/main")));
+        // only the remote-tracking branch
+        sh(d, &["branch", "-q", "-D", "main"]);
+        assert_eq!(default_branch(d).await, Some(def(&["origin/main"], "origin/main")));
+
+        let rt = |remote: &str, branch: &str| Some((remote.to_string(), branch.to_string()));
+        assert_eq!(remote_tracking(d, "origin/main").await, rt("origin", "main"));
+        assert_eq!(remote_tracking(d, "upstream/feat/x").await, rt("upstream", "feat/x"));
+        assert_eq!(remote_tracking(d, "feat").await, None);
+        assert_eq!(remote_tracking(d, "HEAD").await, None);
+        sh(d, &["branch", "-q", "origin/local-lookalike", "feat"]);
+        assert_eq!(remote_tracking(d, "origin/local-lookalike").await, None, "a local branch spelled like a remote one is local");
+    }
+
+    #[tokio::test]
+    async fn fetch_never_prompts_over_ssh() {
+        if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+            return;
+        }
+        let td = fixture();
+        let d = td.path();
+        assert_eq!(batch_ssh_command(d).await.as_deref(), Some("ssh -o BatchMode=yes"));
+        sh(d, &["config", "core.sshCommand", "/usr/bin/ssh -i /k"]);
+        assert_eq!(batch_ssh_command(d).await.as_deref(), Some("/usr/bin/ssh -i /k -o BatchMode=yes"));
+        sh(d, &["config", "core.sshCommand", "plink -batch"]);
+        assert_eq!(batch_ssh_command(d).await, None, "non-OpenSSH programs are left alone");
     }
 
     #[tokio::test]

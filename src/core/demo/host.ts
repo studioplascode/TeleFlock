@@ -1740,7 +1740,7 @@ export class DemoHost implements SimHost {
     }
     for (const b of all.slice(0, 4)) branches.push({ name: `origin/${b}`, current: false, remote: true, lastCommitAt: now - rng.int(5, 3000) * 60_000 });
     branches.push({ name: "origin/release/1.0", current: false, remote: true, lastCommitAt: now - 9 * 86400_000 });
-    return { branches, defaultBranch: "main" };
+    return { branches, defaultBranch: "main", defaultBase: "origin/main" };
   }
 
   private gitDiff(cwd: string, path?: string): unknown {

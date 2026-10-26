@@ -4,14 +4,15 @@ import { Check, CloudDownload, FolderTree, GitBranch, GitBranchPlus, GitFork, Lo
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useDraft } from "@/core";
 import type { BranchInfo, BranchList } from "@/core/gen";
-import { Button, Chip, Field, Input, Select, type SelectOption, SegmentedControl, Skeleton, Switch, cn, formatAge, spring } from "@/design";
+import { Button, Chip, Field, Input, Select, SegmentedControl, Skeleton, Switch, cn, formatAge, spring } from "@/design";
 import { branchNameError, tildify } from "../workspace/shared/paths";
+import { baseOptions, shownBase } from "./base";
 
 export interface BranchDraft {
   mode: "new" | "existing";
   /** New branch name (mode new). */
   name: string;
-  /** Base ref for a new branch ("" = HEAD). */
+  /** Base ref for a new branch ("" = untouched: the host's default base, see `base.tsx`). */
   base: string;
   /** Existing branch to check out (mode existing); local name. */
   existing: string;
@@ -96,23 +97,7 @@ export function BranchStep({ branches, loading, error, draft, onChange, filterKe
   const localNames = useMemo(() => new Set((branches?.branches ?? []).filter((b) => !b.remote).map((b) => b.name)), [branches]);
 
   const filtered = q ? list.filter((b) => b.name.toLowerCase().includes(q.toLowerCase())) : list;
-  const baseOptions = useMemo<SelectOption[]>(() => {
-    const def = branches?.defaultBranch;
-    const all = (branches?.branches ?? []).filter((b) => b.name !== def && !/\/HEAD$/.test(b.name));
-    all.sort((a, b) => Number(a.remote) - Number(b.remote) || (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0));
-    const opts: SelectOption[] = [];
-    if (def) opts.push({ value: def, label: def, hint: "default branch", icon: <GitBranch /> });
-    for (const b of all) {
-      opts.push({
-        value: b.name,
-        label: b.name,
-        hint: `${b.remote ? "remote" : b.current ? "checked out here" : "local"}${b.lastCommitAt ? ` · ${formatAge(Date.now() - b.lastCommitAt)}` : ""}`,
-        icon: b.remote ? <CloudDownload /> : <GitBranch />,
-      });
-    }
-    opts.push({ value: "HEAD", label: "HEAD", hint: "current commit of the repo", icon: <GitFork /> });
-    return opts;
-  }, [branches]);
+  const baseChoices = useMemo(() => baseOptions(branches), [branches]);
 
   const typedMatch = draft.mode === "new" ? (branches?.branches ?? []).find((b) => !b.remote && b.name === draft.name.trim()) : undefined;
   const syntaxError = draft.mode === "new" && draft.name ? branchNameError(draft.name) : null;
@@ -233,7 +218,7 @@ export function BranchStep({ branches, loading, error, draft, onChange, filterKe
               loading && !branches ? (
                 <Skeleton className="h-10 w-full rounded-md" />
               ) : (
-                <Select id={id} value={draft.base || baseOptions[0]?.value} onValueChange={(v) => onChange({ base: v })} options={baseOptions} className="w-full" aria-label="Base ref" />
+                <Select id={id} value={shownBase(branches, draft.base)} onValueChange={(v) => onChange({ base: v })} options={baseChoices} className="w-full" aria-label="Base ref" />
               )
             }
           </Field>

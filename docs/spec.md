@@ -155,7 +155,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
 ### Workspaces and worktrees (P0)
 - **New worktree wizard**
   - remote folder browser with git badges (branch, clean/dirty), recent repos
-  - new or existing branch, base ref, auto path preview, label
+  - new or existing branch, base ref (default: the remote's default branch, e.g. `origin/main`, fetched first so a stale local `main` never becomes the base; the new branch does not track it), auto path preview, label
   - start an omp agent: name, model, thinking, plan mode, initial prompt
   - the branch can be left to omp's tiny model ("Name it from the task"): it names the branch and the agent from the prompt at the Create step, editable
   - a command preview of what it will run

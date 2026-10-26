@@ -17,6 +17,7 @@ import { templateSummary } from "../workspace/shared/templates";
 import { slugFromPrompt, slugify } from "../workspace/shared/slug";
 import { useDialogSession } from "../workspace/shared/useDialogSession";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
+import { baseOptions, baseParam, fetchPreview, shownBase } from "./base";
 import { FolderBrowser, type FolderPick } from "./FolderBrowser";
 import { StepRail } from "./StepRail";
 
@@ -137,7 +138,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   }, [seeded, canSeed, templates, catalog]);
 
   const branches = useHostQuery(hostId, "git.branches", repo ? { cwd: repo.path } : null);
-  const baseRef = base || branches.data?.defaultBranch || "HEAD";
+  const baseRef = shownBase(branches.data, base);
   const task = prompt.trim();
   // untouched name: the tiny model's slug for the task, else the task's own words
   const aiOn = useAiNaming(hostId);
@@ -197,7 +198,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
       ? {
           cwd: repo.path,
           branch: branchOf(v),
-          base: baseRef !== "HEAD" ? baseRef : undefined,
+          base: baseParam(branches.data, base),
           label: nameOf(v),
           existing: false,
           trust: trustRepo,
@@ -266,25 +267,29 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   }, [allRunning]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const session = host?.info.herdrSession;
+  const fetchLine = fetchPreview(branches.data, baseRef, "many");
   const preview: PreviewLine[] = repo
-    ? variants.map((v) => ({
-        argv: herdrArgv(
-          session,
-          "worktree",
-          "create",
-          "--cwd",
-          shellQuote(tildify(repo.path, home)),
-          "--branch",
-          shellQuote(branchOf(v)),
-          baseRef !== "HEAD" && "--base",
-          baseRef !== "HEAD" && shellQuote(baseRef),
-          "--label",
-          shellQuote(nameOf(v)),
-          "--no-focus",
-          trust && "--trust-repository",
-        ),
-        note: `${nameOf(v)} · ${v.model === DEFAULT ? "default model" : v.model}${v.thinking !== DEFAULT ? ` · ${v.thinking}` : ""}${v.plan ? " · plan" : ""}`,
-      }))
+    ? [
+        ...(fetchLine ? [fetchLine] : []),
+        ...variants.map((v) => ({
+          argv: herdrArgv(
+            session,
+            "worktree",
+            "create",
+            "--cwd",
+            shellQuote(tildify(repo.path, home)),
+            "--branch",
+            shellQuote(branchOf(v)),
+            "--base",
+            shellQuote(baseRef),
+            "--label",
+            shellQuote(nameOf(v)),
+            "--no-focus",
+            trust && "--trust-repository",
+          ),
+          note: `${nameOf(v)} · ${v.model === DEFAULT ? "default model" : v.model}${v.thinking !== DEFAULT ? ` · ${v.thinking}` : ""}${v.plan ? " · plan" : ""}`,
+        })),
+      ]
     : [];
 
   const templateOptions: SelectOption[] = [
@@ -296,11 +301,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
     ...(catalog?.models ?? []).map((m) => ({ value: `${m.provider}/${m.id}`, label: m.label ?? m.id, hint: m.provider })),
   ];
   const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...(["off", "minimal", "low", "medium", "high", "xhigh"] as const).map((l) => ({ value: l, label: l }))];
-  const baseOptions: SelectOption[] = [
-    ...(branches.data?.defaultBranch ? [{ value: branches.data.defaultBranch, label: branches.data.defaultBranch, hint: "default branch" }] : []),
-    ...(branches.data?.branches ?? []).filter((b) => b.name !== branches.data?.defaultBranch && !/\/HEAD$/.test(b.name)).map((b) => ({ value: b.name, label: b.name, hint: b.remote ? "remote" : undefined })),
-    { value: "HEAD", label: "HEAD" },
-  ];
+  const baseChoices = baseOptions(branches.data);
 
   const footer = (
     <div className="flex w-full items-center gap-2">
@@ -430,7 +431,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                     )}
                   </Field>
                   <Field label="Base" hint="branch from">
-                    {(id) => <Select id={id} value={baseRef} onValueChange={setBase} options={baseOptions} className="w-full" aria-label="Base ref" />}
+                    {(id) => <Select id={id} value={baseRef} onValueChange={setBase} options={baseChoices} className="w-full" aria-label="Base ref" />}
                   </Field>
                 </div>
 

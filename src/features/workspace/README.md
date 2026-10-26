@@ -63,6 +63,10 @@ export function FolderBrowser(props: { hostId: string; mode: "repo" | "folder"; 
 - Worktree failures map to fixes (`shared/errors.ts`, tf-hostd codes `untrusted_repo`, `branch_in_use`,
   `branch_exists`, `path_exists`, `dirty_worktree`, `group_close_required`, plus raw herdr/git messages):
   trust-repository confirm, "use existing branch", "branch off it instead", another path, open the existing checkout.
+- Base of a new worktree branch (`worktree/base.tsx`, New worktree + Fan out): the untouched Base select shows the
+  host's `defaultBase` (`origin/main`) and sends no `base` (hostd fetches it, forks, drops the upstream); the preview
+  shows the fetch and `--base`. Explicit picks (local `main`, HEAD, any branch) are sent. Older hosts without
+  `defaultBase` get the shown ref (default branch, else HEAD).
 - After `worktree.create` / `agent.start` / `host.resume`, the dialog shows a success burst and navigates to the
   new agent's session as soon as it appears in host state (falls back to the pane's terminal after 15 s).
 - Review: `git.status` + `git.diff`; virtualized diff (unified/split, wrap, per-file collapse, pinned file header,
