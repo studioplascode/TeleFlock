@@ -41,17 +41,23 @@ TeleFlock is a native desktop and phone app for the [omp](https://github.com/can
 
 ### The board: is everything alive?
 
-Four lanes, **Needs you · Running · Review · Done**, with every omp agent on every host. Needs you comes first, and its oldest question sits on top, answerable right on the card. Every card has the same layout in every lane: the state and its time on top (`turn 27:24`, `waiting 6:13`, `finished 25m ago`), then who and where, the task, what it is doing right now, and labelled meters (`ctx 61%`, `subs 59%`, `+188 −74 · 3 files`, model, thinking). Running cards keep a live heartbeat with the streaming line, tool timers and tokens per second, and agents that go quiet while working are called out. Above the lanes sit today's spend with the subscription limit you will hit first, every host's health and a live terminal tile. Mark a reviewed card done (with Undo), drag it back to reopen, multi-select, filter, and drive everything from the keyboard (`J`/`K`, `Enter`, `A` answer, `T` terminal).
+Four lanes, **Needs you · Running · Review · Done**, with every omp agent on every host. Needs you comes first, and its oldest question sits on top, answerable right on the card. Every card has the same layout in every lane: the state and its time on top (`turn 27:24`, `waiting 6:13`, `finished 25m ago`), then who and where, the task, what it is doing right now, and labelled meters (`ctx 61%`, `subs 59%`, `+188 −74 · 3 files`, model, thinking). Running cards keep a live heartbeat with the streaming line, tool timers and tokens per second, and agents that go quiet while working are called out. Above the lanes sit today's spend with the subscription limit you will hit first, every host's health and a live terminal tile. Mark a reviewed card done (with Undo) and its herdr pane closes, worktree workspace included; the card stays in Done with its transcript, and **Resume**, opening its terminal or simply sending it a message picks the session back up with `omp --resume`. Drag a card back to reopen it, multi-select, filter, and drive everything from the keyboard (`J`/`K`, `Enter`, `A` answer, `T` terminal). When omp's cleanup (or you) deletes an agent's session file, the agent disappears from the board, the inbox and Dispatch.
 
 <img src="docs/assets/readme/board.webp" alt="Board with Needs you, Running, Review and Done lanes" width="100%">
 
 ### Easy to start, nothing hidden
 
-New to omp and herdr? The board's **First steps** checklist walks you through the demo flock (answer a question, approve a command, steer an agent, review, dispatch, the palette) and retires itself. Dotted terms such as *pane*, *steer*, *follow-up*, *worktree* or *compact* explain themselves on hover or tap, short hints beside the composer and the phone pager retire after a few sightings, and every launcher and palette action says what it does. Each fact is shown once, in one place, with its unit. Motion is calm by default: only changes and what needs you move, and Settings → Motion → Lively brings back the full show.
+New to omp and herdr? The board's **First steps** checklist walks you through the demo flock (answer a question, approve a command, steer an agent, review, dispatch, the palette) and retires itself. Dotted terms such as *pane*, *steer*, *follow-up*, *worktree* or *compact* explain themselves on hover or tap, short hints beside the composer and the phone pager retire after a few sightings, and every launcher and palette action says what it does. Each fact is shown once, in one place, with its unit. Motion is calm by default: only changes and what needs you move, briefly, then the screen holds still; nothing animates while the window is in the background, and Settings → Motion → Lively brings back the full show.
 
 ### AI naming with omp's tiny model
 
 TeleFlock uses the **tiny model role** you set up in omp (`modelRoles.tiny`, falling back to `smol`) as its AI provider, on the host and through your own omp login. It names Dispatch worktrees and branches, wizard branches and agents, fan-out runs and templates, suggests a name when you rename a session or workspace, and drafts commit messages and pull request titles and descriptions in Review. AI-made names carry a ✨, are always editable, and fall back to names made from your own text when the model is slow or switched off (Settings → AI naming). Nothing is stored: the text goes only to your own model provider, through omp.
+
+### Every omp setting, in the app
+
+Everything you can configure in omp is on the **omp settings** page (`Ctrl+8`, a host card's ⋯ menu, or Settings → New agents), per host: all of omp's settings under omp's own tabs, groups, labels and descriptions, with search, the right control for each (switches, choices with their explanations, numbers with omp's presets, lists, JSON), a modified dot and reset to default. The **model roles** editor at the top of the Model tab assigns a model and thinking level to every role (default, smol, slow, plan, tiny, task, advisor, …) and to roles of your own. TeleFlock reads omp's own settings schema from the omp on the host and writes through `omp config`, so omp validates every change; secrets are write-only.
+
+<img src="docs/assets/readme/omp-settings.webp" alt="omp settings page with omp's tabs and the model roles editor" width="100%">
 
 ### A native session for every agent
 
@@ -63,9 +69,15 @@ A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, b
 
 ### Dispatch: fire tasks into fresh worktrees
 
-Pick a repository and send tasks like chat messages. omp's tiny model names each one (`dispatch/offline-board-cache`), and each gets its own worktree and omp agent; they all run side by side. A thread per repo shows every agent's progress live: naming, creating the worktree, starting, then the agent's status and streaming line. You can answer its questions inline and jump to its session, terminal or review. Templates, model, thinking and plan mode are set per message. Up to three worktrees are created at once; the rest queue. Need a specific branch or several attempts? New worktree and Fan out are one click away, with the repository filled in.
+Pick a repository and send tasks like chat messages. omp's tiny model names each one (`dispatch/offline-board-cache`), and each gets its own worktree and omp agent; they all run side by side. A thread per repo shows every agent's progress live: naming, creating the worktree, starting, then the agent's status and streaming line. You can answer its questions inline and jump to its session, terminal or review. Templates, model, thinking and plan mode are set per message, and you can paste, drop or attach images that go to the agent with its first message. Every worktree forks from a freshly fetched `origin/main`, not a local `main` that may be behind. Put hosts in a **group** (host editor) and pick **Auto · <group>**: each task goes to the least busy host of the group that has the repository (running agents, tasks on their way, CPU and memory; clones are matched by their `origin` URL), and its card says where it went and why. Up to three worktrees are created at once; the rest queue. Need a specific branch or several attempts? New worktree and Fan out are one click away, with the repository filled in.
 
-<img src="docs/assets/readme/dispatch.webp" alt="Dispatch thread with three tasks, each in its own worktree" width="100%">
+<img src="docs/assets/readme/dispatch.webp" alt="Dispatch in Auto mode: two tasks, one with an image, each sent to the least busy host of the group" width="100%">
+
+### Automations: agents on a schedule
+
+A host can start an omp agent on a schedule: a nightly dependency audit, a weekday standup summary, a weekly flaky-test triage. Each automation has a prompt, a model, thinking level and plan mode, and either a fresh worktree per run (forked from `origin/main`) or a folder it runs in. Schedules are cron expressions in the host's time zone; the editor has presets and reads the next runs back in plain English. A run whose previous agent is still busy is skipped instead of piling up, and a run missed while the host was off can catch up once. Every run lands in the history with a link to its agent, and your devices get a notification. `tf-hostd` runs the schedules itself, so no app needs to be connected; on Linux with systemd a timer brings it back after reboots and crashes while an automation is enabled.
+
+<img src="docs/assets/readme/automations.webp" alt="Automations page with three scheduled agents and their recent runs" width="100%">
 
 ### Subagents and agent chat
 
@@ -89,9 +101,9 @@ A diff viewer (unified or split) for any worktree. From there you commit (✨ le
 
 ### A real terminal when you need it
 
-xterm.js attached to any herdr pane, in **Fira Code** with **Nerd Font** icons. It supports control or observe mode with take-over, search, tabs, `localhost` preview tunnels, and an extra-keys row on phones. omp keeps running as its normal TUI inside herdr, so the terminal is always the real thing.
+xterm.js attached to any herdr pane, in **Fira Code** with **Nerd Font** icons. Beside it, **Running panes** lists every pane on the host, shells and agents, grouped by workspace and tab with the program running in each (`vim`, `bun run dev`, `htop`); the sidebar shows shells under their workspace and the palette finds them, and opening one attaches to the existing pane instead of starting a new shell. It supports control or observe mode with take-over, search, tabs, `localhost` preview tunnels, and an extra-keys row on phones. omp keeps running as its normal TUI inside herdr, so the terminal is always the real thing.
 
-<img src="docs/assets/readme/terminal.webp" alt="Terminal attached to an omp pane in herdr" width="100%">
+<img src="docs/assets/readme/terminal.webp" alt="Terminal attached to an omp pane in herdr, with the list of running panes beside it" width="100%">
 
 ### In your pocket
 
@@ -155,7 +167,7 @@ On the machine that runs herdr and omp:
    - Run `sudo tailscale set --ssh`.
    - Make sure your tailnet policy lets your devices SSH to this host as your user.
    - If the policy uses `check` mode, TeleFlock shows an **Open browser** card to finish the login.
-2. **herdr and omp** must be installed (`herdr --version`, `omp --version`; omp ≥ 18.12).
+2. **herdr and omp** must be installed (`herdr --version`, `omp --version`; omp ≥ 18.12). From then on the host keeps them current: `tf-hostd` checks for new releases every 6 hours and installs them (`omp update`, plain `herdr update`, never a live server handoff, so running agents keep running). The host card shows both versions with Check now / Update now and a switch to turn it off.
 3. **In TeleFlock:** **Add host** (first launch, or the **+** next to HOSTS in the sidebar) → Tailscale SSH (MagicDNS name or 100.x IP, user), Local, or WSL (pick a distro) → **Test** → **Add host**. The dialog lists what the host needs, and a failed test shows the command that fixes it. TeleFlock deploys `tf-hostd` to `~/.teleflock/` and connects.
 4. **Host setup** (on the Hosts page, which opens it by itself while items are open; the board shows a **Fix…** strip too) offers one-tap fixes, each explained by what goes wrong without it. Each runs only when you tick its consent box:
    - **herdr's omp integration** (`install-herdr-integration`): accurate working/blocked/idle states.
@@ -201,6 +213,8 @@ flowchart LR
 - A companion omp extension adds structured controls (model, thinking, tree, queue, …).
 - herdr is driven through its local API; git and `gh` run on the host for review and shipping.
 - AI naming runs `omp --mode json` once per request on the host with the `tiny` role (no tools, no session), reads the answer and stops the process.
+- `tf-hostd` also runs the host's automations and keeps omp and herdr up to date; on Linux with systemd a timer restarts it after a reboot while an automation is enabled.
+- omp settings come from omp's own schema (read once per omp build by a throwaway headless omp with the TeleFlock extension) and are written through `omp config set`.
 - The UI is React, rendered by the system webview through Tauri 2. Desktop and Android share all of it.
 
 Details: [`docs/architecture.md`](docs/architecture.md) · spec: [`docs/spec.md`](docs/spec.md) · feature coverage: [`docs/coverage.md`](docs/coverage.md) · bridge protocol: [`docs/bridge-protocol.md`](docs/bridge-protocol.md).
@@ -250,11 +264,12 @@ What has been verified, and how:
 - **Real omp + herdr, on Linux:** the full stack was exercised end to end through the UI in herdr lab sessions, via `tf-devserver` with the local transport, including subscription limits against real Claude and Codex accounts. AI naming (`ai.complete`) was run against omp 18.12.3's real `tiny` model role (an answer in about 4 s).
 - **0.4.0 interface:** the changed screens were walked in the demo at 1440×900, 1280×720 and on a Pixel 5 profile, and the whole change went through a code review.
 - **0.4.1 fixes:** each was reproduced first and re-checked after the fix: the collab join of resumed sessions against a live omp 18.12.3 room (joined in about 1 s instead of timing out every 30 s), queued steers, omp's own `/btw` with follow-ups, kept image originals and the observed terminal size in herdr lab sessions, the systemd scopes and the herdr move on a throwaway process tree, and the update schedule in unit tests plus a live run against GitHub. The Android lifecycle hook for updates was compiled only in the release build.
+- **0.5.0:** the Rust and frontend suites, plus lab runs against real omp 18.12.3 and herdr 0.9.0: Mark done closing the pane, the parked card, Resume, a prompt resuming a parked agent, a daemon restart and pruning after the session file was deleted; a Dispatch task whose image reached omp with its first prompt (the agent answered "Red") in a worktree forked from the fetched `origin/main` with no upstream; all 559 omp settings read from omp's schema and a set/reset round trip in a temporary agent dir; scheduled, catch-up and skipped automation runs and the systemd timer on a lab home; the omp/herdr updater against fake binaries; every pane of a lab herdr session listed with its program. Rendering was measured in headless Chromium and in WebKitGTK at 2× scale: on an idle board the GPU process went from 97% to 3% CPU and compositor layers from 75 to 17, and WebKitGTK's web process from 584% to 114%. The new screens were walked in the demo at 1440×900 and 412×892, and the whole change went through a code review.
 - **Packages:** the Windows installer, the signed APK and the Linux .deb, AppImage and Arch package build from this tree. The Linux app was smoke-run: the window renders, the tray starts, a second launch hands its `teleflock://` link to the first, and the .deb installs and runs on a clean Ubuntu 22.04.
 
 **Not yet exercised:**
 - on real Windows, Android or macOS hardware (macOS is built only in CI);
-- on a real Linux desktop session (tray rendering, the update password prompt);
+- on a real Linux desktop session (tray rendering, the update password prompt, a fractional-scale monitor) and real WebView2 GPU usage;
 - against a real remote Tailscale SSH peer (the SSH path is covered by an in-process server that imitates Tailscale);
 - WSL mode.
 

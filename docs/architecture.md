@@ -511,8 +511,9 @@ It must exercise every UI state, including disconnected, stale and auth-required
 | FrontSession | `src/features/session/**` | Session view on desktop and mobile: virtualized transcript, streaming markdown with highlighting, tool cards, ask/approval/plan-review cards, composer (slash palette, @files, images, steer/follow-up queue), model/thinking/plan/goal/fast controls, inspector (context, cost, tps, todos, subagents, files, tree, actions), btw, non-omp terminal-first view, mobile agent pager |
 | FrontTerminal | `src/features/terminal/**` | xterm.js WebGL terminal (frames, input, resize, scroll), tabs, send-keys bar, mobile extra keys (sticky Ctrl/Alt), embeddable `<TerminalPane>` for split view and session |
 | FrontOps | `src/features/{worktree,workspace,review,preview,history}/**` | New worktree/agent wizard with remote folder browser, workspace ops, review and ship (git diff viewer, commit/push/PR/merge), preview tunnels, past sessions and resume |
-| Dispatch | `src/features/dispatch/**` | Dispatch screen: per-repo chat thread where each message creates a worktree + omp agent, with live reply cards |
+| Dispatch | `src/features/dispatch/**` | Dispatch screen: per-repo chat thread where each message creates a worktree + omp agent, with live reply cards; images; Auto mode over a host group |
 | OmpSettings | `src/features/ompSettings/**` | Per-host omp settings page: omp's tabs/groups/labels, search, per-type controls, model-roles editor, Other tab for keys omp's panel lacks (§3.10) |
+| Automations | `src/features/automations/**` | Per-host Automations page: list with next/last run, editor with schedule builder and live preview, run history, scheduler status (§3.11) |
 | FrontCore | `src/core/**` (except `gen/`) | §6.1 |
 
 Shared UI building blocks come from `@/design` only. A feature that needs a cross-cutting primitive asks FrontShell (for layout) or adds it in its own folder.
@@ -528,6 +529,7 @@ Routes (hash router, `src/app/router.ts`):
 - `#/hosts`
 - `#/settings`
 - `#/omp[/:hostId]` (omp settings of a host)
+- `#/automations[/:hostId]` (automations of a host)
 - `#/design`
 
 On mobile, the same routes render mobile layouts (`useIsMobile`).

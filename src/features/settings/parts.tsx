@@ -8,8 +8,8 @@ export const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "med
 
 /** The three motion budgets, as Settings and the palette name them (stored values unchanged). */
 export const MOTION_COPY: Record<MotionPref, { label: string; description: string }> = {
-  system: { label: "Calm", description: "Only changes and what needs you move." },
-  full: { label: "Lively", description: "Every running agent breathes and glows." },
+  system: { label: "Calm", description: "Changes and what needs you move briefly, then the screen holds still. Lightest on battery and GPU." },
+  full: { label: "Lively", description: "Every running agent breathes and glows, and the background drifts." },
   reduced: { label: "Reduced", description: "No motion; meaning stays as colour and text." },
 };
 
