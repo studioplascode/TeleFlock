@@ -148,7 +148,9 @@ export function AutomationsView({ hostId: routeHost }: { hostId?: string }) {
       open={editor.open}
       onOpenChange={(open) => setEditor((e) => e && { ...e, open })}
       onSaved={() => {
-        setEditor((e) => e && { ...e, open: false });
+        // A slow save answering after this editor was replaced must not close the new one.
+        const key = editor.key;
+        setEditor((e) => (e && e.key === key ? { ...e, open: false } : e));
         q.reload();
       }}
     />

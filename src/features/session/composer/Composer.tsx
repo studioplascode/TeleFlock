@@ -2,13 +2,13 @@ import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, 
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
-import { dragHasFiles, imageFiles } from "@/core/clipboardImages";
+import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, imageFiles, MAX_PROMPT_IMAGE_CHARS } from "@/core/clipboardImages";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import { openTerminal } from "@/features/board/agentActions";
 import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
 import { useFirstUse } from "@/features/shell/hints";
-import { fileToImageInput, hostCall, usePending } from "../api";
+import { hostCall, usePending } from "../api";
 import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
 import { useQueueChips, usePendingQueue, userRowsWithText } from "./queue";
@@ -275,6 +275,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       toast({ title: "Can't send", description: disabledReason, status: "error" });
       return;
     }
+    if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) {
+      toast({ title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.`, status: "error" });
+      return;
+    }
     // Leading space escapes a slash: " /path is a file" goes to the model as text.
     const prompt = text.startsWith(" /") ? text.slice(1) : text.trim();
     const delivery = followUp ? "followUp" : working && caps && !caps.steer && caps.followUp ? "followUp" : "auto";
@@ -308,8 +312,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     const imgs = [...files].filter((f) => f.type.startsWith("image/"));
     if (imgs.length === 0) return;
     try {
-      const loaded = await Promise.all(imgs.map(fileToImageInput));
-      setImages((cur) => [...cur, ...loaded].slice(0, 8));
+      // Very large images (a Linux screenshot paste) are scaled down; the total stays under the
+      // relay's message limit.
+      const { added, skipped } = await attachImages(draftKey, imgs);
+      if (skipped) toast({ title: added ? "Some images were left out" : "Image not attached", description: skipped, status: "error" });
     } catch (e) {
       toast({ title: "Couldn't attach image", description: e instanceof Error ? e.message : String(e), status: "error" });
     }

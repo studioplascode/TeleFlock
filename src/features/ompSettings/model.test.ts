@@ -72,9 +72,18 @@ describe("editors", () => {
     expect(editorFor(byId("compaction.methodOrder"))).toBe("members");
     expect(editorFor(byId("statusLine.leftSegments"))).toBe("members");
     expect(editorFor(byId("contextFiles.extra"))).toBe("json");
-    expect(editorFor(byId("workspace.additionalDirectories"))).toBe("list");
     expect(editorFor(byId("retry.fallbackChains"))).toBe("json");
     expect(editorFor({ ...byId("workspace.additionalDirectories"), value: [{ path: "/x" }] })).toBe("json");
+  });
+
+  test("an array is a string list only when that is known", () => {
+    // Empty, no item schema: could hold objects (bash.patterns: { match, approval } items).
+    expect(editorFor(byId("bash.patterns"))).toBe("json");
+    expect(editorFor(byId("workspace.additionalDirectories"))).toBe("json");
+    expect(editorFor({ ...byId("workspace.additionalDirectories"), value: ["/srv/shared"] })).toBe("list");
+    expect(editorFor({ ...byId("bash.patterns"), default: ["git *"] })).toBe("list");
+    expect(editorFor({ ...byId("workspace.additionalDirectories"), items: { type: "string" } })).toBe("list");
+    expect(editorFor({ ...byId("workspace.additionalDirectories"), value: ["/x"], items: { type: "object" } })).toBe("json");
   });
 
   test("numbers and JSON validate like omp", () => {

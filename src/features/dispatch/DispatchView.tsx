@@ -3,6 +3,7 @@ import { Eraser, FolderGit2, FolderSearch, MoreHorizontal, Send, Server, Shuffle
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type DraftImage, draftKey, navigate, useHostIds, useHostStates, useHosts, useSettings, useUi } from "@/core";
 import type { ConnStatus, HostState } from "@/core/gen";
+import { IMAGES_TOO_LARGE, imageChars, MAX_PROMPT_IMAGE_CHARS } from "@/core/clipboardImages";
 import { describeLoad, type HostLoad, hostLoad, pickHost, rankHosts } from "@/core/workload";
 import {
   Button,
@@ -23,7 +24,7 @@ import { ACTIONS } from "@/features/shell/vocab";
 import { confirmAction } from "@/features/workspace/shared/overlays";
 import { basename, tildify } from "@/features/workspace/shared/paths";
 import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
-import { autoTarget, canonicalRemote, groupHosts, groupOf, groupRepos, remoteKey } from "./auto";
+import { autoTarget, canonicalRemote, findGroupRepo, groupHosts, groupOf, groupRepos, localRepoIds, remoteKey } from "./auto";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
 import { BasePicker, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
@@ -129,7 +130,8 @@ export function DispatchView() {
     () => (auto ? groupRepos(members.map((h) => ({ hostId: h, recents: recentRepos(states[h], dispatched[h] ?? {}) })), remotes) : []),
     [auto, members, states, dispatched, remotes],
   );
-  const autoRepo = auto && repo ? pooled.find((r) => r.id === repo) : undefined;
+  // A thread keeps the repo id it was started under (a host-local one until the remote was known).
+  const autoRepo = auto && repo ? findGroupRepo(pooled, repo) : undefined;
   const candidates = useMemo(() => (autoRepo ? members.filter((h) => autoRepo.roots[h]) : NO_HOSTS), [autoRepo, members]);
   const repoChoices = useMemo<RepoChoice[]>(
     () =>
@@ -149,7 +151,8 @@ export function DispatchView() {
   const workHost = hostId ?? preview?.hostId ?? candidates[0];
   const workRepo = hostId ? repo : workHost ? autoRepo?.roots[workHost] : undefined;
 
-  // Base branch: remembered per thread, else the host's default base (`origin/<default>`).
+  // Base branch: remembered per thread, else the host's default base (`origin/<default>`). Auto
+  // resolves it again on the host each send goes to (as does a send before the list is in).
   const branches = useHostQuery(workHost, "git.branches", workRepo ? { cwd: workRepo } : null);
   const reloadBranches = branches.reload;
   useEffect(() => onDispatchSettled(reloadBranches), [reloadBranches]);
@@ -206,6 +209,15 @@ export function DispatchView() {
   const composer = useRef<DispatchComposerHandle>(null);
   const send = (prompt: string, images: readonly DraftImage[]): boolean => {
     if (!target || !repo || !key) return false;
+    if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) {
+      toast({ title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.`, status: "error" });
+      return false;
+    }
+    // Image prompts need a hostd known to be 0.5+ (older ones drop `agent.images` silently).
+    const takesImages = (h: string) => {
+      const version = states[h]?.info.hostdVersion;
+      return profiles.find((p) => p.id === h)?.kind === "demo" || (!!version && !versionBelow(version, IMAGES_MIN_HOSTD));
+    };
     let to = hostId;
     let root = repo;
     let placed: string | undefined;
@@ -214,24 +226,35 @@ export function DispatchView() {
         toast({ title: `No host of ${auto} has ${repoName}`, description: "Pick another repository, or a single host to browse for it.", status: "error" });
         return false;
       }
+      const able = images.length ? candidates.filter(takesImages) : candidates;
+      if (!able.length) {
+        toast({ title: `No host of ${auto} with ${repoName} can take images yet`, description: `Images need TeleFlock host daemon ${IMAGES_MIN_HOSTD} or newer on ${candidates.map(nameOf).join(", ")}: update one from Hosts, or send the task without images.`, status: "error" });
+        return false;
+      }
       // Fresh numbers: the dispatches just sent count against their host right away.
-      const ranked = rankHosts(loadsOf(candidates, states, status, useDispatch.getState().threads));
+      const ranked = rankHosts(loadsOf(able, states, status, useDispatch.getState().threads));
       const pick = pickHost(ranked);
       if (!pick) {
-        toast({ title: `No host of ${auto} with ${repoName} is online`, description: candidates.map(nameOf).join(", "), status: "error" });
+        toast({ title: `No host of ${auto} with ${repoName}${able.length < candidates.length ? " that takes images" : ""} is online`, description: able.map(nameOf).join(", "), status: "error" });
         return false;
       }
       to = pick.hostId;
       root = autoRepo.roots[pick.hostId] ?? repo;
       const others = ranked.filter((l) => l !== pick && l.available).map((l) => `${nameOf(l.hostId)}: ${describeLoad(l)}`);
-      placed = `least busy of ${candidates.length}: ${describeLoad(pick)}${others.length ? ` (${others.join("; ")})` : ""}`;
+      placed = `least busy of ${able.length}: ${describeLoad(pick)}${others.length ? ` (${others.join("; ")})` : ""}`;
     }
     if (!to) return false;
-    const profile = profiles.find((p) => p.id === to);
-    if (images.length && profile?.kind !== "demo" && versionBelow(states[to]?.info.hostdVersion, IMAGES_MIN_HOSTD)) {
-      toast({ title: `${nameOf(to)} can't take images yet`, description: `Its TeleFlock host daemon (${states[to]?.info.hostdVersion}) is older than ${IMAGES_MIN_HOSTD}: update it from Hosts, or send the task without images.`, status: "error" });
+    if (images.length && !takesImages(to)) {
+      const version = states[to]?.info.hostdVersion;
+      toast({
+        title: `${nameOf(to)} can't take images yet`,
+        description: `${version ? `Its TeleFlock host daemon (${version}) is older than ${IMAGES_MIN_HOSTD}` : `Its TeleFlock host daemon version isn't known yet (images need ${IMAGES_MIN_HOSTD} or newer)`}: update it from Hosts, or send the task without images.`,
+        status: "error",
+      });
       return false;
     }
+    // The view's branch list is the preview host's (Auto) or not in yet: resolve the base on `to`.
+    const resolveBase = auto || !branches.data ? { stored: storedBase, legacy: legacyBase } : undefined;
     dispatchTask({
       key,
       hostId: to,
@@ -243,7 +266,7 @@ export function DispatchView() {
       placed,
       options,
       taken: auto ? (states[to]?.agents.map((a) => a.name) ?? []) : taken.current,
-      lookupBranches: !!auto,
+      resolveBase,
     });
     return true;
   };
@@ -274,7 +297,10 @@ export function DispatchView() {
   const pickRepo = (id: string) => {
     if (!target) return;
     focusAfterPick.current = true;
-    select(target, id);
+    // Auto: back to the thread started under the repo's host-local id, if that's where it is.
+    const picked = auto ? pooled.find((r) => r.id === id) : undefined;
+    const ids = picked ? [id, ...localRepoIds(picked)] : [id];
+    select(target, ids.find((x) => x === repo || (threads[threadKey(target, x)]?.length ?? 0) > 0) ?? id);
   };
   useEffect(() => {
     if (!repo || !focusAfterPick.current) return;
@@ -309,7 +335,7 @@ export function DispatchView() {
       )}
       <RepoPicker
         browseHostId={hostId}
-        repo={repo}
+        repo={autoRepo?.id ?? repo}
         repos={repoChoices}
         emptyHint={auto ? `No repositories on ${auto}'s hosts yet. Pick a single host to browse for one; once it has a worktree or dispatch there, Auto offers it.` : undefined}
         onChange={pickRepo}

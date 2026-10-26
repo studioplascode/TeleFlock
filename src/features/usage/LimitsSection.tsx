@@ -179,7 +179,7 @@ export function LimitsSection({ hostIds, className }: { hostIds: string[]; class
           </p>
         </div>
         <IconButton className="ml-auto" size="sm" label="Refresh limits (ask omp again now)" onClick={refresh}>
-          <RefreshCw className={cn(spinning && "animate-spin")} />
+          <RefreshCw className={cn(spinning && "animate-spin tf-keep")} />
         </IconButton>
       </div>
       {errors.map((e) => (

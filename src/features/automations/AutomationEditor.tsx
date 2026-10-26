@@ -120,6 +120,8 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
   const levels = catalog?.models.find((m) => `${m.provider}/${m.id}` === form.model)?.thinking ?? [];
   const thinkingLevels = levels.length > 0 ? levels : LEVELS;
   const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...thinkingLevels.map((l) => ({ value: l, label: l[0]?.toUpperCase() + l.slice(1) }))];
+  // A level the picked model lacks reads (and saves) as Default.
+  const thinking = form.thinking === DEFAULT || thinkingLevels.includes(form.thinking) ? form.thinking : DEFAULT;
 
   const missing = {
     name: touched && !form.name.trim() ? "Name the automation" : null,
@@ -140,7 +142,7 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
       worktree: form.worktree,
       prompt: form.prompt.trim(),
       model: form.model === DEFAULT ? undefined : form.model,
-      thinking: form.thinking === DEFAULT ? undefined : form.thinking,
+      thinking: thinking === DEFAULT ? undefined : thinking,
       plan: form.plan,
       catchUp: form.catchUp,
     };
@@ -299,7 +301,7 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
                 {(id) => (
                   <Select
                     id={id}
-                    value={form.thinking === DEFAULT || thinkingLevels.includes(form.thinking) ? form.thinking : DEFAULT}
+                    value={thinking}
                     onValueChange={(v) => patch({ thinking: v as Form["thinking"] })}
                     options={thinkingOptions}
                     className="w-full"

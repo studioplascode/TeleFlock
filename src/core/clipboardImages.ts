@@ -1,7 +1,11 @@
+import { type DraftImage, MAX_DRAFT_IMAGES, updateDraftImages } from "./draftImages";
+
 /*
  * Image files out of a paste or a drop. Browsers disagree on where they put them: Chromium lists
  * a pasted screenshot in both `files` and `items`, WebKitGTK (the Linux app) often only in
  * `items` (`getAsFile()`), and a drop from a file manager in `files`. Both are read and merged.
+ * Then the composers' attach path (`attachImages`): very large images scaled down, and the images
+ * of one prompt kept within the count and the relay's message size (`fitImages`).
  */
 
 /** The parts of `DataTransfer` read here (structural, so tests can pass plain objects). */
@@ -73,4 +77,78 @@ export async function shrinkImage(file: File): Promise<File> {
   } catch {
     return file;
   }
+}
+
+/**
+ * Base64 characters of images per prompt (session prompt or Dispatch task). The request carries
+ * them to the host in one relay message (16 MiB cap), so they stay well under it with room for
+ * the rest of the request.
+ */
+export const MAX_PROMPT_IMAGE_CHARS = 12 * 1024 * 1024;
+
+/** Sum of base64 characters (what the request carries). */
+export function imageChars(images: readonly Pick<DraftImage, "data">[]): number {
+  return images.reduce((n, i) => n + i.data.length, 0);
+}
+
+/** Why images were left out of a prompt, for a toast. */
+export const IMAGES_TOO_LARGE = `The images of one prompt stay under ${Math.round((MAX_PROMPT_IMAGE_CHARS * 3) / 4 / 1024 / 1024)} MB in total (the host connection's message limit).`;
+
+/** A file as a prompt image (base64, with a data: URL preview). */
+async function fileToImageInput(file: File): Promise<DraftImage> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  const mime = file.type || "image/png";
+  const data = btoa(bin);
+  return { mime, data, preview: `data:${mime};base64,${data}` };
+}
+
+/** Image files read as prompt images, very large ones scaled down first (`shrinkImage`). */
+async function readImages(files: readonly File[]): Promise<DraftImage[]> {
+  const out: DraftImage[] = [];
+  // One at a time: a batch of big screenshots decoded at once is a lot of memory.
+  for (const f of files) if (f.type.startsWith("image/")) out.push(await fileToImageInput(await shrinkImage(f)));
+  return out;
+}
+
+/**
+ * `incoming` appended to `current` within a prompt's caps (`MAX_DRAFT_IMAGES` images,
+ * `MAX_PROMPT_IMAGE_CHARS` in total); `skipped` says why some were left out. Pure: run it inside
+ * the draft's update so it checks against the images attached by then.
+ */
+export function fitImages(current: readonly DraftImage[], incoming: readonly DraftImage[]): { images: DraftImage[]; skipped?: string } {
+  const images = [...current];
+  let chars = imageChars(current);
+  let skipped: string | undefined;
+  for (const img of incoming) {
+    if (images.length >= MAX_DRAFT_IMAGES) {
+      skipped = `A prompt takes at most ${MAX_DRAFT_IMAGES} images.`;
+      break;
+    }
+    if (chars + img.data.length > MAX_PROMPT_IMAGE_CHARS) {
+      skipped = IMAGES_TOO_LARGE;
+      continue;
+    }
+    chars += img.data.length;
+    images.push(img);
+  }
+  return skipped ? { images, skipped } : { images };
+}
+
+/**
+ * Read `files` (scaled down when very large) and add them to draft `key`'s images within the
+ * caps, checked against the images attached by the time they are read (pastes can overlap).
+ * Returns how many were added and why others were left out.
+ */
+export async function attachImages(key: string, files: readonly File[]): Promise<{ added: number; skipped?: string }> {
+  const loaded = await readImages(files);
+  const out: { added: number; skipped?: string } = { added: 0 };
+  updateDraftImages(key, (cur) => {
+    const fit = fitImages(cur, loaded);
+    out.added = fit.images.length - cur.length;
+    out.skipped = fit.skipped;
+    return fit.images;
+  });
+  return out;
 }

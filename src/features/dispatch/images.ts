@@ -11,13 +11,8 @@ import type { ImageInput } from "@/core/gen";
  * swept against the threads at startup. IndexedDB missing or failing → memory only.
  */
 
-/** Images per task, as in the session composer. */
+/** Images per task, as in the session composer (their total size: `MAX_PROMPT_IMAGE_CHARS`). */
 export const MAX_TASK_IMAGES = MAX_DRAFT_IMAGES;
-/**
- * Base64 characters of images per task. `worktree.create` carries them to the host in one relay
- * message (16 MiB cap), so they stay well under it with room for the rest of the request.
- */
-export const MAX_TASK_IMAGE_CHARS = 12 * 1024 * 1024;
 
 const DB_NAME = "tf.dispatch";
 const STORE = "images";
@@ -160,9 +155,4 @@ export async function sweepEntryImages(live: ReadonlySet<string>): Promise<void>
   const keys = await backend.keys().catch(() => [] as string[]);
   const dead = keys.filter((k) => !live.has(k));
   if (dead.length) await backend.remove(dead).catch(() => undefined);
-}
-
-/** Sum of base64 characters (what the request carries). */
-export function imageChars(images: readonly Pick<ImageInput, "data">[]): number {
-  return images.reduce((n, i) => n + i.data.length, 0);
 }

@@ -20,6 +20,8 @@ export function useOmpSettings(hostId: string | undefined): OmpSettingsState {
   const [state, setState] = useState<{ hostId?: string; data?: OmpSettings; error?: ApiError; loading: boolean }>({ loading: false });
   const queue = useRef<Promise<void>>(Promise.resolve());
   const pending = useRef(0);
+  /** Writes started so far: a read that overlapped one answers with values from before it. */
+  const writes = useRef(0);
   const failed = useRef(false);
   const hostRef = useRef(hostId);
   hostRef.current = hostId;
@@ -28,12 +30,17 @@ export function useOmpSettings(hostId: string | undefined): OmpSettingsState {
     (refresh = false) => {
       if (!hostId) return;
       setState((s) => ({ hostId, data: s.hostId === hostId ? s.data : undefined, loading: true }));
+      const startedAt = writes.current;
+      // Another host by now, or a write started meanwhile (or still running, with the newer values:
+      // its answer wins): only stop the spinner.
+      const stale = () => hostRef.current !== hostId || writes.current !== startedAt || pending.current > 0;
+      const settle = () => setState((s) => (s.hostId === hostId ? { ...s, loading: false } : s));
       core
         .host(hostId)
         .call("omp.settings", refresh ? { refresh: true } : {})
         .then(
-          (data) => hostRef.current === hostId && setState({ hostId, data, loading: false }),
-          (e: unknown) => hostRef.current === hostId && setState((s) => ({ hostId, data: s.hostId === hostId ? s.data : undefined, error: toApiError(e), loading: false })),
+          (data) => (stale() ? settle() : setState({ hostId, data, loading: false })),
+          (e: unknown) => (stale() ? settle() : setState((s) => ({ hostId, data: s.hostId === hostId ? s.data : undefined, error: toApiError(e), loading: false }))),
         );
     },
     [hostId],
@@ -48,6 +55,7 @@ export function useOmpSettings(hostId: string | undefined): OmpSettingsState {
       if (!hostId || changes.length === 0) return Promise.resolve();
       setState((s) => (s.data && s.hostId === hostId ? { ...s, data: applyLocal(s.data, changes) } : s));
       pending.current += 1;
+      writes.current += 1;
       const run = async () => {
         try {
           const data = await core.host(hostId).call("omp.settingsSet", { changes });

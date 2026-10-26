@@ -30,6 +30,19 @@ export const PRESET_LABELS: Record<PresetKind, string> = {
 
 export const DEFAULT_SCHEDULE: ScheduleDraft = { kind: "weekdays", every: 30, minute: 0, hour: 9, days: [1], cron: "0 9 * * 1-5" };
 
+/**
+ * The N of "every N minutes / hours": divisors of the hour / day only, so the gap stays N across
+ * the wrap (`*\/45` fires at :00 and :45; `*\/5` hours leaves 4 h at midnight).
+ */
+export const EVERY_MINUTES: readonly number[] = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+export const EVERY_HOURS: readonly number[] = [1, 2, 3, 4, 6, 8, 12];
+
+/** `every` as one of the kind's choices: the largest not above it (else the smallest). */
+export function fitEvery(kind: "minutes" | "hours", every: number): number {
+  const choices = kind === "minutes" ? EVERY_MINUTES : EVERY_HOURS;
+  return choices.findLast((n) => n <= every) ?? choices[0] ?? 1;
+}
+
 /** The cron expression a schedule draft stands for. */
 export function scheduleToCron(d: ScheduleDraft): string {
   switch (d.kind) {
@@ -61,11 +74,11 @@ export function cronToSchedule(cron: string): ScheduleDraft {
     const hour = num(h);
     if (h === "*" && dow === "*") {
       const every = stepOf(mi);
-      if (every !== null) candidates.push({ ...base, kind: "minutes", every });
+      if (every !== null && EVERY_MINUTES.includes(every)) candidates.push({ ...base, kind: "minutes", every });
     }
     if (minute !== null && dow === "*") {
       const every = stepOf(h);
-      if (every !== null) candidates.push({ ...base, kind: "hours", every, minute });
+      if (every !== null && EVERY_HOURS.includes(every)) candidates.push({ ...base, kind: "hours", every, minute });
     }
     if (minute !== null && hour !== null) {
       if (dow === "*") candidates.push({ ...base, kind: "daily", minute, hour });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { dragHasFiles, imageFiles, shrinkImage } from "./clipboardImages";
+import { attachImages, dragHasFiles, fitImages, imageChars, imageFiles, MAX_PROMPT_IMAGE_CHARS, shrinkImage } from "./clipboardImages";
+import { getDraftImages, MAX_DRAFT_IMAGES } from "./draftImages";
 
 const png = (name = "image.png", bytes = 8, lastModified = 1) => new File([new Uint8Array(bytes)], name, { type: "image/png", lastModified });
 const item = (f: File | null, kind = "file", type = f?.type ?? "text/plain") => ({ kind, type, getAsFile: () => f });
@@ -43,5 +44,33 @@ describe("shrinkImage", () => {
     expect(await shrinkImage(small)).toBe(small);
     const gif = new File([new Uint8Array(4 * 1024 * 1024)], "a.gif", { type: "image/gif" });
     expect(await shrinkImage(gif)).toBe(gif);
+  });
+});
+
+describe("prompt image caps", () => {
+  const img = (chars: number) => ({ mime: "image/png", data: "A".repeat(chars), preview: "" });
+
+  test("count and total size", () => {
+    const nine = Array.from({ length: MAX_DRAFT_IMAGES + 1 }, () => img(4));
+    const counted = fitImages([], nine);
+    expect(counted.images).toHaveLength(MAX_DRAFT_IMAGES);
+    expect(counted.skipped).toContain(`${MAX_DRAFT_IMAGES} images`);
+    const half = img(MAX_PROMPT_IMAGE_CHARS / 2 + 1);
+    const sized = fitImages([half], [half, img(10)]);
+    // The big one is left out, a small one after it still fits.
+    expect(sized.images.map((i) => i.data.length)).toEqual([half.data.length, 10]);
+    expect(sized.skipped).toContain("MB in total");
+    expect(fitImages([img(1)], [img(2)])).toEqual({ images: [img(1), img(2)] });
+  });
+
+  test("overlapping pastes are capped against each other, not against what each saw at the start", async () => {
+    // 5 MiB each: ~6.7 MiB of base64, so only one of two fits under the 12 MiB cap.
+    const big = (name: string) => new File([new Uint8Array(5 * 1024 * 1024)], name, { type: "image/png", lastModified: 1 });
+    const [a, b] = await Promise.all([attachImages("test.overlap", [big("a.png")]), attachImages("test.overlap", [big("b.png")])]);
+    expect([a.added, b.added].sort()).toEqual([0, 1]);
+    expect(a.skipped ?? b.skipped).toContain("MB in total");
+    const kept = getDraftImages("test.overlap");
+    expect(kept).toHaveLength(1);
+    expect(imageChars(kept)).toBeLessThanOrEqual(MAX_PROMPT_IMAGE_CHARS);
   });
 });

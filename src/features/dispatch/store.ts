@@ -1,10 +1,10 @@
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import { aiNamingEnabled, apiError, core, type DraftImage, getAgentViews, suggestBranch, toApiError, useSettings } from "@/core";
-import type { Agent, AgentSpec, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
+import type { Agent, AgentSpec, BranchList, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
 import { classifyHerdrError, describeError, type HerdrFailure } from "@/features/workspace/shared/errors";
 import { deleteEntryImages, loadEntryImages, saveEntryImages, sweepEntryImages } from "./images";
-import { BRANCH_PREFIX, type BranchSuggester, baseSlug, nameDispatch, resolveAgent, slimThreads, uniqueSlug } from "./thread";
+import { BRANCH_PREFIX, type BranchSuggester, baseSlug, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
 /*
  * Dispatch threads: every message fired at a repo becomes one `worktree.create` with an omp agent
@@ -422,12 +422,21 @@ export function suggestDispatchName(hostId: string, repo: string, prompt: string
 /** What an image-only task is named after. */
 const IMAGE_TASK = "image task";
 
+/** A thread's base choice, resolved against the branches of the host a task actually goes to. */
+export interface BaseChoice {
+  /** The thread's remembered base (absent = the host's default base). */
+  stored?: string;
+  /** Remembered before 0.5 (`legacyBases`). */
+  legacy: boolean;
+}
+
 /**
  * Fire one task: append an entry to thread `key` (default: the host + repo thread) and create its
  * worktree + agent on `hostId` in the background. `taken` = names that are not free (existing
  * branches, live agent names); the host's own dispatches are added here, so rapid sends (to any
- * repo) never collide with each other. With `lookupBranches` (Auto: the view has no branch list of
- * the picked host) the host's branches are fetched before the name is claimed.
+ * repo) never collide with each other. With `resolveBase` (Auto, or a send before the view had the
+ * host's branch list) the host's branches are fetched first: the name is deduped against them and
+ * the base is resolved there (`threadBase`); `base`/`baseLabel` then only stand in until it is.
  * With a namer (default: omp's tiny model when AI naming is on and there is text; `null` = none)
  * the entry first goes through `naming`, holding the prompt's slug as its fallback name meanwhile.
  */
@@ -442,7 +451,7 @@ export function dispatchTask(args: {
   placed?: string;
   options: DispatchOptions;
   taken: Iterable<string>;
-  lookupBranches?: boolean;
+  resolveBase?: BaseChoice;
   suggest?: BranchSuggester | null;
 }): DispatchEntry {
   const key = args.key ?? threadKey(args.hostId, args.repo);
@@ -475,21 +484,21 @@ export function dispatchTask(args: {
   void saveEntryImages(entry.id, images);
   s.add(key, entry);
   s.setOptions(args.options);
-  void (suggest || args.lookupBranches ? nameThenRun(key, entry.id, taken, suggest, !!args.lookupBranches) : run(key, entry.id));
+  void (suggest || args.resolveBase ? nameThenRun(key, entry.id, taken, suggest, args.resolveBase) : run(key, entry.id));
   return entry;
 }
 
-/** The names of `repo`'s branches on `hostId` (none when the host can't say). */
-async function branchNames(hostId: string, repo: string): Promise<string[]> {
+/** `repo`'s branches on `hostId` (undefined when the host can't say). */
+async function branchList(hostId: string, repo: string): Promise<BranchList | undefined> {
   try {
-    return (await core.host(hostId).call("git.branches", { cwd: repo })).branches.map((b) => b.name);
+    return await core.host(hostId).call("git.branches", { cwd: repo });
   } catch {
-    return [];
+    return undefined;
   }
 }
 
 /** `naming` → the AI name (or the fallback) made unique the moment the answer is in → `run`. */
-async function nameThenRun(key: string, id: string, taken: readonly string[], suggest: BranchSuggester | null, lookupBranches: boolean): Promise<void> {
+async function nameThenRun(key: string, id: string, taken: readonly string[], suggest: BranchSuggester | null, resolveBase: BaseChoice | undefined): Promise<void> {
   const store = useDispatch.getState;
   const e = find(key, id);
   if (!e) return;
@@ -497,7 +506,7 @@ async function nameThenRun(key: string, id: string, taken: readonly string[], su
   const hostId = entryHost(key, e);
   inflight.add(id);
   const naming = nameDispatch(e.prompt.trim() ? e.prompt : IMAGE_TASK, suggest);
-  const [{ slug, ai }, branches] = lookupBranches ? await Promise.all([naming, branchNames(hostId, entryRepo(key, e))]) : [await naming, []];
+  const [{ slug, ai }, list] = resolveBase ? await Promise.all([naming, branchList(hostId, entryRepo(key, e))]) : [await naming, undefined];
   // Dismissed (or the thread cleared) while naming: nothing reached the host.
   if (find(key, id)?.phase !== phase) {
     settled(id);
@@ -505,8 +514,9 @@ async function nameThenRun(key: string, id: string, taken: readonly string[], su
   }
   // Dedupe and claim the name in one synchronous step: identical sends share one AI answer and
   // resume in the same tick, so each must see the name the previous one just took.
-  const name = uniqueSlug(slug, reservedNames(hostId, [...taken, ...branches], id));
-  store().patch(key, id, { name, branch: `${BRANCH_PREFIX}${name}`, aiNamed: ai });
+  const name = uniqueSlug(slug, reservedNames(hostId, [...taken, ...(list?.branches.map((b) => b.name) ?? [])], id));
+  const base = resolveBase ? threadBase(list, resolveBase.stored, resolveBase.legacy) : undefined;
+  store().patch(key, id, { name, branch: `${BRANCH_PREFIX}${name}`, aiNamed: ai, ...(base ? { base: base.param, baseLabel: base.shown } : {}) });
   void run(key, id);
 }
 

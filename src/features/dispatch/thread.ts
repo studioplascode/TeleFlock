@@ -102,12 +102,13 @@ export const START_TIMEOUT_MS = 90_000;
  * pre-0.5 remembered local default branch) → the host's default base: `param` absent, so a 0.5
  * host forks from `origin/<default>` after fetching; an older host (no `defaultBase`) gets its
  * default branch spelled out (absent meant HEAD there). A remembered branch the repo no longer
- * has falls back to the default too.
+ * has falls back to the default too. Without a branch list a pre-0.5 base can't be told from the
+ * default, so it counts as untouched.
  */
 export function threadBase(list: BranchList | undefined, stored: string | undefined, legacy: boolean): { shown: string; param?: string; untouched: boolean } {
   const def = list?.defaultBase ?? list?.defaultBranch;
   const known = !list || stored === "HEAD" || list.branches.some((b) => b.name === stored);
-  const untouched = !stored || stored === def || (legacy && stored === list?.defaultBranch) || !known;
+  const untouched = !stored || stored === def || (legacy && (!list || stored === list.defaultBranch)) || !known;
   if (!untouched && stored) return { shown: stored, param: stored, untouched };
   const param = list && !list.defaultBase ? list.defaultBranch : undefined;
   return { shown: def ?? "default branch", ...(param ? { param } : {}), untouched };

@@ -480,7 +480,7 @@ Errors reject with `ApiError`.
 - `pulseBus.subscribe(key, cb)`.
 - `termBus.subscribe(hostId, termId, cb)`.
 - `useUi()`: navigation (view, selected agent, split, palette, sheets, mobile tab, pager).
-- `@/core/clipboardImages`: `imageFiles(clipboardData | dataTransfer)` reads `items` (WebKitGTK puts pasted screenshots only there) and `files`, deduplicated; `shrinkImage` scales images over 3 MB down to ≤ 2560 px. Used by the session composer and Dispatch.
+- `@/core/clipboardImages`: `imageFiles(clipboardData | dataTransfer)` reads `items` (WebKitGTK puts pasted screenshots only there) and `files`, deduplicated; `attachImages(draftKey, files)` scales images over 3 MB down to ≤ 2560 px (`shrinkImage`) and adds them to the draft within one prompt's caps (`fitImages`: 8 images, `MAX_PROMPT_IMAGE_CHARS` = 12 MiB of base64 under the relay's 16 MiB message cap, checked against the images attached by then). Used by the session composer and Dispatch, which also refuse a send above the cap.
 - `@/core/workload`: per-host load for Dispatch Auto (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`): running agents and dispatches on their way, needs-you agents, CPU pressure (max of CPU% and load/cores), memory above 85 %; offline hosts never picked.
 
 **Parked and pruned agents** (`store/lifecycle.ts` pure, `agentLifecycle.ts` effects):

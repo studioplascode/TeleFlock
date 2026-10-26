@@ -58,7 +58,7 @@ import {
   useUi,
 } from "@/core";
 import type { MotionPref, ThinkingLevel } from "@/core/gen";
-import { archiveWithUndo, openAnswerHud, setArchived, setMuted, stopAgent } from "@/features/board/agentActions";
+import { archiveWithUndo, openAnswerHud, openTerminal, setArchived, setMuted, stopAgent } from "@/features/board/agentActions";
 import { connect } from "@/features/hosts/ConnStatusCard";
 import { MOTION_COPY } from "@/features/settings/parts";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
@@ -131,7 +131,8 @@ function useEntries(): Entry[] {
         icon: <SquareTerminal />,
         shortcut: ACTIONS.terminal.shortcut,
         hint: ACTIONS.terminal.description,
-        run: () => navigate({ name: "terminal", hostId: ctxAgent.hostId, agentId: ctxAgent.id }),
+        // The full Terminal view (`openTerminal`'s phone form); a parked agent resumes first, then its new pane opens.
+        run: () => openTerminal(ctxAgent.key, true),
       },
       ctxAgent.archived
         ? {

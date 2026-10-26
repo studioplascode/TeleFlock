@@ -78,22 +78,32 @@ function whenPresent(key: string): Promise<string | null> {
   });
 }
 
+/** Resumes started here and not settled yet (key → the shared promise), so a second click joins the first. */
+const resuming = new Map<string, Promise<string | null>>();
+
 /**
  * `agent.resume` of a parked agent (omp --resume in a new pane). Resolves with the new agent's key
  * once it is on the board (null if it never showed up); views on the old key follow on their own.
- * Rejects with the host's ApiError (older hosts: `unknown_method`).
+ * Rejects with the host's ApiError (older hosts: `unknown_method`). A call while one is in flight
+ * for the same key shares it.
  */
-export async function resumeAgent(key: string): Promise<string | null> {
-  const { hostId, agentId } = parseAgentKey(key);
-  markResuming(key, true);
-  try {
-    const started = await core.host(hostId).call("agent.resume", { agentId });
-    if (started.agentId) pushInternal({ type: "$successor", hostId, from: agentId, to: started.agentId });
-  } catch (err) {
-    markResuming(key, false);
-    throw err;
-  }
-  return whenPresent(key);
+export function resumeAgent(key: string): Promise<string | null> {
+  const pending = resuming.get(key);
+  if (pending) return pending;
+  const run = (async () => {
+    const { hostId, agentId } = parseAgentKey(key);
+    markResuming(key, true);
+    try {
+      const started = await core.host(hostId).call("agent.resume", { agentId });
+      if (started.agentId) pushInternal({ type: "$successor", hostId, from: agentId, to: started.agentId });
+    } catch (err) {
+      markResuming(key, false);
+      throw err;
+    }
+    return whenPresent(key);
+  })().finally(() => resuming.delete(key));
+  resuming.set(key, run);
+  return run;
 }
 
 // ---------------------------------------------------------------- following and pruning

@@ -86,15 +86,6 @@ export function useBeat(key: string): number {
 /** A composer attachment (persisted with the composer draft). */
 export type PendingImage = DraftImage;
 
-export async function fileToImageInput(file: File): Promise<PendingImage> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  const mime = file.type || "image/png";
-  const data = btoa(bin);
-  return { mime, data, preview: `data:${mime};base64,${data}` };
-}
-
 export interface MuteState {
   muted: boolean;
   toggle(): Promise<void>;

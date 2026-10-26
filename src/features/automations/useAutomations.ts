@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { core, toApiError } from "@/core";
+import { useEffect, useRef, useState } from "react";
+import { core, toApiError, useHosts } from "@/core";
 import type { ApiError, Automation, AutomationDraft, AutomationList, SchedulePreview } from "@/core/gen";
 import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
 
@@ -20,14 +20,23 @@ export interface AutomationsQuery {
 
 /**
  * `automation.list` of one host, refreshed every 30 s while the page is visible, when it becomes
- * visible again, and just after the soonest scheduled run (so next/last run stay current).
+ * visible again, and just after the soonest scheduled run (so next/last run stay current). A host
+ * that predates automations isn't polled (each reload would blank its notice); it is asked again
+ * when it reconnects (after an update).
  */
 export function useAutomations(hostId: string | undefined): AutomationsQuery {
   const q = useHostQuery(hostId, "automation.list", hostId ? {} : null);
   const { reload, data } = q;
+  const outdated = q.error?.code === "unknown_method";
+  const outdatedRef = useRef(outdated);
+  outdatedRef.current = outdated;
+  const online = useHosts((h) => (hostId ? h.status[hostId]?.phase === "online" : false));
+  useEffect(() => {
+    if (online && outdatedRef.current) reload();
+  }, [online, reload]);
 
   useEffect(() => {
-    if (!hostId) return;
+    if (!hostId || outdated) return;
     const visible = () => document.visibilityState === "visible";
     const timer = setInterval(() => visible() && reload(), POLL_MS);
     const onVisible = () => visible() && reload();
@@ -36,7 +45,7 @@ export function useAutomations(hostId: string | undefined): AutomationsQuery {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [hostId, reload]);
+  }, [hostId, outdated, reload]);
 
   const soonest = data?.automations.reduce<number | undefined>((min, a) => (a.nextRunAt !== undefined && (min === undefined || a.nextRunAt < min) ? a.nextRunAt : min), undefined);
   useEffect(() => {
@@ -47,7 +56,7 @@ export function useAutomations(hostId: string | undefined): AutomationsQuery {
     return () => clearTimeout(timer);
   }, [soonest, reload]);
 
-  return { data, error: q.error, loading: q.loading, waiting: q.waiting, outdated: q.error?.code === "unknown_method", reload };
+  return { data, error: q.error, loading: q.loading, waiting: q.waiting, outdated, reload };
 }
 
 /** The editable draft of a saved automation. */

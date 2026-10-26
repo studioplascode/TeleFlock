@@ -503,7 +503,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
           }
           actions={
             <IconButton label="Refresh" size="sm" onClick={reload}>
-              <RefreshCw className={cn(refreshing && "animate-spin")} />
+              <RefreshCw className={cn(refreshing && "animate-spin tf-keep")} />
             </IconButton>
           }
         />
@@ -586,7 +586,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
       </Tooltip>
       <Tooltip content="Refresh" shortcut="R">
         <IconButton label="Refresh diff" size="sm" onClick={reload}>
-          <RefreshCw className={cn(refreshing && "animate-spin")} />
+          <RefreshCw className={cn(refreshing && "animate-spin tf-keep")} />
         </IconButton>
       </Tooltip>
       <WorkspaceActionsMenu hostId={hostId} workspace={ws} home={host?.info.home}>

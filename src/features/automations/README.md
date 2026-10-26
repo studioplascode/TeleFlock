@@ -42,7 +42,8 @@ export function describeCron(expr: string): string | null;
   tf-hostd predates automations: "Update TeleFlock on <host>" (it updates when an updated app
   reconnects). Offline hosts show a waiting state; the list loads once the host is online.
 - The list refreshes after every mutation, every 30 s while the page is visible, when it becomes
-  visible, and ~2.5 s after the soonest next run (so the new last run shows up).
+  visible, and ~2.5 s after the soonest next run (so the new last run shows up). A host whose
+  tf-hostd predates automations isn't polled; it is asked again when it reconnects.
 - Scheduler banner from `AutomationList.scheduler`: systemd timer active (runs without an app,
   survives reboots), systemd without persistence (its `note`, with a copyable
   `loginctl enable-linger <user>` when the note names it), or daemon-only (its `note`). Shows the
@@ -56,8 +57,9 @@ export function describeCron(expr: string): string | null;
 - Editor: name; worktree vs in place (worktree = a fresh `automation/<slug>-<date>` branch forked
   from the remote's default branch per run); repository / folder (typed, or the FolderBrowser in
   repo mode for worktrees, folder mode otherwise, shown in place of the form; Esc goes back); prompt (required unless plan mode, as in hostd);
-  schedule; model / thinking (host catalog) / plan; catch-up; enabled. Presets: every N minutes,
-  every N hours at minute M, daily, weekdays, weekly on chosen days (all at HH:MM), custom cron.
+  schedule; model / thinking (host catalog) / plan; catch-up; enabled. Presets: every N minutes
+  (N divides 60), every N hours at minute M (N divides 24), daily, weekdays, weekly on chosen days
+  (all at HH:MM), custom cron; so runs stay N apart across the hour / midnight.
   An existing cron reads back into the preset that generates exactly it, else custom. The preview
   is the host's `automation.preview` (debounced 300 ms; the host's time zone): description and the
   next 5 runs in this device's time (plus host time when the zones differ), or the error.

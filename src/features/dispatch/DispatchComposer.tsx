@@ -2,13 +2,12 @@ import { motion } from "motion/react";
 import { ArrowUp, Check, ClipboardList, Cpu, ImagePlus, LayoutTemplate, Lock, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
-import { dragHasFiles, imageFiles, shrinkImage } from "@/core/clipboardImages";
+import { attachImages, dragHasFiles, imageFiles } from "@/core/clipboardImages";
 import type { ThinkingLevel } from "@/core/gen";
 import { IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
-import { fileToImageInput } from "@/features/session/api";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
 import { templateSummary } from "@/features/workspace/shared/templates";
-import { imageChars, MAX_TASK_IMAGE_CHARS, MAX_TASK_IMAGES } from "./images";
+import { MAX_TASK_IMAGES } from "./images";
 import { type DispatchOptions, suggestDispatchName } from "./store";
 import { prefetchKey } from "./thread";
 
@@ -35,30 +34,6 @@ export interface DispatchComposerProps {
   disabledReason?: string | null;
   placeholder: string;
   mobile: boolean;
-}
-
-/**
- * Attach `files` to `current` within a task's caps (8 images, total size under the relay's
- * message limit); very large images are scaled down first. Returns the images that fit and why
- * others were left out.
- */
-async function attachImages(current: readonly DraftImage[], files: readonly File[]): Promise<{ added: DraftImage[]; skipped?: string }> {
-  const room = MAX_TASK_IMAGES - current.length;
-  const tooMany = `A task takes at most ${MAX_TASK_IMAGES} images.`;
-  if (room <= 0) return { added: [], skipped: tooMany };
-  let chars = imageChars(current);
-  const added: DraftImage[] = [];
-  let skipped = files.length > room ? tooMany : undefined;
-  for (const f of files.slice(0, room)) {
-    const img = await fileToImageInput(await shrinkImage(f));
-    if (chars + img.data.length > MAX_TASK_IMAGE_CHARS) {
-      skipped = `The images of one task stay under ${Math.round((MAX_TASK_IMAGE_CHARS * 3) / 4 / 1024 / 1024)} MB in total (the host connection's message limit).`;
-      continue;
-    }
-    chars += img.data.length;
-    added.push(img);
-  }
-  return { added, skipped };
 }
 
 /**
@@ -102,10 +77,8 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const addFiles = async (files: readonly File[]) => {
     if (!files.length || disabled) return;
     try {
-      // Caps against what is attached right now.
-      const { added, skipped } = await attachImages(images, files);
-      if (added.length) setImages((cur) => [...cur, ...added].slice(0, MAX_TASK_IMAGES));
-      if (skipped) toast({ title: added.length ? "Some images were left out" : "Image not attached", description: skipped, status: "error" });
+      const { added, skipped } = await attachImages(draftKey, files);
+      if (skipped) toast({ title: added ? "Some images were left out" : "Image not attached", description: skipped, status: "error" });
     } catch (e) {
       toast({ title: "Couldn't attach image", description: e instanceof Error ? e.message : String(e), status: "error" });
     }

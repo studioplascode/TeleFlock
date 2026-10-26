@@ -23,8 +23,8 @@ omp settings, palette / Ctrl+8, mobile More.
 | `number` | number; presets (omp's options) + Custom… | after a typing pause, blur or Enter, when valid |
 | `text` | string; presets when omp has options; `runtime` options (themes …) as free text | after a typing pause, blur or Enter |
 | `members` | array with omp options or an item vocabulary (`statusLine.*Segments`): ordered list + Add menu | on each change |
-| `list` | array of strings | on each change |
-| `json` | record, `editor: json`, arrays of objects | Save button, once valid (array / object shape checked) |
+| `list` | array of strings (declared by its item schema, or a non-empty value / default of strings) | on each change |
+| `json` | record, `editor: json`, arrays of objects, empty arrays without an item schema | Save button, once valid (array / object shape checked) |
 
 Settings without `ui` (≈ 140 in omp 18.12) are on the **Other** tab, grouped by key prefix, so every
 key is editable. Conditions (`macOS`, `vimModeEnabled`, …) never hide a row: they show as a hint and

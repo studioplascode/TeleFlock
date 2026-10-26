@@ -146,7 +146,10 @@ export function SearchField() {
   );
 }
 
-/** Needs-you counter: sunset pill that pulses while anything waits on you; opens the Answer-next HUD. */
+/**
+ * Needs-you counter: sunset pill that pulses while anything waits on you (again for each change of
+ * the count, so Calm's bounded pulse marks new arrivals); opens the Answer-next HUD.
+ */
 export function NeedsCounter() {
   const { needs } = useFlockCounts();
   const { setAnswerNext } = useUi();
@@ -158,11 +161,13 @@ export function NeedsCounter() {
             <button
               type="button"
               onClick={() => setAnswerNext(true)}
-              className="sun-pulse flex h-7 items-center gap-1.5 rounded-full bg-sun pr-3 pl-2 text-xs font-extrabold text-white pressable focus-ring"
+              className="relative flex h-7 items-center gap-1.5 rounded-full bg-sun pr-3 pl-2 text-xs font-extrabold text-white pressable focus-ring"
               aria-label={`${needs} agent${needs === 1 ? "" : "s"} need you: ${ACTIONS.answerNext.label}`}
             >
+              {/* The glow as its own layer, keyed like the ping: replays without remounting the focusable button. Inline position: `sun-pulse` sets `relative`. */}
+              <span key={needs} aria-hidden className="sun-pulse pointer-events-none rounded-[inherit]" style={{ position: "absolute", inset: 0 }} />
               <span className="relative grid size-4 place-items-center">
-                <span className="tf-loop absolute inset-0 animate-ping rounded-full bg-white/60" />
+                <span key={needs} className="tf-loop absolute inset-0 animate-ping rounded-full bg-white/60" />
                 <span className="size-2 rounded-full bg-white" />
               </span>
               <NumberTicker value={needs} />

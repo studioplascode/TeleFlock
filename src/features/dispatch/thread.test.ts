@@ -101,6 +101,9 @@ describe("dispatch naming", () => {
     });
     test("before the branch list arrives", () => {
       expect(threadBase(undefined, undefined, false)).toEqual({ shown: "default branch", untouched: true });
+      // A pre-0.5 base can't be told from the default yet: nothing is sent (the host resolves it).
+      expect(threadBase(undefined, "main", true)).toEqual({ shown: "default branch", untouched: true });
+      expect(threadBase(undefined, "dev", false)).toEqual({ shown: "dev", param: "dev", untouched: false });
     });
   });
 

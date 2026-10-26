@@ -157,7 +157,8 @@ function Widgets() {
         className="text-left pressable focus-ring rounded-tile"
         aria-label={needs.length > 0 ? `${needs.length} need you: answer` : "Nothing needs you: open Inbox"}
       >
-        <Tile variant={needs.length > 0 ? "sunset" : "default"} className={cn(tile, needs.length > 0 && "sun-pulse")}>
+        {/* Keyed by the count: Calm's bounded sunset pulse plays again for each new arrival (the button keeps focus). */}
+        <Tile key={needs.length} variant={needs.length > 0 ? "sunset" : "default"} className={cn(tile, needs.length > 0 && "sun-pulse")}>
           <NumberTicker value={needs.length} className="font-display text-display leading-none font-bold" />
           <span className={cn("text-xs font-bold whitespace-nowrap", needs.length > 0 ? "text-white/90" : "text-mute")}>
             need you{needs.length > 0 && <span className="text-white"> · Answer →</span>}

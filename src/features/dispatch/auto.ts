@@ -83,3 +83,16 @@ export function groupRepos(hosts: readonly { hostId: string; recents: readonly R
   }
   return [...byId.values()].sort((a, b) => b.at - a.at || a.name.localeCompare(b.name));
 }
+
+/** The host-local ids a repository had on each of its hosts before their remote was known. */
+export function localRepoIds(repo: GroupRepo): string[] {
+  return Object.entries(repo.roots).map(([h, root]) => `local:${h}:${root}`);
+}
+
+/**
+ * The repository behind a stored repo id (a thread's, a draft's, `lastRepo`): by identity, else by
+ * the host-local id it had until a workspace reported its remote (the id moves; threads don't).
+ */
+export function findGroupRepo(repos: readonly GroupRepo[], id: string): GroupRepo | undefined {
+  return repos.find((r) => r.id === id) ?? (id.startsWith("local:") ? repos.find((r) => localRepoIds(r).includes(id)) : undefined);
+}

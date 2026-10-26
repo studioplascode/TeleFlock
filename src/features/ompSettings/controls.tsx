@@ -17,7 +17,7 @@ import {
   Tooltip,
   useIsMobile,
 } from "@/design";
-import { conditionInfo, editorFor, enumChoices, formatJson, isModified, memberChoices, parseJson, parseNumber, valueText } from "./model";
+import { conditionInfo, deepEqual, editorFor, enumChoices, formatJson, isModified, memberChoices, parseJson, parseNumber, valueText } from "./model";
 import { ModelRoles } from "./ModelRoles";
 
 /** Typing pause before a text field saves (blur and Enter save at once). */
@@ -104,10 +104,17 @@ function TextControl({ value, onCommit, label, placeholder, validate, className 
   );
 }
 
-/** Presets (omp's options) plus "Custom…" with a free field; the field shows while the value is no preset. */
+/**
+ * Presets (omp's options) plus "Custom…" with a free field; the field shows while the value is no
+ * preset. A number setting's non-numeric option (`compaction.thresholdPercent`: "default") stands
+ * for omp's default: picking it resets the setting, and the default value shows as that option.
+ */
 function PresetControl({ s, onCommit, kind }: { s: OmpSetting; onCommit: (v: unknown) => void; kind: "number" | "text" }) {
   const options = s.options ?? [];
-  const current = valueText(s.value);
+  const resetOption = kind === "number" ? options.find((o) => !parseNumber(o.value).ok)?.value : undefined;
+  const raw = valueText(s.value);
+  const atDefault = s.value === undefined || deepEqual(s.value, s.default);
+  const current = resetOption !== undefined && atDefault && !options.some((o) => o.value === raw) ? resetOption : raw;
   const isPreset = options.some((o) => o.value === current);
   const [custom, setCustom] = useState(!isPreset);
   useEffect(() => {
@@ -116,6 +123,7 @@ function PresetControl({ s, onCommit, kind }: { s: OmpSetting; onCommit: (v: unk
   const label = s.label ?? s.id;
   const commitText = (text: string) => {
     if (kind === "text") return onCommit(text);
+    if (text === resetOption) return onCommit(null);
     const n = parseNumber(text);
     if (n.ok) onCommit(n.value);
   };
@@ -134,7 +142,7 @@ function PresetControl({ s, onCommit, kind }: { s: OmpSetting; onCommit: (v: unk
       />
       {custom && (
         <TextControl
-          value={current}
+          value={raw}
           label={`${label} value`}
           className="w-36 max-md:flex-1"
           onCommit={commitText}

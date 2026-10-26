@@ -133,7 +133,7 @@ export function OmpSettingsView({ hostId: routeHost }: { hostId?: string }) {
   );
   const refresh = data && (
     <IconButton label="Read omp's settings again" onClick={() => reload(true)} disabled={loading}>
-      <RefreshCw className={cn(loading && "animate-spin")} />
+      <RefreshCw className={cn(loading && "animate-spin tf-keep")} />
     </IconButton>
   );
 

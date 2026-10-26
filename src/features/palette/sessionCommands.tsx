@@ -19,6 +19,7 @@ import {
 import type { ReactNode } from "react";
 import { agentKey, core, navigate, useUi } from "@/core";
 import { MOBILE_MAX_WIDTH, toast } from "@/design";
+import { openTerminal } from "@/features/board/agentActions";
 import { runSlash } from "@/features/session/composer/slash";
 import type { Agent } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
@@ -213,8 +214,13 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
               agentId,
               key: agentKey(hostId, agentId),
               meta: undefined,
-              openTerminal: () =>
-                window.innerWidth <= MOBILE_MAX_WIDTH ? navigate({ name: "terminal", hostId, agentId }) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId }),
+              // a parked agent has no pane: it resumes first, then its new pane opens (as in the composer)
+              openTerminal: () => {
+                const mobile = window.innerWidth <= MOBILE_MAX_WIDTH;
+                if (agent.parked) openTerminal(agentKey(hostId, agentId), mobile);
+                else if (mobile) navigate({ name: "terminal", hostId, agentId });
+                else useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent.paneId });
+              },
             },
             command.startsWith("/") ? command : `/${command}`,
           ),

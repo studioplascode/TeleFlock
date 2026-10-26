@@ -15,7 +15,7 @@ export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (targe
 export function threadKey(target: string, repo: string): string;  // target = host id or "auto:<group>"; repo = root (host) or repo id (Auto)
 export function entryHost(key, entry): string;                    // the host an entry went to (entry.hostId, else the thread's host)
 export function entryRepo(key, entry): string;                    // that host's checkout root (entry.repo, else the thread's repo)
-export function dispatchTask(args: { key?; hostId; repo; prompt; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; lookupBranches?; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text
+export function dispatchTask(args: { key?; hostId; repo; prompt; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text; resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase)
 export function pendingByHost(threads, runningAgentIds, now): Record<string, number>; // dispatches on their way to each host (Auto's workload)
 export function suggestDispatchName(hostId, repo, prompt): Promise<string | null>; // the send's suggestBranch call (the composer prefetches through it)
 export function resumeInterruptedNaming(): void; // every `naming` entry cut short by a reload (any thread) goes ahead under the fallback name once its host answers; runs after hydration, call at startup
@@ -27,7 +27,7 @@ export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; 
 export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean }
 
 // src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
-export const MAX_TASK_IMAGES = 8; export const MAX_TASK_IMAGE_CHARS = 12 MiB; // base64 per task (relay messages cap at 16 MiB)
+export const MAX_TASK_IMAGES = 8; // their total: MAX_PROMPT_IMAGE_CHARS (@/core/clipboardImages, 12 MiB base64; relay messages cap at 16 MiB)
 export function saveEntryImages(id, images): Promise<void>; export function loadEntryImages(id): Promise<ImageInput[] | null>;
 export function useEntryImages(id, count): DraftImage[] | null | undefined; // undefined while loading, null = not on this device
 export function deleteEntryImages(ids): void; export function sweepEntryImages(liveIds): Promise<void>;
@@ -37,6 +37,8 @@ export function autoTarget(group): string; export function groupOf(target): stri
 export function canonicalRemote(url): string | null;              // git@github.com:O/r.git, https://github.com/o/r, ssh://git@github.com:22/o/r → "github.com/o/r"
 export function repoIdOf(hostId, root, remotes): string;           // canonical remote, else "local:<host>:<root>"
 export function groupRepos(hosts: { hostId; recents }[], remotes): GroupRepo[]; // { id, name, roots: { [hostId]: root }, at }
+export function localRepoIds(repo): string[];                      // the "local:<host>:<root>" ids it had before its remote was known
+export function findGroupRepo(repos, id): GroupRepo | undefined;   // by id, else by one of those local ids (threads keep the id they started under)
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)
 export const BRANCH_PREFIX = "dispatch/";
@@ -53,8 +55,8 @@ export function slimThreads(threads, maxEntries, maxPrompt): Record<string, Disp
 
 Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | dataTransfer)` reads
 `items` *and* `files`, deduplicated — WebKitGTK puts pasted screenshots only in `items`;
-`dragHasFiles`; `shrinkImage` scales images > 3 MB to ≤ 2560 px), `@/core/workload` (`hostLoad`,
-`rankHosts`, `pickHost`, `describeLoad`).
+`dragHasFiles`; `attachImages` scales images > 3 MB to ≤ 2560 px and adds them within the caps,
+as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`).
 
 ## Behaviour
 - Top bar: target chip (more than one host, or any host group): single hosts and every host group
@@ -70,17 +72,22 @@ Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | 
   (`← origin/main`). Untouched, the send carries no `base`, so a 0.5 hostd fetches and forks from
   `defaultBase`; an older hostd (no `defaultBase`) gets its default branch spelled out. A pick
   (another branch, HEAD) is remembered per thread and sent as is. A base remembered before 0.5 that
-  equals the local default branch counts as untouched (`legacyBases`, store v2 migration).
+  equals the local default branch counts as untouched (`legacyBases`, store v2 migration; without
+  a branch list it can't be told apart, so it counts as untouched too). Auto sends (and a send
+  before the branch list is in) resolve the base on the host the task goes to (`resolveBase`): a
+  remembered branch that host lacks falls back to its default.
 - Images: attach button, paste (clipboard `items` + `files`) or drop into the composer; thumbnails
   with remove and a lightbox; persisted with the draft (`useDraftImages` on the target + repo draft
   key). At most 8 per task and ~9 MB in total (base64 ≤ 12 MiB, under the relay's 16 MiB message
-  cap); images over 3 MB are scaled down first; a clear toast says what was left out. Image-only
+  cap), checked against the images attached by the time each paste is read and again at send;
+  images over 3 MB are scaled down first; a clear toast says what was left out. Image-only
   tasks are fine (named `image-task`, no AI naming). The images go to the host as
   `worktree.create { agent: { images } }` and hostd delivers them with the agent's first prompt.
   Each entry keeps its images in IndexedDB (`images.ts`) for the thread's thumbnails and for
   retries; they are deleted when the entry leaves the threads (dismiss, clear, cap, pruned) and
-  swept at startup. A host daemon older than 0.5 ignores `agent.images`, so sends with images to
-  one are refused with an "update the host" toast. Images no longer on this device (another
+  swept at startup. A host daemon older than 0.5 (or whose version isn't known yet) would ignore
+  `agent.images`: Auto leaves such hosts out of an image task's pick, and a send with images to a
+  single such host is refused with an "update the host" toast. Images no longer on this device (another
   device's thread, cleared storage) show as "N images (not on this device)" and a retry fails
   with a clear error instead of sending without them.
 - Auto (host groups, `HostProfile.group`, set in the host editor): the repo chip lists the union of
@@ -93,7 +100,9 @@ Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | 
   host's `repo` root and `placed` ("least busy of 2: 1 running · CPU 34% (studio-pc: …)"), shown on
   the card as "on <host> · why". Items, retries, trust (`trusted[host + root]`) and naming use the
   entry's host. The composer hint names the group's hosts and the next pick. No host with the
-  repo, or none online → the composer says so and sends nothing.
+  repo, or none online → the composer says so and sends nothing. A thread started while the repo
+  had no known remote (`local:<host>:<root>`) stays reachable once its remote is learned: it is
+  matched by its local id (`findGroupRepo`), and picking the repo goes back to it.
 - A dispatch is one `worktree.create { cwd: root, branch: "dispatch/<slug>", base?, label: slug,
   existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt, images? } }`.
   A template's prompt frames the message (as in Fan out). With Settings → AI naming on (and the

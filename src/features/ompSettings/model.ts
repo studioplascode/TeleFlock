@@ -139,10 +139,16 @@ export function isModified(s: OmpSetting): boolean {
 
 export type EditorKind = "roles" | "secret" | "switch" | "choice" | "number" | "text" | "members" | "list" | "json";
 
-/** Whether every entry of the value (else the default) is a string. */
+/**
+ * Whether the array holds strings: declared so (`items.type`), else a non-empty value (else
+ * default) of strings only. An empty array without item schema (`bash.patterns` holds objects)
+ * can't tell, so it gets the JSON editor.
+ */
 function stringList(s: OmpSetting): boolean {
-  const v = Array.isArray(s.value) ? s.value : Array.isArray(s.default) ? s.default : [];
-  return v.every((x) => typeof x === "string");
+  const items = s.items;
+  if (items && typeof items === "object" && "type" in items) return items.type === "string";
+  const v = Array.isArray(s.value) && s.value.length > 0 ? s.value : Array.isArray(s.default) ? s.default : [];
+  return v.length > 0 && v.every((x) => typeof x === "string");
 }
 
 /** Closed vocabulary of an array: omp's ui options, else the declared item values. */

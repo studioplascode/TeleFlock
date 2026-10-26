@@ -15,7 +15,7 @@ import type {
   Workspace,
 } from "@/core/gen";
 import type { ApiError, SessionMeta } from "@/core/gen";
-import { onAgentsPruned, startAgentLifecycle } from "./agentLifecycle";
+import { onAgentMoved, onAgentsPruned, startAgentLifecycle } from "./agentLifecycle";
 import { activityWatchers, core, loadActivity, pushInternal, startCore } from "./client";
 import { type IrcEntry, ircOf } from "./irc";
 import { resolveSuccessor } from "./store/lifecycle";
@@ -503,6 +503,12 @@ onAgentsPruned((gone) => {
   const keys = new Set(gone.flatMap((g) => g.keys));
   const muted = currentSettings().mutedAgents;
   if (coreStore.getState().settings && muted.some((k) => keys.has(k))) void updateSettings({ mutedAgents: muted.filter((k) => !keys.has(k)) }).catch(() => {});
+});
+
+// A resumed agent comes back under a new key: it stays muted.
+onAgentMoved((from, to) => {
+  const muted = currentSettings().mutedAgents;
+  if (coreStore.getState().settings && muted.includes(from)) void updateSettings({ mutedAgents: [...muted.filter((k) => k !== from && k !== to), to] }).catch(() => {});
 });
 
 function saveTemplate(template: AgentTemplate): Promise<void> {

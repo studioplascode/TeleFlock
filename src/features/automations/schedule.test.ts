@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SCHEDULE, cronToSchedule, scheduleToCron } from "./schedule";
+import { DEFAULT_SCHEDULE, EVERY_HOURS, EVERY_MINUTES, cronToSchedule, fitEvery, scheduleToCron } from "./schedule";
 
 describe("schedule presets", () => {
   test("generate cron strings", () => {
@@ -25,8 +25,18 @@ describe("schedule presets", () => {
   });
 
   test("anything else is custom, text kept", () => {
-    for (const cron of ["0 9 1 * *", "@daily", "0 9 * * mon-fri", "0 9 * * 5,1", "05 9 * * *", "0 9-17 * * *"]) {
+    for (const cron of ["0 9 1 * *", "@daily", "0 9 * * mon-fri", "0 9 * * 5,1", "05 9 * * *", "0 9-17 * * *", "*/45 * * * *", "0 */5 * * *"]) {
       expect(cronToSchedule(cron)).toMatchObject({ kind: "custom", cron });
     }
+  });
+
+  test("every N keeps the same gap across the hour / day", () => {
+    for (const n of EVERY_MINUTES) expect(60 % n).toBe(0);
+    for (const n of EVERY_HOURS) expect(24 % n).toBe(0);
+    expect(fitEvery("minutes", 45)).toBe(30);
+    expect(fitEvery("minutes", 15)).toBe(15);
+    expect(fitEvery("hours", 5)).toBe(4);
+    expect(fitEvery("hours", 30)).toBe(12);
+    expect(fitEvery("hours", 0)).toBe(1);
   });
 });

@@ -25,7 +25,7 @@ import {
   Zap,
 } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { agentKey, navigate, useAgent, useHosts, useSettings, useTunnels, useWorkspaces } from "@/core";
+import { agentKey, navigate, useAgent, useCore, useHosts, useSettings, useTunnels, useWorkspaces } from "@/core";
 import type { ConnPhase, PaneInfo, Split, TermMode, TermOpened, TermTarget, Workspace } from "@/core/gen";
 import {
   BottomSheet,
@@ -138,6 +138,7 @@ export function TerminalView(props: TerminalViewProps) {
 function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & { shell?: ShellRequest }) {
   const isMobile = useIsMobile();
   const workspaces = useWorkspaces(hostId);
+  const home = useCore((s) => s.hosts[hostId]?.state.info.home);
   const agent = useAgent(agentKey(hostId, agentId ?? ""));
   const conn = useHosts((h) => h.status[hostId]);
   const hostName = useHosts((h) => h.profiles.find((p) => p.id === hostId)?.name ?? hostId);
@@ -197,13 +198,16 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   const effective: Selection | null = selection ?? (bareTarget ? { kind: "pane", paneId: bareTarget } : null);
 
   const selKey = effective ? JSON.stringify(effective) : "";
+  // No workspace (a fresh host): the shell opens in the host's home, as the buttons say (hostd
+  // needs a workspace or a folder).
+  const shellHome = effective?.kind === "shell" && !effective.workspaceId && !effective.cwd ? (home ?? null) : null;
   const target = useMemo<TermTarget | null>(() => {
     if (!selKey) return null;
     const e: Selection = JSON.parse(selKey);
     if (e.kind === "pane") return { kind: "pane", paneId: e.paneId };
     if (e.kind === "agent") return { kind: "agent", agentId: e.agentId };
-    return { kind: "shell", workspaceId: e.workspaceId, cwd: e.cwd, split: e.split };
-  }, [selKey]);
+    return { kind: "shell", workspaceId: e.workspaceId, cwd: e.cwd ?? shellHome, split: e.split };
+  }, [selKey, shellHome]);
   const highlighted = effective?.kind === "pane" ? effective.paneId : opened?.paneId;
   const currentEntry = panes.find((e) => e.pane.id === highlighted);
   const urls = useLocalhostUrls(hostId, opened?.termId);

@@ -2,7 +2,7 @@ import { CalendarClock, CircleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { Input, Select, Spinner, cn } from "@/design";
 import { formatWhen, hostWhen } from "./format";
-import { PRESET_LABELS, type PresetKind, type ScheduleDraft, scheduleToCron } from "./schedule";
+import { EVERY_HOURS, EVERY_MINUTES, fitEvery, PRESET_LABELS, type PresetKind, type ScheduleDraft, scheduleToCron } from "./schedule";
 import type { PreviewState } from "./useAutomations";
 
 const KINDS: PresetKind[] = ["minutes", "hours", "daily", "weekdays", "weekly", "custom"];
@@ -43,6 +43,18 @@ function NumberBox({ value, min, max, onChange, label }: { value: number; min: n
   );
 }
 
+function EveryBox({ value, choices, onChange, label }: { value: number; choices: readonly number[]; onChange(v: number): void; label: string }) {
+  return (
+    <Select
+      value={String(value)}
+      onValueChange={(v) => onChange(Number(v))}
+      options={choices.map((n) => ({ value: String(n), label: String(n) }))}
+      aria-label={label}
+      className="w-[84px] tabular"
+    />
+  );
+}
+
 function TimeBox({ draft, onChange }: { draft: ScheduleDraft; onChange(p: Partial<ScheduleDraft>): void }) {
   return (
     <Input
@@ -74,7 +86,7 @@ export function ScheduleField({ draft, onChange, preview, timezone, error }: Sch
   const cron = scheduleToCron(draft);
   const p = preview.preview;
   const stale = preview.loading || preview.schedule !== cron.trim();
-  const setKind = (kind: PresetKind) => onChange(kind === "custom" ? { kind, cron } : kind === "hours" && draft.every > 23 ? { kind, every: 2 } : { kind });
+  const setKind = (kind: PresetKind) => onChange(kind === "custom" ? { kind, cron } : kind === "minutes" || kind === "hours" ? { kind, every: fitEvery(kind, draft.every) } : { kind });
   const problem = preview.error?.message ?? (p && !p.valid ? (p.error ?? "Invalid schedule") : null);
 
   return (
@@ -90,12 +102,12 @@ export function ScheduleField({ draft, onChange, preview, timezone, error }: Sch
 
       {draft.kind === "minutes" && (
         <Inline>
-          Every <NumberBox label="Minutes between runs" value={draft.every} min={1} max={59} onChange={(every) => onChange({ every })} /> minutes
+          Every <EveryBox label="Minutes between runs" value={draft.every} choices={EVERY_MINUTES} onChange={(every) => onChange({ every })} /> minutes
         </Inline>
       )}
       {draft.kind === "hours" && (
         <Inline>
-          Every <NumberBox label="Hours between runs" value={draft.every} min={1} max={23} onChange={(every) => onChange({ every })} /> hours, at minute
+          Every <EveryBox label="Hours between runs" value={draft.every} choices={EVERY_HOURS} onChange={(every) => onChange({ every })} /> hours, at minute
           <NumberBox label="Minute past the hour" value={draft.minute} min={0} max={59} onChange={(minute) => onChange({ minute })} />
         </Inline>
       )}
