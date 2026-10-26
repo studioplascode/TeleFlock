@@ -149,8 +149,9 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
 ### Terminal (P0)
 - xterm.js with the WebGL renderer, attached to a herdr pane through a PTY.
 - Tabs for the workspace's panes, takeover, send-keys toolbar (Esc, Ctrl+C, Tab, arrows), copy/paste, font size, search (P1).
+- Every pane already running on the host (shells and agents, including ones opened in herdr's own TUI) is listed and attachable without creating anything: the desktop Terminal view's "Running panes" list (by workspace and tab, named by foreground process or title, with the folder), sidebar shell rows under each workspace, workspace menus ("Open shell …"), palette "Shell · …" entries, and the phone chooser.
 - Mobile extra-keys row with sticky Ctrl/Alt.
-- Open a new shell pane in a workspace.
+- Open a new shell pane in a workspace (a separate, explicit action).
 
 ### Workspaces and worktrees (P0)
 - **New worktree wizard**

@@ -30,9 +30,16 @@ export interface TerminalHandle {
 }
 
 // src/features/terminal/TerminalView.tsx — the full route view (#/terminal/:hostId[/:target]).
-// Phones: the bare route (no pane/agent) is the Terminal tab's "Attach to…" chooser (TerminalChooser.tsx):
+// Desktop: a "Running panes" list (PaneList.tsx) beside the terminal — every pane of the host, by workspace and tab.
+// Phones: the bare route (no pane or agent) is the Terminal tab's "Attach to…" chooser (TerminalChooser.tsx):
 // agents in lane order with status orbs, then shell panes of online hosts.
 export function TerminalView(props: { hostId: string; paneId?: string; agentId?: string }): JSX.Element;
+
+// src/features/terminal/panes.ts — how every pane list (terminal, sidebar, palette, workspace menus, chooser) names panes
+export interface PaneRef { ws: Workspace; tab: Tab; pane: PaneInfo }
+export function hostPanes(workspaces: readonly Workspace[]): PaneRef[]; // workspace order, then tabs, then panes
+export function paneName(pane: PaneInfo): string;   // a program (`vim`, `bun`) unless the title names it, else title, shell, folder, id
+export function paneDetail(pane: PaneInfo, home?: string, base?: string): string; // hidden process · folder (`~`, `./sub` under `base`, nothing at `base`)
 
 // src/features/terminal/lastTerminal.ts — what the phone Terminal tab reopens (persisted, `tf.terminal.last`)
 export const useLastTerminal: UseBoundStore<{ last: TermSpot | null; lastSession: { hostId; agentId } | null; tabRoot: string | null; … }>;
@@ -85,5 +92,17 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - Mobile extra keys: Esc/Ctrl/Alt pinned, the rest scrolls with edge fades; Ctrl/Alt tap = next key, double-tap or
   long-press = lock (haptic tick/select/heavy). Dimmed while detached.
 - TerminalView shortcuts: Ctrl+Shift+M mode, Ctrl+Shift+T new shell, Ctrl+Shift+[ / ] previous/next pane, ←/→ in the pane tabs.
+- Existing panes are never hidden behind "New shell": the desktop view lists every running pane of the host (shells and
+  agents, including panes opened in herdr's own TUI; agents show their name, orb and state) grouped by workspace and tab,
+  with a host picker when there are several hosts. Picking one attaches to it (`TermTarget{kind:"pane"}`); only the
+  per-workspace `+` and the list's "New shell in …" button create panes. The list toggles from the tab row (per device,
+  `localStorage["tf.terminal.paneList"]`) and is always open on the bare route, which attaches the pane used last on that
+  host while it still runs, else herdr's focused pane. Ctrl+Shift+[ / ] step through every pane of the host.
+- Pane names come from `PaneInfo.process` (hostd: herdr `pane.process_info` once per pane terminal, then `/proc` on Linux,
+  see `crates/tf-hostd/src/state/procs.rs`): a program in the foreground (`vim`, `top`) names the pane unless its title
+  already does; an idle shell goes by its title, else the shell name. The same naming is used by the sidebar shell rows
+  (under each workspace, three then "N more"; right-click: Open terminal / Open beside / Close shell…), the workspace menus
+  ("Open shell …" / "Open <agent>'s terminal" per tab), the palette ("Shell · <name> · <workspace>") and the phone chooser
+  (workspace › tab · process · folder).
 - Search: Ctrl+F (or context menu / palette "Terminal: Find on screen" / `handle.openSearch()`) opens a find bar (`@xterm/addon-search`): Enter / Shift+Enter next/prev, match count, case toggle, Esc closes. It searches the visible screen (scrollback is 0); scroll to bring older output into view.
 - Tab strip: right-click / long-press a tab → Rename tab… (`tab.rename`), Close tab… (`tab.close`), Close pane… (`pane.close`, shell panes only), each destructive action confirmed.

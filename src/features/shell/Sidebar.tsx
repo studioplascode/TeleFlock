@@ -24,6 +24,7 @@ import {
   Server,
   Settings2,
   SquareTerminal,
+  SquareX,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type PointerEvent as ReactPointerEvent, useEffect, useState } from "react";
@@ -50,12 +51,13 @@ import {
 } from "@/design";
 import { navigate, type Route, useAgent, useAgentKeys, useHostIds, useHosts, useHostStale, useInbox, useNotifications, useRoute, useUi, useWorkspaces } from "@/core";
 import { routeKey } from "@/app/routes";
-import type { HerdrState, Workspace } from "@/core/gen";
+import type { HerdrState, PaneInfo, Workspace } from "@/core/gen";
 import { archiveWithUndo, openAnswerHud, setArchived } from "@/features/board/agentActions";
 import { connAction } from "@/features/hosts/ConnStatusCard";
 import { hostAccent } from "@/features/hosts/kinds";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
-import { WorkspaceActionsMenu } from "@/features/workspace/workspaceActions";
+import { closePane, WorkspaceActionsMenu } from "@/features/workspace/workspaceActions";
+import { paneDetail, paneName } from "@/features/terminal/panes";
 import { useHealthHistory } from "./healthHistory";
 import { agentTier, COLUMN_STATUS, connSummary, PHASE_STATUS } from "./status";
 import { SIDEBAR_DEFAULT_W, SIDEBAR_LABELS_W, SIDEBAR_RAIL_QUERY, toggleSidebar, useSidebarPeek, useSidebarWidth } from "./sidebarState";
@@ -182,13 +184,63 @@ function AgentRow({ agentKey: key, depth }: { agentKey: string; depth: number })
   );
 }
 
+/** Shell rows shown under a workspace before "N more". */
+const SHELLS_SHOWN = 3;
+
+/** A pane no agent owns (a shell, or whatever runs in it): opens its terminal; nothing is created. */
+function ShellRow({ hostId, pane, tabLabel, depth }: { hostId: string; pane: PaneInfo; tabLabel: string; depth: number }) {
+  const route = useRoute();
+  const { setSplit } = useUi();
+  const active = route.name === "terminal" && route.hostId === hostId && route.paneId === pane.id;
+  const open = () => navigate({ name: "terminal", hostId, paneId: pane.id });
+  const name = paneName(pane);
+  const detail = paneDetail(pane);
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={open}
+          aria-current={active ? "page" : undefined}
+          aria-label={`Shell ${name}`}
+          title={[name, `tab ${tabLabel}`, detail].filter(Boolean).join(" · ")}
+          className={cn(
+            "flex h-6 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-[11px] font-semibold transition-colors focus-ring",
+            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]" : "text-mute hover:bg-white/4 hover:text-ink-2",
+          )}
+          style={{ paddingLeft: 8 + depth * 14 }}
+        >
+          <SquareTerminal className={cn("size-3 shrink-0", active ? "text-accent-hi" : "text-mute-2")} />
+          <span className="min-w-0 flex-1 truncate font-mono">{name}</span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem icon={<SquareTerminal />} onSelect={open}>
+          Open terminal
+        </ContextMenuItem>
+        <ContextMenuItem icon={<Columns2 />} onSelect={() => setSplit({ kind: "terminal", hostId, paneId: pane.id })}>
+          Open beside
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem icon={<SquareX />} danger onSelect={() => void closePane(hostId, pane)}>
+          Close shell…
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
 function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; nested: boolean }) {
   const keys = useAgentKeys({ hostId, workspaceId: ws.id });
+  const [allShells, setAllShells] = useState(false);
   const route = useRoute();
   const active = route.name === "review" && route.hostId === hostId && route.workspaceId === ws.id;
   const branch = ws.worktree?.branch ?? ws.repo?.branch ?? ws.label;
   const Icon = ws.worktree ? GitBranch : ws.repo ? FolderGit2 : FolderOpen;
   const dirty = ws.repo?.dirty ?? 0;
+  const shells = ws.tabs.flatMap((t) => t.panes.filter((p) => !p.agentId).map((pane) => ({ pane, tabLabel: t.label })));
+  const shown = allShells ? shells : shells.slice(0, SHELLS_SHOWN);
+  const depth = nested ? 2 : 1;
   return (
     <li>
       <WorkspaceActionsMenu hostId={hostId} workspace={ws} mode="context">
@@ -218,9 +270,31 @@ function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; n
         <ul className="flex flex-col gap-px">
           {keys.map((k) => (
             <li key={k}>
-              <AgentRow agentKey={k} depth={nested ? 2 : 1} />
+              <AgentRow agentKey={k} depth={depth} />
             </li>
           ))}
+        </ul>
+      )}
+      {shells.length > 0 && (
+        <ul className="flex flex-col gap-px" aria-label={`Shells in ${ws.label}`}>
+          {shown.map(({ pane, tabLabel }) => (
+            <li key={pane.id}>
+              <ShellRow hostId={hostId} pane={pane} tabLabel={tabLabel} depth={depth} />
+            </li>
+          ))}
+          {shells.length > SHELLS_SHOWN && (
+            <li>
+              <button
+                type="button"
+                onClick={() => setAllShells((v) => !v)}
+                aria-expanded={allShells}
+                className="flex h-5 w-full items-center rounded-sm pr-1.5 text-left text-[10.5px] font-bold text-mute-2 transition-colors focus-ring hover:text-ink-2"
+                style={{ paddingLeft: 8 + depth * 14 + 20 }}
+              >
+                {allShells ? "Fewer shells" : `${shells.length - SHELLS_SHOWN} more shell${shells.length - SHELLS_SHOWN === 1 ? "" : "s"}`}
+              </button>
+            </li>
+          )}
         </ul>
       )}
     </li>

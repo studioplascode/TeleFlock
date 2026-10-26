@@ -1,4 +1,4 @@
-import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PanelTopClose, PencilLine, SquareTerminal, SquareX, Trash2, X } from "lucide-react";
+import { Bot, FileDiff, GitBranchPlus, History, type LucideIcon, PanelTopClose, PencilLine, SquareArrowOutUpRight, SquareTerminal, SquareX, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { aiNamingEnabled, core, draftKey, drafts, getAgentViews, navigate, suggestTitle, useUi } from "@/core";
 import type { PaneInfo, Tab, Workspace } from "@/core/gen";
@@ -18,6 +18,7 @@ import {
   toast,
 } from "@/design";
 import { ACTIONS } from "@/features/shell/vocab";
+import { paneName } from "@/features/terminal/panes";
 import { openPastSessions } from "../history/PastSessionsDialog";
 import { openNewAgent } from "./NewAgentDialog";
 import { classifyHerdrError, describeError } from "./shared/errors";
@@ -34,6 +35,7 @@ export type WorkspaceActionId =
   | "close"
   | "removeWorktree"
   | `renameTab:${string}`
+  | `openPane:${string}`
   | `closeTab:${string}`
   | `closePane:${string}`;
 
@@ -253,7 +255,7 @@ export async function closeTab(hostId: string, ws: Workspace, tab: Tab): Promise
 }
 
 export async function closePane(hostId: string, pane: PaneInfo): Promise<void> {
-  const name = pane.title || pane.id;
+  const name = paneName(pane);
   const ok = await confirmAction({
     title: `Close shell ${name}?`,
     body: "Ends the shell and any command still running in it.",
@@ -287,6 +289,18 @@ export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction
   if (ws.worktree)
     actions.push({ id: "removeWorktree", label: "Remove worktree…", icon: Trash2, danger: true, group: "danger", run: async () => void (await removeWorktree(hostId, ws)) });
   for (const tab of ws.tabs) {
+    // Per tab: attach to what already runs there (nothing is created), then rename / close.
+    for (const pane of tab.panes) {
+      const agent = pane.agentId ? getAgentViews().find((a) => a.hostId === hostId && a.id === pane.agentId) : undefined;
+      actions.push({
+        id: `openPane:${pane.id}`,
+        label: agent ? `Open ${agent.name}'s terminal` : `Open shell ${paneName(pane)}`,
+        icon: SquareArrowOutUpRight,
+        group: "tabs",
+        section: tab.label,
+        run: async () => navigate({ name: "terminal", hostId, paneId: pane.id }),
+      });
+    }
     actions.push(
       { id: `renameTab:${tab.id}`, label: "Rename tab…", icon: PencilLine, group: "tabs", section: tab.label, run: () => renameTab(hostId, tab) },
       { id: `closeTab:${tab.id}`, label: "Close tab…", icon: PanelTopClose, danger: true, group: "tabs", section: tab.label, run: () => closeTab(hostId, ws, tab) },
@@ -295,7 +309,7 @@ export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction
       if (pane.agentId) continue;
       actions.push({
         id: `closePane:${pane.id}`,
-        label: `Close shell ${pane.title || pane.id}…`,
+        label: `Close shell ${paneName(pane)}…`,
         icon: SquareX,
         danger: true,
         group: "tabs",

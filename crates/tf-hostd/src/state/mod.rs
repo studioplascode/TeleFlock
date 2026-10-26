@@ -10,6 +10,7 @@
 pub mod build;
 pub mod parked;
 pub mod persist;
+pub mod procs;
 pub mod subs;
 
 use std::collections::{HashMap, HashSet};
@@ -89,6 +90,8 @@ struct Inner {
     repos: HashMap<String, (Option<RepoInfo>, Instant)>,
     /// pane → foreground pids (omp pid cross-check), with fetch time.
     pane_pids: HashMap<String, (Vec<u32>, Instant)>,
+    /// pane → foreground process (`PaneInfo.process`).
+    pane_procs: procs::PaneProcs,
     /// agent id → omp session id (current mapping).
     omp_of: HashMap<String, String>,
     pulses: HashMap<(String, PulseKind), u32>,
@@ -132,6 +135,7 @@ impl StateHandle {
                     tracks: HashMap::new(),
                     repos: HashMap::new(),
                     pane_pids: HashMap::new(),
+                    pane_procs: procs::PaneProcs::default(),
                     omp_of: HashMap::new(),
                     pulses: HashMap::new(),
                     health: None,
@@ -558,7 +562,8 @@ impl StateHandle {
 
         let repos: HashMap<String, Option<RepoInfo>> = m.repos.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect();
         let workspaces = if m.mirror.ok || !m.mirror.workspaces.is_empty() {
-            build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, &repos)
+            m.pane_procs.refresh();
+            build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, &repos, &m.pane_procs)
         } else {
             m.published.workspaces.clone()
         };
@@ -850,6 +855,7 @@ fn apply_snapshot(h: &StateHandle, snap: tf_herdr::Snapshot) {
     m.mirror.agents = snap.agents;
     m.mirror.activity.retain(|k, _| live.contains(k));
     m.pane_pids.retain(|k, _| live.contains(k));
+    m.pane_procs.retain(&live);
 }
 
 fn agent_panes(h: &StateHandle) -> Vec<String> {
@@ -1023,22 +1029,35 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
     false
 }
 
-/// Fetches foreground pids for omp panes that lack them (pid cross-check).
+/// Fetches `pane.process_info`: foreground pids for omp panes that lack them (pid cross-check),
+/// and the shell / foreground process of panes new to `pane_procs` (see `procs`).
 async fn fetch_pids(ctx: &Arc<Ctx>) {
-    let want: Vec<String> = {
+    let want: Vec<(String, bool)> = {
         let m = ctx.state.lock();
-        m.mirror
+        let mut want: Vec<(String, bool)> = m
+            .mirror
             .agents
             .iter()
             .filter(|a| build::is_omp(a))
             .filter(|a| m.pane_pids.get(&a.pane_id).is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(30)))
-            .map(|a| a.pane_id.clone())
-            .collect()
+            .map(|a| (a.pane_id.clone(), true))
+            .collect();
+        for pane in m.pane_procs.wanted(&m.mirror.panes) {
+            if !want.iter().any(|(p, _)| *p == pane) {
+                want.push((pane, false));
+            }
+        }
+        want
     };
-    for pane in want {
-        if let Ok(info) = ctx.herdr.pane_process_info(&pane).await {
+    for (pane, omp) in want {
+        let info = ctx.herdr.pane_process_info(&pane).await.ok();
+        let mut m = ctx.state.lock();
+        if let Some(terminal) = m.mirror.panes.iter().find(|p| p.pane_id == pane).map(|p| p.terminal_id.clone()) {
+            m.pane_procs.record(&pane, &terminal, info.as_ref());
+        }
+        if let (Some(info), true) = (&info, omp) {
             let pids: Vec<u32> = info.foreground_processes.iter().map(|p| p.pid).chain(info.shell_pid).collect();
-            ctx.state.lock().pane_pids.insert(pane, (pids, Instant::now()));
+            m.pane_pids.insert(pane, (pids, Instant::now()));
         }
     }
 }

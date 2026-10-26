@@ -66,6 +66,7 @@ import { toggleSplit } from "@/features/shell/keyboard";
 import { toggleSidebar } from "@/features/shell/sidebarState";
 import { COLUMN_STATUS, PHASE_STATUS } from "@/features/shell/status";
 import { ACTIONS, type ActionDef, VIEWS } from "@/features/shell/vocab";
+import { paneDetail, paneName } from "@/features/terminal/panes";
 import { rankItem } from "./fuzzy";
 import { type PaletteCommand, useContributed, useRecents } from "./registry";
 import { hostCall, type PalettePage, sessionCommands } from "./sessionCommands";
@@ -84,7 +85,7 @@ interface Entry {
   page?: PalettePage;
 }
 
-const GROUP_ORDER = ["Recent", "This session", "Actions", "Views", "Agents", "Workspaces", "Hosts", "Contributed"];
+const GROUP_ORDER = ["Recent", "This session", "Actions", "Views", "Agents", "Workspaces", "Shells", "Hosts", "Contributed"];
 const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
 const MAX_RESULTS = 60;
 
@@ -238,6 +239,25 @@ function useEntries(): Entry[] {
     });
   }
 
+  // Existing panes no agent owns: attaching never creates a pane.
+  for (const { hostId, ws } of workspaces) {
+    for (const tab of ws.tabs) {
+      for (const pane of tab.panes) {
+        if (pane.agentId) continue;
+        const name = paneName(pane);
+        entries.push({
+          id: `pane:${hostId}:${pane.id}`,
+          title: `Shell · ${name} · ${ws.label}`,
+          group: "Shells",
+          keywords: ["shell", "terminal", "pane", tab.label, pane.process ?? "", pane.title ?? "", pane.cwd ?? "", hostName(hostId)],
+          icon: <SquareTerminal />,
+          hint: [profiles.length > 1 ? hostName(hostId) : null, `tab ${tab.label}`, paneDetail(pane, undefined, ws.cwd)].filter(Boolean).join(" · "),
+          run: () => navigate({ name: "terminal", hostId, paneId: pane.id }),
+        });
+      }
+    }
+  }
+
   for (const p of profiles) {
     const phase = status[p.id]?.phase ?? "idle";
     const online = phase === "online";
@@ -368,7 +388,7 @@ function ThinkingPage({ hostId, agentId, query, done }: { hostId: string; agentI
 }
 
 /**
- * The command palette (Ctrl+K): ranked fuzzy search over agents, workspaces, hosts, views and
+ * The command palette (Ctrl+K): ranked fuzzy search over agents, workspaces, shells (existing panes), hosts, views and
  * actions; slash commands for the current session with argument pages; recents first.
  */
 export function CommandPalette() {
@@ -419,7 +439,7 @@ function PaletteBody({ close }: { close: () => void }) {
       : page.kind === "model"
         ? "Search models…"
         : "Pick a thinking level…"
-    : "Search agents, workspaces, hosts, or run a command…";
+    : "Search agents, workspaces, shells, hosts, or run a command…";
 
   return (
     <>

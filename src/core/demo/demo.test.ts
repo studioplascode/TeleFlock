@@ -249,6 +249,33 @@ describe("demo engine", () => {
     expect(termEvents(opened.termId).some((e) => e.k === "closed" && e.reason === "terminal attach taken over")).toBe(true);
   });
 
+  test("shells: seeded panes report processes; attaching never creates a pane; Ctrl+C returns to zsh", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const panes = () => (r.state.hosts.forge?.state.workspaces ?? []).flatMap((w) => w.tabs.flatMap((t) => t.panes));
+    const shells = panes().filter((p) => !p.agentId);
+    for (const proc of ["zsh", "bun", "tail", "htop", "python3"]) expect(shells.some((p) => p.process === proc)).toBe(true);
+    expect(panes().filter((p) => p.agentId).every((p) => !!p.process)).toBe(true);
+    const dev = shells.find((p) => p.process === "bun");
+    const before = panes().length;
+    const opened = await r.call<{ termId: string; paneId: string }>("forge", "term.open", { target: { kind: "pane", paneId: dev?.id }, cols: 80, rows: 24, mode: "control", takeover: false });
+    r.clock.advance(100);
+    expect(opened.paneId).toBe(dev?.id as string);
+    expect(panes().length).toBe(before);
+    const text = () =>
+      r.events
+        .filter((e): e is Extract<AppEvent, { type: "term" }> => e.type === "term" && e.termId === opened.termId)
+        .map((e) => e.ev)
+        .filter((e): e is Extract<TermEvent, { k: "frame" }> => e.k === "frame")
+        .map((f) => atob(f.data))
+        .join("");
+    expect(text()).toContain("http://localhost:5173/");
+    r.engine.termInput("forge", opened.termId, "\x03");
+    r.clock.advance(500);
+    expect(text()).toContain("^C");
+    expect(panes().find((p) => p.id === dev?.id)?.process).toBe("zsh");
+  });
+
   test("worktree.create adds a workspace and an agent; errors are realistic", async () => {
     const r = rig();
     r.clock.advance(2000);
@@ -355,11 +382,11 @@ describe("demo engine", () => {
     expect(r.state.agents[agentKey("forge", "kanban")]).toBeUndefined();
     // Primary with linked worktrees refuses to lose its last pane.
     await expect(r.call("forge", "pane.close", { paneId: "w3:p1" })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
-    // A refused tab close leaves every pane (and its agent) untouched.
-    await expect(r.call("forge", "tab.close", { tabId: "w1:t1" })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
+    // A refused tab close (the primary's only tab) leaves its pane and agent untouched.
+    await expect(r.call("forge", "tab.close", { tabId: "w3:t1" })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
     r.clock.advance(300);
-    expect(r.state.hosts.forge?.state.workspaces.find((w) => w.id === "w1")?.tabs[0]?.panes.map((p) => p.id)).toEqual(["w1:p1", "w1:p2"]);
-    expect(r.state.agents[agentKey("forge", "docs")]).toBeDefined();
+    expect(r.state.hosts.forge?.state.workspaces.find((w) => w.id === "w3")?.tabs[0]?.panes.map((p) => p.id)).toEqual(["w3:p1"]);
+    expect(r.state.agents[agentKey("forge", "copy")]).toBeDefined();
     await expect(r.call("forge", "tab.close", { tabId: "nope" })).rejects.toMatchObject({ code: "not_found" });
   });
 

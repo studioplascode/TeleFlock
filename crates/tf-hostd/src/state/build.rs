@@ -338,6 +338,7 @@ pub fn build_workspaces(
     panes: &[PaneInfo],
     agent_by_pane: &HashMap<String, String>,
     repos: &HashMap<String, Option<RepoInfo>>,
+    procs: &super::procs::PaneProcs,
 ) -> Vec<Workspace> {
     let mut out: Vec<Workspace> = workspaces
         .iter()
@@ -364,7 +365,7 @@ pub fn build_workspaces(
                             cwd: p.foreground_cwd.clone().or_else(|| p.cwd.clone()),
                             agent_id: agent_by_pane.get(&p.pane_id).cloned(),
                             focused: p.focused,
-                            process: None,
+                            process: procs.name(&p.pane_id).map(str::to_string),
                         })
                         .collect(),
                 })

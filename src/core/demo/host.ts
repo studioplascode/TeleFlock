@@ -74,6 +74,7 @@ import {
   renderTurn,
 } from "./scripts";
 import { historyFor, longHistory } from "./seeds";
+import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
 import { DemoTerm } from "./term";
 
 export type HostVariant = "forge" | "studio";
@@ -230,6 +231,7 @@ export class DemoHost implements SimHost {
     const now = this.now();
     const wsDefs: WorkspaceDef[] = this.variant === "forge" ? WORKSPACES : [{ id: "w1", repo: "teleflock", branch: "main", worktree: false, order: 0 }];
     for (const d of wsDefs) this.addWorkspace(d.repo, d.branch, d.worktree, d.order, d.id, d.shellPane, d.cwd);
+    seedDemoShells(this.variant, this.wss.values());
     const defs = this.variant === "forge" ? AGENTS : STUDIO_AGENTS;
     for (const def of defs) {
       const sim = this.addAgent(def, def.workspace);
@@ -432,7 +434,7 @@ export class DemoHost implements SimHost {
 
   private workspace(m: WsModel): Workspace {
     const dirty = [...this.sims.values()].filter((s) => s.agent.workspaceId === m.ws.id).reduce((n, s) => n + s.files.length, 0);
-    return structuredClone({ ...m.ws, rollup: this.rollup(m.ws.id), repo: m.ws.repo ? { ...m.ws.repo, dirty } : undefined });
+    return withPaneProcesses(structuredClone({ ...m.ws, rollup: this.rollup(m.ws.id), repo: m.ws.repo ? { ...m.ws.repo, dirty } : undefined }));
   }
 
   hostState(): HostState {
@@ -1884,6 +1886,7 @@ export class DemoHost implements SimHost {
         prompt: sim ? (text) => (sim.busy ? (sim.agent.state === "working" ? sim.steer(text) : undefined) : sim.startTurn(text)) : undefined,
         abort: sim ? () => sim.abort("Interrupted (Esc)") : undefined,
         render: sim ? (rows) => sim.renderTui(rows) : undefined,
+        program: agentId ? undefined : demoProgram(wsm, paneId, () => this.dirtyWs.add(wsm.ws.id)),
         after: (ms, cb) => {
           this.env.clock.after(ms, cb);
         },

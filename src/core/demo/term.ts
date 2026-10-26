@@ -23,6 +23,8 @@ export interface TermContext {
   abort?(): void;
   /** Agent terminal: current TUI render. */
   render?(rows: number): string;
+  /** Shell terminal: a program in the foreground (its screen, until Ctrl+C returns to the prompt). */
+  program?: { lines: string[]; exit(): void };
   after(ms: number, cb: () => void): void;
 }
 
@@ -35,6 +37,8 @@ export class DemoTerm {
   private line = "";
   private closed = false;
   private busy = false;
+  /** A seeded program owns the screen (`ctx.program`). */
+  private foreground = false;
   title: string;
 
   constructor(
@@ -70,6 +74,9 @@ export class DemoTerm {
     if (this.agentId) {
       const body = this.ctx.render?.(this.rows) ?? "";
       this.frame(`${D}omp 18.12.3 · collab live · ${this.ctx.cwd.replace("/home/demo", "~")}${X}\r\n${body}\r\n`, true);
+    } else if (this.ctx.program) {
+      this.foreground = true;
+      this.frame(this.ctx.program.lines.join("\r\n"), true);
     } else {
       this.frame(`${D}herdr 0.9.0 · ${this.ctx.hostname} · demo shell (type ${B}help${X}${D})${X}\r\n\r\n${this.prompt()}`, true);
     }
@@ -80,6 +87,8 @@ export class DemoTerm {
     this.rows = rows;
     if (this.agentId) {
       this.frame(`${this.ctx.render?.(rows) ?? ""}\r\n`, true);
+    } else if (this.foreground && this.ctx.program) {
+      this.frame(this.ctx.program.lines.join("\r\n"), true);
     } else {
       this.frame(`${this.prompt()}${this.line}`, true);
     }
@@ -98,6 +107,14 @@ export class DemoTerm {
 
   input(data: string): void {
     if (this.closed || this.mode === "observe") return;
+    if (this.foreground) {
+      // Only Ctrl+C reaches a seeded program: it ends, and the shell prompt comes back.
+      if (!data.includes("\x03")) return;
+      this.foreground = false;
+      this.ctx.program?.exit();
+      this.frame(`^C\r\n${this.prompt()}`);
+      return;
+    }
     for (const ch of data) {
       if (ch === "\r" || ch === "\n") {
         const cmd = this.line;

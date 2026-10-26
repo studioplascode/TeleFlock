@@ -12,6 +12,8 @@ import {
   Keyboard,
   MessageSquareText,
   Minus,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelTop,
   Plus,
   RotateCcw,
@@ -64,6 +66,8 @@ import { type TerminalHandle, TerminalPane } from "./TerminalPane";
 import { clampFontSize, DEFAULT_FONT_SIZE } from "./theme";
 import { useLocalhostUrls } from "./useLocalhostUrls";
 import { type ShellRequest, terminalRouteKey, useLastTerminal, useShellRequest } from "./lastTerminal";
+import { PaneList } from "./PaneList";
+import { hostPanes, paneName } from "./panes";
 import { TerminalChooser } from "./TerminalChooser";
 
 export interface TerminalViewProps {
@@ -82,12 +86,6 @@ interface PaneEntry {
   pane: PaneInfo;
   tabId: string;
   tabLabel: string;
-}
-
-function basename(path: string | undefined): string | undefined {
-  if (!path) return undefined;
-  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || path;
 }
 
 function workspacePanes(ws: Workspace | undefined): PaneEntry[] {
@@ -119,10 +117,15 @@ function urlLabel(url: string, port: number): string {
   return `:${port}${path === "/" ? "" : path}`;
 }
 
+/** Whether the desktop Terminal view shows its running-panes list (per device). */
+const PANE_LIST_KEY = "tf.terminal.paneList";
+
 /**
  * Full terminal screen: pane tabs, send-keys, mode, takeover, previews; desktop + mobile layouts.
- * On phones the bare route (no pane or agent) is the Terminal tab's "Attach to…" chooser, or the
- * new shell picked there (`?shell=<nonce>`, see `openNewShell`).
+ * Desktop lists every running pane of the host beside the terminal; the bare route attaches the
+ * pane used last on the host (else herdr's focused one) with that list open. On phones the bare
+ * route (no pane or agent) is the Terminal tab's "Attach to…" chooser, or the new shell picked
+ * there (`?shell=<nonce>`, see `openNewShell`).
  */
 export function TerminalView(props: TerminalViewProps) {
   const isMobile = useIsMobile();
@@ -142,7 +145,13 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   // Selection follows the route props; local switches (tabs, new shell) override until they change.
   const propsKey = `${hostId}|${paneId ?? ""}|${agentId ?? ""}|${shell?.nonce ?? ""}`;
   const [sel, setSel] = useState<{ key: string; sel: Selection | null }>({ key: "", sel: null });
-  const [wsPick, setWsPick] = useState<{ key: string; id: string } | null>(null);
+  const [listOpen, setListOpen] = useState(() => (!paneId && !agentId && !shell) || globalThis.localStorage?.getItem(PANE_LIST_KEY) !== "0");
+  const toggleList = useCallback(() => {
+    setListOpen((open) => {
+      globalThis.localStorage?.setItem(PANE_LIST_KEY, open ? "0" : "1");
+      return !open;
+    });
+  }, []);
   const initial: Selection | null = paneId
     ? { kind: "pane", paneId }
     : agentId
@@ -160,26 +169,31 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   const [opened, setOpened] = useState<TermOpened | null>(null);
   const handle = useRef<TerminalHandle>(null);
 
-  // Workspace: the one holding the attached pane, else the picked one, else the focused/first.
+  // Every pane on the host (the list, Ctrl+Shift+[ ]). The bare route attaches the pane used last
+  // on this host while it still runs, else herdr's focused pane, else the first.
+  const allPanes = useMemo(() => hostPanes(workspaces), [workspaces]);
+  const last = useLastTerminal((s) => (s.last?.hostId === hostId ? s.last : null));
+  const bareTarget =
+    paneId || agentId || shell
+      ? undefined
+      : (allPanes.find((r) => last && (last.agentId ? r.pane.agentId === last.agentId : r.pane.id === last.paneId)) ?? allPanes.find((r) => r.pane.focused) ?? allPanes[0])?.pane.id;
+
+  // Workspace: the one holding the attached pane, else the new shell's, else the agent's, else the focused/first.
   const activePaneId =
-    selection?.kind === "pane" ? selection.paneId : (opened?.paneId ?? (selection?.kind === "agent" ? agent?.paneId : undefined));
+    selection?.kind === "pane"
+      ? selection.paneId
+      : (opened?.paneId ?? (selection?.kind === "agent" ? agent?.paneId : selection ? undefined : bareTarget));
   const workspace = useMemo(() => {
     const byPane = activePaneId ? workspaces.find((w) => w.tabs.some((t) => t.panes.some((p) => p.id === activePaneId))) : undefined;
     if (byPane) return byPane;
     if (selection?.kind === "shell" && selection.workspaceId) return workspaces.find((w) => w.id === selection.workspaceId);
-    if (wsPick?.key === propsKey) return workspaces.find((w) => w.id === wsPick.id);
     if (agent) return workspaces.find((w) => w.id === agent.workspaceId);
     return workspaces.find((w) => w.tabs.some((t) => t.panes.some((p) => p.focused))) ?? workspaces[0];
-  }, [workspaces, activePaneId, selection, wsPick, propsKey, agent]);
+  }, [workspaces, activePaneId, selection, agent]);
   const panes = useMemo(() => workspacePanes(workspace), [workspace]);
 
-  // With nothing selected, attach to the workspace's focused pane.
-  const effective: Selection | null =
-    selection ??
-    (() => {
-      const p = panes.find((e) => e.pane.focused) ?? panes[0];
-      return p ? { kind: "pane", paneId: p.pane.id } : null;
-    })();
+  // With nothing selected (bare route), attach the most relevant pane.
+  const effective: Selection | null = selection ?? (bareTarget ? { kind: "pane", paneId: bareTarget } : null);
 
   const selKey = effective ? JSON.stringify(effective) : "";
   const target = useMemo<TermTarget | null>(() => {
@@ -207,6 +221,13 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
     },
     [select],
   );
+  const newShellIn = useCallback(
+    (workspaceId: string | null, cwd: string | null) => {
+      haptic("select");
+      select({ kind: "shell", workspaceId, cwd, split: "tab", nonce: Date.now() });
+    },
+    [select],
+  );
   const send = useCallback((bytes: string) => {
     handle.current?.send(bytes);
     handle.current?.focus();
@@ -225,8 +246,9 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   }, []);
 
   // Keyboard-first: Ctrl+Shift chords bubble out of xterm (TerminalPane lets them through).
-  const nav = useRef({ panes, highlighted });
-  nav.current = { panes, highlighted };
+  // [ / ] step through every pane on the host, in the list's order.
+  const nav = useRef({ panes: allPanes, highlighted });
+  nav.current = { panes: allPanes, highlighted };
   useEffect(() => {
     if (isMobile) return;
     const onKey = (e: KeyboardEvent) => {
@@ -282,7 +304,7 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   const paneAgent = useAgent(agentKey(hostId, currentEntry?.pane.agentId ?? ""));
   const paneLabel =
     paneAgent?.name ??
-    (currentEntry ? entryLabel(currentEntry) : effective?.kind === "shell" ? "New shell" : (agent?.name ?? agentId ?? highlighted ?? "Terminal"));
+    (currentEntry ? paneName(currentEntry.pane) : effective?.kind === "shell" ? "New shell" : (agent?.name ?? agentId ?? highlighted ?? "Terminal"));
   // The phone Terminal tab reopens whatever was attached last (the agent when the pane is an agent's).
   const attachedAgentId = currentEntry ? currentEntry.pane.agentId : effective?.kind === "agent" ? effective.agentId : undefined;
   const attachedPaneId = phase.k === "live" ? opened?.paneId : undefined;
@@ -422,7 +444,13 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 p-4">
+    // Grid: the pane list spans column 1; header, tabs, terminal and footer auto-place into column 2.
+    <div className={cn("grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 p-4", listOpen ? "grid-cols-[16rem_minmax(0,1fr)]" : "grid-cols-[minmax(0,1fr)]")}>
+      {listOpen && (
+        <div className="col-start-1 row-span-4 row-start-1 flex min-h-0">
+          <PaneList hostId={hostId} workspaces={workspaces} active={highlighted} current={workspace} onPick={pickPane} onNewShell={newShellIn} />
+        </div>
+      )}
       <header className="@container flex shrink-0 items-center gap-3">
         <div className="relative grid size-10 shrink-0 place-items-center rounded-md bg-tile-3 shadow-d1 [&_svg]:size-5">
           {mode === "observe" ? (
@@ -447,17 +475,6 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {workspaces.length > 1 && (
-            <WorkspacePicker
-              workspaces={workspaces}
-              current={workspace}
-              onPick={(id) => {
-                setWsPick({ key: propsKey, id });
-                const first = workspacePanes(workspaces.find((w) => w.id === id))[0];
-                if (first) select({ kind: "pane", paneId: first.pane.id });
-              }}
-            />
-          )}
           <Tooltip content={<span className="flex items-center gap-2">Control types into the pane · Observe is read-only<Kbd>Ctrl Shift M</Kbd></span>}>
             <span>{modeToggle}</span>
           </Tooltip>
@@ -498,6 +515,9 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
       </header>
 
       <div className="flex min-w-0 shrink-0 items-center gap-2">
+        <IconButton size="sm" label={listOpen ? "Hide running panes" : `Show running panes (${allPanes.length})`} onClick={toggleList} aria-expanded={listOpen}>
+          {listOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+        </IconButton>
         <div className="min-w-0 flex-1">{tabs}</div>
         {detected}
         <PreviewsMenu />
@@ -530,7 +550,7 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
           <span className="flex items-center gap-1">
             <Kbd>Ctrl Shift T</Kbd> shell
           </span>
-          {panes.length > 1 && (
+          {allPanes.length > 1 && (
             <span className="flex items-center gap-1">
               <Kbd>Ctrl Shift [ ]</Kbd> panes
             </span>
@@ -539,10 +559,6 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
       </footer>
     </div>
   );
-}
-
-function entryLabel(e: PaneEntry): string {
-  return e.pane.title || basename(e.pane.cwd) || e.pane.id;
 }
 
 function ReconnectingLabel({ phase }: { phase: ConnPhase | undefined }) {
@@ -697,7 +713,7 @@ function PaneTab({
 }) {
   const agent = useAgent(agentKey(hostId, entry.pane.agentId ?? ""));
   const status = agent ? COLUMN_STATUS[agent.column] : "idle";
-  const label = agent?.name ?? entryLabel(entry);
+  const label = agent?.name ?? paneName(entry.pane);
   return (
     <>
       {divider && <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-line-2" />}
@@ -737,28 +753,6 @@ function PaneTab({
         </button>
       </TabActions>
     </>
-  );
-}
-
-function WorkspacePicker({ workspaces, current, onPick }: { workspaces: Workspace[]; current: Workspace | undefined; onPick(id: string): void }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button size="sm" variant="secondary" trailing={<ChevronDown className="opacity-60" />} className="max-w-56 @max-[720px]:max-w-32" aria-label={`Workspace: ${current?.label ?? "none"}`}>
-          <span className="truncate">{current?.label ?? "Workspace"}</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
-        {[...workspaces]
-          .sort((a, b) => a.order - b.order)
-          .map((w) => (
-            <DropdownMenuItem key={w.id} onSelect={() => onPick(w.id)} shortcut={w.id}>
-              {w.label}
-            </DropdownMenuItem>
-          ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 

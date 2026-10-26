@@ -7,6 +7,7 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { agentTier, COLUMN_STATUS, connSummary, PHASE_STATUS } from "@/features/shell/status";
 import { agentStateWord } from "@/features/shell/vocab";
 import { openNewShell } from "./lastTerminal";
+import { hostPanes, paneDetail, paneName } from "./panes";
 
 function Row({ orb, title, detail, trailing, onClick }: { orb: ReactNode; title: string; detail?: string; trailing?: string; onClick(): void }) {
   return (
@@ -63,9 +64,11 @@ export function TerminalChooser() {
   const multiHost = ids.length > 1;
   const nameOf = (id: string) => profiles.find((p) => p.id === id)?.name ?? id;
   const online = ids.filter((id) => status[id]?.phase === "online");
-  // panes no agent owns (plain shells, other tools)
+  // panes no agent owns (plain shells, other tools), in workspace and tab order
   const shells = online.flatMap((hostId) =>
-    (states[hostId]?.workspaces ?? []).flatMap((ws) => ws.tabs.flatMap((t) => t.panes.filter((p) => !p.agentId).map((pane) => ({ hostId, ws, pane })))),
+    hostPanes(states[hostId]?.workspaces ?? [])
+      .filter((r) => !r.pane.agentId)
+      .map((r) => ({ hostId, ...r })),
   );
   // where a new shell opens on each online host: the workspace in focus (as the terminal screen picks it), else the host's home
   const newShells = online.map((hostId) => {
@@ -120,12 +123,12 @@ export function TerminalChooser() {
           <section aria-label="Shells">
             <h2 className="kicker px-1 pb-1">Shells</h2>
             <Tile className="divide-y divide-line overflow-hidden">
-              {shells.map(({ hostId, ws, pane }) => (
+              {shells.map(({ hostId, ws, tab, pane }) => (
                 <Row
                   key={`${hostId}/${pane.id}`}
                   orb={<SquareTerminal className="size-4 text-mute" aria-hidden />}
-                  title={pane.title || ws.label}
-                  detail={multiHost ? `${nameOf(hostId)} · ${ws.label}` : ws.label}
+                  title={paneName(pane)}
+                  detail={[multiHost ? nameOf(hostId) : null, `${ws.label} › ${tab.label}`, paneDetail(pane, states[hostId]?.info.home, ws.cwd)].filter(Boolean).join(" · ")}
                   onClick={() => navigate({ name: "terminal", hostId, paneId: pane.id })}
                 />
               ))}
