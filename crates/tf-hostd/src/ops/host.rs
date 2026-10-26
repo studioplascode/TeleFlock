@@ -516,8 +516,9 @@ fn session_titles() -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Past omp sessions, newest first. `live` maps session file / id → agent id.
-pub(crate) fn scan_sessions(dir: &Path, cwd: Option<&Path>, limit: usize, live: &HashMap<String, String>) -> Vec<PastSession> {
+/// Past omp sessions, newest first. `live` maps session file / id → (agent id, running): a
+/// parked agent's session lists its agent id but is not live (resuming it reopens that agent).
+pub(crate) fn scan_sessions(dir: &Path, cwd: Option<&Path>, limit: usize, live: &HashMap<String, (String, bool)>) -> Vec<PastSession> {
     let mut files: Vec<(i64, u64, PathBuf)> = Vec::new();
     let Ok(buckets) = std::fs::read_dir(dir) else { return vec![] };
     for bucket in buckets.flatten() {
@@ -556,14 +557,14 @@ pub(crate) fn scan_sessions(dir: &Path, cwd: Option<&Path>, limit: usize, live: 
         }
         let id = head.id.clone().or_else(|| id_from_file_name(&path)).unwrap_or_default();
         let file = path.display().to_string();
-        let agent_id = live.get(&file).or_else(|| live.get(&id)).cloned();
+        let agent = live.get(&file).or_else(|| live.get(&id));
         out.push(PastSession {
             title: titles.get(&id).cloned().or(head.title),
             cwd: head.cwd,
             updated_at: mtime,
             messages,
-            live: agent_id.is_some(),
-            agent_id,
+            live: agent.is_some_and(|(_, running)| *running),
+            agent_id: agent.map(|(a, _)| a.clone()),
             file,
             id,
         });
@@ -571,16 +572,18 @@ pub(crate) fn scan_sessions(dir: &Path, cwd: Option<&Path>, limit: usize, live: 
     out
 }
 
-/// Session file / session id → agent id for every omp agent on the board.
-fn live_sessions(ctx: &Ctx) -> HashMap<String, String> {
+/// Session file / session id → (agent id, running) for every omp agent on the board (parked
+/// agents are not running).
+fn live_sessions(ctx: &Ctx) -> HashMap<String, (String, bool)> {
     let mut m = HashMap::new();
     for a in ctx.state.snapshot().agents {
         if let Some(omp) = &a.omp {
+            let v = (a.id.clone(), a.parked.is_none());
             if let Some(f) = &omp.session_file {
-                m.insert(f.clone(), a.id.clone());
+                m.insert(f.clone(), v.clone());
             }
             if let Some(s) = &omp.session_id {
-                m.insert(s.clone(), a.id.clone());
+                m.insert(s.clone(), v);
             }
         }
     }
@@ -607,7 +610,11 @@ pub async fn resume(ctx: &Ctx, p: ResumeParams) -> Result<Started, ApiError> {
     let file_s = file.display().to_string();
     let live = live_sessions(ctx);
     let id = id_from_file_name(&file).unwrap_or_default();
-    if let Some(agent_id) = live.get(&file_s).or_else(|| live.get(&id)) {
+    if let Some((agent_id, running)) = live.get(&file_s).or_else(|| live.get(&id)) {
+        if !running {
+            // A parked agent: reopen it (same name, model, archive cleared) at the asked target.
+            return crate::ops::agent::resume_parked(ctx, agent_id, Some(p.target), None, Vec::new()).await;
+        }
         let name = ctx.state.agent(agent_id).map(|a| a.name).unwrap_or_else(|| agent_id.clone());
         return Err(ApiError::new("busy", format!("this session is open in agent {name}"))
             .with_hint("Resuming a live session would fork it. Open that agent instead."));
@@ -971,12 +978,17 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         write("2026-10-20T22-00-00-000Z_01a15b4d-bbbb.jsonl", "/tmp/y", "second", 1);
         write("2026-10-20T22-01-00-000Z_01a15b4e-cccc.jsonl", "/tmp/y", "empty", 0);
-        let live: HashMap<String, String> = [("01a15b4c-aaaa".to_string(), "term_1".to_string())].into();
+        let live: HashMap<String, (String, bool)> = [
+            ("01a15b4c-aaaa".to_string(), ("term_1".to_string(), true)),
+            ("01a15b4d-bbbb".to_string(), ("term_2".to_string(), false)),
+        ]
+        .into();
         let all = scan_sessions(td.path(), None, 10, &live);
         assert_eq!(all.len(), 2, "{all:?}");
         assert_eq!(all[0].id, "01a15b4d-bbbb");
         assert_eq!(all[0].messages, Some(1));
-        assert!(!all[0].live);
+        assert!(!all[0].live, "parked: not live");
+        assert_eq!(all[0].agent_id.as_deref(), Some("term_2"), "parked: its agent");
         assert!(all[1].live);
         assert_eq!(all[1].agent_id.as_deref(), Some("term_1"));
         assert_eq!(all[1].title.as_deref(), Some("first"));

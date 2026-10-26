@@ -5,13 +5,14 @@
 //! fast, plan, goal, compact, rename, fork/branch/tree, new session, handoff, export,
 //! btw, follow-up queue), then herdr keystroke injection under the §3.6 safety rules.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{info, warn};
 
-use tf_herdr::{AgentStart, PaneSplit, SplitDirection, TabCreate, WorkspaceCreate};
+use tf_herdr::{AgentStart, PaneSplit, SplitDirection, TabCreate, WorkspaceCreate, WorktreeOpen, WorktreeScope, WorktreeTarget};
 use tf_proto::methods::*;
 use tf_proto::model::{ActivityKind, Agent, HerdrState, LinkState, NeedsKind, OmpMode, ThinkingLevel};
 use tf_proto::session::{HistoryPage, SessionSnapshot};
@@ -24,14 +25,20 @@ use crate::inject::{self, When};
 use crate::omp::{guest_err, MetaOverlay, OmpSession};
 use crate::ops::{herdr_err, to_value, Ctx};
 use crate::state::build;
+use crate::state::parked::{self, PARK_GRACE};
+use crate::state::persist::{ParkedRecord, ParkedWorktree};
 use crate::state::subs::Sub;
+use crate::util::now_ms;
 
 const DEFAULT_LIMIT: usize = 200;
 
 pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError> {
     use HostMethod as M;
     match req {
-        M::SessionOpen(p) => to_value(session_open(ctx, p, client)?),
+        M::SessionOpen(p) => match parked_record(ctx, &p.agent_id) {
+            Some(rec) => to_value(parked_snapshot(ctx, rec, p.limit).await?),
+            None => to_value(session_open(ctx, p, client)?),
+        },
         M::SessionClose(p) => {
             session_close(ctx, &p.agent_id, client);
             to_value(Empty {})
@@ -64,11 +71,12 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentDequeue(p) => to_value(dequeue(ctx, &p.agent_id).await?),
         M::AgentKeys(p) => unit(keys(ctx, p).await),
         M::AgentSubagent(p) => unit(subagent(ctx, p)),
-        M::AgentArchive(p) => unit(archive(ctx, p)),
+        M::AgentArchive(p) => unit(archive(ctx, p).await),
         M::AgentConnect(p) => unit(connect(ctx, &p.agent_id).await),
         M::AgentStart(p) => to_value(start_agent(ctx, p.target, &p.spec, None).await?),
         M::AgentStop(p) => unit(stop(ctx, p).await),
         M::AgentRenameHandle(p) => unit(rename_handle(ctx, p).await),
+        M::AgentResume(p) => to_value(resume_parked(ctx, &p.agent_id, None, None, Vec::new()).await?),
         other => Err(ApiError::new("unknown_method", format!("`{}` is not an agent method", other.name()))),
     }
 }
@@ -80,7 +88,18 @@ fn unit(r: Result<(), ApiError>) -> Result<Value, ApiError> {
 // ───────────────────────────── lookups ─────────────────────────────
 
 fn agent(ctx: &Ctx, agent_id: &str) -> Result<Agent, ApiError> {
-    ctx.state.agent(agent_id).ok_or_else(|| ApiError::new("not_found", format!("no agent `{agent_id}`")))
+    let a = ctx.state.agent(agent_id).ok_or_else(|| ApiError::new("not_found", format!("no agent `{agent_id}`")))?;
+    if a.parked.is_some() {
+        return Err(ApiError::new("parked", format!("{} is done and its pane is closed", a.name)).with_hint("Resume it first"));
+    }
+    Ok(a)
+}
+
+/// The parked record of an agent that is parked on the board right now (a record whose pane is
+/// still closing does not count).
+fn parked_record(ctx: &Ctx, agent_id: &str) -> Option<ParkedRecord> {
+    ctx.state.agent(agent_id).filter(|a| a.parked.is_some())?;
+    ctx.state.parked(agent_id)
 }
 
 fn omp_agent(ctx: &Ctx, agent_id: &str) -> Result<Agent, ApiError> {
@@ -239,7 +258,11 @@ async fn session_image(ctx: &Ctx, p: ImageParams) -> Result<ImageBlob, ApiError>
     let path = match (p.original, p.blob) {
         (Some(original), _) => {
             let sid = match &p.agent_id {
-                Some(agent_id) if original.starts_with("local://") => Some(session_id(ctx, agent_id)?),
+                // A parked agent's read-only transcript still shows its images.
+                Some(agent_id) if original.starts_with("local://") => Some(match parked_record(ctx, agent_id).and_then(|r| r.session_id) {
+                    Some(sid) => sid,
+                    None => session_id(ctx, agent_id)?,
+                }),
                 _ => None,
             };
             tokio::task::spawn_blocking(move || crate::originals::resolve(&original, sid.as_deref()))
@@ -268,6 +291,13 @@ async fn session_image(ctx: &Ctx, p: ImageParams) -> Result<ImageBlob, ApiError>
 async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(), ApiError> {
     if p.text.trim().is_empty() && p.images.is_empty() {
         return Err(ApiError::new("invalid_params", "empty prompt"));
+    }
+    if parked_record(ctx, &p.agent_id).is_some() {
+        // Prompting a parked agent resumes it; the launch path submits the prompt once linked.
+        info!(agent = %p.agent_id, device = %client.info().device, "prompt resumes a parked agent");
+        let text = Some(p.text).filter(|t| !t.trim().is_empty());
+        resume_parked(ctx, &p.agent_id, None, text, p.images).await?;
+        return Ok(());
     }
     let a = omp_agent(ctx, &p.agent_id)?;
     if a.state == HerdrState::Blocked && a.needs.as_ref().is_some_and(|n| n.answerable) {
@@ -732,12 +762,222 @@ async fn keys(ctx: &Ctx, p: KeysParams) -> Result<(), ApiError> {
     ctx.herdr.agent_send_keys(&a.pane_id, &keys).await.map_err(herdr_err)
 }
 
-fn archive(ctx: &Ctx, p: ArchiveParams) -> Result<(), ApiError> {
+/// `agent.archive`. With `close`, a pending close parks the agent after the undo window
+/// ([`PARK_GRACE`]); un-archiving cancels it, and un-archiving a parked agent resumes it.
+async fn archive(ctx: &Ctx, p: ArchiveParams) -> Result<(), ApiError> {
+    if parked_record(ctx, &p.agent_id).is_some() {
+        if !p.archived {
+            resume_parked(ctx, &p.agent_id, None, None, Vec::new()).await?;
+        }
+        return Ok(());
+    }
     agent(ctx, &p.agent_id)?;
     if !ctx.state.set_archived(&p.agent_id, p.archived) {
         return Err(ApiError::new("not_found", format!("no agent `{}`", p.agent_id)));
     }
+    match (p.archived, p.close) {
+        (true, Some(true)) => {
+            let (generation, cancel) = ctx.state.schedule_park(&p.agent_id);
+            let ctx = ctx.arc();
+            let agent_id = p.agent_id;
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = ctx.cancel.cancelled() => return,
+                    _ = tokio::time::sleep(PARK_GRACE) => {}
+                }
+                if !ctx.state.end_park_wait(&agent_id, generation) {
+                    return;
+                }
+                if let Err(e) = park(&ctx, &agent_id).await {
+                    warn!(agent = %agent_id, "closing a done agent failed: {e}");
+                    ctx.state.record_activity(&agent_id, ActivityKind::Error, "Closing the pane failed".into(), Some(e.to_string()));
+                }
+            });
+        }
+        (true, Some(false)) => {
+            ctx.state.cancel_park(&p.agent_id);
+        }
+        _ => {}
+    }
     Ok(())
+}
+
+/// End of the undo window: parks the agent and closes its pane, if it is still archived, idle,
+/// an omp agent and its session file exists. Otherwise the pane stays open.
+async fn park(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
+    let Some(a) = ctx.state.agent(agent_id).filter(|a| a.parked.is_none()) else { return Ok(()) };
+    let Some(file) = parked::parkable(&a).map(str::to_string) else {
+        info!(agent = %agent_id, state = ?a.state, archived = a.archived, "done agent not idle (or not omp); keeping its pane");
+        return Ok(());
+    };
+    if !tokio::fs::metadata(&file).await.is_ok_and(|m| m.is_file()) {
+        info!(agent = %agent_id, %file, "session file missing; keeping the pane");
+        return Ok(());
+    }
+    let snap = ctx.state.snapshot();
+    let ws = snap.workspaces.iter().find(|w| w.id == a.workspace_id);
+    let worktree = ws.and_then(|w| {
+        let wt = w.worktree.as_ref()?;
+        Some(ParkedWorktree { path: wt.path.clone(), repo_root: w.repo.as_ref().map(|r| r.root.clone()).unwrap_or_default() })
+    });
+    let archived_at = ctx.state.archived_at(agent_id).unwrap_or_else(now_ms);
+    let Some(rec) = parked::record_from_agent(&a, archived_at, now_ms(), worktree, ws.map(|w| w.cwd.clone())) else { return Ok(()) };
+    ctx.state.park(rec);
+    if let Err(e) = parked::close_agent(ctx, &a).await {
+        ctx.state.unpark(agent_id);
+        return Err(herdr_err(e));
+    }
+    ctx.state.record_activity(agent_id, ActivityKind::Stopped, format!("Closed {} (done)", a.name), Some("Pane closed; resume it from Done".into()));
+    Ok(())
+}
+
+/// `agent.resume` (also prompting or un-archiving a parked agent, and `host.resume` of its
+/// session file): `omp --resume=<file>` in a new pane with the parked name, model and thinking
+/// level. `target` overrides where (default: its worktree / folder, see [`reopen_target`]).
+pub(crate) async fn resume_parked(
+    ctx: &Ctx,
+    agent_id: &str,
+    target: Option<StartTarget>,
+    prompt: Option<String>,
+    images: Vec<ImageInput>,
+) -> Result<Started, ApiError> {
+    let Some(rec) = parked_record(ctx, agent_id) else {
+        return Err(match ctx.state.agent(agent_id) {
+            Some(a) => ApiError::new("invalid_params", format!("{} is not parked; it still has a pane", a.name)),
+            None => ApiError::new("not_found", format!("no agent `{agent_id}`")),
+        });
+    };
+    let claim = ctx.state.claim_resume(agent_id).ok_or_else(|| {
+        ApiError::new("busy", format!("{} is already being resumed", rec.name)).retryable()
+    })?;
+    let file = rec.session_file.clone();
+    if !tokio::fs::metadata(&file).await.is_ok_and(|m| m.is_file()) {
+        drop(claim);
+        ctx.state.prune_parked(agent_id);
+        return Err(ApiError::new("not_found", format!("the omp session file {file} was deleted"))
+            .with_hint("Nothing left to resume; the agent was removed from Done"));
+    }
+    let target = match target {
+        Some(t) => t,
+        None => reopen_target(ctx, &rec).await?,
+    };
+    let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().filter(|a| a.parked.is_none()).map(|a| a.name).collect();
+    let name = if valid_handle(&rec.name) && !taken.contains(&rec.name) { rec.name.clone() } else { derive_handle(&rec.name, &taken) };
+    let spec = AgentSpec {
+        name: Some(name.clone()),
+        kind: "omp".into(),
+        model: rec.model.as_ref().map(|m| format!("{}/{}", m.provider, m.id)),
+        thinking: rec.thinking,
+        plan: false,
+        prompt,
+        images,
+    };
+    info!(agent = %agent_id, %name, %file, "resuming parked agent");
+    let started = start_agent(ctx, target, &spec, Some(&file)).await?;
+    let new_id = started.agent_id.clone().unwrap_or_default();
+    ctx.state.resumed(claim, &new_id);
+    ctx.state.record_activity_as(&new_id, &name, ActivityKind::Unarchived, format!("Resumed {name}"), Some(file));
+    Ok(started)
+}
+
+/// Where a parked agent reopens: a new tab in its old workspace when that is still open at the
+/// same folder; its linked worktree through herdr `worktree.open` (grouped under its repo);
+/// else a new workspace at its folder.
+async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<StartTarget, ApiError> {
+    let cwd = rec
+        .cwd
+        .clone()
+        .or_else(|| rec.workspace_cwd.clone())
+        .ok_or_else(|| ApiError::new("not_found", format!("no folder is known for {}", rec.name)))?;
+    let path = crate::paths::expand_tilde(&cwd);
+    if !path.is_dir() {
+        return Err(ApiError::new("not_found", format!("{} no longer exists", path.display())).with_hint(
+            "Its folder or worktree was removed. Recreate it, or resume the session from Sessions in another folder.",
+        ));
+    }
+    if let (Some(ws_id), Some(ws_cwd)) = (&rec.workspace_id, &rec.workspace_cwd) {
+        if ctx.state.snapshot().workspaces.iter().any(|w| &w.id == ws_id && &w.cwd == ws_cwd) {
+            return Ok(StartTarget::Workspace { workspace_id: ws_id.clone(), split: Some(Split::Tab) });
+        }
+    }
+    if let Some((checkout, repo_root)) = linked_worktree(rec, &path).await {
+        let open = WorktreeOpen {
+            scope: WorktreeScope::Cwd(repo_root),
+            target: WorktreeTarget::Path(checkout.clone()),
+            label: None,
+            focus: false,
+            trust_repository: false,
+        };
+        match ctx.herdr.worktree_open(&open).await {
+            Ok(o) => {
+                ctx.state.refresh();
+                return Ok(match o.root_pane.filter(|_| !o.already_open) {
+                    Some(p) => StartTarget::Pane { pane_id: p.pane_id },
+                    None => StartTarget::Workspace { workspace_id: o.workspace.workspace_id, split: Some(Split::Tab) },
+                });
+            }
+            Err(e) => warn!(%checkout, "worktree open failed ({e}); resuming in a plain workspace"),
+        }
+    }
+    Ok(StartTarget::Cwd { cwd: path.display().to_string(), label: None })
+}
+
+/// `(checkout, main worktree root)` when the parked agent ran in a linked git worktree: from the
+/// record, else asked from git.
+async fn linked_worktree(rec: &ParkedRecord, cwd: &Path) -> Option<(String, String)> {
+    if let Some(wt) = rec.worktree.as_ref().filter(|w| !w.repo_root.is_empty() && Path::new(&w.path).is_dir()) {
+        return Some((wt.path.clone(), wt.repo_root.clone()));
+    }
+    let args = ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"];
+    let out = crate::ops::git::git(cwd, &args, Duration::from_secs(5)).await.ok().filter(|o| o.ok())?;
+    let text = out.stdout_str();
+    let mut lines = text.lines().map(PathBuf::from);
+    let (top, git_dir, common) = (lines.next()?, lines.next()?, lines.next()?);
+    if git_dir == common {
+        return None;
+    }
+    let root = if common.file_name().is_some_and(|n| n == ".git") { common.parent()?.to_path_buf() } else { return None };
+    Some((top.display().to_string(), root.display().to_string()))
+}
+
+/// Largest tail of a parked session file read for its read-only transcript.
+const PARKED_READ_MAX: u64 = 16 * 1024 * 1024;
+
+/// `session.open` on a parked agent: a read-only snapshot (meta from the parked record, the last
+/// rows of its session file mapped like a live replica). No subscription, no paging.
+async fn parked_snapshot(ctx: &Ctx, rec: ParkedRecord, limit: Option<u32>) -> Result<SessionSnapshot, ApiError> {
+    let limit = limit.map(|l| l.clamp(1, 2000) as usize).unwrap_or(DEFAULT_LIMIT);
+    let path = PathBuf::from(&rec.session_file);
+    let read = tokio::task::spawn_blocking(move || read_tail(&path, PARKED_READ_MAX)).await.map_err(|e| ApiError::new("internal", e.to_string()))?;
+    let text = match read {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            ctx.state.prune_parked(&rec.agent_id);
+            return Err(ApiError::new("not_found", format!("the omp session file {} was deleted", rec.session_file)));
+        }
+        Err(e) => return Err(crate::ops::fs::io_error(e, Path::new(&rec.session_file))),
+    };
+    let mut items = tf_collab::replica::transcript_page(&text).items;
+    items.drain(..items.len().saturating_sub(limit));
+    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more: false, cursor: None, ui: None })
+}
+
+/// The file, or its last `max` bytes from a line start.
+fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut buf = Vec::new();
+    if len > max {
+        f.seek(SeekFrom::Start(len - max))?;
+        f.take(max).read_to_end(&mut buf)?;
+        let start = buf.iter().position(|b| *b == b'\n').map_or(buf.len(), |i| i + 1);
+        buf.drain(..start);
+    } else {
+        f.read_to_end(&mut buf)?;
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 async fn connect(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {

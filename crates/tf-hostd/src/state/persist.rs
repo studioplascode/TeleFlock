@@ -1,5 +1,7 @@
-//! `state.json`: archive, turn counters, activity ring (per herdr session) and the
-//! host's daily usage ledger. Written atomically, at most once per second.
+//! `state.json`: archive, turn counters, activity ring, parked agents and the prune list (per
+//! herdr session) and the host's daily usage ledger. Written atomically, at most once per second.
+//! Every field is `serde(default)`: files from older builds load unchanged, and older builds
+//! ignore the fields they don't know.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -11,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use tf_proto::model::{ActivityEvent, CostInfo, UsageTotals};
+use tf_proto::model::{ActivityEvent, CostInfo, DiffStat, ModelRef, PrunedAgent, ThinkingLevel, UsageTotals};
 use tf_proto::Millis;
 
 /// Activity events kept per herdr session.
@@ -32,6 +34,53 @@ pub struct SessionData {
     pub first_seen: HashMap<String, Millis>,
     /// Newest last.
     pub activity: VecDeque<ActivityEvent>,
+    /// Agents marked done whose pane TeleFlock closed (agent id → record, architecture §3.5).
+    pub parked: BTreeMap<String, ParkedRecord>,
+    /// Agents removed because their omp session file was deleted; newest first, capped.
+    pub pruned: Vec<PrunedAgent>,
+}
+
+/// Everything needed to show a parked agent as a Done card and to resume it
+/// (`omp --resume=<session_file>`). A snapshot taken when its pane was closed.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ParkedRecord {
+    pub agent_id: String,
+    /// herdr agent name (reused on resume unless a live agent took it).
+    pub name: String,
+    pub kind: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub session_id: Option<String>,
+    pub session_file: String,
+    pub model: Option<ModelRef>,
+    pub thinking: Option<ThinkingLevel>,
+    pub started_at: Option<Millis>,
+    pub archived_at: Millis,
+    pub parked_at: Millis,
+    pub turns: u32,
+    pub diff: Option<DiffStat>,
+    pub cost: Option<CostInfo>,
+    pub last_turn_ended_at: Option<Millis>,
+    /// Last one-line activity summary.
+    pub line: Option<String>,
+    /// The agent ran in a linked git worktree (resume reopens it with herdr `worktree.open`).
+    pub worktree: Option<ParkedWorktree>,
+    /// herdr workspace the pane lived in, and its folder: resume adds a tab there when that
+    /// workspace is still open at the same folder.
+    pub workspace_id: Option<String>,
+    pub workspace_cwd: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ParkedWorktree {
+    /// Checkout path of the linked worktree.
+    pub path: String,
+    /// Main worktree root of its repository.
+    pub repo_root: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

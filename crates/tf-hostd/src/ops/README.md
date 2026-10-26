@@ -65,6 +65,7 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   `split: right|down` splits the workspace's focused pane; `cwd` only → new workspace. One herdr
   bridge per terminal; frames are forwarded as-is (base64). The stream ends with
   `TermEvent::Closed{reason}` (`terminal attach taken over`, `detached`, …). Disconnect detaches.
+  An `agent` target that is parked (pane closed by Mark done) fails with `parked`.
 - **host.usage**: `~/.omp/stats.db` opened `?mode=ro` (as fresh as omp's last stats sync); days
   are host-local and zero-filled; `input` = input + cache read + cache write tokens.
 - **host.limits** (`limits.rs`): `omp usage --json` (hostd cache 60 s, `refresh` 10 s; omp itself caches
@@ -78,7 +79,14 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   --no-session` `get_available_models` (fallback `omp models --json`); cached 5 min.
 - **host.sessions**: scans `<omp agent dir>/sessions/*/*.jsonl` (newest first), titles from
   `history.db` (read-only) or the title slot, skips never-prompted sessions, marks `live` from the
-  board's omp agents. **host.resume** refuses live sessions (`busy`; resuming would fork).
+  board's omp agents (a parked agent's session carries its `agentId` with `live: false`).
+  **host.resume** refuses live sessions (`busy`; resuming would fork); a parked agent's session file
+  resumes that agent (`ops::agent::resume_parked`) at the given target.
+- **agent.archive / agent.resume** (`agent.rs`, done-agent lifecycle, architecture §3.5/§3.7):
+  `close: true` parks the agent after a 10 s undo window (closes its exclusive workspace, else its
+  pane); un-archiving, prompting or `agent.resume` on a parked card relaunch `omp --resume=<file>`
+  (worktree reopened via herdr `worktree.open`). Other per-agent methods on a parked card fail with
+  `parked` ("Resume it first"); `session.open` gives a read-only transcript snapshot.
 - **host.setupApply** is the only config-mutating path, and only for explicit fix ids:
   `install-herdr-integration` (herdr `integration.install omp`), `enable-global-sharing`
   (`omp config set collab.autoStart control` + `collab.relayUrl ws://127.0.0.1:<port>`),

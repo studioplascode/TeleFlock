@@ -4,10 +4,11 @@
 //! the companion bridge, git repo info (cached), host info/health. Every input change
 //! marks the store dirty; a flusher rebuilds the board at most 10×/s, diffs it against
 //! what clients have and broadcasts `patch`es (one rev per message). Pulses are
-//! aggregated per 100 ms window. Archive, turns, activity and usage persist in
-//! `state.json`.
+//! aggregated per 100 ms window. Archive, turns, activity, parked agents and usage persist in
+//! `state.json`; done agents park and prune per [`parked`].
 
 pub mod build;
+pub mod parked;
 pub mod persist;
 pub mod subs;
 
@@ -93,6 +94,7 @@ struct Inner {
     pulses: HashMap<(String, PulseKind), u32>,
     health: Option<HostHealth>,
     built_once: bool,
+    life: parked::Lifecycle,
 }
 
 struct Store {
@@ -134,6 +136,7 @@ impl StateHandle {
                     pulses: HashMap::new(),
                     health: None,
                     built_once: false,
+                    life: parked::Lifecycle::default(),
                 }),
                 dirty: Notify::new(),
                 resnap: Notify::new(),
@@ -156,7 +159,7 @@ impl StateHandle {
     }
 
     pub fn agent_by_pane(&self, pane_id: &str) -> Option<Agent> {
-        self.lock().published.agents.iter().find(|a| a.pane_id == pane_id).cloned()
+        self.lock().published.agents.iter().find(|a| a.pane_id == pane_id && a.parked.is_none()).cloned()
     }
 
     /// The raw herdr agent record (fresh from the mirror).
@@ -246,8 +249,9 @@ impl StateHandle {
         self.inner.omp.usage_today()
     }
 
-    pub fn set_info(&self, info: HostInfo) {
+    pub fn set_info(&self, mut info: HostInfo) {
         let mut m = self.lock();
+        info.pruned = m.published.info.pruned.clone();
         if m.published.info != info {
             m.published.info = info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
@@ -297,6 +301,9 @@ impl StateHandle {
                 }
             }
         });
+        if !archived {
+            self.cancel_park(agent_id);
+        }
         let kind = if archived { ActivityKind::Archived } else { ActivityKind::Unarchived };
         let name = name.unwrap_or_else(|| agent_id.to_string());
         self.push_activity(agent_id, &name, kind, format!("{} {name}", if archived { "Archived" } else { "Un-archived" }), None);
@@ -522,6 +529,7 @@ impl StateHandle {
         }
         m.tracks.retain(|k, _| seen.contains(k));
         m.omp_of = omp_of;
+        parked::merge_into(self, m, &persisted, &seen, &mut agents);
 
         // Persist turns, first-seen, auto-unarchive.
         if !new_turns.is_empty() || !unarchive.is_empty() || seen.iter().any(|id| !persisted.first_seen.contains_key(id)) {
@@ -561,6 +569,7 @@ impl StateHandle {
         // Bind failures/recoveries show up without waiting for the next full setup probe.
         info.setup.issues.retain(|i| !crate::omp::RELAY_ISSUE_IDS.contains(&i.id.as_str()));
         info.setup.issues.extend(store.omp.relay_issue());
+        info.pruned = persisted.pruned.clone();
 
         // Diff.
         let mut ops = Vec::new();
@@ -821,6 +830,7 @@ pub async fn start(ctx: &Arc<Ctx>) {
     tokio::spawn(bridge_consumer(ctx.arc(), ctx.bridge.subscribe()));
     tokio::spawn(repo_loop(ctx.arc()));
     tokio::spawn(host_loop(ctx.arc()));
+    tokio::spawn(parked::prune_loop(ctx.arc()));
 }
 
 fn apply_snapshot(h: &StateHandle, snap: tf_herdr::Snapshot) {

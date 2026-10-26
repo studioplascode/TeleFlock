@@ -153,11 +153,13 @@ pub async fn client_gone(ctx: &Ctx, client_id: &str) {
 async fn resolve_target(ctx: &Ctx, target: &TermTarget) -> Result<String, ApiError> {
     match target {
         TermTarget::Pane { pane_id } => Ok(pane_id.clone()),
-        TermTarget::Agent { agent_id } => ctx
-            .state
-            .agent(agent_id)
-            .map(|a| a.pane_id)
-            .ok_or_else(|| ApiError::new("not_found", format!("agent {agent_id} not found"))),
+        TermTarget::Agent { agent_id } => match ctx.state.agent(agent_id) {
+            Some(a) if a.parked.is_some() => {
+                Err(ApiError::new("parked", format!("{} is done and its pane is closed", a.name)).with_hint("Resume it first"))
+            }
+            Some(a) => Ok(a.pane_id),
+            None => Err(ApiError::new("not_found", format!("agent {agent_id} not found"))),
+        },
         TermTarget::Shell { workspace_id, cwd, split } => {
             let cwd = match cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
                 Some(c) => Some(existing_dir(c)?),
