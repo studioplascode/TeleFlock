@@ -36,16 +36,27 @@ pub struct Paths {
     pub bin: PathBuf,
     /// Automations and their run history `<home>/automations.json`.
     pub automations: PathBuf,
-    /// `$TF_HOSTD_HOME` home (lab / dev instance), not the default `~/.teleflock`.
+    /// A home other than the default `~/.teleflock` (lab / dev instance). Derived from the path,
+    /// not from whether `TF_HOSTD_HOME` is set: `attach` (run by the app without it) starts the
+    /// daemon with `TF_HOSTD_HOME` = its home, and both must derive the same endpoints.
     pub custom: bool,
 }
 
 impl Paths {
     /// Resolves the home from `TF_HOSTD_HOME`, else `~/.teleflock`.
     pub fn from_env() -> Self {
-        match std::env::var_os("TF_HOSTD_HOME").filter(|v| !v.is_empty()) {
-            Some(h) => Self::new(PathBuf::from(h), true),
-            None => Self::new(home_dir().join(".teleflock"), false),
+        Self::resolve(std::env::var_os("TF_HOSTD_HOME").filter(|v| !v.is_empty()).map(PathBuf::from))
+    }
+
+    /// [`Paths::from_env`] for a given `TF_HOSTD_HOME` value.
+    fn resolve(env_home: Option<PathBuf>) -> Self {
+        let default = home_dir().join(".teleflock");
+        match env_home {
+            Some(home) => {
+                let custom = !same_dir(&home, &default);
+                Self::new(home, custom)
+            }
+            None => Self::new(default, false),
         }
     }
 
@@ -99,15 +110,17 @@ impl Paths {
         format!("teleflock-hostd-{:08x}", fnv1a(self.home.to_string_lossy().as_bytes()))
     }
 
-    /// The user's real daemon home (`~/.teleflock`), as opposed to a lab / dev home. Not the same
-    /// as `custom`: `attach` always starts the daemon with `TF_HOSTD_HOME` set, also for the
-    /// default home.
+    /// The user's real daemon home (`~/.teleflock`), as opposed to a lab / dev home.
     pub fn is_default_home(&self) -> bool {
-        let default = home_dir().join(".teleflock");
-        match (std::fs::canonicalize(&self.home), std::fs::canonicalize(&default)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => self.home == default,
-        }
+        same_dir(&self.home, &home_dir().join(".teleflock"))
+    }
+}
+
+/// Whether two paths name the same directory (canonical when both exist, else literal).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -228,12 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn default_home_is_told_apart_from_lab_homes() {
-        // `attach` starts every daemon with TF_HOSTD_HOME set (custom = true), also for the real
-        // home: the real-home check must look at the path, not at `custom`.
-        assert!(Paths::new(home_dir().join(".teleflock"), true).is_default_home());
-        assert!(Paths::new(home_dir().join(".teleflock"), false).is_default_home());
-        assert!(!Paths::new(PathBuf::from("/tmp/tf-lab-x"), true).is_default_home());
+    fn attach_and_its_daemon_derive_the_same_endpoints() {
+        // The app runs `tf-hostd attach` without TF_HOSTD_HOME; attach starts the daemon with
+        // TF_HOSTD_HOME = its own home. Both must listen/connect on the same pipe and socket, or
+        // attach never reaches the daemon (Windows Local hosts).
+        let attach = Paths::resolve(None);
+        let daemon = Paths::resolve(Some(attach.home.clone()));
+        assert_eq!((&attach.pipe, &attach.bridge_pipe, &attach.sock), (&daemon.pipe, &daemon.bridge_pipe, &daemon.sock));
+        assert!(!attach.custom && !daemon.custom && daemon.is_default_home());
+
+        // A lab home: attach and daemon both see TF_HOSTD_HOME, both get the suffixed pipe.
+        let lab_attach = Paths::resolve(Some(PathBuf::from("/tmp/tf-lab-x")));
+        let lab_daemon = Paths::resolve(Some(lab_attach.home.clone()));
+        assert_eq!(lab_attach.pipe, lab_daemon.pipe);
+        assert!(lab_daemon.custom && !lab_daemon.is_default_home());
+        assert_ne!(lab_daemon.pipe, daemon.pipe);
     }
 
     #[cfg(unix)]

@@ -86,7 +86,7 @@ Every Rust crate is a workspace member (`crates/*`). Each agent compiles with it
 | Path | Purpose |
 |---|---|
 | `~/.teleflock/bin/tf-hostd` | Binary, uploaded by the app. Its version must equal the app's embedded version. |
-| `~/.teleflock/run/hostd.sock` | Client socket (0600). On Windows: pipe `\\.\pipe\teleflock-hostd-<user>`. |
+| `~/.teleflock/run/hostd.sock` | Client socket (0600). On Windows: pipe `\\.\pipe\teleflock-hostd-<user>`; a home other than `~/.teleflock` (lab) adds `-<FNV-1a of the home>`. The suffix follows the home path, not whether `TF_HOSTD_HOME` is set: the app runs `attach` without it and `attach` starts the daemon with it, and both must name the same pipe. |
 | `~/.teleflock/run/bridge.sock` | Companion-extension socket. On Windows: pipe `\\.\pipe\teleflock-bridge-<user>`. |
 | `~/.teleflock/run/hostd.lock` | Single-instance lock (holds the pid). |
 | `~/.teleflock/state.json` | Persistent per-herdr-session state: archived agents (by agent id and omp session), turn counters, first-seen times, activity ring, parked agents (`parked`: agent id → snapshot record, §3.5) and the prune list (`pruned`, ≤ 200, 30 days); plus the daily usage ledger and image-original links. Every field defaults when absent, so older files load unchanged. |
