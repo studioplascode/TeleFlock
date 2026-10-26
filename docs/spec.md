@@ -31,6 +31,7 @@
   6. TeleFlock relay running
   7. omp session sharing enabled (with an explanation of what it changes)
 - **Host health.** CPU, RAM, load, disk, uptime, plus herdr and omp versions.
+- **Tool updates.** Every host's tf-hostd keeps omp and herdr current by itself (on by default, a per-host switch turns it off): it checks 2 minutes after it starts and every 6 hours, installs with `omp update` / plain `herdr update` (never a live herdr handoff, never a channel switch; running herdr servers and agents keep running). The host card shows the versions, an available update, the last check, a spinner while it runs, notes (package-manager installs, a herdr server that switches on its next restart) and errors, plus **Check now** / **Update now**.
 
 ## 3. Information architecture
 ### Desktop (Windows, custom chrome)

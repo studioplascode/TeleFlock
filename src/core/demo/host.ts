@@ -76,6 +76,7 @@ import {
 import { historyFor, longHistory } from "./seeds";
 import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
 import { DemoTerm } from "./term";
+import { DemoTools } from "./tools";
 
 export type HostVariant = "forge" | "studio";
 
@@ -169,6 +170,7 @@ export class DemoHost implements SimHost {
   /** studio-pc presents an unknown SSH host key until the user trusts it (`hosts.trustKey`). */
   private keyTrusted = false;
   private everOnline = false;
+  private readonly tools: DemoTools;
 
   constructor(
     private readonly env: HostEnv,
@@ -202,6 +204,12 @@ export class DemoHost implements SimHost {
             ],
           }
         : { herdrIntegration: false, globalSharing: false, globalBridge: false, relay: true, issues: [{ id: "install-herdr-integration", severity: "error", title: "herdr omp integration missing", detail: "herdr can't tell when omp is working or blocked. Installs ~/.omp/agent/extensions/herdr-omp-agent-state.ts.", fixable: true, recommended: true }] };
+    this.tools = new DemoTools(variant, env.clock, (tools, installed) => {
+      this.info = { ...this.info, tools, ...(installed === "omp" && this.info.omp ? { omp: { ...this.info.omp, version: tools.omp.current ?? this.info.omp.version } } : {}) };
+      if (!this.online) return;
+      this.rev += 1;
+      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
+    });
     this.info = {
       hostname,
       os: "linux",
@@ -214,6 +222,7 @@ export class DemoHost implements SimHost {
       herdrSessions: ["default", "tf-lab"],
       relayPort: 47466,
       setup: this.setup,
+      tools: this.tools.status(),
     };
     this.health = { at: now, cpuPct: 34, cores: variant === "forge" ? 16 : 24, load1: 2.1, memUsed: 21.4e9, memTotal: 64e9, diskFree: 412e9, diskTotal: 1000e9, uptimeS: 86400 * 12 + 3600 * 5 };
     this.usageTotals = { costUsd: 0, tokens: 0, input: 0, output: 0 };
@@ -505,6 +514,7 @@ export class DemoHost implements SimHost {
     this.stopTick?.();
     this.phaseTimer?.();
     for (const t of this.terms.values()) t.close("host removed");
+    this.tools.stop();
   }
 
   private connectSequence(withAuth: boolean): void {
@@ -1063,6 +1073,9 @@ export class DemoHost implements SimHost {
         return this.setupApply(Array.isArray(p.fixes) ? (p.fixes as string[]) : []);
       case "host.activity":
         return this.activityPage(p);
+      case "host.toolsUpdate":
+      case "host.toolsConfig":
+        return this.tools.call(method, p);
       default:
         throw apiError("unknown_method", `Unknown method ${method}`);
     }

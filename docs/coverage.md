@@ -55,6 +55,7 @@ What closed the ❌ and ⚠️ rows:
 | Offline-first stale cache | board/sidebar stale treatment | StaleHosts strip | cached `HostState` | L `engine.rs` | ✅ demo (studio-pc host is stale) |
 | Setup checklist + one-tap fixes | Hosts → Host setup | More → Hosts | `host.setup/setupApply` | H/B `ops/host.rs`, `ops/scope.rs` | ⚠️ 9 rows, there is no separate "SSH OK" row; a relay that is down cannot be fixed with one tap (hostd owns the port). `move-herdr-out-of-login-session` (0.4.1): run on a throwaway herdr lab session started from a login scope, all of its processes moved into a new scope and kept running |
 | Host health | Hosts view, sidebar host rows (CPU sparkline + RAM bar), board Hosts tile (one row per host, load) | More → Hosts | state push (`host.health` exists but is not called directly) | L `ops/host.rs` | ✅ demo |
+| Tool updates (omp, herdr) | Hosts → host card: versions, available update, last check, notes/errors, Check now / Update now, auto switch | More → Hosts (same card) | `HostInfo.tools`, `host.toolsUpdate`, `host.toolsConfig` | H `ops/tools.rs` (daemon updater, architecture §3.9) | ✅ demo (forge: omp update waiting; studio-pc: auto off, Homebrew herdr) + lab hostd with fake omp/herdr/curl; hidden for older hostds |
 
 ## §3 Information architecture
 

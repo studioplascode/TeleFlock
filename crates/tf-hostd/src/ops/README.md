@@ -1,4 +1,4 @@
-# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`)
+# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`, `tools`)
 
 Owner: HostdOps. Every family exposes
 `pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError>`
@@ -15,6 +15,8 @@ ops::git::repo_info(&Path).await -> Option<RepoInfo>
 ops::term::TermRegistry                             // Ctx.terms (Default + Clone)
 ops::term::input(ctx, client, term_id, data).await  // ClientMsg::TermIn
 ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
+ops::tools::Tools::load(<home>/tools.json)          // daemon: one updater; .spawn(cancel) schedules runs
+ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish HostInfo.tools for that session
 ```
 
 ## Behavior
@@ -106,6 +108,15 @@ ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
   one retry with `smol` after a failed attempt when ≥ 1.5 s remain. `timeoutMs` default 20 000,
   clamped 2 000–60 000, semaphore queue included → `timeout` (retryable). 3 omp processes per
   daemon. Prompt and system text are never logged or returned; logs: task, role, model, ms, outcome.
+- **host.toolsUpdate / host.toolsConfig** (`tools.rs`, architecture §3.9): one updater per daemon,
+  first run 2 min after start, then every 6 h + jitter while `auto` (default on, `tools.json`).
+  omp: `omp update --check` → `omp update` (5 min) → `omp --version`. herdr: `herdr --version`,
+  `herdr status`, stable manifest via `curl https://herdr.dev/latest.json` → plain `herdr update`
+  (5 min; stdin closed, `HERDR_ENV`/`HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`/`HERDR_SESSION`
+  removed). Never `--handoff`, `--force` or a channel flag. Package-manager installs, a release that
+  needs the server restarted (herdr declines without a terminal) and a stale running herdr server
+  become `note`s; failures become `error`s (permission denied explained). `toolsUpdate` joins a
+  running run that covers it, answers when done or after 20 s; `checkOnly` never installs.
 
 ## Error codes (beyond `tf_proto::ApiError`'s list)
 | code | when | hint tells the user |
@@ -128,4 +139,5 @@ porcelain, refs, gh JSON, herdr error samples, omp JSONL answers), a git fixture
 fixture whose clone is behind (new worktree forks from the fetched `origin/main` without tracking
 it, explicit bases, offline remote, push of the new branch), stats.db fixture, session scan.
 `cargo test -p tf-hostd ai -- --ignored --nocapture` calls the real omp (needs a tiny role) and
-prints the slug, model and ms.
+prints the slug, model and ms. `cargo test -p tf-hostd tools` parses captured omp/herdr outputs and
+drives the updater against fake `omp`/`herdr`/`curl` scripts in a tempdir (never the real updaters).

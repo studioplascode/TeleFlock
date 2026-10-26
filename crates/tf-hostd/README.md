@@ -43,6 +43,7 @@ pub struct Ctx {
     pub paths: crate::paths::Paths,
     pub relay_port: u16,
     pub sessions: crate::state::subs::SessionSubs, // session.open bookkeeping
+    pub tools: crate::ops::tools::Tools,         // shared across herdr sessions: omp/herdr updater
     pub cancel: CancellationToken,               // cancelled on shutdown
 }
 fn arc(&self) -> Arc<Ctx>                         // for spawned tasks
@@ -73,7 +74,8 @@ fn activity_page(&self, before: Option<Millis>, limit: usize, agent_id: Option<&
 fn record_activity(&self, agent_id: &str, kind: ActivityKind, title: String, detail: Option<String>)
 fn refresh(&self)                            // re-pull the herdr snapshot soon (after workspace/tab ops)
 fn refresh_repo(&self, cwd: &str)            // re-read git info for a folder (after commits)
-fn set_info(&self, info: HostInfo)
+fn set_info(&self, info: HostInfo)            // keeps `info.tools` (owned by set_tools)
+fn set_tools(&self, tools: Option<ToolUpdates>)
 fn usage_today(&self) -> UsageTotals
 ```
 ### `OmpHandle` (`src/omp.rs`, `Clone`)

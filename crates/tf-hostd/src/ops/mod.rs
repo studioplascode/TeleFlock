@@ -49,6 +49,8 @@ pub struct Ctx {
     pub relay_port: u16,
     /// `session.open` subscriptions (agent id → clients).
     pub sessions: SessionSubs,
+    /// Shared across herdr sessions: the daemon's omp/herdr updater.
+    pub tools: tools::Tools,
     /// Cancelled when the context closes (daemon shutdown).
     pub cancel: CancellationToken,
     me: Weak<Ctx>,
@@ -73,9 +75,11 @@ impl Ctx {
             paths: daemon.paths.clone(),
             relay_port: daemon.relay_port,
             sessions: SessionSubs::default(),
+            tools: daemon.tools.clone(),
             cancel,
             me: me.clone(),
         });
+        tools::follow(&ctx);
         crate::state::start(&ctx).await;
         Ok(ctx)
     }

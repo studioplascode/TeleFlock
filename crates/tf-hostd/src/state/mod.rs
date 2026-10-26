@@ -26,7 +26,7 @@ use tf_herdr::{AgentInfo, PaneInfo, SubscribeOptions, TabInfo, WorkspaceInfo};
 use tf_proto::host::ServerMsg;
 use tf_proto::model::{
     ActivityEvent, ActivityKind, Agent, Column, HerdrState, HostHealth, HostInfo, HostState, Notification, Pulse,
-    PulseKind, RepoInfo, SetupStatus, StatePatch, UsageTotals,
+    PulseKind, RepoInfo, SetupStatus, StatePatch, ToolUpdates, UsageTotals,
 };
 use tf_proto::Millis;
 
@@ -253,11 +253,24 @@ impl StateHandle {
         self.inner.omp.usage_today()
     }
 
+    /// Replaces the host facts; `tools` stays as [`set_tools`](Self::set_tools) left it and
+    /// `pruned` as the prune loop left it.
     pub fn set_info(&self, mut info: HostInfo) {
         let mut m = self.lock();
+        info.tools = m.published.info.tools.clone();
         info.pruned = m.published.info.pruned.clone();
         if m.published.info != info {
             m.published.info = info.clone();
+            broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
+        }
+    }
+
+    /// Publishes the tool updater's status (`HostInfo.tools`).
+    pub fn set_tools(&self, tools: Option<ToolUpdates>) {
+        let mut m = self.lock();
+        if m.published.info.tools != tools {
+            m.published.info.tools = tools;
+            let info = m.published.info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
         }
     }
@@ -820,7 +833,11 @@ fn hostname() -> String {
 pub async fn start(ctx: &Arc<Ctx>) {
     let h = ctx.state.clone();
     match tokio::time::timeout(Duration::from_secs(3), crate::ops::host::probe_info(ctx)).await {
-        Ok(info) => h.lock().published.info = info,
+        Ok(mut info) => {
+            let mut m = h.lock();
+            info.tools = m.published.info.tools.take();
+            m.published.info = info;
+        }
         Err(_) => warn!(session = %ctx.herdr_session, "host info probe timed out"),
     }
     if let Ok(Ok(snap)) = tokio::time::timeout(Duration::from_secs(3), ctx.herdr.snapshot()).await {

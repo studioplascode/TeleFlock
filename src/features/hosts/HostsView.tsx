@@ -32,6 +32,7 @@ import { ConnStatusCard, disconnect } from "./ConnStatusCard";
 import { hostAccent, KIND_META, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
 import { setupFromHash, useSetupFocus } from "./setupFocus";
+import { ToolUpdatesRow } from "./ToolUpdates";
 
 function gb(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(bytes >= 100 * 1024 ** 3 ? 0 : 1)}`;
@@ -211,6 +212,7 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
             <Counts hostId={profile.id} />
             <Health hostId={profile.id} />
             <Versions hostId={profile.id} />
+            <ToolUpdatesRow hostId={profile.id} />
             <div className="border-t border-line pt-3 max-md:pt-1">
               <button
                 type="button"

@@ -29,6 +29,8 @@ pub struct Daemon {
     pub bridge: BridgeHandle,
     /// `state.json` (archive, turns, activity, usage ledger).
     pub persist: Arc<crate::state::persist::Persist>,
+    /// Keeps omp and herdr up to date (`<home>/tools.json`).
+    pub tools: crate::ops::tools::Tools,
     pub shutdown: CancellationToken,
     pub started_at: i64,
     /// Identity of the binary this daemon runs (`attach --replace` compares it).
@@ -233,6 +235,8 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
             return Err(anyhow::anyhow!("bridge socket: {e}"));
         }
     };
+    let tools = crate::ops::tools::Tools::load(paths.home.join("tools.json"));
+    tools.spawn(shutdown.child_token());
     let mut listener = Listener::bind(&paths).with_context(|| format!("bind {}", paths.endpoint()))?;
     info!(endpoint = %paths.endpoint(), "listening");
 
@@ -242,6 +246,7 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
         omp: omp.clone(),
         bridge,
         persist: persist.clone(),
+        tools,
         shutdown: shutdown.clone(),
         started_at: now_ms(),
         exe_id: exe_identity(),

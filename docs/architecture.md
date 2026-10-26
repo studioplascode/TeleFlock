@@ -94,6 +94,7 @@ Every Rust crate is a workspace member (`crates/*`). Each agent compiles with it
 | `~/.teleflock/ext/teleflock-bridge.ts` | Companion extension, uploaded by the app. |
 | `~/.teleflock/omp-overlay.yml` | Per-process collab overlay, uploaded by the app. |
 | `~/.teleflock/originals/<sha256>.<ext>` | Full-size originals of images TeleFlock sent while omp was working (omp saves only a downscaled copy then), served by `session.image {original}`; 0600, pruned after 30 days and above 1 GiB, oldest first. |
+| `~/.teleflock/tools.json` | Tool updater status (§3.9): the per-host `auto` switch, last check/install per tool. |
 
 **Processes outlive the login that started them.** On Linux with systemd, a process started from an SSH command lives in that login's `session-*.scope`, and systemd kills everything in the scope when logind tears the session down (logout with `KillUserProcesses=yes`, or a restarted logind cleaning up sessions that already ended). So the daemon (`attach`) and every herdr server it starts (`tf_herdr::durable`) each run in a fresh transient scope: `systemd-run --scope` of the system manager for root (`teleflock-hostd-*.scope`, `teleflock-herdr-<session>-*.scope` in `system.slice`), of the user manager for other users only when lingering is enabled (without it the user manager stops with the last session). herdr has its own scope, so replacing or stopping the daemon never touches herdr and its agents. When `systemd-run` is missing or cannot create the unit (no bus, no permission), and on macOS, Windows and Linux without systemd, both are started plainly (`setsid`, null stdio). A herdr server that already runs in a login-session scope is a setup issue (`move-herdr-out-of-login-session`, §3.4 `ops::scope`); for root, `host.setupApply` moves it and its live process tree into a new scope without stopping anything.
 
@@ -135,6 +136,7 @@ A client sees one `snapshot` on hello, then patches.
 | `ops/limits.rs` | HostdOps | `host.limits`: subscription limits from `omp usage --json` / `--history --json` (see below) |
 | `ops/ai.rs` | HostdOps | `ai.complete`: one short completion from omp's `tiny` model role (see §3.8) |
 | `ops/scope.rs` | HostdOps | Setup issue + fix `move-herdr-out-of-login-session`: a herdr server (`SO_PEERCRED` on its socket) in a `session-*.scope` is moved with its process tree into a new scope (`StartTransientUnit`, see §3.1) |
+| `ops/tools.rs` | HostdOps | omp/herdr updater (one per daemon), `host.toolsUpdate`, `host.toolsConfig`, `HostInfo.tools` (see §3.9) |
 
 **Dispatcher contract.** HostdCore owns it. `clients.rs` parses `HostMethod::parse(method, params)`. For each method family it calls an async handler fn:
 
@@ -246,6 +248,20 @@ without a shell, reads the JSONL events and answers with the last assistant text
 **Limits.** Role default `tiny` (validated `^[a-z][a-z0-9-]{0,31}$`); a failed attempt (exit, error event, empty text) is retried once with `smol` while ≥ 1.5 s remain. Timeout default 20 s, clamped 2–60 s, queue time included → `timeout` (retryable). At most 3 omp processes per daemon (semaphore). Errors: omp missing or no such role → `ai_unavailable`; anything else → `ai_failed` with ≤ 300 chars of stderr/error text. The client treats `ai_unavailable` and `unknown_method` (older hostd) as "skip this host for 10 min".
 
 **Privacy.** Prompts (task text, file lists, patches) go only to omp on the host and from there to the model provider the user configured for omp's tiny role, like any other omp session. Nothing is stored: `--no-session` writes no session file, hostd neither logs nor returns prompt or system text (logs carry task, role, model, ms, outcome), and the client cache lives in memory only. Settings → AI naming turns it all off.
+
+### 3.9 Keeping omp and herdr up to date (`ops/tools.rs`)
+
+Every tf-hostd keeps the host's omp and herdr current, so all hosts run the versions TeleFlock is tested against without anyone logging in. On by default; `host.toolsConfig {auto}` turns it off per host (persisted in `tools.json`).
+
+**Cadence.** One updater per daemon. First run 2 min after the daemon starts (or 6 h after the last complete check when that is later, so restarts don't refetch), then every 6 h + up to 10 min jitter while `auto` is on. One tool at a time; every command runs without a shell, stdin closed, `NO_COLOR=1`, with a timeout. Installed versions are probed at start (no network).
+
+**omp.** `omp update --check` (60 s) → `Already up to date` / `New version available: X` / `… kept up to date by <manager>` (bun/npm global installs owned by Homebrew, mise, …: a note, nothing runs) / `Failed to check for updates: …`. When newer: `omp update` (5 min), then `omp --version`. Never `--force`, `--canary` or `--stable`: the channel stays whatever the user chose. Running agents keep the old omp until they restart (shown as a note).
+
+**herdr.** `herdr --version`, `herdr status` (channel, server version, `server_binary_stale`), and on the stable channel the manifest `herdr update` itself reads (`curl https://herdr.dev/latest.json`). When newer (or the manifest is unreachable), plain `herdr update` (5 min) with `HERDR_ENV`/`HERDR_SOCKET_PATH`/`HERDR_CLIENT_SOCKET_PATH`/`HERDR_SESSION` removed so it plans against every session. It installs the new client and keeps running servers (and their agents) running; the status then notes "the herdr server keeps running X until it restarts". **Never `--handoff`** (live server replacement is experimental). A release for another endpoint generation would need servers stopped: herdr declines that by itself when stdin is not a terminal ("Herdr was not updated"), and the updater doesn't even start it when the manifest's `endpoint_generation` differs from the running client's; the note asks the user to run `herdr update` when ready. Homebrew / mise / Nix installs refuse self-update; their command becomes the note.
+
+**Status.** `ToolUpdates {auto, omp, herdr, nextCheckAt}` lives in a `watch` channel; every herdr session context publishes it as `HostInfo.tools` (an `info` patch on each change: `updating`, results, errors, notes) and re-probes `HostInfo.omp/herdr` after an install. `set_info` keeps `tools`, so the periodic host probe never drops it. Older apps ignore the field; older hostds don't send it, and the app hides the row.
+
+**Methods.** `host.toolsUpdate {tool?, checkOnly}` starts a run now (manual runs work with `auto` off; `checkOnly` never installs). A request covered by the newest run (same or more tools, install ⊇ check) joins it; others queue behind it. The reply comes when the run is done or after 20 s (the app's request timeout is 30 s) with the current status; progress keeps arriving through `HostInfo.tools`. `host.toolsConfig {auto}` persists and reschedules.
 
 ## 4. Companion extension `teleflock-bridge.ts` (owner: BridgeExt)
 
@@ -470,3 +486,4 @@ On mobile, the same routes render mobile layouts (`useIsMobile`).
 | `tf-devserver` | Per-launch 256-bit token, Origin and Host checks, loopback-only unless `--allow-remote`. |
 | Webview | Strict CSP. Agent-controlled links (markdown, web sources, xterm OSC 8) allow only `http(s)` and open externally through `app.openExternal`; other schemes render inert. `TF_HOSTD_BIN` deploy override works in debug builds only. Android has backups disabled (`allowBackup=false`, data-extraction rules exclude everything); cleartext traffic is allowed only to loopback (preview iframe). |
 | Host config | `host.setupApply` is the only code path that changes omp or herdr config. It accepts only fixed fix ids and runs only on explicit user consent in the UI. |
+| Tool updates | Only `omp update [--check]` and plain `herdr update` (never `--handoff`, never a channel switch, stdin closed so no prompt can stop a server), as the host user, with the binaries hostd already runs. `host.toolsConfig {auto: false}` stops automatic runs per host. |
