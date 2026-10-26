@@ -25,11 +25,15 @@ export function resolveReduced(preference: MotionPreference, systemReduced: bool
   return preference === "reduced" || (preference === "system" && systemReduced);
 }
 
+/** Resolved level; the value of html[data-motion]. */
+export type MotionLevel = "reduced" | "calm" | "full";
+
 /**
- * html[data-motion]: "reduced" (nothing loops), "calm" (default: only needs-you and changes move;
- * running things hold still) or "full" (Settings → Motion → Lively: every glow, breath and orbit).
+ * html[data-motion]: "reduced" (nothing loops), "calm" (default: the screen holds still; what needs
+ * you pulses briefly when it arrives, changes animate once) or "full" (Settings → Motion → Lively:
+ * every glow, breath, orbit and the drifting ambient background).
  */
-export function motionAttribute(preference: MotionPreference, systemReduced: boolean): "reduced" | "calm" | "full" {
+export function motionAttribute(preference: MotionPreference, systemReduced: boolean): MotionLevel {
   if (resolveReduced(preference, systemReduced)) return "reduced";
   return preference === "full" ? "full" : "calm";
 }

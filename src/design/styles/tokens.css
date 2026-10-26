@@ -282,7 +282,17 @@
     radial-gradient(90% 120% at 0% 100%, #ff7a18 0%, transparent 70%),
     linear-gradient(135deg, #ff7a18, #ff3d77) !important;
 }
+/*
+ * Translucent panel (sidebar-, session-, inspector-sized surfaces). No backdrop-filter: these sit on
+ * the soft ambient glow, where a blur changes almost nothing visible but re-blurs the backdrop on
+ * every frame in which anything inside or behind the panel changes — the main GPU cost on WebView2
+ * iGPUs and WebKitGTK at fractional scale. Small overlays floating over sharp content use glass-blur.
+ */
 @utility glass {
+  background: rgb(27 27 37 / 0.72);
+  box-shadow: var(--shadow-d2), inset 0 0 0 1px rgb(255 255 255 / 0.07);
+}
+@utility glass-blur {
   background: rgb(27 27 37 / 0.72);
   backdrop-filter: blur(24px) saturate(150%);
   -webkit-backdrop-filter: blur(24px) saturate(150%);

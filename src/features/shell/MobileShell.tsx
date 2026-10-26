@@ -86,7 +86,7 @@ function BottomNav() {
 
   return (
     <nav
-      className="relative z-sticky shrink-0 border-t border-line bg-[rgb(12_12_18/0.86)] px-1 pt-1 pb-[max(4px,env(safe-area-inset-bottom))] backdrop-blur-xl"
+      className="relative z-sticky shrink-0 border-t border-line bg-[rgb(12_12_18/0.86)] px-1 pt-1 pb-[max(4px,env(safe-area-inset-bottom))]"
       aria-label="Primary"
     >
       <ul className="grid grid-cols-5">

@@ -87,7 +87,7 @@ Liveness per agent is computed from the herdr state, the time since the last omp
 | idle / done done | calm, desaturated, static |
 | stale (host disconnected) | desaturated, with a "last seen" timestamp and a shimmer when reconnecting |
 
-**Motion budget.** Settings → Motion: **Calm** (default, follows the OS reduced-motion setting) animates only changes and what needs you; running cards keep the heartbeat trace and the tool ring, without glow borders, breathing orbs, ring comets or orbiting swarms. **Lively** restores every encoding above. **Reduced** removes motion; every state keeps its colour and text.
+**Motion budget.** Settings → Motion: **Calm** (default, follows the OS reduced-motion setting) holds the screen still when nothing happens: changes animate once, running cards keep the heartbeat trace (it scrolls while events arrive and settles a few seconds after the last one) and a standing tool ring, without glow borders, breathing orbs, ring comets, orbiting swarms or a drifting background; needs-you glow, pulse and ping play three cycles when they appear and then rest, and the 20 s nudge keeps asking. **Lively** restores every encoding above, looping, plus the drifting ambient glow. **Reduced** removes motion; every state keeps its colour and text. At every level, loops pause while the window is hidden or unfocused.
 
 Global liveness:
 - an aggregated heartbeat in the title bar

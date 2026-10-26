@@ -1,7 +1,14 @@
 /*
- * Liveness & motion system. Everything that loops forever is transform/opacity only (compositor),
- * except a few tiny background-position shimmers on text. Every infinite loop is tagged `tf-loop`
- * so the reduced-motion switch (html[data-motion="reduced"]) can stop it in one place.
+ * Liveness & motion system. Loops are transform/opacity only (compositor), except a few tiny
+ * background-position shimmers on text. Every infinite loop is tagged `tf-loop` (or is a Tailwind
+ * `animate-*` utility) so the policies below can govern it in one place:
+ * - html[data-motion="reduced"]: nothing loops.
+ * - html[data-motion="calm"] (default): the screen holds still when nothing happens. Running things
+ *   are static; attention loops (needs-you breath/ping/glow, shimmering "Thinking…") play a few
+ *   cycles when they appear, then rest on their last frame. Only Lively loops forever.
+ * - html[data-active="false"] (window hidden or unfocused, any level): every loop pauses in place.
+ * No permanent `will-change`: a running animation promotes its element by itself, and a promoted
+ * layer that sits still only costs GPU memory and compositing work.
  */
 
 @keyframes tf-spin { to { transform: rotate(360deg); } }
@@ -30,9 +37,15 @@
   from { background-position: 0% 50%; }
   to { background-position: 200% 50%; }
 }
+/* starts and ends on the resting look, so a bounded (Calm) run finishes without a jump */
 @keyframes tf-sun-pulse {
-  0%, 100% { opacity: 0.55; transform: scale(0.985); }
-  50% { opacity: 1; transform: scale(1.01); }
+  0%, 100% { opacity: 1; transform: none; }
+  50% { opacity: 0.55; transform: scale(0.985); }
+}
+/* Calm stand-in for tf-breathe on arbitrary elements (icons, dots): also rests on the element's own look */
+@keyframes tf-breathe-rest {
+  0%, 100% { opacity: 1; transform: none; }
+  50% { opacity: 0.35; transform: scale(0.82); }
 }
 @keyframes tf-rise-in {
   from { opacity: 0; transform: translateY(8px) scale(0.985); }
@@ -74,15 +87,40 @@ html[data-motion="reduced"] .tf-fade-ok * {
 }
 
 /* ---------- calm motion (default) ----------
- * Only what needs you and what just changed moves. Running things hold still: orbs are static state
- * dots, todo rings drop their comet, subagent swarms stop orbiting. The heartbeat trace, the tool ring
- * (rendered only while a tool runs), needs-you breath/ping/glow and arrival bursts keep moving.
- * Settings → Motion → Lively sets data-motion="full" and restores every loop. */
+ * The screen holds still when nothing happens. Running things are static: orbs are plain state
+ * dots, todo rings drop their comet, subagent swarms stop orbiting, the ambient glow doesn't drift,
+ * the tool ring and glow borders stand. Attention loops (needs-you breath, ping, sunset pulse, glow,
+ * shimmering "Thinking…") play three cycles when they appear, then stop; the needs-you card nudge
+ * (every 20 s, JS) keeps asking. They end on the element's base style (no `fill-mode: forwards`: a
+ * filled transform/opacity animation keeps its compositor layer forever), so the base styles below
+ * match each loop's last frame. Carets (only while tokens stream), skeletons and progress bars
+ * (loading), `tf-keep` spinners and anything inside a dialog (launch progress the user is watching)
+ * keep looping. Settings → Motion → Lively sets data-motion="full" and restores every loop. */
 html[data-motion="calm"] .tf-orb:not([data-status="needs-you"]):not([data-status="error"]) .tf-orb__halo { display: none; }
 html[data-motion="calm"] .tf-orb[data-status="running"] .tf-orb__core { animation: none; }
 html[data-motion="calm"] .tf-ring__comet { display: none; }
 html[data-motion="calm"] .tf-swarm__orbit { animation: none; }
 html[data-motion="calm"] .live-gradient { animation: none; }
+html[data-motion="calm"] :is(.tf-loop, .tf-shimmer-text, .animate-spin, .animate-spin-slow, .animate-ping, .animate-ping-soft, .animate-pulse, .animate-breathe, .animate-blink, .animate-sun-pulse):not(.tf-keep, .tf-caret, .tf-skeleton, .animate-shimmer, .animate-gradient-pan, [role="dialog"] *),
+html[data-motion="calm"] .tf-loop:not(.tf-skeleton, [role="dialog"] *)::before,
+html[data-motion="calm"] .tf-loop:not(.tf-skeleton, [role="dialog"] *)::after,
+html[data-motion="calm"] .sun-pulse::after {
+  animation-iteration-count: 3 !important;
+}
+/* resting looks = last frames */
+html[data-motion="calm"] .tf-orb__halo { opacity: 0.25; transform: scale(0.8); }
+html[data-motion="calm"] :is(.tf-orb__ping, .animate-ping-soft) { opacity: 0; }
+html[data-motion="calm"] .animate-ping { animation-name: tf-ping; opacity: 0; }
+html[data-motion="calm"] .animate-breathe:not([role="dialog"] *) { animation-name: tf-breathe-rest; }
+html[data-motion="calm"] .tf-shimmer-text { background-position: -50% 0; }
+
+/* ---------- inactive window (hidden or unfocused): every loop pauses where it is ---------- */
+html[data-active="false"] :is(.tf-loop, .tf-shimmer-text, .tf-sky__flock, .tf-sky__bird, .tf-sky__bird path, .animate-spin, .animate-spin-slow, .animate-ping, .animate-ping-soft, .animate-pulse, .animate-breathe, .animate-blink, .animate-shimmer, .animate-gradient-pan, .animate-sun-pulse):not(.tf-keep),
+html[data-active="false"] .tf-loop::before,
+html[data-active="false"] .tf-loop::after,
+html[data-active="false"] .sun-pulse::after {
+  animation-play-state: paused !important;
+}
 
 @layer components {
 /* ---------- StatusOrb ---------- */
@@ -114,7 +152,6 @@ html[data-motion="calm"] .live-gradient { animation: none; }
 .tf-orb__halo {
   background: radial-gradient(circle, rgb(var(--st-rgb) / 0.7) 0%, rgb(var(--st-rgb) / 0) 70%);
   animation: tf-breathe var(--tf-breath, 2.4s) var(--ease-in-out-sine) infinite;
-  will-change: transform, opacity;
 }
 .tf-orb__ping {
   box-shadow: 0 0 0 1.5px rgb(var(--st-rgb) / 0.9);
@@ -150,7 +187,6 @@ html[data-motion="calm"] .live-gradient { animation: none; }
   -webkit-mask: radial-gradient(circle, transparent 57%, #000 60%, #000 69%, transparent 72%);
   mask: radial-gradient(circle, transparent 57%, #000 60%, #000 69%, transparent 72%);
   animation: tf-spin 2.2s linear infinite;
-  will-change: transform;
 }
 
 /* ---------- GlowBorder ---------- */
@@ -192,7 +228,6 @@ html[data-motion="calm"] .live-gradient { animation: none; }
   translate: -50% -50%;
   background: conic-gradient(from 0deg, var(--st-1), var(--st-2) 25%, transparent 42%, transparent 58%, var(--st-1) 75%, var(--st-2) 92%, var(--st-1));
   animation: tf-spin var(--gb-speed, 3.6s) linear infinite;
-  will-change: transform;
 }
 .tf-glow-border__bloom::before {
   background: conic-gradient(from 0deg, rgb(var(--st-rgb) / 0.9), transparent 30%, transparent 55%, rgb(var(--st-rgb) / 0.8) 80%, rgb(var(--st-rgb) / 0.9));
@@ -200,13 +235,11 @@ html[data-motion="calm"] .live-gradient { animation: none; }
 
 /* ---------- TiltCard ---------- */
 .tf-tilt {
-  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(var(--ty, 0px)) scale(var(--sc, 1));
+  /* Untilted cards carry no transform: a 3D transform would give every card its own layer. */
   transition: transform 0.7s var(--ease-spring), box-shadow 0.35s ease;
-  will-change: transform;
 }
 .tf-tilt[data-tilting="true"] {
-  --ty: -3px;
-  --sc: 1.012;
+  transform: perspective(900px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) translateY(-3px) scale(1.012);
   transition: transform 0.45s var(--ease-spring), box-shadow 0.35s ease;
   z-index: 2;
 }
@@ -218,7 +251,6 @@ html[data-motion="calm"] .live-gradient { animation: none; }
   opacity: 0;
   transition: opacity 0.35s;
   background: radial-gradient(320px circle at var(--mx, 50%) var(--my, 50%), rgb(255 255 255 / 0.13), rgb(255 255 255 / 0.03) 35%, transparent 60%);
-  mix-blend-mode: plus-lighter;
   z-index: 5;
 }
 .tf-tilt[data-tilting="true"] > .tf-tilt__spec { opacity: 1; }
@@ -235,7 +267,6 @@ html[data-motion="calm"] .live-gradient { animation: none; }
   inset: 0;
   animation: tf-spin var(--orbit-speed, 6s) linear infinite;
   animation-delay: var(--orbit-delay, 0s);
-  will-change: transform;
 }
 .tf-swarm__arm {
   position: absolute;
@@ -345,9 +376,11 @@ html[data-motion="reduced"] .tf-shimmer-text { color: var(--shim-base, var(--col
   border-radius: 50%;
   opacity: 0;
   transition: opacity 1.4s ease;
-  will-change: transform, opacity;
 }
 .tf-ambient__blob[data-on="true"] { opacity: var(--blob-o, 1); }
+/* Lively only: the blooms drift (off blobs hold still, so they fade back in where they left off). */
+html[data-motion="full"] .tf-ambient__blob { animation: var(--blob-drift); animation-play-state: paused; }
+html[data-motion="full"] .tf-ambient__blob[data-on="true"] { animation-play-state: running; }
 
 } /* @layer components */
 
@@ -424,7 +457,6 @@ html[data-motion="reduced"] .live-gradient { animation: none; }
 .tf-sky__flock {
   position: absolute;
   left: var(--sky-x, 0px);
-  will-change: transform;
   animation: tf-glide var(--sky-dur, 40s) linear infinite;
   animation-delay: var(--sky-delay, 0s);
 }

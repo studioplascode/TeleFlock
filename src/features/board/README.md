@@ -74,7 +74,9 @@ Everything is re-exported from `src/features/board/index.ts`.
 Five fixed zones on every lane: (1) state strip (`agentStateWord` + tool, `stateTime` top-right), (2) identity (todo
 ring/glyph · name · host chip when > 1 host · repo · branch), (3) title, (4) lane body, (5) meters in one order that
 wraps (`ctx` · `subs` · diff · ✦ model · 🧠 thinking). Motion budget: in Calm (default) running cards keep only the
-heartbeat trace and the tool ring; needs-you keeps its glow and 20 s nudge; Lively restores glow/breath/orbits.
+heartbeat trace and a standing tool ring; needs-you glow/pulse play three cycles on arrival, then the 20 s nudge repeats;
+Lively restores looping glow/breath/orbits. Per-second work stays out of the card: `useQuiet` is a threshold timer,
+`QuietChip`/the heartbeat age own their 1 s clock, and `TpsSparkline` stops sampling a flat zero line.
 
 **Parked agents** (Mark done closed their pane, `Agent.parked`): a quiet "closed" chip (`ParkedChip`, "resuming…"
 while it resumes) on the card and the phone row; the ⋯ menu offers Open, Resume, Terminal (resumes first) and

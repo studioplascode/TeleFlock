@@ -269,7 +269,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const agent = useAgent(agentKey);
   const stale = useHostStale(agent?.hostId ?? "");
   const muted = useMuted(agentKey);
-  const silent = useQuiet(column === "running" && !stale, agent?.live.lastEventAt);
+  const quiet = useQuiet(column === "running" && !stale, agent?.live.lastEventAt);
   const now = useNow(30_000);
   if (!agent) return null;
   // the lane the row is drawn in leads the host state during an optimistic move
@@ -278,7 +278,6 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   // a fresh agent that never ran sits calmly (idle), not in review cyan
   const status = fresh ? "idle" : LANE_BY_COLUMN[column].status;
   const todos = agent.omp?.todos;
-  const quiet = silent !== null;
   return (
     <SwipeRow id={agentKey} actions={swipeActions(agentKey, column)} onOpen={() => openAgent(agentKey)}>
       <div data-status={status} data-morph="surface" data-morph-key={agentKey} className={cn("card-surface flex gap-2.5 rounded-xl py-2.5 pr-1.5 pl-3", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]")}>
@@ -326,7 +325,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
                     height={16}
                     className="min-w-0 flex-1"
                   />
-                  {quiet ? <QuietChip silentMs={silent} className="shrink-0" /> : <TpsSparkline tps={agent.live.tps} status={status} />}
+                  {quiet ? <QuietChip since={agent.live.lastEventAt ?? 0} className="shrink-0" /> : <TpsSparkline tps={agent.live.tps} status={status} />}
                 </div>
                 <RowMeta agentKey={agentKey} />
               </>

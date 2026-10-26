@@ -289,6 +289,7 @@ export function TerminalPane({
     const term = termRef.current;
     if (!inst || !term || compact || renderer !== "webgl" || webglBroken) return;
     let webgl: WebglAddon | null = null;
+    let canvas: HTMLCanvasElement | undefined;
     const drop = () => {
       try {
         webgl?.dispose();
@@ -296,12 +297,18 @@ export function TerminalPane({
         // already disposed together with the terminal
       }
       webgl = null;
+      // Hand the GPU context back now instead of whenever the canvas is collected: browsers cap live
+      // contexts (~16) and drop the oldest, and a terminal opened again soon must not hit that cap.
+      canvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+      canvas = undefined;
     };
     try {
+      const before = new Set(term.element?.querySelectorAll("canvas"));
       webgl = new WebglAddon();
       // Falls back to the DOM renderer until the pane remounts.
       webgl.onContextLoss(drop);
       term.loadAddon(webgl);
+      canvas = [...(term.element?.querySelectorAll("canvas") ?? [])].find((c) => !before.has(c));
     } catch {
       // No WebGL2: xterm's DOM renderer stays active.
       webgl = null;

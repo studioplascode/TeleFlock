@@ -37,11 +37,14 @@ function startInterval(periodMs: number, clock: IntervalClock) {
 /**
  * Wall-clock `Date.now()` that re-renders every `periodMs` (default 1s). All subscribers with the
  * same period share one timer and tick in sync (so every Elapsed on screen flips together).
+ * `null` subscribes to nothing (for a hook that only needs the clock some of the time); the
+ * returned value is then the time of the last tick of any 1 s clock and must not be relied on.
  */
-export function useNow(periodMs = 1000): number {
-  const clock = getIntervalClock(periodMs);
+export function useNow(periodMs: number | null = 1000): number {
+  const clock = getIntervalClock(periodMs ?? 1000);
   return useSyncExternalStore(
     (onChange) => {
+      if (periodMs === null) return () => {};
       clock.listeners.add(onChange);
       startInterval(periodMs, clock);
       return () => {

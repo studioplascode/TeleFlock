@@ -27,11 +27,13 @@ export function tierForRate(eventsPerSecond: number): ActivityTier {
 /**
  * Track activity from a monotonically increasing event counter (`beat`).
  * Increment the counter whenever the agent emits anything (token, tool call, state change).
+ * Re-evaluates once a second only while beats from the last WINDOW_MS are in play, so a silent
+ * agent's orb (or terminal pane) doesn't re-render every second.
  */
 export function useActivity(beat: number): { tier: ActivityTier; rate: number } {
   const [stamps, setStamps] = useState<number[]>([]);
   const [prevBeat, setPrevBeat] = useState(beat);
-  const now = useNow(1000);
+  const now = useNow(stamps.length ? 1000 : null);
 
   useEffect(() => {
     if (beat === prevBeat) return;
@@ -48,6 +50,10 @@ export function useActivity(beat: number): { tier: ActivityTier; rate: number } 
   const horizon = Math.max(now, stamps[stamps.length - 1] ?? 0) - WINDOW_MS;
   let count = 0;
   for (const s of stamps) if (s > horizon) count++;
+  // Everything aged out: drop the stamps, which also stops the clock subscription.
+  useEffect(() => {
+    if (count === 0 && stamps.length > 0) setStamps([]);
+  }, [count, stamps.length]);
   const rate = count / (WINDOW_MS / 1000);
   return { tier: tierForRate(rate), rate };
 }

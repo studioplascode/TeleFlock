@@ -11,15 +11,16 @@ export { useNow, onFrame } from "./lib/clock";
 export type { FrameCallback } from "./lib/clock";
 export { useMediaQuery, useIsMobile, useFinePointer, useInView, useMinWidth, useIdleReady } from "./lib/hooks";
 export { isTauri, isAndroid, isWindows, hasCustomWindowChrome } from "./lib/platform";
+export { useWindowActive } from "./lib/windowActive";
 export { formatElapsed, formatAge, formatCompact, formatUsd, formatInt } from "./lib/format";
 export { hashString, seededRandom } from "./lib/hash";
 export { DesignProvider } from "./DesignProvider";
 
 // motion & liveness
 export { spring, tween, pressMotion, fadeRise, popIn } from "./motion/springs";
-export { MotionProvider, useCalmMotion, useLivelyMotion } from "./motion/MotionProvider";
+export { MotionProvider, useCalmMotion, useLivelyMotion, useMotionLevel } from "./motion/MotionProvider";
 export { useMotionPreference, applyInitialMotionAttribute } from "./motion/preference";
-export type { MotionPreference } from "./motion/preference";
+export type { MotionPreference, MotionLevel } from "./motion/preference";
 export { useActivity, tierForRate, BREATH_SECONDS } from "./motion/activity";
 export type { ActivityTier } from "./motion/activity";
 export { StatusOrb } from "./motion/StatusOrb";

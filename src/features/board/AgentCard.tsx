@@ -35,7 +35,7 @@ const NUDGE_EVERY_MS = 20_000;
 /** Sunset nudge every 20 s while an agent waits on you (spec §4). */
 function useNudge(on: boolean) {
   const [scope, animate] = useAnimate<HTMLDivElement>();
-  const tick = useNow(NUDGE_EVERY_MS);
+  const tick = useNow(on ? NUDGE_EVERY_MS : null);
   const calm = useCalmMotion();
   useEffect(() => {
     if (!on || calm || !scope.current) return;
@@ -219,7 +219,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   const multiHost = useHosts((s) => s.profiles.length > 1);
   const muted = useMuted(agentKey);
   const lively = useLivelyMotion();
-  const silentMs = useQuiet(lane === "running" && !stale, agent?.live.lastEventAt);
+  const quiet = useQuiet(lane === "running" && !stale, agent?.live.lastEventAt);
   // a muted agent still waits visibly, it just stops tugging at your sleeve
   const nudge = useNudge(lane === "needs" && !stale && !muted);
   const burst = useArrival(agentKey, lane, floating);
@@ -230,7 +230,6 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   const fresh = state === "fresh";
   // a fresh agent that never ran sits calmly (idle), not in review cyan
   const status = fresh ? "idle" : LANE_BY_COLUMN[lane].status;
-  const quiet = silentMs !== null;
   const omp = agent.omp;
   const todos = omp?.todos;
   const subs = omp?.subagents?.live ?? 0;
@@ -292,7 +291,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         <div className="mt-2 flex min-w-0 items-center gap-2">
           {/* when quiet, the chip replaces the age label: one signal per fact */}
           <AgentHeartbeat agentKey={agentKey} status={quiet ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={20} showAge={!quiet} className="min-w-0 flex-1" />
-          {quiet ? <QuietChip silentMs={silentMs} /> : <TpsSparkline tps={agent.live.tps} status={status} />}
+          {quiet ? <QuietChip since={agent.live.lastEventAt ?? 0} /> : <TpsSparkline tps={agent.live.tps} status={status} />}
         </div>
       </>
     );
@@ -413,7 +412,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
       {/* hover actions: quick tools for running cards, the ⋯ menu everywhere */}
       {!floating && (
         <div
-          className="absolute top-2 right-2 flex gap-0.5 rounded-md glass p-0.5 opacity-0 transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100 has-[[data-state=open]]:opacity-100"
+          className="absolute top-2 right-2 flex gap-0.5 rounded-md bg-[rgb(27_27_37/0.94)] p-0.5 opacity-0 shadow-[var(--shadow-d2),inset_0_0_0_1px_rgb(255_255_255/0.07)] transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100 has-[[data-state=open]]:opacity-100"
           onClick={stop}
           onPointerDown={stop}
         >

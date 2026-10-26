@@ -591,7 +591,7 @@ export function Sidebar() {
       animate={{ width: collapsed ? COLLAPSED_W : width }}
       transition={dragging ? { duration: 0 } : spring.smooth}
       className={cn(
-        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-[rgb(13_13_19/0.55)] backdrop-blur-xl",
+        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-[rgb(13_13_19/0.55)]",
         rail && "absolute inset-y-0 left-0",
         overlay && "bg-[rgb(15_15_22/0.94)] shadow-[var(--shadow-d3),1px_0_0_var(--color-line-2)]",
         dragging && "select-none",

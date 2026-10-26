@@ -22,12 +22,12 @@ export function goBack(): void {
   else navigate({ name: "board" }, { replace: true });
 }
 
-/** Sticky, frosted top bar for mobile screens. The title springs in on mount. */
+/** Sticky top bar for mobile screens (dense tint, no backdrop blur: it sits over live scrolling content). The title springs in on mount. */
 export function MobileHeader({ title, subtitle, back = false, actions, className }: MobileHeaderProps) {
   return (
     <header
       className={cn(
-        "sticky top-0 z-sticky flex min-h-12 items-center gap-1 bg-[rgb(11_11_16/0.72)] px-2.5 py-1 backdrop-blur-xl [mask-image:linear-gradient(#000_85%,transparent)]",
+        "sticky top-0 z-sticky flex min-h-12 items-center gap-1 bg-[rgb(11_11_16/0.9)] px-2.5 py-1 [mask-image:linear-gradient(#000_85%,transparent)]",
         className,
       )}
     >

@@ -283,7 +283,7 @@ const ghost = `${action} text-mute hover:bg-white/6 hover:text-ink`;
 
 function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: Shown; entry: DispatchEntry; agentKey?: string; parkedKey?: string; ctx: ThreadContext; online: boolean }) {
   const agent = shown.k === "live" ? shown.agent : undefined;
-  const silentMs = useQuiet(agent?.column === "running" && online, agent?.live.lastEventAt);
+  const quiet = useQuiet(agent?.column === "running" && online, agent?.live.lastEventAt);
 
   if (shown.k === "unconfirmed") {
     return (
@@ -388,7 +388,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
     <>
       <div className="mt-2 flex min-w-0 items-center gap-2">
         <LiveLine live={agent.live} running={agent.column === "running" && online} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="min-w-0 flex-1" />
-        {silentMs !== null && <QuietChip silentMs={silentMs} />}
+        {quiet && <QuietChip since={agent.live.lastEventAt ?? 0} />}
       </div>
       <Actions>
         {buttons}

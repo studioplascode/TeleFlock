@@ -75,7 +75,8 @@ export function ConnectLinkButton({ agentKey }: { agentKey: string }) {
 
 /**
  * Status orb whose breath follows the agent's measured pulse rate (Lively motion; Calm holds it still),
- * wrapped in a rotating conic ring while a tool runs (spec §4 "tool running", kept in Calm).
+ * wrapped in a conic ring while a tool runs (spec §4 "tool running"; it turns in Lively, Calm gives it
+ * three turns and then lets it stand — the tool chip's timer keeps ticking).
  */
 export function AgentOrb({
   agentKey,
@@ -144,16 +145,24 @@ export function AgentHeartbeat({
   );
 }
 
-/** True when a working agent has emitted nothing for QUIET_AFTER_MS (re-evaluated every second). */
-export function useQuiet(working: boolean, lastEventAt: number | undefined): number | null {
-  const now = useNow(1000);
-  if (!working || lastEventAt === undefined) return null;
-  const silent = now - lastEventAt;
-  return silent > QUIET_AFTER_MS ? silent : null;
+/**
+ * True once a working agent has emitted nothing for QUIET_AFTER_MS. A single timer at the threshold,
+ * not a clock subscription: the card using it re-renders when quiet flips, not every second.
+ */
+export function useQuiet(working: boolean, lastEventAt: number | undefined): boolean {
+  const due = working && lastEventAt !== undefined ? lastEventAt + QUIET_AFTER_MS : null;
+  const [passed, setPassed] = useState<number | null>(() => (due !== null && Date.now() >= due ? due : null));
+  useEffect(() => {
+    if (due === null) return;
+    const t = window.setTimeout(() => setPassed(due), Math.max(0, due - Date.now()));
+    return () => clearTimeout(t);
+  }, [due]);
+  return due !== null && passed === due;
 }
 
-/** Amber "quiet 2m" chip: the agent says it's working but nothing has happened for a while. */
-export function QuietChip({ silentMs, className }: { silentMs: number; className?: string }) {
+/** Amber "quiet 2m" chip: the agent says it's working but nothing has happened since `since` (ms epoch). */
+export function QuietChip({ since, className }: { since: number; className?: string }) {
+  const silentMs = useNow(1000) - since;
   return (
     <span
       className={cn(
@@ -220,13 +229,19 @@ export function LiveLine({
 
 const TPS_SAMPLES = 24;
 
-/** Rolling tok/s sparkline, sampled once a second from the agent's `live.tps`. */
+/**
+ * Rolling tok/s sparkline, sampled once a second from the agent's `live.tps`. A flat zero line has
+ * nothing to scroll: it stops sampling (and re-rendering) until tokens flow again.
+ */
 export function TpsSparkline({ tps, status, className }: { tps: number | undefined; status: Status; className?: string }) {
-  const now = useNow(1000);
-  const [values, setValues] = useState<number[]>([]);
+  // starts as a flat line (two points draw it), which is also all a never-busy agent ever shows
+  const [values, setValues] = useState<number[]>(() => [0, 0]);
   const latest = tps ?? 0;
+  const flat = latest === 0 && values.every((v) => v === 0);
+  const now = useNow(flat ? null : 1000);
   // one sample per clock tick (not per tps patch), using the latest rendered value
   useEffect(() => {
+    if (flat) return;
     setValues((v) => (v.length >= TPS_SAMPLES ? [...v.slice(v.length - TPS_SAMPLES + 1), latest] : [...v, latest]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now]);

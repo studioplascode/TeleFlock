@@ -178,7 +178,7 @@ function SubagentPanel({ agentKey, sub, mobile, position, onPrev, onNext }: Pane
       <Header sub={sub} mobile={mobile} position={position} onPrev={onPrev} onNext={onNext} acting={acting} blocked={blocked} onAct={(a) => void act(a)} />
       <div className="relative flex min-h-0 flex-1 flex-col">
         {error && snap && (
-          <div role="status" className="absolute inset-x-0 top-2 z-raised mx-auto flex w-fit items-center gap-2 rounded-full glass px-3 py-1.5 text-2xs font-semibold text-warn shadow-d2">
+          <div role="status" className="absolute inset-x-0 top-2 z-raised mx-auto flex w-fit items-center gap-2 rounded-full glass-blur px-3 py-1.5 text-2xs font-semibold text-warn shadow-d2">
             <RefreshCw className="size-3" />
             Couldn't refresh: {error}
           </div>

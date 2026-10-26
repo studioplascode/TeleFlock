@@ -43,8 +43,10 @@ export interface AmbientGlowProps {
 }
 
 /**
- * Fixed full-viewport background: noise plus slow drifting blooms that crossfade with the global
- * mood — a warm sunset bloom when anything needs you. Mount once, behind everything.
+ * Fixed full-viewport background: noise plus soft blooms that crossfade with the global mood — a
+ * warm sunset bloom when anything needs you. Mount once, behind everything. The blooms drift only in
+ * Lively motion (html[data-motion="full"], motion.css): a static background is painted once,
+ * while a drifting one recomposites the whole window (and every translucent surface over it) each frame.
  */
 export function AmbientGlow({ mood, intensity = 1, className }: AmbientGlowProps) {
   return (
@@ -61,9 +63,7 @@ export function AmbientGlow({ mood, intensity = 1, className }: AmbientGlowProps
                 ...b.style,
                 "--blob-o": b.opacity * intensity,
                 background: `radial-gradient(circle at center, rgb(${b.color} / 1) 0%, rgb(${b.color} / 0.35) 32%, rgb(${b.color} / 0) 68%)`,
-                // Off blobs (opacity 0) hold still: no per-frame work for what nobody sees, and no
-                // position jump when they fade back in.
-                animation: `tf-drift-${b.drift} ${b.seconds}s ease-in-out infinite ${on ? "running" : "paused"}`,
+                "--blob-drift": `tf-drift-${b.drift} ${b.seconds}s ease-in-out infinite`,
               } as CSSProperties
             }
           />

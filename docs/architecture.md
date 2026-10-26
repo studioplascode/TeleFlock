@@ -532,6 +532,16 @@ Routes (hash router, `src/app/router.ts`):
 
 On mobile, the same routes render mobile layouts (`useIsMobile`).
 
+### 6.3 Rendering budget (design system, `src/design`)
+An open, idle window must cost next to nothing: WebView2 on iGPU laptops and WebKitGTK at fractional scale pay for every composited frame and every translucent pixel.
+- **Motion levels** (`html[data-motion]`, `MotionProvider`, `motion.css`). Calm (default) holds the screen still: no drifting ambient glow, no running-state loops; attention loops (needs-you breath/ping/sunset pulse/glow border, "Thinking…" shimmer, tool ring) play three cycles when they appear and end on the element's base style, so no finished animation keeps a compositor layer. Lively loops everything and drifts the ambient blooms; Reduced animates nothing. `useMotionLevel()` returns the level; `useCalmMotion()` means *reduced*.
+- **Inactive window** (`lib/windowActive.ts`: document hidden, window blurred, or Tauri `onFocusChanged` false): `html[data-active="false"]` pauses every loop in place (`tf-keep` spinners excepted) and heartbeats stop scrolling (each beat steps the trace once). Clocks keep ticking while merely unfocused (a window watched on a second monitor stays truthful) and stop while hidden.
+- **Surfaces.** `glass` is a translucent tint without `backdrop-filter` (sidebar, session, inspector, composer, split view; mobile header/nav are dense tints): over the soft ambient glow a blur is invisible but re-blurs its backdrop whenever anything inside or behind changes. `glass-blur` keeps the blur for small transient overlays above sharp content (selection bar, jump-to-latest pill); tooltips, popovers, toasts and dialog scrims keep theirs.
+- **Layers.** No permanent `will-change`; `TiltCard` carries a transform only while hovered. An idle Calm board is ~17 compositor layers (75 before 0.5.0).
+- **Per-second work.** One shared 1 s clock (`useNow`, `null` = not subscribed); components needing it are leaves (`Elapsed`, heartbeat age, `QuietChip`); `useQuiet` is a threshold timer; `useActivity` ticks only while it has recent beats; `TpsSparkline` stops on a flat zero line. Heartbeats scroll in Lively at frame rate, in Calm in whole samples (≤ 30 fps) and settle ~5 s after the last event.
+- **Terminal.** WebGL for full panes (board tiles stay on DOM), context released explicitly on dispose (`WEBGL_lose_context`); xterm pauses cursor blink while unfocused.
+- **Windows/Linux windows.** The Windows window is opaque (`transparent: false`; nothing uses Mica, and a transparent WebView2 window is alpha-composited every frame). On Linux no WebKitGTK env var is set by default; `WEBKIT_DISABLE_DMABUF_RENDERER=1` (blank or flickering window on some NVIDIA/Wayland stacks) and `WEBKIT_DISABLE_COMPOSITING_MODE=1` are user opt-ins, see `docs/build.md`.
+
 ## 7. Testing and verification
 - **Golden fixtures.** Collab frames (`docs/research/omp-collab-samples/`) feed `tf-collab` replica tests. herdr samples (`docs/research/herdr-samples/`) feed `tf-herdr` parser tests.
 - **Lab sessions.** E2E runs use the herdr session `tf-lab` (never `default`), with a dedicated hostd instance through `TF_HOSTD_HOME=/tmp/tf-lab-home` (the env var overrides `~/.teleflock`). The relay uses a non-default port in the lab (`--relay-port 47566`) so it never collides with a real daemon.

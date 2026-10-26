@@ -3,8 +3,9 @@ import { onFrame, useNow } from "../lib/clock";
 import { cn } from "../lib/cn";
 import { formatAge } from "../lib/format";
 import { useInView } from "../lib/hooks";
+import { useWindowActive } from "../lib/windowActive";
 import { STATUS, type Status } from "../tokens";
-import { useCalmMotion } from "./MotionProvider";
+import { useMotionLevel } from "./MotionProvider";
 
 export interface HeartbeatProps {
   /** Monotonic event counter: every increment draws one ECG spike. */
@@ -31,6 +32,8 @@ const SPIKE = [
 ];
 const PX_PER_SAMPLE = 2;
 const SAMPLE_MS = 34; // ~59px/s scroll
+/** Calm motion: post-beat jitter dies within this window, so the trace (and its rAF loop) settles in seconds. */
+const CALM_FLAT_MS = 5000;
 
 interface Trace {
   samples: Float32Array;
@@ -70,7 +73,10 @@ function addSpike(t: Trace, amp: number) {
 /**
  * "Is it still running?" — an ECG trace that spikes on every agent event and decays to a flat line
  * when the agent goes quiet, plus the age of the last event. Rendered on a canvas driven by the
- * shared rAF clock; it stops drawing when off-screen or fully flat.
+ * shared rAF clock; it stops drawing when off-screen or fully flat. Lively scrolls smoothly every
+ * frame and decays over `flatAfterMs`; Calm scrolls in whole samples (≤ 30 fps) and settles within
+ * a few seconds; Reduced, an unfocused/hidden window or an off-screen trace don't scroll at all
+ * (each beat steps the trace once).
  */
 export function Heartbeat({
   beat,
@@ -89,8 +95,11 @@ export function Heartbeat({
   const wakeRef = useRef<() => void>(() => {});
   const prevBeatRef = useRef(beat);
   const inView = useInView(wrapRef);
-  const calm = useCalmMotion();
-  const now = useNow(1000);
+  const level = useMotionLevel();
+  const active = useWindowActive();
+  const still = level === "reduced" || !active || !inView;
+  const smooth = level === "full";
+  const decayMs = smooth ? flatAfterMs : Math.min(flatAfterMs, CALM_FLAT_MS);
   const meta = STATUS[status];
 
   // Size + draw loop.
@@ -133,7 +142,7 @@ export function Heartbeat({
       const mid = h * 0.62;
       const amp = h * 0.5;
       const step = PX_PER_SAMPLE * dpr;
-      const shift = calm ? 0 : (t.acc / SAMPLE_MS) * step;
+      const shift = smooth ? (t.acc / SAMPLE_MS) * step : 0;
       const grad = ctx.createLinearGradient(0, 0, w, 0);
       grad.addColorStop(0, `rgb(${meta.rgb} / 0)`);
       grad.addColorStop(0.35, `${meta.c1}88`);
@@ -179,12 +188,15 @@ export function Heartbeat({
       if (!t) return;
       const at = performance.now();
       t.acc += dt;
+      let pushed = false;
       while (t.acc >= SAMPLE_MS) {
         t.acc -= SAMPLE_MS;
-        pushSample(t, at, flatAfterMs);
+        pushSample(t, at, decayMs);
+        pushed = true;
       }
-      draw();
-      const flat = t.pending.length === 0 && at - t.lastBeatAt > flatAfterMs && t.samples.every((v) => Math.abs(v) < 0.004);
+      // Calm scrolls in whole samples: no redraw between them.
+      if (smooth || pushed) draw();
+      const flat = t.pending.length === 0 && at - t.lastBeatAt > decayMs && t.samples.every((v) => Math.abs(v) < 0.004);
       if (flat && unsub) {
         unsub();
         unsub = null;
@@ -192,7 +204,7 @@ export function Heartbeat({
     };
 
     const wake = () => {
-      if (calm || !inView) {
+      if (still) {
         draw();
         return;
       }
@@ -221,7 +233,7 @@ export function Heartbeat({
       unsub?.();
       wakeRef.current = () => {};
     };
-  }, [calm, inView, height, flatAfterMs, meta]);
+  }, [still, smooth, decayMs, height, meta]);
 
   // Inject a spike per event.
   useEffect(() => {
@@ -233,30 +245,31 @@ export function Heartbeat({
     const spikes = Math.min(Math.max(beat - prev, 1), 3);
     for (let i = 0; i < spikes; i++) addSpike(t, 0.62 + ((t.seed >>> 8) % 38) / 100);
     t.lastBeatAt = performance.now();
-    if (calm) {
+    if (still) {
       // no scrolling: flush the spike straight into the trace
-      while (t.pending.length) pushSample(t, t.lastBeatAt, flatAfterMs);
+      while (t.pending.length) pushSample(t, t.lastBeatAt, decayMs);
     }
     wakeRef.current();
-  }, [beat, calm, flatAfterMs]);
-
-  const age = lastEventAt !== undefined ? now - lastEventAt : undefined;
-  // staleness only means something for statuses that are supposed to be producing events
-  const stale = STATUS[status].live && age !== undefined && age > staleAfterMs;
+  }, [beat, still, decayMs]);
 
   return (
     <div data-status={status} className={cn("flex items-center gap-2 min-w-0", className)}>
       <div ref={wrapRef} className="relative min-w-0 flex-1" style={{ height }} aria-hidden>
         <canvas ref={canvasRef} className="absolute inset-0 block" />
       </div>
-      {showAge && age !== undefined && (
-        <span
-          className={cn("shrink-0 font-mono text-2xs tabular transition-colors", stale ? "text-warn" : "text-mute")}
-          title={stale ? "No events for a while" : "Last event"}
-        >
-          {agePrefix ? `${agePrefix} ${formatAge(age)}` : formatAge(age)}
-        </span>
-      )}
+      {showAge && lastEventAt !== undefined && <AgeLabel status={status} lastEventAt={lastEventAt} agePrefix={agePrefix} staleAfterMs={staleAfterMs} />}
     </div>
+  );
+}
+
+/** "4s ago", amber once stale. Owns the 1 s clock so the canvas component doesn't re-render every second. */
+function AgeLabel({ status, lastEventAt, agePrefix, staleAfterMs }: { status: Status; lastEventAt: number; agePrefix?: string; staleAfterMs: number }) {
+  const age = useNow(1000) - lastEventAt;
+  // staleness only means something for statuses that are supposed to be producing events
+  const stale = STATUS[status].live && age > staleAfterMs;
+  return (
+    <span className={cn("shrink-0 font-mono text-2xs tabular transition-colors", stale ? "text-warn" : "text-mute")} title={stale ? "No events for a while" : "Last event"}>
+      {agePrefix ? `${agePrefix} ${formatAge(age)}` : formatAge(age)}
+    </span>
   );
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop-window-chrome",
-  "description": "Custom title bar (undecorated main window): drag, minimize / maximize / close, Snap Layouts overlay, attention + taskbar state, optional Mica.",
+  "description": "Custom title bar (undecorated main window): drag, minimize / maximize / close, Snap Layouts overlay, attention + taskbar state.",
   "platforms": ["linux", "macOS", "windows"],
   "windows": ["main"],
   "permissions": [
@@ -19,7 +19,6 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-request-user-attention",
-    "core:window:allow-set-effects",
     "snap-layout:default"
   ]
 }

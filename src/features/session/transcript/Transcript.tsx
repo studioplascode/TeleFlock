@@ -359,7 +359,7 @@ export function TranscriptLog({
               setStick(true);
               toBottom(true);
             }}
-            className="focus-ring absolute bottom-4 left-1/2 z-raised flex -translate-x-1/2 items-center gap-2 rounded-full glass px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
+            className="focus-ring absolute bottom-4 left-1/2 z-raised flex -translate-x-1/2 items-center gap-2 rounded-full glass-blur px-3.5 py-2 text-xs font-bold text-ink shadow-glow-accent"
           >
             {jumpLabel(unseen)}
             <ArrowDown className="size-3.5" />

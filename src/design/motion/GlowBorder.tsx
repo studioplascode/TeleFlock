@@ -18,7 +18,9 @@ export interface GlowBorderProps extends HTMLAttributes<HTMLDivElement> {
 
 /**
  * Rotating conic-gradient border for running / needs-you surfaces. The gradient is a rotating
- * square behind a masked ring, so the loop is a pure transform (GPU), not a repaint.
+ * square behind a masked ring, so the loop is a pure transform (GPU), not a repaint. In Calm motion
+ * it turns three times when it appears and then stands (motion.css), so a waiting card doesn't keep
+ * the compositor — and its blurred bloom — busy for as long as it waits.
  */
 export function GlowBorder({ status, active = true, width = 1.5, radius = 22, speed, bloom, className, style, children, ...rest }: GlowBorderProps) {
   const loud = status === "needs-you";

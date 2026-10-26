@@ -12,7 +12,8 @@ export interface TiltCardProps extends HTMLAttributes<HTMLDivElement> {
 
 /**
  * 3D tilt + specular highlight that follows the pointer. Only on fine pointers (mouse/trackpad)
- * and when motion isn't reduced. Writes CSS variables directly (no React re-render per move).
+ * and when motion isn't reduced. Writes CSS variables directly (no React re-render per move). The
+ * card carries a transform only while the pointer is on it, so a board of cards at rest is one layer.
  */
 export function TiltCard({ maxTilt = 5, disabled = false, className, children, onPointerMove, onPointerLeave, ...rest }: TiltCardProps) {
   const ref = useRef<HTMLDivElement>(null);
