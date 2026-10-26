@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, Sparkles, SquareTerminal } from "lucide-react";
+import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, SlidersHorizontal, Sparkles, SquareTerminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -15,7 +15,7 @@ import {
   useIsMobile,
   useMotionPreference,
 } from "@/design";
-import { core, usePrefs, useSettings, useUi } from "@/core";
+import { core, navigate, usePrefs, useSettings, useUi } from "@/core";
 import type { MotionPref, Settings, ThinkingLevel } from "@/core/gen";
 import { useAppInfo } from "@/features/hosts/appInfo";
 import { errorHint, errorMessage } from "@/features/shell/errors";
@@ -284,6 +284,11 @@ export function SettingsView() {
           </Row>
           <Row label="Start in plan mode" description="The agent proposes a plan before touching files.">
             <Switch checked={settings.defaultPlan} onCheckedChange={(defaultPlan) => update({ defaultPlan })} label="Start in plan mode" />
+          </Row>
+          <Row label="omp settings" description="Model roles, tools, compaction and every other omp setting, per host.">
+            <Button size="sm" variant="secondary" icon={<SlidersHorizontal />} onClick={() => navigate({ name: "omp" })}>
+              Open
+            </Button>
           </Row>
         </Section>
 

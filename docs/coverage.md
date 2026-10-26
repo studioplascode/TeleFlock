@@ -127,6 +127,7 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Session history + resume in new pane | Past sessions | palette | `host.sessions/resume` | G scan + H start `--resume` | ✅ demo |
 | Fan-out (P2), templates (P2), focus mode (P2) | Fan out dialog, templates in every start dialog, Focus mode (`F`) | Fan out sheet, templates | `worktree.create` ×N | H | ✅ demo |
 | Settings honoured | Settings (Motion, Hints, AI naming, notifications, quiet hours, muted, templates, updates) | Settings | `settings.set`, `usePrefs` | L | ✅ demo |
+| omp settings (every `omp config` key with omp's own tabs/groups/labels/choices, search, model-roles editor, Other tab for keys omp's panel lacks; the GUI side of omp's `/settings` and `/model roles`) | Settings → New agents → omp settings, host card ⋯ → omp settings, palette, Ctrl+8 | More → omp settings | `omp.settings`, `omp.settingsSet`, `host.models` | hostd `ops/omp_config.rs` (schema via bridge dump mode, `omp config list/set/reset`) | ✅ demo + unit tests (`ompSettings/model.test.ts`, `ops/omp_config.rs`); ✅ real omp 18.12.3 in a temp `PI_CODING_AGENT_DIR` (ignored test + lab hostd) |
 
 ## §6 Keyboard map
 

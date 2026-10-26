@@ -89,7 +89,7 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   pane); un-archiving, prompting or `agent.resume` on a parked card relaunch `omp --resume=<file>`
   (worktree reopened via herdr `worktree.open`). Other per-agent methods on a parked card fail with
   `parked` ("Resume it first"); `session.open` gives a read-only transcript snapshot.
-- **host.setupApply** is the only config-mutating path, and only for explicit fix ids:
+- **host.setupApply** is one of two config-mutating paths (the other: `omp.settingsSet`, below), and only for explicit fix ids:
   `install-herdr-integration` (herdr `integration.install omp`), `enable-global-sharing`
   (`omp config set collab.autoStart control` + `collab.relayUrl ws://127.0.0.1:<port>`),
   `install-global-bridge` (atomic copy of `~/.teleflock/ext/teleflock-bridge.ts` into
@@ -99,6 +99,14 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   `teleflock-herdr-<session>-<pid>-<ms>.scope` (Delegate, TasksMax=infinity), then
   `AttachProcessesToUnit` for its process tree still in login sessions, parents first, a few passes
   for processes forked meanwhile; never stops anything. Non-root gets an explanation instead).
+- **omp.settings / omp.settingsSet** (`omp_config.rs`, owner OmpSettings, architecture §3.10): omp's
+  settings schema through the companion extension's dump mode (throwaway `omp --mode rpc … -e
+  <home>/ext/teleflock-bridge.ts`, `TF_OMP_SCHEMA_OUT`; cached per omp binary in memory and
+  `<home>/cache/omp-settings-schema.json`) + values from `omp config list --json` (10 s);
+  `source: "cli"` from the list alone when the schema can't be read. Writes: keys checked first,
+  then `omp config set|reset -- <key> [<text>]` in order, omp's validation message →
+  `invalid_params`. Credentials never leave the host. Real-omp test (temp `PI_CODING_AGENT_DIR`):
+  `cargo test -p tf-hostd omp_config -- --ignored --nocapture`.
 - **ai.complete** (`ai.rs`): `omp --mode json --no-session --no-tools --no-extensions --no-skills
   --no-rules --no-lsp --no-title --model @<role> --system-prompt <system>`, prompt on stdin,
   `NO_COLOR=1`, cwd = `cwd` if it is a dir, else home. Line breaks in `system` become spaces

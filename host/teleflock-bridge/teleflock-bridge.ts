@@ -20,8 +20,9 @@ import type {
 	PlanReviewRequestedEvent,
 } from "@oh-my-pi/pi-coding-agent";
 
-/** 1.1.0: `btw` runs omp's own /btw (follow-ups via `btwId`), `getBtwHistory`. */
-const BRIDGE_VERSION = "1.1.0";
+/** 1.1.0: `btw` runs omp's own /btw (follow-ups via `btwId`), `getBtwHistory`.
+ *  1.2.0: schema-dump mode (`TF_OMP_SCHEMA_OUT`, used by tf-hostd `omp.settings`). */
+const BRIDGE_VERSION = "1.2.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -412,7 +413,61 @@ function advisorText(details: unknown): string {
 		.join(" ");
 }
 
-export default function teleflockBridge(pi: ExtensionAPI) {
+/**
+ * Schema-dump mode (`TF_OMP_SCHEMA_OUT=<file>`; docs/bridge-protocol.md "Schema dump"): tf-hostd
+ * starts a throwaway headless omp with this extension to read omp's settings schema. Writes
+ * `{bridgeVersion, ompVersion, settings: <definition>[] | null, error?}` atomically to the file, then
+ * exits the process. Functions (validators, env parsers) are dropped by JSON serialization.
+ */
+async function dumpSchema(pi: ExtensionAPI, out: string): Promise<void> {
+	let settings: unknown[] | null = null;
+	let error: string | undefined;
+	try {
+		// Dynamic, not static: older omp builds lack this module (a static import would break the whole
+		// bridge there) and normal sessions must not load every settings domain. The specifier stays a
+		// literal: omp's extension loader only maps statically named package paths.
+		const mod: { orderedSettings?: () => readonly { definition?: unknown }[] } = await import(
+			"@oh-my-pi/pi-coding-agent/config/all-settings"
+		);
+		if (typeof mod.orderedSettings !== "function") throw new Error("orderedSettings() not exported");
+		settings = mod.orderedSettings().map((s) => plainDefinition(s.definition));
+	} catch (e) {
+		error = e instanceof Error ? e.message : String(e);
+	}
+	let code = 0;
+	try {
+		const json = JSON.stringify({ bridgeVersion: BRIDGE_VERSION, ompVersion: ompVersion(pi), settings, error });
+		const tmp = `${out}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, json, { mode: 0o600 });
+		fs.renameSync(tmp, out);
+	} catch {
+		code = 1;
+	}
+	// omp refuses `process.exit` while it loads extensions: exit right after loading instead
+	// (tf-hostd also kills the process once the file is in).
+	setTimeout(() => process.exit(code), 0);
+}
+
+/** One definition as plain JSON (functions dropped); only `id`/`type` when it cannot be serialized. */
+function plainDefinition(def: unknown): unknown {
+	try {
+		return JSON.parse(JSON.stringify(def, (_k, v: unknown) => (typeof v === "bigint" ? Number(v) : v)));
+	} catch {
+		const d = (def ?? {}) as { id?: unknown; type?: unknown };
+		return { id: d.id, type: d.type };
+	}
+}
+
+export default async function teleflockBridge(pi: ExtensionAPI) {
+	const schemaOut = process.env.TF_OMP_SCHEMA_OUT;
+	if (schemaOut) {
+		await dumpSchema(pi, schemaOut);
+		return;
+	}
+	bridge(pi);
+}
+
+function bridge(pi: ExtensionAPI) {
 	const home = hostdHome();
 	const endpoint = bridgeEndpoint(home);
 	const secretPath = bridgeSecretPath(home);

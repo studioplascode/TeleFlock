@@ -1,4 +1,4 @@
-import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, Trash2 } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, SlidersHorizontal, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -22,7 +22,7 @@ import {
   toast,
   useIsMobile,
 } from "@/design";
-import { core, useAgentKeys, useHosts, useHostState, useUi } from "@/core";
+import { core, navigate, useAgentKeys, useHosts, useHostState, useUi } from "@/core";
 import type { ConnStatus, HostProfile } from "@/core/gen";
 import { errorMessage } from "@/features/shell/errors";
 import { useHealthHistory } from "@/features/shell/healthHistory";
@@ -186,6 +186,11 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
               {online && (
                 <DropdownMenuItem icon={<ShieldCheck />} onSelect={() => setSetupOpen(true)}>
                   Host setup
+                </DropdownMenuItem>
+              )}
+              {online && (
+                <DropdownMenuItem icon={<SlidersHorizontal />} onSelect={() => navigate({ name: "omp", hostId: profile.id })}>
+                  omp settings
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />

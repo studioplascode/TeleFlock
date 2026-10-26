@@ -26,6 +26,8 @@ cp teleflock-bridge.ts ~/.omp/agent/extensions/ # global install (needs the user
 
 TUI-only commands run through the composer's own submit handler, so no herdr keystroke injection is needed and the operator's draft is preserved. Tree, branch and new-session control use a command context, which the extension captures once through its hidden `/teleflock-attach` command. See the protocol doc's "TUI mechanics" section.
 
+**Schema dump mode** (1.2.0). With `TF_OMP_SCHEMA_OUT=<file>` set, the extension skips all of the above: it writes omp's settings schema (`config/all-settings` → `orderedSettings()` definitions) to `<file>` and exits. tf-hostd uses it for `omp.settings` (protocol doc "Schema dump").
+
 ## Safety
 
 The extension must never take omp down:

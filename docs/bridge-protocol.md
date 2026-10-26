@@ -55,7 +55,7 @@ The TUI shows exactly one thing: a dim `⇄ teleflock` status-line notice while 
 ```
 - `reason`: `connect` (new connection) or `switch` (same connection, new omp session).
 - `tui`: omp runs the interactive TUI (`ctx.mode === "tui"`). Ops marked **TUI** below need it.
-- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent.
+- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent. 1.2.0 adds the schema-dump mode (see "Schema dump"); the socket protocol is unchanged.
 - hostd keys sessions by `sessionId`. The latest `hello` wins if two connections claim the same id.
 
 ### `event`
@@ -196,6 +196,16 @@ A TeleFlock side question is omp's own `/btw`, so it shows in the TUI, lands in 
 - **Streaming.** Three sources feed `btw_delta`, whichever comes first: the history files (read on every 1 s tick: turn start and end, also for `/btw` asked in the TUI), the inline answer panel and the history panel (the extension wraps their update methods on the instance; omp's originals always run first and wrapper failures are swallowed). The first scan of a session only learns the existing history.
 - **Cancel.** The operator's Esc where omp listens for it: the history panel when open (`x` with native rendering), else the composer's Esc handler, which a visible `/btw` panel owns first.
 - **Fallback.** Without the TUI, or for a session with no artifacts directory, `btw` runs a private `ctx.runEphemeralTurn` with omp's btw prompt, replaying the conversation's earlier turns (one provider lineage per run of successful turns, as in omp). Those conversations live in the extension's memory only (ids `tf-btw-…`), are listed by `getBtwHistory`, and are aborted when hostd disconnects.
+
+## Schema dump (`TF_OMP_SCHEMA_OUT`, bridge ≥ 1.2.0)
+
+Not a socket protocol: a one-shot mode tf-hostd uses for `omp.settings` (architecture §3.10). When `TF_OMP_SCHEMA_OUT=<file>` is set in omp's environment at load, the extension opens no socket, registers nothing and only:
+
+1. imports `@oh-my-pi/pi-coding-agent/config/all-settings` (a literal specifier: omp's extension loader maps only statically named package paths) and calls `orderedSettings()`;
+2. writes `{bridgeVersion, ompVersion, settings, error?}` to `<file>.<pid>.tmp` (mode 0600) and renames it to `<file>`. `settings` is every setting's `definition` in settings-panel order as plain JSON (`id, type, default, values, env, credential, items, pathScoped, protocolDefault, ui {tab, group, label, description, options | "runtime", condition, warning, editor, secret, ordered}`; validators, normalizers and env parsers are functions and drop out), or `null` with `error` when the module or function is missing (older omp);
+3. exits the process right after loading (omp refuses `process.exit` during extension loading, so the exit is scheduled for the next tick).
+
+hostd starts it as `omp --mode rpc --no-session --no-skills --no-rules --no-lsp --no-tools --no-extensions -e <home>/ext/teleflock-bridge.ts` with stdin at EOF (no model call, no session file), waits ≤ 20 s for the file and kills the child either way. hostd only does this when the deployed file contains the `TF_OMP_SCHEMA_OUT` marker: an older bridge would ignore the variable and run as a normal bridge.
 
 ## Safety rules (extension)
 

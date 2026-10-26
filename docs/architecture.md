@@ -137,6 +137,7 @@ A client sees one `snapshot` on hello, then patches.
 | `ops/ai.rs` | HostdOps | `ai.complete`: one short completion from omp's `tiny` model role (see §3.8) |
 | `ops/scope.rs` | HostdOps | Setup issue + fix `move-herdr-out-of-login-session`: a herdr server (`SO_PEERCRED` on its socket) in a `session-*.scope` is moved with its process tree into a new scope (`StartTransientUnit`, see §3.1) |
 | `ops/tools.rs` | HostdOps | omp/herdr updater (one per daemon), `host.toolsUpdate`, `host.toolsConfig`, `HostInfo.tools` (see §3.9) |
+| `ops/omp_config.rs` | OmpSettings | `omp.settings` / `omp.settingsSet`: omp's own settings schema + global config (see §3.10) |
 
 **Dispatcher contract.** HostdCore owns it. `clients.rs` parses `HostMethod::parse(method, params)`. For each method family it calls an async handler fn:
 
@@ -229,7 +230,6 @@ Once the agent is idle and `link=live`:
 The new agent appears through herdr events. The response returns `Started{paneId, workspaceId, agentId?}`.
 
 **Resuming a parked agent** (`agent.resume`; also `agent.prompt` and `agent.archive {archived:false}` on a parked card, and `host.resume` of its session file). Live agents fail with `invalid_params`; a second concurrent resume of the same card fails with `busy`; a missing session file prunes the card and fails with `not_found`. Target: a new tab in its old workspace when that is still open at the same folder; else, for a linked git worktree (from the record, else `git rev-parse --git-dir --git-common-dir`), herdr `worktree.open {cwd: <repo root>, path: <checkout>}` so the workspace is grouped under its repo again (falls back to a plain workspace when herdr refuses); else a new workspace at its folder (a missing folder fails with `not_found` and a hint). The launch above runs with the parked name (deduped against live names), model and thinking level, `--resume=<file>`, and, for a prompt, `spec.prompt`/`spec.images` delivered once linked. The archive marks are cleared, so the agent lands in Review; the parked card is dropped in the same patch that first shows the new agent (a start that never shows up gives the card back after 90 s). Activity: `unarchived` "Resumed X".
-
 **Worktree base (`worktree.create`, `ops/worktree.rs`).** A new branch forks from the given `base`, else from `git.branches`' `defaultBase`: `origin/<default>` when that remote-tracking ref exists (else the local default's remote upstream, else the local default), never herdr's implicit HEAD, which is usually a local `main` that only moves when someone pulls. Before forking from a remote-tracking base hostd runs `git fetch <remote> refs/heads/<branch>` (no hooks, no prompts: `GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`; 30 s; single-flight per repo + branch with a 20 s answer cache for fan-outs); a failure is logged and creation continues from the ref it has, so offline hosts still create worktrees. herdr's `git worktree add -b B P origin/main` makes `B` track `origin/main`; hostd then removes that upstream, so ahead/behind and review don't compare against main and the first `git.push` publishes `B` under its own name (`--set-upstream origin HEAD`). Review's merge-base uses the default branch's local and remote refs together (`git merge-base HEAD main origin/main`), so it is the real fork point whichever one the branch came from. Clients send no `base` when the Base select is untouched (they show `defaultBase`); older hosts without `defaultBase` get the shown ref, as before.
 
 ### 3.8 AI through omp's tiny role (`ai.complete`, `ops/ai.rs`)
@@ -263,6 +263,23 @@ Every tf-hostd keeps the host's omp and herdr current, so all hosts run the vers
 
 **Methods.** `host.toolsUpdate {tool?, checkOnly}` starts a run now (manual runs work with `auto` off; `checkOnly` never installs). A request covered by the newest run (same or more tools, install ⊇ check) joins it; others queue behind it. The reply comes when the run is done or after 20 s (the app's request timeout is 30 s) with the current status; progress keeps arriving through `HostInfo.tools`. `host.toolsConfig {auto}` persists and reschedules.
 
+### 3.10 omp settings (`omp.settings`, `omp.settingsSet`, `ops/omp_config.rs`)
+
+The app's omp settings page (`src/features/ompSettings`) edits everything `omp config` can, with omp's own labels, tabs, groups and choices.
+
+**Schema.** `omp config list --json` only has key, type and description. The full registry (`@oh-my-pi/pi-coding-agent/config/all-settings` → `orderedSettings()`: type, default, enum values, item vocabularies, env override, credential flag, and `ui {tab, group, label, description, options | "runtime", condition, warning, editor}`) is only reachable from inside omp, so hostd starts a throwaway
+
+```
+omp --mode rpc --no-session --no-skills --no-rules --no-lsp --no-tools --no-extensions -e <home>/ext/teleflock-bridge.ts
+    # env TF_OMP_SCHEMA_OUT=<home>/run/omp-schema-<pid>-<ns>.json, NO_COLOR=1, stdin /dev/null, cwd home
+```
+
+and the companion extension's schema-dump mode (§4) writes the definitions there and exits. hostd waits ≤ 20 s for the file, kills the child, deletes the file, and caches the schema per omp binary (canonical path + size + mtime) in memory and in `<home>/cache/omp-settings-schema.json` (≈ 2 s once per omp build; `refresh: true` reads again). A failed dump is remembered for that omp binary + extension file until either changes. An extension without the dump mode (bridge < 1.2.0, detected by the `TF_OMP_SCHEMA_OUT` marker in the file) is never started for a dump: it would run as a normal bridge.
+
+**Values.** `omp config list --json` (omp's global config, else defaults; omp itself redacts credentials), cached 10 s, dropped after every write. Credentials (`credential`, `ui.secret`, or `redacted` in the list) never carry a value or default in the answer. Without a schema the answer is `source: "cli"` from the list alone (omp's order, no labels/tabs): every key stays editable.
+
+**Writes.** `omp.settingsSet` checks every key against the current settings first (one unknown key → `invalid_params`, nothing written), then runs `omp config set -- <key> <text>` / `omp config reset -- <key>` one at a time without a shell (writes are serialized per daemon). Text per type: strings as-is unless omp's parser would alter them (surrounding whitespace, leading `"`, line breaks: then JSON-quoted, which omp unquotes exactly), numbers/booleans as text, arrays/records as compact JSON. omp validates (enum values, item vocabularies, shapes); its message (`Invalid value: x. Valid values: …`) comes back as `invalid_params`, earlier changes of the batch stay applied. A `modelRoles` write also drops the `host.models` cache. Logs carry keys and outcomes only, never values. The answer is the fresh `OmpSettings`.
+
 ## 4. Companion extension `teleflock-bridge.ts` (owner: BridgeExt)
 
 **Connection.** At load it connects to `bridge.sock` and retries every 5 s while hostd is absent. It never throws into omp: every timer goes through `ctx.setInterval`, and every handler is wrapped in try/catch.
@@ -282,6 +299,8 @@ Every tf-hostd keeps the host's omp and herdr current, so all hosts run the vers
   - `resolvePlanReview`, `export`, `handoff`
   - `btw` (omp's own `/btw`, shown in the TUI and its BTW history; `btwId` follows up), `btwCancel`, `getBtwHistory`
   - `getTree`, `getQueue`
+
+**Schema dump mode** (bridge ≥ 1.2.0). With `TF_OMP_SCHEMA_OUT=<file>` in its environment at load, the extension does nothing else: it imports `@oh-my-pi/pi-coding-agent/config/all-settings` (literal specifier; older omp builds without it report `error`), writes `{bridgeVersion, ompVersion, settings: <definition>[] | null, error?}` atomically to the file (functions dropped by JSON) and exits right after loading. Only tf-hostd's throwaway omp (§3.9) sets the variable.
 
 ## 5. App side
 
@@ -446,6 +465,7 @@ It must exercise every UI state, including disconnected, stale and auth-required
 | FrontTerminal | `src/features/terminal/**` | xterm.js WebGL terminal (frames, input, resize, scroll), tabs, send-keys bar, mobile extra keys (sticky Ctrl/Alt), embeddable `<TerminalPane>` for split view and session |
 | FrontOps | `src/features/{worktree,workspace,review,preview,history}/**` | New worktree/agent wizard with remote folder browser, workspace ops, review and ship (git diff viewer, commit/push/PR/merge), preview tunnels, past sessions and resume |
 | Dispatch | `src/features/dispatch/**` | Dispatch screen: per-repo chat thread where each message creates a worktree + omp agent, with live reply cards |
+| OmpSettings | `src/features/ompSettings/**` | Per-host omp settings page: omp's tabs/groups/labels, search, per-type controls, model-roles editor, Other tab for keys omp's panel lacks (§3.9) |
 | FrontCore | `src/core/**` (except `gen/`) | §6.1 |
 
 Shared UI building blocks come from `@/design` only. A feature that needs a cross-cutting primitive asks FrontShell (for layout) or adds it in its own folder.
@@ -460,6 +480,7 @@ Routes (hash router, `src/app/router.ts`):
 - `#/usage`
 - `#/hosts`
 - `#/settings`
+- `#/omp[/:hostId]` (omp settings of a host)
 - `#/design`
 
 On mobile, the same routes render mobile layouts (`useIsMobile`).
@@ -485,5 +506,5 @@ On mobile, the same routes render mobile layouts (`useIsMobile`).
 | Preview tunnels | Bound to `127.0.0.1` on the device; targets are restricted to host loopback; tunnels close on disconnect. |
 | `tf-devserver` | Per-launch 256-bit token, Origin and Host checks, loopback-only unless `--allow-remote`. |
 | Webview | Strict CSP. Agent-controlled links (markdown, web sources, xterm OSC 8) allow only `http(s)` and open externally through `app.openExternal`; other schemes render inert. `TF_HOSTD_BIN` deploy override works in debug builds only. Android has backups disabled (`allowBackup=false`, data-extraction rules exclude everything); cleartext traffic is allowed only to loopback (preview iframe). |
-| Host config | `host.setupApply` is the only code path that changes omp or herdr config. It accepts only fixed fix ids and runs only on explicit user consent in the UI. |
+| Host config | Only two code paths change omp or herdr config, both only on an explicit user action in the UI: `host.setupApply` (fixed fix ids only) and `omp.settingsSet`, which writes omp's global config through `omp config set\|reset` (keys checked against omp's own schema, values validated by omp, never through a shell; credentials are write-only: never returned or logged). |
 | Tool updates | Only `omp update [--check]` and plain `herdr update` (never `--handoff`, never a channel switch, stdin closed so no prompt can stop a server), as the host user, with the binaries hostd already runs. `host.toolsConfig {auto: false}` stops automatic runs per host. |

@@ -43,6 +43,7 @@ import { demoAiComplete, demoAiLatency } from "./ai";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
 import { demoLimits } from "./limits";
+import { DemoOmpSettings } from "./ompSettings";
 import {
   AGENTS,
   type AgentDef,
@@ -54,7 +55,6 @@ import {
   type RepoDef,
   repoByName,
   repoForPath,
-  ROLES,
   slug,
   STUDIO_AGENTS,
   WORKSPACES,
@@ -171,6 +171,7 @@ export class DemoHost implements SimHost {
   private keyTrusted = false;
   private everOnline = false;
   private readonly tools: DemoTools;
+  private readonly ompSettings = new DemoOmpSettings();
 
   constructor(
     private readonly env: HostEnv,
@@ -1062,7 +1063,11 @@ export class DemoHost implements SimHost {
       case "host.limits":
         return demoLimits(this.id, this.now(), this.agentsList(), true);
       case "host.models":
-        return { models: MODELS.map(({ inPerM: _i, outPerM: _o, ...m }) => m), roles: ROLES };
+        return { models: MODELS.map(({ inPerM: _i, outPerM: _o, ...m }) => m), roles: this.ompSettings.roles() };
+      case "omp.settings":
+        return this.ompSettings.get();
+      case "omp.settingsSet":
+        return this.ompSettings.set(p.changes);
       case "host.sessions":
         return { sessions: this.pastSessions(typeof p.cwd === "string" ? p.cwd : undefined, typeof p.limit === "number" ? p.limit : 50) };
       case "host.resume":
