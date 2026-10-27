@@ -36,13 +36,13 @@ pub fn counts(state: &HostState) -> (u32, u32) {
     })
 }
 
-/// On-disk cache record (`data_dir/cache/<hostId>.json`).
+/// On-disk cache record (`data_dir/cache/<hostId>.json`); written from a borrowed state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CacheRecord {
+pub struct CacheRecord<S = HostState> {
     pub rev: u64,
     pub saved_at: Millis,
-    pub state: HostState,
+    pub state: S,
 }
 
 #[cfg(test)]
@@ -68,6 +68,8 @@ pub(crate) mod fixtures {
                     global_bridge: false,
                     relay: true,
                     issues: vec![],
+                    applying: vec![],
+                    failed: vec![],
                 },
                 tools: None,
                 pruned: Vec::new(),

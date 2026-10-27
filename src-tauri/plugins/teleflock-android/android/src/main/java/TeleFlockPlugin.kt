@@ -18,6 +18,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.webkit.WebView
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
 import app.tauri.PermissionState
@@ -26,6 +27,7 @@ import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
+import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
@@ -89,9 +91,22 @@ class InstallApkArgs {
     var openSettings: Boolean = true
 }
 
+@InvokeArg
+class StartDictationArgs {
+    /** Receives the session's events (see [Dictation]); its id names the session. */
+    lateinit var channel: Channel
+}
+
+@InvokeArg
+class DictationArgs {
+    /** The session's channel id; 0 = whichever session runs. */
+    var session: Long = 0
+}
+
 @TauriPlugin(
     permissions = [
-        Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "postNotification")
+        Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "postNotification"),
+        Permission(strings = [Manifest.permission.RECORD_AUDIO], alias = "recordAudio"),
     ]
 )
 class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivity) {
@@ -103,9 +118,20 @@ class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivit
     private val activity: Activity
         get() = PluginManager.activity ?: firstActivity
 
+    private val dictation = Dictation(firstActivity.applicationContext)
+
     override fun load(webView: WebView) {
         Notifications.ensureChannels(activity)
         watchNetwork(activity.applicationContext)
+    }
+
+    override fun onPause(activity: AppCompatActivity) {
+        // Leaving the front: keep what was said, then let go of the microphone.
+        dictation.stop(0)
+    }
+
+    override fun onDestroy(activity: AppCompatActivity) {
+        dictation.cancel(0)
     }
 
     // ── keep-alive ────────────────────────────────────────────────────────────────────────────
@@ -195,6 +221,86 @@ class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivit
             activity.startActivity(i)
         } catch (_: ActivityNotFoundException) {
         }
+    }
+
+    // ── microphone + dictation ────────────────────────────────────────────────────────────────
+
+    private fun resolveMicrophoneState(invoke: Invoke) {
+        val r = JSObject()
+        r.put("recordAudio", (getPermissionState("recordAudio") ?: PermissionState.PROMPT).toString())
+        invoke.resolve(r)
+    }
+
+    /**
+     * Shows the system prompt unless RECORD_AUDIO is granted and resolves `{ recordAudio }` once
+     * the user answered: `prompt-with-rationale` = denied, asking again shows the prompt again;
+     * `denied` = denied for good, only the app's settings screen ([openAppSettings]) grants it now.
+     */
+    @Command
+    fun requestMicrophonePermission(invoke: Invoke) {
+        if (getPermissionState("recordAudio") == PermissionState.GRANTED) {
+            resolveMicrophoneState(invoke)
+            return
+        }
+        // Also when Tauri remembers `denied`: it records a dismissed prompt the same way, and a
+        // real permanent denial comes back at once, without a dialog.
+        requestPermissionForAlias("recordAudio", invoke, "microphonePermissionResult")
+    }
+
+    @PermissionCallback
+    fun microphonePermissionResult(invoke: Invoke) = resolveMicrophoneState(invoke)
+
+    /** The app's page in Android's settings (permissions, notifications, battery). */
+    @Command
+    fun openAppSettings(invoke: Invoke) {
+        try {
+            activity.startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.parse("package:" + activity.packageName))
+            )
+            invoke.resolve()
+        } catch (e: ActivityNotFoundException) {
+            invoke.reject("couldn't open TeleFlock's settings", "NO_HANDLER", e)
+        }
+    }
+
+    @Command
+    fun dictationAvailable(invoke: Invoke) {
+        val r = JSObject()
+        r.put("available", dictation.available())
+        invoke.resolve(r)
+    }
+
+    /** Starts a [Dictation] session reporting to the `channel` argument. Needs RECORD_AUDIO. */
+    @Command
+    fun startDictation(invoke: Invoke) {
+        val a = invoke.parseArgs(StartDictationArgs::class.java)
+        if (getPermissionState("recordAudio") != PermissionState.GRANTED) {
+            invoke.reject("Microphone permission denied", "PERMISSION")
+            return
+        }
+        if (!dictation.available()) {
+            invoke.reject("Speech recognition isn't available on this device", "UNAVAILABLE")
+            return
+        }
+        try {
+            dictation.start(a.channel)
+            invoke.resolve()
+        } catch (e: RuntimeException) {
+            invoke.reject(e.message ?: "couldn't start speech recognition", "START_FAILED", e)
+        }
+    }
+
+    /** Stops listening; the phrase being spoken still arrives before `end`. */
+    @Command
+    fun stopDictation(invoke: Invoke) {
+        dictation.stop(invoke.parseArgs(DictationArgs::class.java).session)
+        invoke.resolve()
+    }
+
+    @Command
+    fun cancelDictation(invoke: Invoke) {
+        dictation.cancel(invoke.parseArgs(DictationArgs::class.java).session)
+        invoke.resolve()
     }
 
     // ── battery ───────────────────────────────────────────────────────────────────────────────

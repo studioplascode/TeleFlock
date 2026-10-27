@@ -116,7 +116,8 @@ export function ToolUpdatesRow({ hostId }: { hostId: string }) {
   return (
     <div className="flex min-w-0 flex-col gap-2 rounded-md well p-2.5 text-xs" data-testid="tool-updates">
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 font-mono text-2xs text-ink-2">
+        {/* basis, not 0: on a narrow card the buttons wrap below instead of squeezing the versions under them */}
+        <div className="flex min-w-0 flex-[1_1_12rem] flex-wrap items-center gap-x-3 gap-y-1 font-mono text-2xs text-ink-2">
           <ToolChip t={tools.omp} now={now} />
           <ToolChip t={tools.herdr} now={now} />
           {available && !updating && <Badge tone="accent">Update available</Badge>}

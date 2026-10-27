@@ -1,9 +1,9 @@
 import { AlertTriangle, Gauge, KeyRound, RefreshCw, TimerReset } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
-import { describePace, formatPct, formatSpan, type HostLimits, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
+import { describePace, formatPct, formatSpan, type HostLimits, LIMITS_USAGE_EVERY_MS, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
 import type { LimitAccount, LimitWindow } from "@/core/gen";
-import { Badge, Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow } from "@/design";
+import { Badge, Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
 import { PROVIDER_NAMES, paceStatus } from "./limitsUi";
 
 /** One account across the hosts that report it (the same login is often on several hosts). */
@@ -149,7 +149,7 @@ function AccountTile({ row, hostNames, now }: { row: AccountRow; hostNames: Reco
  * projection. Sits beside Today on Usage, so its tiles use one column there and two on wide pages.
  */
 export function LimitsSection({ hostIds, className }: { hostIds: string[]; className?: string }) {
-  const byHost = useAccountLimits(hostIds);
+  const byHost = useAccountLimits(hostIds, useWindowActive() ? LIMITS_USAGE_EVERY_MS : null);
   const profiles = useHosts((s) => s.profiles);
   const hostNames = Object.fromEntries(profiles.filter((p) => hostIds.includes(p.id)).map((p) => [p.id, p.name]));
   const now = useNow(30_000);

@@ -289,10 +289,11 @@ fn exec_err(what: &str, out: &tf_transport::Output) -> ApiError {
     .retryable()
 }
 
-/// Runs the probe on a remote (SSH/WSL) host.
+/// Runs the probe on a remote (SSH/WSL) host. 60 s: every WSL `exec` starts `wsl.exe` and a
+/// login shell, which a slow laptop needs seconds for; a timeout is retryable.
 pub async fn probe_remote(t: &dyn Transport) -> Result<Probe, ApiError> {
     let out = t
-        .exec(&Cmd::new(["sh", "-c", PROBE_SCRIPT]).timeout(Duration::from_secs(30)))
+        .exec(&Cmd::new(["sh", "-c", PROBE_SCRIPT]).timeout(Duration::from_secs(60)))
         .await?;
     if !out.status.success() {
         return Err(exec_err("host probe", &out));
@@ -319,13 +320,18 @@ async fn read_trim(path: &Path) -> String {
     tokio::fs::read_to_string(path).await.map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
-async fn version_of(t: &dyn Transport, hostd: &str) -> String {
-    match t.exec(&Cmd::new([hostd, "--version"]).timeout(Duration::from_secs(15))).await {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_string()
-        }
-        _ => String::new(),
+/// `tf-hostd --version` (first line; empty when it exits non-zero). An error only when it could
+/// not run at all (timeout, transport): retryable, unlike a binary that reports another version.
+async fn run_version(t: &dyn Transport, hostd: &str) -> Result<String, ApiError> {
+    let out = t.exec(&Cmd::new([hostd, "--version"]).timeout(Duration::from_secs(30))).await?;
+    if !out.status.success() {
+        return Ok(String::new());
     }
+    Ok(String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_string())
+}
+
+async fn version_of(t: &dyn Transport, hostd: &str) -> String {
+    run_version(t, hostd).await.unwrap_or_default()
 }
 
 /// Probes the local machine (Local kind).
@@ -385,85 +391,137 @@ pub async fn deploy(
         let bytes = bin.into_bytes().await?;
         if local {
             install_local(t, Path::new(&hostd_path), &bytes, &sha).await?;
+            // Could not run it (slow host, transport hiccup): retry the connect, not a dead end.
+            let v = run_version(t, &hostd_path).await?;
+            if v != expected {
+                return Err(version_mismatch(&format!("deployed tf-hostd reports `{v}`"), &expected));
+            }
         } else {
-            upload_remote(t, &p.home, "bin/tf-hostd", bytes, &sha, true).await?;
-        }
-        let v = version_of(t, &hostd_path).await;
-        if v != expected {
-            return Err(ApiError::new(
-                "version_mismatch",
-                format!("deployed tf-hostd reports `{v}`, this app expects `{expected}`"),
-            )
-            .with_hint("rebuild tf-hostd and the app from the same source tree"));
+            // The upload script runs its `--version` before replacing anything: no extra spawn,
+            // and a binary that cannot run on the host never replaces the installed one.
+            let hostd = Upload { rel: "bin/tf-hostd", sha: &sha, inline: None, hostd_version: Some(&expected) };
+            upload_remote(t, &p.home, &[hostd], Some(bytes)).await?;
         }
     }
-    if p.ext_sha != ext_sha {
+    let (put_ext, put_overlay) = (p.ext_sha != ext_sha, p.overlay_sha != overlay_sha);
+    if put_ext {
         progress("Uploading companion extension…".into());
-        put_file(t, local, &p.home, "ext/teleflock-bridge.ts", ext.as_bytes(), &ext_sha).await?;
     }
-    if p.overlay_sha != overlay_sha {
-        put_file(t, local, &p.home, "omp-overlay.yml", overlay.as_bytes(), &overlay_sha).await?;
+    if local {
+        if put_ext {
+            put_local(&p.home, "ext/teleflock-bridge.ts", ext.as_bytes(), &ext_sha).await?;
+        }
+        if put_overlay {
+            put_local(&p.home, "omp-overlay.yml", overlay.as_bytes(), &overlay_sha).await?;
+        }
+    } else if put_ext || put_overlay {
+        // One exec for both: the extension on stdin, the few lines of overlay inline.
+        let mut files = Vec::with_capacity(2);
+        if put_ext {
+            files.push(Upload { rel: "ext/teleflock-bridge.ts", sha: &ext_sha, inline: None, hostd_version: None });
+        }
+        if put_overlay {
+            files.push(Upload { rel: "omp-overlay.yml", sha: &overlay_sha, inline: Some(&overlay), hostd_version: None });
+        }
+        upload_remote(t, &p.home, &files, put_ext.then(|| ext.as_bytes().to_vec())).await?;
     }
     Ok(Deployed { hostd: hostd_path, replaced: need_hostd && !p.version.is_empty(), newer: None })
 }
 
-async fn put_file(
-    t: &dyn Transport,
-    local: bool,
-    home: &str,
-    rel: &str,
-    bytes: &[u8],
-    sha: &str,
-) -> Result<(), ApiError> {
-    if local {
-        let path = rel.split('/').fold(PathBuf::from(home), |p, c| p.join(c));
-        write_atomic(&path, bytes).await.map_err(|e| io_err(&format!("write {}", path.display()), e))?;
-        let stamp = path.with_file_name(format!("{}.sha256", path.file_name().unwrap().to_string_lossy()));
-        write_atomic(&stamp, sha.as_bytes()).await.map_err(|e| io_err(&format!("write {}", stamp.display()), e))
-    } else {
-        upload_remote(t, home, rel, bytes.to_vec(), sha, false).await
-    }
+fn version_mismatch(what: &str, expected: &str) -> ApiError {
+    ApiError::new("version_mismatch", format!("{what}, this app expects `{expected}`"))
+        .with_hint("rebuild tf-hostd and the app from the same source tree")
 }
 
-/// `exec` with the payload on stdin: write to a temp file, verify its sha256 against `sha`
-/// (a truncated or corrupted upload never replaces the installed file), chmod, rename,
-/// then stamp. `rel` is a fixed relative path made of safe characters (`bin/tf-hostd`).
-pub fn upload_script(home: &str, rel: &str, sha: &str, executable: bool) -> String {
-    let dir = rel.rsplit_once('/').map(|(d, _)| format!("/{d}")).unwrap_or_default();
-    format!(
-        "set -e\numask 077\nH={h}\nmkdir -p \"$H{dir}\"\nt=\"$H/{rel}.tmp.$$\"\ntrap 'rm -f \"$t\"' EXIT\ncat > \"$t\"\n\
-         if command -v sha256sum >/dev/null 2>&1; then a=$(sha256sum \"$t\")\n\
-         elif command -v shasum >/dev/null 2>&1; then a=$(shasum -a 256 \"$t\")\n\
-         else echo 'neither sha256sum nor shasum is installed on the host' >&2; exit 3; fi\n\
-         a=${{a%% *}}\n\
-         if [ \"$a\" != {sha} ]; then echo \"checksum mismatch for {rel}: got $a, expected \"{sha} >&2; exit 4; fi\n\
-         chmod {mode} \"$t\"\nmv -f \"$t\" \"$H/{rel}\"\nprintf '%s' {sha} > \"$H/{rel}.sha256\"\n",
-        h = sh_quote(home),
-        mode = if executable { "755" } else { "644" },
-        sha = sh_quote(sha),
-    )
+async fn put_local(home: &str, rel: &str, bytes: &[u8], sha: &str) -> Result<(), ApiError> {
+    let path = rel.split('/').fold(PathBuf::from(home), |p, c| p.join(c));
+    write_atomic(&path, bytes).await.map_err(|e| io_err(&format!("write {}", path.display()), e))?;
+    let stamp = path.with_file_name(format!("{}.sha256", path.file_name().unwrap().to_string_lossy()));
+    write_atomic(&stamp, sha.as_bytes()).await.map_err(|e| io_err(&format!("write {}", stamp.display()), e))
 }
 
-async fn upload_remote(
-    t: &dyn Transport,
-    home: &str,
-    rel: &str,
-    bytes: Vec<u8>,
-    sha: &str,
-    executable: bool,
-) -> Result<(), ApiError> {
-    let script = upload_script(home, rel, sha, executable);
-    let out = t
-        .exec(
-            &Cmd::new(["sh".to_string(), "-c".to_string(), script])
-                .stdin(bytes)
-                .timeout(Duration::from_secs(600)),
-        )
-        .await?;
-    if !out.status.success() {
-        return Err(exec_err(&format!("upload {rel}"), &out));
+/// One file [`upload_script`] installs under the tf-hostd home.
+pub struct Upload<'a> {
+    /// Relative path made of safe characters (`bin/tf-hostd`).
+    pub rel: &'a str,
+    pub sha: &'a str,
+    /// Small text the script writes itself (it travels on the command line); `None`: the
+    /// script's stdin, for one file at most.
+    pub inline: Option<&'a str>,
+    /// The file is tf-hostd: executable, and it must print this `--version` line on the host
+    /// before it may replace the installed one.
+    pub hostd_version: Option<&'a str>,
+}
+
+/// Script for one `exec` (one `wsl.exe` or SSH channel) that installs `files`: each is written to
+/// a temp file and its sha256 verified, so a truncated or corrupted upload never replaces the
+/// installed file; a tf-hostd must also report the expected version (else exit 5, with
+/// `tf.version=<what it printed>` on stdout). Only once all passed is each renamed into place
+/// and stamped.
+pub fn upload_script(home: &str, files: &[Upload]) -> String {
+    let mut lines = vec![
+        "set -e".to_string(),
+        "umask 077".into(),
+        format!("H={}", sh_quote(home)),
+        "sum() { if command -v sha256sum >/dev/null 2>&1; then a=$(sha256sum \"$1\"); \
+         elif command -v shasum >/dev/null 2>&1; then a=$(shasum -a 256 \"$1\"); \
+         else echo 'neither sha256sum nor shasum is installed on the host' >&2; exit 3; fi; a=${a%% *}; }"
+            .into(),
+    ];
+    for (i, f) in files.iter().enumerate() {
+        let dir = f.rel.rsplit_once('/').map(|(d, _)| format!("/{d}")).unwrap_or_default();
+        lines.push(format!("mkdir -p \"$H{dir}\""));
+        lines.push(format!("t{i}=\"$H/{}.tmp.$$\"", f.rel));
     }
-    Ok(())
+    let temps: Vec<String> = (0..files.len()).map(|i| format!("\"$t{i}\"")).collect();
+    lines.push(format!("trap 'rm -f {}' EXIT", temps.join(" ")));
+    for (i, f) in files.iter().enumerate() {
+        let (rel, sha) = (f.rel, sh_quote(f.sha));
+        lines.push(match f.inline {
+            Some(text) => format!("printf '%s' {} > \"$t{i}\"", sh_quote(text)),
+            None => format!("cat > \"$t{i}\""),
+        });
+        lines.push(format!("sum \"$t{i}\""));
+        lines.push(format!(
+            "if [ \"$a\" != {sha} ]; then echo \"checksum mismatch for {rel}: got $a, expected \"{sha} >&2; exit 4; fi"
+        ));
+        match f.hostd_version {
+            Some(v) => {
+                let v = sh_quote(v);
+                lines.push(format!("chmod 755 \"$t{i}\""));
+                lines.push(format!("v=$(\"$t{i}\" --version 2>/dev/null | head -n 1) || true"));
+                lines.push("echo \"tf.version=$v\"".into());
+                lines.push(format!(
+                    "if [ \"$v\" != {v} ]; then echo \"the uploaded {rel} reports '$v', expected \"{v} >&2; exit 5; fi"
+                ));
+            }
+            None => lines.push(format!("chmod 644 \"$t{i}\"")),
+        }
+    }
+    for (i, f) in files.iter().enumerate() {
+        lines.push(format!("mv -f \"$t{i}\" \"$H/{}\"", f.rel));
+        lines.push(format!("printf '%s' {} > \"$H/{}.sha256\"", sh_quote(f.sha), f.rel));
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Runs [`upload_script`] for `files` (`stdin`: the content of the one without `inline`).
+async fn upload_remote(t: &dyn Transport, home: &str, files: &[Upload<'_>], stdin: Option<Vec<u8>>) -> Result<(), ApiError> {
+    let mut cmd = Cmd::new(["sh".to_string(), "-c".to_string(), upload_script(home, files)]).timeout(Duration::from_secs(600));
+    cmd.stdin = stdin;
+    let out = t.exec(&cmd).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    if out.status.code == Some(5)
+        && let Some(expected) = files.iter().find_map(|f| f.hostd_version)
+    {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let v = stdout.lines().find_map(|l| l.trim_end_matches('\r').strip_prefix("tf.version=")).unwrap_or_default();
+        return Err(version_mismatch(&format!("the uploaded tf-hostd reports `{v}` (the installed one is kept)"), expected));
+    }
+    let names: Vec<&str> = files.iter().map(|f| f.rel).collect();
+    Err(exec_err(&format!("upload {}", names.join(", ")), &out))
 }
 
 /// Local install of the hostd binary. On Windows a running daemon locks its exe, so stop it
@@ -528,46 +586,85 @@ mod tests {
         assert!(y.contains("relayUrl: ws://127.0.0.1:47591"));
     }
 
-    async fn run_upload(home: &str, sha: &str, payload: &[u8]) -> std::process::Output {
-        let script = upload_script(home, "ext/teleflock-bridge.ts", sha, false);
-        let mut child = tokio::process::Command::new("sh")
-            .args(["-c", &script])
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        use tokio::io::AsyncWriteExt;
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(payload).await.unwrap();
-        drop(stdin);
-        child.wait_with_output().await.unwrap()
+    fn local() -> tf_transport::LocalTransport {
+        tf_transport::LocalTransport::new(tokio::sync::mpsc::channel(4).0)
     }
 
+    /// The overlay (inline) and the extension (stdin) travel in one exec; a payload that does
+    /// not hash to its sha replaces nothing, not even the file that did.
     #[tokio::test]
     async fn upload_script_runs() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home with space").to_string_lossy().into_owned();
-        let payload = b"export default 1;\n";
-        let sha = sha256_hex(payload);
-        assert!(run_upload(&home, &sha, payload).await.status.success());
-        let base = Path::new(&home).join("ext");
-        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts")).unwrap(), "export default 1;\n");
-        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts.sha256")).unwrap(), sha);
+        let read = |rel: &str| std::fs::read_to_string(Path::new(&home).join(rel)).unwrap();
+        let put = |ext: &'static [u8], ext_sha: String, overlay: String| {
+            let home = home.clone();
+            async move {
+                let overlay_sha = sha256_hex(overlay.as_bytes());
+                let files = [
+                    Upload { rel: "omp-overlay.yml", sha: &overlay_sha, inline: Some(&overlay), hostd_version: None },
+                    Upload { rel: "ext/teleflock-bridge.ts", sha: &ext_sha, inline: None, hostd_version: None },
+                ];
+                upload_remote(&local(), &home, &files, Some(ext.to_vec())).await
+            }
+        };
+        let sha = sha256_hex(b"export default 1;\n");
+        put(b"export default 1;\n", sha.clone(), overlay_yaml(47591)).await.unwrap();
+        assert_eq!(read("ext/teleflock-bridge.ts"), "export default 1;\n");
+        assert_eq!(read("ext/teleflock-bridge.ts.sha256"), sha);
+        assert_eq!(read("omp-overlay.yml"), overlay_yaml(47591));
+        assert_eq!(read("omp-overlay.yml.sha256"), sha256_hex(overlay_yaml(47591).as_bytes()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700, "umask 077 home");
-            assert_eq!(std::fs::metadata(base.join("teleflock-bridge.ts")).unwrap().permissions().mode() & 0o777, 0o644);
+            let mode = |rel: &str| std::fs::metadata(Path::new(&home).join(rel)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(""), 0o700, "umask 077 home");
+            assert_eq!(mode("ext/teleflock-bridge.ts"), 0o644);
         }
 
-        // A payload that doesn't hash to the expected sha never replaces the file.
-        let out = run_upload(&home, &sha, b"export default 2;\n").await;
-        assert!(!out.status.success());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"), "{out:?}");
-        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts")).unwrap(), "export default 1;\n");
-        assert_eq!(std::fs::read_to_string(base.join("teleflock-bridge.ts.sha256")).unwrap(), sha);
-        let leftovers: Vec<_> = std::fs::read_dir(&base).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".tmp.")).collect();
-        assert!(leftovers.is_empty(), "temp file removed");
+        let e = put(b"export default 2;\n", sha.clone(), overlay_yaml(47592)).await.unwrap_err();
+        assert!(e.message.contains("checksum mismatch for ext/teleflock-bridge.ts"), "{e:?}");
+        assert!(e.retryable);
+        assert_eq!(read("ext/teleflock-bridge.ts"), "export default 1;\n");
+        assert_eq!(read("omp-overlay.yml"), overlay_yaml(47591));
+        for d in ["", "ext"] {
+            let tmp = std::fs::read_dir(Path::new(&home).join(d)).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".tmp."));
+            assert_eq!(tmp.count(), 0, "temp files removed");
+        }
+    }
+
+    /// An uploaded tf-hostd replaces the installed one only when it runs on the host and reports
+    /// the expected version, checked by the upload itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hostd_upload_checks_the_version_before_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_string_lossy().into_owned();
+        let expected = "tf-hostd 9.9.9 proto 1";
+        let upload = |payload: Vec<u8>| {
+            let home = home.clone();
+            async move {
+                let sha = sha256_hex(&payload);
+                let hostd = Upload { rel: "bin/tf-hostd", sha: &sha, inline: None, hostd_version: Some(expected) };
+                upload_remote(&local(), &home, &[hostd], Some(payload)).await
+            }
+        };
+        let script = |v: &str| format!("#!/bin/sh\necho '{v}'\n").into_bytes();
+        let installed = || std::fs::read(dir.path().join("bin/tf-hostd")).unwrap();
+        upload(script(expected)).await.unwrap();
+        assert_eq!(installed(), script(expected));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.path().join("bin/tf-hostd")).unwrap().permissions().mode() & 0o777, 0o755);
+
+        let e = upload(script("tf-hostd 0.0.1 proto 1")).await.unwrap_err();
+        assert_eq!(e.code, "version_mismatch");
+        assert!(e.message.contains("reports `tf-hostd 0.0.1 proto 1`"), "{}", e.message);
+        // Built for another architecture: it does not run at all.
+        let e = upload(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0".to_vec()).await.unwrap_err();
+        assert_eq!(e.code, "version_mismatch");
+        assert!(e.message.contains("reports ``"), "{}", e.message);
+        assert_eq!(installed(), script(expected), "the installed tf-hostd is kept");
+        assert_eq!(std::fs::read_to_string(dir.path().join("bin/tf-hostd.sha256")).unwrap(), sha256_hex(&script(expected)));
     }
 
     /// Every embedded binary decompresses to exactly the bytes its stamp describes.

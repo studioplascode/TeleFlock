@@ -356,7 +356,7 @@ Build times on 15 cores: Windows app + NSIS 7m03s cold, 3m10s warm (incl. fronte
 
 ### 10.4 Not verifiable here (no Windows box, no Android device)
 
-Windows: tray icon animation/badge rendering, toast buttons + inline reply activation, Snap Layouts flyout on `#tf-max`, Mica, protocol activation via the installer's registration, single-instance forwarding. Android: foreground service lifetime in Doze, notification actions/RemoteInput reaching Rust with the Activity destroyed, `POST_NOTIFICATIONS` prompt, haptics, deep link from a notification tap, `ACCESS_LOCAL_NETWORK` on API 37 (platform.md §5).
+Windows: tray icon animation/badge rendering (and the still comet in Calm), toast buttons + inline reply activation, Snap Layouts flyout on `#tf-max`, Mica, protocol activation via the installer's registration, single-instance forwarding, file drops onto the composer, Dispatch and terminal (`dragDropEnabled: false`), the WSL keepalive (`wsl.exe … sleep`) across reconnects, the link surviving sleep, `visibilityState`/`isVisible` after minimize and close-to-tray. Android: foreground service lifetime in Doze, notification actions/RemoteInput reaching Rust with the Activity destroyed, `POST_NOTIFICATIONS` prompt, the `RECORD_AUDIO` prompt and dictation (partial and final text, denied and blocked states, the settings link), SSH key import, the image key in the terminal's extra keys, haptics, deep link from a notification tap, `ACCESS_LOCAL_NETWORK` on API 37 (platform.md §5).
 
 ## 11. Releases and self-update
 

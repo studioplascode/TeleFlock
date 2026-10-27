@@ -1,0 +1,12 @@
+                                                   ██       v18.13.1
+
+                        Tip: `/shake` rips heavy tool results out of context to reclaim tokens
+                              without a full /compact — `/shake images` drops just images
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+▎                                                                                       󰘶 󰌒 to change thinking effort
+
+ 󰵗 ·  no-model ·  tf-bridgectl-cap-work ·  7.6K/? 󰁨
+⇄ teleflock

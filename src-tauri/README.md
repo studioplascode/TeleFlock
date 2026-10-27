@@ -8,7 +8,7 @@ Embeds `tf_client::Engine` (AppCore) and wires it to the webview and the OS.
 |---|---|---|
 | `invoke("core_call", …)` | `{ hostId: string \| null, method: string, params?: unknown }` | method result; rejects with a tf-proto `ApiError`. `app.update*` are answered by the shell (below), everything else by the engine |
 | `invoke("core_term_input", …)` | `{ hostId, termId, data: string }` | `void` (fast path, never waits for the host) |
-| `invoke("core_events", …)` | `{ channel: Channel<AppEvent> }` | `void`. Replays current state first (Profiles, Settings, Tunnels, HostStatus + HostSnapshot per host), then streams live events. Call once per page load; a reload drops older subscriptions. |
+| `invoke("core_events", …)` | `{ channel: Channel<AppEvent[]> }` | `void`. Replays current state first (Profiles, Settings, Tunnels, HostStatus + HostSnapshot per host), then streams live events, in order, in batches (a live event with whatever queued behind it; one webview eval per batch). Call once per page load; a reload drops older subscriptions. |
 
 UI intents arrive on the same channel: `{type:"openAgent", hostId, agentId}` (toast / notification /
 deep link) and `{type:"answerNext"}` (tray menu, `teleflock://answer-next`). Intents raised while no
@@ -84,6 +84,25 @@ Android only (Kotlin plugin `src-tauri/plugins/teleflock-android`, capability `t
 | `invoke("plugin:teleflock-android\|request_notification_permission")` | – | same; opens system settings if permanently denied |
 | `invoke("plugin:teleflock-android\|battery_status")` | – | `{ ignoringOptimizations: boolean }` |
 | `invoke("plugin:teleflock-android\|request_ignore_battery_optimizations")` | – | `void` |
+| `invoke("plugin:teleflock-android\|request_microphone_permission")` | – | `{ recordAudio: "granted" \| "denied" \| "prompt-with-rationale" }` once the user answered the system prompt (none when granted); `denied` = only the app's settings can grant it |
+| `invoke("plugin:teleflock-android\|open_app_settings")` | – | `void`; opens the app's page in Android's settings |
+| `invoke("plugin:teleflock-android\|dictation_available")` | – | `{ available: boolean }`: a speech recognizer is installed |
+| `invoke("plugin:teleflock-android\|start_dictation", { channel })` | `channel`: a `Channel` for the session's events | `void`; rejects `PERMISSION` (no `RECORD_AUDIO`), `UNAVAILABLE` |
+| `invoke("plugin:teleflock-android\|stop_dictation", { session })` | `session`: the channel's `id` | `void`; the phrase being spoken still arrives |
+| `invoke("plugin:teleflock-android\|cancel_dictation", { session })` | same | `void`; drops the phrase being spoken |
+
+Dictation (`Dictation.kt`, used by `src/features/session/composer/useDictation.ts` instead of the
+Web Speech API, which Android's WebView lacks): `android.speech.SpeechRecognizer` (free-form, the
+recognizer's default language), one session at a time, a newer one ends the older. Channel events:
+`{ type: "partial", text }` (the phrase so far), `{ type: "final", text }`, `{ type: "error", code,
+message }` (readable message per `SpeechRecognizer.ERROR_*`), then always `{ type: "end" }`. Like Web
+Speech's continuous mode it keeps listening across pauses (a fresh recognizer per phrase) until
+stopped; silence, or a stop, after a phrase ends it without an error. The app leaving the front
+stops it, a destroyed activity cancels it. The plugin manifest declares `RECORD_AUDIO` (with
+`android.hardware.microphone` not required) and a `<queries>` entry for
+`android.speech.RecognitionService`, without which API 30+ hides the recognizer. The composer asks
+for the permission when the mic is tapped; after a denial it explains, and once Android blocks the
+prompt it offers **Open settings**. No recognizer installed: the mic is hidden.
 
 Driven from Rust only (`run_mobile_plugin`, not in the webview ACL): `installApk { path, openSettings }`
 → `{ status: "started" | "needsPermission" }`. First checks the archive with
@@ -121,15 +140,15 @@ notification taps use it too.
 |---|---|---|
 | Notifications | WinRT toasts (tag = host/agent, group `agents`): buttons + inline reply (in-process activation), body = protocol deep link, cleared on quit | Kotlin notifications (tag = host/agent, id 1, grouped): ≤ 3 actions incl. RemoteInput reply → JNI → engine, even with the Activity gone |
 | Handled elsewhere | `Platform::retract` → removed from Action Center by tag + group (`History.RemoveGroupedTagWithId`) if that tag still shows the notification; user close (`Dismissed`/`UserCanceled`) → `Engine::notification_dismissed` | `retract` command → cancelled by tag + id if the shown notification still carries that `notificationId` extra; group summary count updated, removed with the last child; swipe-away (delete intent) → JNI `onNotificationDismissed` → `Engine::notification_dismissed` |
-| Badge | tray icon (orbiting comet while running, pink count when needs-you) + taskbar overlay + progress bar + flash | keep-alive notice text "3 running · 2 need you" |
+| Badge | tray icon (comet while running: orbiting in Lively motion, still in Calm and Reduced; pink count when needs-you) + taskbar overlay + progress bar (running: marquee in Lively, a still full bar otherwise; needs-you: paused yellow) + flash | keep-alive notice text "3 running · 2 need you" |
 | Keep-alive | window close hides to tray | `remoteMessaging` foreground service while `settings.keepAlive` and a host is connected |
 | App closed from recents | — | the keep-alive service keeps the process and the core running without an activity. `MainActivity` reports its lifecycle over JNI (`RustBridge`): Kotlin commands are skipped meanwhile (Tauri can't reach plugins without an activity), so agent notifications are not posted until the app is opened again, and the next activity gets the main window rebuilt (`restore_main_window`; Tauri creates windows once per process, tauri-apps/tauri#15671), Wry's back handler (Tauri's is bound to the first activity) and its launch intent forwarded to the plugins (deep links) |
-| Reconnect hints | window focus → `engine.resume()`, update check if due | `MainActivity.onResume` (Tauri's `RunEvent::Resumed` never fires on Android) → `engine.resume()`, keep-alive start/stop retry, pending update install or an update check if due (`onPause` marks the app as not in front); default-network change → `engine.resume()` |
+| Reconnect hints | window focus → `engine.resume(Resume::Focus)` (only links quiet for 20 s are checked, with 15 s to answer), update check if due | `MainActivity.onResume` (Tauri's `RunEvent::Resumed` never fires on Android) → `engine.resume(Resume::Foreground)` (every live link answers within 5 s), keep-alive start/stop retry, pending update install or an update check if due (`onPause` marks the app as not in front); default-network change → `engine.resume(Resume::Network)` |
 
 Linux and macOS: no OS notifications (`supports_notifications() == false`: the engine keeps them
 in the app, i.e. the inbox, tray badge and tooltip; a test notification answers `unsupported`).
 Tray icon with the same badge and menu (Linux: libayatana-appindicator / StatusNotifierItem; the
-comet stays still there), window close hides to the tray, focus → `engine.resume()` and an update check if due; macOS also
+comet stays still there), window close hides to the tray, focus → `engine.resume(Resume::Focus)` and an update check if due; macOS also
 reopens the hidden window from the Dock (`RunEvent::Reopen`). `open_external` uses `xdg-open` /
 `open`.
 

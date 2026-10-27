@@ -30,6 +30,8 @@ use crate::util::now_ms;
 pub const PARK_GRACE: Duration = Duration::from_secs(10);
 /// How often session files of parked / archived agents are checked.
 pub const PRUNE_EVERY: Duration = Duration::from_secs(60);
+/// A sessions root that stays without a verdict is logged again after this long.
+const PRUNE_REWARN: Duration = Duration::from_secs(3600);
 /// `HostInfo.pruned`: at most this many entries …
 pub const PRUNED_CAP: usize = 200;
 /// … none older than 30 days.
@@ -565,30 +567,74 @@ pub struct PruneMemory {
     known: HashSet<String>,
     /// Consecutive passes a known live agent's file was missing.
     misses: HashMap<String, u32>,
+    /// Sessions roots skipped for lack of a verdict → (reason, when it was logged).
+    warned: HashMap<String, (String, Instant)>,
+}
+
+impl PruneMemory {
+    /// The skipped roots worth a log line: new ones, ones whose reason changed and ones last logged
+    /// [`PRUNE_REWARN`] ago. Roots no longer skipped are forgotten, so a relapse logs again.
+    pub fn problems_to_log(&mut self, skipped: &[(String, String)], now: Instant) -> Vec<(String, String)> {
+        self.warned.retain(|root, _| skipped.iter().any(|(r, _)| r == root));
+        let mut out = Vec::new();
+        for (root, why) in skipped {
+            let fresh = self.warned.get(root).is_none_or(|(w, at)| w != why || now.duration_since(*at) >= PRUNE_REWARN);
+            if fresh {
+                self.warned.insert(root.clone(), (why.clone(), now));
+                out.push((root.clone(), why.clone()));
+            }
+        }
+        out
+    }
 }
 
 /// Misses in a row before an archived live agent's pane is closed.
 pub const LIVE_MISSES: u32 = 2;
 
+/// The sessions root a session file is judged with: omp keeps sessions in
+/// `<sessions>/<folder slug>/<file>`, and one file system answers for a whole root.
+fn sessions_root(file: &str) -> String {
+    let p = Path::new(file);
+    p.ancestors().nth(2).or_else(|| p.parent()).unwrap_or(p).to_string_lossy().into_owned()
+}
+
+/// One pass's verdicts ([`plan_prune`]).
+#[derive(Debug, Default, PartialEq)]
+pub struct PrunePlan {
+    /// Parked agents whose session file is gone.
+    pub parked: Vec<String>,
+    /// Archived live agents whose known file was missing on [`LIVE_MISSES`] passes in a row.
+    pub live: Vec<String>,
+    /// Sessions roots without a verdict this pass, each with the first reason, by root.
+    pub skipped: Vec<(String, String)>,
+}
+
 /// Which agents one pass prunes: parked agents whose file is missing, archived live agents
-/// whose known file was missing on [`LIVE_MISSES`] passes in a row. Any file without a verdict
-/// skips the whole pass (`None`, memory untouched): a file system that errors may err for all.
-pub fn plan_prune(
-    parked: &[(String, String)],
-    live: &[(String, String)],
-    checks: &HashMap<String, FileCheck>,
-    mem: &mut PruneMemory,
-) -> Option<(Vec<String>, Vec<String>)> {
-    let check = |f: &str| checks.get(f).cloned().unwrap_or_else(|| FileCheck::Unknown("not checked".into()));
-    if parked.iter().chain(live).any(|(_, f)| matches!(check(f), FileCheck::Unknown(_))) {
-        return None;
+/// whose known file was missing on [`LIVE_MISSES`] passes in a row. A file without a verdict
+/// skips every file under its sessions root ([`sessions_root`]) for this pass, memory untouched:
+/// a file system that errs may err for all its files. Other roots are judged as usual.
+pub fn plan_prune(parked: &[(String, String)], live: &[(String, String)], checks: &HashMap<String, FileCheck>, mem: &mut PruneMemory) -> PrunePlan {
+    let check = |f: &str| checks.get(f).cloned().unwrap_or_else(|| FileCheck::Unknown(format!("{f}: not checked")));
+    let mut skipped: BTreeMap<String, String> = BTreeMap::new();
+    for (_, f) in parked.iter().chain(live) {
+        if let FileCheck::Unknown(why) = check(f) {
+            skipped.entry(sessions_root(f)).or_insert(why);
+        }
     }
-    let gone_parked = parked.iter().filter(|(_, f)| check(f) == FileCheck::Missing).map(|(id, _)| id.clone()).collect();
+    let judged = |f: &str| !skipped.contains_key(&sessions_root(f));
+    let gone_parked = parked.iter().filter(|(_, f)| judged(f) && check(f) == FileCheck::Missing).map(|(id, _)| id.clone()).collect();
     let mut gone_live = Vec::new();
     let mut known = HashSet::new();
     let mut misses = HashMap::new();
     for (id, f) in live {
-        if check(f) == FileCheck::Present {
+        if !judged(f) {
+            if mem.known.contains(f) {
+                known.insert(f.clone());
+            }
+            if let Some(n) = mem.misses.get(f) {
+                misses.insert(f.clone(), *n);
+            }
+        } else if check(f) == FileCheck::Present {
             known.insert(f.clone());
         } else if mem.known.contains(f) {
             let n = mem.misses.get(f).copied().unwrap_or(0) + 1;
@@ -600,8 +646,9 @@ pub fn plan_prune(
             misses.insert(f.clone(), n);
         }
     }
-    *mem = PruneMemory { known, misses };
-    Some((gone_parked, gone_live))
+    mem.known = known;
+    mem.misses = misses;
+    PrunePlan { parked: gone_parked, live: gone_live, skipped: skipped.into_iter().collect() }
 }
 
 /// Checks session files at start and every [`PRUNE_EVERY`].
@@ -632,17 +679,16 @@ async fn prune_pass(ctx: &Ctx, mem: &mut PruneMemory) {
         Ok(c) => c,
         Err(_) => return,
     };
-    let Some((gone_parked, gone_live)) = plan_prune(&parked, &live_files, &checks, mem) else {
-        let why: Vec<&String> = checks.values().filter_map(|c| match c { FileCheck::Unknown(e) => Some(e), _ => None }).take(3).collect();
-        warn!(?why, "prune: session files unreadable; skipping this pass");
-        return;
-    };
-    for id in gone_parked {
+    let plan = plan_prune(&parked, &live_files, &checks, mem);
+    for (root, why) in mem.problems_to_log(&plan.skipped, Instant::now()) {
+        warn!(%root, "prune: no verdict for session files under {root} ({why}); agents whose files live there are not pruned until that changes");
+    }
+    for id in plan.parked {
         if !h.lock().life.resuming.contains_key(&id) {
             h.prune_parked(&id);
         }
     }
-    for a in live.iter().filter(|a| gone_live.contains(&a.id)) {
+    for a in live.iter().filter(|a| plan.live.contains(&a.id)) {
         let sid = a.omp.as_ref().and_then(|o| o.session_id.clone());
         match close_agent(ctx, a, None).await {
             Ok(true) => h.prune(&a.id, sid.as_deref()),
@@ -962,35 +1008,86 @@ mod tests {
         assert!(matches!(check_file(&slug), FileCheck::Unknown(_)));
     }
 
+    fn plan(parked: &[&str], live: &[&str], skipped: &[(&str, &str)]) -> PrunePlan {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect();
+        PrunePlan { parked: s(parked), live: s(live), skipped: skipped.iter().map(|(r, w)| (r.to_string(), w.to_string())).collect() }
+    }
+
+    fn checks(v: &[(&str, FileCheck)]) -> HashMap<String, FileCheck> {
+        v.iter().map(|(f, c)| (f.to_string(), c.clone())).collect()
+    }
+
+    fn pair(id: &str, f: &str) -> (String, String) {
+        (id.to_string(), f.to_string())
+    }
+
     #[test]
     fn prune_needs_verdicts_and_two_misses_for_live_agents() {
-        let pair = |id: &str, f: &str| (id.to_string(), f.to_string());
-        let parked = vec![pair("p1", "/s/p1"), pair("p2", "/s/p2")];
-        let live = vec![pair("l1", "/s/l1"), pair("l2", "/s/l2")];
-        let checks = |v: &[(&str, FileCheck)]| v.iter().map(|(f, c)| (f.to_string(), c.clone())).collect::<HashMap<_, _>>();
+        let parked = vec![pair("p1", "/s/a/p1"), pair("p2", "/s/a/p2")];
+        let live = vec![pair("l1", "/s/b/l1"), pair("l2", "/s/b/l2")];
         use FileCheck::{Missing, Present};
         let mut mem = PruneMemory::default();
 
         // l2 has no file yet (omp writes it lazily): never pruned on that.
-        let all = checks(&[("/s/p1", Present), ("/s/p2", Missing), ("/s/l1", Present), ("/s/l2", Missing)]);
-        assert_eq!(plan_prune(&parked, &live, &all, &mut mem), Some((vec!["p2".to_string()], vec![])));
+        let all = checks(&[("/s/a/p1", Present), ("/s/a/p2", Missing), ("/s/b/l1", Present), ("/s/b/l2", Missing)]);
+        assert_eq!(plan_prune(&parked, &live, &all, &mut mem), plan(&["p2"], &[], &[]));
         // l1's file vanished: one miss is not enough…
-        let gone = checks(&[("/s/p1", Present), ("/s/p2", Present), ("/s/l1", Missing), ("/s/l2", Missing)]);
-        assert_eq!(plan_prune(&parked, &live, &gone, &mut mem), Some((vec![], vec![])));
-        // …an unreadable file system skips the pass (nothing pruned, nothing forgotten)…
-        let flaky = checks(&[("/s/p1", FileCheck::Unknown("EIO".into())), ("/s/p2", Present), ("/s/l1", Missing), ("/s/l2", Missing)]);
-        assert_eq!(plan_prune(&parked, &live, &flaky, &mut mem), None);
+        let gone = checks(&[("/s/a/p1", Present), ("/s/a/p2", Present), ("/s/b/l1", Missing), ("/s/b/l2", Missing)]);
+        assert_eq!(plan_prune(&parked, &live, &gone, &mut mem), plan(&[], &[], &[]));
+        // …an unreadable file in the same sessions root skips the root (nothing pruned, nothing
+        // forgotten)…
+        let flaky = checks(&[("/s/a/p1", FileCheck::Unknown("EIO".into())), ("/s/a/p2", Missing), ("/s/b/l1", Missing), ("/s/b/l2", Missing)]);
+        assert_eq!(plan_prune(&parked, &live, &flaky, &mut mem), plan(&[], &[], &[("/s", "EIO")]));
         // …the second miss in a row closes it.
-        assert_eq!(plan_prune(&parked, &live, &gone, &mut mem), Some((vec![], vec!["l1".to_string()])));
+        assert_eq!(plan_prune(&parked, &live, &gone, &mut mem), plan(&[], &["l1"], &[]));
 
         // A file that comes back resets the count.
         let mut mem = PruneMemory::default();
-        plan_prune(&[], &live, &checks(&[("/s/l1", Present), ("/s/l2", Present)]), &mut mem);
-        plan_prune(&[], &live, &checks(&[("/s/l1", Missing), ("/s/l2", Present)]), &mut mem);
-        plan_prune(&[], &live, &checks(&[("/s/l1", Present), ("/s/l2", Present)]), &mut mem);
-        assert_eq!(plan_prune(&[], &live, &checks(&[("/s/l1", Missing), ("/s/l2", Present)]), &mut mem), Some((vec![], vec![])));
+        plan_prune(&[], &live, &checks(&[("/s/b/l1", Present), ("/s/b/l2", Present)]), &mut mem);
+        plan_prune(&[], &live, &checks(&[("/s/b/l1", Missing), ("/s/b/l2", Present)]), &mut mem);
+        plan_prune(&[], &live, &checks(&[("/s/b/l1", Present), ("/s/b/l2", Present)]), &mut mem);
+        assert_eq!(plan_prune(&[], &live, &checks(&[("/s/b/l1", Missing), ("/s/b/l2", Present)]), &mut mem), plan(&[], &[], &[]));
         // A file never checked is no verdict either.
-        assert_eq!(plan_prune(&parked, &[], &HashMap::new(), &mut mem), None);
+        assert_eq!(plan_prune(&parked, &[], &HashMap::new(), &mut mem), plan(&[], &[], &[("/s", "/s/a/p1: not checked")]));
+    }
+
+    #[test]
+    fn a_file_without_verdict_only_blocks_its_sessions_root() {
+        use FileCheck::{Missing, Present};
+        let (p1, l2) = ("/home/u/.omp/agent/sessions/-repo/p1.jsonl", "/home/u/.omp/agent/sessions/-repo/l2.jsonl");
+        // The field case: an archived agent whose session lived in a deleted lab folder.
+        let lab = "/tmp/tf-lab-resume/sessions/2026-10-22T11-44-46-293Z_x.jsonl";
+        let parked = vec![pair("p1", p1), pair("p2", "/tmp/tf-lab-resume/sessions/p2.jsonl")];
+        let live = vec![pair("l1", lab), pair("l2", l2)];
+        let mut mem = PruneMemory::default();
+        let why = format!("{lab}: its folders are gone too (unmounted?)");
+        let pass = |l2_check: FileCheck| {
+            checks(&[(p1, Missing), ("/tmp/tf-lab-resume/sessions/p2.jsonl", Missing), (lab, FileCheck::Unknown(why.clone())), (l2, l2_check)])
+        };
+        // omp's own root is judged as usual; the lab root (p2 included) is not.
+        assert_eq!(plan_prune(&parked, &live, &pass(Present), &mut mem), plan(&["p1"], &[], &[("/tmp/tf-lab-resume", &why)]));
+        assert_eq!(plan_prune(&parked, &live, &pass(Missing), &mut mem), plan(&["p1"], &[], &[("/tmp/tf-lab-resume", &why)]));
+        assert_eq!(plan_prune(&parked, &live, &pass(Missing), &mut mem), plan(&["p1"], &["l2"], &[("/tmp/tf-lab-resume", &why)]));
+    }
+
+    #[test]
+    fn prune_problems_are_logged_once_per_change_or_hour() {
+        let mut mem = PruneMemory::default();
+        let t0 = Instant::now();
+        let skip = |v: &[(&str, &str)]| v.iter().map(|(r, w)| (r.to_string(), w.to_string())).collect::<Vec<_>>();
+        let a = skip(&[("/a", "gone")]);
+        assert_eq!(mem.problems_to_log(&a, t0), a);
+        assert!(mem.problems_to_log(&a, t0 + PRUNE_EVERY).is_empty());
+        // Another root joins: only it is new.
+        let ab = skip(&[("/a", "gone"), ("/b", "EIO")]);
+        assert_eq!(mem.problems_to_log(&ab, t0 + 2 * PRUNE_EVERY), skip(&[("/b", "EIO")]));
+        // A changed reason, and the hourly reminder.
+        let ab2 = skip(&[("/a", "gone"), ("/b", "EACCES")]);
+        assert_eq!(mem.problems_to_log(&ab2, t0 + 3 * PRUNE_EVERY), skip(&[("/b", "EACCES")]));
+        assert_eq!(mem.problems_to_log(&ab2, t0 + PRUNE_REWARN), skip(&[("/a", "gone")]));
+        // Recovered, then broken again: logged again.
+        assert!(mem.problems_to_log(&[], t0 + PRUNE_REWARN + PRUNE_EVERY).is_empty());
+        assert_eq!(mem.problems_to_log(&a, t0 + PRUNE_REWARN + 2 * PRUNE_EVERY), a);
     }
 
     #[cfg(unix)]

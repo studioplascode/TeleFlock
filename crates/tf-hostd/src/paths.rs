@@ -36,6 +36,8 @@ pub struct Paths {
     pub bin: PathBuf,
     /// Automations and their run history `<home>/automations.json`.
     pub automations: PathBuf,
+    /// Files uploaded for prompts (videos) `<home>/uploads/<yyyy-mm-dd>/<name>` (`ops::upload`).
+    pub uploads: PathBuf,
     /// A home other than the default `~/.teleflock` (lab / dev instance). Derived from the path,
     /// not from whether `TF_HOSTD_HOME` is set: `attach` (run by the app without it) starts the
     /// daemon with `TF_HOSTD_HOME` = its home, and both must derive the same endpoints.
@@ -79,6 +81,7 @@ impl Paths {
             overlay: home.join("omp-overlay.yml"),
             bin: home.join("bin"),
             automations: home.join("automations.json"),
+            uploads: home.join("uploads"),
             custom,
             run,
             home,
@@ -205,6 +208,32 @@ pub fn open_private_append(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Creates `path` (and missing parents) as owner-only directories (0700 on unix); an existing
+/// `path` is tightened to 0700 too.
+pub fn create_private_dir(path: &Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Creates a new owner-only file (0600 on unix) for writing; fails if `path` exists.
+pub fn create_private_new(path: &Path) -> io::Result<File> {
+    let file = private_options().write(true).create_new(true).open(path)?;
+    restrict_open(&file)?;
+    Ok(file)
+}
+
 /// Writes `bytes` to `path` atomically (tmp file + rename); the result is owner-only (0600
 /// on unix). Every call writes its own temp file (`.<name>.<pid>.<n>.tmp`), so concurrent
 /// writers never interleave in one file; the last rename wins (callers that need ordering
@@ -236,6 +265,7 @@ mod tests {
         let p = Paths::new(PathBuf::from("/tmp/x"), true);
         assert_eq!(p.sock, PathBuf::from("/tmp/x/run/hostd.sock"));
         assert_eq!(p.ext, PathBuf::from("/tmp/x/ext/teleflock-bridge.ts"));
+        assert_eq!(p.uploads, PathBuf::from("/tmp/x/uploads"));
         assert!(p.pipe.starts_with(r"\\.\pipe\teleflock-hostd-"));
         assert_ne!(p.pipe, Paths::new(PathBuf::from("/tmp/y"), true).pipe);
     }

@@ -207,7 +207,7 @@ export function DispatchView() {
   const repoName = repo ? (auto ? autoRepo?.name : recents.find((r) => r.root === repo)?.name) ?? basename(repo) : null;
 
   const composer = useRef<DispatchComposerHandle>(null);
-  const send = (prompt: string, images: readonly DraftImage[]): boolean => {
+  const send = (prompt: string, images: readonly DraftImage[], videos: readonly string[]): boolean => {
     if (!target || !repo || !key) return false;
     if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) {
       toast({ title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.`, status: "error" });
@@ -261,6 +261,7 @@ export function DispatchView() {
       repo: root,
       prompt,
       images,
+      videos,
       base: base.param,
       baseLabel: base.shown,
       placed,
@@ -426,32 +427,40 @@ export function DispatchView() {
       hostId={workHost}
       repo={workRepo}
       draftKey={draftKey("dispatch.task", target ?? "", repo ?? "")}
+      uploadHost={hostId}
       options={options}
       onOptionsChange={useDispatch.getState().setOptions}
       onSend={send}
       disabledReason={disabledReason}
-      placeholder={repo ? `Describe a task for ${repoName}… (paste or drop images)` : "Pick a repository to dispatch to"}
+      placeholder={repo ? `Describe a task for ${repoName}… (paste or drop images and videos)` : "Pick a repository to dispatch to"}
       mobile={mobile}
     />
   );
 
   // The other launchers, for when Dispatch's one-message flow isn't what's needed.
   const link = "font-bold text-accent-hi rounded-[3px] hover:underline focus-ring";
+  // Phone: wraps between the two offers (each stays whole) rather than truncating "Fan out" away.
+  const offer = mobile ? "whitespace-nowrap" : undefined;
   const alternatives = workHost && (
-    <p className={cn("truncate px-2 text-[11px] font-semibold text-mute-2", mobile ? "mt-1" : "mt-1.5")}>
-      Need a specific branch or model?{" "}
-      <button type="button" className={link} title={ACTIONS.newWorktree.description} onClick={() => useUi.getState().openDialog({ kind: "newWorktree", hostId: workHost, cwd: workRepo ?? undefined })}>
-        {ACTIONS.newWorktree.label}
-      </button>
-      {" · "}Several attempts?{" "}
-      <button
-        type="button"
-        className={link}
-        title={ACTIONS.fanOut.description}
-        onClick={() => useUi.getState().openDialog({ kind: "fanOut", hostId: workHost, cwd: workRepo ?? undefined, prompt: composer.current?.text().trim() || undefined })}
-      >
-        {ACTIONS.fanOut.label}
-      </button>
+    <p className={cn("px-2 text-[11px] font-semibold text-mute-2", mobile ? "mt-1 leading-relaxed" : "mt-1.5 truncate")}>
+      <span className={offer}>
+        Need a specific branch or model?{" "}
+        <button type="button" className={link} title={ACTIONS.newWorktree.description} onClick={() => useUi.getState().openDialog({ kind: "newWorktree", hostId: workHost, cwd: workRepo ?? undefined })}>
+          {ACTIONS.newWorktree.label}
+        </button>
+      </span>
+      {" · "}
+      <span className={offer}>
+        Several attempts?{" "}
+        <button
+          type="button"
+          className={link}
+          title={ACTIONS.fanOut.description}
+          onClick={() => useUi.getState().openDialog({ kind: "fanOut", hostId: workHost, cwd: workRepo ?? undefined, prompt: composer.current?.text().trim() || undefined })}
+        >
+          {ACTIONS.fanOut.label}
+        </button>
+      </span>
     </p>
   );
 
@@ -614,8 +623,8 @@ function Thread({
             </div>
           )}
           <ul ref={list} className={cn("flex flex-col", mobile ? "gap-5" : "gap-6")}>
-            {visible.map((e) => (
-              <DispatchItem key={e.id} entry={e} agentId={resolved[e.id]} />
+            {visible.map((e, i) => (
+              <DispatchItem key={e.id} entry={e} agentId={resolved[e.id]} index={i} />
             ))}
           </ul>
         </ThreadCtx.Provider>

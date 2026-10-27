@@ -43,7 +43,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long an installing run waits for another daemon's run (two installs plus checks).
-const LOCK_WAIT: Duration = Duration::from_secs(12 * 60);
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(12 * 60);
 /// `host.toolsUpdate` answers once its run is done or after this long (the app's request
 /// timeout is 30 s); progress keeps arriving through `HostInfo.tools`.
 const REPLY_WITHIN: Duration = Duration::from_secs(20);
@@ -381,13 +381,14 @@ pub fn install_lock_path() -> PathBuf {
 }
 
 /// Exclusive OS file lock on [`install_lock_path`]; released on drop (also when the process dies).
-struct InstallLock {
+/// Setup installs (`ops/install.rs`) take it too.
+pub(crate) struct InstallLock {
     _file: std::fs::File,
 }
 
 impl InstallLock {
     /// Waits up to `max` for the lock (another daemon's run holds it).
-    async fn acquire(path: &Path, max: Duration) -> Result<InstallLock, String> {
+    pub(crate) async fn acquire(path: &Path, max: Duration) -> Result<InstallLock, String> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
@@ -804,7 +805,7 @@ pub fn parse_manifest(json: &str) -> Result<HerdrRelease, String> {
 
 async fn fetch_manifest(curl: &Path) -> Result<HerdrRelease, String> {
     let args = ["-sfL", "--retry", "2", "--connect-timeout", "10", "--max-time", "20", HERDR_MANIFEST_URL];
-    let out = run(curl, &args, Duration::from_secs(70), &[]).await?;
+    let out = run(curl, &args, Duration::from_secs(70), &[], &[]).await?;
     if out.code != 0 {
         return Err(format!("herdr.dev is unreachable (curl exit {})", out.code));
     }
@@ -853,10 +854,10 @@ async fn installed_version(bin: &Path, tool: Tool) -> Option<String> {
 }
 
 /// Process output: `text` = stdout then stderr, ANSI-stripped (the CLIs print to both).
-struct Out {
-    code: i32,
-    stdout: String,
-    text: String,
+pub(crate) struct Out {
+    pub(crate) code: i32,
+    pub(crate) stdout: String,
+    pub(crate) text: String,
 }
 
 async fn exec(bin: &Path, args: &[&str], timeout: Duration, tool: Tool) -> Result<Out, String> {
@@ -864,14 +865,20 @@ async fn exec(bin: &Path, args: &[&str], timeout: Duration, tool: Tool) -> Resul
         Tool::Herdr => HERDR_SCOPE_VARS,
         Tool::Omp => &[],
     };
-    run(bin, args, timeout, remove).await
+    run(bin, args, timeout, &[], remove).await
 }
 
 /// Runs a tool without a shell, stdin closed (interactive prompts take their non-interactive
-/// default), in the temp dir (omp reads project settings from its cwd), `NO_COLOR=1`. The tool
-/// runs in its own process group: on timeout (or when the run is dropped) the whole group goes,
-/// installers it started included (`bun install -g`, `npm i -g`, …).
-async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) -> Result<Out, String> {
+/// default), in the temp dir (omp reads project settings from its cwd), `NO_COLOR=1` plus `env`.
+/// The tool runs in its own process group: on timeout (or when the run is dropped) the whole
+/// group goes, installers it started included (`bun install -g`, `npm i -g`, …).
+pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(
+    bin: &Path,
+    args: &[S],
+    timeout: Duration,
+    env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> Result<Out, String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .current_dir(std::env::temp_dir())
@@ -883,6 +890,9 @@ async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) 
     for k in env_remove {
         cmd.env_remove(k);
     }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(windows)]
@@ -891,6 +901,7 @@ async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) 
         cmd.creation_flags(0x0800_0000);
     }
     let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let shown = || args.iter().map(|a| a.as_ref().to_string_lossy()).collect::<Vec<_>>().join(" ");
     let child = cmd.spawn().map_err(|e| format!("couldn't run {name}: {e}"))?;
     let pid = child.id();
     let wait = child.wait_with_output();
@@ -902,7 +913,7 @@ async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) 
         r = &mut wait => r,
         _ = tokio::time::sleep(timeout) => {
             drop(tree);
-            return Err(format!("{name} {} timed out after {} s", args.join(" "), timeout.as_secs()));
+            return Err(format!("{name} {} timed out after {} s", shown(), timeout.as_secs()));
         }
     };
     // Exited (and reaped): leave whatever it deliberately left running alone.
@@ -913,7 +924,7 @@ async fn run(bin: &Path, args: &[&str], timeout: Duration, env_remove: &[&str]) 
             let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
             Ok(Out { code: out.status.code().unwrap_or(-1), text: format!("{stdout}\n{stderr}"), stdout })
         }
-        Err(e) => Err(format!("{name} {}: {e}", args.join(" "))),
+        Err(e) => Err(format!("{name} {}: {e}", shown())),
     }
 }
 
@@ -984,7 +995,7 @@ fn after_marker(text: &str, marker: &str) -> Option<String> {
     text.lines().find_map(|l| l.find(marker).map(|i| shorten(l[i + marker.len()..].trim())))
 }
 
-fn last_line(text: &str) -> Option<String> {
+pub(crate) fn last_line(text: &str) -> Option<String> {
     text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(shorten)
 }
 
@@ -1405,7 +1416,7 @@ printf '{"version":"%s","protocol":22,"endpoint_generation":%s}' "$(cat "$d/herd
         // An "installer" in the background, then the tool itself hangs.
         std::fs::write(&tool, format!("#!/bin/sh\nsleep 30 &\necho $! > {}\nsleep 30\n", pidfile.display())).unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let Err(err) = run(&tool, &[], Duration::from_millis(700), &[]).await else { panic!("the hung tool did not time out") };
+        let Err(err) = run::<&str>(&tool, &[], Duration::from_millis(700), &[], &[]).await else { panic!("the hung tool did not time out") };
         assert!(err.contains("timed out"), "{err}");
         let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
         let mut gone = false;

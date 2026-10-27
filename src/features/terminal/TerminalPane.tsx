@@ -4,9 +4,10 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { AnimatePresence, motion } from "motion/react";
-import { ClipboardCopy, ClipboardPaste, Cpu, Search, Eye, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
+import { ClipboardCopy, ClipboardPaste, Cpu, Search, Eye, ImageUp, Keyboard, Minus, Plus, RotateCcw, ScanLine, SquareMousePointer, Zap } from "lucide-react";
 import { type CSSProperties, type Ref, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { draftKey, openLink, useHosts, useSettings } from "@/core";
+import { dragHasFiles, mediaFiles } from "@/core/clipboardImages";
 import type { TermMode, TermOpened, TermTarget, TunnelInfo } from "@/core/gen";
 import {
   Button,
@@ -29,6 +30,7 @@ import { openExternal, openTunnel } from "@/features/preview/store";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
 import { localhostUrlRanges } from "./frames";
+import { pastePathsInput, pastedMedia, pasteTextInput, pathsText, readClipboard } from "./mediaPaste";
 import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraKeys";
 import { applyMods, encodeKey } from "./keys";
 import { observeTransform } from "./observeScale";
@@ -37,6 +39,8 @@ import { type TermPhase, TermSession } from "./session";
 import { COMPACT_FONT_SIZE, DEFAULT_FONT_SIZE, TERM_FONT_FAMILY, clampFontSize, isTermFontFace, loadTermFonts, termTheme } from "./theme";
 import { setTermRenderer, useTermRenderer } from "./renderer";
 import { SearchBar } from "./SearchBar";
+import { TermUploads } from "./termUploads";
+import { UploadPill } from "./UploadPill";
 import { registerLiveTerm } from "./useLocalhostUrls";
 
 /** Imperative control of a mounted `TerminalPane` (toolbars, palette commands). */
@@ -175,6 +179,10 @@ export function TerminalPane({
   const [badge, setBadge] = useState<{ text: string; n: number } | null>(null);
   const [focused, setFocused] = useState(false);
   const [previewTunnel, setPreviewTunnel] = useState<TunnelInfo | null>(null);
+  // Files dragged over a control terminal (drop overlay).
+  const [dragging, setDragging] = useState(false);
+  const [uploads] = useState(() => new TermUploads());
+  const pickRef = useRef<HTMLInputElement>(null);
   const { tier } = useActivity(beat);
 
   const savedFont = clampFontSize(terminalFontSize || DEFAULT_FONT_SIZE);
@@ -567,17 +575,86 @@ export function TerminalPane({
     return true;
   }, []);
 
+  /**
+   * Images / videos pasted, dropped or picked: upload them to the host, then paste their host paths
+   * into the pane (omp attaches them; a shell gets the path). Control mode only.
+   */
+  const sendMedia = useCallback(
+    async (files: readonly Blob[]) => {
+      const attached = () => {
+        const s = sessionRef.current;
+        return s !== null && s.phase.k === "live" && s.currentTermId !== null && cbRef.current.hostOnline;
+      };
+      if (!interactive) return;
+      if (!attached()) {
+        toast({ title: "Not attached", description: "Reattach the terminal, then try again.", status: "error" });
+        return;
+      }
+      const res = await uploads.run(hostId, files);
+      for (const s of res.skipped) toast({ title: `Not uploaded: ${s.name}`, description: s.reason, status: "error" });
+      if (res.cancelled) return;
+      if (res.paths.length > 0) {
+        if (attached()) sessionRef.current?.input(pastePathsInput(res.paths));
+        else {
+          const text = pathsText(res.paths);
+          toast({
+            title: "Not pasted: the terminal detached",
+            description: `The upload is on the host: ${text}`,
+            status: "error",
+            action: { label: "Copy path", onClick: () => void navigator.clipboard.writeText(text).catch(() => {}) },
+          });
+        }
+      }
+      if (res.failed) {
+        const { name, error } = res.failed;
+        toast({ title: `Couldn't upload ${name}`, description: error.hint ? `${error.message} ${error.hint}` : error.message, status: "error" });
+      }
+    },
+    [interactive, hostId, uploads],
+  );
+
+  /** Clipboard text, as one bracketed paste so its line breaks stay text (`pasteTextInput`). */
+  const sendText = useCallback(
+    (text: string) => {
+      if (interactive && text) sessionRef.current?.input(pasteTextInput(text));
+    },
+    [interactive],
+  );
+
   const paste = useCallback(async () => {
     const term = termRef.current;
     if (!term || !interactive) return;
     try {
-      const text = await navigator.clipboard.readText();
-      if (text) term.paste(text);
+      const clip = await readClipboard();
+      if (clip.media.length > 0) void sendMedia(clip.media);
+      else if (clip.text) sendText(clip.text);
     } catch {
       toast({ title: "Paste unavailable", description: "Allow clipboard access, or use Ctrl+V.", status: "error" });
     }
     term.focus();
-  }, [interactive]);
+  }, [interactive, sendMedia, sendText]);
+
+  // Ctrl+V / the webview's own Paste. Capture phase on an ancestor, so it runs before xterm's paste
+  // listener: images or videos with no text are uploaded, text goes in as one bracketed paste.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    const term = termRef.current;
+    if (!inst || !wrap || !term || !interactive) return;
+    const onPaste = (e: ClipboardEvent) => {
+      if (!(e.target instanceof Node) || !term.element?.contains(e.target)) return;
+      const files = pastedMedia(e.clipboardData);
+      const text = files.length === 0 ? (e.clipboardData?.getData("text/plain") ?? "") : "";
+      if (files.length === 0 && !text) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (files.length > 0) void sendMedia(files);
+      else sendText(text);
+    };
+    wrap.addEventListener("paste", onPaste, true);
+    return () => wrap.removeEventListener("paste", onPaste, true);
+  }, [inst, interactive, sendMedia, sendText]);
+  // Another attachment (pane, mode, host) or unmount: drop what was on its way to this one.
+  useEffect(() => () => uploads.cancel(), [uploads, inst]);
 
   const scrollQueue = useRef({ lines: 0, raf: 0 });
   const queueScroll = useCallback((lines: number) => {
@@ -635,7 +712,7 @@ export function TerminalPane({
         setSearchOpen(true);
         return false;
       }
-      // Ctrl+V / Ctrl+Shift+V: let the browser fire `paste` on xterm's textarea (bracketed paste aware).
+      // Ctrl+V / Ctrl+Shift+V: let the browser fire `paste`; the capture listener above sends it.
       if (ctrl && k === "v") return false;
       if (ctrl && !e.shiftKey && !e.altKey && (k === "=" || k === "+" || k === "-" || k === "0") && !compact) {
         e.preventDefault();
@@ -836,6 +913,30 @@ export function TerminalPane({
       className={cn("relative min-h-0 flex-1 overflow-hidden", compact ? "p-1" : "px-2.5 pt-2 pb-1")}
       style={frameStyle}
       onClick={() => interactive && termRef.current?.focus()}
+      // Dropped images / videos: uploaded, then their host paths are pasted (control mode). Other
+      // files are refused, and no drop ever navigates the webview to the file.
+      onDragOver={(e) => {
+        if (compact || !dragHasFiles(e.dataTransfer)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = interactive ? "copy" : "none";
+        if (interactive) setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (!(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget))) setDragging(false);
+      }}
+      onDrop={(e) => {
+        setDragging(false);
+        if (compact || (!dragHasFiles(e.dataTransfer) && e.dataTransfer.files.length === 0)) return;
+        e.preventDefault();
+        if (!interactive) return;
+        const files = mediaFiles(e.dataTransfer);
+        if (files.length === 0) {
+          toast({ title: "Only images and videos", description: "Drop an image or a video to paste its path on the host.", status: "error" });
+          return;
+        }
+        termRef.current?.focus();
+        void sendMedia(files);
+      }}
     >
       <div
         ref={hostRef}
@@ -862,6 +963,24 @@ export function TerminalPane({
           />
         )}
       </AnimatePresence>
+      <AnimatePresence>
+        {dragging && (
+          <motion.div
+            key="drop"
+            aria-hidden
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="pointer-events-none absolute inset-0 z-raised grid place-items-center bg-[rgb(12_10_20/0.62)] shadow-[inset_0_0_0_2px_var(--color-accent),inset_0_0_36px_-8px_rgb(163_92_240/0.6)]"
+          >
+            <span className="flex items-center gap-2 rounded-full bg-[rgb(20_20_28/0.92)] px-3.5 py-2 text-xs font-bold text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]">
+              <ImageUp className="size-4 text-accent-hi" />
+              Drop to upload · its host path is pasted
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <PaneOverlay
         phase={phase}
         compact={compact}
@@ -881,7 +1000,8 @@ export function TerminalPane({
         }
       />
       {!compact && (
-        <div className="pointer-events-none absolute top-2 right-3 flex items-center gap-1.5">
+        <div className="pointer-events-none absolute top-2 right-3 flex min-w-0 items-center gap-1.5">
+          <UploadPill uploads={uploads} touch={touchUi} />
           <AnimatePresence>
             {badge && (
               <motion.span
@@ -1008,16 +1128,31 @@ export function TerminalPane({
         </div>
       )}
       {showExtraKeys && (
-        <ExtraKeys
-          mods={mods}
-          onKey={onExtraKey}
-          onSetMod={onSetMod}
-          onPaste={() => void paste()}
-          className={cn(
-            "shrink-0 border-t border-line bg-[linear-gradient(180deg,var(--color-tile-1),var(--color-chrome))] transition-opacity duration-300",
-            !live && "pointer-events-none opacity-45",
-          )}
-        />
+        <>
+          <input
+            ref={pickRef}
+            type="file"
+            accept="image/*,video/*"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = [...(e.currentTarget.files ?? [])];
+              e.currentTarget.value = "";
+              if (files.length > 0) void sendMedia(files);
+            }}
+          />
+          <ExtraKeys
+            mods={mods}
+            onKey={onExtraKey}
+            onSetMod={onSetMod}
+            onPaste={() => void paste()}
+            onPickMedia={() => pickRef.current?.click()}
+            className={cn(
+              "shrink-0 border-t border-line bg-[linear-gradient(180deg,var(--color-tile-1),var(--color-chrome))] transition-opacity duration-300",
+              !live && "pointer-events-none opacity-45",
+            )}
+          />
+        </>
       )}
       {/* keyboard focus: typing goes to this pane */}
       {interactive && (

@@ -296,7 +296,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                         );
                       })}
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                       <span className="text-2xs font-bold text-mute">Place it</span>
                       <SegmentedControl
                         size="sm"

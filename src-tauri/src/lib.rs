@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use tauri::{App, AppHandle, Manager, RunEvent, Wry, webview::PageLoadEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
-use tf_client::{Engine, EngineConfig};
+use tf_client::{Engine, EngineConfig, Resume};
 use tf_proto::AppEvent;
 
 use crate::core::{Core, CoreState};
@@ -154,21 +154,22 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Keeps the tray animation in line with the user's motion preference.
+/// Keeps the tray and taskbar animation in line with the user's motion preference: only Lively
+/// (`full`) animates them; Calm (`system`, the default) and Reduced keep them still.
 #[cfg(desktop)]
 fn watch_motion(core: CoreState, tray: Arc<tray::Tray<Wry>>) {
     use tf_proto::{MotionPref, Settings};
-    let reduced = |s: &Settings| s.motion == MotionPref::Reduced;
+    let lively = |s: &Settings| s.motion == MotionPref::Full;
     tauri::async_runtime::spawn(async move {
         let mut rx = core.engine.subscribe();
         if let Ok(v) = core.engine.call(None, "settings.get", serde_json::Value::Null).await
             && let Ok(s) = serde_json::from_value::<Settings>(v)
         {
-            tray.set_reduced_motion(reduced(&s));
+            tray.set_lively(lively(&s));
         }
         loop {
             match rx.recv().await {
-                Ok(AppEvent::Settings { settings }) => tray.set_reduced_motion(reduced(&settings)),
+                Ok(AppEvent::Settings { settings }) => tray.set_lively(lively(&settings)),
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -223,7 +224,7 @@ fn install_android_sink() -> Arc<std::sync::OnceLock<AppHandle<Wry>>> {
         match ev {
             NativeEvent::Action(a) => core.notification_action(a.host_id, a.notification_id, a.action_id, a.reply),
             NativeEvent::Dismissed(r) => core.engine.notification_dismissed(&r.host_id, &r.notification_id),
-            NativeEvent::NetworkChanged => core.engine.resume(),
+            NativeEvent::NetworkChanged => core.engine.resume(Resume::Network),
             NativeEvent::ActivityResumed { .. } => {}
         }
     });
@@ -241,7 +242,7 @@ fn activity_resumed(app: &AppHandle<Wry>, needs_window: bool) {
         restore_main_window(app);
     }
     if let Some(core) = app.try_state::<CoreState>() {
-        core.engine.resume();
+        core.engine.resume(Resume::Foreground);
     }
     if let Some(p) = app.try_state::<Arc<TauriPlatform>>() {
         p.sync_keep_alive();
@@ -320,7 +321,9 @@ pub fn run() {
                     u.foreground();
                 }
                 if let Some(core) = window.try_state::<CoreState>() {
-                    core.engine.resume();
+                    // Desktop focus comes with every alt-tab: only quiet links are checked, and
+                    // given longer (`Resume::Focus`). Android keeps its 5 s check of every link.
+                    core.engine.resume(if cfg!(desktop) { Resume::Focus } else { Resume::Foreground });
                 }
             }
             _ => {}

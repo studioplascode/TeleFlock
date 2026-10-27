@@ -4,7 +4,8 @@ import type { Severity } from "./Severity";
 export type SetupIssue = { 
 /**
  * Stable id, also the fix id accepted by `host.setupApply`
- * (e.g. `install-herdr-integration`, `enable-global-sharing`, `install-global-bridge`).
+ * (e.g. `install-herdr-integration`, `enable-global-sharing`, `install-global-bridge`,
+ * `install-omp`, `install-bun`, `install-herdr`, `install-gh`, `install-git`, `install-ffmpeg`).
  */
 id: string, severity: Severity, title: string, detail: string, 
 /**

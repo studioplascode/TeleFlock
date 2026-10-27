@@ -1,4 +1,4 @@
-import { BellOff, Brain, Sparkles } from "lucide-react";
+import { BellOff, Brain, Sparkles, Trash2 } from "lucide-react";
 import { AnimatePresence, motion, useAnimate } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { navigate, useAgent, useCore, useHostStale, useHosts } from "@/core";
@@ -22,13 +22,15 @@ import {
 import { hostAccent } from "@/features/hosts/kinds";
 import { ShipStepper } from "@/features/review/ShipPanel";
 import { ACTIONS, type AgentStateId, agentStateId, agentStateWord, stateTime } from "@/features/shell/vocab";
-import { archiveWithUndo, canReview, openAgent, openTerminal, promptAgent, stopAgent, useMuted } from "./agentActions";
+import { archiveWithUndo, canReview, deleteWorktree, openAgent, openTerminal, promptAgent, stopAgent, useMuted } from "./agentActions";
 import { CardContextMenu, CardMenuButton } from "./CardMenu";
 import { LANE_BY_COLUMN } from "./lanes";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { ParkedChip } from "./ParkedChip";
 import { QuickAnswer } from "./QuickAnswer";
+import { RepoTag } from "./RepoTag";
 import { useShipMemo } from "./shipMemo";
+import { PrProbe, shippedWords, useShippedPr } from "./worktreePr";
 
 const NUDGE_EVERY_MS = 20_000;
 
@@ -147,7 +149,28 @@ function StateTime({ agent, state, stale, className }: { agent: Agent & { hostId
   return <span className={className}>{stateTime(state, since, now)}</span>;
 }
 
-/** Review card zone 4: the next ship step as the primary button (from host state, or what Review last saw), Mark done, Open. */
+/**
+ * "Delete worktree…" for a Review/Done card whose linked worktree's pull request is merged or closed
+ * (`useShippedPr`; the card's `PrProbe` asks gh). Renders nothing until then.
+ */
+function DeleteWorktreeButton({ agentKey, andDone }: { agentKey: string; andDone: boolean }) {
+  const pr = useShippedPr(agentKey);
+  if (!pr) return null;
+  return (
+    <Tooltip content={`${shippedWords(pr)}: delete the checkout folder${andDone ? " and mark it done" : ""} (asks first); the branch stays`}>
+      <button
+        type="button"
+        className="inline-flex h-7 items-center gap-1 rounded-sm bg-error/12 px-2.5 text-2xs font-bold text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)] pressable focus-ring hover:bg-error hover:text-white"
+        onClick={() => void deleteWorktree(agentKey)}
+      >
+        <Trash2 className="size-3 shrink-0" aria-hidden />
+        {ACTIONS.deleteWorktree.label}
+      </button>
+    </Tooltip>
+  );
+}
+
+/** Review card zone 4: the next ship step as the primary button (from host state, or what Review last saw), Mark done, Open, Delete worktree once shipped. */
 function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; agentKey: string }) {
   const repo = useCore((s) => s.hosts[agent.hostId]?.state.workspaces.find((w) => w.id === agent.workspaceId)?.repo);
   const memo = useShipMemo((s) => s.byWorkspace[`${agent.hostId}/${agent.workspaceId}`]);
@@ -191,6 +214,7 @@ function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; ag
         <button type="button" className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink" onClick={() => openAgent(agentKey)}>
           Open
         </button>
+        <DeleteWorktreeButton agentKey={agentKey} andDone />
       </div>
     </>
   );
@@ -295,8 +319,16 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         </div>
       </>
     );
-  } else if (lane === "done" && agent.live.line) {
-    body = <p className="mt-1.5 line-clamp-1 text-xs text-mute">{agent.live.line}</p>;
+  } else if (lane === "done") {
+    body = (
+      <>
+        {agent.live.line && <p className="mt-1.5 line-clamp-1 text-xs text-mute">{agent.live.line}</p>}
+        {/* collapses while there's nothing to offer */}
+        <div className="mt-2.5 flex empty:hidden" onClick={stop} onPointerDown={stop}>
+          <DeleteWorktreeButton agentKey={agentKey} andDone={false} />
+        </div>
+      </>
+    );
   }
 
   const model = omp?.model;
@@ -389,13 +421,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             )}
             {agent.parked && <ParkedChip agentKey={agentKey} />}
             {multiHost && <HostTag hostId={agent.hostId} />}
-            {(agent.repo || agent.branch) && (
-              <span className="max-w-full min-w-0 truncate font-mono text-2xs text-mute-2" title={[agent.repo, agent.branch].filter(Boolean).join(" · ")}>
-                {agent.repo}
-                {agent.repo && agent.branch && " · "}
-                {agent.branch}
-              </span>
-            )}
+            <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} sunset={isHero} />
           </div>
           <h4 className={cn("mt-0.5 font-sans leading-snug font-bold wrap-break-word text-ink", lane === "done" ? "line-clamp-1 text-xs" : "line-clamp-2 text-sm")}>
             {agent.title || (fresh ? "New session" : agent.name)}
@@ -408,6 +434,9 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
 
       {/* (5) meters */}
       {meters}
+
+      {/* Review/Done in a linked worktree: is its PR merged or closed? (lazy, cached; feeds Delete worktree) */}
+      {(lane === "review" || lane === "done") && !fresh && !floating && <PrProbe agentKey={agentKey} />}
 
       {/* hover actions: quick tools for running cards, the ⋯ menu everywhere */}
       {!floating && (

@@ -4,8 +4,8 @@
  * `animate-*` utility) so the policies below can govern it in one place:
  * - html[data-motion="reduced"]: nothing loops.
  * - html[data-motion="calm"] (default): the screen holds still when nothing happens. Running things
- *   are static; attention loops (needs-you breath/ping/glow, shimmering "Thinking…") play a few
- *   cycles when they appear, then rest on their last frame. Only Lively loops forever.
+ *   and shimmer text are static; attention loops (needs-you breath/ping/glow) play a few cycles
+ *   when they appear, then rest on their last frame. Only Lively loops forever.
  * - html[data-active="false"] (window hidden or unfocused, any level): every loop pauses in place.
  * No permanent `will-change`: a running animation promotes its element by itself, and a promoted
  * layer that sits still only costs GPU memory and compositing work.
@@ -89,8 +89,8 @@ html[data-motion="reduced"] .tf-fade-ok * {
 /* ---------- calm motion (default) ----------
  * The screen holds still when nothing happens. Running things are static: orbs are plain state
  * dots, todo rings drop their comet, subagent swarms stop orbiting, the ambient glow doesn't drift,
- * the tool ring and glow borders stand. Attention loops (needs-you breath, ping, sunset pulse, glow,
- * shimmering "Thinking…") play three cycles when they appear, then stop; the needs-you card nudge
+ * the tool ring, glow borders and shimmer text ("Thinking…", "reconnecting") stand. Attention loops
+ * (needs-you breath, ping, sunset pulse, glow) play three cycles when they appear, then stop; the needs-you card nudge
  * (every 20 s, JS) keeps asking. They end on the element's base style (no `fill-mode: forwards`: a
  * filled transform/opacity animation keeps its compositor layer forever), so the base styles below
  * match each loop's last frame. Carets (only while tokens stream), skeletons and progress bars
@@ -112,7 +112,9 @@ html[data-motion="calm"] .tf-orb__halo { opacity: 0.25; transform: scale(0.8); }
 html[data-motion="calm"] :is(.tf-orb__ping, .animate-ping-soft) { opacity: 0; }
 html[data-motion="calm"] .animate-ping { animation-name: tf-ping; opacity: 0; }
 html[data-motion="calm"] .animate-breathe:not([role="dialog"] *) { animation-name: tf-breathe-rest; }
-html[data-motion="calm"] .tf-shimmer-text { background-position: -50% 0; }
+/* Shimmer text stands still in Calm: a background-position loop repaints on the main thread every
+ * frame, and a host flapping between reconnecting and offline would re-arm its three cycles each time. */
+html[data-motion="calm"] .tf-shimmer-text { background-position: -50% 0; animation: none; }
 
 /* ---------- inactive window (hidden or unfocused): every loop pauses where it is ---------- */
 html[data-active="false"] :is(.tf-loop, .tf-shimmer-text, .tf-sky__flock, .tf-sky__bird, .tf-sky__bird path, .animate-spin, .animate-spin-slow, .animate-ping, .animate-ping-soft, .animate-pulse, .animate-breathe, .animate-blink, .animate-shimmer, .animate-gradient-pan, .animate-sun-pulse):not(.tf-keep),
@@ -121,6 +123,15 @@ html[data-active="false"] .tf-loop::after,
 html[data-active="false"] .sun-pulse::after {
   animation-play-state: paused !important;
 }
+
+/* ---------- values that change: glide in Lively only ----------
+ * A sparkline path morphing (CSS `d`), a bar resizing (width, flex-grow) or a glow filter on a
+ * moving arc costs main-thread or raster work on every frame. Calm and Reduced jump straight to the
+ * new value; Lively glides, and only while the window is active. */
+html[data-motion="full"][data-active="true"] .tf-spark-path { transition: d 0.6s cubic-bezier(0.16, 1, 0.3, 1); }
+html[data-motion="full"][data-active="true"] .tf-glide-width { transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
+html[data-motion="full"][data-active="true"] .tf-glide-grow { transition: flex-grow 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
+html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--st-rgb) / 0.8)); }
 
 @layer components {
 /* ---------- StatusOrb ---------- */

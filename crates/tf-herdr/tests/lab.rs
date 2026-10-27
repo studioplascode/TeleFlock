@@ -63,13 +63,17 @@ async fn lab_end_to_end() {
 
     // ---- agent -----------------------------------------------------------
     let started = client
-        .agent_start(&AgentStart {
-            name: "hhomp".into(),
-            kind: "omp".into(),
-            pane_id: root.clone(),
-            args: MODEL_ARGS.iter().map(|s| s.to_string()).collect(),
-            timeout_ms: Some(90_000),
-        })
+        .agent_start(
+            &AgentStart {
+                name: "hhomp".into(),
+                kind: "omp".into(),
+                pane_id: root.clone(),
+                args: MODEL_ARGS.iter().map(|s| s.to_string()).collect(),
+                timeout_ms: Some(90_000),
+            },
+            // The workspace was just created: its shell may still be starting.
+            Duration::from_secs(45),
+        )
         .await
         .expect("agent_start");
     println!("[agent_start] argv={:?} status={:?}", started.argv, started.agent.agent_status);

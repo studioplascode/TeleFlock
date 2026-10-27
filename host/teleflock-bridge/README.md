@@ -11,6 +11,7 @@ cp teleflock-bridge.ts ~/.omp/agent/extensions/ # global install (needs the user
 
 - **Socket.** The extension connects to `<home>/run/bridge.sock` (Windows: `\\.\pipe\teleflock-bridge-<USERNAME>[-<hash>]`). It resolves `<home>` from `TF_BRIDGE_SOCK` (which overrides the whole endpoint), then from its own location when deployed as `<home>/ext/teleflock-bridge.ts`, then `TF_HOSTD_HOME`, then `~/.teleflock`.
 - **Retry.** It retries every 5 s while hostd is absent.
+- **One per process** (1.4.0). A process that loads several copies (the global install plus TeleFlock's `-e` copy, maybe of different versions) elects one through a `globalThis[Symbol.for("teleflock.bridge")]` slot: the highest version, else the first claimant, connects; the others stay silent, and a newer copy loading later takes over. Older copies (< 1.4.0) don't know the slot; hostd routes to the newest bridge of a pid. See the protocol doc's "One bridge per omp process".
 - **TUI footprint.** Its only output is a dim `⇄ teleflock` status notice while connected.
 - **Scope.** Only the main session is bridged; subagents are ignored.
 
@@ -24,7 +25,7 @@ cp teleflock-bridge.ts ~/.omp/agent/extensions/ # global install (needs the user
 | **Interaction** | `resolvePlanReview`, `btw` (omp's own `/btw`: in the TUI and its BTW history; `btwId` follows up), `btwCancel`, `getBtwHistory`, `slash`, `dequeue`, `abort` |
 | **Reads** | `getTree`, `getQueue`, `getCommands`, `getState`, `ping` |
 
-TUI-only commands run through the composer's own submit handler, so no herdr keystroke injection is needed and the operator's draft is preserved. Tree, branch and new-session control use a command context, which the extension captures once through its hidden `/teleflock-attach` command. See the protocol doc's "TUI mechanics" section.
+TUI-only commands run through the composer's own submit handler, so no herdr keystroke injection is needed and the operator's draft is preserved. Tree, branch and new-session control use a command context, which the extension captures once per process through its hidden `/teleflock-control` command (older copies register `/teleflock-attach` and keep the context to themselves); every 1.4.0+ copy stores the context in the shared slot. See the protocol doc's "TUI mechanics" section.
 
 **Schema dump mode** (1.2.0). With `TF_OMP_SCHEMA_OUT=<file>` set, the extension skips all of the above: it writes omp's settings schema (`config/all-settings` → `orderedSettings()` definitions) to `<file>` and exits. tf-hostd uses it for `omp.settings` (protocol doc "Schema dump").
 

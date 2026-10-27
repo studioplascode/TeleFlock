@@ -1,6 +1,6 @@
-import { ChevronDown, Server, Stethoscope, Trash2 } from "lucide-react";
+import { ChevronDown, KeyRound, Server, ShieldCheck, Stethoscope, Trash2, Upload, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   BottomSheet,
   Button,
@@ -13,33 +13,78 @@ import {
   Select,
   spring,
   Switch,
+  Textarea,
   toast,
   useIsMobile,
 } from "@/design";
 import { core, draftKey, useDraftState, useHosts, useUi } from "@/core";
-import type { DiagReport, HostKind, HostProfile, WslDistro } from "@/core/gen";
+import type { DiagReport, HostKind, HostProfile, HostSecrets, SecretStatus, SshAuth, WslDistro } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { useAppInfo } from "./appInfo";
 import { connectAndFollow } from "./ConnStatusCard";
 import { CopyCommand, ExtLink } from "./CopyCommand";
 import { Diagnostics } from "./Diagnostics";
-import { availableKinds, defaultHostName, HERDR_URL, HOST_COLORS, hostAccent, hostGroups, KIND_META, MAX_GROUP_LEN, newHostId, normalizeGroup, OMP_MIN_VERSION, OMP_URL, TAILSCALE_SSH_COMMAND } from "./kinds";
+import {
+  AUTH_META,
+  AUTH_METHODS,
+  availableKinds,
+  defaultHostName,
+  HERDR_URL,
+  HOST_COLORS,
+  hostAccent,
+  hostAuth,
+  hostGroups,
+  importsKeys,
+  KEY_PATH_SUGGESTIONS,
+  KIND_META,
+  MAX_GROUP_LEN,
+  newHostId,
+  normalizeGroup,
+  OMP_MIN_VERSION,
+  OMP_URL,
+  TAILSCALE_SSH_COMMAND,
+} from "./kinds";
 import { requestSetup } from "./setupFocus";
 
 function blankProfile(kind: HostKind): HostProfile {
   return { id: "", name: "", kind, herdrSession: "default", autoConnect: true, port: 22, color: HOST_COLORS[0] };
 }
 
-/** Validation errors per field (empty when valid). */
-function validate(p: HostProfile): Partial<Record<"name" | "address" | "port" | "herdrSession" | "relayPort", string>> {
-  const e: Partial<Record<"name" | "address" | "port" | "herdrSession" | "relayPort", string>> = {};
+/**
+ * Sign-in secrets typed in this editor session. Memory only: never part of the persisted draft
+ * (localStorage), sent with save / test and dropped when the editor closes.
+ */
+interface SecretInput {
+  password: string;
+  /** Imported or pasted private key (Android). */
+  privateKey: string;
+  /** File the key was imported from. */
+  keyFile?: string;
+  passphrase: string;
+}
+
+const NO_SECRETS: SecretInput = { password: "", privateKey: "", passphrase: "" };
+
+/** Imported key files above this size are not private keys. */
+const MAX_KEY_FILE_BYTES = 64 * 1024;
+
+type FieldKey = "name" | "address" | "user" | "port" | "keyPath" | "password" | "privateKey" | "herdrSession" | "relayPort";
+
+/** Validation errors per field (empty when valid). `stored`: the secrets the app already keeps for this host. */
+function validate(p: HostProfile, s: SecretInput, stored: SecretStatus | null): Partial<Record<FieldKey, string>> {
+  const e: Partial<Record<FieldKey, string>> = {};
   if (!p.name.trim() && !defaultHostName(p)) e.name = "Give the host a name.";
   if (p.kind === "tailscaleSsh") {
+    const auth = hostAuth(p);
     const a = p.address?.trim() ?? "";
-    if (!a) e.address = "MagicDNS name or tailnet IP, e.g. forge or 100.64.0.7.";
+    if (!a) e.address = auth === "tailscale" ? "MagicDNS name or tailnet IP, e.g. forge or 100.64.0.7." : "Host name or IP of the host.";
     else if (/\s|@|\//.test(a)) e.address = "Just the host name or IP (put the user in the User field).";
     if (p.port !== undefined && (!Number.isInteger(p.port) || p.port < 1 || p.port > 65535)) e.port = "1–65535";
+    if (auth !== "tailscale" && !p.user?.trim()) e.user = "Your user name on the host.";
+    if (auth === "key" && !importsKeys && !p.keyPath?.trim()) e.keyPath = "Path to your private key, e.g. ~/.ssh/id_ed25519.";
+    if (auth === "key" && importsKeys && !s.privateKey.trim() && !stored?.privateKey) e.privateKey = "Import or paste your private key.";
+    if (auth === "password" && !s.password && !stored?.password) e.password = "Enter the password.";
   }
   if (!/^[A-Za-z0-9_.-]+$/.test(p.herdrSession)) e.herdrSession = "Letters, digits, dot, dash or underscore.";
   if (p.relayPort !== undefined && (!Number.isInteger(p.relayPort) || p.relayPort < 1024 || p.relayPort > 65535)) e.relayPort = "1024–65535";
@@ -53,10 +98,17 @@ function normalize(p: HostProfile): HostProfile {
     delete out.address;
     delete out.user;
     delete out.port;
+    delete out.auth;
+    delete out.keyPath;
   } else {
     out.address = p.address?.trim();
     if (!p.user?.trim()) delete out.user;
     else out.user = p.user.trim();
+    const auth = hostAuth(p);
+    if (auth === "tailscale") delete out.auth;
+    const keyPath = p.keyPath?.trim();
+    if (auth === "key" && !importsKeys && keyPath) out.keyPath = keyPath;
+    else delete out.keyPath;
   }
   if (p.kind !== "wsl") delete out.distro;
   const group = normalizeGroup(p.group);
@@ -64,6 +116,16 @@ function normalize(p: HostProfile): HostProfile {
   else delete out.group;
   if (!out.id) out.id = newHostId(out.name);
   return out;
+}
+
+/** The secrets save / test send: what the sign-in method uses and the user typed (absent = keep the saved ones). */
+function secretsPayload(p: HostProfile, s: SecretInput): HostSecrets | undefined {
+  const auth = hostAuth(p);
+  const out: HostSecrets = {};
+  if (auth === "password" && s.password) out.password = s.password;
+  if (auth === "key" && importsKeys && s.privateKey.trim()) out.privateKey = s.privateKey;
+  if (auth === "key" && s.passphrase) out.passphrase = s.passphrase;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function WslPicker({ value, onChange }: { value?: string; onChange: (v: string) => void }) {
@@ -106,7 +168,7 @@ function WslPicker({ value, onChange }: { value?: string; onChange: (v: string) 
 }
 
 /** What must already be on the machine for a kind to work, said before the first failed connect. */
-function Prerequisites({ kind }: { kind: HostKind }) {
+function Prerequisites({ kind, auth }: { kind: HostKind; auth: SshAuth }) {
   if (kind === "demo") return null;
   const tools = (
     <>
@@ -116,7 +178,11 @@ function Prerequisites({ kind }: { kind: HostKind }) {
   return (
     <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-mute-2">
       <span className="font-bold text-mute">Before you start:</span>
-      {kind === "tailscaleSsh" ? (
+      {kind === "tailscaleSsh" && auth !== "tailscale" ? (
+        <span>
+          On the host: an sshd that accepts your {auth === "key" ? "key" : "password"}, plus {tools}
+        </span>
+      ) : kind === "tailscaleSsh" ? (
         <>
           <span>On the host:</span>
           <span className="inline-flex min-w-0 items-center">
@@ -133,22 +199,190 @@ function Prerequisites({ kind }: { kind: HostKind }) {
   );
 }
 
-function Advanced({ children }: { children: ReactNode }) {
-  const [open, setOpen] = useState(false);
+/** Collapsed section: `label` toggles it; `aside` is shown next to the label while it is closed. */
+function Advanced({ label = "Advanced", aside, defaultOpen = false, className = "grid gap-3 pt-3 sm:grid-cols-2", children }: { label?: string; aside?: ReactNode; defaultOpen?: boolean; className?: string; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <div>
       <button type="button" className="inline-flex items-center gap-1 rounded-xs text-xs font-bold text-mute hover:text-ink focus-ring" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        Advanced
+        {label}
         <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+        {aside && !open && <span className="ml-1 font-semibold text-mute-2">{aside}</span>}
       </button>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={spring.smooth} className="overflow-hidden">
-            <div className="grid gap-3 pt-3 sm:grid-cols-2">{children}</div>
+            <div className={className}>{children}</div>
           </motion.div>
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+const SAVED_PLACEHOLDER = "Saved · type to replace";
+
+/**
+ * "Advanced: authentication": how an SSH host signs in. Tailscale SSH stays the default; a private
+ * key (a file on desktop, imported or pasted on Android) or a password are for hosts without it.
+ * Secrets live in `secrets` (memory) until save; `stored` says which ones the app already keeps.
+ */
+function SignInSection({
+  p,
+  set,
+  secrets,
+  setSecret,
+  stored,
+  errors,
+}: {
+  p: HostProfile;
+  set: (patch: Partial<HostProfile>) => void;
+  secrets: SecretInput;
+  setSecret: (patch: Partial<SecretInput>) => void;
+  stored: SecretStatus | null;
+  errors: Partial<Record<FieldKey, string>>;
+}) {
+  const auth = hostAuth(p);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importFile = (file: File | undefined) => {
+    setImportError(null);
+    if (!file) return;
+    if (file.size > MAX_KEY_FILE_BYTES) {
+      setImportError("That file is too large to be a private key.");
+      return;
+    }
+    file.text().then(
+      (text) => setSecret({ privateKey: text, keyFile: file.name }),
+      () => setImportError("Couldn't read that file."),
+    );
+  };
+  return (
+    <Advanced label="Advanced: authentication" aside={AUTH_META[auth].label} defaultOpen={auth !== "tailscale"} className="flex flex-col gap-3 pt-3">
+      <SegmentedControl<SshAuth>
+        value={auth}
+        onValueChange={(a) => set({ auth: a })}
+        options={AUTH_METHODS.map((a) => {
+          const M = AUTH_META[a];
+          return { value: a, label: M.label, icon: <M.icon /> };
+        })}
+        size="sm"
+        fill
+        aria-label="Sign-in method"
+      />
+      <p className="text-xs text-mute">{AUTH_META[auth].blurb}</p>
+      {auth === "key" && !importsKeys && (
+        <Field label="Key file" hint="on this device" error={errors.keyPath}>
+          {(id) => (
+            <div className="flex flex-col gap-2">
+              <Input
+                id={id}
+                value={p.keyPath ?? ""}
+                onChange={(e) => set({ keyPath: e.target.value })}
+                placeholder={KEY_PATH_SUGGESTIONS[0]}
+                className="font-mono"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                invalid={!!errors.keyPath}
+              />
+              <div className="flex flex-wrap gap-1.5" aria-label="Usual key files">
+                {KEY_PATH_SUGGESTIONS.map((k) => {
+                  const on = p.keyPath?.trim() === k;
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => set({ keyPath: k })}
+                      className={cn(
+                        "h-6 rounded-full px-2.5 font-mono text-2xs font-bold pressable focus-ring",
+                        on ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.05] text-mute hover:text-ink",
+                      )}
+                    >
+                      {k}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </Field>
+      )}
+      {auth === "key" && importsKeys && (
+        <Field label="Private key" hint={stored?.privateKey && !secrets.privateKey ? "saved" : undefined} error={errors.privateKey ?? importError ?? undefined} description="Kept by TeleFlock; the file is not needed afterwards.">
+          {(id) => (
+            <div className="flex flex-col gap-2">
+              <input
+                ref={fileRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => {
+                  importFile(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              {secrets.keyFile ? (
+                <div className="well flex h-10 items-center gap-2 rounded-md px-3 text-sm">
+                  <KeyRound className="size-4 shrink-0 text-mute-2" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{secrets.keyFile}</span>
+                  <span className="text-xs text-mute-2">imported</span>
+                  <button type="button" aria-label="Remove the imported key" onClick={() => setSecret({ privateKey: "", keyFile: undefined })} className="rounded-xs text-mute hover:text-ink focus-ring">
+                    <X className="size-4" />
+                  </button>
+                </div>
+              ) : (
+                <Textarea
+                  id={id}
+                  value={secrets.privateKey}
+                  onChange={(e) => setSecret({ privateKey: e.target.value })}
+                  placeholder={stored?.privateKey ? "A key is saved. Paste or import another to replace it." : "Paste the private key (-----BEGIN OPENSSH PRIVATE KEY-----…)"}
+                  maxHeight={120}
+                  className="font-mono text-2xs"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  invalid={!!errors.privateKey}
+                />
+              )}
+              <Button variant="secondary" size="sm" icon={<Upload />} onClick={() => fileRef.current?.click()} className="self-start">
+                Import key file
+              </Button>
+            </div>
+          )}
+        </Field>
+      )}
+      {auth === "key" && (
+        <Field label="Passphrase" hint="if the key has one">
+          {(id) => (
+            <Input id={id} type="password" value={secrets.passphrase} onChange={(e) => setSecret({ passphrase: e.target.value })} placeholder={stored?.passphrase ? SAVED_PLACEHOLDER : undefined} autoComplete="new-password" />
+          )}
+        </Field>
+      )}
+      {auth === "password" && (
+        <Field label="Password" hint={stored?.password ? "saved" : undefined} error={errors.password}>
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              value={secrets.password}
+              onChange={(e) => setSecret({ password: e.target.value })}
+              placeholder={stored?.password ? SAVED_PLACEHOLDER : undefined}
+              autoComplete="new-password"
+              invalid={!!errors.password}
+            />
+          )}
+        </Field>
+      )}
+      {auth !== "tailscale" && (
+        <p className="flex items-start gap-1.5 text-2xs text-mute-2">
+          <ShieldCheck className="mt-px size-3.5 shrink-0" />
+          <span>
+            Saved on this device only, readable by your user alone, and sent to nothing but this host. A host outside your tailnet shows its host key fingerprint for you to confirm on the first connect.
+          </span>
+        </p>
+      )}
+    </Advanced>
   );
 }
 
@@ -157,18 +391,39 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
   const kinds = availableKinds(info?.capabilities);
   // persists per edited host ("new" for Add); untouched, it follows the saved profile
   const [p, setP, clearDraft] = useDraftState<HostProfile>(draftKey("host.editor", initial.id || "new"), initial);
+  // sign-in secrets: memory only, never in the persisted draft
+  const [secrets, setSecrets] = useState<SecretInput>(NO_SECRETS);
+  const [stored, setStored] = useState<SecretStatus | null>(null);
   const [touched, setTouched] = useState(false);
   const [report, setReport] = useState<DiagReport | null>(null);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const errors = validate(p);
+  const errors = validate(p, secrets, stored);
   const shown = touched ? errors : {};
   const valid = Object.keys(errors).length === 0;
   const editing = initial.id !== "";
+  const auth = hostAuth(p);
   const set = (patch: Partial<HostProfile>) => {
     setP((prev) => ({ ...prev, ...patch }));
     setReport(null);
   };
+  const setSecret = (patch: Partial<SecretInput>) => {
+    setSecrets((prev) => ({ ...prev, ...patch }));
+    setReport(null);
+  };
+
+  // Which secrets the app already keeps for this host (never the secrets themselves).
+  useEffect(() => {
+    if (!editing) return;
+    let live = true;
+    core.app("hosts.secretStatus", { hostId: initial.id }).then(
+      (s) => live && setStored(s),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [editing, initial.id]);
 
   const test = () => {
     setTouched(true);
@@ -176,7 +431,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
     setTesting(true);
     setReport(null);
     core
-      .app("hosts.test", normalize(p))
+      .app("hosts.test", { ...normalize(p), secrets: secretsPayload(p, secrets) })
       .then(
         (r) => {
           setReport(r);
@@ -195,7 +450,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
     setSaving(true);
     const profile = normalize(p);
     core
-      .app("hosts.save", profile)
+      .app("hosts.save", { ...profile, secrets: secretsPayload(p, secrets) })
       .then((saved) => {
         haptic("success");
         clearDraft();
@@ -239,8 +494,10 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
         <SegmentedControl<HostKind> value={p.kind} onValueChange={(kind) => set({ kind })} options={kindOptions} fill aria-label="Connection kind" />
         <AnimatePresence mode="wait" initial={false}>
           <motion.div key={p.kind} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.15 }} className="flex flex-col gap-1">
-            <p className="text-xs text-mute">{KIND_META[p.kind].blurb}</p>
-            <Prerequisites kind={p.kind} />
+            <p className="text-xs text-mute">
+              {p.kind === "tailscaleSsh" && auth !== "tailscale" ? `A herdr host reached over SSH, signing in with your ${auth === "key" ? "private key" : "password"}.` : KIND_META[p.kind].blurb}
+            </p>
+            <Prerequisites kind={p.kind} auth={auth} />
           </motion.div>
         </AnimatePresence>
       </div>
@@ -277,27 +534,40 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
       <AnimatePresence initial={false} mode="popLayout">
         {p.kind === "tailscaleSsh" && (
           <motion.div key="ts" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="overflow-hidden">
-            <div className="grid gap-3 sm:grid-cols-[2fr_1fr_90px]">
-              <Field label="Host" hint="MagicDNS or 100.x IP" error={shown.address}>
-                {(id) => (
-                  <Input id={id} value={p.address ?? ""} onChange={(e) => set({ address: e.target.value })} placeholder="forge" autoCapitalize="off" autoCorrect="off" spellCheck={false} invalid={!!shown.address} />
-                )}
-              </Field>
-              <Field label="User" hint="optional">
-                {(id) => <Input id={id} value={p.user ?? ""} onChange={(e) => set({ user: e.target.value })} placeholder="tailnet default" autoCapitalize="off" spellCheck={false} />}
-              </Field>
-              <Field label="Port" error={shown.port}>
-                {(id) => (
-                  <Input
-                    id={id}
-                    inputMode="numeric"
-                    value={p.port == null ? "" : String(p.port)}
-                    onChange={(e) => set({ port: e.target.value === "" ? undefined : Number(e.target.value) })}
-                    placeholder="22"
-                    invalid={!!shown.port}
-                  />
-                )}
-              </Field>
+            <div className="flex flex-col gap-3">
+              <div className="grid gap-3 sm:grid-cols-[2fr_1fr_90px]">
+                <Field label="Host" hint={auth === "tailscale" ? "MagicDNS or 100.x IP" : "host name or IP"} error={shown.address}>
+                  {(id) => (
+                    <Input id={id} value={p.address ?? ""} onChange={(e) => set({ address: e.target.value })} placeholder="forge" autoCapitalize="off" autoCorrect="off" spellCheck={false} invalid={!!shown.address} />
+                  )}
+                </Field>
+                <Field label="User" hint={auth === "tailscale" ? "optional" : "required"} error={shown.user}>
+                  {(id) => (
+                    <Input
+                      id={id}
+                      value={p.user ?? ""}
+                      onChange={(e) => set({ user: e.target.value })}
+                      placeholder={auth === "tailscale" ? "tailnet default" : "you on the host"}
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      invalid={!!shown.user}
+                    />
+                  )}
+                </Field>
+                <Field label="Port" error={shown.port}>
+                  {(id) => (
+                    <Input
+                      id={id}
+                      inputMode="numeric"
+                      value={p.port == null ? "" : String(p.port)}
+                      onChange={(e) => set({ port: e.target.value === "" ? undefined : Number(e.target.value) })}
+                      placeholder="22"
+                      invalid={!!shown.port}
+                    />
+                  )}
+                </Field>
+              </div>
+              <SignInSection p={p} set={set} secrets={secrets} setSecret={setSecret} stored={stored} errors={shown} />
             </div>
           </motion.div>
         )}
@@ -336,7 +606,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
         </Advanced>
       )}
 
-      <Diagnostics kind={p.kind} report={report} running={testing} />
+      <Diagnostics kind={p.kind} auth={auth} report={report} running={testing} />
 
       {/* The actions stay pinned to the bottom of the scrolling body: phone sheets ride above the keyboard (primary full-width in the thumb zone); short desktop windows keep them reachable. */}
       <div

@@ -1,0 +1,12 @@
+
+                        Tip: Type `#` anywhere in your prompt for quick actions — copy the line
+                                      or the whole prompt, undo, jump the cursor
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
++-- pi > [M] no-model > [T] tf-bridgectl-cap-work > ctx: 7.6K/? [A] >-------------------------------------------------+
++-                                                                               Shift+Tab to change thinking effort -+
+ lab widget line one
+ lab widget line two
+⇄ teleflock

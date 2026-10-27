@@ -14,8 +14,8 @@ import {
   CardFlight,
   Elapsed,
   EmptyState,
+  FlightGroup,
   Heartbeat,
-  LayoutGroup,
   NumberTicker,
   ProgressRing,
   StatusOrb,
@@ -34,14 +34,16 @@ import { FilterChip } from "./FilterChip";
 import { SelectionBar } from "./SelectionBar";
 import { useTodayUsage } from "./BentoRow";
 import { useBoard } from "./boardStore";
-import { connWords, FlockFab, HostChip } from "./FlockActions";
+import { connWords, FlockFab, HostChip, RepoChip } from "./FlockActions";
 import { LANE_BY_COLUMN, QUIET_AFTER_MS } from "./lanes";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { ParkedChip } from "./ParkedChip";
 import { SetupGaps } from "./StaleHosts";
 import { QuickAnswer } from "./QuickAnswer";
+import { RepoTag } from "./RepoTag";
 import { type SwipeAction, SwipeRow } from "./SwipeRow";
 import { useBeat } from "./useBeat";
+import { PrProbe } from "./worktreePr";
 
 const RUNNING_ID = "flock-running";
 
@@ -150,7 +152,8 @@ function Widgets() {
   );
   const tile = "flex h-24 flex-col justify-between rounded-[20px] p-3";
   return (
-    <div className="grid grid-cols-[1fr_1fr_1.35fr] gap-2">
+    // minmax(0, …): no tile's content widens its column; labels wrap or truncate, the spend figure shrinks to its tile
+    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.35fr)] gap-2">
       <button
         type="button"
         onClick={() => (needs[0] ? openAnswerHud(needs[0]) : navigate({ name: "inbox" }))}
@@ -160,8 +163,8 @@ function Widgets() {
         {/* Keyed by the count: Calm's bounded sunset pulse plays again for each new arrival (the button keeps focus). */}
         <Tile key={needs.length} variant={needs.length > 0 ? "sunset" : "default"} className={cn(tile, needs.length > 0 && "sun-pulse")}>
           <NumberTicker value={needs.length} className="font-display text-display leading-none font-bold" />
-          <span className={cn("text-xs font-bold whitespace-nowrap", needs.length > 0 ? "text-white/90" : "text-mute")}>
-            need you{needs.length > 0 && <span className="text-white"> · Answer →</span>}
+          <span className={cn("text-xs leading-tight font-bold", needs.length > 0 ? "text-white/90" : "text-mute")}>
+            need you{needs.length > 0 && <span className="text-white"> · Answer&nbsp;→</span>}
           </span>
         </Tile>
       </button>
@@ -187,13 +190,14 @@ function Widgets() {
                 </span>
               )}
             </div>
-            <span className="text-xs font-bold text-mute">running{running.length > 0 && " ↓"}</span>
+            <span className="block truncate text-xs font-bold text-mute">running{running.length > 0 && " ↓"}</span>
           </div>
         </Tile>
       </button>
       <button type="button" onClick={() => navigate({ name: "usage" })} className="min-w-0 text-left pressable focus-ring rounded-tile" aria-label={`${formatUsd(cost)} today: open Usage`}>
-        <Tile className={cn(tile, "min-w-0")}>
-          <NumberTicker value={cost} format={formatUsd} className="font-display text-2xl leading-none font-bold text-ink" />
+        {/* @container: the cost figure shrinks to the tile (up to text-2xl) instead of clipping */}
+        <Tile className={cn(tile, "min-w-0 @container")}>
+          <NumberTicker value={cost} format={formatUsd} className="font-display text-hero-fit leading-none font-bold text-ink [--fit-max:var(--text-2xl)]" />
           <span className="flex min-w-0 flex-col text-xs font-bold text-mute">
             <span className="truncate">
               <NumberTicker value={tokens} format={formatCompact} className="text-ink" /> tok
@@ -231,12 +235,9 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
             <CardMenuButton agentKey={agentKey} lane="needs" mobile />
           </span>
         </div>
+        <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="mt-1 flex" />
         <p className="mt-1.5 font-display text-lg leading-snug font-bold text-ink">{headline}</p>
         {body && <p className="mt-1 line-clamp-3 text-sm whitespace-pre-line text-mute">{body}</p>}
-        <p className="mt-1 truncate font-mono text-2xs text-mute-2">
-          {agent.repo}
-          {agent.branch && ` · ${agent.branch}`}
-        </p>
         {n.command && <pre className="mt-2 overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs text-ink-2">{n.command}</pre>}
         <QuickAnswer agentKey={agentKey} appearance="big" mobile className="mt-3" />
       </div>
@@ -244,7 +245,11 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
   );
 }
 
-/** Live facts under a row, same set as the desktop card footer: ctx · subagents · diff · not shared · model. */
+/**
+ * Live facts under a row, same set as the desktop card footer: ctx · subagents · diff · not shared · model.
+ * Fixed order, wrapping onto another line instead of running past the card; a narrow row drops the context
+ * bar first (its % stays), and the model takes the rest of a line, truncated.
+ */
 function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }) {
   const agent = useAgent(agentKey);
   const omp = agent?.omp;
@@ -254,14 +259,14 @@ function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }
   const model = omp?.model ? `${omp.model.label ?? omp.model.id}${omp.thinking && omp.thinking !== "off" ? ` · ${omp.thinking}` : ""}` : null;
   if (!omp?.context && subPct == null && !(diff && agent.diff) && omp?.link !== "notShared" && !model) return null;
   return (
-    <div className="mt-1.5 flex min-w-0 items-center gap-2.5">
-      {omp?.context && <ContextMeter pct={omp.context.pct} />}
+    <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 @container">
+      {omp?.context && <ContextMeter pct={omp.context.pct} barClassName="@max-[300px]:hidden" />}
       {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
       {diff && agent.diff && <DiffStat {...agent.diff} />}
       <span className="contents" {...stopRow}>
         <ConnectLinkButton agentKey={agentKey} />
       </span>
-      {model && <span className="ml-auto min-w-0 truncate font-mono text-2xs text-mute">{model}</span>}
+      {model && <span className="min-w-0 flex-[1_1_6rem] truncate text-right font-mono text-2xs text-mute">{model}</span>}
     </div>
   );
 }
@@ -297,8 +302,9 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
             </span>
             {muted && <BellOff className="size-3 shrink-0 text-mute-2" aria-label="Notifications muted" />}
             {agent.parked && <ParkedChip agentKey={agentKey} />}
-            <span className="min-w-0 flex-[1_1_0] truncate font-mono text-2xs text-mute-2">{agent.repo}</span>
-            <span className="shrink-0 font-mono text-2xs text-mute tabular">
+            {/* takes only the room the name, time and ⋯ leave: the branch gives way first, then the repo name (the chip keeps its icon) */}
+            <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="min-w-6 flex-[1_1_0]" />
+            <span className="ml-auto shrink-0 font-mono text-2xs text-mute tabular">
               {column === "running" ? (
                 <>
                   turn <Elapsed since={agent.omp?.turnStartedAt ?? agent.stateSince} />
@@ -380,6 +386,8 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
             )}
           </div>
         </div>
+        {/* Review/Done in a linked worktree: merged or closed PR → "Delete worktree…" in the ⋯ menu */}
+        {(column === "review" || column === "done") && !fresh && <PrProbe agentKey={agentKey} />}
       </div>
     </SwipeRow>
   );
@@ -451,10 +459,12 @@ export function FlockHome() {
   const hostId = useHosts((s) => s.filter);
   const ids = useHostIds();
   const q = useBoard((s) => s.q.trim()) || undefined;
-  const needs = useColumnKeys("needs", { hostId, q });
-  const running = useColumnKeys("running", { hostId, q });
-  const review = useColumnKeys("review", { hostId, q });
-  const done = useColumnKeys("done", { hostId, q });
+  // shared with the desktop toolbar's repo select
+  const repo = useBoard((s) => s.repo) ?? undefined;
+  const needs = useColumnKeys("needs", { hostId, repo, q });
+  const running = useColumnKeys("running", { hostId, repo, q });
+  const review = useColumnKeys("review", { hostId, repo, q });
+  const done = useColumnKeys("done", { hostId, repo, q });
   const doneOpen = useBoard((s) => s.doneOpen);
   const toggleDone = useBoard((s) => s.toggleDone);
   const empty = needs.length + running.length + review.length + done.length === 0;
@@ -465,8 +475,11 @@ export function FlockHome() {
     <div className="flex min-h-full flex-col gap-3 px-3.5 pt-2.5 pb-22">
       <WhileAwayToast />
       <header className="flex items-center justify-between gap-2">
-        <h1 className="font-display text-2xl font-bold text-ink">Flock</h1>
-        <HostChip />
+        <h1 className="shrink-0 font-display text-2xl font-bold text-ink">Flock</h1>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <RepoChip />
+          <HostChip />
+        </div>
       </header>
       <AnimatePresence initial={false}>
         {shownHosts.map((id) => (
@@ -476,9 +489,21 @@ export function FlockHome() {
       <SetupGaps />
       <FilterChip className="self-start" />
       <Widgets />
-      <LayoutGroup id="flock">
-        {empty && q && <EmptyState title="No matches" description={`No agent matches “${q}”.`} />}
-        {empty && !q && <EmptyFlock />}
+      <FlightGroup id="flock" arrangement={[needs, running, review, done].map((keys) => keys.join(" ")).join("|")}>
+        {empty && (q || repo) && (
+          <EmptyState
+            title="No matches"
+            description={q ? `No agent${repo ? ` in ${repo}` : ""} matches “${q}”.` : `No agents in ${repo}.`}
+            action={
+              repo && (
+                <Button variant="secondary" size="sm" onClick={() => useBoard.getState().setRepo(null)}>
+                  All repos
+                </Button>
+              )
+            }
+          />
+        )}
+        {empty && !q && !repo && <EmptyFlock />}
         {needs.length > 0 && (
           <Section column="needs" count={needs.length}>
             {needs.map((k) => (
@@ -537,7 +562,7 @@ export function FlockHome() {
             </AnimatePresence>
           </Section>
         )}
-      </LayoutGroup>
+      </FlightGroup>
       <SelectionBar mobile />
       <FlockFab />
     </div>

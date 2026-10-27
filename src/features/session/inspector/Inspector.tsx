@@ -1,9 +1,9 @@
 import { Bot, FileCode2, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Reply, Send, Square, Workflow } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useDraft, useIrcEntries, useSession } from "@/core";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useCore, useDraft, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
 import type { BtwThread, BtwTurn, TreeInfo, TreeNode } from "@/core/gen";
-import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Sparkline, Spinner, useNow } from "@/design";
+import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Sparkline, Spinner, useMediaQuery, useNow } from "@/design";
 import { Term } from "@/features/shell/Term";
 import { ACTIONS } from "@/features/shell/vocab";
 import { errorText, hostCall, usePending } from "../api";
@@ -31,17 +31,16 @@ function Pane({ id, title, label, aside, children, className }: { id: InspectorT
 /** Tile chrome inside the Session pane. */
 const TILE = "rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline";
 
-/** Rolling tok/s history: one sample per second of the latest value, 60 s (only while mounted). */
+/** Rolling tok/s history: one sample per second of the latest value, 60 s (only while mounted; the clock pauses while the window is inactive). */
 function useTpsHistory(value: number | undefined): number[] {
   const now = useNow(1000);
-  const [hist, setHist] = useState<number[]>([]);
+  const [hist, setHist] = useState<{ at: number; values: number[] }>({ at: 0, values: [] });
   const latest = value ?? 0;
   // one sample per clock tick (not per tps patch), so the history always spans 60 s
   useEffect(() => {
-    setHist((h) => [...h.slice(-59), latest]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [now]);
-  return hist;
+    setHist((h) => (h.at === now ? h : { at: now, values: [...h.values.slice(-59), latest] }));
+  }, [now, latest]);
+  return hist.values;
 }
 
 export function OverviewPanel({ agentKey }: { agentKey: string }) {
@@ -188,94 +187,131 @@ interface TreeRow {
   leaf: boolean;
 }
 
-function flattenTree(tree: TreeInfo): TreeRow[] {
+interface TreeLayout {
+  rows: TreeRow[];
+  /** Rows that open a branch lane (their parent sits in a shallower lane). */
+  forks: number;
+  /** Row of the current leaf, -1 if none. */
+  leafIndex: number;
+}
+
+const NO_TREE: TreeLayout = { rows: [], forks: 0, leafIndex: -1 };
+
+function layoutTree(tree: TreeInfo): TreeLayout {
   const children = new Map<string, TreeNode[]>();
   const roots: TreeNode[] = [];
   const ids = new Set(tree.nodes.map((n) => n.id));
   for (const n of tree.nodes) {
-    if (n.parentId && ids.has(n.parentId)) children.set(n.parentId, [...(children.get(n.parentId) ?? []), n]);
-    else roots.push(n);
+    const parent = n.parentId !== undefined && ids.has(n.parentId) ? n.parentId : undefined;
+    if (parent === undefined) roots.push(n);
+    else if (children.has(parent)) children.get(parent)!.push(n);
+    else children.set(parent, [n]);
   }
-  const out: TreeRow[] = [];
+  const rows: TreeRow[] = [];
   // Iterative DFS; the on-path child continues the current lane, other children branch right.
   const stack: { n: TreeNode; depth: number }[] = roots.reverse().map((n) => ({ n, depth: 0 }));
   while (stack.length) {
     const { n, depth } = stack.pop()!;
-    out.push({ node: n, depth, leaf: n.id === tree.leafId });
+    rows.push({ node: n, depth, leaf: n.id === tree.leafId });
     const kids = [...(children.get(n.id) ?? [])].sort((a, b) => Number(b.onPath) - Number(a.onPath) || a.at - b.at);
     for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i]!, depth: i === 0 ? depth : depth + 1 });
   }
-  return out;
+  const depthOf = new Map(rows.map((r) => [r.node.id, r.depth]));
+  let forks = 0;
+  let leafIndex = -1;
+  rows.forEach((r, i) => {
+    if (r.depth > 0 && (depthOf.get(r.node.parentId ?? "") ?? 0) < r.depth) forks++;
+    if (r.leaf) leafIndex = i;
+  });
+  return { rows, forks, leafIndex };
 }
+
+/** hostd re-sends the whole tree with every session meta: it only counts as new once the leaf or the node count moves. */
+function sameTree(a: TreeInfo | undefined, b: TreeInfo | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined && a.leafId === b.leafId && a.nodes.length === b.nodes.length);
+}
+
+/** Rows have a fixed height so only those in view (plus TREE_OVERSCAN) render: long sessions have thousands of entries. */
+const TREE_ROW_PX = 24;
+/** Touch screens show each row's actions inline (24 px buttons). */
+const TREE_ROW_TOUCH_PX = 30;
+const TREE_VIEW_PX = 300;
+const TREE_OVERSCAN = 8;
 
 export function TreePanel({ agentKey }: { agentKey: string }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
-  const { meta } = useSession(agentKey);
-  const tree = meta?.tree;
+  const tree = useCore((s) => s.sessions[agentKey]?.meta?.tree, sameTree);
+  const canTree = useCore((s) => s.sessions[agentKey]?.meta?.caps.tree ?? false);
+  const canBranch = useCore((s) => s.sessions[agentKey]?.meta?.caps.branch ?? false);
+  const canFork = useCore((s) => s.sessions[agentKey]?.meta?.caps.fork ?? false);
   const [busy, run] = usePending();
-  const caps = meta?.caps;
   const scrollRef = useRef<HTMLDivElement>(null);
-  const rows = tree ? flattenTree(tree) : [];
+  const { rows, forks, leafIndex } = useMemo(() => (tree ? layoutTree(tree) : NO_TREE), [tree]);
+  const rowPx = useMediaQuery("(pointer: coarse)") ? TREE_ROW_TOUCH_PX : TREE_ROW_PX;
+  const [top, setTop] = useState(0);
+  const first = Math.max(0, top - TREE_OVERSCAN);
+  const last = Math.min(rows.length, top + Math.ceil(TREE_VIEW_PX / rowPx) + TREE_OVERSCAN);
   useEffect(() => {
-    // Scroll only the tree's own box (scrollIntoView would also scroll the inspector rail).
+    // Centre the leaf in the tree's own box (scrollIntoView would also scroll the inspector rail).
     const box = scrollRef.current;
-    const leaf = box?.querySelector<HTMLElement>("[data-leaf=true]");
-    if (box && leaf) box.scrollTop = leaf.offsetTop - box.clientHeight / 2;
+    if (box && leafIndex >= 0) box.scrollTop = leafIndex * rowPx - box.clientHeight / 2;
   }, [tree?.leafId]);
-  if (!caps?.tree && !tree) return null;
-  const forks = rows.filter((r) => r.depth > 0 && (rows.find((x) => x.node.id === r.node.parentId)?.depth ?? 0) < r.depth).length;
+  if (!canTree && !tree) return null;
   return (
     <Pane id="tree" title="Session tree" aside={forks ? `${forks} branch${forks === 1 ? "" : "es"}` : undefined}>
       {!tree || rows.length === 0 ? (
         <EmptyState compact title="No tree yet" description="Branch or fork from any message once the session has turns." />
       ) : (
-        <div ref={scrollRef} className="relative -mx-1 max-h-[300px] overflow-y-auto px-1">
-          {rows.map(({ node, depth, leaf }) => (
-            <div
-              key={node.id}
-              data-leaf={leaf}
-              className={cn("group/node relative isolate flex items-center gap-2 rounded-[10px] py-[3px] pr-1 hover:bg-white/[0.04]", leaf && "bg-accent/10")}
-              style={{ paddingLeft: 6 + depth * 14 }}
-            >
-              {Array.from({ length: depth }, (_, i) => (
-                <span key={i} className="absolute top-0 bottom-0 w-px bg-review/30" style={{ left: 9 + i * 14 }} aria-hidden />
-              ))}
-              <span
-                className={cn(
-                  "relative z-raised size-2 shrink-0 rounded-full",
-                  leaf ? "bg-sun shadow-[0_0_0_3px_rgb(255_61_119/0.25)]" : node.onPath ? "bg-ink-2" : depth > 0 ? "bg-review" : "bg-mute-2",
-                )}
-              />
-              <span className={cn("min-w-0 flex-1 truncate text-[11.5px]", node.onPath ? "font-semibold text-ink-2" : "text-mute", node.kind === "user" && "font-bold")}>
-                {node.kind === "user" ? "› " : node.kind === "compaction" || node.kind === "summary" ? "≡ " : ""}
-                {node.label.replace(/\*\*|__|`/g, "")}
-              </span>
-              {node.children > 1 && <span className="shrink-0 font-mono text-[10px] text-review">⑂{node.children}</span>}
-              <span className="absolute inset-y-0 right-1 z-raised flex items-center gap-0.5 rounded-[8px] bg-[rgb(24_24_32/0.96)] pl-1 opacity-0 transition-opacity group-focus-within/node:opacity-100 group-hover/node:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:shrink-0 [@media(pointer:coarse)]:bg-transparent [@media(pointer:coarse)]:opacity-100">
-                {caps?.tree && !leaf && (
-                  <IconButton label="Go to this point" size="sm" className="size-6" disabled={busy} onClick={() => void run(hostCall(hostId, "agent.navigate", { agentId, entryId: node.id }, { success: "Moved in tree" }))}>
-                    <Navigation />
-                  </IconButton>
-                )}
-                {caps?.branch && (
-                  <IconButton label="Branch from here" size="sm" className="size-6" disabled={busy} onClick={() => void run(hostCall(hostId, "agent.branch", { agentId, entryId: node.id }, { success: "Branched" }))}>
-                    <GitBranch />
-                  </IconButton>
-                )}
-                {caps?.fork && (
-                  <IconButton
-                    label="Fork from here into a new pane"
-                    size="sm"
-                    className="size-6"
-                    disabled={busy}
-                    onClick={() => void run(hostCall(hostId, "agent.fork", { agentId, entryId: node.id, placement: "pane" }, { success: "Forked into a new pane" }))}
-                  >
-                    <GitFork />
-                  </IconButton>
-                )}
-              </span>
-            </div>
-          ))}
+        <div ref={scrollRef} onScroll={(e) => setTop(Math.floor(e.currentTarget.scrollTop / rowPx))} className="relative -mx-1 overflow-y-auto px-1" style={{ maxHeight: TREE_VIEW_PX }}>
+          {/* Clips the rows' enlarged button hit areas: they would add scroll height and scroll a short tree's first row out of view. */}
+          <div className="relative overflow-hidden" style={{ height: rows.length * rowPx }}>
+            {rows.slice(first, last).map(({ node, depth, leaf }, i) => (
+              <div
+                key={node.id}
+                data-leaf={leaf}
+                className={cn("group/node absolute inset-x-0 isolate flex items-center gap-2 rounded-[10px] pr-1 hover:bg-white/[0.04]", leaf && "bg-accent/10")}
+                style={{ top: (first + i) * rowPx, height: rowPx, paddingLeft: 6 + depth * 14 }}
+              >
+                {Array.from({ length: depth }, (_, d) => (
+                  <span key={d} className="absolute top-0 bottom-0 w-px bg-review/30" style={{ left: 9 + d * 14 }} aria-hidden />
+                ))}
+                <span
+                  className={cn(
+                    "relative z-raised size-2 shrink-0 rounded-full",
+                    leaf ? "bg-sun shadow-[0_0_0_3px_rgb(255_61_119/0.25)]" : node.onPath ? "bg-ink-2" : depth > 0 ? "bg-review" : "bg-mute-2",
+                  )}
+                />
+                <span className={cn("min-w-0 flex-1 truncate text-[11.5px]", node.onPath ? "font-semibold text-ink-2" : "text-mute", node.kind === "user" && "font-bold")}>
+                  {node.kind === "user" ? "› " : node.kind === "compaction" || node.kind === "summary" ? "≡ " : ""}
+                  {node.label.replace(/\*\*|__|`/g, "")}
+                </span>
+                {node.children > 1 && <span className="shrink-0 font-mono text-[10px] text-review">⑂{node.children}</span>}
+                <span className="absolute inset-y-0 right-1 z-raised flex items-center gap-0.5 rounded-[8px] bg-[rgb(24_24_32/0.96)] pl-1 opacity-0 transition-opacity group-focus-within/node:opacity-100 group-hover/node:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:shrink-0 [@media(pointer:coarse)]:bg-transparent [@media(pointer:coarse)]:opacity-100">
+                  {canTree && !leaf && (
+                    <IconButton label="Go to this point" size="sm" className="size-6" disabled={busy} onClick={() => void run(hostCall(hostId, "agent.navigate", { agentId, entryId: node.id }, { success: "Moved in tree" }))}>
+                      <Navigation />
+                    </IconButton>
+                  )}
+                  {canBranch && (
+                    <IconButton label="Branch from here" size="sm" className="size-6" disabled={busy} onClick={() => void run(hostCall(hostId, "agent.branch", { agentId, entryId: node.id }, { success: "Branched" }))}>
+                      <GitBranch />
+                    </IconButton>
+                  )}
+                  {canFork && (
+                    <IconButton
+                      label="Fork from here into a new pane"
+                      size="sm"
+                      className="size-6"
+                      disabled={busy}
+                      onClick={() => void run(hostCall(hostId, "agent.fork", { agentId, entryId: node.id, placement: "pane" }, { success: "Forked into a new pane" }))}
+                    >
+                      <GitFork />
+                    </IconButton>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
       <div className="mt-2 text-[10.5px] text-mute-2">

@@ -1,12 +1,15 @@
 //! Relay + guest against a scripted fake omp host (wire-level: envelopes, routing, close codes,
 //! resync after host reconnect). Runs offline.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tf_collab::frame::GuestFrame;
-use tf_collab::{CollabLink, EndReason, Guest, GuestError, GuestEvent, HostFrame, Relay, RelayConfig, RoomKey};
+use tf_collab::relay::CLOSE_RESET;
+use tf_collab::{CollabLink, EndReason, Guest, GuestError, GuestEvent, HostFrame, JoinTimeouts, Relay, RelayConfig, RoomKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -33,7 +36,25 @@ async fn http(port: u16, req: &str) -> String {
 /// A minimal omp host: welcome + one-entry snapshot per hello, echoes prompts as events,
 /// answers fetch-transcript. Reports guest frames on `seen`.
 async fn fake_host(port: u16, key: RoomKey, seen: tokio::sync::mpsc::UnboundedSender<(u32, Value)>) -> tokio::task::JoinHandle<()> {
+    fake_host_with(port, key, seen, Arc::new(AtomicBool::new(true))).await
+}
+
+/// [`fake_host`] that ignores `hello` while `answer` is false (a host that keeps the room open
+/// but stopped answering joins), and reports the relay's close code as `(0, {"close": code})`.
+async fn fake_host_with(
+    port: u16,
+    key: RoomKey,
+    seen: tokio::sync::mpsc::UnboundedSender<(u32, Value)>,
+    answer: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/r/{ROOM}?role=host")).await.unwrap();
+    // The relay registers the room just after the upgrade; a guest racing it gets 4004 on a busy
+    // machine. `/healthz` counts rooms, so wait for this one before handing the host over.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !http(port, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await.contains(r#""rooms":1"#) {
+        assert!(tokio::time::Instant::now() < deadline, "the relay never registered the room");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     tokio::spawn(async move {
         let (mut tx, mut rx) = ws.split();
         while let Some(Ok(msg)) = rx.next().await {
@@ -43,7 +64,10 @@ async fn fake_host(port: u16, key: RoomKey, seen: tokio::sync::mpsc::UnboundedSe
                     let _ = seen.send((0, serde_json::from_str(&t).unwrap()));
                     continue;
                 }
-                Message::Close(_) => break,
+                Message::Close(f) => {
+                    let _ = seen.send((0, json!({"close": f.map(|f| u16::from(f.code))})));
+                    break;
+                }
                 _ => continue,
             };
             // Like omp: undecryptable guest frames are dropped silently.
@@ -52,7 +76,7 @@ async fn fake_host(port: u16, key: RoomKey, seen: tokio::sync::mpsc::UnboundedSe
             let _ = seen.send((peer, frame.clone()));
             let send = |target: u32, v: Value| Message::binary(key.seal(target, &serde_json::to_vec(&v).unwrap()));
             match frame["t"].as_str().unwrap() {
-                "hello" => {
+                "hello" if answer.load(Ordering::SeqCst) => {
                     let welcome = json!({"t":"welcome","proto":3,
                         "header":{"type":"session","version":3,"id":"sess-1","timestamp":"2026-10-20T21:52:42.390Z","cwd":"/tmp/w"},
                         "state":{"isStreaming":false,"queuedMessageCount":0,"cwd":"/tmp/w","participants":[]},
@@ -184,5 +208,78 @@ async fn view_link_is_read_only() {
     assert_eq!(g.abort().unwrap_err(), GuestError::ReadOnly);
     // Fetching transcripts is allowed on view links.
     assert_eq!(g.fetch_transcript("Main", 0).await.unwrap().new_size, 18);
+    relay.shutdown().await;
+}
+
+/// The field failure behind hostd's room reset: the host keeps its room open on the relay but
+/// never answers a join. Every join times out; resetting the room (the host reconnects to the
+/// same room id) lets the next one through.
+#[tokio::test(flavor = "multi_thread")]
+async fn stuck_room_times_out_until_reset() {
+    let relay = Relay::start(RelayConfig::new(0)).await.unwrap();
+    let port = relay.port();
+    let l = link(port);
+    let key = RoomKey::new(&l.key);
+    let short = JoinTimeouts { welcome: Duration::from_millis(300), snapshot_progress: Duration::from_millis(300) };
+    assert!(!relay.reset_room(ROOM), "no such room yet");
+
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let answer = Arc::new(AtomicBool::new(false));
+    let stuck = fake_host_with(port, key.clone(), seen_tx.clone(), answer.clone()).await;
+    for _ in 0..2 {
+        assert_eq!(Guest::connect_with(l.clone(), "teleflock", short).await.unwrap_err(), GuestError::Timeout("welcome"));
+    }
+
+    // The relay closes the host with 1012; like omp, it comes back on the same room id.
+    assert!(relay.reset_room(ROOM));
+    let close = loop {
+        let (_, v) = tokio::time::timeout(Duration::from_secs(5), seen.recv()).await.unwrap().unwrap();
+        if let Some(code) = v.get("close") {
+            break code.as_u64();
+        }
+    };
+    assert_eq!(close, Some(u64::from(CLOSE_RESET)));
+    let _ = stuck.await;
+    let _host = fake_host(port, key, seen_tx).await;
+    let (guest, mut events) = Guest::connect_with(l, "teleflock", short).await.unwrap();
+    assert!(guest.is_live());
+    assert!(matches!(next(&mut events).await, GuestEvent::Snapshot(_)));
+    relay.shutdown().await;
+}
+
+/// After the join, a host that stops answering a resync makes the guest reconnect and say the
+/// welcome timed out (hostd counts those to reset the room); the guest keeps retrying.
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_timeout_reconnects_and_reports_it() {
+    let relay = Relay::start(RelayConfig::new(0)).await.unwrap();
+    let port = relay.port();
+    let l = link(port);
+    let (seen_tx, _seen) = tokio::sync::mpsc::unbounded_channel();
+    let answer = Arc::new(AtomicBool::new(true));
+    let _host = fake_host_with(port, RoomKey::new(&l.key), seen_tx, answer.clone()).await;
+    let short = JoinTimeouts { welcome: Duration::from_millis(300), snapshot_progress: Duration::from_millis(300) };
+    let (guest, mut events) = Guest::connect_with(l, "teleflock", short).await.unwrap();
+    assert!(matches!(next(&mut events).await, GuestEvent::Snapshot(_)));
+
+    answer.store(false, Ordering::SeqCst);
+    guest.resync().unwrap();
+    match next(&mut events).await {
+        GuestEvent::Reconnecting { code, timed_out, attempt, .. } => assert_eq!((code, timed_out, attempt), (1006, true, 1)),
+        other => panic!("{other:?}"),
+    }
+    // Answering again: a resync during the backoff retries at once and the guest is live again.
+    answer.store(true, Ordering::SeqCst);
+    guest.resync().unwrap();
+    loop {
+        match next(&mut events).await {
+            GuestEvent::Snapshot(s) => {
+                assert!(s.resync);
+                break;
+            }
+            GuestEvent::Reconnecting { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(guest.is_live());
     relay.shutdown().await;
 }

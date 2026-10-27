@@ -6,7 +6,8 @@
 //!   everything else goes to the engine.
 //! * `core_term_input({ hostId, termId, data })` → fire-and-forget terminal input.
 //! * `core_events({ channel })` → subscribes the page: first a replay of the current state
-//!   (profiles, statuses, snapshots, settings, tunnels), then live `AppEvent`s.
+//!   (profiles, statuses, snapshots, settings, tunnels), then live `AppEvent`s, in order, as
+//!   batches (`AppEvent[]`): each send is a script evaluation in the webview.
 //!
 //! UI-intent events (`OpenAgent`, `AnswerNext`) that fire while no page is subscribed (cold start
 //! from a toast / deep link, webview reload) are held and delivered to the next subscriber.
@@ -20,7 +21,7 @@ use serde_json::Value;
 use tauri::{State, ipc::Channel};
 use tf_client::Engine;
 use tf_proto::{ApiError, AppEvent};
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 /// UI intents kept for a late subscriber (bounded; the newest win).
 const MAX_PENDING: usize = 8;
@@ -109,7 +110,7 @@ impl Core {
         });
     }
 
-    fn subscribe_page(self: std::sync::Arc<Self>, channel: Channel<AppEvent>) {
+    fn subscribe_page(self: std::sync::Arc<Self>, channel: Channel<Vec<AppEvent>>) {
         let generation = self.generation.load(Ordering::Acquire);
         // Subscribe before counting as live, so an intent emitted in between is not lost.
         let (replay, mut rx) = self.engine.subscribe_with_replay();
@@ -117,22 +118,44 @@ impl Core {
         log::info!("webview subscribed to core events (replay {} events, {live} live)", replay.len());
         tauri::async_runtime::spawn(async move {
             let alive = || self.generation.load(Ordering::Acquire) == generation;
-            let mut ok = replay.into_iter().all(|ev| channel.send(ev).is_ok());
-            if ok {
-                let held = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
-                ok = held.into_iter().all(|ev| channel.send(ev).is_ok());
-            }
-            while ok && alive() {
-                match rx.recv().await {
-                    Ok(ev) => ok = channel.send(ev).is_ok(),
-                    Err(RecvError::Lagged(n)) => {
-                        log::warn!("webview lagged {n} events; resending state");
-                        let (replay, fresh) = self.engine.subscribe_with_replay();
-                        rx = fresh;
-                        ok = replay.into_iter().all(|ev| channel.send(ev).is_ok());
-                    }
-                    Err(RecvError::Closed) => break,
+            // Each send is one script evaluation in the webview (plus a fetch from 8 KB up), so
+            // events go in batches: the replay with the held intents (kept for the next page if
+            // this one is gone), then every live event with whatever queued behind it meanwhile.
+            // Nothing waits for company: a lone event goes out at once.
+            let mut ok = {
+                let mut held = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+                let mut batch = replay;
+                batch.extend(held.iter().cloned());
+                let ok = channel.send(batch).is_ok();
+                if ok {
+                    held.clear();
                 }
+                ok
+            };
+            while ok && alive() {
+                let mut batch = Vec::new();
+                let mut lagged = match rx.recv().await {
+                    Ok(ev) => {
+                        batch.push(ev);
+                        None
+                    }
+                    Err(RecvError::Lagged(n)) => Some(n),
+                    Err(RecvError::Closed) => break,
+                };
+                while lagged.is_none() {
+                    match rx.try_recv() {
+                        Ok(ev) => batch.push(ev),
+                        Err(TryRecvError::Lagged(n)) => lagged = Some(n),
+                        Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                    }
+                }
+                if let Some(n) = lagged {
+                    log::warn!("webview lagged {n} events; resending state");
+                    let (replay, fresh) = self.engine.subscribe_with_replay();
+                    rx = fresh;
+                    batch.extend(replay);
+                }
+                ok = channel.send(batch).is_ok();
             }
             if alive() {
                 self.live.fetch_sub(1, Ordering::AcqRel);
@@ -173,7 +196,7 @@ pub async fn core_term_input(
 }
 
 #[tauri::command]
-pub fn core_events(core: State<'_, CoreState>, channel: Channel<AppEvent>) {
+pub fn core_events(core: State<'_, CoreState>, channel: Channel<Vec<AppEvent>>) {
     std::sync::Arc::clone(&core).subscribe_page(channel);
 }
 
@@ -216,12 +239,13 @@ mod tests {
         Core::new(engine, rx)
     }
 
-    fn recorder() -> (Channel<AppEvent>, Arc<Mutex<Vec<Value>>>) {
+    /// Every event the page got, flattened from its batches.
+    fn recorder() -> (Channel<Vec<AppEvent>>, Arc<Mutex<Vec<Value>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&seen);
         let ch = Channel::new(move |body| {
             if let InvokeResponseBody::Json(s) = body {
-                sink.lock().unwrap().push(serde_json::from_str::<Value>(&s).unwrap());
+                sink.lock().unwrap().extend(serde_json::from_str::<Vec<Value>>(&s).unwrap());
             }
             Ok(())
         });
@@ -305,6 +329,13 @@ mod tests {
         core.ui_intent(AppEvent::AnswerNext);
         let got = wait_for(&seen, |v| types(v).contains(&"answerNext"));
         assert!(types(&got).contains(&"answerNext"));
+        // A burst arrives complete and in order, however it was batched.
+        for i in 0..200 {
+            core.engine.emit(AppEvent::OpenAgent { host_id: "h".into(), agent_id: format!("burst-{i}") });
+        }
+        let got = wait_for(&seen, |v| v.iter().any(|e| e["agentId"] == "burst-199"));
+        let burst: Vec<&str> = got.iter().filter_map(|e| e["agentId"].as_str()?.strip_prefix("burst-")).collect();
+        assert_eq!(burst, (0..200).map(|i| i.to_string()).collect::<Vec<_>>());
 
         // Reload: the old page is gone, intents are held for the next one.
         core.page_reset();

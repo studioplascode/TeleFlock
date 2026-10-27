@@ -131,6 +131,7 @@ export const ACTIONS = {
   answerNext: { label: "Answer next", shortcut: "Ctrl J", description: "Everything waiting on you, oldest first" },
   markDone: { label: "Mark done", description: "Move it to Done; its pane closes once idle (see Settings) and the session resumes when needed" },
   markDoneRemove: { label: "Mark done & remove worktree…", description: "Also deletes the checkout folder (asks first)" },
+  deleteWorktree: { label: "Delete worktree…", description: "Its pull request is merged or closed: delete the checkout folder (asks first); the branch stays" },
   reopen: { label: "Reopen", description: "Move it back to Review" },
   resume: { label: "Resume", description: "Reopen the closed session (omp --resume) in a new pane" },
   stopTurn: { label: "Stop turn", shortcut: "Esc", description: "Interrupt the current turn; the session stays" },

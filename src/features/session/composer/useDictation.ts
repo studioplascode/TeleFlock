@@ -1,4 +1,21 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
+import { isAndroid, isTauri } from "@/design";
+import { errorMessage } from "@/features/shell/errors";
+
+export interface Dictation {
+  /** Speech recognition is available; hide the mic otherwise. */
+  supported: boolean;
+  listening: boolean;
+  /** Words recognised so far that may still change. */
+  interim: string;
+  error: string | null;
+  /** Set while Android blocks the microphone for good: opens the app's system settings. */
+  openSettings: (() => void) | null;
+  toggle(): void;
+}
+
+// ── Web Speech API (desktop, mobile browsers) ───────────────────────────────────────────────
 
 interface RecognitionResultLike {
   readonly isFinal: boolean;
@@ -25,18 +42,7 @@ function recognitionCtor(): RecognitionCtor | undefined {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition;
 }
 
-export interface Dictation {
-  /** Web Speech API present; hide the mic otherwise. */
-  supported: boolean;
-  listening: boolean;
-  /** Words recognised so far that may still change. */
-  interim: string;
-  error: string | null;
-  toggle(): void;
-}
-
-/** Voice dictation through the Web Speech API. Final phrases are passed to `onFinal`. */
-export function useDictation(onFinal: (text: string) => void): Dictation {
+function useWebDictation(onFinal: (text: string) => void): Dictation {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -84,5 +90,142 @@ export function useDictation(onFinal: (text: string) => void): Dictation {
     }
   };
 
-  return { supported: Ctor != null, listening, interim, error, toggle };
+  return { supported: Ctor != null, listening, interim, error, openSettings: null, toggle };
 }
+
+// ── Android app: the system speech recognizer through the TeleFlock plugin ──────────────────
+
+const PLUGIN = "plugin:teleflock-android|";
+
+type MicPermission = "granted" | "denied" | "prompt" | "prompt-with-rationale";
+
+/** Events of one session (`Dictation.kt`); `end` always comes last. */
+type SpeechEvent = { type: "partial" | "final"; text: string } | { type: "error"; code: string; message: string } | { type: "end" };
+
+/**
+ * What to tell the user after Android refused the microphone. `settings`: denied for good, only
+ * the app's system settings can grant it now; otherwise the next tap asks again.
+ */
+export function micPermissionNotice(state: Exclude<MicPermission, "granted">): { message: string; settings: boolean } {
+  if (state === "denied") return { message: "Microphone access is blocked.", settings: true };
+  return { message: "Dictation needs the microphone. Tap the mic to allow it.", settings: false };
+}
+
+let recognizer: boolean | undefined;
+let recognizerCheck: Promise<boolean> | undefined;
+
+/** Whether the phone has a speech recognizer; asked once per app run. */
+function checkRecognizer(): Promise<boolean> {
+  recognizerCheck ??= invoke<{ available: boolean }>(`${PLUGIN}dictation_available`).then(
+    (r) => (recognizer = r.available),
+    () => (recognizer = false),
+  );
+  return recognizerCheck;
+}
+
+function useAndroidDictation(onFinal: (text: string) => void): Dictation {
+  const [supported, setSupported] = useState(recognizer === true);
+  const [listening, setListening] = useState(false);
+  const [interim, setInterim] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState(false);
+  /** The running session's channel; events of older sessions are ignored. */
+  const session = useRef<Channel<SpeechEvent> | null>(null);
+  const starting = useRef(false);
+  const mounted = useRef(false);
+  const finalRef = useRef(onFinal);
+  useEffect(() => {
+    finalRef.current = onFinal;
+  });
+  useEffect(() => {
+    mounted.current = true;
+    void checkRecognizer().then((ok) => {
+      if (mounted.current) setSupported(ok);
+    });
+    return () => {
+      mounted.current = false;
+      const s = session.current;
+      session.current = null;
+      if (s) invoke(`${PLUGIN}cancel_dictation`, { session: s.id }).catch(() => {});
+    };
+  }, []);
+
+  const listen = async () => {
+    const ch = new Channel<SpeechEvent>();
+    ch.onmessage = (e) => {
+      if (session.current !== ch) return;
+      switch (e.type) {
+        case "partial":
+          setInterim(e.text);
+          break;
+        case "final":
+          setInterim("");
+          finalRef.current(e.text);
+          break;
+        case "error":
+          setError(e.message);
+          break;
+        case "end":
+          session.current = null;
+          setListening(false);
+          setInterim("");
+      }
+    };
+    session.current = ch;
+    setListening(true);
+    try {
+      await invoke(`${PLUGIN}start_dictation`, { channel: ch });
+    } catch (e) {
+      if (session.current === ch) {
+        session.current = null;
+        setListening(false);
+      }
+      throw e;
+    }
+  };
+
+  const start = async () => {
+    starting.current = true;
+    setError(null);
+    setBlocked(false);
+    try {
+      // Resolves at once when granted, otherwise after the user answered the system prompt.
+      const { recordAudio } = await invoke<{ recordAudio: MicPermission }>(`${PLUGIN}request_microphone_permission`);
+      if (!mounted.current) return;
+      if (recordAudio === "granted") {
+        await listen();
+        return;
+      }
+      const notice = micPermissionNotice(recordAudio);
+      setError(notice.message);
+      setBlocked(notice.settings);
+    } catch (e) {
+      if (mounted.current) setError(errorMessage(e));
+    } finally {
+      starting.current = false;
+    }
+  };
+
+  const toggle = () => {
+    const s = session.current;
+    if (s) {
+      invoke(`${PLUGIN}stop_dictation`, { session: s.id }).catch((e: unknown) => setError(errorMessage(e)));
+      return;
+    }
+    if (!starting.current) void start();
+  };
+
+  const openSettings = () => {
+    setError(null);
+    setBlocked(false);
+    invoke(`${PLUGIN}open_app_settings`).catch((e: unknown) => setError(errorMessage(e)));
+  };
+
+  return { supported, listening, interim, error, openSettings: blocked ? openSettings : null, toggle };
+}
+
+/**
+ * Voice dictation; final phrases are passed to `onFinal`. The Android app uses the system speech
+ * recognizer (its WebView has no working Web Speech API); everything else the Web Speech API.
+ */
+export const useDictation: (onFinal: (text: string) => void) => Dictation = isTauri() && isAndroid ? useAndroidDictation : useWebDictation;

@@ -7,11 +7,22 @@ use crate::term::TermEvent;
 use crate::{ApiError, Millis};
 
 wire_enum! {
-    /// * `tailscaleSsh`: remote host over Tailscale SSH (no credentials; tailnet identity).
+    /// * `tailscaleSsh`: remote host over SSH. Tailscale SSH by default (no credentials; tailnet
+    ///   identity); password or private-key sign-in as the advanced setup ([`HostProfile::auth`]).
     /// * `local`: herdr on this desktop machine (Windows).
     /// * `wsl`: herdr inside a WSL distro on this desktop machine.
     /// * `demo`: built-in simulated host (handled entirely by the frontend).
     pub enum HostKind { TailscaleSsh, Local, Wsl, Demo }
+}
+
+wire_enum! {
+    /// How a `tailscaleSsh` host signs in. Only the configured method is used (plus SSH `none`,
+    /// which needs no credentials); there is no fallback to other credentials.
+    /// * `tailscale`: SSH `none` auth, Tailscale SSH vouches for this device (default, recommended).
+    /// * `key`: a private key: [`HostProfile::key_path`] on this device, else the key saved with
+    ///   `hosts.save` (imported on Android). Its passphrase, if any, is saved too.
+    /// * `password`: the password saved with `hosts.save`.
+    pub enum SshAuth { Tailscale, Key, Password }
 }
 
 wire_struct! {
@@ -19,11 +30,18 @@ wire_struct! {
         pub id: String,
         pub name: String,
         pub kind: HostKind,
-        /// MagicDNS name or tailnet IP (`tailscaleSsh`).
+        /// Host name or IP (`tailscaleSsh`): the MagicDNS name or tailnet IP for Tailscale SSH.
         pub address: Option<String>,
-        /// SSH user (`tailscaleSsh`); defaults to the tailnet policy's user mapping.
+        /// SSH user (`tailscaleSsh`); Tailscale SSH defaults to this device's user name (the
+        /// tailnet policy maps it). Required for password and key sign-in.
         pub user: Option<String>,
         pub port: Option<u16>,
+        /// SSH sign-in (`tailscaleSsh`); absent = `tailscale`. Password and key secrets never live
+        /// in the profile: see [`HostSecrets`].
+        pub auth: Option<SshAuth>,
+        /// Private key file on this device for `auth: key` (`~/` = home dir). Absent: the key saved
+        /// with `hosts.save` ([`HostSecrets::private_key`]).
+        pub key_path: Option<String>,
         /// WSL distro name (`wsl`).
         pub distro: Option<String>,
         /// herdr session name (`default`).
@@ -36,6 +54,37 @@ wire_struct! {
         /// Host group label (trimmed, non-empty). Hosts sharing a group form a pool that
         /// Dispatch's Auto mode spreads tasks over by their current workload.
         pub group: Option<String>,
+    }
+}
+
+/// Sign-in secrets of a host using password or key sign-in. Write-only: `hosts.save` and
+/// `hosts.test` accept them (`HostSaveParams::secrets`); no result, event, log line or cache file
+/// carries them. The app core keeps them owner-only in its data dir (`secrets.json`), keyed by host
+/// id, and deletes them with the host. `hosts.secretStatus` tells which ones are saved.
+///
+/// On save, per field: absent = keep the saved value, empty = delete it, text = replace it.
+/// Secrets the host's sign-in method does not use are not kept.
+#[serde_with::skip_serializing_none]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
+pub struct HostSecrets {
+    pub password: Option<String>,
+    /// OpenSSH or PEM private key text (imported or pasted).
+    pub private_key: Option<String>,
+    /// Passphrase of the private key (key file or saved key).
+    pub passphrase: Option<String>,
+}
+
+/// Redacted: shows which secrets are present, never their values.
+impl std::fmt::Debug for HostSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shown = |s: &Option<String>| if s.is_some() { "<redacted>" } else { "-" };
+        f.debug_struct("HostSecrets")
+            .field("password", &shown(&self.password))
+            .field("private_key", &shown(&self.private_key))
+            .field("passphrase", &shown(&self.passphrase))
+            .finish()
     }
 }
 

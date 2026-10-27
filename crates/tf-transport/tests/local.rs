@@ -18,6 +18,8 @@ async fn local(ev: &Events) -> std::sync::Arc<dyn Transport> {
         address: None,
         user: None,
         port: None,
+        auth: None,
+        key_path: None,
         distro: None,
         herdr_session: "default".into(),
         color: None,

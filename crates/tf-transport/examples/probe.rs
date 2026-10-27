@@ -1,20 +1,26 @@
 //! Manual transport probe, for verifying against real hosts (e.g. a Tailscale SSH peer).
 //!
 //! ```text
-//! cargo run -p tf-transport --example probe -- ssh <address> [--port N] [--user U] [--known-hosts PATH] [--forward HOST:PORT] -- <argv…>
+//! cargo run -p tf-transport --example probe -- ssh <address> [--port N] [--user U] [--known-hosts PATH] [--trust SHA256:…] [--key PATH | --password] [--forward HOST:PORT] -- <argv…>
 //! cargo run -p tf-transport --example probe -- local -- <argv…>
 //! cargo run -p tf-transport --example probe -- wsl [--distro D] -- <argv…>
 //! ```
 //! Prints every `TransportEvent` with a timestamp, runs `argv` via `exec`, optionally
 //! sends an HTTP GET through `forward_tcp`, then closes the transport.
+//!
+//! `--password` signs in with `$TF_PROBE_PASSWORD`; `--key` with that private key file (and
+//! `$TF_PROBE_PASSPHRASE` if set). Secrets come from the environment so they stay out of `ps`.
+//! `--trust` pins a non-tailnet host key with that fingerprint (what `hosts.trustKey` confirms).
 
 use std::time::{Duration, Instant};
 
-use tf_transport::{Cmd, ConnectOptions, HostKind, HostProfile, connect};
+use tf_transport::{Cmd, ConnectOptions, HostKeyDecision, HostKeyPolicy, HostKind, HostProfile, SshAuth, connect, is_tailnet_ip};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn usage() -> ! {
-    eprintln!("usage: probe (ssh <address> [--port N] [--user U] [--known-hosts P] [--forward H:P] | local | wsl [--distro D]) -- <argv…>");
+    eprintln!(
+        "usage: probe (ssh <address> [--port N] [--user U] [--known-hosts P] [--trust SHA256:…] [--key PATH | --password] [--forward H:P] | local | wsl [--distro D]) -- <argv…>"
+    );
     std::process::exit(2)
 }
 
@@ -37,6 +43,8 @@ async fn main() {
         address: None,
         user: None,
         port: None,
+        auth: None,
+        key_path: None,
         distro: None,
         herdr_session: "default".into(),
         color: None,
@@ -46,6 +54,7 @@ async fn main() {
     };
     let mut known_hosts = std::env::temp_dir().join("tf-probe-known_hosts");
     let mut forward: Option<(String, u16)> = None;
+    let mut trusted: Option<String> = None;
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| usage());
         match a.as_str() {
@@ -53,6 +62,12 @@ async fn main() {
             "--user" => profile.user = Some(val()),
             "--distro" => profile.distro = Some(val()),
             "--known-hosts" => known_hosts = val().into(),
+            "--trust" => trusted = Some(val()),
+            "--key" => {
+                profile.auth = Some(SshAuth::Key);
+                profile.key_path = Some(val());
+            }
+            "--password" => profile.auth = Some(SshAuth::Password),
             "--forward" => {
                 let v = val();
                 let (h, p) = v.rsplit_once(':').unwrap_or_else(|| usage());
@@ -70,7 +85,12 @@ async fn main() {
             println!("[{:>8.3}s] event {ev:?}", t0.elapsed().as_secs_f64());
         }
     });
-    let opts = ConnectOptions::new(&known_hosts);
+    let mut opts = ConnectOptions::new(&known_hosts);
+    opts.host_key_policy = HostKeyPolicy::new(move |c| {
+        if is_tailnet_ip(c.address) || trusted.as_deref() == Some(c.fingerprint.as_str()) { HostKeyDecision::Trust } else { HostKeyDecision::Confirm }
+    });
+    opts.secrets.password = std::env::var("TF_PROBE_PASSWORD").ok();
+    opts.secrets.passphrase = std::env::var("TF_PROBE_PASSPHRASE").ok();
     let t = match connect(&profile, &opts, tx).await {
         Ok(t) => t,
         Err(e) => {

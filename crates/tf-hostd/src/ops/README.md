@@ -1,4 +1,4 @@
-# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`, `tools`, `omp`, `automation`)
+# HostdOps families (`fs`, `git`, `gh`, `workspace`, `worktree`, `host`, `term`, `ai`, `tools`, `omp`, `automation`, `upload`)
 
 Owner: HostdOps. Every family exposes
 `pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError>`
@@ -11,7 +11,8 @@ ops::host::setup_status(ctx).await -> SetupStatus   // read-only checklist
 ops::host::health() -> HostHealth                   // sync; /proc on Linux, sysinfo elsewhere
 ops::host::usage_today() -> UsageTotals             // blocking sqlite read (spawn_blocking)
 ops::host::invalidate_models().await                // next host.models re-fetches
-ops::git::repo_info(&Path).await -> Option<RepoInfo>
+ops::git::repo_top(&Path).await -> Result<Option<RepoTop>, ApiError> // state store: the worktree of a folder …
+ops::git::repo_info_at(&RepoTop).await -> RepoInfo                   // … and its facts (one status per worktree)
 ops::term::TermRegistry                             // Ctx.terms (Default + Clone)
 ops::term::input(ctx, client, term_id, data).await  // ClientMsg::TermIn
 ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
@@ -21,8 +22,10 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
 
 ## Behavior
 - **Processes** run without a shell, with a hard timeout (child killed), `GIT_OPTIONAL_LOCKS=0`,
-  `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`. Binaries are found on `PATH`, then `~/.local/bin`,
-  `~/.bun/bin`, … (non-login SSH execs lack them).
+  `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`. Binaries are found on `PATH` (the daemon's PATH already
+  merges the user's interactive-shell PATH, `userenv.rs`), then the well-known install dirs
+  (`~/.local/bin`, `~/.bun/bin`, …). `omp_bin` prefers an omp that can start (its `#!`
+  interpreter is found).
 - **fs.list**: dirs first (symlinked dirs count as dirs), case-insensitive, hidden filter (dotfiles;
   Windows hidden attribute), ≤ 5000 entries. **Never runs git** (browsed repos are untrusted; their
   config can name filter drivers). Badges come from the filesystem only: `.git` dir or `gitdir:`
@@ -57,8 +60,8 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   refspec), hookless, `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=` (empty: no `core.askPass` /
   `SSH_ASKPASS` dialog), `SSH_ASKPASS_REQUIRE=never`, ssh `-o BatchMode=yes -o ConnectTimeout=5`
   appended to the ssh command git would use (`GIT_SSH_COMMAND` / `core.sshCommand` / an OpenSSH
-  `GIT_SSH` program (quoted) / `ssh`; other programs are left alone), 8 s (the whole create must fit
-  the app's 30 s request timeout). Single-flight per repo + branch, and an attempt answers for 20 s
+  `GIT_SSH` program (quoted) / `ssh`; other programs are left alone), 8 s (the fetch must leave the
+  agent start its share of the app's 180 s launch timeout on a slow host). Single-flight per repo + branch, and an attempt answers for 20 s
   (fan-outs fork from one commit and pay one timeout). A failed fetch is logged and creation
   continues from the existing ref; a base that does not exist locally is `invalid_params`. herdr then
   runs `git worktree add -b <branch> <path> <base>`, which makes the branch track a remote base
@@ -104,6 +107,13 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   `teleflock-herdr-<session>-<pid>-<ms>.scope` (Delegate, TasksMax=infinity), then
   `AttachProcessesToUnit` for its process tree still in login sessions, parents first, a few passes
   for processes forked meanwhile; never stops anything. Non-root gets an explanation instead).
+  And it installs what is missing (`install.rs`, architecture §3.12): `install-omp`, `install-bun`,
+  `install-herdr`, `install-gh`, `install-git`, `install-ffmpeg` (official installers, the gh
+  release archive, or the system package manager as root / passwordless sudo), each under the
+  shared install lock through `tools::run`. Every fix runs on its own: failures land in
+  `SetupStatus.failed`, fixes still running in `SetupStatus.applying`; the reply comes when the
+  batch is done or after 20 s. A consented global bridge copy is kept equal to the uploaded one
+  (`refresh_global_bridge`, at daemon start and on every host probe).
 - **omp.settings / omp.settingsSet** (`omp_config.rs`, owner OmpSettings, architecture §3.10): omp's
   settings schema through the companion extension's dump mode (throwaway `omp --mode rpc … -e
   <home>/ext/teleflock-bridge.ts`, `TF_OMP_SCHEMA_OUT`; cached per omp binary in memory and
@@ -147,6 +157,17 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   host's time zone, plain-English description). `unavailable` (retryable) before the scheduler
   started.
 
+- **upload.\*** (`upload.rs`, architecture §3.13): files for prompts and pastes under
+  `<home>/uploads/<yyyy-mm-dd>/<sanitized unique name>` (0600, folders 0700; any mime). `begin`
+  reserves the name (1 B–2 GiB, ≤ 8 running), `chunk` appends base64 ≤ 1 MiB strictly at `offset` =
+  bytes received (repeats and gaps → `upload_offset`, past the size → `invalid_params`, nothing
+  written), hashing as it goes; `status` says where to resume; `finish` checks size and optional
+  SHA-256 and renames `.partial/<id>.part` into place (a retried finish answers the same for a
+  day); `cancel` drops a partial or an unsent finished file. Idle 1 h → dropped (swept every 5 min);
+  an earlier run's partials go when the first session context starts; finished files are pruned
+  after 30 days, then oldest first above 10 GiB. `upload::start(&paths, cancel)` (in `Ctx::create`)
+  runs that cleanup and the sweeper once per daemon.
+
 ## Error codes (beyond `tf_proto::ApiError`'s list)
 | code | when | hint tells the user |
 |---|---|---|
@@ -162,6 +183,10 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
 | `ai_failed` | omp exited, reported an error or answered nothing (message: ≤ 300 chars of stderr/error) | — |
 | `unsupported` | `omp.settingsSet` setting a credential while the deployed extension lacks the settings-write mode | reconnect with the current app, or the setting's `$ENV` override |
 | `io_error` (retryable) | resuming a parked agent whose session file cannot be read (not definitely deleted) | try again once it is reachable |
+| `upload_offset` | `upload.chunk` at an offset other than the bytes received (a repeat whose answer was lost, or a gap) | ask `upload.status` and continue there |
+| `checksum_mismatch` | `upload.finish` with a `sha256` the received bytes don't have (the upload is dropped) | upload the file again |
+| `busy` (retryable) | `upload.begin` while 8 uploads run | wait for one to finish |
+| `busy` (retryable) | an agent launch whose new pane's shell never became ready (waited 45 s), or whose chosen pane's shell is not at an idle prompt | slow shell startup files; pick an idle pane |
 
 ## Tests
 `cargo test -p tf-hostd ops::` — parsers (porcelain v2, numstat/name-status `-z`, worktree
@@ -178,3 +203,8 @@ across DST jumps (a POSIX-TZ zone), descriptions, the scheduler's fire/catch-up/
 skip-if-busy guard (kept outside the run cap, collapsed repeat skips), distinct agent names for
 launches in flight, store validation and round trip (0600, run cap, corrupt file set aside), systemd
 unit contents and unit removal without a running user manager.
+`cargo test -p tf-hostd upload` — chunks in order (repeats, gaps, overflow, oversized and empty
+chunks refused; racing duplicates land once), checksum, size and count caps, name sanitizing and
+per-day uniqueness (never overwriting), owner-only modes, cancel (partial and unsent finished
+file), idle sweep (busy uploads kept), start-up cleanup of an earlier run's partials, pruning by age
+and total.

@@ -1,0 +1,12 @@
+
++- Command: ls -la ---------------------------------------------------------------------------------------------------+
+|                                                                                                                     |
+| > Approve                                                                                                           |
+|   Approve bash for this session                                                                                     |
+|   Deny                                                                                                              |
++---------------------------------------------------------------------------------------------------------------------+
+| Up/Down choose · Enter select · Ctrl+Enter/Ctrl+Q approve · Esc deny · Ctrl+O details · type to deny and steer      |
++---------------------------------------------------------------------------------------------------------------------+
++-- pi > [M] no-model > [T] tf-bridgectl-cap-work > ctx: 7.6K/? [A] >-------------------------------------------------+
++-                                                                               Shift+Tab to change thinking effort -+
+⇄ teleflock

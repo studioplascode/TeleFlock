@@ -1,7 +1,7 @@
 import { motion } from "motion/react";
 import { type ReactNode, useRef } from "react";
 import { useInbox, useUi } from "@/core";
-import { AnimatePresence, Button, CardFlight, EmptyState, Kbd, LayoutGroup, PageHeader, StatusOrb, cn, fadeRise, useInView, useIsMobile } from "@/design";
+import { AnimatePresence, Button, CardFlight, EmptyState, FlightGroup, Kbd, PageHeader, StatusOrb, cn, fadeRise, useInView, useIsMobile } from "@/design";
 import { openAgent, openAnswerHud, openTerminal } from "@/features/board/agentActions";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
 import { UpdatesActions, UpdatesList, useUpdates } from "@/features/notify/NotificationCenter";
@@ -64,13 +64,13 @@ export function InboxView() {
     <div className={cn("flex flex-col", mobile ? "gap-6" : "gap-8")}>
       <section aria-label={LANE_TITLE.needs} className={cn("flex flex-col", mobile ? "gap-3" : "gap-3.5")}>
         <SectionHeader title={LANE_TITLE.needs} meta={keys.length > 0 ? `${keys.length} · oldest first` : undefined} />
-        <LayoutGroup id="inbox">
+        <FlightGroup id="inbox" arrangement={keys.join(" ")}>
           <AnimatePresence mode="popLayout" initial={false}>
             {keys.map((k, i) => (
               <InboxItem key={k} agentKey={k} index={i} mobile={mobile} />
             ))}
           </AnimatePresence>
-        </LayoutGroup>
+        </FlightGroup>
         {keys.length === 0 && (
           <motion.div {...fadeRise} className="card-surface rounded-xl">
             <EmptyState

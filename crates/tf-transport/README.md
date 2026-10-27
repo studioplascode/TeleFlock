@@ -2,7 +2,7 @@
 
 The app-side transports (architecture §5.1). There is one `Transport` per host connection:
 
-- **Tailscale SSH**: a single russh connection that multiplexes exec, spawn and `direct-tcpip` channels.
+- **SSH**: a single russh connection that multiplexes exec, spawn and `direct-tcpip` channels. Signs in with Tailscale SSH (`none`, the default) or, as the advanced setup, a private key or password (`HostProfile::auth`).
 - **Local**: `tokio::process` with no shell.
 - **WSL**: `wsl.exe` through the local process layer.
 
@@ -23,7 +23,8 @@ use tf_transport::*;
 
 pub async fn connect(profile: &HostProfile, opts: &ConnectOptions, events: mpsc::Sender<TransportEvent>)
     -> Result<Arc<dyn Transport>, TransportError>;
-pub async fn list_distros() -> Result<Vec<WslDistro>, TransportError>;   // `wsl.exe -l -v`
+pub async fn list_distros() -> Result<Vec<WslDistro>, TransportError>;   // `wsl.exe -l -v` + `-l --running -q`, concurrently
+pub struct WslKeepalive;   // WslKeepalive::start(distro) -> Result<_, TransportError>; is_running(&mut self); drop = kill
 
 pub struct Cmd { pub argv: Vec<String>, pub env: Vec<(String, String)>, pub cwd: Option<String>,
                  pub stdin: Option<Vec<u8>>, pub timeout: Option<Duration> }
@@ -40,8 +41,10 @@ pub enum TransportEvent { Phase(ConnPhase, Option<String>), AuthUrl(String), Lat
 pub struct ConnectOptions { pub known_hosts: PathBuf, pub host_key_policy: HostKeyPolicy /* tailnet_only() */,
                             pub auth_timeout: Duration /* 31 min */,
                             pub ping_interval: Duration /* 15 s */, pub ping_timeout, pub ping_max_misses /* 3 */,
-                            pub resolve_timeout, pub connect_timeout, pub handshake_timeout, pub wsl_start_timeout }
-// ConnectOptions::new(known_hosts_path) fills in the defaults.
+                            pub resolve_timeout, pub connect_timeout, pub handshake_timeout, pub wsl_start_timeout,
+                            pub secrets: HostSecrets /* password / imported key / passphrase; Debug redacts */ }
+// ConnectOptions::new(known_hosts_path) fills in the defaults (no secrets).
+pub fn check_private_key(text: &str, passphrase: Option<&str>) -> Result<String /* SHA256 fingerprint */, TransportError>;
 
 pub struct HostKeyCheck { pub host: String, pub address: IpAddr, pub algorithm: String, pub fingerprint: String }
 pub enum HostKeyDecision { Trust, Confirm }
@@ -110,12 +113,18 @@ Differences from the architecture sketch:
 - `Confirm`: nothing is pinned and the connect fails with `HostKeyUnconfirmed { host, address, algorithm, fingerprint }` (`transport.hostKeyUnconfirmed`, not retryable). Connect again with a policy that trusts that fingerprint once the user has confirmed it.
 - A different key fails with `HostKeyMismatch { host, expected, actual, known_hosts }`, whatever the policy says. The pin is never overwritten.
 
-**Authentication**
+**Authentication** (`ssh/auth.rs`, by `HostProfile::auth`; absent = `tailscale`)
 
-- `none` only.
-- A banner containing an `https://` URL (Tailscale check mode) produces `Phase(AuthRequired, banner)` and then `AuthUrl(url)`. The connect keeps waiting, up to `auth_timeout`.
-- If the server ends auth, the error is `AuthDenied { banner }`.
-- If the server offers other methods instead, the error is `NotTailscaleSsh { methods }`: you reached a regular sshd.
+- Host key checks run in the handshake, before any auth request, for every method.
+- `tailscale`: `none` only.
+  - A banner containing an `https://` URL (Tailscale check mode) produces `Phase(AuthRequired, banner)` and then `AuthUrl(url)`. The connect keeps waiting, up to `auth_timeout`.
+  - If the server ends auth, the error is `AuthDenied { banner }`.
+  - If the server offers other methods instead, the error is `NotTailscaleSsh { methods }`: you reached a regular sshd.
+- `password` / `key` need `profile.user`. The credential is loaded first (`CredentialMissing` when nothing is saved): the password from `opts.secrets`, or the key from `profile.key_path` (`~/` expanded, read on a blocking thread) else `opts.secrets.private_key`, decrypted with `opts.secrets.passphrase` only when it is encrypted. OpenSSH, PEM (PKCS#1, PKCS#8, SEC1) and PuTTY keys; pasted text may carry indentation, CRLF and blank lines. Errors: `KeyPassphraseNeeded`, `KeyPassphraseWrong`, `KeyUnreadable { detail }` (missing file, a `.pub` file, unsupported format or legacy cipher).
+- Then `none` (a host that needs no credentials, e.g. Tailscale SSH, signs in right there) and the configured credential, once. Nothing else is ever tried: no agent, no default key files, no other saved secret.
+  - Password: `password` if offered, else answered at a `keyboard-interactive` password prompt (a second password prompt = rejected; other prompts = `AuthIncomplete`).
+  - Key: RSA signs with the best `rsa-sha2-*` the host lists.
+  - Errors (none retryable, so a wrong password is never retried on its own): `PasswordRejected { user }`, `KeyRejected { user, fingerprint }`, `AuthMethodNotAllowed { method, offered }`, `AuthIncomplete { method, user, needs }` (partial success), `SignInClosed { method, user, banner }`.
 
 **Liveness**
 
@@ -138,28 +147,31 @@ Differences from the architecture sketch:
   - `--exec` avoids an extra Windows-side shell layer.
   - The login wrapper provides PATH, env and cwd in the same way as SSH.
 - When wsl.exe's own stderr is UTF-16, it is re-encoded to UTF-8.
-- `connect` warms the distro up by running `true`, and fails with `Wsl(msg)` if the distro is missing.
+- `connect` warms the distro up by running `wsl.exe -d <distro> --exec true` directly (no login shell: its profile files can take seconds), and fails with `Wsl(msg)` if the distro is missing.
 - `forward_tcp` maps localhost-like hosts to `127.0.0.1`, since WSL2 forwards localhost.
+- `WslKeepalive::start(distro)` runs `wsl.exe -d <distro> --exec sleep 2147483647` (no shell; 68 years instead of `sleep infinity`, which old busybox lacks) and kills it on drop. WSL stops a distro `instanceIdleTimeout` (default 15 s) after its last `wsl.exe` client exits, taking everything running in it along; tf-client holds one per wanted WSL host across reconnects. Agents that must outlive the app need `[general] instanceIdleTimeout=-1` in `%UserProfile%\.wslconfig`.
 - `list_distros` and `parse_distros`:
   - Decode the UTF-16LE output of `wsl.exe -l -v`.
   - Read the columns from the right, because the headers may be localized.
-  - Take `running` from `wsl.exe -l --running -q`.
+  - Take `running` from `wsl.exe -l --running -q` (both run at once).
 
 ## Verification
 
 - Tests: `cargo test -p tf-transport`.
-  - The SSH tests use an in-process russh server that simulates Tailscale:
+  - The SSH tests use an in-process russh server that simulates Tailscale and a regular sshd:
     - `none` auth
     - check-mode banner, then a delayed accept
     - deny
     - an OpenSSH-like refusal
+    - password (also over `keyboard-interactive`) and public keys (`AuthMode::Sshd`), logging every auth request so tests prove which credentials were sent
     - `sh -c` exec, and a direct-tcpip proxy
+  - Key fixtures in `tests/fixtures/user_*`: ed25519 (plain and passphrase `correct horse`), encrypted PKCS#8 ECDSA, RSA PEM.
   - A TCP proxy cuts or freezes links to test disconnects and keepalive.
 - Probe a real host:
   ```
   cargo run -p tf-transport --example probe -- ssh <100.x IP> --user <u> -- herdr --version
   ```
-  Add `--forward 127.0.0.1:<port>` to exercise a tunnel.
+  Add `--forward 127.0.0.1:<port>` to exercise a tunnel. For a regular sshd: `--key <file>` (passphrase in `$TF_PROBE_PASSPHRASE`) or `--password` (`$TF_PROBE_PASSWORD`), and `--trust SHA256:…` to pin a non-tailnet host key.
 - Cross checks:
   - `cargo xwin check --target x86_64-pc-windows-msvc -p tf-transport`
   - `cargo check --target aarch64-linux-android -p tf-transport`, with NDK `CC_`/`AR_` set as in `docs/build.md`.

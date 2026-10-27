@@ -83,16 +83,22 @@ fn usage_today(&self) -> UsageTotals
 
 ### Launch recipe (`src/ops/agent.rs`, §3.7)
 ```rust
-pub async fn start_agent(ctx: &Ctx, target: StartTarget, spec: &AgentSpec, resume: Option<&str>) -> Result<Started, ApiError>
+pub enum LaunchPane { Target(StartTarget), New(String) }   // From<StartTarget>; New = a root pane hostd just created
+pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentSpec, resume: Option<&str>) -> Result<Started, ApiError>
 ```
 Passes `--config <home>/omp-overlay.yml` / `-e <home>/ext/teleflock-bridge.ts` only when the app deployed them.
+A busy shell (herdr `agent_pane_busy`) is waited for 45 s in a pane hostd made (`New`, `Workspace`, `Cwd`) and 2 s in
+a pane the client picked (`StartTarget::Pane`), then fails as a retryable `busy`; the agent gets 90 s to become
+interactive and the first prompt/plan mode 90 s for the collab link.
 
 ## Behavior summary
 - **Board** (`state/`): herdr snapshot + coalesced events (re-snapshot debounced on structure changes),
-  replicas, bridge, git (20 s cache) → `HostState`; patches ≤ 10 Hz, one rev per message; pulses per 100 ms.
-  Columns, needs and notifications per §3.5; archive/turns/activity/usage in `state.json`.
+  replicas, bridge, git (per worktree; on turn ends, cwd changes and connects, 5 min while clients are
+  connected) → `HostState`; patches ≤ 10 Hz, one rev per message; pulses per 100 ms. Columns, needs and
+  notifications per §3.5; archive/turns/activity/usage in `state.json` (compact; usage-only changes ≤ 1/min).
 - **omp** (`omp.rs`): relay on `127.0.0.1:<relay-port>`, registry poll every 1.5 s, one guest + replica per
   room on our relay (rooms on other relays are `notShared`), session events coalesced to one flush / 50 ms
+  (`meta` ≤ 2/s per session, the tree only when it changed for apps ≥ 0.5.1)
   and ordered with the `session.open` snapshot. Agents map by herdr `agent_session` id, cross-checked by pid.
 - **Controls** (`ops/agent.rs`): collab → bridge → injection (`inject.rs`, §3.6: idle, composer visible,
   no draft, catalog-only canonical commands, re-read + one extra `enter`).

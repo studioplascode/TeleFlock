@@ -1,10 +1,10 @@
 import { ArrowRight, Check, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useMemo } from "react";
-import { navigate, parseAgentKey, useAccountLimits, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useUi } from "@/core";
+import { LIMITS_EVERY_MS, navigate, parseAgentKey, useAccountLimits, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useUi } from "@/core";
 import type { Column } from "@/core/gen";
 import { TerminalPane } from "@/features/terminal/TerminalPane";
-import { AgentGlyph, IconButton, NumberTicker, StatusOrb, Tile, TiltCard, cn, formatAge, formatCompact, formatUsd, spring, useNow } from "@/design";
+import { AgentGlyph, IconButton, NumberTicker, StatusOrb, Tile, TiltCard, cn, formatAge, formatCompact, formatUsd, spring, useNow, useWindowActive, useWindowVisible } from "@/design";
 import { hostAccent } from "@/features/hosts/kinds";
 import { useHealthHistory } from "@/features/shell/healthHistory";
 import { PHASE_STATUS, connSummary } from "@/features/shell/status";
@@ -48,17 +48,17 @@ function useHostsInView(): string[] {
   return filter === "all" ? ids : ids.filter((id) => id === filter);
 }
 
-/** The subscription window that binds first across the accounts of the hosts in view. */
+/** The subscription window that binds first across the accounts of the hosts in view (re-asked every 5 min while the window is active). */
 function useLimitHeadline(): LimitHeadline | null {
   const ids = useHostsInView();
   const online = useHosts((s) => ids.filter((id) => s.status[id]?.phase === "online").join("|"));
-  const byHost = useAccountLimits(online ? online.split("|") : []);
+  const byHost = useAccountLimits(online ? online.split("|") : [], useWindowActive() ? LIMITS_EVERY_MS : null);
   return limitHeadline(byHost, useNow(30_000));
 }
 
 const TONE = { error: "text-error", warn: "text-warn", mute: "text-mute" } as const;
 
-/** Proportional lane bar (the counts live in the lane headers right below). */
+/** Proportional lane bar (the counts live in the lane headers right below). Glides in Lively only (`tf-glide-grow`). */
 function LaneBar({ counts, className }: { counts: Record<Column, number>; className?: string }) {
   const total = counts.running + counts.needs + counts.review + counts.done;
   return (
@@ -68,13 +68,11 @@ function LaneBar({ counts, className }: { counts: Record<Column, number>; classN
       aria-label={LANES.map((l) => `${counts[l.column]} ${l.title}`).join(", ")}
     >
       {LANES.map((l) => (
-        <motion.i
+        <i
           key={l.column}
           data-status={l.status}
-          className={cn("min-w-[3px] rounded-full st-bg", l.column === "running" && "live-gradient")}
-          animate={{ flexGrow: Math.max(counts[l.column], total === 0 ? 1 : 0.0001) }}
-          transition={spring.gentle}
-          style={{ flexBasis: 0 }}
+          className={cn("tf-glide-grow min-w-[3px] rounded-full st-bg", l.column === "running" && "live-gradient")}
+          style={{ flexBasis: 0, flexGrow: Math.max(counts[l.column], total === 0 ? 1 : 0.0001) }}
         />
       ))}
     </div>
@@ -148,7 +146,7 @@ function HostRow({ hostId, dense = false }: { hostId: string; dense?: boolean })
         <span className="inline-flex items-center gap-1">
           ram
           <span className="h-1 w-10 overflow-hidden rounded-full bg-white/8" aria-hidden>
-            <span className={cn("block h-full rounded-full transition-[width] duration-700", memPct >= 90 ? "bg-warn" : "bg-white/35")} style={{ width: `${memPct}%` }} />
+            <span className={cn("tf-glide-width block h-full rounded-full", memPct >= 90 ? "bg-warn" : "bg-white/35")} style={{ width: `${memPct}%` }} />
           </span>
           <b className={cn("text-ink-2", dense && "hidden @min-[22rem]:inline")}>
             {gb(health.memUsed)}/{gb(health.memTotal)} GB
@@ -292,9 +290,11 @@ function useLeader(): string | null {
   return useMostActive(live);
 }
 
+/** The leader's terminal, observed. Detached while the window is hidden (no attach, no xterm work for a window nobody can see); an unfocused window keeps it, so a board on a second monitor stays live. */
 export function LiveTerminalTile({ className }: { className?: string }) {
   const leader = useLeader();
   const agent = useAgent(leader ?? "");
+  const shown = useWindowVisible();
   const target = leader ? parseAgentKey(leader) : null;
 
   return (
@@ -321,7 +321,7 @@ export function LiveTerminalTile({ className }: { className?: string }) {
         </div>
         <div className="relative min-h-0 flex-1 px-1.5 pb-1.5">
           <AnimatePresence mode="wait" initial={false}>
-            {target ? (
+            {target && shown ? (
               <motion.div
                 key={leader}
                 className="absolute inset-0 px-1.5 pb-1.5"
@@ -333,7 +333,7 @@ export function LiveTerminalTile({ className }: { className?: string }) {
                 <TerminalPane hostId={target.hostId} target={{ kind: "agent", agentId: target.agentId }} mode="observe" compact className="h-full w-full" />
               </motion.div>
             ) : (
-              <p className="px-3 pt-6 text-sm text-mute">The busiest running agent streams here.</p>
+              <p className="px-3 pt-6 text-sm text-mute">{target ? "Paused while TeleFlock is hidden." : "The busiest running agent streams here."}</p>
             )}
           </AnimatePresence>
         </div>

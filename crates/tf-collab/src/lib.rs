@@ -18,7 +18,7 @@ pub mod replica;
 
 pub use crypto::{CryptoError, RoomKey};
 pub use frame::{AgentCmdKind, COLLAB_PROTO, GuestFrame, HostFrame, ImageContent};
-pub use guest::{EndReason, Guest, GuestError, GuestEvent, Snapshot, TranscriptChunk};
+pub use guest::{EndReason, Guest, GuestError, GuestEvent, JoinTimeouts, Snapshot, TranscriptChunk};
 pub use link::{CollabLink, LinkError};
 pub use registry::{Access, HostEntry, LinkInfo, Registry, RegistryError};
 pub use relay::{IdentityError, Relay, RelayConfig, RelayIdentity, RelayStats};

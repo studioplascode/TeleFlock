@@ -1,8 +1,10 @@
+import { FolderGit2 } from "lucide-react";
 import type { Ref } from "react";
 import { useCore, useHosts } from "@/core";
 import { Input, Kbd, SegmentedControl, Select, cn } from "@/design";
 import { type GroupBy, useBoard } from "./boardStore";
 import { FilterChip } from "./FilterChip";
+import { repoAccent } from "./RepoTag";
 
 /** Distinct repo names across agents in view, sorted (newline-joined so the selector stays primitive). */
 export function useRepoNames(hostFilter: string): string[] {
@@ -41,7 +43,11 @@ export function BoardToolbar({ searchRef, className }: { searchRef: Ref<HTMLInpu
         value={repo ?? "*"}
         onValueChange={(v) => setRepo(v === "*" ? null : v)}
         className="h-9 w-40 min-w-24 shrink"
-        options={[{ value: "*", label: "All repos" }, ...repos.map((r) => ({ value: r, label: r }))]}
+        aria-label="Repo filter"
+        options={[
+          { value: "*", label: "All repos", icon: <FolderGit2 className="text-mute" aria-hidden /> },
+          ...repos.map((r) => ({ value: r, label: r, icon: <FolderGit2 style={{ color: repoAccent(r) }} aria-hidden /> })),
+        ]}
       />
       <Input
         ref={searchRef}

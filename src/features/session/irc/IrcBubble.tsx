@@ -185,9 +185,10 @@ export function IrcBubble({ entry, withPrev = false, withNext = false }: { entry
   );
 
   return (
-    <div className={cn("flex gap-2.5", out ? "flex-row-reverse" : "flex-row", withPrev && "-mt-2 max-md:-mt-1")} data-irc={m.direction}>
+    // phones keep the glyph's 28 px column and close the gap instead (same look; the glyph no longer spills into the gap)
+    <div className={cn("flex gap-2.5 max-md:gap-1.5", out ? "flex-row-reverse" : "flex-row", withPrev && "-mt-2 max-md:-mt-1")} data-irc={m.direction}>
       {!out && (
-        <div className="w-7 shrink-0 max-md:w-6">
+        <div className="w-7 shrink-0">
           {!withPrev &&
             (open ? (
               <button type="button" onClick={open} className="focus-ring pressable mt-[18px] rounded-[9px]" aria-label={`Open ${sub?.name ?? m.peer}`}>

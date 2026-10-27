@@ -7,6 +7,9 @@
 //!   WebView is alive; taps on the body open the app through a `teleflock://` deep link.
 //!   Notifications handled elsewhere are retracted by tag + id (the group summary follows).
 //! * `POST_NOTIFICATIONS` permission flow, haptics, battery-optimisation status.
+//! * Dictation (`Dictation.kt`): the `RECORD_AUDIO` permission flow and the system
+//!   `SpeechRecognizer`, whose partial and final phrases stream to the webview over a channel
+//!   (Android's WebView has no working Web Speech API). Webview-only: no Rust API.
 //! * Self-update install: a verified APK from the cache dir goes to the system installer through
 //!   the app's FileProvider (`REQUEST_INSTALL_PACKAGES`, "install unknown apps" grant flow).
 //! * Default-network changes (Wi-Fi ↔ cellular, VPN up) are reported through the same sink so

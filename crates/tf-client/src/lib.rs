@@ -8,12 +8,13 @@ mod diag;
 mod engine;
 mod link;
 mod platform;
+mod secrets;
 mod settings;
 mod state;
 mod tunnel;
 mod util;
 
 pub use deploy::HOSTD_VERSION;
-pub use engine::{Engine, EngineConfig};
+pub use engine::{Engine, EngineConfig, Resume};
 pub use platform::{BadgeState, NotifyStyle, Platform};
 pub use tf_proto;

@@ -12,7 +12,10 @@ use crate::daemon::{exe_identity, InstanceLock};
 use crate::ipc;
 use crate::paths::Paths;
 
-const START_WAIT: Duration = Duration::from_secs(10);
+/// How long `attach` waits for a daemon it started to open its socket. Generous for slow hosts
+/// (a cold WSL VM, a loaded laptop): a daemon that dies is noticed at once (`try_wait`), so the
+/// full wait only runs while it is still starting.
+const START_WAIT: Duration = Duration::from_secs(30);
 
 /// `tf-hostd attach`. `session` is informational: the client's `hello` selects the
 /// herdr session, so one daemon serves every session.
@@ -207,7 +210,7 @@ async fn start_and_connect(paths: &Paths, relay_port: u16) -> Result<(ipc::BoxRe
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Err("daemon not ready after 10 s".into())
+    Err(format!("daemon not ready after {} s", START_WAIT.as_secs()))
 }
 
 /// Starts `tf-hostd daemon` detached, inside `scope` when given (Linux with systemd: outside the

@@ -1,0 +1,12 @@
+
+                       Tip: Try starting your prompt with a ->, and writing a list (1. Do X, 2.
+                                                         Do Y)
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+▎ rail draft
+▎ second line
+
+ π · ⬢ no-model · 🗑 tf-bridgectl-cap-work · ◫ 7.6K/? ⟲
+⇄ teleflock

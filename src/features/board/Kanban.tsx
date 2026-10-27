@@ -17,7 +17,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { navigate, useAgent, useUi } from "@/core";
 import type { Column } from "@/core/gen";
-import { AnimatePresence, CardFlight, CountBadge, EmptyState, LayoutGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion, z } from "@/design";
+import { AnimatePresence, CardFlight, CountBadge, EmptyState, FlightGroup, NumberTicker, StatusOrb, cn, spring, toast, useCalmMotion, z } from "@/design";
 import { ACTIONS } from "@/features/shell/vocab";
 import { AgentCard } from "./AgentCard";
 import { archiveWithUndo, openAgent, setArchived } from "./agentActions";
@@ -72,6 +72,11 @@ export function applyMoves(lanes: LaneKeys, moves: Record<string, Column>): Lane
     out[lane.column] = [...incoming, ...own];
   }
   return out;
+}
+
+/** Every lane's keys in order: what moves a card on the board (FlightGroup `arrangement`). */
+export function arrangementOf(view: LaneKeys): string {
+  return LANES.map((l) => view[l.column].join(" ")).join("|");
 }
 
 /** Card click: Ctrl/⌘ toggles the multi-selection, Shift extends it, a plain click opens (or toggles while selecting). */
@@ -273,7 +278,7 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
 
   return (
     <DndContext sensors={sensors} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => setDrag(null)}>
-      <LayoutGroup id="board">
+      <FlightGroup id="board" arrangement={arrangementOf(view)}>
         {/* Bleeds into the board padding so a narrow window scrolls lanes edge to edge instead of clipping them short. */}
         <div className="-mx-4 grid min-h-0 flex-1 snap-x scroll-px-4 grid-cols-[repeat(4,minmax(216px,1fr))] gap-3 overflow-x-auto overscroll-x-contain px-4 short:-mx-3 short:scroll-px-3 short:px-3 [&>section]:snap-start">
           {LANES.map((meta) => (
@@ -287,7 +292,7 @@ export function Kanban({ lanes, selectedKey }: { lanes: LaneKeys; selectedKey: s
             />
           ))}
         </div>
-      </LayoutGroup>
+      </FlightGroup>
       {Object.entries(moves).map(([k, target]) => (
         <MoveWatcher key={k} agentKey={k} target={target} />
       ))}

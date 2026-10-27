@@ -172,11 +172,14 @@ export function Templates({ index }: { index: number }) {
                     )}
                   </div>
                   {t.description && <div className="truncate text-xs text-mute">{t.description}</div>}
+                  {/* every chip at most the line's width (a long model id or prompt truncates instead of running past the card) */}
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    <Chip className="h-5 text-2xs">{t.model ?? "default model"}</Chip>
+                    <Chip className="h-5 max-w-full min-w-0 text-2xs">
+                      <span className="truncate">{t.model ?? "default model"}</span>
+                    </Chip>
                     {t.thinking && <Chip className="h-5 text-2xs">think {t.thinking}</Chip>}
                     {t.prompt && (
-                      <Chip className="h-5 max-w-60 min-w-0 text-2xs">
+                      <Chip className="h-5 max-w-[min(240px,100%)] min-w-0 text-2xs">
                         <span className="truncate">“{t.prompt.split("\n")[0]}”</span>
                       </Chip>
                     )}

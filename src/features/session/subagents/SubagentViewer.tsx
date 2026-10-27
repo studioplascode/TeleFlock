@@ -520,7 +520,10 @@ function SteerComposer({ agentKey, sub, mobile, blocked, onSent }: { agentKey: s
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+            // Desktop: Enter sends, Shift+Enter is a newline. Phone (like the session composer): Enter is a
+            // newline and the button sends, or Ctrl/Meta+Enter from a hardware keyboard.
+            if (mobile ? e.ctrlKey || e.metaKey : !e.shiftKey) {
               e.preventDefault();
               void send();
             }
@@ -528,7 +531,7 @@ function SteerComposer({ agentKey, sub, mobile, blocked, onSent }: { agentKey: s
           placeholder={blocked ? "Messaging is unavailable" : running ? `Steer ${sub.name}…` : `Message ${sub.name}…`}
           aria-label={running ? `Steer ${sub.name}` : `Message ${sub.name}`}
           disabled={!!blocked}
-          enterKeyHint={mobile ? "send" : undefined}
+          enterKeyHint={mobile ? "enter" : undefined}
           maxHeight={mobile ? 140 : 220}
           boxClassName={cn("rounded-[22px] glass px-4 py-3", mobile ? "py-2 pr-2 pl-4 [&>div]:mt-1.5" : "[@media(max-height:720px)]:py-2", !!blocked && "opacity-80")}
           className={cn("text-[14px]", mobile && "min-h-[1lh] text-[15px]")}
@@ -537,7 +540,7 @@ function SteerComposer({ agentKey, sub, mobile, blocked, onSent }: { agentKey: s
               {status}
               <span className="ml-auto flex shrink-0 items-center">
                 <IconButton
-                  label={running ? "Steer (Enter)" : "Send (Enter)"}
+                  label={`${running ? "Steer" : "Send"}${mobile ? "" : " (Enter)"}`}
                   size={mobile ? "lg" : "sm"}
                   variant="primary"
                   onClick={() => void send()}

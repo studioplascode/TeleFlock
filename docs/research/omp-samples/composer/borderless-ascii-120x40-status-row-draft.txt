@@ -1,0 +1,12 @@
+                                               ▒▒  ██                  █
+                                                   ██       v18.13.1
+
+                       Tip: Turn on `/advisor` to attach a second model that reviews every turn
+                                              and quietly injects advice
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+❯ borderless ascii draft
+ pi · [M] no-model · [T] tf-bridgectl-cap-work · ctx: 7.6K/? [A]
+⇄ teleflock

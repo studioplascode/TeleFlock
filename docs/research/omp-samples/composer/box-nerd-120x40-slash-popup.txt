@@ -1,0 +1,12 @@
+╭── 󰵗  󰪟 GPT-6 Luna    tf-bridgectl-cap-work  󰙺 ──3%──────────────────────────────────────󰕝─────󰁨────────272K───╮
+╰─ /                                                                                                                 ─╯
+  skill:            3 skills                                                                                        █
+   usage             Show provider usage and limits                                                                  │
+   btw               Ask a side question, or browse this session's BTW history                                       │
+   model             Model: openai-codex/gpt-6-luna                                                                  │
+   teleflock-attach  TeleFlock: enable remote session control (run automatically by the bridge)                      │
+   collab            Collab: off                                                                                     │
+   advisor           Advisor: on (openai-codex/gpt-6-astra)                                                          │
+   plan              Plan: off                                                                                       │
+   fast              Fast: off                                                                                       │
+   login             Login: choose provider                                                                          │

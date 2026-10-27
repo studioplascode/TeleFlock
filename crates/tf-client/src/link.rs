@@ -1,10 +1,10 @@
 //! Protocol client for one `tf-hostd attach` stdio stream (JSON lines,
 //! `tf_proto::host::{ClientMsg, ServerMsg}`): hello/welcome, snapshot + patches with
-//! revision-gap resync, request correlation with timeouts, pings, and passthrough of
-//! pulse/session/term/notify messages to a [`LinkSink`].
+//! revision-gap resync, request correlation with timeouts, liveness by unanswered pings, and
+//! passthrough of pulse/session/term/notify messages to a [`LinkSink`].
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,15 +12,22 @@ use serde_json::Value;
 use tf_proto::{ApiError, ClientMsg, HostState, Millis, ServerMsg, StatePatch};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 
 use crate::util::now_ms;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const TERM_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// Methods that may start an omp agent: hostd answers once it is launched, which on a slow
+/// host means waiting for a new pane's shell (up to 45 s) and for omp to become interactive
+/// (up to 90 s), plus the worktree for `worktree.create`.
+pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(180);
 pub const PING_EVERY: Duration = Duration::from_secs(15);
-pub const SILENCE_LIMIT: Duration = Duration::from_secs(45);
-/// `attach` may need up to 10 s to start the daemon.
-pub const WELCOME_TIMEOUT: Duration = Duration::from_secs(25);
+/// The link is dead once nothing at all arrived since a ping sent this long ago (`Pings`).
+pub const PING_DEADLINE: Duration = Duration::from_secs(30);
+/// `attach` waits up to 30 s for a daemon it starts, the daemon then creates the herdr session
+/// context (starting herdr waits up to 15 s) before it welcomes the client; slow hosts need it.
+pub const WELCOME_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Receives everything the daemon pushes. Called from the link's reader task, in order.
@@ -34,7 +41,13 @@ pub trait LinkSink: Send + Sync + 'static {
 }
 
 pub fn timeout_for(method: &str) -> Duration {
-    if method == "term.open" { TERM_OPEN_TIMEOUT } else { DEFAULT_TIMEOUT }
+    match method {
+        "term.open" => TERM_OPEN_TIMEOUT,
+        // `agent.archive {archived: false}` and `agent.prompt` resume a parked agent.
+        "agent.start" | "agent.resume" | "agent.archive" | "agent.prompt" | "host.resume" | "worktree.create"
+        | "automation.run" => LAUNCH_TIMEOUT,
+        _ => DEFAULT_TIMEOUT,
+    }
 }
 
 enum Pending {
@@ -48,7 +61,12 @@ pub struct Link {
     out: mpsc::UnboundedSender<String>,
     pending: Mutex<HashMap<u64, Pending>>,
     next_id: AtomicU64,
-    last_rx: AtomicI64,
+    /// Messages received so far: did anything arrive since a ping?
+    rx_count: AtomicU64,
+    /// When the last message arrived, in ms since `born`. tokio's clock: monotonic (unlike the
+    /// wall clock, it never jumps), paused in tests.
+    last_rx: AtomicU64,
+    born: Instant,
     closed_tx: watch::Sender<Option<String>>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     pub hostd_version: String,
@@ -207,7 +225,9 @@ impl Link {
             out: out_tx,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            last_rx: AtomicI64::new(now_ms()),
+            rx_count: AtomicU64::new(0),
+            last_rx: AtomicU64::new(0),
+            born: Instant::now(),
             closed_tx,
             stderr_tail: tail,
             hostd_version,
@@ -237,7 +257,7 @@ impl Link {
                 ));
             }
         };
-        link.last_rx.store(now_ms(), Ordering::Relaxed);
+        link.heard();
         sink.snapshot(rev, state);
 
         tokio::spawn(link.clone().read_loop(lines, rev, sink.clone()));
@@ -289,16 +309,28 @@ impl Link {
         self.out.send(line(msg)).map_err(|_| not_connected("writer stopped"))
     }
 
+    /// Something arrived from the host.
+    fn heard(&self) {
+        self.rx_count.fetch_add(1, Ordering::Relaxed);
+        self.last_rx.store(self.born.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// How long ago the host last sent anything: a live link hears at least the pong to the ping
+    /// sent every [`PING_EVERY`].
+    pub fn silent_for(&self) -> Duration {
+        self.born.elapsed().saturating_sub(Duration::from_millis(self.last_rx.load(Ordering::Relaxed)))
+    }
+
     /// Liveness probe (app resumed / network changed): ping and close the link when nothing
     /// arrives within `timeout`.
     pub async fn check(&self, timeout: Duration) {
-        let before = self.last_rx.load(Ordering::Relaxed);
+        let before = self.rx_count.load(Ordering::Relaxed);
         if self.send(&ClientMsg::Ping { ts: now_ms() }).is_err() {
             return;
         }
-        let deadline = tokio::time::Instant::now() + timeout;
-        while tokio::time::Instant::now() < deadline {
-            if self.is_closed() || self.last_rx.load(Ordering::Relaxed) != before {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.is_closed() || self.rx_count.load(Ordering::Relaxed) != before {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -383,7 +415,7 @@ impl Link {
                     return;
                 }
             };
-            self.last_rx.store(now_ms(), Ordering::Relaxed);
+            self.heard();
             match msg {
                 ServerMsg::Snapshot { rev, state } => {
                     last_rev = rev;
@@ -427,22 +459,61 @@ impl Link {
         }
     }
 
+    /// Pings every [`PING_EVERY`] and closes the link by the rule in [`Pings`]. The ping goes out
+    /// before anything is judged: a tick that comes late (the machine slept, the app was stopped)
+    /// asks the host first instead of declaring it dead.
     async fn ping_loop(self: Arc<Self>) {
         let mut closed = self.closed_tx.subscribe();
         let mut tick = tokio::time::interval(PING_EVERY);
+        // After a stall: one tick now and the next a whole period later, not a burst of them.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
+        let mut last = Instant::now();
+        let mut pings = Pings::default();
         loop {
             tokio::select! {
                 _ = tick.tick() => {}
                 _ = wait_closed(&mut closed) => return,
             }
-            let silent = now_ms() - self.last_rx.load(Ordering::Relaxed);
-            if silent > SILENCE_LIMIT.as_millis() as i64 {
-                self.close(&format!("tf-hostd silent for {}s", silent / 1000));
-                return;
+            let now = Instant::now();
+            let gap = now - last;
+            last = now;
+            let stalled = gap >= 2 * PING_EVERY;
+            if stalled {
+                log::info!("tf-hostd: no ping for {}s (system sleep or a stopped app); asking the host", gap.as_secs());
             }
+            let rx = self.rx_count.load(Ordering::Relaxed);
             if self.send(&ClientMsg::Ping { ts: now_ms() }).is_err() {
                 return;
+            }
+            if let Some(unanswered) = pings.sent(now, rx, stalled) {
+                self.close(&format!("no answer from tf-hostd for {}s", unanswered.as_secs()));
+                return;
+            }
+        }
+    }
+}
+
+/// Liveness by unanswered pings: the link is dead once nothing at all arrived since a ping sent
+/// [`PING_DEADLINE`] ago. Pings sent before a stall are not judged: while the app did not run
+/// (system sleep, which Windows' monotonic clock counts and Linux's does not), the host could not
+/// answer either, so the ping sent on waking starts afresh.
+#[derive(Default)]
+struct Pings {
+    /// The oldest ping nothing arrived after: when it was sent, and the receive count before it.
+    oldest: Option<(Instant, u64)>,
+}
+
+impl Pings {
+    /// Records a ping sent at `at` (`rx`: messages received before it; `stalled`: its tick came a
+    /// whole period late or more). Returns how long the oldest ping went unanswered once that
+    /// reaches [`PING_DEADLINE`].
+    fn sent(&mut self, at: Instant, rx: u64, stalled: bool) -> Option<Duration> {
+        match self.oldest {
+            Some((first, seen)) if seen == rx && !stalled => Some(at - first).filter(|age| *age >= PING_DEADLINE),
+            _ => {
+                self.oldest = Some((at, rx));
+                None
             }
         }
     }
@@ -565,5 +636,58 @@ mod tests {
             .unwrap();
         assert_eq!(e.code, "not_connected");
         assert!(e.message.contains("daemon not ready"), "{}", e.message);
+    }
+
+    /// The ping rule on tokio's paused clock: a host that answers survives the clock jumping
+    /// 2 minutes with no tick in between (Windows counts system sleep), even with a ping left
+    /// unanswered just before it; a host that stops answering is dropped once its first
+    /// unanswered ping is 30 s old, not sooner.
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_pings_close_the_link_and_sleep_does_not() {
+        use std::sync::atomic::AtomicBool;
+        let (client_w, server_r) = tokio::io::duplex(1 << 16);
+        let (mut server_w, client_r) = tokio::io::duplex(1 << 16);
+        let answer = Arc::new(AtomicBool::new(true));
+        let pings = Arc::new(AtomicU64::new(0));
+        let (a, p) = (answer.clone(), pings.clone());
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(server_r).lines();
+            lines.next_line().await.unwrap();
+            send(&mut server_w, &ServerMsg::Welcome { protocol: PROTOCOL_VERSION, hostd_version: "0.1.0".into(), client_id: "c1".into() }).await;
+            send(&mut server_w, &ServerMsg::Snapshot { rev: 1, state: host_state() }).await;
+            while let Ok(Some(l)) = lines.next_line().await {
+                if let Ok(ClientMsg::Ping { ts }) = serde_json::from_str(&l) {
+                    p.fetch_add(1, Ordering::Relaxed);
+                    if a.load(Ordering::Relaxed) {
+                        send(&mut server_w, &ServerMsg::Pong { ts }).await;
+                    }
+                }
+            }
+        });
+        let link = Link::establish(Box::new(client_w), Box::new(client_r), None, hello(), Arc::new(Rec::default()))
+            .await
+            .unwrap();
+        // Ticks come at +15 s, +30 s …; every wait below ends between two of them.
+        tokio::time::sleep(Duration::from_secs(121)).await;
+        assert!(!link.is_closed());
+        assert_eq!(pings.load(Ordering::Relaxed), 8);
+        assert!(link.silent_for() <= Duration::from_secs(1), "{:?}", link.silent_for());
+
+        // The ping at +135 s goes unanswered, then the machine sleeps for 2 minutes.
+        answer.store(false, Ordering::Relaxed);
+        tokio::time::sleep(PING_EVERY).await;
+        answer.store(true, Ordering::Relaxed);
+        tokio::time::advance(Duration::from_secs(120)).await;
+        // The late tick (+256 s) pings before it judges anything, and the host answers.
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert!(!link.is_closed(), "{:?}", link.closed_tx.borrow());
+        assert_eq!(pings.load(Ordering::Relaxed), 14, "one ping after the jump, no burst");
+
+        // The host stops answering at +317 s: pings at +331, +346, closed at +361.
+        answer.store(false, Ordering::Relaxed);
+        let t0 = Instant::now();
+        let reason = link.closed().await;
+        assert_eq!(reason, "no answer from tf-hostd for 30s");
+        assert_eq!(t0.elapsed(), Duration::from_secs(44));
     }
 }

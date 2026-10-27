@@ -1,0 +1,12 @@
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.13.1
+
+                        Tip: Say `orchestrate` in your message to drive a multi-phase task with
+                                    parallel subagents — watch it glow as you type
+
+
+╭── 󰵗  󰪟 GPT-6 Luna    tf-bridgectl-cap-work  󰙺 ──3%──────────────────────────────────────󰕝─────󰁨────────272K───╮
+╰─ draft with a status row                                                                                           ─╯
+⇄ teleflock

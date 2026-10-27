@@ -11,7 +11,7 @@ export { useNow, onFrame } from "./lib/clock";
 export type { FrameCallback } from "./lib/clock";
 export { useMediaQuery, useIsMobile, useFinePointer, useInView, useMinWidth, useIdleReady } from "./lib/hooks";
 export { isTauri, isAndroid, isWindows, hasCustomWindowChrome } from "./lib/platform";
-export { useWindowActive } from "./lib/windowActive";
+export { useWindowActive, useWindowVisible } from "./lib/windowActive";
 export { formatElapsed, formatAge, formatCompact, formatUsd, formatInt } from "./lib/format";
 export { hashString, seededRandom } from "./lib/hash";
 export { DesignProvider } from "./DesignProvider";
@@ -39,7 +39,7 @@ export { Swarm } from "./motion/Swarm";
 export { Sparkline } from "./motion/Sparkline";
 export { FlockSky } from "./motion/FlockSky";
 export { Skeleton } from "./motion/Skeleton";
-export { CardFlight, cardLayoutId, LayoutGroup, AnimatePresence } from "./motion/layout";
+export { CardFlight, cardLayoutId, FlightGroup, LayoutGroup, AnimatePresence } from "./motion/layout";
 export { morphTo, MORPH_PARTS } from "./motion/morph";
 export type { MorphPart } from "./motion/morph";
 

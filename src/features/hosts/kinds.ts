@@ -1,6 +1,6 @@
-import { FlaskConical, type LucideIcon, Monitor, Network, SquareTerminal } from "lucide-react";
+import { FlaskConical, KeyRound, type LucideIcon, Monitor, Network, RectangleEllipsis, SquareTerminal } from "lucide-react";
 import { isAndroid } from "@/design";
-import type { AppCapabilities, HostKind, HostProfile } from "@/core/gen";
+import type { AppCapabilities, HostKind, HostProfile, SshAuth } from "@/core/gen";
 
 export interface KindMeta {
   label: string;
@@ -36,7 +36,50 @@ export const KIND_META: Record<HostKind, KindMeta> = {
   },
 };
 
-/** Host kinds this device can use: Android only attaches over Tailscale SSH (and the demo). */
+export interface AuthMeta {
+  label: string;
+  icon: LucideIcon;
+  blurb: string;
+}
+
+/** How an SSH host signs in. Tailscale SSH is the default and the recommended one; key and password are the advanced setup for hosts without it. */
+export const AUTH_META: Record<SshAuth, AuthMeta> = {
+  tailscale: {
+    label: "Tailscale SSH",
+    icon: Network,
+    blurb: "Recommended. No keys or passwords: your tailnet identity is the login.",
+  },
+  key: {
+    label: "Private key",
+    icon: KeyRound,
+    blurb: "Signs in with an OpenSSH or PEM private key, like ssh -i. The host must list its public key in ~/.ssh/authorized_keys.",
+  },
+  password: {
+    label: "Password",
+    icon: RectangleEllipsis,
+    blurb: "Signs in with your password on the host. Its sshd must allow password sign-in.",
+  },
+};
+
+export const AUTH_METHODS: readonly SshAuth[] = ["tailscale", "key", "password"];
+
+/** How a profile signs in: `tailscale` unless an SSH host says otherwise. */
+export function hostAuth(p: Pick<HostProfile, "kind" | "auth">): SshAuth {
+  return p.kind === "tailscaleSsh" ? (p.auth ?? "tailscale") : "tailscale";
+}
+
+/** Badge text for a profile's connection kind: SSH hosts signing in with a key or password are not Tailscale SSH hosts. */
+export function kindBadge(p: Pick<HostProfile, "kind" | "auth">): string {
+  return hostAuth(p) === "tailscale" ? KIND_META[p.kind].short : "SSH";
+}
+
+/** Private key files offered with one click on desktop (OpenSSH's defaults, newest type first). */
+export const KEY_PATH_SUGGESTIONS = ["~/.ssh/id_ed25519", "~/.ssh/id_ecdsa", "~/.ssh/id_rsa"] as const;
+
+/** Android has no key files to point at: the key is imported (or pasted) into the app instead. */
+export const importsKeys = isAndroid;
+
+/** Host kinds this device can use: Android only attaches over SSH (and the demo). */
 export function availableKinds(caps: AppCapabilities | undefined): HostKind[] {
   const kinds: HostKind[] = ["tailscaleSsh"];
   if (!isAndroid && caps?.local) kinds.push("local");

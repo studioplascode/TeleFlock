@@ -49,7 +49,7 @@ normalised to the 0.9.2 code). Both error envelope shapes (0.9.0 id lost, 0.9.2 
 | Area | Calls |
 |---|---|
 | session | `snapshot() -> Snapshot { workspaces, tabs, panes, layouts, agents, focused_* , version, protocol }` |
-| agent | `agent_list()`, `agent_get(target)`, `agent_read(target, ReadOptions)`, `agent_send_keys(target, &[&str])`, `agent_prompt(target, text, Option<AgentWait>) -> AgentInfo`, `agent_wait(target, AgentWait)`, `agent_rename(target, Option<&str>)`, `agent_start(&AgentStart{name, kind, pane_id, args, timeout_ms}) -> AgentStarted{agent, argv}`, `agent_explain(target) -> AgentExplain` |
+| agent | `agent_list()`, `agent_get(target)`, `agent_read(target, ReadOptions)`, `agent_send_keys(target, &[&str])`, `agent_prompt(target, text, Option<AgentWait>) -> AgentInfo`, `agent_wait(target, AgentWait)`, `agent_rename(target, Option<&str>)`, `agent_start(&AgentStart{name, kind, pane_id, args, timeout_ms}, shell_wait: Duration) -> AgentStarted{agent, argv}`, `agent_explain(target) -> AgentExplain` |
 | workspace | `workspace_create(&WorkspaceCreate{cwd, label, env, focus}) -> WorkspaceCreated{workspace, tab, root_pane}`, `workspace_list()`, `workspace_get(id)`, `workspace_rename(id, label)`, `workspace_close(id, group: bool)` |
 | worktree | `worktree_list(&WorktreeScope::Cwd(p) \| Workspace(id), trust) -> WorktreeList{source, worktrees}`, `worktree_create(&WorktreeCreate::new(scope){branch, base, path, label, focus, trust_repository}) -> WorktreeCreated{workspace, tab, root_pane, worktree}`, `worktree_open(&WorktreeOpen{scope, target: WorktreeTarget::Branch\|Path, ..}) -> WorktreeOpened`, `worktree_remove(ws, force, trust) -> WorktreeRemoved` |
 | tab | `tab_create(&TabCreate) -> TabCreated{tab, root_pane}`, `tab_list(Option<ws>)`, `tab_get(id)`, `tab_rename(id, label)`, `tab_close(id)` |
@@ -57,7 +57,8 @@ normalised to the 0.9.2 code). Both error envelope shapes (0.9.0 id lost, 0.9.2 
 
 `agent_start` behaves like `herdr agent start`: the raw API returns while the launch is pending (prompting then
 fails with `agent_not_ready`), so the helper polls `agent.get` until the agent is idle and `interactive_ready`
-(within `timeout_ms`, default 30 s), retrying `agent_pane_busy` for 2 s while a fresh shell initialises.
+(within `timeout_ms`, default 30 s). `agent_pane_busy` (the pane's foreground job is not its bare shell, e.g. a fresh
+shell still running its startup files) is retried every 100 ms until `shell_wait` has passed, then returned.
 
 Models (`tf_herdr::model`, all re-exported) ignore unknown fields and default missing ones: `AgentStatus`
 (`Idle|Working|Blocked|Done|Unknown`), `PaneInfo`, `AgentInfo` (`name`, `agent` kind, `agent_status`, `agent_session`,

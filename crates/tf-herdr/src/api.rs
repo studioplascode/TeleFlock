@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// Floor for requests that create a workspace, tab or pane (herdr spawns the shell before answering;
+/// slow WSL laptops need more than the default request timeout). Reads keep the default.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Parameter types
 // ---------------------------------------------------------------------------
@@ -334,18 +338,24 @@ impl HerdrClient {
 
     /// Start an agent and wait until it is interactive, mirroring `herdr agent start`:
     /// the API call returns while the launch is still pending, so this polls `agent.get`
-    /// (100 ms) until the agent is idle/done and `interactive_ready`. A pane whose fresh
-    /// shell is still initialising (`agent_pane_busy`) is retried for up to 2 s.
-    /// Errors: `agent_not_ready` (blocked during startup), `agent_start_failed` (exited
-    /// before becoming interactive), `agent_kind_mismatch`, `agent_name_not_found`, `timeout`.
-    pub async fn agent_start(&self, start: &AgentStart) -> Result<AgentStarted> {
+    /// (100 ms) until the agent is idle/done and `interactive_ready` (within `timeout_ms`).
+    /// `agent_pane_busy` (the pane's foreground job is not its bare shell: a fresh shell
+    /// still running its startup files, or a command running in it) is retried every 100 ms
+    /// until `shell_wait` has passed, then returned as is (`Duration::ZERO`: no retry).
+    /// Errors: `agent_pane_busy`, `agent_not_ready` (blocked during startup), `agent_start_failed`
+    /// (exited before becoming interactive), `agent_kind_mismatch`, `agent_name_not_found`, `timeout`.
+    pub async fn agent_start(&self, start: &AgentStart, shell_wait: Duration) -> Result<AgentStarted> {
         const POLL: Duration = Duration::from_millis(100);
         let startup = Duration::from_millis(start.timeout_ms.unwrap_or(30_000));
-        let busy_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let busy_deadline = tokio::time::Instant::now() + shell_wait;
         let mut started = loop {
             match self.request::<AgentStarted>("agent.start", start).await {
-                Err(e) if e.is(code::AGENT_PANE_BUSY) && tokio::time::Instant::now() < busy_deadline => {
-                    tokio::time::sleep(POLL).await;
+                Err(e) if e.is(code::AGENT_PANE_BUSY) => {
+                    let left = busy_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(POLL.min(left)).await;
                 }
                 other => break other?,
             }
@@ -401,8 +411,9 @@ impl HerdrClient {
 
     // ---- workspace ---------------------------------------------------------
 
+    /// Creating a workspace, tab or pane spawns a shell; slow hosts get [`CREATE_TIMEOUT`].
     pub async fn workspace_create(&self, p: &WorkspaceCreate) -> Result<WorkspaceCreated> {
-        self.request("workspace.create", p).await
+        self.request_with_timeout("workspace.create", p, self.inner.timeout.max(CREATE_TIMEOUT)).await
     }
 
     pub async fn workspace_list(&self) -> Result<Vec<WorkspaceInfo>> {
@@ -486,7 +497,7 @@ impl HerdrClient {
     // ---- tab ---------------------------------------------------------------
 
     pub async fn tab_create(&self, p: &TabCreate) -> Result<TabCreated> {
-        self.request("tab.create", p).await
+        self.request_with_timeout("tab.create", p, self.inner.timeout.max(CREATE_TIMEOUT)).await
     }
 
     /// Tabs of one workspace, or of all workspaces with `None`.
@@ -524,7 +535,7 @@ impl HerdrClient {
 
     /// Split a pane; returns the new pane.
     pub async fn pane_split(&self, p: &PaneSplit) -> Result<PaneInfo> {
-        Ok(self.request::<PaneOne>("pane.split", p).await?.pane)
+        Ok(self.request_with_timeout::<PaneOne>("pane.split", p, self.inner.timeout.max(CREATE_TIMEOUT)).await?.pane)
     }
 
     /// Close a pane (kills its process).

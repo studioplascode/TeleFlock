@@ -374,7 +374,8 @@ function applySession(
       break;
     }
     case "meta":
-      sess.meta = ev.meta;
+      // tf-hostd ≥ 0.5.1 sends the session tree only when it changed: keep the one we have.
+      sess.meta = ev.meta.tree === undefined && sess.meta?.tree ? { ...ev.meta, tree: sess.meta.tree } : ev.meta;
       break;
     case "ui":
       sess.ui = ev.request;

@@ -1,19 +1,21 @@
-import { ArrowUp, AtSign, CornerDownRight, FileText, ImagePlus, ListPlus, Lock, Mic, MicOff, Pencil, Slash, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff, Paperclip, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
-import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, imageFiles, MAX_PROMPT_IMAGE_CHARS } from "@/core/clipboardImages";
+import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, isVideoFile, MAX_PROMPT_IMAGE_CHARS, mediaFiles } from "@/core/clipboardImages";
+import { attachVideos, detachDraftVideos, releaseVideos, removeDraftVideo, retryVideos, useDraftVideos, type VideoRef, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import { openTerminal } from "@/features/board/agentActions";
 import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
 import { useFirstUse } from "@/features/shell/hints";
-import { hostCall, usePending } from "../api";
+import { errorText, hostCall, usePending } from "../api";
 import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
 import { useQueueChips, usePendingQueue, userRowsWithText } from "./queue";
 import { findCommand, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
 import { useDictation } from "./useDictation";
+import { VideoChips } from "./VideoChips";
 
 /**
  * First-use caption while the agent works (mounted only then, so idle sessions don't use up its
@@ -28,7 +30,12 @@ function SteerHint({ doneRef }: { doneRef: RefObject<(() => void) | null> }) {
   return <div className="mb-1.5 px-2 text-2xs leading-snug text-mute">Steer lands mid-turn; a follow-up waits for the turn to end.</div>;
 }
 
-/** Phone: context, cost and todos at a glance in the composer's icon row; opens the inspector sheet. */
+/**
+ * Phone: context, todos and cost at a glance in the composer's icon row; opens the inspector sheet.
+ * Short of room it gives way before any button does: its segments wrap onto a second line that the
+ * button clips, so the cost goes first, then the todos (whole segments, never cut off), and the pill
+ * (an inline background, cloned per line) hugs what is left.
+ */
 function StatusPill({ agentKey }: { agentKey: string }) {
   const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
@@ -40,24 +47,36 @@ function StatusPill({ agentKey }: { agentKey: string }) {
       type="button"
       onClick={() => useSessionUi.getState().setSheet(agentKey, true)}
       aria-label={`Inspector: context ${ctx ? `${Math.round(ctx.pct)}% used` : "unknown"}${cost ? `, ${formatUsd(cost.usd)} spent` : ""}${todos?.total ? `, ${todos.done} of ${todos.total} todos done` : ""}`}
-      className="pressable focus-ring flex h-8 shrink-0 items-center gap-1 rounded-full bg-white/[0.05] px-2.5 text-[11px] font-bold whitespace-nowrap text-ink-2 tabular shadow-hairline"
+      className="pressable focus-ring block h-8 min-w-0 overflow-hidden rounded-full text-left text-[11px] leading-8 font-bold whitespace-normal text-ink-2 tabular"
     >
-      <span data-status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined} className={cn(ctx && ctx.pct >= 65 && "st-text")}>
-        ctx {ctx ? `${Math.round(ctx.pct)}%` : "—"}
-      </span>
-      {cost && <span className="text-mute max-[359px]:hidden">· {formatUsd(cost.usd)}</span>}
-      {todos?.total ? (
-        <span className="text-mute">
-          · {todos.done}/{todos.total}
+      {/* py: Manrope's 15px content area at 11px + 2 × 8.5px = the 32px row */}
+      <span className="box-decoration-clone rounded-full bg-white/[0.05] px-2.5 py-[8.5px] shadow-hairline">
+        <span data-status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined} className={cn("whitespace-nowrap", ctx && ctx.pct >= 65 && "st-text")}>
+          ctx {ctx ? `${Math.round(ctx.pct)}%` : "—"}
         </span>
-      ) : null}
+        {todos?.total ? (
+          <>
+            <wbr />
+            <span className="whitespace-nowrap text-mute">
+              {" "}
+              · {todos.done}/{todos.total}
+            </span>
+          </>
+        ) : null}
+        {cost && (
+          <>
+            <wbr />
+            <span className="whitespace-nowrap text-mute"> · {formatUsd(cost.usd)}</span>
+          </>
+        )}
+      </span>
     </button>
   );
 }
 
 export interface ComposerProps {
   agentKey: string;
-  /** Phone layout: bigger touch targets, mic, no hint row. */
+  /** Phone layout: bigger touch targets, mic, no hint row; Enter is a newline (the send button or Ctrl/Meta+Enter sends). */
   mobile?: boolean;
   className?: string;
   autoFocus?: boolean;
@@ -73,7 +92,7 @@ const MENTION_RE = /(^|\s)@([^\s@]*)$/;
 /**
  * Composer: Enter sends (steer while the agent works, prompt when idle), Alt+Enter queues a
  * follow-up, Esc stops. `/` opens the command palette, `@` searches files in the agent's cwd,
- * images paste/drop in as attachments.
+ * images paste/drop in as attachments, and so do videos (uploaded to the host as files the agent reads).
  */
 export function Composer({ agentKey, mobile = false, className, autoFocus = false }: ComposerProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
@@ -83,6 +102,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const draftKey = composerDraftKey(agentKey);
   const [text, setText] = useDraft(draftKey);
   const [images, setImages] = useDraftImages(draftKey);
+  // Videos upload to the host as soon as they are attached (kept in memory, not across restarts).
+  const videos = useDraftVideos(draftKey);
   const focusNonce = useSessionUi((s) => s.composerFocus[agentKey]);
   const [popup, setPopup] = useState<Popup | null>(null);
   /** Attachment open in the lightbox. */
@@ -90,6 +111,9 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const [sel, setSel] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [sending, run] = usePending();
+  /** A send waiting for its videos to finish uploading. */
+  const [waitingUploads, setWaitingUploads] = useState(false);
+  const uploadWait = useRef(false);
   const ta = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const searchSeq = useRef(0);
@@ -100,6 +124,9 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const working = agent?.column === "running" || agent?.live.streaming === true || agent?.live.tool != null;
   const queue = meta?.queue ?? agent?.omp?.queue;
   const cwd = meta?.cwd ?? agent?.cwd;
+  /** The latest render's agent state, for a send that waited for its videos. */
+  const live = useRef({ working, caps });
+  live.current = { working, caps };
   const [altHeld, setAltHeld] = useState(false);
 
   useEffect(() => {
@@ -265,8 +292,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const send = async (followUp: boolean) => {
     const body = text.trim();
-    if (!body && images.length === 0) return;
-    if (body.startsWith("/") && images.length === 0) {
+    if (!body && images.length === 0 && videos.length === 0) return;
+    if (body.startsWith("/") && images.length === 0 && videos.length === 0) {
       const okRun = await run(runSlash(slashCtx, body));
       if (okRun) setText("");
       return;
@@ -279,13 +306,40 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       toast({ title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.`, status: "error" });
       return;
     }
+    // A send already waits for its videos: another one would send them twice.
+    if (uploadWait.current) {
+      toast({ title: "Sending once the videos are uploaded", status: "idle", duration: 2600 });
+      return;
+    }
     // Leading space escapes a slash: " /path is a file" goes to the model as text.
-    const prompt = text.startsWith(" /") ? text.slice(1) : text.trim();
-    const delivery = followUp ? "followUp" : working && caps && !caps.steer && caps.followUp ? "followUp" : "auto";
+    const typed = text.startsWith(" /") ? text.slice(1) : text.trim();
+    // Videos go as one line each with their path on the host, once uploaded (the agent reads them).
+    const sentVideos = videos.map((v) => v.id);
+    let refs: VideoRef[] = [];
+    if (sentVideos.length) {
+      uploadWait.current = true;
+      setWaitingUploads(true);
+      try {
+        refs = await whenUploaded(sentVideos);
+      } catch (e) {
+        const { title, hint } = errorText(e);
+        toast({ title: "Video not uploaded", description: hint ? `${title} — ${hint}` : title, status: "error" });
+        return;
+      } finally {
+        uploadWait.current = false;
+        setWaitingUploads(false);
+      }
+    }
+    const prompt = withVideoRefs(typed, refs);
+    // Every video was removed while the send waited, and nothing else was in it.
+    if (!prompt.trim() && images.length === 0) return;
+    // Read after the wait: the agent may have started or ended a turn meanwhile.
+    const at = live.current;
+    const delivery = followUp ? "followUp" : at.working && at.caps && !at.caps.steer && at.caps.followUp ? "followUp" : "auto";
     const sentImages = images;
     const imgs: ImageInput[] = sentImages.map(({ mime, data }) => ({ mime, data }));
     // Into a working agent this queues (steer or follow-up): show it in the strip right away.
-    const queuedKind = !working || !prompt.trim() ? null : delivery === "followUp" ? "follow" : "steer";
+    const queuedKind = !at.working || !prompt.trim() ? null : delivery === "followUp" ? "follow" : "steer";
     const pendingId = queuedKind
       ? usePendingQueue.getState().add(agentKey, { text: prompt, kind: queuedKind, before: userRowsWithText(getTranscript(agentKey).items, prompt) })
       : null;
@@ -301,6 +355,9 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       const cur = drafts.get(draftKey);
       drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
       setImages((cur) => cur.filter((i) => !sentImages.includes(i)));
+      // Sent: off the draft, their files stay on the host for the agent.
+      detachDraftVideos(draftKey, sentVideos);
+      releaseVideos(sentVideos);
       setPopup(null);
       if (delivery === "followUp") steerDone.current?.();
     }
@@ -309,7 +366,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const abort = () => void run(hostCall(hostId, "agent.abort", { agentId }, { failure: "Stop failed" }));
 
   const addFiles = async (files: Iterable<File>) => {
-    const imgs = [...files].filter((f) => f.type.startsWith("image/"));
+    const all = [...files];
+    const vids = all.filter(isVideoFile);
+    if (vids.length > 0) {
+      const { added, skipped } = attachVideos(draftKey, hostId, vids);
+      if (skipped) toast({ title: added ? "Some videos were left out" : "Video not attached", description: skipped, status: "error" });
+    }
+    const imgs = all.filter((f) => f.type.startsWith("image/"));
     if (imgs.length === 0) return;
     try {
       // Very large images (a Linux screenshot paste) are scaled down; the total stays under the
@@ -370,7 +433,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     }
     if (e.key === "Enter" && !e.shiftKey && !mobile) {
       // Empty composer + pending ask: let Enter bubble so the ask card sends its selection.
-      if (ui && !text.trim() && images.length === 0) return;
+      if (ui && !text.trim() && images.length === 0 && videos.length === 0) return;
       e.preventDefault();
       void send(e.altKey);
     } else if (e.key === "Enter" && mobile && (e.ctrlKey || e.metaKey)) {
@@ -381,7 +444,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onPaste = (e: ClipboardEvent) => {
     // `items` too: WebKitGTK (Linux) lists pasted screenshots only there.
-    const files = imageFiles(e.clipboardData);
+    const files = mediaFiles(e.clipboardData);
     if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
@@ -390,13 +453,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onDrop = (e: DragEvent) => {
     setDragging(false);
-    // Any file: never let the webview navigate to it; images are attached.
+    // Any file: never let the webview navigate to it; images and videos are attached.
     if (dragHasFiles(e.dataTransfer) || e.dataTransfer.files.length > 0) e.preventDefault();
-    const files = imageFiles(e.dataTransfer);
+    const files = mediaFiles(e.dataTransfer);
     if (files.length > 0) void addFiles(files);
   };
 
-  const hasContent = text.trim() !== "" || images.length > 0;
+  const hasContent = text.trim() !== "" || images.length > 0 || videos.length > 0;
   // Phone, nothing typed: one row (text + attach/mic/stop) so the transcript keeps the height;
   // the first character expands to the full toolbar with send.
   const inline = mobile && !hasContent && !dictation.listening && !dictation.error;
@@ -647,6 +710,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
             ))}
           </div>
         )}
+        <VideoChips
+          videos={videos}
+          onRemove={(id) => removeDraftVideo(draftKey, id)}
+          onRetry={(id) => retryVideos([id])}
+          mobile={mobile}
+          className={cn("px-3 pb-1", images.length > 0 ? "pt-1" : "pt-3")}
+        />
         <Lightbox
           images={images.map((img, i) => ({ src: img.preview, alt: `attachment ${i + 1}` }))}
           index={viewing !== null && viewing < images.length ? viewing : null}
@@ -670,21 +740,23 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           aria-label="Message"
           data-composer=""
           autoFocus={autoFocus}
-          enterKeyHint={mobile ? "send" : undefined}
+          // Phone: Enter is a newline (the button sends; Ctrl/Meta+Enter from a hardware keyboard), so the keyboard shows a return key.
+          enterKeyHint={mobile ? "enter" : undefined}
           maxHeight={mobile ? 160 : 260}
           boxClassName={cn(
             "rounded-[22px] glass px-4 py-3 md:[@media(max-height:720px)]:py-2",
             mobile && "py-2 pr-2 pl-4 [&>div]:mt-1.5",
-            inline && "flex-row items-center gap-1 py-1 pr-1 [&>div]:mt-0 [&>div]:shrink-0",
+            // one row: the text keeps room to type, the icon row (status pill first) gives way
+            inline && "flex-row items-center gap-1 py-1 pr-1 [&>div]:mt-0",
             !!disabledReason && "opacity-80",
           )}
-          className={cn("text-[14px]", mobile && "min-h-[1lh] text-[15px]", inline && "min-w-0 flex-1 overflow-hidden whitespace-nowrap")}
+          className={cn("text-[14px]", mobile && "min-h-[1lh] text-[15px]", inline && "min-w-[30%] flex-1 overflow-hidden whitespace-nowrap")}
           footer={
             <>
               <input
                 ref={fileInput}
                 type="file"
-                accept="image/*"
+                accept="image/*,video/*"
                 multiple
                 hidden
                 onChange={(e) => {
@@ -692,8 +764,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   e.target.value = "";
                 }}
               />
-              <IconButton label="Attach image" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
-                <ImagePlus />
+              <IconButton label="Attach images or videos" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
+                <Paperclip />
               </IconButton>
               {mobile && dictation.supported && (
                 <IconButton
@@ -754,10 +826,15 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   </span>
                 )
               )}
-              {dictation.error && <span className="truncate text-2xs font-semibold text-error">{dictation.error}</span>}
+              {dictation.error && <span className="line-clamp-2 min-w-0 text-2xs leading-tight font-semibold text-error">{dictation.error}</span>}
+              {dictation.openSettings && (
+                <button type="button" className="relative shrink-0 rounded-xs text-2xs font-extrabold text-accent-hi touch-hit focus-ring hover:underline" onClick={dictation.openSettings}>
+                  Open settings
+                </button>
+              )}
               <span className="ml-auto flex shrink-0 items-center gap-1.5">
                 {working && hasContent && !disabledReason && caps?.followUp && !followMode && (
-                  <IconButton label="Queue follow-up (Alt+Enter)" size={mobile ? "md" : "sm"} variant="secondary" onClick={() => void send(true)} disabled={sending}>
+                  <IconButton label="Queue follow-up (Alt+Enter)" size={mobile ? "md" : "sm"} variant="secondary" onClick={() => void send(true)} disabled={sending || waitingUploads}>
                     <ListPlus />
                   </IconButton>
                 )}
@@ -768,13 +845,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                 )}
                 {(hasContent || !working) && !inline && (
                   <IconButton
-                    label={followMode ? "Queue follow-up (Alt+Enter)" : working ? "Steer (Enter)" : "Send (Enter)"}
+                    label={waitingUploads ? "Sending once the videos are uploaded" : followMode ? "Queue follow-up (Alt+Enter)" : `${working ? "Steer" : "Send"}${mobile ? "" : " (Enter)"}`}
                     size={mobile ? "lg" : "sm"}
                     variant="primary"
                     onClick={() => void send(followMode)}
-                    disabled={!hasContent || sending || (!!disabledReason && !text.trim().startsWith("/"))}
+                    disabled={!hasContent || sending || waitingUploads || (!!disabledReason && !text.trim().startsWith("/"))}
                   >
-                    {sending ? <Spinner size={14} /> : followMode ? <ListPlus /> : working ? <CornerDownRight /> : <ArrowUp />}
+                    {sending || waitingUploads ? <Spinner size={14} /> : followMode ? <ListPlus /> : working ? <CornerDownRight /> : <ArrowUp />}
                   </IconButton>
                 )}
               </span>
@@ -782,7 +859,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           }
         />
         {dragging && (
-          <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[22px] bg-accent/10 text-sm font-bold text-accent-ink backdrop-blur-[2px]">Drop images to attach</div>
+          <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-[22px] bg-accent/10 text-sm font-bold text-accent-ink backdrop-blur-[2px]">Drop images or videos to attach</div>
         )}
       </GlowBorder>
     </div>

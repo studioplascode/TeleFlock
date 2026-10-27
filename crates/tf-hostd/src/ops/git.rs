@@ -155,16 +155,32 @@ pub(crate) async fn run_cmd<S: AsRef<OsStr>>(
     }
 }
 
-/// Locates an executable: `PATH` first, then the usual per-user install dirs that a
-/// non-login SSH exec does not have on `PATH` (`~/.local/bin`, `~/.bun/bin`, …).
+/// Locates an executable: `PATH` first, then the well-known install dirs
+/// ([`crate::userenv::well_known_dirs`]: `~/.local/bin`, `~/.bun/bin`, …) that a daemon started
+/// without the user's interactive PATH may lack.
 pub(crate) fn resolve_bin(name: &str) -> Option<PathBuf> {
+    bin_candidates(name).next()
+}
+
+/// Every match of [`resolve_bin`]'s search, in its order, each once.
+pub(crate) fn resolve_bin_all(name: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for cand in bin_candidates(name) {
+        if !out.contains(&cand) {
+            out.push(cand);
+        }
+    }
+    out
+}
+
+fn bin_candidates(name: &str) -> impl Iterator<Item = PathBuf> + '_ {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     let home = crate::ops::fs::home_dir();
-    for rel in [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", "bin"] {
-        dirs.push(home.join(rel));
-    }
     if cfg!(windows) {
+        for rel in [".local/bin", ".bun/bin", ".cargo/bin", ".npm-global/bin", "bin"] {
+            dirs.push(home.join(rel));
+        }
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             let local = PathBuf::from(local);
             dirs.push(local.join("Programs").join("Herdr").join("bin"));
@@ -177,22 +193,14 @@ pub(crate) fn resolve_bin(name: &str) -> Option<PathBuf> {
             }
         }
     } else {
-        for d in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/home/linuxbrew/.linuxbrew/bin"] {
-            dirs.push(PathBuf::from(d));
-        }
+        dirs.extend(crate::userenv::well_known_dirs(&home));
     }
-    for dir in dirs {
-        for ext in exts {
-            let cand = dir.join(format!("{name}{ext}"));
-            if is_executable(&cand) {
-                return Some(cand);
-            }
-        }
-    }
-    None
+    dirs.into_iter()
+        .flat_map(move |dir| exts.iter().map(move |ext| dir.join(format!("{name}{ext}"))))
+        .filter(|cand| is_executable(cand))
 }
 
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(p) else { return false };
     if !meta.is_file() {
         return false;
@@ -208,9 +216,14 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
+/// git, found once (a missing git is looked up again on every call: Host setup can install it).
 fn git_bin() -> Result<PathBuf, ApiError> {
-    static GIT: std::sync::LazyLock<Option<PathBuf>> = std::sync::LazyLock::new(|| resolve_bin("git"));
-    GIT.clone().ok_or_else(|| {
+    static GIT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    let mut git = GIT.lock().unwrap_or_else(|p| p.into_inner());
+    if git.is_none() {
+        *git = resolve_bin("git");
+    }
+    git.clone().ok_or_else(|| {
         ApiError::new("git_error", "git is not installed on this host").with_hint("Install git and make sure it is on PATH.")
     })
 }
@@ -810,30 +823,42 @@ pub(crate) fn badge_for_dir(dir: &Path) -> Option<GitBadge> {
     Some(GitBadge { repo_root: true, worktree: meta.is_file(), branch: Some(branch), dirty: None })
 }
 
-/// Repository facts for a workspace cwd (used by the state store for workspace badges).
-pub async fn repo_info(cwd: &Path) -> Option<RepoInfo> {
-    let o = git(cwd, &["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], QUICK).await.ok()?;
+/// Where a folder's repository lives: its worktree top and the main worktree root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoTop {
+    pub top: PathBuf,
+    pub root: PathBuf,
+}
+
+/// The repository a folder is in (`Ok(None)`: none; `Err`: git could not tell, e.g. a timeout).
+pub async fn repo_top(cwd: &Path) -> Result<Option<RepoTop>, ApiError> {
+    let o = git(cwd, &["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], QUICK).await?;
     if !o.ok() {
-        return None;
+        return Ok(None);
     }
     let s = o.stdout_str();
     let mut lines = s.lines();
-    let top = PathBuf::from(lines.next()?);
-    let common = PathBuf::from(lines.next()?);
+    let (Some(top), Some(common)) = (lines.next().map(PathBuf::from), lines.next().map(PathBuf::from)) else { return Ok(None) };
     // Main worktree root: parent of the common `.git` dir (bare repos: the dir itself).
     let root = if common.file_name().map(|n| n == ".git").unwrap_or(false) {
         common.parent().map(Path::to_path_buf).unwrap_or(top.clone())
     } else {
         top.clone()
     };
+    Ok(Some(RepoTop { top, root }))
+}
+
+/// Repository facts of a worktree (the state store's agent and workspace badges).
+pub async fn repo_info_at(t: &RepoTop) -> RepoInfo {
+    let RepoTop { top, root } = t;
     let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-    let st = git(&top, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal", "--ignore-submodules=dirty"], QUICK)
+    let st = git(top, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal", "--ignore-submodules=dirty"], QUICK)
         .await
         .ok()
         .filter(|o| o.ok())
         .map(|o| parse_status_v2(&o.stdout));
-    let remote_url = git(&top, &["config", "--get", "remote.origin.url"], QUICK).await.ok().filter(|o| o.ok()).map(|o| o.line());
-    Some(RepoInfo {
+    let remote_url = git(top, &["config", "--get", "remote.origin.url"], QUICK).await.ok().filter(|o| o.ok()).map(|o| o.line());
+    RepoInfo {
         root: root.display().to_string(),
         name,
         branch: st.as_ref().and_then(|s| s.head.clone()),
@@ -842,7 +867,7 @@ pub async fn repo_info(cwd: &Path) -> Option<RepoInfo> {
         ahead: st.as_ref().filter(|s| s.upstream.is_some()).map(|s| s.ahead),
         behind: st.as_ref().filter(|s| s.upstream.is_some()).map(|s| s.behind),
         remote_url,
-    })
+    }
 }
 
 // ───────────────────────────── methods ─────────────────────────────
@@ -1411,9 +1436,15 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         let td = fixture();
         let wt = td.path().join("wt2");
         sh(td.path(), &["worktree", "add", "-q", "-b", "other", wt.to_str().unwrap(), "main"]);
-        let info = repo_info(&wt).await.unwrap();
+        // A linked worktree: its own top, the main worktree's root, its own branch.
+        let sub = wt.join("nested");
+        std::fs::create_dir(&sub).unwrap();
+        let t = repo_top(&sub).await.unwrap().unwrap();
+        assert_eq!((t.top.canonicalize().unwrap(), t.root.canonicalize().unwrap()), (wt.canonicalize().unwrap(), td.path().canonicalize().unwrap()));
+        let info = repo_info_at(&t).await;
         assert_eq!(Path::new(&info.root), td.path().canonicalize().unwrap());
         assert_eq!(info.branch.as_deref(), Some("other"));
+        assert_eq!(repo_top(tempfile::tempdir().unwrap().path()).await.unwrap(), None, "not a repository");
         let badge = badge_for_dir(&wt).unwrap();
         assert!(badge.worktree && badge.repo_root);
         assert_eq!(badge.branch.as_deref(), Some("other"));

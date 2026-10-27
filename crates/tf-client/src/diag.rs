@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tf_proto::{
-    ApiError, ClientInfo, ClientMsg, DiagReport, DiagStatus, DiagStep, HostKind, HostProfile, HostState,
-    PROTOCOL_VERSION, ServerMsg, StatePatch,
+    ApiError, ClientInfo, ClientMsg, DiagReport, DiagStatus, DiagStep, HostKind, HostProfile, HostSecrets, HostState,
+    PROTOCOL_VERSION, ServerMsg, SshAuth, StatePatch,
 };
 use tf_transport::{Cmd, ConnectOptions, Transport, TransportEvent};
 use tokio::sync::mpsc;
@@ -47,33 +47,157 @@ fn first_line(b: &[u8]) -> String {
     String::from_utf8_lossy(b).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string()
 }
 
-async fn version_step(t: &dyn Transport, steps: &mut Steps, id: &str, label: &str, bin: &str) {
+/// Finds a tool like tf-hostd does and runs `<tool> --version` (POSIX sh, so a fish login shell
+/// works too): the login PATH, then the well-known install dirs, then (bounded to 6 s) the PATH
+/// of the user's interactive shell, where bun's and nvm's installers add theirs. Prints tagged
+/// lines (login shells may print noise): `tf.missing=1`, or `tf.path`, `tf.via`, `tf.code`, `tf.out`.
+const TOOL_PROBE: &str = r#"tool=$1
+found() { command -v "$tool" 2>/dev/null; }
+via=login
+bin=$(found)
+if [ -z "$bin" ]; then
+  PATH="$PATH:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/.npm-global/bin:$HOME/bin:$HOME/.deno/bin:$HOME/.volta/bin:$HOME/.local/share/mise/shims:$HOME/.asdf/shims:$HOME/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/opt/homebrew/bin"
+  via=wellknown
+  bin=$(found)
+fi
+if [ -z "$bin" ] && [ -n "$SHELL" ] && [ -x "$SHELL" ]; then
+  f=$(mktemp 2>/dev/null || echo "/tmp/tf-diag-path.$$")
+  "$SHELL" -i -l -c "printf '%s' '__TF_PATH_' 'BEGIN__' \"\$PATH\" '__TF_PATH_' 'END__'" </dev/null >"$f" 2>/dev/null &
+  p=$!
+  ( sleep 6; kill -9 "$p" ) </dev/null >/dev/null 2>&1 &
+  k=$!
+  wait "$p" 2>/dev/null
+  kill "$k" 2>/dev/null
+  out=$(cat "$f" 2>/dev/null)
+  rm -f "$f"
+  case $out in
+    *__TF_PATH_BEGIN__*__TF_PATH_END__*)
+      ip=${out#*__TF_PATH_BEGIN__}
+      PATH="${ip%%__TF_PATH_END__*}:$PATH"
+      via=interactive
+      bin=$(found) ;;
+  esac
+fi
+if [ -z "$bin" ]; then
+  echo "tf.missing=1"
+  exit 0
+fi
+echo "tf.path=$bin"
+echo "tf.via=$via"
+out=$("$bin" --version 2>&1)
+echo "tf.code=$?"
+printf '%s\n' "$out" | sed -n '/[^[:space:]]/{s/^/tf.out=/p;q;}'
+"#;
+
+/// What [`TOOL_PROBE`] found.
+#[derive(Debug, Default, PartialEq)]
+struct ToolProbe {
+    /// `None`: not found anywhere.
+    path: Option<String>,
+    /// `login`, `wellknown` or `interactive`.
+    via: String,
+    code: Option<i32>,
+    /// First line `--version` printed (stdout and stderr).
+    out: String,
+}
+
+fn parse_tool_probe(stdout: &str) -> Option<ToolProbe> {
+    let mut p = ToolProbe::default();
+    let mut seen = false;
+    for line in stdout.lines() {
+        let Some((k, v)) = line.trim_end_matches('\r').strip_prefix("tf.").and_then(|r| r.split_once('=')) else { continue };
+        seen = true;
+        match k {
+            "path" => p.path = Some(v.to_string()),
+            "via" => p.via = v.to_string(),
+            "code" => p.code = v.trim().parse().ok(),
+            "out" => p.out = v.trim().to_string(),
+            _ => {}
+        }
+    }
+    seen.then_some(p)
+}
+
+/// The step for one probed tool.
+fn tool_step(bin: &str, p: &ToolProbe) -> (DiagStatus, String) {
+    let Some(path) = &p.path else {
+        return (
+            DiagStatus::Warn,
+            format!(
+                "not installed (not on the login PATH, in ~/.local/bin, ~/.bun/bin and the other usual dirs, or on your interactive shell's PATH); TeleFlock can install {bin} from Host setup once the host is added"
+            ),
+        );
+    };
+    let found = match p.via.as_str() {
+        "wellknown" => " (outside the login PATH; tf-hostd looks there too)",
+        "interactive" => " (only on your interactive shell's PATH; tf-hostd uses that PATH)",
+        _ => "",
+    };
+    match p.code {
+        Some(0) => (DiagStatus::Ok, format!("{} · {path}{found}", p.out)),
+        _ => {
+            let why = if p.out.is_empty() { format!("`{bin} --version` failed") } else { p.out.clone() };
+            let hint = if why.contains("env") && why.contains("No such file") {
+                "; its interpreter is missing: Host setup can install it once the host is added"
+            } else {
+                ""
+            };
+            (DiagStatus::Fail, format!("{path}{found}: {why}{hint}"))
+        }
+    }
+}
+
+async fn version_step(t: &dyn Transport, steps: &mut Steps, id: &str, label: &str, bin: &str, host_os: &str) {
     let start = Instant::now();
-    let r = t.exec(&Cmd::new([bin, "--version"]).timeout(Duration::from_secs(20))).await;
+    // Windows (Local kind on Windows): no POSIX shell; run it directly.
+    if host_os == "windows" {
+        let r = t.exec(&Cmd::new([bin, "--version"]).timeout(Duration::from_secs(20))).await;
+        let ms = Some(start.elapsed());
+        return match r {
+            Ok(out) if out.status.success() => steps.push(id, label, DiagStatus::Ok, Some(first_line(&out.stdout)), ms),
+            Ok(out) => {
+                let err = first_line(&out.stderr);
+                steps.push(id, label, DiagStatus::Fail, Some(if err.is_empty() { format!("`{bin} --version` failed") } else { err }), ms)
+            }
+            Err(e) => {
+                let detail = format!("{}; TeleFlock can install {bin} from Host setup once the host is added", ApiError::from(e).message);
+                steps.push(id, label, DiagStatus::Warn, Some(detail), ms)
+            }
+        };
+    }
+    let r = t.exec(&Cmd::new(["sh", "-c", TOOL_PROBE, "sh", bin]).timeout(Duration::from_secs(30))).await;
     let ms = Some(start.elapsed());
     match r {
-        Ok(out) if out.status.success() => steps.push(id, label, DiagStatus::Ok, Some(first_line(&out.stdout)), ms),
-        Ok(out) => {
-            let err = first_line(&out.stderr);
-            steps.push(
-                id,
-                label,
-                DiagStatus::Fail,
-                Some(if err.is_empty() { format!("`{bin} --version` failed") } else { err }),
-                ms,
-            )
-        }
+        Ok(out) => match parse_tool_probe(&String::from_utf8_lossy(&out.stdout)) {
+            Some(p) => {
+                let (status, detail) = tool_step(bin, &p);
+                steps.push(id, label, status, Some(detail), ms)
+            }
+            None => {
+                let err = first_line(&out.stderr);
+                steps.push(id, label, DiagStatus::Fail, Some(if err.is_empty() { format!("couldn't look for {bin}") } else { err }), ms)
+            }
+        },
         Err(e) => steps.push(id, label, DiagStatus::Fail, Some(ApiError::from(e).message), ms),
     }
 }
 
-pub(crate) async fn run(eng: &Arc<Inner>, profile: HostProfile) -> DiagReport {
+/// `secrets`: what password / key sign-in uses (the saved ones, or those typed in the editor).
+pub(crate) async fn run(eng: &Arc<Inner>, profile: HostProfile, secrets: HostSecrets) -> DiagReport {
     let mut steps = Steps(Vec::new());
     let remote = profile.kind == HostKind::TailscaleSsh;
+    let method = crate::secrets::method(&profile);
     let (ssh_label, auth_label) = match profile.kind {
-        HostKind::TailscaleSsh => ("SSH connection".to_string(), "Tailscale SSH auth"),
-        HostKind::Wsl => (format!("Start WSL ({})", profile.distro.clone().unwrap_or_default()), "Authentication"),
-        _ => ("Local process".to_string(), "Authentication"),
+        HostKind::TailscaleSsh => (
+            "SSH connection".to_string(),
+            match method {
+                SshAuth::Tailscale => "Tailscale SSH auth".to_string(),
+                SshAuth::Password => "Password sign-in".to_string(),
+                SshAuth::Key => format!("Key sign-in ({})", profile.key_path.as_deref().unwrap_or("saved key")),
+            },
+        ),
+        HostKind::Wsl => (format!("Start WSL ({})", profile.distro.clone().unwrap_or_default()), "Authentication".to_string()),
+        _ => ("Local process".to_string(), "Authentication".to_string()),
     };
 
     if profile.kind == HostKind::Demo {
@@ -94,7 +218,7 @@ pub(crate) async fn run(eng: &Arc<Inner>, profile: HostProfile) -> DiagReport {
                     "resolve",
                     format!("Resolve {addr}"),
                     DiagStatus::Fail,
-                    Some(format!("{e} (is Tailscale up on this device?)")),
+                    Some(format!("{e} ({})", if method == SshAuth::Tailscale { "is Tailscale up on this device?" } else { "check the host name" })),
                     Some(start.elapsed()),
                 );
                 return finish(steps, "resolve failed");
@@ -123,6 +247,7 @@ pub(crate) async fn run(eng: &Arc<Inner>, profile: HostProfile) -> DiagReport {
     }
     let mut opts = ConnectOptions::new(eng.data_dir().join("known_hosts"));
     opts.auth_timeout = Duration::from_secs(120);
+    opts.secrets = secrets;
     let start = Instant::now();
     let transport = tf_transport::connect(&profile, &opts, tx).await;
     let done = Instant::now();
@@ -195,8 +320,8 @@ async fn after_connect(eng: &Arc<Inner>, profile: &HostProfile, t: &dyn Transpor
         }
     };
 
-    version_step(t, &mut steps, "herdr", "herdr", "herdr").await;
-    version_step(t, &mut steps, "omp", "omp", "omp").await;
+    version_step(t, &mut steps, "herdr", "herdr", "herdr", &probe.os).await;
+    version_step(t, &mut steps, "omp", "omp", "omp", &probe.os).await;
 
     // hostd
     let expected = expected_version_line();
@@ -316,4 +441,70 @@ fn finish(mut steps: Steps, why: &str) -> DiagReport {
         }
     }
     DiagReport { steps: steps.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_steps() {
+        let noisy = "Welcome!\ntf.path=/home/u/.bun/bin/omp\ntf.via=wellknown\ntf.code=0\ntf.out=omp/18.13.1\r\n";
+        let p = parse_tool_probe(noisy).unwrap();
+        assert_eq!(p, ToolProbe { path: Some("/home/u/.bun/bin/omp".into()), via: "wellknown".into(), code: Some(0), out: "omp/18.13.1".into() });
+        assert_eq!(tool_step("omp", &p), (DiagStatus::Ok, "omp/18.13.1 · /home/u/.bun/bin/omp (outside the login PATH; tf-hostd looks there too)".into()));
+
+        let broken = parse_tool_probe("tf.path=/home/u/.bun/bin/omp\ntf.via=login\ntf.code=127\ntf.out=/usr/bin/env: 'bun': No such file or directory\n").unwrap();
+        let (status, detail) = tool_step("omp", &broken);
+        assert_eq!(status, DiagStatus::Fail);
+        assert!(detail.starts_with("/home/u/.bun/bin/omp: /usr/bin/env: 'bun'") && detail.contains("Host setup can install it"), "{detail}");
+
+        let (status, detail) = tool_step("herdr", &parse_tool_probe("tf.missing=1\n").unwrap());
+        assert_eq!(status, DiagStatus::Warn);
+        assert!(detail.contains("TeleFlock can install herdr from Host setup once the host is added"), "{detail}");
+        assert_eq!(parse_tool_probe("sh: 1: syntax error\n"), None);
+    }
+
+    #[cfg(unix)]
+    fn probe(home: &std::path::Path, shell: Option<&std::path::Path>, tool: &str) -> ToolProbe {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", TOOL_PROBE, "sh", tool]).env("HOME", home).env("PATH", "/usr/bin:/bin").env_remove("SHELL");
+        if let Some(shell) = shell {
+            cmd.env("SHELL", shell);
+        }
+        let out = cmd.output().unwrap();
+        parse_tool_probe(&String::from_utf8_lossy(&out.stdout)).unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(&out.stderr)))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_probe_script_finds_tools_like_hostd() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let exe = |path: std::path::PathBuf, body: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // An `env`-style script in ~/.bun/bin whose interpreter lives there too.
+        exe(td.path().join(".bun/bin/tfdiag-runtime"), "#!/bin/sh\nshift\necho 'tfdiag 1.2.3'\n");
+        exe(td.path().join(".bun/bin/tfdiag-tool"), "#!/usr/bin/env tfdiag-runtime\n");
+        let p = probe(td.path(), None, "tfdiag-tool");
+        assert_eq!((p.via.as_str(), p.code, p.out.as_str()), ("wellknown", Some(0), "tfdiag 1.2.3"), "{p:?}");
+        assert_eq!(p.path.as_deref(), Some(td.path().join(".bun/bin/tfdiag-tool").to_str().unwrap()));
+
+        // Only the interactive shell's PATH has it.
+        exe(td.path().join("nvm/bin/tfdiag-node"), "#!/bin/sh\necho v22.1.0\n");
+        let shell = td.path().join("fake-shell");
+        exe(shell.clone(), &format!("#!/bin/sh\necho 'motd'\nshift 3\nPATH={}:/usr/bin:/bin\neval \"$1\"\n", td.path().join("nvm/bin").display()));
+        let p = probe(td.path(), Some(&shell), "tfdiag-node");
+        assert_eq!((p.via.as_str(), p.code, p.out.as_str()), ("interactive", Some(0), "v22.1.0"), "{p:?}");
+
+        // Nowhere; a shell that never prints its PATH is cut off after 6 s at most.
+        let hung = td.path().join("hung-shell");
+        exe(hung.clone(), "#!/bin/sh\nexec sleep 30\n");
+        let started = Instant::now();
+        assert_eq!(probe(td.path(), Some(&hung), "tfdiag-absent").path, None);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 }

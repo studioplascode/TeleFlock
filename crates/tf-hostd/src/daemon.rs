@@ -194,6 +194,9 @@ pub fn exe_identity() -> String {
 }
 
 /// Entry point of `tf-hostd daemon`. Exit code 3 when another daemon holds the lock.
+///
+/// Startup order: lock, client socket (so `attach` can connect at once), the user's PATH
+/// ([`crate::userenv::prepare`], which must run while this is the only thread), logging, runtime.
 pub fn run(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
     paths.ensure_dirs().with_context(|| format!("create {}", paths.run.display()))?;
     let lock = match InstanceLock::acquire(&paths) {
@@ -206,11 +209,14 @@ pub fn run(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
             return Ok(3);
         }
     };
+    let bound = crate::ipc::Bound::bind(&paths).with_context(|| format!("bind {}", paths.endpoint()))?;
+    let env = crate::userenv::prepare();
     crate::logging::init_file(&paths.log).with_context(|| format!("open {}", paths.log.display()))?;
     info!(version = %crate::version_line(), pid = std::process::id(), home = %paths.home.display(), relay_port, "daemon starting");
+    env.log();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("tf-hostd").build()?;
-    let code = rt.block_on(async_main(paths.clone(), relay_port));
+    let code = rt.block_on(async_main(paths.clone(), relay_port, bound));
     rt.shutdown_timeout(Duration::from_secs(2));
     #[cfg(unix)]
     {
@@ -221,12 +227,16 @@ pub fn run(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
     code
 }
 
-async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
+async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> anyhow::Result<i32> {
     let shutdown = CancellationToken::new();
     let persist = crate::state::persist::Persist::load(paths.state_file.clone());
     persist.spawn_saver(shutdown.child_token());
     let originals = crate::originals::dir(&paths.home);
     tokio::task::spawn_blocking(move || crate::originals::prune(&originals));
+    // The app uploaded this build's extension before starting it: bring a consented global copy
+    // up to date before omp loads it again.
+    let ext_paths = paths.clone();
+    tokio::task::spawn_blocking(move || crate::ops::host::refresh_global_bridge(&ext_paths));
     let omp = OmpHandle::start(relay_port, persist.clone(), shutdown.clone()).await;
     let bridge = match BridgeHandle::start(&paths) {
         Ok(b) => b,
@@ -238,7 +248,7 @@ async fn async_main(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
     // Automatic tool updates default on for the real daemon (`~/.teleflock`), off for lab homes.
     let tools = crate::ops::tools::Tools::load(paths.home.join("tools.json"), paths.is_default_home());
     tools.spawn(shutdown.child_token());
-    let mut listener = Listener::bind(&paths).with_context(|| format!("bind {}", paths.endpoint()))?;
+    let mut listener = Listener::start(bound, &paths).with_context(|| format!("bind {}", paths.endpoint()))?;
     info!(endpoint = %paths.endpoint(), "listening");
 
     let daemon = Arc::new(Daemon {

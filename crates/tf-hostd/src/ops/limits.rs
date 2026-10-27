@@ -25,8 +25,10 @@ use crate::ops::host::{omp_agent_dir, omp_bin, open_ro};
 use crate::ops::Ctx;
 use crate::util::now_ms;
 
-/// hostd's own cache of `omp usage --json` (omp's per-account cache is ~5 min).
-const TTL: Duration = Duration::from_secs(60);
+/// hostd's own cache of `omp usage --json`: omp itself serves a per-account cache of ~5 min, so
+/// re-running it sooner (0.7 s CPU, ~200 MB) mostly re-reads the same report. `refresh: true`
+/// asks again after [`REFRESH_MIN`].
+const TTL: Duration = Duration::from_secs(300);
 /// Minimum spacing of explicit refreshes.
 const REFRESH_MIN: Duration = Duration::from_secs(10);
 /// `omp usage --history` only gains a row per hour.

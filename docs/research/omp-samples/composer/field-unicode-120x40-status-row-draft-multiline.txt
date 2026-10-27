@@ -1,0 +1,12 @@
+
+                         Tip: Press Alt+P (or /switch) to switch provider, and Ctrl+P to cycle
+                                            role models smol -> slow -> etc
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+▐ field draft                                                                                                         ▌
+▐ second line                                                                                                         ▌
+
+ π · ⬢ no-model · 🗑 tf-bridgectl-cap-work · ◫ 7.6K/? ⟲
+⇄ teleflock

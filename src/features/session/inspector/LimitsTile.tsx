@@ -1,8 +1,8 @@
 import { Gauge } from "lucide-react";
 import type { ReactNode } from "react";
-import { describePace, formatPct, formatSpan, parseAgentKey, type SessionLimits, sessionLimits, tightestWindow, useAccountLimits, useAgent, type WindowPace } from "@/core";
+import { describePace, formatPct, formatSpan, LIMITS_EVERY_MS, parseAgentKey, type SessionLimits, sessionLimits, tightestWindow, useAccountLimits, useAgent, type WindowPace } from "@/core";
 import type { LimitWindow } from "@/core/gen";
-import { cn, formatAge, type Status, Tooltip, useNow } from "@/design";
+import { cn, formatAge, type Status, Tooltip, useNow, useWindowActive } from "@/design";
 import { PROVIDER_NAMES, paceStatus } from "@/features/usage/limitsUi";
 
 export interface SessionLimitsView {
@@ -18,7 +18,7 @@ export interface SessionLimitsView {
 export function useSessionLimits(agentKey: string): SessionLimitsView {
   const { hostId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
-  const data = useAccountLimits(agent?.omp ? [hostId] : [])[hostId]?.data;
+  const data = useAccountLimits(agent?.omp ? [hostId] : [], useWindowActive() ? LIMITS_EVERY_MS : null)[hostId]?.data;
   const now = useNow(30_000);
   const model = agent?.omp?.model;
   const limits = sessionLimits(data, agent?.omp?.sessionId, model, now);

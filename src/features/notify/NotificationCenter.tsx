@@ -79,8 +79,10 @@ function Item({ n, index, onOpen }: { n: HostNotification; index: number; onOpen
   const answerable = n.actions.filter((a) => a.answer);
   const unread = !n.read;
   return (
+    // moved by its place in the list, resized by resolving/answering: only those make it measure its layout
     <motion.li
       layout
+      layoutDependency={`${index}/${n.resolved ?? false}/${answered ?? ""}`}
       initial={{ opacity: 0, x: 16 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 24, transition: { duration: 0.15 } }}

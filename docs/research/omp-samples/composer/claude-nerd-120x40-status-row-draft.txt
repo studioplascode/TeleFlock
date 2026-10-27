@@ -1,0 +1,12 @@
+                                                   ██       v18.13.1
+
+                                       Tip: You can /btw to ask a side question
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ claude nerd draft
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 󰵗 ·  no-model ·  tf-bridgectl-cap-work ·  7.6K/? 󰁨
+⇄ teleflock

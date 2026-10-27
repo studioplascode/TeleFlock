@@ -7,6 +7,17 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Self-update: hand the downloaded, checksum-verified APK to the system installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Dictation (the composer's mic) through the system speech recognizer; asked for at runtime
+         when the mic is tapped. Not required: devices without a microphone (TVs) still qualify. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <!-- Package visibility (API 30+): SpeechRecognizer has to see the recognition service. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <application>
         <!-- Holds the process (and the in-process Rust core + SSH sessions) at foreground

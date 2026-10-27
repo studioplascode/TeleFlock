@@ -12,6 +12,9 @@
 //! * Host BINARY `[u32 BE peer][sealed]`: 0 broadcasts, N targets guest N. Guest BINARY gets its
 //!   first 4 bytes rewritten to the sender's id and goes to the host. TEXT from clients is ignored.
 //! * Host leaves → each guest gets TEXT `{"t":"room-closed"}` then close 4001.
+//! * [`Relay::reset_room`] closes a room's host connection with 1012: the host reconnects and the
+//!   room starts a new incarnation (the recovery for a host that is connected but stopped
+//!   answering joins).
 //! * Liveness: ping every `ping_interval` (20 s), drop after `idle_timeout` (60 s) of silence.
 //! * Limits: max message `max_message` (16 MiB); per-room guest cap → close 4029; room cap → close
 //!   1013; connection cap → 503 before the upgrade; `max_queued_bytes` of outbound data per
@@ -48,6 +51,9 @@ pub const CLOSE_ROOM_FULL: u16 = 4029;
 pub const CLOSE_TOO_MANY_ROOMS: u16 = 1013;
 /// RFC 6455 policy violation: a guest exceeded its outbound byte budget.
 pub const CLOSE_BACKLOG: u16 = 1008;
+/// RFC 6455 "service restart": [`Relay::reset_room`]. omp treats it as a transient drop and
+/// reconnects (1 s backoff), which recreates the room.
+pub const CLOSE_RESET: u16 = 1012;
 
 const ROOM_CLOSED_TEXT: &str = r#"{"t":"room-closed"}"#;
 const MAX_HEAD: usize = 16 * 1024;
@@ -383,6 +389,19 @@ impl Relay {
 
     pub fn stats(&self) -> RelayStats {
         self.shared.stats()
+    }
+
+    /// Closes the host connection of `room_id` with [`CLOSE_RESET`]. The host reconnects to the
+    /// same room id, which starts a new room incarnation: guests get `room-closed` + 4001, peer
+    /// ids start over, and omp discards every per-guest send it still had queued and every
+    /// departed-guest record. tf-hostd uses it when the host keeps the room open but stops
+    /// answering joins. False when no such room is open.
+    pub fn reset_room(&self, room_id: &str) -> bool {
+        let rooms = self.shared.rooms.lock().unwrap();
+        let Some(room) = rooms.get(room_id) else { return false };
+        room.host.push_control(Out::Close(CLOSE_RESET, "room reset by the relay"));
+        log::info!("relay: resetting room {room_id}");
+        true
     }
 
     /// Graceful stop: guests get `room-closed` + 4001, hosts 1001; waits up to 3 s.

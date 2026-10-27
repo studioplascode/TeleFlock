@@ -87,6 +87,13 @@ import type { ToggleParams } from "./ToggleParams";
 import type { ToolUpdates } from "./ToolUpdates";
 import type { ToolsConfigParams } from "./ToolsConfigParams";
 import type { ToolsUpdateParams } from "./ToolsUpdateParams";
+import type { UploadBeginParams } from "./UploadBeginParams";
+import type { UploadBegun } from "./UploadBegun";
+import type { UploadChunkParams } from "./UploadChunkParams";
+import type { UploadFinishParams } from "./UploadFinishParams";
+import type { UploadFinished } from "./UploadFinished";
+import type { UploadProgress } from "./UploadProgress";
+import type { UploadRef } from "./UploadRef";
 import type { UsageParams } from "./UsageParams";
 import type { UsageReport } from "./UsageReport";
 import type { WorkspaceCloseParams } from "./WorkspaceCloseParams";
@@ -179,4 +186,9 @@ export interface HostMethods {
   "automation.run": { params: AutomationRef; result: AutomationRun };
   "automation.preview": { params: SchedulePreviewParams; result: SchedulePreview };
   "ai.complete": { params: AiCompleteParams; result: AiCompleteResult };
+  "upload.begin": { params: UploadBeginParams; result: UploadBegun };
+  "upload.chunk": { params: UploadChunkParams; result: UploadProgress };
+  "upload.status": { params: UploadRef; result: UploadProgress };
+  "upload.finish": { params: UploadFinishParams; result: UploadFinished };
+  "upload.cancel": { params: UploadRef; result: Empty };
 }

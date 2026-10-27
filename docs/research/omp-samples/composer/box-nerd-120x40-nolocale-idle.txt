@@ -1,0 +1,12 @@
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.13.1
+
+                        Tip: `/copy code` grabs the last code block to your clipboard — `/copy
+                                       cmd` grabs the last shell/python command
+
+
+╭── 󰵗  󰪟 GPT-6 Luna    tf-bridgectl-cap-work  󰙺 ──3%──────────────────────────────────────󰕝─────󰁨────────272K───╮
+╰─                                                                                     󰘶 󰌒 to change thinking effort ─╯

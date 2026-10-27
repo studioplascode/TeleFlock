@@ -1,15 +1,17 @@
-//! Tailscale SSH transport over one long-lived russh connection.
+//! SSH transport over one long-lived russh connection.
 //!
 //! * TCP dial with friendly resolve/connect errors, then SSH with the `ring` backend.
 //! * Host key: pinned in the app's known_hosts file; a key seen for the first time is
 //!   pinned when `ConnectOptions::host_key_policy` trusts it, else the connect fails with
-//!   `HostKeyUnconfirmed`. A mismatch is always a hard error.
-//! * Auth: `none` only (Tailscale identity comes from the tailnet). A banner carrying a
-//!   URL (check mode) becomes `AuthUrl` + `authRequired`, and we keep waiting.
+//!   `HostKeyUnconfirmed`. A mismatch is always a hard error. The same for every sign-in method.
+//! * Sign-in (`auth.rs`): Tailscale SSH's `none` by default (Tailscale identity comes from the
+//!   tailnet; a banner carrying a URL (check mode) becomes `AuthUrl` + `authRequired`, and we keep
+//!   waiting), or the configured password / private key only.
 //! * russh's own keepalive is off (it busy-loops while auth is pending in 0.64.1); after
 //!   auth our own ping task measures latency and detects dead links.
 //! * Exec/spawn run through `sh -c 'exec "${SHELL:-/bin/sh}" -lc "$1"'` with POSIX-quoted argv.
 
+mod auth;
 mod known_hosts;
 
 use std::net::SocketAddr;
@@ -19,7 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
-use russh::client::{self, AuthResult, DisconnectReason, Handle, Msg, Session};
+use russh::client::{self, DisconnectReason, Handle, Msg, Session};
 use russh::keys::PublicKeyOrCertificate;
 use russh::{ChannelMsg, ChannelOpenFailure, ChannelReadHalf, ChannelWriteHalf, Disconnect, Sig};
 use bytes::Bytes;
@@ -29,8 +31,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
     BoxedStream, Child, Cmd, ConnPhase, ConnectOptions, ExitStatus, HostKeyCheck, HostKeyDecision, HostKeyPolicy, HostKind,
-    HostProfile, Output, Transport, TransportError, TransportEvent, quote,
+    HostProfile, Output, SshAuth, Transport, TransportError, TransportEvent, quote,
 };
+pub use auth::check_private_key;
 pub use known_hosts::{KnownHosts, Verdict, fingerprint, host_pattern};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -215,17 +218,19 @@ fn default_user() -> String {
         .unwrap_or_else(|| "root".into())
 }
 
-fn connect_error(addr: &str, port: u16, e: &std::io::Error) -> TransportError {
+fn connect_error(addr: &str, port: u16, e: &std::io::Error, tailscale: bool) -> TransportError {
     let hint = match e.kind() {
-        std::io::ErrorKind::ConnectionRefused => {
+        std::io::ErrorKind::ConnectionRefused if tailscale => {
             format!("Nothing accepts SSH on port {port}. Enable Tailscale SSH on the host (`tailscale set --ssh`).")
         }
-        _ => "Host unreachable. Check that Tailscale is connected on this device (and TeleFlock is not excluded from it) and that the host is online.".into(),
+        std::io::ErrorKind::ConnectionRefused => format!("Nothing accepts SSH on port {port}. Check that sshd runs on the host and listens on this port."),
+        _ if tailscale => "Host unreachable. Check that Tailscale is connected on this device (and TeleFlock is not excluded from it) and that the host is online.".into(),
+        _ => "Host unreachable. Check the address, that the host is online, and that this device can reach it (network, VPN, firewall).".into(),
     };
     TransportError::Connect { addr: format!("{addr}:{port}"), detail: e.to_string(), hint: Some(hint) }
 }
 
-async fn dial(addr: &str, port: u16, opts: &ConnectOptions) -> Result<TcpStream, TransportError> {
+async fn dial(addr: &str, port: u16, opts: &ConnectOptions, tailscale: bool) -> Result<TcpStream, TransportError> {
     let resolve_err = |detail: String| TransportError::Resolve { host: addr.to_owned(), detail };
     let mut addrs: Vec<SocketAddr> = tokio::time::timeout(opts.resolve_timeout, tokio::net::lookup_host((addr, port)))
         .await
@@ -244,10 +249,10 @@ async fn dial(addr: &str, port: u16, opts: &ConnectOptions) -> Result<TcpStream,
                 let _ = s.set_nodelay(true);
                 return Ok(s);
             }
-            Ok(Err(e)) => last = Some(connect_error(addr, port, &e)),
+            Ok(Err(e)) => last = Some(connect_error(addr, port, &e, tailscale)),
             Err(_) => {
                 let e = std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {} s", opts.connect_timeout.as_secs()));
-                last = Some(connect_error(addr, port, &e));
+                last = Some(connect_error(addr, port, &e, tailscale));
             }
         }
     }
@@ -255,24 +260,31 @@ async fn dial(addr: &str, port: u16, opts: &ConnectOptions) -> Result<TcpStream,
 }
 
 impl SshTransport {
-    /// Dial, verify the host key, authenticate with `none` (waiting through check mode)
-    /// and start the keepalive task.
+    /// Dial, verify the host key, sign in with the profile's method (`none` waits through
+    /// Tailscale check mode; password / key use `opts.secrets`) and start the keepalive task.
     pub async fn connect(
         profile: &HostProfile,
         opts: &ConnectOptions,
         events: mpsc::Sender<TransportEvent>,
     ) -> Result<Arc<Self>, TransportError> {
-        let addr = profile
-            .address
-            .as_deref()
-            .map(str::trim)
-            .filter(|a| !a.is_empty())
-            .ok_or_else(|| TransportError::Config("a Tailscale SSH host needs an address (MagicDNS name or 100.x IP)".into()))?;
+        let method = profile.auth.unwrap_or(SshAuth::Tailscale);
+        let tailscale = method == SshAuth::Tailscale;
+        let addr = profile.address.as_deref().map(str::trim).filter(|a| !a.is_empty()).ok_or_else(|| {
+            TransportError::Config(if tailscale {
+                "a Tailscale SSH host needs an address (MagicDNS name or 100.x IP)".into()
+            } else {
+                "an SSH host needs an address (host name or IP)".into()
+            })
+        })?;
         let port = profile.port.unwrap_or(22);
-        let user = profile.user.clone().filter(|u| !u.trim().is_empty()).unwrap_or_else(default_user);
+        let user = match profile.user.clone().filter(|u| !u.trim().is_empty()) {
+            Some(user) => user,
+            None if tailscale => default_user(),
+            None => return Err(TransportError::Config(format!("{} sign-in needs a user name", auth::method_name(method)))),
+        };
 
         let _ = events.send(TransportEvent::Phase(ConnPhase::Connecting, Some(format!("Connecting to {addr}…")))).await;
-        let tcp = dial(addr, port, opts).await?;
+        let tcp = dial(addr, port, opts, tailscale).await?;
 
         let shared = Arc::new(Shared {
             events: events.clone(),
@@ -315,28 +327,15 @@ impl SshTransport {
                 other => other,
             })?;
 
-        let _ = events.send(TransportEvent::Phase(ConnPhase::Authenticating, Some(format!("Signing in as {user}…")))).await;
+        let signing_in = match method {
+            SshAuth::Tailscale => format!("Signing in as {user}…"),
+            SshAuth::Key => format!("Signing in as {user} with a key…"),
+            SshAuth::Password => format!("Signing in as {user} with a password…"),
+        };
+        let _ = events.send(TransportEvent::Phase(ConnPhase::Authenticating, Some(signing_in))).await;
+        let credential = auth::Credential::load(method, profile.key_path.as_deref(), &opts.secrets).await?;
         let last_banner = || lock(&banners).last().map(|b| tidy_banner(b)).filter(|b| !b.is_empty());
-        let auth = tokio::time::timeout(opts.auth_timeout, handle.authenticate_none(user.clone())).await;
-        match auth {
-            Err(_) => {
-                let _ = tokio::time::timeout(Duration::from_secs(2), handle.disconnect(Disconnect::ByApplication, "auth timeout", "en")).await;
-                return Err(TransportError::AuthTimeout { mins: opts.auth_timeout.as_secs() / 60 });
-            }
-            Ok(Err(e)) => {
-                return Err(if handle.is_closed() { TransportError::AuthDenied { banner: last_banner() } } else { e.into() });
-            }
-            Ok(Ok(AuthResult::Success)) => {}
-            Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => {
-                // The server closing during auth also lands here, with no methods left.
-                if remaining_methods.is_empty() || handle.is_closed() {
-                    return Err(TransportError::AuthDenied { banner: last_banner() });
-                }
-                let methods = remaining_methods.iter().map(|m| <&str>::from(m).to_owned()).collect::<Vec<_>>().join(", ");
-                let _ = tokio::time::timeout(Duration::from_secs(2), handle.disconnect(Disconnect::ByApplication, "", "en")).await;
-                return Err(TransportError::NotTailscaleSsh { methods });
-            }
-        }
+        auth::sign_in(&mut handle, &user, credential, opts.auth_timeout, last_banner).await?;
 
         shared.established.store(true, Ordering::SeqCst);
         if shared.is_finished() {

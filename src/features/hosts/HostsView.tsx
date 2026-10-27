@@ -29,7 +29,7 @@ import { useHealthHistory } from "@/features/shell/healthHistory";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { connSummary, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ConnStatusCard, disconnect } from "./ConnStatusCard";
-import { hostAccent, KIND_META, normalizeGroup, profileAddress } from "./kinds";
+import { hostAccent, KIND_META, kindBadge, normalizeGroup, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
 import { setupFromHash, useSetupFocus } from "./setupFocus";
 import { ToolUpdatesRow } from "./ToolUpdates";
@@ -159,7 +159,7 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
               <h3 className="max-w-full min-w-0 truncate font-display text-xl font-bold max-md:text-lg">{profile.name}</h3>
-              <Badge>{KIND_META[profile.kind].short}</Badge>
+              <Badge>{kindBadge(profile)}</Badge>
               {profile.autoConnect && <Badge tone="accent">Auto</Badge>}
             </div>
             <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-xs text-mute">

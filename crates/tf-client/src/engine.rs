@@ -10,9 +10,10 @@ use std::time::Duration;
 use serde_json::Value;
 use tf_proto::{
     Answer, ApiError, AppCapabilities, AppEvent, AppInfo, AppMethod, ConnPhase, ConnStatus, Delivery, Empty,
-    HostKind, HostMethod, HostProfile, HostState, HostStatusEntry, HostsListResult, NeedsKind, NeedsYou, Notification,
-    NotifyKind, Settings, StatePatch, TunnelListResult, WslDistrosResult,
+    HostKind, HostMethod, HostProfile, HostSaveParams, HostSecrets, HostState, HostStatusEntry, HostsListResult, NeedsKind,
+    NeedsYou, Notification, NotifyKind, Settings, SshAuth, StatePatch, TunnelListResult, WslDistrosResult,
 };
+use tf_transport::TransportError;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -20,15 +21,16 @@ use crate::conn::{self, ConnCmd, HostRt, HostView, Tracked};
 use crate::deploy::{Artifacts, HOSTD_VERSION};
 use crate::link::timeout_for;
 use crate::platform::{BadgeState, NotifyStyle, Platform};
+use crate::secrets::{self, SecretStore};
 use crate::settings::{default_settings, in_quiet_hours, is_muted, local_minutes_now, validate, wants};
 use crate::state::{CacheRecord, apply_patches, counts};
 use crate::tunnel::Tunnels;
-use crate::util::{invalid, now_ms, rand_id, read_json, to_value, write_json};
+use crate::util::{invalid, now_ms, rand_id, read_json, to_value, write_atomic, write_json};
 
 /// Engine configuration supplied by the embedder.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// `hosts.json`, `settings.json`, `known_hosts`, `cache/<hostId>.json`.
+    /// `hosts.json`, `settings.json`, `secrets.json`, `known_hosts`, `cache/<hostId>.json`.
     pub data_dir: PathBuf,
     /// `windows` | `android` | `linux` | `macos` | `web`.
     pub platform_name: String,
@@ -41,7 +43,37 @@ pub struct EngineConfig {
 }
 
 const EVENT_CAPACITY: usize = 8192;
-const CACHE_FLUSH_EVERY: Duration = Duration::from_secs(5);
+/// Cached host states are written at most this often, and whenever a host disconnects (shutdown
+/// included). Health samples alone never make the cache dirty.
+const CACHE_FLUSH_EVERY: Duration = Duration::from_secs(60);
+/// Window focus leaves a link alone that the host spoke on this recently: the ping loop watches
+/// it anyway, and a live link hears a pong every `PING_EVERY` (15 s).
+const FOCUS_FRESH: Duration = Duration::from_secs(20);
+/// Window focus gives a quiet link this long to answer: a busy WSL VM is slow, not gone.
+const FOCUS_CHECK: Duration = Duration::from_secs(15);
+/// Android resume or a network change: every live link answers this fast or reconnects.
+const RESUME_CHECK: Duration = Duration::from_secs(5);
+
+/// What made the embedder call [`Engine::resume`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resume {
+    /// The desktop window got focus (often: every alt-tab).
+    Focus,
+    /// The app came back to the foreground (Android activity resume).
+    Foreground,
+    /// The network changed (Android).
+    Network,
+}
+
+/// How long `why` gives a live link the host last spoke on `silent` ago to answer a ping
+/// (`None`: no check).
+fn resume_check(why: Resume, silent: Duration) -> Option<Duration> {
+    match why {
+        Resume::Focus if silent < FOCUS_FRESH => None,
+        Resume::Focus => Some(FOCUS_CHECK),
+        Resume::Foreground | Resume::Network => Some(RESUME_CHECK),
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct HostsFile {
@@ -64,6 +96,8 @@ pub(crate) struct Inner {
     keep_alive: Mutex<Option<bool>>,
     /// Serializes `hosts.json` / `settings.json` writes.
     io: tokio::sync::Mutex<()>,
+    /// Password / key sign-in secrets (`secrets.json`), never part of the profiles.
+    secrets: SecretStore,
     /// Bumped by [`Engine::page_closed`]; opens that complete under an older epoch are released.
     page_epoch: std::sync::atomic::AtomicU64,
     /// For work started from sync entry points the embedder may call off the runtime
@@ -191,19 +225,25 @@ impl Inner {
         self.cfg.data_dir.join("cache").join(format!("{}.json", safe_file_name(host_id)))
     }
 
-    /// Writes the host's state to the cache when it changed since the last write.
+    /// Writes the host's state to the cache when it changed since the last write: compact JSON,
+    /// serialized under the view lock rather than from a clone of the state.
     pub async fn flush_cache(&self, rt: &HostRt) {
-        let rec = {
+        let bytes = {
             let mut v = rt.view.lock().unwrap();
             if !v.dirty {
                 return;
             }
             v.dirty = false;
-            v.state.as_ref().map(|(rev, state)| CacheRecord { rev: *rev, saved_at: now_ms(), state: state.clone() })
+            match &v.state {
+                Some((rev, state)) => serde_json::to_vec(&CacheRecord { rev: *rev, saved_at: now_ms(), state }),
+                None => return,
+            }
         };
-        if let Some(rec) = rec
-            && let Err(e) = write_json(&self.cache_path(&rt.id), &rec).await
-        {
+        let written = match bytes {
+            Ok(b) => write_atomic(&self.cache_path(&rt.id), &b).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = written {
             log::warn!("cache {}: {e}", rt.id);
         }
     }
@@ -231,7 +271,8 @@ impl Inner {
                 apply_patches(s, ops.clone());
                 *r = rev;
             }
-            v.dirty = true;
+            // A health sample alone (one every few seconds while connected) is not worth a write.
+            v.dirty |= ops.iter().any(|op| !matches!(op, StatePatch::Health { .. }));
             self.send(AppEvent::HostPatch { host_id: rt.id.clone(), rev, ops });
         }
         self.refresh_badge();
@@ -356,6 +397,14 @@ impl Inner {
         let file = HostsFile { profiles: self.profiles.lock().unwrap().clone() };
         write_json(&self.cfg.data_dir.join("hosts.json"), &file).await
     }
+
+    /// Saved sign-in secrets for connecting `profile` (none for Tailscale SSH and other kinds).
+    pub(crate) async fn ssh_secrets(&self, profile: &HostProfile) -> Result<HostSecrets, ApiError> {
+        if secrets::method(profile) == SshAuth::Tailscale {
+            return Ok(HostSecrets::default());
+        }
+        self.secrets.get(&profile.id).await
+    }
 }
 
 /// Notifications settled in one step: ids for `NotifyDone`, OS notifications to retract.
@@ -461,6 +510,14 @@ fn validate_profile(mut p: HostProfile, platform: &str) -> Result<HostProfile, A
     p.user = trim(p.user);
     p.distro = trim(p.distro);
     p.color = trim(p.color);
+    // SSH sign-in: `tailscale` (the default) is stored as absent; other kinds have none.
+    if p.kind != HostKind::TailscaleSsh || p.auth == Some(SshAuth::Tailscale) {
+        p.auth = None;
+    }
+    p.key_path = trim(p.key_path).filter(|_| p.auth == Some(SshAuth::Key));
+    if p.auth.is_some() && p.user.is_none() {
+        return Err(invalid("user is required for password and key sign-in"));
+    }
     // Host group (Dispatch Auto pool): inner whitespace collapsed, capped at a label's length.
     p.group = trim(p.group).map(|g| g.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_GROUP_LEN).collect::<String>().trim_end().to_string());
     if p.port == Some(0) {
@@ -472,7 +529,7 @@ fn validate_profile(mut p: HostProfile, platform: &str) -> Result<HostProfile, A
     match p.kind {
         HostKind::TailscaleSsh => {
             if p.address.is_none() {
-                return Err(invalid("address is required for Tailscale SSH hosts"));
+                return Err(invalid("address is required for SSH hosts"));
             }
         }
         HostKind::Local => {
@@ -493,9 +550,40 @@ fn validate_profile(mut p: HostProfile, platform: &str) -> Result<HostProfile, A
     Ok(p)
 }
 
+/// Save-time checks of the secrets a password / key host signs in with (`s`: as they will be
+/// saved). A key file is read and checked on this device when connecting.
+async fn check_secrets(p: &HostProfile, s: &HostSecrets) -> Result<(), ApiError> {
+    match secrets::method(p) {
+        SshAuth::Tailscale => Ok(()),
+        SshAuth::Password if s.password.is_none() => Err(invalid("enter the password for password sign-in")),
+        SshAuth::Password => Ok(()),
+        SshAuth::Key if p.key_path.is_some() => Ok(()),
+        SshAuth::Key => {
+            let Some(text) = s.private_key.clone() else {
+                return Err(invalid("choose a key file or import a private key for key sign-in"));
+            };
+            let passphrase = s.passphrase.clone();
+            let checked = tokio::task::spawn_blocking(move || tf_transport::check_private_key(&text, passphrase.as_deref()))
+                .await
+                .map_err(|e| ApiError::new("internal", e.to_string()))?;
+            checked.map(drop).map_err(|e| {
+                let hint = e.hint();
+                let mut api = invalid(match e {
+                    TransportError::KeyPassphraseNeeded { .. } => "this private key is encrypted: enter its passphrase".to_string(),
+                    TransportError::KeyPassphraseWrong { .. } => "wrong passphrase for this private key".to_string(),
+                    TransportError::KeyUnreadable { detail, .. } => format!("this private key can't be used: {detail}"),
+                    other => other.to_string(),
+                });
+                api.hint = hint;
+                api
+            })
+        }
+    }
+}
+
 /// Connection-relevant fields: a change forces a reconnect.
 fn conn_key(p: &HostProfile) -> impl PartialEq + use<> {
-    (p.kind, p.address.clone(), p.user.clone(), p.port, p.distro.clone(), p.herdr_session.clone(), p.relay_port)
+    (p.kind, p.address.clone(), p.user.clone(), p.port, p.auth, p.key_path.clone(), p.distro.clone(), p.herdr_session.clone(), p.relay_port)
 }
 
 impl Engine {
@@ -525,6 +613,7 @@ impl Engine {
             }
         };
         let artifacts = Artifacts { hostd_override: cfg.hostd_bins_override.clone() };
+        let secrets = SecretStore::new(&cfg.data_dir);
         let inner = Arc::new(Inner {
             cfg,
             platform,
@@ -539,6 +628,7 @@ impl Engine {
             badge: Mutex::new(None),
             keep_alive: Mutex::new(None),
             io: tokio::sync::Mutex::new(()),
+            secrets,
             page_epoch: std::sync::atomic::AtomicU64::new(0),
             runtime: tokio::runtime::Handle::current(),
         });
@@ -644,8 +734,9 @@ impl Engine {
         }
     }
 
-    /// Foreground / network change: verify live links now and retry waiting hosts.
-    pub fn resume(&self) {
+    /// Window focus, foreground or network change: verify live links (window focus only the ones
+    /// the host has been quiet on, see [`Resume`]) and retry waiting hosts now.
+    pub fn resume(&self, why: Resume) {
         let hosts: Vec<Arc<HostRt>> = self.inner.hosts.lock().unwrap().values().cloned().collect();
         for rt in hosts {
             if !rt.wanted.load(Ordering::SeqCst) {
@@ -653,7 +744,9 @@ impl Engine {
             }
             match rt.link() {
                 Some(link) => {
-                    self.inner.runtime.spawn(async move { link.check(Duration::from_secs(5)).await });
+                    if let Some(timeout) = resume_check(why, link.silent_for()) {
+                        self.inner.runtime.spawn(async move { link.check(timeout).await });
+                    }
                 }
                 None => {
                     let _ = rt.cmd.send(ConnCmd::Connect);
@@ -932,8 +1025,13 @@ impl Engine {
                     .collect();
                 to_value(&HostsListResult { profiles, statuses })
             }
-            AppMethod::HostsSave(p) => {
-                let p = validate_profile(p, &i.cfg.platform_name)?;
+            AppMethod::HostsSave(HostSaveParams { profile, secrets: update }) => {
+                let p = validate_profile(profile, &i.cfg.platform_name)?;
+                // Secrets first: a connect this save starts must find them.
+                let saved = i.secrets.get(&p.id).await?;
+                let next = secrets::merged(saved.clone(), update, &p);
+                check_secrets(&p, &next).await?;
+                i.secrets.put(&p.id, next).await?;
                 let previous = {
                     let mut profiles = i.profiles.lock().unwrap();
                     match profiles.iter_mut().find(|x| x.id == p.id) {
@@ -945,15 +1043,20 @@ impl Engine {
                     }
                 };
                 if let Err(e) = i.save_profiles().await {
-                    // Roll back the in-memory change.
-                    let mut profiles = i.profiles.lock().unwrap();
-                    match &previous {
-                        Some(old) => {
-                            if let Some(x) = profiles.iter_mut().find(|x| x.id == p.id) {
-                                *x = old.clone();
+                    // Roll back the in-memory change and the secrets.
+                    {
+                        let mut profiles = i.profiles.lock().unwrap();
+                        match &previous {
+                            Some(old) => {
+                                if let Some(x) = profiles.iter_mut().find(|x| x.id == p.id) {
+                                    *x = old.clone();
+                                }
                             }
+                            None => profiles.retain(|x| x.id != p.id),
                         }
-                        None => profiles.retain(|x| x.id != p.id),
+                    }
+                    if let Err(se) = i.secrets.put(&p.id, saved).await {
+                        log::error!("host {}: restoring its sign-in secrets failed: {}", p.id, se.message);
                     }
                     return Err(e);
                 }
@@ -984,6 +1087,11 @@ impl Engine {
                 to_value(&p)
             }
             AppMethod::HostsRemove(r) => {
+                if i.profile(&r.host_id).is_none() {
+                    return Err(not_found_host(&r.host_id));
+                }
+                // Secrets go first, so a removed host never leaves them behind.
+                i.secrets.put(&r.host_id, HostSecrets::default()).await?;
                 let existed = {
                     let mut profiles = i.profiles.lock().unwrap();
                     let n = profiles.len();
@@ -1036,9 +1144,17 @@ impl Engine {
                 i.refresh_keep_alive();
                 to_value(&Empty {})
             }
-            AppMethod::HostsTest(p) => {
-                let p = validate_profile(p, &i.cfg.platform_name)?;
-                to_value(&crate::diag::run(i, p).await)
+            AppMethod::HostsTest(HostSaveParams { profile, secrets: trial }) => {
+                let p = validate_profile(profile, &i.cfg.platform_name)?;
+                // Secrets typed in the editor, over the saved ones of the same host.
+                let s = secrets::merged(i.secrets.get(&p.id).await?, trial, &p);
+                to_value(&crate::diag::run(i, p, s).await)
+            }
+            AppMethod::HostsSecretStatus(r) => {
+                if i.profile(&r.host_id).is_none() {
+                    return Err(not_found_host(&r.host_id));
+                }
+                to_value(&secrets::status(&i.secrets.get(&r.host_id).await?))
             }
             AppMethod::WslDistros(_) => {
                 let distros = tf_transport::list_distros().await.map_err(ApiError::from)?;
@@ -1137,6 +1253,8 @@ mod tests {
             address: None,
             user: None,
             port: None,
+            auth: None,
+            key_path: None,
             distro: None,
             herdr_session: "".into(),
             color: None,
@@ -1170,6 +1288,54 @@ mod tests {
         let mut g = profile(HostKind::Local);
         g.group = Some("x".repeat(100));
         assert_eq!(validate_profile(g, "linux").unwrap().group.map(|s| s.chars().count()), Some(MAX_GROUP_LEN));
+    }
+
+    /// Window focus checks only links the host has been quiet on (a live one hears a pong every
+    /// 15 s), and gives them 15 s; Android resume and network changes check every link with 5 s.
+    #[test]
+    fn resume_checks() {
+        let s = Duration::from_secs;
+        assert_eq!(resume_check(Resume::Focus, s(0)), None);
+        assert_eq!(resume_check(Resume::Focus, Duration::from_millis(19_999)), None);
+        assert_eq!(resume_check(Resume::Focus, s(20)), Some(s(15)));
+        assert_eq!(resume_check(Resume::Focus, s(600)), Some(s(15)));
+        for why in [Resume::Foreground, Resume::Network] {
+            assert_eq!(resume_check(why, s(0)), Some(s(5)));
+            assert_eq!(resume_check(why, s(600)), Some(s(5)));
+        }
+    }
+
+    /// The state cache is compact JSON, written when the state changed; health samples alone
+    /// (every few seconds while connected) never cause a write.
+    #[tokio::test]
+    async fn cache_skips_health_only_patches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _platform, rt, _rx) = notify_host(dir.path()).await;
+        let i = &engine.inner;
+        let saved = || std::fs::read_to_string(i.cache_path("lab")).unwrap();
+        i.apply_snapshot(&rt, 1, host_state());
+        i.flush_cache(&rt).await;
+        let first = saved();
+        assert!(!first.contains('\n'), "compact: {first}");
+        let health = tf_proto::HostHealth {
+            at: 1,
+            cpu_pct: 3.0,
+            cores: 8,
+            load1: 0.1,
+            mem_used: 1,
+            mem_total: 2,
+            disk_free: 1,
+            disk_total: 2,
+            uptime_s: 9,
+        };
+        i.apply_patch(&rt, 2, vec![StatePatch::Health { health }]);
+        i.flush_cache(&rt).await;
+        assert_eq!(saved(), first, "a health sample alone is not written");
+        i.apply_patch(&rt, 3, vec![StatePatch::Agent { id: "a1".into(), value: Some(agent("a1", tf_proto::Column::Running)) }]);
+        i.flush_cache(&rt).await;
+        let rec: CacheRecord = serde_json::from_str(&saved()).unwrap();
+        assert_eq!((rec.rev, rec.state.agents.len()), (3, 1));
+        assert!(rec.state.health.is_some(), "the health sample rides along with the next real change");
     }
 
     #[tokio::test]

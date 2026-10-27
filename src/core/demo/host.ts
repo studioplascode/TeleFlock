@@ -80,6 +80,7 @@ import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
 import { DemoParking } from "./parking";
 import { DemoTerm } from "./term";
 import { DemoTools } from "./tools";
+import { DemoUploads } from "./uploads";
 
 export type HostVariant = "forge" | "studio";
 
@@ -104,6 +105,9 @@ const TICK = 100;
 const DEMO_PANE_GRID = { cols: 110, rows: 32 };
 const OFFLINE: ConnPhase[] = ["offline", "error", "reconnecting", "authRequired", "hostKey", "idle"];
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/** Host setup fixes that install software: they run after the `host.setupApply` reply, like on a real host. */
+const SETUP_INSTALLS: Record<string, true> = { "install-omp": true, "install-bun": true, "install-herdr": true, "install-git": true, "install-gh": true, "install-ffmpeg": true };
+const SETUP_INSTALL_MS = 3500;
 
 interface WsModel {
   ws: Workspace;
@@ -150,6 +154,8 @@ export class DemoHost implements SimHost {
   private usageTotals: UsageTotals;
   private usageDirty = false;
   private setup: SetupStatus;
+  /** gh's first demo install fails (github.com unreachable), to show a per-fix failure. */
+  private ghInstallTried = false;
   private tickN = 0;
   private lastDirector = 0;
   private noNeedsSince: number;
@@ -232,6 +238,8 @@ export class DemoHost implements SimHost {
   });
   /** tf-hostd's automations (`./automations`); studio-pc plays a host whose tf-hostd predates them. */
   private automations?: DemoAutomations;
+  /** `upload.*` (videos for prompts, terminal pastes): offsets only, nothing stored. */
+  private uploads?: DemoUploads;
 
   constructor(
     private readonly env: HostEnv,
@@ -262,9 +270,35 @@ export class DemoHost implements SimHost {
                 fixable: true,
                 recommended: true,
               },
+              {
+                id: "install-gh",
+                severity: "info",
+                title: "Install the GitHub CLI (gh)",
+                detail:
+                  "Pull request status, checks and merges on the board come from the GitHub CLI. Downloads the latest GitHub CLI release for linux/amd64 from github.com, checks it against the release's checksums and installs gh in ~/.local/bin (no root). Then sign in once on the host: `gh auth login`.",
+                fixable: true,
+                recommended: false,
+              },
+              { id: "install-ffmpeg", severity: "info", title: "Install ffmpeg", detail: "omp reads video attachments with ffmpeg and ffprobe. Runs `sudo -n apt-get install -y -q --no-install-recommends ffmpeg` (passwordless sudo).", fixable: true, recommended: false },
             ],
           }
-        : { herdrIntegration: false, globalSharing: false, globalBridge: false, relay: true, issues: [{ id: "install-herdr-integration", severity: "error", title: "herdr omp integration missing", detail: "herdr can't tell when omp is working or blocked. Installs ~/.omp/agent/extensions/herdr-omp-agent-state.ts.", fixable: true, recommended: true }] };
+        : {
+            herdrIntegration: false,
+            globalSharing: false,
+            globalBridge: false,
+            relay: true,
+            issues: [
+              { id: "install-herdr-integration", severity: "error", title: "herdr omp integration missing", detail: "herdr can't tell when omp is working or blocked. Installs ~/.omp/agent/extensions/herdr-omp-agent-state.ts.", fixable: true, recommended: true },
+              {
+                id: "install-ffmpeg",
+                severity: "info",
+                title: "Install ffmpeg",
+                detail: "omp reads video attachments with ffmpeg and ffprobe. TeleFlock installs system packages only as root or with passwordless sudo: run `sudo apt-get install -y -q --no-install-recommends ffmpeg` on the host.",
+                fixable: false,
+                recommended: false,
+              },
+            ],
+          };
     this.tools = new DemoTools(variant, env.clock, (tools, installed) => {
       this.info = { ...this.info, tools, ...(installed === "omp" && this.info.omp ? { omp: { ...this.info.omp, version: tools.omp.current ?? this.info.omp.version } } : {}) };
       if (!this.online) return;
@@ -326,6 +360,10 @@ export class DemoHost implements SimHost {
       this.sims.get("pool")?.resume(poolTurn(), 4000);
       this.sims.get("ci")?.resume(ciTurn(), 75_000);
       this.prs.set("w6", { number: 142, url: "https://github.com/demo/teleflock/pull/142", title: "Auto-reconnect SSH and resume herdr attach", state: "OPEN", draft: true, mergeable: true, checks: { passed: 9, failed: 0, pending: 0 }, createdAt: now - 1_500_000 });
+      // gobump's branch was merged: pushed (nothing ahead), so Done offers "Delete worktree"
+      this.prs.set("w13", { number: 91, url: "https://github.com/demo/api-gateway/pull/91", title: "Bump Go to 1.25 and drop deprecated helpers", state: "MERGED", draft: false, createdAt: now - 3_000_000 });
+      const gobump = this.wss.get("w13")?.ws.repo;
+      if (gobump) gobump.ahead = 0;
       this.seedActivity(defs);
       this.usageTotals = { costUsd: 18.42, tokens: 2_310_000, input: 2_080_000, output: 230_000 };
       this.parking.seed();
@@ -794,8 +832,9 @@ export class DemoHost implements SimHost {
     const needs = sims.filter((s) => s.agent.state === "blocked");
     if (needs.length) this.noNeedsSince = now;
     if (running.length < 2) {
+      // an agent whose pull request is merged is finished: it keeps showing "Delete worktree"
       const idle = sims
-        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000)
+        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000 && this.prs.get(s.agent.workspaceId)?.state !== "MERGED")
         .sort((a, b) => Number(a.agent.archived) - Number(b.agent.archived) || a.agent.stateSince - b.agent.stateSince)[0];
       if (idle) idle.startTurn(DIRECTOR_PROMPTS[this.promptIdx++ % DIRECTOR_PROMPTS.length] as string, { author: OTHER_DEVICE });
     }
@@ -880,6 +919,7 @@ export class DemoHost implements SimHost {
     const parked = this.parking.call(method, p);
     if (parked !== undefined) return parked;
     if (method.startsWith("automation.")) return (this.automations ??= new DemoAutomations({ supported: this.variant === "forge", now: () => this.now(), herdrSession: this.info.herdrSession, call: (m, q) => this.dispatch(m, q) })).call(method, p);
+    if (method.startsWith("upload.")) return (this.uploads ??= new DemoUploads(this.env.clock, HOME)).call(method, p);
     switch (method) {
       case "state.get":
         return this.hostState();
@@ -1666,9 +1706,12 @@ export class DemoHost implements SimHost {
   private worktreeRemove(p: Record<string, unknown>): unknown {
     const m = this.wsModel(p.workspaceId);
     if (!m.ws.worktree) throw apiError("invalid_params", "Not a linked worktree workspace", { hint: "Close the workspace instead" });
+    if (m.path.includes("untrusted") && !p.trust) throw apiError("herdr_error", `fatal: detected dubious ownership in repository at '${m.path}'`, { hint: "Confirm that you trust this repository to continue" });
     const dirty = [...this.sims.values()].filter((s) => s.agent.workspaceId === m.ws.id).reduce((n, s) => n + s.files.length, 0);
     if (dirty > 0 && !p.force) throw apiError("herdr_error", `dirty_worktree_requires_force: ${m.path} has ${dirty} uncommitted change(s)`, { hint: "Commit or discard the changes, or remove with force" });
     this.closeWs(m);
+    // PRs are keyed by workspace here: drop it with the workspace
+    this.prs.delete(m.ws.id);
     return {};
   }
 
@@ -2035,23 +2078,46 @@ export class DemoHost implements SimHost {
     return res;
   }
 
+  /**
+   * Like tf-hostd, every fix runs on its own: config fixes apply at once, installs one after
+   * another (~3.5 s each) after the reply, which lists them in `applying`; `HostInfo.setup` follows
+   * each outcome (a failed install stays open with `failed`).
+   */
   private setupApply(fixes: string[]): SetupStatus {
     const known = new Set(this.setup.issues.map((i) => i.id));
     for (const f of fixes) if (!known.has(f)) throw apiError("invalid_params", `Unknown fix ${f}`);
-    const issues: SetupIssue[] = this.setup.issues.filter((i) => !fixes.includes(i.id));
+    const installs = fixes.filter((f) => SETUP_INSTALLS[f]);
+    const issues: SetupIssue[] = this.setup.issues.filter((i) => installs.includes(i.id) || !fixes.includes(i.id));
     this.setup = {
       herdrIntegration: this.setup.herdrIntegration || fixes.includes("install-herdr-integration"),
       globalSharing: this.setup.globalSharing || fixes.includes("enable-global-sharing"),
       globalBridge: this.setup.globalBridge || fixes.includes("install-global-bridge"),
       relay: true,
       issues,
+      applying: [...(this.setup.applying ?? []), ...installs],
+      failed: (this.setup.failed ?? []).filter((f) => !fixes.includes(f.id)),
     };
-    this.info = { ...this.info, setup: this.setup };
-    if (this.online) {
-      this.rev += 1;
-      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: this.info }] });
-    }
+    installs.forEach((id, i) => this.env.clock.after((i + 1) * SETUP_INSTALL_MS, () => this.finishInstall(id)));
+    this.publishSetup();
     return this.setup;
+  }
+
+  private finishInstall(id: string): void {
+    const applying = (this.setup.applying ?? []).filter((f) => f !== id);
+    const offline = id === "install-gh" && !this.ghInstallTried;
+    if (id === "install-gh") this.ghInstallTried = true;
+    const error = { code: "install_failed", message: "couldn't download https://api.github.com/repos/cli/cli/releases/latest: curl: (6) Could not resolve host: api.github.com", retryable: false };
+    this.setup = offline
+      ? { ...this.setup, applying, failed: [...(this.setup.failed ?? []), { id, error }] }
+      : { ...this.setup, applying, issues: this.setup.issues.filter((i) => i.id !== id) };
+    this.publishSetup();
+  }
+
+  private publishSetup(): void {
+    this.info = { ...this.info, setup: this.setup };
+    if (!this.online) return;
+    this.rev += 1;
+    this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: this.info }] });
   }
 
   private activityPage(p: Record<string, unknown>): unknown {

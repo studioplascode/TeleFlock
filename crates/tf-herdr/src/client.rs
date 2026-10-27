@@ -14,8 +14,9 @@ use std::time::Duration;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Extra slack added on top of herdr-side timeouts for wait-style methods.
 pub(crate) const WAIT_SLACK: Duration = Duration::from_secs(5);
-/// How long `ensure_server` waits for a freshly spawned server to answer `ping`.
-pub const SERVER_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long `ensure_server` waits for a freshly spawned server to answer `ping` (a cold start on a
+/// slow WSL laptop can take well over 15 s).
+pub const SERVER_START_TIMEOUT: Duration = Duration::from_secs(45);
 /// Oldest server version TeleFlock's feature set is built against.
 pub const MIN_SERVER_VERSION: (u32, u32, u32) = (0, 9, 0);
 

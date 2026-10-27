@@ -25,11 +25,13 @@ pub mod fs;
 pub mod gh;
 pub mod git;
 pub mod host;
+pub mod install;
 pub mod limits;
 pub mod omp_config;
 pub mod scope;
 pub mod term;
 pub mod tools;
+pub mod upload;
 pub mod workspace;
 pub mod worktree;
 
@@ -59,8 +61,21 @@ pub struct Ctx {
 impl Ctx {
     pub(crate) async fn create(daemon: &Arc<Daemon>, session: &str) -> Result<Arc<Ctx>, ApiError> {
         let herdr_name = (session != "default").then_some(session);
-        let herdr = tf_herdr::HerdrClient::discover(herdr_name).await.map_err(herdr_err)?;
-        if let Err(e) = herdr.ensure_server().await {
+        let herdr = match tf_herdr::HerdrClient::discover(herdr_name).await {
+            Ok(herdr) => herdr,
+            // Not installed: serve the session anyway, so Host setup can offer `install-herdr`;
+            // the client expects herdr where its installer puts it.
+            Err(e) if e.code == tf_herdr::code::BINARY_NOT_FOUND => {
+                let bin = install::herdr_install_path();
+                tracing::warn!(session, "herdr is not installed; expecting it at {}", bin.display());
+                let opts = tf_herdr::DiscoverOptions { bin: Some(bin), ..Default::default() };
+                tf_herdr::HerdrClient::discover_with(herdr_name, opts).await.map_err(herdr_err)?
+            }
+            Err(e) => return Err(herdr_err(e)),
+        };
+        if git::is_executable(herdr.binary())
+            && let Err(e) = herdr.ensure_server().await
+        {
             tracing::warn!(session, "herdr server not available: {e}");
         }
         let herdr = Arc::new(herdr);
@@ -80,6 +95,7 @@ impl Ctx {
             me: me.clone(),
         });
         tools::follow(&ctx);
+        upload::start(&daemon.paths, daemon.shutdown.child_token());
         crate::state::start(&ctx).await;
         Ok(ctx)
     }
@@ -111,6 +127,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
         "omp" => omp_config::handle(ctx, req, client).await,
         "automation" => automation::handle(ctx, req, client).await,
         "ai" => ai::handle(ctx, req, client).await,
+        "upload" => upload::handle(ctx, req, client).await,
         _ => Err(ApiError::new("unknown_method", format!("unknown method `{}`", req.name()))),
     }
 }

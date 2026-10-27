@@ -1,7 +1,8 @@
 import { motion } from "motion/react";
 import { Check, GitBranch, ImageOff, Play, RotateCcw, Server, ShieldCheck, SquareTerminal, X } from "lucide-react";
-import { createContext, memo, type ReactNode, useContext, useEffect, useState } from "react";
+import { createContext, memo, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { type AgentView, agentKey, navigate, useAgent, useCore, useResuming } from "@/core";
+import { type DraftVideo, useVideoUploads } from "@/core/draftVideos";
 import type { Column } from "@/core/gen";
 import { AgentGlyph, Elapsed, Lightbox, LightboxTrigger, Shimmer, StatusPill, type Status, cn, formatAge, spring, useNow } from "@/design";
 import { canReview, openAgent, openTerminal, resumeParked } from "@/features/board/agentActions";
@@ -11,8 +12,9 @@ import { QuickAnswer } from "@/features/board/QuickAnswer";
 import { ACTIONS, agentStateWord, isFresh } from "@/features/shell/vocab";
 import { AiMark } from "@/features/workspace/shared/ai";
 import { tildify } from "@/features/workspace/shared/paths";
+import { VideoChips } from "@/features/session/composer/VideoChips";
 import { useEntryImages } from "./images";
-import { type DispatchEntry, entryHost, isInFlight, useDispatch } from "./store";
+import { type DispatchEntry, type DispatchVideo, entryHost, isInFlight, useDispatch } from "./store";
 import { APPEAR_GRACE_MS, START_TIMEOUT_MS } from "./thread";
 
 /** Thread-wide handlers and facts the items need (kept out of props so items stay memoised). */
@@ -37,15 +39,15 @@ const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2
 const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 /** Launch steps after the request leaves the composer. */
-type Step = "naming" | "queued" | "creating" | "starting";
+type Step = "naming" | "uploading" | "queued" | "creating" | "starting";
 
-const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
+const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", uploading: "Uploading videos", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
 const SEGMENTS = [
   { step: "creating", label: "Creating worktree" },
   { step: "starting", label: "Starting agent" },
   { step: "running", label: "Running" },
 ] as const;
-const STEP_INDEX: Record<Step, number> = { naming: -1, queued: -1, creating: 0, starting: 1 };
+const STEP_INDEX: Record<Step, number> = { naming: -1, uploading: -1, queued: -1, creating: 0, starting: 1 };
 
 /** What the reply card shows, derived from the entry, whether its request is in flight, and host state. */
 type Shown =
@@ -60,7 +62,7 @@ function shownOf(entry: DispatchEntry, agent: AgentView | undefined, now: number
   const inFlight = isInFlight(entry.id);
   // `naming` shows as such even after a reload: the view resumes it under the fallback name.
   if (entry.phase === "naming") return { k: "step", step: "naming" };
-  if (inFlight && (entry.phase === "queued" || entry.phase === "creating")) return { k: "step", step: entry.phase };
+  if (inFlight && (entry.phase === "uploading" || entry.phase === "queued" || entry.phase === "creating")) return { k: "step", step: entry.phase };
   if (entry.phase === "failed") return { k: "failed" };
   const since = entry.startedAt ?? entry.createdAt;
   if (agent) {
@@ -92,19 +94,23 @@ function optionsSummary(e: DispatchEntry): string {
   return [o.model === "default" ? null : (o.model.split("/").pop() ?? o.model), o.thinking === "default" ? null : o.thinking, o.plan && "plan"].filter(Boolean).join(" · ");
 }
 
-/** One dispatch: the message (images, text) as a user bubble, then the agent's live reply card. */
-export const DispatchItem = memo(function DispatchItem({ entry, agentId }: { entry: DispatchEntry; agentId?: string }) {
+/**
+ * One dispatch: the message (images, videos, text) as a user bubble, then the agent's live reply card.
+ * `index` (its place in the thread) is what moves it: it measures its layout only when that changes.
+ */
+export const DispatchItem = memo(function DispatchItem({ entry, agentId, index }: { entry: DispatchEntry; agentId?: string; index: number }) {
   const ctx = useContext(ThreadCtx);
   if (!ctx) return null;
   const today = new Date(entry.createdAt).toDateString() === new Date().toDateString();
   return (
-    <motion.li layout="position" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={spring.smooth} className="flex flex-col gap-2.5">
+    <motion.li layout="position" layoutDependency={index} initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={spring.smooth} className="flex flex-col gap-2.5">
       <div className="flex flex-col items-end gap-1">
         <div className="flex items-center gap-2 pr-1 text-[11px] font-bold text-mute-2">
           <span>You</span>
           <span className="font-semibold tabular">{(today ? timeFmt : dayFmt).format(entry.createdAt)}</span>
         </div>
         {!!entry.images && <EntryImages id={entry.id} count={entry.images} mobile={ctx.mobile} />}
+        {!!entry.videos?.length && <EntryVideos videos={entry.videos} mobile={ctx.mobile} />}
         {entry.prompt.trim() && (
           <div
             className={cn(
@@ -151,6 +157,48 @@ function EntryImages({ id, count, mobile }: { id: string; count: number; mobile:
           ))
         : Array.from({ length: count }, (_, i) => <span key={i} className={cn(size, "animate-pulse rounded-[14px] bg-tile-4")} />)}
       {images && <Lightbox images={images.map((img, i) => ({ src: img.preview, alt: `image ${i + 1}` }))} index={viewing !== null && viewing < images.length ? viewing : null} onIndexChange={setViewing} />}
+    </div>
+  );
+}
+
+/** The uploads of `videos` still running in this page. */
+function useEntryUploads(videos: readonly DispatchVideo[]): DraftVideo[] {
+  const ids = useMemo(() => videos.flatMap((v) => (v.upload && !v.path ? [v.upload] : [])), [videos]);
+  return useVideoUploads(ids);
+}
+
+/** The videos sent with a task, as chips: their upload's progress while it runs, else uploaded (or not). */
+function EntryVideos({ videos, mobile }: { videos: readonly DispatchVideo[]; mobile: boolean }) {
+  const live = useEntryUploads(videos);
+  const shown = videos.map(
+    (v, i): DraftVideo =>
+      live.find((u) => u.id === v.upload) ?? {
+        id: v.upload ?? `sent-${i}`,
+        name: v.name,
+        size: v.size,
+        mime: "",
+        hostId: null,
+        phase: v.path ? "done" : "failed",
+        sent: v.path ? v.size : 0,
+        ...(v.path ? { path: v.path } : { error: "Not uploaded" }),
+      },
+  );
+  return <VideoChips videos={shown} mobile={mobile} className="max-w-[min(720px,88%)] justify-end" />;
+}
+
+/** A task's videos on their way to the host: one bar for all of them. */
+function Uploading({ videos }: { videos: readonly DispatchVideo[] }) {
+  const live = useEntryUploads(videos);
+  const total = live.reduce((n, v) => n + v.size, 0);
+  const pct = total ? Math.floor((live.reduce((n, v) => n + v.sent, 0) / total) * 100) : 0;
+  return (
+    <div className="mt-2 flex items-center gap-3" role="status">
+      <Shimmer className="text-xs font-semibold">
+        {live.length > 1 ? `Uploading ${live.length} videos` : "Uploading the video"} · {pct}%
+      </Shimmer>
+      <span className="relative ml-auto h-1.5 w-20 overflow-hidden rounded-full bg-white/10" aria-hidden>
+        <span className="absolute inset-y-0 left-0 bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
+      </span>
     </div>
   );
 }
@@ -332,7 +380,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
     );
   }
 
-  if (shown.k === "step") return <Progress step={shown.step} />;
+  if (shown.k === "step") return shown.step === "uploading" ? <Uploading videos={entry.videos ?? []} /> : <Progress step={shown.step} />;
 
   if (shown.k === "gone" && parkedKey && online) return <Parked parkedKey={parkedKey} />;
 

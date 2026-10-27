@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-dictation-available"
+description = "Enables the dictation_available command without any pre-configured scope."
+commands.allow = ["dictation_available"]
+
+[[permission]]
+identifier = "deny-dictation-available"
+description = "Denies the dictation_available command without any pre-configured scope."
+commands.deny = ["dictation_available"]

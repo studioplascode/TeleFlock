@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { demoLimits } from "./demo/limits";
 import type { AccountLimits, LimitWindow } from "./gen";
-import { describePace, formatSpan, MIN_PACE_SPAN_MS, paceFromSamples, paceLookbackMs, projectWindow, sessionLimits, STALE_MS, tightestWindow, windowsForModel } from "./limits";
+import { describePace, formatSpan, LIMITS_EVERY_MS, LIMITS_USAGE_EVERY_MS, MIN_PACE_SPAN_MS, nextAskIn, paceFromSamples, paceLookbackMs, projectWindow, sessionLimits, STALE_MS, tightestWindow, windowsForModel } from "./limits";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -143,6 +143,22 @@ test("formatSpan", () => {
   expect(formatSpan(2 * HOUR)).toBe("2h");
   expect(formatSpan(52 * HOUR)).toBe("2d 4h");
   expect(formatSpan(-5)).toBe("0m");
+});
+
+describe("nextAskIn (limits poll cadence)", () => {
+  test("the shortest cadence among the subscribers counts from the last ask", () => {
+    expect(nextAskIn([LIMITS_EVERY_MS, LIMITS_USAGE_EVERY_MS], NOW - 20_000, NOW)).toBe(LIMITS_USAGE_EVERY_MS - 20_000);
+    expect(nextAskIn([LIMITS_EVERY_MS], NOW - 20_000, NOW)).toBe(LIMITS_EVERY_MS - 20_000);
+  });
+  test("overdue or never asked: now", () => {
+    expect(nextAskIn([LIMITS_EVERY_MS], NOW - LIMITS_EVERY_MS - 1, NOW)).toBe(0);
+    expect(nextAskIn([LIMITS_USAGE_EVERY_MS], undefined, NOW)).toBe(0);
+  });
+  test("subscribers that don't poll (inactive window) never schedule an ask", () => {
+    expect(nextAskIn([null, null], NOW - 10 * HOUR, NOW)).toBeNull();
+    expect(nextAskIn([], undefined, NOW)).toBeNull();
+    expect(nextAskIn([null, LIMITS_EVERY_MS], NOW, NOW)).toBe(LIMITS_EVERY_MS);
+  });
 });
 
 describe("demo limits", () => {

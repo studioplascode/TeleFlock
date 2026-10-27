@@ -117,7 +117,7 @@ impl Guest {
 pub enum GuestEvent {
     Snapshot(Snapshot),                  // { welcome, entries, resync } — initial join and every resync/reconnect
     Frame(HostFrame),                    // live frames after the snapshot (transcript replies go to fetch_transcript)
-    Reconnecting { code: u16, reason: String, attempt: u32 },
+    Reconnecting { code: u16, reason: String, attempt: u32, timed_out: bool }, // timed_out: welcome/snapshot never came (join timeouts double)
     Ended(EndReason),                    // Bye(reason) → re-discover (rotation) | RoomGone | Rejected(msg) | Fatal(msg) | Closed
 }
 pub enum GuestError { Connect(String), NoSuchRoom, Timeout(&'static str), Rejected(String), ReadOnly, NotConnected, Fatal(String) }

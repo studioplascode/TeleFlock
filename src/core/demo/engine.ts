@@ -1,4 +1,4 @@
-import type { AppEvent, DiagReport, HostProfile, HostStatusEntry, Settings, TunnelInfo } from "@/core/gen";
+import type { AppEvent, DiagReport, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
 import { type DemoClock, realClock } from "./clock";
 import { DEMO_GROUP } from "./dispatchAuto";
@@ -19,6 +19,8 @@ export interface DemoEngineOptions {
 }
 
 const SETTINGS_KEY = "tf.demo.settings";
+
+const NO_SECRETS: SecretStatus = { password: false, privateKey: false, passphrase: false };
 
 const DEFAULT_SETTINGS: Settings = {
   motion: "system",
@@ -83,6 +85,8 @@ export class DemoEngine {
   private settings: Settings;
   private tunnels: TunnelInfo[] = [];
   private nextTunnel = 1;
+  /** Which sign-in secrets each host was saved with (`hosts.secretStatus`); never the secrets. */
+  private readonly secretFlags = new Map<string, SecretStatus>();
   private readonly seed: number;
   private disposed = false;
   /** The core's notification sync (needs-you resolution, read sync), applied to everything emitted. */
@@ -191,11 +195,12 @@ export class DemoEngine {
       case "hosts.list":
         return { profiles: this.profiles, statuses: this.statuses() };
       case "hosts.save":
-        return this.saveProfile(p as unknown as HostProfile);
+        return this.saveProfile(p as unknown as HostSaveParams);
       case "hosts.remove": {
         const id = String(p.hostId ?? "");
         this.detachHost(id);
         this.profiles = this.profiles.filter((x) => x.id !== id);
+        this.secretFlags.delete(id);
         this.emit({ type: "profiles", profiles: this.profiles });
         return {};
       }
@@ -221,6 +226,11 @@ export class DemoEngine {
       }
       case "hosts.test":
         return this.test(p as unknown as HostProfile);
+      case "hosts.secretStatus": {
+        const id = String(p.hostId ?? "");
+        if (!this.profiles.some((x) => x.id === id)) throw apiError("not_found", `Unknown host ${id}`);
+        return this.secretFlags.get(id) ?? NO_SECRETS;
+      }
       case "wsl.distros":
         return {
           distros: [
@@ -257,12 +267,27 @@ export class DemoEngine {
     return this.profiles.map((p) => ({ hostId: p.id, status: this.hosts.get(p.id)?.status ?? { phase: "idle", since: this.clock.now(), attempt: 0 } }));
   }
 
-  private saveProfile(input: HostProfile): HostProfile {
+  /** Like the app core: the secrets themselves are dropped here; only which ones were given is remembered. */
+  private saveProfile({ secrets, ...input }: HostSaveParams): HostProfile {
     if (!input.name?.trim()) throw apiError("invalid_params", "Host name is required");
     if (input.kind === "tailscaleSsh" && !input.address?.trim()) throw apiError("invalid_params", "Address is required", { hint: "MagicDNS name or tailnet IP" });
     if (input.kind === "wsl" && !input.distro?.trim()) throw apiError("invalid_params", "Pick a WSL distro");
     const id = input.id?.trim() || `${input.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${this.nextTunnel++}`;
     const profile: HostProfile = { ...input, id, herdrSession: input.herdrSession || "default" };
+    const auth = profile.kind === "tailscaleSsh" ? (profile.auth ?? "tailscale") : "tailscale";
+    if (auth === "tailscale") delete profile.auth;
+    if (auth !== "key") delete profile.keyPath;
+    const prev = this.secretFlags.get(id) ?? NO_SECRETS;
+    // absent = keep, empty = delete, text = replace; only what the method uses is kept
+    const kept = (saved: boolean, update: string | undefined) => (update === undefined ? saved : update !== "");
+    const flags: SecretStatus = {
+      password: auth === "password" && kept(prev.password, secrets?.password),
+      privateKey: auth === "key" && !profile.keyPath && kept(prev.privateKey, secrets?.privateKey),
+      passphrase: auth === "key" && kept(prev.passphrase, secrets?.passphrase),
+    };
+    if (auth === "password" && !flags.password) throw apiError("invalid_params", "enter the password for password sign-in");
+    if (auth === "key" && !profile.keyPath && !flags.privateKey) throw apiError("invalid_params", "choose a key file or import a private key for key sign-in");
+    this.secretFlags.set(id, flags);
     const existing = this.hosts.get(id);
     if (this.opts.mode === "embedded") return profile;
     this.profiles = this.profiles.some((x) => x.id === id) ? this.profiles.map((x) => (x.id === id ? profile : x)) : [...this.profiles, profile];

@@ -1,13 +1,14 @@
 import { useAgent } from "@/core";
 import { AgentGlyph, Elapsed, Shimmer, cn } from "@/design";
 import { HostTag } from "@/features/board/AgentCard";
+import { RepoTag } from "@/features/board/RepoTag";
 import { NEEDS_WORD } from "@/features/shell/vocab";
 import { askText } from "./askText";
 import { useLastAssistant } from "./useLastAssistant";
 
 const TAIL_CHARS = 700;
 
-/** Agent identity row for a needs-you item: glyph, name, repo · branch, host, waiting timer. */
+/** Agent identity row for a needs-you item: glyph, name, repo chip · branch, host, waiting timer. */
 export function NeedsHeader({ agentKey, className }: { agentKey: string; className?: string }) {
   const agent = useAgent(agentKey);
   if (!agent) return null;
@@ -23,11 +24,8 @@ export function NeedsHeader({ agentKey, className }: { agentKey: string; classNa
             </span>
           )}
         </div>
-        <div className="flex min-w-0 items-center gap-2 font-mono text-2xs text-mute-2">
-          <span className="truncate">
-            {agent.repo ?? agent.cwd}
-            {agent.branch && ` · ${agent.branch}`}
-          </span>
+        <div className="mt-0.5 flex min-w-0 items-center gap-2">
+          <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} />
           <HostTag hostId={agent.hostId} />
         </div>
       </div>

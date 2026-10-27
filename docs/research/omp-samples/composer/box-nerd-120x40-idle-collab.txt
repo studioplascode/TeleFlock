@@ -1,0 +1,12 @@
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.13.1
+
+                           Tip: Type `/` at the start of your prompt to browse every command
+
+ collab: TeleFlock joined the collab session
+
+╭── 󰵗  󰪟 GPT-6 Luna   ⇄ collab:2   tf-bridgectl-cap-work  󰙺 ─3%──────────────────────────────󰕝───󰁨──────272K───╮
+╰─                                                                                     󰘶 󰌒 to change thinking effort ─╯

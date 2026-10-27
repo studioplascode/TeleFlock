@@ -1,5 +1,5 @@
 import { useColumnKeys } from "@/core";
-import { AgentGlyph, CardFlight, EmptyState, LayoutGroup, StatusOrb, cn } from "@/design";
+import { AgentGlyph, CardFlight, EmptyState, FlightGroup, StatusOrb, cn } from "@/design";
 import { AgentCard } from "./AgentCard";
 import { useBoard } from "./boardStore";
 import { onCardClick } from "./Kanban";
@@ -69,17 +69,17 @@ function RepoColumn({ repo, filter, selectedKey }: { repo: string; filter: RepoF
   );
 }
 
-/** Group-by-repo: one column per repository, status sections inside (archive via card actions). */
-export function RepoBoard({ repos, filter, selectedKey }: { repos: string[]; filter: RepoFilter; selectedKey: string | null }) {
+/** Group-by-repo: one column per repository, status sections inside (archive via card actions). `arrangement`: see FlightGroup. */
+export function RepoBoard({ repos, filter, selectedKey, arrangement }: { repos: string[]; filter: RepoFilter; selectedKey: string | null; arrangement: string }) {
   if (repos.length === 0) return <EmptyState title="No repositories yet" description="Agents running inside a git repository are grouped here." className="flex-1" />;
   return (
-    <LayoutGroup id="board-repos">
+    <FlightGroup id="board-repos" arrangement={arrangement}>
       {/* Bleeds into the board padding like the status lanes, so scrolled columns reach the window edge. */}
       <div className="-mx-4 flex min-h-0 flex-1 gap-3 overflow-x-auto px-4 pb-1 short:-mx-3 short:px-3">
         {repos.map((r) => (
           <RepoColumn key={r} repo={r} filter={filter} selectedKey={selectedKey} />
         ))}
       </div>
-    </LayoutGroup>
+    </FlightGroup>
   );
 }

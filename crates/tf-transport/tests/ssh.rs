@@ -2,11 +2,13 @@
 
 mod support;
 
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use support::*;
 use tf_transport::{
-    Cmd, ConnPhase, HostKeyDecision, HostKeyPolicy, HostKind, TransportError, TransportEvent, connect, is_tailnet_ip,
+    Cmd, ConnPhase, ConnectOptions, HostKeyDecision, HostKeyPolicy, HostKind, HostProfile, HostSecrets, SshAuth, TransportError,
+    TransportEvent, connect, is_tailnet_ip,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -256,6 +258,207 @@ async fn auth_denied_and_not_tailscale() {
     assert!(err.hint().unwrap().contains("tailscale set --ssh"));
 }
 
+/// `profile` signing in with `auth` (and the key file at `key_path`).
+fn signing_in(addr: SocketAddr, auth: SshAuth, key_path: Option<&std::path::Path>) -> HostProfile {
+    let mut p = profile(addr);
+    p.auth = Some(auth);
+    p.key_path = key_path.map(|k| k.to_string_lossy().into_owned());
+    p
+}
+
+fn with_secrets(dir: &TempDir, password: Option<&str>, private_key: Option<&str>, passphrase: Option<&str>) -> ConnectOptions {
+    let mut o = opts(dir);
+    o.secrets = HostSecrets { password: password.map(Into::into), private_key: private_key.map(Into::into), passphrase: passphrase.map(Into::into) };
+    o
+}
+
+fn sshd(password: Option<&str>, keys: &[&str], keyboard_interactive: bool) -> AuthMode {
+    AuthMode::Sshd { password: password.map(Into::into), keys: keys.iter().map(|k| public_key(k)).collect(), keyboard_interactive }
+}
+
+/// Writes `pem` as a key file in `dir`.
+fn key_file(dir: &TempDir, name: &str, pem: &str) -> std::path::PathBuf {
+    let path = dir.0.join(name);
+    std::fs::write(&path, pem).unwrap();
+    path
+}
+
+const USER_FP: &str = "SHA256:w5faCCjlOpNNSoVVvra5jf/2tnLXOECusm0NORvtULw";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_sign_in() {
+    let (home, dir) = (TempDir::new("home"), TempDir::new("kh"));
+    let srv = TestServer::start(KEY_A, sshd(Some("s3cret pw"), &[USER_KEY], false), home.0.clone()).await;
+    let p = signing_in(srv.addr, SshAuth::Password, None);
+
+    let ev = Events::new();
+    let t = connect(&p, &with_secrets(&dir, Some("s3cret pw"), None, None), ev.tx.clone()).await.expect("password accepted");
+    assert_eq!(t.exec(&Cmd::new(["echo", "ok"])).await.unwrap().stdout_str(), "ok\n");
+    t.close().await;
+    let signing = TransportEvent::Phase(ConnPhase::Authenticating, Some("Signing in as tester with a password…".into()));
+    assert!(ev.all().contains(&signing), "{:?}", ev.all());
+    assert_eq!(srv.attempts(), ["none", "password"]);
+
+    // A wrong password is named, tried once and never retried; the key the host would accept
+    // is not a fallback.
+    let err = connect(&p, &with_secrets(&dir, Some("nope"), Some(USER_KEY), None), Events::new().tx).await.err().unwrap();
+    assert!(matches!(&err, TransportError::PasswordRejected { user } if user == "tester"), "{err:?}");
+    assert_eq!(err.to_string(), "password sign-in as tester failed: the host rejected the password");
+    assert_eq!(err.code(), "transport.passwordRejected");
+    assert!(!err.retryable());
+    assert_eq!(srv.attempts()[2..], ["none", "password"]);
+
+    // Nothing saved: refused before the host is asked anything.
+    let err = connect(&p, &with_secrets(&dir, None, None, None), Events::new().tx).await.err().unwrap();
+    assert_eq!(err.to_string(), "password sign-in failed: no password is saved for this host");
+    assert_eq!(srv.attempts().len(), 4);
+
+    // Password and key sign-in need a user name (Tailscale SSH defaults to this device's).
+    let mut nameless = p.clone();
+    nameless.user = None;
+    let err = connect(&nameless, &with_secrets(&dir, Some("s3cret pw"), None, None), Events::new().tx).await.err().unwrap();
+    assert!(matches!(&err, TransportError::Config(m) if m.contains("needs a user name")), "{err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_over_keyboard_interactive() {
+    let (home, dir) = (TempDir::new("home"), TempDir::new("kh"));
+    let srv = TestServer::start(KEY_A, sshd(Some("s3cret pw"), &[], true), home.0.clone()).await;
+    let p = signing_in(srv.addr, SshAuth::Password, None);
+
+    let t = connect(&p, &with_secrets(&dir, Some("s3cret pw"), None, None), Events::new().tx).await.expect("password prompt answered");
+    t.close().await;
+    assert_eq!(srv.attempts(), ["none", "keyboard-interactive", "keyboard-interactive answer"]);
+
+    let err = connect(&p, &with_secrets(&dir, Some("nope"), None, None), Events::new().tx).await.err().unwrap();
+    assert_eq!(err.code(), "transport.passwordRejected", "{err:?}");
+    assert_eq!(srv.attempts()[3..], ["none", "keyboard-interactive", "keyboard-interactive answer"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn key_sign_in() {
+    let (home, dir, keys) = (TempDir::new("home"), TempDir::new("kh"), TempDir::new("keys"));
+    let ed25519 = key_file(&keys, "id_ed25519", USER_KEY);
+    let rsa = key_file(&keys, "id_rsa", USER_KEY_RSA);
+    let srv = TestServer::start(KEY_A, sshd(Some("pw"), &[USER_KEY, USER_KEY_RSA], false), home.0.clone()).await;
+
+    // Key file on this device; the password the host would accept is not a fallback.
+    let ev = Events::new();
+    let p = signing_in(srv.addr, SshAuth::Key, Some(&ed25519));
+    let t = connect(&p, &with_secrets(&dir, Some("pw"), None, None), ev.tx.clone()).await.expect("key accepted");
+    assert_eq!(t.exec(&Cmd::new(["echo", "ok"])).await.unwrap().stdout_str(), "ok\n");
+    t.close().await;
+    assert!(ev.all().contains(&TransportEvent::Phase(ConnPhase::Authenticating, Some("Signing in as tester with a key…".into()))));
+    assert_eq!(srv.attempts(), ["none".to_string(), format!("publickey {USER_FP}")]);
+
+    // RSA (PEM / PKCS#1), signed with an rsa-sha2 hash the host lists.
+    let t = connect(&signing_in(srv.addr, SshAuth::Key, Some(&rsa)), &opts(&dir), Events::new().tx).await.expect("RSA key accepted");
+    t.close().await;
+
+    // The saved key (imported on Android) when the profile names no file.
+    let t = connect(&signing_in(srv.addr, SshAuth::Key, None), &with_secrets(&dir, None, Some(USER_KEY), None), Events::new().tx)
+        .await
+        .expect("saved key accepted");
+    t.close().await;
+
+    // A key the host does not authorize: rejected, named by fingerprint, nothing else tried.
+    let srv = TestServer::start(KEY_A, sshd(Some("pw"), &[USER_KEY_RSA], false), home.0.clone()).await;
+    let err = connect(&signing_in(srv.addr, SshAuth::Key, Some(&ed25519)), &with_secrets(&dir, Some("pw"), None, None), Events::new().tx)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(&err, TransportError::KeyRejected { user, fingerprint } if user == "tester" && fingerprint == USER_FP), "{err:?}");
+    assert_eq!(err.to_string(), format!("key sign-in as tester failed: the host does not accept key {USER_FP}"));
+    assert!(err.hint().unwrap().contains("authorized_keys of tester"));
+    assert!(!err.retryable());
+    assert_eq!(srv.attempts(), ["none".to_string(), format!("publickey {USER_FP}")]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_key_needs_its_passphrase() {
+    let (home, dir, keys) = (TempDir::new("home"), TempDir::new("kh"), TempDir::new("keys"));
+    let encrypted = key_file(&keys, "id_ed25519", USER_KEY_ENCRYPTED);
+    let srv = TestServer::start(KEY_A, sshd(None, &[USER_KEY, USER_KEY_PKCS8_ENCRYPTED], false), home.0.clone()).await;
+    let p = signing_in(srv.addr, SshAuth::Key, Some(&encrypted));
+
+    let t = connect(&p, &with_secrets(&dir, None, None, Some(PASSPHRASE)), Events::new().tx).await.expect("decrypted key accepted");
+    t.close().await;
+    assert_eq!(srv.attempts(), ["none".to_string(), format!("publickey {USER_FP}")]);
+
+    // Passphrase problems are found on this device: the host is never asked.
+    let path = encrypted.display().to_string();
+    let err = connect(&p, &with_secrets(&dir, None, None, None), Events::new().tx).await.err().unwrap();
+    assert!(matches!(&err, TransportError::KeyPassphraseNeeded { key } if *key == path), "{err:?}");
+    assert_eq!(err.to_string(), format!("key sign-in failed: {path} is encrypted and no passphrase is saved"));
+    let err = connect(&p, &with_secrets(&dir, None, None, Some("wrong")), Events::new().tx).await.err().unwrap();
+    assert!(matches!(&err, TransportError::KeyPassphraseWrong { key } if *key == path), "{err:?}");
+    assert!(!err.retryable());
+    assert_eq!(srv.attempts().len(), 2);
+
+    // An encrypted PKCS#8 key saved in the app.
+    let saved = signing_in(srv.addr, SshAuth::Key, None);
+    let t = connect(&saved, &with_secrets(&dir, None, Some(USER_KEY_PKCS8_ENCRYPTED), Some(PASSPHRASE)), Events::new().tx)
+        .await
+        .expect("saved PKCS#8 key accepted");
+    t.close().await;
+    let err = connect(&saved, &with_secrets(&dir, None, Some(USER_KEY_PKCS8_ENCRYPTED), Some("wrong")), Events::new().tx).await.err().unwrap();
+    assert_eq!(err.to_string(), "key sign-in failed: wrong passphrase for the saved key");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn method_the_host_does_not_offer() {
+    let (home, dir, keys) = (TempDir::new("home"), TempDir::new("kh"), TempDir::new("keys"));
+    let ed25519 = key_file(&keys, "id_ed25519", USER_KEY);
+
+    // Keys only: the password is never sent.
+    let srv = TestServer::start(KEY_A, sshd(None, &[USER_KEY], false), home.0.clone()).await;
+    let err = connect(&signing_in(srv.addr, SshAuth::Password, None), &with_secrets(&dir, Some("pw"), None, None), Events::new().tx)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(&err, TransportError::AuthMethodNotAllowed { method: "password", offered } if offered == "publickey"), "{err:?}");
+    assert_eq!(err.to_string(), "password sign-in failed: the host does not allow it (it offers: publickey)");
+    assert!(err.hint().unwrap().contains("PasswordAuthentication"));
+    assert_eq!(srv.attempts(), ["none"]);
+
+    // Passwords only: the key is never offered.
+    let srv = TestServer::start(KEY_A, sshd(Some("pw"), &[], false), home.0.clone()).await;
+    let err = connect(&signing_in(srv.addr, SshAuth::Key, Some(&ed25519)), &opts(&dir), Events::new().tx).await.err().unwrap();
+    assert!(matches!(&err, TransportError::AuthMethodNotAllowed { method: "key", offered } if offered == "password"), "{err:?}");
+    assert_eq!(err.code(), "transport.authMethodNotAllowed");
+    assert_eq!(srv.attempts(), ["none"]);
+
+    // A host that needs no credentials (Tailscale SSH) takes `none`: nothing secret is sent.
+    let srv = TestServer::start(KEY_A, AuthMode::Accept, home.0.clone()).await;
+    let t = connect(&signing_in(srv.addr, SshAuth::Password, None), &with_secrets(&dir, Some("pw"), None, None), Events::new().tx)
+        .await
+        .expect("none accepted");
+    t.close().await;
+    assert_eq!(srv.attempts(), ["none"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_key_is_confirmed_before_any_credential_is_sent() {
+    let (home, dir, keys) = (TempDir::new("home"), TempDir::new("kh"), TempDir::new("keys"));
+    let ed25519 = key_file(&keys, "id_ed25519", USER_KEY);
+    let srv = TestServer::start(KEY_A, sshd(Some("pw"), &[USER_KEY], false), home.0.clone()).await;
+    for p in [signing_in(srv.addr, SshAuth::Password, None), signing_in(srv.addr, SshAuth::Key, Some(&ed25519))] {
+        let mut o = with_secrets(&dir, Some("pw"), None, None);
+        o.host_key_policy = HostKeyPolicy::tailnet_only();
+        let err = connect(&p, &o, Events::new().tx).await.err().expect("unconfirmed key must stop");
+        let TransportError::HostKeyUnconfirmed { fingerprint, .. } = &err else { panic!("expected HostKeyUnconfirmed, got {err:?}") };
+        assert!(srv.attempts().is_empty(), "no auth request before the host key is trusted");
+        assert!(!o.known_hosts.exists());
+
+        let confirmed = fingerprint.clone();
+        o.host_key_policy = HostKeyPolicy::new(move |c| if c.fingerprint == confirmed { HostKeyDecision::Trust } else { HostKeyDecision::Confirm });
+        let t = connect(&p, &o, Events::new().tx).await.expect("confirmed key, then sign-in");
+        t.close().await;
+        std::fs::remove_file(&o.known_hosts).unwrap();
+        srv.clear_attempts();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dial_errors_are_friendly() {
     let dir = TempDir::new("kh");
@@ -278,6 +481,13 @@ async fn dial_errors_are_friendly() {
     let mut p = profile("127.0.0.1:22".parse().unwrap());
     p.address = None;
     assert!(matches!(connect(&p, &opts(&dir), Events::new().tx).await.err().unwrap(), TransportError::Config(_)));
+
+    // Hosts signing in with a password or key are not told to turn on Tailscale SSH.
+    let p = signing_in(format!("127.0.0.1:{port}").parse().unwrap(), SshAuth::Password, None);
+    match connect(&p, &opts(&dir), Events::new().tx).await.err().unwrap() {
+        TransportError::Connect { hint: Some(h), .. } => assert!(h.contains("sshd") && !h.contains("tailscale"), "{h}"),
+        other => panic!("expected Connect, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

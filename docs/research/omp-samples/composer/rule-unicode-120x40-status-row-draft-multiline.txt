@@ -1,0 +1,12 @@
+
+                                Tip: Press ⇧⇥ to cycle through reasoning effort levels
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ rule draft
+  second line
+
+ π · ⬢ no-model · 🗑 tf-bridgectl-cap-work · ◫ 7.6K/? ⟲
+⇄ teleflock

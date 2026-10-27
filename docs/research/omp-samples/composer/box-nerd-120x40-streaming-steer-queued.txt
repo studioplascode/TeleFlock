@@ -1,0 +1,12 @@
+ Error: Codex error event: The experimental native turn lane cannot accept stateful WebSocket messages while a
+   native turn is running. Start a new independent response.create turn instead.
+   (code=unsupported_native_inflight_message)
+
+
+ please also mention the color of the bell
+
+
+  󱊷 Working…
+
+╭── ⠴ 9s  󰪟 GPT-6 Luna    tf-bridgectl-cap-work  󰙺 ─3%──────────󰕝󰁨──272K─ 󰂚 BELL: Restore clockwork fog bell ──╮
+╰─                                                                                                                   ─╯

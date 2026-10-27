@@ -131,6 +131,8 @@ async fn stalled_guest_over_byte_budget_is_dropped() {
 
     let (host, _) = tokio_tungstenite::connect_async(url(port, ROOM_A, "host")).await.unwrap();
     let (mut host_tx, mut host_rx) = host.split();
+    // The room is registered just after the host's upgrade; a guest racing it gets 4004.
+    wait_for(|| relay.stats().rooms == 1).await;
     // A guest that never reads: everything for it piles up in the relay.
     let (stalled, _) = tokio_tungstenite::connect_async(url(port, ROOM_A, "guest")).await.unwrap();
     let joined = tokio::time::timeout(Duration::from_secs(5), host_rx.next()).await.unwrap().unwrap().unwrap();

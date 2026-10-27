@@ -41,6 +41,8 @@ sysinfo = { version = "0.39", default-features = false, features = ["system", "d
 
 [dev-dependencies]
 tempfile = "3"
+# Paused clock (`start_paused`) for the client-silence test.
+tokio = { version = "1.54", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,8 +1,13 @@
 import { useSyncExternalStore } from "react";
+import { isWindowVisible, onWindowVisible } from "./windowActive";
 
 /*
  * Shared clocks. One setInterval per period and one requestAnimationFrame loop for the whole app,
- * no matter how many timers/heartbeats are on screen. Both pause while the document is hidden.
+ * no matter how many timers/heartbeats are on screen. Interval clocks hold still while the window
+ * is hidden (minimized, in the tray, another tab): nothing re-renders for a clock nobody can see.
+ * An unfocused window keeps ticking (a board watched on a second monitor stays truthful). They
+ * tick at once when the window is shown again. The rAF loop stops with the browser while the
+ * document is hidden.
  */
 
 type Listener = () => void;
@@ -24,19 +29,32 @@ function getIntervalClock(periodMs: number): IntervalClock {
   return clock;
 }
 
+function tick(clock: IntervalClock) {
+  clock.now = Date.now();
+  for (const l of clock.listeners) l();
+}
+
+let catchingUp = false;
+
 function startInterval(periodMs: number, clock: IntervalClock) {
   if (clock.id !== undefined) return;
+  if (!catchingUp) {
+    catchingUp = true;
+    // Shown again: every running clock ticks now instead of up to one period late.
+    onWindowVisible((visible) => {
+      if (visible) for (const c of intervals.values()) if (c.id !== undefined) tick(c);
+    });
+  }
   clock.now = Date.now();
   clock.id = setInterval(() => {
-    if (typeof document !== "undefined" && document.hidden) return;
-    clock.now = Date.now();
-    for (const l of clock.listeners) l();
+    if (isWindowVisible()) tick(clock);
   }, periodMs);
 }
 
 /**
  * Wall-clock `Date.now()` that re-renders every `periodMs` (default 1s). All subscribers with the
- * same period share one timer and tick in sync (so every Elapsed on screen flips together).
+ * same period share one timer and tick in sync (so every Elapsed on screen flips together). The
+ * value holds still while the window is hidden and catches up when it is shown again.
  * `null` subscribes to nothing (for a hook that only needs the clock some of the time); the
  * returned value is then the time of the last tick of any 1 s clock and must not be relied on.
  */

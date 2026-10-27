@@ -1,9 +1,11 @@
 //! WSL transport: commands run as `wsl.exe -d <distro> --exec sh -c <login wrapper> sh <cmd>`
 //! through the local process layer. `--exec` avoids an extra Windows-side shell layer; the
-//! login-shell wrapper (same as SSH) puts `~/.local/bin` on PATH and applies env/cwd.
+//! login-shell wrapper (same as SSH) puts `~/.local/bin` on PATH and applies env/cwd. The distro
+//! warm-up and [`WslKeepalive`] need no login shell and run their program directly.
 //! Previews use plain localhost (WSL2 forwards it).
 
 use std::collections::HashSet;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,16 +20,21 @@ pub struct WslTransport {
     distro: Option<String>,
 }
 
-/// wsl.exe argv for `cmd`.
-fn wsl_cmd(distro: Option<&str>, cmd: &Cmd) -> Cmd {
+/// wsl.exe running `words` in the distro directly (`--exec`: no shell on either side).
+fn wsl_direct(distro: Option<&str>, words: impl IntoIterator<Item = String>) -> Cmd {
     let mut argv: Vec<String> = vec!["wsl.exe".into()];
     if let Some(d) = distro {
         argv.push("-d".into());
         argv.push(d.into());
     }
     argv.push("--exec".into());
-    argv.extend(quote::login_shell_argv(cmd));
-    Cmd { argv, env: vec![("WSL_UTF8".into(), "1".into())], cwd: None, stdin: cmd.stdin.clone(), timeout: cmd.timeout }
+    argv.extend(words);
+    Cmd { argv, env: vec![("WSL_UTF8".into(), "1".into())], ..Cmd::default() }
+}
+
+/// wsl.exe argv for `cmd`, run in the user's login shell.
+fn wsl_cmd(distro: Option<&str>, cmd: &Cmd) -> Cmd {
+    Cmd { stdin: cmd.stdin.clone(), timeout: cmd.timeout, ..wsl_direct(distro, quote::login_shell_argv(cmd)) }
 }
 
 /// Decode wsl.exe's own output: UTF-16LE by default (with or without BOM), UTF-8 when
@@ -58,7 +65,8 @@ fn wsl_missing(e: TransportError) -> TransportError {
 }
 
 impl WslTransport {
-    /// Warm the distro up (boots the VM if needed) and verify it exists.
+    /// Warm the distro up (boots the VM if needed) and verify it exists: `wsl.exe --exec true`,
+    /// without the login shell, whose profile files can take seconds on a slow machine.
     pub async fn connect(
         distro: Option<String>,
         opts: &ConnectOptions,
@@ -66,13 +74,13 @@ impl WslTransport {
     ) -> Result<Arc<Self>, TransportError> {
         let label = distro.clone().unwrap_or_else(|| "default distro".into());
         let _ = events.send(TransportEvent::Phase(ConnPhase::Connecting, Some(format!("Starting WSL ({label})…")))).await;
-        let t = Self { local: LocalTransport::with_kind(HostKind::Wsl, events), distro };
-        let out = t.exec(&Cmd::new(["true"]).timeout(opts.wsl_start_timeout)).await?;
+        let warm = Cmd { timeout: Some(opts.wsl_start_timeout), ..wsl_direct(distro.as_deref(), ["true".to_string()]) };
+        let out = local::run(&warm).await.map(fix_stderr).map_err(wsl_missing)?;
         if !out.status.success() {
             let msg = format!("{}{}", decode_wsl(&out.stdout), out.stderr_str());
             return Err(TransportError::Wsl(format!("{label}: {}", msg.trim())));
         }
-        Ok(Arc::new(t))
+        Ok(Arc::new(Self { local: LocalTransport::with_kind(HostKind::Wsl, events), distro }))
     }
 
     fn ensure_open(&self) -> Result<(), TransportError> {
@@ -155,18 +163,51 @@ pub async fn list_distros() -> Result<Vec<WslDistro>, TransportError> {
         argv.extend_from_slice(args);
         Cmd::new(argv).env("WSL_UTF8", "1").timeout(Duration::from_secs(30))
     };
-    let out = local::run(&wsl(&["-l", "-v"])).await.map_err(wsl_missing)?;
+    // Each is a wsl.exe start: run both at once.
+    let (list, live) = (wsl(&["-l", "-v"]), wsl(&["-l", "--running", "-q"]));
+    let (verbose, running) = tokio::join!(local::run(&list), local::run(&live));
+    let out = verbose.map_err(wsl_missing)?;
     let text = decode_wsl(&out.stdout);
     if !out.status.success() {
         let msg = format!("{} {}", text.trim(), decode_wsl(&out.stderr).trim());
         return Err(TransportError::Wsl(msg.trim().to_owned()));
     }
     // Exits non-zero when nothing is running; that just means an empty set.
-    let running = match local::run(&wsl(&["-l", "--running", "-q"])).await {
+    let running = match running {
         Ok(o) if o.status.success() => names(&decode_wsl(&o.stdout)),
         _ => HashSet::new(),
     };
     Ok(parse_distros(&text, &running))
+}
+
+/// [`WslKeepalive`]'s program, run directly (no shell, so no login profile either). 68 years
+/// rather than `sleep infinity`, which old busybox lacks: every `sleep` takes this number, so
+/// there is nothing to fall back from.
+const KEEPALIVE: [&str; 2] = ["sleep", "2147483647"];
+
+/// Keeps a WSL distro running while it lives. WSL stops a distro `instanceIdleTimeout` (default
+/// 15 s) after its last `wsl.exe` client exits, and tf-hostd, herdr and every agent in it stop
+/// with it; the app's other clients (`attach`, one-shot commands) all end with a reconnect.
+/// Dropping it kills its `wsl.exe` and releases the distro.
+pub struct WslKeepalive {
+    child: tokio::process::Child,
+}
+
+impl WslKeepalive {
+    /// Starts `wsl.exe [-d <distro>] --exec sleep 2147483647` (`None`: the default distro). Must
+    /// run inside a tokio runtime.
+    pub fn start(distro: Option<&str>) -> Result<Self, TransportError> {
+        let mut c = local::command(&wsl_direct(distro, KEEPALIVE.map(String::from)));
+        c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let child = c.spawn().map_err(|e| wsl_missing(local::spawn_err("wsl.exe", e)))?;
+        Ok(Self { child })
+    }
+
+    /// Still holding the distro: `false` once `wsl.exe` ended (the distro was terminated, WSL was
+    /// shut down, or there is no such distro).
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 #[cfg(test)]
@@ -216,5 +257,17 @@ mod tests {
         assert_eq!(&c.argv[4..6], &["sh", "-c"]);
         assert_eq!(c.argv.last().unwrap(), "cd ~ && exec herdr --version");
         assert_eq!(c.env, vec![("WSL_UTF8".to_string(), "1".to_string())]);
+        // The warm-up runs `true` itself: no shell, no login profile.
+        assert_eq!(wsl_direct(None, ["true".to_string()]).argv, ["wsl.exe", "--exec", "true"]);
+    }
+
+    #[test]
+    fn wsl_start_failures_retry_unless_wsl_or_the_distro_is_missing() {
+        let timeout = "Ubuntu: The operation timed out because a response was not received from the virtual machine or container. Error code: Wsl/Service/CreateInstance/HCS_E_CONNECTION_TIMEOUT";
+        assert!(TransportError::Wsl(timeout.into()).retryable());
+        let missing = "Ubuntu: There is no distribution with the supplied name. Error code: Wsl/Service/WSL_E_DISTRO_NOT_FOUND";
+        assert!(!TransportError::Wsl(missing.into()).retryable());
+        let no_wsl = wsl_missing(TransportError::Spawn { program: "wsl.exe".into(), detail: "No such file or directory".into() });
+        assert!(!no_wsl.retryable());
     }
 }

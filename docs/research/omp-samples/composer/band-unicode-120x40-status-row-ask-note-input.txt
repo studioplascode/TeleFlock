@@ -1,0 +1,12 @@
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+╭─ Note for Yes: Proceed with the lab? ───────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                     │
+│ > der the ask                                                                                                       │
+│                                                                                                                     │
+│ ⏎ or Ctrl+Q submit  ⎋ cancel  Ctrl+G external editor                                                                │
+│                                                                                                                     │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+⇄ teleflock

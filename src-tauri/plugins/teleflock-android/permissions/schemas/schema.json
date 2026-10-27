@@ -307,6 +307,30 @@
           "markdownDescription": "Denies the battery_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the cancel_dictation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-dictation",
+          "markdownDescription": "Enables the cancel_dictation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_dictation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-dictation",
+          "markdownDescription": "Denies the cancel_dictation command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the dictation_available command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-dictation-available",
+          "markdownDescription": "Enables the dictation_available command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the dictation_available command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-dictation-available",
+          "markdownDescription": "Denies the dictation_available command without any pre-configured scope."
+        },
+        {
           "description": "Enables the haptic command without any pre-configured scope.",
           "type": "string",
           "const": "allow-haptic",
@@ -331,6 +355,18 @@
           "markdownDescription": "Denies the notification_permission command without any pre-configured scope."
         },
         {
+          "description": "Enables the open_app_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-app-settings",
+          "markdownDescription": "Enables the open_app_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_app_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-app-settings",
+          "markdownDescription": "Denies the open_app_settings command without any pre-configured scope."
+        },
+        {
           "description": "Enables the request_ignore_battery_optimizations command without any pre-configured scope.",
           "type": "string",
           "const": "allow-request-ignore-battery-optimizations",
@@ -341,6 +377,18 @@
           "type": "string",
           "const": "deny-request-ignore-battery-optimizations",
           "markdownDescription": "Denies the request_ignore_battery_optimizations command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_microphone_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-microphone-permission",
+          "markdownDescription": "Enables the request_microphone_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_microphone_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-microphone-permission",
+          "markdownDescription": "Denies the request_microphone_permission command without any pre-configured scope."
         },
         {
           "description": "Enables the request_notification_permission command without any pre-configured scope.",
@@ -355,10 +403,34 @@
           "markdownDescription": "Denies the request_notification_permission command without any pre-configured scope."
         },
         {
-          "description": "Webview access to haptics, the notification permission flow and battery-optimisation status.\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`",
+          "description": "Enables the start_dictation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-dictation",
+          "markdownDescription": "Enables the start_dictation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_dictation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-dictation",
+          "markdownDescription": "Denies the start_dictation command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop_dictation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-stop-dictation",
+          "markdownDescription": "Enables the stop_dictation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_dictation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-stop-dictation",
+          "markdownDescription": "Denies the stop_dictation command without any pre-configured scope."
+        },
+        {
+          "description": "Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer).\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`\n- `allow-request-microphone-permission`\n- `allow-open-app-settings`\n- `allow-dictation-available`\n- `allow-start-dictation`\n- `allow-stop-dictation`\n- `allow-cancel-dictation`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Webview access to haptics, the notification permission flow and battery-optimisation status.\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`"
+          "markdownDescription": "Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer).\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`\n- `allow-request-microphone-permission`\n- `allow-open-app-settings`\n- `allow-dictation-available`\n- `allow-start-dictation`\n- `allow-stop-dictation`\n- `allow-cancel-dictation`"
         }
       ]
     }

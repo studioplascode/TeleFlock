@@ -294,7 +294,11 @@ type Reply = Result<Value, BridgeError>;
 
 struct Conn {
     tx: mpsc::UnboundedSender<String>,
+    /// The session requests for it are routed to: `None` before `hello`, and after another
+    /// connection took the session over (or a newer bridge copy of the same omp process serves it).
     session: Option<BridgeSession>,
+    /// `(pid, bridge version)` of the latest `hello`, kept while the connection is not routed.
+    hello: Option<(u32, String)>,
     pending: HashMap<u64, oneshot::Sender<Reply>>,
 }
 
@@ -819,6 +823,7 @@ where
         Conn {
             tx,
             session: None,
+            hello: None,
             pending: HashMap::new(),
         },
     );
@@ -984,44 +989,85 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
     };
     let event = {
         let mut reg = lock(&shared.reg);
+        // Several bridge copies in one omp process (the global install and the `-e` copy): 1.4.0+
+        // copies elect one among themselves, older ones never negotiate. Only the newest bridge of a
+        // process is routed; an older one stays connected without a session, its events ignored.
+        let newer = reg.conns.iter().find_map(|(&id, c)| match &c.hello {
+            Some((pid, v))
+                if id != conn_id
+                    && *pid == session.pid
+                    && tf_proto::version::cmp_semver(v, &session.bridge_version)
+                        .is_some_and(std::cmp::Ordering::is_gt) =>
+            {
+                Some(v.clone())
+            }
+            _ => None,
+        });
         let Some(conn) = reg.conns.get_mut(&conn_id) else {
             return;
         };
-        let previous = conn.session.replace(session.clone()).map(|s| s.session_id);
-        if let Some(prev) = &previous
-            && prev != &session.session_id
-            && reg.by_session.get(prev) == Some(&conn_id)
-        {
-            reg.by_session.remove(prev);
-        }
-        if let Some(old) = reg.by_session.insert(session.session_id.clone(), conn_id)
-            && old != conn_id
-        {
-            // A second process (or a reconnect racing the old socket's EOF) took over this session.
-            if let Some(c) = reg.conns.get_mut(&old) {
-                c.session = None;
+        conn.hello = Some((session.pid, session.bridge_version.clone()));
+        if let Some(newer) = newer {
+            info!(
+                pid = session.pid,
+                version = %session.bridge_version,
+                %newer,
+                "older bridge copy in the same omp process left unrouted"
+            );
+            // A session it was still routed for (it said hello before the newer copy) goes with it.
+            let dropped = conn.session.take();
+            match dropped {
+                Some(s) if reg.by_session.get(&s.session_id) == Some(&conn_id) => {
+                    reg.by_session.remove(&s.session_id);
+                    Some(BridgeEvent::Disconnected { pid: s.pid, session_id: s.session_id })
+                }
+                _ => None,
             }
-        }
-        match previous {
-            Some(prev) if prev != session.session_id => {
-                info!(pid = session.pid, from = %prev, to = %session.session_id, "bridge session switch");
-                BridgeEvent::SessionSwitch {
-                    pid: session.pid,
-                    previous_session_id: prev,
-                    session,
+        } else {
+            let previous = conn.session.replace(session.clone()).map(|s| s.session_id);
+            if let Some(prev) = &previous
+                && prev != &session.session_id
+                && reg.by_session.get(prev) == Some(&conn_id)
+            {
+                reg.by_session.remove(prev);
+            }
+            if let Some(old) = reg.by_session.insert(session.session_id.clone(), conn_id)
+                && old != conn_id
+            {
+                // A second process, an older bridge copy of this one, or a reconnect racing the old
+                // socket's EOF: this hello takes the session over.
+                if let Some(c) = reg.conns.get_mut(&old) {
+                    c.session = None;
                 }
             }
-            Some(_) => BridgeEvent::State {
-                session_id: session.session_id.clone(),
-                state: session.state,
-            },
-            None => {
-                info!(pid = session.pid, session_id = %session.session_id, "bridge connected");
-                BridgeEvent::Connected { session }
-            }
+            Some(match previous {
+                Some(prev) if prev != session.session_id => {
+                    info!(pid = session.pid, from = %prev, to = %session.session_id, "bridge session switch");
+                    BridgeEvent::SessionSwitch {
+                        pid: session.pid,
+                        previous_session_id: prev,
+                        session,
+                    }
+                }
+                Some(_) => BridgeEvent::State {
+                    session_id: session.session_id.clone(),
+                    state: session.state,
+                },
+                None => {
+                    info!(
+                        pid = session.pid,
+                        session_id = %session.session_id,
+                        version = %session.bridge_version,
+                        "bridge connected"
+                    );
+                    BridgeEvent::Connected { session }
+                }
+            })
         }
     };
-    let _ = shared.events.send(event);
+    if let Some(event) = event {
+        let _ = shared.events.send(event);
+    }
     if let Some(conn) = lock(&shared.reg).conns.get(&conn_id) {
         let _ = conn.tx.send(
             json!({ "t": "welcome", "v": BRIDGE_PROTOCOL, "hostd": crate::HOSTD_VERSION })
@@ -1237,10 +1283,13 @@ mod tests {
             }
         }
         async fn hello(&mut self, pid: u32, sid: &str) {
+            self.hello_v(pid, sid, "1.0.0").await;
+        }
+        async fn hello_v(&mut self, pid: u32, sid: &str, bridge_version: &str) {
             self.send(json!({
                 "t": "hello", "v": 1, "reason": "connect", "pid": pid, "sessionId": sid,
                 "sessionFile": format!("/tmp/{sid}.jsonl"), "cwd": "/w", "ompVersion": "18.12.3",
-                "bridgeVersion": "1.0.0", "tui": true,
+                "bridgeVersion": bridge_version, "tui": true,
                 "state": { "model": { "provider": "openai-codex", "id": "gpt-6-luna", "label": "Luna" },
                            "thinking": "low", "fast": false, "mode": "normal", "idle": true,
                            "queue": { "steering": [], "followUp": [] }, "attached": false }
@@ -1248,6 +1297,33 @@ mod tests {
             .await;
             // Registration is complete once hostd answers with `welcome`.
             assert_eq!(self.recv().await["t"], "welcome");
+        }
+        /// A `state` event titled `title` (tells which connection's events reach HostdCore).
+        async fn state_titled(&mut self, sid: &str, title: &str) {
+            self.send(json!({ "t": "event", "event": "state", "sessionId": sid, "data": {
+                "fast": false, "mode": "normal", "idle": true, "title": title,
+                "queue": { "steering": [], "followUp": [] }, "attached": false } }))
+            .await;
+        }
+    }
+
+    /// Sends a request for `sid` and answers it on `ext` (which must be the one it is routed to).
+    async fn assert_routed(h: &BridgeHandle, sid: &str, ext: &mut FakeExt) {
+        let (h2, sid2) = (h.clone(), sid.to_owned());
+        let call = tokio::spawn(async move { h2.rename(&sid2, "x").await });
+        let req = ext.recv_req().await;
+        assert_eq!(req["op"], "rename");
+        ext.send(json!({ "t": "res", "id": req["id"], "ok": true, "result": { "title": "x" } }))
+            .await;
+        call.await.unwrap().unwrap();
+    }
+
+    /// The title of the next `State` event (skipping registration events).
+    async fn next_state_title(rx: &mut broadcast::Receiver<BridgeEvent>) -> Option<String> {
+        loop {
+            if let BridgeEvent::State { state, .. } = next_event(rx).await {
+                return state.title;
+            }
         }
     }
 
@@ -1437,6 +1513,95 @@ mod tests {
         );
         assert!(!h.is_connected("old"));
         assert!(h.is_connected("new"));
+    }
+
+    #[tokio::test]
+    async fn bridge_same_process_older_then_newer_copy() {
+        // The global 1.1.0 install says hello first, then the `-e` copy of the same omp process.
+        let (h, _dir) = handle();
+        let mut events = h.subscribe();
+        let mut old = FakeExt::connect(&h).await;
+        old.hello_v(7, "s1", "1.1.0").await;
+        let mut new = FakeExt::connect(&h).await;
+        new.hello_v(7, "s1", "1.4.0").await;
+        assert_eq!(h.by_session("s1").unwrap().bridge_version, "1.4.0");
+        assert_routed(&h, "s1", &mut new).await;
+        old.state_titled("s1", "old").await;
+        new.state_titled("s1", "new").await;
+        assert_eq!(next_state_title(&mut events).await.as_deref(), Some("new"));
+        // The older copy's event is dropped, not merely late.
+        assert!(tokio::time::timeout(Duration::from_millis(300), next_state_title(&mut events)).await.is_err());
+        // Session switch: the older copy's hello can arrive first; it does not take the new session.
+        old.hello_v(7, "s2", "1.1.0").await;
+        assert!(!h.is_connected("s2"));
+        new.hello_v(7, "s2", "1.4.0").await;
+        assert!(!h.is_connected("s1"));
+        assert_eq!(h.by_session("s2").unwrap().bridge_version, "1.4.0");
+        assert_routed(&h, "s2", &mut new).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_same_process_newer_then_older_copy() {
+        let (h, _dir) = handle();
+        let mut events = h.subscribe();
+        let mut new = FakeExt::connect(&h).await;
+        new.hello_v(7, "s1", "1.4.0").await;
+        assert!(matches!(next_event(&mut events).await, BridgeEvent::Connected { .. }));
+        let mut old = FakeExt::connect(&h).await;
+        old.hello_v(7, "s1", "1.3.0").await;
+        assert_eq!(h.by_session("s1").unwrap().bridge_version, "1.4.0");
+        assert_routed(&h, "s1", &mut new).await;
+        old.state_titled("s1", "old").await;
+        new.state_titled("s1", "new").await;
+        assert_eq!(next_state_title(&mut events).await.as_deref(), Some("new"));
+        assert!(tokio::time::timeout(Duration::from_millis(300), next_state_title(&mut events)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bridge_same_process_older_copy_loses_its_stale_session() {
+        // The older copy is still routed for the previous session when the newer one (reconnecting
+        // after a switch) says hello for the current one; the older copy's own hello then drops it.
+        let (h, _dir) = handle();
+        let mut events = h.subscribe();
+        let mut old = FakeExt::connect(&h).await;
+        old.hello_v(9, "a", "1.1.0").await;
+        let mut new = FakeExt::connect(&h).await;
+        new.hello_v(9, "b", "1.4.0").await;
+        old.hello_v(9, "b", "1.1.0").await;
+        assert!(!h.is_connected("a"));
+        assert_eq!(h.by_session("b").unwrap().bridge_version, "1.4.0");
+        assert_routed(&h, "b", &mut new).await;
+        let mut gone = None;
+        for _ in 0..3 {
+            if let BridgeEvent::Disconnected { session_id, .. } = next_event(&mut events).await {
+                gone = Some(session_id);
+                break;
+            }
+        }
+        assert_eq!(gone.as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn bridge_same_process_equal_versions_latest_hello_wins() {
+        let (h, _dir) = handle();
+        let mut a = FakeExt::connect(&h).await;
+        a.hello_v(7, "s1", "1.3.0").await;
+        let mut b = FakeExt::connect(&h).await;
+        b.hello_v(7, "s1", "1.3.0").await;
+        assert_routed(&h, "s1", &mut b).await;
+        a.hello_v(7, "s1", "1.3.0").await;
+        assert_routed(&h, "s1", &mut a).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_other_process_takes_the_session_over_whatever_its_version() {
+        let (h, _dir) = handle();
+        let mut first = FakeExt::connect(&h).await;
+        first.hello_v(7, "s1", "1.4.0").await;
+        let mut second = FakeExt::connect(&h).await;
+        second.hello_v(8, "s1", "1.1.0").await;
+        assert_eq!(h.by_session("s1").unwrap().pid, 8);
+        assert_routed(&h, "s1", &mut second).await;
     }
 
     #[tokio::test]

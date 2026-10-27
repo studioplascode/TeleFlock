@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0) and for 0.4.1 on 2026-10-23 and 0.5.0 on 2026-10-26. Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26 and 0.5.1 on 2026-10-27 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -8,7 +8,25 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ⚠️ **implemented, unverified or partial**: the code path exists, but it was not exercised against a real host, or one platform/variant is missing.
 - ❌ **missing**: there is no UI path.
 
-**hostd path legend**: C = collab guest · B = tf-bridge extension · I = herdr keystroke injection (guarded by §3.6, idle-only) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+**hostd path legend**: C = collab guest · B = tf-bridge extension · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.5.1 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| One bridge per omp process (global + `-e` copies) | — | — | bridge 1.4.0 `BridgeSlot`, `/teleflock-control`; hostd `bridge.rs` routes only the newest copy of a pid | ✅ lab (omp 18.13.1 with the ambient 1.1.0 copy: newSession/navigate/branch 17/17 + 3/3, was 7/10); unit tests |
+| Daemon runs with the user's interactive-shell PATH | — | — | `userenv.rs` (`$SHELL -i -l -c`, 6 s cap, well-known dirs) | ✅ lab (`PATH=/usr/bin:/bin` daemon runs an `env bun` omp from `~/.bun/bin`); unit tests |
+| Host setup installs what's missing; fixes apply independently with per-fix outcomes | Hosts → Host setup | More → Hosts | `host.setupApply` (`SetupStatus.applying/failed`), `ops/install.rs` | ✅ lab with sandbox `HOME` (real bun, omp, herdr, gh installs; fake package-manager failure reported per fix); ✅ demo; ⚠️ Windows-local installers, `sudo -n` and wget-only paths not run |
+| Connect while the agent works; composer parser for omp 18.13 | session Connect / Retry now | same | `agent.connect` (`When::AlsoStreaming`, `retry_now`), `inject::parse_composer` | ✅ lab (streaming unshared omp connected in 0.8 s); ✅ 94 real pane captures (`docs/research/omp-samples/composer/`) |
+| Slow hosts: pane shells (45 s), interactive (90 s), link joins (backoff, room reset), longer app timeouts | — | — | `tf-herdr` `agent_start{shell_wait}`, `omp.rs` join backoff, `Relay::reset_room`, `tf-client` `link::timeout_for` | ✅ CPU-quota lab (3 resumed sessions at 10 % CPU all live, no `error`); ⚠️ no real WSL laptop |
+| Password / private-key SSH (Advanced) | HostEditor → Advanced: authentication | same (key import/paste) | `hosts.save/test {secrets}`, `hosts.secretStatus`, `tf-transport` `ssh/auth.rs`, `tf-client` `secrets.rs` | ✅ tests + real OpenSSH 10 sshd from /tmp; ✅ demo; ⚠️ Android key import not run on a device |
+| Video attachments | Composer, Dispatch (picker, drop, paste) | same | `upload.begin/chunk/status/finish/cancel`, `src/core/upload.ts` | ✅ lab (14.4 MB mp4 read by a real omp agent; 3 MiB through tf-devserver → tf-client → hostd, SHA-256 checked); ✅ demo; ⚠️ Android picker not run |
+| Images/videos into the terminal (paste, drop, phone image key); text pastes as one bracketed paste | TerminalPane | ExtraKeys image key | `uploadFile` + bracketed path paste; `pasteTextInput` | ✅ lab (omp attached a pasted PNG; a two-line paste stayed in omp's composer, where the old path ran a shell's first line); ✅ demo |
+| Desktop file drops reach the page | composer, Dispatch, terminal | — | `dragDropEnabled: false`, `shell/fileDrops.ts` guard | ⚠️ desktop app not run here |
+| Repository chips, repo filter, Delete worktree for merged/closed PRs | AgentCard, BoardToolbar, card ⋯ | Flock rows, Repos sheet, row ⋯ | `gh.prStatus` (lazy, cached), `worktree.remove` | ✅ demo at 1440×900 and 412×892; ⚠️ gh missing/unauthenticated host covered by unit tests only |
+| Android dictation with the microphone permission | — | composer mic | plugin `Dictation.kt` (`SpeechRecognizer`, `RECORD_AUDIO`) | ⚠️ compiled (Gradle, cargo for aarch64); not run on a device |
+| Phone layout: no overflow at 360–412 px; keyboard return key matches Enter (newline) in every composer | — | Flock rows/tiles, session composer + header chips, Dispatch, Hosts, Settings, agent chat, New agent | layout only; `enterKeyHint="enter"` | ✅ demo sweep of 45 phone screens at 360×780 and 412×892 (no element past its box); ⚠️ not run on a phone |
+| Lighter on slow machines: React Compiler coverage (Babel 7 + build canary), Calm board idles, hidden/inactive window gating, fewer host spawns and writes, coalesced session metas, link survives sleep, WSL distro keepalive, batched webview events, static tray in Calm | — | — | `vite.config.ts`, `src/design`, `state/`, `omp.rs`, `link.rs`, `clients.rs`, `wsl.rs`, `core.rs`, `tray.rs` | ✅ measured before/after (headless Chromium at 1× and 4×; lab hostd with strace; paused-clock tests; a SIGSTOP'd stack kept its link); ⚠️ WebView2, WSL keepalive and tray on real Windows not run |
 
 ## §0 What 0.4.0 changed
 
@@ -42,7 +60,7 @@ What closed the ❌ and ⚠️ rows:
 
 | Capability | Desktop entry | Mobile entry | Frontend → method | hostd/app path | Status |
 |---|---|---|---|---|---|
-| Tailscale-SSH host | Hosts → HostEditor (address/user/port, Test) | More → Hosts → editor sheet | `hosts.save/test/connect` | L `tf-client/engine.rs`, `tf-transport` SSH | ⚠️ real SSH not exercised in this audit (demo rejects real profiles) |
+| SSH host (Tailscale SSH, or Advanced: private key / password) | Hosts → HostEditor (address/user/port, Advanced: authentication, Test) | More → Hosts → editor sheet | `hosts.save/test/connect`, `hosts.secretStatus` | L `tf-client/engine.rs`, `secrets.rs`, `tf-transport` SSH | ⚠️ Tailscale SSH against a real peer not exercised; key/password run against a real OpenSSH sshd (0.5.1) |
 | Local host | HostEditor kind "Local" | — (Android: SSH + demo only, by spec) | `hosts.save/connect` | L `tf-transport/local.rs` | ⚠️ Windows build not run here |
 | WSL host + distro picker | HostEditor kind "WSL" → distro select | — (by spec) | `wsl.distros`, `hosts.save` | L `tf-transport/wsl.rs` (`wsl.exe -d`) | ⚠️ needs Windows |
 | Demo host | HostEditor kind "Demo" | same | all host methods | `src/core/demo` | ✅ demo |
@@ -53,7 +71,7 @@ What closed the ❌ and ⚠️ rows:
 | Backoff countdown, Retry now, latency | ConnStatusCard, host pill | same | `hosts.connect` | L `conn.rs` | ✅ demo |
 | Resume on foreground/network | automatic | automatic (Android network callback) | `Engine::resume` | L `src-tauri/lib.rs` | ⚠️ needs a device |
 | Offline-first stale cache | board/sidebar stale treatment | StaleHosts strip | cached `HostState` | L `engine.rs` | ✅ demo (studio-pc host is stale) |
-| Setup checklist + one-tap fixes | Hosts → Host setup | More → Hosts | `host.setup/setupApply` | H/B `ops/host.rs`, `ops/scope.rs` | ⚠️ 9 rows, there is no separate "SSH OK" row; a relay that is down cannot be fixed with one tap (hostd owns the port). `move-herdr-out-of-login-session` (0.4.1): run on a throwaway herdr lab session started from a login scope, all of its processes moved into a new scope and kept running |
+| Setup checklist + one-tap fixes | Hosts → Host setup | More → Hosts | `host.setup/setupApply` | H/B `ops/host.rs`, `ops/install.rs`, `ops/scope.rs` | ⚠️ there is no separate "SSH OK" row; a relay that is down cannot be fixed with one tap (hostd owns the port). `move-herdr-out-of-login-session` (0.4.1): run on a throwaway herdr lab session started from a login scope, all of its processes moved into a new scope and kept running. 0.5.1: installs (omp, bun, herdr, gh, git, ffmpeg) and per-fix outcomes, see §0 |
 | Host health | Hosts view, sidebar host rows (CPU sparkline + RAM bar), board Hosts tile (one row per host, load) | More → Hosts | state push (`host.health` exists but is not called directly) | L `ops/host.rs` | ✅ demo |
 | Tool updates (omp, herdr) | Hosts → host card: versions, available update, last check, notes/errors, Check now / Update now, auto switch | More → Hosts (same card) | `HostInfo.tools`, `host.toolsUpdate`, `host.toolsConfig` | H `ops/tools.rs` (daemon updater, architecture §3.9) | ✅ demo (forge: omp update waiting; studio-pc: auto off, Homebrew herdr) + lab hostd with fake omp/herdr/curl; hidden for older hostds |
 
@@ -79,9 +97,9 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Board columns Needs you · Running · Review · Done, drag Review↔Done, live-lane bounce | Kanban | Flock sections + swipe Mark done/Reopen + ⋯ | `agent.archive` | state persist | ✅ demo |
 | Done agents close their panes (parked): "closed" chip, Resume / Reopen / Terminal / prompt resume under a new id and views follow; pruned agents vanish (notifications, drafts, mute, toasts, Dispatch, terminal memory) | Kanban Done lane, ⋯ menu, session gate, terminal notice, Settings switch | Flock rows + ⋯, session gate | `agent.archive {close}`, `agent.resume`, `agent.prompt`, `HostInfo.pruned` | herdr pane close + `omp --resume` | ✅ demo |
 | Card contents (five zones), quick answers, approvals, input requests ("Answer…" → HUD) | AgentCard/QuickAnswer | Flock needs cards | `agent.answer` | C | ✅ demo |
-| Review card: next ship step (Commit N files / Push / Open PR / Merge), Mark done, Open | AgentCard (`shipMemo` from Review) | Flock row: Mark done / Review | route + `agent.archive` | — | ✅ demo; ⚠️ the PR stepper needs Review to have seen the PR once (no per-card `gh` polling) |
+| Review card: next ship step (Commit N files / Push / Open PR / Merge), Mark done, Open; Delete worktree once the PR is merged or closed | AgentCard (`shipMemo` from Review, else lazy `gh.prStatus` for visible worktree cards) | Flock row: Mark done / Review, ⋯ Delete worktree | route + `agent.archive`, `gh.prStatus`, `worktree.remove` | G | ✅ demo |
 | Summary row (first steps, spend + tightest limit, hosts, live terminal; one strip on short windows) | BentoRow | Flock tiles (Answer →, running ↓, today ›) | state | — | ✅ demo + lab (0.4.1: the tile observes the pane at its real size, fills the tile's width and keeps the newest rows at every window size) |
-| Filters/search/group/J-K/H-L | BoardToolbar, useBoardKeys | host filter sheet | frontend | — | ✅ demo |
+| Filters (host, repository)/search/group/J-K/H-L | BoardToolbar, useBoardKeys | host filter sheet, Repos sheet | frontend | — | ✅ demo |
 | Multi-select (P1) | `X` / Ctrl+click → SelectionBar (Mark done, Reopen, Stop turn, Mute) | long-press → SelectionBar | `agent.archive`, `agent.abort`, settings | — | ✅ demo |
 | Transcript, tool cards, thinking | SessionPane | MobileSession pager | `session.open/history` | C replica | ✅ demo |
 | Ask card: select/multi/editor/confirm/input | AskCard | same | `agent.answer` | C ui-response | ✅ demo |
@@ -92,10 +110,10 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Stop turn | Esc, header "Stop turn" | composer Stop, ⋯ sheet, swipe | `agent.abort` | C → B → I `esc` | ✅ demo |
 | `/` palette | Composer | Composer | see the slash table below | | ✅ demo + test |
 | `@` mention | Composer | Composer | `fs.search` | G | ✅ demo |
-| Image paste/drop | Composer | attach button | `agent.prompt{images}` | C `prompt.images` | ⚠️ needs a collab link; follow-ups with images are rejected (omp's TUI queue has no remote image path) |
+| Image and video paste/drop | Composer | attach button | `agent.prompt{images}`; videos: `upload.*`, then the host path in the prompt text | C `prompt.images` | ⚠️ images need a collab link; follow-ups with images are rejected (omp's TUI queue has no remote image path); omp needs ffmpeg on the host to read videos |
 | Drafts: every text field keeps its value (composers, answers, dialogs, filters) + composer images | everywhere | same | `drafts` / `useDraft` (localStorage `tf.drafts`), images in IndexedDB | — | ✅ demo (survives view switches and reloads; cleared on a successful send/submit) |
 | Image viewer: zoom (wheel, pinch, double-click/tap, 1:1), pan, gallery | click a transcript attachment, a tool image or a composer thumbnail | tap; pinch, swipe, swipe down to close | `Lightbox` (`@/design`); transcript images without an inline payload: **`session.image` (new)**; originals: `session.image {original, agentId}` | omp blob store (`<agent dir>/blobs/<sha256>`); hostd `originals/` | ✅ demo; `session.image` run against a real blob store, the journal heal is covered by a replica test. Opens at most at actual size (no blurry upscale). Images the journal or history pages hold as `blob:sha256:` refs, and payloads collab cut from entries over 1 MiB (healed from the journal within seconds), load the full original from the host. 0.4.1: omp downscales images queued while it works (and TUI pastes) before saving them; the viewer swaps in the original when it opens (hostd keeps what TeleFlock sent for 30 days, at most 1 GiB; TUI pastes use the file omp records). Markdown images are not rendered (the parser has no `![]()`) |
-| Voice dictation | — | mic (Web Speech) | text → `agent.prompt` | — | ⚠️ depends on the WebView's SpeechRecognition |
+| Voice dictation | — | mic (Android: `SpeechRecognizer` through the plugin, asks for `RECORD_AUDIO`; browsers: Web Speech) | text → `agent.prompt` | — | ⚠️ not run on a device |
 | Header model/thinking/plan/fast (on/off shown) | Controls | one "model · thinking" chip + Plan/Fast/Goal chips | `agent.setModel/setThinking/setPlan/setFast` | B → I | ✅ demo |
 | Goal (objective + budget) | Goal chip → dialog | same | `agent.goal` | B `/goal …` | ⚠️ the call works; **the goal chip state is read from collab meta only**: the bridge `CtlState.goal` is not in `MetaOverlay` (`omp.rs`); HostdCore owns this |
 | Inspector: can-it-keep-going (ctx used / limit left), spend, throughput, todos, files | Inspector | inspector sheet (labelled tabs) + composer status pill | session meta | C/B | ✅ demo |
@@ -171,8 +189,8 @@ Verification: demo at 1440×900 and 412×892. The sessions exercised the followi
 | Goal | B/I `/goal …` | ⚠️ the chip does not show a goal set through the bridge (`MetaOverlay` lacks goal) |
 | Builtin slash with args / selector-only | B submit / I guarded; selector-only → terminal mode | ✅ |
 | `@file` | literal text through C | ⚠️ expansion in a collab prompt is unverified upstream |
-| Images | C `prompt.images` | ⚠️ collab only |
-| Voice | app-side dictation → text | ⚠️ Web Speech availability |
+| Images | C `prompt.images`; in the terminal: host path pasted (omp attaches it) | ⚠️ collab only from the composer |
+| Voice | app-side dictation → text (Android speech recognizer, Web Speech elsewhere) | ⚠️ not run on a device |
 | Ask, approvals | C ui-response | ✅ |
 | Todos view / edit | C entries / `/todo …` | ✅ |
 | Subagents list / transcript / steer / kill / revive | C | ✅ demo |

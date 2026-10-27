@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { defaultHostName, versionBelow } from "./kinds";
+import { defaultHostName, hostAuth, kindBadge, versionBelow } from "./kinds";
 
 describe("defaultHostName", () => {
   test("MagicDNS names keep their first label; IPs stay as typed", () => {
@@ -31,5 +31,20 @@ describe("versionBelow", () => {
   test("no version found is not 'below'", () => {
     expect(versionBelow("not found", "18.12")).toBe(false);
     expect(versionBelow(undefined, "18.12")).toBe(false);
+  });
+});
+
+describe("hostAuth / kindBadge", () => {
+  test("SSH hosts sign in with Tailscale SSH unless they say otherwise", () => {
+    expect(hostAuth({ kind: "tailscaleSsh" })).toBe("tailscale");
+    expect(hostAuth({ kind: "tailscaleSsh", auth: "password" })).toBe("password");
+    expect(hostAuth({ kind: "local", auth: "key" })).toBe("tailscale");
+  });
+
+  test("key and password hosts are badged SSH, not Tailscale", () => {
+    expect(kindBadge({ kind: "tailscaleSsh" })).toBe("Tailscale");
+    expect(kindBadge({ kind: "tailscaleSsh", auth: "tailscale" })).toBe("Tailscale");
+    expect(kindBadge({ kind: "tailscaleSsh", auth: "key" })).toBe("SSH");
+    expect(kindBadge({ kind: "wsl" })).toBe("WSL");
   });
 });

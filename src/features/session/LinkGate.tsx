@@ -39,7 +39,16 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
             <Shimmer>Joining the omp session…</Shimmer>
           </div>
           <div className="mt-1 text-sm text-mute">TeleFlock is attaching to the session's collab room on the host.</div>
+          {agent.omp?.linkError && (
+            // The host keeps retrying (slow hosts take minutes); say why it is taking long.
+            <div className="mx-auto mt-2 max-w-[520px] break-words text-xs text-mute-2">{agent.omp.linkError}</div>
+          )}
         </div>
+        {agent.omp?.linkError && (
+          <Button icon={<RefreshCw />} loading={busy} onClick={() => void run(hostCall(hostId, "agent.connect", { agentId }, { success: "Retrying…", failure: "Retry failed" }))}>
+            Retry now
+          </Button>
+        )}
         <div className="flex w-full max-w-[520px] flex-col gap-3 opacity-60">
           <Skeleton className="ml-auto h-10 w-2/5 rounded-[20px]" />
           <Skeleton className="h-16 rounded-[16px]" />

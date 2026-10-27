@@ -16,6 +16,7 @@ pub mod paths;
 pub mod secure;
 pub mod state;
 pub mod util;
+pub mod userenv;
 
 /// Version line printed by `tf-hostd --version`.
 pub fn version_line() -> String {

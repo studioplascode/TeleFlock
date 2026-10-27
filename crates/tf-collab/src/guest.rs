@@ -1,13 +1,16 @@
 //! A full-control collab guest (`omp-collab.md` §5.1, §5.6, §4.3–4.4).
 //!
-//! [`Guest::connect`] opens `…/r/<roomId>?role=guest`, sends `hello`, waits for `welcome` (30 s)
-//! and every `snapshot-chunk` (30 s between chunks), then resolves. The event stream starts with
-//! [`GuestEvent::Snapshot`] and continues with live [`GuestEvent::Frame`]s.
+//! [`Guest::connect`] opens `…/r/<roomId>?role=guest`, sends `hello`, waits for `welcome` and
+//! every `snapshot-chunk` ([`JoinTimeouts`]: 30 s each by default, [`Guest::connect_with`] sets
+//! longer ones), then resolves. The event stream starts with [`GuestEvent::Snapshot`] and
+//! continues with live [`GuestEvent::Frame`]s.
 //!
 //! Reconnect rules:
 //! * transient closes (1000/1001/1006/other, heartbeat loss, connect errors) retry with backoff
 //!   `min(1 s · 2^n, 30 s) × U(0.75, 1.25)`; every reopen re-sends `hello` and yields a fresh
 //!   `Snapshot { resync: true }`;
+//! * a reopen whose welcome or snapshot timed out doubles both join timeouts for the next one
+//!   (up to [`JoinTimeouts::MAX_SCALE`]× the base) and says so (`Reconnecting { timed_out }`);
 //! * 4001 (room closed) retries and makes a later 4004 retryable;
 //! * 4004 is retried for a bounded 30 s window after any drop (relay restart race), then the
 //!   guest ends with [`EndReason::RoomGone`];
@@ -34,8 +37,46 @@ use crate::crypto::RoomKey;
 use crate::frame::{AgentCmdKind, COLLAB_PROTO, GuestFrame, HostFrame, ImageContent, TranscriptFrame, Welcome};
 use crate::link::CollabLink;
 
-const WELCOME_TIMEOUT: Duration = Duration::from_secs(30);
-const SNAPSHOT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a join waits for the host.
+///
+/// omp answers `hello` by serializing the whole session on its event loop, then seals and sends
+/// it chunk by chunk. A large session on a slow or busy machine needs far longer than omp's own
+/// 30 s guest timeouts. Waiting costs nothing; giving up throws that work away (the host drops a
+/// departed guest's queued snapshot) and the next join starts it over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinTimeouts {
+    /// `hello` → `welcome`.
+    pub welcome: Duration,
+    /// Welcome → first `snapshot-chunk`, and between chunks.
+    pub snapshot_progress: Duration,
+}
+
+impl JoinTimeouts {
+    /// omp's own guest timeouts.
+    pub const BASE: JoinTimeouts = JoinTimeouts { welcome: Duration::from_secs(30), snapshot_progress: Duration::from_secs(30) };
+    /// [`JoinTimeouts::escalated`] never goes past this multiple of [`JoinTimeouts::BASE`] (4 min).
+    pub const MAX_SCALE: u32 = 8;
+
+    /// Timeouts for a join after `timeouts` consecutive joins that timed out: the base, doubled
+    /// per timeout, at most [`JoinTimeouts::MAX_SCALE`]×.
+    pub fn escalated(timeouts: u32) -> JoinTimeouts {
+        let k = 1u32 << timeouts.min(Self::MAX_SCALE.trailing_zeros());
+        JoinTimeouts { welcome: Self::BASE.welcome * k, snapshot_progress: Self::BASE.snapshot_progress * k }
+    }
+
+    /// Both timeouts doubled, capped at [`JoinTimeouts::MAX_SCALE`]× the base.
+    fn doubled(self) -> JoinTimeouts {
+        let cap = |d: Duration, base: Duration| (d * 2).min(base * Self::MAX_SCALE).max(d);
+        JoinTimeouts { welcome: cap(self.welcome, Self::BASE.welcome), snapshot_progress: cap(self.snapshot_progress, Self::BASE.snapshot_progress) }
+    }
+}
+
+impl Default for JoinTimeouts {
+    fn default() -> Self {
+        Self::BASE
+    }
+}
+
 const TRANSCRIPT_TIMEOUT: Duration = Duration::from_secs(20);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_DEAD: Duration = Duration::from_secs(40);
@@ -72,8 +113,10 @@ pub enum EndReason {
 pub enum GuestEvent {
     Snapshot(Snapshot),
     Frame(HostFrame),
-    /// Socket dropped; the guest is reconnecting (`attempt` starts at 1).
-    Reconnecting { code: u16, reason: String, attempt: u32 },
+    /// Socket dropped; the guest is reconnecting (`attempt` starts at 1). `timed_out`: the host
+    /// did not deliver the welcome or the snapshot in time (it is alive on the relay but not
+    /// answering), as opposed to a dropped socket.
+    Reconnecting { code: u16, reason: String, attempt: u32, timed_out: bool },
     Ended(EndReason),
 }
 
@@ -150,10 +193,19 @@ impl fmt::Debug for Guest {
 }
 
 impl Guest {
-    /// Join the room and wait for the full snapshot.
+    /// Join the room and wait for the full snapshot ([`JoinTimeouts::BASE`]).
     pub async fn connect(
         link: CollabLink,
         display_name: &str,
+    ) -> Result<(Guest, mpsc::UnboundedReceiver<GuestEvent>), GuestError> {
+        Self::connect_with(link, display_name, JoinTimeouts::BASE).await
+    }
+
+    /// [`Guest::connect`] with explicit join timeouts (also the starting point for reconnects).
+    pub async fn connect_with(
+        link: CollabLink,
+        display_name: &str,
+        timeouts: JoinTimeouts,
     ) -> Result<(Guest, mpsc::UnboundedReceiver<GuestEvent>), GuestError> {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
@@ -174,6 +226,7 @@ impl Guest {
             inner: inner.clone(),
             events: ev_tx,
             first: Some(first_tx),
+            timeouts,
         };
         tokio::spawn(worker.run(cmd_rx));
         match first_rx.await {
@@ -261,6 +314,8 @@ enum Phase {
 enum ConnEnd {
     /// Socket closed with this code (1006 for abnormal).
     Closed(u16, String),
+    /// The host sent no welcome / snapshot progress in time (the socket stays open meanwhile).
+    TimedOut(&'static str),
     /// Stop the worker with this reason.
     End(EndReason),
 }
@@ -272,6 +327,8 @@ struct Worker {
     inner: Arc<Inner>,
     events: mpsc::UnboundedSender<GuestEvent>,
     first: Option<oneshot::Sender<Result<(), GuestError>>>,
+    /// Join timeouts of the next connection: doubled after each one that timed out.
+    timeouts: JoinTimeouts,
 }
 
 fn backoff(attempt: u32) -> Duration {
@@ -300,9 +357,13 @@ impl Worker {
                 dropped_at = None;
                 retry_missing_room = false;
             }
-            let (code, why) = match end {
+            let (code, why, timed_out) = match end {
                 ConnEnd::End(r) => break r,
-                ConnEnd::Closed(code, why) => (code, why),
+                ConnEnd::Closed(code, why) => (code, why, false),
+                ConnEnd::TimedOut(what) => {
+                    self.timeouts = self.timeouts.doubled();
+                    (1006, format!("timed out waiting for the host's {what}"), true)
+                }
             };
             if !joined {
                 // Initial join failed: report instead of retrying.
@@ -325,8 +386,9 @@ impl Worker {
                 _ => {}
             }
             attempt += 1;
-            let _ = self.events.send(GuestEvent::Reconnecting { code, reason: why, attempt });
-            // While waiting only Close matters; other commands fail fast (`live` is false).
+            let _ = self.events.send(GuestEvent::Reconnecting { code, reason: why, attempt, timed_out });
+            // While waiting only Close and Resync (retry now) matter; other commands fail fast
+            // (`live` is false).
             let sleep = tokio::time::sleep(backoff(attempt - 1));
             tokio::pin!(sleep);
             loop {
@@ -337,7 +399,8 @@ impl Worker {
                             let _ = self.events.send(GuestEvent::Ended(EndReason::Closed));
                             return;
                         }
-                        Some(_) => {}
+                        Some(Cmd::Resync) => break,
+                        Some(Cmd::Send(_)) => {}
                     },
                 }
             }
@@ -376,7 +439,8 @@ impl Worker {
         if sink.send(self.seal(&self.hello)).await.is_err() {
             return ConnEnd::Closed(1006, "send failed".into());
         }
-        let mut phase = Phase::AwaitWelcome { deadline: Instant::now() + WELCOME_TIMEOUT };
+        let timeouts = self.timeouts;
+        let mut phase = Phase::AwaitWelcome { deadline: Instant::now() + timeouts.welcome };
         let mut resync = resync;
         let mut last_heard = Instant::now();
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -401,7 +465,7 @@ impl Worker {
                         let _ = first.send(Err(GuestError::Timeout(what)));
                         return ConnEnd::End(EndReason::Fatal(format!("timed out waiting for the host's {what}")));
                     }
-                    return ConnEnd::Closed(1006, format!("timed out waiting for the host's {what}"));
+                    return ConnEnd::TimedOut(what);
                 }
                 _ = heartbeat.tick() => {
                     if last_heard.elapsed() > HEARTBEAT_DEAD {
@@ -423,7 +487,7 @@ impl Worker {
                         }
                         self.inner.live.store(false, Ordering::Release);
                         resync = true;
-                        phase = Phase::AwaitWelcome { deadline: Instant::now() + WELCOME_TIMEOUT };
+                        phase = Phase::AwaitWelcome { deadline: Instant::now() + timeouts.welcome };
                     }
                     Some(Cmd::Close) | None => {
                         let frame = CloseFrame { code: CloseCode::Normal, reason: "guest left".into() };
@@ -459,14 +523,14 @@ impl Worker {
                         (_, HostFrame::Welcome(w)) => {
                             self.inner.read_only.store(w.read_only || !self.inner.can_write, Ordering::Release);
                             let done = w.entry_count == 0;
-                            phase = Phase::Snapshot { welcome: w, entries: Vec::new(), deadline: Instant::now() + SNAPSHOT_PROGRESS_TIMEOUT };
+                            phase = Phase::Snapshot { welcome: w, entries: Vec::new(), deadline: Instant::now() + timeouts.snapshot_progress };
                             if done {
                                 self.finish_snapshot(&mut phase, resync, synced);
                             }
                         }
                         (Phase::Snapshot { welcome, entries, deadline }, HostFrame::SnapshotChunk(chunk)) => {
                             entries.extend(chunk.entries);
-                            *deadline = Instant::now() + SNAPSHOT_PROGRESS_TIMEOUT;
+                            *deadline = Instant::now() + timeouts.snapshot_progress;
                             if chunk.is_final || entries.len() as u64 >= welcome.entry_count {
                                 self.finish_snapshot(&mut phase, resync, synced);
                             }
@@ -517,5 +581,28 @@ impl Worker {
         if let Some(first) = self.first.take() {
             let _ = first.send(Ok(()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_timeouts_double_up_to_eight_times_the_base() {
+        let secs = |t: JoinTimeouts| (t.welcome.as_secs(), t.snapshot_progress.as_secs());
+        assert_eq!(JoinTimeouts::default(), JoinTimeouts::BASE);
+        assert_eq!(
+            [0, 1, 2, 3, 9].map(|n| secs(JoinTimeouts::escalated(n))),
+            [(30, 30), (60, 60), (120, 120), (240, 240), (240, 240)]
+        );
+        let mut t = JoinTimeouts::BASE;
+        for _ in 0..6 {
+            t = t.doubled();
+        }
+        assert_eq!(secs(t), (240, 240));
+        // A longer custom timeout is never shortened.
+        let long = JoinTimeouts { welcome: Duration::from_secs(600), snapshot_progress: Duration::from_secs(30) };
+        assert_eq!(secs(long.doubled()), (600, 60));
     }
 }

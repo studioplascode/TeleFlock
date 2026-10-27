@@ -28,6 +28,9 @@ const PULSE_HIGH_WATER: usize = 32;
 const HARD_LIMIT: usize = 8192;
 /// Either side drops the link after this much silence.
 const SILENCE: Duration = Duration::from_secs(45);
+/// Client silence is counted in steps of at most this much of the daemon's own running time
+/// (`read_or_silence`).
+const SILENCE_STEP: Duration = Duration::from_secs(5);
 /// Max inbound line (images are base64 inside prompts).
 const MAX_LINE: usize = 64 * 1024 * 1024;
 
@@ -132,7 +135,7 @@ impl ClientHandle {
         self.inner.queue.lock().unwrap_or_else(|p| p.into_inner()).lines.len()
     }
 
-    fn take_batch(&self, out: &mut Vec<Arc<str>>) {
+    pub(crate) fn take_batch(&self, out: &mut Vec<Arc<str>>) {
         let mut q = self.inner.queue.lock().unwrap_or_else(|p| p.into_inner());
         out.extend(q.lines.drain(..));
     }
@@ -247,7 +250,7 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     loop {
         line.clear();
         let next = tokio::select! {
-            r = tokio::time::timeout(SILENCE, read_line(&mut reader, &mut line)) => r,
+            r = read_or_silence(read_line(&mut reader, &mut line)) => r,
             _ = client.closed() => break,
             _ = shutdown.cancelled() => {
                 client.send(ServerMsg::Error {
@@ -257,16 +260,16 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
             }
         };
         match next {
-            Err(_) => {
+            None => {
                 debug!(client = %client_id, "silent for 45 s; dropping");
                 break;
             }
-            Ok(Err(e)) => {
+            Some(Err(e)) => {
                 debug!(client = %client_id, "read: {e}");
                 break;
             }
-            Ok(Ok(false)) => break,
-            Ok(Ok(true)) => {}
+            Some(Ok(false)) => break,
+            Some(Ok(true)) => {}
         }
         let msg = match serde_json::from_str::<ClientMsg>(&line) {
             Ok(m) => m,
@@ -368,6 +371,29 @@ async fn write_now(write: &mut BoxWrite, msg: &ServerMsg) {
     }
 }
 
+/// Waits for `read`; `None` once [`SILENCE`] of this daemon's running time passed without it.
+/// Silence is counted in steps of at most [`SILENCE_STEP`]: after the daemon itself did not run
+/// (system sleep, which Windows' clock counts; a stopped process, whose first wake-up on Linux
+/// fires overdue timers before it reads the socket), the overdue step counts once, and the line
+/// the client queued meanwhile (its ping) is read before silence is judged again.
+async fn read_or_silence<T>(read: impl Future<Output = T>) -> Option<T> {
+    tokio::pin!(read);
+    let mut silent = Duration::ZERO;
+    loop {
+        let step = tokio::time::Instant::now();
+        tokio::select! {
+            biased;
+            r = &mut read => return Some(r),
+            _ = tokio::time::sleep(SILENCE_STEP) => {
+                silent += step.elapsed().min(SILENCE_STEP);
+                if silent >= SILENCE {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Reads one `\n`-terminated line (without the terminator). `Ok(false)` on EOF.
 async fn read_line(reader: &mut BufReader<BoxRead>, out: &mut String) -> std::io::Result<bool> {
     let mut raw = Vec::new();
@@ -424,5 +450,24 @@ mod tests {
         }
         assert!(!c.send(ServerMsg::Pong { ts: 0 }));
         assert!(c.is_closed());
+    }
+
+    /// Silence counts the daemon's running time: after the clock jumped 2 minutes (the daemon was
+    /// suspended) the overdue check counts one step and the ping that waited is still read; a
+    /// client that really says nothing is dropped after exactly 45 s.
+    #[tokio::test(start_paused = true)]
+    async fn silence_counts_running_time_only() {
+        let (ping, queued) = tokio::sync::oneshot::channel::<()>();
+        let reader = tokio::spawn(read_or_silence(async { queued.await.is_ok() }));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::advance(Duration::from_secs(120)).await;
+        // The reader wakes first and finds its timer overdue, before the ping is readable.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        ping.send(()).unwrap();
+        assert_eq!(reader.await.unwrap(), Some(true), "the client is kept and its ping read");
+
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(read_or_silence(std::future::pending::<()>()).await, None);
+        assert_eq!(t0.elapsed(), SILENCE);
     }
 }

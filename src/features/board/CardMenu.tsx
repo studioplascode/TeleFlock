@@ -18,8 +18,9 @@ import {
   IconButton,
 } from "@/design";
 import { ACTIONS, isFresh } from "@/features/shell/vocab";
-import { archiveWithUndo, canReview, markDoneAndRemove, openAgent, openAnswerHud, openTerminal, promptAgent, resumeParked, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
+import { archiveWithUndo, canReview, deleteWorktree, markDoneAndRemove, openAgent, openAnswerHud, openTerminal, promptAgent, resumeParked, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
 import { useBoard } from "./boardStore";
+import { shippedWords, useShippedPr } from "./worktreePr";
 
 /* ───────────── the card menu (⋯ button and right-click) ───────────── */
 
@@ -43,8 +44,10 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
     const a = s.agents[agentKey];
     return !!a && !!s.hosts[a.hostId]?.state.workspaces.find((w) => w.id === a.workspaceId)?.worktree;
   });
+  // merged or closed pull request (Review/Done cards ask gh lazily; see worktreePr)
+  const shipped = useShippedPr(agentKey, lane === "review" || lane === "done");
   if (!agent) return [];
-  const { openSession, terminal, answer, review, markDone, markDoneRemove, reopen, resume, stopTurn, mute, unmute, select } = ACTIONS;
+  const { openSession, terminal, answer, review, markDone, markDoneRemove, deleteWorktree: deleteWt, reopen, resume, stopTurn, mute, unmute, select } = ACTIONS;
   const items: Item[] = [];
   if (lane === "needs") items.push({ id: "answer", ...answer, icon: <MessageSquareReply />, run: () => openAnswerHud(agentKey) });
   if (isFresh(agent)) items.push({ id: "prompt", label: "Prompt…", description: "Open the session with the composer focused", icon: <MessageSquare />, run: () => promptAgent(agentKey) });
@@ -62,11 +65,27 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
   // a parked agent's workspace may be gone with its pane
   if ((lane === "review" || lane === "done") && canReview(agent) && !agent.parked)
     items.push({ id: "review", ...review, icon: <GitCompare />, run: () => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId }) });
+  const deleteItem = (andDone: boolean): Item | null =>
+    shipped && {
+      id: "deleteWorktree",
+      ...deleteWt,
+      description: `${shippedWords(shipped)}: delete the checkout folder${andDone ? " and mark it done" : ""} (asks first); the branch stays`,
+      icon: <Trash2 />,
+      danger: true,
+      run: () => void deleteWorktree(agentKey),
+    };
   if (lane === "review") {
     items.push({ id: "markDone", ...markDone, icon: <CheckCheck />, run: () => void archiveWithUndo([agentKey]) });
-    if (inWorktree) items.push({ id: "markDoneRemove", ...markDoneRemove, icon: <Trash2 />, danger: true, run: () => void markDoneAndRemove(agentKey) });
+    // shipped: the same removal (it marks done too), named for what it is now
+    const del = deleteItem(true);
+    if (del) items.push(del);
+    else if (inWorktree) items.push({ id: "markDoneRemove", ...markDoneRemove, icon: <Trash2 />, danger: true, run: () => void markDoneAndRemove(agentKey) });
   }
-  if (lane === "done") items.push({ id: "reopen", ...reopen, icon: <ArchiveRestore />, run: () => void setArchived(agentKey, false).catch(() => {}) });
+  if (lane === "done") {
+    items.push({ id: "reopen", ...reopen, icon: <ArchiveRestore />, run: () => void setArchived(agentKey, false).catch(() => {}) });
+    const del = deleteItem(false);
+    if (del) items.push(del);
+  }
   if (lane === "running")
     // reversible, so not styled as danger; its Esc key belongs to the session view, not the board
     items.push({

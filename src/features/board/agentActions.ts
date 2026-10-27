@@ -1,5 +1,5 @@
-import { core, getAgentViews, getWorkspacesSnapshot, markResuming, navigate, parseAgentKey, resumeAgent, useSettings, useUi } from "@/core";
-import type { Answer, ApiError } from "@/core/gen";
+import { type AgentView, core, getAgentViews, getWorkspacesSnapshot, markResuming, navigate, parseAgentKey, resumeAgent, useSettings, useUi } from "@/core";
+import type { Answer, ApiError, Workspace } from "@/core/gen";
 import { morphTo, toast } from "@/design";
 import { haptic } from "@/features/shell/haptics";
 import { useSessionUi } from "@/features/session/state";
@@ -83,20 +83,42 @@ export async function archiveWithUndo(keys: readonly string[]): Promise<string[]
 }
 
 /**
- * Mark done & remove worktree: the shared `removeWorktree` flow (confirm, force confirm when dirty, trust
- * prompt), then archives the agent if its card is still around. Handles its own errors; never rejects.
+ * The shared `removeWorktree` flow (confirm, force confirm when dirty, trust prompt) for the agent's linked
+ * worktree, then Mark done while the agent is still on the board and not done yet. Never rejects.
  */
-export async function markDoneAndRemove(key: string): Promise<void> {
+async function removeAgentWorktree(key: string, confirm: (agent: AgentView, ws: Workspace) => { title: string; confirmLabel: string }, missing: string): Promise<void> {
   const { hostId } = parseAgentKey(key);
   const agent = getAgentViews().find((a) => a.key === key);
   const ws = agent ? getWorkspacesSnapshot().find((w) => w.hostId === hostId && w.ws.id === agent.workspaceId)?.ws : undefined;
   if (!agent || !ws?.worktree) {
-    toast({ title: "No worktree to remove", description: `${agent?.name ?? "This agent"} doesn't run in a linked worktree. Use Mark done instead.`, status: "error" });
+    toast({ title: "No worktree to remove", description: `${agent?.name ?? "This agent"} doesn't run in a linked worktree. ${missing}`, status: "error" });
     return;
   }
-  const removed = await removeWorktree(hostId, ws, { title: `Mark ${agent.name} done and remove its worktree?`, confirmLabel: "Mark done & remove" });
+  const removed = await removeWorktree(hostId, ws, confirm(agent, ws));
   // Removing the worktree usually closes the agent's pane with it; archive only what is still on the board.
-  if (removed && getAgentViews().some((a) => a.key === key)) await setArchived(key, true).catch(() => {});
+  if (removed && getAgentViews().some((a) => a.key === key && !a.archived)) await setArchived(key, true).catch(() => {});
+}
+
+/** Mark done & remove worktree (Review cards, Review's wrap-up): `removeAgentWorktree`. Never rejects. */
+export async function markDoneAndRemove(key: string): Promise<void> {
+  await removeAgentWorktree(key, (agent) => ({ title: `Mark ${agent.name} done and remove its worktree?`, confirmLabel: "Mark done & remove" }), "Use Mark done instead.");
+}
+
+/**
+ * Delete worktree (Review/Done cards whose pull request is merged or closed): `removeAgentWorktree`, so a
+ * Review card is marked done afterwards. Never rejects.
+ */
+export async function deleteWorktree(key: string): Promise<void> {
+  await removeAgentWorktree(
+    key,
+    (agent, ws) => {
+      const name = ws.worktree?.branch ?? ws.label;
+      return agent.archived
+        ? { title: `Delete worktree ${name}?`, confirmLabel: "Delete worktree" }
+        : { title: `Delete worktree ${name} and mark ${agent.name} done?`, confirmLabel: "Delete & mark done" };
+    },
+    "It may be gone already.",
+  );
 }
 
 /** Whether an agent's notifications are muted (`Settings.mutedAgents`). */

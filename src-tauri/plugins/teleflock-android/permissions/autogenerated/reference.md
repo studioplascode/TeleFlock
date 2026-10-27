@@ -1,6 +1,6 @@
 ## Default Permission
 
-Webview access to haptics, the notification permission flow and battery-optimisation status.
+Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer).
 
 #### This default permission set includes the following:
 
@@ -9,6 +9,12 @@ Webview access to haptics, the notification permission flow and battery-optimisa
 - `allow-request-notification-permission`
 - `allow-battery-status`
 - `allow-request-ignore-battery-optimizations`
+- `allow-request-microphone-permission`
+- `allow-open-app-settings`
+- `allow-dictation-available`
+- `allow-start-dictation`
+- `allow-stop-dictation`
+- `allow-cancel-dictation`
 
 ## Permission Table
 
@@ -41,6 +47,58 @@ Enables the battery_status command without any pre-configured scope.
 <td>
 
 Denies the battery_status command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-cancel-dictation`
+
+</td>
+<td>
+
+Enables the cancel_dictation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-cancel-dictation`
+
+</td>
+<td>
+
+Denies the cancel_dictation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-dictation-available`
+
+</td>
+<td>
+
+Enables the dictation_available command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-dictation-available`
+
+</td>
+<td>
+
+Denies the dictation_available command without any pre-configured scope.
 
 </td>
 </tr>
@@ -100,6 +158,32 @@ Denies the notification_permission command without any pre-configured scope.
 <tr>
 <td>
 
+`teleflock-android:allow-open-app-settings`
+
+</td>
+<td>
+
+Enables the open_app_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-open-app-settings`
+
+</td>
+<td>
+
+Denies the open_app_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `teleflock-android:allow-request-ignore-battery-optimizations`
 
 </td>
@@ -126,6 +210,32 @@ Denies the request_ignore_battery_optimizations command without any pre-configur
 <tr>
 <td>
 
+`teleflock-android:allow-request-microphone-permission`
+
+</td>
+<td>
+
+Enables the request_microphone_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-request-microphone-permission`
+
+</td>
+<td>
+
+Denies the request_microphone_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `teleflock-android:allow-request-notification-permission`
 
 </td>
@@ -145,6 +255,58 @@ Enables the request_notification_permission command without any pre-configured s
 <td>
 
 Denies the request_notification_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-start-dictation`
+
+</td>
+<td>
+
+Enables the start_dictation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-start-dictation`
+
+</td>
+<td>
+
+Denies the start_dictation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-stop-dictation`
+
+</td>
+<td>
+
+Enables the stop_dictation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-stop-dictation`
+
+</td>
+<td>
+
+Denies the stop_dictation command without any pre-configured scope.
 
 </td>
 </tr>

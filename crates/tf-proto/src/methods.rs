@@ -7,10 +7,11 @@
 //! The generated TypeScript `HostMethods` / `AppMethods` interfaces map method name →
 //! `{ params; result }`.
 
-use crate::app::{DiagReport, HostProfile, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
+use crate::app::{DiagReport, HostProfile, HostSecrets, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
 use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates, UsageTotals};
 use crate::session::{ChangedFile, HistoryPage, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
+use crate::upload::{UploadBeginParams, UploadBegun, UploadChunkParams, UploadFinishParams, UploadFinished, UploadProgress, UploadRef};
 use crate::{Empty, Millis};
 
 macro_rules! methods {
@@ -757,7 +758,7 @@ wire_struct! {
 
 wire_struct! {
     pub struct LimitsParams {
-        /// Skip hostd's 60 s cache and ask omp again now (omp still serves its own per-account
+        /// Skip hostd's 5 min cache and ask omp again now (omp still serves its own per-account
         /// cache, so provider usage endpoints are hit at most every ~5 min per account).
         pub refresh: Option<bool>,
     }
@@ -1255,6 +1256,12 @@ methods!(HostMethod, "HostMethods", {
     "automation.preview" => AutomationPreview(SchedulePreviewParams) -> SchedulePreview;
 
     "ai.complete" => AiComplete(AiCompleteParams) -> AiCompleteResult;
+
+    "upload.begin" => UploadBegin(UploadBeginParams) -> UploadBegun;
+    "upload.chunk" => UploadChunk(UploadChunkParams) -> UploadProgress;
+    "upload.status" => UploadStatus(UploadRef) -> UploadProgress;
+    "upload.finish" => UploadFinish(UploadFinishParams) -> UploadFinished;
+    "upload.cancel" => UploadCancel(UploadRef) -> Empty;
 });
 
 // ───────────────────────────── app methods ─────────────────────────────
@@ -1266,6 +1273,26 @@ wire_struct! {
         pub host_id: String,
         /// Must equal the `ConnStatus.hostKey.fingerprint` being confirmed.
         pub fingerprint: String,
+    }
+}
+
+wire_struct! {
+    /// `hosts.save` / `hosts.test` params: the profile plus write-only sign-in secrets.
+    pub struct HostSaveParams {
+        #[serde(flatten)]
+        pub profile: HostProfile,
+        /// `hosts.save`: changes to the host's saved secrets ([`HostSecrets`] has the rules).
+        /// `hosts.test`: secrets to try instead of the saved ones of the same host id.
+        pub secrets: Option<HostSecrets>,
+    }
+}
+
+wire_struct! {
+    /// `hosts.secretStatus`: which sign-in secrets are saved for a host (never the secrets).
+    pub struct SecretStatus {
+        pub password: bool,
+        pub private_key: bool,
+        pub passphrase: bool,
     }
 }
 
@@ -1327,12 +1354,13 @@ methods!(AppMethod, "AppMethods", {
     "app.updateCheck" => AppUpdateCheck(UpdateCheckParams) -> UpdateStatus;
     "app.updateInstall" => AppUpdateInstall(Empty) -> UpdateStatus;
     "hosts.list" => HostsList(Empty) -> HostsListResult;
-    "hosts.save" => HostsSave(HostProfile) -> HostProfile;
+    "hosts.save" => HostsSave(HostSaveParams) -> HostProfile;
     "hosts.remove" => HostsRemove(HostRef) -> Empty;
     "hosts.connect" => HostsConnect(HostRef) -> Empty;
     "hosts.disconnect" => HostsDisconnect(HostRef) -> Empty;
-    "hosts.test" => HostsTest(HostProfile) -> DiagReport;
+    "hosts.test" => HostsTest(HostSaveParams) -> DiagReport;
     "hosts.trustKey" => HostsTrustKey(TrustKeyParams) -> Empty;
+    "hosts.secretStatus" => HostsSecretStatus(HostRef) -> SecretStatus;
     "wsl.distros" => WslDistros(Empty) -> WslDistrosResult;
     "settings.get" => SettingsGet(Empty) -> Settings;
     "settings.set" => SettingsSet(Settings) -> Settings;

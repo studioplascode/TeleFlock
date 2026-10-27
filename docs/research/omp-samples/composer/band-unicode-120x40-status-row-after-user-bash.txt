@@ -1,0 +1,12 @@
+                                             adding the output to context
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $ sleep 6
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ π > ⬢ no-model > 🗑 tf-bridgectl-cap-work > ◫ 7.6K/? ⟲ ▶───────────────────────────────────────────────────────────────
+╰─
+⇄ teleflock

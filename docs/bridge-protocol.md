@@ -16,7 +16,7 @@ The extension resolves `<home>` in this order:
 3. `TF_HOSTD_HOME`.
 4. `~/.teleflock`.
 
-- hostd is the **server**; every omp process running the extension is a **client** (one connection per process).
+- hostd is the **server**; every omp process running the extension is a **client**: one connection per process (per hostd endpoint), even when the process loads several copies of the extension (see [One bridge per omp process](#one-bridge-per-omp-process-bridge--140)).
 - Framing: **JSON lines**: one UTF-8 JSON object per `\n`-terminated line. Lines over 64 MiB close the connection.
 - Every frame has a string `t` (frame type). Unknown `t` values and unknown fields are ignored by both sides.
 - All keys are camelCase. Enum values are camelCase strings (`planPaused`, `xhigh`, `inPlace`).
@@ -32,7 +32,7 @@ On Windows another local user can create the pipe name before hostd does (the ex
 - The Rust clients of the **hostd** pipe (`tf-hostd attach`/`stop`) don't need the secret. After connecting, they check that the pipe's server process (`GetNamedPipeServerProcessId` → process token `TokenUser`) runs as the current user's SID. If it doesn't, they refuse with an error.
 
 ### Connection lifecycle (extension)
-1. On `session_start` the extension starts a 1 s managed ticker (`ctx.setInterval`).
+1. On `session_start` the copy claims the process slot (see below). Only the owner starts a 1 s managed ticker (`ctx.setInterval`) and connects; the other copies stay silent.
 2. If not connected, it connects when the endpoint exists. After any failure or close it retries **every 5 s**.
 3. On connect it waits for hostd's `auth` frame and verifies it (see [Authentication](#authentication-bridgesecret)). Only then does it send `hello` (`reason: "connect"`).
 4. Each tick (and right after every request and relevant omp event) it compares the live state with the last one it sent and pushes `state` / `queue_update` deltas.
@@ -41,7 +41,26 @@ On Windows another local user can create the pipe name before hostd does (the ex
 
 Only the **main** agent session is bridged. Subagent bindings (`ctx.agent.kind === "sub"`) stay silent.
 
-The TUI shows exactly one thing: a dim `⇄ teleflock` status-line notice while connected.
+The TUI shows exactly one thing: a dim `⇄ teleflock` status-line notice while the owning copy is connected (copies share the status key; a copy only ever clears the notice it set).
+
+### One bridge per omp process (bridge ≥ 1.4.0)
+
+An omp process can load the extension more than once: the global install in `~/.omp/agent/extensions/` (the "TeleFlock bridge for every session" setup fix) is ambient and loads first, TeleFlock's launch recipe adds `-e <home>/ext/teleflock-bridge.ts`, and the two can be different versions. Before 1.4.0 each copy connected on its own, so hostd saw two connections per pid, routed requests to whichever said `hello` last, and `navigateTree` / `branch` / `newSession` failed with "could not capture the session command context" whenever that was not the copy omp runs `/teleflock-attach` in (omp's `getCommand` returns the **last** loaded extension's command).
+
+1.4.0 copies coordinate through a process-wide slot, `globalThis[Symbol.for("teleflock.bridge")]`:
+
+```ts
+interface BridgeSlot {
+  owners: Record<string, {version: string; stop(): void}>; // active copy per hostd endpoint (socket path / pipe name)
+  cmdCtx?: ExtensionCommandContext;                        // stored by whichever copy's /teleflock-control ran
+  attachWaiters: Array<() => void>;                        // called and removed by that handler
+}
+```
+
+- **Election.** On every main-session `session_start` / switch a copy claims `owners[endpoint]`: it becomes the owner when the slot is empty or the owner's `version` is lower (numeric `x.y.z` comparison). The highest version wins; on equal versions the first claimant (the global install) stays. A copy that takes over calls the previous owner's `stop()`, which closes its socket, stops its ticker and clears its status notice; the new owner then connects and says `hello`. Copies that do not own the slot never connect, tick or touch the status line. The owner releases the slot on `session_shutdown`.
+- **Endpoints.** Copies resolve their endpoint independently (a global copy cannot use its location, see the resolution order above). They only end up with different endpoints when `TF_HOSTD_HOME` / `TF_BRIDGE_SOCK` disagree with the deployed copy's home; each of those hostds then still gets exactly one connection.
+- **Command context.** 1.4.0+ copies capture it through their own hidden command `/teleflock-control`; older copies keep registering `/teleflock-attach` and keep the context to themselves. omp dispatches a command name to just one of its registrants, and in the lab (omp 18.13.1) that was the legacy global copy, not the `-e` copy, in the first omp started after the extension file changed, so a shared name could never be relied on. Every 1.4.0+ copy's handler stores the context in `cmdCtx` and resolves `attachWaiters`, so the owner finds it whichever 1.4.0+ copy omp ran the command in. `state.attached` reads the slot.
+- **Compatibility contract.** The slot is shared across versions: later versions keep these fields and their meaning and only add optional ones. Copies older than 1.4.0 do not know the slot; hostd arbitrates them (see `hello`).
 
 ## Frames: extension → hostd
 
@@ -55,8 +74,8 @@ The TUI shows exactly one thing: a dim `⇄ teleflock` status-line notice while 
 ```
 - `reason`: `connect` (new connection) or `switch` (same connection, new omp session).
 - `tui`: omp runs the interactive TUI (`ctx.mode === "tui"`). Ops marked **TUI** below need it.
-- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent. 1.2.0 adds the schema-dump mode (see "Schema dump"); 1.3.0 the settings-write mode (see "Settings write"); the socket protocol is unchanged.
-- hostd keys sessions by `sessionId`. The latest `hello` wins if two connections claim the same id.
+- `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent. 1.2.0 adds the schema-dump mode (see "Schema dump"); 1.3.0 the settings-write mode (see "Settings write"); 1.4.0 the process slot ([One bridge per omp process](#one-bridge-per-omp-process-bridge--140)); the socket protocol is unchanged.
+- hostd keys sessions by `sessionId`. When two connections claim the same id, the latest `hello` wins, with one exception for two connections of the **same pid** (several copies in one process, at least one older than 1.4.0): only the copy with the highest `bridgeVersion` (semver) is routed. An older copy's `hello` is answered with `welcome` but registers nothing (it drops a session it was still routed for), its events are ignored and no request reaches it. Equal versions fall back to "latest `hello` wins". A different pid always takes the session over (a new process resumed it).
 
 ### `event`
 ```json
@@ -152,11 +171,11 @@ type TreeInfo = {                        // = tf_proto::TreeInfo
 | `getBtwHistory` | – | `{threads:[{btwId, at, turns:[{question, answer, status, error?, at}]}]}`, oldest first; `status` `running\|complete\|cancelled\|error\|interrupted` | the session's BTW history files, overlaid with live turns | | 10 s |
 | `export` | `path?` (default `<artifacts dir>/teleflock-export-<sessionId>-<ms>.html`; no whitespace) | `{path}` | `/export <path>`, then waits up to 15 s for the file | ✓ | 30 s |
 | `handoff` | `focus?` | `{settled}` | `/handoff [focus]`. Needs the agent idle. | ✓ | 600 s |
-| `slash` | `command` (single line, starts with `/`) | `{settled}` | Any slash command through the composer | ✓ | 30 s |
+| `slash` | `command` (single line, starts with `/`) | `{settled}` | Any slash command through the composer. omp runs builtins (e.g. hostd's `/collab ws://127.0.0.1:<port>` for `agent.connect`) at once even while the agent streams. | ✓ | 30 s |
 | `abort` | – | `{}` | `ctx.abort()` | | 10 s |
 | `getTree` | – | `TreeInfo` | `sessionManager.getEntries()` | | 10 s |
 | `getQueue` | – | `{steering, followUp}` | TUI queue chip contents (empty without the TUI) | | 10 s |
-| `getCommands` | – | `{commands:[{name, description?, source}]}` | `pi.getCommands()`: extension, prompt-template and skill commands (`source` `extension`/`prompt`/`skill`; builtins excluded; the bridge's own `teleflock-attach` filtered out) | | 10 s |
+| `getCommands` | – | `{commands:[{name, description?, source}]}` | `pi.getCommands()`: extension, prompt-template and skill commands (`source` `extension`/`prompt`/`skill`; builtins excluded; the bridge's own `teleflock-control` and older copies' `teleflock-attach` filtered out) | | 10 s |
 | `dequeue` | – | `{text?}` | TUI `editor.onDequeue()` (Alt+Up) pops the last queued message (steer first, then follow-up); the popped text is returned and the operator's draft and images are restored. Tried when the band lists something or `ctx.hasPendingMessages()` (the band can lag guest steers); `{}` when nothing was popped. Popped images are dropped | ✓ | 10 s |
 
 `{settled:false}` means that after 15 s the command was still waiting on a TUI dialog (for example "Exit plan mode?"). The operator must answer it in the terminal.
@@ -168,7 +187,7 @@ type TreeInfo = {                        // = tf_proto::TreeInfo
 | `invalid_params` | missing or ill-typed param, unknown level, choice or placement | `invalid_params` |
 | `not_found` | unknown model, entry id, plan review, btw conversation, or no running btw | `not_found` |
 | `unsupported` | not in the TUI, no ephemeral turns, fast tier unavailable, plan mode refused, a btw that only omp's TUI can cancel | `unsupported` |
-| `busy` | needs idle, plan mode is waiting for a terminal confirmation, or another `/btw` is still answering (omp runs one at a time) | `busy` (retryable) |
+| `busy` | needs idle, plan mode is waiting for a terminal confirmation, another `/btw` is still answering (omp runs one at a time), or omp is compacting while the command context is still to be captured | `busy` (retryable) |
 | `auth_required` | model has no credentials | `auth_required` |
 | `nothing_to_compact` | the session is too small or already compacted | `omp_error` (message kept) |
 | `cancelled` | an extension hook cancelled the navigation, branch or new session | `omp_error` |
@@ -184,7 +203,7 @@ hostd-side failures: `NotConnected` → `not_connected` (retryable, hint: start 
   - The operator's draft is protected: pasted images are held back from the submission and the draft text is restored if a command cleared it.
   - Submitted commands appear in the composer's ↑ history.
 - **Finding the composer.** The extension reaches the TUI once by opening and immediately closing an empty `ctx.ui.custom()` component, restoring keyboard focus to whatever had it, and then locates the composer in the component tree.
-- **Command context.** `navigateTree`, `branch` and `newSession` need an `ExtensionCommandContext`. The extension captures it once by submitting its own hidden command `/teleflock-attach` through the composer. After that, `state.attached` is `true` for the life of the process.
+- **Command context.** `navigateTree`, `branch` and `newSession` need an `ExtensionCommandContext`. The extension captures it once per process by submitting its own hidden command `/teleflock-control` (`/teleflock-attach` before 1.4.0) through the composer, waits ≤ 5 s for a handler to store it in the process slot (any 1.4.0+ copy's handler does), and keeps it for the life of the main session (`state.attached: true`). While omp compacts (or hands off) it queues submitted commands under "Steering" until it finishes: when `/teleflock-control` shows up there, the op fails at once with `busy` ("omp is compacting the session; try again when it finishes") instead of timing out, and the queued command still captures the context once the compaction ends. If no handler stored the context within 5 s, the op fails with `unsupported` "could not capture the session command context".
 - **Focused subagent.** If the operator has focused a subagent in the TUI, composer submissions go to that subagent (omp behaviour).
 
 ## Side questions (`/btw`)

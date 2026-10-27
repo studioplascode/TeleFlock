@@ -74,6 +74,8 @@ export {
   describePace,
   formatPct,
   formatSpan,
+  LIMITS_EVERY_MS,
+  LIMITS_USAGE_EVERY_MS,
   projectWindow,
   refreshLimits,
   sessionLimits,

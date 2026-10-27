@@ -1,6 +1,6 @@
 //! Board-level domain model: host, workspaces, agents, liveness, needs-you.
 
-use crate::Millis;
+use crate::{ApiError, Millis};
 
 wire_enum! {
     /// herdr agent lifecycle state (`done` = idle and not yet seen by a herdr client).
@@ -58,7 +58,8 @@ wire_struct! {
 wire_struct! {
     pub struct SetupIssue {
         /// Stable id, also the fix id accepted by `host.setupApply`
-        /// (e.g. `install-herdr-integration`, `enable-global-sharing`, `install-global-bridge`).
+        /// (e.g. `install-herdr-integration`, `enable-global-sharing`, `install-global-bridge`,
+        /// `install-omp`, `install-bun`, `install-herdr`, `install-gh`, `install-git`, `install-ffmpeg`).
         pub id: String,
         pub severity: Severity,
         pub title: String,
@@ -66,6 +67,15 @@ wire_struct! {
         /// Whether `host.setupApply` can fix it.
         pub fixable: bool,
         pub recommended: bool,
+    }
+}
+
+wire_struct! {
+    /// A fix whose last `host.setupApply` attempt failed (the other requested fixes ran anyway).
+    pub struct SetupFixError {
+        /// The fix id (`SetupIssue.id`).
+        pub id: String,
+        pub error: ApiError,
     }
 }
 
@@ -81,6 +91,17 @@ wire_struct! {
         /// The relay embedded in tf-hostd is listening.
         pub relay: bool,
         pub issues: Vec<SetupIssue>,
+        /// Requested fixes still running: installs outlast the `host.setupApply` reply (it comes
+        /// after 20 s at the latest), and the finished status arrives through `HostInfo.setup`.
+        /// Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<String>>", optional)]
+        pub applying: Vec<String>,
+        /// Open issues whose last fix attempt failed, with why. Absent from older daemons, which
+        /// fail the whole `host.setupApply` call at the first failing fix instead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<SetupFixError>>", optional)]
+        pub failed: Vec<SetupFixError>,
     }
 }
 

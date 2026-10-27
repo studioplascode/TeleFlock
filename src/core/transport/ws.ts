@@ -9,7 +9,7 @@ type Pending = { resolve(v: unknown): void; reject(e: unknown): void; timer: Ret
 
 export interface WsTransportOptions {
   url: string;
-  /** Per-request timeout (ms). Default 35 s (the core itself times out host calls at 30 s). */
+  /** Per-request timeout (ms) for ordinary calls. Default 35 s (the core itself times out host calls at 30 s). */
   timeoutMs?: number;
   /** Called once if the very first connection attempt fails (used for the demo fallback). */
   onFirstFailure?: () => void;
@@ -18,6 +18,21 @@ export interface WsTransportOptions {
 }
 
 const TERM_OPEN_TIMEOUT = 20_000;
+/**
+ * Methods that may launch an omp agent wait for it on the host (a slow pane shell, omp becoming
+ * interactive): the core gives them 180 s (`tf-client` `link::timeout_for`), so this safety net
+ * sits just above it.
+ */
+const LAUNCH_METHODS: Record<string, true> = {
+  "agent.start": true,
+  "agent.resume": true,
+  "agent.archive": true,
+  "agent.prompt": true,
+  "host.resume": true,
+  "worktree.create": true,
+  "automation.run": true,
+};
+const LAUNCH_TIMEOUT = 185_000;
 
 /**
  * WebSocket transport to `tf-devserver` `/ws`. Reconnects with backoff (0.5 s → 8 s); requests
@@ -101,7 +116,7 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
     call(hostId, method, params) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        const timeout = method === "term.open" ? TERM_OPEN_TIMEOUT : (opts.timeoutMs ?? 35_000);
+        const timeout = method === "term.open" ? TERM_OPEN_TIMEOUT : Object.hasOwn(LAUNCH_METHODS, method) ? LAUNCH_TIMEOUT : (opts.timeoutMs ?? 35_000);
         const timer = setTimeout(() => {
           pending.delete(id);
           reject(apiError("timeout", `${method} timed out`, { retryable: true }));

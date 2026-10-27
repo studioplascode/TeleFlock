@@ -62,7 +62,7 @@ pub(crate) fn command(cmd: &Cmd) -> tokio::process::Command {
     c
 }
 
-fn spawn_err(program: &str, e: std::io::Error) -> TransportError {
+pub(crate) fn spawn_err(program: &str, e: std::io::Error) -> TransportError {
     TransportError::Spawn { program: program.to_owned(), detail: e.to_string() }
 }
 

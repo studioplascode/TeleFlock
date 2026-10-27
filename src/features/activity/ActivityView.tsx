@@ -95,7 +95,8 @@ function clock(at: number): string {
   return new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-function EventRow({ row, now }: { row: Row; now: number }) {
+/** `index` (the row's place in its day) is what moves a row: it measures its layout only when that changes. */
+function EventRow({ row, now, index }: { row: Row; now: number; index: number }) {
   const isEvent = row.type === "event";
   const hostId = isEvent ? row.ev.hostId : row.n.hostId;
   const agentId = isEvent ? row.ev.agentId : row.n.agentId;
@@ -108,6 +109,7 @@ function EventRow({ row, now }: { row: Row; now: number }) {
   return (
     <motion.li
       layout="position"
+      layoutDependency={index}
       initial={{ opacity: 0, x: -14, scale: 0.98 }}
       animate={{ opacity: 1, x: 0, scale: 1 }}
       transition={spring.smooth}
@@ -262,13 +264,10 @@ export function ActivityView() {
     else days.push({ label, rows: [r] });
   }
 
-  const loadOlder = async () => {
+  // a promise chain, not try/finally: the React Compiler can't compile a component holding try without catch
+  const loadOlder = () => {
     setLoading(true);
-    try {
-      await Promise.all(withMore.split("|").filter(Boolean).map((id) => loadOlderActivity(id)));
-    } finally {
-      setLoading(false);
-    }
+    return Promise.all(withMore.split("|").filter(Boolean).map((id) => loadOlderActivity(id))).finally(() => setLoading(false));
   };
 
   const content = (
@@ -289,8 +288,8 @@ export function ActivityView() {
             </h2>
             <ol className="relative isolate flex flex-col before:absolute before:top-2 before:bottom-2 before:left-[16px] before:w-px before:bg-gradient-to-b before:from-line-3 before:to-transparent">
               <AnimatePresence initial={false}>
-                {d.rows.map((r) => (
-                  <EventRow key={r.id} row={r} now={now} />
+                {d.rows.map((r, i) => (
+                  <EventRow key={r.id} row={r} now={now} index={i} />
                 ))}
               </AnimatePresence>
             </ol>

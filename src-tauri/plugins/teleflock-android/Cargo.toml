@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-teleflock-android"
-description = "TeleFlock Android glue: keep-alive foreground service, agent notifications with actions + inline reply, haptics, network-change signal"
+description = "TeleFlock Android glue: keep-alive foreground service, agent notifications with actions + inline reply, haptics, network-change signal, dictation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -7,6 +7,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { AccountLimits, LimitAccount, LimitSample, LimitWindow } from "./gen";
 import { core } from "./client";
 import { toApiError } from "./errors";
+import type { CoreState } from "./store/state";
 import { coreStore } from "./store/store";
 
 const HOUR = 3_600_000;
@@ -170,8 +171,10 @@ export function describePace(p: WindowPace): string {
 
 // ───────────────────────────── poller ─────────────────────────────
 
-/** Re-asks every host this often while anything is subscribed (hostd caches 60 s; omp ~5 min). */
-const POLL_MS = 60_000;
+/** The board and a session's inspector re-ask this often: omp refreshes its own usage about every 5 min. */
+export const LIMITS_EVERY_MS = 5 * MIN;
+/** The Usage page, where the limits are the point, re-asks every minute (hostd caches 60 s). */
+export const LIMITS_USAGE_EVERY_MS = MIN;
 
 export interface HostLimits {
   data?: AccountLimits;
@@ -181,7 +184,13 @@ export interface HostLimits {
   receivedAt?: number;
 }
 
-type Entry = HostLimits & { subs: number; timer?: ReturnType<typeof setInterval> };
+type Entry = HostLimits & {
+  /** Each subscriber's cadence; null subscribes without polling (e.g. while the window is inactive). */
+  wants: (number | null)[];
+  timer?: ReturnType<typeof setTimeout>;
+  /** When the host was last asked (undefined: never, or it has just come online). */
+  askedAt?: number;
+};
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 let version = 0;
@@ -191,9 +200,21 @@ function emit(): void {
   for (const l of listeners) l();
 }
 
+/**
+ * Delay until a host is asked again: the shortest cadence among its subscribers, counted from the
+ * last ask (0 when overdue or never asked); null while no subscriber polls.
+ */
+export function nextAskIn(wants: readonly (number | null)[], askedAt: number | undefined, now: number): number | null {
+  let every = Infinity;
+  for (const w of wants) if (w !== null && w < every) every = w;
+  if (every === Infinity) return null;
+  return askedAt === undefined ? 0 : Math.max(0, askedAt + every - now);
+}
+
 async function load(hostId: string, refresh = false): Promise<void> {
   const e = entries.get(hostId);
   if (!e) return;
+  e.askedAt = Date.now();
   if (coreStore.getState().status[hostId]?.phase !== "online") return;
   e.loading = true;
   emit();
@@ -208,45 +229,62 @@ async function load(hostId: string, refresh = false): Promise<void> {
   emit();
 }
 
-// A host coming online loads immediately instead of waiting for the next tick.
+function schedule(hostId: string): void {
+  const e = entries.get(hostId);
+  if (!e) return;
+  clearTimeout(e.timer);
+  const wait = nextAskIn(e.wants, e.askedAt, Date.now());
+  e.timer =
+    wait === null
+      ? undefined
+      : setTimeout(() => {
+          void load(hostId);
+          schedule(hostId);
+        }, wait);
+}
+
+// A host coming online is asked as soon as a subscriber polls, instead of a full cadence later.
 let onlineSeen = new Set<string>();
 let watching = false;
 function watchOnline(): void {
   if (watching) return;
   watching = true;
+  const onlineIn = (s: CoreState) => new Set(Object.keys(s.status).filter((id) => s.status[id]?.phase === "online"));
+  onlineSeen = onlineIn(coreStore.getState());
   coreStore.subscribe((s) => {
-    const online = new Set(Object.keys(s.status).filter((id) => s.status[id]?.phase === "online"));
-    for (const id of online) if (!onlineSeen.has(id) && (entries.get(id)?.subs ?? 0) > 0) void load(id);
+    const online = onlineIn(s);
+    for (const id of online) {
+      const e = entries.get(id);
+      if (onlineSeen.has(id) || !e) continue;
+      e.askedAt = undefined;
+      schedule(id);
+    }
     onlineSeen = online;
   });
 }
 
-function retain(hostId: string): () => void {
+function retain(hostId: string, everyMs: number | null): () => void {
   watchOnline();
   let e = entries.get(hostId);
   if (!e) {
-    e = { subs: 0, loading: false };
+    e = { wants: [], loading: false };
     entries.set(hostId, e);
   }
-  e.subs++;
-  if (e.subs === 1) {
-    void load(hostId);
-    e.timer = setInterval(() => void load(hostId), POLL_MS);
-  }
+  e.wants.push(everyMs);
+  schedule(hostId);
   return () => {
     const cur = entries.get(hostId);
     if (!cur) return;
-    cur.subs--;
-    if (cur.subs <= 0) {
-      clearInterval(cur.timer);
-      cur.timer = undefined;
-    }
+    cur.wants.splice(cur.wants.indexOf(everyMs), 1);
+    schedule(hostId);
   };
 }
 
 /** Asks the host again now (hostd re-runs `omp usage`, at most every 10 s). */
 export function refreshLimits(hostId: string): Promise<void> {
-  return load(hostId, true);
+  const done = load(hostId, true);
+  schedule(hostId);
+  return done;
 }
 
 const EMPTY: HostLimits = { loading: false };
@@ -269,15 +307,20 @@ function subscribe(cb: () => void): () => void {
   return () => listeners.delete(cb);
 }
 
-/** `host.limits` for each host, polled every minute while mounted (shared across components). */
-export function useAccountLimits(hostIds: string[]): Record<string, HostLimits> {
+/**
+ * `host.limits` for each host (shared across components), asked again every `everyMs` while mounted:
+ * the shortest cadence among the subscribers of a host wins, and `null` subscribes without polling
+ * (pass it while the window is inactive). A host whose last answer is older than a subscriber's
+ * cadence is asked as soon as that subscriber polls; a remount within the cadence reuses the answer.
+ */
+export function useAccountLimits(hostIds: string[], everyMs: number | null): Record<string, HostLimits> {
   const key = hostIds.join("|");
   useEffect(() => {
-    const releases = key ? key.split("|").map(retain) : [];
+    const releases = key ? key.split("|").map((id) => retain(id, everyMs)) : [];
     return () => {
       for (const r of releases) r();
     };
-  }, [key]);
+  }, [key, everyMs]);
   // Different `hostIds` arrays with the same ids share one cached snapshot.
   return useSyncExternalStore(subscribe, () => snapshot(key ? key.split("|") : []));
 }

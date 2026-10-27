@@ -90,7 +90,26 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - `localhost:PORT` links in the output are clickable: they open a preview tunnel (`@/features/preview` store), then the
   browser (desktop) or the in-app preview sheet (mobile).
 - Mobile extra keys: Esc/Ctrl/Alt pinned, the rest scrolls with edge fades; Ctrl/Alt tap = next key, double-tap or
-  long-press = lock (haptic tick/select/heavy). Dimmed while detached.
+  long-press = lock (haptic tick/select/heavy). Dimmed while detached. The row ends with Paste and an image button
+  (picker for `image/*` and `video/*`, several at once) that pastes the picked files' host paths (below).
+- Images and videos reach the pane as their **host paths**, the way a native terminal pastes a dropped file
+  (control mode only; any pane). Sources: a paste whose clipboard has image/video files or a bitmap and no text
+  (Ctrl+V and the webview's own paste are caught in the capture phase before xterm's listener; the context menu's and
+  the extra keys' Paste read `navigator.clipboard.read()`, falling back to `readText()`), a drop (overlay
+  "Drop to upload…"; other files are refused with a toast and never open in the webview; observe shows a no-drop
+  cursor), and the phone image button. Each paste / drop / pick is one batch (`termUploads.ts`): its files go to
+  the host one after another through `@/core/upload` (`upload.*`, `<hostd home>/uploads/<day>/<name>`), a pill top
+  right shows the name (or "N files") and percent, × cancels every batch (nothing is pasted). Then the paths go in as
+  ONE bracketed paste (`mediaPaste.ts`): bare when plain, `'…'` otherwise, `"…"` (with `\ " $ `` ` escaped) when the
+  path has a `'`; space-separated, plus a trailing space so the next drop stays apart. That is what both POSIX shells
+  and omp's paste parser (pi-tui `extractImagePastePathsFromText`) read back, so omp attaches the images (a chip
+  `#1`, a contact sheet for a video) and a shell gets the text. The paste goes straight to the session, not through
+  `term.paste()`: herdr's re-rendered frames never carry the pane's DEC 2004 state, so xterm's own paste always sends
+  bare keystrokes; herdr unwraps a complete bracketed paste from an attached client and wraps it again only when the
+  pane's program turned bracketed paste on. Text on the clipboard keeps the plain text paste. Empty files and files
+  over 2 GiB are left out (toast); a failed upload ends its batch (toast) and the files that arrived are pasted; not
+  attached at the start → toast; detached by the end → toast with **Copy path**. A new attachment (pane, mode,
+  host) or unmount cancels running uploads.
 - TerminalView shortcuts: Ctrl+Shift+M mode, Ctrl+Shift+T new shell, Ctrl+Shift+[ / ] previous/next pane, ←/→ in the pane tabs.
 - Existing panes are never hidden behind "New shell": the desktop view lists every running pane of the host (shells and
   agents, including panes opened in herdr's own TUI; agents show their name, orb and state) grouped by workspace and tab,

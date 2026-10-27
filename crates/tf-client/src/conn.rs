@@ -12,7 +12,9 @@ use tf_proto::{
     ApiError, AppEvent, ClientInfo, ClientMsg, ConnPhase, ConnStatus, HostKeyInfo, HostKind, HostProfile, HostState, Millis,
     Notification, PROTOCOL_VERSION, ServerMsg, SessionEvent, SessionSnapshot, StatePatch, TermEvent,
 };
-use tf_transport::{Cmd, ConnectOptions, HostKeyDecision, HostKeyPolicy, Transport, TransportError, TransportEvent};
+use tf_transport::{
+    Cmd, ConnectOptions, HostKeyDecision, HostKeyPolicy, Transport, TransportError, TransportEvent, WslKeepalive,
+};
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::deploy;
@@ -249,11 +251,69 @@ enum Outcome {
     Cmd(Option<ConnCmd>),
 }
 
+/// A process holding a WSL distro up (seam over [`WslKeepalive`] for tests).
+pub(crate) trait Holding {
+    fn is_running(&mut self) -> bool;
+}
+
+impl Holding for WslKeepalive {
+    fn is_running(&mut self) -> bool {
+        WslKeepalive::is_running(self)
+    }
+}
+
+/// Keeps a WSL host's distro running from its first connect attempt until the host is no longer
+/// wanted: reconnects and backoff would otherwise leave WSL without a client long enough to stop
+/// the distro, and tf-hostd, herdr and every agent with it ([`WslKeepalive`]).
+pub(crate) struct DistroHold<H, F> {
+    start: F,
+    /// The held distro (`None`: the default one) and the process holding it.
+    held: Option<(Option<String>, H)>,
+}
+
+impl<H: Holding, F: FnMut(Option<&str>) -> Result<H, TransportError>> DistroHold<H, F> {
+    pub fn new(start: F) -> Self {
+        Self { start, held: None }
+    }
+
+    /// Before each connect attempt: holds a WSL profile's distro, starting the hold again when it
+    /// ended and moving it when the distro changed; other kinds hold nothing.
+    pub fn attempt(&mut self, host: &str, p: &HostProfile) {
+        if p.kind != HostKind::Wsl {
+            self.held = None;
+            return;
+        }
+        if let Some((distro, h)) = &mut self.held
+            && *distro == p.distro
+            && h.is_running()
+        {
+            return;
+        }
+        self.held = None;
+        let name = p.distro.as_deref().unwrap_or("the default distro");
+        match (self.start)(p.distro.as_deref()) {
+            Ok(h) => {
+                log::info!("host {host}: keeping WSL {name} running between connections");
+                self.held = Some((p.distro.clone(), h));
+            }
+            Err(e) => log::warn!("host {host}: keeping WSL {name} running failed: {e}"),
+        }
+    }
+
+    /// The host is no longer wanted (disconnect, a permanent error, removal, quit): WSL may stop
+    /// the distro again.
+    pub fn release(&mut self) {
+        self.held = None;
+    }
+}
+
 /// Host task: runs until `Shutdown` (or the engine is dropped).
 pub(crate) async fn run(inner: Weak<Inner>, rt: Arc<HostRt>, mut rx: mpsc::UnboundedReceiver<ConnCmd>) {
     let mut attempt: u32 = 0;
+    let mut hold = DistroHold::new(WslKeepalive::start);
     loop {
         if !rt.wanted.load(Ordering::SeqCst) {
+            hold.release();
             match rx.recv().await {
                 None | Some(ConnCmd::Shutdown) => break,
                 Some(ConnCmd::Connect | ConnCmd::Reconnect) => {
@@ -277,6 +337,7 @@ pub(crate) async fn run(inner: Weak<Inner>, rt: Arc<HostRt>, mut rx: mpsc::Unbou
         }
         let Some(eng) = inner.upgrade() else { break };
         let Some(profile) = eng.profile(&rt.id) else { break };
+        hold.attempt(&rt.id, &profile);
         let online_at: Arc<Mutex<Option<Instant>>> = Arc::default();
         // The attempt runs in its own task so a panic in a lower layer becomes a retryable
         // error instead of killing this state machine.
@@ -461,6 +522,7 @@ async fn connect_and_serve(
     }
 
     let mut opts = ConnectOptions::new(eng.data_dir().join("known_hosts"));
+    opts.secrets = eng.ssh_secrets(profile).await?;
     opts.host_key_policy = host_key_policy(rt.view.lock().unwrap().approved_key.take());
     let transport = tf_transport::connect(profile, &opts, ev_tx).await.map_err(|e| {
         if let TransportError::HostKeyUnconfirmed { address, algorithm, fingerprint, .. } = &e {
@@ -588,5 +650,86 @@ mod tests {
         assert!(!is_fatal(&ApiError::new("timeout", "x")));
         assert!(is_fatal(&ApiError::new("transport.hostKeyMismatch", "x")));
         assert!(!is_fatal(&ApiError::new("transport.timeout", "x").retryable()));
+    }
+
+    /// A WSL host's distro is held by one process across every attempt, held again when that
+    /// process ended, moved with a distro change, and let go for other kinds, on release (not
+    /// wanted any more) and with the host task.
+    #[test]
+    fn distro_hold_lifecycle() {
+        // Fake keepalive `i`: running while `live[i]`; dropping it kills it.
+        struct Fake(usize, Arc<Mutex<Vec<bool>>>);
+        impl Holding for Fake {
+            fn is_running(&mut self) -> bool {
+                self.1.lock().unwrap()[self.0]
+            }
+        }
+        impl Drop for Fake {
+            fn drop(&mut self) {
+                self.1.lock().unwrap()[self.0] = false;
+            }
+        }
+        let live: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let started: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let fail = Arc::new(AtomicBool::new(false));
+        let mut hold = {
+            let (live, started, fail) = (live.clone(), started.clone(), fail.clone());
+            DistroHold::new(move |distro: Option<&str>| {
+                if fail.load(Ordering::SeqCst) {
+                    return Err(TransportError::Wsl("wsl.exe could not be started".into()));
+                }
+                started.lock().unwrap().push(distro.map(String::from));
+                let mut l = live.lock().unwrap();
+                l.push(true);
+                Ok(Fake(l.len() - 1, live.clone()))
+            })
+        };
+        let wsl = |distro: &str| HostProfile {
+            id: "h".into(),
+            name: "h".into(),
+            kind: HostKind::Wsl,
+            address: None,
+            user: None,
+            port: None,
+            auth: None,
+            key_path: None,
+            distro: Some(distro.into()),
+            herdr_session: "default".into(),
+            color: None,
+            auto_connect: false,
+            relay_port: None,
+            group: None,
+        };
+        let live_now = || live.lock().unwrap().clone();
+
+        // Attempts and backoff: one process.
+        for _ in 0..3 {
+            hold.attempt("h", &wsl("Ubuntu"));
+        }
+        assert_eq!(*started.lock().unwrap(), [Some("Ubuntu".to_string())]);
+        assert_eq!(live_now(), [true]);
+        // It ended (`wsl --terminate`): the next attempt holds the distro again.
+        live.lock().unwrap()[0] = false;
+        hold.attempt("h", &wsl("Ubuntu"));
+        assert_eq!(live_now(), [false, true]);
+        // Another distro: the old hold goes.
+        hold.attempt("h", &wsl("Debian"));
+        assert_eq!(live_now(), [false, false, true]);
+        assert_eq!(started.lock().unwrap()[2].as_deref(), Some("Debian"));
+        // Not WSL any more.
+        hold.attempt("h", &HostProfile { kind: HostKind::Local, distro: None, ..wsl("Debian") });
+        assert_eq!(live_now(), [false, false, false]);
+        // Disconnect, a permanent error, removal.
+        hold.attempt("h", &wsl("Ubuntu"));
+        hold.release();
+        assert_eq!(live_now(), [false, false, false, false]);
+        // A failed start holds nothing; the next attempt tries again, and the task's end lets go.
+        fail.store(true, Ordering::SeqCst);
+        hold.attempt("h", &wsl("Ubuntu"));
+        fail.store(false, Ordering::SeqCst);
+        hold.attempt("h", &wsl("Ubuntu"));
+        assert_eq!(live_now(), [false, false, false, false, true]);
+        drop(hold);
+        assert_eq!(live_now(), [false; 5]);
     }
 }

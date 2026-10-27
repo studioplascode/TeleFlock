@@ -1,8 +1,9 @@
 //! TeleFlock app-side transports (architecture §5.1).
 //!
 //! One [`Transport`] per host connection:
-//! * [`HostKind::TailscaleSsh`]: one long-lived russh connection (`none` auth, check-mode
-//!   aware) multiplexing exec, spawn and `direct-tcpip` channels.
+//! * [`HostKind::TailscaleSsh`]: one long-lived russh connection multiplexing exec, spawn and
+//!   `direct-tcpip` channels. Signs in with Tailscale SSH's `none` auth (check-mode aware), or
+//!   with a password or private key ([`HostProfile::auth`]).
 //! * [`HostKind::Local`]: `tokio::process`, no shell.
 //! * [`HostKind::Wsl`]: `wsl.exe -d <distro> --exec …` through the local transport.
 //!
@@ -16,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 
-pub use tf_proto::app::{ConnPhase, HostKind, HostProfile, WslDistro};
+pub use tf_proto::app::{ConnPhase, HostKind, HostProfile, HostSecrets, SshAuth, WslDistro};
 
 mod error;
 mod local;
@@ -26,8 +27,8 @@ mod wsl;
 
 pub use error::TransportError;
 pub use local::LocalTransport;
-pub use ssh::SshTransport;
-pub use wsl::{WslTransport, list_distros, parse_distros};
+pub use ssh::{SshTransport, check_private_key};
+pub use wsl::{WslKeepalive, WslTransport, list_distros, parse_distros};
 
 /// A connection to one host.
 #[async_trait::async_trait]
@@ -233,6 +234,10 @@ pub struct ConnectOptions {
     pub ping_max_misses: u32,
     /// Deadline for the WSL distro warm-up (`true`) run by `connect`.
     pub wsl_start_timeout: Duration,
+    /// Saved secrets for password / key sign-in ([`HostProfile::auth`]): the password, an
+    /// imported key (when the profile has no `key_path`) and the key's passphrase. Debug output
+    /// redacts them.
+    pub secrets: HostSecrets,
 }
 
 impl ConnectOptions {
@@ -248,6 +253,7 @@ impl ConnectOptions {
             ping_timeout: Duration::from_secs(10),
             ping_max_misses: 3,
             wsl_start_timeout: Duration::from_secs(90),
+            secrets: HostSecrets::default(),
         }
     }
 }

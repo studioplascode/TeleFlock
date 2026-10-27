@@ -11,6 +11,7 @@ export function inTauri(): boolean {
 /**
  * Tauri bridge (TauriShell): `core_call`, `core_term_input`, `core_events(channel)`.
  * One `core_events` subscription per page load; the shell replays current state to each new subscriber.
+ * Events arrive in order as batches (one webview eval per batch, not per event).
  */
 export function createTauriTransport(): CoreTransport {
   const listeners = new Set<(e: AppEvent) => void>();
@@ -19,9 +20,9 @@ export function createTauriTransport(): CoreTransport {
   const start = () => {
     if (started) return;
     started = true;
-    const channel = new Channel<AppEvent>();
-    channel.onmessage = (e) => {
-      for (const l of listeners) l(e);
+    const channel = new Channel<AppEvent[]>();
+    channel.onmessage = (batch) => {
+      for (const e of batch) for (const l of listeners) l(e);
     };
     invoke("core_events", { channel }).catch((err: unknown) => {
       started = false;

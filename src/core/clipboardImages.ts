@@ -1,11 +1,12 @@
 import { type DraftImage, MAX_DRAFT_IMAGES, updateDraftImages } from "./draftImages";
 
 /*
- * Image files out of a paste or a drop. Browsers disagree on where they put them: Chromium lists
- * a pasted screenshot in both `files` and `items`, WebKitGTK (the Linux app) often only in
- * `items` (`getAsFile()`), and a drop from a file manager in `files`. Both are read and merged.
- * Then the composers' attach path (`attachImages`): very large images scaled down, and the images
- * of one prompt kept within the count and the relay's message size (`fitImages`).
+ * Image (and video) files out of a paste or a drop. Browsers disagree on where they put them:
+ * Chromium lists a pasted screenshot in both `files` and `items`, WebKitGTK (the Linux app) often
+ * only in `items` (`getAsFile()`), and a drop from a file manager in `files`. Both are read and
+ * merged. Then the composers' attach path for images (`attachImages`): very large images scaled
+ * down, and the images of one prompt kept within the count and the relay's message size
+ * (`fitImages`). Videos are uploaded to the host instead (`draftVideos.ts`, `upload.ts`).
  */
 
 /** The parts of `DataTransfer` read here (structural, so tests can pass plain objects). */
@@ -14,24 +15,47 @@ export interface ImageSource {
   files?: ArrayLike<File> | null;
 }
 
-/** Image files of a clipboard / drag payload: `items` and `files`, deduplicated, in order. */
-export function imageFiles(data: ImageSource | null | undefined): File[] {
+/** Files of a clipboard / drag payload that `keep` accepts: `items` and `files`, deduplicated, in order. */
+function pickFiles(data: ImageSource | null | undefined, keep: (f: File) => boolean): File[] {
   if (!data) return [];
   const out: File[] = [];
   const seen = new Set<string>();
   const add = (f: File | null | undefined) => {
-    if (!f || !f.type.startsWith("image/")) return;
-    // The same image listed in both: `getAsFile()` returns a new File object each time.
+    if (!f || !keep(f)) return;
+    // The same file listed in both: `getAsFile()` returns a new File object each time.
     const id = `${f.name}\u0000${f.size}\u0000${f.type}\u0000${f.lastModified}`;
     if (seen.has(id)) return;
     seen.add(id);
     out.push(f);
   };
   for (const item of Array.from(data.items ?? [])) {
-    if (item.kind === "file" && item.type.startsWith("image/")) add(item.getAsFile());
+    if (item.kind === "file") add(item.getAsFile());
   }
   for (const f of Array.from(data.files ?? [])) add(f);
   return out;
+}
+
+/** Video containers by extension, for files the platform hands over without a type. */
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm|mkv|avi|wmv|3gp|mpe?g)$/i;
+
+/** A video: a `video/*` type, or a video extension when the type is missing (some drops, Android providers). */
+export function isVideoFile(f: Pick<File, "name" | "type">): boolean {
+  return f.type.startsWith("video/") || ((f.type === "" || f.type === "application/octet-stream") && VIDEO_EXT.test(f.name));
+}
+
+/** Image files of a clipboard / drag payload: `items` and `files`, deduplicated, in order. */
+export function imageFiles(data: ImageSource | null | undefined): File[] {
+  return pickFiles(data, (f) => f.type.startsWith("image/"));
+}
+
+/** Video files of a clipboard / drag payload (see `isVideoFile`), as `imageFiles`. */
+export function videoFiles(data: ImageSource | null | undefined): File[] {
+  return pickFiles(data, isVideoFile);
+}
+
+/** Image and video files of a clipboard / drag payload, as `imageFiles`. */
+export function mediaFiles(data: ImageSource | null | undefined): File[] {
+  return pickFiles(data, (f) => f.type.startsWith("image/") || isVideoFile(f));
 }
 
 /** A drag carries files (drag-over: their contents are not readable yet, only their kind). */

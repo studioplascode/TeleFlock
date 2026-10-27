@@ -1,0 +1,12 @@
+                        Tip: Say `orchestrate` in your message to drive a multi-phase task with
+                                    parallel subagents — watch it glow as you type
+
+
+ Run the shell command ls -la with your bash tool and report the number of entries.
+
+
+  󱊷 Working…
+
+╭── ⠸ 1s  󰪟 GPT-6 Luna    tf-bridgectl-cap-work  󰙺 ──3%────────────────────────────────────󰕝─────󰁨───────272K───╮
+╰─                                                                                                                   ─╯
+⇄ teleflock

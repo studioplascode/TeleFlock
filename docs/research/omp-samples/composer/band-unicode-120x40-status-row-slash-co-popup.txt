@@ -1,0 +1,12 @@
+╰─ /co
+❯ 🖥  computer          Computer: off                                                                                  █
+  📡 collab            Collab: off                                                                                    │
+  ⧉  copy              Pick text or code from the conversation to copy                                                │
+  ◫  context           Context: 0% (7,613/0)                                                                          │
+  🗜  compact           Compact: context 0% used                                                                       │
+  ⤢  extended-context  Extended context: off                                                                          │
+  📤 record            Start or stop recording this screen to a replayable file (omp play)                            │
+  📋 dump              Copy session transcript to clipboard (and write LLM request JSON to tmp)                       │
+  👻 seance            Consult a saved session without resuming it                                                    │
+  📰 changelog         Show changelog entries                                                                         │
+⇄ teleflock

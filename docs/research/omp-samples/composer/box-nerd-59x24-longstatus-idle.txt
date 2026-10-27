@@ -1,0 +1,12 @@
+
+              ████████████
+                 ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                 ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                 ▒▒  ██                  █
+                     ██       v18.13.1
+
+  Tip: Press 󰘶 󰌒 to cycle through reasoning effort levels
+
+
+╭── 󰵗  󰪟 GPT-6 Luna    …words ─3%─────────󰕝─󰁨─272K───╮
+╰─                         󰘶 󰌒 to change thinking effort ─╯

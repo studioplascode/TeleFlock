@@ -366,6 +366,28 @@
   scrollbar-width: none;
   &::-webkit-scrollbar { display: none; }
 }
+/*
+ * A row that scrolls sideways (phone chip rows, tab strips) says so: the edge with more content past it
+ * fades out, and both ends are sharp once the row fits. Scroll-driven, so no listener and no frame work
+ * unless the row scrolls; where scroll timelines are unsupported the row just has no fade.
+ */
+@property --tf-fade-l { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --tf-fade-r { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@keyframes tf-scroll-fade-x {
+  0% { --tf-fade-l: 0px; --tf-fade-r: 24px; }
+  12%, 88% { --tf-fade-l: 24px; --tf-fade-r: 24px; }
+  100% { --tf-fade-l: 24px; --tf-fade-r: 0px; }
+}
+@utility scroll-fade-x {
+  @supports (animation-timeline: scroll(self inline)) {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--tf-fade-l), #000 calc(100% - var(--tf-fade-r)), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 var(--tf-fade-l), #000 calc(100% - var(--tf-fade-r)), transparent);
+    animation-name: tf-scroll-fade-x;
+    animation-timing-function: linear;
+    animation-fill-mode: both;
+    animation-timeline: scroll(self inline);
+  }
+}
 @utility safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0px); }
 
 /* Short desktop windows (≤ 820px tall, e.g. 1366×768 laptops): `short:` compacts dense chrome. */

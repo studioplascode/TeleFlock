@@ -107,6 +107,10 @@ export class DemoTerm {
 
   input(data: string): void {
     if (this.closed || this.mode === "observe") return;
+    // A bracketed paste (the terminal pastes uploaded files' paths this way): like herdr for a pane
+    // that never turned bracketed paste on, the demo shell gets the bare text.
+    const pasted = /^\x1b\[200~([\s\S]*)\x1b\[201~$/.exec(data);
+    if (pasted) data = pasted[1] ?? "";
     if (this.foreground) {
       // Only Ctrl+C reaches a seeded program: it ends, and the shell prompt comes back.
       if (!data.includes("\x03")) return;

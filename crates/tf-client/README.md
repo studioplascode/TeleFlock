@@ -3,7 +3,7 @@
 App core shared by `src-tauri` and `tf-devserver` (architecture §5.2).
 
 ```rust
-use tf_client::{Engine, EngineConfig, Platform, NotifyStyle, BadgeState};
+use tf_client::{Engine, EngineConfig, Platform, NotifyStyle, BadgeState, Resume};
 
 pub struct EngineConfig {
     pub data_dir: PathBuf,                    // hosts.json, settings.json, known_hosts, cache/<hostId>.json
@@ -23,7 +23,7 @@ impl Engine {                                 // Clone (Arc inside)
     pub fn emit(&self, ev: AppEvent);                                         // inject (OpenAgent, AnswerNext)
     pub async fn notification_action(&self, host_id: &str, notification_id: &str,
                                      action_id: Option<&str>, reply: Option<String>) -> Result<(), ApiError>;
-    pub fn resume(&self);                     // foreground / network change
+    pub fn resume(&self, why: Resume);        // Focus (desktop) | Foreground | Network (Android)
     pub fn page_closed(&self);                // Tauri: webview reload/navigation → close the page's terminals + sessions
     pub async fn shutdown(&self);
 }
@@ -50,6 +50,16 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   failures go to `reconnecting` (backoff 1, 2, 4 … 30 s + jitter, `attempt`, `nextRetryAt`; reset after
   60 s online) or `error` for permanent failures (unsupported arch, version mismatch, host key mismatch).
   `hosts.connect` / `resume()` retry immediately; `hosts.disconnect` → `offline` and closes the host's tunnels.
+* Liveness: a ping every 15 s; the link closes once nothing at all arrived since a ping sent 30 s ago.
+  A ping tick that comes a whole period late (system sleep, a stopped app) pings first and judges
+  nothing sent before it, so waking from sleep keeps a healthy link. `resume(Resume::Focus)` checks
+  only links the host has been quiet on for 20 s (15 s to answer); `Foreground` / `Network` check
+  every live link (5 s).
+* WSL hosts: from the first connect attempt until the host is no longer wanted (disconnect, permanent
+  error, removal, quit), `wsl.exe -d <distro> --exec sleep 2147483647` keeps the distro running, so
+  reconnects and backoff never let WSL stop it (and tf-hostd, herdr and the agents with it).
+* Cache: `cache/<hostId>.json` (compact JSON) is written at most every 60 s and on every disconnect
+  and shutdown, only when the state changed; health samples alone don't count.
 * Host keys: a new SSH host key from a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48, checked on
   the resolved peer) is pinned silently. Any other address stops in `hostKey` with
   `status.hostKey {address, algorithm, fingerprint}` and pins nothing; `hosts.trustKey {hostId,
@@ -67,7 +77,9 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   quiet hours `style.silent = true`, `style.sound = false`.
 * Deploy: `uname -sm` → triple; upload `<home>/bin/tf-hostd`, `<home>/ext/teleflock-bridge.ts`,
   `<home>/omp-overlay.yml` (+ `.sha256` stamps) when the version line or content differ. Remote uploads
-  land in a temp file whose sha256 (`sha256sum`/`shasum -a 256`) must match before the `mv`;
+  land in a temp file whose sha256 (`sha256sum`/`shasum -a 256`) must match before the `mv`, and an
+  uploaded tf-hostd must report the expected `--version` line first (else `version_mismatch`, the
+  installed one stays); the extension and the overlay share one exec;
   `TF_HOSTD_BIN` (the embedder's `hostd_bins_override`) is honoured by debug app builds only;
   `<home>` = `$TF_HOSTD_HOME` or `~/.teleflock`. Attach: `tf-hostd attach --session S
   [--relay-port P] [--replace]` (`--replace` after an upload).

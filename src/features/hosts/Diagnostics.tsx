@@ -2,7 +2,7 @@ import { AlertTriangle, Check, CircleSlash, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
 import { cn, Shimmer, Spinner, spring } from "@/design";
-import type { DiagReport, DiagStatus, DiagStep, HostKind } from "@/core/gen";
+import type { DiagReport, DiagStatus, DiagStep, HostKind, SshAuth } from "@/core/gen";
 import type { GlossaryId } from "@/features/shell/glossary";
 import { Term } from "@/features/shell/Term";
 import { CopyCommand, ExtLink } from "./CopyCommand";
@@ -34,21 +34,28 @@ interface Fix {
 }
 
 /** The usual fix for a failed step (and for an omp older than TeleFlock needs), or null. */
-function fixFor(step: DiagStep, kind: HostKind): Fix | null {
+function fixFor(step: DiagStep, kind: HostKind, auth: SshAuth): Fix | null {
   const where = kind === "tailscaleSsh" ? "On the host" : kind === "wsl" ? "In the distro" : "On this machine";
+  const tailscale = kind === "tailscaleSsh" && auth === "tailscale";
   if (step.id === "omp" && step.status !== "fail" && step.status !== "skip" && versionBelow(step.detail, OMP_MIN_VERSION)) {
     return { text: `${where}, update omp to ${OMP_MIN_VERSION} or newer:`, command: "omp update" };
+  }
+  // hosts.test: a tool that is not installed (warn), or that can't start because its interpreter is missing.
+  if ((step.id === "herdr" || step.id === "omp") && (step.detail?.startsWith("not installed") || step.detail?.includes("interpreter is missing"))) {
+    const link = step.id === "herdr" ? { href: HERDR_URL, label: "herdr.dev" } : { href: OMP_URL, label: "oh-my-pi" };
+    return { text: "Add the host, then let Host setup install it, or install it yourself:", link };
   }
   if (step.status !== "fail") return null;
   switch (step.id) {
     case "resolve":
-      return kind === "tailscaleSsh" ? { text: "Is Tailscale up on this device?", command: "tailscale up" } : null;
+      return tailscale ? { text: "Is Tailscale up on this device?", command: "tailscale up" } : null;
     case "ssh":
-      if (kind === "tailscaleSsh") return { text: "If Tailscale SSH isn't on yet, run on the host:", command: TAILSCALE_SSH_COMMAND };
+      if (tailscale) return { text: "If Tailscale SSH isn't on yet, run on the host:", command: TAILSCALE_SSH_COMMAND };
       if (kind === "wsl") return { text: "No usable distro? Install one:", command: "wsl --install" };
       return null;
     case "auth":
-      return kind === "tailscaleSsh" ? { text: "Your tailnet policy must let this device SSH to the host as this user.", link: { href: TAILSCALE_SSH_DOCS, label: "Tailscale SSH docs" } } : null;
+      // Key and password failures carry their own fix in the step's detail (the error's hint).
+      return tailscale ? { text: "Your tailnet policy must let this device SSH to the host as this user.", link: { href: TAILSCALE_SSH_DOCS, label: "Tailscale SSH docs" } } : null;
     case "herdr":
       return { text: `${where}, install herdr:`, link: { href: HERDR_URL, label: "herdr.dev" } };
     case "omp":
@@ -127,6 +134,8 @@ function StatusIcon({ status }: { status: DiagStatus }) {
 
 export interface DiagnosticsProps {
   kind: HostKind;
+  /** How an SSH host signs in (labels the auth step and its fix). */
+  auth?: SshAuth;
   /** null while the test runs. */
   report: DiagReport | null;
   running: boolean;
@@ -139,8 +148,8 @@ const REVEAL_MS = 140;
  * Animated connection diagnostics. While the test runs, the planned steps light up one by one
  * (the active one shimmers); when the report lands the real results cascade in with their timing.
  */
-export function Diagnostics({ kind, report, running }: DiagnosticsProps) {
-  const planned = PLANNED[kind];
+export function Diagnostics({ kind, auth = "tailscale", report, running }: DiagnosticsProps) {
+  const planned = kind === "tailscaleSsh" && auth !== "tailscale" ? PLANNED.tailscaleSsh.map((s) => (s.id === "auth" ? { ...s, label: auth === "key" ? "Key sign-in" : "Password sign-in" } : s)) : PLANNED[kind];
   const [probe, setProbe] = useState(0);
   const [revealed, setRevealed] = useState(0);
 
@@ -201,7 +210,7 @@ export function Diagnostics({ kind, report, running }: DiagnosticsProps) {
           })}
         {!running &&
           report?.steps.slice(0, revealed).map((s) => {
-            const fix = fixFor(s, kind);
+            const fix = fixFor(s, kind, auth);
             return (
               <motion.li
                 key={s.id}

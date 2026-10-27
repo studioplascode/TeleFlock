@@ -76,6 +76,15 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   a branch list it can't be told apart, so it counts as untouched too). Auto sends (and a send
   before the branch list is in) resolve the base on the host the task goes to (`resolveBase`): a
   remembered branch that host lacks falls back to its default.
+- Videos: the same attach button (`image/*,video/*`), paste or drop; chips with name, size, upload
+  progress, retry and remove (`@/core/draftVideos`, memory only). A single-host thread uploads each
+  video as soon as it is attached; Auto uploads to the host each task goes to, when it is sent.
+  `dispatchTask({ videos })` stores `videos: { name, size, path?, upload? }[]` on the entry, which
+  waits in `uploading` ("Uploading the video · 45%") before `queued`; the first prompt then carries
+  one `Attached video "<name>" (<size>): <host path> (read it to see it)` line per video (after the
+  task, inside a template's framing). A failed upload fails the entry (Retry uploads it again); a
+  reload mid-upload fails it ("send the task again"); dismissing it drops unsent uploads on the host.
+  A video-only task is named `video-task`.
 - Images: attach button, paste (clipboard `items` + `files`) or drop into the composer; thumbnails
   with remove and a lightbox; persisted with the draft (`useDraftImages` on the target + repo draft
   key). At most 8 per task and ~9 MB in total (base64 ≤ 12 MiB, under the relay's 16 MiB message

@@ -6,6 +6,12 @@ const COMMANDS: &[&str] = &[
     "request_notification_permission",
     "battery_status",
     "request_ignore_battery_optimizations",
+    "request_microphone_permission",
+    "open_app_settings",
+    "dictation_available",
+    "start_dictation",
+    "stop_dictation",
+    "cancel_dictation",
 ];
 
 fn main() {

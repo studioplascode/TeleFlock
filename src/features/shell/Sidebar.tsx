@@ -120,7 +120,8 @@ function NavItem({ id, icon: Icon, collapsed, active, badge, unread }: { id: Rou
   );
 }
 
-function AgentRow({ agentKey: key, depth }: { agentKey: string; depth: number }) {
+/** `index` is the row's place in its workspace: the only thing that moves it, so the only thing that makes it measure its layout. */
+function AgentRow({ agentKey: key, depth, index }: { agentKey: string; depth: number; index: number }) {
   const a = useAgent(key);
   const route = useRoute();
   const { setSplit } = useUi();
@@ -133,6 +134,7 @@ function AgentRow({ agentKey: key, depth }: { agentKey: string; depth: number })
       <ContextMenuTrigger asChild>
         <motion.button
           layout="position"
+          layoutDependency={index}
           type="button"
           onClick={open}
           aria-current={active ? "page" : undefined}
@@ -268,9 +270,9 @@ function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; n
       </WorkspaceActionsMenu>
       {keys.length > 0 && (
         <ul className="flex flex-col gap-px">
-          {keys.map((k) => (
+          {keys.map((k, i) => (
             <li key={k}>
-              <AgentRow agentKey={k} depth={depth} />
+              <AgentRow agentKey={k} depth={depth} index={i} />
             </li>
           ))}
         </ul>
@@ -401,7 +403,7 @@ function HostHealth({ hostId, name }: { hostId: string; name: string }) {
       <span className="w-7 text-right font-mono tabular">{cpuPct}%</span>
       <span className="ml-1">ram</span>
       <span className="relative h-1 w-8 shrink-0 overflow-hidden rounded-full bg-white/8" aria-hidden>
-        <motion.span className={cn("absolute inset-y-0 left-0 rounded-full", mem >= 90 ? "bg-warn" : "bg-white/45")} animate={{ width: `${mem}%` }} transition={spring.gentle} />
+        <span className={cn("tf-glide-width absolute inset-y-0 left-0 rounded-full", mem >= 90 ? "bg-warn" : "bg-white/45")} style={{ width: `${mem}%` }} />
       </span>
       <span className="w-7 text-right font-mono tabular">{mem}%</span>
     </span>

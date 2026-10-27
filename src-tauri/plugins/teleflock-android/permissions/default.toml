@@ -1,11 +1,17 @@
 "$schema" = "schemas/schema.json"
 
 [default]
-description = "Webview access to haptics, the notification permission flow and battery-optimisation status."
+description = "Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer)."
 permissions = [
   "allow-haptic",
   "allow-notification-permission",
   "allow-request-notification-permission",
   "allow-battery-status",
   "allow-request-ignore-battery-optimizations",
+  "allow-request-microphone-permission",
+  "allow-open-app-settings",
+  "allow-dictation-available",
+  "allow-start-dictation",
+  "allow-stop-dictation",
+  "allow-cancel-dictation",
 ]

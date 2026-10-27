@@ -33,6 +33,34 @@ pub enum TransportError {
     /// The check-mode approval was not completed in time.
     #[error("Tailscale SSH approval not completed within {mins} min")]
     AuthTimeout { mins: u64 },
+    /// Password sign-in: the host refused the password (or the user name is wrong).
+    #[error("password sign-in as {user} failed: the host rejected the password")]
+    PasswordRejected { user: String },
+    /// Key sign-in: the host does not accept this key for the user.
+    #[error("key sign-in as {user} failed: the host does not accept key {fingerprint}")]
+    KeyRejected { user: String, fingerprint: String },
+    /// The host does not offer the configured sign-in method (`password` / `key`) at all.
+    #[error("{method} sign-in failed: the host does not allow it (it offers: {offered})")]
+    AuthMethodNotAllowed { method: &'static str, offered: String },
+    /// The configured method went through, but the host asks for more (a second method, or a
+    /// keyboard-interactive prompt other than the password).
+    #[error("{method} sign-in as {user} failed: the host also asks for {needs}")]
+    AuthIncomplete { method: &'static str, user: String, needs: String },
+    /// The host ended a password / key sign-in by closing the connection.
+    #[error("{method} sign-in as {user} failed: the host closed the connection{}", banner.as_deref().map(|b| format!(": {b}")).unwrap_or_default())]
+    SignInClosed { method: &'static str, user: String, banner: Option<String> },
+    /// The configured method's secret is not saved (`what`: `password`, `private key`).
+    #[error("{method} sign-in failed: no {what} is saved for this host")]
+    CredentialMissing { method: &'static str, what: &'static str },
+    /// The private key is encrypted and no passphrase is saved.
+    #[error("key sign-in failed: {key} is encrypted and no passphrase is saved")]
+    KeyPassphraseNeeded { key: String },
+    /// The saved passphrase does not decrypt the private key.
+    #[error("key sign-in failed: wrong passphrase for {key}")]
+    KeyPassphraseWrong { key: String },
+    /// The key file is missing or unreadable, or the text is not a supported private key.
+    #[error("key sign-in failed: {key}: {detail}")]
+    KeyUnreadable { key: String, detail: String },
     /// The host refused a `direct-tcpip` forward (policy or `TS_SSH_DISABLE_FORWARDING`).
     #[error("port forwarding to {target} was refused by the host")]
     ForwardDenied { target: String },
@@ -75,6 +103,15 @@ impl TransportError {
             Self::AuthDenied { .. } => "transport.authDenied",
             Self::NotTailscaleSsh { .. } => "transport.notTailscaleSsh",
             Self::AuthTimeout { .. } => "transport.authTimeout",
+            Self::PasswordRejected { .. } => "transport.passwordRejected",
+            Self::KeyRejected { .. } => "transport.keyRejected",
+            Self::AuthMethodNotAllowed { .. } => "transport.authMethodNotAllowed",
+            Self::AuthIncomplete { .. } => "transport.authIncomplete",
+            Self::SignInClosed { .. } => "transport.signInClosed",
+            Self::CredentialMissing { .. } => "transport.credentialMissing",
+            Self::KeyPassphraseNeeded { .. } => "transport.keyPassphraseNeeded",
+            Self::KeyPassphraseWrong { .. } => "transport.keyPassphraseWrong",
+            Self::KeyUnreadable { .. } => "transport.keyUnreadable",
             Self::ForwardDenied { .. } => "transport.forwardDenied",
             Self::ForwardFailed { .. } => "transport.forwardFailed",
             Self::Ssh(_) => "transport.ssh",
@@ -102,9 +139,31 @@ impl TransportError {
             }
             Self::AuthDenied { .. } => "Check the tailnet SSH policy (ssh rules and users) for this device and user.".into(),
             Self::NotTailscaleSsh { .. } => {
-                "Reached a regular sshd. Enable Tailscale SSH on the host (`tailscale set --ssh`) and connect via its Tailscale IP from another device.".into()
+                "Reached a regular sshd. Enable Tailscale SSH on the host (`tailscale set --ssh`) and connect via its Tailscale IP, or sign in with a key or password under Advanced: authentication.".into()
             }
             Self::AuthTimeout { .. } => "Open the login link and approve the connection, then retry.".into(),
+            Self::PasswordRejected { .. } => {
+                "Check the password and the user name under Advanced: authentication. TeleFlock does not retry a rejected password on its own.".into()
+            }
+            Self::KeyRejected { user, .. } => format!(
+                "Add the public key to ~/.ssh/authorized_keys of {user} on the host (e.g. with `ssh-copy-id`), or choose the key that is already there."
+            ),
+            Self::AuthMethodNotAllowed { method: "password", .. } => {
+                "The host's sshd has password sign-in turned off (`PasswordAuthentication no`). Sign in with a key, or use Tailscale SSH.".into()
+            }
+            Self::AuthMethodNotAllowed { .. } => {
+                "The host's sshd has key sign-in turned off (`PubkeyAuthentication no`). Sign in with a password, or use Tailscale SSH.".into()
+            }
+            Self::AuthIncomplete { .. } => {
+                "TeleFlock signs in with one method. Let this user sign in with it alone (sshd `AuthenticationMethods`), or use Tailscale SSH.".into()
+            }
+            Self::SignInClosed { .. } => {
+                "Check the user name and that the host's sshd lets this user sign in (`AllowUsers`, `DenyUsers`, `MaxAuthTries`).".into()
+            }
+            Self::CredentialMissing { .. } => "Edit the host and enter it under Advanced: authentication.".into(),
+            Self::KeyPassphraseNeeded { .. } => "Enter the key's passphrase under Advanced: authentication.".into(),
+            Self::KeyPassphraseWrong { .. } => "Re-enter the key's passphrase under Advanced: authentication.".into(),
+            Self::KeyUnreadable { .. } => "Use an OpenSSH or PEM private key, e.g. ~/.ssh/id_ed25519 (not the .pub file).".into(),
             Self::ForwardDenied { .. } => {
                 "Allow local port forwarding in the tailnet SSH policy (`allowLocalPortForwarding`) and make sure TS_SSH_DISABLE_FORWARDING is not set.".into()
             }
@@ -116,22 +175,42 @@ impl TransportError {
 
     /// Whether retrying the same operation later can succeed.
     pub fn retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Resolve { .. }
-                | Self::Connect { .. }
-                | Self::Timeout { .. }
-                | Self::AuthTimeout { .. }
-                | Self::Ssh(_)
-                | Self::Io(_)
-                | Self::Closed(_)
-                | Self::ForwardFailed { .. }
-        )
+        match self {
+            // A cold or busy WSL VM fails its start now and then (timeouts, HCS errors); only a
+            // missing WSL or distro is final.
+            Self::Wsl(msg) => !wsl_permanent(msg),
+            _ => matches!(
+                self,
+                Self::Resolve { .. }
+                    | Self::Connect { .. }
+                    | Self::Timeout { .. }
+                    | Self::AuthTimeout { .. }
+                    | Self::Ssh(_)
+                    | Self::Io(_)
+                    | Self::Closed(_)
+                    | Self::ForwardFailed { .. }
+            ),
+        }
     }
 
     pub(crate) fn io(e: std::io::Error) -> Self {
         Self::Io(e.to_string())
     }
+}
+
+/// wsl.exe failures that no retry fixes: WSL not installed or not startable, no such distro.
+fn wsl_permanent(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    [
+        "could not be started",
+        "wsl_e_distro_not_found",
+        "no distribution with the supplied name",
+        "wsl_e_default_distro_not_found",
+        "has no installed distributions",
+        "optional_component_required",
+    ]
+    .iter()
+    .any(|p| m.contains(p))
 }
 
 impl From<TransportError> for ApiError {

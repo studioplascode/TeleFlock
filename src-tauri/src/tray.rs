@@ -1,11 +1,11 @@
 //! Desktop tray icon + taskbar indicators.
 //!
-//! * Tray icon: app icon with an orbiting comet while agents run (a still comet on Linux) and a
-//!   pink count badge when agents need you. Tooltip "3 running · 2 need you". Menu: Answer next
-//!   (n), Open, Quit.
-//! * Windows taskbar: overlay badge (count / running dot), progress bar (indeterminate while
-//!   running, paused-yellow while something needs you) and a flash when a new agent needs you
-//!   while the window is in the background.
+//! * Tray icon: app icon with a comet while agents run (orbiting in Lively motion; still in Calm
+//!   and Reduced, and always on Linux) and a pink count badge when agents need you. Tooltip
+//!   "3 running · 2 need you". Menu: Answer next (n), Open, Quit.
+//! * Windows taskbar: overlay badge (count / running dot), progress bar (while running: the
+//!   indeterminate marquee in Lively, a still full bar otherwise; paused-yellow while something
+//!   needs you) and a flash when a new agent needs you while the window is in the background.
 //! * Closing the window hides it to the tray; Quit exits.
 
 use std::sync::{
@@ -39,7 +39,32 @@ pub struct Tray<R: Runtime> {
     state: Mutex<BadgeState>,
     answer_item: MenuItem<R>,
     animating: AtomicBool,
-    reduced_motion: AtomicBool,
+    /// Settings → Motion → Lively: only then do the comet orbit and the taskbar show a marquee.
+    lively: AtomicBool,
+}
+
+/// The comet orbits (one icon swap every [`FRAME_MS`]) while agents run, in Lively only, and
+/// never on Linux, where every tray frame is a PNG written to disk and re-read by the panel over
+/// D-Bus (StatusNotifierItem).
+fn animates(s: BadgeState, lively: bool) -> bool {
+    lively && s.running > 0 && !cfg!(target_os = "linux")
+}
+
+/// Windows taskbar progress: full and paused (yellow) while something needs you; while agents
+/// run, the indeterminate marquee in Lively and a still full bar otherwise (the shell animates the
+/// marquee for as long as it shows); none when idle.
+#[cfg(any(windows, test))]
+fn taskbar_progress(s: BadgeState, lively: bool) -> (tauri::window::ProgressBarStatus, Option<u64>) {
+    use tauri::window::ProgressBarStatus;
+    if s.needs > 0 {
+        (ProgressBarStatus::Paused, Some(100))
+    } else if s.running > 0 && lively {
+        (ProgressBarStatus::Indeterminate, None)
+    } else if s.running > 0 {
+        (ProgressBarStatus::Normal, Some(100))
+    } else {
+        (ProgressBarStatus::None, None)
+    }
 }
 
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
@@ -91,7 +116,7 @@ impl<R: Runtime> Tray<R> {
             state: Mutex::new(BadgeState::default()),
             answer_item,
             animating: AtomicBool::new(false),
-            reduced_motion: AtomicBool::new(false),
+            lively: AtomicBool::new(false),
         }))
     }
 
@@ -106,9 +131,13 @@ impl<R: Runtime> Tray<R> {
         }
     }
 
-    pub fn set_reduced_motion(self: &Arc<Self>, reduced: bool) {
-        if self.reduced_motion.swap(reduced, Ordering::AcqRel) != reduced {
-            self.refresh(self.current());
+    /// Follows Settings → Motion: Lively animates the tray and the taskbar, Calm and Reduced keep
+    /// them still.
+    pub fn set_lively(self: &Arc<Self>, lively: bool) {
+        if self.lively.swap(lively, Ordering::AcqRel) != lively {
+            let s = self.current();
+            self.taskbar(s, s);
+            self.refresh(s);
         }
     }
 
@@ -129,10 +158,7 @@ impl<R: Runtime> Tray<R> {
 
     /// Static frame, or (re)start the orbit animation while agents run.
     fn refresh(self: &Arc<Self>, s: BadgeState) {
-        // Linux: every tray frame is a PNG written to disk and re-read by the panel over D-Bus
-        // (StatusNotifierItem); 9 fps of that for hours is real load, so the comet stays still.
-        let animate = !cfg!(target_os = "linux") && s.running > 0 && !self.reduced_motion.load(Ordering::Acquire);
-        if !animate {
+        if !animates(s, self.lively.load(Ordering::Acquire)) {
             self.set_frame(s, 0);
             return;
         }
@@ -147,12 +173,11 @@ impl<R: Runtime> Tray<R> {
             loop {
                 tick.tick().await;
                 let s = me.current();
-                if s.running == 0 || me.reduced_motion.load(Ordering::Acquire) {
+                if !animates(s, me.lively.load(Ordering::Acquire)) {
                     me.animating.store(false, Ordering::Release);
                     // A concurrent update may have restarted the need for animation.
                     me.set_frame(s, 0);
-                    let s2 = me.current();
-                    if s2.running > 0 && !me.reduced_motion.load(Ordering::Acquire) && !me.animating.swap(true, Ordering::AcqRel) {
+                    if animates(me.current(), me.lively.load(Ordering::Acquire)) && !me.animating.swap(true, Ordering::AcqRel) {
                         continue;
                     }
                     break;
@@ -165,18 +190,12 @@ impl<R: Runtime> Tray<R> {
 
     #[cfg(windows)]
     fn taskbar(&self, prev: BadgeState, s: BadgeState) {
-        use tauri::{UserAttentionType, window::{ProgressBarState, ProgressBarStatus}};
+        use tauri::{UserAttentionType, window::ProgressBarState};
         let Some(w) = self.app.get_webview_window("main") else { return };
         let overlay = badge::overlay(s.running, s.needs).map(|rgba| Image::new_owned(rgba, badge::SIZE, badge::SIZE));
         let _ = w.set_overlay_icon(overlay);
-        let progress = if s.needs > 0 {
-            ProgressBarState { status: Some(ProgressBarStatus::Paused), progress: Some(100) }
-        } else if s.running > 0 {
-            ProgressBarState { status: Some(ProgressBarStatus::Indeterminate), progress: None }
-        } else {
-            ProgressBarState { status: Some(ProgressBarStatus::None), progress: None }
-        };
-        let _ = w.set_progress_bar(progress);
+        let (status, progress) = taskbar_progress(s, self.lively.load(Ordering::Acquire));
+        let _ = w.set_progress_bar(ProgressBarState { status: Some(status), progress });
         if s.needs > prev.needs && !w.is_focused().unwrap_or(false) {
             let _ = w.request_user_attention(Some(UserAttentionType::Informational));
         }
@@ -184,4 +203,27 @@ impl<R: Runtime> Tray<R> {
 
     #[cfg(not(windows))]
     fn taskbar(&self, _prev: BadgeState, _s: BadgeState) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::window::ProgressBarStatus as P;
+
+    /// Calm (the default) and Reduced keep the tray icon and the taskbar still while agents run;
+    /// Lively animates both. What needs you shows the same either way.
+    #[test]
+    fn only_lively_animates() {
+        let (idle, running, needs) =
+            (BadgeState::default(), BadgeState { needs: 0, running: 2 }, BadgeState { needs: 1, running: 2 });
+        assert!(!animates(running, false));
+        assert_eq!(animates(running, true), !cfg!(target_os = "linux"));
+        assert!(!animates(idle, true));
+        assert!(matches!(taskbar_progress(running, true), (P::Indeterminate, None)));
+        assert!(matches!(taskbar_progress(running, false), (P::Normal, Some(100))));
+        for lively in [false, true] {
+            assert!(matches!(taskbar_progress(needs, lively), (P::Paused, Some(100))));
+            assert!(matches!(taskbar_progress(idle, lively), (P::None, None)));
+        }
+    }
 }

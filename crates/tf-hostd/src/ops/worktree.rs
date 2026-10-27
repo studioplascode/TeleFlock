@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tf_proto::{
-    ApiError, Empty, HostMethod, StartTarget, WorktreeCreateParams, WorktreeCreated, WorktreeEntry, WorktreeList,
-    WorktreeRemoveParams,
+    ApiError, Empty, HostMethod, WorktreeCreateParams, WorktreeCreated, WorktreeEntry, WorktreeList, WorktreeRemoveParams,
 };
 
 use crate::clients::ClientHandle;
@@ -191,7 +190,7 @@ pub async fn create(ctx: &Ctx, p: WorktreeCreateParams) -> Result<WorktreeCreate
     let WorktreeCreated { workspace_id, path: checkout, branch, .. } = created;
     let agent = match &p.agent {
         Some(spec) => {
-            let target = StartTarget::Pane { pane_id: root_pane };
+            let target = crate::ops::agent::LaunchPane::New(root_pane);
             match crate::ops::agent::start_agent(ctx, target, spec, None).await {
                 Ok(started) => Some(started),
                 Err(mut e) => {

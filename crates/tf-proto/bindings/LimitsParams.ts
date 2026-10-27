@@ -2,7 +2,7 @@
 
 export type LimitsParams = { 
 /**
- * Skip hostd's 60 s cache and ask omp again now (omp still serves its own per-account
+ * Skip hostd's 5 min cache and ask omp again now (omp still serves its own per-account
  * cache, so provider usage endpoints are hit at most every ~5 min per account).
  */
 refresh?: boolean, };

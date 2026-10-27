@@ -249,6 +249,21 @@ describe("demo engine", () => {
     expect(termEvents(opened.termId).some((e) => e.k === "closed" && e.reason === "terminal attach taken over")).toBe(true);
   });
 
+  test("terminal: a bracketed paste (uploaded files' paths) reaches the demo shell as its text", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const opened = await r.call<{ termId: string }>("forge", "term.open", { target: { kind: "pane", paneId: "w1:p2" }, cols: 80, rows: 24, mode: "control", takeover: false });
+    r.engine.termInput("forge", opened.termId, "\x1b[200~/home/demo/.teleflock/uploads/2026-10-27/image.png\x1b[201~");
+    const text = r.events
+      .filter((e): e is Extract<AppEvent, { type: "term" }> => e.type === "term" && e.termId === opened.termId)
+      .map((e) => e.ev)
+      .filter((e): e is Extract<TermEvent, { k: "frame" }> => e.k === "frame")
+      .map((f) => atob(f.data))
+      .join("");
+    expect(text).toContain("/home/demo/.teleflock/uploads/2026-10-27/image.png");
+    expect(text).not.toContain("200~");
+  });
+
   test("shells: seeded panes report processes; attaching never creates a pane; Ctrl+C returns to zsh", async () => {
     const r = rig();
     r.clock.advance(2000);
@@ -298,6 +313,24 @@ describe("demo engine", () => {
     await expect(r.call("forge", "worktree.create", { cwd: "/home/demo/code/teleflock", branch: "feat/kanban-board", existing: true, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("already used by worktree") });
     await expect(r.call("forge", "workspace.close", { workspaceId: "w1", group: false })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
     await expect(r.call("forge", "worktree.remove", { workspaceId: "w4", force: false, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("dirty_worktree_requires_force") });
+  });
+
+  test("a Done agent's merged PR: gh.prStatus says MERGED, worktree.remove takes the worktree and its card; foreign repos need trust", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const ws = r.state.hosts.forge?.state.workspaces.find((w) => w.id === "w13");
+    expect(ws?.worktree?.branch).toBe("chore/go-1.25");
+    expect(r.state.agents[agentKey("forge", "gobump")]).toMatchObject({ column: "done", workspaceId: "w13" });
+    const st = await r.call<{ pr?: { number: number; state: string } }>("forge", "gh.prStatus", { cwd: ws?.worktree?.path });
+    expect(st.pr).toMatchObject({ number: 91, state: "MERGED" });
+    await r.call("forge", "worktree.remove", { workspaceId: "w13", force: false, trust: false });
+    r.clock.advance(1000);
+    expect(r.state.agents[agentKey("forge", "gobump")]).toBeUndefined();
+    expect(r.state.hosts.forge?.state.workspaces.some((w) => w.id === "w13")).toBe(false);
+
+    const fork = await r.call<{ workspaceId: string }>("forge", "worktree.create", { cwd: "/home/demo/code/untrusted-fork", branch: "y", existing: false, trust: true });
+    await expect(r.call("forge", "worktree.remove", { workspaceId: fork.workspaceId, force: false, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("dubious ownership") });
+    await r.call("forge", "worktree.remove", { workspaceId: fork.workspaceId, force: false, trust: true });
   });
 
   test("fs, git and gh answer with plausible data", async () => {
@@ -407,5 +440,22 @@ describe("demo engine", () => {
     r.clock.advance(3000);
     expect(r.state.profiles).toHaveLength(1);
     expect(Object.keys(r.state.agents).length).toBeGreaterThan(5);
+  });
+
+  test("SSH hosts with password / key sign-in: secrets are dropped, only their presence is reported", async () => {
+    const r = rig({ empty: true });
+    const host = { id: "lan", name: "lan", kind: "tailscaleSsh", address: "10.0.0.5", user: "me", herdrSession: "default", autoConnect: false };
+    await expect(r.call(null, "hosts.save", { ...host, auth: "password" })).rejects.toMatchObject({ code: "invalid_params" });
+    const saved = await r.call<Record<string, unknown>>(null, "hosts.save", { ...host, auth: "password", secrets: { password: "hunter2" } });
+    expect(saved).not.toHaveProperty("secrets");
+    expect(JSON.stringify(r.events)).not.toContain("hunter2");
+    expect(await r.call(null, "hosts.secretStatus", { hostId: "lan" })).toEqual({ password: true, privateKey: false, passphrase: false });
+    // Editing keeps the password; switching to a key file keeps only the passphrase given with it.
+    await r.call(null, "hosts.save", { ...host, name: "lan 2", auth: "password" });
+    expect(await r.call(null, "hosts.secretStatus", { hostId: "lan" })).toMatchObject({ password: true });
+    await r.call(null, "hosts.save", { ...host, auth: "key", keyPath: "~/.ssh/id_ed25519", secrets: { passphrase: "pp" } });
+    expect(await r.call(null, "hosts.secretStatus", { hostId: "lan" })).toEqual({ password: false, privateKey: false, passphrase: true });
+    await r.call(null, "hosts.remove", { hostId: "lan" });
+    await expect(r.call(null, "hosts.secretStatus", { hostId: "lan" })).rejects.toMatchObject({ code: "not_found" });
   });
 });

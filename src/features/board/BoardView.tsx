@@ -6,7 +6,7 @@ import { BentoStrip, FirstStepsTile, HostsTile, LiveTerminalTile, StatsTile } fr
 import { BoardToolbar, useRepoNames } from "./BoardToolbar";
 import { useBoard } from "./boardStore";
 import { useFirstStepsView } from "./firstSteps";
-import { Kanban, type LaneKeys, applyMoves } from "./Kanban";
+import { Kanban, type LaneKeys, applyMoves, arrangementOf } from "./Kanban";
 import { LANES } from "./lanes";
 import { RepoBoard } from "./RepoBoard";
 import { StaleHosts } from "./StaleHosts";
@@ -101,7 +101,7 @@ export function BoardView() {
         </div>
       )}
       {groupBy === "repo" ? (
-        <RepoBoard repos={shownRepos} filter={{ hostId, q }} selectedKey={selectedKey} />
+        <RepoBoard repos={shownRepos} filter={{ hostId, q }} selectedKey={selectedKey} arrangement={arrangementOf(view)} />
       ) : (
         <Kanban lanes={lanes} selectedKey={selectedKey} />
       )}

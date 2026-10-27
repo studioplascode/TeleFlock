@@ -19,7 +19,11 @@ export interface ProgressRingProps {
   className?: string;
 }
 
-/** Todo progress ring. While running, a comet orbits the ring so you can see the agent working. */
+/**
+ * Todo progress ring. While running, a comet orbits the ring so you can see the agent working. The
+ * arc's glow (`.tf-ring__arc`, a drop-shadow filter) is Lively only: a filtered arc repaints its
+ * whole layer while it moves.
+ */
 export function ProgressRing({ done, total, status = "running", size = 40, stroke = 4, label, ariaLabel, className }: ProgressRingProps) {
   const gid = `tf-ring-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const meta = STATUS[status];
@@ -48,6 +52,7 @@ export function ProgressRing({ done, total, status = "running", size = 40, strok
         </defs>
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgb(255 255 255 / 0.08)" strokeWidth={stroke} />
         <motion.circle
+          className="tf-ring__arc"
           cx={size / 2}
           cy={size / 2}
           r={r}
@@ -59,7 +64,6 @@ export function ProgressRing({ done, total, status = "running", size = 40, strok
           initial={{ strokeDashoffset: c }}
           animate={{ strokeDashoffset: c * (1 - frac) }}
           transition={spring.gentle}
-          style={{ filter: `drop-shadow(0 0 3px rgb(${meta.rgb} / 0.8))` }}
         />
       </svg>
       {text !== null && (

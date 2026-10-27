@@ -102,7 +102,7 @@ export function TemplatePicker({ hostId, draft, onApply, className }: TemplatePi
       {templates.length === 0 ? (
         <p className="text-2xs text-mute-2">No templates yet. Set up the agent below, then save it as a template.</p>
       ) : (
-        <div className="no-scrollbar -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5" role="radiogroup" aria-label="Templates">
+        <div className="no-scrollbar -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5 scroll-fade-x" role="radiogroup" aria-label="Templates">
           {templates.map((t) => {
             const on = active?.id === t.id;
             return (

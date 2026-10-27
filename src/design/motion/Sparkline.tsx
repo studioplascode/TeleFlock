@@ -37,8 +37,9 @@ function smoothPath(pts: readonly [number, number][]): string {
 }
 
 /**
- * Smooth gradient sparkline. The path morphs between updates via CSS `d` transitions
- * (Chromium: WebView2 + Android WebView), so new data glides in.
+ * Smooth gradient sparkline. In Lively, with the window active, the path morphs between updates via
+ * a CSS `d` transition (`.tf-spark-path`, motion.css; Chromium: WebView2 + Android WebView) so new
+ * data glides in; otherwise it jumps (a `d` transition is main-thread SVG animation, 0.6 s per sample).
  */
 export function Sparkline({ values, status = "running", height = 32, fill = true, live = true, className, ...rest }: SparklineProps) {
   const id = `tf-spark-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
@@ -68,9 +69,10 @@ export function Sparkline({ values, status = "running", height = 32, fill = true
             <stop offset="1" stopColor={meta.c2} stopOpacity="0" />
           </linearGradient>
         </defs>
-        {fill && <path style={{ d: `path("${area}")`, transition: "d .6s cubic-bezier(.16,1,.3,1)" }} fill={`url(#${id}-f)`} />}
+        {fill && <path className="tf-spark-path" style={{ d: `path("${area}")` }} fill={`url(#${id}-f)`} />}
         <path
-          style={{ d: `path("${line}")`, transition: "d .6s cubic-bezier(.16,1,.3,1)" }}
+          className="tf-spark-path"
+          style={{ d: `path("${line}")` }}
           fill="none"
           stroke={`url(#${id}-s)`}
           strokeWidth={1.75}

@@ -1,7 +1,7 @@
-import { Bot, Check, ChevronDown, FolderOpen, GitBranchPlus, GitFork, History, Plus, Send, Server } from "lucide-react";
+import { Bot, Check, ChevronDown, FolderGit2, FolderOpen, GitBranchPlus, GitFork, History, Plus, Send, Server } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
-import { navigate, useHostIds, useHosts, useUi } from "@/core";
+import { navigate, useCore, useHostIds, useHosts, useUi } from "@/core";
 import type { ConnPhase, ConnStatus } from "@/core/gen";
 import { cn, formatAge, spring, StatusOrb, useCalmMotion } from "@/design";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
@@ -9,7 +9,9 @@ import { haptic } from "@/features/shell/haptics";
 import { closeSheet, openSheet } from "@/features/shell/sheets";
 import { connSummary, hostsHealth, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ACTIONS } from "@/features/shell/vocab";
+import { useRepoNames } from "./BoardToolbar";
 import { useBoard } from "./boardStore";
+import { repoAccent } from "./RepoTag";
 
 /**
  * A host that is not online, in a few words for one-line strips (Flock, More):
@@ -197,7 +199,8 @@ export function HostChip() {
       aria-label={multi ? `Host filter: ${all ? "all hosts" : name}, ${detail}` : `${name}, ${detail}, open hosts`}
       onClick={() => (multi ? openSheet({ title: "Hosts", description: "Show agents from", content: <HostFilterList /> }) : navigate({ name: "hosts" }))}
       className={cn(
-        "flex min-h-9 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit",
+        // relative: touch-hit's 48 px target must hug the chip, not cover the header beside it
+        "relative flex min-h-9 shrink-0 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit",
         down && (bad ? "shadow-[inset_0_0_0_1px_rgb(255_77_94/0.45)]" : "shadow-[inset_0_0_0_1px_rgb(251_191_36/0.4)]"),
       )}
     >
@@ -209,6 +212,64 @@ export function HostChip() {
       {all ? "All hosts" : name}
       <span className={cn("tabular", !down ? "text-mute" : bad ? "text-[#ff9fb2]" : "text-warn")}>{detail}</span>
       {multi && <ChevronDown className="size-3.5 text-mute" aria-hidden />}
+    </button>
+  );
+}
+
+function RepoFilterList() {
+  const hostFilter = useHosts((s) => s.filter);
+  const repos = useRepoNames(hostFilter);
+  const repo = useBoard((s) => s.repo);
+  // agents per repo in view, joined so the selector stays primitive
+  const counts = useCore((s) => {
+    const n = new Map<string, number>();
+    for (const a of Object.values(s.agents)) if (a.repo && (hostFilter === "all" || a.hostId === hostFilter)) n.set(a.repo, (n.get(a.repo) ?? 0) + 1);
+    return repos.map((r) => n.get(r) ?? 0).join(",");
+  }).split(",");
+  const pick = (r: string | null) => () => {
+    haptic("select");
+    useBoard.getState().setRepo(r);
+    closeSheet();
+  };
+  const check = <Check className="size-5 shrink-0 text-accent-hi" aria-hidden />;
+  return (
+    <div className="flex flex-col gap-1">
+      <SheetRow icon={<FolderGit2 />} label="All repos" hint={`${repos.length} repos`} selected={repo === null} trailing={repo === null ? check : undefined} onClick={pick(null)} />
+      {repos.map((r, i) => (
+        <SheetRow
+          key={r}
+          icon={<FolderGit2 style={{ color: repoAccent(r) }} />}
+          label={r}
+          hint={`${counts[i] ?? 0} agent${counts[i] === "1" ? "" : "s"}`}
+          selected={repo === r}
+          trailing={repo === r ? check : undefined}
+          onClick={pick(r)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Flock header repo filter, the phone twin of the board toolbar's repo select (both drive `useBoard().repo`):
+ * shown once the agents in view span two or more repos (or while one is picked); opens the repo sheet.
+ */
+export function RepoChip() {
+  const hostFilter = useHosts((s) => s.filter);
+  const many = useRepoNames(hostFilter).length > 1;
+  const repo = useBoard((s) => s.repo);
+  if (!many && repo === null) return null;
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      aria-label={`Repo filter: ${repo ?? "all repos"}`}
+      onClick={() => openSheet({ title: "Repos", description: "Show agents from", content: <RepoFilterList /> })}
+      className="relative flex min-h-9 min-w-0 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit"
+    >
+      <FolderGit2 className={cn("size-3.5 shrink-0", repo === null && "text-mute")} style={repo !== null ? { color: repoAccent(repo) } : undefined} aria-hidden />
+      <span className="min-w-0 truncate">{repo ?? "Repos"}</span>
+      <ChevronDown className="size-3.5 shrink-0 text-mute" aria-hidden />
     </button>
   );
 }

@@ -1,0 +1,12 @@
+                                               ▒▒  ██                  █
+                                                   ██       v18.13.1
+
+                         Tip: Say `workflowz` in your message to drive the task with parallel
+                                     subagents in eval — watch it glow as you type
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+ pi > [M] no-model > [T] tf-bridgectl-cap-work > ctx: 7.6K/? [A] >-----------------------------------------------------
+╰─ band-ascii-swcursor draft|
+⇄ teleflock

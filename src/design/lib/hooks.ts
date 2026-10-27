@@ -1,15 +1,27 @@
 import { type RefObject, startTransition, useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react";
 import { MOBILE_MAX_WIDTH } from "../tokens";
 
+/** One MediaQueryList per query: `matchMedia` is a native call worth avoiding on every snapshot read. */
+const queries = new Map<string, MediaQueryList>();
+
+function mediaQuery(query: string): MediaQueryList {
+  let mql = queries.get(query);
+  if (!mql) {
+    mql = window.matchMedia(query);
+    queries.set(query, mql);
+  }
+  return mql;
+}
+
 /** Live `window.matchMedia(query).matches`. */
 export function useMediaQuery(query: string): boolean {
   return useSyncExternalStore(
     (onChange) => {
-      const mql = window.matchMedia(query);
+      const mql = mediaQuery(query);
       mql.addEventListener("change", onChange);
       return () => mql.removeEventListener("change", onChange);
     },
-    () => window.matchMedia(query).matches,
+    () => mediaQuery(query).matches,
     () => false,
   );
 }

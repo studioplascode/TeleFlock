@@ -1,6 +1,7 @@
 //! Hermetic test fixtures: an in-process russh server that behaves like Tailscale SSH
-//! (`none` auth, optional check-mode banner + delayed accept, deny, OpenSSH-like refusal),
-//! runs exec requests with a real `sh -c`, proxies `direct-tcpip`, plus a TCP proxy that
+//! (`none` auth, optional check-mode banner + delayed accept, deny, OpenSSH-like refusal) or
+//! like a regular sshd checking a password (`password` or `keyboard-interactive`) and public
+//! keys, runs exec requests with a real `sh -c`, proxies `direct-tcpip`, plus a TCP proxy that
 //! can freeze or cut connections and a TCP echo server.
 
 #![allow(dead_code)]
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use russh::keys::{PrivateKey, decode_secret_key};
+use russh::keys::{PrivateKey, PublicKey, decode_secret_key};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, ChannelWriteHalf, Disconnect, MethodKind, MethodSet, SshId};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -27,9 +28,22 @@ use tf_transport::{ConnectOptions, HostKeyDecision, HostKeyPolicy, HostKind, Hos
 pub const KEY_A: &str = include_str!("../fixtures/host_key_a");
 pub const KEY_B: &str = include_str!("../fixtures/host_key_b");
 pub const CHECK_URL: &str = "https://login.tailscale.com/a/abc123def";
+/// User keys: an ed25519 key, the same key encrypted with [`PASSPHRASE`], an encrypted PKCS#8
+/// ECDSA key and an RSA PEM (PKCS#1) key.
+pub const USER_KEY: &str = include_str!("../fixtures/user_ed25519");
+pub const USER_KEY_ENCRYPTED: &str = include_str!("../fixtures/user_ed25519_encrypted");
+pub const USER_KEY_PKCS8_ENCRYPTED: &str = include_str!("../fixtures/user_ecdsa_pkcs8_encrypted");
+pub const USER_KEY_RSA: &str = include_str!("../fixtures/user_rsa_pem");
+pub const PASSPHRASE: &str = "correct horse";
 
 pub fn key(pem: &str) -> PrivateKey {
     decode_secret_key(pem, None).expect("fixture key")
+}
+
+/// Public half of an unencrypted fixture key (or of [`USER_KEY_ENCRYPTED`]/
+/// [`USER_KEY_PKCS8_ENCRYPTED`], decrypted with [`PASSPHRASE`]).
+pub fn public_key(pem: &str) -> PublicKey {
+    decode_secret_key(pem, None).or_else(|_| decode_secret_key(pem, Some(PASSPHRASE))).expect("fixture key").public_key().clone()
 }
 
 /// A fresh temp dir (removed on drop).
@@ -59,6 +73,34 @@ pub enum AuthMode {
     Deny,
     /// A regular sshd: `none` rejected with publickey/password offered.
     OpenSsh,
+    /// A regular sshd checking credentials: `none` refused; `publickey` offered when `keys` is
+    /// not empty, the password over `password` (or over `keyboard-interactive` instead when
+    /// `keyboard_interactive`) when set. A failed attempt keeps offering the same methods, like
+    /// OpenSSH.
+    Sshd { password: Option<String>, keys: Vec<PublicKey>, keyboard_interactive: bool },
+}
+
+impl AuthMode {
+    /// Methods a [`AuthMode::Sshd`] offers.
+    fn offered(&self) -> Option<MethodSet> {
+        let AuthMode::Sshd { password, keys, keyboard_interactive } = self else { return None };
+        let mut methods = Vec::new();
+        if !keys.is_empty() {
+            methods.push(MethodKind::PublicKey);
+        }
+        if password.is_some() {
+            methods.push(if *keyboard_interactive { MethodKind::KeyboardInteractive } else { MethodKind::Password });
+        }
+        Some(MethodSet::from(&methods[..]))
+    }
+
+    /// A refusal that keeps offering the same methods (other modes: russh's default).
+    fn reject(&self) -> Auth {
+        match self.offered() {
+            Some(methods) => Auth::Reject { proceed_with_methods: Some(methods), partial_success: false },
+            None => Auth::reject(),
+        }
+    }
 }
 
 struct Shared {
@@ -69,6 +111,9 @@ struct Shared {
     /// HOME for exec'd commands.
     home: PathBuf,
     connections: AtomicUsize,
+    /// Every auth request in order: `none`, `password`, `publickey <fingerprint>`,
+    /// `keyboard-interactive`, `keyboard-interactive answer`.
+    attempts: Arc<Mutex<Vec<String>>>,
 }
 
 pub struct TestServer {
@@ -80,7 +125,7 @@ pub struct TestServer {
 fn config(pem: &str) -> Arc<server::Config> {
     Arc::new(server::Config {
         server_id: SshId::Standard("SSH-2.0-Tailscale".into()),
-        methods: MethodSet::from(&[MethodKind::None, MethodKind::Password, MethodKind::PublicKey][..]),
+        methods: MethodSet::from(&[MethodKind::None, MethodKind::Password, MethodKind::PublicKey, MethodKind::KeyboardInteractive][..]),
         keys: vec![key(pem)],
         auth_rejection_time: Duration::from_millis(5),
         auth_rejection_time_initial: Some(Duration::ZERO),
@@ -98,6 +143,7 @@ impl TestServer {
             sessions: Mutex::new(Vec::new()),
             home,
             connections: AtomicUsize::new(0),
+            attempts: Arc::default(),
         });
         let s = shared.clone();
         let accept = tokio::spawn(async move {
@@ -105,7 +151,12 @@ impl TestServer {
                 let Ok((stream, _)) = listener.accept().await else { return };
                 s.connections.fetch_add(1, Ordering::SeqCst);
                 let cfg = s.config.lock().unwrap().clone();
-                let handler = ServerHandler { auth: s.auth.lock().unwrap().clone(), channels: HashMap::new(), home: s.home.clone() };
+                let handler = ServerHandler {
+                    auth: s.auth.lock().unwrap().clone(),
+                    channels: HashMap::new(),
+                    home: s.home.clone(),
+                    attempts: s.attempts.clone(),
+                };
                 let s2 = s.clone();
                 tokio::spawn(async move {
                     if let Ok(running) = server::run_stream(cfg, stream, handler).await {
@@ -124,6 +175,15 @@ impl TestServer {
 
     pub fn connections(&self) -> usize {
         self.shared.connections.load(Ordering::SeqCst)
+    }
+
+    /// Auth requests seen so far (see `Shared::attempts`).
+    pub fn attempts(&self) -> Vec<String> {
+        self.shared.attempts.lock().unwrap().clone()
+    }
+
+    pub fn clear_attempts(&self) {
+        self.shared.attempts.lock().unwrap().clear();
     }
 
     /// Send SSH_MSG_DISCONNECT on every live session.
@@ -145,6 +205,13 @@ struct ServerHandler {
     auth: AuthMode,
     channels: HashMap<ChannelId, Channel<Msg>>,
     home: PathBuf,
+    attempts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ServerHandler {
+    fn attempt(&self, what: String) {
+        self.attempts.lock().unwrap().push(what);
+    }
 }
 
 impl server::Handler for ServerHandler {
@@ -159,6 +226,7 @@ impl server::Handler for ServerHandler {
     }
 
     async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        self.attempt("none".into());
         match self.auth.clone() {
             AuthMode::Accept => Ok(Auth::Accept),
             AuthMode::Check { delay } => {
@@ -174,7 +242,51 @@ impl server::Handler for ServerHandler {
                 proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password][..])),
                 partial_success: false,
             }),
+            sshd @ AuthMode::Sshd { .. } => Ok(sshd.reject()),
         }
+    }
+
+    async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {
+        self.attempt("password".into());
+        Ok(match &self.auth {
+            AuthMode::Sshd { password: Some(want), keyboard_interactive: false, .. } if want == password => Auth::Accept,
+            other => other.reject(),
+        })
+    }
+
+    async fn auth_publickey(&mut self, _user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+        self.attempt(format!("publickey {}", key.fingerprint(russh::keys::HashAlg::Sha256)));
+        Ok(match &self.auth {
+            AuthMode::Sshd { keys, .. } if keys.iter().any(|k| k.key_data() == key.key_data()) => Auth::Accept,
+            other => other.reject(),
+        })
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        _user: &str,
+        _submethods: &str,
+        response: Option<server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        let AuthMode::Sshd { password: Some(want), keyboard_interactive: true, .. } = self.auth.clone() else {
+            self.attempt("keyboard-interactive".into());
+            return Ok(self.auth.reject());
+        };
+        Ok(match response {
+            // Start: ask for the password like PAM does.
+            None => {
+                self.attempt("keyboard-interactive".into());
+                Auth::Partial {
+                    name: "".into(),
+                    instructions: "".into(),
+                    prompts: vec![("Password: ".into(), false)].into(),
+                }
+            }
+            Some(mut answers) => {
+                self.attempt("keyboard-interactive answer".into());
+                if answers.next().is_some_and(|a| a == want.as_bytes()) { Auth::Accept } else { self.auth.reject() }
+            }
+        })
     }
 
     async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: ChannelOpenHandle, _s: &mut Session) -> Result<(), Self::Error> {
@@ -396,6 +508,8 @@ pub fn profile(addr: SocketAddr) -> HostProfile {
         address: Some(addr.ip().to_string()),
         user: Some("tester".into()),
         port: Some(addr.port()),
+        auth: None,
+        key_path: None,
         distro: None,
         herdr_session: "default".into(),
         color: None,

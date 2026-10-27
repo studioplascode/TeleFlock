@@ -5,6 +5,13 @@
 //! subscribed clients directly from here (ordered with the snapshot under one lock,
 //! coalesced to one flush per 50 ms); board-level changes are announced on a
 //! broadcast channel that each state store consumes.
+//!
+//! Link lifecycle (architecture §3.4): a published `control` room on our relay is joined; a
+//! failed join is retried with backoff (2 s doubling to 60 s) for as long as the room is
+//! published, with join timeouts that grow after each timeout ([`JoinTimeouts::escalated`]) and
+//! a room reset once joins keep timing out ([`RESET_AFTER_TIMEOUTS`]). Only failures retrying
+//! cannot fix show as `error` / `unsupported`; everything else stays `connecting` with the last
+//! failure as `linkError`.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -17,10 +24,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use tf_collab::{
-    Access, EndReason, Guest, GuestEvent, HostEntry, Registry, Relay, RelayConfig, RelayIdentity, Replica, Signal,
+    Access, EndReason, Guest, GuestError, GuestEvent, HostEntry, JoinTimeouts, Registry, RegistryError, Relay,
+    RelayConfig, RelayIdentity, Replica, Signal,
 };
 use tf_proto::host::ServerMsg;
-use tf_proto::model::{Answer, CostInfo, LinkState, Liveness, NeedsYou, PulseKind, SetupIssue, Severity, UsageTotals};
+use tf_proto::model::{
+    Answer, ContextUsage, CostInfo, DiffStat, GoalInfo, LinkState, Liveness, ModelRef, NeedsYou, OmpMode, PulseKind, QueueInfo,
+    SetupIssue, Severity, SubagentSummary, ThinkingLevel, TodoSummary, UsageTotals,
+};
 use tf_proto::session::{HistoryPage, SessionEvent, SessionMeta, SessionSnapshot, TreeInfo, UiRequest};
 use tf_proto::{ApiError, Millis};
 
@@ -32,8 +43,34 @@ use crate::util::{local_day, now_ms};
 pub const GUEST_NAME: &str = "TeleFlock";
 /// One flush of session events per 50 ms (architecture §3.3).
 const FLUSH_EVERY: Duration = Duration::from_millis(50);
+/// At most one `meta` event per session this often; the latest state always goes out, the ones
+/// in between are folded into it.
+const META_EVERY: Duration = Duration::from_millis(500);
+/// Apps from this version (its pre-releases included) keep a session's tree when a `meta` comes
+/// without one, so they get the tree only when it changed; older apps get it in every `meta`.
+const TREE_ON_CHANGE_SINCE: &str = "0.5.1-0";
 const POLL_EVERY: Duration = Duration::from_millis(1500);
-const JOIN_RETRY: Duration = Duration::from_secs(5);
+/// A failed join is retried after 2 s, doubled per consecutive failure up to 60 s (±25 %), for as
+/// long as the room stays published: a slow host is never given up on.
+const JOIN_BACKOFF_BASE: Duration = Duration::from_secs(2);
+const JOIN_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// A failure record outlives its registry row this long, so a host that misses polls while busy
+/// keeps its backoff and its escalated join timeouts.
+const FAILURE_FORGET: Duration = Duration::from_secs(120);
+/// From this many consecutive joins (or reconnects) of one room that timed out waiting for the
+/// host, hostd resets the room before the next try: the relay closes the host's connection, omp
+/// reconnects within ~1 s and the room starts over without any per-guest state. Seen in the
+/// field: a resumed session whose room let every join time out for hours, until a relay restart
+/// (which is the same reset for every room) fixed it at once.
+pub const RESET_AFTER_TIMEOUTS: u32 = 2;
+/// How long an omp process that will share (started with TeleFlock's overlay, or global sharing
+/// on) shows as `connecting` before its first room appears; a slow host needs minutes to start
+/// omp. After that it is `notShared`.
+const ROOM_WAIT: Duration = Duration::from_secs(300);
+/// Our relay drops a silent peer after this long. omp's event loop (which also answers pings)
+/// can block for over a minute while it serializes a large session on a slow machine; a dead
+/// loopback peer closes its socket, so silence never needs a short timeout here.
+const RELAY_IDLE: Duration = Duration::from_secs(180);
 
 /// Board-relevant change announced to the state stores.
 #[derive(Debug, Clone)]
@@ -46,14 +83,15 @@ pub enum OmpUpdate {
     Registry,
 }
 
-/// Snapshot of what the board needs about one omp session.
+/// What the board needs about one omp session. Rebuilt for every agent on each board rebuild
+/// (several a second while agents stream): summaries instead of the session's lists and tree.
 #[derive(Debug, Clone)]
 pub struct OmpView {
     pub session_id: String,
     pub pid: u32,
     pub link: LinkState,
     pub link_error: Option<String>,
-    pub meta: SessionMeta,
+    pub meta: BoardMeta,
     pub live: Liveness,
     pub needs: Option<NeedsYou>,
     pub streaming: bool,
@@ -62,19 +100,71 @@ pub struct OmpView {
     pub turn_active: bool,
 }
 
+/// The session meta facts an agent card shows ([`MetaOverlay::board`]).
+#[derive(Debug, Clone)]
+pub struct BoardMeta {
+    pub session_id: Option<String>,
+    pub session_file: Option<String>,
+    pub title: Option<String>,
+    pub model: Option<ModelRef>,
+    pub thinking: Option<ThinkingLevel>,
+    pub fast: bool,
+    pub mode: OmpMode,
+    pub goal: Option<GoalInfo>,
+    pub context: Option<ContextUsage>,
+    pub cost: Option<CostInfo>,
+    pub queue: QueueInfo,
+    pub started_at: Option<Millis>,
+    pub todos: Option<TodoSummary>,
+    pub subagents: Option<SubagentSummary>,
+    pub diff: Option<DiffStat>,
+}
+
+/// A client subscribed to the session (`session.open`) as one of its agents.
+struct Sub {
+    client: ClientHandle,
+    agent_id: String,
+    /// The app keeps its tree when a `meta` omits it ([`TREE_ON_CHANGE_SINCE`]).
+    tree_on_change: bool,
+}
+
+/// Whether an app of `version` keeps its session tree when a `meta` comes without one.
+fn keeps_tree(version: &str) -> bool {
+    tf_proto::version::cmp_semver(version, TREE_ON_CHANGE_SINCE).is_some_and(|o| o.is_ge())
+}
+
 struct SessionState {
     replica: Replica,
     link: LinkState,
     link_error: Option<String>,
     pending: Vec<SessionEvent>,
     last_flush: Instant,
-    flush_scheduled: bool,
-    subs: Vec<(ClientHandle, String)>,
+    /// When the armed flush timer fires (one at a time, see [`arm_flush`]).
+    flush_at: Option<Instant>,
+    subs: Vec<Sub>,
     last_cost: Option<CostInfo>,
     first_prompt: Option<String>,
     overlay: MetaOverlay,
+    /// The session tree from the bridge (`getTree`), refreshed when the omp leaf moves.
+    tree: Option<TreeInfo>,
     /// Raw omp leaf id the cached (or in-flight) session tree was fetched for.
     tree_for: Option<Option<String>>,
+    /// Bumped whenever `tree` changes; `tree_sent` is the value the last `meta` or reset carried.
+    tree_rev: u64,
+    tree_sent: u64,
+    /// Subscribers are owed a `meta` (replica or overlay change): it goes out, rebuilt from the
+    /// latest state, with the first flush [`META_EVERY`] allows.
+    meta_due: bool,
+    meta_sent_at: Option<Instant>,
+}
+
+impl SessionState {
+    /// When pending events or an owed `meta` are next due (`None`: nothing to send).
+    fn next_flush(&self) -> Option<Instant> {
+        let events = (!self.pending.is_empty()).then(|| self.last_flush + FLUSH_EVERY);
+        let meta = self.meta_due.then(|| self.meta_sent_at.map_or(self.last_flush, |t| t + META_EVERY));
+        events.into_iter().chain(meta).min()
+    }
 }
 
 /// One joined omp collab room.
@@ -83,6 +173,8 @@ pub struct OmpSession {
     pub instance_id: String,
     pub generation: u64,
     pub pid: u32,
+    /// Relay room id (for a room reset when reconnects keep timing out).
+    room_id: String,
     pub guest: Guest,
     st: Mutex<SessionState>,
     closed: AtomicBool,
@@ -100,20 +192,21 @@ impl OmpSession {
     pub fn subscribe(&self, client: &ClientHandle, agent_id: &str, limit: usize) -> SessionSnapshot {
         let mut st = self.lock();
         flush_locked(&mut st);
-        st.subs.retain(|(c, a)| !(c.id() == client.id() && a == agent_id) && !c.is_closed());
+        st.subs.retain(|s| !(s.client.id() == client.id() && s.agent_id == agent_id) && !s.client.is_closed());
         let mut snap = st.replica.snapshot(limit);
         st.overlay.apply(&mut snap.meta, st.link == LinkState::Live);
+        snap.meta.tree = st.tree.clone();
         snap.agent_id = agent_id.to_string();
-        st.subs.push((client.clone(), agent_id.to_string()));
+        st.subs.push(Sub { client: client.clone(), agent_id: agent_id.to_string(), tree_on_change: keeps_tree(&client.info().version) });
         snap
     }
 
     pub fn unsubscribe(&self, client_id: &str, agent_id: &str) {
-        self.lock().subs.retain(|(c, a)| !(c.id() == client_id && a == agent_id));
+        self.lock().subs.retain(|s| !(s.client.id() == client_id && s.agent_id == agent_id));
     }
 
     pub fn unsubscribe_client(&self, client_id: &str) {
-        self.lock().subs.retain(|(c, _)| c.id() != client_id);
+        self.lock().subs.retain(|s| s.client.id() != client_id);
     }
 
     /// Sends an out-of-band event (bridge: btw stream, plan review) to subscribers of
@@ -136,25 +229,14 @@ impl OmpSession {
         self.lock().replica.is_streaming()
     }
 
-    pub fn meta(&self) -> SessionMeta {
-        let st = self.lock();
-        let mut meta = st.replica.meta().clone();
-        st.overlay.apply(&mut meta, st.link == LinkState::Live);
-        meta
-    }
-
-    /// Replaces the bridge overlay; subscribers get a `meta` event when it changed. The cached
-    /// session tree survives (it is refreshed separately through [`Self::set_tree`]).
-    pub fn set_overlay(&self, mut overlay: MetaOverlay) {
+    /// Replaces the bridge overlay; subscribers get a `meta` event when it changed.
+    pub fn set_overlay(self: &Arc<Self>, overlay: MetaOverlay) {
         let mut st = self.lock();
-        if overlay.tree.is_none() {
-            overlay.tree = st.overlay.tree.clone();
-        }
         if st.overlay == overlay {
             return;
         }
         st.overlay = overlay;
-        emit_meta_locked(&mut st);
+        emit_meta(self, &mut st);
     }
 
     /// Claims a tree refresh for the raw omp leaf `leaf`; `false` when the cached or in-flight
@@ -169,17 +251,18 @@ impl OmpSession {
     }
 
     /// Stores a fetched tree (`None` = the fetch failed; the next state change retries).
-    pub fn set_tree(&self, tree: Option<TreeInfo>) {
+    pub fn set_tree(self: &Arc<Self>, tree: Option<TreeInfo>) {
         let mut st = self.lock();
         let Some(tree) = tree else {
             st.tree_for = None;
             return;
         };
-        if st.overlay.tree.as_ref() == Some(&tree) {
+        if st.tree.as_ref() == Some(&tree) {
             return;
         }
-        st.overlay.tree = Some(tree);
-        emit_meta_locked(&mut st);
+        st.tree = Some(tree);
+        st.tree_rev += 1;
+        emit_meta(self, &mut st);
     }
 
     pub fn link(&self) -> (LinkState, Option<String>) {
@@ -208,18 +291,18 @@ impl OmpSession {
 
     /// Lists a prompt sent while omp streams in the queue until it lands (see
     /// [`tf_collab::replica::Replica::expect_queued`]).
-    pub fn expect_queued(&self, text: &str, follow_up: bool) {
+    pub fn expect_queued(self: &Arc<Self>, text: &str, follow_up: bool) {
         let mut st = self.lock();
         if st.replica.expect_queued(text, follow_up, crate::util::now_ms()) {
-            emit_meta_locked(&mut st);
+            emit_meta(self, &mut st);
         }
     }
 
     /// Unlists a queued prompt that was pulled back out of omp's queue.
-    pub fn forget_queued(&self, text: &str) {
+    pub fn forget_queued(self: &Arc<Self>, text: &str) {
         let mut st = self.lock();
         if st.replica.forget_queued(text) {
-            emit_meta_locked(&mut st);
+            emit_meta(self, &mut st);
         }
     }
 
@@ -230,11 +313,7 @@ impl OmpSession {
             pid: self.pid,
             link: st.link,
             link_error: st.link_error.clone(),
-            meta: {
-                let mut meta = st.replica.meta().clone();
-                st.overlay.apply(&mut meta, st.link == LinkState::Live);
-                meta
-            },
+            meta: st.overlay.board(st.replica.meta()),
             live: st.replica.liveness(now),
             needs: st.replica.needs(),
             streaming: st.replica.is_streaming(),
@@ -273,21 +352,21 @@ fn first_prompt_in(events: &[SessionEvent]) -> Option<String> {
 }
 
 /// Bridge-derived session facts layered over the replica's meta (the companion
-/// extension knows model/thinking/mode/queue precisely; collab lags or lacks them).
+/// extension knows model/thinking/mode/queue precisely; collab lags or lacks them). The session
+/// tree, also from the bridge, is kept beside it ([`OmpSession::set_tree`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetaOverlay {
     pub bridge: bool,
-    pub model: Option<tf_proto::model::ModelRef>,
-    pub thinking: Option<tf_proto::model::ThinkingLevel>,
+    pub model: Option<ModelRef>,
+    pub thinking: Option<ThinkingLevel>,
     pub fast: Option<bool>,
-    pub mode: Option<tf_proto::model::OmpMode>,
+    pub mode: Option<OmpMode>,
     pub title: Option<String>,
-    pub context: Option<tf_proto::model::ContextUsage>,
-    pub queue: Option<tf_proto::model::QueueInfo>,
-    pub tree: Option<tf_proto::session::TreeInfo>,
+    pub context: Option<ContextUsage>,
+    pub queue: Option<QueueInfo>,
     /// `Some(goal)` when the bridge reports goal state (authoritative: `Some(None)` = no
     /// active goal, e.g. after drop/complete); `None` = keep the replica's value.
-    pub goal: Option<Option<tf_proto::model::GoalInfo>>,
+    pub goal: Option<Option<GoalInfo>>,
 }
 
 impl MetaOverlay {
@@ -312,82 +391,153 @@ impl MetaOverlay {
             meta.context = Some(v.clone());
         }
         if let Some(v) = &self.queue {
-            // The bridge reads omp's TUI band, which omp does not refresh for collab-guest
-            // steers: keep the prompts we queued that it doesn't list (yet).
-            meta.queue = tf_collab::replica::merge_queue(v, &meta.queue);
-        }
-        if let Some(v) = &self.tree {
-            meta.tree = Some(v.clone());
+            meta.queue = queue_with(v, &meta.queue);
         }
         if let Some(g) = &self.goal {
             meta.goal = g.clone();
         }
     }
+
+    /// The card facts of `meta` with this overlay: what [`Self::apply`] gives, without copying
+    /// the lists the card only summarizes.
+    pub fn board(&self, meta: &SessionMeta) -> BoardMeta {
+        use crate::state::build;
+        BoardMeta {
+            session_id: meta.session_id.clone(),
+            session_file: meta.session_file.clone(),
+            title: self.title.clone().or_else(|| meta.title.clone()),
+            model: self.model.clone().or_else(|| meta.model.clone()),
+            thinking: self.thinking.or(meta.thinking),
+            fast: self.fast.unwrap_or(meta.fast),
+            mode: self.mode.unwrap_or(meta.mode),
+            goal: match &self.goal {
+                Some(g) => g.clone(),
+                None => meta.goal.clone(),
+            },
+            context: self.context.clone().or_else(|| meta.context.clone()),
+            cost: meta.cost.clone(),
+            queue: match &self.queue {
+                Some(v) => queue_with(v, &meta.queue),
+                None => meta.queue.clone(),
+            },
+            started_at: meta.started_at,
+            todos: build::todo_summary(&meta.todos),
+            subagents: build::subagent_summary(&meta.subagents),
+            diff: build::diff_stat(&meta.files),
+        }
+    }
 }
 
-/// Queues a `meta` event with the replica meta plus the overlay and flushes.
-fn emit_meta_locked(st: &mut SessionState) {
-    let mut meta = st.replica.meta().clone();
-    st.overlay.apply(&mut meta, st.link == LinkState::Live);
-    st.pending.push(SessionEvent::Meta { meta });
-    flush_locked(st);
+/// The bridge reads omp's TUI band, which omp does not refresh for collab-guest steers: keep the
+/// prompts we queued that it doesn't list (yet).
+fn queue_with(bridge: &QueueInfo, ours: &QueueInfo) -> QueueInfo {
+    tf_collab::replica::merge_queue(bridge, ours)
 }
 
-/// Sends pending events to the subscribers, merging appends to the same row.
+/// Owes subscribers a `meta` event ([`META_EVERY`]).
+fn emit_meta(session: &Arc<OmpSession>, st: &mut SessionState) {
+    st.meta_due = true;
+    schedule_flush(session, st);
+}
+
+/// Sends pending events to the subscribers, merging appends to the same row, then the owed `meta`
+/// when [`META_EVERY`] allows (else it stays owed: [`schedule_flush`] times it).
 fn flush_locked(st: &mut SessionState) {
     st.last_flush = Instant::now();
-    if st.pending.is_empty() {
+    st.subs.retain(|s| !s.client.is_closed());
+    let (mut events, meta_changed) = coalesce(std::mem::take(&mut st.pending));
+    st.meta_due |= meta_changed;
+    if st.subs.is_empty() {
+        // Nobody listens: a `session.open` starts from a fresh snapshot.
+        st.meta_due = false;
         return;
     }
     let live = st.link == LinkState::Live;
-    let mut events = coalesce(std::mem::take(&mut st.pending));
+    let mut ended = false;
     for ev in &mut events {
         match ev {
-            SessionEvent::Meta { meta } => st.overlay.apply(meta, live),
-            SessionEvent::Reset { snapshot } => st.overlay.apply(&mut snapshot.meta, live),
+            SessionEvent::Reset { snapshot } => {
+                st.overlay.apply(&mut snapshot.meta, live);
+                snapshot.meta.tree = st.tree.clone();
+                st.tree_sent = st.tree_rev;
+            }
+            SessionEvent::Ended { .. } => ended = true,
             _ => {}
         }
     }
-    st.subs.retain(|(c, _)| !c.is_closed());
     for ev in events {
-        for (client, agent_id) in &st.subs {
+        for sub in &st.subs {
             let ev = match &ev {
                 SessionEvent::Reset { snapshot } => {
                     let mut s = snapshot.clone();
-                    s.agent_id = agent_id.clone();
+                    s.agent_id = sub.agent_id.clone();
                     SessionEvent::Reset { snapshot: s }
                 }
                 other => other.clone(),
             };
-            client.send(ServerMsg::Session { agent_id: agent_id.clone(), ev });
+            sub.client.send(ServerMsg::Session { agent_id: sub.agent_id.clone(), ev });
         }
+    }
+    if ended {
+        st.meta_due = false;
+    }
+    if !st.meta_due || st.meta_sent_at.is_some_and(|t| t.elapsed() < META_EVERY) {
+        return;
+    }
+    st.meta_due = false;
+    st.meta_sent_at = Some(Instant::now());
+    let mut meta = st.replica.meta().clone();
+    st.overlay.apply(&mut meta, live);
+    // Apps that keep their tree get it only when it changed; older ones in every meta.
+    let tree_changed = st.tree_rev != st.tree_sent;
+    st.tree_sent = st.tree_rev;
+    let with_tree = st.tree.as_ref().filter(|_| tree_changed || st.subs.iter().any(|s| !s.tree_on_change)).map(|tree| {
+        let mut full = meta.clone();
+        full.tree = Some(tree.clone());
+        full
+    });
+    for sub in &st.subs {
+        let meta = match &with_tree {
+            Some(full) if tree_changed || !sub.tree_on_change => full.clone(),
+            _ => meta.clone(),
+        };
+        sub.client.send(ServerMsg::Session { agent_id: sub.agent_id.clone(), ev: SessionEvent::Meta { meta } });
     }
 }
 
 /// Merges `append`s into an earlier `append` of the same row and field when nothing in
-/// between touched that row.
-pub fn coalesce(events: Vec<SessionEvent>) -> Vec<SessionEvent> {
+/// between touched that row, and folds the `meta`s: a meta carries the whole state, so the flush
+/// sends one, rebuilt from the latest state, after the other events (`true`: one was there).
+pub fn coalesce(events: Vec<SessionEvent>) -> (Vec<SessionEvent>, bool) {
     let mut out: Vec<SessionEvent> = Vec::with_capacity(events.len());
+    let mut meta = false;
     'next: for ev in events {
-        if let SessionEvent::Append { id, field, text } = &ev {
-            for prev in out.iter_mut().rev() {
-                match prev {
-                    SessionEvent::Append { id: pid, field: pf, text: pt } if pid == id => {
-                        if pf == field {
-                            pt.push_str(text);
-                            continue 'next;
+        match &ev {
+            SessionEvent::Meta { .. } => {
+                meta = true;
+                continue;
+            }
+            SessionEvent::Append { id, field, text } => {
+                for prev in out.iter_mut().rev() {
+                    match prev {
+                        SessionEvent::Append { id: pid, field: pf, text: pt } if pid == id => {
+                            if pf == field {
+                                pt.push_str(text);
+                                continue 'next;
+                            }
                         }
+                        SessionEvent::Upsert { item } if item.id() == id => break,
+                        SessionEvent::Remove { id: rid } if rid == id => break,
+                        SessionEvent::Reset { .. } | SessionEvent::Ended { .. } => break,
+                        _ => {}
                     }
-                    SessionEvent::Upsert { item } if item.id() == id => break,
-                    SessionEvent::Remove { id: rid } if rid == id => break,
-                    SessionEvent::Reset { .. } | SessionEvent::Ended { .. } => break,
-                    _ => {}
                 }
             }
+            _ => {}
         }
         out.push(ev);
     }
-    out
+    (out, meta)
 }
 
 /// Port of a loopback relay URL (`ws://127.0.0.1:47466/...`); `None` for remote relays.
@@ -445,15 +595,22 @@ pub fn relay_issue(port: u16, listening: bool, down: Option<&RelayDown>) -> Opti
 /// Proves that the relay a room lives on is the one this process started (fresh nonce, HMAC
 /// answered on `/healthz`) and returns the `ws://` origin the guest must connect to. `own` is our
 /// relay's identity and bound address; `None` when it is not running (another process may hold
-/// the port).
-async fn verify_room_relay(own: Option<(RelayIdentity, SocketAddr)>, port: u16, ws_url: &str) -> Result<String, String> {
+/// the port). Only a foreign answer is final: no answer in time (a starved host) and a relay
+/// that is still binding are retried.
+async fn verify_room_relay(own: Option<(RelayIdentity, SocketAddr)>, port: u16, ws_url: &str) -> Result<String, JoinError> {
     let (identity, addr) = own.ok_or_else(|| {
-        format!("the TeleFlock relay is not running on 127.0.0.1:{port}; not joining a room on a relay tf-hostd does not own")
+        JoinError::new(
+            FailKind::Transient,
+            format!("the TeleFlock relay is not running on 127.0.0.1:{port}; not joining a room on a relay tf-hostd does not own"),
+        )
     })?;
     // omp connects where its URL points: `[::1]` is a different socket from our IPv4 listener.
     let host = ws_url.split_once("://").map_or(ws_url, |(_, r)| r);
     let target = if host.starts_with("[::1]") { SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port) } else { addr };
-    identity.verify(target).await.map_err(|e| format!("refusing to join: the relay on {target} failed the identity check ({e})"))?;
+    identity.verify(target).await.map_err(|e| {
+        let kind = if matches!(e, tf_collab::IdentityError::Foreign(_)) { FailKind::Hard } else { FailKind::Transient };
+        JoinError::new(kind, format!("refusing to join: the relay on {target} failed the identity check ({e})"))
+    })?;
     Ok(format!("ws://{target}"))
 }
 
@@ -463,8 +620,131 @@ struct Registryish {
     /// (instance, generation) shared on another relay.
     foreign: HashSet<(String, u64)>,
     joining: HashSet<String>,
-    /// instance → (error, retry after).
-    failures: HashMap<String, (String, Instant)>,
+    /// instance → the failed joins of its current room.
+    failures: HashMap<String, JoinFailure>,
+    /// omp pids that will share a room but have none yet → (first seen, last seen).
+    awaiting: HashMap<u32, (Instant, Instant)>,
+}
+
+/// What a failed join means for the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailKind {
+    /// Retrying can work: the host is starting, busy, rotating or reconnecting.
+    Transient,
+    /// The host kept the room open but sent no welcome / snapshot in time: the next join waits
+    /// longer, and repeated timeouts reset the room.
+    TimedOut,
+    /// Retrying alone cannot fix it (another relay answers on our port, a link we cannot use).
+    Hard,
+    /// The host speaks another collab protocol.
+    Unsupported,
+}
+
+#[derive(Debug)]
+struct JoinError {
+    msg: String,
+    kind: FailKind,
+    /// Room the join targeted (for a reset).
+    room_id: Option<String>,
+}
+
+impl JoinError {
+    fn new(kind: FailKind, msg: impl Into<String>) -> Self {
+        Self { msg: msg.into(), kind, room_id: None }
+    }
+
+    fn registry(e: RegistryError) -> Self {
+        let kind = if matches!(e, RegistryError::BadLink(_)) { FailKind::Hard } else { FailKind::Transient };
+        Self::new(kind, e.to_string())
+    }
+
+    fn guest(e: GuestError, room_id: &str) -> Self {
+        let kind = match &e {
+            GuestError::Timeout(_) => FailKind::TimedOut,
+            GuestError::Rejected(m) if m.contains("protocol mismatch") => FailKind::Unsupported,
+            _ => FailKind::Transient,
+        };
+        Self { msg: e.to_string(), kind, room_id: Some(room_id.to_string()) }
+    }
+}
+
+/// Consecutive failed joins of one room (instance + generation).
+#[derive(Debug, Clone)]
+struct JoinFailure {
+    generation: u64,
+    error: String,
+    kind: FailKind,
+    /// Failed joins in a row.
+    streak: u32,
+    /// Of those, joins that timed out waiting for the host.
+    timeouts: u32,
+    /// Room of the last attempt (what a reset closes).
+    room: Option<String>,
+    retry_at: Instant,
+    /// Last poll that listed the room.
+    seen_at: Instant,
+}
+
+impl JoinFailure {
+    fn new(generation: u64, now: Instant) -> Self {
+        Self { generation, error: String::new(), kind: FailKind::Transient, streak: 0, timeouts: 0, room: None, retry_at: now, seen_at: now }
+    }
+
+    /// Counts a failed join and schedules the next one. True when the room should be reset first.
+    fn record(&mut self, e: &JoinError, now: Instant) -> bool {
+        self.streak += 1;
+        if e.kind == FailKind::TimedOut {
+            self.timeouts += 1;
+        }
+        self.error = e.msg.clone();
+        self.kind = e.kind;
+        if e.room_id.is_some() {
+            self.room = e.room_id.clone();
+        }
+        self.retry_at = now + join_backoff(self.streak);
+        self.seen_at = now;
+        e.kind == FailKind::TimedOut && self.timeouts >= RESET_AFTER_TIMEOUTS
+    }
+
+    fn link(&self) -> (LinkState, Option<String>) {
+        match self.kind {
+            FailKind::Unsupported => (LinkState::Unsupported, Some(self.error.clone())),
+            FailKind::Hard => (LinkState::Error, Some(self.error.clone())),
+            FailKind::Transient | FailKind::TimedOut => {
+                (LinkState::Connecting, Some(format!("join attempt {} failed: {}; retrying", self.streak, self.error)))
+            }
+        }
+    }
+}
+
+/// Delay before the next join after `streak` consecutive failures: 2, 4, 8 … 60 s, ±25 %.
+fn join_backoff(streak: u32) -> Duration {
+    let base = JOIN_BACKOFF_BASE.saturating_mul(1u32 << streak.saturating_sub(1).min(5)).min(JOIN_BACKOFF_MAX);
+    let mut r = [0u8; 2];
+    let _ = getrandom::fill(&mut r);
+    base.mul_f64(0.75 + f64::from(u16::from_le_bytes(r)) / f64::from(u16::MAX) * 0.5)
+}
+
+/// Whether omp process `pid` was started with TeleFlock's settings overlay (`--config
+/// …/omp-overlay.yml`, which turns collab sharing on). Linux only (`/proc`); false elsewhere.
+fn launched_with_overlay(pid: u32) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|raw| overlay_in_cmdline(&raw))
+}
+
+/// `--config <…/omp-overlay.yml>` / `--config=<…>` among NUL-separated argv.
+fn overlay_in_cmdline(raw: &[u8]) -> bool {
+    let mut args = raw.split(|b| *b == 0);
+    while let Some(arg) = args.next() {
+        let path = match arg.strip_prefix(b"--config=") {
+            Some(p) => p,
+            None if arg == b"--config" => args.next().unwrap_or_default(),
+            None => continue,
+        };
+        if path.ends_with(b"omp-overlay.yml") {
+            return true;
+        }
+    }
+    false
 }
 
 struct Inner {
@@ -519,7 +799,9 @@ impl OmpHandle {
             return true;
         }
         let port = self.inner.relay_port;
-        match Relay::start(RelayConfig::new(port)).await {
+        let mut cfg = RelayConfig::new(port);
+        cfg.idle_timeout = RELAY_IDLE;
+        match Relay::start(cfg).await {
             Ok(r) => {
                 info!(port = r.port(), "collab relay listening");
                 *slot = Some(r);
@@ -577,6 +859,31 @@ impl OmpHandle {
         self.inner.repoll.notify_one();
     }
 
+    /// `agent.connect` on a session that is still connecting: retry its join (or its guest's
+    /// reconnect) now instead of after the backoff, and reset the room first when its joins
+    /// have been timing out.
+    pub async fn retry_now(&self, session_id: &str) {
+        let mut reset = None;
+        if let Some(s) = self.session(session_id) {
+            if s.link().0 != LinkState::Live {
+                let _ = s.guest.resync();
+            }
+        } else {
+            let mut reg = self.inner.reg.lock().unwrap_or_else(|p| p.into_inner());
+            let row = reg.rows.iter().filter(|r| r.session_id.as_deref() == Some(session_id)).max_by_key(|r| r.generation).cloned();
+            if let Some(f) = row.and_then(|r| reg.failures.get_mut(&r.instance_id)) {
+                f.retry_at = Instant::now();
+                if f.timeouts > 0 {
+                    reset = f.room.clone();
+                }
+            }
+        }
+        if let Some(room) = reset {
+            reset_room(&self.inner, &room).await;
+        }
+        self.repoll();
+    }
+
     pub fn session(&self, session_id: &str) -> Option<Arc<OmpSession>> {
         self.inner.sessions.read().unwrap_or_else(|p| p.into_inner()).get(session_id).cloned()
     }
@@ -600,13 +907,28 @@ impl OmpHandle {
         reg.rows.iter().filter(|r| r.pid == pid).max_by_key(|r| r.generation).cloned()
     }
 
-    /// Link state of an omp session TeleFlock has not (or not yet) joined.
-    pub fn link_without_guest(&self, session_id: Option<&str>) -> (LinkState, Option<String>) {
-        let Some(sid) = session_id else { return (LinkState::NotShared, None) };
-        let reg = self.inner.reg.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(row) = reg.rows.iter().filter(|r| r.session_id.as_deref() == Some(sid)).max_by_key(|r| r.generation)
-        else {
-            return (LinkState::NotShared, None);
+    /// Link state of an omp session TeleFlock has not (or not yet) joined. `pids` are the
+    /// pane's foreground processes; `shares_by_default`: omp's global config shares every
+    /// session on our relay.
+    pub fn link_without_guest(&self, session_id: Option<&str>, pids: &[u32], shares_by_default: bool) -> (LinkState, Option<String>) {
+        let mut reg = self.inner.reg.lock().unwrap_or_else(|p| p.into_inner());
+        let row = session_id
+            .and_then(|sid| reg.rows.iter().filter(|r| r.session_id.as_deref() == Some(sid)).max_by_key(|r| r.generation))
+            .cloned();
+        let Some(row) = row else {
+            // No room yet. An omp that will share is still starting (minutes on a slow host).
+            let now = Instant::now();
+            reg.awaiting.retain(|_, (_, last)| now.duration_since(*last) < ROOM_WAIT);
+            let Some(&pid) = pids.iter().find(|p| shares_by_default || launched_with_overlay(**p)) else {
+                return (LinkState::NotShared, None);
+            };
+            let (first, last) = reg.awaiting.entry(pid).or_insert((now, now));
+            *last = now;
+            return if now.duration_since(*first) < ROOM_WAIT {
+                (LinkState::Connecting, Some("omp is starting; waiting for its collab room".into()))
+            } else {
+                (LinkState::NotShared, Some("omp has not opened a collab room on the TeleFlock relay".into()))
+            };
         };
         if reg.foreign.contains(&(row.instance_id.clone(), row.generation)) {
             return (LinkState::NotShared, Some("shared on another relay".into()));
@@ -614,8 +936,8 @@ impl OmpHandle {
         if row.access != "control" {
             return (LinkState::NotShared, Some(format!("room access is `{}`", row.access)));
         }
-        if let Some((err, _)) = reg.failures.get(&row.instance_id) {
-            return (LinkState::Error, Some(err.clone()));
+        if let Some(f) = reg.failures.get(&row.instance_id).filter(|f| f.generation == row.generation && f.streak > 0) {
+            return f.link();
         }
         (LinkState::Connecting, None)
     }
@@ -692,6 +1014,11 @@ async fn poll_once(inner: &Arc<Inner>) {
             .collect();
         let now = Instant::now();
         for row in &rows {
+            if let Some(f) = reg.failures.get_mut(&row.instance_id).filter(|f| f.generation == row.generation) {
+                f.seen_at = now;
+            }
+            // It has a room: a later gap (a busy host missing polls) starts a fresh room wait.
+            reg.awaiting.remove(&row.pid);
             let key = (row.instance_id.clone(), row.generation);
             if !row.relay_connected || row.access != "control" || row.session_id.is_none() {
                 continue;
@@ -699,14 +1026,15 @@ async fn poll_once(inner: &Arc<Inner>) {
             if joined.contains(&key) || reg.foreign.contains(&key) || reg.joining.contains(&row.instance_id) {
                 continue;
             }
-            if reg.failures.get(&row.instance_id).is_some_and(|(_, retry)| *retry > now) {
+            if reg.failures.get(&row.instance_id).is_some_and(|f| f.generation == row.generation && f.retry_at > now) {
                 continue;
             }
             reg.joining.insert(row.instance_id.clone());
             to_join.push(row.clone());
         }
         let live: HashSet<&str> = rows.iter().map(|r| r.instance_id.as_str()).collect();
-        reg.failures.retain(|k, _| live.contains(k.as_str()));
+        // A busy host can miss polls: its failures (backoff, escalated timeouts) outlive the row.
+        reg.failures.retain(|_, f| now.duration_since(f.seen_at) < FAILURE_FORGET);
         reg.foreign.retain(|(i, _)| live.contains(i.as_str()));
         reg.rows = rows;
     }
@@ -716,19 +1044,47 @@ async fn poll_once(inner: &Arc<Inner>) {
     for row in to_join {
         let inner = inner.clone();
         tokio::spawn(async move {
-            let instance = row.instance_id.clone();
-            let res = join(&inner, row).await;
-            let mut reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
-            reg.joining.remove(&instance);
-            if let Err(e) = res {
-                warn!(instance, "join failed: {e}");
-                reg.failures.insert(instance, (e, Instant::now() + JOIN_RETRY));
-            } else {
-                reg.failures.remove(&instance);
+            let (instance, generation) = (row.instance_id.clone(), row.generation);
+            let timeouts = {
+                let reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
+                reg.failures.get(&instance).filter(|f| f.generation == generation).map_or(0, |f| f.timeouts)
+            };
+            let res = join(&inner, row, JoinTimeouts::escalated(timeouts)).await;
+            let mut reset = None;
+            {
+                let mut reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
+                reg.joining.remove(&instance);
+                match res {
+                    Ok(()) => {
+                        reg.failures.remove(&instance);
+                    }
+                    Err(e) => {
+                        let now = Instant::now();
+                        let f = reg.failures.entry(instance.clone()).or_insert_with(|| JoinFailure::new(generation, now));
+                        if f.generation != generation {
+                            *f = JoinFailure::new(generation, now);
+                        }
+                        if f.record(&e, now) {
+                            reset = f.room.clone();
+                        }
+                        let retry_in = f.retry_at.saturating_duration_since(now);
+                        warn!(instance, attempt = f.streak, ?retry_in, "join failed: {}", e.msg);
+                    }
+                }
             }
-            drop(reg);
+            if let Some(room) = reset {
+                reset_room(&inner, &room).await;
+            }
             let _ = inner.updates.send(OmpUpdate::Registry);
         });
+    }
+}
+
+/// Resets a room whose host stopped answering joins ([`Relay::reset_room`]).
+async fn reset_room(inner: &Inner, room_id: &str) {
+    let relay = inner.relay.lock().await;
+    if relay.as_ref().is_some_and(|r| r.reset_room(room_id)) {
+        info!("collab room reset: its host kept the room open but let {RESET_AFTER_TIMEOUTS}+ joins time out");
     }
 }
 
@@ -743,9 +1099,9 @@ fn same_rows(a: &[HostEntry], b: &[HostEntry]) -> bool {
         })
 }
 
-async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
-    let session_id = row.session_id.clone().ok_or("no session id")?;
-    let link = inner.registry.link(&row.instance_id, Access::Control).await.map_err(|e| e.to_string())?;
+async fn join(inner: &Arc<Inner>, row: HostEntry, timeouts: JoinTimeouts) -> Result<(), JoinError> {
+    let session_id = row.session_id.clone().ok_or_else(|| JoinError::new(FailKind::Transient, "no session id"))?;
+    let link = inner.registry.link(&row.instance_id, Access::Control).await.map_err(JoinError::registry)?;
     if loopback_port(&link.link.ws_url) != Some(inner.relay_port) {
         debug!(instance = %row.instance_id, url = %link.link.ws_url, "room is on another relay");
         inner.reg.lock().unwrap_or_else(|p| p.into_inner()).foreign.insert((row.instance_id.clone(), link.generation));
@@ -753,8 +1109,9 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
     }
     let own = inner.relay.lock().await.as_ref().map(|r| (r.identity(), r.local_addr()));
     let relay_url = verify_room_relay(own, inner.relay_port, &link.link.ws_url).await?;
-    let room = link.link.with_relay(&relay_url).map_err(|e| e.to_string())?;
-    let (guest, rx) = Guest::connect(room, GUEST_NAME).await.map_err(|e| e.to_string())?;
+    let room = link.link.with_relay(&relay_url).map_err(|e| JoinError::new(FailKind::Hard, e.to_string()))?;
+    let room_id = room.room_id.clone();
+    let (guest, rx) = Guest::connect_with(room, GUEST_NAME, timeouts).await.map_err(|e| JoinError::guest(e, &room_id))?;
     let mut replica = Replica::new(session_id.clone());
     for (id, slots) in inner.persist.read(|d| d.originals.get(&session_id).cloned()).unwrap_or_default() {
         replica.keep_originals(&id, slots);
@@ -764,6 +1121,7 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
         instance_id: row.instance_id.clone(),
         generation: link.generation,
         pid: row.pid,
+        room_id,
         guest,
         st: Mutex::new(SessionState {
             replica,
@@ -771,12 +1129,17 @@ async fn join(inner: &Arc<Inner>, row: HostEntry) -> Result<(), String> {
             link_error: None,
             pending: Vec::new(),
             last_flush: Instant::now(),
-            flush_scheduled: false,
+            flush_at: None,
             subs: Vec::new(),
             last_cost: None,
             first_prompt: None,
             overlay: MetaOverlay::default(),
+            tree: None,
             tree_for: None,
+            tree_rev: 0,
+            tree_sent: 0,
+            meta_due: false,
+            meta_sent_at: None,
         }),
         closed: AtomicBool::new(false),
         journal_kick: Notify::new(),
@@ -803,30 +1166,40 @@ fn persist_originals(inner: &Inner, session_id: &str, signals: &[Signal]) {
 
 async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::mpsc::UnboundedReceiver<GuestEvent>) {
     let sid = session.session_id.clone();
+    // Reconnects in a row whose welcome/snapshot timed out (a resync resets it).
+    let mut timeouts = 0u32;
     while let Some(ev) = rx.recv().await {
         let Some(inner) = weak.upgrade() else { return };
         let now = now_ms();
-        let mut ended: Option<String> = None;
+        // Why the guest ended, and how the rejoin is paced (`None`: rotation or close, at once).
+        let mut ended: Option<(String, Option<FailKind>)> = None;
+        let mut reset = false;
         let (update, usage) = {
             let mut st = session.lock();
             match &ev {
                 GuestEvent::Snapshot(_) => {
                     st.link = LinkState::Live;
                     st.link_error = None;
+                    timeouts = 0;
                 }
-                GuestEvent::Reconnecting { reason, .. } => {
+                GuestEvent::Reconnecting { reason, timed_out, .. } => {
                     st.link = LinkState::Connecting;
                     st.link_error = (!reason.is_empty()).then(|| reason.clone());
+                    if *timed_out {
+                        timeouts += 1;
+                        reset = timeouts >= RESET_AFTER_TIMEOUTS;
+                    }
                 }
                 GuestEvent::Ended(reason) => {
-                    let (state, msg) = match reason {
-                        EndReason::Rejected(m) => (LinkState::Unsupported, m.clone()),
-                        EndReason::Fatal(m) => (LinkState::Error, m.clone()),
-                        other => (LinkState::Connecting, format!("{other:?}")),
+                    let (state, msg, pace) = match reason {
+                        EndReason::Rejected(m) => (LinkState::Unsupported, m.clone(), Some(FailKind::Unsupported)),
+                        EndReason::Fatal(m) => (LinkState::Error, m.clone(), Some(FailKind::Transient)),
+                        EndReason::RoomGone => (LinkState::Connecting, "collab room closed".to_string(), Some(FailKind::Transient)),
+                        other => (LinkState::Connecting, format!("{other:?}"), None),
                     };
                     st.link = state;
                     st.link_error = Some(msg.clone());
-                    ended = Some(msg);
+                    ended = Some((msg, pace));
                 }
                 GuestEvent::Frame(_) => {}
             }
@@ -862,7 +1235,10 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
         {
             let _ = inner.updates.send(OmpUpdate::Changed { session_id: sid.clone() });
         }
-        if let Some(reason) = ended {
+        if reset {
+            reset_room(&inner, &session.room_id).await;
+        }
+        if let Some((reason, pace)) = ended {
             info!(session = %sid, "guest ended: {reason}");
             {
                 let mut map = inner.sessions.write().unwrap_or_else(|p| p.into_inner());
@@ -871,6 +1247,17 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
                 }
             }
             session.end(&reason);
+            if let Some(kind) = pace {
+                // Rejoin through the registry after a backoff: a room that ends right after every
+                // join must not spin.
+                let now = Instant::now();
+                let mut reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
+                let f = reg.failures.entry(session.instance_id.clone()).or_insert_with(|| JoinFailure::new(session.generation, now));
+                if f.generation != session.generation {
+                    *f = JoinFailure::new(session.generation, now);
+                }
+                f.record(&JoinError { msg: reason, kind, room_id: Some(session.room_id.clone()) }, now);
+            }
             let _ = inner.updates.send(OmpUpdate::Registry);
             inner.repoll.notify_one();
             return;
@@ -948,7 +1335,7 @@ fn changed_usage(st: &mut SessionState) -> Option<CostInfo> {
 fn observe_usage(inner: &Inner, session_id: &str, cost: Option<CostInfo>, now: Millis) {
     if let Some(cost) = cost {
         let day = local_day(now);
-        inner.persist.update(|d| d.usage.observe(session_id, &cost, &day));
+        inner.persist.update_usage(|u| u.observe(session_id, &cost, &day));
     }
 }
 
@@ -1040,26 +1427,34 @@ async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
     }
 }
 
+/// Flushes now when the cadences allow (events every [`FLUSH_EVERY`], `meta` every
+/// [`META_EVERY`]), else arms the flush timer for when they do.
 fn schedule_flush(session: &Arc<OmpSession>, st: &mut SessionState) {
-    if st.pending.is_empty() {
-        return;
-    }
-    let since = st.last_flush.elapsed();
-    if since >= FLUSH_EVERY {
+    let Some(mut at) = st.next_flush() else { return };
+    if at <= Instant::now() {
         flush_locked(st);
+        // A `meta` owed but not allowed yet waits for its turn.
+        let Some(next) = st.next_flush() else { return };
+        at = next;
+    }
+    arm_flush(session, st, at);
+}
+
+/// One flush timer per session: a later one is not armed while an earlier one waits (its flush
+/// re-arms for whatever is still due).
+fn arm_flush(session: &Arc<OmpSession>, st: &mut SessionState, at: Instant) {
+    if st.flush_at.is_some_and(|t| t <= at) {
         return;
     }
-    if st.flush_scheduled {
-        return;
-    }
-    st.flush_scheduled = true;
+    st.flush_at = Some(at);
     let s = session.clone();
-    let wait = FLUSH_EVERY - since;
     tokio::spawn(async move {
-        tokio::time::sleep(wait).await;
+        tokio::time::sleep_until(at.into()).await;
         let mut st = s.lock();
-        st.flush_scheduled = false;
-        flush_locked(&mut st);
+        if st.flush_at == Some(at) {
+            st.flush_at = None;
+        }
+        schedule_flush(&s, &mut st);
     });
 }
 
@@ -1085,7 +1480,7 @@ mod tests {
             text: "x".into(),
             source: None,
         });
-        let out = coalesce(vec![
+        let (out, meta) = coalesce(vec![
             app("a", "he"),
             app("b", "1"),
             app("a", "llo"),
@@ -1096,6 +1491,7 @@ mod tests {
         assert_eq!(out.len(), 3, "{out:?}");
         assert_eq!(out[0], app("a", "hello!"));
         assert_eq!(out[1], app("b", "12"));
+        assert!(!meta);
     }
 
     #[test]
@@ -1107,8 +1503,118 @@ mod tests {
             text: "x".into(),
             source: None,
         });
-        let out = coalesce(vec![app("a", "1"), SessionEvent::Upsert { item }, app("a", "2")]);
+        let (out, _) = coalesce(vec![app("a", "1"), SessionEvent::Upsert { item }, app("a", "2")]);
         assert_eq!(out.len(), 3);
+    }
+
+    fn meta_ev() -> SessionEvent {
+        SessionEvent::Meta { meta: Replica::new("s").meta().clone() }
+    }
+
+    fn state_with(subs: &[(&ClientHandle, bool)]) -> SessionState {
+        SessionState {
+            replica: Replica::new("s"),
+            link: LinkState::Live,
+            link_error: None,
+            pending: Vec::new(),
+            last_flush: Instant::now(),
+            flush_at: None,
+            subs: subs.iter().map(|(c, keeps)| Sub { client: (*c).clone(), agent_id: "a".into(), tree_on_change: *keeps }).collect(),
+            last_cost: None,
+            first_prompt: None,
+            overlay: MetaOverlay::default(),
+            tree: None,
+            tree_for: None,
+            tree_rev: 0,
+            tree_sent: 0,
+            meta_due: false,
+            meta_sent_at: None,
+        }
+    }
+
+    fn client(id: &str, version: &str) -> ClientHandle {
+        let info = tf_proto::host::ClientInfo { app: "teleflock-desktop".into(), version: version.into(), platform: "linux".into(), device: "d".into() };
+        ClientHandle::new(id.into(), info)
+    }
+
+    /// Session events queued for `c`: (kind, whether its meta carried a tree).
+    fn sent(c: &ClientHandle) -> Vec<(String, bool)> {
+        let mut lines = Vec::new();
+        c.take_batch(&mut lines);
+        lines
+            .iter()
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).unwrap();
+                let ev = &v["ev"];
+                let meta = if ev["k"] == "reset" { &ev["snapshot"]["meta"] } else { &ev["meta"] };
+                (ev["k"].as_str().unwrap_or_default().to_string(), meta.get("tree").is_some())
+            })
+            .collect()
+    }
+
+    fn tree(leaf: &str) -> TreeInfo {
+        TreeInfo { nodes: Vec::new(), leaf_id: Some(leaf.into()) }
+    }
+
+    #[test]
+    fn apps_from_0_5_1_keep_their_tree() {
+        for (v, keeps) in [("0.5.0", false), ("0.0.0", false), ("dev", false), ("0.5.1-rc.1", true), ("0.5.1", true), ("0.6.0", true)] {
+            assert_eq!(keeps_tree(v), keeps, "{v}");
+        }
+    }
+
+    #[test]
+    fn metas_fold_into_the_latest_and_go_out_at_most_twice_a_second() {
+        let (old, new) = (client("old", "0.5.0"), client("new", "0.5.1"));
+        let mut st = state_with(&[(&old, false), (&new, true)]);
+        st.tree = Some(tree("l1"));
+        st.tree_rev = 1;
+        let upsert = SessionEvent::Upsert {
+            item: TranscriptItem::Notice(NoticeItem { id: "n".into(), at: 0, level: NoticeLevel::Info, text: "x".into(), source: None }),
+        };
+
+        // Three metas in one flush: one meta, after the other events; the new tree for everyone.
+        st.pending = vec![meta_ev(), upsert.clone(), meta_ev(), meta_ev()];
+        flush_locked(&mut st);
+        let both = vec![("upsert".to_string(), false), ("meta".to_string(), true)];
+        assert_eq!((sent(&old), sent(&new)), (both.clone(), both));
+
+        // Another one right away is owed, timed for META_EVERY after the last.
+        st.pending = vec![upsert.clone(), meta_ev()];
+        flush_locked(&mut st);
+        assert_eq!(sent(&old), vec![("upsert".to_string(), false)]);
+        assert!(st.meta_due);
+        let sent_at = st.meta_sent_at.unwrap();
+        assert_eq!(st.next_flush(), Some(sent_at + META_EVERY));
+
+        // Its turn: the tree did not change, so only the app that would drop it gets it again.
+        st.meta_sent_at = sent_at.checked_sub(META_EVERY);
+        flush_locked(&mut st);
+        assert_eq!(sent(&old), vec![("meta".to_string(), true)]);
+        assert_eq!(sent(&new), vec![("upsert".to_string(), false), ("meta".to_string(), false)]);
+        assert!(!st.meta_due);
+        assert_eq!(st.next_flush(), None);
+
+        // A new tree reaches everyone; a reset carries it too, so the meta after it needn't.
+        st.tree = Some(tree("l2"));
+        st.tree_rev += 1;
+        st.meta_due = true;
+        st.meta_sent_at = None;
+        flush_locked(&mut st);
+        assert_eq!((sent(&old), sent(&new)), (vec![("meta".to_string(), true)], vec![("meta".to_string(), true)]));
+        st.tree = Some(tree("l3"));
+        st.tree_rev += 1;
+        st.pending = vec![SessionEvent::Reset { snapshot: st.replica.snapshot(10) }, meta_ev()];
+        st.meta_sent_at = None;
+        flush_locked(&mut st);
+        assert_eq!(sent(&new), vec![("reset".to_string(), true), ("meta".to_string(), false)]);
+        assert_eq!(sent(&old), vec![("reset".to_string(), true), ("meta".to_string(), true)]);
+
+        // Nobody subscribed: nothing is owed (a `session.open` starts from a snapshot).
+        st.subs.clear();
+        st.pending = vec![meta_ev()];
+        flush_locked(&mut st);
+        assert!(!st.meta_due);
     }
 
     #[test]
@@ -1131,13 +1637,15 @@ mod tests {
         let localhost = format!("ws://localhost:{port}/r/TfRelayJoinRoom000001");
         assert_eq!(verify_room_relay(Some((ours.identity(), ours.local_addr())), port, &localhost).await.unwrap(), ours.url());
 
-        // The socket answering on our port is someone else's relay (different secret).
+        // The socket answering on our port is someone else's relay (different secret): final.
         let err = verify_room_relay(Some((ours.identity(), foreign.local_addr())), port, &url).await.unwrap_err();
-        assert!(err.contains("identity check"), "{err}");
+        assert!(err.msg.contains("identity check"), "{}", err.msg);
+        assert_eq!(err.kind, FailKind::Hard);
 
-        // Our relay is not running (another process may hold the port): never join.
+        // Our relay is not running (another process may hold the port): never join, but retry.
         let err = verify_room_relay(None, port, &url).await.unwrap_err();
-        assert!(err.contains(&format!("127.0.0.1:{port}")) && err.contains("not running"), "{err}");
+        assert!(err.msg.contains(&format!("127.0.0.1:{port}")) && err.msg.contains("not running"), "{}", err.msg);
+        assert_eq!(err.kind, FailKind::Transient);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1188,5 +1696,103 @@ mod tests {
         assert_eq!(other.id, ISSUE_RELAY_DOWN);
         assert!(other.detail.contains("permission denied"));
         assert_eq!(relay_issue(7, false, None).unwrap().id, ISSUE_RELAY_DOWN);
+    }
+
+    #[test]
+    fn join_backoff_doubles_to_a_minute() {
+        for (streak, base) in [(1u32, 2u64), (2, 4), (3, 8), (4, 16), (5, 32), (6, 60), (9, 60)] {
+            let d = join_backoff(streak).as_millis() as u64;
+            assert!(d >= base * 750 && d <= base * 1250, "streak {streak}: {d} ms");
+        }
+    }
+
+    fn failed(kind: FailKind) -> JoinError {
+        JoinError { msg: "boom".into(), kind, room_id: Some("room-1".into()) }
+    }
+
+    #[test]
+    fn join_failures_stay_connecting_and_reset_after_repeated_timeouts() {
+        let now = Instant::now();
+        let mut f = JoinFailure::new(1, now);
+        assert!(!f.record(&failed(FailKind::Transient), now));
+        assert_eq!(f.link(), (LinkState::Connecting, Some("join attempt 1 failed: boom; retrying".into())));
+        assert!(f.retry_at > now);
+        // A first timeout: the next join waits twice as long, the room is left alone.
+        assert!(!f.record(&failed(FailKind::TimedOut), now));
+        assert_eq!(JoinTimeouts::escalated(f.timeouts).welcome, Duration::from_secs(60));
+        // The second one resets the room before the next try, which waits longer still.
+        assert!(f.record(&failed(FailKind::TimedOut), now));
+        assert_eq!(f.room.as_deref(), Some("room-1"));
+        assert_eq!(f.link().0, LinkState::Connecting);
+        assert_eq!(JoinTimeouts::escalated(f.timeouts).welcome, Duration::from_secs(120));
+        // Only what retrying cannot fix leaves `connecting`.
+        f.record(&failed(FailKind::Hard), now);
+        assert_eq!(f.link(), (LinkState::Error, Some("boom".into())));
+        f.record(&failed(FailKind::Unsupported), now);
+        assert_eq!(f.link().0, LinkState::Unsupported);
+    }
+
+    #[test]
+    fn overlay_cmdline() {
+        assert!(overlay_in_cmdline(b"omp\0--config\0/home/u/.teleflock/omp-overlay.yml\0-e\0/x.ts\0"));
+        assert!(overlay_in_cmdline(b"/usr/bin/bun\0omp\0--config=/tmp/lab/omp-overlay.yml\0"));
+        assert!(!overlay_in_cmdline(b"omp\0--config\0/home/u/other.yml\0"));
+        assert!(!overlay_in_cmdline(b"omp\0--resume=/s.jsonl\0omp-overlay.yml\0"));
+        assert!(!overlay_in_cmdline(b"omp\0--config\0"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_states_without_a_guest() {
+        let dir = std::env::temp_dir().join(format!("tf-hostd-link-states-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let omp = OmpHandle::start(0, Persist::load(dir.join("state.json")), cancel).await;
+
+        // Started like TeleFlock starts omp (`--config …/omp-overlay.yml`), no room yet.
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30; :", "omp", "--config", "/tmp/lab/omp-overlay.yml"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !launched_with_overlay(pid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let starting = (LinkState::Connecting, Some("omp is starting; waiting for its collab room".to_string()));
+        assert_eq!(omp.link_without_guest(None, &[pid], false), starting);
+        // Without the overlay it is not shared, unless omp's global config shares every session.
+        let me = std::process::id();
+        assert_eq!(omp.link_without_guest(None, &[me], false), (LinkState::NotShared, None));
+        assert_eq!(omp.link_without_guest(None, &[me], true), starting);
+        // Still no room after the wait: not shared after all.
+        for (first, _) in omp.inner.reg.lock().unwrap().awaiting.values_mut() {
+            *first = first.checked_sub(ROOM_WAIT).unwrap();
+        }
+        let (state, err) = omp.link_without_guest(None, &[pid], false);
+        assert_eq!(state, LinkState::NotShared);
+        assert!(err.unwrap().contains("has not opened a collab room"));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // A published room whose joins keep failing stays `connecting`, with the reason.
+        let row: HostEntry = serde_json::from_value(serde_json::json!({
+            "instanceId": "i1", "generation": 1, "pid": 7, "sessionId": "s1", "relayConnected": true, "access": "control"
+        }))
+        .unwrap();
+        {
+            let mut reg = omp.inner.reg.lock().unwrap();
+            reg.rows.push(row);
+            let mut f = JoinFailure::new(1, Instant::now());
+            f.record(&failed(FailKind::TimedOut), Instant::now());
+            reg.failures.insert("i1".into(), f);
+        }
+        assert_eq!(omp.link_without_guest(Some("s1"), &[], false), (LinkState::Connecting, Some("join attempt 1 failed: boom; retrying".into())));
+        // A new room generation starts over.
+        omp.inner.reg.lock().unwrap().rows[0].generation = 2;
+        assert_eq!(omp.link_without_guest(Some("s1"), &[], false), (LinkState::Connecting, None));
+        omp.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

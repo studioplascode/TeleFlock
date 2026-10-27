@@ -295,7 +295,8 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         }
       />
       {omp && (
-        <div className="flex shrink-0 gap-1 overflow-x-auto px-2 pb-1.5 no-scrollbar">
+        // scrolls sideways on narrow phones: the edge with more chips past it fades
+        <div className="flex shrink-0 gap-1 overflow-x-auto overscroll-x-contain px-2 pb-1.5 no-scrollbar scroll-fade-x">
           <ModelThinkingChip agentKey={key} />
           <PlanToggle agentKey={key} />
           <FastToggle agentKey={key} />

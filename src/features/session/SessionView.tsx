@@ -77,10 +77,13 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
   if (mobile) return <MobileSession hostId={hostId} agentId={agentId} />;
   const rail = agent?.omp?.link === "live" && !focus && wide;
   const transition = calm ? { duration: 0 } : spring.smooth;
+  // focus mode and the rail are all that move these two: they measure their layout only when one changes
+  const arrangement = `${focus}/${rail}`;
   return (
     <div ref={box} className="@container relative flex h-full min-h-0 gap-5 p-4 pt-3" data-focus={focus || undefined}>
       <motion.div
         layout
+        layoutDependency={arrangement}
         transition={transition}
         className={focus ? "mx-auto flex h-full min-h-0 w-full max-w-[860px] flex-col pb-2" : "flex min-h-0 min-w-0 flex-1 flex-col"}
       >
@@ -91,6 +94,7 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
           <motion.div
             key="rail"
             layout
+            layoutDependency={arrangement}
             initial={calm ? { opacity: 0 } : { opacity: 0, x: 48 }}
             animate={{ opacity: 1, x: 0, transition }}
             exit={calm ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, x: 48, transition: { duration: 0.18 } }}

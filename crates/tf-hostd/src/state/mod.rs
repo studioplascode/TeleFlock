@@ -40,9 +40,20 @@ use persist::{Persist, ACTIVITY_CAP};
 const FLUSH_MIN: Duration = Duration::from_millis(100);
 const PULSE_EVERY: Duration = Duration::from_millis(100);
 const RESNAP_DEBOUNCE: Duration = Duration::from_millis(120);
-const REPO_TTL: Duration = Duration::from_secs(20);
+/// While clients are connected, repo facts older than this are refreshed. Turn ends, cwd
+/// changes, a client connecting and TeleFlock's own git operations refresh at once; with no
+/// client nothing polls.
+const REPO_TTL: Duration = Duration::from_secs(300);
+/// How often the repo loop looks for facts past [`REPO_TTL`].
+const REPO_TICK: Duration = Duration::from_secs(30);
+/// A connecting client refreshes repo facts older than this.
+const REPO_CONNECT_FRESH: Duration = Duration::from_secs(10);
 const HEALTH_EVERY: Duration = Duration::from_secs(5);
-const INFO_EVERY: Duration = Duration::from_secs(60);
+/// Host facts are re-probed when a client connects, after setup fixes and tool installs, and
+/// this often while clients stay connected (out-of-band changes: herdr sessions, manual installs).
+const INFO_EVERY: Duration = Duration::from_secs(600);
+/// A connecting client re-probes host facts older than this.
+const INFO_CONNECT_FRESH: Duration = Duration::from_secs(10);
 /// How long a linked omp agent may show herdr `blocked` without a visible request
 /// before it counts as "needs you (terminal only)".
 const BLOCKED_GRACE_MS: Millis = 2_000;
@@ -80,14 +91,24 @@ struct Mirror {
     activity: HashMap<String, Millis>,
 }
 
+/// Repository facts of one folder.
+struct RepoEntry {
+    /// `None`: not in a repository.
+    info: Option<RepoInfo>,
+    /// Worktree top it was read at: folders in one worktree are refreshed together.
+    top: Option<std::path::PathBuf>,
+    /// Last refresh; `None`: due at the next round.
+    at: Option<Instant>,
+}
+
 struct Inner {
     rev: u64,
     published: HostState,
     sinks: Vec<ClientHandle>,
     mirror: Mirror,
     tracks: HashMap<String, Track>,
-    /// cwd → repo (None = not a repository), with fetch time.
-    repos: HashMap<String, (Option<RepoInfo>, Instant)>,
+    /// cwd → repository facts.
+    repos: HashMap<String, RepoEntry>,
     /// pane → foreground pids (omp pid cross-check), with fetch time.
     pane_pids: HashMap<String, (Vec<u32>, Instant)>,
     /// pane → foreground process (`PaneInfo.process`).
@@ -109,6 +130,8 @@ struct Store {
     dirty: Notify,
     resnap: Notify,
     repo_kick: Notify,
+    /// A client attached (host facts are re-probed).
+    connected: Notify,
 }
 
 /// Cheap, cloneable handle to the store of one herdr session.
@@ -145,6 +168,7 @@ impl StateHandle {
                 dirty: Notify::new(),
                 resnap: Notify::new(),
                 repo_kick: Notify::new(),
+                connected: Notify::new(),
             }),
         }
     }
@@ -176,12 +200,21 @@ impl StateHandle {
         self.lock().omp_of.get(agent_id).cloned()
     }
 
-    /// Sends `snapshot` + registers the client for patches (on hello).
+    /// Sends `snapshot` + registers the client for patches (on hello). A client connecting also
+    /// refreshes repo facts and host facts (the patches follow).
     pub fn attach_client(&self, client: &ClientHandle) {
         let mut m = self.lock();
         client.send(ServerMsg::Snapshot { rev: m.rev, state: m.published.clone() });
         m.sinks.retain(|c| !c.is_closed() && c.id() != client.id());
         m.sinks.push(client.clone());
+        for e in m.repos.values_mut() {
+            if e.at.is_some_and(|at| at.elapsed() >= REPO_CONNECT_FRESH) {
+                e.at = None;
+            }
+        }
+        drop(m);
+        self.inner.repo_kick.notify_one();
+        self.inner.connected.notify_one();
     }
 
     pub fn detach_client(&self, client_id: &str) {
@@ -334,9 +367,10 @@ impl StateHandle {
         true
     }
 
-    /// Forces a repo refresh for a folder (after commits, turns).
+    /// Forces a repo refresh for a folder and the folders in the same worktree (after commits,
+    /// turns).
     pub fn refresh_repo(&self, cwd: &str) {
-        self.lock().repos.remove(cwd);
+        mark_repos_stale(&mut self.lock(), cwd);
         self.inner.repo_kick.notify_one();
     }
 
@@ -370,7 +404,7 @@ impl StateHandle {
     fn rebuild(&self) {
         let now = now_ms();
         let store = &self.inner;
-        let persisted = store.persist.read(|d| d.sessions.get(&store.session).cloned().unwrap_or_default());
+        let persisted = store.persist.read(|d| d.sessions.get(&store.session).map(persist::SessionData::without_activity).unwrap_or_default());
         let mut guard = self.lock();
         let m = &mut *guard;
 
@@ -387,7 +421,8 @@ impl StateHandle {
         let mut agent_by_pane = HashMap::new();
         let mut agents = Vec::with_capacity(m.mirror.agents.len());
         let mut unarchive = Vec::new();
-        let mut transitions: Vec<(Option<Column>, Agent, bool, bool)> = Vec::new();
+        // Agents with something to report (needs-you, a finished turn, quiet).
+        let mut transitions: Vec<(Agent, bool, bool)> = Vec::new();
         let mut seen = HashSet::new();
         let mut new_turns: Vec<String> = Vec::new();
         let mut stopped_turns: HashSet<String> = HashSet::new();
@@ -402,7 +437,13 @@ impl StateHandle {
             let state = build::herdr_state(a.agent_status);
             let sid = omp_of.get(&id).cloned().or_else(|| a.agent_session.as_ref().and_then(|s| s.session_id().map(str::to_string)));
             let view = sid.as_deref().and_then(|s| store.omp.session(s)).filter(|s| omp_of.get(&id) == Some(&s.session_id)).map(|s| s.view(now));
-            let link = if view.is_none() { store.omp.link_without_guest(sid.as_deref()) } else { (tf_proto::model::LinkState::Live, None) };
+            let link = if view.is_none() {
+                // An omp that will share but has no room yet (still starting) shows as connecting.
+                let pids = if build::is_omp(a) { m.pane_pids.get(&a.pane_id).map(|(p, _)| p.as_slice()).unwrap_or(&[]) } else { &[] };
+                store.omp.link_without_guest(sid.as_deref(), pids, m.published.info.setup.global_sharing)
+            } else {
+                (tf_proto::model::LinkState::Live, None)
+            };
             let row_pid = sid.as_deref().and_then(|s| store.omp.registry_row(s)).map(|r| r.pid);
             let bridge = sid.as_deref().and_then(|s| store.bridge.by_session(s));
 
@@ -486,7 +527,7 @@ impl StateHandle {
             }
             let first_seen = persisted.first_seen.get(&id).copied();
             let cwd = a.foreground_cwd.clone().or_else(|| a.cwd.clone()).unwrap_or_default();
-            let repo = m.repos.get(&cwd).and_then(|(r, _)| r.as_ref());
+            let repo = m.repos.get(&cwd).and_then(|e| e.info.as_ref());
             let pre_needs_key = view
                 .as_ref()
                 .and_then(|v| v.needs.as_ref().map(build::needs_key))
@@ -524,7 +565,6 @@ impl StateHandle {
             if model.is_some() {
                 track.model = model;
             }
-            let prev_col = track.column;
             let silent = agent.live.last_event_at.map(|t| now - t).unwrap_or(0);
             let quiet = state == HerdrState::Working && silent > build::QUIET_MS && !track.quiet_notified;
             if quiet {
@@ -547,7 +587,9 @@ impl StateHandle {
                 track.needs_notified = None;
             }
             track.column = Some(agent.column);
-            transitions.push((prev_col, agent.clone(), quiet, needs_note));
+            if needs_note || quiet || turn_ended {
+                transitions.push((agent.clone(), quiet, needs_note));
+            }
             agents.push(agent);
         }
         m.tracks.retain(|k, _| seen.contains(k));
@@ -579,10 +621,10 @@ impl StateHandle {
             });
         }
 
-        let repos: HashMap<String, Option<RepoInfo>> = m.repos.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect();
         let workspaces = if m.mirror.ok || !m.mirror.workspaces.is_empty() {
             m.pane_procs.refresh();
-            build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, &repos, &m.pane_procs)
+            let repos = &m.repos;
+            build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, |cwd| repos.get(cwd).and_then(|e| e.info.as_ref()), &m.pane_procs)
         } else {
             m.published.workspaces.clone()
         };
@@ -618,7 +660,7 @@ impl StateHandle {
         m.built_once = true;
         let mut notes = Vec::new();
         let mut acts: Vec<(String, String, ActivityKind, String, Option<String>)> = Vec::new();
-        for (_prev, agent, quiet, needs_note) in transitions {
+        for (agent, quiet, needs_note) in transitions {
             if first {
                 continue;
             }
@@ -666,7 +708,7 @@ impl StateHandle {
         }
         if !finished_cwds.is_empty() {
             for cwd in finished_cwds {
-                m.repos.remove(&cwd);
+                mark_repos_stale(m, &cwd);
             }
             store.repo_kick.notify_one();
         }
@@ -813,6 +855,8 @@ fn initial_info(session: &str, relay_port: u16, relay: bool) -> HostInfo {
             global_bridge: false,
             relay,
             issues: vec![],
+            applying: vec![],
+            failed: vec![],
         },
         tools: None,
         pruned: Vec::new(),
@@ -934,7 +978,11 @@ async fn snapshot_now(ctx: &Arc<Ctx>, status_panes: &mut Vec<String>, stream: &t
                 *status_panes = panes;
             }
             fetch_pids(ctx).await;
-            h.inner.repo_kick.notify_one();
+            // Folders new to the board (cwd changes) get their repo facts now; known ones keep
+            // the repo loop's pace.
+            if repos_missing(&h.lock()) {
+                h.inner.repo_kick.notify_one();
+            }
             h.mark_dirty();
         }
         Err(e) => {
@@ -959,6 +1007,8 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
         E::PaneUpdated(p) => {
             let mut resnap = false;
             let mut pulse_agent = None;
+            let mut cwd_moved = false;
+            let new_folder;
             {
                 let mut m = h.lock();
                 m.mirror.activity.insert(p.pane_id.clone(), now);
@@ -975,6 +1025,7 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                 let stale = known_rev.is_some_and(|(t, rev)| t == p.terminal_id && p.revision < rev);
                 if !stale {
                     if let Some(slot) = m.mirror.panes.iter_mut().find(|x| x.pane_id == p.pane_id) {
+                        cwd_moved |= slot.cwd != p.cwd || slot.foreground_cwd != p.foreground_cwd;
                         *slot = p.clone();
                     } else {
                         resnap = true;
@@ -996,6 +1047,7 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                         let status_differs = a.agent_status != p.agent_status;
                         a.revision = p.revision;
                         a.agent_session = p.agent_session.clone();
+                        cwd_moved |= a.cwd != p.cwd || a.foreground_cwd != p.foreground_cwd;
                         a.cwd = p.cwd.clone();
                         a.foreground_cwd = p.foreground_cwd.clone();
                         a.terminal_title = p.terminal_title.clone();
@@ -1013,6 +1065,10 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
                         }
                     }
                 }
+                new_folder = cwd_moved && repos_missing(&m);
+            }
+            if new_folder {
+                h.inner.repo_kick.notify_one();
             }
             let status_differs = pulse_agent.as_ref().is_some_and(|(_, _, s)| *s);
             if let Some((id, linked, _)) = pulse_agent {
@@ -1090,15 +1146,21 @@ async fn flusher(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
+        let rebuild = tokio::select! {
             _ = ctx.cancel.cancelled() => return,
             // A short settle lets near-simultaneous inputs (herdr status + collab frame) land together.
-            _ = h.inner.dirty.notified() => tokio::time::sleep(Duration::from_millis(25)).await,
-            // Time-based state (quiet detection, liveness ages) needs periodic rebuilds.
-            _ = tick.tick() => {}
+            _ = h.inner.dirty.notified() => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                true
+            }
+            // Time-based state (quiet detection, liveness ages) only moves while an agent works;
+            // the herdr heal rebuilds every 15 s anyway.
+            _ = tick.tick() => h.lock().tracks.values().any(|t| t.state == HerdrState::Working),
+        };
+        if rebuild {
+            h.rebuild();
+            tokio::time::sleep(FLUSH_MIN).await;
         }
-        h.rebuild();
-        tokio::time::sleep(FLUSH_MIN).await;
     }
 }
 
@@ -1231,36 +1293,96 @@ async fn bridge_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<BridgeEvent>
     }
 }
 
+/// Folders the board shows repo facts for: agent cwds and workspace folders.
+fn wanted_cwds(m: &Inner) -> HashSet<String> {
+    let mut cwds: HashSet<String> = HashSet::new();
+    for a in &m.mirror.agents {
+        if let Some(c) = a.foreground_cwd.clone().or_else(|| a.cwd.clone()) {
+            cwds.insert(c);
+        }
+    }
+    for w in &m.mirror.workspaces {
+        let tabs: Vec<&TabInfo> = m.mirror.tabs.iter().filter(|t| t.workspace_id == w.workspace_id).collect();
+        cwds.insert(build::workspace_cwd(w, &tabs, &m.mirror.panes));
+    }
+    cwds.remove("");
+    cwds
+}
+
+/// A folder on the board has no repo facts yet.
+fn repos_missing(m: &Inner) -> bool {
+    wanted_cwds(m).iter().any(|c| !m.repos.contains_key(c))
+}
+
+/// Marks the repo facts of `cwd`, and of the folders in its worktree, due.
+fn mark_repos_stale(m: &mut Inner, cwd: &str) {
+    let top = m.repos.get(cwd).and_then(|e| e.top.clone());
+    for (c, e) in m.repos.iter_mut() {
+        if c == cwd || (top.is_some() && e.top == top) {
+            e.at = None;
+        }
+    }
+}
+
+/// Refreshes the repo facts that are due: folders without facts, facts marked due (turn end,
+/// connect, git operations) and, while clients are connected, facts older than [`REPO_TTL`].
+/// One `git rev-parse` per folder, one `git status` per worktree.
 async fn fetch_repos(h: &StateHandle) {
     let want: Vec<String> = {
         let m = h.lock();
-        let mut cwds: HashSet<String> = HashSet::new();
-        for a in &m.mirror.agents {
-            if let Some(c) = a.foreground_cwd.clone().or_else(|| a.cwd.clone()) {
-                cwds.insert(c);
-            }
-        }
-        for w in &m.mirror.workspaces {
-            let tabs: Vec<&TabInfo> = m.mirror.tabs.iter().filter(|t| t.workspace_id == w.workspace_id).collect();
-            cwds.insert(build::workspace_cwd(w, &tabs, &m.mirror.panes));
-        }
-        cwds.into_iter()
-            .filter(|c| !c.is_empty())
-            .filter(|c| m.repos.get(c).is_none_or(|(_, at)| at.elapsed() > REPO_TTL))
-            .collect()
+        let periodic = m.sinks.iter().any(|c| !c.is_closed());
+        let due = |e: &RepoEntry| e.at.is_none_or(|at| periodic && at.elapsed() >= REPO_TTL);
+        wanted_cwds(&m).into_iter().filter(|c| m.repos.get(c).is_none_or(due)).collect()
     };
     if want.is_empty() {
         return;
     }
-    let mut changed = false;
+    let mut worktrees: Vec<(crate::ops::git::RepoTop, Vec<String>)> = Vec::new();
+    let mut plain: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for cwd in want {
-        let info = crate::ops::git::repo_info(Path::new(&cwd)).await;
-        let mut m = h.lock();
-        if m.repos.get(&cwd).is_none_or(|(old, _)| *old != info) {
-            changed = true;
+        match crate::ops::git::repo_top(Path::new(&cwd)).await {
+            Ok(Some(t)) => match worktrees.iter_mut().find(|(w, _)| w.top == t.top) {
+                Some((_, cwds)) => cwds.push(cwd),
+                None => worktrees.push((t, vec![cwd])),
+            },
+            Ok(None) => plain.push(cwd),
+            Err(e) => {
+                debug!(session = %h.inner.session, cwd, "repo facts: {e}");
+                failed.push(cwd);
+            }
         }
-        m.repos.insert(cwd, (info, Instant::now()));
     }
+    let mut facts = Vec::with_capacity(worktrees.len());
+    for (t, _) in &worktrees {
+        facts.push(crate::ops::git::repo_info_at(t).await);
+    }
+    let mut m = h.lock();
+    let now = Instant::now();
+    let mut changed = false;
+    for cwd in plain {
+        changed |= m.repos.get(&cwd).is_none_or(|e| e.info.is_some());
+        m.repos.insert(cwd, RepoEntry { info: None, top: None, at: Some(now) });
+    }
+    // git could not tell (timeout, spawn failure): keep what is known, retry next round.
+    for cwd in failed {
+        m.repos.entry(cwd).or_insert(RepoEntry { info: None, top: None, at: Some(now) });
+    }
+    for ((t, cwds), info) in worktrees.into_iter().zip(facts) {
+        // Other folders of this worktree take the fresh facts too.
+        for e in m.repos.values_mut().filter(|e| e.top.as_ref() == Some(&t.top)) {
+            changed |= e.info.as_ref() != Some(&info);
+            e.info = Some(info.clone());
+            e.at = Some(now);
+        }
+        for cwd in cwds {
+            changed |= m.repos.get(&cwd).is_none_or(|e| e.info.as_ref() != Some(&info));
+            m.repos.insert(cwd, RepoEntry { info: Some(info.clone()), top: Some(t.top.clone()), at: Some(now) });
+        }
+    }
+    let wanted = wanted_cwds(&m);
+    m.repos.retain(|c, _| wanted.contains(c));
+    drop(m);
     if changed {
         h.mark_dirty();
     }
@@ -1268,11 +1390,13 @@ async fn fetch_repos(h: &StateHandle) {
 
 async fn repo_loop(ctx: Arc<Ctx>) {
     let h = ctx.state.clone();
+    let mut tick = tokio::time::interval(REPO_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = ctx.cancel.cancelled() => return,
             _ = h.inner.repo_kick.notified() => {}
-            _ = tokio::time::sleep(REPO_TTL) => {}
+            _ = tick.tick() => {}
         }
         fetch_repos(&h).await;
     }
@@ -1280,20 +1404,27 @@ async fn repo_loop(ctx: Arc<Ctx>) {
 
 async fn host_loop(ctx: Arc<Ctx>) {
     let h = ctx.state.clone();
+    // `start` probed just before this loop started.
     let mut last_info = Instant::now();
     loop {
-        tokio::select! {
+        let connected = tokio::select! {
             _ = ctx.cancel.cancelled() => return,
-            _ = tokio::time::sleep(HEALTH_EVERY) => {}
-        }
+            _ = h.inner.connected.notified() => true,
+            _ = tokio::time::sleep(HEALTH_EVERY) => false,
+        };
         if !h.has_clients() {
             continue;
         }
-        let health = tokio::task::spawn_blocking(crate::ops::host::health).await;
-        if let Ok(health) = health {
-            h.set_health(health);
+        if !connected {
+            let health = tokio::task::spawn_blocking(crate::ops::host::health).await;
+            if let Ok(health) = health {
+                h.set_health(health);
+            }
         }
-        if last_info.elapsed() >= INFO_EVERY {
+        // A connect re-probes (the app may have just uploaded a new extension), unless the
+        // context was created for it a moment ago.
+        let every = if connected { INFO_CONNECT_FRESH } else { INFO_EVERY };
+        if last_info.elapsed() >= every {
             last_info = Instant::now();
             let info = crate::ops::host::probe_info(&ctx).await;
             h.set_info(info);

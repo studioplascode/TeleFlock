@@ -108,6 +108,16 @@ const [images, setImages, clearImages] = useDraftImages(key);                   
   them (an added image lands after them, a clear stays a clear); nothing is written before that.
   Edit with updaters (`setImages(cur => …)`, remove by identity), not lists built from a stale render.
   At open, entries older than 30 days and all but the newest 40 are swept.
+- Videos (`draftVideos.ts`, through `upload.ts`): memory only (the browser reads a picked file only
+  while that page lives; switching agents or views keeps the upload going). `attachVideos(key, hostId
+  | null, files)` (≤ 4 per prompt, ≤ 2 GiB each, video mime or extension) starts the upload at once
+  when the host is known, one upload per host at a time; `uploadDraftVideos(ids, hostId)` starts
+  waiting ones (Dispatch Auto), `whenUploaded(ids)` resolves with `{name, size, path}` once all are
+  up (rejects `upload_failed`), `withVideoRefs(text, refs)` appends one `Attached video "<name>"
+  (<size>): <host path> (read it to see it)` line each. Removing a chip (`removeDraftVideo`) drops
+  the upload on the host, finished or not; a sent one is `detachDraftVideos` + `releaseVideos`.
+  `uploadFile(hostId, file, {onProgress, signal, mime})` → `{path, size, sha256, uploadId}` is the
+  reusable uploader (terminal pastes use it too; architecture §3.13).
 - Answers: `answerDraftKey(agentKey, requestId, field)` (`"other"` is shared by the ask card, board
   quick answer and answer-next HUD). `startDraftSweep()` (called at boot) drops them once the
   agent's online host no longer lists that pending request (30 s grace for fresh typing).

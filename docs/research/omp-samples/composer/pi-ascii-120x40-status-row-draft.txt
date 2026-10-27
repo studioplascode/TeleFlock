@@ -1,0 +1,12 @@
+                                                   ██       v18.13.1
+
+                       Tip: Press Ctrl+R to search your prompt history and reuse a past message
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+-----------------------------------------------------------------------------------------------------------------------
+ pi ascii draft
+-----------------------------------------------------------------------------------------------------------------------
+ pi · [M] no-model · [T] tf-bridgectl-cap-work · ctx: 7.6K/? [A]
+⇄ teleflock

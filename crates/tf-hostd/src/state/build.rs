@@ -9,11 +9,11 @@ use tf_proto::model::{
     NotifyAction, NotifyKind, OmpInfo, OptionTone, PaneInfo as WirePane, RepoInfo, SubagentSummary, Tab, TodoSummary,
     Workspace, WorktreeInfo,
 };
-use tf_proto::session::{Capabilities, PlanReview, SessionMeta, SubagentStatus, TodoStatus, UiKind, UiRequest};
+use tf_proto::session::{Capabilities, ChangedFile, PlanReview, Subagent, SubagentStatus, TodoPhase, TodoStatus, UiKind, UiRequest};
 use tf_proto::Millis;
 
 use crate::bridge::{BridgeSession, PlanReviewInfo};
-use crate::omp::OmpView;
+use crate::omp::{BoardMeta, OmpView};
 use crate::util::{clip, new_id};
 
 /// Quiet notification threshold (no events while working).
@@ -102,13 +102,7 @@ pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
     if live.last_event_at.is_none() || i.omp.is_none() {
         live.last_event_at = max_opt(live.last_event_at, i.pane_activity);
     }
-    let diff = meta.and_then(|m| {
-        (!m.files.is_empty()).then(|| DiffStat {
-            added: m.files.iter().map(|f| f.added).sum(),
-            removed: m.files.iter().map(|f| f.removed).sum(),
-            files: m.files.len() as u32,
-        })
-    });
+    let diff = meta.and_then(|m| m.diff.clone());
     Agent {
         id: agent_id(a),
         name,
@@ -149,30 +143,43 @@ pub fn strip_spinner(t: &str) -> String {
         .join(" ")
 }
 
-fn omp_info(i: &AgentInputs<'_>, meta: Option<&SessionMeta>) -> OmpInfo {
+/// Todo progress on a card: done of total, and the task in progress.
+pub fn todo_summary(phases: &[TodoPhase]) -> Option<TodoSummary> {
+    let tasks: Vec<_> = phases.iter().flat_map(|p| p.tasks.iter()).collect();
+    (!tasks.is_empty()).then(|| TodoSummary {
+        done: tasks.iter().filter(|t| t.status == TodoStatus::Completed).count() as u32,
+        total: tasks.len() as u32,
+        current: tasks.iter().find(|t| t.status == TodoStatus::InProgress).map(|t| t.content.clone()),
+    })
+}
+
+/// Subagents on a card: running of total, and their mean reported completion.
+pub fn subagent_summary(subagents: &[Subagent]) -> Option<SubagentSummary> {
+    (!subagents.is_empty()).then(|| {
+        let (sum, n) = subagents.iter().filter_map(|s| s.completion_pct).fold((0.0f32, 0u32), |(sum, n), p| (sum + p, n + 1));
+        SubagentSummary {
+            live: subagents.iter().filter(|s| s.status == SubagentStatus::Running).count() as u32,
+            total: subagents.len() as u32,
+            completion_pct: (n > 0).then(|| sum / n as f32),
+        }
+    })
+}
+
+/// Lines added / removed over the files the session changed.
+pub fn diff_stat(files: &[ChangedFile]) -> Option<DiffStat> {
+    (!files.is_empty()).then(|| DiffStat {
+        added: files.iter().map(|f| f.added).sum(),
+        removed: files.iter().map(|f| f.removed).sum(),
+        files: files.len() as u32,
+    })
+}
+
+fn omp_info(i: &AgentInputs<'_>, meta: Option<&BoardMeta>) -> OmpInfo {
     let ctl = i.bridge.map(|b| &b.state);
     let (link, link_error) = match i.omp {
         Some(v) => (v.link, v.link_error.clone()),
         None => i.link.clone(),
     };
-    let todos = meta.and_then(|m| {
-        let tasks: Vec<_> = m.todos.iter().flat_map(|p| p.tasks.iter()).collect();
-        (!tasks.is_empty()).then(|| TodoSummary {
-            done: tasks.iter().filter(|t| t.status == TodoStatus::Completed).count() as u32,
-            total: tasks.len() as u32,
-            current: tasks.iter().find(|t| t.status == TodoStatus::InProgress).map(|t| t.content.clone()),
-        })
-    });
-    let subagents = meta.and_then(|m| {
-        (!m.subagents.is_empty()).then(|| {
-            let (sum, n) = m.subagents.iter().filter_map(|s| s.completion_pct).fold((0.0f32, 0u32), |(sum, n), p| (sum + p, n + 1));
-            SubagentSummary {
-                live: m.subagents.iter().filter(|s| s.status == SubagentStatus::Running).count() as u32,
-                total: m.subagents.len() as u32,
-                completion_pct: (n > 0).then(|| sum / n as f32),
-            }
-        })
-    });
     OmpInfo {
         session_id: i.omp_session_id.clone().or_else(|| meta.and_then(|m| m.session_id.clone())),
         session_file: i
@@ -198,8 +205,8 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&SessionMeta>) -> OmpInfo {
         },
         context: ctl.and_then(|c| c.context.clone()).or_else(|| meta.and_then(|m| m.context.clone())),
         cost: meta.and_then(|m| m.cost.clone()),
-        todos,
-        subagents,
+        todos: meta.and_then(|m| m.todos.clone()),
+        subagents: meta.and_then(|m| m.subagents.clone()),
         // The session meta carries the bridge's queue merged with the prompts we queued.
         queue: match (ctl, meta) {
             (Some(c), Some(m)) => tf_collab::replica::merge_queue(&c.queue, &m.queue),
@@ -332,12 +339,13 @@ pub fn capabilities(live: bool, bridge: bool) -> Capabilities {
 
 // ───────────────────────────── workspaces ─────────────────────────────
 
-pub fn build_workspaces(
+/// `repo_of`: the repository facts of a folder, when known.
+pub fn build_workspaces<'a>(
     workspaces: &[WorkspaceInfo],
     tabs: &[TabInfo],
     panes: &[PaneInfo],
     agent_by_pane: &HashMap<String, String>,
-    repos: &HashMap<String, Option<RepoInfo>>,
+    repo_of: impl Fn(&str) -> Option<&'a RepoInfo>,
     procs: &super::procs::PaneProcs,
 ) -> Vec<Workspace> {
     let mut out: Vec<Workspace> = workspaces
@@ -371,7 +379,7 @@ pub fn build_workspaces(
                 })
                 .collect();
             let cwd = workspace_cwd(w, &ws_tabs, panes);
-            let repo = repos.get(&cwd).cloned().flatten();
+            let repo = repo_of(&cwd).cloned();
             let worktree = w.worktree.as_ref().filter(|wt| wt.is_linked_worktree).map(|wt| WorktreeInfo {
                 path: wt.checkout_path.clone(),
                 branch: repo.as_ref().and_then(|r| r.branch.clone()),

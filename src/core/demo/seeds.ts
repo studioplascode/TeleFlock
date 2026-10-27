@@ -18,6 +18,7 @@ const FIRST_PROMPTS: Record<string, string> = {
   docs: "Write the README and an architecture overview for new contributors.",
   flaky: "auth token refresh test fails ~1 in 20 runs on CI. Find out why and fix it.",
   deps: "Bump tailscale and herdr in the Ansible roles to the latest stable versions.",
+  gobump: "Bump the gateway to Go 1.25 and replace the helpers it deprecates.",
   render: "Batch-render the onboarding video frames at 4K.",
   assets: "Compress the app store screenshots without visible quality loss.",
 };
@@ -145,6 +146,22 @@ export function historyFor(def: AgentDef): Step[] {
       break;
     case "flaky":
       steps.push(say("The refresh test raced a 50 ms timer against the mock clock. Switched it to fake timers; 500/500 runs pass. Merged in #87."));
+      break;
+    case "gobump":
+      steps.push(
+        bash("go test ./...", [`ok  \tgateway/internal/auth\t0.944s`, `ok  \tgateway/internal/db\t1.612s`, `ok  \tgateway/internal/ratelimit\t1.877s`], 14_000),
+        {
+          t: "tool",
+          spec: {
+            tool: "github",
+            title: "gh pr merge 91 --squash",
+            args: {},
+            ms: 2400,
+            view: { type: "markdown", text: "**#91 · Bump Go to 1.25 and drop deprecated helpers** squashed into `main`.\n\nhttps://github.com/demo/api-gateway/pull/91" },
+          },
+        },
+        say("Go 1.25 is in and every package passes. Merged in #91; the chore/go-1.25 worktree isn't needed anymore."),
+      );
       break;
     case "deps":
       steps.push(

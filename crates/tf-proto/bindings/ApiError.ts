@@ -7,7 +7,8 @@
  * `invalid_params`, `unknown_method`, `not_found`, `not_connected`, `unsupported`,
  * `busy` (agent is streaming / dialog open), `agent_blocked`, `timeout`,
  * `herdr_error`, `omp_error`, `git_error`, `gh_error`, `io_error`, `version_mismatch`,
- * `auth_required`, `permission_denied`, `ai_unavailable`, `ai_failed`, `internal`.
+ * `auth_required`, `permission_denied`, `ai_unavailable`, `ai_failed`, `install_failed`
+ * (a Host setup install), `internal`.
  */
 export type ApiError = { code: string, message: string, 
 /**

@@ -22,13 +22,20 @@ import type {
 
 /** 1.1.0: `btw` runs omp's own /btw (follow-ups via `btwId`), `getBtwHistory`.
  *  1.2.0: schema-dump mode (`TF_OMP_SCHEMA_OUT`, used by tf-hostd `omp.settings`).
- *  1.3.0: settings-write mode (`TF_OMP_SETTINGS_IN`, used by tf-hostd `omp.settingsSet` for credentials). */
-const BRIDGE_VERSION = "1.3.0";
+ *  1.3.0: settings-write mode (`TF_OMP_SETTINGS_IN`, used by tf-hostd `omp.settingsSet` for credentials).
+ *  1.4.0: one bridge per omp process (`BridgeSlot`): only the newest copy talks to hostd; the
+ *         command context (now captured through /teleflock-control) is shared; attaching fails fast
+ *         while omp compacts. */
+const BRIDGE_VERSION = "1.4.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
 const SUBMIT_SETTLE_MS = 15_000;
-const ATTACH_COMMAND = "teleflock-attach";
+/** Hidden command that hands the bridge omp's command context. Copies older than 1.4.0 register
+ *  `teleflock-attach` and keep the context to themselves, and omp dispatches a command name to just
+ *  one of its registrants (lab: not reliably the `-e` copy), so slot-aware copies use their own name. */
+const ATTACH_COMMAND = "teleflock-control";
+const LEGACY_ATTACH_COMMAND = "teleflock-attach";
 const STATUS_KEY = "teleflock";
 const MAX_LINE = 64 * 1024 * 1024;
 /** hostd must send its auth frame within this window after the socket opens. */
@@ -180,6 +187,53 @@ function baseContext(ctx: ExtensionContext): ExtensionContext {
 		c = proto;
 	}
 	return c;
+}
+
+// ─── one bridge per omp process ────────────────────────────────────────────────────────────────
+// An omp process can load several TeleFlock bridge copies: the global install in
+// ~/.omp/agent/extensions/ and TeleFlock's `-e <home>/ext/` copy, possibly of different versions.
+// They meet in one process-wide slot, and exactly one copy talks to each hostd (copies only resolve
+// different endpoints when TF_HOSTD_HOME / TF_BRIDGE_SOCK disagree with a copy's deploy location).
+// omp runs /teleflock-control in just one of the copies that register it, so the command context lives in the slot
+// as well. The slot is a contract between bridge versions (docs/bridge-protocol.md "One bridge per
+// omp process"): later versions keep these fields and their meaning, and only add optional ones.
+
+const SLOT_KEY = Symbol.for("teleflock.bridge");
+
+interface BridgeSlot {
+	/** The active copy per hostd endpoint (socket path or pipe name): the highest `version` wins, on
+	 *  equal versions the first claimant stays. A copy that takes over calls the previous owner's
+	 *  `stop()` (close the socket, stop the timers, clear the status line). */
+	owners: Record<string, { version: string; stop(): void }>;
+	/** The session command context, stored by whichever copy's /teleflock-control handler omp ran. */
+	cmdCtx?: ExtensionCommandContext;
+	/** Called (and removed) by that handler right after it stored `cmdCtx`. */
+	attachWaiters: Array<() => void>;
+}
+
+function bridgeSlot(): BridgeSlot {
+	const g = globalThis as unknown as Record<symbol, unknown>;
+	const found = g[SLOT_KEY];
+	if (found && typeof found === "object") {
+		const slot = found as BridgeSlot;
+		if (!slot.owners || typeof slot.owners !== "object") slot.owners = {};
+		if (!Array.isArray(slot.attachWaiters)) slot.attachWaiters = [];
+		return slot;
+	}
+	const slot: BridgeSlot = { owners: {}, attachWaiters: [] };
+	g[SLOT_KEY] = slot;
+	return slot;
+}
+
+/** Orders dotted numeric versions (`1.10.0` > `1.9.2`); missing or non-numeric parts count as 0. */
+function compareVersions(a: string, b: string): number {
+	const pa = a.split(".").map(n => Number.parseInt(n, 10) || 0);
+	const pb = b.split(".").map(n => Number.parseInt(n, 10) || 0);
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+		if (d !== 0) return d;
+	}
+	return 0;
 }
 
 // ─── TUI access ────────────────────────────────────────────────────────────────────────────────
@@ -564,8 +618,8 @@ function bridge(pi: ExtensionAPI) {
 	};
 
 	let ctxRef: ExtensionContext | undefined; // latest main-session context
-	let cmdCtx: ExtensionCommandContext | undefined; // captured once through /teleflock-attach
-	let attachWaiters: Array<() => void> = [];
+	// This copy's entry in the process-wide slot (see "one bridge per omp process").
+	const me: BridgeSlot["owners"][string] = { version: BRIDGE_VERSION, stop: () => standDown() };
 	let active = false; // between session_start and session_shutdown
 	let sock: net.Socket | undefined;
 	let connected = false;
@@ -637,7 +691,8 @@ function bridge(pi: ExtensionAPI) {
 	};
 
 	const showStatus = (on: boolean): void => {
-		if (statusShown === on) return;
+		// Only ever clear what this copy showed: other copies share the status key.
+		if ((statusShown ?? false) === on) return;
 		statusShown = on;
 		try {
 			const ui = ctxRef?.ui;
@@ -730,7 +785,7 @@ function bridge(pi: ExtensionAPI) {
 			leafId: ctx.sessionManager.getLeafId() ?? undefined,
 			queue: readQueue(),
 			planReview: pendingReview,
-			attached: cmdCtx !== undefined,
+			attached: bridgeSlot().cmdCtx !== undefined,
 		};
 	};
 
@@ -855,7 +910,7 @@ function bridge(pi: ExtensionAPI) {
 	};
 
 	const connect = (): void => {
-		if (connecting || connected || !active) return;
+		if (connecting || connected || !active || bridgeSlot().owners[endpoint] !== me) return;
 		if (process.platform !== "win32" && !fs.existsSync(endpoint)) {
 			nextRetryAt = Date.now() + RETRY_MS;
 			return;
@@ -952,15 +1007,52 @@ function bridge(pi: ExtensionAPI) {
 		}
 	};
 
-	const startTicking = (ctx: ExtensionContext): void => {
-		if (tick !== undefined) {
+	const stopTicking = (ctx: ExtensionContext | undefined): void => {
+		if (tick === undefined) return;
+		try {
+			ctx?.clearTimer(tick);
+		} catch {
+			/* stale handle */
+		}
+		tick = undefined;
+	};
+
+	/** Makes this copy the process's bridge to its hostd unless an equal or newer copy already is. */
+	const claim = (): boolean => {
+		const owners = bridgeSlot().owners;
+		const owner = owners[endpoint];
+		if (owner === me) return true;
+		if (owner && compareVersions(String(owner.version), BRIDGE_VERSION) >= 0) return false;
+		owners[endpoint] = me;
+		if (owner) {
+			bridgeLog(`taking over from TeleFlock bridge ${String(owner.version)}`);
 			try {
-				ctx.clearTimer(tick);
-			} catch {
-				/* stale handle */
+				owner.stop();
+			} catch (err) {
+				bridgeLog(`stopping bridge ${String(owner.version)}: ${String(err)}`);
 			}
 		}
+		return true;
+	};
+
+	/** A newer copy took over the process: stop talking to hostd (socket, timers, status line). */
+	const standDown = (): void => {
+		try {
+			stopTicking(ctxRef);
+			dropSocket();
+			bridgeLog("a newer TeleFlock bridge took over");
+		} catch (err) {
+			bridgeLog(`stand down: ${String(err)}`);
+		}
+	};
+
+	/** The main session started or changed: bridge it when this copy owns the process. */
+	const bridgeSession = (ctx: ExtensionContext): void => {
+		if (!claim()) return;
+		stopTicking(ctx);
 		tick = ctx.setInterval(onTick, TICK_MS);
+		if (connected) safeSync();
+		else connect();
 	};
 
 	// ─── requests ─────────────────────────────────────────────────────────────────────────────
@@ -1105,12 +1197,22 @@ function bridge(pi: ExtensionAPI) {
 		return text.trim() ? { text } : {};
 	};
 
-	/** Command context for navigateTree/branch/newSession; captured once by submitting /teleflock-attach. */
+	/**
+	 * Command context for navigateTree/branch/newSession, captured once per process by submitting
+	 * /teleflock-control. omp runs that command in one of the copies that register it, which may be
+	 * another copy than this one, so the context and its waiters live in the process-wide slot.
+	 */
 	const ensureCmdCtx = async (ctx: ExtensionContext): Promise<ExtensionCommandContext> => {
-		if (cmdCtx) return cmdCtx;
+		const slot = bridgeSlot();
+		if (slot.cmdCtx) return slot.cmdCtx;
 		requireTui(ctx);
-		const got = new Promise<void>(resolve => attachWaiters.push(resolve));
-		await submit(ctx, `/${ATTACH_COMMAND}`);
+		const attach = `/${ATTACH_COMMAND}`;
+		// While omp compacts, it queues a submitted command (shown under "Steering") until compaction ends.
+		const compacting = "omp is compacting the session; try again when it finishes";
+		if (readQueue().steering.includes(attach)) fail("busy", compacting);
+		const got = new Promise<void>(resolve => slot.attachWaiters.push(resolve));
+		await submit(ctx, attach);
+		if (!slot.cmdCtx && readQueue().steering.includes(attach)) fail("busy", compacting);
 		let timer: Timer | undefined;
 		await Promise.race([
 			got,
@@ -1119,7 +1221,7 @@ function bridge(pi: ExtensionAPI) {
 				timer.unref?.();
 			}),
 		]).finally(() => clearTimeout(timer));
-		return cmdCtx ?? fail("unsupported", "could not capture the session command context");
+		return slot.cmdCtx ?? fail("unsupported", "could not capture the session command context");
 	};
 
 	const waitFor = async (pred: () => boolean, ms: number): Promise<boolean> => {
@@ -1815,7 +1917,7 @@ function bridge(pi: ExtensionAPI) {
 				return {
 					commands: pi
 						.getCommands()
-						.filter(c => c.name !== ATTACH_COMMAND)
+						.filter(c => c.name !== ATTACH_COMMAND && c.name !== LEGACY_ATTACH_COMMAND)
 						.map(c => ({ name: c.name, description: c.description, source: c.source })),
 				};
 			case "dequeue":
@@ -1830,10 +1932,10 @@ function bridge(pi: ExtensionAPI) {
 		description: "TeleFlock: enable remote session control (run automatically by the bridge)",
 		handler: async (_args, ctx) => {
 			try {
-				cmdCtx = ctx;
-				const waiters = attachWaiters;
-				attachWaiters = [];
-				for (const w of waiters) w();
+				// Whichever copy omp runs this in, the context is the process's (see ensureCmdCtx).
+				const slot = bridgeSlot();
+				slot.cmdCtx = ctx;
+				for (const w of slot.attachWaiters.splice(0)) w();
 			} catch (err) {
 				bridgeLog(`attach: ${String(err)}`);
 			}
@@ -1862,8 +1964,7 @@ function bridge(pi: ExtensionAPI) {
 			} catch {
 				pendingReview = undefined;
 			}
-			startTicking(ctx);
-			connect();
+			bridgeSession(ctx);
 		} catch (err) {
 			bridgeLog(`session_start: ${String(err)}`);
 		}
@@ -1874,9 +1975,7 @@ function bridge(pi: ExtensionAPI) {
 			if (!adopt(ctx)) return;
 			active = true;
 			goalFromEvent = undefined;
-			startTicking(ctx);
-			if (connected) safeSync();
-			else connect();
+			bridgeSession(ctx);
 		} catch (err) {
 			bridgeLog(`session change: ${String(err)}`);
 		}
@@ -1932,14 +2031,11 @@ function bridge(pi: ExtensionAPI) {
 		try {
 			if (ctx.agent && ctx.agent.kind !== "main") return;
 			active = false;
-			if (tick !== undefined) {
-				try {
-					ctx.clearTimer(tick);
-				} catch {
-					/* already cleared */
-				}
-				tick = undefined;
-			}
+			stopTicking(ctx);
+			// The command context dies with the session; a later main session claims the slot anew.
+			const slot = bridgeSlot();
+			slot.cmdCtx = undefined;
+			if (slot.owners[endpoint] === me) delete slot.owners[endpoint];
 			send({ t: "bye", sessionId: helloSessionId ?? sessionId() ?? null });
 			if (sock) {
 				try {

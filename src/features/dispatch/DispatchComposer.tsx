@@ -1,12 +1,14 @@
 import { motion } from "motion/react";
-import { ArrowUp, Check, ClipboardList, Cpu, ImagePlus, LayoutTemplate, Lock, Sparkles, X } from "lucide-react";
+import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Paperclip, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
-import { attachImages, dragHasFiles, imageFiles } from "@/core/clipboardImages";
+import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
+import { attachVideos, detachDraftVideos, MAX_DRAFT_VIDEOS, removeDraftVideo, retryVideos, useDraftVideos } from "@/core/draftVideos";
 import type { ThinkingLevel } from "@/core/gen";
 import { IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
 import { templateSummary } from "@/features/workspace/shared/templates";
+import { VideoChips } from "@/features/session/composer/VideoChips";
 import { MAX_TASK_IMAGES } from "./images";
 import { type DispatchOptions, suggestDispatchName } from "./store";
 import { prefetchKey } from "./thread";
@@ -24,12 +26,14 @@ export interface DispatchComposerProps {
   hostId?: string;
   /** The thread's repository: with AI naming on, the task's name is fetched while the user pauses typing. */
   repo?: string | null;
-  /** Draft key of the task text and images (per target + repo), so an unsent task survives navigation and reload. */
+  /** Draft key of the task text, images and videos (per target + repo), so an unsent task survives navigation (text and images: reloads too). */
   draftKey: string;
+  /** The host videos upload to as soon as they are attached; null (Auto) = the host each task goes to, when it is sent. */
+  uploadHost: string | null;
   options: DispatchOptions;
   onOptionsChange(options: DispatchOptions): void;
-  /** Sends one task (text, images or both); false = refused (the draft stays). The composer clears itself and keeps focus. */
-  onSend(prompt: string, images: readonly DraftImage[]): boolean;
+  /** Sends one task (text, images, videos (`@/core/draftVideos` ids), any mix); false = refused (the draft stays). The composer clears itself and keeps focus. */
+  onSend(prompt: string, images: readonly DraftImage[], videos: readonly string[]): boolean;
   /** Why sending is impossible right now (no repo, host offline); disables the composer. */
   disabledReason?: string | null;
   placeholder: string;
@@ -39,15 +43,17 @@ export interface DispatchComposerProps {
 /**
  * Multi-line task box: Enter sends (desktop), Shift+Enter is a newline, the send button works
  * everywhere. Clears and keeps focus after each send so tasks can be fired back to back. Images
- * come in by the attach button, paste or drop and go with the task (an image-only task is fine).
- * The footer holds the per-dispatch options: template or model + thinking, and plan mode.
+ * and videos come in by the attach button, paste or drop and go with the task (a task of images or
+ * videos alone is fine): images inline, videos uploaded to the host (their paths go with the first
+ * prompt). The footer holds the per-dispatch options: template or model + thinking, and plan mode.
  */
 export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchComposerProps>(function DispatchComposer(
-  { hostId, repo, draftKey, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
+  { hostId, repo, draftKey, uploadHost, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
   ref,
 ) {
   const [text, setText, clearText] = useDraft(draftKey);
   const [images, setImages] = useDraftImages(draftKey);
+  const videos = useDraftVideos(draftKey);
   const [dragging, setDragging] = useState(false);
   const [viewing, setViewing] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -56,7 +62,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   latest.current = text;
   useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus(), text: () => latest.current }), []);
   const disabled = !!disabledReason;
-  const canSend = !disabled && (!!text.trim() || images.length > 0);
+  const canSend = !disabled && (!!text.trim() || images.length > 0 || videos.length > 0);
 
   // Name the task ahead of the send (same call as the send's, cached by ai.ts): after a pause of
   // ~1.2 s with a few words typed, so most sends skip the "Naming…" wait.
@@ -66,18 +72,33 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
 
   const send = () => {
     if (!canSend) return;
+    const failed = videos.find((v) => v.phase === "failed");
+    if (failed) {
+      toast({ title: "A video didn't upload", description: `${failed.name}: ${failed.error ?? "unknown error"}. Retry it or remove it.`, status: "error" });
+      return;
+    }
     const sent = images;
-    if (!onSend(text.trim(), sent)) return;
+    const sentVideos = videos.map((v) => v.id);
+    if (!onSend(text.trim(), sent, sentVideos)) return;
     clearText();
-    // Only what was sent: an image attached meanwhile stays.
+    // Only what was sent: an image or video attached meanwhile stays.
     setImages((cur) => cur.filter((i) => !sent.includes(i)));
+    // The task waits for its videos' uploads now.
+    detachDraftVideos(draftKey, sentVideos);
     ta.current?.focus();
   };
 
   const addFiles = async (files: readonly File[]) => {
     if (!files.length || disabled) return;
+    const vids = files.filter(isVideoFile);
+    if (vids.length) {
+      const { added, skipped } = attachVideos(draftKey, uploadHost, vids);
+      if (skipped) toast({ title: added ? "Some videos were left out" : "Video not attached", description: skipped, status: "error" });
+    }
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length) return;
     try {
-      const { added, skipped } = await attachImages(draftKey, files);
+      const { added, skipped } = await attachImages(draftKey, imgs);
       if (skipped) toast({ title: added ? "Some images were left out" : "Image not attached", description: skipped, status: "error" });
     } catch (e) {
       toast({ title: "Couldn't attach image", description: e instanceof Error ? e.message : String(e), status: "error" });
@@ -86,7 +107,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     // `items` too: WebKitGTK (Linux) lists pasted screenshots only there.
-    const files = imageFiles(e.clipboardData);
+    const files = mediaFiles(e.clipboardData);
     if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
@@ -96,7 +117,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const onDrop = (e: DragEvent) => {
     setDragging(false);
     if (dragHasFiles(e.dataTransfer) || e.dataTransfer.files.length > 0) e.preventDefault();
-    void addFiles(imageFiles(e.dataTransfer));
+    void addFiles(mediaFiles(e.dataTransfer));
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -138,6 +159,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
           ))}
         </div>
       )}
+      <VideoChips videos={videos} onRemove={(id) => removeDraftVideo(draftKey, id)} onRetry={(id) => retryVideos([id])} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 ? "pt-0" : "pt-1")} />
       <Textarea
         ref={ta}
         value={text}
@@ -148,7 +170,8 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
         aria-label="Task"
         disabled={disabled}
         autoFocus={!mobile && !disabled}
-        enterKeyHint={mobile ? "send" : undefined}
+        // Phone: Enter is a newline (the button dispatches; Ctrl/Meta+Enter from a hardware keyboard), so the keyboard shows a return key.
+        enterKeyHint={mobile ? "enter" : undefined}
         maxHeight={mobile ? 140 : 240}
         boxClassName={cn("glass", mobile ? "rounded-[20px] px-3 py-2" : "rounded-[22px] px-4 py-3", disabled && "opacity-80")}
         className={cn(mobile ? "text-[15px]" : "text-[14px]", "disabled:cursor-not-allowed")}
@@ -157,16 +180,21 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
             <input
               ref={fileInput}
               type="file"
-              accept="image/*"
+              accept="image/*,video/*"
               multiple
               hidden
               onChange={(e) => {
-                if (e.target.files) void addFiles(imageFiles({ files: e.target.files }));
+                if (e.target.files) void addFiles(mediaFiles({ files: e.target.files }));
                 e.target.value = "";
               }}
             />
-            <IconButton label="Attach images" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={disabled || images.length >= MAX_TASK_IMAGES}>
-              <ImagePlus />
+            <IconButton
+              label="Attach images or videos"
+              size={mobile ? "md" : "sm"}
+              onClick={() => fileInput.current?.click()}
+              disabled={disabled || (images.length >= MAX_TASK_IMAGES && videos.length >= MAX_DRAFT_VIDEOS)}
+            >
+              <Paperclip />
             </IconButton>
             <OptionsPopover hostId={hostId} options={options} onChange={onOptionsChange} mobile={mobile} />
             <button
@@ -202,7 +230,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
               )
             )}
             <span className="ml-auto flex shrink-0 items-center">
-              <IconButton label="Dispatch (Enter)" size={mobile ? "md" : "sm"} variant="primary" onClick={send} disabled={!canSend}>
+              <IconButton label={mobile ? "Dispatch" : "Dispatch (Enter)"} size={mobile ? "md" : "sm"} variant="primary" onClick={send} disabled={!canSend}>
                 <ArrowUp />
               </IconButton>
             </span>

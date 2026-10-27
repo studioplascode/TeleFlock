@@ -180,6 +180,17 @@ describe("sessions", () => {
     expect(t?.kind === "tool" ? t.output : undefined).toBe("a\n");
   });
 
+  test("a meta without the tree keeps the tree (tf-hostd sends it only when it changed)", () => {
+    const tree = { nodes: [{ id: "e1", kind: "user" as const, label: "hi", at: 1, onPath: true, children: 0 }], leafId: "e1" };
+    const meta = (fast: boolean, t?: typeof tree) => ({ type: "session" as const, hostId: "h", agentId: "a", ev: { k: "meta" as const, meta: { ...snap([]).meta, fast, tree: t } } });
+    let s = reduceEvents(open(base(), []), [meta(false, tree), meta(true)]).state;
+    expect(s.sessions["h::a"]?.meta?.tree).toEqual(tree);
+    expect(s.sessions["h::a"]?.meta?.fast).toBe(true);
+    const moved = { ...tree, leafId: "e2" };
+    s = reduceEvents(s, [meta(true, moved)]).state;
+    expect(s.sessions["h::a"]?.meta?.tree).toEqual(moved);
+  });
+
   test("meta, ui, btw, ended", () => {
     let s = open(base(), []);
     const ui = { id: "r1", kind: "select" as const, title: "Q", options: [], allowOther: false, allowChat: false };

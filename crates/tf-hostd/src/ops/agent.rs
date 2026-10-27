@@ -136,10 +136,16 @@ fn not_shared() -> ApiError {
         .with_hint("Use Connect to start sharing it on the host relay")
 }
 
-/// The bridge session id of an agent, when the companion extension is loaded.
+/// The bridge session id of an agent, when the companion extension is loaded. Right after a session
+/// switch the board's mapping (herdr / collab) can still name the old session while the bridge
+/// already said hello for the new one: then the agent's omp process names the current session.
 fn bridge_sid(ctx: &Ctx, agent_id: &str) -> Option<String> {
     let sid = ctx.state.omp_session_of(agent_id)?;
-    ctx.bridge.is_connected(&sid).then_some(sid)
+    if ctx.bridge.is_connected(&sid) {
+        return Some(sid);
+    }
+    let pid = ctx.state.agent(agent_id)?.omp?.pid?;
+    ctx.bridge.by_pid(pid).map(|s| s.session_id)
 }
 
 fn bridge_err(e: BridgeError) -> ApiError {
@@ -161,7 +167,6 @@ pub fn push_meta_overlay(ctx: &Ctx, session_id: &str) {
             title: b.state.title.clone(),
             context: b.state.context.clone(),
             queue: Some(b.state.queue.clone()),
-            tree: None,
             goal: Some(b.state.goal.clone()),
         },
         None => MetaOverlay::default(),
@@ -887,7 +892,7 @@ pub(crate) async fn resume_parked(
         Err(e) => return Err(ApiError::new("internal", format!("checking the session file: {e}"))),
     }
     let target = match target {
-        Some(t) => t,
+        Some(t) => LaunchPane::Target(t),
         None => reopen_target(ctx, &rec).await?,
     };
     let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().filter(|a| a.parked.is_none()).map(|a| a.name).collect();
@@ -912,7 +917,7 @@ pub(crate) async fn resume_parked(
 /// Where a parked agent reopens: a new tab in its old workspace when that is still open at the
 /// same folder; its linked worktree through herdr `worktree.open` (grouped under its repo);
 /// else a new workspace at its folder.
-async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<StartTarget, ApiError> {
+async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<LaunchPane, ApiError> {
     let cwd = rec
         .cwd
         .clone()
@@ -926,7 +931,7 @@ async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<StartTarget, Api
     }
     if let (Some(ws_id), Some(ws_cwd)) = (&rec.workspace_id, &rec.workspace_cwd) {
         if ctx.state.snapshot().workspaces.iter().any(|w| &w.id == ws_id && &w.cwd == ws_cwd) {
-            return Ok(StartTarget::Workspace { workspace_id: ws_id.clone(), split: Some(Split::Tab) });
+            return Ok(LaunchPane::Target(StartTarget::Workspace { workspace_id: ws_id.clone(), split: Some(Split::Tab) }));
         }
     }
     if let Some((checkout, repo_root)) = linked_worktree(rec, &path).await {
@@ -941,14 +946,14 @@ async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<StartTarget, Api
             Ok(o) => {
                 ctx.state.refresh();
                 return Ok(match o.root_pane.filter(|_| !o.already_open) {
-                    Some(p) => StartTarget::Pane { pane_id: p.pane_id },
-                    None => StartTarget::Workspace { workspace_id: o.workspace.workspace_id, split: Some(Split::Tab) },
+                    Some(p) => LaunchPane::New(p.pane_id),
+                    None => LaunchPane::Target(StartTarget::Workspace { workspace_id: o.workspace.workspace_id, split: Some(Split::Tab) }),
                 });
             }
             Err(e) => warn!(%checkout, "worktree open failed ({e}); resuming in a plain workspace"),
         }
     }
-    Ok(StartTarget::Cwd { cwd: path.display().to_string(), label: None })
+    Ok(LaunchPane::Target(StartTarget::Cwd { cwd: path.display().to_string(), label: None }))
 }
 
 /// `(checkout, main worktree root)` when the parked agent ran in a linked git worktree: from the
@@ -1010,19 +1015,25 @@ fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
 
 async fn connect(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
     let a = omp_agent(ctx, agent_id)?;
-    if a.omp.as_ref().is_some_and(|o| matches!(o.link, LinkState::Live | LinkState::Connecting)) {
-        ctx.omp.repoll();
+    if let Some(o) = a.omp.as_ref().filter(|o| matches!(o.link, LinkState::Live | LinkState::Connecting)) {
+        // Already shared: retry a pending join now (the session view's "Retry now" lands here).
+        match o.session_id.as_deref() {
+            Some(sid) => ctx.omp.retry_now(sid).await,
+            None => ctx.omp.repoll(),
+        }
         return Ok(());
     }
     if !ctx.omp.relay_listening() {
         return Err(ApiError::new("unsupported", format!("the TeleFlock relay is not listening on port {}", ctx.relay_port))
             .with_hint("Another program holds the port; check hostd.log"));
     }
+    // omp runs builtins such as /collab at once even while the agent streams (they dispatch before
+    // the steer path), so sharing never has to wait for the turn to end.
     let cmd = format!("/collab ws://127.0.0.1:{}", ctx.relay_port);
     if let Some(sid) = bridge_sid(ctx, agent_id) {
         ctx.bridge.slash(&sid, &cmd).await.map_err(bridge_err)?;
     } else {
-        inject::slash(ctx, agent_id, &cmd, When::IdleOnly).await?;
+        inject::slash(ctx, agent_id, &cmd, When::AlsoStreaming).await?;
     }
     ctx.omp.repoll();
     Ok(())
@@ -1113,10 +1124,68 @@ pub fn derive_handle(seed: &str, taken: &[String]) -> String {
     (2..1000).map(|n| format!("{base}-{n}")).find(|c| !taken.contains(c)).unwrap_or_else(|| format!("{base}-x"))
 }
 
+/// How long the shell of a pane hostd made (new workspace, worktree, tab or split) may take to
+/// reach its prompt: heavy startup files on slow machines (WSL laptops) need far more than 2 s.
+const NEW_PANE_SHELL_WAIT: Duration = Duration::from_secs(45);
+/// How long the shell of an existing pane the client picked may stay busy: it should be idle already.
+const PICKED_PANE_SHELL_WAIT: Duration = Duration::from_secs(2);
+/// herdr's wait for the launched agent to become interactive (`agent.start` `timeout_ms`, ≤ 300 s).
+const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long [`after_launch`] waits for the new agent to be idle with a live collab link.
+const LINK_WAIT: Duration = Duration::from_secs(90);
+
+/// Where [`start_agent`] launches.
+#[derive(Debug)]
+pub enum LaunchPane {
+    /// A client's target: `StartTarget::Pane` is an existing pane the client picked (a busy shell
+    /// fails fast); `Workspace` / `Cwd` make a new pane.
+    Target(StartTarget),
+    /// The root pane of a workspace or worktree hostd just created (its shell may still be starting).
+    New(String),
+}
+
+impl From<StartTarget> for LaunchPane {
+    fn from(target: StartTarget) -> Self {
+        Self::Target(target)
+    }
+}
+
+impl LaunchPane {
+    /// How long herdr's `agent_pane_busy` is retried in the resolved pane.
+    fn shell_wait(&self) -> Duration {
+        match self {
+            Self::Target(StartTarget::Pane { .. }) => PICKED_PANE_SHELL_WAIT,
+            _ => NEW_PANE_SHELL_WAIT,
+        }
+    }
+}
+
+/// Maps a failed herdr `agent_start`: a shell still busy once [`LaunchPane::shell_wait`] is over
+/// is explained for whose pane it is; anything else goes through [`herdr_err`].
+fn launch_err(e: tf_herdr::HerdrError, target: &LaunchPane) -> ApiError {
+    if !e.is(tf_herdr::code::AGENT_PANE_BUSY) {
+        return herdr_err(e);
+    }
+    // Hints without a final period: callers append to them (`worktree.create`, automation runs).
+    let err = match target {
+        LaunchPane::Target(StartTarget::Pane { pane_id }) => {
+            ApiError::new("busy", format!("the shell in pane {pane_id} is not at an idle prompt")).with_hint(
+                "Something is running in that pane, or its shell is still starting; pick another pane or start the agent in a new tab",
+            )
+        }
+        _ => ApiError::new("busy", format!("the new pane's shell never became ready (waited {} s)", target.shell_wait().as_secs())).with_hint(
+            "Slow shell startup files such as ~/.bashrc, ~/.zshrc, ~/.profile or conda/nvm init delay the shell prompt; try again, or make them faster",
+        ),
+    };
+    err.retryable()
+}
+
 /// The §3.7 launch recipe: resolves (or creates) the pane, then
-/// `herdr agent start <name> --kind omp --pane <pane> -- --config <overlay> -e <ext> …`.
-/// Plan mode and the initial prompt are applied once the agent is idle and linked.
-pub async fn start_agent(ctx: &Ctx, target: StartTarget, spec: &AgentSpec, resume: Option<&str>) -> Result<Started, ApiError> {
+/// `herdr agent start <name> --kind omp --pane <pane> -- --config <overlay> -e <ext> …` once its
+/// shell is at a prompt (`LaunchPane::shell_wait`), giving the agent `INTERACTIVE_TIMEOUT` to
+/// come up. Plan mode and the initial prompt are applied once the agent is idle and linked.
+pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentSpec, resume: Option<&str>) -> Result<Started, ApiError> {
+    let target: LaunchPane = target.into();
     if let Some(name) = &spec.name {
         if !valid_handle(name) {
             return Err(ApiError::new("invalid_params", "names are lowercase `[a-z][a-z0-9_-]`, at most 32 chars"));
@@ -1161,11 +1230,8 @@ pub async fn start_agent(ctx: &Ctx, target: StartTarget, spec: &AgentSpec, resum
         }
     }
     info!(%name, %kind, pane = %pane_id, ?args, "agent start");
-    let started = ctx
-        .herdr
-        .agent_start(&AgentStart { name: name.clone(), kind: kind.clone(), pane_id: pane_id.clone(), args, timeout_ms: Some(30_000) })
-        .await
-        .map_err(herdr_err)?;
+    let start = AgentStart { name: name.clone(), kind: kind.clone(), pane_id: pane_id.clone(), args, timeout_ms: Some(INTERACTIVE_TIMEOUT.as_millis() as u64) };
+    let started = ctx.herdr.agent_start(&start, target.shell_wait()).await.map_err(|e| launch_err(e, &target))?;
     let agent_id = build::agent_id(&started.agent);
     ctx.state.refresh();
     ctx.omp.repoll();
@@ -1201,8 +1267,9 @@ fn image_contents(images: Vec<ImageInput>) -> Vec<tf_collab::ImageContent> {
 /// images. Without a live link the text still goes in through herdr, but images cannot (herdr
 /// only types text): that is reported as a failure instead of dropping them silently.
 async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option<String>, images: Vec<ImageInput>) -> Result<(), ApiError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let deadline = tokio::time::Instant::now() + LINK_WAIT;
     let mut live = false;
+    let mut tick = 0u32;
     while tokio::time::Instant::now() < deadline {
         if let Some(a) = ctx.state.agent(agent_id) {
             let link = a.omp.as_ref().map(|o| o.link);
@@ -1213,7 +1280,12 @@ async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option
                 }
             }
         }
-        ctx.omp.repoll();
+        // The state is checked every 250 ms; a registry poll queries every omp process over IPC,
+        // which loads exactly the slow hosts this wait is long for, so ask for one per second.
+        if tick.is_multiple_of(4) {
+            ctx.omp.repoll();
+        }
+        tick += 1;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     if plan {
@@ -1256,10 +1328,11 @@ fn undelivered_images(count: usize, text_sent: bool) -> (String, String) {
     (title, format!("The agent's collab link never came up, so the first prompt's images could not be attached.{sent} Attach them again from the session once the agent is live."))
 }
 
-/// Resolves a start target to an idle shell pane: `(pane, workspace, cwd)`.
-async fn resolve_pane(ctx: &Ctx, target: &StartTarget) -> Result<(String, String, Option<String>), ApiError> {
+/// Resolves a launch target to an idle shell pane: `(pane, workspace, cwd)`. An existing pane
+/// (picked, or one hostd just created) must not run an agent already.
+async fn resolve_pane(ctx: &Ctx, target: &LaunchPane) -> Result<(String, String, Option<String>), ApiError> {
     match target {
-        StartTarget::Pane { pane_id } => {
+        LaunchPane::New(pane_id) | LaunchPane::Target(StartTarget::Pane { pane_id }) => {
             let p = ctx.herdr.pane_get(pane_id).await.map_err(herdr_err)?;
             if p.agent.is_some() {
                 return Err(ApiError::new("busy", format!("pane {pane_id} already runs an agent")));
@@ -1267,7 +1340,7 @@ async fn resolve_pane(ctx: &Ctx, target: &StartTarget) -> Result<(String, String
             let cwd = p.foreground_cwd.clone().or(p.cwd.clone());
             Ok((p.pane_id, p.workspace_id, cwd))
         }
-        StartTarget::Workspace { workspace_id, split } => {
+        LaunchPane::Target(StartTarget::Workspace { workspace_id, split }) => {
             let pane = match split {
                 Some(Split::Tab) => {
                     let t = ctx
@@ -1288,7 +1361,7 @@ async fn resolve_pane(ctx: &Ctx, target: &StartTarget) -> Result<(String, String
             let cwd = pane.foreground_cwd.clone().or(pane.cwd.clone());
             Ok((pane.pane_id, pane.workspace_id, cwd))
         }
-        StartTarget::Cwd { cwd, label } => {
+        LaunchPane::Target(StartTarget::Cwd { cwd, label }) => {
             let (pane, workspace, cwd) = open_workspace(ctx, cwd, label.clone()).await?;
             Ok((pane, workspace, Some(cwd)))
         }
@@ -1374,5 +1447,35 @@ mod tests {
         let (title, detail) = undelivered_images(3, false);
         assert_eq!(title, "3 images not delivered");
         assert!(!detail.contains("text was sent"));
+    }
+
+    #[test]
+    fn busy_shell_is_explained_for_whose_pane_it_is() {
+        let busy = || tf_herdr::HerdrError::new(tf_herdr::code::AGENT_PANE_BUSY, "agent target pane w1:p2 is not an available shell");
+        // A pane the client picked: its shell should be idle already.
+        let picked = LaunchPane::from(StartTarget::Pane { pane_id: "w1:p2".into() });
+        assert_eq!(picked.shell_wait(), PICKED_PANE_SHELL_WAIT);
+        let e = launch_err(busy(), &picked);
+        assert_eq!((e.code.as_str(), e.retryable), ("busy", true));
+        assert_eq!(e.message, "the shell in pane w1:p2 is not at an idle prompt");
+        assert!(e.hint.as_deref().is_some_and(|h| h.contains("pick another pane")));
+        // Panes hostd makes or just made: a long wait, then the shell's startup files are the suspect.
+        for created in [
+            LaunchPane::New("w3:p1".into()),
+            StartTarget::Cwd { cwd: "/tmp".into(), label: None }.into(),
+            StartTarget::Workspace { workspace_id: "w1".into(), split: Some(Split::Tab) }.into(),
+            StartTarget::Workspace { workspace_id: "w1".into(), split: None }.into(),
+        ] {
+            assert_eq!(created.shell_wait(), NEW_PANE_SHELL_WAIT, "{created:?}");
+            let e = launch_err(busy(), &created);
+            assert_eq!((e.code.as_str(), e.retryable), ("busy", true));
+            assert_eq!(e.message, "the new pane's shell never became ready (waited 45 s)");
+            assert!(e.hint.as_deref().is_some_and(|h| h.contains("~/.bashrc")));
+        }
+        // Other launch failures keep herdr's error.
+        let e = launch_err(tf_herdr::HerdrError::new(tf_herdr::code::AGENT_START_FAILED, "agent process exited before becoming interactive"), &picked);
+        assert_eq!(e.code, "herdr_error");
+        let e = launch_err(tf_herdr::HerdrError::new(tf_herdr::code::TIMEOUT, "agent a did not become interactive in time"), &picked);
+        assert_eq!((e.code.as_str(), e.retryable), ("timeout", true));
     }
 }

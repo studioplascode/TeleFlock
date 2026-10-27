@@ -1,0 +1,12 @@
+                 ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                 ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                 ▒▒  ██                  █
+                     ██       v18.13.1
+
+    Tip: Lint/type errors piling up? `omp cleanse` (or
+ /cleanse right here) hunts project diagnostics and fixes
+         them with parallel subagents — 󱊷 cancels
+
+
+╭── 󰵗  󰪟 GPT-6 Luna    …ctl-cap-work  󰙺 ─3%─󰁨272K───╮
+╰─                         󰘶 󰌒 to change thinking effort ─╯

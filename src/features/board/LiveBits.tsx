@@ -21,8 +21,8 @@ import { reportError } from "./agentActions";
 import { QUIET_AFTER_MS } from "./lanes";
 import { useBeat } from "./useBeat";
 
-/** Context meter `ctx 61%`: neutral fill, warn from 80 %. */
-export function ContextMeter({ pct }: { pct: number }) {
+/** Context meter `ctx 61%`: neutral fill, warn from 80 %. `barClassName` lets a tight line drop the bar (the % stays). */
+export function ContextMeter({ pct, barClassName }: { pct: number; barClassName?: string }) {
   const hot = pct >= 80;
   return (
     <Tooltip content={`Context window ${Math.round(pct)}% used`}>
@@ -30,7 +30,7 @@ export function ContextMeter({ pct }: { pct: number }) {
         <span className={cn("font-mono text-2xs tabular", hot ? "text-warn" : "text-mute")}>
           ctx <b className={cn("font-bold", hot ? "text-warn" : "text-ink-2")}>{Math.round(pct)}%</b>
         </span>
-        <span className="h-1 w-8 overflow-hidden rounded-full bg-white/8" aria-hidden>
+        <span className={cn("h-1 w-8 overflow-hidden rounded-full bg-white/8", barClassName)} aria-hidden>
           <span className={cn("block h-full rounded-full transition-[width] duration-700", hot ? "bg-warn" : "bg-white/35")} style={{ width: `${Math.min(100, pct)}%` }} />
         </span>
       </span>
@@ -230,21 +230,22 @@ export function LiveLine({
 const TPS_SAMPLES = 24;
 
 /**
- * Rolling tok/s sparkline, sampled once a second from the agent's `live.tps`. A flat zero line has
+ * Rolling tok/s sparkline, sampled once a second from the agent's `live.tps` on the shared clock
+ * (which holds still while the window is inactive, so sampling pauses too). A flat zero line has
  * nothing to scroll: it stops sampling (and re-rendering) until tokens flow again.
  */
 export function TpsSparkline({ tps, status, className }: { tps: number | undefined; status: Status; className?: string }) {
   // starts as a flat line (two points draw it), which is also all a never-busy agent ever shows
-  const [values, setValues] = useState<number[]>(() => [0, 0]);
+  const [samples, setSamples] = useState<{ at: number; values: number[] }>(() => ({ at: 0, values: [0, 0] }));
+  const values = samples.values;
   const latest = tps ?? 0;
   const flat = latest === 0 && values.every((v) => v === 0);
   const now = useNow(flat ? null : 1000);
   // one sample per clock tick (not per tps patch), using the latest rendered value
   useEffect(() => {
     if (flat) return;
-    setValues((v) => (v.length >= TPS_SAMPLES ? [...v.slice(v.length - TPS_SAMPLES + 1), latest] : [...v, latest]));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [now]);
+    setSamples((s) => (s.at === now ? s : { at: now, values: s.values.length >= TPS_SAMPLES ? [...s.values.slice(s.values.length - TPS_SAMPLES + 1), latest] : [...s.values, latest] }));
+  }, [now, flat, latest]);
   return (
     <div className={cn("flex items-center gap-1.5", className)}>
       <Sparkline values={values} status={status} height={18} className="w-14" aria-label="Tokens per second" />

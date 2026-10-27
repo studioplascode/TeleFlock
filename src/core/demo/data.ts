@@ -144,6 +144,8 @@ export const WORKSPACES: WorkspaceDef[] = [
   { id: "w2", repo: "api-gateway", branch: "main", worktree: false, order: 4 },
   { id: "w7", repo: "api-gateway", branch: "perf/connection-pool", worktree: true, order: 5 },
   { id: "w8", repo: "api-gateway", branch: "feat/rate-limits", worktree: true, order: 6 },
+  // Its pull request is merged (host.ts seeds it): Done card with "Delete worktree".
+  { id: "w13", repo: "api-gateway", branch: "chore/go-1.25", worktree: true, order: 6.5 },
   { id: "w3", repo: "marketing-site", branch: "main", worktree: false, order: 7 },
   { id: "w9", repo: "marketing-site", branch: "redesign/hero", worktree: true, order: 8 },
   { id: "w10", repo: "infra", branch: "main", worktree: false, order: 9 },
@@ -258,6 +260,11 @@ export const AGENTS: AgentDef[] = [
   {
     id: "docs", kind: "omp", workspace: "w1", column: "done", model: "sonnet-5", thinking: "low", since: 7200, age: 9000, ctxPct: 33, cost: 0.94,
     title: "README and architecture overview", line: "merged #139 · 2h ago",
+    files: [],
+  },
+  {
+    id: "gobump", kind: "omp", workspace: "w13", column: "done", model: "sonnet-5", thinking: "low", since: 2400, age: 6600, ctxPct: 21, cost: 0.38,
+    title: "Bump Go to 1.25 and drop deprecated helpers", line: "merged #91 · 40m ago",
     files: [],
   },
   {

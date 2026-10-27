@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "android",
-  "description": "Android: haptics, notification permission flow, battery-optimisation status (TeleFlock Kotlin plugin).",
+  "description": "Android: haptics, notification permission flow, battery-optimisation status, dictation (TeleFlock Kotlin plugin).",
   "platforms": ["android"],
   "windows": ["main"],
   "permissions": ["teleflock-android:default"]

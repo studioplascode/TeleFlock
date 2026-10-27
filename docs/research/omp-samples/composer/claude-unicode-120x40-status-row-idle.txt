@@ -1,0 +1,12 @@
+
+                         Tip: With default keybindings, Ctrl+D deletes the character under the
+                        cursor instead of quitting your draft — see /hotkeys for your exit key
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                                                          ⇧⇥ to change thinking effort
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ π · ⬢ no-model · 🗑 tf-bridgectl-cap-work · ◫ 7.6K/? ⟲
+⇄ teleflock

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import { aiNamingEnabled, apiError, core, type DraftImage, getAgentViews, suggestBranch, toApiError, useSettings } from "@/core";
 import type { Agent, AgentSpec, BranchList, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
+import { discardVideos, getVideo, releaseVideos, retryVideos, uploadDraftVideos, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import { classifyHerdrError, describeError, type HerdrFailure } from "@/features/workspace/shared/errors";
 import { deleteEntryImages, loadEntryImages, saveEntryImages, sweepEntryImages } from "./images";
 import { BRANCH_PREFIX, type BranchSuggester, baseSlug, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
@@ -39,14 +40,26 @@ export interface DispatchOptions {
 }
 
 /**
- * `naming` (omp's tiny model is naming the branch; skipped when AI naming is off) → `queued` →
- * `creating` (worktree.create in flight) → `started` (herdr answered; the agent's own progress
- * comes from host state), `failed` (herdr refused), or `unknown` (the request timed out or the
- * connection dropped: the host may still be creating it, so the entry keeps looking for its
- * agent). A `queued`/`creating` entry that is no longer in flight was interrupted by a reload; a
- * `naming` one never reached the host and resumes under its fallback name.
+ * `naming` (omp's tiny model is naming the branch; skipped when AI naming is off) → `uploading`
+ * (only with videos still on their way to the host) → `queued` → `creating` (worktree.create in
+ * flight) → `started` (herdr answered; the agent's own progress comes from host state), `failed`
+ * (herdr refused, or a video didn't upload), or `unknown` (the request timed out or the connection
+ * dropped: the host may still be creating it, so the entry keeps looking for its agent). A
+ * `queued`/`creating` entry that is no longer in flight was interrupted by a reload; a `naming` one
+ * never reached the host and resumes under its fallback name; an `uploading` one fails (the page
+ * that could read the video is gone).
  */
-export type DispatchPhase = "naming" | "queued" | "creating" | "started" | "failed" | "unknown";
+export type DispatchPhase = "naming" | "uploading" | "queued" | "creating" | "started" | "failed" | "unknown";
+
+/** A video sent with a task: uploaded to the entry's host, its path goes with the first prompt. */
+export interface DispatchVideo {
+  name: string;
+  size: number;
+  /** Absolute path on the host, once uploaded. */
+  path?: string;
+  /** The upload in this page (`@/core/draftVideos`) until it is done. */
+  upload?: string;
+}
 
 export interface DispatchError {
   title: string;
@@ -90,6 +103,8 @@ export interface DispatchEntry {
   sessionId?: string;
   /** Images sent with the prompt (kept in IndexedDB by id, `images.ts`). */
   images?: number;
+  /** Videos sent with the prompt (each a reference line with its host path). */
+  videos?: DispatchVideo[];
   /** The host it went to; absent (entries before 0.5) = the thread's host. */
   hostId?: string;
   /** That host's checkout root of the repository; absent = the thread's repo. */
@@ -247,17 +262,26 @@ export const useDispatch = create<DispatchState>()(
   ),
 );
 
-/** Images of entries that leave the threads (dismissed, cleared, cut by the cap, pruned) go too. */
+/**
+ * Images of entries that leave the threads (dismissed, cleared, cut by the cap, pruned) go too, and
+ * so do the uploads of their videos that never reached the agent (dropped on the host as well).
+ */
 useDispatch.subscribe((s, prev) => {
   if (s.threads === prev.threads) return;
   const gone: string[] = [];
+  const uploads: string[] = [];
   for (const [k, before] of Object.entries(prev.threads)) {
     const after = s.threads[k];
     if (after === before) continue;
     const kept = new Set(after?.map((e) => e.id));
-    for (const e of before) if (e.images && !kept.has(e.id)) gone.push(e.id);
+    for (const e of before) {
+      if (kept.has(e.id)) continue;
+      if (e.images) gone.push(e.id);
+      for (const v of e.videos ?? []) if (v.upload && !v.path) uploads.push(v.upload);
+    }
   }
   deleteEntryImages(gone);
+  if (uploads.length) discardVideos(uploads);
 });
 
 // ---------------------------------------------------------------- running
@@ -294,10 +318,15 @@ function slot(key: string): Promise<() => void> {
   });
 }
 
-/** The agent spec of an entry, its images read back from storage (an entry whose images are gone fails). */
+/**
+ * The agent spec of an entry: its images read back from storage (an entry whose images are gone
+ * fails), a reference line per uploaded video after the task.
+ */
 async function specOf(e: DispatchEntry): Promise<AgentSpec> {
   const template = useSettings.getState().templates.find((t) => t.id === e.options.templateId);
-  const task = e.prompt.trim();
+  const videos = e.videos ?? [];
+  if (videos.some((v) => !v.path)) throw apiError("videos_missing", "The task's videos didn't reach the host", { hint: "Retry uploads them again" });
+  const task = withVideoRefs(e.prompt.trim(), videos.map((v) => ({ name: v.name, size: v.size, path: v.path ?? "" })));
   const images = e.images ? await loadEntryImages(e.id) : null;
   if (e.images && !images) {
     throw apiError("images_missing", "The task's images are no longer stored on this device", { hint: "Dismiss it and send the task again with its images" });
@@ -312,6 +341,26 @@ async function specOf(e: DispatchEntry): Promise<AgentSpec> {
     prompt: template?.prompt.trim() ? (task ? `${template.prompt.trim()}\n\n${task}` : template.prompt.trim()) : task,
     ...(images ? { images } : {}),
   };
+}
+
+/**
+ * `videos` once uploaded to `hostId`: those not started yet start, failed ones start over (a retry).
+ * Their uploads in this page are forgotten then; a video this page no longer has fails the entry.
+ */
+async function uploadedVideos(hostId: string, videos: readonly DispatchVideo[]): Promise<DispatchVideo[]> {
+  if (videos.some((v) => !v.path && !(v.upload && getVideo(v.upload)))) {
+    throw apiError("videos_missing", "The task's videos are no longer on this device", { hint: "Dismiss it and send the task again with its videos" });
+  }
+  const ids = videos.flatMap((v) => (!v.path && v.upload ? [v.upload] : []));
+  uploadDraftVideos(ids, hostId);
+  retryVideos(ids);
+  await whenUploaded(ids);
+  const out = videos.map((v): DispatchVideo => {
+    const path = v.path ?? (v.upload ? getVideo(v.upload)?.path : undefined);
+    return path ? { name: v.name, size: v.size, path } : v;
+  });
+  releaseVideos(ids);
+  return out;
 }
 
 /** A failure → `failed`, or `unknown` when the host may have carried on regardless. */
@@ -332,6 +381,15 @@ async function run(key: string, id: string): Promise<void> {
   inflight.add(id);
   let release: (() => void) | undefined;
   try {
+    // Videos first: the agent gets their paths on the host with its first prompt.
+    const sending = find(key, id);
+    if (sending?.videos?.some((v) => !v.path)) {
+      store().patch(key, id, { phase: "uploading", error: undefined });
+      const videos = await uploadedVideos(entryHost(key, sending), sending.videos);
+      // Dismissed while uploading: its uploads went with it.
+      if (!find(key, id)) return;
+      store().patch(key, id, { videos });
+    }
     store().patch(key, id, { phase: "queued", error: undefined });
     release = await slot(key);
     const e = find(key, id);
@@ -387,8 +445,8 @@ function reservedNames(hostId: string, taken: Iterable<string>, except?: string)
 const PENDING_STARTED_MS = 60_000;
 
 /**
- * Dispatches on their way to each host (Auto's workload): naming, queued or creating in this
- * tab, or started under a minute ago without a running agent yet (`runningAgentIds`).
+ * Dispatches on their way to each host (Auto's workload): naming, uploading, queued or creating in
+ * this tab, or started under a minute ago without a running agent yet (`runningAgentIds`).
  */
 export function pendingByHost(threads: Readonly<Record<string, DispatchEntry[]>>, runningAgentIds: ReadonlySet<string>, now: number): Record<string, number> {
   const out: Record<string, number> = {};
@@ -396,7 +454,7 @@ export function pendingByHost(threads: Readonly<Record<string, DispatchEntry[]>>
     for (const e of list) {
       const onWay =
         e.phase === "naming" ||
-        ((e.phase === "queued" || e.phase === "creating") && inflight.has(e.id)) ||
+        ((e.phase === "uploading" || e.phase === "queued" || e.phase === "creating") && inflight.has(e.id)) ||
         (e.phase === "started" && now - (e.startedAt ?? e.createdAt) < PENDING_STARTED_MS && !(e.agentId && runningAgentIds.has(e.agentId)));
       if (!onWay) continue;
       const h = entryHost(k, e);
@@ -419,8 +477,14 @@ export function suggestDispatchName(hostId: string, repo: string, prompt: string
   return suggestBranch(hostId, prompt, { timeoutMs: NAMING_TIMEOUT_MS, cwd: repo });
 }
 
-/** What an image-only task is named after. */
+/** What a task without text is named after. */
 const IMAGE_TASK = "image task";
+const VIDEO_TASK = "video task";
+
+/** The text a task is named after: its prompt, else what it carries. */
+function taskText(e: Pick<DispatchEntry, "prompt" | "videos">): string {
+  return e.prompt.trim() ? e.prompt : e.videos?.length ? VIDEO_TASK : IMAGE_TASK;
+}
 
 /** A thread's base choice, resolved against the branches of the host a task actually goes to. */
 export interface BaseChoice {
@@ -446,6 +510,8 @@ export function dispatchTask(args: {
   repo: string;
   prompt: string;
   images?: readonly DraftImage[];
+  /** Videos attached in the composer (`@/core/draftVideos` ids): uploaded to `hostId`, then sent as reference lines. */
+  videos?: readonly string[];
   base?: string;
   baseLabel?: string;
   placed?: string;
@@ -457,7 +523,11 @@ export function dispatchTask(args: {
   const key = args.key ?? threadKey(args.hostId, args.repo);
   const s = useDispatch.getState();
   const taken = [...args.taken];
-  const text = args.prompt.trim() ? args.prompt : IMAGE_TASK;
+  const videos = (args.videos ?? []).flatMap((upload): DispatchVideo[] => {
+    const v = getVideo(upload);
+    return v ? [{ name: v.name, size: v.size, ...(v.path && v.hostId === args.hostId ? { path: v.path } : { upload }) }] : [];
+  });
+  const text = taskText({ prompt: args.prompt, videos });
   const name = uniqueSlug(baseSlug(text), reservedNames(args.hostId, taken));
   const suggest =
     args.suggest !== undefined
@@ -479,9 +549,15 @@ export function dispatchTask(args: {
     hostId: args.hostId,
     repo: args.repo,
     ...(images.length ? { images: images.length } : {}),
+    ...(videos.length ? { videos } : {}),
     ...(args.placed ? { placed: args.placed } : {}),
   };
   void saveEntryImages(entry.id, images);
+  // Uploads start now (Auto: on the host just picked), alongside the naming.
+  const uploading = videos.flatMap((v) => (v.upload ? [v.upload] : []));
+  if (uploading.length) uploadDraftVideos(uploading, args.hostId);
+  // Already uploaded (the composer started them on this host): nothing left to wait for here.
+  releaseVideos((args.videos ?? []).filter((id) => !uploading.includes(id)));
   s.add(key, entry);
   s.setOptions(args.options);
   void (suggest || args.resolveBase ? nameThenRun(key, entry.id, taken, suggest, args.resolveBase) : run(key, entry.id));
@@ -505,7 +581,7 @@ async function nameThenRun(key: string, id: string, taken: readonly string[], su
   const phase = e.phase;
   const hostId = entryHost(key, e);
   inflight.add(id);
-  const naming = nameDispatch(e.prompt.trim() ? e.prompt : IMAGE_TASK, suggest);
+  const naming = nameDispatch(taskText(e), suggest);
   const [{ slug, ai }, list] = resolveBase ? await Promise.all([naming, branchList(hostId, entryRepo(key, e))]) : [await naming, undefined];
   // Dismissed (or the thread cleared) while naming: nothing reached the host.
   if (find(key, id)?.phase !== phase) {
@@ -551,7 +627,7 @@ async function resumeNaming(key: string, id: string): Promise<void> {
       const live = getAgentViews()
         .filter((a) => a.hostId === hostId)
         .map((a) => a.name);
-      const name = uniqueSlug(baseSlug(e.prompt.trim() ? e.prompt : IMAGE_TASK), reservedNames(hostId, [...branches.branches.map((b) => b.name), ...live], id));
+      const name = uniqueSlug(baseSlug(taskText(e)), reservedNames(hostId, [...branches.branches.map((b) => b.name), ...live], id));
       store().patch(key, id, { name, branch: `${BRANCH_PREFIX}${name}`, aiNamed: false });
       void run(key, id);
       return;
@@ -575,9 +651,19 @@ export function resumeInterruptedNaming(): void {
   }
 }
 
-/** Startup: interrupted naming goes ahead; stored images of entries that are gone are dropped. */
+/**
+ * Startup: interrupted naming goes ahead; uploads cut short by the reload fail (only the page that
+ * picked a video can read it); stored images of entries that are gone are dropped.
+ */
 function afterHydration(): void {
   resumeInterruptedNaming();
+  const { threads, patch } = useDispatch.getState();
+  for (const [k, list] of Object.entries(threads)) {
+    for (const e of list) {
+      if (e.phase !== "uploading" || inflight.has(e.id)) continue;
+      patch(k, e.id, { phase: "failed", error: { title: "The app reloaded while the videos were uploading", hint: "Dismiss it and send the task again with its videos", kind: "other" } });
+    }
+  }
   const live = new Set(Object.values(useDispatch.getState().threads).flatMap((list) => list.filter((e) => e.images).map((e) => e.id)));
   void sweepEntryImages(live);
 }
@@ -642,7 +728,7 @@ export async function retryDispatch(args: {
     const taken = reservedNames(hostId, args.taken, e.id);
     for (const b of branches.branches) taken.add(b.name);
     // An AI name stays the base (a left-over branch makes it `<name>-2`); else the prompt's slug.
-    const name = uniqueSlug(e.aiNamed ? e.name : baseSlug(e.prompt.trim() ? e.prompt : IMAGE_TASK), taken);
+    const name = uniqueSlug(e.aiNamed ? e.name : baseSlug(taskText(e)), taken);
     store().patch(key, e.id, { name, branch: `${BRANCH_PREFIX}${name}`, agentId: undefined, paneId: undefined, workspaceId: undefined, path: undefined, startedAt: undefined, last: undefined });
     recreate = true;
   } catch (err) {

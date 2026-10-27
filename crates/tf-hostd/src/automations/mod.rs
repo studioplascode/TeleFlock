@@ -18,8 +18,7 @@ use tracing::{info, warn};
 
 use tf_proto::{
     ActivityKind, Agent, AgentSpec, ApiError, Automation, AutomationDraft, AutomationList, AutomationRun, AutomationRunStatus,
-    AutomationScheduler, AutomationTrigger, HerdrState, Millis, Notification, NotifyKind, SchedulePreview, StartTarget,
-    WorktreeCreateParams,
+    AutomationScheduler, AutomationTrigger, HerdrState, Millis, Notification, NotifyKind, SchedulePreview, WorktreeCreateParams,
 };
 
 use crate::daemon::Daemon;
@@ -410,14 +409,16 @@ impl Automations {
         NameClaim { names: self.names.clone(), key }
     }
 
-    /// Starts the run's agent in `pane_id` under a free `base`-derived name, retrying with the
-    /// next one when herdr says a concurrent launch took it.
+    /// Starts the run's agent in `pane_id` (the root pane of the worktree or workspace the run just
+    /// created) under a free `base`-derived name, retrying with the next one when herdr says a
+    /// concurrent launch took it.
     async fn start_named(&self, ctx: &Ctx, pane_id: &str, spec: &AgentSpec, base: &str) -> Result<tf_proto::Started, ApiError> {
         let mut avoid = Vec::new();
         loop {
             let claim = self.claim_name(ctx, base, &avoid);
             let spec = AgentSpec { name: Some(claim.key.1.clone()), ..spec.clone() };
-            match crate::ops::agent::start_agent(ctx, StartTarget::Pane { pane_id: pane_id.to_string() }, &spec, None).await {
+            let pane = crate::ops::agent::LaunchPane::New(pane_id.to_string());
+            match crate::ops::agent::start_agent(ctx, pane, &spec, None).await {
                 Err(e) if name_taken(&e) && avoid.len() + 1 < NAME_ATTEMPTS => avoid.push(claim.key.1.clone()),
                 other => return other,
             }

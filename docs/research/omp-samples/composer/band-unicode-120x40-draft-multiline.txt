@@ -1,0 +1,12 @@
+                                               ▒▒  ██                  █
+                                                   ██       v18.13.1
+
+                         Tip: No native tool_calling? Inference provider botches parsing them?
+                              `PI_DIALECT=glm|kimi|anthropic…` rolls it locally for them!
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+ π > ⬢ no-model > 🗑 tf-bridgectl-cap-work > ◫ 7.6K/? ⟲ ▶───────────────────────────────────────────────────────────────
+╰─ hello band draft
+   second band lines
