@@ -315,22 +315,43 @@ describe("demo engine", () => {
     await expect(r.call("forge", "worktree.remove", { workspaceId: "w4", force: false, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("dirty_worktree_requires_force") });
   });
 
-  test("a Done agent's merged PR: gh.prStatus says MERGED, worktree.remove takes the worktree and its card; foreign repos need trust", async () => {
+  test("a parked agent's merged PR: the card keeps its worktree, gh.prStatus says MERGED, worktree.remove {path} deletes it; foreign repos need trust", async () => {
     const r = rig();
     r.clock.advance(2000);
-    const ws = r.state.hosts.forge?.state.workspaces.find((w) => w.id === "w13");
-    expect(ws?.worktree?.branch).toBe("chore/go-1.25");
-    expect(r.state.agents[agentKey("forge", "gobump")]).toMatchObject({ column: "done", workspaceId: "w13" });
-    const st = await r.call<{ pr?: { number: number; state: string } }>("forge", "gh.prStatus", { cwd: ws?.worktree?.path });
-    expect(st.pr).toMatchObject({ number: 91, state: "MERGED" });
-    await r.call("forge", "worktree.remove", { workspaceId: "w13", force: false, trust: false });
-    r.clock.advance(1000);
-    expect(r.state.agents[agentKey("forge", "gobump")]).toBeUndefined();
+    // Mark done closed gobump's pane and, with it, its worktree workspace: the card remembers the checkout
+    const gobump = r.state.agents[agentKey("forge", "gobump")];
+    // read before toMatchObject: bun's asymmetric matchers can end up written into the received object
+    const path = gobump?.parked?.worktree?.path;
+    expect(path).toContain("api-gateway/chore-go-1-25");
+    expect(gobump).toMatchObject({ column: "done", workspaceId: "" });
     expect(r.state.hosts.forge?.state.workspaces.some((w) => w.id === "w13")).toBe(false);
+    const st = await r.call<{ pr?: { number: number; state: string } }>("forge", "gh.prStatus", { cwd: path });
+    expect(st.pr).toMatchObject({ number: 91, state: "MERGED" });
+    await r.call("forge", "worktree.remove", { workspaceId: "", path, force: false, trust: false });
+    r.clock.advance(1000);
+    // the agent stays done with its transcript; only the checkout is gone
+    const after = r.state.agents[agentKey("forge", "gobump")];
+    expect(after).toMatchObject({ column: "done", parked: { sessionFile: expect.any(String) } });
+    expect(after?.parked?.worktree).toBeUndefined();
+    // the checkout is gone: gh has nothing to look at there any more
+    await expect(r.call("forge", "gh.prStatus", { cwd: path })).rejects.toMatchObject({ message: expect.stringContaining("not a git repository") });
 
     const fork = await r.call<{ workspaceId: string }>("forge", "worktree.create", { cwd: "/home/demo/code/untrusted-fork", branch: "y", existing: false, trust: true });
     await expect(r.call("forge", "worktree.remove", { workspaceId: fork.workspaceId, force: false, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("dubious ownership") });
     await r.call("forge", "worktree.remove", { workspaceId: fork.workspaceId, force: false, trust: true });
+  });
+
+  test("Mark done of a worktree agent parks it with its worktree, and the PR follows the path", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const key = agentKey("forge", "reconnect");
+    const ws = r.state.hosts.forge?.state.workspaces.find((w) => w.id === r.state.agents[key]?.workspaceId);
+    expect(ws?.worktree).toBeDefined();
+    await r.call("forge", "agent.archive", { agentId: "reconnect", archived: true, close: true });
+    r.clock.advance(10_500);
+    expect(r.state.agents[key]).toMatchObject({ workspaceId: "", parked: { worktree: { path: ws?.worktree?.path } } });
+    const st = await r.call<{ pr?: { number: number } }>("forge", "gh.prStatus", { cwd: ws?.worktree?.path });
+    expect(st.pr).toMatchObject({ number: 142 });
   });
 
   test("fs, git and gh answer with plausible data", async () => {

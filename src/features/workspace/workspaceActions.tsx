@@ -150,20 +150,41 @@ export async function closeWorkspace(hostId: string, ws: Workspace): Promise<voi
   }
 }
 
+/** A linked worktree to remove: its herdr workspace, or, for a parked agent (Mark done closed the workspace), only its folder. */
+export interface WorktreeTarget {
+  /** The herdr workspace holding it; absent: removed by path (hosts ≥ 0.5.2, `Parked.worktree`). */
+  workspaceId?: string;
+  path: string;
+  branch?: string;
+  /** Named by this when there is no branch. */
+  label: string;
+  /** Uncommitted changes, when known: the first dialog warns about the force remove. */
+  dirty: number;
+}
+
+export function worktreeTargetOf(ws: Workspace): WorktreeTarget {
+  return { workspaceId: ws.id, path: ws.worktree?.path ?? ws.cwd, branch: ws.worktree?.branch, label: ws.label, dirty: ws.repo?.dirty ?? 0 };
+}
+
 /**
  * Remove a linked worktree: confirm, then `worktree.remove` (a second, explicit confirm to force when it has
  * uncommitted changes; a trust prompt for repos owned by another user). Toasts its own outcome and never
  * rejects; resolves true once the worktree is gone. `confirm` overrides the first dialog's title and button.
  */
 export async function removeWorktree(hostId: string, ws: Workspace, confirm?: { title: string; confirmLabel: string }): Promise<boolean> {
-  const path = ws.worktree?.path ?? ws.cwd;
-  const branch = ws.worktree?.branch;
-  const dirty = ws.repo?.dirty ?? 0;
+  return removeWorktreeTarget(hostId, worktreeTargetOf(ws), confirm);
+}
+
+/** {@link removeWorktree} for any {@link WorktreeTarget}, a workspace-less one included. */
+export async function removeWorktreeTarget(hostId: string, t: WorktreeTarget, confirm?: { title: string; confirmLabel: string }): Promise<boolean> {
+  const { path, branch, dirty } = t;
+  const name = branch ?? t.label;
   const ok = await confirmAction({
-    title: confirm?.title ?? `Remove worktree ${branch ?? ws.label}?`,
+    title: confirm?.title ?? `Remove worktree ${name}?`,
     body: (
       <>
-        Deletes the checkout at <span className="font-mono">{path}</span> and closes its workspace.
+        Deletes the checkout at <span className="font-mono">{path}</span>
+        {t.workspaceId ? " and closes its workspace." : "."}
         {branch && (
           <>
             {" "}
@@ -181,8 +202,8 @@ export async function removeWorktree(hostId: string, ws: Workspace, confirm?: { 
   let trust = false;
   for (;;) {
     try {
-      await core.host(hostId).call("worktree.remove", { workspaceId: ws.id, force, trust });
-      toast({ title: `Removed worktree ${branch ?? ws.label}`, description: force ? "Forced — local changes were discarded." : undefined, duration: 3000 });
+      await core.host(hostId).call("worktree.remove", t.workspaceId ? { workspaceId: t.workspaceId, force, trust } : { workspaceId: "", path, force, trust });
+      toast({ title: `Removed worktree ${name}`, description: force ? "Forced — local changes were discarded." : undefined, duration: 3000 });
       return true;
     } catch (e) {
       const f = classifyHerdrError(e);
@@ -210,7 +231,7 @@ export async function removeWorktree(hostId: string, ws: Workspace, confirm?: { 
         if (!trust) return false;
         continue;
       }
-      failToast(`Couldn't remove ${branch ?? ws.label}`, e);
+      failToast(`Couldn't remove ${name}`, e);
       return false;
     }
   }

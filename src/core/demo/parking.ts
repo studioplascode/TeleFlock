@@ -35,6 +35,11 @@ export interface ParkingHost {
   seedSim(def: AgentDef, workspaceId: string): AgentSim;
   /** Close the pane an agent left (its workspace with it when that was the last pane) and its terminals. */
   closePane(agentId: string, workspaceId: string, paneId: string): void;
+  /**
+   * The linked worktree `workspaceId` holds, as a parked card remembers it (hostd ≥ 0.5.2); its pull request
+   * stays known by path, since the workspace may close with the pane.
+   */
+  parkWorktree(workspaceId: string): { path: string; repoRoot: string } | undefined;
   /** A pane for a resumed agent: in its workspace when that still exists, else in a new one at its folder. */
   openPane(agentId: string, place: Place): Omit<Started, "agentId"> & { tabId: string };
   /** Move an agent to a new id: the old id leaves and the new one arrives in the same patch. */
@@ -66,6 +71,9 @@ const PARKED: { def: AgentDef; workspace: string; prune?: boolean }[] = [
   },
 ];
 
+/** Agents `data.ts` seeds live that start out parked (Mark done closed their pane): gobump's worktree PR is merged. */
+const PARK_SEEDED = ["gobump"];
+
 export class DemoParking {
   private readonly places = new Map<string, Place>();
   /** Pending pane closes (agent id → cancel) during the undo window. */
@@ -85,6 +93,10 @@ export class DemoParking {
       if (!prune) continue;
       this.host.after(6_000, () => this.host.notify(def.id, "finished", `${def.id} finished`, def.title));
       this.host.after(PRUNE_AFTER_MS, () => this.prune(def.id));
+    }
+    for (const id of PARK_SEEDED) {
+      const sim = this.host.sims.get(id);
+      if (sim) this.park(sim, sim.agent.stateSince, false);
     }
   }
 
@@ -148,10 +160,11 @@ export class DemoParking {
     const a = sim.agent;
     const { workspaceId, paneId } = a;
     this.places.set(a.id, { workspaceId, cwd: a.cwd ?? "", repo: a.repo, branch: a.branch, worktree: (a.cwd ?? "").startsWith(`${WORKTREES}/`) });
+    const worktree = this.host.parkWorktree(workspaceId);
     a.paneId = "";
     a.tabId = "";
     a.workspaceId = "";
-    a.parked = { at, sessionFile: a.omp?.sessionFile ?? "" };
+    a.parked = { at, sessionFile: a.omp?.sessionFile ?? "", ...(worktree ? { worktree } : {}) };
     a.state = "idle";
     a.stateSince = at;
     a.column = "done";

@@ -89,12 +89,17 @@ interface Target {
   key: string;
 }
 
-/** The agent's linked worktree as one primitive (a stable selector result), or null. */
+/**
+ * The agent's linked worktree as one primitive (a stable selector result), or null: its live workspace's,
+ * else the checkout a parked agent's card remembers (Mark done closed its workspace; hosts ≥ 0.5.2).
+ */
 function selectTarget(s: CoreState, agentKey: string): string | null {
   const a = s.agents[agentKey];
-  const ws = a ? s.hosts[a.hostId]?.state.workspaces.find((w) => w.id === a.workspaceId) : undefined;
-  if (!a || !ws?.worktree) return null;
-  return [a.hostId, ws.id, ws.worktree.path, ws.worktree.branch ?? ws.repo?.branch ?? ""].join(SEP);
+  if (!a) return null;
+  const ws = s.hosts[a.hostId]?.state.workspaces.find((w) => w.id === a.workspaceId);
+  if (ws?.worktree) return [a.hostId, ws.id, ws.worktree.path, ws.worktree.branch ?? ws.repo?.branch ?? ""].join(SEP);
+  const parked = a.parked?.worktree;
+  return parked ? [a.hostId, "", parked.path, a.branch ?? ""].join(SEP) : null;
 }
 
 function parseTarget(t: string): Target {

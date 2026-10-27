@@ -490,6 +490,19 @@ wire_struct! {
         pub at: Millis,
         /// omp session file `agent.resume` reopens with `omp --resume=<file>`.
         pub session_file: String,
+        /// The linked git worktree it ran in. Mark done closed that worktree's herdr workspace, so
+        /// `worktree.remove {path}` deletes the checkout (hosts ≥ 0.5.2; older hosts omit it).
+        pub worktree: Option<LinkedWorktree>,
+    }
+}
+
+wire_struct! {
+    /// A linked git worktree that no herdr workspace holds.
+    pub struct LinkedWorktree {
+        /// Checkout folder.
+        pub path: String,
+        /// Main worktree root of its repository.
+        pub repo_root: String,
     }
 }
 

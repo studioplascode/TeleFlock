@@ -96,10 +96,13 @@ filter icon); white on a dark tint on the sunset hero card. An agent outside a g
 (FolderOpen + cwd basename, `~` for the host's home). The branch follows as secondary mono text and truncates first.
 Static styles only: no animation, blur or layer.
 
-**Delete worktree** (Review and Done cards whose workspace is a linked worktree whose pull request is merged or
-closed): a danger button on the desktop card and "Delete worktree…" in the ⋯/right-click menu (on Review it takes the
-place of "Mark done & remove worktree…"). It runs `deleteWorktree`: `removeWorktree`'s confirm, force confirm when
-dirty, trust prompt for repos owned by another user, toast; a Review agent is marked done afterwards. The PR state
+**Delete worktree** (Review and Done cards that ran in a linked worktree whose pull request is merged or closed): a
+danger button on the desktop card and "Delete worktree…" in the ⋯/right-click menu (on Review it takes the place of
+"Mark done & remove worktree…"). The worktree is `agentWorktree(agent)`: the live workspace's, else the parked card's
+`Agent.parked.worktree` (Mark done closed that workspace; hosts ≥ 0.5.2, older ones omit it and show no button).
+It runs `deleteWorktree`: `removeWorktreeTarget`'s confirm, force confirm when dirty, trust prompt for repos owned by
+another user, toast; a Review agent is marked done afterwards. A parked card's worktree goes by path
+(`worktree.remove {workspaceId: "", path}`), and the card stays in Done with its transcript. The PR state
 comes from Review's memo (stage merged) or from `worktreePr.tsx`: each such card (not fresh, host online) carries an
 invisible `PrProbe`; after 600 ms on screen it queues `gh.prStatus {cwd: worktree}` (2 in flight per host, none
 while the window is hidden), cached per host + worktree path + branch. Answers hold 30 min (merged/closed), 5 min
@@ -109,8 +112,9 @@ and offline hosts keep the last answer and retry in 1 min; gh missing or signed 
 hide the button for that worktree for an hour.
 
 **Parked agents** (Mark done closed their pane, `Agent.parked`): a quiet "closed" chip (`ParkedChip`, "resuming…"
-while it resumes) on the card and the phone row; the ⋯ menu offers Open, Resume, Terminal (resumes first) and
-Reopen (resumes too); no Review (the worktree workspace may be gone), no Connect. Dragging one back to Review
+while it resumes) on the card and the phone row; the ⋯ menu offers Open, Resume, Terminal (resumes first),
+Reopen (resumes too) and, once its worktree's pull request is merged or closed, Delete worktree…; no Review (the
+worktree workspace may be gone), no Connect. Dragging one back to Review
 resumes it; the card then reappears under the new id (the optimistic move clears when the old one leaves).
 
 ## Board keyboard (desktop, only while the board is mounted and focus is not in a text field)

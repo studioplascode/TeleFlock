@@ -18,6 +18,9 @@ use crate::ops::{to_value, Ctx};
 /// Per-worktree budget for the dirty count in `worktree.list`.
 const DIRTY_BUDGET: Duration = Duration::from_secs(2);
 const QUICK: Duration = Duration::from_secs(10);
+/// Budget for `git worktree remove`: it deletes the whole checkout (a `node_modules` tree on a slow
+/// disk takes a while, and a killed git leaves half a checkout), within the app's 30 s request timeout.
+const REMOVE_CHECKOUT: Duration = Duration::from_secs(25);
 /// Budget for fetching a new branch's remote base; past it the worktree forks from the ref as
 /// is. Short: `worktree.create` (fetch + herdr checkout + agent start) must answer well within
 /// the app's 30 s request timeout even when the remote silently drops traffic (ssh also gets
@@ -261,9 +264,96 @@ pub(crate) async fn checkout(ctx: &Ctx, p: &WorktreeCreateParams) -> Result<(Wor
 }
 
 pub async fn remove(ctx: &Ctx, p: &WorktreeRemoveParams) -> Result<Empty, ApiError> {
-    ctx.herdr.worktree_remove(&p.workspace_id, p.force, p.trust).await.map_err(map_herdr)?;
+    let by_path = p.path.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    match (p.workspace_id.trim(), by_path) {
+        ("", Some(path)) => remove_path(ctx, path, p.force, p.trust).await?,
+        ("", None) => return Err(ApiError::new("invalid_params", "worktree.remove needs a workspaceId or a path")),
+        (workspace_id, _) => {
+            ctx.herdr.worktree_remove(workspace_id, p.force, p.trust).await.map_err(map_herdr)?;
+        }
+    }
     ctx.state.refresh();
     Ok(Empty {})
+}
+
+/// `worktree.remove {path}`: a linked worktree no herdr workspace holds, a parked agent's (Mark done
+/// closed its workspace). A workspace that holds it after all (reopened since) goes through herdr
+/// as usual. Afterwards no parked card offers to delete it any more.
+async fn remove_path(ctx: &Ctx, path: &str, force: bool, trust: bool) -> Result<(), ApiError> {
+    let path = resolve_path(path)?;
+    let same = |other: &str| same_path(Path::new(other), &path);
+    let held = ctx.state.snapshot().workspaces.into_iter().find(|w| w.worktree.as_ref().is_some_and(|t| same(&t.path)));
+    if let Some(ws) = held {
+        ctx.herdr.worktree_remove(&ws.id, force, trust).await.map_err(map_herdr)?;
+    } else {
+        let root = ctx.state.parked_all().into_iter().find_map(|r| r.worktree.filter(|w| same(&w.path)).map(|w| PathBuf::from(w.repo_root)));
+        remove_checkout(&path, root.as_deref(), force, trust).await?;
+    }
+    ctx.state.forget_parked_worktree(same);
+    tracing::info!(path = %path.display(), force, "removed worktree by path");
+    Ok(())
+}
+
+/// Same folder: canonical paths when both exist, else the lexically normalized ones.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => normalize_key(&a.display().to_string()) == normalize_key(&b.display().to_string()),
+    }
+}
+
+/// Removes the linked worktree at `path` with git, the way herdr's `worktree.remove` does for a
+/// workspace. Only a linked worktree of its repository qualifies (never the main checkout). A
+/// folder that is already gone counts as removed (git's record of it is pruned when the repository
+/// is known). Errors: `untrusted_repo` (retry with `trust`), `dirty_worktree` (retry with `force`),
+/// `not_git_repo`.
+pub(crate) async fn remove_checkout(path: &Path, repo_root: Option<&Path>, force: bool, trust: bool) -> Result<(), ApiError> {
+    let git_args = |args: &[&str]| -> Vec<String> {
+        let trusting = if trust { vec!["-c", "safe.directory=*"] } else { vec![] };
+        trusting.into_iter().chain(args.iter().copied()).map(str::to_string).collect()
+    };
+    if !path.exists() {
+        if let Some(root) = repo_root.filter(|r| r.is_dir()) {
+            let _ = git::git(root, &git_args(&["worktree", "prune"])[..], QUICK).await;
+        }
+        return Ok(());
+    }
+    let listed = git::git(path, &git_args(&["worktree", "list", "--porcelain"])[..], QUICK).await?;
+    if !listed.ok() {
+        return Err(remove_failure(&listed.message()));
+    }
+    let entries = git::parse_worktree_porcelain(&listed.stdout_str());
+    let linked = entries.iter().skip(1).any(|w| same_path(Path::new(&w.path), path));
+    let Some(main) = entries.first().filter(|_| linked) else {
+        return Err(ApiError::new("not_git_repo", format!("{} is not a linked git worktree", path.display()))
+            .with_hint("Only linked worktrees are removed this way, never a repository's main checkout."));
+    };
+    let target = path.display().to_string();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(target.as_str());
+    let out = git::git(Path::new(&main.path), &git_args(&args)[..], REMOVE_CHECKOUT).await?;
+    if out.ok() { Ok(()) } else { Err(remove_failure(&out.message())) }
+}
+
+/// git's `worktree list|remove` failures with the codes and hints herdr's are mapped to.
+fn remove_failure(msg: &str) -> ApiError {
+    let lower = msg.to_lowercase();
+    let clean = msg.trim().trim_start_matches("fatal: ").trim().to_string();
+    if lower.contains("dubious ownership") {
+        ApiError::new("untrusted_repo", clean).with_hint(
+            "This repository is owned by another user. Retry with “Trust repository” (applies safe.directory to this command only; your git config is not changed).",
+        )
+    } else if lower.contains("modified or untracked files") || lower.contains("use --force") {
+        ApiError::new("dirty_worktree", clean)
+            .with_hint("The worktree has uncommitted or untracked files. Remove it with “force” to discard them (the branch is kept).")
+    } else if lower.contains("not a git repository") {
+        ApiError::new("not_git_repo", clean).with_hint("The folder is no longer a git checkout.")
+    } else {
+        ApiError::new("git_error", clean)
+    }
 }
 
 #[cfg(test)]
@@ -429,5 +519,45 @@ mod tests {
         assert_eq!(upstream(&clone, "feat/offline"), None);
         // a remote branch that was never fetched cannot be a base offline
         assert_eq!(plan_branch(&clone, &params("feat/y", false, Some("origin/unfetched"))).await.unwrap_err().code, "invalid_params");
+    }
+
+    /// A parked agent's worktree (no herdr workspace holds it): removed by path with git.
+    #[tokio::test]
+    async fn checkout_removal_by_path() {
+        let td = fixture();
+        let root = td.path();
+        let add = |name: &str| {
+            let wt = td.path().parent().unwrap().join(format!("{}-{name}", td.path().file_name().unwrap().to_string_lossy()));
+            sh(root, &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap(), "main"]);
+            wt
+        };
+        let listed = || std::process::Command::new("git").args(["worktree", "list"]).current_dir(root).output().unwrap().stdout;
+
+        // Clean: gone from disk and from git's list; the branch stays.
+        let clean = add("wt-clean");
+        remove_checkout(&clean, Some(root), false, false).await.unwrap();
+        assert!(!clean.exists());
+        assert!(!String::from_utf8_lossy(&listed()).contains("wt-clean"));
+        sh(root, &["rev-parse", "--verify", "-q", "wt-clean"]);
+
+        // Dirty: refused without force (the folder stays), removed with it.
+        let dirty = add("wt-dirty");
+        std::fs::write(dirty.join("scratch.txt"), "x\n").unwrap();
+        assert_eq!(remove_checkout(&dirty, Some(root), false, false).await.unwrap_err().code, "dirty_worktree");
+        assert!(dirty.join("scratch.txt").exists());
+        remove_checkout(&dirty, Some(root), true, false).await.unwrap();
+        assert!(!dirty.exists());
+
+        // Never the main checkout, never a folder that is not a worktree.
+        assert_eq!(remove_checkout(root, Some(root), true, false).await.unwrap_err().code, "not_git_repo");
+        assert!(root.join("a.txt").exists());
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(remove_checkout(plain.path(), None, true, false).await.unwrap_err().code, "not_git_repo");
+
+        // Already deleted by hand: counts as removed, and git forgets it.
+        let gone = add("wt-gone");
+        std::fs::remove_dir_all(&gone).unwrap();
+        remove_checkout(&gone, Some(root), false, false).await.unwrap();
+        assert!(!String::from_utf8_lossy(&listed()).contains("wt-gone"));
     }
 }

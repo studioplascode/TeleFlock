@@ -144,7 +144,8 @@ export const WORKSPACES: WorkspaceDef[] = [
   { id: "w2", repo: "api-gateway", branch: "main", worktree: false, order: 4 },
   { id: "w7", repo: "api-gateway", branch: "perf/connection-pool", worktree: true, order: 5 },
   { id: "w8", repo: "api-gateway", branch: "feat/rate-limits", worktree: true, order: 6 },
-  // Its pull request is merged (host.ts seeds it): Done card with "Delete worktree".
+  // gobump's: its pull request is merged (host.ts seeds it) and Mark done closed this workspace (parking.ts parks
+  // gobump at seed), so the parked Done card offers "Delete worktree" by path.
   { id: "w13", repo: "api-gateway", branch: "chore/go-1.25", worktree: true, order: 6.5 },
   { id: "w3", repo: "marketing-site", branch: "main", worktree: false, order: 7 },
   { id: "w9", repo: "marketing-site", branch: "redesign/hero", worktree: true, order: 8 },

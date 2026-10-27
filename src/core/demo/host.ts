@@ -149,6 +149,8 @@ export class DemoHost implements SimHost {
   private pulses = new Map<string, { kind: PulseKind; n: number }>();
   private activityLog: ActivityEvent[] = [];
   private prs = new Map<string, PrInfo & { createdAt: number }>();
+  /** Pull requests of linked worktrees whose workspace closed with a parked agent's pane, by worktree path. */
+  private parkedPrs = new Map<string, PrInfo & { createdAt: number }>();
   private info: HostInfo;
   private health: HostHealth;
   private usageTotals: UsageTotals;
@@ -206,9 +208,23 @@ export class DemoHost implements SimHost {
         this.dirtyWs.add(m.ws.id);
       }
     },
+    parkWorktree: (wsId) => {
+      const m = this.wss.get(wsId);
+      if (!m?.ws.worktree) return undefined;
+      const primary = m.ws.worktree.primaryWorkspaceId ? this.wss.get(m.ws.worktree.primaryWorkspaceId) : undefined;
+      const pr = this.prs.get(m.ws.id);
+      if (pr) this.parkedPrs.set(m.path, pr);
+      return { path: m.path, repoRoot: primary?.path ?? m.repo?.root ?? m.path };
+    },
     openPane: (agentId, place) => {
       const kept = place.workspaceId ? this.wss.get(place.workspaceId) : undefined;
       const m = kept ?? this.addWorkspace(place.repo, place.branch, place.worktree, this.wss.size, undefined, false, place.cwd);
+      // a worktree reopened in a new workspace takes its pull request back
+      const pr = kept ? undefined : this.parkedPrs.get(m.path);
+      if (pr) {
+        this.prs.set(m.ws.id, pr);
+        this.parkedPrs.delete(m.path);
+      }
       const paneId = kept ? this.addPane(m.ws.id, null) : (m.ws.tabs[0]?.panes[0]?.id as string);
       const tab = m.ws.tabs.find((t) => t.panes.some((p) => p.id === paneId));
       for (const p of tab?.panes ?? []) if (p.id === paneId) Object.assign(p, { agentId, title: "omp" });
@@ -1704,6 +1720,7 @@ export class DemoHost implements SimHost {
   }
 
   private worktreeRemove(p: Record<string, unknown>): unknown {
+    if (!p.workspaceId && typeof p.path === "string") return this.worktreeRemovePath(this.resolve(p.path), Boolean(p.force), Boolean(p.trust));
     const m = this.wsModel(p.workspaceId);
     if (!m.ws.worktree) throw apiError("invalid_params", "Not a linked worktree workspace", { hint: "Close the workspace instead" });
     if (m.path.includes("untrusted") && !p.trust) throw apiError("herdr_error", `fatal: detected dubious ownership in repository at '${m.path}'`, { hint: "Confirm that you trust this repository to continue" });
@@ -1712,7 +1729,31 @@ export class DemoHost implements SimHost {
     this.closeWs(m);
     // PRs are keyed by workspace here: drop it with the workspace
     this.prs.delete(m.ws.id);
+    this.forgetParkedWorktree(m.path);
     return {};
+  }
+
+  /** `worktree.remove {path}`: a parked agent's worktree, whose workspace closed with its pane (hostd ≥ 0.5.2). */
+  private worktreeRemovePath(path: string, force: boolean, trust: boolean): unknown {
+    const held = [...this.wss.values()].find((m) => m.ws.worktree && m.path === path);
+    if (held) return this.worktreeRemove({ workspaceId: held.ws.id, force, trust });
+    const owners = [...this.sims.values()].filter((s) => s.agent.parked?.worktree?.path === path);
+    if (path.includes("untrusted") && !trust) throw apiError("untrusted_repo", `detected dubious ownership in repository at '${path}'`, { hint: "Retry with “Trust repository”" });
+    const dirty = owners.reduce((n, s) => n + s.files.length, 0);
+    if (dirty > 0 && !force) throw apiError("dirty_worktree", `'${path}' contains modified or untracked files, use --force to delete it`, { hint: "Remove it with “force” to discard them (the branch is kept)." });
+    this.parkedPrs.delete(path);
+    this.forgetParkedWorktree(path);
+    return {};
+  }
+
+  /** The checkout is gone: parked cards that ran there stop offering to delete it. */
+  private forgetParkedWorktree(path: string): void {
+    for (const s of this.sims.values()) {
+      const parked = s.agent.parked;
+      if (parked?.worktree?.path !== path) continue;
+      s.agent.parked = { at: parked.at, sessionFile: parked.sessionFile };
+      this.agentChanged(s.agent.id);
+    }
   }
 
   // ---------------------------------------------------------------- fs
@@ -1913,6 +1954,10 @@ export class DemoHost implements SimHost {
   }
 
   private prStatus(cwd: string): unknown {
+    const abs = this.resolve(cwd);
+    const parked = this.parkedPrs.get(abs);
+    // a parked agent's worktree has no workspace any more: its PR is known by path
+    if (parked && ![...this.wss.values()].some((m) => m.path === abs)) return { pr: this.prView(parked) };
     const m = this.wsForCwd(cwd);
     const pr = this.prs.get(m.ws.id);
     return pr ? { pr: this.prView(pr) } : {};

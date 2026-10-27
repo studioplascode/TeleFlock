@@ -121,6 +121,7 @@ export type * from "./LimitStatus";
 export type * from "./LimitWindow";
 export type * from "./LimitsParams";
 export type * from "./LinkState";
+export type * from "./LinkedWorktree";
 export type * from "./Liveness";
 export type * from "./MarkdownView";
 export type * from "./MergeMethod";

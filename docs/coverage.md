@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26 and 0.5.1 on 2026-10-27 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1 and 0.5.2 on 2026-10-27 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,12 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.5.2 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| Delete worktree on Done cards whose pane Mark done closed (0.5.1 offered it only while the worktree's workspace was open) | AgentCard, card ⋯ | Flock row ⋯ | `Parked.worktree`, `gh.prStatus {cwd: path}`, `worktree.remove {workspaceId: "", path}` → hostd `remove_checkout` (`git worktree remove`) | ✅ real stack (tf-devserver, lab hostd, herdr session, omp): worktree agent → Mark done → parked after 11 s with its worktree → merged PR (stand-in `gh`) → button → confirm → checkout gone, branch kept, card stays in Done without the button; ✅ demo (gobump seeded parked); unit tests (main checkout refused, dirty needs force, already-gone counts) |
 
 ## §0 What 0.5.1 changed
 
@@ -23,7 +29,7 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 | Video attachments | Composer, Dispatch (picker, drop, paste) | same | `upload.begin/chunk/status/finish/cancel`, `src/core/upload.ts` | ✅ lab (14.4 MB mp4 read by a real omp agent; 3 MiB through tf-devserver → tf-client → hostd, SHA-256 checked); ✅ demo; ⚠️ Android picker not run |
 | Images/videos into the terminal (paste, drop, phone image key); text pastes as one bracketed paste | TerminalPane | ExtraKeys image key | `uploadFile` + bracketed path paste; `pasteTextInput` | ✅ lab (omp attached a pasted PNG; a two-line paste stayed in omp's composer, where the old path ran a shell's first line); ✅ demo |
 | Desktop file drops reach the page | composer, Dispatch, terminal | — | `dragDropEnabled: false`, `shell/fileDrops.ts` guard | ⚠️ desktop app not run here |
-| Repository chips, repo filter, Delete worktree for merged/closed PRs | AgentCard, BoardToolbar, card ⋯ | Flock rows, Repos sheet, row ⋯ | `gh.prStatus` (lazy, cached), `worktree.remove` | ✅ demo at 1440×900 and 412×892; ⚠️ gh missing/unauthenticated host covered by unit tests only |
+| Repository chips, repo filter, Delete worktree for merged/closed PRs | AgentCard, BoardToolbar, card ⋯ | Flock rows, Repos sheet, row ⋯ | `gh.prStatus` (lazy, cached), `worktree.remove` | ✅ demo at 1440×900 and 412×892; ⚠️ gh missing/unauthenticated host covered by unit tests only; parked Done cards fixed in 0.5.2 (above) |
 | Android dictation with the microphone permission | — | composer mic | plugin `Dictation.kt` (`SpeechRecognizer`, `RECORD_AUDIO`) | ⚠️ compiled (Gradle, cargo for aarch64); not run on a device |
 | Phone layout: no overflow at 360–412 px; keyboard return key matches Enter (newline) in every composer | — | Flock rows/tiles, session composer + header chips, Dispatch, Hosts, Settings, agent chat, New agent | layout only; `enterKeyHint="enter"` | ✅ demo sweep of 45 phone screens at 360×780 and 412×892 (no element past its box); ⚠️ not run on a phone |
 | Lighter on slow machines: React Compiler coverage (Babel 7 + build canary), Calm board idles, hidden/inactive window gating, fewer host spawns and writes, coalesced session metas, link survives sleep, WSL distro keepalive, batched webview events, static tray in Calm | — | — | `vite.config.ts`, `src/design`, `state/`, `omp.rs`, `link.rs`, `clients.rs`, `wsl.rs`, `core.rs`, `tray.rs` | ✅ measured before/after (headless Chromium at 1× and 4×; lab hostd with strace; paused-clock tests; a SIGSTOP'd stack kept its link); ⚠️ WebView2, WSL keepalive and tray on real Windows not run |
@@ -97,7 +103,7 @@ Board cards, Flock rows and the session header render every encoding listed in t
 | Board columns Needs you · Running · Review · Done, drag Review↔Done, live-lane bounce | Kanban | Flock sections + swipe Mark done/Reopen + ⋯ | `agent.archive` | state persist | ✅ demo |
 | Done agents close their panes (parked): "closed" chip, Resume / Reopen / Terminal / prompt resume under a new id and views follow; pruned agents vanish (notifications, drafts, mute, toasts, Dispatch, terminal memory) | Kanban Done lane, ⋯ menu, session gate, terminal notice, Settings switch | Flock rows + ⋯, session gate | `agent.archive {close}`, `agent.resume`, `agent.prompt`, `HostInfo.pruned` | herdr pane close + `omp --resume` | ✅ demo |
 | Card contents (five zones), quick answers, approvals, input requests ("Answer…" → HUD) | AgentCard/QuickAnswer | Flock needs cards | `agent.answer` | C | ✅ demo |
-| Review card: next ship step (Commit N files / Push / Open PR / Merge), Mark done, Open; Delete worktree once the PR is merged or closed | AgentCard (`shipMemo` from Review, else lazy `gh.prStatus` for visible worktree cards) | Flock row: Mark done / Review, ⋯ Delete worktree | route + `agent.archive`, `gh.prStatus`, `worktree.remove` | G | ✅ demo |
+| Review card: next ship step (Commit N files / Push / Open PR / Merge), Mark done, Open; Delete worktree once the PR is merged or closed (parked Done cards too: by path, hosts ≥ 0.5.2) | AgentCard (`shipMemo` from Review, else lazy `gh.prStatus` for visible worktree cards) | Flock row: Mark done / Review, ⋯ Delete worktree | route + `agent.archive`, `gh.prStatus`, `worktree.remove` | G | ✅ demo; ✅ real stack for parked cards (0.5.2) |
 | Summary row (first steps, spend + tightest limit, hosts, live terminal; one strip on short windows) | BentoRow | Flock tiles (Answer →, running ↓, today ›) | state | — | ✅ demo + lab (0.4.1: the tile observes the pane at its real size, fills the tile's width and keeps the newest rows at every window size) |
 | Filters (host, repository)/search/group/J-K/H-L | BoardToolbar, useBoardKeys | host filter sheet, Repos sheet | frontend | — | ✅ demo |
 | Multi-select (P1) | `X` / Ctrl+click → SelectionBar (Mark done, Reopen, Stop turn, Mute) | long-press → SelectionBar | `agent.archive`, `agent.abort`, settings | — | ✅ demo |

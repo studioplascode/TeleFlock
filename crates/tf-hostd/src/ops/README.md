@@ -69,6 +69,14 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   `.git/config.lock`, then verified), so ahead/behind and review are right. Existing-branch
   mode is unchanged (a remote-only branch becomes a local branch tracking it). Untrusted repos
   (`trust`, git refuses to read them) skip all of this: an absent base is herdr's HEAD there.
+- **worktree.remove**: `workspaceId` → herdr `worktree.remove` (closes the workspace). `workspaceId: ""`
+  plus `path` (hosts ≥ 0.5.2) is for a parked agent's worktree (`Parked.worktree`: Mark done closed its
+  workspace): a workspace still holding that folder goes through herdr as above; otherwise
+  `remove_checkout` runs `git worktree list --porcelain` in the folder (only a linked worktree
+  qualifies, never the main checkout: `not_git_repo`) and `git worktree remove [--force]` from the
+  main worktree, with `-c safe.directory=*` under `trust`; a folder already gone counts as removed
+  (`git worktree prune` in the recorded repo root). Then no parked record keeps that worktree
+  (`forget_parked_worktree`, persisted); the card stays in Done. The branch is kept either way.
 - **gh.\***: `gh pr view --json number,url,title,state,isDraft,mergeable,statusCheckRollup`;
   "no pull requests found" → `{ pr: null }`.
 - **term.open**: `Shell` targets default to a new **tab** (never shrinks existing panes);

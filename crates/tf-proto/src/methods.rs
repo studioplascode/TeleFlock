@@ -465,7 +465,13 @@ wire_struct! {
 
 wire_struct! {
     pub struct WorktreeRemoveParams {
+        /// The worktree's herdr workspace (herdr removes the checkout and closes the workspace).
+        /// Empty when removing by `path`.
+        #[serde(default)]
         pub workspace_id: String,
+        /// A linked worktree that no herdr workspace holds (a parked agent's, `Parked.worktree`):
+        /// hostd removes it with `git worktree remove` (hosts ≥ 0.5.2). With `workspaceId` empty.
+        pub path: Option<String>,
         pub force: bool,
         pub trust: bool,
     }

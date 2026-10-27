@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use tf_proto::model::{
-    Agent, Column, HerdrState, LinkState, Liveness, OmpInfo, OmpMode, Parked, PrunedAgent, QueueInfo, Workspace,
+    Agent, Column, HerdrState, LinkState, LinkedWorktree, Liveness, OmpInfo, OmpMode, Parked, PrunedAgent, QueueInfo, Workspace,
 };
 use tf_proto::session::SessionMeta;
 use tf_proto::Millis;
@@ -131,7 +131,11 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
         live: Liveness { last_event_at: None, streaming: false, thinking: false, tool: None, tps: None, tps_split: None, line: r.line.clone() },
         needs: None,
         diff: r.diff.clone(),
-        parked: Some(Parked { at: r.parked_at, session_file: r.session_file.clone() }),
+        parked: Some(Parked {
+            at: r.parked_at,
+            session_file: r.session_file.clone(),
+            worktree: r.worktree.as_ref().map(|w| LinkedWorktree { path: w.path.clone(), repo_root: w.repo_root.clone() }),
+        }),
     }
 }
 
@@ -366,6 +370,24 @@ impl StateHandle {
             s.parked.remove(agent_id);
         });
         self.mark_dirty();
+    }
+
+    /// The linked worktree at `path` is gone (removed on request): parked records that ran there
+    /// forget it, so their cards stop offering to delete it. `same` compares two paths.
+    pub fn forget_parked_worktree(&self, same: impl Fn(&str) -> bool) {
+        let mut changed = false;
+        self.inner.persist.session(&self.inner.session, |s| {
+            for r in s.parked.values_mut() {
+                if r.worktree.as_ref().is_some_and(|w| same(&w.path)) {
+                    r.worktree = None;
+                    changed = true;
+                }
+            }
+        });
+        if changed {
+            self.inner.persist.save_now();
+            self.mark_dirty();
+        }
     }
 
     /// Claims resuming a parked agent; `None` while another resume of it is in flight.
@@ -749,7 +771,9 @@ mod tests {
         assert_eq!((card.started_at, card.diff.clone()), (Some(100), a.diff.clone()));
         assert_eq!((card.pane_id.as_str(), card.tab_id.as_str(), card.workspace_id.as_str()), ("", "", ""));
         assert_eq!((card.column, card.state, card.archived, card.state_since), (Column::Done, HerdrState::Idle, true, 1000));
-        assert_eq!(card.parked, Some(Parked { at: 1000, session_file: "/s/a.jsonl".into() }));
+        // The card carries the worktree, so Delete worktree works once Mark done closed its workspace.
+        let checkout = Some(LinkedWorktree { path: "/tmp/lab".into(), repo_root: "/tmp/main".into() });
+        assert_eq!(card.parked, Some(Parked { at: 1000, session_file: "/s/a.jsonl".into(), worktree: checkout }));
         assert_eq!(card.live.line.as_deref(), Some("All tests pass."));
         let o = card.omp.unwrap();
         let src = a.omp.unwrap();
