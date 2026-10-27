@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1 and 0.5.2 on 2026-10-27 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,12 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.5.3 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| Delete worktree on a card whose folder is already gone drops only that worktree's git registration (0.5.2 ran a repository-wide `git worktree prune`, dropping every other missing worktree too); a locked one is refused | AgentCard, card ⋯ | Flock row ⋯ | `worktree.remove {path}` → hostd `remove_checkout` (`git worktree remove <path>` in the repo root) | ✅ test with real git (two worktrees with deleted folders: removing one keeps the other registered; locked refused), failing before the fix; ✅ lab hostd (parked card's folder deleted by hand, another missing worktree of the repo stayed registered, the card forgot its worktree) |
 
 ## §0 What 0.5.2 changed
 

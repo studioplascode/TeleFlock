@@ -304,8 +304,9 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// Removes the linked worktree at `path` with git, the way herdr's `worktree.remove` does for a
 /// workspace. Only a linked worktree of its repository qualifies (never the main checkout). A
-/// folder that is already gone counts as removed (git's record of it is pruned when the repository
-/// is known). Errors: `untrusted_repo` (retry with `trust`), `dirty_worktree` (retry with `force`),
+/// folder that is already gone counts as removed: only its own registration is dropped (`git
+/// worktree remove` from `repo_root`, refused when it is locked), never another missing worktree's.
+/// Errors: `untrusted_repo` (retry with `trust`), `dirty_worktree` (retry with `force`),
 /// `not_git_repo`.
 pub(crate) async fn remove_checkout(path: &Path, repo_root: Option<&Path>, force: bool, trust: bool) -> Result<(), ApiError> {
     let git_args = |args: &[&str]| -> Vec<String> {
@@ -313,10 +314,20 @@ pub(crate) async fn remove_checkout(path: &Path, repo_root: Option<&Path>, force
         trusting.into_iter().chain(args.iter().copied()).map(str::to_string).collect()
     };
     if !path.exists() {
-        if let Some(root) = repo_root.filter(|r| r.is_dir()) {
-            let _ = git::git(root, &git_args(&["worktree", "prune"])[..], QUICK).await;
+        // Not `git worktree prune`: that drops every missing worktree of the repository, a checkout
+        // on an unmounted disk included.
+        let Some(root) = repo_root.filter(|r| r.is_dir()) else { return Ok(()) };
+        let listed = git::git(root, &git_args(&["worktree", "list", "--porcelain"])[..], QUICK).await?;
+        if !listed.ok() {
+            let err = remove_failure(&listed.message());
+            // the repository is gone too: nothing is registered anywhere
+            return if err.code == "not_git_repo" { Ok(()) } else { Err(err) };
         }
-        return Ok(());
+        let entries = git::parse_worktree_porcelain(&listed.stdout_str());
+        let Some(wt) = entries.iter().skip(1).find(|w| same_path(Path::new(&w.path), path)) else { return Ok(()) };
+        // for a missing folder git skips the clean check and deletes only `.git/worktrees/<id>`
+        let out = git::git(root, &git_args(&["worktree", "remove", wt.path.as_str()])[..], QUICK).await?;
+        return if out.ok() { Ok(()) } else { Err(remove_failure(&out.message())) };
     }
     let listed = git::git(path, &git_args(&["worktree", "list", "--porcelain"])[..], QUICK).await?;
     if !listed.ok() {
@@ -554,10 +565,21 @@ mod tests {
         let plain = tempfile::tempdir().unwrap();
         assert_eq!(remove_checkout(plain.path(), None, true, false).await.unwrap_err().code, "not_git_repo");
 
-        // Already deleted by hand: counts as removed, and git forgets it.
+        // Already deleted by hand: counts as removed, and git forgets that one only. Another missing
+        // worktree (a checkout on an unmounted disk, say) keeps its registration: no repo-wide prune.
         let gone = add("wt-gone");
+        let offline = add("wt-offline");
         std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::remove_dir_all(&offline).unwrap();
         remove_checkout(&gone, Some(root), false, false).await.unwrap();
-        assert!(!String::from_utf8_lossy(&listed()).contains("wt-gone"));
+        let after = String::from_utf8_lossy(&listed()).into_owned();
+        assert!(!after.contains("wt-gone"), "{after}");
+        assert!(after.contains("wt-offline"), "another missing worktree must stay registered: {after}");
+        // No longer registered: still nothing to do.
+        remove_checkout(&gone, Some(root), false, false).await.unwrap();
+        // A locked one is refused (even with force), not silently forgotten.
+        sh(root, &["worktree", "lock", offline.to_str().unwrap()]);
+        assert!(remove_checkout(&offline, Some(root), true, false).await.is_err());
+        assert!(String::from_utf8_lossy(&listed()).contains("wt-offline"));
     }
 }

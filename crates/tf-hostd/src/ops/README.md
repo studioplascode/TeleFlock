@@ -74,8 +74,10 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   workspace): a workspace still holding that folder goes through herdr as above; otherwise
   `remove_checkout` runs `git worktree list --porcelain` in the folder (only a linked worktree
   qualifies, never the main checkout: `not_git_repo`) and `git worktree remove [--force]` from the
-  main worktree, with `-c safe.directory=*` under `trust`; a folder already gone counts as removed
-  (`git worktree prune` in the recorded repo root). Then no parked record keeps that worktree
+  main worktree, with `-c safe.directory=*` under `trust`; a folder already gone counts as removed,
+  and only its own registration is dropped (`git worktree remove <path>` in the recorded repo root;
+  never `git worktree prune`, which would drop every missing worktree, one on an unmounted disk
+  included; a locked one is refused). Then no parked record keeps that worktree
   (`forget_parked_worktree`, persisted); the card stays in Done. The branch is kept either way.
 - **gh.\***: `gh pr view --json number,url,title,state,isDraft,mergeable,statusCheckRollup`;
   "no pull requests found" → `{ pr: null }`.
