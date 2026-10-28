@@ -54,7 +54,7 @@ export function slimThreads(threads, maxEntries, maxPrompt): Record<string, Disp
 ```
 
 Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | dataTransfer)` reads
-`items` *and* `files`, deduplicated — WebKitGTK puts pasted screenshots only in `items`;
+the files of `items`, else of `files`, never both — WebKitGTK puts pasted screenshots only in `items`, Chromium in both;
 `dragHasFiles`; `attachImages` scales images > 3 MB to ≤ 2560 px and adds them within the caps,
 as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`).
 
@@ -85,7 +85,7 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   task, inside a template's framing). A failed upload fails the entry (Retry uploads it again); a
   reload mid-upload fails it ("send the task again"); dismissing it drops unsent uploads on the host.
   A video-only task is named `video-task`.
-- Images: attach button, paste (clipboard `items` + `files`) or drop into the composer; thumbnails
+- Images: attach button, paste (clipboard `items`, else `files`) or drop into the composer; thumbnails
   with remove and a lightbox; persisted with the draft (`useDraftImages` on the target + repo draft
   key). At most 8 per task and ~9 MB in total (base64 ≤ 12 MiB, under the relay's 16 MiB message
   cap), checked against the images attached by the time each paste is read and again at send;

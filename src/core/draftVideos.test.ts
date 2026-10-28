@@ -64,7 +64,7 @@ describe("video files", () => {
     const clip = mp4();
     const item = (f: File) => ({ kind: "file", type: f.type, getAsFile: () => f });
     expect(videoFiles({ items: [item(png), item(clip)], files: [clip] })).toEqual([clip]);
-    expect(mediaFiles({ items: [item(png)], files: [clip] })).toEqual([png, clip]);
+    expect(mediaFiles({ items: [item(png), item(clip)], files: [png, clip] })).toEqual([png, clip]);
   });
 });
 

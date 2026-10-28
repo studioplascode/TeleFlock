@@ -11,23 +11,25 @@ describe("imageFiles", () => {
     expect(imageFiles({ items: [item(shot)], files: [] })).toEqual([shot]);
   });
 
-  test("files only (drops from a file manager)", () => {
+  test("files only (drops from a file manager), also when items holds only strings", () => {
     const a = png("a.png");
     expect(imageFiles({ files: [a] })).toEqual([a]);
+    expect(imageFiles({ items: [item(null, "string", "text/uri-list")], files: [a] })).toEqual([a]);
   });
 
-  test("the same image in items and files counts once", () => {
-    const shot = png();
-    // getAsFile() hands out a new File object for the same image.
-    const copy = new File([new Uint8Array(8)], "image.png", { type: "image/png", lastModified: 1 });
-    expect(imageFiles({ items: [item(copy)], files: [shot] })).toHaveLength(1);
+  test("a pasted image counts once although Chromium lists it in items and files", () => {
+    // Two File objects, one per list, whose lastModified differ (Chromium 150: 1 ms apart for a
+    // small image, 22 ms for a screenshot).
+    const fromFiles = png("image.png", 8, 1_000);
+    const fromItems = png("image.png", 8, 1_022);
+    expect(imageFiles({ items: [item(fromItems)], files: [fromFiles] })).toHaveLength(1);
   });
 
   test("text and non-image files are skipped; distinct images all kept", () => {
     const a = png("a.png", 8);
     const b = png("b.png", 9);
     const doc = new File(["x"], "notes.txt", { type: "text/plain" });
-    expect(imageFiles({ items: [item(null, "string", "text/plain"), item(a), item(doc)], files: [b, doc] })).toEqual([a, b]);
+    expect(imageFiles({ items: [item(null, "string", "text/plain"), item(a), item(doc), item(b)], files: [a, doc, b] })).toEqual([a, b]);
     expect(imageFiles(null)).toEqual([]);
     expect(imageFiles({ items: [item(null, "file", "image/png")] })).toEqual([]);
   });

@@ -1,12 +1,12 @@
 import { type DraftImage, MAX_DRAFT_IMAGES, updateDraftImages } from "./draftImages";
 
 /*
- * Image (and video) files out of a paste or a drop. Browsers disagree on where they put them:
- * Chromium lists a pasted screenshot in both `files` and `items`, WebKitGTK (the Linux app) often
- * only in `items` (`getAsFile()`), and a drop from a file manager in `files`. Both are read and
- * merged. Then the composers' attach path for images (`attachImages`): very large images scaled
- * down, and the images of one prompt kept within the count and the relay's message size
- * (`fitImages`). Videos are uploaded to the host instead (`draftVideos.ts`, `upload.ts`).
+ * Image (and video) files out of a paste or a drop. Engines disagree on where they put them:
+ * WebKitGTK (the Linux app) lists a pasted screenshot only in `items` (`getAsFile()`), Chromium
+ * (WebView2, Android) in both `items` and `files`, and a drop from a file manager in `files`.
+ * Then the composers' attach path for images (`attachImages`): very large images scaled down, and
+ * the images of one prompt kept within the count and the relay's message size (`fitImages`).
+ * Videos are uploaded to the host instead (`draftVideos.ts`, `upload.ts`).
  */
 
 /** The parts of `DataTransfer` read here (structural, so tests can pass plain objects). */
@@ -15,24 +15,20 @@ export interface ImageSource {
   files?: ArrayLike<File> | null;
 }
 
-/** Files of a clipboard / drag payload that `keep` accepts: `items` and `files`, deduplicated, in order. */
+/**
+ * Files of a clipboard / drag payload that `keep` accepts, in order: those of `items`, or of
+ * `files` when `items` lists none. Never both: Chromium hands out one pasted image as two File
+ * objects, one per list, whose `lastModified` differ (each is stamped when it is made), so the
+ * lists cannot be matched up and merging them attached every pasted image twice.
+ */
 function pickFiles(data: ImageSource | null | undefined, keep: (f: File) => boolean): File[] {
   if (!data) return [];
-  const out: File[] = [];
-  const seen = new Set<string>();
-  const add = (f: File | null | undefined) => {
-    if (!f || !keep(f)) return;
-    // The same file listed in both: `getAsFile()` returns a new File object each time.
-    const id = `${f.name}\u0000${f.size}\u0000${f.type}\u0000${f.lastModified}`;
-    if (seen.has(id)) return;
-    seen.add(id);
-    out.push(f);
-  };
+  const fromItems: File[] = [];
   for (const item of Array.from(data.items ?? [])) {
-    if (item.kind === "file") add(item.getAsFile());
+    const f = item.kind === "file" ? item.getAsFile() : null;
+    if (f) fromItems.push(f);
   }
-  for (const f of Array.from(data.files ?? [])) add(f);
-  return out;
+  return (fromItems.length > 0 ? fromItems : Array.from(data.files ?? [])).filter(keep);
 }
 
 /** Video containers by extension, for files the platform hands over without a type. */
@@ -43,7 +39,7 @@ export function isVideoFile(f: Pick<File, "name" | "type">): boolean {
   return f.type.startsWith("video/") || ((f.type === "" || f.type === "application/octet-stream") && VIDEO_EXT.test(f.name));
 }
 
-/** Image files of a clipboard / drag payload: `items` and `files`, deduplicated, in order. */
+/** Image files of a clipboard / drag payload, each once, in order (`items`, else `files`). */
 export function imageFiles(data: ImageSource | null | undefined): File[] {
   return pickFiles(data, (f) => f.type.startsWith("image/"));
 }
