@@ -1,3 +1,5 @@
+/** The app version Vite injects (vite.config.ts `define`); absent under bun test. */
+declare const __APP_VERSION__: string | undefined;
 import type { AppEvent, DiagReport, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
 import { type DemoClock, realClock } from "./clock";
@@ -113,7 +115,17 @@ export class DemoEngine {
   }
 
   private addHost(profile: HostProfile, variant: HostVariant, start: boolean): DemoHost {
-    const host = new DemoHost({ clock: this.clock, emit: (e) => this.emit(e), seed: this.seed, longTranscript: this.opts.longTranscript ?? 0 }, profile, variant);
+    const host = new DemoHost(
+      {
+        clock: this.clock,
+        emit: (e) => this.emit(e),
+        seed: this.seed,
+        longTranscript: this.opts.longTranscript ?? 0,
+        tunnelOpen: (hostId, port) => this.tunnels.some((t) => t.hostId === hostId && t.remotePort === port && t.localPort === port),
+      },
+      profile,
+      variant,
+    );
     this.hosts.set(profile.id, host);
     if (this.opts.mode === "backend") this.profiles = [...this.profiles.filter((p) => p.id !== profile.id), profile];
     if (start) this.clock.after(0, () => host.start());
@@ -165,7 +177,8 @@ export class DemoEngine {
     switch (method) {
       case "app.info":
         return {
-          version: "0.1.0",
+          // Vite injects the package version; bun tests run without it.
+          version: typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "dev",
           platform: "web",
           hostdVersion: "0.1.0",
           dataDir: "(demo: in-memory)",
@@ -173,7 +186,7 @@ export class DemoEngine {
         };
       case "app.openExternal": {
         const url = String(p.url ?? "");
-        for (const h of this.hosts.values()) if (h.completeAuth(url)) return {};
+        for (const h of this.hosts.values()) if (h.completeAuth(url) || h.auth.opened(url)) return {};
         if (typeof window !== "undefined" && /^https?:|^blob:/.test(url)) window.open(url, "_blank", "noopener");
         return {};
       }
@@ -247,7 +260,7 @@ export class DemoEngine {
         return this.settings;
       }
       case "tunnel.open":
-        return this.openTunnel(String(p.hostId ?? ""), Number(p.port), typeof p.remoteHost === "string" ? p.remoteHost : "127.0.0.1");
+        return this.openTunnel(String(p.hostId ?? ""), Number(p.port), typeof p.remoteHost === "string" ? p.remoteHost : "127.0.0.1", typeof p.localPort === "number" ? p.localPort : undefined);
       case "tunnel.close": {
         const t = this.tunnels.find((x) => x.tunnelId === p.tunnelId);
         if (!t) throw apiError("not_found", `Unknown tunnel ${String(p.tunnelId)}`);
@@ -335,14 +348,29 @@ export class DemoEngine {
     };
   }
 
-  private openTunnel(hostId: string, port: number, remoteHost: string): TunnelInfo {
+  /** A flow's sign-in page (`app.openExternal` of it belongs to the demo, not the real core). */
+  ownsAuthUrl(url: string): boolean {
+    for (const h of this.hosts.values()) if (h.auth.ownsUrl(url)) return true;
+    return false;
+  }
+
+  private openTunnel(hostId: string, port: number, remoteHost: string, wanted?: number): TunnelInfo {
     const host = this.hosts.get(hostId);
     if (!host) throw apiError("not_found", `Unknown host ${hostId}`);
     if (!host.online) throw apiError("not_connected", `${host.profile.name} is not online`, { retryable: true });
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw apiError("invalid_params", `Invalid port ${port}`);
-    const existing = this.tunnels.find((t) => t.hostId === hostId && t.remotePort === port && t.remoteHost === remoteHost);
+    const existing = this.tunnels.find((t) => t.hostId === hostId && t.remotePort === port && t.remoteHost === remoteHost && (wanted === undefined || t.localPort === wanted));
     if (existing) return existing;
-    const localPort = 49_000 + this.nextTunnel++;
+    if (wanted !== undefined) {
+      const holder = this.tunnels.find((t) => t.localPort === wanted);
+      // Port 8085 plays "taken by another program on this device" (a dev server), so the demo shows
+      // the paste fallback of sign-ins whose callback can't be forwarded.
+      if (holder || wanted === 8085)
+        throw apiError("port_in_use", `port ${wanted} is not free on this device: ${holder ? `TeleFlock's tunnel to port ${holder.remotePort} of another host uses it` : "another program on this device uses it"}`, {
+          hint: "Finish the sign-in by pasting the address the browser lands on, or free the port and try again.",
+        });
+    }
+    const localPort = wanted ?? 49_000 + this.nextTunnel++;
     const html = `<!doctype html><meta charset="utf-8"><title>${remoteHost}:${port} · TeleFlock preview</title><body style="margin:0;font-family:system-ui;background:#0b0a12;color:#ece9ff;display:grid;place-items:center;min-height:100vh"><div style="text-align:center"><div style="font-size:13px;opacity:.6;letter-spacing:.08em;text-transform:uppercase">TeleFlock demo preview</div><h1 style="font-size:40px;margin:.3em 0;background:linear-gradient(90deg,#f053d0,#a15eef,#7fa2e7);-webkit-background-clip:text;color:transparent">${remoteHost}:${port}</h1><p style="opacity:.75">In the real app this tab shows the dev server on <b>${host.profile.name}</b>, tunnelled over SSH.</p></div></body>`;
     const url = typeof URL.createObjectURL === "function" && typeof Blob !== "undefined" ? URL.createObjectURL(new Blob([html], { type: "text/html" })) : `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
     const t: TunnelInfo = { tunnelId: `tun-${localPort}`, hostId, remoteHost, remotePort: port, localPort, url, openedAt: this.clock.now() };

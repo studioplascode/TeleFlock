@@ -68,7 +68,7 @@ function SwipeHint({ doneRef }: { doneRef: RefObject<(() => void) | null> }) {
   });
   if (!show) return null;
   return (
-    <span className="mt-1 flex items-center gap-1 rounded-full bg-[rgb(12_12_18/0.72)] px-2 py-0.5 text-2xs font-semibold text-mute shadow-hairline">
+    <span className="flex items-center gap-1 rounded-full bg-[rgb(12_12_18/0.72)] px-2 py-0.5 text-2xs font-semibold text-mute shadow-hairline">
       swipe for next agent
       <motion.span className="grid" animate={calm ? undefined : { x: [0, 5, 0] }} transition={{ duration: 0.9, repeat: 3, ease: "easeInOut" }}>
         <ChevronRight className="size-3" />
@@ -88,7 +88,8 @@ function PagerDots({ keys, current, inline = false, onList, hintDone }: { keys: 
   if (keys.length < 2) return null;
   const cancel = () => window.clearTimeout(timer.current);
   return (
-    <div className={cn("pointer-events-none flex flex-col items-center", inline ? "shrink-0 pb-1.5" : "absolute inset-x-0 top-0 z-raised")}>
+    // Floating: the hint sits beside the dots (one row), so neither reaches the first message below.
+    <div className={cn("pointer-events-none flex items-center", inline ? "shrink-0 flex-col pb-1.5" : "absolute inset-x-0 top-0 z-raised justify-center gap-1.5")}>
       <div
         className={cn("pointer-events-auto mt-0.5 flex items-center rounded-full px-1 select-none", !inline && "bg-[rgb(12_12_18/0.72)] shadow-hairline backdrop-blur-md")}
         role="tablist"

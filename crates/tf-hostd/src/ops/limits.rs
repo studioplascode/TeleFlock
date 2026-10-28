@@ -95,6 +95,16 @@ static CACHE: LazyLock<tokio::sync::Mutex<Cache>> = LazyLock::new(Default::defau
 
 /// Account limits for `host.limits`. Concurrent callers share one refresh.
 pub async fn limits(ctx: &Ctx, refresh: bool) -> Result<AccountLimits, ApiError> {
+    Ok(limits_with_idents(ctx, refresh).await?.0)
+}
+
+/// Forgets the cached report: the next call asks omp again (an account was linked or unlinked).
+pub(crate) async fn invalidate() {
+    CACHE.lock().await.fetched = None;
+}
+
+/// [`limits`] plus who each account is (`idents[i]` belongs to `accounts[i]`).
+pub(crate) async fn limits_with_idents(ctx: &Ctx, refresh: bool) -> Result<(AccountLimits, Vec<Ident>), ApiError> {
     let (fetched_at, accounts, error) = {
         let mut c = CACHE.lock().await;
         let max_age = if refresh { REFRESH_MIN } else { TTL };
@@ -132,7 +142,8 @@ pub async fn limits(ctx: &Ctx, refresh: bool) -> Result<AccountLimits, ApiError>
     let sessions = tokio::task::spawn_blocking(move || session_accounts(&db, &live, &pairs))
         .await
         .map_err(|e| ApiError::new("internal", e.to_string()))?;
-    Ok(AccountLimits { fetched_at, accounts: accounts.into_iter().map(|p| p.account).collect(), sessions, error })
+    let idents = accounts.iter().map(|p| p.ident.clone()).collect();
+    Ok((AccountLimits { fetched_at, accounts: accounts.into_iter().map(|p| p.account).collect(), sessions, error }, idents))
 }
 
 async fn refresh_cache(c: &mut Cache) {
@@ -443,7 +454,7 @@ fn downsample(v: Vec<LimitSample>, max: usize) -> Vec<LimitSample> {
 // ───────────────────────────── sessions ─────────────────────────────
 
 /// Whether omp's credential `identity_key` (`email:…|org:…`, `account:…`, …) names `id`.
-fn identity_matches(identity_key: &str, id: &Ident) -> bool {
+pub(crate) fn identity_matches(identity_key: &str, id: &Ident) -> bool {
     let mut matched = false;
     for part in identity_key.split('|') {
         let Some((kind, value)) = part.split_once(':') else { continue };

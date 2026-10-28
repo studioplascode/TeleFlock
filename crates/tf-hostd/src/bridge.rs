@@ -7,7 +7,10 @@
 //!
 //! * a registry of connected sessions keyed by omp `sessionId` (pid cross-check via [`BridgeHandle::by_pid`]),
 //! * typed async control calls with per-op timeouts and typed errors ([`BridgeError`] → [`ApiError`]),
-//! * a broadcast stream of [`BridgeEvent`]s for HostdCore.
+//! * a broadcast stream of [`BridgeEvent`]s for HostdCore,
+//! * the data plane of bridges ≥ 2.0 (`hello.caps.live`): a lossless, ordered live feed per
+//!   session ([`BridgeHandle::live_subscribe`] → [`LiveMsg`]s) that `crate::feed` turns into the
+//!   session replica, plus `prompt`, `uiResponse` and `agentCmd`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +19,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
+use tf_collab::{AgentCmdKind, HostFrame, ImageContent};
+use tf_proto::methods::Delivery;
 use tf_proto::{
     ApiError, BtwHistory, BtwStarted, CommandList, ContextUsage, Dequeued, ExportResult, ForkPlacement, GoalInfo,
     GoalOp, Millis, ModelRef, OmpMode, QueueInfo, ThinkingLevel, TreeInfo,
@@ -25,8 +30,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-/// Bridge wire protocol version (the `v` field of `hello`).
-pub const BRIDGE_PROTOCOL: u32 = 1;
+/// Bridge wire protocol version (`v` of `auth`, `hello` and `welcome`): 1 is the control plane,
+/// 2 adds the data plane (`hello.caps`, the live feed, bridge ≥ 2.0.0). hostd serves both.
+pub const BRIDGE_PROTOCOL: u32 = 2;
 /// Longest accepted line (plan contents and trees can be large).
 const MAX_LINE: usize = 64 * 1024 * 1024;
 /// Quick ops (state reads, model/thinking/rename, queue, plan answers).
@@ -146,6 +152,31 @@ pub struct PlanTier {
     pub thinking_level: Option<String>,
 }
 
+/// Data-plane features a bridge announces in `hello.caps` (bridge ≥ 2.0.0; all off before).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeCaps {
+    /// Live-feed version (`liveSubscribe`, `live` and `resync` frames); 0: none.
+    #[serde(default)]
+    pub live: u32,
+    /// omp's dialogs (ask, tool approvals, selects, editors) reach hostd and take `uiResponse`.
+    #[serde(default)]
+    pub dialogs: bool,
+    /// Subagents take `agentCmd` (chat, kill, revive).
+    #[serde(default)]
+    pub subagent_ctl: bool,
+    /// `prompt` (text, images, delivery).
+    #[serde(default)]
+    pub prompt: bool,
+}
+
+impl BridgeCaps {
+    /// The bridge serves the session's transcript and live events itself (no collab room needed).
+    pub fn data_plane(&self) -> bool {
+        self.live >= 1
+    }
+}
+
 /// One connected omp session.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +191,47 @@ pub struct BridgeSession {
     pub tui: bool,
     pub state: CtlState,
     pub connected_at: Millis,
+    pub caps: BridgeCaps,
+    /// The connection serving it (a reconnect is a new connection).
+    #[serde(skip)]
+    pub conn: u64,
+}
+
+/// One message of a session's live feed ([`BridgeHandle::live_subscribe`]), in wire order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveMsg {
+    /// Everything in flight, taken between two omp events: the first message of every
+    /// subscription, and again after the extension had to drop frames it could not send.
+    Resync(Resync),
+    /// One live event, shaped exactly like an omp collab host → guest frame.
+    Frame { seq: u64, frame: HostFrame },
+    /// omp is shutting down (`session_shutdown`); the connection closes next.
+    Bye,
+}
+
+/// A `resync` frame (`docs/bridge-protocol.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resync {
+    pub seq: u64,
+    pub session_id: String,
+    pub session_file: Option<String>,
+    pub leaf_id: Option<String>,
+    /// Newest entry omp already wrote to the session file (file order); `None` while omp has not
+    /// written the file yet (its entries are then among `frames`).
+    pub last_entry_id: Option<String>,
+    pub streaming: bool,
+    /// The in-flight state as collab frames, in order: `entry` frames (only while the file is not
+    /// written yet), `state`, `agents`, running events, subagent `bus` frames, pending dialogs.
+    pub frames: Vec<HostFrame>,
+}
+
+/// A subscription to a session's live feed. `rx` ends when the connection closes, the omp
+/// session switches, or a newer subscription replaces this one.
+#[derive(Debug)]
+pub struct LiveFeed {
+    pub rx: mpsc::UnboundedReceiver<LiveMsg>,
+    /// The connection the feed belongs to.
+    pub conn: u64,
 }
 
 /// Events for HostdCore (`BridgeHandle::subscribe`).
@@ -300,6 +372,9 @@ struct Conn {
     /// `(pid, bridge version)` of the latest `hello`, kept while the connection is not routed.
     hello: Option<(u32, String)>,
     pending: HashMap<u64, oneshot::Sender<Reply>>,
+    /// Live feed of `session` ([`BridgeHandle::live_subscribe`]); dropped (ending the feed) when
+    /// the session switches or is taken away from this connection.
+    feed: Option<mpsc::UnboundedSender<LiveMsg>>,
 }
 
 #[derive(Default)]
@@ -427,26 +502,38 @@ impl BridgeHandle {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, BridgeError> {
+        let Some(&conn_id) = self.reg().by_session.get(session_id) else {
+            return Err(BridgeError::NotConnected {
+                session_id: session_id.to_owned(),
+            });
+        };
+        self.call_on(conn_id, session_id, op, params, timeout).await
+    }
+
+    /// [`Self::call`] on one connection (the one a live feed was registered on).
+    async fn call_on(
+        &self,
+        conn_id: u64,
+        session_id: &str,
+        op: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, BridgeError> {
         let id = self.inner.shared.next_req.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        let conn_id = {
+        {
             let mut reg = self.reg();
-            let Some(&conn_id) = reg.by_session.get(session_id) else {
+            let Some(conn) = reg.conns.get_mut(&conn_id) else {
                 return Err(BridgeError::NotConnected {
                     session_id: session_id.to_owned(),
                 });
             };
-            let conn = reg
-                .conns
-                .get_mut(&conn_id)
-                .expect("by_session points at a live conn");
             let line = json!({ "t": "req", "id": id, "op": op, "params": params }).to_string();
             if conn.tx.send(line).is_err() {
                 return Err(BridgeError::Disconnected { op: op.to_owned() });
             }
             conn.pending.insert(id, tx);
-            conn_id
-        };
+        }
         debug!(session_id, op, id, "bridge request");
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(reply)) => reply.map_err(|e| with_op(e, op)),
@@ -461,6 +548,75 @@ impl BridgeHandle {
                 })
             }
         }
+    }
+
+    // ── data plane (bridge ≥ 2.0, `caps.live`) ──
+
+    /// Starts (or restarts) the live feed of `session_id`: the extension answers with a `resync`
+    /// (written before its `res`, so it is the feed's first message after any stale frames of an
+    /// earlier subscription), then `live` frames. Replaces an earlier feed of the session.
+    pub async fn live_subscribe(&self, session_id: &str) -> Result<LiveFeed, BridgeError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mine = tx.clone();
+        let conn = {
+            let mut reg = self.reg();
+            let Some(&conn_id) = reg.by_session.get(session_id) else {
+                return Err(BridgeError::NotConnected { session_id: session_id.to_owned() });
+            };
+            let conn = reg.conns.get_mut(&conn_id).expect("by_session points at a live conn");
+            conn.feed = Some(tx);
+            conn_id
+        };
+        match self.call_on(conn, session_id, "liveSubscribe", json!({}), QUICK).await {
+            Ok(_) => Ok(LiveFeed { rx, conn }),
+            Err(e) => {
+                if let Some(c) = self.reg().conns.get_mut(&conn)
+                    && c.feed.as_ref().is_some_and(|f| f.same_channel(&mine))
+                {
+                    c.feed = None;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Prompts through omp's `pi.sendUserMessage`: `auto` steers while omp streams and starts a
+    /// turn otherwise. Returns whether omp queued it (a steer or follow-up) instead of starting.
+    pub async fn prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: &[ImageContent],
+        delivery: Delivery,
+    ) -> Result<bool, BridgeError> {
+        #[derive(Deserialize)]
+        struct Queued {
+            #[serde(default)]
+            queued: bool,
+        }
+        let params = json!({ "text": text, "images": images, "delivery": delivery });
+        let r: Queued = self.typed(session_id, "prompt", params, TUI).await?;
+        Ok(r.queued)
+    }
+
+    /// Answers dialog `req_id` (a `ui-request` live frame) with an exact option label or editor
+    /// text; `None` cancels (the same values a collab guest sends).
+    pub async fn ui_response(&self, session_id: &str, req_id: u64, value: Option<&str>) -> Result<(), BridgeError> {
+        self.unit(session_id, "uiResponse", json!({ "reqId": req_id, "value": value }), QUICK)
+            .await
+    }
+
+    /// Subagent control, as omp's collab host does it for guests (chat steers or revives, kill
+    /// aborts and tombstones).
+    pub async fn agent_cmd(
+        &self,
+        session_id: &str,
+        cmd: AgentCmdKind,
+        agent_id: &str,
+        text: Option<&str>,
+    ) -> Result<(), BridgeError> {
+        let params = json!({ "cmd": cmd, "agentId": agent_id, "text": text });
+        self.unit(session_id, "agentCmd", params, TUI).await
     }
 
     async fn typed<T: serde::de::DeserializeOwned>(
@@ -825,6 +981,7 @@ where
             session: None,
             hello: None,
             pending: HashMap::new(),
+            feed: None,
         },
     );
     debug!(conn_id, "bridge connection");
@@ -915,6 +1072,32 @@ struct Hello {
     tui: bool,
     #[serde(default)]
     state: Option<CtlState>,
+    #[serde(default)]
+    caps: BridgeCaps,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResyncLine {
+    seq: u64,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    session_file: Option<String>,
+    #[serde(default)]
+    leaf_id: Option<String>,
+    #[serde(default)]
+    last_entry_id: Option<String>,
+    #[serde(default)]
+    live: ResyncLive,
+}
+
+#[derive(Deserialize, Default)]
+struct ResyncLive {
+    #[serde(default)]
+    streaming: bool,
+    #[serde(default)]
+    frames: Vec<Value>,
 }
 
 #[derive(Deserialize)]
@@ -964,16 +1147,65 @@ fn on_line(shared: &Shared, conn_id: u64, line: &str) {
         },
         "res" => on_res(shared, conn_id, &msg),
         "event" => on_event(shared, conn_id, msg),
-        "bye" => debug!(conn_id, "bridge bye"),
+        "live" => on_live(shared, conn_id, msg),
+        "resync" => match serde_json::from_value::<ResyncLine>(msg) {
+            Ok(r) => {
+                let resync = Resync {
+                    seq: r.seq,
+                    session_id: r.session_id,
+                    session_file: r.session_file.filter(|f| !f.is_empty()),
+                    leaf_id: r.leaf_id,
+                    last_entry_id: r.last_entry_id.filter(|id| !id.is_empty()),
+                    streaming: r.live.streaming,
+                    frames: r.live.frames.into_iter().map(HostFrame::from_value).collect(),
+                };
+                to_feed(shared, conn_id, LiveMsg::Resync(resync));
+            }
+            Err(e) => warn!(conn_id, "bridge: bad resync: {e}"),
+        },
+        "bye" => {
+            debug!(conn_id, "bridge bye");
+            to_feed(shared, conn_id, LiveMsg::Bye);
+        }
         other => debug!(conn_id, "bridge: ignoring frame {other:?}"),
     }
 }
 
+/// `{"t":"live","seq":N,"f":<collab host frame>}`.
+fn on_live(shared: &Shared, conn_id: u64, mut msg: Value) {
+    let Some(seq) = msg.get("seq").and_then(Value::as_u64) else {
+        warn!(conn_id, "bridge: live frame without seq");
+        return;
+    };
+    let Some(f) = msg.as_object_mut().and_then(|m| m.remove("f")) else {
+        warn!(conn_id, seq, "bridge: live frame without f");
+        return;
+    };
+    to_feed(shared, conn_id, LiveMsg::Frame { seq, frame: HostFrame::from_value(f) });
+}
+
+/// Hands a data-plane message to the connection's live feed. Without a subscription (none yet,
+/// or one that a session switch ended) it is dropped: the next subscription starts with a resync.
+fn to_feed(shared: &Shared, conn_id: u64, msg: LiveMsg) {
+    let mut reg = lock(&shared.reg);
+    let Some(conn) = reg.conns.get_mut(&conn_id) else { return };
+    match &conn.feed {
+        Some(tx) if conn.session.is_some() => {
+            if tx.send(msg).is_err() {
+                // The subscriber is gone (its session ended): stop routing until it re-subscribes.
+                conn.feed = None;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
-    if h.v != BRIDGE_PROTOCOL {
+    // v1: control plane (bridge < 2.0); v2 adds the data plane. Anything newer is a newer bridge.
+    if !(1..=BRIDGE_PROTOCOL).contains(&h.v) {
         warn!(
             conn_id,
-            "bridge protocol {} (hostd speaks {BRIDGE_PROTOCOL}); continuing", h.v
+            "bridge protocol {} (hostd speaks 1–{BRIDGE_PROTOCOL}); continuing", h.v
         );
     }
     let session = BridgeSession {
@@ -986,6 +1218,8 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
         tui: h.tui,
         state: h.state.unwrap_or_default(),
         connected_at: now_ms(),
+        caps: h.caps,
+        conn: conn_id,
     };
     let event = {
         let mut reg = lock(&shared.reg);
@@ -1016,6 +1250,7 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
             );
             // A session it was still routed for (it said hello before the newer copy) goes with it.
             let dropped = conn.session.take();
+            conn.feed = None;
             match dropped {
                 Some(s) if reg.by_session.get(&s.session_id) == Some(&conn_id) => {
                     reg.by_session.remove(&s.session_id);
@@ -1025,6 +1260,10 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
             }
         } else {
             let previous = conn.session.replace(session.clone()).map(|s| s.session_id);
+            if previous.as_ref().is_some_and(|p| p != &session.session_id) {
+                // A session switch ends the feed of the previous session; hostd subscribes anew.
+                conn.feed = None;
+            }
             if let Some(prev) = &previous
                 && prev != &session.session_id
                 && reg.by_session.get(prev) == Some(&conn_id)
@@ -1038,6 +1277,7 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
                 // socket's EOF: this hello takes the session over.
                 if let Some(c) = reg.conns.get_mut(&old) {
                     c.session = None;
+                    c.feed = None;
                 }
             }
             Some(match previous {
@@ -1234,28 +1474,30 @@ fn on_close(shared: &Shared, conn_id: u64) {
 
 // ─────────────────────────────────────────── tests ───────────────────────────────────────────
 
+/// A scripted extension for tests (bridge, feed, routing): speaks the bridge protocol over the
+/// handle's unix socket.
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod fake {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-    struct FakeExt {
-        lines: tokio::io::Lines<BufReader<OwnedReadHalf>>,
-        w: OwnedWriteHalf,
+    pub(crate) struct FakeExt {
+        pub(crate) lines: tokio::io::Lines<BufReader<OwnedReadHalf>>,
+        pub(crate) w: OwnedWriteHalf,
     }
 
     impl FakeExt {
         /// Connects and consumes hostd's `auth` frame (checking it carries the handle's secret).
-        async fn connect(h: &BridgeHandle) -> Self {
+        pub(crate) async fn connect(h: &BridgeHandle) -> Self {
             let mut ext = Self::connect_raw(h).await;
             let auth = ext.recv().await;
             assert_eq!(auth["t"], "auth");
             assert_eq!(auth["secret"], h.inner.shared.secret.as_str());
             ext
         }
-        async fn connect_raw(h: &BridgeHandle) -> Self {
+        pub(crate) async fn connect_raw(h: &BridgeHandle) -> Self {
             let BridgeEndpoint::Unix(p) = h.endpoint();
             let (r, w) = UnixStream::connect(p).await.unwrap().into_split();
             FakeExt {
@@ -1263,10 +1505,10 @@ mod tests {
                 w,
             }
         }
-        async fn send(&mut self, v: Value) {
+        pub(crate) async fn send(&mut self, v: Value) {
             self.w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
         }
-        async fn recv(&mut self) -> Value {
+        pub(crate) async fn recv(&mut self) -> Value {
             let line = tokio::time::timeout(Duration::from_secs(5), self.lines.next_line())
                 .await
                 .unwrap()
@@ -1274,7 +1516,7 @@ mod tests {
                 .unwrap();
             serde_json::from_str(&line).unwrap()
         }
-        async fn recv_req(&mut self) -> Value {
+        pub(crate) async fn recv_req(&mut self) -> Value {
             loop {
                 let v = self.recv().await;
                 if v["t"] == "req" {
@@ -1282,30 +1524,60 @@ mod tests {
                 }
             }
         }
-        async fn hello(&mut self, pid: u32, sid: &str) {
+        /// Answers request `req` with `result`.
+        pub(crate) async fn ok(&mut self, req: &Value, result: Value) {
+            self.send(json!({ "t": "res", "id": req["id"], "ok": true, "result": result })).await;
+        }
+        pub(crate) async fn hello(&mut self, pid: u32, sid: &str) {
             self.hello_v(pid, sid, "1.0.0").await;
         }
-        async fn hello_v(&mut self, pid: u32, sid: &str, bridge_version: &str) {
-            self.send(json!({
-                "t": "hello", "v": 1, "reason": "connect", "pid": pid, "sessionId": sid,
+        pub(crate) async fn hello_v(&mut self, pid: u32, sid: &str, bridge_version: &str) {
+            self.hello_caps(pid, sid, bridge_version, None).await;
+        }
+        /// `hello` with `caps` (bridge ≥ 2.0) when given.
+        pub(crate) async fn hello_caps(&mut self, pid: u32, sid: &str, bridge_version: &str, caps: Option<Value>) {
+            let mut hello = json!({
+                "t": "hello", "v": if caps.is_some() { 2 } else { 1 }, "reason": "connect", "pid": pid, "sessionId": sid,
                 "sessionFile": format!("/tmp/{sid}.jsonl"), "cwd": "/w", "ompVersion": "18.12.3",
                 "bridgeVersion": bridge_version, "tui": true,
                 "state": { "model": { "provider": "openai-codex", "id": "gpt-6-luna", "label": "Luna" },
                            "thinking": "low", "fast": false, "mode": "normal", "idle": true,
                            "queue": { "steering": [], "followUp": [] }, "attached": false }
-            }))
-            .await;
+            });
+            if let Some(caps) = caps {
+                hello["caps"] = caps;
+            }
+            self.send(hello).await;
             // Registration is complete once hostd answers with `welcome`.
             assert_eq!(self.recv().await["t"], "welcome");
         }
         /// A `state` event titled `title` (tells which connection's events reach HostdCore).
-        async fn state_titled(&mut self, sid: &str, title: &str) {
+        pub(crate) async fn state_titled(&mut self, sid: &str, title: &str) {
             self.send(json!({ "t": "event", "event": "state", "sessionId": sid, "data": {
                 "fast": false, "mode": "normal", "idle": true, "title": title,
                 "queue": { "steering": [], "followUp": [] }, "attached": false } }))
             .await;
         }
     }
+
+    /// A handle on a fresh socket under the temp dir (the dir is returned for cleanup).
+    pub(crate) fn handle() -> (BridgeHandle, std::path::PathBuf) {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tf-bridge-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let sock = dir.join("run").join("bridge.sock");
+        (BridgeHandle::bind(BridgeEndpoint::Unix(sock), "ab".repeat(32)).unwrap(), dir)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::fake::{handle, FakeExt};
+    use super::*;
+    use tokio::io::AsyncWriteExt;
 
     /// Sends a request for `sid` and answers it on `ext` (which must be the one it is routed to).
     async fn assert_routed(h: &BridgeHandle, sid: &str, ext: &mut FakeExt) {
@@ -1325,17 +1597,6 @@ mod tests {
                 return state.title;
             }
         }
-    }
-
-    fn handle() -> (BridgeHandle, std::path::PathBuf) {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "tf-bridge-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let sock = dir.join("run").join("bridge.sock");
-        (BridgeHandle::bind(BridgeEndpoint::Unix(sock), "ab".repeat(32)).unwrap(), dir)
     }
 
     async fn next_event(rx: &mut broadcast::Receiver<BridgeEvent>) -> BridgeEvent {
@@ -1724,5 +1985,99 @@ mod tests {
         assert_eq!(ext.recv().await["t"], "welcome");
         let s = h.by_session("s1").unwrap();
         assert_eq!((s.state.thinking, s.state.mode), (None, OmpMode::Normal));
+    }
+
+    const CAPS: &str = r#"{"live":1,"dialogs":true,"subagentCtl":false,"prompt":true}"#;
+
+    /// Subscribes `sid` on `ext`: the extension writes the resync before its `res`.
+    async fn subscribe(h: &BridgeHandle, sid: &str, ext: &mut FakeExt, seq: u64) -> LiveFeed {
+        let (h2, sid2) = (h.clone(), sid.to_owned());
+        let call = tokio::spawn(async move { h2.live_subscribe(&sid2).await });
+        let req = ext.recv_req().await;
+        assert_eq!(req["op"], "liveSubscribe");
+        ext.send(json!({ "t": "resync", "seq": seq, "sessionId": sid, "sessionFile": "/s.jsonl", "lastEntryId": "e9",
+            "live": { "streaming": true, "frames": [{ "t": "state", "state": { "isStreaming": true } }] } }))
+            .await;
+        ext.ok(&req, json!({})).await;
+        call.await.unwrap().unwrap()
+    }
+
+    async fn next_live(feed: &mut LiveFeed) -> Option<LiveMsg> {
+        tokio::time::timeout(Duration::from_secs(5), feed.rx.recv()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_feed_is_ordered_and_ends_with_its_session() {
+        let (h, _dir) = handle();
+        let mut ext = FakeExt::connect(&h).await;
+        ext.hello_caps(5, "s1", "2.0.0", Some(serde_json::from_str(CAPS).unwrap())).await;
+        let s = h.by_session("s1").unwrap();
+        assert!(s.caps.data_plane() && s.caps.dialogs && !s.caps.subagent_ctl);
+        // Frames sent before anyone subscribed are dropped (the subscription starts with a resync).
+        ext.send(json!({ "t": "live", "seq": 1, "f": { "t": "event", "event": { "type": "agent_start" } } })).await;
+        let mut feed = subscribe(&h, "s1", &mut ext, 2).await;
+        // A frame that raced the subscription may come first; the consumer skips it (it precedes
+        // the resync). The resync is next, then the frames in order.
+        let r = loop {
+            match next_live(&mut feed).await {
+                Some(LiveMsg::Resync(r)) => break r,
+                Some(LiveMsg::Frame { seq: 1, .. }) => continue,
+                other => panic!("resync first, got {other:?}"),
+            }
+        };
+        assert_eq!((r.seq, r.last_entry_id.as_deref(), r.streaming, r.frames.len()), (2, Some("e9"), true, 1));
+        ext.send(json!({ "t": "live", "seq": 3, "f": { "t": "event", "event": { "type": "message_start" } } })).await;
+        ext.send(json!({ "t": "live", "seq": 4, "f": { "t": "ui-request-end", "reqId": 7 } })).await;
+        assert!(matches!(next_live(&mut feed).await, Some(LiveMsg::Frame { seq: 3, frame: HostFrame::Event { .. } })));
+        assert!(matches!(next_live(&mut feed).await, Some(LiveMsg::Frame { seq: 4, frame: HostFrame::UiRequestEnd { req_id: 7 } })));
+        // A session switch on the connection ends the feed of the old session.
+        ext.send(json!({ "t": "hello", "v": 2, "reason": "switch", "pid": 5, "sessionId": "s2", "caps": serde_json::from_str::<Value>(CAPS).unwrap() })).await;
+        assert_eq!(ext.recv().await["t"], "welcome");
+        assert_eq!(next_live(&mut feed).await, None);
+        // The new session subscribes anew; `bye`, then the closed connection, end it.
+        let mut feed = subscribe(&h, "s2", &mut ext, 5).await;
+        assert!(matches!(next_live(&mut feed).await, Some(LiveMsg::Resync(_))));
+        ext.send(json!({ "t": "bye", "sessionId": "s2" })).await;
+        assert_eq!(next_live(&mut feed).await, Some(LiveMsg::Bye));
+        drop(ext);
+        assert_eq!(next_live(&mut feed).await, None);
+    }
+
+    #[tokio::test]
+    async fn data_plane_ops_send_exact_shapes() {
+        let (h, _dir) = handle();
+        let mut ext = FakeExt::connect(&h).await;
+        ext.hello_caps(5, "s1", "2.0.0", Some(serde_json::from_str(CAPS).unwrap())).await;
+        let h2 = h.clone();
+        let call = tokio::spawn(async move {
+            let img = ImageContent::new("aGk=", "image/png");
+            h2.prompt("s1", "look", &[img], Delivery::FollowUp).await
+        });
+        let req = ext.recv_req().await;
+        assert_eq!(req["op"], "prompt");
+        assert_eq!(req["params"], json!({ "text": "look", "images": [{ "type": "image", "data": "aGk=", "mimeType": "image/png" }], "delivery": "followUp" }));
+        ext.ok(&req, json!({ "queued": true })).await;
+        assert!(call.await.unwrap().unwrap());
+
+        let h2 = h.clone();
+        let call = tokio::spawn(async move { h2.ui_response("s1", 12, Some("Blue")).await });
+        let req = ext.recv_req().await;
+        assert_eq!((req["op"].clone(), req["params"].clone()), (json!("uiResponse"), json!({ "reqId": 12, "value": "Blue" })));
+        ext.ok(&req, json!({})).await;
+        call.await.unwrap().unwrap();
+
+        let h2 = h.clone();
+        let call = tokio::spawn(async move { h2.ui_response("s1", 13, None).await });
+        let req = ext.recv_req().await;
+        assert_eq!(req["params"], json!({ "reqId": 13, "value": null }), "a cancel is a null value");
+        ext.ok(&req, json!({})).await;
+        call.await.unwrap().unwrap();
+
+        let h2 = h.clone();
+        let call = tokio::spawn(async move { h2.agent_cmd("s1", AgentCmdKind::Chat, "Sub", Some("go on")).await });
+        let req = ext.recv_req().await;
+        assert_eq!((req["op"].clone(), req["params"].clone()), (json!("agentCmd"), json!({ "cmd": "chat", "agentId": "Sub", "text": "go on" })));
+        ext.ok(&req, json!({})).await;
+        call.await.unwrap().unwrap();
     }
 }

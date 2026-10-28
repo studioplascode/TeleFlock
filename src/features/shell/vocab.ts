@@ -165,6 +165,8 @@ export const VIEWS = {
   dispatch: { label: "Dispatch", shortcut: "D", description: "Send tasks to a repository like messages" },
   automations: { label: "Automations", shortcut: "Ctrl 7", description: "Agents a host starts on a schedule" },
   omp: { label: "omp settings", shortcut: "Ctrl 8", description: "omp's models, roles, tools and every other setting, per host" },
+  mcp: { label: "MCP servers", description: "Tool servers omp can use: add, sign in, test and switch them on or off, per host" },
+  accounts: { label: "Accounts", description: "Subscription logins omp uses: link, unlink and pick the default, per host" },
 } as const satisfies Record<string, ActionDef>;
 
 /**

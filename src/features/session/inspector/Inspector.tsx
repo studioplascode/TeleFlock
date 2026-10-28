@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useCore, useDraft, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
 import type { BtwThread, BtwTurn, TreeInfo, TreeNode } from "@/core/gen";
-import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Sparkline, Spinner, useMediaQuery, useNow } from "@/design";
+import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Skeleton, Sparkline, Spinner, useIdleReady, useMediaQuery, useNow } from "@/design";
 import { Term } from "@/features/shell/Term";
 import { ACTIONS } from "@/features/shell/vocab";
 import { errorText, hostCall, usePending } from "../api";
@@ -517,28 +517,42 @@ export function ChatPanel({ agentKey }: { agentKey: string }) {
   );
 }
 
-/** Desktop right rail: every inspector panel stacked; `tab` changes scroll to (and flash) a panel. */
+/**
+ * Desktop right rail: every inspector panel stacked; `tab` changes scroll to (and flash) a panel.
+ * Opening an agent paints the transcript and the Session panel first; the panels below mount a
+ * moment later in a time-sliced transition (the tree alone lays out hundreds of nodes).
+ */
 export function Inspector({ agentKey, className }: { agentKey: string; className?: string }) {
   const tab = useSessionUi((s) => s.tab[agentKey]);
+  const ready = useIdleReady(0);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!tab) return;
+    if (!tab || !ready) return;
     const el = ref.current?.querySelector<HTMLElement>(`[data-panel="${tab}"]`);
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "nearest" });
     el.animate([{ boxShadow: "0 0 0 2px rgb(163 92 240 / 0.7), 0 0 30px rgb(163 92 240 / 0.4)" }, { boxShadow: "0 0 0 0 transparent" }], { duration: 1100, easing: "ease-out" });
     el.querySelector<HTMLInputElement>("input")?.focus();
-  }, [tab]);
+  }, [tab, ready]);
   return (
     <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
-    <aside ref={ref} aria-label="Inspector" className={cn("flex min-h-0 flex-col gap-3 overflow-y-auto pb-4 no-scrollbar", className)}>
+    <aside ref={ref} aria-label="Inspector" aria-busy={!ready} className={cn("flex min-h-0 flex-col gap-3 overflow-y-auto pb-4 no-scrollbar", className)}>
       <OverviewPanel agentKey={agentKey} />
-      <TodosPanel agentKey={agentKey} />
-      <SubagentsPanel agentKey={agentKey} />
-      <FilesPanel agentKey={agentKey} />
-      <ChatPanel agentKey={agentKey} />
-      <BtwPanel agentKey={agentKey} />
-      <TreePanel agentKey={agentKey} />
+      {ready ? (
+        <>
+          <TodosPanel agentKey={agentKey} />
+          <SubagentsPanel agentKey={agentKey} />
+          <FilesPanel agentKey={agentKey} />
+          <ChatPanel agentKey={agentKey} />
+          <BtwPanel agentKey={agentKey} />
+          <TreePanel agentKey={agentKey} />
+        </>
+      ) : (
+        <>
+          <Skeleton className="h-28 shrink-0 rounded-[22px]" />
+          <Skeleton className="h-40 shrink-0 rounded-[22px]" />
+        </>
+      )}
     </aside>
     </SessionCtx.Provider>
   );

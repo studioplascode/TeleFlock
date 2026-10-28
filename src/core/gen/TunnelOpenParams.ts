@@ -4,4 +4,11 @@ export type TunnelOpenParams = { hostId: string, port: number,
 /**
  * Remote host to connect to from the agent host (default `127.0.0.1`).
  */
-remoteHost?: string, };
+remoteHost?: string, 
+/**
+ * Listen on exactly this port of the device's loopback (`127.0.0.1`, and `[::1]` when
+ * free) instead of a free one: an OAuth redirect to `http://localhost:<port>/…` opened in
+ * the device's browser then reaches the callback server of the same port on the host.
+ * Taken → `port_in_use`. Absent: any free port.
+ */
+localPort?: number, };

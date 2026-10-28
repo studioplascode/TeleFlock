@@ -731,17 +731,31 @@ fn mid_turn_join() {
     snap.welcome.state.is_streaming = true;
     let mut rep = Replica::new("x");
     let mut mirror = Mirror::default();
-    for e in rep.apply(&GuestEvent::Snapshot(snap), at0).events {
+    let up = rep.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    // The turn in progress is this replica's turn now: its end will count (board turn, notice).
+    assert_eq!(up.signals.iter().filter(|s| matches!(s, Signal::TurnStarted)).count(), 1);
+    assert!(rep.turn_started_at().is_some());
+    for e in up.events {
         mirror.apply(&e);
     }
     assert!(rep.liveness(at0).thinking, "streaming snapshot shows activity before the first token");
+    // A resync while it still runs does not start another one.
+    let again = rep.apply(&GuestEvent::Snapshot(Snapshot { resync: true, ..snap }), at0);
+    assert!(!again.signals.iter().any(|s| matches!(s, Signal::TurnStarted)));
+    for e in again.events {
+        mirror.apply(&e);
+    }
     let rows = load("06-abort");
     let start = rows.iter().position(|r| r.frame["event"]["type"] == "message_update").unwrap() + 50;
+    let mut ended = 0;
     for row in rows[start..].iter().filter(|r| r.dir == "h2g") {
-        for e in rep.apply(&GuestEvent::Frame(HostFrame::from_value(row.frame.clone())), row.at).events {
+        let up = rep.apply(&GuestEvent::Frame(HostFrame::from_value(row.frame.clone())), row.at);
+        ended += up.signals.iter().filter(|s| matches!(s, Signal::TurnEnded { .. })).count();
+        for e in up.events {
             mirror.apply(&e);
         }
     }
+    assert_eq!(ended, 1, "the joined turn's end is signaled");
     let texts: Vec<String> = rep
         .snapshot(usize::MAX)
         .items

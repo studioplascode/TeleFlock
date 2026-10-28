@@ -613,7 +613,8 @@ mod tests {
         let mut a = crate::state::build::build_agent(&crate::state::build::AgentInputs {
             herdr: &info,
             omp: None,
-            link: (tf_proto::model::LinkState::NotShared, None),
+            link: crate::omp::LinkStatus::new(tf_proto::model::LinkState::NotShared, None, None, None),
+            link_since: None,
             omp_session_id: None,
             omp_pid: None,
             bridge: None,

@@ -931,7 +931,7 @@ pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(
 /// Kills a still-running tool and everything it started when dropped while armed: unix, its
 /// process group (it leads one: `process_group(0)`); Windows, best effort `taskkill /T` of its
 /// process tree.
-struct TreeGuard(Option<u32>);
+pub(crate) struct TreeGuard(pub(crate) Option<u32>);
 
 impl Drop for TreeGuard {
     fn drop(&mut self) {
@@ -958,7 +958,7 @@ impl Drop for TreeGuard {
 }
 
 /// Removes ANSI escape sequences (CSI and OSC) in case a tool ignores `NO_COLOR`.
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {

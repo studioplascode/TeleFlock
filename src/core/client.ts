@@ -207,6 +207,7 @@ function appCallTargetsDemo(method: string, params: unknown): boolean {
   if ("hostId" in params && typeof params.hostId === "string" && method !== "hosts.remove") return demoHostIds.has(params.hostId);
   if (method === "hosts.test" && "kind" in params) return params.kind === "demo";
   if (method === "tunnel.close" && "tunnelId" in params) return demoTunnels.some((t) => t.tunnelId === params.tunnelId);
+  if (method === "app.openExternal" && "url" in params && typeof params.url === "string") return demo?.ownsAuthUrl(params.url) ?? false;
   return false;
 }
 

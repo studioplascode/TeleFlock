@@ -41,10 +41,12 @@ import { OMP_COMMAND_NAMES, ompCommandName } from "../ompCommands";
 import { AgentSim, type SimHost } from "./agent";
 import { demoAiComplete, demoAiLatency } from "./ai";
 import { DemoAutomations } from "./automations";
+import { DemoAccounts } from "./accounts";
+import { DemoAuthFlows } from "./auth";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
-import { demoLimits } from "./limits";
 import { DemoOmpSettings } from "./ompSettings";
+import { DemoMcp } from "./mcp";
 import { demoFirstPrompt } from "./dispatchAuto";
 import {
   AGENTS,
@@ -97,6 +99,8 @@ export interface HostEnv {
   seed: number;
   /** Extra rows seeded before pool's history (long-transcript perf knob). */
   longTranscript?: number;
+  /** Is a same-port tunnel to `port` of this host open (sign-in callbacks)? */
+  tunnelOpen?(hostId: string, port: number): boolean;
 }
 
 const OTHER_DEVICE = "Pixel 9";
@@ -183,6 +187,10 @@ export class DemoHost implements SimHost {
   private everOnline = false;
   private readonly tools: DemoTools;
   private readonly ompSettings = new DemoOmpSettings();
+  /** Sign-ins (`auth.*`, `./auth`): account links here, MCP OAuth from the MCP demo. */
+  readonly auth: DemoAuthFlows;
+  /** omp's accounts and keys (`accounts.*`, `./accounts`); also answers `host.limits`. */
+  private readonly accounts: DemoAccounts;
   /** Done agents' lifecycle (`./parking`): Mark done closes panes, parked agents resume, pruned ones go. */
   private readonly parking = new DemoParking({
     now: () => this.now(),
@@ -256,6 +264,8 @@ export class DemoHost implements SimHost {
   private automations?: DemoAutomations;
   /** `upload.*` (videos for prompts, terminal pastes): offsets only, nothing stored. */
   private uploads?: DemoUploads;
+  /** omp's MCP servers (`mcp.*`, `./mcp`); studio-pc plays a host whose tf-hostd predates them. */
+  private mcp?: DemoMcp;
 
   constructor(
     private readonly env: HostEnv,
@@ -263,6 +273,8 @@ export class DemoHost implements SimHost {
     readonly variant: HostVariant,
   ) {
     this.id = profile.id;
+    this.auth = new DemoAuthFlows(env.clock, (port) => env.tunnelOpen?.(profile.id, port) ?? false);
+    this.accounts = new DemoAccounts({ id: profile.id, now: () => this.now(), agents: () => this.agentsList(), auth: this.auth });
     this.rng = new Rng(env.seed ^ hash(`${variant}`));
     const now = this.now();
     this.noNeedsSince = now;
@@ -275,8 +287,8 @@ export class DemoHost implements SimHost {
             globalBridge: false,
             relay: true,
             issues: [
-              { id: "enable-global-sharing", severity: "warn", title: "Share every omp session with TeleFlock", detail: "Sets collab.autoStart: control and collab.relayUrl: ws://127.0.0.1:47466 in ~/.omp/agent/config.yml, so sessions you start by hand (or that herdr restores) appear here with full controls.", fixable: true, recommended: true },
-              { id: "install-global-bridge", severity: "info", title: "Install the TeleFlock companion extension", detail: "Copies teleflock-bridge.ts into ~/.omp/agent/extensions for precise model/thinking/plan controls without keystroke injection.", fixable: true, recommended: true },
+              { id: "install-global-bridge", severity: "warn", title: "Install the TeleFlock companion extension", detail: "Lets TeleFlock follow and control omp sessions it did not start (live transcript, questions and approvals, subagents, model and other controls), including sessions herdr restores.", fixable: true, recommended: true },
+              { id: "enable-global-sharing", severity: "info", title: "Share every omp session with TeleFlock (fallback)", detail: "Sets collab.autoStart: control and collab.relayUrl: ws://127.0.0.1:47466 in ~/.omp/agent/config.yml. Only needed for sessions without the TeleFlock extension.", fixable: true, recommended: false },
               {
                 id: "move-herdr-out-of-login-session",
                 severity: "warn",
@@ -936,6 +948,10 @@ export class DemoHost implements SimHost {
     if (parked !== undefined) return parked;
     if (method.startsWith("automation.")) return (this.automations ??= new DemoAutomations({ supported: this.variant === "forge", now: () => this.now(), herdrSession: this.info.herdrSession, call: (m, q) => this.dispatch(m, q) })).call(method, p);
     if (method.startsWith("upload.")) return (this.uploads ??= new DemoUploads(this.env.clock, HOME)).call(method, p);
+    if (method.startsWith("auth.")) return this.auth.call(method, p);
+    if (method.startsWith("accounts.")) return this.accounts.call(method, p);
+    if (method.startsWith("mcp."))
+      return (this.mcp ??= new DemoMcp({ supported: this.variant === "forge", clock: this.env.clock, home: HOME, agents: () => this.agentsList(), auth: this.auth, ompVersion: () => this.info.omp?.version })).call(method, p);
     switch (method) {
       case "state.get":
         return this.hostState();
@@ -1063,11 +1079,11 @@ export class DemoHost implements SimHost {
         const sim = this.sim(p.agentId);
         if (!sim.agent.omp) throw apiError("unsupported", "Not an omp agent");
         if (sim.agent.omp.link === "live") return {};
-        sim.agent.omp = { ...sim.agent.omp, link: "connecting" };
+        sim.agent.omp = { ...sim.agent.omp, link: "connecting", linkReason: "joining", linkVia: "collab", linkSince: this.env.clock.now(), linkError: undefined };
         this.agentChanged(sim.agent.id);
         this.env.clock.after(1600, () => {
           if (!sim.agent.omp) return;
-          sim.agent.omp = { ...sim.agent.omp, link: "live", bridge: true };
+          sim.agent.omp = { ...sim.agent.omp, link: "live", bridge: true, linkReason: undefined, linkVia: "collab", linkSince: this.env.clock.now() };
           sim.caps = { ...sim.caps, prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true };
           this.agentChanged(sim.agent.id);
         });
@@ -1181,9 +1197,10 @@ export class DemoHost implements SimHost {
       case "host.usage":
         return this.usageReport(typeof p.days === "number" ? p.days : 14);
       case "host.limits":
-        return demoLimits(this.id, this.now(), this.agentsList(), true);
+        return this.accounts.limits(true);
       case "host.models":
-        return { models: MODELS.map(({ inPerM: _i, outPerM: _o, ...m }) => m), roles: this.ompSettings.roles() };
+        // Like omp: no usable credential (every account unlinked or expired), no model.
+        return { models: this.accounts.usable() ? MODELS.map(({ inPerM: _i, outPerM: _o, ...m }) => m) : [], roles: this.ompSettings.roles() };
       case "omp.settings":
         return this.ompSettings.get();
       case "omp.settingsSet":
@@ -1523,11 +1540,11 @@ export class DemoHost implements SimHost {
     sim.agent.stateSince = this.now();
     sim.agent.live = { streaming: false, thinking: false, lastEventAt: this.now() };
     if (sim.agent.omp) {
-      sim.agent.omp = { ...sim.agent.omp, link: "connecting" };
+      sim.agent.omp = { ...sim.agent.omp, link: "connecting", linkReason: "starting", linkVia: undefined, linkSince: this.env.clock.now(), linkError: undefined };
       if (spec.plan) sim.mode = "plan";
       this.env.clock.after(1400, () => {
         if (!sim.agent.omp) return;
-        sim.agent.omp = { ...sim.agent.omp, link: "live" };
+        sim.agent.omp = { ...sim.agent.omp, link: "live", linkReason: undefined, linkVia: "bridge", linkSince: this.env.clock.now() };
         sim.refreshDerived();
         this.agentChanged(sim.agent.id);
         if (prompt) sim.startTurn(prompt);

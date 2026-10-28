@@ -21,6 +21,8 @@ const ReviewView = lazy(() => import("@/features/review/ReviewView").then((m) =>
 const DispatchView = lazy(() => import("@/features/dispatch/DispatchView").then((m) => ({ default: m.DispatchView })));
 const AutomationsView = lazy(() => import("@/features/automations/AutomationsView").then((m) => ({ default: m.AutomationsView })));
 const OmpSettingsView = lazy(() => import("@/features/ompSettings/OmpSettingsView").then((m) => ({ default: m.OmpSettingsView })));
+const McpView = lazy(() => import("@/features/mcp/McpView").then((m) => ({ default: m.McpView })));
+const AccountsView = lazy(() => import("@/features/accounts/AccountsView").then((m) => ({ default: m.AccountsView })));
 const DesignGallery = lazy(() => import("./routes/design/DesignGallery"));
 
 /** Stable key per screen (agent/terminal/review include their ids so switching agents re-animates). */
@@ -72,5 +74,31 @@ export function RouteView({ route, mobile }: { route: Route; mobile: boolean }) 
       return <AutomationsView hostId={route.hostId} />;
     case "omp":
       return <OmpSettingsView hostId={route.hostId} />;
+    case "mcp":
+      return <McpView hostId={route.hostId} />;
+    case "accounts":
+      return <AccountsView hostId={route.hostId} link={route.link} />;
   }
+}
+
+/**
+ * Warms the code-split screens one tap away, one per idle period, so the first open of an agent,
+ * the inbox or a terminal renders at once instead of waiting for its chunk (seconds on a phone).
+ */
+export function prefetchViews(mobile: boolean): void {
+  const order = [
+    () => import("@/features/session/SessionView"),
+    mobile ? () => import("@/features/board/FlockHome") : () => import("@/features/board/BoardView"),
+    () => import("@/features/inbox/InboxView"),
+    () => import("@/features/dispatch/DispatchView"),
+    () => import("@/features/terminal/TerminalView"),
+  ];
+  const next = (i: number) => {
+    const load = order[i];
+    if (!load) return;
+    const run = () => void load().then(() => next(i + 1), () => next(i + 1));
+    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 3000 });
+    else window.setTimeout(run, 300);
+  };
+  next(0);
 }

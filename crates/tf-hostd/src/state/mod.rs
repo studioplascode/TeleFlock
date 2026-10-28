@@ -25,8 +25,8 @@ use tf_collab::Signal;
 use tf_herdr::{AgentInfo, PaneInfo, SubscribeOptions, TabInfo, WorkspaceInfo};
 use tf_proto::host::ServerMsg;
 use tf_proto::model::{
-    ActivityEvent, ActivityKind, Agent, Column, HerdrState, HostHealth, HostInfo, HostState, Notification, Pulse,
-    PulseKind, RepoInfo, SetupStatus, StatePatch, ToolUpdates, UsageTotals,
+    ActivityEvent, ActivityKind, Agent, Column, HerdrState, HostHealth, HostInfo, HostState, LinkReason, LinkState, LinkVia,
+    Notification, Pulse, PulseKind, RepoInfo, SetupStatus, StatePatch, ToolUpdates, UsageTotals,
 };
 use tf_proto::Millis;
 
@@ -78,6 +78,9 @@ struct Track {
     turn_signal_at: Option<Millis>,
     /// The last collab turn ended with `stopReason: aborted` (someone pressed stop).
     turn_aborted: bool,
+    /// The link the board last showed (state, reason, path) and since when (`OmpInfo.linkSince`).
+    link_key: Option<(LinkState, Option<LinkReason>, Option<LinkVia>)>,
+    link_since: Millis,
 }
 
 #[derive(Default)]
@@ -413,7 +416,7 @@ impl StateHandle {
         for a in m.mirror.agents.iter().filter(|a| build::is_omp(a)) {
             let id = build::agent_id(a);
             let pids = m.pane_pids.get(&a.pane_id).map(|(p, _)| p.as_slice()).unwrap_or(&[]);
-            if let Some(sid) = resolve_omp_session(&store.omp, a, pids) {
+            if let Some(sid) = resolve_omp_session(&store.omp, &store.bridge, a, pids) {
                 omp_of.insert(id, sid);
             }
         }
@@ -437,12 +440,14 @@ impl StateHandle {
             let state = build::herdr_state(a.agent_status);
             let sid = omp_of.get(&id).cloned().or_else(|| a.agent_session.as_ref().and_then(|s| s.session_id().map(str::to_string)));
             let view = sid.as_deref().and_then(|s| store.omp.session(s)).filter(|s| omp_of.get(&id) == Some(&s.session_id)).map(|s| s.view(now));
-            let link = if view.is_none() {
-                // An omp that will share but has no room yet (still starting) shows as connecting.
-                let pids = if build::is_omp(a) { m.pane_pids.get(&a.pane_id).map(|(p, _)| p.as_slice()).unwrap_or(&[]) } else { &[] };
-                store.omp.link_without_guest(sid.as_deref(), pids, m.published.info.setup.global_sharing)
-            } else {
-                (tf_proto::model::LinkState::Live, None)
+            // The replica's link, else (no replica yet) what the registry and the bridge say: an omp
+            // that will share but has no room yet (still starting) shows as connecting.
+            let link = match &view {
+                Some(v) => crate::omp::LinkStatus::new(v.link, v.link_reason, v.link_via, v.link_error.clone()),
+                None => {
+                    let pids = if build::is_omp(a) { m.pane_pids.get(&a.pane_id).map(|(p, _)| p.as_slice()).unwrap_or(&[]) } else { &[] };
+                    store.omp.link_without_guest(sid.as_deref(), pids, m.published.info.setup.global_sharing)
+                }
             };
             let row_pid = sid.as_deref().and_then(|s| store.omp.registry_row(s)).map(|r| r.pid);
             let bridge = sid.as_deref().and_then(|s| store.bridge.by_session(s));
@@ -464,9 +469,17 @@ impl StateHandle {
                 needs_notified: None,
                 turn_signal_at: None,
                 turn_aborted: false,
+                link_key: None,
+                link_since: now,
             });
             track.name = name;
             track.omp_session = sid.clone();
+            let link_key = (link.state, link.reason, link.via);
+            if track.link_key != Some(link_key) {
+                track.link_key = Some(link_key);
+                track.link_since = now;
+            }
+            let link_since = Some(track.link_since);
             // A structured link makes turn boundaries exact: a turn ends once the replica
             // left its turn (`agent_end`) and herdr left `working`. herdr alone also flips to
             // `working` for omp's background work (titles), so without a link only episodes
@@ -541,6 +554,7 @@ impl StateHandle {
                 herdr: a,
                 omp: view.as_ref(),
                 link,
+                link_since,
                 omp_session_id: sid.clone(),
                 omp_pid: row_pid,
                 bridge: bridge.as_ref(),
@@ -820,16 +834,20 @@ fn diff_entities<T: PartialEq + Clone>(
 }
 
 /// omp session of a herdr agent: herdr's `agent_session` id, cross-checked against the
-/// pane's foreground pids (after `/new` herdr may lag behind the live room).
-fn resolve_omp_session(omp: &OmpHandle, a: &AgentInfo, pids: &[u32]) -> Option<String> {
+/// pane's foreground pids (after `/new` herdr may lag behind the live session): a replica of
+/// that pid, its collab room, or its bridge.
+fn resolve_omp_session(omp: &OmpHandle, bridge: &BridgeHandle, a: &AgentInfo, pids: &[u32]) -> Option<String> {
     let reported = a.agent_session.as_ref().and_then(|s| s.session_id().map(str::to_string));
-    let by_pid = pids.iter().find_map(|p| omp.session_by_pid(*p).map(|s| s.session_id.clone()).or_else(|| {
-        omp.registry_row_by_pid(*p).and_then(|r| r.session_id)
-    }));
+    let by_pid = pids.iter().find_map(|p| {
+        omp.session_by_pid(*p)
+            .map(|s| s.session_id.clone())
+            .or_else(|| omp.registry_row_by_pid(*p).and_then(|r| r.session_id))
+            .or_else(|| bridge.by_pid(*p).map(|b| b.session_id))
+    });
     match (reported, by_pid) {
         (Some(r), Some(p)) if r != p => {
             // The pid is authoritative for which process owns the pane.
-            let pid_owner = omp.session(&r).map(|s| s.pid);
+            let pid_owner = omp.session(&r).map(|s| s.pid());
             if pid_owner.is_some_and(|op| pids.contains(&op)) { Some(r) } else { Some(p) }
         }
         (Some(r), _) => Some(r),
@@ -1495,8 +1513,8 @@ mod tests {
         let persist = Persist::load(dir.path().join("state.json"));
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
-        let omp = OmpHandle::start(0, persist.clone(), cancel).await;
         let bridge = BridgeHandle::bind(crate::bridge::BridgeEndpoint::Unix(dir.path().join("bridge.sock")), "s".into()).unwrap();
+        let omp = OmpHandle::start(0, persist.clone(), cancel, bridge.clone()).await;
         let h = StateHandle::new("lab", persist, omp, bridge);
 
         // Working with a spinner; the first updates are still current.
@@ -1566,7 +1584,8 @@ mod tests {
         build::build_agent(&build::AgentInputs {
             herdr: &a,
             omp: None,
-            link: (tf_proto::model::LinkState::NotShared, None),
+            link: crate::omp::LinkStatus::new(LinkState::NotShared, None, None, None),
+            link_since: None,
             omp_session_id: None,
             omp_pid: None,
             bridge: None,

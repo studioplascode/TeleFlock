@@ -12,6 +12,8 @@ const host = process.env.TAURI_DEV_HOST;
 const require = createRequire(import.meta.url);
 // @babel/core 7 ships no type declarations; this is the one call the guard makes.
 const babelCore = require("@babel/core") as { version: string; transformAsync(code: string, options: object): Promise<unknown> };
+// package.json's version (createRequire returns untyped JSON).
+const pkgVersion: unknown = require("./package.json").version;
 
 /** Everyday component syntax the React Compiler must compile: one component and one hook. */
 const CANARY = `
@@ -108,6 +110,8 @@ export default defineConfig({
     watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**", "**/.research/**", "**/drafts/**"] },
   },
   envPrefix: ["VITE_", "TAURI_ENV_"],
+  // The app's own version (package.json, kept in step by scripts/set-version.sh) for the in-browser demo's app.info.
+  define: { __APP_VERSION__: JSON.stringify(typeof pkgVersion === "string" ? pkgVersion : "dev") },
   build: {
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "es2022",
     minify: process.env.TAURI_ENV_DEBUG ? false : "oxc",

@@ -1,16 +1,22 @@
 //! Protocol client for one `tf-hostd attach` stdio stream (JSON lines,
-//! `tf_proto::host::{ClientMsg, ServerMsg}`): hello/welcome, snapshot + patches with
-//! revision-gap resync, request correlation with timeouts, liveness by unanswered pings, and
-//! passthrough of pulse/session/term/notify messages to a [`LinkSink`].
+//! `tf_proto::host::{ClientMsg, ServerMsg}`): hello/welcome with feature negotiation (zstd
+//! streams after the welcome, `sessionSync`), snapshot + patches with revision-gap resync,
+//! request correlation with timeouts, liveness by unanswered pings, and passthrough of
+//! pulse/session/term/notify messages to a [`LinkSink`].
 
 use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use async_compression::tokio::bufread::ZstdDecoder;
+use async_compression::tokio::write::ZstdEncoder;
 use serde_json::Value;
+use tf_proto::host::{FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, ClientMsg, HostState, Millis, ServerMsg, StatePatch};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadBuf};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -55,7 +61,93 @@ enum Pending {
     Resync,
 }
 
-type Reader = Lines<BufReader<Box<dyn AsyncRead + Send + Unpin>>>;
+type Reader = Lines<Pin<Box<dyn AsyncBufRead + Send>>>;
+
+/// zstd window of the outbound stream (2 MiB, zstd's own choice for its default level).
+const ZSTD_WINDOW_LOG: u32 = 21;
+/// Largest window the inbound zstd stream may use (8 MiB).
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
+
+/// Wire features this client asks hostd for in `hello` (`tf_proto::host`, point 7).
+pub fn requested_features() -> Vec<String> {
+    vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string()]
+}
+
+/// What hostd accepted (`welcome.features`; older daemons send none).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Features {
+    pub zstd: bool,
+    pub session_sync: bool,
+}
+
+impl Features {
+    fn accepted(features: Option<&[String]>) -> Features {
+        let has = |f: &str| features.is_some_and(|all| all.iter().any(|x| x == f));
+        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC) }
+    }
+}
+
+/// Bytes that crossed the link: on the wire (compressed with `zstd`) and as JSON lines.
+#[derive(Debug, Default)]
+struct WireStats {
+    rx: AtomicU64,
+    tx: AtomicU64,
+    rx_plain: AtomicU64,
+    tx_plain: AtomicU64,
+}
+
+/// [`Link::totals`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WireTotals {
+    pub rx: u64,
+    pub tx: u64,
+    pub rx_plain: u64,
+    pub tx_plain: u64,
+}
+
+impl WireStats {
+    fn totals(&self) -> WireTotals {
+        WireTotals {
+            rx: self.rx.load(Ordering::Relaxed),
+            tx: self.tx.load(Ordering::Relaxed),
+            rx_plain: self.rx_plain.load(Ordering::Relaxed),
+            tx_plain: self.tx_plain.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Counts what is read from (`rx`) or written to (`tx`) the attach stdio.
+struct Counted<T> {
+    inner: T,
+    stats: Arc<WireStats>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for Counted<R> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.inner).poll_read(cx, buf);
+        self.stats.rx.fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        r
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for Counted<W> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        let r = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = r {
+            self.stats.tx.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        r
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+static NEXT_LINK: AtomicU64 = AtomicU64::new(1);
 
 pub struct Link {
     out: mpsc::UnboundedSender<String>,
@@ -71,6 +163,10 @@ pub struct Link {
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     pub hostd_version: String,
     pub client_id: String,
+    /// Unique per link in this process (session subscriptions belong to one link).
+    pub id: u64,
+    pub features: Features,
+    stats: Arc<WireStats>,
 }
 
 fn line(msg: &ClientMsg) -> String {
@@ -82,9 +178,10 @@ fn not_connected(reason: &str) -> ApiError {
 }
 
 /// Reads the next `ServerMsg`, skipping unparsable lines. `Ok(None)` = EOF.
-async fn next_msg(lines: &mut Reader) -> std::io::Result<Option<ServerMsg>> {
+async fn next_msg(lines: &mut Reader, stats: &WireStats) -> std::io::Result<Option<ServerMsg>> {
     loop {
         let Some(l) = lines.next_line().await? else { return Ok(None) };
+        stats.rx_plain.fetch_add(l.len() as u64 + 1, Ordering::Relaxed);
         let l = l.trim();
         if l.is_empty() {
             continue;
@@ -102,6 +199,47 @@ fn tail_text(tail: &Mutex<VecDeque<String>>) -> String {
 
 async fn wait_closed(rx: &mut watch::Receiver<Option<String>>) {
     let _ = rx.wait_for(|c| c.is_some()).await.map(|_| ());
+}
+
+/// Writes queued lines to attach's stdin until the link closes: whatever is queued goes out as
+/// one batch, flushed (with `zstd`, one block of the stream, so hostd never waits for more).
+async fn write_loop(
+    w: Counted<Box<dyn AsyncWrite + Send + Unpin>>,
+    mut out_rx: mpsc::UnboundedReceiver<String>,
+    mut closed: watch::Receiver<Option<String>>,
+    closed_tx: watch::Sender<Option<String>>,
+    zstd: bool,
+    stats: Arc<WireStats>,
+) {
+    let mut w: Pin<Box<dyn AsyncWrite + Send>> = if zstd {
+        let params = [async_compression::zstd::CParameter::window_log(ZSTD_WINDOW_LOG)];
+        Box::pin(ZstdEncoder::with_quality_and_params(w, async_compression::Level::Default, &params))
+    } else {
+        Box::pin(w)
+    };
+    loop {
+        tokio::select! {
+            m = out_rx.recv() => {
+                let Some(mut m) = m else { break };
+                m.push('\n');
+                // Batch whatever is queued (keystrokes, bursts of requests).
+                while let Ok(more) = out_rx.try_recv() {
+                    m.push_str(&more);
+                    m.push('\n');
+                }
+                stats.tx_plain.fetch_add(m.len() as u64, Ordering::Relaxed);
+                if let Err(e) = async { w.write_all(m.as_bytes()).await?; w.flush().await }.await {
+                    closed_tx.send_if_modified(|c| {
+                        c.get_or_insert_with(|| format!("write failed: {e}"));
+                        true
+                    });
+                    break;
+                }
+            }
+            _ = wait_closed(&mut closed) => break,
+        }
+    }
+    let _ = w.shutdown().await;
 }
 
 impl Link {
@@ -130,40 +268,16 @@ impl Link {
             });
         }
 
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+        let stats = Arc::new(WireStats::default());
+        let mut w = Counted { inner: stdin, stats: stats.clone() };
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
-        {
-            let mut closed = closed_rx.clone();
-            let closed_tx = closed_tx.clone();
-            let mut w = stdin;
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        m = out_rx.recv() => {
-                            let Some(mut m) = m else { break };
-                            m.push('\n');
-                            // Batch whatever is queued (keystrokes, bursts of requests).
-                            while let Ok(more) = out_rx.try_recv() {
-                                m.push_str(&more);
-                                m.push('\n');
-                            }
-                            if let Err(e) = async { w.write_all(m.as_bytes()).await?; w.flush().await }.await {
-                                closed_tx.send_if_modified(|c| {
-                                    c.get_or_insert_with(|| format!("write failed: {e}"));
-                                    true
-                                });
-                                break;
-                            }
-                        }
-                        _ = wait_closed(&mut closed) => break,
-                    }
-                }
-                let _ = w.shutdown().await;
-            });
-        }
-
-        let mut lines: Reader = BufReader::new(stdout).lines();
-        out_tx.send(line(&hello)).ok();
+        let plain: Pin<Box<dyn AsyncBufRead + Send>> = Box::pin(BufReader::new(Counted { inner: stdout, stats: stats.clone() }));
+        let mut lines: Reader = plain.lines();
+        // The hello goes out plain. A failed write (attach already exited) shows up as the EOF
+        // below, with attach's reason.
+        let hello = format!("{}\n", line(&hello));
+        stats.tx_plain.fetch_add(hello.len() as u64, Ordering::Relaxed);
+        let _ = async { w.write_all(hello.as_bytes()).await?; w.flush().await }.await;
 
         let eof = |tail: &Mutex<VecDeque<String>>| {
             let t = tail_text(tail);
@@ -175,9 +289,9 @@ impl Link {
         };
         let welcome = tokio::time::timeout(WELCOME_TIMEOUT, async {
             loop {
-                match next_msg(&mut lines).await {
-                    Ok(Some(ServerMsg::Welcome { hostd_version, client_id, protocol, .. })) => {
-                        return Ok((hostd_version, client_id, protocol));
+                match next_msg(&mut lines, &stats).await {
+                    Ok(Some(ServerMsg::Welcome { hostd_version, client_id, protocol, features })) => {
+                        return Ok((hostd_version, client_id, protocol, features));
                     }
                     Ok(Some(ServerMsg::Error { error })) => return Err(error),
                     Ok(Some(other)) => log::debug!("tf-hostd: ignoring pre-welcome message {other:?}"),
@@ -195,7 +309,7 @@ impl Link {
             closed_tx.send_replace(Some(e.message.clone()));
             e
         };
-        let (hostd_version, client_id, protocol) = match welcome {
+        let (hostd_version, client_id, protocol, features) = match welcome {
             Ok(Ok(w)) => w,
             Ok(Err(e)) => return Err(fail(e)),
             Err(_) => {
@@ -221,6 +335,16 @@ impl Link {
             }));
         }
 
+        // After the welcome, both directions are zstd streams when hostd accepted it.
+        let features = Features::accepted(features.as_deref());
+        if features.zstd {
+            let params = [async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)];
+            let rest: Pin<Box<dyn AsyncBufRead + Send>> = Box::pin(BufReader::new(ZstdDecoder::with_params(lines.into_inner(), &params)));
+            lines = rest.lines();
+        }
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<String>();
+        tokio::spawn(write_loop(w, out_rx, closed_rx, closed_tx.clone(), features.zstd, stats.clone()));
+
         let link = Arc::new(Link {
             out: out_tx,
             pending: Mutex::new(HashMap::new()),
@@ -232,12 +356,15 @@ impl Link {
             stderr_tail: tail,
             hostd_version,
             client_id,
+            id: NEXT_LINK.fetch_add(1, Ordering::Relaxed),
+            features,
+            stats,
         });
 
         // First snapshot.
         let first = tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
             loop {
-                match next_msg(&mut lines).await {
+                match next_msg(&mut lines, &link.stats).await {
                     Ok(Some(ServerMsg::Snapshot { rev, state })) => return Ok((rev, state)),
                     Ok(Some(ServerMsg::Error { error })) => return Err(error),
                     Ok(Some(other)) => link.handle_other(other, &sink),
@@ -272,19 +399,36 @@ impl Link {
 
     /// Closes the link (idempotent). Pending requests fail with `not_connected`.
     pub fn close(&self, reason: &str) {
-        self.closed_tx.send_if_modified(|c| {
+        let closed_now = self.closed_tx.send_if_modified(|c| {
             if c.is_some() {
                 return false;
             }
             *c = Some(reason.to_string());
             true
         });
+        if closed_now {
+            let t = self.totals();
+            log::info!(
+                "tf-hostd link {} closed ({reason}): received {} bytes ({} as JSON), sent {} bytes ({} as JSON){}",
+                self.id,
+                t.rx,
+                t.rx_plain,
+                t.tx,
+                t.tx_plain,
+                if self.features.zstd { ", zstd" } else { "" }
+            );
+        }
         let pending: Vec<_> = self.pending.lock().unwrap().drain().collect();
         for (_, p) in pending {
             if let Pending::Waiter(tx) = p {
                 let _ = tx.send(Err(not_connected(reason)));
             }
         }
+    }
+
+    /// Bytes this link received and sent so far: on the wire and as JSON lines.
+    pub fn totals(&self) -> WireTotals {
+        self.stats.totals()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -399,7 +543,7 @@ impl Link {
         let mut resync: Option<u64> = None;
         loop {
             let msg = tokio::select! {
-                m = next_msg(&mut lines) => m,
+                m = next_msg(&mut lines, &self.stats) => m,
                 _ = wait_closed(&mut closed) => return,
             };
             let msg = match msg {

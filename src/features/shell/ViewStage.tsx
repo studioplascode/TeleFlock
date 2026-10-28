@@ -1,9 +1,9 @@
 import { AlertOctagon, RotateCcw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Component, type ErrorInfo, type ReactNode, Suspense, useState } from "react";
+import { Component, type ErrorInfo, type ReactNode, Suspense, useEffect, useState } from "react";
 import { Button, cn, LogoMark, spring, tween } from "@/design";
 import { navigate, type Route, useRoute } from "@/core";
-import { isFullBleed, RouteView, routeKey } from "@/app/routes";
+import { isFullBleed, prefetchViews, RouteView, routeKey } from "@/app/routes";
 import { PullToRefresh } from "./PullToRefresh";
 
 /** Bottom-nav tabs, in order (direction of the slide between them). */
@@ -92,6 +92,12 @@ export function ViewStage({ mobile }: { mobile: boolean }) {
   const dir = changed ? direction(nav.route, route) : nav.dir;
   if (changed) setNav({ route, dir });
   const full = isFullBleed(route, mobile);
+  // Once the first screen is up, warm the others a tap away (idle time only).
+  useEffect(() => {
+    const t = window.setTimeout(() => prefetchViews(mobile), 1500);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per app run; the form factor at boot picks the board variant
+  }, []);
 
   const variants = mobile
     ? {

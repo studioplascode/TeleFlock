@@ -93,7 +93,7 @@ const NAV: readonly { id: "board" | "inbox" | "activity" | "usage" | "automation
 ];
 
 function NavItem({ id, icon: Icon, collapsed, active, badge, unread }: { id: Route["name"] & keyof typeof VIEWS; icon: LucideIcon; collapsed: boolean; active: boolean; badge?: number; unread?: number }) {
-  const def = VIEWS[id];
+  const def: ActionDef = VIEWS[id];
   const dot = !!unread && (
     <span className={cn("size-1.5 rounded-full bg-accent-hi shadow-[0_0_8px_rgb(163_92_240/0.9)]", collapsed ? "absolute top-1.5 left-2" : "relative")} aria-label={`${unread} unread update${unread === 1 ? "" : "s"}`} />
   );

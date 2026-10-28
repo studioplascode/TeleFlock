@@ -17,7 +17,13 @@ export type Route =
   /** Scheduled agent runs of one host (`hostId` absent: the first / last used host). */
   | { name: "automations"; hostId?: string }
   /** omp's own settings (models, roles, tools, …) of one host. */
-  | { name: "omp"; hostId?: string };
+  | { name: "omp"; hostId?: string }
+  /** omp's MCP servers of one host (list, add, sign in, test, enable/disable). */
+  | { name: "mcp"; hostId?: string }
+  /** Subscription accounts and API keys omp signs in with on one host; `link` opens the Link
+   * account sheet: on that provider (`#/accounts/<hostId>/link/<provider>`), or on the provider
+   * picker when empty (`#/accounts/<hostId>/link`). */
+  | { name: "accounts"; hostId?: string; link?: string };
 
 export type RouteName = Route["name"];
 
@@ -48,7 +54,12 @@ export function routeToHash(route: Route): string {
       return `#/review/${enc(route.hostId)}/${enc(route.workspaceId)}`;
     case "automations":
     case "omp":
+    case "mcp":
       return route.hostId ? `#/${route.name}/${enc(route.hostId)}` : `#/${route.name}`;
+    case "accounts":
+      if (!route.hostId) return "#/accounts";
+      if (route.link === undefined) return `#/accounts/${enc(route.hostId)}`;
+      return route.link ? `#/accounts/${enc(route.hostId)}/link/${enc(route.link)}` : `#/accounts/${enc(route.hostId)}/link`;
     default:
       return `#/${route.name}`;
   }
@@ -76,7 +87,11 @@ export function parseHash(hash: string): Route {
   const c = dec(parts[3]);
   if (head === "agent" && a && b) return { name: "agent", hostId: a, agentId: b };
   if (head === "review" && a && b) return { name: "review", hostId: a, workspaceId: b };
-  if (head === "automations" || head === "omp") return a ? { name: head, hostId: a } : { name: head };
+  if (head === "automations" || head === "omp" || head === "mcp") return a ? { name: head, hostId: a } : { name: head };
+  if (head === "accounts") {
+    if (!a) return { name: "accounts" };
+    return b === "link" ? { name: "accounts", hostId: a, link: c ?? "" } : { name: "accounts", hostId: a };
+  }
   if (head === "terminal" && a) {
     if (b === "a" && c) return { name: "terminal", hostId: a, agentId: c };
     if (b === "p" && c) return { name: "terminal", hostId: a, paneId: c };

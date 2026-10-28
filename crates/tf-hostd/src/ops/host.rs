@@ -727,24 +727,24 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
         };
         issues.push(SetupIssue {
             id: FIX_GLOBAL_SHARING.into(),
-            severity: Severity::Warn,
-            title: "Share every omp session with TeleFlock".into(),
+            severity: Severity::Info,
+            title: "Share every omp session with TeleFlock (fallback)".into(),
             detail: format!(
-                "Sessions you start by hand (or that herdr restores) only appear live in TeleFlock if omp shares them on the private relay. Sets collab.autoStart=control and collab.relayUrl={want} in omp's global config; rooms stay on this host.{current}"
+                "Only needed for omp sessions that run without the TeleFlock extension: omp then shares them on the private relay instead. Sets collab.autoStart=control and collab.relayUrl={want} in omp's global config; rooms stay on this host.{current}"
             ),
             fixable: true,
-            recommended: true,
+            recommended: false,
         });
     }
     if !bridge_current {
         let source = ctx.paths.ext.is_file();
         issues.push(SetupIssue {
             id: FIX_GLOBAL_BRIDGE.into(),
-            severity: Severity::Info,
+            severity: Severity::Warn,
             title: if bridge_installed { "Update the TeleFlock omp extension".into() } else { "Install the TeleFlock omp extension globally".into() },
             detail: if source {
                 format!(
-                    "Gives precise remote controls (model, thinking, plan review, rename, compact, tree) for sessions TeleFlock did not start. Copies {} to {}.",
+                    "Lets TeleFlock follow and control omp sessions it did not start (live transcript, questions and approvals, subagents, model and other controls), including sessions herdr restores. Copies {} to {}.",
                     ctx.paths.ext.display(),
                     installed.display()
                 )

@@ -3,10 +3,13 @@
 // Loaded with `omp -e <this file>` (or installed into ~/.omp/agent/extensions/). It connects to the
 // tf-hostd bridge socket and gives TeleFlock a structured control plane over the live TUI session:
 // model, thinking, fast, plan, goal, compact, rename, follow-ups, tree/branch/fork/new session, plan
-// review answers, btw side questions, export and handoff.
+// review answers, btw side questions, export and handoff. Since 2.0.0 it is also the session's data
+// plane: a live feed shaped like omp's collab host→guest frames, prompts with images, the session's
+// dialogs (ask, approvals, selects, editors) answerable from TeleFlock, and subagent control.
 //
 // Hard rule: this file must never take omp down. Every callback that can run outside omp's handler
-// dispatch (socket callbacks, timers, promise chains) is wrapped, and timers go through `ctx.setInterval`.
+// dispatch (socket callbacks, timers, promise chains, session listeners, dialog wrappers) is wrapped,
+// and the ticker goes through `ctx.setInterval`.
 import fs from "node:fs";
 import crypto from "node:crypto";
 import net from "node:net";
@@ -25,8 +28,11 @@ import type {
  *  1.3.0: settings-write mode (`TF_OMP_SETTINGS_IN`, used by tf-hostd `omp.settingsSet` for credentials).
  *  1.4.0: one bridge per omp process (`BridgeSlot`): only the newest copy talks to hostd; the
  *         command context (now captured through /teleflock-control) is shared; attaching fails fast
- *         while omp compacts. */
-const BRIDGE_VERSION = "1.4.0";
+ *         while omp compacts.
+ *  2.0.0: data plane (`hello.caps`): `liveSubscribe` live feed + `resync`, `prompt`, `uiResponse`
+ *         (the session's dialogs race the TUI against hostd), `agentCmd`; subagent copies relay their
+ *         task bus to the owner. */
+const BRIDGE_VERSION = "2.0.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -200,15 +206,27 @@ function baseContext(ctx: ExtensionContext): ExtensionContext {
 
 const SLOT_KEY = Symbol.for("teleflock.bridge");
 
+/** A subagent's task-bus frame as relayed by the bridge copy loaded in that subagent's session (2.0.0). */
+interface RelayedBus {
+	channel: string;
+	data: unknown;
+	/** Registry id of the session that saw it (the spawning agent). */
+	from?: string;
+}
+
 interface BridgeSlot {
 	/** The active copy per hostd endpoint (socket path or pipe name): the highest `version` wins, on
 	 *  equal versions the first claimant stays. A copy that takes over calls the previous owner's
-	 *  `stop()` (close the socket, stop the timers, clear the status line). */
-	owners: Record<string, { version: string; stop(): void }>;
+	 *  `stop()` (close the socket, stop the timers, clear the status line). 2.0.0 owners add `relay`:
+	 *  copies loaded in subagent sessions hand it the task-bus frames only their session sees. */
+	owners: Record<string, { version: string; stop(): void; relay?(frame: RelayedBus): void }>;
 	/** The session command context, stored by whichever copy's /teleflock-control handler omp ran. */
 	cmdCtx?: ExtensionCommandContext;
 	/** Called (and removed) by that handler right after it stored `cmdCtx`. */
 	attachWaiters: Array<() => void>;
+	/** Last dialog request id handed out in this process (2.0.0): ids are never reused, even when
+	 *  another copy takes over, so a late `uiResponse` can never answer an unrelated dialog. */
+	uiReqSeq?: number;
 }
 
 function bridgeSlot(): BridgeSlot {
@@ -468,6 +486,1173 @@ function advisorText(details: unknown): string {
 		.join(" ");
 }
 
+// ─── protocol v2: live feed ────────────────────────────────────────────────────────────────────
+// hostd subscribes with `liveSubscribe` and then receives the session as omp's own collab
+// host→guest frames, each wrapped as `{"t":"live","seq","f"}`, after a `resync` snapshot of
+// everything in flight (docs/bridge-protocol.md "Live feed"). Every frame of a connection, control
+// frames included, goes through one ordered writer, so nothing ever overtakes anything.
+
+/** Transport backlog (`writableLength`) above which frames wait in the writer's own queue, where
+ *  cumulative frames are replaced by their newest version instead of piling up. */
+const LIVE_HIGH_WATER = 1024 * 1024;
+/** Queued non-cumulative live bytes above which the queue is dropped for one `resync`. */
+const LIVE_OVERFLOW = 16 * 1024 * 1024;
+/** Queued control bytes above which hostd counts as stuck: the connection is dropped and redialed. */
+const CTL_STALL = 64 * 1024 * 1024;
+/** Largest live frame sent as is; bigger ones are clipped, else replaced by a notice (hostd closes at 64 MiB). */
+const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+/** Same bound for a `resync`, which carries the whole in-flight state in one line. */
+const MAX_RESYNC_BYTES = 48 * 1024 * 1024;
+const MESSAGE_UPDATE_MS = 50;
+const TOOL_UPDATE_MS = 100;
+const STATE_DEBOUNCE_MS = 100;
+const AGENTS_DEBOUNCE_MS = 100;
+const MAX_PENDING_DIALOGS = 64;
+/** Subagents whose latest bus frames a `resync` replays (oldest forgotten first). */
+const MAX_TRACKED_SUBAGENTS = 256;
+const TASK_PROGRESS = "task:subagent:progress";
+const TASK_LIFECYCLE = "task:subagent:lifecycle";
+/** omp's `USER_INTERRUPT_LABEL`, used when its module cannot be imported. */
+const USER_INTERRUPT = "Interrupted by user";
+
+/** Agent events omp's collab host mirrors (`collab/host.ts` WIRE_AGENT_EVENT_TYPES). */
+const WIRE_EVENTS: Record<string, true> = {
+	agent_start: true,
+	agent_end: true,
+	turn_start: true,
+	turn_end: true,
+	message_start: true,
+	message_update: true,
+	message_end: true,
+	tool_execution_start: true,
+	tool_execution_update: true,
+	tool_execution_end: true,
+	notice: true,
+	auto_compaction_start: true,
+	auto_compaction_end: true,
+	auto_retry_start: true,
+	auto_retry_end: true,
+	thinking_level_changed: true,
+};
+/** Events after which collab refreshes its `state` frame (`collab/host.ts` STATE_TRIGGER_EVENTS). */
+const STATE_TRIGGERS: Record<string, true> = {
+	agent_start: true,
+	agent_end: true,
+	message_end: true,
+	tool_execution_end: true,
+	thinking_level_changed: true,
+	model_changed: true,
+	advisor_cost_changed: true,
+	auto_compaction_end: true,
+};
+/** Session entry types collab replicates (`collab/host.ts` WIRE_SESSION_ENTRY_TYPES). */
+const WIRE_ENTRIES: Record<string, true> = {
+	message: true,
+	custom_message: true,
+	compaction: true,
+	branch_summary: true,
+	model_change: true,
+	thinking_level_change: true,
+};
+
+type Json = Record<string, unknown>;
+const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
+const strField = (o: unknown, key: string): string | undefined => {
+	const v = isObj(o) ? o[key] : undefined;
+	return typeof v === "string" && v ? v : undefined;
+};
+
+/** Clip passes for an oversized payload (long strings and arrays cut, cycles and depth elided). */
+const SHRINK_PASSES: ReadonlyArray<{ stringCap: number; arrayLimit: number }> = [
+	{ stringCap: 256 * 1024, arrayLimit: 1024 },
+	{ stringCap: 16 * 1024, arrayLimit: 256 },
+	{ stringCap: 1024, arrayLimit: 32 },
+	{ stringCap: 64, arrayLimit: 4 },
+];
+
+function clipValue(v: unknown, stringCap: number, arrayLimit: number, depth: number, path: WeakSet<object>): unknown {
+	if (typeof v === "string") return v.length > stringCap ? `${v.slice(0, stringCap)}\n…[${v.length - stringCap} chars elided]` : v;
+	if (typeof v === "bigint") return Number(v);
+	if (typeof v === "function" || typeof v === "symbol") return undefined;
+	if (!v || typeof v !== "object") return v;
+	if (depth > 64 || path.has(v)) return "…[elided]";
+	path.add(v);
+	try {
+		let src: object = v;
+		if ("toJSON" in v && typeof v.toJSON === "function") {
+			let converted: unknown;
+			try {
+				converted = v.toJSON();
+			} catch {
+				return "…[unserializable]";
+			}
+			if (!converted || typeof converted !== "object") return clipValue(converted, stringCap, arrayLimit, depth + 1, path);
+			src = converted;
+		}
+		if (Array.isArray(src)) {
+			const out = src.slice(0, arrayLimit).map(x => clipValue(x, stringCap, arrayLimit, depth + 1, path) ?? null);
+			if (src.length > arrayLimit) out.push(`…[${src.length - arrayLimit} items elided]`);
+			return out;
+		}
+		const out: Json = {};
+		for (const [k, value] of Object.entries(src)) {
+			const c = clipValue(value, stringCap, arrayLimit, depth + 1, path);
+			if (c !== undefined) out[k] = c;
+		}
+		return out;
+	} finally {
+		path.delete(v);
+	}
+}
+
+/** `frame` as JSON of at most `maxBytes` UTF-8 bytes: as is, else with long strings and arrays clipped
+ *  (as omp's collab shrinks oversized payloads), else a collab-style notice saying what was omitted. */
+export function frameJson(frame: unknown, maxBytes = MAX_FRAME_BYTES): string {
+	const fits = (json: string | undefined): json is string =>
+		json !== undefined && (json.length * 3 <= maxBytes || Buffer.byteLength(json, "utf8") <= maxBytes);
+	try {
+		const json = JSON.stringify(frame);
+		if (fits(json)) return json;
+	} catch {
+		// cycles or BigInt: the clip passes below handle both
+	}
+	for (const pass of SHRINK_PASSES) {
+		try {
+			const json = JSON.stringify(clipValue(frame, pass.stringCap, pass.arrayLimit, 0, new WeakSet()));
+			if (fits(json)) return json;
+		} catch {
+			// next pass
+		}
+	}
+	const t = strField(frame, "t") ?? "frame";
+	const what = (t === "event" && isObj(frame) ? strField(frame.event, "type") : undefined) ?? t;
+	return JSON.stringify({
+		t: "event",
+		event: { type: "notice", level: "warning", source: "teleflock", message: `Host ${what} omitted: too large to replicate.` },
+	});
+}
+
+/** The event as the live feed sends it: collab's shape minus payloads hostd gets elsewhere
+ *  (`assistantMessageEvent.partial`/`.message` repeat `message`; `agent_end.messages` and
+ *  `turn_end.message`/`.toolResults` repeat the turn's `message_end` frames). */
+export function wireEvent(ev: Json): Json {
+	switch (ev.type) {
+		case "message_update": {
+			const ame = ev.assistantMessageEvent;
+			if (!isObj(ame) || !("partial" in ame || "message" in ame)) return ev;
+			const { partial: _partial, message: _message, ...rest } = ame;
+			return { ...ev, assistantMessageEvent: rest };
+		}
+		case "agent_end": {
+			const { messages: _messages, ...rest } = ev;
+			return rest;
+		}
+		case "turn_end": {
+			const { message: _message, toolResults: _results, ...rest } = ev;
+			return rest;
+		}
+		default:
+			return ev;
+	}
+}
+
+/** Where the writer puts lines (the socket) and how much it still holds. */
+export interface LiveSink {
+	write(line: string): void;
+	/** Bytes the transport has not flushed yet (`socket.writableLength`). */
+	backlog(): number;
+}
+
+type FrameSource = unknown | (() => unknown);
+type QueueItem =
+	| { k: "ctl"; line: string; dead?: boolean }
+	| { k: "live"; key?: string; json?: string; build?: () => unknown; bytes: number; dead?: boolean }
+	| { k: "resync"; dead?: boolean };
+
+export interface LiveWriterOptions {
+	/** The `resync` frame for `seq`, built when it is written, so it covers everything dropped before it. */
+	resync: (seq: number) => Json;
+	highWater?: number;
+	overflow?: number;
+	stall?: number;
+	/** Queued control frames passed `stall`: hostd stopped reading for good. */
+	onStall?: () => void;
+	log?: (msg: string) => void;
+}
+
+/**
+ * One connection's ordered writer. Lines go straight to the sink while its backlog stays under
+ * `highWater`; beyond that they queue here. A queued cumulative live frame (a `key`) is replaced by
+ * the newer one (the stale one is dropped and the new one appended, so the delivered stream is
+ * always a subsequence of what was produced). Control frames are never dropped. When the queued
+ * non-cumulative live frames pass `overflow`, all queued live frames are dropped for one `resync`,
+ * built when it is written; live frames produced while it waits are covered by it and skipped.
+ * `seq` is assigned when a live or resync frame is written, so it is contiguous on the wire.
+ */
+export class LiveWriter {
+	/** seq of the last live/resync frame written on this connection (0 = none yet). */
+	seq = 0;
+	#on = false;
+	#q: QueueItem[] = [];
+	#head = 0;
+	readonly #byKey = new Map<string, Extract<QueueItem, { k: "live" }>>();
+	#liveBytes = 0;
+	#ctlBytes = 0;
+	#resyncQueued = false;
+	readonly #highWater: number;
+	readonly #overflow: number;
+	readonly #stall: number;
+
+	constructor(
+		readonly sink: LiveSink,
+		readonly opts: LiveWriterOptions,
+	) {
+		this.#highWater = opts.highWater ?? LIVE_HIGH_WATER;
+		this.#overflow = opts.overflow ?? LIVE_OVERFLOW;
+		this.#stall = opts.stall ?? CTL_STALL;
+	}
+
+	/** The live feed is on (between `start` and `stop`). */
+	get subscribed(): boolean {
+		return this.#on;
+	}
+
+	/** Items waiting in the queue (dropped ones included until the next flush skips them). */
+	get pending(): number {
+		return this.#q.length - this.#head;
+	}
+
+	/** A control frame (`hello`, `res`, `event`, `bye`): never dropped, never reordered. */
+	ctl(obj: unknown): void {
+		let line: string;
+		try {
+			line = `${JSON.stringify(obj)}\n`;
+		} catch (err) {
+			this.opts.log?.(`unserializable frame: ${String(err)}`);
+			return;
+		}
+		if (this.pending === 0 && this.#room()) {
+			this.sink.write(line);
+			return;
+		}
+		this.#q.push({ k: "ctl", line });
+		this.#ctlBytes += line.length;
+		if (this.#ctlBytes > this.#stall) this.opts.onStall?.();
+		else if (this.#room()) this.flush();
+	}
+
+	/** Starts (or restarts) the feed: anything queued for the old one is dropped, a `resync` comes first. */
+	start(): void {
+		this.#dropLive();
+		this.#on = true;
+		this.#queueResync();
+		if (this.#room()) this.flush();
+	}
+
+	/** Ends the feed; queued live frames are dropped, control frames stay. */
+	stop(): void {
+		this.#on = false;
+		this.#dropLive();
+	}
+
+	/** A live frame (or a thunk building it). With a `key` it is cumulative: a newer frame under the same
+	 *  key replaces it while it is queued, and the thunk runs only when it is written. */
+	live(frame: FrameSource, key?: string): void {
+		if (!this.#on || this.#resyncQueued) return;
+		if (key) this.drop(key);
+		if (this.pending === 0 && this.#room()) {
+			this.#writeLive(frameJson(resolveFrame(frame)));
+			return;
+		}
+		if (key) {
+			const item: Extract<QueueItem, { k: "live" }> = { k: "live", key, build: () => resolveFrame(frame), bytes: 0 };
+			this.#q.push(item);
+			this.#byKey.set(key, item);
+		} else {
+			const json = frameJson(resolveFrame(frame));
+			this.#q.push({ k: "live", json, bytes: json.length });
+			this.#liveBytes += json.length;
+			if (this.#liveBytes > this.#overflow) {
+				this.opts.log?.(`live queue passed ${this.#overflow} bytes while hostd lags: one resync instead`);
+				this.#dropLive();
+				this.#queueResync();
+			}
+		}
+		if (this.#room()) this.flush();
+	}
+
+	/** Drops the queued frame under `key` (its end frame supersedes it). */
+	drop(key: string): void {
+		const old = this.#byKey.get(key);
+		if (!old) return;
+		old.dead = true;
+		this.#byKey.delete(key);
+	}
+
+	/** Writes queued frames while the sink has room (`force`: regardless, for a final goodbye). */
+	flush(force = false): void {
+		while (this.#head < this.#q.length) {
+			if (!force && !this.#room()) break;
+			const item = this.#q[this.#head]!;
+			this.#head++;
+			if (item.dead) continue;
+			if (item.k === "ctl") {
+				this.#ctlBytes -= item.line.length;
+				this.sink.write(item.line);
+			} else if (item.k === "resync") {
+				this.#resyncQueued = false;
+				this.#writeResync();
+			} else {
+				if (item.key) this.#byKey.delete(item.key);
+				else this.#liveBytes -= item.bytes;
+				this.#writeLive(item.json ?? frameJson(item.build?.()));
+			}
+		}
+		if (this.#head === this.#q.length) {
+			this.#q = [];
+			this.#head = 0;
+		} else if (this.#head > 1024 && this.#head * 2 > this.#q.length) {
+			this.#q = this.#q.slice(this.#head);
+			this.#head = 0;
+		}
+	}
+
+	#room(): boolean {
+		return this.sink.backlog() <= this.#highWater;
+	}
+
+	#dropLive(): void {
+		for (let i = this.#head; i < this.#q.length; i++) {
+			const item = this.#q[i]!;
+			if (item.k !== "ctl") item.dead = true;
+		}
+		this.#byKey.clear();
+		this.#liveBytes = 0;
+		this.#resyncQueued = false;
+	}
+
+	#queueResync(): void {
+		this.#q.push({ k: "resync" });
+		this.#resyncQueued = true;
+	}
+
+	#writeLive(json: string): void {
+		this.seq++;
+		this.sink.write(`{"t":"live","seq":${this.seq},"f":${json}}\n`);
+	}
+
+	#writeResync(): void {
+		this.seq++;
+		let frame: Json;
+		try {
+			frame = this.opts.resync(this.seq);
+		} catch (err) {
+			this.opts.log?.(`resync: ${String(err)}`);
+			frame = { t: "resync", seq: this.seq, live: { streaming: false, frames: [] } };
+		}
+		this.sink.write(`${frameJson(frame, MAX_RESYNC_BYTES)}\n`);
+	}
+}
+
+/** `TF_BRIDGE_LIVE_LIMITS=<highWater>,<overflow>` (bytes): smaller flow-control limits for labs, so a
+ *  paused fake hostd (probe.ts `pause`) shows backpressure and overflow with an ordinary turn. */
+function liveLimits(): { highWater?: number; overflow?: number } {
+	const [highWater, overflow] = (process.env.TF_BRIDGE_LIVE_LIMITS ?? "").split(",").map(s => Number.parseInt(s, 10));
+	return {
+		highWater: highWater !== undefined && highWater >= 0 ? highWater : undefined,
+		overflow: overflow !== undefined && overflow > 0 ? overflow : undefined,
+	};
+}
+
+const resolveFrame = (frame: FrameSource): unknown => (typeof frame === "function" ? frame() : frame);
+
+/** `fn()` as a promise, a synchronous throw included (as a rejection). */
+function attempt<T>(fn: () => T | Promise<T>): Promise<T> {
+	try {
+		return Promise.resolve(fn());
+	} catch (err) {
+		return Promise.reject(err);
+	}
+}
+
+/** Injectable clock and timers (tests drive them by hand). */
+export interface Timers {
+	now(): number;
+	set(fn: () => void, ms: number): unknown;
+	clear(handle: unknown): void;
+}
+
+export const realTimers: Timers = {
+	now: () => Date.now(),
+	set: (fn, ms) => {
+		const t = setTimeout(fn, ms);
+		t.unref?.();
+		return t;
+	},
+	clear: handle => clearTimeout(handle as Timer),
+};
+
+/** At most one call per `ms` per key, leading edge first and the latest trailing call kept; `end`
+ *  forgets a key and drops its trailing call (the key's end frame supersedes it). */
+export class Throttle {
+	readonly #last = new Map<string, number>();
+	readonly #held = new Map<string, { fn: () => void; handle: unknown }>();
+
+	constructor(readonly timers: Timers = realTimers) {}
+
+	run(key: string, ms: number, fn: () => void): void {
+		const held = this.#held.get(key);
+		if (held) {
+			held.fn = fn;
+			return;
+		}
+		const now = this.timers.now();
+		const last = this.#last.get(key);
+		if (last === undefined || now - last >= ms) {
+			this.#last.set(key, now);
+			fn();
+			return;
+		}
+		const entry = { fn, handle: undefined as unknown };
+		entry.handle = this.timers.set(() => {
+			if (this.#held.get(key) !== entry) return;
+			this.#held.delete(key);
+			this.#last.set(key, this.timers.now());
+			try {
+				entry.fn();
+			} catch {
+				/* the caller logs its own failures */
+			}
+		}, ms - (now - last));
+		this.#held.set(key, entry);
+	}
+
+	end(key: string): void {
+		const held = this.#held.get(key);
+		if (held) this.timers.clear(held.handle);
+		this.#held.delete(key);
+		this.#last.delete(key);
+	}
+
+	clear(): void {
+		for (const held of this.#held.values()) this.timers.clear(held.handle);
+		this.#held.clear();
+		this.#last.clear();
+	}
+}
+
+/** What is in flight right now (from the events the feed sees), replayed by a `resync`. */
+export class LiveTracker {
+	streaming = false;
+	/** Latest `message_start`/`message_update` of the assistant message still streaming. */
+	message?: Json;
+	readonly tools = new Map<string, { start?: Json; update?: Json }>();
+	compaction?: Json;
+	retry?: Json;
+	/** Latest lifecycle and progress per subagent id (insertion order = least recently seen first). */
+	readonly subs = new Map<string, { lifecycle?: Json; progress?: Json; parent?: string; first: number; at: number }>();
+
+	track(ev: Json): void {
+		const id = typeof ev.toolCallId === "string" ? ev.toolCallId : "";
+		switch (ev.type) {
+			case "agent_start":
+				this.streaming = true;
+				break;
+			case "agent_end":
+				this.streaming = false;
+				this.message = undefined;
+				this.tools.clear();
+				this.compaction = undefined;
+				this.retry = undefined;
+				break;
+			case "message_start":
+			case "message_update":
+				if (strField(ev.message, "role") === "assistant") this.message = ev;
+				break;
+			case "message_end":
+				this.message = undefined;
+				break;
+			case "tool_execution_start":
+				if (id) this.tools.set(id, { start: ev });
+				break;
+			case "tool_execution_update":
+				if (id) this.tools.set(id, { ...this.tools.get(id), update: ev });
+				break;
+			case "tool_execution_end":
+				this.tools.delete(id);
+				break;
+			case "auto_compaction_start":
+				this.compaction = ev;
+				break;
+			case "auto_compaction_end":
+				this.compaction = undefined;
+				break;
+			case "auto_retry_start":
+				this.retry = ev;
+				break;
+			case "auto_retry_end":
+				this.retry = undefined;
+				break;
+		}
+	}
+
+	bus(channel: string, data: Json, parent: string | undefined, now: number): void {
+		const id = channel === TASK_LIFECYCLE ? strField(data, "id") : strField(data.progress, "id");
+		if (!id) return;
+		const sub = this.subs.get(id) ?? { first: now, at: now };
+		this.subs.delete(id);
+		if (channel === TASK_LIFECYCLE) sub.lifecycle = data;
+		else sub.progress = data;
+		sub.parent ??= parent;
+		sub.at = now;
+		this.subs.set(id, sub);
+		while (this.subs.size > MAX_TRACKED_SUBAGENTS) {
+			const oldest = this.subs.keys().next().value;
+			if (oldest === undefined) break;
+			this.subs.delete(oldest);
+		}
+	}
+
+	reset(): void {
+		this.streaming = false;
+		this.message = undefined;
+		this.tools.clear();
+		this.compaction = undefined;
+		this.retry = undefined;
+		this.subs.clear();
+	}
+
+	/**
+	 * The in-flight frames in replay order: compaction / retry in progress, the streaming message
+	 * (omp's live `streamMessage` when known, it can be ahead of the last throttled update), running
+	 * tools (start, then the latest update), then each subagent's latest lifecycle and progress.
+	 */
+	frames(live?: { streamMessage?: unknown; toolUpdates?: ReadonlyMap<string, Json> }): Json[] {
+		const out: Json[] = [];
+		const event = (e: Json) => out.push({ t: "event", event: wireEvent(e) });
+		if (this.compaction) event(this.compaction);
+		if (this.retry) event(this.retry);
+		const stream = live?.streamMessage;
+		if (isObj(stream) && stream.role === "assistant") {
+			event({ type: "message_update", message: stream, assistantMessageEvent: this.message?.assistantMessageEvent });
+		} else if (this.message) {
+			event(this.message.type === "message_update" ? this.message : { ...this.message, type: "message_update" });
+		}
+		for (const [id, tool] of this.tools) {
+			if (tool.start) event(tool.start);
+			const update = live?.toolUpdates?.get(id) ?? tool.update;
+			if (update) event(update);
+		}
+		for (const sub of this.subs.values()) {
+			if (sub.lifecycle) out.push({ t: "bus", channel: TASK_LIFECYCLE, data: sub.lifecycle });
+			if (sub.progress) out.push({ t: "bus", channel: TASK_PROGRESS, data: sub.progress });
+		}
+		return out;
+	}
+}
+
+// ─── protocol v2: dialogs ──────────────────────────────────────────────────────────────────────
+// The dialog members of omp's shared extension UI context are wrapped so that every dialog races
+// omp's own (the TUI) against hostd's answer, exactly as omp races its collab guests
+// (`modes/controllers/extension-ui-controller.ts` #raceCollabDialog, #runGuestAskDialog): the first
+// answer wins and the loser is cancelled through its abort signal. hostd sees each dialog as a
+// collab `ui-request` (select or editor) and answers with the collab `ui-response` value.
+
+type WireSelectItem = string | { label: string; description?: string };
+export type DialogDraft =
+	| {
+			kind: "select";
+			title: string;
+			options: WireSelectItem[];
+			initialIndex?: number;
+			selectionMarker?: "radio" | "checkbox";
+			checkedIndices?: number[];
+			markableCount?: number;
+			helpText?: string;
+	  }
+	| { kind: "editor"; title: string; prefill?: string };
+export type DialogRequest = DialogDraft & { reqId: number };
+/** `answered` carries hostd's value (`undefined` is an explicit cancel); `unavailable` means no answer
+ *  will come (the dialog was settled locally, aborted, or this bridge stood down). */
+export type RemoteResult = { kind: "answered"; value: string | undefined } | { kind: "unavailable" };
+
+/** Pending dialogs offered to hostd (omp's CollabHost.requestGuestUi, minus the transport). */
+export class DialogHub {
+	readonly #pending = new Map<number, { request: DialogRequest; settle(result: RemoteResult): void }>();
+
+	constructor(
+		readonly nextId: () => number,
+		readonly emit: (frame: Json) => void,
+	) {}
+
+	get size(): number {
+		return this.#pending.size;
+	}
+
+	/** Offers a dialog (`ui-request`), settled by `answer`, an abort of `signal` or `close`; each
+	 *  settlement emits `ui-request-end`. `null` when it cannot be offered (aborted, too many pending). */
+	request(draft: DialogDraft, signal?: AbortSignal): Promise<RemoteResult> | null {
+		if (signal?.aborted || this.#pending.size >= MAX_PENDING_DIALOGS) return null;
+		const reqId = this.nextId();
+		const request = { ...draft, reqId } as DialogRequest;
+		const { promise, resolve } = Promise.withResolvers<RemoteResult>();
+		let done = false;
+		const onAbort = () => settle({ kind: "unavailable" });
+		const settle = (result: RemoteResult): void => {
+			if (done) return;
+			done = true;
+			signal?.removeEventListener("abort", onAbort);
+			this.#pending.delete(reqId);
+			this.emit({ t: "ui-request-end", reqId });
+			resolve(result);
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		this.#pending.set(reqId, { request, settle });
+		this.emit({ t: "ui-request", request });
+		return promise;
+	}
+
+	/** hostd's answer; false when `reqId` is not pending (already settled, or never offered). */
+	answer(reqId: number, value: string | undefined): boolean {
+		const pending = this.#pending.get(reqId);
+		if (!pending) return false;
+		pending.settle({ kind: "answered", value });
+		return true;
+	}
+
+	/** Pending requests, oldest first. */
+	requests(): DialogRequest[] {
+		return [...this.#pending.values()].map(p => p.request).sort((a, b) => a.reqId - b.reqId);
+	}
+
+	/** Settles everything as unavailable: the local dialogs go on alone. */
+	close(): void {
+		for (const pending of [...this.#pending.values()]) pending.settle({ kind: "unavailable" });
+	}
+}
+
+const anySignal = (a: AbortSignal | undefined, b: AbortSignal): AbortSignal => (a ? AbortSignal.any([a, b]) : b);
+
+/**
+ * omp's own dialog (`local`) against hostd's answer to `draft`: the first answer wins and aborts the
+ * other side; a remote `unavailable` is no answer, the local dialog goes on and decides.
+ */
+export async function raceDialog<T>(
+	hub: DialogHub,
+	draft: DialogDraft,
+	signal: AbortSignal | undefined,
+	local: (signal: AbortSignal) => T | Promise<T>,
+	fromRemote: (value: string | undefined) => T,
+): Promise<T> {
+	const localAbort = new AbortController();
+	const remoteAbort = new AbortController();
+	const localSignal = anySignal(signal, localAbort.signal);
+	const remote = hub.request(draft, anySignal(signal, remoteAbort.signal));
+	if (!remote) return local(localSignal);
+	type Winner = { source: "local" | "remote"; value: T };
+	const localWinner = attempt(() => local(localSignal)).then((value): Winner => ({ source: "local", value }));
+	const remoteWinner = remote.then(
+		(result): Winner | Promise<Winner> =>
+			result.kind === "answered" ? { source: "remote", value: fromRemote(result.value) } : localWinner,
+	);
+	localWinner.catch(() => {});
+	remoteWinner.catch(() => {});
+	try {
+		const winner = await Promise.race([localWinner, remoteWinner]);
+		if (winner.source === "remote") localAbort.abort();
+		else remoteAbort.abort();
+		return winner.value;
+	} catch (err) {
+		localAbort.abort();
+		remoteAbort.abort();
+		throw err;
+	}
+}
+
+// The ask tool's dialog, offered to hostd as omp offers it to collab guests: one select per
+// question (radio, or a checkbox loop toggling one label per round), "Other" followed by a
+// "Custom answer:" editor, "Chat about this" ending the ask as chat.
+const ASK_OTHER = "Other (type your own)";
+const ASK_CHAT = "Chat about this";
+const ASK_NEXT = "Next →";
+const CUSTOM_ANSWER = "Custom answer: ";
+
+export interface AskQuestion {
+	id: string;
+	question: string;
+	header?: string;
+	options: Array<{ label: string; description?: string; preview?: string }>;
+	multi?: boolean;
+	recommended?: number;
+}
+export interface AskResultItem {
+	id: string;
+	question: string;
+	options: string[];
+	multi: boolean;
+	selectedOptions: string[];
+	customInput?: string;
+}
+export type AskResult = { kind: "submit"; results: AskResultItem[] } | { kind: "chat" };
+
+/** omp's `sanitizeCarriageReturns`: CRLF → LF, CR runs → one space. */
+const sanitizeCR = (text: string): string => (text.includes("\r") ? text.replaceAll("\r\n", "\n").replace(/\r+/g, " ") : text);
+
+/** omp's `disambiguateDisplayLabels`: unique, sentinel-safe display copies of the option labels. */
+function displayLabels(raw: readonly string[], reserved: readonly string[]): string[] {
+	const taken = new Set<string>(reserved);
+	return raw.map(label => {
+		const base = sanitizeCR(label);
+		let candidate = base;
+		for (let suffix = 2; taken.has(candidate); suffix++) candidate = `${base} (${suffix})`;
+		taken.add(candidate);
+		return candidate;
+	});
+}
+
+/** omp's `normalizeDialogQuestions`: untrusted ask input coerced into a safe shape. */
+export function normalizeAskQuestions(questions: unknown): AskQuestion[] {
+	if (!Array.isArray(questions)) return [];
+	const out: AskQuestion[] = [];
+	for (const entry of questions) {
+		if (!isObj(entry)) continue;
+		const options: AskQuestion["options"] = [];
+		for (const opt of Array.isArray(entry.options) ? entry.options : []) {
+			if (!isObj(opt)) continue;
+			options.push({
+				label: typeof opt.label === "string" ? opt.label : "",
+				...(typeof opt.description === "string" ? { description: sanitizeCR(opt.description) } : {}),
+			});
+		}
+		out.push({
+			id: typeof entry.id === "string" ? entry.id : "?",
+			question: typeof entry.question === "string" ? entry.question : "",
+			options,
+			...(typeof entry.multi === "boolean" ? { multi: entry.multi } : {}),
+			...(Number.isInteger(entry.recommended) ? { recommended: entry.recommended as number } : {}),
+		});
+	}
+	return out;
+}
+
+const askHelpText = (action: string, extra = ""): string => `↑/↓ navigate  Enter ${action}  ${extra}Esc cancel`;
+
+type GuestString = { kind: "answered"; value: string } | { kind: "cancelled" } | { kind: "unavailable" };
+
+async function requestString(hub: DialogHub, draft: DialogDraft, signal: AbortSignal): Promise<GuestString> {
+	const remote = hub.request(draft, signal);
+	if (!remote) return { kind: "unavailable" };
+	const result = await remote;
+	if (result.kind === "unavailable") return result;
+	return typeof result.value === "string" ? { kind: "answered", value: result.value } : { kind: "cancelled" };
+}
+
+async function guestAskQuestion(
+	hub: DialogHub,
+	question: AskQuestion,
+	signal: AbortSignal,
+): Promise<AskResultItem | "chat" | "unavailable" | undefined> {
+	const selected = new Set<string>();
+	let customInput: string | undefined;
+	const labels = question.options.map(o => o.label);
+	const shown = displayLabels(labels, [ASK_OTHER, ASK_CHAT, ASK_NEXT]);
+	const original = new Map<string, string>();
+	shown.forEach((label, i) => original.set(label, labels[i]!));
+	const resolveLabel = (value: string): string => original.get(value) ?? value;
+	const title = sanitizeCR(question.question);
+	// omp bounds this title to the terminal's width; hostd shows it whole.
+	const customTitle = `${CUSTOM_ANSWER}${title}`.replace(/\s+/g, " ").trim();
+	const base: WireSelectItem[] = question.options.map((o, i) =>
+		o.description?.trim() ? { label: shown[i]!, description: sanitizeCR(o.description.trim()) } : shown[i]!,
+	);
+	if (question.multi) {
+		for (;;) {
+			const checkedIndices = labels.map((label, i) => (selected.has(label) ? i : -1)).filter(i => i >= 0);
+			const hasAnswer = selected.size > 0 || customInput !== undefined;
+			const options = [...base, ASK_OTHER];
+			if (hasAnswer) options.push(ASK_NEXT);
+			options.push(ASK_CHAT);
+			const choice = await requestString(
+				hub,
+				{
+					kind: "select",
+					title,
+					options,
+					selectionMarker: "checkbox",
+					checkedIndices,
+					markableCount: question.options.length,
+					helpText: askHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
+				},
+				signal,
+			);
+			if (choice.kind === "unavailable") return "unavailable";
+			if (choice.kind === "cancelled") return undefined;
+			if (choice.value === ASK_CHAT) return "chat";
+			if (choice.value === ASK_NEXT) break;
+			if (choice.value === ASK_OTHER) {
+				const input = await requestString(hub, { kind: "editor", title: customTitle }, signal);
+				if (input.kind === "unavailable") return "unavailable";
+				if (input.kind === "cancelled") continue;
+				customInput = input.value;
+				break;
+			}
+			const picked = resolveLabel(choice.value);
+			if (selected.has(picked)) selected.delete(picked);
+			else selected.add(picked);
+		}
+	} else {
+		const recommended = typeof question.recommended === "number" && Number.isInteger(question.recommended) ? question.recommended : 0;
+		const initialIndex = Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
+		for (;;) {
+			const choice = await requestString(
+				hub,
+				{
+					kind: "select",
+					title,
+					options: [...base, ASK_OTHER, ASK_CHAT],
+					initialIndex,
+					selectionMarker: "radio",
+					markableCount: question.options.length,
+					helpText: askHelpText("select"),
+				},
+				signal,
+			);
+			if (choice.kind === "unavailable") return "unavailable";
+			if (choice.kind === "cancelled") return undefined;
+			if (choice.value === ASK_CHAT) return "chat";
+			if (choice.value === ASK_OTHER) {
+				const input = await requestString(hub, { kind: "editor", title: customTitle }, signal);
+				if (input.kind === "unavailable") return "unavailable";
+				if (input.kind === "cancelled") continue;
+				customInput = input.value;
+			} else {
+				selected.add(resolveLabel(choice.value));
+			}
+			break;
+		}
+	}
+	return {
+		id: question.id,
+		question: question.question,
+		options: labels,
+		multi: question.multi ?? false,
+		selectedOptions: labels.filter(label => selected.has(label)),
+		customInput,
+	};
+}
+
+/** The guest side of omp's ask dialog, question by question; `unavailable` when no answer came. */
+export async function runGuestAsk(hub: DialogHub, questions: AskQuestion[], signal: AbortSignal): Promise<AskResult | "unavailable" | undefined> {
+	const results: AskResultItem[] = [];
+	for (const question of questions) {
+		const result = await guestAskQuestion(hub, question, signal);
+		if (result === "unavailable" || result === undefined) return result;
+		if (result === "chat") return { kind: "chat" };
+		results.push(result);
+	}
+	return { kind: "submit", results };
+}
+
+/** omp's ask dialog (`local`) against the guest flow above (omp's `showAskDialog`). */
+export async function raceAsk<T>(
+	hub: DialogHub,
+	questions: unknown,
+	signal: AbortSignal | undefined,
+	local: (signal: AbortSignal) => T | Promise<T>,
+): Promise<T | AskResult | undefined> {
+	const normalized = normalizeAskQuestions(questions);
+	const localAbort = new AbortController();
+	const remoteAbort = new AbortController();
+	type Winner = { source: "local" | "remote"; value: T | AskResult | undefined };
+	const localWinner = attempt(() => local(anySignal(signal, localAbort.signal))).then((value): Winner => ({ source: "local", value }));
+	const remoteWinner = runGuestAsk(hub, normalized, anySignal(signal, remoteAbort.signal)).then(
+		(result): Winner | Promise<Winner> => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
+	);
+	localWinner.catch(() => {});
+	remoteWinner.catch(() => {});
+	try {
+		const winner = await Promise.race([localWinner, remoteWinner]);
+		if (winner.source === "remote") localAbort.abort();
+		else remoteAbort.abort();
+		return winner.value;
+	} catch (err) {
+		localAbort.abort();
+		remoteAbort.abort();
+		throw err;
+	}
+}
+
+/** omp's approval prompt (`ExtensionApprovalPrompt`) and answer, and its select-menu mapping
+ *  (`tools/approval.ts`), used when omp's own functions cannot be imported. */
+export interface ApprovalPrompt {
+	full: string;
+	compact?: string;
+	session?: string;
+	grants?: Array<{ scope: string; label: string; alwaysLabel: string }>;
+}
+export type ApprovalAnswer = "once" | "session" | "deny" | { grant: string; always: boolean };
+export interface ApprovalLabels {
+	approvalChoiceLabels(prompt: ApprovalPrompt): string[];
+	approvalAnswerForChoice(prompt: ApprovalPrompt, choice: string | undefined): ApprovalAnswer;
+}
+
+const approvalOnceLabel = (prompt: ApprovalPrompt): string => (prompt.grants?.length ? "Approve Once" : "Approve");
+
+export const fallbackApproval: ApprovalLabels = {
+	approvalChoiceLabels: prompt => {
+		const grants = prompt.grants ?? [];
+		return [
+			...grants.map(g => g.label),
+			...grants.map(g => g.alwaysLabel),
+			approvalOnceLabel(prompt),
+			...(prompt.session ? [prompt.session] : []),
+			"Deny",
+		];
+	},
+	approvalAnswerForChoice: (prompt, choice) => {
+		if (choice === undefined) return "deny";
+		if (choice === approvalOnceLabel(prompt)) return "once";
+		if (prompt.session && choice === prompt.session) return "session";
+		for (const grant of prompt.grants ?? []) {
+			if (choice === grant.label) return { grant: grant.scope, always: false };
+			if (choice === grant.alwaysLabel) return { grant: grant.scope, always: true };
+		}
+		return "deny";
+	},
+};
+
+export const DIALOG_MEMBERS = ["askDialog", "approve", "select", "editor", "confirm", "input"] as const;
+export type DialogMember = (typeof DIALOG_MEMBERS)[number];
+type AnyFn = (this: unknown, ...args: unknown[]) => unknown;
+const DIALOG_WRAP = Symbol.for("teleflock.bridge.dialogWrap");
+type WrappedFn = AnyFn & { [DIALOG_WRAP]?: { token: object; original: AnyFn } };
+
+/** A member's own function, read past omp's `trackUserWaits` proxy: it has no descriptor trap, so
+ *  the target's descriptor comes back (a `get` would return the proxy's tracking wrapper). */
+function ownMember(ui: object, name: string): PropertyDescriptor | undefined {
+	let o: object | null = ui;
+	for (let i = 0; o && i < 4; i++) {
+		const desc = Object.getOwnPropertyDescriptor(o, name);
+		if (desc) return desc;
+		o = Object.getPrototypeOf(o) as object | null;
+	}
+	return undefined;
+}
+
+function wrappedBy(fn: unknown, token: object): boolean {
+	let f = fn as WrappedFn | undefined;
+	for (let i = 0; typeof f === "function" && i < 8; i++) {
+		const tag = f[DIALOG_WRAP];
+		if (!tag) return false;
+		if (tag.token === token) return true;
+		f = tag.original as WrappedFn;
+	}
+	return false;
+}
+
+/**
+ * Puts `make(name, original)` in place of each dialog member of `ui` that does not carry this copy's
+ * wrapper yet (a fresh UI context after a mode re-init, or a wrapper of another bridge copy, which
+ * stays underneath). Assigning through omp's proxy lands on its target, so omp's tools and handlers
+ * (which read members on every access) call the wrapper. Returns whether `select` is wrapped.
+ */
+export function installDialogWrappers(ui: object, token: object, make: (name: DialogMember, original: AnyFn) => AnyFn): boolean {
+	for (const name of DIALOG_MEMBERS) {
+		const desc = ownMember(ui, name);
+		const original: unknown = desc?.value;
+		if (typeof original !== "function" || wrappedBy(original, token)) continue;
+		const wrapper = make(name, original as AnyFn) as WrappedFn;
+		wrapper[DIALOG_WRAP] = { token, original: original as AnyFn };
+		try {
+			Object.defineProperty(ui, name, { value: wrapper, writable: true, configurable: true, enumerable: desc?.enumerable ?? true });
+		} catch {
+			// a frozen UI context: its dialogs stay local
+		}
+	}
+	return wrappedBy(ownMember(ui, "select")?.value, token);
+}
+
+/** omp's `toWireSelectOptions`. */
+const wireSelectOptions = (options: readonly unknown[]): WireSelectItem[] =>
+	options.map(o => {
+		if (typeof o === "string") return o;
+		const label = strField(o, "label") ?? String(o);
+		const description = strField(o, "description");
+		return description ? { label, description } : { label };
+	});
+
+const numberField = (o: Json | undefined, key: string): number | undefined => {
+	const v = o?.[key];
+	return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+};
+
+/**
+ * One wrapped dialog call: hostd's draft for `name` and the race (omp's collab mirroring for
+ * select / editor / approve / ask, the same select / editor mapping for confirm and input, which
+ * omp keeps local). `undefined` when the arguments are not what omp passes: the caller runs the
+ * original alone.
+ */
+export function raceMember(
+	hub: DialogHub,
+	name: DialogMember,
+	original: AnyFn,
+	self: unknown,
+	args: unknown[],
+	approval: ApprovalLabels,
+): Promise<unknown> | undefined {
+	const optsAt = (i: number): Json | undefined => {
+		const arg = args[i];
+		return isObj(arg) ? arg : undefined;
+	};
+	/** The original with `signal` in the options argument at `i` (the race's local side). */
+	const local = (i: number) => (signal: AbortSignal) => {
+		const patched = [...args];
+		while (patched.length < i) patched.push(undefined);
+		patched[i] = { ...optsAt(i), signal };
+		return original.apply(self, patched);
+	};
+	const signalAt = (i: number): AbortSignal | undefined => {
+		const s = optsAt(i)?.signal;
+		return s instanceof AbortSignal ? s : undefined;
+	};
+	const same = (v: string | undefined) => v;
+	switch (name) {
+		case "select": {
+			const [title, options] = args;
+			if (typeof title !== "string" || !Array.isArray(options)) return undefined;
+			const opts = optsAt(2);
+			const marker = opts?.selectionMarker;
+			const checked = opts?.checkedIndices;
+			const draft: DialogDraft = {
+				kind: "select",
+				title,
+				options: wireSelectOptions(options),
+				initialIndex: numberField(opts, "initialIndex"),
+				selectionMarker: marker === "radio" || marker === "checkbox" ? marker : undefined,
+				checkedIndices: Array.isArray(checked) ? checked.filter((n): n is number => typeof n === "number") : undefined,
+				markableCount: numberField(opts, "markableCount"),
+				helpText: typeof opts?.helpText === "string" ? opts.helpText : undefined,
+			};
+			return raceDialog(hub, draft, signalAt(2), local(2), same);
+		}
+		case "editor": {
+			const [title, prefill] = args;
+			if (typeof title !== "string") return undefined;
+			const draft: DialogDraft = { kind: "editor", title, prefill: typeof prefill === "string" ? prefill : undefined };
+			return raceDialog(hub, draft, signalAt(2), local(2), same);
+		}
+		case "input": {
+			const [title] = args;
+			if (typeof title !== "string") return undefined;
+			return raceDialog(hub, { kind: "editor", title }, signalAt(2), local(2), same);
+		}
+		case "confirm": {
+			const [title, message] = args;
+			if (typeof title !== "string") return undefined;
+			const text = typeof message === "string" && message ? `${title}\n${message}` : title;
+			return raceDialog(hub, { kind: "select", title: text, options: ["Yes", "No"] }, signalAt(2), local(2), v => v === "Yes");
+		}
+		case "approve": {
+			const [prompt] = args;
+			if (!isObj(prompt) || typeof prompt.full !== "string") return undefined;
+			const p = prompt as unknown as ApprovalPrompt;
+			const draft: DialogDraft = { kind: "select", title: p.full, options: approval.approvalChoiceLabels(p) };
+			return raceDialog(hub, draft, signalAt(1), local(1), v => approval.approvalAnswerForChoice(p, v));
+		}
+		case "askDialog": {
+			const [questions] = args;
+			if (!Array.isArray(questions)) return undefined;
+			return raceAsk(hub, questions, signalAt(1), local(1));
+		}
+	}
+}
+
+// ─── protocol v2: omp internals ────────────────────────────────────────────────────────────────
+// The data plane reads a few omp internals, each feature-detected: without one, the feature it
+// serves is off (`hello.caps`) or falls back to the public extension API.
+
+/** The slice of omp's AgentSession the data plane uses (from `AgentRegistry` refs). */
+interface AgentSessionLike {
+	subscribe(listener: (event: Json) => void): () => void;
+	readonly isStreaming?: boolean;
+	readonly isAborting?: boolean;
+	readonly queuedMessageCount?: number;
+	readonly sessionName?: string;
+	readonly model?: unknown;
+	readonly thinkingLevel?: string;
+	readonly sessionManager?: { getSessionId?(): string };
+	readonly agent?: { state?: { streamMessage?: unknown } };
+	activeToolExecutionUpdates?(): readonly Json[];
+	prompt?(text: string, options?: Json): Promise<unknown>;
+	abort?(options?: Json): Promise<void>;
+}
+interface AgentRefLike {
+	id: string;
+	displayName?: string;
+	kind?: string;
+	parentId?: string;
+	status?: string;
+	session?: unknown;
+	sessionFile?: string | null;
+	createdAt?: number;
+	lastActivity?: number;
+}
+interface AgentRegistryLike {
+	get(id: string): AgentRefLike | undefined;
+	list(): AgentRefLike[];
+	onChange?(listener: () => void): () => void;
+}
+interface LifecycleLike {
+	ensureLive(id: string): Promise<unknown>;
+	release(id: string, expected?: unknown, options?: { tombstone?: boolean }): Promise<boolean>;
+}
+interface Internals {
+	/** `AgentRegistry.global()`: roster, subagent refs and the main AgentSession. */
+	registry?: AgentRegistryLike;
+	/** `AgentLifecycleManager` (only omp's own module instance: its registry is module state). */
+	lifecycle?: { global(): LifecycleLike };
+	interruptLabel: string;
+	approval: ApprovalLabels;
+}
+
+const isSession = (s: unknown): s is AgentSessionLike => !!s && typeof s === "object" && "subscribe" in s && typeof s.subscribe === "function";
+const hasGlobal = (v: unknown): v is { global(): unknown } => typeof v === "function" && "global" in v && typeof v.global === "function";
+
+/** `p`, or `undefined` once it rejects or `ms` passed. */
+async function settleWithin<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+	const { promise, resolve } = Promise.withResolvers<undefined>();
+	const timer = setTimeout(() => resolve(undefined), ms);
+	timer.unref?.();
+	try {
+		return await Promise.race([p, promise]);
+	} catch {
+		return undefined;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** The model fields hostd reads (`state.model`), without provider headers or compat flags. */
+const MODEL_FIELDS = ["id", "name", "api", "provider", "baseUrl", "reasoning", "input", "contextWindow", "maxTokens"] as const;
+function modelWire(model: unknown): Json | undefined {
+	if (!isObj(model)) return undefined;
+	const out: Json = {};
+	for (const key of MODEL_FIELDS) if (model[key] !== undefined) out[key] = model[key];
+	return out;
+}
+
+/** omp materializes a fresh session's file only with its first assistant message. */
+function sessionOnDisk(sm: object, file: string | undefined): boolean {
+	if ("isSessionOnDisk" in sm && typeof sm.isSessionOnDisk === "function") {
+		try {
+			return sm.isSessionOnDisk() === true;
+		} catch {
+			// fall back to the file itself
+		}
+	}
+	return !!file && fs.existsSync(file);
+}
+
 /**
  * Schema-dump mode (`TF_OMP_SCHEMA_OUT=<file>`; docs/bridge-protocol.md "Schema dump"): tf-hostd
  * starts a throwaway headless omp with this extension to read omp's settings schema. Writes
@@ -619,7 +1804,7 @@ function bridge(pi: ExtensionAPI) {
 
 	let ctxRef: ExtensionContext | undefined; // latest main-session context
 	// This copy's entry in the process-wide slot (see "one bridge per omp process").
-	const me: BridgeSlot["owners"][string] = { version: BRIDGE_VERSION, stop: () => standDown() };
+	const me: BridgeSlot["owners"][string] = { version: BRIDGE_VERSION, stop: () => standDown(), relay: frame => onRelay(frame) };
 	let active = false; // between session_start and session_shutdown
 	let sock: net.Socket | undefined;
 	let connected = false;
@@ -665,14 +1850,82 @@ function bridge(pi: ExtensionAPI) {
 	const sideThreads = new Map<string, SideThread>();
 	let btwSeq = 0;
 	let statusShown: boolean | undefined;
+	// Data plane (protocol v2, see "─── data plane" below).
+	/** This binding's session: every session (main and each subagent) gets its own binding of the
+	 *  factory; `sub` bindings only relay their task bus to the process's owner copy. */
+	let bindingKind: "main" | "sub" | undefined;
+	let bindingAgentId: string | undefined;
+	let startedAt = Date.now();
+	let writer: LiveWriter | undefined; // the connection's ordered writer, from hostd's auth on
+	const throttle = new Throttle();
+	const tracker = new LiveTracker();
+	let msgSeq = 0; // bumped on every message_start: keys one message's cumulative updates
+	let endedMsg = -1; // msgSeq of the last message_end (no update may follow it)
+	const endedTools = new Set<string>();
+	let agentSession: AgentSessionLike | undefined;
+	let unsubscribeSession: (() => void) | undefined;
+	let unsubscribeRegistry: (() => void) | undefined;
+	let stateTimer: Timer | undefined;
+	let agentsTimer: Timer | undefined;
+	let lastLiveState = "";
+	let lastAgents = "";
+	let dialogsReady = false;
+	/** Marks this binding's dialog wrappers (see installDialogWrappers). */
+	const dialogToken = {};
+	const seenBus = new WeakSet<object>();
+	const internals: Internals = { interruptLabel: USER_INTERRUPT, approval: fallbackApproval };
+	const hub = new DialogHub(
+		() => {
+			const slot = bridgeSlot();
+			slot.uiReqSeq = (slot.uiReqSeq ?? 0) + 1;
+			return slot.uiReqSeq;
+		},
+		frame => feedLive(frame),
+	);
+	/** Probes the omp internals the data plane uses (`hello.caps`). The agent registry comes from omp's
+	 *  root exports, synchronously; the rest are literal subpath imports, which omp's extension loader
+	 *  maps to its own (already loaded) modules. */
+	const internalsReady: Promise<void> = (async () => {
+		const ns: Record<string, unknown> = pi.pi ?? {};
+		if (hasGlobal(ns.AgentRegistry)) {
+			const reg: unknown = ns.AgentRegistry.global();
+			if (isObj(reg) && typeof reg.get === "function" && typeof reg.list === "function") internals.registry = reg as unknown as AgentRegistryLike;
+		}
+		const load = (mod: Promise<unknown>): Promise<Json | undefined> => settleWithin(mod, 3_000).then(m => (isObj(m) ? m : undefined));
+		const exported = hasGlobal(ns.AgentLifecycleManager);
+		const [lifecycleMod, registryMod, approvalMod, messagesMod] = await Promise.all([
+			exported ? undefined : load(import("@oh-my-pi/pi-coding-agent/registry/agent-lifecycle")),
+			exported ? undefined : load(import("@oh-my-pi/pi-coding-agent/registry/agent-registry")),
+			load(import("@oh-my-pi/pi-coding-agent/tools/approval")),
+			load(import("@oh-my-pi/pi-coding-agent/session/messages")),
+		]);
+		let lifecycle: unknown = ns.AgentLifecycleManager;
+		// The manager keeps its registry in module state: only the module instance omp runs will do.
+		if (!exported && registryMod?.AgentRegistry === ns.AgentRegistry) lifecycle = lifecycleMod?.AgentLifecycleManager;
+		if (hasGlobal(lifecycle) && internals.registry) internals.lifecycle = lifecycle as { global(): LifecycleLike };
+		if (typeof approvalMod?.approvalChoiceLabels === "function" && typeof approvalMod.approvalAnswerForChoice === "function") {
+			internals.approval = approvalMod as unknown as ApprovalLabels;
+		}
+		if (typeof messagesMod?.USER_INTERRUPT_LABEL === "string") internals.interruptLabel = messagesMod.USER_INTERRUPT_LABEL;
+	})().catch((err: unknown) => bridgeLog(`omp internals: ${String(err)}`));
 
 	// ─── wire ─────────────────────────────────────────────────────────────────────────────────
+	/** A control frame, in order with the live feed (see LiveWriter). */
 	const send = (obj: Record<string, unknown>): void => {
-		if (!sock || !connected) return;
+		if (!sock || !connected || !writer) return;
 		try {
-			sock.write(`${JSON.stringify(obj)}\n`);
+			writer.ctl(obj);
 		} catch (err) {
 			bridgeLog(`write failed: ${String(err)}`);
+		}
+	};
+
+	/** A live frame, when hostd subscribed (`key`: a cumulative frame, see LiveWriter.live). */
+	const feedLive = (frame: FrameSource, key?: string): void => {
+		try {
+			if (writer?.subscribed) writer.live(frame, key);
+		} catch (err) {
+			bridgeLog(`live frame: ${String(err)}`);
 		}
 	};
 
@@ -817,6 +2070,8 @@ function bridge(pi: ExtensionAPI) {
 			ompVersion: ompVersion(pi),
 			bridgeVersion: BRIDGE_VERSION,
 			tui: ctx.mode === "tui",
+			// 2.0.0: the data plane; `dialogs` / `subagentCtl` say whether the omp internals they need are there.
+			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true },
 			state: readState(ctx),
 		};
 	};
@@ -825,6 +2080,12 @@ function bridge(pi: ExtensionAPI) {
 		const ctx = ctxRef;
 		if (!ctx || !connected) return;
 		try {
+			if (reason === "switch") {
+				// The live feed belonged to the previous session: hostd subscribes again after this hello.
+				stopFeed();
+				tracker.reset();
+				endedTools.clear();
+			}
 			const hello = helloPayload(ctx, reason, previous);
 			helloSessionId = hello.sessionId;
 			lastStateJson = JSON.stringify(hello.state);
@@ -838,7 +2099,7 @@ function bridge(pi: ExtensionAPI) {
 	/** Push state/queue deltas and re-hello on a session change. Runs on every tick and after events. */
 	const sync = (): void => {
 		const ctx = ctxRef;
-		if (!ctx || !connected) return;
+		if (!ctx || !connected || !helloSessionId) return;
 		const sid = sessionId();
 		if (sid && helloSessionId && sid !== helloSessionId) {
 			const prev = helloSessionId;
@@ -857,6 +2118,7 @@ function bridge(pi: ExtensionAPI) {
 			lastStateJson = stateJson;
 			emit("state", state);
 		}
+		scheduleState();
 	};
 
 	const safeSync = (): void => {
@@ -867,6 +2129,394 @@ function bridge(pi: ExtensionAPI) {
 		}
 	};
 
+	// ─── data plane (protocol v2) ─────────────────────────────────────────────────────────────
+	// The live feed mirrors omp's AgentSession stream exactly as omp's collab host does (the
+	// session comes from omp's agent registry; without it the extension events stand in), the task
+	// bus at every depth, the agent roster and the session's dialogs. See docs/bridge-protocol.md.
+
+	/** This copy is the process's bridge to its hostd and the main session runs. */
+	const ownsSlot = (): boolean => active && bridgeSlot().owners[endpoint] === me;
+
+	const isStreaming = (): boolean => {
+		const live = agentSession?.isStreaming;
+		if (typeof live === "boolean") return live;
+		try {
+			return tracker.streaming || !(ctxRef?.isIdle() ?? true);
+		} catch {
+			return tracker.streaming;
+		}
+	};
+
+	/** Collab's `state` frame (`collab/host.ts` #buildState): the AgentSession's view, else ctx's. */
+	const liveState = (ctx: ExtensionContext): Json => {
+		const s = agentSession;
+		let tokens = 0;
+		let window = 0;
+		let percent: number | undefined;
+		try {
+			const usage = ctx.getContextUsage();
+			if (typeof usage?.tokens === "number") tokens = usage.tokens;
+			if (typeof usage?.contextWindow === "number") window = usage.contextWindow;
+			if (typeof usage?.percent === "number") percent = usage.percent;
+		} catch {
+			// no usage before the first turn
+		}
+		const model = s ? s.model : ctx.model;
+		if (!window && isObj(model) && typeof model.contextWindow === "number") window = model.contextWindow;
+		let queued = s?.queuedMessageCount;
+		if (typeof queued !== "number") {
+			const q = readQueue();
+			queued = q.steering.length + q.followUp.length;
+		}
+		return {
+			isStreaming: isStreaming(),
+			isAborting: s?.isAborting === true,
+			queuedMessageCount: queued,
+			sessionName: (s ? s.sessionName : pi.getSessionName()) || undefined,
+			cwd: ctx.sessionManager.getCwd() || ctx.cwd,
+			model: modelWire(model),
+			thinkingLevel: (s ? s.thinkingLevel : pi.getThinkingLevel()) ?? undefined,
+			contextUsage: { tokens, contextWindow: window, percent: percent ?? (window > 0 ? (tokens / window) * 100 : 0) },
+			participants: [],
+		};
+	};
+
+	/** Debounced `state` frame (collab: 100 ms, deduplicated), after state-changing events and requests. */
+	const scheduleState = (): void => {
+		if (stateTimer !== undefined || !writer?.subscribed) return;
+		stateTimer = setTimeout(() => {
+			stateTimer = undefined;
+			try {
+				const ctx = ctxRef;
+				if (!ctx || !writer?.subscribed) return;
+				const state = liveState(ctx);
+				const json = JSON.stringify(state);
+				if (json === lastLiveState) return;
+				lastLiveState = json;
+				writer.live({ t: "state", state }, "state");
+			} catch (err) {
+				bridgeLog(`live state: ${String(err)}`);
+			}
+		}, STATE_DEBOUNCE_MS);
+		stateTimer.unref?.();
+	};
+
+	/** Collab's agent roster (`#snapshotAgents`, advisors excluded) plus each agent's `sessionFile`;
+	 *  without omp's registry, the main agent and the subagents lifecycle frames named. */
+	const snapshotAgents = (): Json[] => {
+		const reg = internals.registry;
+		if (reg) {
+			return reg
+				.list()
+				.filter(ref => ref.kind !== "advisor")
+				.map(ref => ({
+					id: ref.id,
+					displayName: ref.displayName ?? ref.id,
+					kind: ref.kind === "main" ? "main" : "sub",
+					parentId: ref.parentId,
+					status: ref.status ?? "idle",
+					hasSessionFile: !!ref.sessionFile,
+					createdAt: ref.createdAt ?? 0,
+					lastActivity: ref.lastActivity ?? 0,
+					sessionFile: ref.sessionFile ?? null,
+				}));
+		}
+		const ctx = ctxRef;
+		const mainId = ctx?.agent?.id ?? "Main";
+		const file = ctx?.sessionManager.getSessionFile() ?? null;
+		const out: Json[] = [
+			{
+				id: mainId,
+				displayName: ctx?.agent?.name ?? "main",
+				kind: "main",
+				status: isStreaming() ? "running" : "idle",
+				hasSessionFile: !!file,
+				createdAt: startedAt,
+				lastActivity: startedAt,
+				sessionFile: file,
+			},
+		];
+		for (const [id, sub] of tracker.subs) {
+			if (!sub.lifecycle) continue;
+			const status = strField(sub.lifecycle, "status");
+			const subFile = strField(sub.lifecycle, "sessionFile") ?? null;
+			out.push({
+				id,
+				displayName: strField(sub.lifecycle, "agent") ?? id,
+				kind: "sub",
+				parentId: sub.parent ?? mainId,
+				status: status === "started" ? "running" : status === "completed" ? "idle" : "aborted",
+				hasSessionFile: !!subFile,
+				createdAt: sub.first,
+				lastActivity: sub.at,
+				sessionFile: subFile,
+			});
+		}
+		return out;
+	};
+
+	/** Debounced `agents` frame (collab: 100 ms after a registry change), deduplicated. */
+	const scheduleAgents = (): void => {
+		if (agentsTimer !== undefined || !writer?.subscribed) return;
+		agentsTimer = setTimeout(() => {
+			agentsTimer = undefined;
+			try {
+				if (!writer?.subscribed) return;
+				const agents = snapshotAgents();
+				const json = JSON.stringify(agents);
+				if (json === lastAgents) return;
+				lastAgents = json;
+				writer.live({ t: "agents", agents }, "agents");
+			} catch (err) {
+				bridgeLog(`agents: ${String(err)}`);
+			}
+		}, AGENTS_DEBOUNCE_MS);
+		agentsTimer.unref?.();
+	};
+
+	/** omp's AgentSession of the main session (its agent registry ref). */
+	const findSession = (ctx: ExtensionContext): AgentSessionLike | undefined => {
+		const reg = internals.registry;
+		if (!reg) return undefined;
+		try {
+			const sid = ctx.sessionManager.getSessionId();
+			const fits = (s: unknown): s is AgentSessionLike => isSession(s) && s.sessionManager?.getSessionId?.() === sid;
+			const own = ctx.agent?.id ? reg.get(ctx.agent.id)?.session : undefined;
+			if (fits(own)) return own;
+			for (const ref of reg.list()) if (ref.kind === "main" && fits(ref.session)) return ref.session;
+		} catch (err) {
+			bridgeLog(`session lookup: ${String(err)}`);
+		}
+		return undefined;
+	};
+
+	/** Listens to the main AgentSession (as omp's collab host does), once found; rechecked every tick. */
+	const attachSession = (ctx: ExtensionContext): void => {
+		const s = findSession(ctx);
+		if (!s || s === agentSession) return;
+		try {
+			unsubscribeSession?.();
+		} catch {
+			// the old session is gone
+		}
+		unsubscribeSession = undefined;
+		agentSession = undefined;
+		try {
+			unsubscribeSession = s.subscribe(event => {
+				try {
+					onAgentEvent(event, true);
+				} catch (err) {
+					bridgeLog(`live event: ${String(err)}`);
+				}
+			});
+			agentSession = s;
+		} catch (err) {
+			bridgeLog(`session subscribe: ${String(err)}`);
+		}
+	};
+
+	const attachRegistry = (): void => {
+		const reg = internals.registry;
+		if (unsubscribeRegistry || !reg?.onChange) return;
+		try {
+			unsubscribeRegistry = reg.onChange(() => scheduleAgents());
+		} catch (err) {
+			bridgeLog(`registry: ${String(err)}`);
+		}
+	};
+
+	/** This copy stops bridging: let go of omp's session, registry and the pending dialogs (they go on locally). */
+	const detachLive = (): void => {
+		for (const off of [unsubscribeSession, unsubscribeRegistry]) {
+			try {
+				off?.();
+			} catch {
+				// already gone
+			}
+		}
+		unsubscribeSession = undefined;
+		unsubscribeRegistry = undefined;
+		agentSession = undefined;
+		clearTimeout(stateTimer);
+		clearTimeout(agentsTimer);
+		stateTimer = undefined;
+		agentsTimer = undefined;
+		throttle.clear();
+		hub.close();
+	};
+
+	/** Ends the live feed (queued live frames dropped; the connection stays). */
+	const stopFeed = (): void => {
+		writer?.stop();
+		throttle.clear();
+		lastLiveState = "";
+		lastAgents = "";
+	};
+
+	/**
+	 * One agent event (the AgentSession's, else the extension event standing in for it): tracked for
+	 * `resync` and, while hostd is subscribed, sent as collab's `event` frame. `message_update` and
+	 * `tool_execution_update` are cumulative: throttled per message / tool call, and never sent
+	 * after their end frame.
+	 */
+	const onAgentEvent = (ev: Json, fromSession: boolean): void => {
+		if ((!fromSession && agentSession) || !ownsSlot()) return;
+		const type = typeof ev.type === "string" ? ev.type : "";
+		if (type === "message_start") msgSeq++;
+		tracker.track(ev);
+		if (STATE_TRIGGERS[type]) scheduleState();
+		if (!WIRE_EVENTS[type]) return;
+		const msgKey = `m${msgSeq}`;
+		const toolKey = `t:${typeof ev.toolCallId === "string" ? ev.toolCallId : ""}`;
+		switch (type) {
+			case "message_update":
+				// Extension events can deliver an update after its message's end: never send that one.
+				if (msgSeq !== endedMsg && writer?.subscribed)
+					throttle.run(msgKey, MESSAGE_UPDATE_MS, () => feedLive(() => ({ t: "event", event: wireEvent(ev) }), msgKey));
+				return;
+			case "tool_execution_update":
+				if (!endedTools.has(toolKey) && writer?.subscribed)
+					throttle.run(toolKey, TOOL_UPDATE_MS, () => feedLive(() => ({ t: "event", event: wireEvent(ev) }), toolKey));
+				return;
+			case "message_end":
+				endedMsg = msgSeq;
+				throttle.end(msgKey);
+				writer?.drop(msgKey);
+				break;
+			case "tool_execution_end":
+				endedTools.add(toolKey);
+				throttle.end(toolKey);
+				writer?.drop(toolKey);
+				break;
+			case "agent_end":
+				endedTools.clear();
+				break;
+		}
+		if (!writer?.subscribed) return;
+		// A session change ends the feed (the switch hello goes first); hostd subscribes again.
+		if (helloSessionId && sessionId() !== helloSessionId) {
+			safeSync();
+			return;
+		}
+		feedLive({ t: "event", event: wireEvent(ev) });
+	};
+
+	/** A task-bus frame (direct subagents on the main bus, nested ones relayed): tracked, then sent.
+	 *  Progress is cumulative per subagent; the same payload object arriving twice is sent once. */
+	const onBusFrame = (channel: string, data: unknown, from: string | undefined): void => {
+		if (!isObj(data) || seenBus.has(data)) return;
+		seenBus.add(data);
+		tracker.bus(channel, data, from ?? ctxRef?.agent?.id, Date.now());
+		if (!internals.registry && channel === TASK_LIFECYCLE) scheduleAgents();
+		if (!writer?.subscribed) return;
+		if (channel === TASK_PROGRESS) {
+			const id = strField(data.progress, "id");
+			feedLive(() => ({ t: "bus", channel, data }), id ? `p:${id}` : undefined);
+		} else {
+			feedLive({ t: "bus", channel, data });
+		}
+	};
+
+	/** `me.relay`: the copies loaded in subagent sessions hand over what only their session's bus sees. */
+	const onRelay = (frame: RelayedBus): void => {
+		try {
+			if (ownsSlot() && isObj(frame) && typeof frame.channel === "string") onBusFrame(frame.channel, frame.data, frame.from);
+		} catch (err) {
+			bridgeLog(`relay: ${String(err)}`);
+		}
+	};
+
+	/**
+	 * The `resync` frame, taken synchronously when it is written: the file's newest entry (hostd
+	 * applies the session file through it), then everything in flight as collab frames in replay
+	 * order (unwritten entries, `state`, `agents`, in-flight events, subagent bus frames, pending
+	 * dialogs). Live frames with a higher seq follow it.
+	 */
+	const buildResync = (seq: number): Json => {
+		const ctx = ctxRef;
+		const frames: Json[] = [];
+		const out: Json = { t: "resync", seq, sessionId: null, sessionFile: null, leafId: null, lastEntryId: null, live: { streaming: false, frames } };
+		if (!ctx) return out;
+		const sm = ctx.sessionManager;
+		try {
+			const file = sm.getSessionFile();
+			out.sessionId = sm.getSessionId();
+			out.sessionFile = file ?? null;
+			out.leafId = sm.getLeafId() ?? null;
+			const entries = sm.getEntries();
+			if (sessionOnDisk(sm, file)) {
+				// omp writes title changes asynchronously: the newest other entry is in the file.
+				for (let i = entries.length - 1; i >= 0; i--) {
+					const entry = entries[i]!;
+					if ((entry.type as string) === "title_change") continue;
+					out.lastEntryId = entry.id;
+					break;
+				}
+			} else {
+				// No file yet (omp writes it with the first assistant message): the entries come along.
+				for (const entry of entries) if (WIRE_ENTRIES[entry.type]) frames.push({ t: "entry", entry });
+			}
+		} catch (err) {
+			bridgeLog(`resync entries: ${String(err)}`);
+		}
+		try {
+			const state = liveState(ctx);
+			lastLiveState = JSON.stringify(state);
+			frames.push({ t: "state", state });
+		} catch (err) {
+			bridgeLog(`resync state: ${String(err)}`);
+		}
+		try {
+			const agents = snapshotAgents();
+			lastAgents = JSON.stringify(agents);
+			frames.push({ t: "agents", agents });
+		} catch (err) {
+			bridgeLog(`resync agents: ${String(err)}`);
+		}
+		try {
+			const s = agentSession;
+			const toolUpdates = new Map<string, Json>();
+			for (const update of s?.activeToolExecutionUpdates?.() ?? []) {
+				if (typeof update.toolCallId === "string") toolUpdates.set(update.toolCallId, update);
+			}
+			frames.push(...tracker.frames({ streamMessage: s?.agent?.state?.streamMessage, toolUpdates }));
+		} catch (err) {
+			bridgeLog(`resync live: ${String(err)}`);
+		}
+		for (const request of hub.requests()) frames.push({ t: "ui-request", request });
+		out.live = { streaming: isStreaming(), frames };
+		return out;
+	};
+
+	/** Wraps the dialogs of omp's shared UI context (again after a mode re-init gave it a new one). */
+	const ensureDialogs = (ctx: ExtensionContext): void => {
+		try {
+			if (!ctx.hasUI) {
+				dialogsReady = false;
+				return;
+			}
+			const ui: object = baseContext(ctx).ui;
+			dialogsReady = installDialogWrappers(ui, dialogToken, dialogWrapper);
+		} catch (err) {
+			dialogsReady = false;
+			bridgeLog(`dialogs: ${String(err)}`);
+		}
+	};
+
+	/** A dialog member's wrapper: races omp's dialog against hostd while this copy bridges, else omp's alone. */
+	const dialogWrapper = (name: DialogMember, original: AnyFn): AnyFn =>
+		function (this: unknown, ...args: unknown[]): unknown {
+			if (ownsSlot()) {
+				try {
+					const raced = raceMember(hub, name, original, this, args, internals.approval);
+					if (raced) return raced;
+				} catch (err) {
+					bridgeLog(`dialog ${name}: ${String(err)}`);
+				}
+			}
+			return original.apply(this, args);
+		};
+
 	// ─── connection ───────────────────────────────────────────────────────────────────────────
 	const dropSocket = (): void => {
 		const s = sock;
@@ -874,6 +2524,12 @@ function bridge(pi: ExtensionAPI) {
 		connected = false;
 		connecting = false;
 		helloSessionId = undefined;
+		// The live feed is per connection: hostd subscribes again after the next hello.
+		writer?.stop();
+		writer = undefined;
+		throttle.clear();
+		lastLiveState = "";
+		lastAgents = "";
 		// Private fallback side turns stream only to hostd; omp's own /btw keeps running.
 		for (const th of sideThreads.values()) th.ac?.abort(new Error("bridge disconnected"));
 		if (s) {
@@ -958,8 +2614,33 @@ function bridge(pi: ExtensionAPI) {
 						authed = true;
 						connecting = false;
 						connected = true;
+						writer = new LiveWriter(
+							{
+								write: line => {
+									try {
+										s.write(line);
+									} catch (err) {
+										bridgeLog(`write failed: ${String(err)}`);
+									}
+								},
+								backlog: () => s.writableLength,
+							},
+							{
+								resync: buildResync,
+								...liveLimits(),
+								log: bridgeLog,
+								onStall: () => {
+									bridgeLog("hostd stopped reading; reconnecting");
+									dropSocket();
+									nextRetryAt = Date.now() + RETRY_MS;
+								},
+							},
+						);
 						showStatus(true);
-						sendHello("connect");
+						// `caps` needs the omp internals probe (a few module imports, usually long done).
+						void internalsReady.then(() => {
+							if (sock === s && connected) sendHello("connect");
+						});
 						continue;
 					}
 					try {
@@ -984,12 +2665,26 @@ function bridge(pi: ExtensionAPI) {
 		};
 		s.on("error", onGone);
 		s.on("close", () => onGone(undefined));
+		// The kernel took what was backed up: send what waited in the live writer's queue.
+		s.on("drain", () => {
+			try {
+				if (sock === s) writer?.flush();
+			} catch (err) {
+				bridgeLog(`drain: ${String(err)}`);
+			}
+		});
 		s.unref();
 	};
 
 	const onTick = (): void => {
 		try {
 			if (!active) return;
+			// Independent of hostd: the session stream and the dialog wrappers (re-wrapped after a mode
+			// re-init replaced omp's UI context) are in place before it subscribes.
+			if (ctxRef) {
+				attachSession(ctxRef);
+				ensureDialogs(ctxRef);
+			}
 			if (connecting && Date.now() - connectStartedAt > AUTH_TIMEOUT_MS) {
 				bridgeLog("hostd did not authenticate in time; reconnecting");
 				dropSocket();
@@ -1000,6 +2695,7 @@ function bridge(pi: ExtensionAPI) {
 				if (!connecting && Date.now() >= nextRetryAt) connect();
 				return;
 			}
+			writer?.flush();
 			sync();
 			btwTick();
 		} catch (err) {
@@ -1039,6 +2735,7 @@ function bridge(pi: ExtensionAPI) {
 	const standDown = (): void => {
 		try {
 			stopTicking(ctxRef);
+			detachLive();
 			dropSocket();
 			bridgeLog("a newer TeleFlock bridge took over");
 		} catch (err) {
@@ -1051,6 +2748,9 @@ function bridge(pi: ExtensionAPI) {
 		if (!claim()) return;
 		stopTicking(ctx);
 		tick = ctx.setInterval(onTick, TICK_MS);
+		attachSession(ctx);
+		attachRegistry();
+		ensureDialogs(ctx);
 		if (connected) safeSync();
 		else connect();
 	};
@@ -1693,6 +3393,75 @@ function bridge(pi: ExtensionAPI) {
 		return { btwId: thread.id, turn: index };
 	};
 
+	/** `prompt` (2.0.0): a user message with optional images. While idle it starts a turn whatever
+	 *  `delivery` says; while streaming `auto` and `steer` steer, `followUp` waits for the turn's end. */
+	const promptOp = (p: Params): { queued: boolean } => {
+		const text = str(p, "text") ?? "";
+		const raw = p.images;
+		if (raw !== undefined && raw !== null && !Array.isArray(raw)) fail("invalid_params", '"images" must be an array');
+		const images = (Array.isArray(raw) ? raw : []).map((img: unknown, i) => {
+			const data = strField(img, "data");
+			const mimeType = strField(img, "mimeType");
+			if (!data || !mimeType?.startsWith("image/")) return fail("invalid_params", `images[${i}] needs base64 "data" and an image/* "mimeType"`);
+			return { type: "image" as const, data, mimeType };
+		});
+		if (!text.trim() && images.length === 0) fail("invalid_params", 'missing "text"');
+		const delivery = str(p, "delivery") ?? "auto";
+		if (delivery !== "auto" && delivery !== "steer" && delivery !== "followUp") fail("invalid_params", `unknown delivery ${delivery}`);
+		const content = images.length > 0 ? [{ type: "text" as const, text }, ...images] : text;
+		if (!isStreaming()) {
+			pi.sendUserMessage(content);
+			return { queued: false };
+		}
+		pi.sendUserMessage(content, { deliverAs: delivery === "followUp" ? "followUp" : "steer" });
+		return { queued: true };
+	};
+
+	/** `agentCmd` (2.0.0), as omp's collab host `#handleAgentCmd`: `chat` revives a parked subagent and
+	 *  steers (or starts) its turn, `kill` aborts and tombstones it, `revive` brings it back. */
+	const agentCmd = async (p: Params): Promise<Record<string, never>> => {
+		const cmd = str(p, "cmd", true);
+		const agentId = str(p, "agentId", true);
+		const reg = internals.registry;
+		const lifecycle = internals.lifecycle;
+		if (!reg || !lifecycle) return fail("unsupported", "this omp has no agent lifecycle manager");
+		const ref = reg.get(agentId);
+		if (ref?.kind === "advisor") fail("invalid_params", `agent ${agentId}: advisor transcripts are read-only`);
+		const manager = lifecycle.global();
+		switch (cmd) {
+			case "chat": {
+				const text = str(p, "text")?.trim();
+				if (!text) return fail("invalid_params", `agent ${agentId}: empty chat message`);
+				const live: unknown = await manager.ensureLive(agentId);
+				if (!isSession(live) || typeof live.prompt !== "function") return fail("unsupported", `agent ${agentId} cannot take messages`);
+				// The turn outlives this request: report only a failure that comes at once.
+				const run = live.prompt(text, { streamingBehavior: "steer" });
+				run.catch((err: unknown) => bridgeLog(`agent ${agentId}: ${String(err)}`));
+				const early = await settleWithin(
+					run.then(
+						() => undefined,
+						(err: unknown) => err ?? new Error("prompt failed"),
+					),
+					1_500,
+				);
+				if (early !== undefined) throw early;
+				return {};
+			}
+			case "kill": {
+				if (!ref) return fail("not_found", `no agent ${agentId}`);
+				const s = ref.session;
+				if (ref.status === "running" && isSession(s) && typeof s.abort === "function") await s.abort({ reason: internals.interruptLabel });
+				await manager.release(agentId, ref, { tombstone: true });
+				return {};
+			}
+			case "revive":
+				await manager.ensureLive(agentId);
+				return {};
+			default:
+				return fail("invalid_params", `unknown cmd ${cmd}`);
+		}
+	};
+
 	async function handle(op: string, p: Params): Promise<unknown> {
 		const ctx = ctxRef ?? fail("not_ready", "session not initialised yet");
 		switch (op) {
@@ -1922,6 +3691,30 @@ function bridge(pi: ExtensionAPI) {
 				};
 			case "dequeue":
 				return dequeueLast(ctx);
+			case "liveSubscribe": {
+				const w = writer ?? fail("not_ready", "not connected");
+				attachSession(ctx);
+				attachRegistry();
+				ensureDialogs(ctx);
+				throttle.clear();
+				w.start(); // its resync goes out before this request's `res`
+				return {};
+			}
+			case "liveUnsubscribe":
+				stopFeed();
+				return {};
+			case "prompt":
+				return promptOp(p);
+			case "uiResponse": {
+				const reqId = num(p, "reqId") ?? fail("invalid_params", 'missing "reqId"');
+				const value = p.value;
+				if (value !== undefined && value !== null && typeof value !== "string") fail("invalid_params", '"value" must be a string or null');
+				// An answer to a settled (or unknown) dialog: say it is over, as omp's collab host does.
+				if (!hub.answer(reqId, typeof value === "string" ? value : undefined)) feedLive({ t: "ui-request-end", reqId });
+				return {};
+			}
+			case "agentCmd":
+				return agentCmd(p);
 			default:
 				return fail("unknown_op", `unknown op ${op}`);
 		}
@@ -1955,7 +3748,16 @@ function bridge(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		try {
+			if (ctx.agent?.kind === "sub") {
+				// A subagent's binding only relays its task bus to the owner copy (see below).
+				bindingKind = "sub";
+				bindingAgentId = ctx.agent.id;
+				return;
+			}
 			if (!adopt(ctx)) return;
+			bindingKind = "main";
+			bindingAgentId = ctx.agent?.id;
+			startedAt = Date.now();
 			active = true;
 			goalFromEvent = undefined;
 			try {
@@ -1995,6 +3797,52 @@ function bridge(pi: ExtensionAPI) {
 		});
 	}
 
+	// Live events come from omp's AgentSession stream (attachSession); these extension events stand
+	// in while it cannot be reached. With omp's agent registry present the per-delta ones stay
+	// unsubscribed: any handler for them makes omp build an extension context per streamed token.
+	const omp: Record<string, unknown> = pi.pi ?? {};
+	const standIns = [
+		"agent_start",
+		"agent_end",
+		"turn_start",
+		"turn_end",
+		"message_start",
+		"message_end",
+		"tool_execution_start",
+		"tool_execution_end",
+		"auto_compaction_start",
+		"auto_compaction_end",
+		"auto_retry_start",
+		"auto_retry_end",
+	];
+	if (!hasGlobal(omp.AgentRegistry)) standIns.push("message_update", "tool_execution_update");
+	for (const name of standIns) {
+		pi.on(name as "agent_start", (event, ctx) => {
+			try {
+				if (ctx.agent?.kind !== "sub") onAgentEvent(event as unknown as Json, false);
+			} catch (err) {
+				bridgeLog(`${name}: ${String(err)}`);
+			}
+		});
+	}
+
+	// Task bus: the main binding mirrors its session's bus (direct subagents); a subagent's binding
+	// hands its own bus (that subagent's children, which no other bus carries) to the owner copy.
+	for (const channel of [TASK_PROGRESS, TASK_LIFECYCLE]) {
+		try {
+			pi.events.on(channel, (data: unknown) => {
+				try {
+					if (bindingKind === "sub") bridgeSlot().owners[endpoint]?.relay?.({ channel, data, from: bindingAgentId });
+					else if (bindingKind === "main" && ownsSlot()) onBusFrame(channel, data, undefined);
+				} catch (err) {
+					bridgeLog(`task bus: ${String(err)}`);
+				}
+			});
+		} catch (err) {
+			bridgeLog(`task bus: ${String(err)}`);
+		}
+	}
+
 	pi.on("goal_updated", (event, ctx) => {
 		try {
 			if (!adopt(ctx)) return;
@@ -2032,11 +3880,14 @@ function bridge(pi: ExtensionAPI) {
 			if (ctx.agent && ctx.agent.kind !== "main") return;
 			active = false;
 			stopTicking(ctx);
+			detachLive();
 			// The command context dies with the session; a later main session claims the slot anew.
 			const slot = bridgeSlot();
 			slot.cmdCtx = undefined;
 			if (slot.owners[endpoint] === me) delete slot.owners[endpoint];
+			writer?.stop();
 			send({ t: "bye", sessionId: helloSessionId ?? sessionId() ?? null });
+			writer?.flush(true);
 			if (sock) {
 				try {
 					sock.end();

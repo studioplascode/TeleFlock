@@ -87,6 +87,10 @@ pub struct AgentSnapshot {
     pub created_at: i64,
     #[serde(default, deserialize_with = "lenient_millis")]
     pub last_activity: i64,
+    /// The agent's transcript file. Not in omp's collab frames; TeleFlock's bridge (≥ 2.0) adds it
+    /// so tf-hostd reads subagent transcripts from disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_file: Option<String>,
 }
 
 /// Epoch milliseconds as omp sends them: JS numbers. Agents restored from disk carry file times

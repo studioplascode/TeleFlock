@@ -7,7 +7,15 @@
 //! The generated TypeScript `HostMethods` / `AppMethods` interfaces map method name →
 //! `{ params; result }`.
 
+use crate::accounts::{
+    AccountLinkParams, AccountPreferParams, AccountUnlinkParams, AccountsListParams, AccountsSnapshot, AuthFlow, AuthFlowList, AuthFlowRef,
+    AuthSubmitParams, AuthWaitParams,
+};
 use crate::app::{DiagReport, HostProfile, HostSecrets, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
+use crate::mcp::{
+    McpChanged, McpEnableParams, McpList, McpListParams, McpReload, McpReloadParams, McpSaveParams, McpSearchParams, McpSearchResult, McpServerRef,
+    McpTestParams, McpTestResult,
+};
 use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates, UsageTotals};
 use crate::session::{ChangedFile, HistoryPage, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
@@ -1271,6 +1279,29 @@ methods!(HostMethod, "HostMethods", {
     "upload.status" => UploadStatus(UploadRef) -> UploadProgress;
     "upload.finish" => UploadFinish(UploadFinishParams) -> UploadFinished;
     "upload.cancel" => UploadCancel(UploadRef) -> Empty;
+
+    // Sign-ins run on the host (accounts.rs): shared by accounts.link and mcp.authStart.
+    "auth.list" => AuthList(Empty) -> AuthFlowList;
+    "auth.wait" => AuthWait(AuthWaitParams) -> AuthFlow;
+    "auth.submit" => AuthSubmit(AuthSubmitParams) -> AuthFlow;
+    "auth.cancel" => AuthCancel(AuthFlowRef) -> Empty;
+
+    // omp subscription accounts and keys (accounts.rs).
+    "accounts.list" => AccountsList(AccountsListParams) -> AccountsSnapshot;
+    "accounts.link" => AccountsLink(AccountLinkParams) -> AuthFlow;
+    "accounts.unlink" => AccountsUnlink(AccountUnlinkParams) -> AccountsSnapshot;
+    "accounts.prefer" => AccountsPrefer(AccountPreferParams) -> AccountsSnapshot;
+
+    // omp's MCP servers (mcp.rs): list with status, edit, switch, test, sign in, reload sessions.
+    "mcp.list" => McpListReq(McpListParams) -> McpList;
+    "mcp.save" => McpSave(McpSaveParams) -> McpChanged;
+    "mcp.remove" => McpRemove(McpServerRef) -> McpChanged;
+    "mcp.setEnabled" => McpSetEnabled(McpEnableParams) -> McpChanged;
+    "mcp.test" => McpTest(McpTestParams) -> McpTestResult;
+    "mcp.reload" => McpReloadReq(McpReloadParams) -> McpReload;
+    "mcp.authStart" => McpAuthStart(McpServerRef) -> AuthFlow;
+    "mcp.signOut" => McpSignOut(McpServerRef) -> McpChanged;
+    "mcp.search" => McpSearch(McpSearchParams) -> McpSearchResult;
 });
 
 // ───────────────────────────── app methods ─────────────────────────────
@@ -1320,6 +1351,11 @@ wire_struct! {
         pub port: u16,
         /// Remote host to connect to from the agent host (default `127.0.0.1`).
         pub remote_host: Option<String>,
+        /// Listen on exactly this port of the device's loopback (`127.0.0.1`, and `[::1]` when
+        /// free) instead of a free one: an OAuth redirect to `http://localhost:<port>/…` opened in
+        /// the device's browser then reaches the callback server of the same port on the host.
+        /// Taken → `port_in_use`. Absent: any free port.
+        pub local_port: Option<u16>,
     }
 }
 

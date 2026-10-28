@@ -18,6 +18,7 @@ use crate::paths::Paths;
 use crate::state::subs::SessionSubs;
 use crate::state::StateHandle;
 
+pub mod accounts;
 pub mod ai;
 pub mod agent;
 pub mod automation;
@@ -27,6 +28,7 @@ pub mod git;
 pub mod host;
 pub mod install;
 pub mod limits;
+pub mod mcp;
 pub mod omp_config;
 pub mod scope;
 pub mod term;
@@ -128,6 +130,9 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
         "automation" => automation::handle(ctx, req, client).await,
         "ai" => ai::handle(ctx, req, client).await,
         "upload" => upload::handle(ctx, req, client).await,
+        "auth" => crate::authflow::handle(req).await,
+        "accounts" => accounts::handle(ctx, req, client).await,
+        "mcp" => mcp::handle(ctx, req, client).await,
         _ => Err(ApiError::new("unknown_method", format!("unknown method `{}`", req.name()))),
     }
 }

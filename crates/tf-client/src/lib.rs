@@ -9,6 +9,8 @@ mod engine;
 mod link;
 mod platform;
 mod secrets;
+mod session_cache;
+mod sessions;
 mod settings;
 mod state;
 mod tunnel;

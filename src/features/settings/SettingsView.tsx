@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, SlidersHorizontal, Sparkles, SquareTerminal } from "lucide-react";
+import { Bell, BellRing, Blocks, Bot, Info, KeyRound, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, SlidersHorizontal, Sparkles, SquareTerminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -290,6 +290,16 @@ export function SettingsView() {
           </Row>
           <Row label="omp settings" description="Model roles, tools, compaction and every other omp setting, per host.">
             <Button size="sm" variant="secondary" icon={<SlidersHorizontal />} onClick={() => navigate({ name: "omp" })}>
+              Open
+            </Button>
+          </Row>
+          <Row label="MCP servers" description="Tool servers omp can use: add, sign in, test and switch them on or off, per host.">
+            <Button size="sm" variant="secondary" icon={<Blocks />} onClick={() => navigate({ name: "mcp" })}>
+              Open
+            </Button>
+          </Row>
+          <Row label="Accounts" description="Subscription logins omp uses: link, unlink and pick the default, per host.">
+            <Button size="sm" variant="secondary" icon={<KeyRound />} onClick={() => navigate({ name: "accounts" })}>
               Open
             </Button>
           </Row>

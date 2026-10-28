@@ -171,7 +171,7 @@ export class DemoParking {
     a.archived = true;
     a.needs = undefined;
     a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined };
-    if (a.omp) a.omp = { ...a.omp, link: "notShared", bridge: false, pid: undefined };
+    if (a.omp) a.omp = { ...a.omp, link: "notShared", linkReason: "noRoom", linkVia: undefined, linkSince: this.host.now(), linkError: "omp isn't running in a pane: the session resumes with omp --resume when you need it.", bridge: false, pid: undefined };
     this.host.closePane(a.id, workspaceId, paneId);
     this.host.changed(a.id);
     if (live) this.host.activity(a.id, "stopped", `${a.name} pane closed (done)`, "Resumes with omp --resume when needed");
@@ -195,12 +195,12 @@ export class DemoParking {
     a.column = "review";
     a.state = "done";
     a.stateSince = this.host.now();
-    if (a.omp) a.omp = { ...a.omp, link: "connecting", pid: 41_000 + this.resumes };
+    if (a.omp) a.omp = { ...a.omp, link: "connecting", linkReason: "starting", linkVia: undefined, linkSince: this.host.now(), linkError: undefined, pid: 41_000 + this.resumes };
     this.host.changed(id);
     this.host.activity(id, "started", `${a.name} resumed`, a.omp?.sessionFile);
     this.host.after(1400, () => {
       if (this.host.sims.get(id) !== sim || !a.omp) return;
-      a.omp = { ...a.omp, link: "live", bridge: true };
+      a.omp = { ...a.omp, link: "live", bridge: true, linkReason: undefined, linkVia: "bridge", linkSince: this.host.now() };
       this.host.changed(id);
       if (prompt) sim.startTurn(prompt);
     });

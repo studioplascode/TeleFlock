@@ -40,8 +40,10 @@ macro_rules! wire_enum {
     };
 }
 
+pub mod accounts;
 pub mod app;
 pub mod host;
+pub mod mcp;
 pub mod methods;
 pub mod model;
 pub mod session;
@@ -49,8 +51,10 @@ pub mod term;
 pub mod upload;
 pub mod version;
 
+pub use accounts::*;
 pub use app::*;
 pub use host::*;
+pub use mcp::*;
 pub use methods::*;
 pub use model::*;
 pub use session::*;
@@ -79,7 +83,8 @@ wire_struct! {
     /// `busy` (agent is streaming / dialog open), `agent_blocked`, `timeout`,
     /// `herdr_error`, `omp_error`, `git_error`, `gh_error`, `io_error`, `version_mismatch`,
     /// `auth_required`, `permission_denied`, `ai_unavailable`, `ai_failed`, `install_failed`
-    /// (a Host setup install), `internal`.
+    /// (a Host setup install), `port_in_use` / `port_unavailable` (`tunnel.open { localPort }`),
+    /// `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed), `internal`.
     pub struct ApiError {
         pub code: String,
         pub message: String,

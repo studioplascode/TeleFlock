@@ -66,7 +66,7 @@ export function Onboarding() {
           initial="hidden"
           animate="show"
           variants={{ show: { transition: { staggerChildren: 0.07, delayChildren: 0.3 } } }}
-          className="mt-5 flex flex-wrap justify-center gap-2"
+          className="mt-5 flex flex-wrap justify-center gap-2 max-md:hidden"
         >
           {FEATURES.map((f) => (
             <motion.li
@@ -80,7 +80,7 @@ export function Onboarding() {
           ))}
         </motion.ul>
 
-        <div className="mt-9 grid w-full gap-4 md:grid-cols-2 md:[@media(max-height:720px)]:mt-6">
+        <div className="mt-9 grid w-full gap-4 max-md:mt-6 max-md:gap-3 md:grid-cols-2 md:[@media(max-height:720px)]:mt-6">
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.42 }}>
             <TiltCard className="h-full rounded-tile">
               <button
@@ -89,7 +89,7 @@ export function Onboarding() {
                   haptic("select");
                   openDialog({ kind: "hostEditor" });
                 }}
-                className="group flex h-full w-full flex-col items-start gap-3 rounded-tile p-6 text-left text-white pressable focus-ring [background:radial-gradient(110%_120%_at_100%_0%,rgb(240_83_208/0.9)_0%,transparent_60%),linear-gradient(135deg,#a15eef,#7fa2e7)] shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-accent)]"
+                className="group flex h-full w-full flex-col items-start gap-3 rounded-tile p-6 text-left text-white pressable focus-ring max-md:gap-2 max-md:p-4 [background:radial-gradient(110%_120%_at_100%_0%,rgb(240_83_208/0.9)_0%,transparent_60%),linear-gradient(135deg,#a15eef,#7fa2e7)] shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-accent)]"
               >
                 <span className="grid size-11 place-items-center rounded-lg bg-white/20 [&_svg]:size-5">
                   <Network />
@@ -108,7 +108,7 @@ export function Onboarding() {
                 type="button"
                 onClick={tryDemo}
                 disabled={starting}
-                className={cn("tile group flex h-full w-full flex-col items-start gap-3 p-6 text-left pressable focus-ring", starting && "opacity-80")}
+                className={cn("tile group flex h-full w-full flex-col items-start gap-3 p-6 text-left pressable focus-ring max-md:gap-2 max-md:p-4", starting && "opacity-80")}
               >
                 <span className="grid size-11 place-items-center rounded-lg bg-accent/18 text-accent-hi [&_svg]:size-5">
                   <FlaskConical />
@@ -122,6 +122,10 @@ export function Onboarding() {
             </TiltCard>
           </motion.div>
         </div>
+        <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ ...spring.smooth, delay: 0.6 }} className="mt-5 max-w-lg text-xs text-mute">
+          <b className="text-ink-2">What a host needs:</b> any machine running <ExtLink href={HERDR_URL}>herdr</ExtLink> with <ExtLink href={OMP_URL}>omp</ExtLink> ≥ 18.12 (Host setup installs
+          what's missing). TeleFlock connects over Tailscale SSH and runs a small helper there; your code and keys stay on that machine.
+        </motion.p>
       </div>
       </div>
     </div>

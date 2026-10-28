@@ -1,21 +1,27 @@
-//! Per-client sessions (architecture §3.3): hello/welcome, snapshot + patches, request
-//! dispatch, session/term subscriptions, pulses, ping/pong and backpressure.
+//! Per-client sessions (architecture §3.3): hello/welcome with feature negotiation, snapshot +
+//! patches, request dispatch, session/term subscriptions, pulses, ping/pong and backpressure.
 //!
 //! Outbound messages go through a bounded per-client queue. Pulses are dropped first
 //! once the queue backs up; a client whose queue overflows entirely is disconnected
 //! (it reconnects and gets a fresh snapshot).
+//!
+//! With the `zstd` feature, everything after `welcome` is one zstd stream per direction: each
+//! batch of queued lines is written and flushed as a zstd block, so nothing waits for more input.
 
 use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use async_compression::tokio::bufread::ZstdDecoder;
+use async_compression::tokio::write::ZstdEncoder;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg};
+use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, PROTOCOL_VERSION};
 
 use crate::daemon::Daemon;
@@ -33,6 +39,42 @@ const SILENCE: Duration = Duration::from_secs(45);
 const SILENCE_STEP: Duration = Duration::from_secs(5);
 /// Max inbound line (images are base64 inside prompts).
 const MAX_LINE: usize = 64 * 1024 * 1024;
+/// zstd window of the outbound stream (2 MiB, zstd's own choice for its default level).
+const ZSTD_WINDOW_LOG: u32 = 21;
+/// Largest window an inbound zstd stream may use (8 MiB): bounds what a client can make the
+/// daemon allocate.
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
+
+/// Wire features negotiated with a client: what its `hello` asked for that this hostd speaks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Features {
+    /// Zstd streams after `welcome`.
+    pub zstd: bool,
+    /// Cached, resumable session subscriptions ([`crate::sync`]).
+    pub session_sync: bool,
+}
+
+impl Features {
+    /// The features of `requested` (`hello`'s `client.features`) this hostd speaks.
+    pub fn negotiate(requested: Option<&[String]>) -> Features {
+        let has = |f: &str| requested.is_some_and(|r| r.iter().any(|x| x == f));
+        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC) }
+    }
+
+    /// `welcome.features`: the accepted ones (none for a client that asked for none, which then
+    /// gets the welcome it always got).
+    pub fn welcome(&self, requested: Option<&[String]>) -> Option<Vec<String>> {
+        requested?;
+        let mut out = Vec::new();
+        if self.zstd {
+            out.push(FEATURE_ZSTD.to_string());
+        }
+        if self.session_sync {
+            out.push(FEATURE_SESSION_SYNC.to_string());
+        }
+        Some(out)
+    }
+}
 
 struct Queue {
     lines: VecDeque<Arc<str>>,
@@ -41,6 +83,7 @@ struct Queue {
 struct Inner {
     id: String,
     info: ClientInfo,
+    features: Features,
     queue: Mutex<Queue>,
     wake: Notify,
     closed: CancellationToken,
@@ -60,11 +103,17 @@ impl std::fmt::Debug for ClientHandle {
 }
 
 impl ClientHandle {
+    /// A client that negotiated no features.
     pub fn new(id: String, info: ClientInfo) -> Self {
+        Self::with_features(id, info, Features::default())
+    }
+
+    pub fn with_features(id: String, info: ClientInfo, features: Features) -> Self {
         Self {
             inner: Arc::new(Inner {
                 id,
                 info,
+                features,
                 queue: Mutex::new(Queue { lines: VecDeque::new() }),
                 wake: Notify::new(),
                 closed: CancellationToken::new(),
@@ -79,6 +128,10 @@ impl ClientHandle {
 
     pub fn info(&self) -> &ClientInfo {
         &self.inner.info
+    }
+
+    pub fn features(&self) -> Features {
+        self.inner.features
     }
 
     /// Queues a message. Returns false when the client is gone (or the message was a
@@ -232,19 +285,27 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     };
 
     let client_id = format!("c{}", NEXT_CLIENT.fetch_add(1, Ordering::Relaxed));
-    let client = ClientHandle::new(client_id.clone(), client_info);
+    let requested = client_info.features.clone();
+    let features = Features::negotiate(requested.as_deref());
+    let client = ClientHandle::with_features(client_id.clone(), client_info, features);
     let _counted = daemon.count_client();
-    info!(client = %client_id, app = %client.info().app, device = %client.info().device, session = %session, clients = daemon.clients(), "client connected");
+    info!(client = %client_id, app = %client.info().app, device = %client.info().device, session = %session, clients = daemon.clients(), ?features, "client connected");
 
-    client.send(ServerMsg::Welcome {
-        protocol: PROTOCOL_VERSION,
-        hostd_version: crate::HOSTD_VERSION.to_string(),
-        client_id: client_id.clone(),
-        features: None,
-    });
+    // The welcome is the last plain line; with `zstd`, both directions are zstd streams after it.
+    write_now(
+        &mut write,
+        &ServerMsg::Welcome {
+            protocol: PROTOCOL_VERSION,
+            hostd_version: crate::HOSTD_VERSION.to_string(),
+            client_id: client_id.clone(),
+            features: features.welcome(requested.as_deref()),
+        },
+    )
+    .await;
     ctx.state.attach_client(&client);
 
     let writer = tokio::spawn(write_loop(client.clone(), write));
+    let mut reader = framed_reader(reader, features);
     let shutdown = daemon.shutdown.clone();
 
     let mut line = String::new();
@@ -328,7 +389,26 @@ async fn dispatch_req(ctx: &Arc<Ctx>, method: &str, params: serde_json::Value, c
     ops::dispatch(ctx, req, client).await
 }
 
-async fn write_loop(client: ClientHandle, mut write: BoxWrite) {
+/// The inbound line stream after `welcome` (`reader` holds whatever followed the hello): plain,
+/// or decoded from the client's zstd stream.
+pub fn framed_reader<R: AsyncBufRead + Send + Unpin + 'static>(reader: R, features: Features) -> Pin<Box<dyn AsyncBufRead + Send>> {
+    if features.zstd {
+        let params = [async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)];
+        Box::pin(BufReader::with_capacity(64 * 1024, ZstdDecoder::with_params(reader, &params)))
+    } else {
+        Box::pin(reader)
+    }
+}
+
+/// Writes the client's queued lines until it closes: each batch at once, flushed (with `zstd`,
+/// as one block of the stream).
+pub async fn write_loop<W: AsyncWrite + Send + Unpin + 'static>(client: ClientHandle, write: W) {
+    let mut write: Pin<Box<dyn AsyncWrite + Send>> = if client.features().zstd {
+        let params = [async_compression::zstd::CParameter::window_log(ZSTD_WINDOW_LOG)];
+        Box::pin(ZstdEncoder::with_quality_and_params(write, async_compression::Level::Default, &params))
+    } else {
+        Box::pin(write)
+    };
     let mut batch: Vec<Arc<str>> = Vec::with_capacity(64);
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     loop {
@@ -396,7 +476,7 @@ async fn read_or_silence<T>(read: impl Future<Output = T>) -> Option<T> {
 }
 
 /// Reads one `\n`-terminated line (without the terminator). `Ok(false)` on EOF.
-async fn read_line(reader: &mut BufReader<BoxRead>, out: &mut String) -> std::io::Result<bool> {
+pub async fn read_line<R: AsyncBufRead + Unpin + ?Sized>(reader: &mut R, out: &mut String) -> std::io::Result<bool> {
     let mut raw = Vec::new();
     loop {
         let buf = reader.fill_buf().await?;
@@ -470,5 +550,108 @@ mod tests {
         let t0 = tokio::time::Instant::now();
         assert_eq!(read_or_silence(std::future::pending::<()>()).await, None);
         assert_eq!(t0.elapsed(), SILENCE);
+    }
+
+    #[test]
+    fn features_are_negotiated_with_old_and_new_clients() {
+        // An old client asks for nothing and gets the welcome it always got.
+        assert_eq!(Features::negotiate(None), Features::default());
+        assert_eq!(Features::default().welcome(None), None);
+        let all = vec!["zstd".to_string(), "sessionSync".into(), "fromTheFuture".into()];
+        let f = Features::negotiate(Some(&all));
+        assert_eq!(f, Features { zstd: true, session_sync: true });
+        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into()]));
+        let unknown = vec!["fromTheFuture".to_string()];
+        let f = Features::negotiate(Some(&unknown));
+        assert_eq!((f, f.welcome(Some(&unknown))), (Features::default(), Some(vec![])));
+    }
+
+    /// Delivers at most one byte per read: the zstd stream must cope with any split.
+    struct Trickle<R>(R);
+    impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Trickle<R> {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+            let mut one = [0u8; 1];
+            let mut b = tokio::io::ReadBuf::new(&mut one);
+            match Pin::new(&mut self.0).poll_read(cx, &mut b) {
+                std::task::Poll::Ready(Ok(())) => {
+                    buf.put_slice(b.filled());
+                    std::task::Poll::Ready(Ok(()))
+                }
+                other => other,
+            }
+        }
+    }
+
+    /// hostd → client: every batch is decodable on its own (a reader never waits for the next
+    /// one), byte-by-byte delivery decodes, many small batches arrive in order, and the stream
+    /// compresses repeated JSON.
+    #[tokio::test]
+    async fn zstd_batches_flush_and_survive_partial_reads() {
+        let zstd = Features { zstd: true, session_sync: false };
+        let c = ClientHandle::with_features("c1".into(), info(), zstd);
+        let (w, r) = tokio::io::duplex(1 << 20);
+        let (counted_tx, counted) = tokio::io::duplex(1 << 20);
+        // Count the compressed bytes on their way to the reader.
+        let raw = tokio::spawn(async move {
+            let mut r = r;
+            let mut n = 0usize;
+            let mut buf = [0u8; 4096];
+            let mut tx = counted_tx;
+            loop {
+                let k = tokio::io::AsyncReadExt::read(&mut r, &mut buf).await.unwrap();
+                if k == 0 {
+                    return n;
+                }
+                n += k;
+                tx.write_all(&buf[..k]).await.unwrap();
+            }
+        });
+        let writer = tokio::spawn(write_loop(c.clone(), w));
+        let mut lines = framed_reader(BufReader::new(Trickle(counted)), zstd);
+        let mut line = String::new();
+        // One message, then nothing: it must arrive without more input behind it.
+        c.send(ServerMsg::Pong { ts: 1 });
+        tokio::time::timeout(Duration::from_secs(5), read_line(&mut lines, &mut line)).await.expect("flushed").unwrap();
+        assert_eq!(serde_json::from_str::<ServerMsg>(&line).unwrap(), ServerMsg::Pong { ts: 1 });
+        let mut plain = line.len() + 1;
+        for i in 0..300 {
+            c.send(ServerMsg::Pong { ts: 1000 + i });
+            if i % 3 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        for i in 0..300 {
+            assert!(read_line(&mut lines, &mut line).await.unwrap());
+            assert_eq!(serde_json::from_str::<ServerMsg>(&line).unwrap(), ServerMsg::Pong { ts: 1000 + i });
+            plain += line.len() + 1;
+        }
+        c.close();
+        writer.await.unwrap();
+        assert!(!read_line(&mut lines, &mut line).await.unwrap(), "the stream ends cleanly");
+        drop(lines);
+        let wire = raw.await.unwrap();
+        assert!(wire * 3 < plain, "{wire} compressed bytes for {plain} plain ones");
+    }
+
+    /// client → hostd: the reader picks the stream up right after the hello, even when the
+    /// compressed bytes arrived in the same read as the hello line.
+    #[tokio::test]
+    async fn zstd_stream_starts_right_after_the_hello() {
+        let mut compressed = ZstdEncoder::new(Vec::new());
+        compressed.write_all(b"{\"t\":\"ping\",\"ts\":7}\n{\"t\":\"bye\"}\n").await.unwrap();
+        compressed.shutdown().await.unwrap();
+        let mut wire = b"{\"t\":\"hello\"}\n".to_vec();
+        wire.extend_from_slice(&compressed.into_inner());
+        let read: BoxRead = Box::pin(std::io::Cursor::new(wire));
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        assert!(read_line(&mut reader, &mut line).await.unwrap());
+        assert_eq!(line, "{\"t\":\"hello\"}");
+        let mut rest = framed_reader(reader, Features { zstd: true, session_sync: false });
+        assert!(read_line(&mut rest, &mut line).await.unwrap());
+        assert_eq!(serde_json::from_str::<ClientMsg>(&line).unwrap(), ClientMsg::Ping { ts: 7 });
+        assert!(read_line(&mut rest, &mut line).await.unwrap());
+        assert_eq!(serde_json::from_str::<ClientMsg>(&line).unwrap(), ClientMsg::Bye);
+        assert!(!read_line(&mut rest, &mut line).await.unwrap());
     }
 }

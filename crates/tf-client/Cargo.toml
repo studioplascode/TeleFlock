@@ -17,11 +17,14 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", 
 sha2 = "0.10"
 rand = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-ruzstd = "0.8"
+# zstd: the embedded tf-hostd binaries, the session cache, and (async-compression) the zstd
+# streams to tf-hostd.
+zstd = "0.14"
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 
 [build-dependencies]
 sha2 = "0.10"
-zstd = "0.13"
+zstd = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
@@ -30,3 +33,5 @@ tokio = { version = "1", features = ["test-util"] }
 # tests/host_key.rs reuses tf-transport's in-process SSH server (tests/support).
 bytes = "1"
 russh = { version = "0.64.1", default-features = false, features = ["flate2", "rsa", "ring"] }
+# Session sync end to end against tf-hostd's real subscription and stream code (sessions.rs tests).
+tf-hostd = { path = "../tf-hostd" }

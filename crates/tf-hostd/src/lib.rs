@@ -2,12 +2,15 @@
 
 pub mod artifacts;
 pub mod attach;
+pub mod authflow;
 pub mod automations;
 pub mod bridge;
 pub mod clients;
 pub mod daemon;
+pub mod feed;
 pub mod inject;
 pub mod ipc;
+pub mod journal;
 pub mod logging;
 pub mod omp;
 pub mod ops;
@@ -15,6 +18,7 @@ pub mod originals;
 pub mod paths;
 pub mod secure;
 pub mod state;
+pub mod sync;
 pub mod util;
 pub mod userenv;
 

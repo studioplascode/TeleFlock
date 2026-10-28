@@ -6,6 +6,7 @@ import { navigate, useHostIds, useHosts, useHostState } from "@/core";
 import type { OmpSetting } from "@/core/gen";
 import { Button, cn, EmptyState, IconButton, Input, PageHeader, Select, Skeleton, Tile, useIsMobile } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
+import { OmpAreaNav } from "@/features/shell/OmpArea";
 import { type RowContext, SettingRow } from "./controls";
 import { buildTabs, MODEL_ROLES_KEY, matchesQuery, OMP_TABS, OTHER_TAB, type SettingTab } from "./model";
 import { useOmpSettings } from "./useOmpSettings";
@@ -260,6 +261,7 @@ export function OmpSettingsView({ hostId: routeHost }: { hostId?: string }) {
       <div className="flex min-h-full flex-col">
         <MobileHeader title="omp settings" subtitle={options.find((o) => o.value === hostId)?.label} back actions={refresh} />
         <div className="flex flex-col gap-3 px-3 pt-1 pb-6">
+          <OmpAreaNav current="omp" hostId={hostId} />
           {hostPicker}
           {online && data && search}
           {body}
@@ -268,6 +270,7 @@ export function OmpSettingsView({ hostId: routeHost }: { hostId?: string }) {
     );
   return (
     <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-5 px-8 pt-7 pb-12">
+      <OmpAreaNav current="omp" hostId={hostId} className="-mb-2" />
       <PageHeader
         kicker={
           <span className="inline-flex items-center gap-1.5">

@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type KeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
 import { getTranscript, loadOlder, useAgent, useSession, useSessionItem } from "@/core";
 import type { TranscriptItem } from "@/core/gen";
 import { cn, Elapsed, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
@@ -138,15 +138,21 @@ export function TranscriptLog({
   const settledRef = useRef(settled);
   settledRef.current = settled;
 
-  const estimate = (i: number) => {
-    const kind = kinds[i];
-    return (kind && ROW_ESTIMATE[kind]) ?? ROW_ESTIMATE_DEFAULT;
-  };
+  // Stable while the rows are: a new getItemKey makes the virtualizer re-measure every row (O(n))
+  // on each render, which scrolling a long transcript does dozens of times a second.
+  const estimate = useCallback(
+    (i: number) => {
+      const kind = kinds[i];
+      return (kind && ROW_ESTIMATE[kind]) ?? ROW_ESTIMATE_DEFAULT;
+    },
+    [kinds],
+  );
+  const itemKey = useCallback((i: number) => ids[i] ?? i, [ids]);
   const virtualizer = useVirtualizer({
     count: ids.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: estimate,
-    getItemKey: (i) => ids[i] ?? i,
+    getItemKey: itemKey,
     overscan: settled ? overscan : Math.min(overscan, 2),
     gap: dense ? ROW_GAP_DENSE : ROW_GAP,
     // Phones float the pager dots over this strip.
@@ -155,6 +161,9 @@ export function TranscriptLog({
     // session builds only the last screenful of rows instead of the top ones and then the bottom.
     initialOffset: () => ids.reduce((sum, _, i) => sum + estimate(i) + (dense ? ROW_GAP_DENSE : ROW_GAP), 0),
     initialRect: { width: 0, height: typeof window === "undefined" ? 800 : window.innerHeight },
+    // Scrolling re-renders with React's normal batching instead of flushSync inside every scroll
+    // event: rows entering view mount once per frame, not once per event (overscan covers the edge).
+    useFlushSync: false,
   });
 
   const setStick = (v: boolean) => {

@@ -21,7 +21,7 @@ const ITEMS: Record<string, { name: ReactNode; consequence: ReactNode }> = {
         <Term id="collab">Share sessions</Term> with TeleFlock
       </>
     ),
-    consequence: "Without this, omp sessions you start by hand (or that herdr restores) won't appear on the board.",
+    consequence: "Fallback for sessions without the TeleFlock bridge (older bridges, or with the bridge off): without this they won't appear on the board.",
   },
   "install-herdr-integration": {
     name: "herdr's omp integration",
@@ -33,7 +33,7 @@ const ITEMS: Record<string, { name: ReactNode; consequence: ReactNode }> = {
         TeleFlock <Term id="bridge">bridge</Term> for every session
       </>
     ),
-    consequence: "Without this, sessions TeleFlock didn't start get typed slash commands instead of exact model, thinking and plan controls.",
+    consequence: "Without this, omp sessions TeleFlock didn't start (started by hand, or restored by herdr) don't show up live, and get typed slash commands instead of exact controls.",
   },
   "install-omp": {
     name: `omp ≥ ${OMP_MIN_VERSION}`,
@@ -83,7 +83,7 @@ const CONSENT: Record<string, { kind: "global" | "install"; what: string; why: s
   "install-global-bridge": {
     kind: "global",
     what: "Copies the TeleFlock companion extension into ~/.omp/agent/extensions/, where every omp session loads it. TeleFlock keeps that copy up to date when it updates itself.",
-    why: "Gives TeleFlock precise controls (model, thinking, plan review, rename, compact, fork, follow-up queue, export) in sessions it did not launch, without typing slash commands into the terminal.",
+    why: "Every omp session on this host then streams itself to TeleFlock natively (transcript, questions, subagents) and gets precise controls (model, thinking, plan review, rename, compact, fork, follow-up queue, export), including sessions it did not launch, without typing slash commands into the terminal.",
   },
   "install-herdr-integration": {
     kind: "global",

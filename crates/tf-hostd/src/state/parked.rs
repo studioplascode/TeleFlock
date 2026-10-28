@@ -96,6 +96,9 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
         version: None,
         link: LinkState::NotShared,
         link_error: None,
+        link_reason: None,
+        link_via: None,
+        link_since: None,
         bridge: false,
         model: r.model.clone(),
         thinking: r.thinking,
@@ -151,7 +154,7 @@ pub fn parked_meta(r: &ParkedRecord) -> SessionMeta {
     meta.thinking = r.thinking;
     meta.cost = r.cost.clone();
     meta.started_at = r.started_at;
-    meta.caps = super::build::capabilities(false, false);
+    meta.caps = super::build::capabilities(false, false, None);
     meta.caps.prompt = true;
     for c in [
         &mut meta.caps.model,
@@ -918,9 +921,9 @@ mod tests {
         let persist = super::super::persist::Persist::load(dir.join("state.json"));
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let omp = crate::omp::OmpHandle::start(0, persist.clone(), cancel).await;
         let sock = dir.join(format!("bridge-{tag}.sock"));
         let bridge = crate::bridge::BridgeHandle::bind(crate::bridge::BridgeEndpoint::Unix(sock), "s".into()).unwrap();
+        let omp = crate::omp::OmpHandle::start(0, persist.clone(), cancel, bridge.clone()).await;
         StateHandle::new("lab", persist, omp, bridge)
     }
 

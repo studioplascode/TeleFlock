@@ -1,4 +1,4 @@
-import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Blocks, ChevronDown, KeyRound, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, SlidersHorizontal, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -22,12 +22,14 @@ import {
   toast,
   useIsMobile,
 } from "@/design";
-import { core, navigate, useAgentKeys, useHosts, useHostState, useUi } from "@/core";
+import { core, navigate, useAgentKeys, useCore, useHosts, useHostState, useUi } from "@/core";
 import type { ConnStatus, HostProfile } from "@/core/gen";
+import { LinkAccountNudge } from "@/features/accounts/LinkAccountNudge";
 import { errorMessage } from "@/features/shell/errors";
 import { useHealthHistory } from "@/features/shell/healthHistory";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { connSummary, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
+import { VIEWS } from "@/features/shell/vocab";
 import { ConnStatusCard, disconnect } from "./ConnStatusCard";
 import { hostAccent, KIND_META, kindBadge, normalizeGroup, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
@@ -106,6 +108,23 @@ function Versions({ hostId }: { hostId: string }) {
   );
 }
 
+/** omp's own pages for this host, one tap away (also in ⋯, the palette, Settings and phone More). */
+function OmpLinks({ hostId }: { hostId: string }) {
+  return (
+    <div role="group" aria-label="omp on this host" className="flex flex-wrap items-center gap-2">
+      <Button size="sm" variant="secondary" icon={<SlidersHorizontal />} title={VIEWS.omp.description} onClick={() => navigate({ name: "omp", hostId })}>
+        {VIEWS.omp.label}
+      </Button>
+      <Button size="sm" variant="secondary" icon={<Blocks />} title={VIEWS.mcp.description} onClick={() => navigate({ name: "mcp", hostId })}>
+        {VIEWS.mcp.label}
+      </Button>
+      <Button size="sm" variant="secondary" icon={<KeyRound />} title={VIEWS.accounts.description} onClick={() => navigate({ name: "accounts", hostId })}>
+        {VIEWS.accounts.label}
+      </Button>
+    </div>
+  );
+}
+
 /** "2 recommended · 1 optional": setup items left, in accent (warn when one is an error), never needs-you. */
 function SetupBadge({ issues }: { issues: readonly { recommended: boolean; severity: string }[] }) {
   if (issues.length === 0) return <Badge tone="done">All set</Badge>;
@@ -127,7 +146,8 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
   const phase = status?.phase ?? "idle";
   const online = phase === "online";
   const active = phase !== "idle" && phase !== "offline" && phase !== "error";
-  const issues = useHostState(profile.id)?.info.setup.issues;
+  // `info` only: the card doesn't re-render (and re-measure the page's layout) on every 5 Hz host patch.
+  const issues = useCore((s) => s.hosts[profile.id]?.state.info.setup.issues);
   const issueCount = issues?.length ?? 0;
   const known = issues !== undefined;
   const pending = useSetupFocus((s) => s.pending[profile.id] === true);
@@ -146,7 +166,7 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
   }, [online, known, pending, seen, issueCount, profile.id]);
   const Kind = KIND_META[profile.kind].icon;
   return (
-    <motion.div ref={ref} {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }} layout className="min-w-0 scroll-mt-4">
+    <motion.div ref={ref} {...fadeRise} transition={{ ...spring.smooth, delay: index * 0.05 }} layout layoutDependency={`${phase}/${setupOpen}/${issueCount}`} className="min-w-0 scroll-mt-4">
       <Tile className="flex flex-col gap-4 p-5 max-md:gap-3 max-md:p-3.5">
         <div className="flex items-start gap-3">
           <span
@@ -190,7 +210,17 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
               )}
               {online && (
                 <DropdownMenuItem icon={<SlidersHorizontal />} onSelect={() => navigate({ name: "omp", hostId: profile.id })}>
-                  omp settings
+                  {VIEWS.omp.label}
+                </DropdownMenuItem>
+              )}
+              {online && (
+                <DropdownMenuItem icon={<Blocks />} onSelect={() => navigate({ name: "mcp", hostId: profile.id })}>
+                  {VIEWS.mcp.label}
+                </DropdownMenuItem>
+              )}
+              {online && (
+                <DropdownMenuItem icon={<KeyRound />} onSelect={() => navigate({ name: "accounts", hostId: profile.id })}>
+                  {VIEWS.accounts.label}
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -218,6 +248,8 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
             <Health hostId={profile.id} />
             <Versions hostId={profile.id} />
             <ToolUpdatesRow hostId={profile.id} />
+            <LinkAccountNudge hostId={profile.id} variant="card" />
+            <OmpLinks hostId={profile.id} />
             <div className="border-t border-line pt-3 max-md:pt-1">
               <button
                 type="button"

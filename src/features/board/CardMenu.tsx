@@ -113,10 +113,28 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
   return items;
 }
 
+/** The actions, mounted only while a menu is open: a closed menu doesn't follow every agent update. */
+function DropdownItems({ agentKey, lane, mobile }: { agentKey: string; lane: Column; mobile: boolean }) {
+  const items = useItems(agentKey, lane, mobile);
+  return items.map((it) => (
+    <DropdownMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
+      {it.label}
+    </DropdownMenuItem>
+  ));
+}
+
+function ContextItems({ agentKey, lane }: { agentKey: string; lane: Column }) {
+  const items = useItems(agentKey, lane, false);
+  return items.map((it) => (
+    <ContextMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
+      {it.label}
+    </ContextMenuItem>
+  ));
+}
+
 /** "⋯" button with the card's actions. */
 export function CardMenuButton({ agentKey, lane, mobile = false }: { agentKey: string; lane: Column; mobile?: boolean }) {
-  const items = useItems(agentKey, lane, mobile);
-  const name = useAgent(agentKey)?.name ?? "";
+  const name = useCore((s) => s.agents[agentKey]?.name ?? "");
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -127,11 +145,7 @@ export function CardMenuButton({ agentKey, lane, mobile = false }: { agentKey: s
       <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
         <DropdownMenuLabel>{name}</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {items.map((it) => (
-          <DropdownMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
-            {it.label}
-          </DropdownMenuItem>
-        ))}
+        <DropdownItems agentKey={agentKey} lane={lane} mobile={mobile} />
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -139,19 +153,14 @@ export function CardMenuButton({ agentKey, lane, mobile = false }: { agentKey: s
 
 /** Right-click menu around a desktop card (same actions as the ⋯ button). */
 export function CardContextMenu({ agentKey, lane, children }: { agentKey: string; lane: Column; children: ReactNode }) {
-  const items = useItems(agentKey, lane, false);
-  const name = useAgent(agentKey)?.name ?? "";
+  const name = useCore((s) => s.agents[agentKey]?.name ?? "");
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuLabel>{name}</ContextMenuLabel>
         <ContextMenuSeparator />
-        {items.map((it) => (
-          <ContextMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
-            {it.label}
-          </ContextMenuItem>
-        ))}
+        <ContextItems agentKey={agentKey} lane={lane} />
       </ContextMenuContent>
     </ContextMenu>
   );

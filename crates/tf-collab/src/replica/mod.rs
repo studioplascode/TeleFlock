@@ -172,6 +172,8 @@ struct SubState {
     lifecycle: Option<String>,
     description: Option<String>,
     parent_tool: Option<String>,
+    /// Transcript file named by omp's lifecycle frames (`sessionFile`).
+    session_file: Option<String>,
 }
 
 /// What the main session journal says that collab does not mirror (`mode_change`, `custom`,
@@ -659,20 +661,25 @@ impl Replica {
     }
 
     fn load_snapshot(&mut self, snap: &Snapshot, out: &mut Update) {
+        let was_running = self.running;
         let agent_id = std::mem::take(&mut self.agent_id);
         let authors = std::mem::take(&mut self.authors);
         let expected = std::mem::take(&mut self.expected_authors);
         let originals = std::mem::take(&mut self.originals);
         let expected_originals = std::mem::take(&mut self.expected_originals);
-        // Journal state survives a resync of the same session (not a rotation).
+        // Journal state survives a resync of the same session (not a rotation), and so does what
+        // tf-hostd read before the first snapshot: the artifacts dir, and the session file it
+        // reads itself for bridge-backed sessions (journal first, then the snapshot).
         let same_session = self.header.as_ref().is_some_and(|h| h.id == snap.welcome.header.id);
-        let journal = if same_session { std::mem::take(&mut self.journal) } else { Journal::default() };
-        // So does what tf-hostd read from the artifacts dir (it may land before the first snapshot).
         let keep_artifacts = same_session || self.header.is_none();
+        let journal = if keep_artifacts { std::mem::take(&mut self.journal) } else { Journal::default() };
         let artifacts = if keep_artifacts { self.artifacts.take() } else { None };
         let playback = if keep_artifacts { std::mem::take(&mut self.playback) } else { Vec::new() };
         let queued_sent = if same_session { std::mem::take(&mut self.queued_sent) } else { VecDeque::new() };
+        // Notice and retry ids (`n<seq>`, `r<seq>`) never repeat with other content after a reload.
+        let seq = self.seq;
         *self = Replica::new(agent_id);
+        self.seq = seq;
         self.authors = authors;
         self.expected_authors = expected;
         self.originals = originals;
@@ -708,6 +715,12 @@ impl Replica {
         self.running = self.state.is_streaming;
         if self.running {
             self.phase = Phase::Waiting;
+            // A turn in progress (joined mid-turn, a resync, tf-hostd restarted): from here on it
+            // is this replica's turn, and its end counts like any other (`TurnEnded`).
+            self.turn_started_at = Some(self.now);
+            if !was_running {
+                out.signals.push(Signal::TurnStarted);
+            }
         }
         self.emit = true;
         self.refresh_meta();
@@ -1596,48 +1609,69 @@ impl Replica {
     /// side-call spend come from here. Keep fetching while the reply's text is non-empty (replies
     /// are capped at 4 MiB).
     pub fn apply_journal(&mut self, chunk: &crate::guest::TranscriptChunk) -> Update {
-        let mut out = Update::default();
         if chunk.error.is_some() {
-            return out;
+            return Update::default();
         }
+        let entries: Vec<Value> = chunk.text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+        self.apply_journal_entries(&entries, chunk.new_size)
+    }
+
+    /// [`Self::apply_journal`] for entries already parsed (tf-hostd reads the session file itself
+    /// for bridge-backed sessions). `new_size` is the journal offset after them; one below the
+    /// current offset means the file was replaced, and the journal state starts over. Entries the
+    /// journal does not cover (assistant turns, tool results, …) are skipped.
+    pub fn apply_journal_entries(&mut self, entries: &[Value], new_size: u64) -> Update {
+        let mut out = Update::default();
         let before = self.meta.clone();
-        if chunk.new_size < self.journal.offset {
+        if new_size < self.journal.offset {
             // File replaced/truncated: the slice starts over.
             self.journal = Journal { offset: 0, ..Journal::default() };
         }
-        for line in chunk.text.lines() {
-            if let Ok(entry) = serde_json::from_str::<Value>(line) {
-                match s(&entry, "type") {
-                    Some("mode_change" | "custom") => self.journal_entry(&entry),
-                    // Side calls billed to the main agent (omp `entryUsage`); collab never mirrors them.
-                    Some("model_usage") => {
-                        if let Some(usage) = entry.get("usage") {
-                            self.journal.side.add_usage(usage);
-                        }
+        for entry in entries {
+            match s(entry, "type") {
+                Some("mode_change" | "custom") => self.journal_entry(entry),
+                // Side calls billed to the main agent (omp `entryUsage`); collab never mirrors them.
+                Some("model_usage") => {
+                    if let Some(usage) = entry.get("usage") {
+                        self.journal.side.add_usage(usage);
                     }
-                    // Same timestamps as `entry` uses for the row id.
-                    Some("custom_message") if s(&entry, "customType") == Some(IMAGE_ATTACHMENT) => {
-                        if let Some(t) = ts(&entry) {
-                            self.attachment_source(format!("u{t}"), &entry, &mut out);
-                        }
-                    }
-                    Some("custom_message") => self.journal_images(&entry, ts(&entry), &mut out),
-                    Some("message") => {
-                        if let Some(msg) = entry.get("message").filter(|m| !matches!(s(m, "role"), Some("assistant" | "toolResult"))) {
-                            self.journal_images(msg, None, &mut out);
-                        }
-                    }
-                    _ => {}
                 }
+                // Same timestamps as `entry` uses for the row id.
+                Some("custom_message") if s(entry, "customType") == Some(IMAGE_ATTACHMENT) => {
+                    if let Some(t) = ts(entry) {
+                        self.attachment_source(format!("u{t}"), entry, &mut out);
+                    }
+                }
+                Some("custom_message") => self.journal_images(entry, ts(entry), &mut out),
+                Some("message") => {
+                    if let Some(msg) = entry.get("message").filter(|m| !matches!(s(m, "role"), Some("assistant" | "toolResult"))) {
+                        self.journal_images(msg, None, &mut out);
+                    }
+                }
+                _ => {}
             }
         }
-        self.journal.offset = chunk.new_size;
+        self.journal.offset = new_size;
         self.meta.cost = self.usage();
         if self.meta != before {
             out.meta_changed = true;
             out.events.push(SessionEvent::Meta { meta: self.meta.clone() });
         }
         out
+    }
+
+    /// Forgets what the journal said (goal, plan mode, todo edits, side-call spend, user images),
+    /// before tf-hostd re-reads a session file from its start. The rows and meta stay until the
+    /// re-read replaces them.
+    pub fn reset_journal(&mut self) {
+        self.journal = Journal::default();
+    }
+
+    /// The transcript file of agent `id` (a subagent): from TeleFlock's bridge roster, else from
+    /// omp's lifecycle frames.
+    pub fn agent_session_file(&self, id: &str) -> Option<&str> {
+        let sub = self.subs.get(id)?;
+        sub.snapshot.as_ref().and_then(|a| a.session_file.as_deref()).or(sub.session_file.as_deref()).filter(|f| !f.is_empty())
     }
 
     fn journal_entry(&mut self, entry: &Value) {
@@ -1728,6 +1762,9 @@ impl Replica {
                     sub.description = non_empty(data, "description").map(str::to_owned);
                 }
                 sub.parent_tool = s(data, "parentToolCallId").map(str::to_owned).or(sub.parent_tool.take());
+                if let Some(file) = non_empty(data, "sessionFile") {
+                    sub.session_file = Some(file.to_owned());
+                }
             }
             _ => {}
         }

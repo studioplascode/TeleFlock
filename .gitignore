@@ -14,3 +14,4 @@ src-tauri/gen/android/build/
 **/gen/android/build/
 dist-release/
 .site/
+crates/tf-proto/bindings/

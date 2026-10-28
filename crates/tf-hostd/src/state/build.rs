@@ -5,15 +5,15 @@ use std::collections::HashMap;
 
 use tf_herdr::{AgentInfo, AgentStatus, PaneInfo, TabInfo, WorkspaceInfo};
 use tf_proto::model::{
-    Agent, Answer, Column, DiffStat, HerdrState, LinkState, Liveness, NeedsKind, NeedsOption, NeedsYou, Notification,
+    Agent, Answer, Column, DiffStat, HerdrState, Liveness, NeedsKind, NeedsOption, NeedsYou, Notification,
     NotifyAction, NotifyKind, OmpInfo, OptionTone, PaneInfo as WirePane, RepoInfo, SubagentSummary, Tab, TodoSummary,
     Workspace, WorktreeInfo,
 };
 use tf_proto::session::{Capabilities, ChangedFile, PlanReview, Subagent, SubagentStatus, TodoPhase, TodoStatus, UiKind, UiRequest};
 use tf_proto::Millis;
 
-use crate::bridge::{BridgeSession, PlanReviewInfo};
-use crate::omp::{BoardMeta, OmpView};
+use crate::bridge::{BridgeCaps, BridgeSession, PlanReviewInfo};
+use crate::omp::{BoardMeta, LinkStatus, OmpView};
 use crate::util::{clip, new_id};
 
 /// Quiet notification threshold (no events while working).
@@ -51,8 +51,10 @@ pub fn agent_id(a: &AgentInfo) -> String {
 pub struct AgentInputs<'a> {
     pub herdr: &'a AgentInfo,
     pub omp: Option<&'a OmpView>,
-    /// Link state when no guest exists (`omp` is `None`).
-    pub link: (LinkState, Option<String>),
+    /// Link when no replica serves the session (`omp` is `None`).
+    pub link: LinkStatus,
+    /// When the agent's current link (state, reason, path) began.
+    pub link_since: Option<Millis>,
     pub omp_session_id: Option<String>,
     pub omp_pid: Option<u32>,
     pub bridge: Option<&'a BridgeSession>,
@@ -174,12 +176,18 @@ pub fn diff_stat(files: &[ChangedFile]) -> Option<DiffStat> {
     })
 }
 
+/// The agent's link: the replica's when one serves the session, else what the registry and the
+/// bridge say.
+pub fn link_of(i: &AgentInputs<'_>) -> LinkStatus {
+    match i.omp {
+        Some(v) => LinkStatus::new(v.link, v.link_reason, v.link_via, v.link_error.clone()),
+        None => i.link.clone(),
+    }
+}
+
 fn omp_info(i: &AgentInputs<'_>, meta: Option<&BoardMeta>) -> OmpInfo {
     let ctl = i.bridge.map(|b| &b.state);
-    let (link, link_error) = match i.omp {
-        Some(v) => (v.link, v.link_error.clone()),
-        None => i.link.clone(),
-    };
+    let link = link_of(i);
     OmpInfo {
         session_id: i.omp_session_id.clone().or_else(|| meta.and_then(|m| m.session_id.clone())),
         session_file: i
@@ -191,8 +199,11 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&BoardMeta>) -> OmpInfo {
             .or_else(|| i.bridge.and_then(|b| b.session_file.clone())),
         pid: i.omp.map(|v| v.pid).or(i.omp_pid).or(i.bridge.map(|b| b.pid)),
         version: i.bridge.and_then(|b| b.omp_version.clone()).filter(|v| !v.is_empty()),
-        link,
-        link_error,
+        link: link.state,
+        link_error: link.error,
+        link_reason: link.reason,
+        link_via: link.via,
+        link_since: i.link_since,
         bridge: i.bridge.is_some(),
         model: ctl.and_then(|c| c.model.clone()).or_else(|| meta.and_then(|m| m.model.clone())),
         thinking: ctl.and_then(|c| c.thinking).or_else(|| meta.and_then(|m| m.thinking)),
@@ -310,15 +321,18 @@ pub fn needs_key(n: &NeedsYou) -> String {
     format!("{:?}:{}", n.kind, n.request_id.as_deref().unwrap_or(&n.question))
 }
 
-/// Session capabilities given the link and the bridge (§3.4: bridge first, collab second,
-/// injection last).
-pub fn capabilities(live: bool, bridge: bool) -> Capabilities {
+/// Session capabilities given the link, the bridge, and the bridge's data plane while it serves
+/// the session (§3.4: bridge first, collab second, injection last). Without the data plane's
+/// dialog or subagent support those controls are left to the terminal.
+pub fn capabilities(live: bool, bridge: bool, data_plane: Option<BridgeCaps>) -> Capabilities {
+    let dialogs = data_plane.is_none_or(|c| c.dialogs);
+    let subagents = data_plane.is_none_or(|c| c.subagent_ctl);
     Capabilities {
         prompt: live,
         steer: live,
         follow_up: live,
         abort: live,
-        answer: live,
+        answer: live && dialogs,
         model: true,
         thinking: true,
         fast: true,
@@ -332,7 +346,7 @@ pub fn capabilities(live: bool, bridge: bool) -> Capabilities {
         btw: bridge,
         export: true,
         handoff: true,
-        subagents: live,
+        subagents: live && subagents,
         bridge,
     }
 }
@@ -531,7 +545,8 @@ mod tests {
         AgentInputs {
             herdr: a,
             omp: None,
-            link: (LinkState::NotShared, None),
+            link: LinkStatus::new(tf_proto::model::LinkState::NotShared, None, None, None),
+            link_since: None,
             omp_session_id: None,
             omp_pid: None,
             bridge: None,
@@ -584,6 +599,8 @@ mod tests {
             tui: true,
             state: crate::bridge::CtlState { goal, ..Default::default() },
             connected_at: 0,
+            caps: Default::default(),
+            conn: 0,
         }
     }
 

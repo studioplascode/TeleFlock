@@ -6,6 +6,8 @@ import {
   BarChart3,
   Bell,
   BellOff,
+  Blocks,
+  KeyRound,
   Bot,
   Clock3,
   CornerDownLeft,
@@ -56,6 +58,7 @@ import {
   useRoute,
   useSettings,
   useUi,
+  type Route,
 } from "@/core";
 import type { MotionPref, ThinkingLevel } from "@/core/gen";
 import { archiveWithUndo, openAnswerHud, openTerminal, setArchived, setMuted, stopAgent } from "@/features/board/agentActions";
@@ -195,7 +198,7 @@ function useEntries(): Entry[] {
     });
   }
 
-  const views: { id: keyof typeof VIEWS; icon: ReactNode; keys: string[] }[] = [
+  const views: { id: Route["name"] & keyof typeof VIEWS; icon: ReactNode; keys: string[] }[] = [
     { id: "board", icon: <LayoutDashboard />, keys: ["home", "kanban", "flock", "lanes"] },
     { id: "dispatch", icon: <Send />, keys: ["send", "fire", "tasks", "many agents", "worktree", "quick"] },
     { id: "inbox", icon: <Inbox />, keys: ["needs you", "questions", "updates", "notifications"] },
@@ -205,10 +208,12 @@ function useEntries(): Entry[] {
     { id: "settings", icon: <Settings2 />, keys: ["preferences", "options"] },
     { id: "automations", icon: <Clock3 />, keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
     { id: "omp", icon: <Bot />, keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },
+    { id: "mcp", icon: <Blocks />, keys: ["mcp", "tools", "servers", "model context protocol", "integrations", "plugins", "oauth"] },
+    { id: "accounts", icon: <KeyRound />, keys: ["accounts", "login", "sign in", "subscription", "provider", "claude", "chatgpt", "codex", "link account"] },
   ];
   for (const v of views) {
-    const def = VIEWS[v.id];
-    entries.push({ id: `view:${v.id}`, title: def.label, group: "Views", keywords: v.keys, icon: v.icon, shortcut: def.shortcut, hint: def.description, run: () => navigate({ name: v.id }) });
+    const def: ActionDef = VIEWS[v.id];
+    entries.push({ id: `view:${v.id}`, title: def.label, group: "Views", keywords: v.keys, icon: v.icon, shortcut: def.shortcut, hint: def.description, run: () => navigate({ name: v.id } as Route) });
   }
   if (defaultHost) {
     entries.push({ id: "view:terminal", title: "Terminal", group: "Views", keywords: ["shell", "tty", "herdr"], icon: <SquareTerminal />, run: () => navigate({ name: "terminal", hostId: defaultHost }) });

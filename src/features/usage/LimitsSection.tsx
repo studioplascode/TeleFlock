@@ -1,9 +1,9 @@
 import { AlertTriangle, Gauge, KeyRound, RefreshCw, TimerReset } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
-import { describePace, formatPct, formatSpan, type HostLimits, LIMITS_USAGE_EVERY_MS, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
+import { describePace, formatPct, formatSpan, type HostLimits, LIMITS_USAGE_EVERY_MS, navigate, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
 import type { LimitAccount, LimitWindow } from "@/core/gen";
-import { Badge, Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
+import { Badge, Button, Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
 import { PROVIDER_NAMES, paceStatus } from "./limitsUi";
 
 /** One account across the hosts that report it (the same login is often on several hosts). */
@@ -122,7 +122,14 @@ function AccountTile({ row, hostNames, now }: { row: AccountRow; hostNames: Reco
           {account.disabled ? <KeyRound className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
           <span className="min-w-0 break-words">
             {account.error ?? "No limits reported."}
-            {account.disabled && <span className="block text-mute">Log in again in omp (/login) to restore it.</span>}
+            {account.disabled && (
+              <span className="mt-1.5 flex flex-wrap items-center gap-2 text-mute">
+                Sign in to it again to restore it.
+                <Button size="sm" variant="secondary" icon={<KeyRound />} onClick={() => navigate({ name: "accounts", hostId: row.hostIds[0], link: account.provider })}>
+                  Re-link
+                </Button>
+              </span>
+            )}
           </span>
         </div>
       )}

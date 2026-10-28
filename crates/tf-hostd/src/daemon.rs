@@ -237,7 +237,6 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     // up to date before omp loads it again.
     let ext_paths = paths.clone();
     tokio::task::spawn_blocking(move || crate::ops::host::refresh_global_bridge(&ext_paths));
-    let omp = OmpHandle::start(relay_port, persist.clone(), shutdown.clone()).await;
     let bridge = match BridgeHandle::start(&paths) {
         Ok(b) => b,
         Err(e) => {
@@ -245,6 +244,8 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
             return Err(anyhow::anyhow!("bridge socket: {e}"));
         }
     };
+    // Bridges ≥ 2.0 serve their sessions to the omp data plane directly (no collab room).
+    let omp = OmpHandle::start(relay_port, persist.clone(), shutdown.clone(), bridge.clone()).await;
     // Automatic tool updates default on for the real daemon (`~/.teleflock`), off for lab homes.
     let tools = crate::ops::tools::Tools::load(paths.home.join("tools.json"), paths.is_default_home());
     tools.spawn(shutdown.child_token());

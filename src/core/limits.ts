@@ -157,7 +157,7 @@ export function describePace(p: WindowPace): string {
     case "exhausted":
       return p.resetsInMs != null ? `Limit reached · resets in ${formatSpan(p.resetsInMs)}` : "Limit reached";
     case "runsOut":
-      return `At this pace you hit the limit in ~${formatSpan(p.etaMs ?? 0)}${p.resetsInMs != null ? `, ${formatSpan(p.resetsInMs - (p.etaMs ?? 0))} before it resets` : ""}`;
+      return `At this pace you run out in ~${formatSpan(p.etaMs ?? 0)}${p.resetsInMs != null ? ` (${formatSpan(p.resetsInMs - (p.etaMs ?? 0))} before it resets)` : ""}`;
     case "resetsFirst":
       return `Resets before you run out (~${formatPct(p.atReset ?? 0)} used at reset)`;
     case "idle":

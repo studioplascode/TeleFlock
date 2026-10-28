@@ -35,14 +35,20 @@ getrandom = "0.3"
 sha2 = "0.11"
 # Automations: cron schedules in the host's time zone (automations/cron.rs)
 jiff = "0.2"
+# zstd streams to clients that speak the `zstd` feature (clients.rs)
+async-compression = { version = "0.4", features = ["tokio", "zstd"] }
+# omp's cross-process config lock names (xxh64), so MCP config writes exclude omp's own (ops/mcp/files.rs)
+twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk"] }
 
 [dev-dependencies]
 tempfile = "3"
-# Paused clock (`start_paused`) for the client-silence test.
+# Paused clock (`start_paused`, `time::pause`) for the client-silence and bridge-return tests.
 tokio = { version = "1.54", features = ["test-util"] }
+# A scripted omp collab host on hostd's relay (omp/session_tests.rs); tf-collab's version.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

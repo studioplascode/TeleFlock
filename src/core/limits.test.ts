@@ -49,7 +49,7 @@ describe("projectWindow", () => {
     expect(p.outcome).toBe("runsOut");
     expect(p.ratePerHour ?? Number.NaN).toBeCloseTo(0.2);
     expect(p.etaMs ?? Number.NaN).toBeCloseTo(2.5 * HOUR, -3);
-    expect(describePace(p)).toBe("At this pace you hit the limit in ~2h 30m, 30m before it resets");
+    expect(describePace(p)).toBe("At this pace you run out in ~2h 30m (30m before it resets)");
   });
   test("window resets before exhaustion", () => {
     // 5 %/h, 50 % left → 10 h; resets in 2 h → ~60 % at reset.

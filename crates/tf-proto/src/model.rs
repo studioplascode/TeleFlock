@@ -41,6 +41,49 @@ wire_enum! {
 }
 
 wire_enum! {
+    /// The path that serves (or is being brought up for) an omp session's link (`OmpInfo.linkVia`).
+    ///
+    /// * `bridge`: TeleFlock's companion extension (bridge ≥ 2.0): live frames plus omp's session file.
+    /// * `collab`: an omp collab room on the TeleFlock relay (sessions without a data-plane bridge).
+    pub enum LinkVia { Bridge, Collab }
+}
+
+wire_enum! {
+    /// Why a link is in its current state (`OmpInfo.linkReason`); `OmpInfo.linkError` says it in
+    /// words. Absent while the link is live on its normal path.
+    ///
+    /// * `starting`: omp is starting; neither its bridge nor its collab room is up yet.
+    /// * `syncing`: the bridge is connected; reading the session file and its live state.
+    /// * `joining`: joining the collab room.
+    /// * `joinFailed`: a collab join failed; retrying with backoff.
+    /// * `reconnecting`: the collab guest lost its room connection and reconnects.
+    /// * `bridgeLost`: the bridge connection dropped; the transcript is kept while it comes back.
+    /// * `roomClosed`: omp closed its collab room; waiting for omp to reopen it.
+    /// * `noRoom`: (`notShared`) no room on the TeleFlock relay and no data-plane bridge.
+    /// * `sharedElsewhere`: (`notShared`) the room is on another relay.
+    /// * `viewOnly`: (`notShared`) the room does not grant control.
+    /// * `relayDown`: the TeleFlock relay is not listening (see the setup checklist).
+    /// * `fallbackCollab`: (`live`) served by the collab room because the bridge went away.
+    /// * `other`: a reason this build does not know (render `linkError`).
+    pub enum LinkReason {
+        Starting,
+        Syncing,
+        Joining,
+        JoinFailed,
+        Reconnecting,
+        BridgeLost,
+        RoomClosed,
+        NoRoom,
+        SharedElsewhere,
+        ViewOnly,
+        RelayDown,
+        FallbackCollab,
+        #[serde(other)]
+        Other,
+    }
+}
+
+wire_enum! {
     pub enum Severity { Info, Warn, Error }
 }
 
@@ -358,6 +401,12 @@ wire_struct! {
         pub version: Option<String>,
         pub link: LinkState,
         pub link_error: Option<String>,
+        /// Why the link is in its state (absent while live on its normal path).
+        pub link_reason: Option<LinkReason>,
+        /// The path serving the link (or being brought up for it).
+        pub link_via: Option<LinkVia>,
+        /// Host time when the current (`link`, `linkReason`, `linkVia`) began.
+        pub link_since: Option<Millis>,
         /// The TeleFlock companion extension is loaded in this omp process.
         pub bridge: bool,
         pub model: Option<ModelRef>,

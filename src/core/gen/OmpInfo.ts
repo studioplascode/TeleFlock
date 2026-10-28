@@ -2,7 +2,9 @@
 import type { ContextUsage } from "./ContextUsage";
 import type { CostInfo } from "./CostInfo";
 import type { GoalInfo } from "./GoalInfo";
+import type { LinkReason } from "./LinkReason";
 import type { LinkState } from "./LinkState";
+import type { LinkVia } from "./LinkVia";
 import type { ModelRef } from "./ModelRef";
 import type { OmpMode } from "./OmpMode";
 import type { QueueInfo } from "./QueueInfo";
@@ -14,6 +16,18 @@ import type { TodoSummary } from "./TodoSummary";
  * omp-specific facts about an agent (present when the agent is omp).
  */
 export type OmpInfo = { sessionId?: string, sessionFile?: string, pid?: number, version?: string, link: LinkState, linkError?: string, 
+/**
+ * Why the link is in its state (absent while live on its normal path).
+ */
+linkReason?: LinkReason, 
+/**
+ * The path serving the link (or being brought up for it).
+ */
+linkVia?: LinkVia, 
+/**
+ * Host time when the current (`link`, `linkReason`, `linkVia`) began.
+ */
+linkSince?: number, 
 /**
  * The TeleFlock companion extension is loaded in this omp process.
  */

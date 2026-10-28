@@ -1,16 +1,15 @@
 //! Per-host connection runtime (architecture §5.2): the phase state machine with backoff,
 //! deploy, `tf-hostd attach`, the protocol link, and the client-side view of the host
-//! (status, last state, notifications, open sessions/terminals).
+//! (status, last state, notifications, session mirrors, open terminals).
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
 use tf_proto::{
     ApiError, AppEvent, ClientInfo, ClientMsg, ConnPhase, ConnStatus, HostKeyInfo, HostKind, HostProfile, HostState, Millis,
-    Notification, PROTOCOL_VERSION, ServerMsg, SessionEvent, SessionSnapshot, StatePatch, TermEvent,
+    Notification, PROTOCOL_VERSION, ServerMsg, StatePatch, TermEvent,
 };
 use tf_transport::{
     Cmd, ConnectOptions, HostKeyDecision, HostKeyPolicy, Transport, TransportError, TransportEvent, WslKeepalive,
@@ -18,8 +17,9 @@ use tf_transport::{
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::deploy;
-use crate::engine::Inner;
+use crate::engine::{Inner, session_host};
 use crate::link::{Link, LinkSink};
+use crate::sessions::{self, Sessions};
 use crate::util::now_ms;
 
 pub(crate) enum ConnCmd {
@@ -41,8 +41,6 @@ pub(crate) struct HostView {
     pub dirty: bool,
     /// Recent notifications (`notification_action`, cross-surface read/resolved sync).
     pub notifications: VecDeque<Tracked>,
-    /// Open sessions (`session.open` params by agent id), re-opened after a reconnect.
-    pub sessions: HashMap<String, Value>,
     pub terms: HashSet<String>,
     /// Fingerprint the user confirmed with `hosts.trustKey`; consumed by the next attempt.
     pub approved_key: Option<String>,
@@ -72,6 +70,8 @@ pub(crate) struct HostRt {
     pub online: watch::Sender<bool>,
     /// The user wants this host connected.
     pub wanted: AtomicBool,
+    /// What the app core keeps of the sessions the UI opens on this host.
+    pub sessions: Sessions,
 }
 
 const NOTIFICATION_RING: usize = 100;
@@ -135,7 +135,6 @@ impl HostRt {
                 live: false,
                 dirty: false,
                 notifications: VecDeque::new(),
-                sessions: HashMap::new(),
                 terms: HashSet::new(),
                 approved_key: None,
             }),
@@ -143,6 +142,7 @@ impl HostRt {
             transport: Mutex::new(None),
             online: watch::channel(false).0,
             wanted: AtomicBool::new(false),
+            sessions: Sessions::default(),
         });
         (rt, rx)
     }
@@ -205,6 +205,8 @@ impl HostRt {
 struct Sink {
     inner: Weak<Inner>,
     rt: Weak<HostRt>,
+    /// [`Link::id`] of the link this sink serves, once established.
+    link_id: AtomicU64,
 }
 
 impl LinkSink for Sink {
@@ -223,11 +225,12 @@ impl LinkSink for Sink {
         let host_id = rt.id.clone();
         match msg {
             ServerMsg::Pulse { at, pulses } => inner.send(AppEvent::Pulse { host_id, at, pulses }),
-            ServerMsg::Session { agent_id, ev, .. } => {
-                if matches!(ev, SessionEvent::Ended { .. }) {
-                    rt.view.lock().unwrap().sessions.remove(&agent_id);
-                }
-                inner.send(AppEvent::Session { host_id, agent_id, ev })
+            ServerMsg::Session { agent_id, ev, seq } => {
+                let link = match self.link_id.load(Ordering::SeqCst) {
+                    0 => rt.link().map_or(0, |l| l.id),
+                    id => id,
+                };
+                sessions::on_event(&session_host(&inner, &rt), link, agent_id, ev, seq);
             }
             ServerMsg::Term { term_id, ev } => {
                 if matches!(ev, TermEvent::Closed { .. }) {
@@ -430,13 +433,14 @@ pub(crate) async fn run(inner: Weak<Inner>, rt: Arc<HostRt>, mut rx: mpsc::Unbou
     }
 }
 
-/// Closes link + transport, ends open terminals, marks state stale, flushes the cache.
+/// Closes link + transport, ends open terminals, marks state stale, flushes the caches.
 async fn teardown(eng: &Arc<Inner>, rt: &Arc<HostRt>) {
     let link = rt.link.lock().unwrap().take();
     if let Some(link) = link {
         link.bye();
         link.close("disconnected");
     }
+    rt.sessions.link_down();
     rt.online.send_replace(false);
     let transport = rt.transport.lock().unwrap().take();
     if let Some(t) = transport {
@@ -457,6 +461,8 @@ async fn teardown(eng: &Arc<Inner>, rt: &Arc<HostRt>) {
     }
     eng.refresh_badge();
     eng.flush_cache(rt).await;
+    // Bounded like the transport close: a slow disk must not hold up a reconnect.
+    let _ = tokio::time::timeout(Duration::from_secs(5), sessions::persist_all(session_host(eng, rt))).await;
 }
 
 fn transport_err(e: tf_transport::TransportError) -> ApiError {
@@ -569,16 +575,17 @@ async fn connect_and_serve(
             version: eng.cfg.version.clone(),
             platform: eng.cfg.platform_name.clone(),
             device: eng.device_name(),
-            features: None,
+            features: Some(crate::link::requested_features()),
         },
         herdr_session: profile.herdr_session.clone(),
     };
-    let sink = Arc::new(Sink { inner: Arc::downgrade(eng), rt: Arc::downgrade(rt) });
-    let link = Link::establish(stdin, stdout, child.stderr.take(), hello, sink).await?;
+    let sink = Arc::new(Sink { inner: Arc::downgrade(eng), rt: Arc::downgrade(rt), link_id: AtomicU64::new(0) });
+    let link = Link::establish(stdin, stdout, child.stderr.take(), hello, sink.clone()).await?;
+    sink.link_id.store(link.id, Ordering::SeqCst);
     *rt.link.lock().unwrap() = Some(link.clone());
     *online_at.lock().unwrap() = Some(Instant::now());
     let hostd_version = link.hostd_version.clone();
-    log::info!("host {}: online (tf-hostd {}, client {})", rt.id, hostd_version, link.client_id);
+    log::info!("host {}: online (tf-hostd {}, client {}, {:?})", rt.id, hostd_version, link.client_id, link.features);
     eng.update_status(rt, |s| {
         s.phase = ConnPhase::Online;
         s.message = None;
@@ -590,7 +597,7 @@ async fn connect_and_serve(
         s.hostd_version = Some(hostd_version);
     });
     rt.online.send_replace(true);
-    tokio::spawn(reopen_sessions(Arc::downgrade(eng), rt.clone(), link.clone()));
+    tokio::spawn(sessions::reopen(session_host(eng, rt), link.clone()));
 
     let reason = tokio::select! {
         r = link.closed() => r,
@@ -609,27 +616,6 @@ async fn connect_and_serve(
     // Dropping the child kills `attach` if it is still running.
     drop(child);
     Ok(reason)
-}
-
-/// After a reconnect, re-subscribe sessions the UI still has open and push a `reset`.
-async fn reopen_sessions(inner: Weak<Inner>, rt: Arc<HostRt>, link: Arc<Link>) {
-    let open: Vec<(String, Value)> =
-        rt.view.lock().unwrap().sessions.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    for (agent_id, params) in open {
-        let r = link.request("session.open", params, crate::link::DEFAULT_TIMEOUT).await;
-        let Some(eng) = inner.upgrade() else { return };
-        let ev = match r.and_then(|v| {
-            serde_json::from_value::<SessionSnapshot>(v).map_err(|e| ApiError::new("internal", e.to_string()))
-        }) {
-            Ok(snapshot) => SessionEvent::Reset { snapshot },
-            Err(e) if e.code == "not_connected" => return,
-            Err(e) => {
-                rt.view.lock().unwrap().sessions.remove(&agent_id);
-                SessionEvent::Ended { reason: e.message }
-            }
-        };
-        eng.send(AppEvent::Session { host_id: rt.id.clone(), agent_id, ev });
-    }
 }
 
 #[cfg(test)]

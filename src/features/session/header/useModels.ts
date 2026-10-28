@@ -6,13 +6,19 @@ import { errorText } from "../api";
 const cache = new Map<string, { at: number; p: Promise<ModelCatalog> }>();
 const TTL_MS = 5 * 60_000;
 
-function fetchModels(hostId: string): Promise<ModelCatalog> {
+/** The host's model catalog (`host.models`), shared by every picker; cached for five minutes. */
+export function fetchModels(hostId: string): Promise<ModelCatalog> {
   const hit = cache.get(hostId);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.p;
   const p = core.host(hostId).call("host.models", {});
   cache.set(hostId, { at: Date.now(), p });
   p.catch(() => cache.delete(hostId));
   return p;
+}
+
+/** Forgets the cached catalog: the host's accounts changed, so may the models omp can use. */
+export function forgetModels(hostId: string): void {
+  cache.delete(hostId);
 }
 
 export interface ModelsState {

@@ -97,14 +97,7 @@ impl HostdBin {
             Payload::Zstd(z) => {
                 let len = self.len;
                 tokio::task::spawn_blocking(move || {
-                    use std::io::Read;
-                    let mut src = z;
-                    let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut src)
-                        .map_err(|e| ApiError::new("internal", format!("embedded tf-hostd: {e}")))?;
-                    let mut out = Vec::with_capacity(len);
-                    dec.read_to_end(&mut out)
-                        .map_err(|e| ApiError::new("internal", format!("embedded tf-hostd: {e}")))?;
-                    Ok(out)
+                    zstd::bulk::decompress(z, len).map_err(|e| ApiError::new("internal", format!("embedded tf-hostd: {e}")))
                 })
                 .await
                 .map_err(|e| ApiError::new("internal", e.to_string()))?
@@ -687,7 +680,7 @@ mod tests {
     /// `(raw, zstd(raw))`, static like the embedded tables.
     static SAMPLE: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
         let raw: Vec<u8> = (0..200_000u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
-        let z = ruzstd::encoding::compress_to_vec(raw.as_slice(), ruzstd::encoding::CompressionLevel::Fastest);
+        let z = zstd::bulk::compress(raw.as_slice(), 3).unwrap();
         (raw, z)
     });
 

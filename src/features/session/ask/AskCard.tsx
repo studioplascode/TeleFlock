@@ -123,7 +123,9 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   const { headline, body } = askText({ title: request.title, message: request.message, command: needs?.command, approval: kindKey === "approval" });
   return (
     <motion.section
+      // Re-renders with its agent (5 Hz while streaming elsewhere): measure only when the card's shape changes.
       layout
+      layoutDependency={`${request.id}/${other != null}/${sent ?? ""}/${picked.length}`}
       aria-label={request.title}
       data-status="needs-you"
       className={cn(

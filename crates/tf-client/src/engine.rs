@@ -23,6 +23,8 @@ use crate::link::timeout_for;
 use crate::platform::{BadgeState, NotifyStyle, Platform};
 use crate::secrets::{self, SecretStore};
 use crate::settings::{default_settings, in_quiet_hours, is_muted, local_minutes_now, validate, wants};
+use crate::session_cache::SessionCache;
+use crate::sessions::{self, AgentHint, SessionHost, Sessions};
 use crate::state::{CacheRecord, apply_patches, counts};
 use crate::tunnel::Tunnels;
 use crate::util::{invalid, now_ms, rand_id, read_json, to_value, write_atomic, write_json};
@@ -30,7 +32,8 @@ use crate::util::{invalid, now_ms, rand_id, read_json, to_value, write_atomic, w
 /// Engine configuration supplied by the embedder.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// `hosts.json`, `settings.json`, `secrets.json`, `known_hosts`, `cache/<hostId>.json`.
+    /// `hosts.json`, `settings.json`, `secrets.json`, `known_hosts`, `cache/<hostId>.json`,
+    /// `sessions/<hostId>/<sessionId>.json.zst` (the session cache).
     pub data_dir: PathBuf,
     /// `windows` | `android` | `linux` | `macos` | `web`.
     pub platform_name: String,
@@ -46,6 +49,9 @@ const EVENT_CAPACITY: usize = 8192;
 /// Cached host states are written at most this often, and whenever a host disconnects (shutdown
 /// included). Health samples alone never make the cache dirty.
 const CACHE_FLUSH_EVERY: Duration = Duration::from_secs(60);
+/// Changed session mirrors are written to the session cache this often (and when they close,
+/// at a disconnect and at shutdown).
+const SESSION_CACHE_EVERY: Duration = Duration::from_secs(15);
 /// Window focus leaves a link alone that the host spoke on this recently: the ping loop watches
 /// it anyway, and a live link hears a pong every `PING_EVERY` (15 s).
 const FOCUS_FRESH: Duration = Duration::from_secs(20);
@@ -103,6 +109,50 @@ pub(crate) struct Inner {
     /// For work started from sync entry points the embedder may call off the runtime
     /// (`resume`, `page_closed` from Tauri window/page callbacks).
     runtime: tokio::runtime::Handle,
+    /// What the session mirrors persist (`data_dir/sessions`).
+    session_cache: SessionCache,
+}
+
+/// [`SessionHost`] of one host for the session mirrors.
+struct EngineHost {
+    inner: Arc<Inner>,
+    rt: Arc<HostRt>,
+}
+
+impl SessionHost for EngineHost {
+    fn host_id(&self) -> &str {
+        &self.rt.id
+    }
+
+    fn sessions(&self) -> &Sessions {
+        &self.rt.sessions
+    }
+
+    fn cache(&self) -> &SessionCache {
+        &self.inner.session_cache
+    }
+
+    fn link(&self) -> Option<Arc<crate::link::Link>> {
+        self.rt.link()
+    }
+
+    fn emit(&self, agent_id: &str, ev: tf_proto::SessionEvent) {
+        self.inner.send(AppEvent::Session { host_id: self.rt.id.clone(), agent_id: agent_id.to_owned(), ev });
+    }
+
+    fn agent(&self, agent_id: &str) -> AgentHint {
+        let v = self.rt.view.lock().unwrap();
+        let omp = v.state.as_ref().and_then(|(_, s)| s.agents.iter().find(|a| a.id == agent_id)).and_then(|a| a.omp.as_ref());
+        AgentHint {
+            session_id: omp.and_then(|o| o.session_id.clone()),
+            live: v.live && omp.is_some_and(|o| o.link == tf_proto::LinkState::Live),
+        }
+    }
+}
+
+/// The session mirrors' view of `rt`.
+pub(crate) fn session_host(inner: &Arc<Inner>, rt: &Arc<HostRt>) -> Arc<dyn SessionHost> {
+    Arc::new(EngineHost { inner: inner.clone(), rt: rt.clone() })
 }
 
 /// Handle to the app core. Cheap to clone.
@@ -614,6 +664,7 @@ impl Engine {
         };
         let artifacts = Artifacts { hostd_override: cfg.hostd_bins_override.clone() };
         let secrets = SecretStore::new(&cfg.data_dir);
+        let session_cache = SessionCache::new(&cfg.data_dir, &cfg.platform_name);
         let inner = Arc::new(Inner {
             cfg,
             platform,
@@ -631,6 +682,7 @@ impl Engine {
             secrets,
             page_epoch: std::sync::atomic::AtomicU64::new(0),
             runtime: tokio::runtime::Handle::current(),
+            session_cache,
         });
         let engine = Engine { inner: inner.clone() };
 
@@ -665,6 +717,20 @@ impl Engine {
                 let hosts: Vec<Arc<HostRt>> = inner.hosts.lock().unwrap().values().cloned().collect();
                 for rt in hosts {
                     inner.flush_cache(&rt).await;
+                }
+            }
+        });
+        // Changed session mirrors to the session cache.
+        let weak = Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SESSION_CACHE_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(inner) = weak.upgrade() else { break };
+                let hosts: Vec<Arc<HostRt>> = inner.hosts.lock().unwrap().values().cloned().collect();
+                for rt in hosts {
+                    sessions::persist_all(session_host(&inner, &rt)).await;
                 }
             }
         });
@@ -763,20 +829,19 @@ impl Engine {
         self.inner.page_epoch.fetch_add(1, Ordering::SeqCst);
         let hosts: Vec<Arc<HostRt>> = self.inner.hosts.lock().unwrap().values().cloned().collect();
         for rt in hosts {
-            let (terms, sessions): (Vec<String>, Vec<String>) = {
-                let mut v = rt.view.lock().unwrap();
-                (v.terms.drain().collect(), v.sessions.drain().map(|(k, _)| k).collect())
-            };
+            let terms: Vec<String> = rt.view.lock().unwrap().terms.drain().collect();
+            let open = rt.sessions.page_closed();
+            self.inner.runtime.spawn(sessions::persist_all(session_host(&self.inner, &rt)));
             let Some(link) = rt.link() else { continue };
-            if terms.is_empty() && sessions.is_empty() {
+            if terms.is_empty() && open.is_empty() {
                 continue;
             }
-            log::info!("host {}: page closed; releasing {} terminal(s), {} session(s)", rt.id, terms.len(), sessions.len());
+            log::info!("host {}: page closed; releasing {} terminal(s), {} session(s)", rt.id, terms.len(), open.len());
             self.inner.runtime.spawn(async move {
                 let calls = terms
                     .into_iter()
                     .map(|t| ("term.close", serde_json::json!({ "termId": t })))
-                    .chain(sessions.into_iter().map(|a| ("session.close", serde_json::json!({ "agentId": a }))));
+                    .chain(open.into_iter().map(|a| ("session.close", serde_json::json!({ "agentId": a }))));
                 for (method, params) in calls {
                     if let Err(e) = link.request(method, params, timeout_for(method)).await {
                         log::debug!("{method} on page close: {}", e.message);
@@ -827,25 +892,24 @@ impl Engine {
             }
         };
         let epoch = self.inner.page_epoch.load(Ordering::SeqCst);
-        let result = link.request(method, params, timeout_for(method)).await?;
+        let host = session_host(&self.inner, &rt);
+        if let HostMethod::SessionClose(p) = &req {
+            sessions::closed(&host, &p.agent_id);
+        }
+        // Sessions go through their mirrors (cache, delta re-opens, cached history pages).
+        let result = match &req {
+            HostMethod::SessionOpen(p) => sessions::open(&host, &link, p).await?,
+            HostMethod::SessionHistory(p) => sessions::history(&host, &link, p).await?,
+            _ => link.request(method, params, timeout_for(method)).await?,
+        };
         // Record what the page opened (checked under the view lock, like `page_closed`'s drain);
         // if the page went away while the request was in flight, release it at once.
         let stale = || self.inner.page_epoch.load(Ordering::SeqCst) != epoch;
         let release = match req {
-            HostMethod::SessionOpen(p) => {
-                let params = to_value(&p)?;
-                let mut v = rt.view.lock().unwrap();
-                if stale() {
-                    Some(("session.close", serde_json::json!({ "agentId": p.agent_id })))
-                } else {
-                    v.sessions.insert(p.agent_id, params);
-                    None
-                }
-            }
-            HostMethod::SessionClose(p) => {
-                rt.view.lock().unwrap().sessions.remove(&p.agent_id);
-                None
-            }
+            HostMethod::SessionOpen(p) => stale().then(|| {
+                sessions::closed(&host, &p.agent_id);
+                ("session.close", serde_json::json!({ "agentId": p.agent_id }))
+            }),
             HostMethod::TermOpen(_) => match result.get("termId").and_then(Value::as_str) {
                 Some(id) => {
                     let mut v = rt.view.lock().unwrap();
@@ -1112,6 +1176,7 @@ impl Engine {
                     let _ = tokio::time::timeout(Duration::from_secs(5), t).await;
                 }
                 let _ = tokio::fs::remove_file(i.cache_path(&r.host_id)).await;
+                i.session_cache.remove_host(&r.host_id).await;
                 if i.tunnels.close_host(&r.host_id) {
                     i.emit_tunnels();
                 }

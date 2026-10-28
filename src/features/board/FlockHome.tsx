@@ -106,8 +106,11 @@ function StaleStrip({ hostId }: { hostId: string }) {
   const action = connAction(st, hostId);
   const bad = st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error";
   return (
+    // Re-renders every second (age, countdown) at one line's height: measuring layout on each tick
+    // would re-measure every card below (motion measures the whole layout tree).
     <motion.div
       layout
+      layoutDependency={st.phase}
       initial={{ opacity: 0, y: -8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -8 }}

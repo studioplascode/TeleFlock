@@ -303,6 +303,23 @@ async fn values(omp: &Omp, refresh: bool) -> Result<Arc<Entries>, ApiError> {
     Ok(entries)
 }
 
+/// One global value from `omp config list` (cached like the settings page's; `None` = unset and
+/// no default).
+pub(crate) async fn global_value(ctx: &Ctx, key: &str, refresh: bool) -> Result<Option<Value>, ApiError> {
+    let entries = values(&Omp::from_ctx(ctx)?, refresh).await?;
+    Ok(entries.iter().find(|(k, _)| k == key).and_then(|(_, e)| e.get("value").cloned()))
+}
+
+/// Writes one non-credential array / record setting (`omp config set -- <key> <json>`), serialized
+/// with the settings page's writes.
+pub(crate) async fn set_json(ctx: &Ctx, key: &str, value: &Value) -> Result<(), ApiError> {
+    let omp = Omp::from_ctx(ctx)?;
+    let _writing = WRITES.lock().await;
+    let written = write_via_cli(&omp, &[Write::Set(key, value.to_string())]).await;
+    drop_values();
+    written
+}
+
 /// Parses `config list --json` keeping omp's key order (serde_json's map would sort it).
 fn parse_list(bytes: &[u8]) -> Result<Entries, serde_json::Error> {
     struct Ordered(Entries);

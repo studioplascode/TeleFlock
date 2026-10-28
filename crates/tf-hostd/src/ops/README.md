@@ -178,6 +178,18 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   after 30 days, then oldest first above 10 GiB. `upload::start(&paths, cancel)` (in `Ctx::create`)
   runs that cleanup and the sweeper once per daemon.
 
+- **mcp.\*** (`mcp/`, architecture §3.15): omp's MCP servers. Config read and written in omp's own
+  files and format (`<agent dir>/mcp.json`, `<folder>/.omp/mcp.json`, `.mcp.json` siblings) under omp's
+  cross-process lock (`files.rs`: the pi-natives lock name, so a concurrent `/mcp add` never loses an
+  edit), key order and unknown fields kept (`json.rs`), secrets masked as `SECRET_MASK` and restored
+  from the stored value (`secrets.rs`), enable/disable exactly like omp's `setMcpServerEnabled`.
+  Status, tools, `test`, sign-in (`auth.*` flow driving omp's `/mcp reauth` engine), sign-out and
+  Smithery search run omp's own code in the embedded helper extension `host/teleflock-mcp/teleflock-mcp.ts`
+  (one throwaway omp per request, owner-only request file, JSON-lines answers; `helper.rs`). Checks are
+  cached per folder with definition fingerprints; only changed servers are checked again. Every
+  change runs omp's `/mcp reload` in the concerned interactive sessions (busy ones when their turn ends;
+  `reload.rs`).
+
 ## Error codes (beyond `tf_proto::ApiError`'s list)
 | code | when | hint tells the user |
 |---|---|---|

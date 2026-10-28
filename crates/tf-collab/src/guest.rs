@@ -246,6 +246,11 @@ impl Guest {
         self.inner.read_only.load(Ordering::Acquire)
     }
 
+    /// Both handles are the same guest (one connection, cloned).
+    pub fn ptr_eq(&self, other: &Guest) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     fn send(&self, frame: GuestFrame, write: bool) -> Result<(), GuestError> {
         if write && (!self.inner.can_write || self.read_only()) {
             return Err(GuestError::ReadOnly);

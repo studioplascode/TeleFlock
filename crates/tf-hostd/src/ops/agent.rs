@@ -1,9 +1,10 @@
 //! `agent.*` and `session.*` (architecture §3.4, §3.6, §3.7).
 //!
-//! Control order per method: collab guest first where collab can do it (prompt/steer,
-//! abort, answers, subagents, transcripts), then the companion bridge (model, thinking,
-//! fast, plan, goal, compact, rename, fork/branch/tree, new session, handoff, export,
-//! btw, follow-up queue), then herdr keystroke injection under the §3.6 safety rules.
+//! Control order per method: the session's data path first where it can do it (prompt/steer,
+//! abort, answers, subagents, transcripts): the bridge's data plane for sessions a bridge ≥ 2.0
+//! serves, else the collab guest; then the companion bridge's control plane (model, thinking,
+//! fast, plan, goal, compact, rename, fork/branch/tree, new session, handoff, export, btw,
+//! follow-up queue), then herdr keystroke injection under the §3.6 safety rules.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use tf_proto::{ApiError, Empty, HostMethod};
 use crate::bridge::BridgeError;
 use crate::clients::ClientHandle;
 use crate::inject::{self, When};
-use crate::omp::{guest_err, MetaOverlay, OmpSession};
+use crate::omp::{MetaOverlay, OmpSession};
 use crate::ops::{herdr_err, to_value, Ctx};
 use crate::state::build;
 use crate::state::parked::{self, PARK_GRACE};
@@ -71,7 +72,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentCommands(p) => to_value(commands(ctx, &p.agent_id).await?),
         M::AgentDequeue(p) => to_value(dequeue(ctx, &p.agent_id).await?),
         M::AgentKeys(p) => unit(keys(ctx, p).await),
-        M::AgentSubagent(p) => unit(subagent(ctx, p)),
+        M::AgentSubagent(p) => unit(subagent(ctx, p).await),
         M::AgentArchive(p) => unit(archive(ctx, p).await),
         M::AgentConnect(p) => unit(connect(ctx, &p.agent_id).await),
         M::AgentStart(p) => to_value(start_agent(ctx, p.target, &p.spec, None).await?),
@@ -120,7 +121,7 @@ fn session_id(ctx: &Ctx, agent_id: &str) -> Result<String, ApiError> {
     })
 }
 
-/// The live collab guest of an agent.
+/// The live session of an agent (served by its bridge or by a collab guest).
 fn guest(ctx: &Ctx, agent_id: &str) -> Result<Arc<OmpSession>, ApiError> {
     let sid = session_id(ctx, agent_id)?;
     match ctx.omp.session(&sid) {
@@ -168,6 +169,7 @@ pub fn push_meta_overlay(ctx: &Ctx, session_id: &str) {
             context: b.state.context.clone(),
             queue: Some(b.state.queue.clone()),
             goal: Some(b.state.goal.clone()),
+            data_plane: None,
         },
         None => MetaOverlay::default(),
     };
@@ -194,7 +196,7 @@ fn session_open(ctx: &Ctx, p: SessionOpenParams, client: &ClientHandle) -> Resul
     let s = ctx.omp.session(&sid).ok_or_else(not_shared)?;
     push_meta_overlay(ctx, &sid);
     let limit = p.limit.map(|l| l.clamp(1, 2000) as usize).unwrap_or(DEFAULT_LIMIT);
-    let mut snap = s.subscribe(client, &p.agent_id, limit);
+    let mut snap = s.subscribe(client, &p.agent_id, limit, p.have.as_ref());
     if snap.ui.is_none() {
         if let Some(review) = ctx.bridge.by_session(&sid).and_then(|b| b.state.plan_review) {
             snap.ui = Some(build::plan_review_ui(&review));
@@ -234,23 +236,7 @@ fn session_history(ctx: &Ctx, p: SessionHistoryParams) -> Result<HistoryPage, Ap
 }
 
 async fn subagent_transcript(ctx: &Ctx, p: SubagentRef) -> Result<HistoryPage, ApiError> {
-    let s = guest(ctx, &p.agent_id)?;
-    let mut text = String::new();
-    let mut from = 0u64;
-    // Pull the whole transcript (chunked by the host at line boundaries).
-    for _ in 0..64 {
-        let chunk = s.guest.fetch_transcript(&p.subagent_id, from).await.map_err(guest_err)?;
-        if let Some(err) = chunk.error {
-            return Err(ApiError::new("omp_error", format!("transcript: {err}")));
-        }
-        let done = chunk.text.is_empty() || chunk.new_size <= from;
-        text.push_str(&chunk.text);
-        from = chunk.new_size;
-        if done {
-            break;
-        }
-    }
-    Ok(tf_collab::replica::transcript_page(&text))
+    guest(ctx, &p.agent_id)?.transcript(&p.subagent_id).await
 }
 
 /// Largest image `session.image` sends (its base64 must fit a client line, 64 MiB).
@@ -317,6 +303,13 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
         s.expect_prompt(&p.text, &client.info().device);
     }
     if p.delivery == Delivery::FollowUp && streaming {
+        // The bridge's data plane queues follow-ups with images; the v1 paths take text only.
+        if let Some(s) = session.as_ref().filter(|s| s.follow_up_prompts()) {
+            s.prompt(&p.text, image_contents(p.images), Delivery::FollowUp).await?;
+            s.expect_queued(&p.text, true);
+            ctx.state.mark_dirty();
+            return Ok(());
+        }
         if !p.images.is_empty() {
             return Err(ApiError::new("unsupported", "follow-ups cannot carry images; send it as a steer or after the turn"));
         }
@@ -350,9 +343,10 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
                 }
             }
             let images = image_contents(images);
-            s.guest.prompt(p.text.clone(), images).map_err(guest_err)?;
-            // omp queues a guest prompt sent mid-turn as a steer; its TUI band (what the bridge
-            // reads) doesn't show it, so list it ourselves until it lands.
+            let delivery = if p.delivery == Delivery::FollowUp { Delivery::Auto } else { p.delivery };
+            s.prompt(&p.text, images, delivery).await?;
+            // omp queues a prompt sent mid-turn as a steer; its TUI band (what the bridge reads)
+            // may not show it yet, so list it ourselves until it lands.
             s.expect_queued(&p.text, false);
             ctx.state.mark_dirty();
             Ok(())
@@ -375,7 +369,7 @@ async fn abort(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
     let a = agent(ctx, agent_id)?;
     if a.kind == "omp" {
         if let Ok(s) = guest(ctx, agent_id) {
-            return s.guest.abort().map_err(guest_err);
+            return s.abort().await;
         }
         if let Some(sid) = bridge_sid(ctx, agent_id) {
             return ctx.bridge.abort(&sid).await.map_err(bridge_err);
@@ -416,7 +410,7 @@ async fn answer(ctx: &Ctx, p: AnswerParams) -> Result<(), ApiError> {
         }
     }
     let s = guest(ctx, &p.agent_id)?;
-    s.answer(&p.request_id, &p.answer)?;
+    s.answer(&p.request_id, &p.answer).await?;
     let label = if p.answer.cancel {
         "Skipped".to_string()
     } else if p.answer.chat {
@@ -437,7 +431,7 @@ async fn answer(ctx: &Ctx, p: AnswerParams) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn subagent(ctx: &Ctx, p: SubagentCmdParams) -> Result<(), ApiError> {
+async fn subagent(ctx: &Ctx, p: SubagentCmdParams) -> Result<(), ApiError> {
     let s = guest(ctx, &p.agent_id)?;
     let kind = match p.action {
         SubagentAction::Chat => tf_collab::AgentCmdKind::Chat,
@@ -447,7 +441,7 @@ fn subagent(ctx: &Ctx, p: SubagentCmdParams) -> Result<(), ApiError> {
     if p.action == SubagentAction::Chat && p.message.as_deref().is_none_or(|m| m.trim().is_empty()) {
         return Err(ApiError::new("invalid_params", "chat needs a message"));
     }
-    s.guest.agent_cmd(kind, &p.subagent_id, p.message).map_err(guest_err)
+    s.agent_cmd(kind, &p.subagent_id, p.message).await
 }
 
 // ───────────────────────────── bridge-first ─────────────────────────────
@@ -1303,7 +1297,7 @@ async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option
         return Ok(());
     }
     if live {
-        guest(ctx, agent_id)?.guest.prompt(text.unwrap_or_default(), image_contents(images)).map_err(guest_err)?;
+        guest(ctx, agent_id)?.prompt(&text.unwrap_or_default(), image_contents(images), Delivery::Auto).await?;
         return Ok(());
     }
     if let Some(text) = &text {
