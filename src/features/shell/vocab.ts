@@ -1,3 +1,4 @@
+import { Activity, BarChart3, Blocks, Clock3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
 import type { Agent, Column, NeedsKind } from "@/core/gen";
 import { formatAge, formatElapsed } from "@/design";
 
@@ -133,7 +134,7 @@ export const ACTIONS = {
   markDoneRemove: { label: "Mark done & remove worktree…", description: "Also deletes the checkout folder (asks first)" },
   deleteWorktree: { label: "Delete worktree…", description: "Its pull request is merged or closed: delete the checkout folder (asks first); the branch stays" },
   reopen: { label: "Reopen", description: "Move it back to Review" },
-  resume: { label: "Resume", description: "Reopen the closed session (omp --resume) in a new pane" },
+  resume: { label: "Resume", description: "Reopen the closed omp session in a new pane" },
   stopTurn: { label: "Stop turn", shortcut: "Esc", description: "Interrupt the current turn; the session stays" },
   exitOmp: { label: "Exit omp (keep pane)", description: "Quit omp; the herdr pane stays open" },
   closePane: { label: "Close pane…", description: "Quit omp and close its herdr pane (asks first)" },
@@ -154,20 +155,31 @@ export const ACTIONS = {
 
 export type ActionId = keyof typeof ACTIONS;
 
-/** Views reachable from the nav (desktop sidebar / phone tabs) with their shortcuts. */
+/** A view: its label, shortcut and one-line description (`ActionDef`) plus the one icon every entry point shows. */
+export interface ViewDef extends ActionDef {
+  icon: LucideIcon;
+}
+
+/**
+ * Views reachable from the nav (desktop sidebar / phone tabs, More), the palette, Settings and the host
+ * cards: one label, icon and description per page, wherever it is offered.
+ */
 export const VIEWS = {
-  board: { label: "Board", shortcut: "Ctrl 1", description: "Every agent on every host, by state" },
-  inbox: { label: "Inbox", shortcut: "Ctrl 2", description: "What needs you, then unread updates" },
-  activity: { label: "Activity", shortcut: "Ctrl 3", description: "Everything that happened, newest first" },
-  usage: { label: "Usage", shortcut: "Ctrl 4", description: "Spend, tokens and subscription limits" },
-  hosts: { label: "Hosts", shortcut: "Ctrl 5", description: "Connections, health and setup" },
-  settings: { label: "Settings", shortcut: "Ctrl 6", description: "Notifications, motion, hints and AI naming" },
-  dispatch: { label: "Dispatch", shortcut: "D", description: "Send tasks to a repository like messages" },
-  automations: { label: "Automations", shortcut: "Ctrl 7", description: "Agents a host starts on a schedule" },
-  omp: { label: "omp settings", shortcut: "Ctrl 8", description: "omp's models, roles, tools and every other setting, per host" },
-  mcp: { label: "MCP servers", description: "Tool servers omp can use: add, sign in, test and switch them on or off, per host" },
-  accounts: { label: "Accounts", description: "Subscription logins omp uses: link, unlink and pick the default, per host" },
-} as const satisfies Record<string, ActionDef>;
+  board: { label: "Board", shortcut: "Ctrl 1", description: "Every agent on every host, by state", icon: LayoutDashboard },
+  inbox: { label: "Inbox", shortcut: "Ctrl 2", description: "What needs you, then unread updates", icon: Inbox },
+  activity: { label: "Activity", shortcut: "Ctrl 3", description: "Everything that happened, newest first", icon: Activity },
+  usage: { label: "Usage", shortcut: "Ctrl 4", description: "Spend, tokens and subscription limits", icon: BarChart3 },
+  hosts: { label: "Hosts", shortcut: "Ctrl 5", description: "Connections, health and setup", icon: Server },
+  settings: { label: "Settings", shortcut: "Ctrl 6", description: "Notifications, motion, hints and AI naming", icon: Settings2 },
+  dispatch: { label: "Dispatch", shortcut: "D", description: "Send tasks to a repository like messages", icon: Send },
+  automations: { label: "Automations", shortcut: "Ctrl 7", description: "Agents a host starts on a schedule", icon: Clock3 },
+  omp: { label: "omp settings", shortcut: "Ctrl 8", description: "omp's models, roles, tools and every other setting, per host", icon: SlidersHorizontal },
+  mcp: { label: "MCP servers", description: "Tool servers omp can use, per host: add, sign in, test, turn on or off", icon: Blocks },
+  accounts: { label: "Accounts", description: "Subscription logins omp uses, per host: link, unlink, pick the default", icon: KeyRound },
+} as const satisfies Record<string, ViewDef>;
+
+/** omp's own per-host pages (the omp area), in the order every entry point lists them. */
+export const OMP_PAGES = ["omp", "mcp", "accounts"] as const;
 
 /**
  * Send keys, one contract everywhere. Single message boxes (session composer, Dispatch, Other…,

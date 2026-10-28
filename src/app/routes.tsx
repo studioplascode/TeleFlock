@@ -83,7 +83,8 @@ export function RouteView({ route, mobile }: { route: Route; mobile: boolean }) 
 
 /**
  * Warms the code-split screens one tap away, one per idle period, so the first open of an agent,
- * the inbox or a terminal renders at once instead of waiting for its chunk (seconds on a phone).
+ * the inbox, a terminal or the omp area (MCP servers, Accounts, omp settings: linked to each other by
+ * their strip) renders at once instead of waiting for its chunk (seconds on a phone).
  */
 export function prefetchViews(mobile: boolean): void {
   const order = [
@@ -92,6 +93,9 @@ export function prefetchViews(mobile: boolean): void {
     () => import("@/features/inbox/InboxView"),
     () => import("@/features/dispatch/DispatchView"),
     () => import("@/features/terminal/TerminalView"),
+    () => import("@/features/mcp/McpView"),
+    () => import("@/features/accounts/AccountsView"),
+    () => import("@/features/ompSettings/OmpSettingsView"),
   ];
   const next = (i: number) => {
     const load = order[i];

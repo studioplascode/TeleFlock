@@ -1,9 +1,9 @@
 import { ArrowUpCircle, Check, ChevronDown, CircleAlert, Copy, Globe, KeyRound, RefreshCw, Search, TerminalSquare, X } from "lucide-react";
 import { type ReactNode, useState } from "react";
-import type { McpServerDraft, McpStatus, McpTestResult, McpTool, McpTransport } from "@/core/gen";
+import type { McpServer, McpServerDraft, McpStatus, McpTestResult, McpTool, McpTransport } from "@/core/gen";
 import { Button, cn, Elapsed, EmptyState, IconButton, Input, Shimmer, Spinner } from "@/design";
 import { copyText } from "@/features/hosts/CopyCommand";
-import { filterTools, plural, quoteArg, STATUS_META, type StatusTone, statusLabel } from "./model";
+import { definedIn, filterTools, plural, quoteArg, STATUS_META, type StatusTone, statusLabel } from "./model";
 
 const TONE: Record<StatusTone, string> = {
   ok: "bg-done/12 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.3)]",
@@ -65,6 +65,29 @@ export function Banner({ tone, title, children, action, className }: { tone: "wa
         {children && <div className="text-xs text-ink-2">{children}</div>}
       </div>
       {action && <div className="shrink-0 self-center">{action}</div>}
+    </div>
+  );
+}
+
+/**
+ * Under the URL / command of the editor: that server is already set up on the host. Saving a
+ * second copy stays possible; this says which one it doubles and opens it.
+ */
+export function SameServerNote({ server: s, what, onOpen }: { server: McpServer; what: "URL" | "package" | "command"; onOpen(): void }) {
+  const loaded = s.enabled && !s.shadowed;
+  return (
+    <div role="status" className="flex items-center gap-2.5 rounded-md bg-warn/[0.07] py-1.5 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.24)]">
+      <CircleAlert className="size-3.5 shrink-0 text-warn" />
+      <p className="min-w-0 flex-1 py-1 text-xs text-ink-2">
+        <span className="font-bold text-warn">
+          Same {what} as “{s.name}”
+        </span>{" "}
+        in {definedIn(s)}
+        {loaded ? ": omp would load its tools twice." : s.enabled ? "." : ", switched off there."}
+      </p>
+      <Button size="sm" variant="ghost" onClick={onOpen} className="shrink-0">
+        Open it
+      </Button>
     </div>
   );
 }
@@ -229,13 +252,17 @@ export function DefinitionSummary({ server: d, extra, className }: { server: Mcp
   );
 }
 
-/** A test in progress or its outcome. `signIn` offers the sign-in when the server wants one. */
+/**
+ * A test in progress or its outcome. `signIn` offers the sign-in when the server wants one.
+ * `compact`: the verdict line only, where the row above already shows the outcome's error and tools.
+ */
 export function TestOutcome({
   testing,
   result,
   error,
   needsAuthHint,
   signIn,
+  compact,
   className,
 }: {
   testing?: number;
@@ -243,6 +270,7 @@ export function TestOutcome({
   error?: string;
   needsAuthHint?: string;
   signIn?: () => void;
+  compact?: boolean;
   className?: string;
 }) {
   if (testing !== undefined) {
@@ -270,7 +298,7 @@ export function TestOutcome({
             </span>
           )}
         </p>
-        {result.tools.length > 0 && (
+        {!compact && result.tools.length > 0 && (
           <p className="flex flex-wrap gap-1">
             {result.tools.slice(0, 16).map((t) => (
               <code key={t.name} className="rounded-xs bg-white/6 px-1.5 py-px font-mono text-2xs text-ink-2" title={t.description}>
@@ -288,10 +316,13 @@ export function TestOutcome({
       <div className={cn("flex items-start gap-2.5 rounded-md bg-warn/[0.07] px-3 py-2.5 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.24)]", className)} aria-live="polite">
         <KeyRound className="mt-0.5 size-3.5 shrink-0 text-warn" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <p className="text-xs font-bold text-warn">It wants a sign-in{needsAuthHint ? ` · ${needsAuthHint}` : ""}</p>
-          {result.error && <p className="text-2xs break-words text-mute">{result.error}</p>}
+          <p className="text-xs font-bold text-warn">
+            It wants a sign-in{needsAuthHint ? ` · ${needsAuthHint}` : ""}
+            {compact && <span className="font-semibold text-mute"> ({secs})</span>}
+          </p>
+          {!compact && result.error && <p className="text-2xs break-words text-mute">{result.error}</p>}
         </div>
-        {signIn && (
+        {!compact && signIn && (
           <Button size="sm" variant="secondary" icon={<KeyRound />} onClick={signIn} className="shrink-0">
             Sign in
           </Button>
@@ -309,7 +340,7 @@ export function TestOutcome({
   return (
     <div className={cn("flex flex-col gap-1.5", className)} aria-live="polite">
       <p className="text-xs font-bold text-[#ff8aa5]">Couldn't connect ({secs})</p>
-      {result.error && <ErrorText text={result.error} />}
+      {!compact && result.error && <ErrorText text={result.error} />}
     </div>
   );
 }

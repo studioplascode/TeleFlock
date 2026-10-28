@@ -34,7 +34,9 @@ const REFRESH_MIN: Duration = Duration::from_secs(10);
 /// `omp usage --history` only gains a row per hour.
 const HISTORY_TTL: Duration = Duration::from_secs(600);
 const HISTORY_DAYS: &str = "8";
-const OMP_USAGE_TIMEOUT: Duration = Duration::from_secs(45);
+/// One `omp usage` run. Public for the app's request timeouts (tf-client `timeout_for`): requests
+/// that read a fresh report (`accounts.unlink`) must outlast it.
+pub const OMP_USAGE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Samples sent per window.
 const MAX_SAMPLES: usize = 120;
 /// Own readings kept per window.

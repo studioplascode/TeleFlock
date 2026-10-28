@@ -1,8 +1,9 @@
 /**
  * Pure helpers of the MCP servers page: secrets, names, the shell-like argument line, registry
- * inputs, the editor form ⇄ `McpServerDraft`, row summaries and status labels, reload notes.
+ * inputs, the editor form ⇄ `McpServerDraft`, row summaries and status labels, reload notes, a
+ * row's state after its test, and spotting the same server set up twice.
  */
-import type { McpKeyValue, McpList, McpOAuthSettings, McpReload, McpRegistryInput, McpScope, McpServer, McpServerDraft, McpStatus, McpTool, McpTransport, Workspace } from "@/core/gen";
+import type { McpKeyValue, McpList, McpOAuthSettings, McpReload, McpRegistryInput, McpScope, McpServer, McpServerDraft, McpStatus, McpTestResult, McpTool, McpTransport, Workspace } from "@/core/gen";
 import { basename, expandTilde, tildify } from "@/features/workspace/shared/paths";
 import type { McpTemplateInput } from "./templates";
 
@@ -308,18 +309,204 @@ export function projectFolders(workspaces: readonly Workspace[], home?: string):
 }
 
 /**
- * What a change did to running sessions, as one line ("applied to 2 running sessions · 1 more
- * when it finishes its turn · restart 1 session to use it"); null when nothing ran.
+ * What a change does to a server for running sessions: they start using it (added, switched on),
+ * use its new definition (edited, signed out, reloaded) or drop it (removed, switched off).
  */
-export function reloadNote(r: McpReload): string | null {
+export type ReloadChange = "add" | "change" | "remove";
+
+/**
+ * What a change did to running sessions, as one line ("applied to 2 running sessions · 1 more
+ * when it finishes its turn · restart 1 session to use it"; a removal: "dropped by 2 running
+ * sessions · … · 1 session keeps it until restarted"); null when nothing ran.
+ */
+export function reloadNote(r: McpReload, change: ReloadChange): string | null {
+  const drop = change === "remove";
   const parts: string[] = [];
-  if (r.reloaded > 0) parts.push(`applied to ${plural(r.reloaded, "running session")}`);
+  if (r.reloaded > 0) parts.push(`${drop ? "dropped by" : "applied to"} ${plural(r.reloaded, "running session")}`);
   if (r.queued > 0) {
-    const when = r.queued === 1 ? "when it finishes its turn" : "when they finish their turns";
-    parts.push(r.reloaded > 0 ? `${r.queued} more ${when}` : `${plural(r.queued, "busy session")} pick it up ${when}`);
+    const one = r.queued === 1;
+    const when = one ? "when it finishes its turn" : "when they finish their turns";
+    const does = drop ? (one ? "drops it" : "drop it") : one ? "picks it up" : "pick it up";
+    parts.push(r.reloaded > 0 ? `${r.queued} more ${when}` : `${plural(r.queued, "busy session")} ${does} ${when}`);
   }
-  if (r.restartNeeded > 0) parts.push(`restart ${plural(r.restartNeeded, "session")} to use it`);
+  if (r.restartNeeded > 0) {
+    const n = r.restartNeeded;
+    parts.push(drop ? `${plural(n, "session")} ${n === 1 ? "keeps" : "keep"} it until restarted` : `restart ${plural(n, "session")} to ${change === "add" ? "use it" : "pick it up"}`);
+  }
   return parts.length ? parts.join(" · ") : null;
+}
+
+/** The newest `checkedAt` of the servers: when the last check that got through ended (none: undefined). */
+export function lastGoodCheck(servers: readonly McpServer[]): number | undefined {
+  let at: number | undefined;
+  for (const s of servers) if (s.checkedAt !== undefined && (at === undefined || s.checkedAt > at)) at = s.checkedAt;
+  return at;
+}
+
+/** A test of a server's saved definition (its row's Test): running since `startedAt`, or its outcome. */
+export interface RowTest {
+  startedAt?: number;
+  result?: McpTestResult;
+  error?: string;
+  /** When the outcome arrived. */
+  at?: number;
+  /** The row's `checkedAt` when the test started: a check that ends later wins over the test. */
+  since?: number;
+}
+
+/** What a row shows of a server's state; `tested`: its test's outcome, newer than the last check. */
+export type RowState = Pick<McpServer, "status" | "error" | "tools" | "serverInfo" | "checkedAt"> & { tested: boolean };
+
+/** Statuses a test can replace (off, skipped and checking rows keep theirs). */
+const TESTABLE: Record<McpStatus, boolean> = { unknown: true, connected: true, needsAuth: true, failed: true, pending: true, checking: false, disabled: false, skipped: false };
+
+/**
+ * The server as listed, or as its row's test found it when that is newer: the list's `checkedAt`
+ * hasn't moved since the test started (no clock comparison: the host's and this device's differ).
+ */
+export function rowState(s: McpServer, test: RowTest | undefined): RowState {
+  if (!test?.result || test.at === undefined || test.since !== s.checkedAt || s.shadowed || !TESTABLE[s.status]) {
+    return { status: s.status, error: s.error, tools: s.tools, serverInfo: s.serverInfo, checkedAt: s.checkedAt, tested: false };
+  }
+  const r = test.result;
+  return { status: r.status, error: r.error, tools: r.status === "connected" ? r.tools : [], serverInfo: r.serverInfo, checkedAt: test.at, tested: true };
+}
+
+// ---------------------------------------------------------------- the same server twice
+
+/** `/usr/bin/npx` → `npx`, `npx.cmd` → `npx`. */
+function commandName(command: string): string {
+  return (command.trim().split(/[\\/]/).pop() ?? "").toLowerCase().replace(/\.(cmd|exe|bat|ps1)$/, "");
+}
+
+type Ecosystem = "npm" | "pypi";
+
+/** Runner flags whose value is the package, and flags that take a value (skipped along with it). */
+const RUNNER_FLAGS: Record<Ecosystem, { pkg: Record<string, true>; valued: Record<string, true> }> = {
+  npm: { pkg: { "-p": true, "--package": true }, valued: { "--registry": true, "--cache": true, "--userconfig": true, "-w": true, "--workspace": true } },
+  pypi: {
+    pkg: { "--from": true, "--spec": true },
+    valued: {
+      "-p": true,
+      "--python": true,
+      "--with": true,
+      "--with-editable": true,
+      "--with-requirements": true,
+      "--index": true,
+      "--index-url": true,
+      "--extra-index-url": true,
+      "--default-index": true,
+      "-f": true,
+      "--find-links": true,
+    },
+  },
+};
+
+/** A package without its version: `@scope/pkg@1.2` → `@scope/pkg`; on PyPI `Foo_Bar[x]==1` → `foo-bar`. */
+function packageName(eco: Ecosystem, spec: string): string {
+  if (eco === "npm") {
+    const at = spec.indexOf("@", spec.startsWith("@") ? 1 : 0);
+    return (at > 0 ? spec.slice(0, at) : spec).toLowerCase();
+  }
+  if (/:\/\/|^[./~]/.test(spec)) return spec;
+  return (/^[A-Za-z0-9][A-Za-z0-9._-]*/.exec(spec)?.[0] ?? spec).toLowerCase().replace(/[-_.]+/g, "-");
+}
+
+/**
+ * The package a runner starts and the arguments after it: `npx -y pkg@1 …`, `bunx`, `pnpm dlx`,
+ * `yarn dlx`, `bun x`, `npm exec` (npm); `uvx pkg==1 …`, `uv tool run`, `pipx run` (PyPI).
+ */
+export function runnerPackage(command: string, args: readonly string[]): { eco: Ecosystem; name: string; rest: string[] } | null {
+  const cmd = commandName(command);
+  const sub = (...words: string[]) => words.every((w, i) => args[i] === w);
+  let eco: Ecosystem;
+  let i = 0;
+  if (cmd === "npx" || cmd === "bunx" || cmd === "pnpx") eco = "npm";
+  else if (((cmd === "pnpm" || cmd === "yarn") && sub("dlx")) || (cmd === "bun" && sub("x")) || (cmd === "npm" && (sub("exec") || sub("x")))) {
+    eco = "npm";
+    i = 1;
+  } else if (cmd === "uvx") eco = "pypi";
+  else if (cmd === "uv" && sub("tool", "run")) {
+    eco = "pypi";
+    i = 2;
+  } else if (cmd === "pipx" && sub("run")) {
+    eco = "pypi";
+    i = 1;
+  } else return null;
+  const flags = RUNNER_FLAGS[eco];
+  let pkg: string | undefined;
+  for (; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--") {
+      i++;
+      break;
+    }
+    if (!a.startsWith("-")) break;
+    const eq = a.indexOf("=");
+    const flag = eq > 0 ? a.slice(0, eq) : a;
+    if (flags.pkg[flag]) pkg = eq > 0 ? a.slice(eq + 1) : args[++i];
+    else if (flags.valued[flag] && eq < 0) i++;
+  }
+  const spec = pkg ?? args[i];
+  return spec ? { eco, name: packageName(eco, spec), rest: args.slice(i + 1) } : null;
+}
+
+/**
+ * A URL as an identity: scheme, host (case and default port folded by parsing) and path without
+ * trailing slashes, and the query without credentials (masked values, secret-looking names).
+ */
+export function urlKey(url: string): string {
+  const text = url.trim();
+  try {
+    const u = new URL(text);
+    const query = [...u.searchParams]
+      .filter(([k, v]) => !v.includes(SECRET_MASK) && !looksSecret(k))
+      .map(([k, v]) => `${k}=${v}`)
+      .sort();
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}${query.length ? `?${query.join("&")}` : ""}`;
+  } catch {
+    return text.replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+/**
+ * What a definition connects to, the same however it is spelled: its URL (http and sse alike), the
+ * package a runner starts (`npx -y pkg@1` ≈ `bunx pkg`, `uvx pkg==1` ≈ `pipx run pkg`, a Smithery
+ * server by its id), else the command line and its folder. Null while there is nothing to compare.
+ */
+export function endpointKey(d: McpServerDraft): string | null {
+  if (d.transport !== "stdio") return d.url?.trim() ? `url ${urlKey(d.url)}` : null;
+  const command = d.command?.trim();
+  if (!command) return null;
+  const p = runnerPackage(command, d.args);
+  if (p?.eco === "npm" && p.name === "@smithery/cli" && p.rest[0] === "run" && p.rest[1]) return `smithery ${p.rest[1].toLowerCase()}`;
+  if (p) return `${p.eco} ${p.name}`;
+  return `cmd ${JSON.stringify([commandName(command), ...d.args, d.cwd ?? ""])}`;
+}
+
+/** What two definitions share when `endpointKey` matches them, for the warning's wording. */
+export function endpointKind(d: McpServerDraft): "URL" | "package" | "command" {
+  if (d.transport !== "stdio") return "URL";
+  return runnerPackage(d.command ?? "", d.args) ? "package" : "command";
+}
+
+/** Servers already set up for what `d` connects to, the ones sessions load first; `except` (a server key) is the one being edited. */
+export function findSame(d: McpServerDraft, servers: readonly McpServer[], except?: string): McpServer[] {
+  const key = endpointKey(d);
+  if (!key) return [];
+  const hits = servers.filter((s) => serverKey(s) !== except && endpointKey(s.server) === key);
+  return [...hits.filter((s) => !s.shadowed), ...hits.filter((s) => s.shadowed)];
+}
+
+/** Where a listed server is defined, for a sentence: "omp's config", "this project's config", "Cursor". */
+export function definedIn(s: Pick<McpServer, "origin" | "sourceLabel">): string {
+  return s.origin === "user" ? "omp's config" : s.origin === "project" ? "this project's config" : (s.sourceLabel ?? "another tool");
+}
+
+/** What the editor's form connects to, read while the rest of it may still be incomplete. */
+export function formEndpoint(f: McpForm): McpServerDraft {
+  if (f.transport !== "stdio") return { transport: f.transport, url: f.url, args: [], env: [], headers: [] };
+  return { transport: "stdio", command: f.command, args: splitArgs(f.argsText).args, cwd: f.cwd.trim() || undefined, env: [], headers: [] };
 }
 
 // ---------------------------------------------------------------- editor form
@@ -539,4 +726,19 @@ export function draftFromForm(f: McpForm): { draft?: McpServerDraft; errors: For
   if (o.redirectUri.trim()) oauth.redirectUri = o.redirectUri.trim();
   if (Object.keys(oauth).length > 0 && f.transport !== "stdio") draft.oauth = oauth;
   return Object.keys(errors).length ? { errors } : { draft, errors };
+}
+
+// ---------------------------------------------------------------- row actions
+
+/**
+ * What a row offers. A hidden imported server (a server of the same name wins) gets no working
+ * switch and no test: sessions don't load it, omp switches other tools' servers through user-level
+ * lists keyed by name (they would switch the winner too), and a test without a scope tests the
+ * winner. Sign-in and sign-out: servers of omp's own `mcp.json` files (its `/mcp reauth` and
+ * `/mcp unauth` never read the `.mcp.json` siblings) that connect over HTTP and are on.
+ */
+export function rowActions(s: Pick<McpServer, "origin" | "shadowed" | "enabled" | "path" | "server">): { toggle: boolean; test: boolean; signIn: boolean } {
+  const hiddenImport = s.origin === "imported" && s.shadowed;
+  const inMcpJson = /(^|[\\/])mcp\.json$/.test(s.path ?? "");
+  return { toggle: !hiddenImport, test: !hiddenImport, signIn: canSignIn(s.server) && s.origin !== "imported" && s.enabled && inMcpJson };
 }

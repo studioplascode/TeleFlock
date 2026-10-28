@@ -1,8 +1,8 @@
-import { ArrowLeft, Blocks, Check, ExternalLink, FlaskConical, KeyRound, Library, Search, Sparkles, SquarePen } from "lucide-react";
+import { ArrowLeft, Blocks, ExternalLink, FlaskConical, Library, Search, Sparkles, SquarePen } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { core, linkProps, toApiError } from "@/core";
 import type { McpList, McpRegistryEntry, McpRegistryInput, McpScope, McpServer, McpServerDraft } from "@/core/gen";
-import { Button, cn, SegmentedControl, Spinner, Switch, useIsMobile } from "@/design";
+import { Button, cn, SegmentedControl, Switch, useIsMobile } from "@/design";
 import { tildify } from "@/features/workspace/shared/paths";
 import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
 import { RegistrySearch, TemplateGrid, useRegistrySearch } from "./Chooser";
@@ -12,21 +12,24 @@ import {
   applyTemplateInput,
   draftFromForm,
   emptyForm,
+  endpointKind,
   errorField,
   type FieldKey,
   fieldMessage,
+  findSame,
+  formEndpoint,
   type FormErrors,
   formFromDraft,
   type McpForm,
-  plural,
   registryDefaults,
   registryInputError,
+  rowActions,
+  type RowTest,
   scopeOf,
+  serverKey,
   uniqueName,
 } from "./model";
-import { Banner, DefinitionSummary, ErrorText, LetterMark, StatusChip, TestOutcome } from "./parts";
-import type { RowTest } from "./ServerRow";
-import { SignInPanel } from "./SignIn";
+import { Banner, DefinitionSummary, LetterMark, SameServerNote, TestOutcome } from "./parts";
 import type { McpTemplate } from "./templates";
 import type { McpQuery } from "./useMcp";
 
@@ -40,7 +43,7 @@ export interface ServerEditorProps {
   home?: string;
   /** The page's project folder (absent: All projects). */
   cwd?: string;
-  /** The live list (names in use; the saved server's status after saving). */
+  /** The live list (names in use, servers already set up). */
   list?: McpList;
   /** The server to edit (imported: shown read-only); absent: add one. */
   server?: McpServer;
@@ -52,8 +55,8 @@ export interface ServerEditorProps {
   /** Switch state of `server` (with a change on its way) and the switch itself (imported servers). */
   enabled?: boolean;
   setEnabled: McpQuery["setEnabled"];
-  /** A sign-in finished: read the list again. */
-  onSignedIn(): void;
+  /** Show this server's row on the page (the sheet closes): the one just saved, or one already set up. */
+  onReveal(key: string): void;
 }
 
 function SourceHeader({ source, onChange }: { source: Source; onChange(): void }) {
@@ -108,10 +111,12 @@ function registryErrors(e: McpRegistryEntry | undefined, values: Readonly<Record
 
 /**
  * Add / edit an MCP server (dialog on desktop, full-height sheet on phones). Adding starts on a
- * chooser (Popular templates, Smithery registry, Custom); a saved HTTP server that wants a sign-in
- * offers it right here. Imported servers open read-only. Mount per opening.
+ * chooser (Popular templates, Smithery registry, Custom) that marks servers the host already has;
+ * the form flags a URL / package that one already reaches. Saving closes the sheet on the saved
+ * server's row, which shows how it connects (and offers Sign in when it wants one). Imported
+ * servers open read-only. Mount per opening.
  */
-export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: initialTab, open, onOpenChange, mutate, enabled, setEnabled, onSignedIn }: ServerEditorProps) {
+export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: initialTab, open, onOpenChange, mutate, enabled, setEnabled, onReveal }: ServerEditorProps) {
   const mobile = useIsMobile();
   const adding = !server;
   const imported = server?.origin === "imported";
@@ -124,19 +129,30 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
   const [hostError, setHostError] = useState<{ field: FieldKey | null; message: string; hint?: string } | null>(null);
   const [test, setTest] = useState<RowTest | null>(null);
   const [saving, setSaving] = useState(false);
-  const [step, setStep] = useState<"edit" | "saved" | "signin">("edit");
-  const [saved, setSaved] = useState<{ name: string; scope: McpScope; path: string } | null>(null);
   const search = useRegistrySearch(hostId);
   const outcomeRef = useRef<HTMLDivElement>(null);
+  /** The row the sheet closed on (focus goes there). */
+  const revealed = useRef<string | null>(null);
 
   const template = source?.kind === "template" ? source.template : undefined;
   const entry = source?.kind === "registry" ? source.entry : undefined;
   const choosing = adding && !source && tab !== "custom";
-  const taken = (list?.servers ?? []).filter((s) => s.origin === form.scope).map((s) => s.name);
+  const servers = list?.servers ?? [];
+  const taken = servers.filter((s) => s.origin === form.scope).map((s) => s.name);
   const built = draftFromForm(form);
   const inputErrors = touched ? { ...templateInputErrors(template, inputs), ...registryErrors(entry, inputs) } : {};
   const errors: FormErrors = { ...(touched ? built.errors : {}) };
   if (hostError?.field) errors[hostError.field] = fieldMessage(hostError.message);
+
+  // A server already set up that the form's URL / command line reaches too (not the one edited).
+  const probe = formEndpoint(form);
+  const same = imported || choosing ? undefined : findSame(probe, servers, server && serverKey(server))[0];
+
+  const reveal = (key: string) => {
+    revealed.current = key;
+    onReveal(key);
+    onOpenChange(false);
+  };
 
   // Bring a test's outcome into view when it arrives.
   const settled = test && test.startedAt === undefined;
@@ -217,17 +233,13 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
     setHostError(null);
     mutate(
       (h) => h.call("mcp.save", { scope, ...(cwd ? { cwd } : {}), name, ...(server ? { previousName: server.name } : {}), server: draft }),
-      server ? "Saved" : "Added",
+      server ? `Saved “${name}”` : `Added “${name}”`,
+      server ? "change" : "add",
     ).then(
-      (changed) => {
+      () => {
         setSaving(false);
-        const s = changed.list.servers.find((x) => x.name === name && x.origin === scope);
-        const remote = draft.transport !== "stdio";
-        const wantedSignIn = test?.result?.status === "needsAuth" || server?.status === "needsAuth" || s?.status === "needsAuth";
-        if (s && remote && s.enabled && !s.signedIn && (adding || wantedSignIn)) {
-          setSaved({ name, scope, path: s.path ?? (scope === "project" ? (changed.list.projectPath ?? "") : changed.list.userPath) });
-          setStep("saved");
-        } else onOpenChange(false);
+        // Its row tells how it went: checking, then its status, with Sign in when it wants one.
+        reveal(serverKey({ origin: scope, name }));
       },
       (e: unknown) => {
         setSaving(false);
@@ -237,7 +249,6 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
     );
   };
 
-  const savedServer = saved ? list?.servers.find((x) => x.name === saved.name && x.origin === saved.scope) : undefined;
   const testing = test?.startedAt !== undefined;
 
   // ---------------------------------------------------------------- body
@@ -247,75 +258,27 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
   let footer: ReactNode;
   const generalError = hostError && !hostError.field && <p className="text-xs font-semibold text-error">{[hostError.message, hostError.hint].filter(Boolean).join(" — ")}</p>;
 
-  if (step === "signin" && saved) {
-    title = `Sign in to ${saved.name}`;
-    description = "omp signs in on the host; you approve it in this device's browser.";
-    body = <SignInPanel hostId={hostId} target={{ name: saved.name, scope: saved.scope, cwd }} onDone={onSignedIn} onClose={() => onOpenChange(false)} />;
-    footer = undefined;
-  } else if (step === "saved" && saved) {
-    const status = savedServer?.status ?? "checking";
-    title = `Saved “${saved.name}”`;
-    description = <span className="font-mono text-2xs">{tildify(saved.path, home)}</span>;
-    body = (
-      <div className="flex flex-col gap-3 pb-1">
-        <div className="flex items-center gap-3 rounded-lg bg-white/[0.03] px-3.5 py-3 shadow-hairline">
-          <span className="grid size-8 shrink-0 place-items-center rounded-full bg-done/14 text-done">
-            <Check className="size-4" />
-          </span>
-          <p className="min-w-0 flex-1 text-sm text-ink-2">omp sessions on {hostName} load it from now on; running ones pick it up as they reload.</p>
-        </div>
-        <div className="flex flex-col gap-2.5 rounded-lg well px-3.5 py-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-mute">Status</span>
-            <StatusChip status={status} tools={savedServer?.tools.length ?? 0} />
-          </div>
-          {status === "checking" && (
-            <p className="flex items-center gap-2 text-xs text-mute">
-              <Spinner size={13} /> Connecting the way an omp session would…
-            </p>
-          )}
-          {status === "needsAuth" && <p className="text-xs text-ink-2">It wants a sign-in. omp opens it on the host; you approve it here, in this device's browser.</p>}
-          {status === "connected" && savedServer && savedServer.tools.length > 0 && (
-            <p className="text-xs text-mute">
-              {plural(savedServer.tools.length, "tool")}: {savedServer.tools.slice(0, 6).map((t) => t.name).join(", ")}
-              {savedServer.tools.length > 6 && "…"}
-            </p>
-          )}
-          {status === "failed" && savedServer?.error && <ErrorText text={savedServer.error} />}
-        </div>
-      </div>
-    );
-    footer =
-      status === "needsAuth" ? (
-        <div className="flex w-full items-center justify-end gap-2">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Later
-          </Button>
-          <Button variant="primary" icon={<KeyRound />} onClick={() => setStep("signin")} className={mobile ? "flex-1" : undefined}>
-            Sign in now
-          </Button>
-        </div>
-      ) : (
-        <div className="flex w-full items-center justify-end gap-2">
-          <Button variant="primary" onClick={() => onOpenChange(false)} className={mobile ? "flex-1" : undefined}>
-            Done
-          </Button>
-        </div>
-      );
-  } else if (imported && server) {
+  if (imported && server) {
+    const act = rowActions(server);
     title = server.name;
     description = `From ${server.sourceLabel ?? "another tool"}`;
     body = (
       <div className="flex flex-col gap-4 pb-1">
         <Banner tone="warn" title={`Defined in ${server.sourceLabel ?? "another tool"}`}>
-          <span className="font-mono text-2xs">{tildify(server.path ?? "", home)}</span> — change it there. You can switch it off for omp here.
+          <span className="font-mono text-2xs">{tildify(server.path ?? "", home)}</span> — change it there.{act.toggle && " You can switch it off for omp here."}
         </Banner>
-        <label className="flex cursor-pointer items-center gap-3 rounded-md well px-3.5 py-3">
+        <label className={cn("flex items-center gap-3 rounded-md well px-3.5 py-3", act.toggle && "cursor-pointer")}>
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="text-sm font-bold">Used by omp</span>
-            <span className="text-2xs text-mute-2">{enabled ? "omp sessions on this host start it" : "Switched off for omp (other tools still use it)"}</span>
+            <span className="text-2xs text-mute-2">
+              {!act.toggle
+                ? "No: a server of the same name takes precedence. Switching this one would switch that one too."
+                : enabled
+                  ? "omp sessions on this host start it"
+                  : "Switched off for omp (other tools still use it)"}
+            </span>
           </span>
-          <Switch checked={!!enabled} onCheckedChange={(v) => setEnabled(server, v)} label="Used by omp" />
+          <Switch checked={act.toggle && !!enabled} disabled={!act.toggle} onCheckedChange={(v) => setEnabled(server, v)} label="Used by omp" />
         </label>
         <DefinitionSummary server={server.server} extra={server.extra} className="px-0.5" />
         <div ref={outcomeRef}>{test && <TestOutcome testing={test.startedAt} result={test.result} error={test.error} />}</div>
@@ -323,9 +286,11 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
     );
     footer = (
       <div className="flex w-full items-center justify-end gap-2">
-        <Button variant="secondary" icon={<FlaskConical />} loading={testing} onClick={runTest} className={mobile ? "flex-1" : undefined}>
-          Test
-        </Button>
+        {act.test && (
+          <Button variant="secondary" icon={<FlaskConical />} loading={testing} onClick={runTest} className={mobile ? "flex-1" : undefined}>
+            Test
+          </Button>
+        )}
         <Button variant="primary" onClick={() => onOpenChange(false)} className={mobile ? "flex-1" : undefined}>
           Close
         </Button>
@@ -371,6 +336,7 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
           scopeChoice={adding && cwd && list?.projectPath ? { projectPath: list.projectPath, userPath: list.userPath } : undefined}
           savedIn={server?.path}
           sourceInputs={sourceInputs}
+          sameNote={same && <SameServerNote server={same} what={endpointKind(probe)} onOpen={() => reveal(serverKey(same))} />}
           autoFocusName={!mobile && !source && !server}
         />
         <div ref={outcomeRef}>
@@ -382,7 +348,11 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
     );
     body = choosing ? (
       <div className="flex flex-col gap-4">
-        {tab === "popular" ? <TemplateGrid onPick={pickTemplate} /> : <RegistrySearch search={search} onPick={pickEntry} autoFocus={!mobile} />}
+        {tab === "popular" ? (
+          <TemplateGrid servers={servers} onPick={pickTemplate} onOpen={(s) => reveal(serverKey(s))} />
+        ) : (
+          <RegistrySearch search={search} servers={servers} onPick={pickEntry} onOpen={(s) => reveal(serverKey(s))} autoFocus={!mobile} />
+        )}
       </div>
     ) : (
       formEl
@@ -438,7 +408,7 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
             </Button>
           </div>
           <Button variant="primary" loading={saving} onClick={save} className={mobile ? "flex-1" : undefined}>
-            {server ? "Save" : "Add server"}
+            {server ? "Save" : same ? "Add a second copy" : "Add server"}
           </Button>
         </div>
       </div>
@@ -446,7 +416,23 @@ export function ServerEditor({ hostId, hostName, home, cwd, list, server, tab: i
   }
 
   return (
-    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title={title} description={description} icon={step === "signin" ? <KeyRound /> : <Blocks />} width={760} tall footer={footer}>
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={title}
+      description={description}
+      icon={<Blocks />}
+      width={760}
+      tall
+      footer={footer}
+      onCloseAutoFocus={(e) => {
+        const key = revealed.current;
+        if (!key) return;
+        // Focus goes to the row the sheet closed on, not back to the button that opened it.
+        e.preventDefault();
+        document.querySelector<HTMLElement>(`[data-mcp-row="${CSS.escape(key)}"] [aria-expanded]`)?.focus({ preventScroll: true });
+      }}
+    >
       {body}
     </ResponsiveDialog>
   );

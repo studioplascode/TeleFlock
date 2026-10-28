@@ -1,24 +1,17 @@
 import {
-  Activity,
   Archive,
   ArchiveRestore,
   ArrowLeft,
-  BarChart3,
   Bell,
   BellOff,
-  Blocks,
-  KeyRound,
   Bot,
-  Clock3,
   CornerDownLeft,
   FolderGit2,
   FolderOpen,
   GitBranchPlus,
   GitFork,
   History,
-  Inbox,
   Keyboard,
-  LayoutDashboard,
   Columns2,
   MessageSquareReply,
   PanelLeft,
@@ -26,7 +19,6 @@ import {
   PlugZap,
   Send,
   Server,
-  Settings2,
   Sparkles,
   Square,
   SquareTerminal,
@@ -68,7 +60,7 @@ import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { toggleSplit } from "@/features/shell/keyboard";
 import { toggleSidebar } from "@/features/shell/sidebarState";
 import { COLUMN_STATUS, PHASE_STATUS } from "@/features/shell/status";
-import { ACTIONS, type ActionDef, VIEWS } from "@/features/shell/vocab";
+import { ACTIONS, type ActionDef, type ViewDef, VIEWS } from "@/features/shell/vocab";
 import { paneDetail, paneName } from "@/features/terminal/panes";
 import { rankItem } from "./fuzzy";
 import { type PaletteCommand, useContributed, useRecents } from "./registry";
@@ -198,22 +190,23 @@ function useEntries(): Entry[] {
     });
   }
 
-  const views: { id: Route["name"] & keyof typeof VIEWS; icon: ReactNode; keys: string[] }[] = [
-    { id: "board", icon: <LayoutDashboard />, keys: ["home", "kanban", "flock", "lanes"] },
-    { id: "dispatch", icon: <Send />, keys: ["send", "fire", "tasks", "many agents", "worktree", "quick"] },
-    { id: "inbox", icon: <Inbox />, keys: ["needs you", "questions", "updates", "notifications"] },
-    { id: "activity", icon: <Activity />, keys: ["timeline", "feed", "history"] },
-    { id: "usage", icon: <BarChart3 />, keys: ["cost", "tokens", "spend", "limits", "subscription"] },
-    { id: "hosts", icon: <Server />, keys: ["machines", "connections"] },
-    { id: "settings", icon: <Settings2 />, keys: ["preferences", "options"] },
-    { id: "automations", icon: <Clock3 />, keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
-    { id: "omp", icon: <Bot />, keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },
-    { id: "mcp", icon: <Blocks />, keys: ["mcp", "tools", "servers", "model context protocol", "integrations", "plugins", "oauth"] },
-    { id: "accounts", icon: <KeyRound />, keys: ["accounts", "login", "sign in", "subscription", "provider", "claude", "chatgpt", "codex", "link account"] },
+  // Icon, label, shortcut and description from VIEWS: the same as every other way to a page.
+  const views: { id: Route["name"] & keyof typeof VIEWS; keys: string[] }[] = [
+    { id: "board", keys: ["home", "kanban", "flock", "lanes"] },
+    { id: "dispatch", keys: ["send", "fire", "tasks", "many agents", "worktree", "quick"] },
+    { id: "inbox", keys: ["needs you", "questions", "updates", "notifications"] },
+    { id: "activity", keys: ["timeline", "feed", "history"] },
+    { id: "usage", keys: ["cost", "tokens", "spend", "limits", "subscription"] },
+    { id: "hosts", keys: ["machines", "connections"] },
+    { id: "settings", keys: ["preferences", "options"] },
+    { id: "automations", keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
+    { id: "omp", keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },
+    { id: "mcp", keys: ["mcp", "tools", "servers", "model context protocol", "integrations", "plugins", "oauth"] },
+    { id: "accounts", keys: ["accounts", "login", "sign in", "subscription", "provider", "claude", "chatgpt", "codex", "link account"] },
   ];
   for (const v of views) {
-    const def: ActionDef = VIEWS[v.id];
-    entries.push({ id: `view:${v.id}`, title: def.label, group: "Views", keywords: v.keys, icon: v.icon, shortcut: def.shortcut, hint: def.description, run: () => navigate({ name: v.id } as Route) });
+    const def: ViewDef = VIEWS[v.id];
+    entries.push({ id: `view:${v.id}`, title: def.label, group: "Views", keywords: v.keys, icon: <def.icon />, shortcut: def.shortcut, hint: def.description, run: () => navigate({ name: v.id } as Route) });
   }
   if (defaultHost) {
     entries.push({ id: "view:terminal", title: "Terminal", group: "Views", keywords: ["shell", "tty", "herdr"], icon: <SquareTerminal />, run: () => navigate({ name: "terminal", hostId: defaultHost }) });

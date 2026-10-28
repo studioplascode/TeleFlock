@@ -5,7 +5,8 @@
  *
  * - browser: finishes ~2.5 s after the app opened its URL while a same-port tunnel to the callback
  *   port is open (the redirect reaches the "host"); without one the browser "lands on an error page"
- *   and the flow waits for the pasted address.
+ *   and the flow waits for the pasted address. Like omp's callback server, it gives up after 5 min
+ *   (`expiresAt` counts that down, as a real host's does).
  * - device: finishes ~5 s after the app opened the device page.
  * - paste / prompt: finish on a submission the script's `check` accepts.
  */
@@ -18,8 +19,11 @@ export interface DemoAuthScript {
   title: string;
   subject?: string;
   method: "browser" | "device" | "paste" | "prompt";
-  /** Browser flows: an authorization URL with `redirect_uri=http://localhost:<port>/…`. */
-  url: string;
+  /**
+   * The page the user opens. Browser flows: an authorization URL with
+   * `redirect_uri=http://localhost:<port>/…`; key prompts may have none.
+   */
+  url?: string;
   userCode?: string;
   instructions?: string;
   prompt?: AuthPrompt;
@@ -42,6 +46,8 @@ const START_MS = 600;
 const BROWSER_MS = 2500;
 const DEVICE_MS = 5000;
 const TTL_MS = 10 * 60_000;
+/** omp's loopback callback server waits this long (`omp login`, MCP sign-ins), then the sign-in fails. */
+const CALLBACK_WAIT_MS = 5 * 60_000;
 const KEEP_MS = 10 * 60_000;
 const MAX_WAIT_MS = 20_000;
 
@@ -179,18 +185,20 @@ export class DemoAuthFlows {
 
   private publish(e: Entry): void {
     const s = e.script;
-    const port = s.method === "browser" ? redirectPort(s.url) : undefined;
+    const port = s.method === "browser" && s.url ? redirectPort(s.url) : undefined;
     this.change(e, (f) => {
       f.state = "waiting";
       f.url = s.url;
       f.instructions = s.instructions;
       f.userCode = s.userCode;
       f.callbackPort = port;
-      f.redirectUri = port != null ? (new URL(s.url).searchParams.get("redirect_uri") ?? undefined) : undefined;
+      f.redirectUri = port != null && s.url ? (new URL(s.url).searchParams.get("redirect_uri") ?? undefined) : undefined;
       f.paste = s.method === "paste" ? "primary" : port != null ? "fallback" : "none";
       f.prompt = s.method === "prompt" ? s.prompt : undefined;
       f.message = s.method === "device" ? "Waiting for you to enter the code…" : s.method === "browser" ? "Waiting for browser authentication..." : undefined;
+      if (port != null) f.expiresAt = Math.min(f.expiresAt ?? Number.POSITIVE_INFINITY, this.clock.now() + CALLBACK_WAIT_MS);
     });
+    if (port != null) e.cancelTimers.push(this.clock.after(CALLBACK_WAIT_MS, () => this.end(e, "failed", "OAuth callback cancelled: TimeoutError: The operation timed out.")));
   }
 
   private done(e: Entry): void {

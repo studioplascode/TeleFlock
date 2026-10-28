@@ -18,7 +18,7 @@ const STUCK_MS = 20_000;
 const WAITING: Partial<Record<LinkReason, { title: string; explain: string; stuck?: string; retry?: true }>> = {
   starting: {
     title: "omp is starting…",
-    explain: "Waiting for its TeleFlock extension or its collab room to come up. This usually takes a few seconds.",
+    explain: "Waiting for omp to load the TeleFlock bridge (TeleFlock's omp extension) or to open its collab room. This usually takes a few seconds.",
     stuck: "Still starting. omp may be waiting on something in its terminal, such as a trust prompt or an error.",
   },
   syncing: { title: "Loading the session…", explain: "Reading omp's session file and what is in flight right now." },
@@ -27,7 +27,7 @@ const WAITING: Partial<Record<LinkReason, { title: string; explain: string; stuc
   reconnecting: { title: "Reconnecting to the collab room…", explain: "The connection to omp's room dropped. The transcript stays while it comes back.", retry: true },
   bridgeLost: {
     title: "Reconnecting to omp…",
-    explain: "The TeleFlock extension's connection dropped (omp restarting or reloading its extensions). The transcript stays; without it for ~10 s TeleFlock switches to omp's collab room if one is open.",
+    explain: "The TeleFlock bridge lost its connection (omp restarting or reloading its extensions). The transcript stays; if the bridge isn't back within ~10 s, TeleFlock switches to omp's collab room when one is open.",
     stuck: "omp hasn't come back. Check its terminal; the session may have exited.",
   },
   roomClosed: {
@@ -144,7 +144,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
           ? { title: "This session is shared read-only", description: "omp's room only lets guests watch. Connect shares it again with control, while it's idle." }
           : {
               title: "This session isn't connected to TeleFlock yet",
-              description: "omp runs without the TeleFlock extension and isn't sharing a room on TeleFlock's relay (it was started outside TeleFlock, or restored by herdr). Connect makes it share itself while it's idle; nothing else changes.",
+              description: "omp runs without the TeleFlock bridge (TeleFlock's omp extension) and isn't sharing a room on TeleFlock's relay: it was started outside TeleFlock, or restored by herdr. Connect makes it share itself while it's idle; nothing else changes.",
             };
     return (
       <EmptyState
@@ -155,7 +155,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
           <>
             {copy.description}
             {reason !== "sharedElsewhere" && reason !== "viewOnly" && !omp?.bridge && (
-              <span className="mt-2 block text-xs text-mute-2">Install the TeleFlock extension for every session (Hosts → Host setup) and sessions show up live by themselves.</span>
+              <span className="mt-2 block text-xs text-mute-2">Install the TeleFlock bridge for every session (Hosts → Host setup) and sessions show up live by themselves.</span>
             )}
           </>
         }
@@ -182,7 +182,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
           className="flex-1"
           icon={<CircleAlert className="text-error" />}
           title="TeleFlock's relay isn't running on this host"
-          description={cause ?? "Sessions without the TeleFlock extension reach TeleFlock through its relay. Host setup says what's wrong and fixes it."}
+          description={cause ?? "Sessions without the TeleFlock bridge reach TeleFlock through its relay. Host setup says what's wrong and fixes it."}
           action={actions(
             <Button key="setup" variant="primary" icon={<ShieldCheck />} onClick={() => (window.location.hash = `#/hosts?setup=${encodeURIComponent(hostId)}`)}>
               Open host setup
@@ -231,12 +231,12 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
       />
     );
 
-  // Live, but through omp's collab room because the extension's connection went away: say so, quietly.
+  // Live, but through omp's collab room because the bridge's connection went away: say so, quietly.
   if (reason === "fallbackCollab")
     return (
       <>
         <p role="status" className="shrink-0 truncate rounded-lg bg-white/[0.03] px-4 py-1.5 text-2xs font-semibold text-mute shadow-hairline" title={cause}>
-          Live through omp's collab room: the TeleFlock extension's connection went away{cause ? ` (${cause})` : ""}.
+          Live through omp's collab room: the TeleFlock bridge lost its connection{cause ? ` (${cause})` : ""}.
         </p>
         {children}
       </>

@@ -81,7 +81,7 @@ export {
   ContextMenuLabel,
   ContextMenuSeparator,
 } from "./ui/Menu";
-export { Toaster, toast, dismissToast, useToastStore } from "./ui/Toast";
+export { Toaster, toast, dismissToast, toastAnchorsChanged, useToastStore } from "./ui/Toast";
 export type { ToastInput } from "./ui/Toast";
 export { ScrollArea } from "./ui/ScrollArea";
 export { EmptyState } from "./ui/EmptyState";

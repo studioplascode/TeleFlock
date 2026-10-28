@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use tf_proto::*;
 
-use super::{KeptOriginal, Replica, Signal, Update};
+use super::{KeptOriginal, Replica, RowNote, Signal, Update};
 use crate::frame::{HostFrame, SnapshotChunk, Welcome};
 use crate::guest::{GuestEvent, Snapshot};
 
@@ -653,9 +653,48 @@ fn s12_relay_restart_resync() {
     // Paging.
     let first = r.replica.snapshot(10);
     assert!(first.has_more);
-    let older = r.replica.history(first.cursor.as_deref(), 10);
+    let older = r.replica.history(first.cursor.as_deref(), 10).expect("a cursor of the replica's");
     assert_eq!(older.items.len(), 10);
     assert_ne!(older.items[9].id(), first.items[0].id());
+}
+
+/// Notice and retry ids belong to one replica's lifetime: a reload continues them, and another
+/// replica of the session (tf-hostd restarted) never reuses them, so a client that kept rows of
+/// the earlier one never mistakes an old notice for a new one. A cursor the replica does not
+/// have pages nothing (never the newest rows).
+#[test]
+fn live_only_ids_are_unique_per_replica_lifetime() {
+    let (at0, snap) = snapshot_from(&load("00-join"), false).unwrap();
+    let ev = |event: serde_json::Value| GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "event", "event": event })));
+    let notice = |text: &str| ev(serde_json::json!({ "type": "notice", "level": "warning", "message": text }));
+    let retry = ev(serde_json::json!({ "type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 1000, "errorMessage": "overloaded" }));
+    let live_only = |rep: &Replica| -> Vec<String> {
+        rep.snapshot(usize::MAX).items.iter().filter(|i| matches!(i, TranscriptItem::Notice(_))).map(|i| i.id().to_owned()).collect()
+    };
+    let mut first = Replica::new("x");
+    first.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    first.apply(&notice("one"), at0);
+    first.apply(&retry, at0);
+    let before = live_only(&first);
+    assert_eq!(before.len(), 2);
+    // A reload rebuilds the rows from the entries (live-only ones go); new ones continue.
+    first.apply(&GuestEvent::Snapshot(Snapshot { resync: true, ..snap.clone() }), at0);
+    first.apply(&notice("two"), at0);
+    let reloaded = live_only(&first);
+    assert_eq!(reloaded.len(), 1);
+    assert!(!before.contains(&reloaded[0]));
+    // tf-hostd restarted: a new replica of the same session, the same events.
+    let mut second = Replica::new("x");
+    second.apply(&GuestEvent::Snapshot(snap), at0);
+    second.apply(&notice("one"), at0);
+    second.apply(&retry, at0);
+    let again = live_only(&second);
+    assert_eq!(again.len(), 2);
+    assert!(again.iter().all(|id| !before.contains(id) && !reloaded.contains(id)), "{before:?} {reloaded:?} {again:?}");
+
+    assert!(second.history(Some(&before[0]), 10).is_none(), "a row of the earlier replica");
+    let newest = second.snapshot(1).items[0].id().to_owned();
+    assert!(second.history(Some(&newest), 10).is_some_and(|p| !p.items.is_empty() && p.items.iter().all(|i| i.id() != newest)));
 }
 
 #[test]
@@ -1185,4 +1224,232 @@ fn merge_queue_dedupes_bridge_chips() {
     let m = super::merge_queue(&bridge, &sent);
     assert_eq!(m.steering, vec!["a ↵ b".to_string(), "new".into()]);
     assert_eq!(m.follow_up, vec!["later".to_string(), "later".into()]);
+}
+
+/// The notes a run took, as tf-hostd persists them ([`Signal::Noted`]).
+fn notes_of(r: &Run) -> Vec<(String, RowNote)> {
+    r.signals()
+        .into_iter()
+        .filter_map(|s| match s {
+            Signal::Noted { id, note } => Some((id.clone(), note.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a fresh replica builds from scenario `name`'s entries after `r` ran it live (tf-hostd
+/// restarted at the end): the snapshot the scenario ran on (or its latest resync), every entry
+/// frame after it, omp's latest state, and the notes the live run took, handed back first.
+fn rebuilt(name: &str, r: &Run) -> Replica {
+    let (mut at, mut snap) = snapshot_from(&load("00-join"), false).unwrap();
+    let rows: Vec<Row> = load(name).into_iter().filter(|r| r.dir == "h2g").collect();
+    let mut i = 0;
+    while i < rows.len() {
+        if rows[i].frame["t"] == "welcome" {
+            let mut j = i + 1;
+            while j < rows.len() && !(rows[j].frame["t"] == "snapshot-chunk" && rows[j].frame["final"] == true) {
+                j += 1;
+            }
+            (at, snap) = snapshot_from(&rows[i..=j.min(rows.len() - 1)], true).unwrap();
+            i = j + 1;
+            continue;
+        }
+        if rows[i].frame["t"] == "entry" {
+            snap.entries.push(rows[i].frame["entry"].clone());
+        }
+        at = at.max(rows[i].at);
+        i += 1;
+    }
+    snap.welcome.state = r.replica.state().clone();
+    let mut fresh = Replica::new("agent");
+    fresh.keep_notes(notes_of(r));
+    fresh.apply(&GuestEvent::Snapshot(snap), at);
+    fresh
+}
+
+/// Rows that only the live stream builds: notices (collab, retries, interrupts).
+fn file_rows(rows: Vec<TranscriptItem>) -> Vec<TranscriptItem> {
+    rows.into_iter().filter(|i| !matches!(i, TranscriptItem::Notice(_))).collect()
+}
+
+/// Every scenario's rows, built live and settled by their entries, equal what a fresh replica
+/// rebuilds from the same entries with the notes the live one took: field for field, so a client
+/// holding them by hash keeps them across a resync or a tf-hostd restart.
+#[test]
+fn rows_built_live_equal_rows_rebuilt_from_the_entries() {
+    let names = [
+        "01-prompt-text",
+        "01b-prompt-streaming-thinking",
+        "02-bash-tool",
+        "03-edit-tool",
+        "04-todo",
+        "05-ask-ui-response",
+        "05a-ask-wrong-label",
+        "06-abort",
+        "07-task-subagent",
+        "09-agent-cmd-chat",
+        "10-injected-switch-thinking",
+        "11-guest-slash-not-executed",
+        "12-relay-restart",
+        "15-tui-typed-prompt-mirrored",
+        "16-tool-approval",
+        "17-task-completion-probe",
+        "18-irc",
+        "18b-irc-incoming",
+    ];
+    let mut thought = 0;
+    for name in names {
+        // The scenario's first prompt came from a TeleFlock device.
+        let first_prompt = load(name).into_iter().find_map(|row| {
+            let m = &row.frame["event"]["message"];
+            (row.frame["event"]["type"] == "message_start" && matches!(m["role"].as_str(), Some("user" | "custom")))
+                .then(|| super::util::content_text(m.get("content")))
+        });
+        let r = run_with(name, |rep| {
+            if let Some(text) = &first_prompt {
+                rep.expect_prompt(text, "pixel");
+            }
+        });
+        assert!(!r.replica.is_streaming(), "{name}: the scenario ends idle");
+        // omp 18.12 kept reporting an async task's progress after its result: the live row follows
+        // it (`s07_task_subagent`), a rebuild shows the result as recorded.
+        let mut ended = std::collections::HashSet::new();
+        let mut late = std::collections::HashSet::new();
+        for row in load(name).iter().filter(|r| r.frame["t"] == "event") {
+            let (ty, call) = (&row.frame["event"]["type"], row.frame["event"]["toolCallId"].as_str().unwrap_or(""));
+            if ty == "tool_execution_end" {
+                ended.insert(call.to_owned());
+            } else if ty == "tool_execution_update" && ended.contains(call) {
+                late.insert(format!("t:{call}"));
+            }
+        }
+        let fresh = rebuilt(name, &r);
+        let live = file_rows(r.rows());
+        let again = file_rows(fresh.snapshot(usize::MAX).items);
+        let ids = |rows: &[TranscriptItem]| rows.iter().map(|i| i.id().to_owned()).collect::<Vec<_>>();
+        assert_eq!(ids(&live), ids(&again), "{name}: rows");
+        for (a, b) in live.iter().zip(&again) {
+            match (a, b) {
+                (TranscriptItem::Tool(x), TranscriptItem::Tool(y)) if late.contains(&x.id) => {
+                    let recorded = |t: &ToolItem| ToolItem { view: None, output: None, ..t.clone() };
+                    assert_eq!(recorded(x), recorded(y), "{name}: {}", x.id);
+                }
+                _ => assert_eq!(a, b, "{name}: row {} built live differs from its rebuild", a.id()),
+            }
+            if let TranscriptItem::Thinking(t) = a {
+                thought += usize::from(t.duration_ms.is_some());
+            }
+        }
+        if let Some(text) = &first_prompt {
+            for i in &live {
+                if let TranscriptItem::User(u) = i
+                    && u.text == *text
+                    && !u.synthetic
+                {
+                    assert_eq!(u.author.as_deref(), Some("pixel"), "{name}: the prompt's sender is kept");
+                }
+            }
+        }
+    }
+    assert!(thought > 0, "thinking durations came back through the notes");
+}
+
+/// A steer, its sender and a thought's duration are only seen live: the notes bring them back to
+/// rows rebuilt from the entries, and a tool call's recorded arguments and timestamps make its row
+/// the same either way, whatever `tool_execution_start` carried.
+#[test]
+fn notes_and_recorded_calls_survive_a_rebuild() {
+    let (at0, snap) = snapshot_from(&load("00-join"), false).unwrap();
+    let t0 = at0 + 1000;
+    let ev = |event: serde_json::Value| GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "event", "event": event })));
+    let entry = |id: &str, message: serde_json::Value| GuestEvent::Frame(HostFrame::Entry {
+        entry: serde_json::json!({ "type": "message", "id": id, "timestamp": "2026-10-28T16:39:06.583Z", "message": message }),
+    });
+    let prompt = serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "list the files" }], "timestamp": t0 });
+    let thinking = |text: &str| serde_json::json!({ "type": "thinking", "thinking": text, "thinkingSignature": "sig" });
+    let call = serde_json::json!({ "type": "toolCall", "id": "c1", "name": "bash",
+        "arguments": { "i": "Listing files", "command": "ls", "cwd": null, "timeout": null, "env": { "A": "1", "B": null } } });
+    let streaming = |content: serde_json::Value| serde_json::json!({ "role": "assistant", "content": content, "timestamp": t0 + 10 });
+    let assistant = serde_json::json!({ "role": "assistant", "content": [thinking("Plan: run ls."), call.clone()], "stopReason": "toolUse",
+        "model": "gpt-6-luna", "timestamp": t0 + 10, "completedAt": t0 + 900, "usage": { "input": 10, "output": 5 } });
+    let result = serde_json::json!({ "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "isError": false,
+        "content": [{ "type": "text", "text": "a\nb\n" }], "details": {}, "timestamp": t0 + 1400 });
+    let steer = serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "skip hidden files" }], "timestamp": t0 + 1500 });
+    let answer = serde_json::json!({ "role": "assistant", "content": [{ "type": "text", "text": "a and b." }], "stopReason": "stop",
+        "model": "gpt-6-luna", "timestamp": t0 + 1600, "completedAt": t0 + 1700 });
+    let frames = vec![
+        (t0, ev(serde_json::json!({ "type": "agent_start" }))),
+        (t0, ev(serde_json::json!({ "type": "message_start", "message": prompt }))),
+        (t0, ev(serde_json::json!({ "type": "message_end", "message": prompt }))),
+        (t0 + 1, entry("e1", prompt.clone())),
+        (t0 + 5, ev(serde_json::json!({ "type": "turn_start" }))),
+        (t0 + 100, ev(serde_json::json!({ "type": "message_update", "message": streaming(serde_json::json!([thinking("Plan:")])),
+            "assistantMessageEvent": { "type": "thinking_delta" } }))),
+        (t0 + 700, ev(serde_json::json!({ "type": "message_update", "message": streaming(serde_json::json!([thinking("Plan: run ls."), call])),
+            "assistantMessageEvent": { "type": "toolcall_delta" } }))),
+        (t0 + 900, ev(serde_json::json!({ "type": "message_end", "message": assistant }))),
+        (t0 + 901, entry("e2", assistant.clone())),
+        // omp's validated copy of the arguments: no intent, no nulls.
+        (t0 + 910, ev(serde_json::json!({ "type": "tool_execution_start", "toolCallId": "c1", "toolName": "bash",
+            "args": { "command": "ls", "env": { "A": "1" } }, "intent": "Listing files" }))),
+        (t0 + 1450, ev(serde_json::json!({ "type": "tool_execution_end", "toolCallId": "c1", "toolName": "bash", "isError": false,
+            "result": { "content": [{ "type": "text", "text": "a\nb\n" }], "details": {} } }))),
+        (t0 + 1460, ev(serde_json::json!({ "type": "message_end", "message": result }))),
+        (t0 + 1461, entry("e3", result.clone())),
+        (t0 + 1500, ev(serde_json::json!({ "type": "message_start", "message": steer }))),
+        (t0 + 1500, ev(serde_json::json!({ "type": "message_end", "message": steer }))),
+        (t0 + 1501, entry("e4", steer.clone())),
+        (t0 + 1700, ev(serde_json::json!({ "type": "message_end", "message": answer }))),
+        (t0 + 1701, entry("e5", answer.clone())),
+        (t0 + 1800, ev(serde_json::json!({ "type": "agent_end", "messages": [] }))),
+    ];
+
+    let mut live = Replica::new("x");
+    live.expect_prompt("skip hidden files", "pixel");
+    let mut mirror = Mirror::default();
+    let mut notes = Vec::new();
+    for (at, frame) in std::iter::once((at0, GuestEvent::Snapshot(snap.clone()))).chain(frames) {
+        let up = live.apply(&frame, at);
+        up.events.iter().for_each(|e| mirror.apply(e));
+        notes.extend(up.signals.into_iter().filter_map(|s| match s {
+            Signal::Noted { id, note } => Some((id, note)),
+            _ => None,
+        }));
+    }
+    let rows = live.snapshot(usize::MAX).items;
+    let user = |id: &str| match live.item(id) {
+        Some(TranscriptItem::User(u)) => u.clone(),
+        other => panic!("{id}: {other:?}"),
+    };
+    assert!(!user(&format!("u{t0}")).steering, "the prompt started the turn");
+    let steered = user(&format!("u{}", t0 + 1500));
+    assert!(steered.steering && steered.author.as_deref() == Some("pixel"), "{steered:?}");
+    let Some(TranscriptItem::Thinking(th)) = live.item(&format!("a{}.0", t0 + 10)) else { panic!("thinking row") };
+    assert_eq!(th.duration_ms, Some(600), "measured while it streamed (t0+100 → t0+700)");
+    let tool = rows.iter().find_map(|i| if let TranscriptItem::Tool(t) = i { Some(t.clone()) } else { None }).unwrap();
+    assert_eq!(tool.args, serde_json::json!({ "command": "ls", "env": { "A": "1" } }), "the recorded call, nulls and intent dropped");
+    assert_eq!(tool.intent.as_deref(), Some("Listing files"));
+    assert_eq!(tool.duration_ms, Some(500), "the message's end (t0+900) to the result (t0+1400), not the events' arrival");
+    assert_eq!(mirror.rows().into_iter().cloned().collect::<Vec<_>>(), rows, "clients follow every settled row");
+
+    // tf-hostd restarted: the same entries and the persisted notes rebuild the same rows.
+    let mut snap2 = snap;
+    snap2.entries.extend([prompt, assistant, result, steer, answer].into_iter().enumerate().map(|(i, message)| {
+        serde_json::json!({ "type": "message", "id": format!("e{}", i + 1), "timestamp": "2026-10-28T16:39:06.583Z", "message": message })
+    }));
+    let mut fresh = Replica::new("x");
+    fresh.keep_notes(notes.clone());
+    fresh.apply(&GuestEvent::Snapshot(snap2.clone()), t0 + 5000);
+    assert_eq!(fresh.snapshot(usize::MAX).items, rows);
+
+    // Without the notes only what the file says comes back.
+    let mut bare = Replica::new("x");
+    bare.apply(&GuestEvent::Snapshot(snap2), t0 + 5000);
+    let Some(TranscriptItem::User(u)) = bare.item(&format!("u{}", t0 + 1500)) else { panic!() };
+    assert!(!u.steering && u.author.is_none());
+    // Notes merge in any order; fields never go back.
+    let mut note = RowNote { author: Some("pixel".into()), ..RowNote::default() };
+    assert!(note.merge(&RowNote { author: Some("laptop".into()), steering: true, thought_ms: Some(5) }));
+    assert_eq!(note, RowNote { author: Some("pixel".into()), steering: true, thought_ms: Some(5) });
+    assert!(!note.merge(&RowNote::default()));
 }

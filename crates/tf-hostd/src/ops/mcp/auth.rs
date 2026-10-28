@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tf_proto::{ApiError, AuthFlow, AuthFlowState, AuthPaste};
@@ -25,6 +25,8 @@ const FLOW_TTL: Duration = Duration::from_secs(6 * 60);
 /// What the driver needs to know about the server being signed in.
 pub struct Target {
     pub name: String,
+    /// The config file defining it: omp's lookup from `cwd` must land on this one.
+    pub path: PathBuf,
     /// omp's cwd for the sign-in (the project folder, or the neutral user-level folder).
     pub cwd: PathBuf,
     /// The project folder (sessions to reload after it); `None` for a user-scope server.
@@ -34,7 +36,7 @@ pub struct Target {
 }
 
 pub async fn start(ctx: &Ctx, env: &HelperEnv, t: Target) -> Result<AuthFlow, ApiError> {
-    let run = Running::start(env, &t.cwd, json!({ "op": "auth", "name": t.name })).await?;
+    let run = Running::start(env, &t.cwd, json!({ "op": "auth", "name": t.name, "path": t.path }), Instant::now() + FLOW_TTL).await?;
     let flow = authflow::start("mcp", t.name.clone(), Some(t.name.clone()), FLOW_TTL);
     let snapshot = flow.snapshot();
     tokio::spawn(drive(flow, run, ctx.arc(), t));
@@ -47,7 +49,7 @@ async fn drive(mut flow: FlowCtl, mut run: Running, ctx: Arc<Ctx>, t: Target) {
         tokio::select! {
             line = run.next() => {
                 let Some(line) = line else {
-                    let tail = run.stderr_tail();
+                    let tail = run.last_words().await;
                     let why = if tail.is_empty() { "omp stopped before the sign-in finished.".to_string() } else { format!("omp stopped: {}", crate::util::clip(&tail, 300)) };
                     flow.finish(AuthFlowState::Failed, Some(why));
                     return;
@@ -69,14 +71,7 @@ async fn drive(mut flow: FlowCtl, mut run: Running, ctx: Arc<Ctx>, t: Target) {
                         }
                     }
                     Some("result") => {
-                        super::mark_dirty(&t.check_key, &t.name);
-                        let reload = super::reload::reload(&ctx, t.project.as_deref()).await;
-                        let mut msg = format!("Signed in to {}.", t.name);
-                        if reload.reloaded > 0 {
-                            msg.push_str(&format!(" Reloaded in {} running session{}.", reload.reloaded, if reload.reloaded == 1 { "" } else { "s" }));
-                        }
-                        flow.update(|f| f.account = Some(t.name.clone()));
-                        flow.finish(AuthFlowState::Done, Some(msg));
+                        signed_in(&flow, &ctx, &t).await;
                         return;
                     }
                     Some("error") => {
@@ -91,7 +86,7 @@ async fn drive(mut flow: FlowCtl, mut run: Running, ctx: Arc<Ctx>, t: Target) {
             input = flow.next_input() => {
                 let Some(input) = input else {
                     // Cancelled, expired or finished elsewhere: stop omp (and its callback server).
-                    run.kill().await;
+                    run.stop().await;
                     return;
                 };
                 let verdict = match &redirect {
@@ -102,6 +97,24 @@ async fn drive(mut flow: FlowCtl, mut run: Running, ctx: Arc<Ctx>, t: Target) {
             }
         }
     }
+}
+
+/// omp stored the credential: the flow is done at once (a cancel arriving now can't undo the
+/// sign-in, so it must not read "Cancelled"), then the lists and running sessions catch up.
+async fn signed_in(flow: &FlowCtl, ctx: &Ctx, t: &Target) {
+    let live = super::reload::reachable(&ctx.bridge, t.project.as_deref());
+    let mut msg = format!("Signed in to {}.", t.name);
+    if live > 0 {
+        msg.push_str(if live == 1 { " The running omp session picks it up." } else { " Running omp sessions pick it up." });
+    }
+    flow.update(|f| f.account = Some(t.name.clone()));
+    flow.finish(AuthFlowState::Done, Some(msg));
+    if t.project.is_some() {
+        super::mark_dirty(&t.check_key, &t.name);
+    } else {
+        super::mark_dirty_everywhere(&t.path, &t.name);
+    }
+    super::reload::reload(ctx, t.project.as_deref()).await;
 }
 
 /// A pasted address or code → omp's callback server, as the browser would have delivered it.

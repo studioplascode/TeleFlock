@@ -231,8 +231,11 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     let shutdown = CancellationToken::new();
     let persist = crate::state::persist::Persist::load(paths.state_file.clone());
     persist.spawn_saver(shutdown.child_token());
-    let originals = crate::originals::dir(&paths.home);
-    tokio::task::spawn_blocking(move || crate::originals::prune(&originals));
+    let (originals, notes) = (crate::originals::dir(&paths.home), crate::notes::dir(&paths.home));
+    tokio::task::spawn_blocking(move || {
+        crate::originals::prune(&originals);
+        crate::notes::prune(&notes);
+    });
     // The app uploaded this build's extension before starting it: bring a consented global copy
     // up to date before omp loads it again.
     let ext_paths = paths.clone();

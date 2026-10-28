@@ -7,7 +7,7 @@ use tf_proto::McpKeyValue;
 fn mcp_at(dir: &Path, omp: Option<PathBuf>) -> Mcp {
     Mcp {
         agent_dir: dir.join("agent"),
-        helper: HelperEnv { omp, ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None },
+        helper: HelperEnv { omp, ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None, slots: helper::Slots::new(4, 2) },
         neutral: dir.join("neutral"),
     }
 }
@@ -201,7 +201,7 @@ async fn checks_run_once_then_only_for_changed_servers() {
           "tools": [{ "name": "resolve-library-id", "description": "Find a library" }, { "name": "get-library-docs" }],
           "serverInfo": { "name": "Context7", "version": "1.0.13" } },
         { "name": "gh", "provider": "native", "path": user, "enabled": true, "status": "needsAuth", "authType": "oauth", "error": "HTTP 401" },
-        { "name": "linear", "provider": "claude", "providerName": "Claude Code", "path": "/home/me/.claude.json", "enabled": false,
+        { "name": "linear", "provider": "claude", "providerName": "Claude Code", "path": "/home/me/.claude.json", "enabled": false, "entryEnabled": false,
           "status": "disabled", "config": { "type": "http", "url": "https://mcp.linear.app/mcp", "headers": { "Authorization": "Bearer lin_secret" } } }
     ]});
     let (omp, log) = fake_omp(td.path(), &answer.to_string());
@@ -344,4 +344,103 @@ async fn mcp_real_omp_helper() {
     let res = search(&mcp, McpSearchParams { query: "github".into(), limit: Some(3) }).await;
     eprintln!("search: {:?}", res.as_ref().map(|r| r.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>()));
     let _ = Duration::from_secs(0);
+}
+
+#[test]
+fn windows_verbatim_prefixes_are_stripped() {
+    assert_eq!(strip_verbatim(r"\\?\C:\proj").as_deref(), Some(r"C:\proj"));
+    assert_eq!(strip_verbatim(r"\\?\UNC\srv\share\proj").as_deref(), Some(r"\\srv\share\proj"));
+    assert_eq!(strip_verbatim(r"\\?\Volume{1234}\x"), None, "not a drive path: kept");
+    assert_eq!(strip_verbatim("/home/me/proj"), None);
+}
+
+/// A user server hidden by a project one is checked again once the project one goes.
+#[tokio::test]
+async fn a_server_no_longer_hidden_is_not_left_skipped() {
+    let td = tempfile::tempdir().unwrap();
+    let mcp = mcp_at(td.path(), None);
+    let proj = std::fs::canonicalize(td.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&proj).unwrap();
+    save_files(&mcp, &save_params(McpScope::User, None, "db", None, stdio("u", &[], &[]))).await.unwrap();
+    save_files(&mcp, &save_params(McpScope::Project, Some(&proj), "db", None, stdio("p", &[], &[]))).await.unwrap();
+    let files = native_files(&mcp, Some(&proj));
+    let lists = UserLists::of(&files, &mcp.user_file());
+    let hidden = natives(&files, &lists).into_iter().find(|n| n.origin == McpOrigin::User).unwrap();
+    remove_files(&mcp, &McpServerRef { cwd: Some(proj.display().to_string()), name: "db".into(), scope: Some(McpScope::Project) }).await.unwrap();
+    let files = native_files(&mcp, Some(&proj));
+    let lists = UserLists::of(&files, &mcp.user_file());
+    let shown = natives(&files, &lists).into_iter().find(|n| n.origin == McpOrigin::User).unwrap();
+    assert!(hidden.shadowed && !shown.shadowed);
+    assert_ne!(hidden.fp, shown.fp, "its earlier (hidden) result no longer applies");
+    assert!(checks().get(&proj).is_some_and(|s| s.dirty.contains("db")), "the removed name is checked again");
+}
+
+/// Other tools' servers are on or off as the user-level lists say now, in every folder's list.
+#[tokio::test]
+async fn imported_switches_show_in_every_list() {
+    let td = tempfile::tempdir().unwrap();
+    let mcp = mcp_at(td.path(), None);
+    let key = mcp.cwd_for(None).unwrap();
+    let linear = Probed {
+        name: "linear".into(), provider: "claude".into(), provider_name: Some("Claude Code".into()), path: Some("/h/.claude.json".into()),
+        enabled: true, entry_enabled: true, shadowed: false, signed_in: false, config: Some(json!({ "type": "http", "url": "https://mcp.linear.app/mcp" })),
+        status: "connected".into(), error: None, auth_type: None, note: None, tools: vec![McpTool { name: "t".into(), description: None }], server_info: None, at: 1,
+    };
+    {
+        let mut map = checks();
+        let slot = map.entry(key.clone()).or_default();
+        slot.servers = vec![linear];
+        slot.finished_at = Some(now_ms());
+    }
+    // Switched off from some project's list: this one shows it off at once.
+    set_enabled_files(&mcp, &McpEnableParams { cwd: None, name: "linear".into(), scope: None, enabled: false }).await.unwrap();
+    let files = native_files(&mcp, None);
+    let lists = UserLists::of(&files, &mcp.user_file());
+    let off = build_list(&mcp, None, &files, &[], &lists, &key, 0);
+    assert_eq!((off.servers[0].enabled, off.servers[0].status), (false, McpStatus::Disabled));
+    // Back on: the result taken while it was on still applies.
+    set_enabled_files(&mcp, &McpEnableParams { cwd: None, name: "linear".into(), scope: None, enabled: true }).await.unwrap();
+    checks().get_mut(&key).unwrap().dirty.clear();
+    let files = native_files(&mcp, None);
+    let lists = UserLists::of(&files, &mcp.user_file());
+    let on = build_list(&mcp, None, &files, &[], &lists, &key, 0);
+    assert_eq!((on.servers[0].enabled, on.servers[0].status, on.servers[0].tools.len()), (true, McpStatus::Connected, 1));
+}
+
+#[tokio::test]
+async fn sign_in_targets_the_rows_own_file_and_not_mcp_json_siblings() {
+    let td = tempfile::tempdir().unwrap();
+    let mcp = mcp_at(td.path(), None);
+    let proj = std::fs::canonicalize(td.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&proj).unwrap();
+    save_files(&mcp, &save_params(McpScope::User, None, "docs", None, http("https://u.dev/mcp"))).await.unwrap();
+    save_files(&mcp, &save_params(McpScope::Project, Some(&proj), "docs", None, http("https://p.dev/mcp"))).await.unwrap();
+    // The hidden user server: omp looks it up from the neutral folder, where no project file is.
+    let (t, s) = auth_target(&mcp, Some(proj.clone()), "docs", Some(McpScope::User)).await.unwrap();
+    assert_eq!((s, t.path.clone(), t.cwd.clone(), t.project.clone()), (McpScope::User, mcp.user_file(), mcp.neutral.clone(), None));
+    let (t, _) = auth_target(&mcp, Some(proj.clone()), "docs", Some(McpScope::Project)).await.unwrap();
+    assert_eq!((t.cwd.clone(), t.project.clone()), (proj.clone(), Some(proj.clone())));
+    // A `.mcp.json` sibling: omp's sign-in never reads it.
+    std::fs::write(mcp.agent_dir.join(".mcp.json"), r#"{"mcpServers":{"side":{"type":"http","url":"https://s.dev/mcp"}}}"#).unwrap();
+    let err = auth_target(&mcp, None, "side", None).await.err().unwrap();
+    assert_eq!(err.code, "invalid_params");
+    assert!(err.message.contains("mcp.json files only"), "{}", err.message);
+}
+
+/// `test` of a row without a draft sends that row's own definition, not the one hiding it.
+#[cfg(unix)]
+#[tokio::test]
+async fn testing_a_hidden_row_tests_its_own_definition() {
+    let td = tempfile::tempdir().unwrap();
+    let (omp, log) = fake_omp(td.path(), r#"{"t":"result","status":"connected","tools":[],"ms":5}"#);
+    let mcp = mcp_at(td.path(), Some(omp));
+    let proj = std::fs::canonicalize(td.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&proj).unwrap();
+    save_files(&mcp, &save_params(McpScope::User, None, "db", None, stdio("user-db", &[], &[]))).await.unwrap();
+    save_files(&mcp, &save_params(McpScope::Project, Some(&proj), "db", None, stdio("project-db", &[], &[]))).await.unwrap();
+    let r = test(&mcp, McpTestParams { cwd: Some(proj.display().to_string()), name: "db".into(), scope: Some(McpScope::User), server: None }).await.unwrap();
+    assert_eq!(r.status, McpStatus::Connected);
+    let req = requests(&log).pop().unwrap();
+    assert_eq!(req["config"]["command"], "user-db");
+    assert!(req["deadlineAt"].as_i64().is_some());
 }

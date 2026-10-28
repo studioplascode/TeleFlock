@@ -1,10 +1,12 @@
-import { AlertTriangle, Gauge, KeyRound, RefreshCw, TimerReset } from "lucide-react";
+import { AlertTriangle, Gauge, RefreshCw, TimerReset } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
 import { describePace, formatPct, formatSpan, type HostLimits, LIMITS_USAGE_EVERY_MS, navigate, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
 import type { LimitAccount, LimitWindow } from "@/core/gen";
-import { Badge, Button, Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
-import { PROVIDER_NAMES, paceStatus } from "./limitsUi";
+import { Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
+import { ExpiredLogin } from "@/features/accounts/ExpiredLogin";
+import { providerName } from "@/features/accounts/providers";
+import { formatPlan, PROVIDER_NAMES, paceAlert, paceStatus, tierLabel, windowLabel } from "./limitsUi";
 
 /** One account across the hosts that report it (the same login is often on several hosts). */
 interface AccountRow {
@@ -31,22 +33,25 @@ function mergeAccounts(byHost: Record<string, HostLimits>): AccountRow[] {
 
 function WindowRow({ w, pace, index }: { w: LimitWindow; pace: WindowPace; index: number }) {
   const status = paceStatus(w, pace);
+  const alert = paceAlert(w, pace);
   const used = Math.min(1, pace.used ?? 0);
   const projected = pace.outcome === "runsOut" ? 1 : pace.outcome === "resetsFirst" ? (pace.atReset ?? used) : used;
   const ratePct = pace.ratePerHour != null ? pace.ratePerHour * 100 : undefined;
   const absolute = w.amount != null && w.limit != null ? `${Math.round(w.amount).toLocaleString()} / ${Math.round(w.limit).toLocaleString()} ${w.unit}` : undefined;
+  const name = windowLabel(w);
+  const tier = tierLabel(w);
   return (
     <li className="flex flex-col gap-1.5" data-limit={w.id}>
       <div className="flex items-baseline gap-2 text-xs">
-        <span className="min-w-0 truncate font-bold text-ink">{w.label}</span>
-        {w.tier && <Badge>{w.tier} only</Badge>}
+        <span className="min-w-0 truncate font-bold text-ink">{name}</span>
+        {tier && <span className="shrink-0 font-semibold text-mute-2">{tier}</span>}
         <span className="ml-auto shrink-0 font-display text-base font-bold text-ink tabular">{pace.remaining != null ? `${formatPct(pace.remaining)} left` : "—"}</span>
       </div>
       <Tooltip content={pace.used != null ? `${formatPct(pace.used)} used${projected > used ? ` · striped: projected ${formatPct(projected)} by the reset` : ""}` : "No amount reported"}>
         <div
           className="relative h-2 overflow-hidden rounded-full bg-white/6"
           role="progressbar"
-          aria-label={`${w.label} used`}
+          aria-label={`${name}${tier ? `, ${tier}` : ""} used`}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.round(used * 100)}
@@ -80,8 +85,8 @@ function WindowRow({ w, pace, index }: { w: LimitWindow; pace: WindowPace; index
         )}
         {absolute && <span className="tabular">{absolute}</span>}
       </div>
-      <div data-status={status} className={cn("text-[11.5px] font-bold", pace.outcome === "runsOut" || pace.outcome === "exhausted" ? "st-text" : "text-mute-2")}>
-        {describePace(pace)}
+      <div data-status={alert?.status ?? status} className={cn("text-[11.5px] font-bold", alert ? "st-text" : "text-mute-2")}>
+        {alert?.full ?? describePace(pace)}
       </div>
     </li>
   );
@@ -103,7 +108,7 @@ function AccountTile({ row, hostNames, now }: { row: AccountRow; hostNames: Reco
           {account.org && <div className="truncate text-[11px] font-semibold text-mute-2">{account.org}</div>}
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-1">
-          {account.plan && <Chip tone="accent">{account.plan}</Chip>}
+          {account.plan && <Chip tone="accent">{formatPlan(account.plan)}</Chip>}
           {!!account.resetsAvailable && (
             <Tooltip content="Banked limit resets this account can redeem (omp usage reset)">
               <Chip icon={<TimerReset />}>{account.resetsAvailable} reset{account.resetsAvailable === 1 ? "" : "s"}</Chip>
@@ -117,20 +122,12 @@ function AccountTile({ row, hostNames, now }: { row: AccountRow; hostNames: Reco
             <WindowRow key={w.id} w={w} pace={paces[i] as WindowPace} index={i} />
           ))}
         </ul>
+      ) : account.disabled ? (
+        <ExpiredLogin provider={providerName(account.provider)} reason={account.error} onRelink={() => navigate({ name: "accounts", hostId: row.hostIds[0], link: account.provider })} />
       ) : (
-        <div data-status={account.disabled ? "error" : "needs-you"} className="flex items-start gap-2 rounded-lg st-soft px-3 py-2 text-xs font-semibold">
-          {account.disabled ? <KeyRound className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
-          <span className="min-w-0 break-words">
-            {account.error ?? "No limits reported."}
-            {account.disabled && (
-              <span className="mt-1.5 flex flex-wrap items-center gap-2 text-mute">
-                Sign in to it again to restore it.
-                <Button size="sm" variant="secondary" icon={<KeyRound />} onClick={() => navigate({ name: "accounts", hostId: row.hostIds[0], link: account.provider })}>
-                  Re-link
-                </Button>
-              </span>
-            )}
-          </span>
+        <div data-status="needs-you" className="flex items-start gap-2 rounded-lg st-soft px-3 py-2 text-xs font-semibold">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 break-words">{account.error ?? "No limits reported."}</span>
         </div>
       )}
       {account.notes.length > 0 && <p className="text-[11px] text-mute-2">{account.notes.join(" · ")}</p>}

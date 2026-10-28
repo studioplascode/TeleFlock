@@ -1,9 +1,9 @@
-import { BadgeCheck, RefreshCw, Search, X } from "lucide-react";
+import { BadgeCheck, Check, RefreshCw, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { core, toApiError } from "@/core";
-import type { ApiError, McpRegistryEntry } from "@/core/gen";
+import type { ApiError, McpRegistryEntry, McpServer } from "@/core/gen";
 import { Button, cn, hashString, IconButton, Input, Skeleton, Spinner } from "@/design";
-import { plural } from "./model";
+import { definedIn, findSame, plural } from "./model";
 import { LetterMark } from "./parts";
 import { MCP_TEMPLATES, type McpTemplate, type TemplateTag } from "./templates";
 
@@ -21,29 +21,57 @@ const TAG_HINT: Record<TemplateTag, string> = {
   Local: "Runs as a program on the host",
 };
 
-/** Popular servers as cards (curated in `templates.ts`). */
-export function TemplateGrid({ onPick }: { onPick(t: McpTemplate): void }) {
+/**
+ * "✓ Added · Open" in the corner of a card whose server is already set up on the host: opens that
+ * one. The card itself still adds another copy (the form says it's one).
+ */
+function AddedOpen({ server, onOpen }: { server: McpServer; onOpen(s: McpServer): void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(server)}
+      title={`Already set up as “${server.name}” in ${definedIn(server)}`}
+      aria-label={`Added as “${server.name}”: open it`}
+      className="absolute top-2.5 right-2.5 inline-flex h-6 items-center gap-1 rounded-full bg-done/12 pr-2.5 pl-2 text-[11px] font-bold whitespace-nowrap text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.25)] pressable touch-hit focus-ring hover:bg-done/20"
+    >
+      <Check className="size-3" />
+      Added
+      <span className="text-mute-2" aria-hidden>
+        ·
+      </span>
+      <span className="text-ink">Open</span>
+    </button>
+  );
+}
+
+/** Popular servers as cards (curated in `templates.ts`); one the host already has offers to open it. */
+export function TemplateGrid({ servers, onPick, onOpen }: { servers: readonly McpServer[]; onPick(t: McpTemplate): void; onOpen(s: McpServer): void }) {
   return (
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-      {MCP_TEMPLATES.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          onClick={() => onPick(t)}
-          className="group flex min-w-0 items-center gap-3 rounded-lg bg-white/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-white/[0.06]"
-        >
-          <LetterMark mark={t.mark} color={t.color} ink={t.ink} />
-          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-sm font-bold text-ink">{t.title}</span>
-              <span className={cn("shrink-0 rounded-full px-1.5 py-px text-[10px] font-bold", TAG_TONE[t.tag])} title={TAG_HINT[t.tag]}>
-                {t.tag}
+      {MCP_TEMPLATES.map((t) => {
+        const added = findSame(t.server, servers)[0];
+        return (
+          <div key={t.id} className="relative flex min-w-0">
+            <button
+              type="button"
+              onClick={() => onPick(t)}
+              className="group flex min-w-0 flex-1 items-center gap-3 rounded-lg bg-white/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-white/[0.06]"
+            >
+              <LetterMark mark={t.mark} color={t.color} ink={t.ink} />
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className={cn("flex min-w-0 items-center gap-2", added && "pr-[6.75rem]")}>
+                  <span className="truncate text-sm font-bold text-ink">{t.title}</span>
+                  <span className={cn("shrink-0 rounded-full px-1.5 py-px text-[10px] font-bold", TAG_TONE[t.tag])} title={TAG_HINT[t.tag]}>
+                    {t.tag}
+                  </span>
+                </span>
+                <span className="line-clamp-2 text-2xs text-mute">{t.description}</span>
               </span>
-            </span>
-            <span className="line-clamp-2 text-2xs text-mute">{t.description}</span>
-          </span>
-        </button>
-      ))}
+            </button>
+            {added && <AddedOpen server={added} onOpen={onOpen} />}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -108,8 +136,20 @@ function entryMark(e: McpRegistryEntry): { mark: string; color: string } {
   return { mark: mark.length > 1 ? mark[0]?.toUpperCase() + (mark[1] ?? "").toLowerCase() : mark.toUpperCase(), color: MARK_COLORS[hashString(e.id) % MARK_COLORS.length] as string };
 }
 
-/** Search box and result cards of the Smithery registry. */
-export function RegistrySearch({ search: s, onPick, autoFocus }: { search: RegistrySearchState; onPick(e: McpRegistryEntry): void; autoFocus?: boolean }) {
+/** Search box and result cards of the Smithery registry; a server the host already has offers to open it. */
+export function RegistrySearch({
+  search: s,
+  servers,
+  onPick,
+  onOpen,
+  autoFocus,
+}: {
+  search: RegistrySearchState;
+  servers: readonly McpServer[];
+  onPick(e: McpRegistryEntry): void;
+  onOpen(s: McpServer): void;
+  autoFocus?: boolean;
+}) {
   const text = s.text.trim();
   return (
     <div className="flex flex-col gap-3">
@@ -175,36 +215,39 @@ export function RegistrySearch({ search: s, onPick, autoFocus }: { search: Regis
         <div className={cn("grid grid-cols-1 gap-2 sm:grid-cols-2 transition-opacity", s.loading && "opacity-60")}>
           {s.entries.map((e) => {
             const m = entryMark(e);
+            const added = findSame(e.server, servers)[0];
             return (
-              <button
-                key={e.id}
-                type="button"
-                onClick={() => onPick(e)}
-                className="flex min-w-0 flex-col gap-2 rounded-lg bg-white/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-white/[0.06]"
-              >
-                <span className="flex min-w-0 items-center gap-3">
-                  <LetterMark mark={m.mark} color={m.color} className="size-9 text-xs" />
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="truncate text-sm font-bold text-ink">{e.title}</span>
-                      {e.verified && <BadgeCheck className="size-3.5 shrink-0 text-review" aria-label="Verified" />}
+              <div key={e.id} className="relative flex min-w-0">
+                <button
+                  type="button"
+                  onClick={() => onPick(e)}
+                  className="flex min-w-0 flex-1 flex-col gap-2 rounded-lg bg-white/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-white/[0.06]"
+                >
+                  <span className={cn("flex min-w-0 items-center gap-3", added && "pr-[6.75rem]")}>
+                    <LetterMark mark={m.mark} color={m.color} className="size-9 text-xs" />
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-sm font-bold text-ink">{e.title}</span>
+                        {e.verified && <BadgeCheck className="size-3.5 shrink-0 text-review" aria-label="Verified" />}
+                      </span>
+                      <span className="truncate font-mono text-2xs text-mute-2">{e.id}</span>
                     </span>
-                    <span className="truncate font-mono text-2xs text-mute-2">{e.id}</span>
                   </span>
-                </span>
-                {e.description && <span className="line-clamp-2 text-2xs text-mute">{e.description}</span>}
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-2xs text-mute-2">
-                  <span className={cn("rounded-full px-1.5 py-px font-bold", e.remote ? "bg-accent/14 text-accent-ink" : "bg-review/12 text-review")}>{e.remote ? "Remote" : "Local"}</span>
-                  <span className="tabular">{USES.format(e.useCount)} uses</span>
-                  {e.inputs.length > 0 && <span>{plural(e.inputs.length, "setting")}</span>}
-                  {e.tools.length > 0 && <span>{plural(e.tools.length, "tool")}</span>}
-                </span>
-                {e.warnings.map((w) => (
-                  <span key={w} className="text-2xs font-semibold text-warn">
-                    {w}
+                  {e.description && <span className="line-clamp-2 text-2xs text-mute">{e.description}</span>}
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-2xs text-mute-2">
+                    <span className={cn("rounded-full px-1.5 py-px font-bold", e.remote ? "bg-accent/14 text-accent-ink" : "bg-review/12 text-review")}>{e.remote ? "Remote" : "Local"}</span>
+                    <span className="tabular">{USES.format(e.useCount)} uses</span>
+                    {e.inputs.length > 0 && <span>{plural(e.inputs.length, "setting")}</span>}
+                    {e.tools.length > 0 && <span>{plural(e.tools.length, "tool")}</span>}
                   </span>
-                ))}
-              </button>
+                  {e.warnings.map((w) => (
+                    <span key={w} className="text-2xs font-semibold text-warn">
+                      {w}
+                    </span>
+                  ))}
+                </button>
+                {added && <AddedOpen server={added} onOpen={onOpen} />}
+              </div>
             );
           })}
         </div>

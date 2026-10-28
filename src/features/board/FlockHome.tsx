@@ -4,9 +4,7 @@ import { type ReactNode, useEffect } from "react";
 import { navigate, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useHostStale, useHostStates, useUi } from "@/core";
 import type { Column } from "@/core/gen";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
-import { connAction } from "@/features/hosts/ConnStatusCard";
 import { askText } from "@/features/inbox/askText";
-import { phaseBusy } from "@/features/shell/status";
 import { ACTIONS, isFresh, LANE_TITLE, NEEDS_WORD, STATE_WORD, stateTime } from "@/features/shell/vocab";
 import {
   AgentGlyph,
@@ -34,14 +32,15 @@ import { FilterChip } from "./FilterChip";
 import { SelectionBar } from "./SelectionBar";
 import { useTodayUsage } from "./BentoRow";
 import { useBoard } from "./boardStore";
-import { connWords, FlockFab, HostChip, RepoChip } from "./FlockActions";
+import { FlockFab, HostChip, RepoChip } from "./FlockActions";
 import { LANE_BY_COLUMN, QUIET_AFTER_MS } from "./lanes";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { ParkedChip } from "./ParkedChip";
-import { SetupGaps } from "./StaleHosts";
+import { PhoneNotices } from "./Notices";
 import { QuickAnswer } from "./QuickAnswer";
 import { RepoTag } from "./RepoTag";
 import { type SwipeAction, SwipeRow } from "./SwipeRow";
+import { boardSetupGap } from "./setupGap";
 import { useBeat } from "./useBeat";
 import { PrProbe } from "./worktreePr";
 
@@ -93,45 +92,6 @@ const stopRow = {
   onClick: (e: { stopPropagation(): void }) => e.stopPropagation(),
   onPointerDown: (e: { stopPropagation(): void }) => e.stopPropagation(),
 };
-
-/* ───────────────────────── host strips ───────────────────────── */
-
-/** One line per disconnected host in view: `● studio-pc offline · 3h ago · Retry` (cards below are its snapshot). */
-function StaleStrip({ hostId }: { hostId: string }) {
-  const stale = useHostStale(hostId);
-  const st = useHosts((s) => s.status[hostId]);
-  const name = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
-  const now = useNow(1000);
-  if (!stale || !st) return null;
-  const action = connAction(st, hostId);
-  const bad = st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error";
-  return (
-    // Re-renders every second (age, countdown) at one line's height: measuring layout on each tick
-    // would re-measure every card below (motion measures the whole layout tree).
-    <motion.div
-      layout
-      layoutDependency={st.phase}
-      initial={{ opacity: 0, y: -8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
-      transition={spring.smooth}
-      role="status"
-      aria-label={`${name} ${connWords(st, now)}; its cards show the last snapshot`}
-      className="flex min-h-10 items-center gap-2 rounded-lg bg-warn/8 py-1 pr-1 pl-3 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]"
-    >
-      <StatusOrb status={bad ? "error" : "idle"} size={8} label={null} className="shrink-0" />
-      <p className="min-w-0 flex-1 truncate text-mute">
-        <b className="text-ink">{name}</b> <span className={cn(phaseBusy(st.phase) && "tf-shimmer-text")}>{connWords(st, now)}</span>
-        {st.error && <span className="text-[#ff9fb2]"> · {st.error.message}</span>}
-      </p>
-      {action && (
-        <Button size="sm" variant="secondary" className="shrink-0" onClick={action.run}>
-          {action.label}
-        </Button>
-      )}
-    </motion.div>
-  );
-}
 
 /* ───────────────────────── widgets ───────────────────────── */
 
@@ -412,17 +372,16 @@ function Section({ column, count, children, action, id }: { column: Column; coun
 
 /**
  * The host to send a newcomer to while setup is unfinished: no host yet ("" = add one), none online,
- * or an online host whose setup hides agents. null when every host is ready.
+ * or an online host whose setup hides agents (the board's notices name the same gaps). null when
+ * every host is ready.
  */
 function useSetupTarget(): string | null {
+  const profiles = useHosts((s) => s.profiles);
   const ids = useHostIds();
   const status = useHosts((s) => s.status);
   const states = useHostStates();
   if (ids.length === 0) return "";
-  const gap = ids.find((id) => {
-    const setup = states[id]?.info.setup;
-    return status[id]?.phase === "online" && setup !== undefined && !(setup.globalSharing && setup.herdrIntegration);
-  });
+  const gap = ids.find((id) => status[id]?.phase === "online" && boardSetupGap(profiles.find((p) => p.id === id)?.kind, states[id]?.info.setup) !== null);
   if (gap) return gap;
   return ids.some((id) => status[id]?.phase === "online") ? null : (ids[0] ?? "");
 }
@@ -460,7 +419,6 @@ function EmptyFlock() {
 /** Mobile home (spec §3 "Flock home"). */
 export function FlockHome() {
   const hostId = useHosts((s) => s.filter);
-  const ids = useHostIds();
   const q = useBoard((s) => s.q.trim()) || undefined;
   // shared with the desktop toolbar's repo select
   const repo = useBoard((s) => s.repo) ?? undefined;
@@ -471,7 +429,6 @@ export function FlockHome() {
   const doneOpen = useBoard((s) => s.doneOpen);
   const toggleDone = useBoard((s) => s.toggleDone);
   const empty = needs.length + running.length + review.length + done.length === 0;
-  const shownHosts = hostId === "all" ? ids : ids.filter((id) => id === hostId);
   useEffect(() => () => useBoard.getState().clearPicked(), []);
 
   return (
@@ -484,12 +441,7 @@ export function FlockHome() {
           <HostChip />
         </div>
       </header>
-      <AnimatePresence initial={false}>
-        {shownHosts.map((id) => (
-          <StaleStrip key={id} hostId={id} />
-        ))}
-      </AnimatePresence>
-      <SetupGaps />
+      <PhoneNotices />
       <FilterChip className="self-start" />
       <Widgets />
       <FlightGroup id="flock" arrangement={[needs, running, review, done].map((keys) => keys.join(" ")).join("|")}>

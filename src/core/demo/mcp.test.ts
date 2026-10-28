@@ -252,4 +252,23 @@ describe("demo mcp", () => {
     }
     expect(code).toBe("unknown_method");
   });
+
+  test("mcp=broken: every check fails; the last good check's statuses stay, and the error until a check succeeds", async () => {
+    const clock = new ManualClock();
+    const demo = new DemoMcp({ supported: true, clock, home: HOME, agents: () => [], auth: new DemoAuthFlows(clock, () => false), ompVersion: () => "18.13.2", knob: "broken" });
+    const list = (params: Record<string, unknown> = {}, ms = 0): Promise<McpList> => {
+      const p = Promise.resolve(demo.call("mcp.list", params) as McpList | Promise<McpList>);
+      clock.advance(ms);
+      return p;
+    };
+    expect((await list()).check.running).toBe(true);
+    const failed = await list({ waitMs: 20_000 }, 2000);
+    expect(failed.check).toMatchObject({ running: false, error: expect.stringContaining("exited before it reported the servers") });
+    const c7 = byName(failed, "context7", "user");
+    expect(c7.status).toBe("connected");
+    expect(c7.checkedAt).toBe(clock.now() - 2000 - 2 * 60 * 60_000);
+    expect(failed.fileErrors).toHaveLength(1);
+    // "Check again": running, and still the last failure (hostd clears it only when a check succeeds).
+    expect((await list({ refresh: true })).check).toMatchObject({ running: true, error: expect.any(String) });
+  });
 });

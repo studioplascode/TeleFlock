@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowRight, Check, ClipboardPaste, Copy, Eye, EyeOff, ExternalLink, KeyRound, Link2, PlugZap, RotateCcw, WifiOff } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
-import { useHosts } from "@/core";
+import { safeHref, useHosts } from "@/core";
 import type { AuthFlow } from "@/core/gen";
 import { Button, cn, IconButton, Input, popIn, Spinner, spring, useIsMobile, useNow } from "@/design";
 import type { RemoteAuth, RemoteAuthTunnel } from "./remoteAuth";
@@ -273,12 +273,13 @@ function OpenButton({ auth, label, primary = true }: { auth: RemoteAuth; label: 
   );
 }
 
+/** ` · times out in 4:59` while the host's deadline is ahead (omp's callback wait for a browser sign-in). */
 function Expiry({ flow }: { flow: AuthFlow | null }) {
   const now = useNow(1000);
   if (!flow?.expiresAt) return null;
   const left = flow.expiresAt - now;
   if (left <= 0 || left > 60 * 60_000) return null;
-  return <span className="tabular">times out in {clock(left)}</span>;
+  return <span className="tabular"> · times out in {clock(left)}</span>;
 }
 
 /** The redirect target, as the browser will show it: `http://localhost:8085/oauth2callback?code=…`. */
@@ -537,7 +538,7 @@ export function RemoteAuthPanel({ auth, name, icon, onClose, doneLabel = "Done",
       {auth.openError && !final && (
         <Callout tone="warn" icon={<Link2 />}>
           Couldn't open the browser: {auth.openError}
-          <span className="mt-0.5 block font-medium text-mute">Copy the link and open it yourself.</span>
+          <span className="mt-0.5 block font-medium text-mute">{safeHref(auth.flow?.url) ? "Copy the link and open it yourself." : "TeleFlock opens only web pages for a sign-in."}</span>
         </Callout>
       )}
       <AnimatePresence mode="wait" initial={false}>
@@ -568,10 +569,11 @@ export function RemoteAuthPanel({ auth, name, icon, onClose, doneLabel = "Done",
       </AnimatePresence>
       {!final && auth.stage !== "starting" && aside}
       {!final && (
-        <div className={cn("flex items-center gap-3 border-t border-line pt-3 text-2xs font-semibold text-mute-2", mobile && "flex-col-reverse items-stretch")}>
+        // pb on touch screens: the Cancel button's 48 px touch target reaches 8 px below the row and
+        // would make the dialog body scroll (desktop layout: the button is the last thing in it).
+        <div className={cn("flex items-center gap-3 border-t border-line pt-3 text-2xs font-semibold text-mute-2", mobile ? "flex-col-reverse items-stretch" : "[@media(hover:none)]:pb-2")}>
           <span className={cn("min-w-0 flex-1", mobile && "text-center")}>
             Runs on {host}
-            {auth.flow?.expiresAt ? " · " : ""}
             <Expiry flow={auth.flow} />
           </span>
           <Button variant="ghost" size="sm" onClick={cancel} className={cn(mobile && "w-full")}>

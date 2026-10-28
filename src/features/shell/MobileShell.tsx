@@ -28,11 +28,16 @@ function tabFor(r: Route): Tab {
       return "inbox";
     case "terminal":
       return "terminal";
+    // everything reached from More keeps More lit (the omp area's pages, automations, …)
     case "more":
     case "hosts":
     case "settings":
     case "usage":
     case "activity":
+    case "automations":
+    case "omp":
+    case "mcp":
+    case "accounts":
       return "more";
     default:
       return "board";

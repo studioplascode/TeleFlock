@@ -49,8 +49,8 @@ const EVENT_CAPACITY: usize = 8192;
 /// Cached host states are written at most this often, and whenever a host disconnects (shutdown
 /// included). Health samples alone never make the cache dirty.
 const CACHE_FLUSH_EVERY: Duration = Duration::from_secs(60);
-/// Changed session mirrors are written to the session cache this often (and when they close,
-/// at a disconnect and at shutdown).
+/// Changed session mirrors are written to the session cache on this tick (big ones less often,
+/// see `sessions::persist_due`), and whenever they close, at a disconnect and at shutdown.
 const SESSION_CACHE_EVERY: Duration = Duration::from_secs(15);
 /// Window focus leaves a link alone that the host spoke on this recently: the ping loop watches
 /// it anyway, and a live link hears a pong every `PING_EVERY` (15 s).
@@ -730,7 +730,7 @@ impl Engine {
                 let Some(inner) = weak.upgrade() else { break };
                 let hosts: Vec<Arc<HostRt>> = inner.hosts.lock().unwrap().values().cloned().collect();
                 for rt in hosts {
-                    sessions::persist_all(session_host(&inner, &rt)).await;
+                    sessions::persist_due(session_host(&inner, &rt)).await;
                 }
             }
         });
@@ -1245,7 +1245,14 @@ impl Engine {
             }
             AppMethod::TunnelOpen(p) => {
                 let rt = i.host(&p.host_id).ok_or_else(|| not_found_host(&p.host_id))?;
-                let info = i.tunnels.open(&rt, p).await?;
+                let weak = Arc::downgrade(i);
+                // A sign-in tunnel that closes by itself (its sign-in ended on the host, or its lease ran out) tells the app.
+                let closed = move || {
+                    if let Some(i) = weak.upgrade() {
+                        i.emit_tunnels();
+                    }
+                };
+                let info = i.tunnels.open(&rt, p, closed).await?;
                 i.emit_tunnels();
                 to_value(&info)
             }

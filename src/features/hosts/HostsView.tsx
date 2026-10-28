@@ -1,4 +1,4 @@
-import { Blocks, ChevronDown, KeyRound, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, SlidersHorizontal, Trash2 } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -29,7 +29,7 @@ import { errorMessage } from "@/features/shell/errors";
 import { useHealthHistory } from "@/features/shell/healthHistory";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { connSummary, PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
-import { VIEWS } from "@/features/shell/vocab";
+import { OMP_PAGES, VIEWS } from "@/features/shell/vocab";
 import { ConnStatusCard, disconnect } from "./ConnStatusCard";
 import { hostAccent, KIND_META, kindBadge, normalizeGroup, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
@@ -112,15 +112,14 @@ function Versions({ hostId }: { hostId: string }) {
 function OmpLinks({ hostId }: { hostId: string }) {
   return (
     <div role="group" aria-label="omp on this host" className="flex flex-wrap items-center gap-2">
-      <Button size="sm" variant="secondary" icon={<SlidersHorizontal />} title={VIEWS.omp.description} onClick={() => navigate({ name: "omp", hostId })}>
-        {VIEWS.omp.label}
-      </Button>
-      <Button size="sm" variant="secondary" icon={<Blocks />} title={VIEWS.mcp.description} onClick={() => navigate({ name: "mcp", hostId })}>
-        {VIEWS.mcp.label}
-      </Button>
-      <Button size="sm" variant="secondary" icon={<KeyRound />} title={VIEWS.accounts.description} onClick={() => navigate({ name: "accounts", hostId })}>
-        {VIEWS.accounts.label}
-      </Button>
+      {OMP_PAGES.map((name) => {
+        const { icon: Icon, label, description } = VIEWS[name];
+        return (
+          <Button key={name} size="sm" variant="secondary" icon={<Icon />} title={description} onClick={() => navigate({ name, hostId })}>
+            {label}
+          </Button>
+        );
+      })}
     </div>
   );
 }
@@ -208,21 +207,15 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
                   Host setup
                 </DropdownMenuItem>
               )}
-              {online && (
-                <DropdownMenuItem icon={<SlidersHorizontal />} onSelect={() => navigate({ name: "omp", hostId: profile.id })}>
-                  {VIEWS.omp.label}
-                </DropdownMenuItem>
-              )}
-              {online && (
-                <DropdownMenuItem icon={<Blocks />} onSelect={() => navigate({ name: "mcp", hostId: profile.id })}>
-                  {VIEWS.mcp.label}
-                </DropdownMenuItem>
-              )}
-              {online && (
-                <DropdownMenuItem icon={<KeyRound />} onSelect={() => navigate({ name: "accounts", hostId: profile.id })}>
-                  {VIEWS.accounts.label}
-                </DropdownMenuItem>
-              )}
+              {online &&
+                OMP_PAGES.map((name) => {
+                  const { icon: Icon, label } = VIEWS[name];
+                  return (
+                    <DropdownMenuItem key={name} icon={<Icon />} onSelect={() => navigate({ name, hostId: profile.id })}>
+                      {label}
+                    </DropdownMenuItem>
+                  );
+                })}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 danger

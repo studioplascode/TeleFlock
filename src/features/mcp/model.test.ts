@@ -1,20 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import type { McpList, McpRegistryInput, McpServer, McpServerDraft, Workspace } from "@/core/gen";
+import type { McpList, McpRegistryInput, McpServer, McpServerDraft, McpTestResult, Workspace } from "@/core/gen";
 import {
   applyRegistryInputs,
   applyTemplateInput,
+  definedIn,
   draftFromForm,
   emptyForm,
+  endpointKey,
+  endpointKind,
   errorField,
   fieldMessage,
+  findSame,
+  formEndpoint,
   formFromDraft,
   joinArgs,
   kvRow,
+  lastGoodCheck,
   looksSecret,
   nameError,
   projectFolders,
   registryConfig,
   reloadNote,
+  type RowTest,
+  rowState,
   SECRET_MASK,
   setArgAt,
   shadowedBy,
@@ -172,11 +180,132 @@ describe("host errors", () => {
   });
 });
 
+describe("the same server twice", () => {
+  const stdio = (command: string, args: string[], extra: Partial<McpServerDraft> = {}): McpServerDraft => ({ transport: "stdio", command, args, env: [], headers: [], ...extra });
+
+  test("URLs match whatever the case of scheme and host, default port, trailing slash and credentials", () => {
+    const base = endpointKey(http("https://mcp.context7.com/mcp"));
+    for (const url of ["HTTPS://MCP.Context7.com/mcp/", "https://mcp.context7.com:443/mcp", `https://mcp.context7.com/mcp?api_key=${SECRET_MASK}`, "https://mcp.context7.com/mcp?token=abc#x", "  https://user:pw@mcp.context7.com/mcp  "]) {
+      expect(endpointKey(http(url))).toBe(base);
+    }
+    expect(endpointKey(http("https://mcp.context7.com/mcp", { transport: "sse" }))).toBe(base);
+    // Another path, scheme, host or plain query is another server.
+    for (const url of ["https://mcp.context7.com/sse", "http://mcp.context7.com/mcp", "https://mcp.context7.com/mcp?login", "https://context7.com/mcp"]) {
+      expect(endpointKey(http(url))).not.toBe(base);
+    }
+    expect(endpointKey(http(""))).toBeNull();
+  });
+
+  test("a package matches however its runner starts it; versions and runner flags don't count", () => {
+    const memory = endpointKey(stdio("npx", ["@modelcontextprotocol/server-memory"]));
+    expect(memory).toBe("npm @modelcontextprotocol/server-memory");
+    const npm: [string, string[]][] = [
+      ["npx", ["-y", "@modelcontextprotocol/server-memory@2.0.0"]],
+      ["/usr/local/bin/npx", ["--yes", "@modelcontextprotocol/server-memory@latest", "--extra"]],
+      ["npx.cmd", ["-y", "@modelcontextprotocol/server-memory"]],
+      ["bunx", ["@modelcontextprotocol/server-memory"]],
+      ["pnpm", ["dlx", "@modelcontextprotocol/server-memory"]],
+      ["npm", ["exec", "--", "@modelcontextprotocol/server-memory"]],
+      ["npx", ["-p", "@modelcontextprotocol/server-memory", "mcp-server-memory"]],
+    ];
+    for (const [cmd, args] of npm) expect(endpointKey(stdio(cmd, args))).toBe(memory);
+    const fetch = endpointKey(stdio("uvx", ["mcp-server-fetch"]));
+    expect(fetch).toBe("pypi mcp-server-fetch");
+    const pypi: [string, string[]][] = [
+      ["uvx", ["mcp-server-fetch==2026.10.24"]],
+      ["uvx", ["Mcp_Server.Fetch@latest"]],
+      ["uvx", ["--python", "3.12", "mcp-server-fetch[socks]"]],
+      ["uvx", ["--from", "mcp-server-fetch", "mcp-server-fetch-cli"]],
+      ["uv", ["tool", "run", "mcp-server-fetch"]],
+      ["pipx", ["run", "--spec", "mcp-server-fetch==1.0", "fetch"]],
+    ];
+    for (const [cmd, args] of pypi) expect(endpointKey(stdio(cmd, args))).toBe(fetch);
+    // An npm and a PyPI package of one name are different programs.
+    expect(endpointKey(stdio("npx", ["mcp-server-fetch"]))).not.toBe(fetch);
+  });
+
+  test("Smithery servers match by id; other commands by their whole line and folder", () => {
+    const smithery = (id: string, config = "{}") => stdio("bunx", ["-y", "@smithery/cli", "run", id, "--config", config]);
+    expect(endpointKey(smithery("@upstash/context7-mcp"))).toBe(endpointKey(smithery("@upstash/context7-mcp", `{"apiKey":"${SECRET_MASK}"}`)));
+    expect(endpointKey(smithery("@upstash/context7-mcp"))).not.toBe(endpointKey(smithery("@other/server")));
+    const docs = stdio("bun", ["run", "scripts/docs-mcp.ts"], { cwd: "/h/code/x" });
+    expect(endpointKey(docs)).toBe(endpointKey(stdio("/usr/bin/bun", ["run", "scripts/docs-mcp.ts"], { cwd: "/h/code/x" })));
+    expect(endpointKey(docs)).not.toBe(endpointKey({ ...docs, cwd: "/h/code/y" }));
+    expect(endpointKey(docs)).not.toBe(endpointKey({ ...docs, args: ["run", "scripts/other.ts"] }));
+    expect(endpointKey(stdio("  ", []))).toBeNull();
+    expect([endpointKind(docs), endpointKind(smithery("x")), endpointKind(http("https://x.dev"))]).toEqual(["command", "package", "URL"]);
+  });
+
+  test("findSame lists the one sessions load first and never the server being edited", () => {
+    const own = server("context7", { server: http("https://mcp.context7.com/mcp") });
+    const cursor = server("context7", {
+      origin: "imported",
+      sourceLabel: "Cursor",
+      shadowed: true,
+      server: http("https://mcp.context7.com/mcp", { headers: [{ key: "CONTEXT7_API_KEY", value: SECRET_MASK, secret: true }] }),
+    });
+    const list = [cursor, server("docs"), own];
+    const c7 = MCP_TEMPLATES.find((t) => t.id === "context7");
+    const fsTemplate = MCP_TEMPLATES.find((t) => t.id === "filesystem");
+    if (!c7 || !fsTemplate) throw new Error("templates");
+    expect(findSame(c7.server, list)).toEqual([own, cursor]);
+    expect(findSame(own.server, list, "user:context7")).toEqual([cursor]);
+    expect(findSame(http("https://elsewhere.dev/mcp"), list)).toEqual([]);
+    // A template without its inputs still finds the server set up from it.
+    const fs = server("filesystem", { server: stdio("npx", ["-y", "@modelcontextprotocol/server-filesystem", "/h/code", "/h/notes"]) });
+    expect(findSame(fsTemplate.server, [fs])).toEqual([fs]);
+    expect([definedIn(own), definedIn(cursor), definedIn({ origin: "project" })]).toEqual(["omp's config", "Cursor", "this project's config"]);
+  });
+});
+
+describe("the same server, from the editor's form", () => {
+  test("a half-filled form is enough to spot one", () => {
+    const own = server("context7", { server: http("https://mcp.context7.com/mcp") });
+    const memory = server("memory", { server: { transport: "stdio", command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"], env: [], headers: [] } });
+    expect(findSame(formEndpoint({ ...emptyForm("user"), transport: "http", url: "https://mcp.context7.com/mcp/" }), [own, memory])).toEqual([own]);
+    expect(findSame(formEndpoint({ ...emptyForm("user"), command: "bunx", argsText: "@modelcontextprotocol/server-memory@2" }), [own, memory])).toEqual([memory]);
+    expect(findSame(formEndpoint(emptyForm("user")), [own, memory])).toEqual([]);
+  });
+});
+
+describe("a row after its test", () => {
+  const result = (status: McpTestResult["status"], extra: Partial<McpTestResult> = {}): McpTestResult => ({ status, tools: [], ms: 200, ...extra });
+
+  test("a test newer than the last check shows its outcome and time; a check that ends later wins again", () => {
+    const pg = server("postgres", { status: "failed", error: "spawn uvx ENOENT", checkedAt: 1000 });
+    const failed: RowTest = { result: result("failed", { error: "spawn uvx ENOENT" }), at: 5000, since: 1000 };
+    expect(rowState(pg, failed)).toEqual({ status: "failed", error: "spawn uvx ENOENT", tools: [], serverInfo: undefined, checkedAt: 5000, tested: true });
+    const tools = [{ name: "query" }];
+    expect(rowState(pg, { result: result("connected", { tools, serverInfo: { name: "pg" } }), at: 5000, since: 1000 })).toMatchObject({ status: "connected", error: undefined, tools, serverInfo: { name: "pg" }, checkedAt: 5000, tested: true });
+    expect(rowState({ ...pg, checkedAt: 6000 }, failed)).toMatchObject({ checkedAt: 6000, tested: false });
+    expect(rowState(pg, { startedAt: 4000, since: 1000 }).tested).toBe(false);
+    // Never checked: the test is the first word on it.
+    expect(rowState(server("new", { status: "unknown" }), { result: result("needsAuth", { error: "401" }), at: 5000 })).toMatchObject({ status: "needsAuth", error: "401", checkedAt: 5000, tested: true });
+  });
+
+  test("off, skipped, hidden and checking rows keep their state", () => {
+    const t: RowTest = { result: result("connected"), at: 5000 };
+    for (const s of [server("a", { status: "disabled", enabled: false }), server("b", { status: "skipped" }), server("c", { status: "checking" }), server("d", { shadowed: true, status: "unknown" })]) {
+      expect(rowState(s, t)).toMatchObject({ status: s.status, tested: false });
+    }
+  });
+
+  test("the last good check is the newest status of any server", () => {
+    expect(lastGoodCheck([server("a", { checkedAt: 10 }), server("b"), server("c", { checkedAt: 30 })])).toBe(30);
+    expect(lastGoodCheck([server("a"), server("b")])).toBeUndefined();
+  });
+});
+
 describe("list helpers", () => {
-  test("reload notes say what reached running sessions, and nothing when nothing did", () => {
-    expect(reloadNote({ reloaded: 2, queued: 1, restartNeeded: 1, errors: [] })).toBe("applied to 2 running sessions · 1 more when it finishes its turn · restart 1 session to use it");
-    expect(reloadNote({ reloaded: 0, queued: 2, restartNeeded: 0, errors: [] })).toBe("2 busy sessions pick it up when they finish their turns");
-    expect(reloadNote({ reloaded: 0, queued: 0, restartNeeded: 0, errors: [] })).toBeNull();
+  test("reload notes say what reached running sessions, worded for the change, and nothing when nothing did", () => {
+    const r = { reloaded: 2, queued: 1, restartNeeded: 1, errors: [] };
+    expect(reloadNote(r, "add")).toBe("applied to 2 running sessions · 1 more when it finishes its turn · restart 1 session to use it");
+    expect(reloadNote(r, "change")).toBe("applied to 2 running sessions · 1 more when it finishes its turn · restart 1 session to pick it up");
+    expect(reloadNote(r, "remove")).toBe("dropped by 2 running sessions · 1 more when it finishes its turn · 1 session keeps it until restarted");
+    expect(reloadNote({ reloaded: 0, queued: 2, restartNeeded: 2, errors: [] }, "add")).toBe("2 busy sessions pick it up when they finish their turns · restart 2 sessions to use it");
+    expect(reloadNote({ reloaded: 0, queued: 1, restartNeeded: 0, errors: [] }, "change")).toBe("1 busy session picks it up when it finishes its turn");
+    expect(reloadNote({ reloaded: 0, queued: 1, restartNeeded: 2, errors: [] }, "remove")).toBe("1 busy session drops it when it finishes its turn · 2 sessions keep it until restarted");
+    expect(reloadNote({ reloaded: 0, queued: 0, restartNeeded: 0, errors: [] }, "remove")).toBeNull();
   });
 
   test("unchanged servers keep their objects across answers (memoized rows skip rendering)", () => {

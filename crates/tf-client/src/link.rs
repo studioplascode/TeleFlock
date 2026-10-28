@@ -35,6 +35,11 @@ pub const PING_DEADLINE: Duration = Duration::from_secs(30);
 /// context (starting herdr waits up to 15 s) before it welcomes the client; slow hosts need it.
 pub const WELCOME_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `accounts.unlink` runs omp's RPC logout on the host (up to 90 s), then reads the accounts again
+/// with a fresh quota report (`omp usage`, up to 45 s) and omp's config (`omp config list`, up to
+/// 20 s); `accounts.prefer` reads and writes omp's config around the accounts (a quota report
+/// older than 5 min is read anew). The app must not give up while the host still finishes it.
+pub const ACCOUNTS_CHANGE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Receives everything the daemon pushes. Called from the link's reader task, in order.
 pub trait LinkSink: Send + Sync + 'static {
@@ -52,6 +57,7 @@ pub fn timeout_for(method: &str) -> Duration {
         // `agent.archive {archived: false}` and `agent.prompt` resume a parked agent.
         "agent.start" | "agent.resume" | "agent.archive" | "agent.prompt" | "host.resume" | "worktree.create"
         | "automation.run" => LAUNCH_TIMEOUT,
+        "accounts.unlink" | "accounts.prefer" => ACCOUNTS_CHANGE_TIMEOUT,
         _ => DEFAULT_TIMEOUT,
     }
 }
@@ -63,8 +69,10 @@ enum Pending {
 
 type Reader = Lines<Pin<Box<dyn AsyncBufRead + Send>>>;
 
-/// zstd window of the outbound stream (2 MiB, zstd's own choice for its default level).
-const ZSTD_WINDOW_LOG: u32 = 21;
+/// zstd window of the outbound stream: 128 KiB. What goes to hostd is small (requests, keystrokes,
+/// pings), and the window is what hostd's decoder for it allocates (one per client) and what the
+/// encoder here keeps; zstd's choice for the level (2 MiB) would cost megabytes on both sides.
+const ZSTD_WINDOW_LOG: u32 = 17;
 /// Largest window the inbound zstd stream may use (8 MiB).
 const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 
@@ -668,7 +676,7 @@ mod tests {
     use super::*;
     use crate::state::fixtures::*;
     use tf_proto::*;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     #[derive(Default)]
     pub struct Rec(pub Mutex<Vec<String>>);
@@ -758,6 +766,42 @@ mod tests {
         assert_eq!(log, ["snap 5 0", "patch 6 0", "snap 10 1", "patch 11 0", "push pulse"]);
     }
 
+    /// The stream to hostd announces a 128 KiB zstd window (what hostd's decoder allocates per
+    /// client), not the level's default of 2 MiB.
+    #[tokio::test]
+    async fn outbound_zstd_window_is_128_kib() {
+        use async_compression::tokio::write::ZstdEncoder;
+        let (client_w, server_r) = tokio::io::duplex(1 << 16);
+        let (mut server_w, client_r) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            let mut r = BufReader::new(server_r);
+            let mut hello = String::new();
+            r.read_line(&mut hello).await.unwrap();
+            let welcome = ServerMsg::Welcome { protocol: PROTOCOL_VERSION, hostd_version: "0.6.0".into(), client_id: "c1".into(), features: Some(vec![FEATURE_ZSTD.into()]) };
+            send(&mut server_w, &welcome).await;
+            let mut z = ZstdEncoder::new(server_w);
+            let snap = format!("{}\n", serde_json::to_string(&ServerMsg::Snapshot { rev: 1, state: host_state() }).unwrap());
+            z.write_all(snap.as_bytes()).await.unwrap();
+            z.flush().await.unwrap();
+            let mut head = [0u8; 6];
+            r.read_exact(&mut head).await.unwrap();
+            (head, z)
+        });
+        let mut hi = hello();
+        if let ClientMsg::Hello { client, .. } = &mut hi {
+            client.features = Some(requested_features());
+        }
+        let link = Link::establish(Box::new(client_w), Box::new(client_r), None, hi, Arc::new(Rec::default())).await.unwrap();
+        assert!(link.features.zstd);
+        link.term_input("t1", "x".into()).unwrap();
+        let (head, _z) = server.await.unwrap();
+        assert_eq!(head[..4], [0x28, 0xB5, 0x2F, 0xFD], "a zstd frame");
+        assert_eq!(head[4] & 0x20, 0, "a window descriptor follows (no single segment)");
+        let (exponent, mantissa) = (u32::from(head[5] >> 3), u64::from(head[5] & 7));
+        let base = 1u64 << (10 + exponent);
+        assert_eq!(base + base / 8 * mantissa, 128 << 10);
+    }
+
     #[tokio::test]
     async fn handshake_error_and_eof() {
         let (client_w, _server_r) = tokio::io::duplex(1 << 16);
@@ -833,5 +877,17 @@ mod tests {
         let reason = link.closed().await;
         assert_eq!(reason, "no answer from tf-hostd for 30s");
         assert_eq!(t0.elapsed(), Duration::from_secs(44));
+    }
+
+    #[test]
+    fn account_changes_outlast_the_hosts_own_limits() {
+        use tf_hostd::ops::{accounts::LOGOUT_TIMEOUT, limits::OMP_USAGE_TIMEOUT};
+        // One `omp config list` / `omp config set` on the host (omp_config's CLI timeout).
+        let config = Duration::from_secs(20);
+        // Logout, a fresh quota report, omp's config read once.
+        assert!(timeout_for("accounts.unlink") >= LOGOUT_TIMEOUT + OMP_USAGE_TIMEOUT + config);
+        // omp's config read, read again, written and read around a quota report older than 5 min.
+        assert!(timeout_for("accounts.prefer") >= OMP_USAGE_TIMEOUT + config * 4);
+        assert_eq!(timeout_for("accounts.list"), DEFAULT_TIMEOUT);
     }
 }

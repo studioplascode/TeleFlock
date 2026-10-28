@@ -681,11 +681,17 @@ interface Omp {
 	sm: SM;
 	session: FakeSession;
 	registry: ReturnType<typeof fakeRegistry>;
+	/** Runs the bridge's tick now (omp runs it every second). */
+	tick(): void;
 }
 
-/** A fake omp main session (or a subagent's, with `sub`) and its `pi`. */
-function fakeOmp(opts: { sub?: string; registry?: ReturnType<typeof fakeRegistry>; lifecycle?: unknown; tui?: ReturnType<typeof fakeTui> } = {}): Omp {
+/** A fake omp main session (or a subagent's, with `sub`) and its `pi`; `onDisk: false`: omp has not
+ *  written the session file yet. */
+function fakeOmp(
+	opts: { sub?: string; registry?: ReturnType<typeof fakeRegistry>; lifecycle?: unknown; tui?: ReturnType<typeof fakeTui>; onDisk?: boolean } = {},
+): Omp {
 	const sm = fakeSessionManager(opts.sub ? `sub-${opts.sub}` : "S1", `/tmp/${opts.sub ?? "S1"}.jsonl`);
+	sm.onDisk = opts.onDisk ?? true;
 	const session = fakeAgentSession(sm);
 	const registry = opts.registry ?? fakeRegistry();
 	const agentId = opts.sub ?? "Main";
@@ -701,6 +707,7 @@ function fakeOmp(opts: { sub?: string; registry?: ReturnType<typeof fakeRegistry
 		lastActivity: 2,
 	});
 	const tui = opts.tui ?? fakeTui();
+	const intervals: Array<() => void> = [];
 	const handlers = new Map<string, Array<(e: Json, c: object) => unknown>>();
 	const events = new FakeBus();
 	const AgentRegistry = class {
@@ -724,7 +731,10 @@ function fakeOmp(opts: { sub?: string; registry?: ReturnType<typeof fakeRegistry
 		model: MODEL,
 		isIdle: () => !session.isStreaming,
 		getContextUsage: () => ({ tokens: 2720, contextWindow: 272000, percent: 1 }),
-		setInterval: (fn: () => void, ms: number) => setInterval(fn, ms),
+		setInterval: (fn: () => void, ms: number) => {
+			intervals.push(fn);
+			return setInterval(fn, ms);
+		},
 		clearTimer: (t: Timer) => clearInterval(t),
 		setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
 		abort: () => {},
@@ -755,7 +765,7 @@ function fakeOmp(opts: { sub?: string; registry?: ReturnType<typeof fakeRegistry
 			for (const fn of handlers.get(name) ?? []) fn(event, c);
 		},
 	};
-	return { pi, ctx, tui, sm, session, registry };
+	return { pi, ctx, tui, sm, session, registry, tick: () => intervals.at(-1)?.() };
 }
 
 async function bridged(hostd: Hostd & { sock: string }, opts: Parameters<typeof fakeOmp>[0] = {}): Promise<Omp> {
@@ -898,12 +908,39 @@ describe("extension against a fake hostd", () => {
 
 	test("before omp wrote the session file, the resync carries its entries instead of a lastEntryId", async () => {
 		const hostd = await startHostd();
-		const omp = await bridged(hostd);
-		omp.sm.onDisk = false;
+		const omp = await bridged(hostd, { onDisk: false });
+		omp.tick();
 		await request(hostd, "liveSubscribe");
 		const resync = hostd.lines.find(l => l.t === "resync") as Json & { live: { frames: Json[] } };
 		expect(resync.lastEntryId).toBeNull();
 		expect(resync.live.frames.filter(f => f.t === "entry").map(f => (f.entry as Json).id)).toEqual(["e1", "e2", "e3"]);
+	});
+
+	test("a session omp wrote names its file in every resync, also while omp moves the file", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd);
+		await request(hostd, "liveSubscribe");
+		// omp's moveTo renamed the file and has not pointed the session at the new path yet: hostd
+		// finds the file gone and subscribes again until it is there (no transcript inlined).
+		omp.sm.onDisk = false;
+		await request(hostd, "liveSubscribe");
+		const resyncs = hostd.lines.filter(l => l.t === "resync") as Array<Json & { live: { frames: Json[] } }>;
+		expect(resyncs.map(r => r.lastEntryId)).toEqual(["e3", "e3"]);
+		expect(resyncs.flatMap(r => r.live.frames).filter(f => f.t === "entry")).toEqual([]);
+	});
+
+	test("a session omp writes after a resync counts as written from the next tick on", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd, { onDisk: false });
+		await request(hostd, "liveSubscribe");
+		omp.sm.onDisk = true;
+		omp.tick();
+		// …then omp moves it.
+		omp.sm.onDisk = false;
+		await request(hostd, "liveSubscribe");
+		const resyncs = hostd.lines.filter(l => l.t === "resync") as Array<Json & { live: { frames: Json[] } }>;
+		expect(resyncs.map(r => r.lastEntryId)).toEqual([null, "e3"]);
+		expect(resyncs.map(r => r.live.frames.filter(f => f.t === "entry").length)).toEqual([3, 0]);
 	});
 
 	test("the ask tool's dialog is answered from hostd round by round; the TUI dialog closes", async () => {

@@ -1,20 +1,17 @@
-import { Blocks, KeyRound, type LucideIcon, SlidersHorizontal } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { navigate } from "@/core";
 import { cn } from "@/design";
 import { haptic } from "./haptics";
-import { VIEWS } from "./vocab";
+import { OMP_PAGES, VIEWS } from "./vocab";
 
 /** omp's per-host pages, in nav order. */
 export type OmpAreaPage = "omp" | "mcp" | "accounts";
 
-const PAGES: readonly { name: OmpAreaPage; icon: LucideIcon; label: string }[] = [
-  { name: "omp", icon: SlidersHorizontal, label: VIEWS.omp.label },
-  { name: "mcp", icon: Blocks, label: VIEWS.mcp.label },
-  { name: "accounts", icon: KeyRound, label: VIEWS.accounts.label },
-];
+const PAGES: readonly { name: OmpAreaPage; icon: LucideIcon; label: string }[] = OMP_PAGES.map((name) => ({ name, icon: VIEWS[name].icon, label: VIEWS[name].label }));
 
 /**
- * omp's per-host pages (settings, MCP servers) as one area: a strip at the top of each links to the
+ * omp's per-host pages (settings, MCP servers, accounts) as one area: a strip at the top of each links to the
  * others for the same host, so finding one of them finds all of them.
  */
 export function OmpAreaNav({ current, hostId, className }: { current: OmpAreaPage; hostId?: string; className?: string }) {
@@ -43,5 +40,19 @@ export function OmpAreaNav({ current, hostId, className }: { current: OmpAreaPag
         );
       })}
     </nav>
+  );
+}
+
+/**
+ * The frame every omp-area page renders in: one width, padding and rhythm, so the strip at the top
+ * stays put when you switch between the pages (desktop), and the same body padding under the
+ * MobileHeader (phone).
+ */
+export function OmpAreaFrame({ current, hostId, mobile, children }: { current: OmpAreaPage; hostId?: string; mobile: boolean; children: ReactNode }) {
+  return (
+    <div className={mobile ? "flex flex-col gap-3 px-3 pt-1 pb-6" : "mx-auto flex w-full max-w-[1180px] flex-col gap-5 px-8 pt-7 pb-12"}>
+      <OmpAreaNav current={current} hostId={hostId} className={mobile ? undefined : "-mb-2"} />
+      {children}
+    </div>
   );
 }

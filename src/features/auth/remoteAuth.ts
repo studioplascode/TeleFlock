@@ -11,14 +11,17 @@
  *   A port that can't be bound here (`port_in_use` / `port_unavailable`) makes pasting the address
  *   the browser landed on the primary path. Hosts on this machine need no tunnel;
  * - opens the authorization page in this device's browser (`app.openExternal` in Tauri, desktop and
- *   Android, and for demo hosts; `window.open` inside the click in a plain browser);
+ *   Android, and for demo hosts; `window.open` inside the click in a plain browser), only an
+ *   http(s) one (the page comes from the host, e.g. an MCP server's authorization endpoint);
  * - submits pasted codes / addresses and prompt answers (`auth.submit`), reporting a refusal where
  *   it was made;
- * - on cancel, unmount or a final state: closes the tunnel it opened and cancels a running flow.
+ * - on cancel, unmount or a final state: closes the callback port's tunnel (also one that was open
+ *   already: a same-port tunnel is always a sign-in's, e.g. left by a page that reloaded mid
+ *   sign-in) and cancels a running flow, reported to `onFinal` once the host has it.
  */
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { apiError, core, toApiError, useHosts } from "@/core";
-import type { ApiError, AuthFlow, AuthFlowState, AuthPaste, HostKind, TunnelInfo, TunnelListResult } from "@/core/gen";
+import { apiError, core, safeHref, toApiError, useHosts } from "@/core";
+import type { ApiError, AuthFlow, AuthFlowState, AuthPaste, HostKind, TunnelInfo } from "@/core/gen";
 import { inTauri } from "@/core/transport/tauri";
 
 /**
@@ -163,7 +166,8 @@ export class RemoteAuthController {
   private releaseTimer: ReturnType<typeof setTimeout> | undefined;
   /** Port the tunnel is (being) opened for; null: none wanted. */
   private tunnelPort: number | null = null;
-  /** The tunnel this controller opened (a tunnel that existed before is never closed). */
+  /** The tunnel of the callback port, closed when the flow ends: opened by this controller, or a
+   * same-port tunnel that was open already (only sign-ins listen on the remote port's own number). */
   private tunnelId: string | null = null;
   private autoOpened = false;
   private doneReported = false;
@@ -214,6 +218,12 @@ export class RemoteAuthController {
   readonly openUrl = (): void => {
     const url = this.snap.flow?.url;
     if (!url || this.disposed) return;
+    // The host relays the page (an MCP server picks its own authorization endpoint): only a web
+    // page is opened, never a protocol handler.
+    if (!safeHref(url)) {
+      this.set({ openError: "its address isn't http or https" });
+      return;
+    }
     this.set({ opened: true, openError: null });
     if (this.deps.externalOpen()) {
       this.deps.app("app.openExternal", { url }).catch((e: unknown) => {
@@ -258,12 +268,7 @@ export class RemoteAuthController {
   /** Cancels the sign-in (stage `cancelled`). */
   readonly cancel = (): void => {
     if (this.disposed || isFinalFlow(this.snap.flow) || (this.snap.stage === "failed" && !this.snap.flow)) return;
-    const flow = this.snap.flow;
-    this.stop();
-    const now = Date.now();
-    const cancelled: AuthFlow | null = flow ? { ...flow, state: "cancelled", message: "Cancelled.", prompt: undefined, rev: flow.rev + 1, updatedAt: now } : null;
-    this.set({ stage: "cancelled", flow: cancelled, tunnel: { state: "none" }, submitting: false, reconnecting: false });
-    if (cancelled) this.handlers.onFinal?.(cancelled);
+    this.set({ stage: "cancelled", flow: this.stop(), tunnel: { state: "none" }, submitting: false, reconnecting: false });
   };
 
   /** Starts a new attempt (after a failure, a cancel or an expired code). */
@@ -292,7 +297,7 @@ export class RemoteAuthController {
     }
     if (gen !== this.gen) {
       // Cancelled or closed while the host was starting it: nobody follows this flow.
-      if (!isFinalFlow(flow)) this.deps.host("auth.cancel", { flowId: flow.flowId }).catch(() => {});
+      if (!isFinalFlow(flow)) this.cancelOnHost(flow);
       return;
     }
     this.apply(flow);
@@ -368,13 +373,23 @@ export class RemoteAuthController {
     if (flow) this.handlers.onFinal?.({ ...flow, state: "failed", message: error.message });
   }
 
-  /** Stops following the current flow (cancelling it on the host when it still runs). */
-  private stop(): void {
+  /** Stops following the current flow; a running one is cancelled (see {@link cancelOnHost}) and
+   * returned as such. */
+  private stop(): AuthFlow | null {
     this.gen += 1;
     this.settling = false;
     this.closeTunnel();
     const flow = this.snap.flow;
-    if (flow && !isFinalFlow(flow)) this.deps.host("auth.cancel", { flowId: flow.flowId }).catch(() => {});
+    return flow && !isFinalFlow(flow) ? this.cancelOnHost(flow) : null;
+  }
+
+  /** Cancels a running flow on the host and reports it to `onFinal` once the host has it (also
+   * after {@link dispose}): what is read from the host then no longer lists it as running. */
+  private cancelOnHost(flow: AuthFlow): AuthFlow {
+    const cancelled: AuthFlow = { ...flow, state: "cancelled", message: "Cancelled.", prompt: undefined, rev: flow.rev + 1, updatedAt: Date.now() };
+    const report = () => this.handlers.onFinal?.(cancelled);
+    this.deps.host("auth.cancel", { flowId: flow.flowId }).then(report, report);
+    return cancelled;
   }
 
   // ───────────────────────────── tunnel ─────────────────────────────
@@ -405,22 +420,16 @@ export class RemoteAuthController {
   private async openTunnel(port: number): Promise<void> {
     const gen = this.gen;
     const wanted = () => gen === this.gen && this.tunnelPort === port && !this.disposed;
-    // Tunnels that exist already (a preview of the same port) are reused, never closed by us.
-    let before = new Set<string>();
     try {
-      const list = (await this.deps.app("tunnel.list", {})) as TunnelListResult;
-      before = new Set(list.tunnels.map((t) => t.tunnelId));
-    } catch {
-      /* unknown: treat the tunnel we get as ours */
-    }
-    try {
+      // The tunnel listens on this host's remote port's own number, which only sign-ins do
+      // (previews listen on a free port): it is this flow's also when it was open already (left
+      // by a page that reloaded mid sign-in, or this flow followed again), and closes with it.
       const t = (await this.deps.app("tunnel.open", { hostId: this.deps.hostId, port, localPort: port })) as TunnelInfo;
-      const ours = !before.has(t.tunnelId);
       if (!wanted()) {
-        if (ours) this.deps.app("tunnel.close", { tunnelId: t.tunnelId }).catch(() => {});
+        this.deps.app("tunnel.close", { tunnelId: t.tunnelId }).catch(() => {});
         return;
       }
-      this.tunnelId = ours ? t.tunnelId : null;
+      this.tunnelId = t.tunnelId;
       this.setTunnel({ state: "open", port });
     } catch (e) {
       if (!wanted()) return;

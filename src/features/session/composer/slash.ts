@@ -461,7 +461,7 @@ export async function runSlash(ctx: SlashContext, input: string, opts: { confirm
   const mode = cmd.modeFor(args);
   if (mode === "native" && cmd.run) {
     if (cmd.cap && ctx.meta && !ctx.meta.caps[cmd.cap]) {
-      toast({ title: `/${cmd.name} isn't available right now`, description: "This session doesn't expose that control (bridge missing or agent busy).", status: "error" });
+      toast({ title: `/${cmd.name} isn't available right now`, description: "This session doesn't expose that control (it runs without the TeleFlock bridge, or the agent is busy).", status: "error" });
       return false;
     }
     return cmd.run(ctx, args);

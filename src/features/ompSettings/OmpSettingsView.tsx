@@ -1,4 +1,4 @@
-import { CircleAlert, RefreshCw, Search, Server, SlidersHorizontal, X } from "lucide-react";
+import { CircleAlert, RefreshCw, Search, Server, X } from "lucide-react";
 import { type ReactNode, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
@@ -6,7 +6,8 @@ import { navigate, useHostIds, useHosts, useHostState } from "@/core";
 import type { OmpSetting } from "@/core/gen";
 import { Button, cn, EmptyState, IconButton, Input, PageHeader, Select, Skeleton, Tile, useIsMobile } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
-import { OmpAreaNav } from "@/features/shell/OmpArea";
+import { OmpAreaFrame } from "@/features/shell/OmpArea";
+import { VIEWS } from "@/features/shell/vocab";
 import { type RowContext, SettingRow } from "./controls";
 import { buildTabs, MODEL_ROLES_KEY, matchesQuery, OMP_TABS, OTHER_TAB, type SettingTab } from "./model";
 import { useOmpSettings } from "./useOmpSettings";
@@ -229,8 +230,10 @@ export function OmpSettingsView({ hostId: routeHost }: { hostId?: string }) {
         {data.source === "cli" && (
           <p className="flex items-start gap-2 rounded-md bg-warn/10 px-3 py-2 text-xs text-warn">
             <CircleAlert className="mt-px size-3.5 shrink-0" />
-            This host's omp {data.version} (or its TeleFlock companion extension) doesn't share omp's settings schema, so labels, tabs and choices are missing. Every key is still listed
-            under Other and can be edited.
+            <span>
+              Labels, tabs and choices are missing: TeleFlock reads them through the TeleFlock bridge (its omp extension), which couldn't get them from omp {data.version} on
+              this host. Every key is still listed under Other and can be edited.
+            </span>
           </p>
         )}
         {mobile ? (
@@ -259,25 +262,23 @@ export function OmpSettingsView({ hostId: routeHost }: { hostId?: string }) {
   if (mobile)
     return (
       <div className="flex min-h-full flex-col">
-        <MobileHeader title="omp settings" subtitle={options.find((o) => o.value === hostId)?.label} back actions={refresh} />
-        <div className="flex flex-col gap-3 px-3 pt-1 pb-6">
-          <OmpAreaNav current="omp" hostId={hostId} />
+        <MobileHeader title={VIEWS.omp.label} subtitle={options.find((o) => o.value === hostId)?.label} back actions={refresh} />
+        <OmpAreaFrame current="omp" hostId={hostId} mobile>
           {hostPicker}
           {online && data && search}
           {body}
-        </div>
+        </OmpAreaFrame>
       </div>
     );
   return (
-    <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-5 px-8 pt-7 pb-12">
-      <OmpAreaNav current="omp" hostId={hostId} className="-mb-2" />
+    <OmpAreaFrame current="omp" hostId={hostId} mobile={false}>
       <PageHeader
         kicker={
           <span className="inline-flex items-center gap-1.5">
-            <SlidersHorizontal className="size-3" /> {options.find((o) => o.value === hostId)?.label ?? "Host"}
+            <VIEWS.omp.icon className="size-3" /> {options.find((o) => o.value === hostId)?.label ?? "Host"}
           </span>
         }
-        title="omp settings"
+        title={VIEWS.omp.label}
         meta={meta}
         description="Everything omp lets you configure on this host, with omp's own tabs and labels. Changes save at once into omp's global config; omp sessions pick them up as they load their settings."
         actions={
@@ -289,6 +290,6 @@ export function OmpSettingsView({ hostId: routeHost }: { hostId?: string }) {
         }
       />
       {body}
-    </div>
+    </OmpAreaFrame>
   );
 }

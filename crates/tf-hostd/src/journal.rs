@@ -6,15 +6,16 @@
 //! `session` header (`session/session-manager.ts`). Full rewrites (migrations, recovery, `/move`)
 //! are written to a temp file that is renamed over the path; a relocation leaves the old path
 //! behind. The tail tells those apart from appends: a shorter file, another file (unix inode), or
-//! other bytes right before the read position mean a rewrite; a missing file means it moved.
-//! Either way the caller reads the file again from the start.
+//! other bytes right before the read position mean a rewrite; a file the tail has seen that is
+//! gone means it moved, where one omp has not written yet just waits. Either way the caller reads
+//! the file again from the start.
 //!
 //! Blocking I/O: [`read_full`] and [`JournalTail::poll`] (one `stat`, plus the appended bytes)
 //! run on the blocking pool, never on the async runtime nor under a session lock
 //! ([`crate::feed`] reads, then applies what it read under the lock).
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -54,11 +55,20 @@ pub struct FullRead {
     pub tail: JournalTail,
 }
 
+impl FullRead {
+    /// The file was there (`false`: omp has not written it yet, or it is gone).
+    pub fn exists(&self) -> bool {
+        self.tail.seen
+    }
+}
+
 /// Reads `path` from the start. With `last_entry_id`, stops after that entry (what omp had
 /// written when the bridge took its `resync`); the tail then reads the rest as appends. A file
-/// that does not exist yet (omp writes it lazily, at the first assistant message) reads as empty.
+/// that is not there reads as empty ([`FullRead::exists`] says so): omp writes it lazily, at the
+/// first assistant message. Line by line: a session file of hundreds of MB is never in memory
+/// whole next to the entries parsed from it.
 pub fn read_full(path: &Path, last_entry_id: Option<&str>) -> std::io::Result<FullRead> {
-    let mut file = match File::open(path) {
+    let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(FullRead { header: None, title: None, entries: Vec::new(), found: false, tail: JournalTail::new(path) });
@@ -66,14 +76,20 @@ pub fn read_full(path: &Path, last_entry_id: Option<&str>) -> std::io::Result<Fu
         Err(e) => return Err(e),
     };
     let id = file_id(&file.metadata()?);
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    let complete = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
     let (mut header, mut title, mut entries, mut found) = (None, None, Vec::new(), false);
-    let mut end = 0;
-    for line in bytes[..complete].split_inclusive(|&b| b == b'\n') {
-        end += line.len();
-        let Some(v) = parse_line(line) else { continue };
+    // Bytes consumed (complete lines only), and the last ≤ ANCHOR of them.
+    let (mut end, mut anchor, mut line) = (0usize, Vec::with_capacity(ANCHOR), Vec::new());
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        // The end, or a partial last line (omp is writing it): not consumed.
+        if n == 0 || line.last() != Some(&b'\n') {
+            break;
+        }
+        end += n;
+        keep_last(&mut anchor, &line);
+        let Some(v) = parse_line(&line) else { continue };
         match v.get("type").and_then(Value::as_str) {
             Some("title") => title = v.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_owned),
             Some("session") => header = Some(v),
@@ -87,8 +103,20 @@ pub fn read_full(path: &Path, last_entry_id: Option<&str>) -> std::io::Result<Fu
             }
         }
     }
-    let tail = JournalTail { path: path.to_path_buf(), id, offset: end as u64, anchor: anchor_before(&bytes, end) };
+    let tail = JournalTail { path: path.to_path_buf(), id, seen: true, offset: end as u64, anchor };
     Ok(FullRead { header, title, entries, found, tail })
+}
+
+/// Appends `bytes` to `anchor`, keeping its last ≤ [`ANCHOR`] bytes.
+fn keep_last(anchor: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.len() >= ANCHOR {
+        anchor.clear();
+        anchor.extend_from_slice(&bytes[bytes.len() - ANCHOR..]);
+    } else {
+        anchor.extend_from_slice(bytes);
+        let excess = anchor.len().saturating_sub(ANCHOR);
+        anchor.drain(..excess);
+    }
 }
 
 /// What [`JournalTail::poll`] saw.
@@ -101,7 +129,7 @@ pub enum Poll {
     Appended { entries: Vec<Value>, offset: u64 },
     /// The file shrank, was replaced or was rewritten in place: read it again from the start.
     Rewritten,
-    /// The file is gone (relocated or deleted).
+    /// The file the tail has seen is gone (relocated or deleted).
     Missing,
 }
 
@@ -111,6 +139,9 @@ pub struct JournalTail {
     path: PathBuf,
     /// The file the offset belongs to (`None` until a file was seen, or without inodes).
     id: Option<FileId>,
+    /// The file was there (read in full, or seen by a poll): once it is gone it moved, where a
+    /// file omp has not written yet just waits.
+    seen: bool,
     /// Bytes consumed, always at a line boundary.
     offset: u64,
     /// The last bytes before `offset` (≤ [`ANCHOR`]), as read.
@@ -120,7 +151,7 @@ pub struct JournalTail {
 impl JournalTail {
     /// A tail of a file omp has not written yet: everything it will contain is new.
     pub fn new(path: &Path) -> JournalTail {
-        JournalTail { path: path.to_path_buf(), id: None, offset: 0, anchor: Vec::new() }
+        JournalTail { path: path.to_path_buf(), id: None, seen: false, offset: 0, anchor: Vec::new() }
     }
 
     pub fn path(&self) -> &Path {
@@ -131,16 +162,22 @@ impl JournalTail {
         self.offset
     }
 
+    /// The tail saw its file (it moved if it is gone now).
+    pub fn seen(&self) -> bool {
+        self.seen
+    }
+
     /// One `stat`; when the file grew, the appended complete lines.
     pub fn poll(&mut self) -> Poll {
         let meta = match std::fs::metadata(&self.path) {
             Ok(m) => m,
             // Not written yet: still nothing to read.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.offset == 0 && self.id.is_none() => return Poll::Idle,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.seen => return Poll::Idle,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Poll::Missing,
             // Transient (permissions, I/O): the next poll tries again.
             Err(_) => return Poll::Idle,
         };
+        self.seen = true;
         if self.id.is_some_and(|id| file_id(&meta).is_some_and(|now| now != id)) || meta.len() < self.offset {
             return Poll::Rewritten;
         }
@@ -324,7 +361,7 @@ mod tests {
         let path = dir.path().join("s.jsonl");
         // omp writes the file lazily: an empty read, then everything it writes is new.
         let r = read_full(&path, None).unwrap();
-        assert!(r.entries.is_empty() && r.header.is_none());
+        assert!(r.entries.is_empty() && r.header.is_none() && !r.exists());
         let mut tail = r.tail;
         assert_eq!(tail.poll(), Poll::Idle);
         append(&path, &format!("{TITLE}\n{HEADER}\n{}\n", entry("e1")));
@@ -334,11 +371,50 @@ mod tests {
     }
 
     #[test]
+    fn a_file_the_tail_saw_is_missing_once_gone_even_before_its_first_complete_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut tail = read_full(&path, None).unwrap().tail;
+        assert!(!tail.seen());
+        // omp started writing the file: no complete line yet, nothing to read.
+        append(&path, &TITLE[..20]);
+        assert_eq!(tail.poll(), Poll::Idle);
+        assert!(tail.seen());
+        // Gone now: it moved (a tail that never saw its file would still wait).
+        std::fs::rename(&path, dir.path().join("moved.jsonl")).unwrap();
+        assert_eq!(tail.poll(), Poll::Missing);
+        // A full read of an existing file says it is there, also its tail.
+        let r = read_full(&dir.path().join("moved.jsonl"), None).unwrap();
+        assert!(r.exists() && r.tail.seen());
+    }
+
+    #[test]
     fn malformed_lines_are_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         append(&path, &format!("{TITLE}\n{HEADER}\nnot json\n\n{}\n", entry("e1")));
         let r = read_full(&path, None).unwrap();
         assert_eq!(ids(&r.entries), ["e1"]);
+    }
+
+    /// The full read (line by line) keeps the anchor a whole-file read would: the ≤ 64 bytes
+    /// before its offset, across short lines too, so a change in them is a rewrite.
+    #[test]
+    fn the_full_reads_anchor_spans_short_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let short = r#"{"id":"s1"}"#;
+        let body = format!("{TITLE}\n{HEADER}\n{}\n{short}\n{short}\n{short}\n{short}\n", entry("e1"));
+        append(&path, &body);
+        let r = read_full(&path, None).unwrap();
+        assert_eq!(r.tail.offset(), body.len() as u64);
+        assert_eq!(r.tail.anchor, body.as_bytes()[body.len() - ANCHOR..]);
+        let mut tail = r.tail;
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start((body.len() - short.len() - 1) as u64)).unwrap();
+        f.write_all(br#"{"id":"s2"}"#).unwrap();
+        drop(f);
+        append(&path, &format!("{}\n", entry("e2")));
+        assert_eq!(tail.poll(), Poll::Rewritten);
     }
 }

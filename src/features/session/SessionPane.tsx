@@ -2,7 +2,7 @@ import { Bot } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { navigate, openSession, parseAgentKey, useAgent, useHosts, useSession, useUi } from "@/core";
-import { Button, cn, EmptyState, spring, StatusOrb } from "@/design";
+import { Button, cn, EmptyState, spring, StatusOrb, toastAnchorsChanged } from "@/design";
 import { ConnStatusCard } from "@/features/hosts/ConnStatusCard";
 import { PHASE_LABEL, PHASE_STATUS, phaseBusy } from "@/features/shell/status";
 import { hostCall } from "./api";
@@ -145,10 +145,13 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }:
           </div>
         )}
       </div>
-      <AnimatePresence mode="popLayout">
+      <AnimatePresence mode="popLayout" onExitComplete={mobile ? undefined : toastAnchorsChanged}>
         {ui && (
           <motion.div
             key={ui.id}
+            // desktop toasts keep clear of the question too, not only of the composer under it
+            data-toast-anchor={mobile ? undefined : ""}
+            onAnimationComplete={mobile ? undefined : toastAnchorsChanged}
             initial={{ opacity: 0, y: 40, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
             exit={{ opacity: 0, y: 24, scale: 0.97, transition: { duration: 0.2 } }}
@@ -170,8 +173,9 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }:
         )}
       </AnimatePresence>
       {dock}
+      {/* toasts keep clear of the composer (phone: the dock; desktop: when it runs under the toast stack) */}
       <div
-        data-toast-anchor={mobile ? "" : undefined}
+        data-toast-anchor=""
         className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}
         style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
       >

@@ -1,10 +1,10 @@
-import type { LoginProvider } from "@/core/gen";
+import type { LinkedAccount, LoginProvider } from "@/core/gen";
 
 /**
  * How the app names and marks omp's login providers. omp's own names (`omp auth-broker list`) are
- * long ("ChatGPT Plus/Pro (Codex Subscription)"): the app shows a short name with omp's name as the
- * detail. Providers this table doesn't know (newer omp) get a name derived from omp's and a hashed
- * mark color.
+ * long ("ChatGPT Plus/Pro (Codex Subscription)"): the app shows a short name, and under it only
+ * what that name doesn't already say (a curated blurb, or the rest of omp's name). Providers this
+ * table doesn't know (newer omp) get a name derived from omp's and a hashed mark color.
  */
 export interface ProviderLook {
   /** Short name: `ChatGPT`, `Claude`. */
@@ -13,21 +13,21 @@ export interface ProviderLook {
   glyph: string | "burst" | "sparkle" | "x";
   /** Mark background (CSS). */
   bg: string;
-  /** What signing in to it uses, when omp's name doesn't say (picker tiles). */
+  /** What you sign in with or what it gives you, where omp's name doesn't say it (picker). */
   blurb?: string;
 }
 
 const KNOWN: Record<string, ProviderLook> = {
-  "openai-codex": { name: "ChatGPT", glyph: "GPT", bg: "linear-gradient(135deg,#1fc488,#0d8a63)", blurb: "Plus or Pro (Codex)" },
+  "openai-codex": { name: "ChatGPT", glyph: "GPT", bg: "linear-gradient(135deg,#1fc488,#0d8a63)", blurb: "Plus or Pro plan" },
   "openai-codex-device": { name: "ChatGPT", glyph: "GPT", bg: "linear-gradient(135deg,#1fc488,#0d8a63)" },
   anthropic: { name: "Claude", glyph: "burst", bg: "linear-gradient(135deg,#e59273,#c25d3a)", blurb: "Pro or Max plan" },
-  "github-copilot": { name: "GitHub Copilot", glyph: "GH", bg: "linear-gradient(135deg,#4b5260,#22262d)", blurb: "Any Copilot plan" },
-  "google-gemini-cli": { name: "Gemini CLI", glyph: "sparkle", bg: "linear-gradient(135deg,#5b8cff,#9a63f2)", blurb: "Google account" },
-  "google-antigravity": { name: "Antigravity", glyph: "sparkle", bg: "linear-gradient(135deg,#2fa866,#3f7ff0)", blurb: "Google account" },
-  cursor: { name: "Cursor", glyph: "Cu", bg: "linear-gradient(135deg,#3a3a44,#131317)", blurb: "Cursor plan" },
-  "xai-oauth": { name: "Grok", glyph: "x", bg: "linear-gradient(135deg,#34343c,#0c0c0e)", blurb: "SuperGrok, X Premium+" },
+  "github-copilot": { name: "GitHub Copilot", glyph: "GH", bg: "linear-gradient(135deg,#4b5260,#22262d)", blurb: "Sign in with GitHub" },
+  "google-gemini-cli": { name: "Gemini CLI", glyph: "sparkle", bg: "linear-gradient(135deg,#5b8cff,#9a63f2)", blurb: "Sign in with Google" },
+  "google-antigravity": { name: "Antigravity", glyph: "sparkle", bg: "linear-gradient(135deg,#2fa866,#3f7ff0)", blurb: "Gemini, Claude and GPT-OSS" },
+  cursor: { name: "Cursor", glyph: "Cu", bg: "linear-gradient(135deg,#3a3a44,#131317)", blurb: "Claude, GPT and more" },
+  "xai-oauth": { name: "Grok", glyph: "x", bg: "linear-gradient(135deg,#34343c,#0c0c0e)", blurb: "SuperGrok or X Premium+" },
   xai: { name: "xAI API", glyph: "x", bg: "linear-gradient(135deg,#34343c,#0c0c0e)" },
-  openrouter: { name: "OpenRouter", glyph: "OR", bg: "linear-gradient(135deg,#7a7cf6,#5146d9)", blurb: "OpenRouter account" },
+  openrouter: { name: "OpenRouter", glyph: "OR", bg: "linear-gradient(135deg,#7a7cf6,#5146d9)", blurb: "Pay-as-you-go credits" },
   zai: { name: "Z.AI", glyph: "Z", bg: "linear-gradient(135deg,#4b6bff,#2b3fd1)" },
   "zai-coding-plan": { name: "Z.AI", glyph: "Z", bg: "linear-gradient(135deg,#4b6bff,#2b3fd1)" },
   "zhipu-coding-plan": { name: "Zhipu", glyph: "Z", bg: "linear-gradient(135deg,#4b6bff,#2b3fd1)" },
@@ -83,27 +83,89 @@ export function providerName(id: string, providers?: readonly LoginProvider[]): 
   return providerLook(id, providers?.find((p) => p.id === id)?.name).name;
 }
 
-/** omp's detail for a provider when it says more than the short name (`Plus/Pro (Codex Subscription)`). */
+/**
+ * What a provider's subtitle adds to its short name: the curated blurb, else omp's name minus the
+ * short name (`Z.AI (GLM Coding Plan)` → `GLM Coding Plan`, `MiniMax Token Plan (International)` →
+ * `Token Plan · International`); nothing when omp's name says no more than the short one.
+ */
 export function providerDetail(p: LoginProvider): string | undefined {
-  const short = providerLook(p.id, p.name).name;
-  return p.name.trim().toLowerCase() === short.toLowerCase() ? undefined : p.name;
+  const look = providerLook(p.id, p.name);
+  if (look.blurb) return look.blurb;
+  const short = look.name.toLowerCase();
+  const m = p.name.trim().match(/^(.*?)\s*(?:\(([^)]*)\))?$/);
+  let rest = (m?.[1] ?? "").trim();
+  const stem = short.replace(/\s*\(.*\)$/, "");
+  if (rest.toLowerCase().startsWith(stem)) rest = rest.slice(stem.length).trim();
+  const paren = m?.[2]?.trim();
+  const detail = [rest, paren && !short.includes(paren.toLowerCase()) ? paren : ""].filter(Boolean).join(" · ");
+  return detail && detail.toLowerCase() !== short ? detail : undefined;
+}
+
+/** A second login omp lists for the same account, offered inside the first one's sign-in. */
+export interface AlternateLogin {
+  provider: LoginProvider;
+  /** A device code instead of the browser (`<id>-device`). */
+  device: boolean;
+  /** The link that switches to it. */
+  offer: string;
+  /** The way back to the first login. */
+  back: string;
+}
+
+/** omp's other paired logins: Z.AI's API key and its sign-in are one account (stored as `zai`). */
+const TWINS: Record<string, { id: string; offer: string; back: string }> = {
+  zai: { id: "zai-coding-plan", offer: "Have a Z.AI account? Sign in instead", back: "Back to the API key" },
+};
+
+/** The other login of `id`'s account, if omp lists one. */
+export function alternateLogin(id: string, all: readonly LoginProvider[]): AlternateLogin | undefined {
+  const device = all.find((p) => p.id === `${id}-device`);
+  if (device) return { provider: device, device: true, offer: "Signing in on another device? Use a code instead", back: "Back to the browser sign-in" };
+  const twin = TWINS[id];
+  const other = twin && all.find((p) => p.id === twin.id);
+  return twin && other ? { provider: other, device: false, offer: twin.offer, back: twin.back } : undefined;
+}
+
+/** The login whose alternate `id` is, with the way back to it. */
+export function baseLogin(id: string, all: readonly LoginProvider[]): { provider: LoginProvider; back: string } | undefined {
+  for (const p of all) {
+    const alt = alternateLogin(p.id, all);
+    if (alt?.provider.id === id) return { provider: p, back: alt.back };
+  }
+  return undefined;
 }
 
 export interface PickerEntry {
   provider: LoginProvider;
-  /** A second way to sign in to the same account (`openai-codex-device`: a code instead of the browser). */
+  /** The account's other login, offered from this one's sign-in (searched too). */
   alternate?: LoginProvider;
 }
 
-/** The picker's sections: popular subscriptions first (when omp offers them), then everything else
- * in omp's order. `<id>-device` logins are the same account through a device code: offered under `<id>`. */
+/**
+ * The picker's sections: popular subscriptions first (when omp offers them), then everything else
+ * in omp's order. A pair of logins to one account (`<id>-device`, Z.AI's two) is one entry.
+ */
 export function pickerSections(all: readonly LoginProvider[]): { popular: PickerEntry[]; rest: PickerEntry[] } {
-  const hidden = new Set(all.filter((p) => p.id.endsWith("-device") && all.some((x) => `${x.id}-device` === p.id)).map((p) => p.id));
-  const entry = (p: LoginProvider): PickerEntry => ({ provider: p, alternate: all.find((x) => x.id === `${p.id}-device`) });
+  const hidden = new Set(all.filter((p) => baseLogin(p.id, all)).map((p) => p.id));
+  const entry = (p: LoginProvider): PickerEntry => ({ provider: p, alternate: alternateLogin(p.id, all)?.provider });
   const popular = POPULAR.map((id) => all.find((p) => p.id === id)).filter((p): p is LoginProvider => !!p).map(entry);
   const taken = new Set(popular.map((e) => e.provider.id));
   const rest = all.filter((p) => !taken.has(p.id) && !hidden.has(p.id)).map(entry);
   return { popular, rest };
+}
+
+/**
+ * The order a provider's accounts are listed in: working ones by when they were linked (oldest
+ * first, like omp uses keys), those only the usage report knows after them, expired logins last.
+ * Unlike omp's own order it ignores the preference, so preferring one moves no row.
+ */
+export function byListOrder(a: LinkedAccount, b: LinkedAccount): number {
+  return (
+    Number(a.disabled) - Number(b.disabled) ||
+    (a.linkedAt ?? Number.POSITIVE_INFINITY) - (b.linkedAt ?? Number.POSITIVE_INFINITY) ||
+    a.label.localeCompare(b.label) ||
+    (a.credentialId ?? 0) - (b.credentialId ?? 0)
+  );
 }
 
 /** Matches the picker search against the short name, omp's name and the id. */

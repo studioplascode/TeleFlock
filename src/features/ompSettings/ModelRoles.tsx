@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { ModelInfo, OmpSetting, ThinkingLevel } from "@/core/gen";
 import { Button, cn, Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, formatCompact, IconButton, Input, Popover, PopoverContent, PopoverTrigger, Select } from "@/design";
 import { useModels } from "@/features/session/header/useModels";
+import { Ticks } from "@/features/shell/Ticks";
 import { formatRoleSelector, parseRoleSelector, ROLE_NAME, type RoleRow, roleRecord, roleRows, THINKING_LEVELS, withRole } from "./model";
 
 const NO_LEVEL = "__default";
@@ -170,7 +171,9 @@ export function ModelRoles({ setting, hostId, onCommit }: { setting: OmpSetting;
             Add role
           </Button>
         </div>
-        <p className="mt-1.5 text-2xs text-mute-2">Use a custom role as `--model @name`, in agent definitions or with omp's /switch.</p>
+        <p className="mt-1.5 text-2xs text-mute-2">
+          <Ticks text="Use a custom role as `--model @name`, in agent definitions or with omp's `/switch`." />
+        </p>
       </div>
     </div>
   );

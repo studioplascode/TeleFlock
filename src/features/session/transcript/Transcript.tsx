@@ -6,6 +6,7 @@ import { getTranscript, loadOlder, useAgent, useSession, useSessionItem } from "
 import type { TranscriptItem } from "@/core/gen";
 import { cn, Elapsed, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
 import { useSessionUi } from "../state";
+import { estimateRowHeight } from "./estimate";
 import { EmptyTranscript } from "./FreshStart";
 import { Row } from "./rows";
 
@@ -16,9 +17,6 @@ const ROW_GAP = 12;
 const ROW_GAP_DENSE = 8;
 /** Reading measure on very wide windows (the ask card and composer line up with it). */
 export const TRANSCRIPT_MAX_WIDTH = 1120;
-/** Typical row heights before measurement (tool cards with output dominate). */
-const ROW_ESTIMATE: Partial<Record<TranscriptItem["kind"], number>> = { tool: 320, assistant: 140, user: 88, thinking: 56 };
-const ROW_ESTIMATE_DEFAULT = 48;
 /** Growth larger than this while following is a jump (session switch, big paste), not a glide. */
 const GLIDE_MAX_PX = 900;
 
@@ -52,16 +50,16 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
   const session = useSession(agentKey);
   const focus = useSessionUi((s) => s.focus[agentKey]);
   const ids = session.itemIds;
-  // Per-kind estimates keep the first (pre-measure) render close to one screenful of rows.
-  const kinds = useMemo(() => {
-    const byId = new Map(getTranscript(agentKey).items.map((it) => [it.id, it.kind]));
+  // Items in id order: row height estimates before rows are measured (keeps the scrollbar steady).
+  const items = useMemo(() => {
+    const byId = new Map(getTranscript(agentKey).items.map((it) => [it.id, it]));
     return ids.map((id) => byId.get(id));
   }, [agentKey, ids]);
   return (
     <TranscriptLog
       {...layout}
       ids={ids}
-      kinds={kinds}
+      items={items}
       loading={session.status === "loading"}
       hasMore={session.hasMore}
       onLoadOlder={() => loadOlder(agentKey)}
@@ -77,8 +75,8 @@ export function Transcript({ agentKey, ...layout }: TranscriptProps) {
 export interface TranscriptLogProps extends TranscriptLayout {
   /** Row ids, oldest first. Pass the same array while the id list is unchanged. */
   ids: string[];
-  /** Item kind per id (same order), for size estimates before rows are measured. */
-  kinds: readonly (TranscriptItem["kind"] | undefined)[];
+  /** The item of each id (same order), for size estimates before rows are measured. */
+  items: readonly (TranscriptItem | undefined)[];
   /** One row; `rail` = draw the gutter timeline. */
   renderRow: (id: string, prevId: string | undefined, nextId: string | undefined, rail: boolean) => ReactNode;
   /** First load in flight: a skeleton while there are no rows yet. */
@@ -106,7 +104,7 @@ export interface TranscriptLogProps extends TranscriptLayout {
  */
 export function TranscriptLog({
   ids,
-  kinds,
+  items,
   renderRow,
   loading = false,
   empty,
@@ -140,13 +138,7 @@ export function TranscriptLog({
 
   // Stable while the rows are: a new getItemKey makes the virtualizer re-measure every row (O(n))
   // on each render, which scrolling a long transcript does dozens of times a second.
-  const estimate = useCallback(
-    (i: number) => {
-      const kind = kinds[i];
-      return (kind && ROW_ESTIMATE[kind]) ?? ROW_ESTIMATE_DEFAULT;
-    },
-    [kinds],
-  );
+  const estimate = useCallback((i: number) => estimateRowHeight(items[i], dense), [items, dense]);
   const itemKey = useCallback((i: number) => ids[i] ?? i, [ids]);
   const virtualizer = useVirtualizer({
     count: ids.length,
@@ -297,7 +289,7 @@ export function TranscriptLog({
     if (stick.current && (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home")) setStick(false);
   };
 
-  const items = virtualizer.getVirtualItems();
+  const visible = virtualizer.getVirtualItems();
 
   return (
     <div className={cn("relative flex min-h-0 flex-1 flex-col", className)}>
@@ -336,7 +328,7 @@ export function TranscriptLog({
             empty
           ) : (
             <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-              {items.map((v) => {
+              {visible.map((v) => {
                 const id = ids[v.index];
                 if (!id) return null;
                 return (

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ManualClock } from "@/core/demo/clock";
 import { DemoEngine } from "@/core/demo/engine";
-import type { AuthFlow, TunnelListResult } from "@/core/gen";
+import type { AccountsSnapshot, AuthFlow, TunnelInfo, TunnelListResult } from "@/core/gen";
 import { RemoteAuthController, type RemoteAuthDeps, type RemoteAuthHandlers, type RemoteAuthSnapshot, type RemoteAuthStage } from "./remoteAuth";
 
 /** The demo host `forge` online on a manual clock, and a controller wired to it like the app's. */
@@ -123,7 +123,7 @@ describe("remote auth", () => {
     expect((await r.flowOnHost(flow.flowId)).state).toBe("cancelled");
   });
 
-  test("cancel closes the tunnel it opened and cancels the flow on the host", async () => {
+  test("cancel closes the tunnel it opened and cancels the flow on the host, reported once the host has it", async () => {
     const r = rig();
     const finals: AuthFlow[] = [];
     const { ctl } = r.make({ start: r.link("anthropic"), onFinal: (f) => finals.push(f) });
@@ -133,22 +133,62 @@ describe("remote auth", () => {
     const flowId = open.flow?.flowId ?? "";
     ctl.cancel();
     expect(ctl.getSnapshot().stage).toBe("cancelled");
-    expect(finals.map((f) => f.state)).toEqual(["cancelled"]);
+    expect(finals).toEqual([]);
     await r.until(ctl, () => false, 300);
+    expect(finals.map((f) => f.state)).toEqual(["cancelled"]);
     expect(await r.tunnels()).toEqual([]);
     expect((await r.flowOnHost(flowId)).state).toBe("cancelled");
   });
 
-  test("a tunnel that existed before is reused and left open", async () => {
+  test("closing mid sign-in reports the cancelled flow once the host has it: a list read then is current", async () => {
     const r = rig();
-    const preview = await r.engine.callApp("tunnel.open", { hostId: "forge", port: 1455, localPort: 1455 });
+    let listed: Promise<unknown> | undefined;
+    const { ctl } = r.make({ start: r.link("openai-codex"), onFinal: () => (listed = r.engine.callHost("forge", "accounts.list", {})) });
+    ctl.retain();
+    const open = await r.until(ctl, (s) => s.tunnel.state === "open");
+    ctl.dispose();
+    expect(listed).toBeUndefined();
+    await r.until(ctl, () => false, 300);
+    expect(listed).toBeDefined();
+    const list = (await r.drive(listed ?? Promise.reject())) as AccountsSnapshot;
+    expect(list.flows.find((f) => f.flowId === open.flow?.flowId)?.state).toBe("cancelled");
+    expect(await r.tunnels()).toEqual([]);
+  });
+
+  test("a same-port tunnel left open by an earlier sign-in is taken over and closed at the end; a preview of the port is left alone", async () => {
+    const r = rig();
+    const preview = (await r.drive(r.engine.callApp("tunnel.open", { hostId: "forge", port: 1455 }))) as TunnelInfo;
+    // A page that reloaded mid sign-in never closed its tunnel.
+    const left = (await r.drive(r.engine.callApp("tunnel.open", { hostId: "forge", port: 1455, localPort: 1455 }))) as TunnelInfo;
+    expect(preview.localPort).not.toBe(1455);
     const { ctl } = r.make({ start: r.link("openai-codex") });
     ctl.retain();
     await r.until(ctl, (s) => s.tunnel.state === "open");
+    expect(r.calls.filter((c) => c.method === "tunnel.open").length).toBe(1);
+    expect((await r.tunnels()).map((t) => t.tunnelId)).toEqual([preview.tunnelId, left.tunnelId]);
     ctl.openUrl();
     await r.until(ctl, (s) => s.stage === "done");
     await r.until(ctl, () => false, 300);
     expect(await r.tunnels()).toEqual([preview]);
+  });
+
+  test("only an http(s) sign-in page is opened", async () => {
+    // The host relays an MCP server's authorization endpoint as is; followed here, the poll never answers.
+    const r = rig({ externalOpen: () => false, host: (method) => (method === "auth.wait" ? new Promise(() => {}) : Promise.resolve({})) });
+    const page: AuthFlow = { flowId: "auth_x", kind: "mcp", title: "evil", state: "waiting", rev: 2, url: "vscode://evil/run?cmd=x", paste: "none", startedAt: 1, updatedAt: 1 };
+    const { ctl } = r.make({ start: () => Promise.resolve(page) });
+    ctl.retain();
+    await r.until(ctl, (s) => s.stage === "browser");
+    ctl.openUrl();
+    expect(r.opened).toEqual([]);
+    expect(ctl.getSnapshot()).toMatchObject({ opened: false, openError: "its address isn't http or https" });
+    expect(r.calls.some((c) => c.method === "app.openExternal")).toBe(false);
+    // An https page opens in the browser (inside the click).
+    const { ctl: ok } = r.make({ start: () => Promise.resolve({ ...page, flowId: "auth_y", url: "https://auth.example/authorize?x=1" }) });
+    ok.retain();
+    await r.until(ok, (s) => s.stage === "browser");
+    ok.openUrl();
+    expect(r.opened).toEqual(["https://auth.example/authorize?x=1"]);
   });
 
   test("a host on this machine needs no tunnel; a browser elsewhere pastes", async () => {

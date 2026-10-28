@@ -287,8 +287,8 @@ export class DemoHost implements SimHost {
             globalBridge: false,
             relay: true,
             issues: [
-              { id: "install-global-bridge", severity: "warn", title: "Install the TeleFlock companion extension", detail: "Lets TeleFlock follow and control omp sessions it did not start (live transcript, questions and approvals, subagents, model and other controls), including sessions herdr restores.", fixable: true, recommended: true },
-              { id: "enable-global-sharing", severity: "info", title: "Share every omp session with TeleFlock (fallback)", detail: "Sets collab.autoStart: control and collab.relayUrl: ws://127.0.0.1:47466 in ~/.omp/agent/config.yml. Only needed for sessions without the TeleFlock extension.", fixable: true, recommended: false },
+              { id: "install-global-bridge", severity: "warn", title: "Install the TeleFlock bridge for every session", detail: "Lets TeleFlock follow and control omp sessions it did not start (live transcript, questions and approvals, subagents, model and other controls), including sessions herdr restores.", fixable: true, recommended: true },
+              { id: "enable-global-sharing", severity: "info", title: "Share every omp session with TeleFlock (fallback)", detail: "Sets collab.autoStart: control and collab.relayUrl: ws://127.0.0.1:47466 in ~/.omp/agent/config.yml. Only needed for sessions without the TeleFlock bridge.", fixable: true, recommended: false },
               {
                 id: "move-herdr-out-of-login-session",
                 severity: "warn",
@@ -951,7 +951,15 @@ export class DemoHost implements SimHost {
     if (method.startsWith("auth.")) return this.auth.call(method, p);
     if (method.startsWith("accounts.")) return this.accounts.call(method, p);
     if (method.startsWith("mcp."))
-      return (this.mcp ??= new DemoMcp({ supported: this.variant === "forge", clock: this.env.clock, home: HOME, agents: () => this.agentsList(), auth: this.auth, ompVersion: () => this.info.omp?.version })).call(method, p);
+      return (this.mcp ??= new DemoMcp({
+        supported: this.variant === "forge",
+        clock: this.env.clock,
+        home: HOME,
+        agents: () => this.agentsList(),
+        auth: this.auth,
+        ompVersion: () => this.info.omp?.version,
+        folderExists: (path) => this.isDir(path),
+      })).call(method, p);
     switch (method) {
       case "state.get":
         return this.hostState();

@@ -51,16 +51,32 @@ fn non_empty(s: Option<&str>) -> Option<String> {
     s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-/// The stored entry as the app shows it (secrets masked) + names of the fields it doesn't edit.
-pub fn to_draft(entry: &Obj) -> (McpServerDraft, Vec<String>) {
-    let transport = transport_of(entry);
-    let oauth = entry.obj("oauth").map(|o| McpOAuthSettings {
+/// A number as omp coerces `timeout` (a number, or a string holding one), as whole milliseconds.
+fn whole_number(v: Option<&J>) -> Option<u64> {
+    let f = match v? {
+        J::Num(n) => n.as_f64()?,
+        J::Str(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    (f.is_finite() && f >= 0.0).then(|| f.round() as u64)
+}
+
+const NO_OAUTH: McpOAuthSettings = McpOAuthSettings { client_id: None, client_secret: None, scope: None, callback_port: None, redirect_uri: None };
+
+/// The `oauth` block as the app shows it (the client secret masked).
+fn oauth_shown(o: &Obj) -> McpOAuthSettings {
+    McpOAuthSettings {
         client_id: non_empty(o.str("clientId")),
         client_secret: o.str("clientSecret").filter(|s| !s.is_empty()).map(|s| if secrets::is_secret("clientSecret", s) { secrets::MASK.to_string() } else { s.to_string() }),
         scope: non_empty(o.str("scope")),
-        callback_port: o.get("callbackPort").and_then(J::as_u64).and_then(|p| u16::try_from(p).ok()),
+        callback_port: whole_number(o.get("callbackPort")).and_then(|p| u16::try_from(p).ok()),
         redirect_uri: non_empty(o.str("redirectUri")),
-    });
+    }
+}
+
+/// The stored entry as the app shows it (secrets masked) + names of the fields it doesn't edit.
+pub fn to_draft(entry: &Obj) -> (McpServerDraft, Vec<String>) {
+    let transport = transport_of(entry);
     let draft = McpServerDraft {
         transport,
         command: entry.str("command").map(str::to_string),
@@ -69,15 +85,16 @@ pub fn to_draft(entry: &Obj) -> (McpServerDraft, Vec<String>) {
         env: entry.obj("env").map(secrets::mask_kv).unwrap_or_default(),
         url: entry.str("url").map(secrets::mask_url),
         headers: entry.obj("headers").map(secrets::mask_kv).unwrap_or_default(),
-        timeout_ms: entry.get("timeout").and_then(J::as_u64),
-        oauth: oauth.filter(|o| *o != McpOAuthSettings { client_id: None, client_secret: None, scope: None, callback_port: None, redirect_uri: None }),
+        timeout_ms: whole_number(entry.get("timeout")),
+        oauth: entry.obj("oauth").map(oauth_shown).filter(|o| *o != NO_OAUTH),
     };
     let extra = entry.keys().filter(|k| !OWNED.contains(k)).map(str::to_string).collect();
     (draft, extra)
 }
 
 /// Writes `draft` into `entry` (the stored entry, or empty for a new server). `stored` is the
-/// entry before the edit (masked values are taken from it).
+/// entry before the edit (masked values are taken from it). A value the draft leaves as listed
+/// keeps its stored form (`"timeout": "30000"`, a decimal, a string port).
 pub fn apply_draft(entry: &mut Obj, draft: &McpServerDraft, stored: Option<&Obj>) -> Result<(), ApiError> {
     let invalid = |m: String| ApiError::new("invalid_params", m);
     let had_type = entry.contains("type");
@@ -124,7 +141,10 @@ pub fn apply_draft(entry: &mut Obj, draft: &McpServerDraft, stored: Option<&Obj>
             set_or_remove(entry, "headers", (!headers.is_empty()).then_some(J::Obj(headers)));
         }
     }
-    set_or_remove(entry, "timeout", draft.timeout_ms.map(J::num));
+    // Listed as it is stored: left as stored.
+    if stored.is_none() || draft.timeout_ms != whole_number(stored.and_then(|s| s.get("timeout"))) {
+        set_or_remove(entry, "timeout", draft.timeout_ms.map(J::num));
+    }
     apply_oauth(entry, draft.oauth.as_ref(), stored.and_then(|s| s.obj("oauth")))?;
     Ok(())
 }
@@ -139,10 +159,12 @@ fn set_or_remove(entry: &mut Obj, key: &str, value: Option<J>) {
 }
 
 /// The draft's OAuth client settings into the `oauth` block; its other keys (`prompt`,
-/// `callbackPath`) stay. An emptied block is removed.
+/// `callbackPath`) stay, and so does a setting the draft leaves as listed. An emptied block is
+/// removed.
 fn apply_oauth(entry: &mut Obj, draft: Option<&McpOAuthSettings>, stored: Option<&Obj>) -> Result<(), ApiError> {
     let mut o = entry.obj("oauth").cloned().unwrap_or_default();
-    let d = draft.cloned().unwrap_or(McpOAuthSettings { client_id: None, client_secret: None, scope: None, callback_port: None, redirect_uri: None });
+    let d = draft.cloned().unwrap_or(NO_OAUTH);
+    let shown = stored.map(oauth_shown).unwrap_or(NO_OAUTH);
     let secret = match d.client_secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) if s == secrets::MASK => Some(
             stored
@@ -167,18 +189,28 @@ fn apply_oauth(entry: &mut Obj, draft: Option<&McpOAuthSettings>, stored: Option
         d.callback_port.map(|p| J::num(u64::from(p))),
         non_empty(d.redirect_uri.as_deref()).map(J::str),
     ];
-    for (k, v) in OAUTH_KEYS.iter().zip(values) {
-        set_or_remove(&mut o, k, v);
+    let unchanged = [
+        d.client_id == shown.client_id,
+        d.client_secret == shown.client_secret,
+        d.scope == shown.scope,
+        d.callback_port == shown.callback_port,
+        d.redirect_uri == shown.redirect_uri,
+    ];
+    for ((k, v), same) in OAUTH_KEYS.iter().zip(values).zip(unchanged) {
+        if !(same && stored.is_some()) {
+            set_or_remove(&mut o, k, v);
+        }
     }
     set_or_remove(entry, "oauth", (!o.is_empty()).then_some(J::Obj(o)));
     Ok(())
 }
 
-/// The `enabled` flag of an entry (`"false"` strings count, like omp's coercion).
+/// The `enabled` flag of an entry, coerced like omp's loader: `"false"` / `"0"` strings are off,
+/// other strings and types are ignored (on).
 pub fn entry_enabled(entry: &Obj) -> bool {
     match entry.get("enabled") {
         Some(J::Bool(b)) => *b,
-        Some(J::Str(s)) => !s.eq_ignore_ascii_case("false"),
+        Some(J::Str(s)) => !(s.eq_ignore_ascii_case("false") || s == "0"),
         _ => true,
     }
 }
@@ -212,6 +244,38 @@ mod tests {
         }
         for bad in ["", "two  spaces", " lead", "trail ", "a/b", "émoji", &"x".repeat(101)] {
             assert!(validate_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn values_listed_as_stored_keep_their_stored_form() {
+        let stored = obj(r#"{"type":"http","url":"https://x.dev/mcp","timeout":"30000","oauth":{"callbackPort":"4100","clientId":"id1"}}"#);
+        let (d, _) = to_draft(&stored);
+        assert_eq!(d.timeout_ms, Some(30000), "omp coerces numeric strings");
+        assert_eq!(d.oauth.as_ref().unwrap().callback_port, Some(4100));
+        let mut entry = stored.clone();
+        apply_draft(&mut entry, &d, Some(&stored)).unwrap();
+        assert_eq!(entry, stored, "an untouched edit keeps the strings");
+        let mut changed = d.clone();
+        changed.timeout_ms = Some(5000);
+        let mut entry = stored.clone();
+        apply_draft(&mut entry, &changed, Some(&stored)).unwrap();
+        assert_eq!(compact(entry.get("timeout").unwrap()), "5000");
+        assert_eq!(compact(entry.get("oauth").unwrap()), r#"{"callbackPort":"4100","clientId":"id1"}"#);
+        let decimal = obj(r#"{"command":"x","timeout":1500.5}"#);
+        let (d, _) = to_draft(&decimal);
+        let mut entry = decimal.clone();
+        apply_draft(&mut entry, &d, Some(&decimal)).unwrap();
+        assert_eq!(compact(entry.get("timeout").unwrap()), "1500.5");
+    }
+
+    #[test]
+    fn enabled_strings_are_read_like_omp() {
+        for off in [r#""false""#, r#""FALSE""#, r#""0""#, "false"] {
+            assert!(!entry_enabled(&obj(&format!(r#"{{"enabled":{off}}}"#))), "{off}");
+        }
+        for on in [r#""true""#, r#""1""#, r#""yes""#, "0", "true", "null"] {
+            assert!(entry_enabled(&obj(&format!(r#"{{"enabled":{on}}}"#))), "{on}");
         }
     }
 

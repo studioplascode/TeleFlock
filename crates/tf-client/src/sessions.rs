@@ -7,7 +7,13 @@
 //! back into the plain session events the UI understands (`reset`, `upsert`, `append`, `remove`,
 //! `meta`, …). Mirrors are persisted per host and omp session ([`crate::session_cache`]): after
 //! an app restart the cached rows show at once and only the delta crosses the network. Older rows
-//! paged in once (`session.history`) stay in the mirror and are served from it.
+//! paged in once (`session.history`) stay in the mirror and are served from it. Closed mirrors
+//! stay in memory up to a size budget per host, least recently used leaving first (the cache
+//! keeps them); a mirror an open, a re-open or a write is working on never leaves.
+//!
+//! A re-open that fails while the link stays up (no answer, the session not shared yet) is tried
+//! again, waiting longer each time, as long as the UI has the session open; one that cannot work
+//! ends the session for the UI (`ended`, with the reason).
 //!
 //! With an older hostd, opens and events pass through unchanged; the mirror only remembers what
 //! to re-open after a reconnect.
@@ -35,12 +41,24 @@ const DEFAULT_PAGE: usize = 100;
 const HAVE_MAX: usize = 500;
 /// Rows a mirror keeps at most (older ones page from the host again).
 const MAX_ROWS: usize = 3000;
-/// Closed mirrors kept in memory per host (beyond that they live in the cache only).
-const MAX_IDLE: usize = 16;
 /// More gap repairs than this within [`REPAIR_WINDOW`] give up on `sessionSync` for the mirror
 /// (its next open is a plain subscription).
 const MAX_REPAIRS: usize = 3;
 const REPAIR_WINDOW: Duration = Duration::from_secs(60);
+/// A re-open that found no answer is tried again after this, then after twice as long each time
+/// up to [`RETRY_MAX`], while the UI has the session open.
+const RETRY_FIRST: Duration = if cfg!(test) { Duration::from_millis(20) } else { Duration::from_secs(1) };
+const RETRY_MAX: Duration = if cfg!(test) { Duration::from_millis(80) } else { Duration::from_secs(30) };
+/// A changed mirror that stays open is written to the cache on every periodic tick
+/// ([`persist_due`], 15 s), a big one once this long passed since its last write: per MiB of it
+/// (writing it costs more), up to [`PERSIST_MAX`]…
+const PERSIST_PER_MIB: Duration = Duration::from_secs(15);
+const PERSIST_MAX: Duration = Duration::from_secs(120);
+/// …give or take this (ticks and writes do not keep exact time).
+const PERSIST_SLACK: Duration = Duration::from_secs(2);
+/// Rows hostd no longer has (live-only rows of an earlier tf-hostd) a history page drops at most
+/// before it gives up on paging further back.
+const UNKNOWN_MAX: usize = 32;
 
 /// One transcript row the mirror holds, with the hash hostd gave it (`None`: appended to since,
 /// or paged in by `session.history`).
@@ -55,9 +73,11 @@ pub struct Row {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Data {
     pub session_id: String,
-    /// The full meta (tree included).
+    /// The meta without its tree (that is `tree`).
     pub meta: SessionMeta,
-    /// hostd's hash of `meta` (`SessionSync::meta_hash`).
+    /// The session tree, shared: meta patches, cache writes and evicted mirrors never copy it.
+    pub tree: Option<Arc<TreeInfo>>,
+    /// hostd's hash of the meta with its tree (`SessionSync::meta_hash`).
     pub meta_hash: Option<String>,
     /// Oldest first: the window hostd syncs, and older rows paged in.
     pub rows: Vec<Arc<Row>>,
@@ -111,6 +131,12 @@ fn apply_tree_patch(tree: &mut TreeInfo, upsert: Vec<TreeNode>, remove: &[String
     tree.leaf_id = leaf_id;
 }
 
+/// A meta from hostd as a mirror keeps it: without its tree, and the tree shared.
+fn split(mut meta: SessionMeta) -> (SessionMeta, Option<Arc<TreeInfo>>) {
+    let tree = meta.tree.take().map(Arc::new);
+    (meta, tree)
+}
+
 impl Data {
     /// What a `session.open` sends when nothing is cached.
     fn empty_have(session_id: Option<&str>) -> SessionHave {
@@ -136,13 +162,29 @@ impl Data {
         self.rows.iter().rposition(|r| r.item.id() == id)
     }
 
+    /// The meta with its tree, as the UI gets it in a `reset`.
+    pub fn full_meta(&self) -> SessionMeta {
+        SessionMeta { tree: self.tree.as_deref().cloned(), ..self.meta.clone() }
+    }
+
+    /// Holds what `other` holds, as far as the cache is concerned: the same rows (shared), the
+    /// same meta hash.
+    fn same_as(&self, other: &Data) -> bool {
+        self.session_id == other.session_id
+            && self.meta_hash.is_some()
+            && self.meta_hash == other.meta_hash
+            && self.has_more == other.has_more
+            && self.rows.len() == other.rows.len()
+            && self.rows.iter().zip(&other.rows).all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+
     /// The newest `n` rows as the snapshot the UI gets.
     pub fn window(&self, agent_id: &str, n: usize) -> SessionSnapshot {
         let start = self.rows.len().saturating_sub(n);
         let has_more = start > 0 || self.has_more;
         SessionSnapshot {
             agent_id: agent_id.to_owned(),
-            meta: self.meta.clone(),
+            meta: self.full_meta(),
             items: self.rows[start..].iter().map(|r| r.item.clone()).collect(),
             has_more,
             cursor: if has_more { self.rows.get(start).map(|r| r.item.id().to_owned()) } else { None },
@@ -158,17 +200,24 @@ impl Data {
     pub fn merge(prev: Option<&Data>, mut snap: SessionSnapshot) -> Result<Data, String> {
         let Some(sync) = snap.sync.take() else {
             // No sync (a parked agent's transcript, a plain fallback): rows without hashes.
+            let (meta, tree) = split(snap.meta);
             return Ok(Data {
-                session_id: snap.meta.session_id.clone().unwrap_or_default(),
+                session_id: meta.session_id.clone().unwrap_or_default(),
                 rows: snap.items.into_iter().map(|item| Arc::new(Row { item, h: None })).collect(),
-                meta: snap.meta,
+                meta,
+                tree,
                 meta_hash: None,
                 has_more: snap.has_more,
                 ui: snap.ui,
             });
         };
         let mut hashes: HashMap<String, String> = sync.hashes.into_iter().map(|d| (d.id, d.h)).collect();
-        let meta = if sync.meta_same { prev.ok_or("meta_same without a cached meta")?.meta.clone() } else { snap.meta };
+        let (meta, tree) = if sync.meta_same {
+            let p = prev.ok_or("meta_same without a cached meta")?;
+            (p.meta.clone(), p.tree.clone())
+        } else {
+            split(snap.meta)
+        };
         let session_id = meta.session_id.clone().or_else(|| prev.map(|p| p.session_id.clone())).unwrap_or_default();
         let prev = prev.filter(|p| p.session_id == session_id);
         let pos: HashMap<&str, usize> = prev.map(|p| p.rows.iter().enumerate().map(|(i, r)| (r.item.id(), i)).collect()).unwrap_or_default();
@@ -202,7 +251,7 @@ impl Data {
             _ => (Vec::new(), snap.has_more),
         };
         rows.extend(window);
-        let mut d = Data { session_id, meta, meta_hash: Some(sync.meta_hash), rows, has_more, ui: snap.ui };
+        let mut d = Data { session_id, meta, tree, meta_hash: Some(sync.meta_hash), rows, has_more, ui: snap.ui };
         d.trim();
         Ok(d)
     }
@@ -251,6 +300,7 @@ impl Data {
                 SessionEvent::Remove { id }
             }
             SessionEvent::MetaPatch { set, hash } => {
+                // The meta without its tree: a patch never copies the tree (it is not in `set`).
                 let mut v = serde_json::to_value(&self.meta).map_err(|e| e.to_string())?;
                 let obj = v.as_object_mut().ok_or("meta is not an object")?;
                 for (k, val) in set {
@@ -263,25 +313,23 @@ impl Data {
                         obj.insert(k, val);
                     }
                 }
-                let meta: SessionMeta = serde_json::from_value(v).map_err(|e| format!("meta patch: {e}"))?;
-                self.meta = meta;
+                self.meta = serde_json::from_value(v).map_err(|e| format!("meta patch: {e}"))?;
                 self.meta_hash = Some(hash);
                 // The UI keeps its tree when a `meta` comes without one.
-                let mut meta = self.meta.clone();
-                meta.tree = None;
-                SessionEvent::Meta { meta }
+                SessionEvent::Meta { meta: self.meta.clone() }
             }
             SessionEvent::TreePatch { upsert, remove, leaf_id, hash } => {
-                let tree = self.meta.tree.get_or_insert_with(|| TreeInfo { nodes: Vec::new(), leaf_id: None });
-                apply_tree_patch(tree, upsert, &remove, leaf_id);
+                let tree = self.tree.get_or_insert_with(|| Arc::new(TreeInfo { nodes: Vec::new(), leaf_id: None }));
+                apply_tree_patch(Arc::make_mut(tree), upsert, &remove, leaf_id);
                 self.meta_hash = Some(hash);
-                SessionEvent::Meta { meta: self.meta.clone() }
+                SessionEvent::Meta { meta: self.full_meta() }
             }
             SessionEvent::Meta { meta } => {
                 // A whole meta (tf-hostd sends one when a patch cannot say it): hash unknown.
-                self.meta = meta.clone();
+                let out = meta.clone();
+                (self.meta, self.tree) = split(meta);
                 self.meta_hash = None;
-                SessionEvent::Meta { meta }
+                SessionEvent::Meta { meta: out }
             }
             SessionEvent::Ui { request } => {
                 self.ui = request.clone();
@@ -356,7 +404,6 @@ enum Sub {
     Live { link: u64, seq: Option<u64> },
 }
 
-#[derive(Default)]
 struct State {
     /// The UI has it open: re-opened after a reconnect.
     wanted: bool,
@@ -366,14 +413,66 @@ struct State {
     data: Option<Data>,
     /// `data` changed since the cache was written.
     dirty: bool,
+    /// When the cache was last written (or read) for `data`, and its size then (JSON bytes): a
+    /// big mirror that stays open is written less often ([`persist_due`]).
+    saved: Option<(Instant, usize)>,
+    /// What `data` takes, roughly (its JSON bytes; `None`: not measured since it changed).
+    weight: Option<usize>,
     /// Recent gap repairs (storm guard).
     repairs: VecDeque<Instant>,
     /// Too many repairs: opens go without `have` (a plain subscription) until the UI closes it.
     plain: bool,
-    used: Option<Instant>,
+    /// Last opened or closed (closed mirrors leave memory least recently used first).
+    used: Instant,
 }
 
 impl State {
+    fn new() -> State {
+        State {
+            wanted: false,
+            limit: 0,
+            sub: Sub::None,
+            data: None,
+            dirty: false,
+            saved: None,
+            weight: None,
+            repairs: VecDeque::new(),
+            plain: false,
+            used: Instant::now(),
+        }
+    }
+
+    /// `data` changed: the cache is behind, its size unknown.
+    fn changed(&mut self) {
+        self.dirty = true;
+        self.weight = None;
+    }
+
+    /// Takes `d` (a merge of what it held), changed or not.
+    fn take(&mut self, d: Data) {
+        if !self.data.as_ref().is_some_and(|p| p.same_as(&d)) {
+            self.changed();
+        }
+        self.data = Some(d);
+    }
+
+    /// Closed and written to the cache: memory may let it go.
+    fn idle(&self) -> bool {
+        !self.wanted && !self.dirty && matches!(self.sub, Sub::None)
+    }
+
+    /// [`State::weight`], measured when unknown.
+    fn weight(&mut self) -> usize {
+        match self.weight {
+            Some(w) => w,
+            None => {
+                let w = self.data.as_ref().map_or(0, weight_of);
+                self.weight = Some(w);
+                w
+            }
+        }
+    }
+
     /// A `session` message from link `link`. True when it shows a gap: the caller re-opens.
     fn event(&mut self, host: &dyn SessionHost, agent: &str, link: u64, ev: SessionEvent, seq: Option<u64>) -> bool {
         let last = match &mut self.sub {
@@ -420,8 +519,7 @@ impl State {
                 let n = snapshot.sync.as_ref().and_then(|s| s.order.as_ref().map(Vec::len)).unwrap_or(snapshot.items.len());
                 let d = Data::merge(self.data.as_ref(), snapshot)?;
                 let window = d.window(agent, n.max(self.limit));
-                self.data = Some(d);
-                self.dirty = true;
+                self.take(d);
                 host.emit(agent, SessionEvent::Reset { snapshot: window });
             }
             SessionEvent::Ended { reason } => {
@@ -430,9 +528,13 @@ impl State {
                 host.emit(agent, SessionEvent::Ended { reason });
             }
             ev => {
+                // What the cache keeps: rows, meta, tree (not the dialog, not side answers).
+                let kept = !matches!(ev, SessionEvent::Ui { .. } | SessionEvent::Btw { .. });
                 let d = self.data.as_mut().ok_or("a live event before the snapshot")?;
                 let out = d.apply(ev)?;
-                self.dirty = true;
+                if kept {
+                    self.changed();
+                }
                 host.emit(agent, out);
             }
         }
@@ -489,7 +591,7 @@ impl Sessions {
                     agent_id: agent_id.to_owned(),
                     opening: tokio::sync::Mutex::new(()),
                     persisting: tokio::sync::Mutex::new(()),
-                    st: Mutex::new(State::default()),
+                    st: Mutex::new(State::new()),
                 })
             })
             .clone()
@@ -525,25 +627,59 @@ impl Sessions {
         open
     }
 
-    /// Forgets closed mirrors beyond [`MAX_IDLE`] (least recently used first; their data is in
-    /// the cache).
-    fn evict_idle(&self) {
-        let mut map = self.map();
-        let mut idle: Vec<(Option<Instant>, String)> = map
-            .iter()
-            .filter_map(|(id, m)| {
-                let st = m.lock();
-                (!st.wanted && !st.dirty && matches!(st.sub, Sub::None)).then(|| (st.used, id.clone()))
-            })
-            .collect();
-        if idle.len() <= MAX_IDLE {
+    /// Forgets closed mirrors (their data is in the cache), least recently used first, until the
+    /// rest take at most `budget` bytes. A mirror anyone else holds — an open loading it, a
+    /// re-open, a write, a history page — is never forgotten: whoever holds it would go on with a
+    /// mirror the host no longer routes events to.
+    fn evict_idle(&self, budget: usize) {
+        // Measured outside the map's lock (a big mirror takes a while).
+        let idle: Vec<(String, Arc<Mirror>)> =
+            self.map().iter().filter(|(_, m)| Arc::strong_count(m) == 1 && m.lock().idle()).map(|(id, m)| (id.clone(), m.clone())).collect();
+        let mut sized: Vec<(Instant, usize, String)> = idle.iter().map(|(id, m)| {
+            let mut st = m.lock();
+            (st.used, st.weight(), id.clone())
+        }).collect();
+        drop(idle);
+        let mut total: usize = sized.iter().map(|(_, w, _)| w).sum();
+        if total <= budget {
             return;
         }
-        idle.sort();
-        for (_, id) in idle.iter().take(idle.len() - MAX_IDLE) {
-            map.remove(id);
+        sized.sort();
+        let mut map = self.map();
+        for (_, w, id) in sized {
+            if total <= budget {
+                break;
+            }
+            // Still nobody else's and closed: an open takes its mirror out of the map under this
+            // lock, so it either holds it already (and it stays) or finds it gone.
+            if map.get(&id).is_some_and(|m| Arc::strong_count(m) == 1 && m.lock().idle()) {
+                map.remove(&id);
+            }
+            total -= w;
         }
     }
+}
+
+/// Roughly what a mirror's data takes in memory: the size of its JSON.
+fn weight_of(d: &Data) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Count(0);
+    // Serializing our own wire types into a counter cannot fail.
+    let _ = serde_json::to_writer(&mut n, &d.meta);
+    let _ = serde_json::to_writer(&mut n, &d.tree.as_deref());
+    for r in &d.rows {
+        let _ = serde_json::to_writer(&mut n, &**r);
+    }
+    n.0
 }
 
 fn internal(what: impl std::fmt::Display) -> ApiError {
@@ -561,7 +697,7 @@ pub fn on_event(host: &Arc<dyn SessionHost>, link: u64, agent_id: String, ev: Se
     };
     let gap = m.lock().event(host.as_ref(), &agent_id, link, ev, seq);
     if gap {
-        tokio::spawn(repair(host.clone(), link, m));
+        tokio::spawn(repair(host.clone(), link, m, true));
     }
 }
 
@@ -586,19 +722,23 @@ async fn load(host: &Arc<dyn SessionHost>, m: &Arc<Mirror>, session_id: &str) {
     let loaded = host.cache().load(host.host_id(), session_id).await;
     let mut st = m.lock();
     if st.data.as_ref().is_none_or(|d| d.session_id != session_id) {
-        st.data = loaded;
+        let size = loaded.as_ref().map(|(_, size)| *size);
+        st.data = loaded.map(|(d, _)| d);
+        st.saved = size.map(|s| (Instant::now(), s));
+        st.weight = size;
         st.dirty = false;
     }
 }
 
 /// `session.open` (with what `m` holds) on `link`, merged into `m`; then the messages that came
-/// meanwhile. `announce`: the UI shows this session already and gets the result as a `reset`.
+/// meanwhile. `announce`: the UI shows this session already and gets the result as a `reset`
+/// (and an `ended`, error `ended`, when the session ended while it opened).
 /// `Ok(Some(answer))`: hostd answered plainly (a parked agent; the fallback after repeated
 /// repairs), events pass through.
 async fn sync_open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, m: &Arc<Mirror>, limit: usize, session_hint: Option<&str>, announce: bool) -> Result<Option<Value>, ApiError> {
     let agent = m.agent_id.as_str();
     let mut full = false;
-    for _ in 0..=MAX_REPAIRS + 1 {
+    'reopen: for _ in 0..=MAX_REPAIRS + 1 {
         let params = {
             let mut st = m.lock();
             let buffer = match std::mem::take(&mut st.sub) {
@@ -614,102 +754,158 @@ async fn sync_open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, m: &Arc<Mirror
             serde_json::json!({ "agentId": agent, "limit": limit, "have": have })
         };
         let r = link.request("session.open", params, DEFAULT_TIMEOUT).await;
-        let mut st = m.lock();
-        let buffer = match std::mem::take(&mut st.sub) {
-            Sub::Opening { link: l, buffer } if l == link.id => buffer,
-            other => {
-                // Closed (or the link went down) while it opened.
-                st.sub = other;
-                return Err(ApiError::new("not_connected", "the session was closed while it opened").retryable());
+        let subscribed = r.is_ok();
+        // From the answer until the subscription is live the mirror stays locked (no message
+        // slips past), and nothing awaits. `true`: it was closed (by the UI, a page close) or the
+        // link went down while it opened.
+        let closed = 'answer: {
+            let mut st = m.lock();
+            let buffer = match std::mem::take(&mut st.sub) {
+                Sub::Opening { link: l, buffer } if l == link.id => buffer,
+                other => {
+                    st.sub = other;
+                    break 'answer true;
+                }
+            };
+            let v = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    // The session ended while it opened: its last message says so, nothing else will.
+                    let ended = buffer.into_iter().find_map(|(ev, _)| match ev {
+                        SessionEvent::Ended { reason } => Some(reason),
+                        _ => None,
+                    });
+                    let Some(reason) = ended else { return Err(e) };
+                    st.wanted = false;
+                    drop(st);
+                    if announce {
+                        host.emit(agent, SessionEvent::Ended { reason: reason.clone() });
+                    }
+                    return Err(ApiError::new("ended", reason));
+                }
+            };
+            let snap: SessionSnapshot = serde_json::from_value(v.clone()).map_err(|e| internal(format!("session.open: {e}")))?;
+            let Some(base) = snap.sync.as_ref().map(|s| s.seq) else {
+                st.sub = Sub::Live { link: link.id, seq: None };
+                if announce {
+                    host.emit(agent, SessionEvent::Reset { snapshot: snap });
+                }
+                for (ev, seq) in buffer {
+                    // The earlier subscription's numbered messages are stale.
+                    if seq.is_none() {
+                        st.event(host.as_ref(), agent, link.id, ev, None);
+                    }
+                }
+                return Ok(Some(v));
+            };
+            let n = snap.sync.as_ref().and_then(|s| s.order.as_ref().map(Vec::len)).unwrap_or(snap.items.len());
+            match Data::merge(st.data.as_ref(), snap) {
+                Ok(d) => st.take(d),
+                Err(why) if !full => {
+                    log::info!("session {agent}: {why}; re-opening without the cache");
+                    full = true;
+                    st.sub = Sub::Opening { link: link.id, buffer };
+                    continue 'reopen;
+                }
+                Err(why) => return Err(internal(why)),
             }
-        };
-        let v = r?;
-        let snap: SessionSnapshot = serde_json::from_value(v.clone()).map_err(|e| internal(format!("session.open: {e}")))?;
-        let Some(base) = snap.sync.as_ref().map(|s| s.seq) else {
-            st.sub = Sub::Live { link: link.id, seq: None };
+            st.sub = Sub::Live { link: link.id, seq: Some(base) };
             if announce {
-                host.emit(agent, SessionEvent::Reset { snapshot: snap });
-            }
-            for (ev, seq) in buffer {
-                // The earlier subscription's numbered messages are stale.
-                if seq.is_none() {
-                    st.event(host.as_ref(), agent, link.id, ev, None);
+                let window = st.data.as_ref().map(|d| d.window(agent, n.max(limit)));
+                if let Some(snapshot) = window {
+                    host.emit(agent, SessionEvent::Reset { snapshot });
                 }
             }
-            return Ok(Some(v));
+            // Messages that came while it opened: the snapshot holds those up to `base`.
+            let mut gap = false;
+            for (ev, seq) in buffer {
+                if seq.is_some_and(|s| s <= base) {
+                    continue;
+                }
+                gap |= st.event(host.as_ref(), agent, link.id, ev, seq);
+            }
+            if !gap {
+                return Ok(None);
+            }
+            st.note_repair(agent);
+            false
         };
-        let n = snap.sync.as_ref().and_then(|s| s.order.as_ref().map(Vec::len)).unwrap_or(snap.items.len());
-        match Data::merge(st.data.as_ref(), snap) {
-            Ok(d) => {
-                st.data = Some(d);
-                st.dirty = true;
+        if closed {
+            // hostd subscribed all the same: release that before this mirror's next open goes out
+            // (whoever opens it next waits for this one), or it streams to us until the link ends.
+            if subscribed && !link.is_closed() {
+                let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
             }
-            Err(why) if !full => {
-                log::info!("session {agent}: {why}; re-opening without the cache");
-                full = true;
-                st.sub = Sub::Opening { link: link.id, buffer };
-                continue;
-            }
-            Err(why) => return Err(internal(why)),
+            return Err(ApiError::new("not_connected", "the session was closed while it opened").retryable());
         }
-        st.sub = Sub::Live { link: link.id, seq: Some(base) };
-        if announce {
-            let window = st.data.as_ref().map(|d| d.window(agent, n.max(limit)));
-            if let Some(snapshot) = window {
-                host.emit(agent, SessionEvent::Reset { snapshot });
-            }
-        }
-        // Messages that came while it opened: the snapshot holds those up to `base`.
-        let mut gap = false;
-        for (ev, seq) in buffer {
-            if seq.is_some_and(|s| s <= base) {
-                continue;
-            }
-            gap |= st.event(host.as_ref(), agent, link.id, ev, seq);
-        }
-        if !gap {
-            return Ok(None);
-        }
-        st.note_repair(agent);
     }
     m.lock().sub = Sub::None;
     Err(internal("the session kept changing under its re-opens").retryable())
 }
 
-/// Re-opens `m` after a gap on `link`.
-async fn repair(host: Arc<dyn SessionHost>, link: u64, m: Arc<Mirror>) {
-    let _one = m.opening.lock().await;
-    let Some(l) = host.link().filter(|l| l.id == link && !l.is_closed()) else { return };
-    let limit = {
-        let mut st = m.lock();
-        if !matches!(st.sub, Sub::Opening { link: x, .. } if x == link) {
-            return;
+/// Re-opens `m` on link `link`: right away after a gap (`gap`; unless another open got there
+/// first), else after a re-open that failed. One that finds no answer (or no session: the bridge
+/// reconnecting) is tried again after [`RETRY_FIRST`], twice as long each time up to
+/// [`RETRY_MAX`], while the UI has the session open and the link is up (a reconnect re-opens it
+/// otherwise). One that cannot work ends the session for the UI.
+async fn repair(host: Arc<dyn SessionHost>, link: u64, m: Arc<Mirror>, gap: bool) {
+    let mut wait = RETRY_FIRST;
+    let mut first = gap;
+    loop {
+        if !first {
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(RETRY_MAX);
         }
-        st.note_repair(&m.agent_id);
-        st.limit.max(1)
-    };
-    let hint = host.agent(&m.agent_id).session_id;
-    match sync_open(&host, &l, &m, limit, hint.as_deref(), true).await {
-        Ok(_) => {}
-        Err(e) if matches!(e.code.as_str(), "not_connected" | "timeout") => log::info!("session {}: re-open failed: {}", m.agent_id, e.message),
-        Err(e) => {
-            m.lock().wanted = false;
-            host.emit(&m.agent_id, SessionEvent::Ended { reason: e.message });
+        let r = {
+            let _one = m.opening.lock().await;
+            let Some(l) = host.link().filter(|l| l.id == link && !l.is_closed()) else { return };
+            let limit = {
+                let mut st = m.lock();
+                if first {
+                    if !matches!(st.sub, Sub::Opening { link: x, .. } if x == link) {
+                        return;
+                    }
+                    st.note_repair(&m.agent_id);
+                } else if !st.wanted || !matches!(st.sub, Sub::None) {
+                    // Closed meanwhile, or open again.
+                    return;
+                }
+                st.limit.max(1)
+            };
+            let hint = host.agent(&m.agent_id).session_id;
+            sync_open(&host, &l, &m, limit, hint.as_deref(), true).await
+        };
+        first = false;
+        match r {
+            Ok(_) => return,
+            Err(e) if e.code == "ended" => return,
+            Err(e) if retry_later(&e) => log::info!("session {}: re-open failed ({}); trying again in {wait:?}", m.agent_id, e.message),
+            Err(e) => {
+                m.lock().wanted = false;
+                host.emit(&m.agent_id, SessionEvent::Ended { reason: e.message });
+                return;
+            }
         }
     }
+}
+
+/// A failed `session.open` worth trying again: no answer, or no session yet.
+fn retry_later(e: &ApiError) -> bool {
+    matches!(e.code.as_str(), "not_connected" | "timeout")
 }
 
 /// `session.open` from the UI.
 pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpenParams) -> Result<Value, ApiError> {
     let agent = p.agent_id.as_str();
     let limit = p.limit.map_or(DEFAULT_LIMIT, |l| (l as usize).clamp(1, 2000));
+    // Held until it returns: while it is, no eviction forgets the mirror.
     let m = host.sessions().mirror(agent);
     let _one = m.opening.lock().await;
     let opened = |m: &Mirror| {
         let mut st = m.lock();
         st.wanted = true;
         st.limit = limit;
-        st.used = Some(Instant::now());
+        st.used = Instant::now();
     };
     if !link.features.session_sync {
         let v = link.request("session.open", serde_json::to_value(p).map_err(internal)?, DEFAULT_TIMEOUT).await?;
@@ -755,7 +951,9 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
 }
 
 /// `session.history` from the UI: rows the mirror holds come from it (a page it holds only part
-/// of is completed from hostd), and pages hostd sends that continue its oldest row are kept.
+/// of is completed from hostd), and pages hostd sends that continue its oldest row are kept. A
+/// mirror's oldest rows that hostd no longer has (live-only rows of an earlier tf-hostd: hostd
+/// says `not_found`) are dropped, and the page continues from the next row.
 pub async fn history(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionHistoryParams) -> Result<Value, ApiError> {
     let limit = p.limit.map_or(DEFAULT_PAGE, |l| (l as usize).clamp(1, 2000));
     let m = host.sessions().get(&p.agent_id);
@@ -766,18 +964,40 @@ pub async fn history(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionH
         return serde_json::to_value(page).map_err(internal);
     }
     // The rest from hostd, from where the mirror's rows end.
-    let (cursor, want) = match &cached {
+    let (mut cursor, want) = match &cached {
         Some(page) => (page.cursor.clone().unwrap_or_else(|| p.cursor.clone()), limit - page.items.len()),
         None => (p.cursor.clone(), limit),
     };
-    let params = serde_json::json!({ "agentId": p.agent_id, "cursor": cursor, "limit": want });
-    let v = link.request("session.history", params, DEFAULT_TIMEOUT).await?;
+    let mut dropped = 0;
+    let v = loop {
+        let params = serde_json::json!({ "agentId": p.agent_id, "cursor": cursor, "limit": want });
+        match link.request("session.history", params, DEFAULT_TIMEOUT).await {
+            Ok(v) => break v,
+            Err(e) if e.code == "not_found" && dropped < UNKNOWN_MAX => {
+                let next = m.as_ref().and_then(|m| {
+                    let mut st = m.lock();
+                    let d = st.data.as_mut().filter(|d| d.rows.first().is_some_and(|r| r.item.id() == cursor))?;
+                    d.rows.remove(0);
+                    let next = d.rows.first().map(|r| r.item.id().to_owned());
+                    st.changed();
+                    next
+                });
+                let Some(next) = next else { return Err(e) };
+                log::info!("session {}: hostd no longer has row {cursor}; paging on from {next}", p.agent_id);
+                cursor = next;
+                dropped += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let Some(m) = m.filter(|m| m.lock().data.is_some()) else { return Ok(v) };
     let fetched: HistoryPage = serde_json::from_value(v).map_err(|e| internal(format!("session.history: {e}")))?;
     {
         let mut st = m.lock();
         let kept = st.data.as_mut().is_some_and(|d| d.meta_hash.is_some() && d.prepend(&cursor, &fetched));
-        st.dirty |= kept;
+        if kept {
+            st.changed();
+        }
     }
     let page = match cached {
         Some(c) => {
@@ -799,37 +1019,46 @@ pub fn closed(host: &Arc<dyn SessionHost>, agent_id: &str) {
         st.wanted = false;
         st.plain = false;
         st.sub = Sub::None;
-        st.used = Some(Instant::now());
+        st.used = Instant::now();
     }
-    tokio::spawn(persist(host.clone(), m));
+    tokio::spawn(persist(host.clone(), m, true));
 }
 
 /// After a reconnect: re-opens what the UI has open (with what each mirror holds) and gives the
-/// UI each as a `reset`; one that cannot be re-opened ends.
+/// UI each as a `reset`. One that finds no answer is tried again ([`repair`]); one that cannot
+/// be re-opened ends.
 pub async fn reopen(host: Arc<dyn SessionHost>, link: Arc<Link>) {
     for m in host.sessions().all() {
-        let _one = m.opening.lock().await;
-        let (wanted, live, limit, cached) = {
-            let st = m.lock();
-            (st.wanted, matches!(st.sub, Sub::Live { link: l, .. } if l == link.id), st.limit.max(1), st.data.as_ref().map(|d| d.session_id.clone()))
-        };
-        if !wanted || live {
-            continue;
-        }
         let agent = m.agent_id.as_str();
-        let r = if link.features.session_sync {
-            let hint = host.agent(agent).session_id.or(cached);
-            sync_open(&host, &link, &m, limit, hint.as_deref(), true).await.map(|_| ())
-        } else {
-            let r = link.request("session.open", serde_json::json!({ "agentId": agent, "limit": limit }), DEFAULT_TIMEOUT).await;
-            r.and_then(|v| serde_json::from_value::<SessionSnapshot>(v).map_err(internal)).map(|snapshot| {
-                m.lock().sub = Sub::Live { link: link.id, seq: None };
-                host.emit(agent, SessionEvent::Reset { snapshot });
-            })
+        let r = {
+            let _one = m.opening.lock().await;
+            let (wanted, live, limit, cached) = {
+                let st = m.lock();
+                (st.wanted, matches!(st.sub, Sub::Live { link: l, .. } if l == link.id), st.limit.max(1), st.data.as_ref().map(|d| d.session_id.clone()))
+            };
+            if !wanted || live {
+                continue;
+            }
+            if link.features.session_sync {
+                let hint = host.agent(agent).session_id.or(cached);
+                sync_open(&host, &link, &m, limit, hint.as_deref(), true).await.map(|_| ())
+            } else {
+                let r = link.request("session.open", serde_json::json!({ "agentId": agent, "limit": limit }), DEFAULT_TIMEOUT).await;
+                r.and_then(|v| serde_json::from_value::<SessionSnapshot>(v).map_err(internal)).map(|snapshot| {
+                    m.lock().sub = Sub::Live { link: link.id, seq: None };
+                    host.emit(agent, SessionEvent::Reset { snapshot });
+                })
+            }
         };
         match r {
             Ok(()) => {}
-            Err(e) if e.code == "not_connected" => return,
+            Err(e) if e.code == "ended" => {}
+            // The link went down: the next one re-opens them all.
+            Err(_) if link.is_closed() => return,
+            Err(e) if retry_later(&e) => {
+                log::info!("session {agent}: re-open failed ({}); trying again", e.message);
+                tokio::spawn(repair(host.clone(), link.id, m.clone(), false));
+            }
             Err(e) => {
                 {
                     let mut st = m.lock();
@@ -842,12 +1071,19 @@ pub async fn reopen(host: Arc<dyn SessionHost>, link: Arc<Link>) {
     }
 }
 
-/// Writes `m`'s data to the cache when it changed.
-async fn persist(host: Arc<dyn SessionHost>, m: Arc<Mirror>) {
+/// How long a changed mirror of `bytes` that stays open waits after a cache write before the
+/// next (0: the next periodic tick).
+fn persist_every(bytes: usize) -> Duration {
+    (PERSIST_PER_MIB * (bytes >> 20) as u32).min(PERSIST_MAX)
+}
+
+/// Writes `m`'s data to the cache when it changed. `force`: now (it closes, the link goes, the
+/// app quits); else once [`persist_every`] has passed since the last write.
+async fn persist(host: Arc<dyn SessionHost>, m: Arc<Mirror>, force: bool) {
     let _one = m.persisting.lock().await;
     let saved = {
         let mut st = m.lock();
-        if !st.dirty {
+        if !st.dirty || (!force && st.saved.is_some_and(|(at, size)| at.elapsed() + PERSIST_SLACK < persist_every(size))) {
             return;
         }
         st.dirty = false;
@@ -857,22 +1093,37 @@ async fn persist(host: Arc<dyn SessionHost>, m: Arc<Mirror>) {
             _ => return,
         }
     };
-    host.cache().store(host.host_id(), saved).await;
+    let size = host.cache().store(host.host_id(), saved).await;
+    let mut st = m.lock();
+    st.saved = Some((Instant::now(), size));
+    if !st.dirty {
+        st.weight = Some(size);
+    }
 }
 
-/// Writes every changed mirror to the cache, then forgets idle ones beyond [`MAX_IDLE`].
+/// Writes every changed mirror to the cache (a mirror closes, the link goes, the page goes, the
+/// app quits), then lets closed mirrors beyond the memory budget go.
 pub async fn persist_all(host: Arc<dyn SessionHost>) {
     for m in host.sessions().all() {
-        persist(host.clone(), m).await;
+        persist(host.clone(), m, true).await;
     }
-    host.sessions().evict_idle();
+    host.sessions().evict_idle(host.cache().idle_budget());
+}
+
+/// The periodic cache write: changed mirrors, big ones less often ([`persist_every`]); then lets
+/// closed mirrors beyond the memory budget go.
+pub async fn persist_due(host: Arc<dyn SessionHost>) {
+    for m in host.sessions().all() {
+        persist(host.clone(), m, false).await;
+    }
+    host.sessions().evict_idle(host.cache().idle_budget());
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::link::{LinkSink, requested_features};
-    use tf_proto::session::{AssistantItem, ToolItem, ToolStatus, TreeNodeKind, UserItem};
+    use tf_proto::session::{AssistantItem, NoticeItem, NoticeLevel, ToolItem, ToolStatus, TreeNodeKind, UserItem};
     use tf_proto::{ClientInfo, ClientMsg, HostState, OmpMode, PROTOCOL_VERSION, QueueInfo, ServerMsg, StatePatch};
 
     pub(crate) fn user(id: &str, text: &str) -> TranscriptItem {
@@ -936,6 +1187,7 @@ pub(crate) mod tests {
         Data {
             session_id: sid.into(),
             meta: SessionMeta { session_id: Some(sid.into()), ..meta("t") },
+            tree: None,
             meta_hash: Some("m".into()),
             rows: items.into_iter().map(|item| Arc::new(Row { h: Some(format!("h-{}", item.id())), item })).collect(),
             has_more: false,
@@ -1064,7 +1316,37 @@ pub(crate) mod tests {
         assert_eq!(m.tree.as_ref().unwrap().nodes.len(), 2);
         // A later meta patch leaves the tree out of the UI's meta (it keeps its own).
         let SessionEvent::Meta { meta: m } = d.apply(SessionEvent::MetaPatch { set: serde_json::Map::new(), hash: "m5".into() }).unwrap() else { panic!() };
-        assert!(m.tree.is_none() && d.meta.tree.is_some());
+        assert!(m.tree.is_none() && d.tree.is_some());
+    }
+
+    /// A meta patch (tps, context, cost: twice a second while streaming) never copies the tree,
+    /// however big: neither into the meta it patches nor into the event the UI gets. A tree
+    /// patch changes the mirror's tree in place unless a cache write still holds it.
+    #[test]
+    fn meta_patches_leave_the_tree_alone() {
+        let mut d = data("s1", vec![user("u1", "hi")]);
+        d.tree = Some(Arc::new(big_tree(1000)));
+        let tree = d.tree.clone().unwrap();
+        for i in 0..3 {
+            let mut set = serde_json::Map::new();
+            set.insert("tps".into(), serde_json::json!(i as f32 + 0.5));
+            let SessionEvent::Meta { meta } = d.apply(SessionEvent::MetaPatch { set, hash: format!("m{i}") }).unwrap() else { panic!() };
+            assert!(meta.tree.is_none(), "the UI keeps its own");
+            assert_eq!(meta.tps, Some(i as f32 + 0.5));
+            assert!(Arc::ptr_eq(d.tree.as_ref().unwrap(), &tree), "the same tree, not a copy");
+            assert!(d.meta.tree.is_none());
+        }
+        // A cache write in progress shares the tree: a tree patch then works on a copy of its own.
+        let saved = crate::session_cache::Saved::of(&d);
+        let node = TreeNode { id: "new".into(), parent_id: None, kind: TreeNodeKind::User, label: "new".into(), at: 0, on_path: true, children: 0 };
+        let SessionEvent::Meta { meta } = d.apply(SessionEvent::TreePatch { upsert: vec![node.clone()], remove: vec![], leaf_id: Some("new".into()), hash: "t1".into() }).unwrap() else { panic!() };
+        assert_eq!(meta.tree.as_ref().unwrap().nodes.len(), 1001, "the UI gets the whole tree");
+        assert_eq!(saved.tree.as_ref().unwrap().nodes.len(), 1000, "what is being written stays as it was");
+        drop(saved);
+        let held = Arc::as_ptr(d.tree.as_ref().unwrap());
+        d.apply(SessionEvent::TreePatch { upsert: vec![TreeNode { id: "newer".into(), ..node }], remove: vec![], leaf_id: None, hash: "t2".into() }).unwrap();
+        assert_eq!(Arc::as_ptr(d.tree.as_ref().unwrap()), held, "patched in place");
+        assert_eq!(d.tree.as_ref().unwrap().nodes.len(), 1002);
     }
 
     #[test]
@@ -1095,27 +1377,98 @@ pub(crate) mod tests {
         assert_eq!((have.session_id.as_str(), have.meta_hash.as_deref()), ("s1", Some("m")));
     }
 
+    /// A session tree of `n` nodes like a long omp session's (labels a line of prose).
+    pub(crate) fn big_tree(n: usize) -> TreeInfo {
+        let id = |i: usize| format!("{:08x}", i.wrapping_mul(2_654_435_761) % 0xffff_ffff);
+        let nodes = (0..n)
+            .map(|i| TreeNode {
+                id: id(i),
+                parent_id: (i > 0).then(|| id(i - 1)),
+                kind: if i % 2 == 0 { TreeNodeKind::User } else { TreeNodeKind::Assistant },
+                label: format!("node {i}: the handler returns early when the queue is empty and the parser reads a token…"),
+                at: 1_793_205_532_197 + i as i64,
+                on_path: true,
+                children: 1,
+            })
+            .collect();
+        TreeInfo { nodes, leaf_id: Some(id(n.saturating_sub(1))) }
+    }
+
+    /// Bench: what one live `metaPatch` (tps, ~2/s while streaming) and one `treePatch` (a new
+    /// node) cost a mirror whose session has a big tree. Release build:
+    /// `cargo test --release -p tf-client meta_patch_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "bench"]
+    fn meta_patch_cost() {
+        for n in [2_000usize, 10_000, 30_000] {
+            let mut d = data("s1", vec![user("u1", "x")]);
+            d.tree = Some(Arc::new(big_tree(n)));
+            let reps = 20u32;
+            let t = Instant::now();
+            for i in 0..reps {
+                let mut set = serde_json::Map::new();
+                set.insert("tps".into(), serde_json::json!(i as f32 + 0.5));
+                std::hint::black_box(d.apply(SessionEvent::MetaPatch { set, hash: format!("m{i}") }).unwrap());
+            }
+            let patch = t.elapsed() / reps;
+            let t = Instant::now();
+            for i in 0..reps {
+                let node = TreeNode { id: format!("new{i}"), parent_id: None, kind: TreeNodeKind::User, label: "new".into(), at: 0, on_path: true, children: 0 };
+                std::hint::black_box(d.apply(SessionEvent::TreePatch { upsert: vec![node], remove: vec![], leaf_id: Some(format!("new{i}")), hash: format!("t{i}") }).unwrap());
+            }
+            let tree = t.elapsed() / reps;
+            println!("tree nodes {n:>6}: metaPatch {:>8.3} ms, treePatch {:>8.3} ms", patch.as_secs_f64() * 1e3, tree.as_secs_f64() * 1e3);
+        }
+    }
+
     // ── against tf-hostd's real subscription and stream code ─────────────────────────────────
 
     use tf_hostd::clients::{ClientHandle, Features, framed_reader, read_line, write_loop};
-    use tf_hostd::sync::Fanout;
+    use tf_hostd::sync::{Fanout, Tree};
     use tokio::io::{AsyncWriteExt, BufReader};
+
+    /// Holds tf-hostd's next `session.open`: `reached` fires when it arrives, its answer goes out
+    /// once `release` fires.
+    struct Gate {
+        reached: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    fn gate() -> (Gate, tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        let (reached, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release) = tokio::sync::oneshot::channel();
+        (Gate { reached, release }, reached_rx, release_tx)
+    }
 
     /// tf-hostd's side of one session: the replica's rows and meta, and its subscribers.
     struct HostSide {
         rows: Vec<TranscriptItem>,
+        /// With its tree.
         meta: SessionMeta,
+        /// Bumped when the tree changes (`OmpSession`'s `tree_rev`).
+        tree_rev: u64,
         fanout: Fanout,
         /// What each `session.open` answered.
         opened: Vec<SessionSnapshot>,
+        /// `session.open` requests (answered or not), `session.close` requests.
+        open_requests: usize,
+        closes: usize,
+        /// The next `session.open`s fail with these error codes.
+        fail_opens: VecDeque<&'static str>,
+        gate: Option<Gate>,
     }
 
     impl HostSide {
+        fn new(rows: Vec<TranscriptItem>, meta: SessionMeta) -> HostSide {
+            HostSide { rows, meta, tree_rev: 1, fanout: Fanout::default(), opened: Vec::new(), open_requests: 0, closes: 0, fail_opens: VecDeque::new(), gate: None }
+        }
+
+        /// The newest `limit` rows, the meta without its tree (the tree goes out as a [`Tree`]).
         fn window(&self, limit: usize) -> SessionSnapshot {
             let start = self.rows.len().saturating_sub(limit);
             SessionSnapshot {
                 agent_id: "a".into(),
-                meta: self.meta.clone(),
+                meta: SessionMeta { tree: None, ..self.meta.clone() },
                 items: self.rows[start..].to_vec(),
                 has_more: start > 0,
                 cursor: (start > 0).then(|| self.rows[start].id().to_owned()),
@@ -1146,14 +1499,36 @@ pub(crate) mod tests {
             self.mutate(&ev);
             let rows = &self.rows;
             let len = |id: &str, f: AppendField| rows.iter().find(|r| r.id() == id).and_then(|r| tf_hostd::sync::field_len(r, f));
-            self.fanout.send_events(&[ev], &len);
+            self.fanout.send_events(&[ev], Tree { tree: self.meta.tree.as_ref(), rev: self.tree_rev }, &len);
         }
 
         fn set_meta(&mut self, meta: SessionMeta, tree_changed: bool) {
-            self.meta = meta.clone();
-            let mut bare = meta;
-            let tree = bare.tree.take();
-            self.fanout.send_meta(&bare, tree.as_ref(), tree_changed);
+            if tree_changed {
+                self.tree_rev += 1;
+            }
+            self.meta = meta;
+            let bare = SessionMeta { tree: None, ..self.meta.clone() };
+            self.fanout.send_meta(&bare, Tree { tree: self.meta.tree.as_ref(), rev: self.tree_rev }, tree_changed);
+        }
+
+        /// `session.open`, the way tf-hostd answers it.
+        fn open(&mut self, c: &ClientHandle, p: &SessionOpenParams) -> Result<Value, ApiError> {
+            if let Some(code) = self.fail_opens.pop_front() {
+                return Err(ApiError::new(code, "no session here right now").retryable());
+            }
+            let snap = self.window(p.limit.unwrap_or(200) as usize);
+            let tree = Tree { tree: self.meta.tree.as_ref(), rev: self.tree_rev };
+            let out = self.fanout.subscribe(c, &p.agent_id, snap, tree, p.have.as_ref(), "s1");
+            self.opened.push(out.clone());
+            Ok(serde_json::to_value(out).unwrap())
+        }
+
+        /// `session.history`, the way tf-hostd answers it: a row it does not have is `not_found`.
+        fn history(&self, p: &SessionHistoryParams) -> Result<Value, ApiError> {
+            let end = self.rows.iter().position(|r| r.id() == p.cursor).ok_or_else(|| ApiError::new("not_found", format!("row {} is not in the session", p.cursor)))?;
+            let start = end.saturating_sub(p.limit.unwrap_or(100) as usize);
+            let page = HistoryPage { items: self.rows[start..end].to_vec(), has_more: start > 0, cursor: (start > 0).then(|| self.rows[start].id().to_owned()) };
+            Ok(serde_json::to_value(page).unwrap())
         }
     }
 
@@ -1189,27 +1564,30 @@ pub(crate) mod tests {
                         let result = match method.as_str() {
                             "session.open" => {
                                 let p: SessionOpenParams = serde_json::from_value(params).unwrap();
-                                let mut s = side.lock().unwrap();
-                                let snap = s.window(p.limit.unwrap_or(200) as usize);
-                                let out = s.fanout.subscribe(&c, &p.agent_id, snap, p.have.as_ref(), "s1");
-                                s.opened.push(out.clone());
-                                serde_json::to_value(out).unwrap()
+                                let gate = {
+                                    let mut s = side.lock().unwrap();
+                                    s.open_requests += 1;
+                                    s.gate.take()
+                                };
+                                if let Some(g) = gate {
+                                    let _ = g.reached.send(());
+                                    let _ = g.release.await;
+                                }
+                                side.lock().unwrap().open(&c, &p)
                             }
-                            "session.history" => {
-                                let p: SessionHistoryParams = serde_json::from_value(params).unwrap();
-                                let s = side.lock().unwrap();
-                                let end = s.rows.iter().position(|r| r.id() == p.cursor).unwrap_or(s.rows.len());
-                                let start = end.saturating_sub(p.limit.unwrap_or(100) as usize);
-                                let page = HistoryPage { items: s.rows[start..end].to_vec(), has_more: start > 0, cursor: (start > 0).then(|| s.rows[start].id().to_owned()) };
-                                serde_json::to_value(page).unwrap()
-                            }
+                            "session.history" => side.lock().unwrap().history(&serde_json::from_value(params).unwrap()),
                             "session.close" => {
-                                side.lock().unwrap().fanout.unsubscribe(c.id(), params["agentId"].as_str().unwrap());
-                                serde_json::json!({})
+                                let mut s = side.lock().unwrap();
+                                s.closes += 1;
+                                s.fanout.unsubscribe(c.id(), params["agentId"].as_str().unwrap());
+                                Ok(serde_json::json!({}))
                             }
-                            _ => serde_json::json!({}),
+                            _ => Ok(serde_json::json!({})),
                         };
-                        c.send(ServerMsg::Res { id, result: Some(result), error: None });
+                        c.send(match result {
+                            Ok(v) => ServerMsg::Res { id, result: Some(v), error: None },
+                            Err(e) => ServerMsg::Res { id, result: None, error: Some(e) },
+                        });
                     }
                     ClientMsg::Ping { ts } => {
                         c.send(ServerMsg::Pong { ts });
@@ -1269,9 +1647,14 @@ pub(crate) mod tests {
     }
 
     fn test_host(cache_dir: &std::path::Path) -> Arc<TestHost> {
+        test_host_with(cache_dir, crate::session_cache::IDLE_DESKTOP)
+    }
+
+    /// `idle`: what closed mirrors may take in memory.
+    fn test_host_with(cache_dir: &std::path::Path, idle: usize) -> Arc<TestHost> {
         Arc::new(TestHost {
             sessions: Sessions::default(),
-            cache: SessionCache::with_budget(cache_dir.to_path_buf(), 1 << 30),
+            cache: SessionCache::with_budget(cache_dir.to_path_buf(), 1 << 30, idle),
             link: Mutex::new(None),
             ui: Mutex::new(Vec::new()),
             hint: Mutex::new(AgentHint { session_id: Some("s1".into()), live: true }),
@@ -1304,6 +1687,7 @@ pub(crate) mod tests {
         rows: Vec<TranscriptItem>,
         meta: Option<SessionMeta>,
         resets: usize,
+        ended: Option<String>,
     }
 
     impl Ui {
@@ -1328,6 +1712,8 @@ pub(crate) mod tests {
                     let tree = if meta.tree.is_none() { self.meta.as_ref().and_then(|m| m.tree.clone()) } else { meta.tree.clone() };
                     self.meta = Some(SessionMeta { tree, ..meta.clone() });
                 }
+                SessionEvent::Ended { reason } => self.ended = Some(reason.clone()),
+                SessionEvent::Ui { .. } => {}
                 other => panic!("the UI never sees {other:?}"),
             }
         }
@@ -1388,7 +1774,7 @@ pub(crate) mod tests {
             nodes: (0..200).map(|i| TreeNode { id: format!("n{i}"), parent_id: (i > 0).then(|| format!("n{}", i - 1)), kind: TreeNodeKind::User, label: prose(i as u64, 6), at: i, on_path: true, children: 1 }).collect(),
             leaf_id: Some("n199".into()),
         });
-        HostSide { rows, meta: m, fanout: Fanout::default(), opened: Vec::new() }
+        HostSide::new(rows, m)
     }
 
     /// The rows the last `session.open` answer carried, and whether the meta was left out.
@@ -1556,6 +1942,294 @@ pub(crate) mod tests {
             persist_all(dyn_host.clone()).await;
             assert!(!dir.path().join("lab").exists(), "plain sessions are not cached");
         }
+    }
+
+    /// Waits (up to 5 s) until `f` holds.
+    async fn until(what: &str, mut f: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting until {what}");
+    }
+
+    /// Opens agent `a` the way the UI does; what the UI shows once it caught up.
+    async fn ui_open(host: &Arc<TestHost>, link: &Arc<Link>, side: &Side, limit: u32) -> Ui {
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let snap = open(&dyn_host, link, &open_params(limit)).await.unwrap();
+        let mut ui = Ui::default();
+        ui.drain(host);
+        ui.apply(&SessionEvent::Reset { snapshot: serde_json::from_value(snap).unwrap() });
+        converge(&mut ui, host, side).await;
+        ui
+    }
+
+    /// A message out of order: the mirror re-opens.
+    fn gap(ch: &ClientHandle) {
+        ch.send(ServerMsg::Session { agent_id: "a".into(), ev: SessionEvent::Remove { id: "zz".into() }, seq: Some(1_000_000) });
+    }
+
+    /// The mirror of `a` is closed, written to the cache, and held by nobody but the host.
+    async fn settled(host: &TestHost) {
+        until("the mirror is closed and written", || host.sessions.get("a").is_some_and(|m| Arc::strong_count(&m) == 2 && m.lock().idle())).await;
+    }
+
+    /// A mirror an open is working on never leaves memory, however long ago it was used and
+    /// however small the budget: the open would finish on a mirror the host no longer routes
+    /// events to, and the UI would show a live session that never changes. The interleaving:
+    /// omp moved the agent to a new session, the open loads it from a (stalled) disk, and the
+    /// periodic cache write evicts meanwhile.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn eviction_never_takes_a_mirror_being_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        // Closed mirrors may take 1 byte: every one leaves memory at the next eviction.
+        let host = test_host_with(dir.path(), 1);
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        ui_open(&host, &link, &side, 200).await;
+        closed(&dyn_host, "a");
+        link.request("session.close", serde_json::json!({ "agentId": "a" }), DEFAULT_TIMEOUT).await.unwrap();
+        settled(&host).await;
+
+        {
+            let mut s = side.lock().unwrap();
+            s.meta.session_id = Some("s2".into());
+            s.rows.truncate(60);
+        }
+        *host.hint.lock().unwrap() = AgentHint { session_id: Some("s2".into()), live: true };
+        host.ui.lock().unwrap().clear();
+        let stall = host.cache.stall().await;
+        let opening = tokio::spawn({
+            let (h, l) = (dyn_host.clone(), link.clone());
+            async move { open(&h, &l, &open_params(200)).await }
+        });
+        until("the open is loading the new session", || host.sessions.get("a").is_some_and(|m| m.opening.try_lock().is_err())).await;
+        persist_all(dyn_host.clone()).await;
+        assert!(host.sessions.get("a").is_some(), "the mirror being opened stays");
+        drop(stall);
+        let snap: SessionSnapshot = serde_json::from_value(opening.await.unwrap().unwrap()).unwrap();
+        assert_eq!(snap.meta.session_id.as_deref(), Some("s2"));
+        let mut ui = Ui::default();
+        ui.apply(&SessionEvent::Reset { snapshot: snap });
+        side.lock().unwrap().change(SessionEvent::Upsert { item: user("u-live", "streamed after the open"), h: None });
+        converge(&mut ui, &host, &side).await;
+
+        // Without an open in progress, the same eviction takes it.
+        closed(&dyn_host, "a");
+        link.request("session.close", serde_json::json!({ "agentId": "a" }), DEFAULT_TIMEOUT).await.unwrap();
+        settled(&host).await;
+        persist_all(dyn_host.clone()).await;
+        assert!(host.sessions.get("a").is_none(), "a closed mirror over the budget leaves memory");
+    }
+
+    /// The page goes away (webview reload) while a first open waits for hostd: the open does not
+    /// count as open, and the subscription hostd made for it is released, not streamed to the
+    /// app for the rest of the connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn page_close_during_a_first_open_releases_the_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let (g, reached, release) = gate();
+        side.lock().unwrap().gate = Some(g);
+        let opening = tokio::spawn({
+            let (h, l) = (dyn_host.clone(), link.clone());
+            async move { open(&h, &l, &open_params(100)).await }
+        });
+        reached.await.unwrap();
+        assert!(host.sessions.page_closed().is_empty(), "a first open is not open yet");
+        release.send(()).unwrap();
+        let e = opening.await.unwrap().unwrap_err();
+        assert_eq!(e.code, "not_connected");
+        let s = side.lock().unwrap();
+        assert_eq!((s.opened.len(), s.closes), (1, 1), "hostd subscribed, then was told to let go");
+        assert!(s.fanout.is_empty(), "nothing streams to a page that is gone");
+        assert!(!host.sessions.get("a").unwrap().lock().wanted);
+    }
+
+    /// A notice the mirror kept from before tf-hostd restarted is a row the new tf-hostd does not
+    /// have (its live-only rows are new ones with new ids): paging past it goes on from the next
+    /// row, never shows the newest rows again, and the mirror lets the stale row go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_pages_past_rows_hostd_no_longer_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let notice = TranscriptItem::Notice(NoticeItem { id: "n-old.1".into(), at: 5, level: NoticeLevel::Warn, text: "Retrying (1/3)".into(), source: Some("retry".into()) });
+        let rows = (0..3).map(|i| user(&format!("o{i}"), "older")).chain([notice]).chain((0..10).map(|i| user(&format!("u{i}"), "x"))).collect();
+        let side: Side = Arc::new(Mutex::new(HostSide::new(rows, meta("t"))));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        ui_open(&host, &link, &side, 11).await;
+
+        // tf-hostd restarts: its new replica rebuilt the rows from the file, without the notice.
+        link.close("tf-hostd restarts");
+        host.sessions.link_down();
+        {
+            let mut s = side.lock().unwrap();
+            s.rows.retain(|r| r.id() != "n-old.1");
+            s.fanout.clear();
+        }
+        let (link, _) = connect(&host, &side, true, true, "c2").await;
+        let ui = ui_open(&host, &link, &side, 10).await;
+        assert_eq!(ui.rows.first().map(|r| r.id()), Some("u0"));
+        let held = |host: &TestHost| host.sessions.get("a").unwrap().lock().data.as_ref().map(|d| ids(&d.rows).into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
+        assert_eq!(held(&host)[..2], ["n-old.1", "u0"], "the mirror kept the notice in front of the window");
+
+        let page = history(&dyn_host, &link, &SessionHistoryParams { agent_id: "a".into(), cursor: "u0".into(), limit: Some(5) }).await.unwrap();
+        let page: HistoryPage = serde_json::from_value(page).unwrap();
+        assert_eq!(page.items.iter().map(|i| i.id()).collect::<Vec<_>>(), ["o0", "o1", "o2", "n-old.1"]);
+        assert!(!page.has_more);
+        assert_eq!(held(&host)[..4], ["o0", "o1", "o2", "u0"], "pages on from the rows hostd has");
+    }
+
+    /// A re-open after a gap that finds no answer (the session is not shared again yet) is tried
+    /// again, waiting longer each time, while the UI has the session open; one that cannot work
+    /// ends the session for the UI, and so does an end that came while it re-opened.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_repairs_retry_while_wanted_or_end_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let (link, ch) = connect(&host, &side, true, true, "c1").await;
+        let mut ui = ui_open(&host, &link, &side, 50).await;
+        let opens = |side: &Side| side.lock().unwrap().open_requests;
+
+        // Twice no session: tried again until it works.
+        let before = opens(&side);
+        side.lock().unwrap().fail_opens.extend(["not_connected", "not_connected"]);
+        gap(&ch);
+        side.lock().unwrap().change(SessionEvent::Upsert { item: user("u-gap", "after the gap"), h: None });
+        converge(&mut ui, &host, &side).await;
+        assert_eq!(opens(&side) - before, 3, "two re-opens found no session, the third worked");
+        assert!(ui.ended.is_none());
+
+        // An answer that will not change: the UI hears the session ended, and why.
+        side.lock().unwrap().fail_opens.push_back("not_found");
+        gap(&ch);
+        until("the UI hears it ended", || {
+            ui.drain(&host);
+            ui.ended.is_some()
+        })
+        .await;
+        assert!(!host.sessions.get("a").unwrap().lock().wanted);
+
+        // Open again; this time omp ends the session while the mirror re-opens.
+        let mut ui = ui_open(&host, &link, &side, 50).await;
+        let (g, reached, release) = gate();
+        side.lock().unwrap().gate = Some(g);
+        gap(&ch);
+        reached.await.unwrap();
+        {
+            let mut s = side.lock().unwrap();
+            s.change(SessionEvent::Ended { reason: "omp exited".into() });
+            s.fail_opens.push_back("not_connected");
+        }
+        let before = opens(&side);
+        release.send(()).unwrap();
+        until("the UI hears it ended", || {
+            ui.drain(&host);
+            ui.ended.is_some()
+        })
+        .await;
+        assert_eq!(ui.ended.as_deref(), Some("omp exited"));
+        tokio::time::sleep(RETRY_MAX * 3).await;
+        assert_eq!(opens(&side), before, "an ended session is not re-opened");
+        assert!(!host.sessions.get("a").unwrap().lock().wanted);
+    }
+
+    /// The periodic cache write rewrites only mirrors that changed (a dialog or an unchanged
+    /// re-open is no change), a big one that stays open less often; a close writes at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_writes_follow_changes_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        let dirty = |host: &TestHost| host.sessions.get("a").unwrap().lock().dirty;
+        assert!(dirty(&host));
+        persist_due(dyn_host.clone()).await;
+        assert!(!dirty(&host), "a small mirror is written on the next tick");
+        let file = dir.path().join("lab/s1.json.zst");
+        let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+
+        // A dialog opens and closes: nothing the cache keeps.
+        side.lock().unwrap().change(SessionEvent::Ui { request: None });
+        converge(&mut ui, &host, &side).await;
+        // A reconnect re-opens it with nothing new.
+        link.close("network lost");
+        host.sessions.link_down();
+        side.lock().unwrap().fanout.clear();
+        let (link, _) = connect(&host, &side, true, true, "c2").await;
+        reopen(dyn_host.clone(), link.clone()).await;
+        assert_eq!(last_open(&side), (vec![], true, true), "nothing resent");
+        assert!(!dirty(&host));
+        persist_due(dyn_host.clone()).await;
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), written, "not rewritten");
+
+        // A row changes: written on the next tick.
+        side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a150", "new"), h: None });
+        converge(&mut ui, &host, &side).await;
+        persist_due(dyn_host.clone()).await;
+        assert!(!dirty(&host));
+
+        // Now 3 MiB: written once, then not again for a while.
+        side.lock().unwrap().change(SessionEvent::Upsert { item: tool("big", &prose(7, 500_000)), h: None });
+        converge(&mut ui, &host, &side).await;
+        persist_due(dyn_host.clone()).await;
+        assert!(!dirty(&host));
+        side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a151", "more"), h: None });
+        converge(&mut ui, &host, &side).await;
+        persist_due(dyn_host.clone()).await;
+        assert!(dirty(&host), "a big mirror waits");
+        // Closing it writes it at once.
+        closed(&dyn_host, "a");
+        until("the close wrote it", || !dirty(&host)).await;
+    }
+
+    /// Closed mirrors leave memory least recently used first once they take more than the
+    /// budget, by size however many they are; open ones, unwritten ones and ones anyone holds
+    /// (an open, a write) stay.
+    #[test]
+    fn idle_mirrors_are_capped_by_size() {
+        let s = Sessions::default();
+        let t0 = Instant::now();
+        let put = |id: &str, rows: usize, at: u64| {
+            let m = s.mirror(id);
+            let mut st = m.lock();
+            st.data = Some(data("s", (0..rows).map(|i| user(&format!("u{i}"), &prose(i as u64, 50))).collect()));
+            st.used = t0 + Duration::from_millis(at);
+        };
+        put("old", 200, 0);
+        put("mid", 200, 1);
+        put("new", 200, 2);
+        put("open", 200, 0);
+        s.get("open").unwrap().lock().wanted = true;
+        put("unwritten", 200, 0);
+        s.get("unwritten").unwrap().lock().dirty = true;
+        put("held", 200, 0);
+        let held = s.get("held").unwrap();
+        let one = s.get("old").unwrap().lock().weight();
+        let present = |s: &Sessions| ["old", "mid", "new", "open", "unwritten", "held"].map(|id| s.get(id).is_some());
+        s.evict_idle(2 * one + one / 2);
+        assert_eq!(present(&s), [false, true, true, true, true, true], "the least recently used leaves first");
+        s.evict_idle(0);
+        assert_eq!(present(&s), [false, false, false, true, true, true]);
+        drop(held);
+        s.evict_idle(0);
+        assert!(s.get("held").is_none());
+        // Many small ones fit where a few big ones would not.
+        for i in 0..40 {
+            put(&format!("small{i}"), 1, 10 + i);
+        }
+        s.evict_idle(2 * one);
+        assert!((0..40).all(|i| s.get(&format!("small{i}")).is_some()));
     }
 
     // ── lab: a real long session through a real tf-hostd ──────────────────────────────────────

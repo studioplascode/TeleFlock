@@ -33,6 +33,7 @@ use tf_collab::{
     Access, AgentCmdKind, EndReason, Guest, GuestError, GuestEvent, HostEntry, ImageContent, JoinTimeouts, Registry,
     RegistryError, Relay, RelayConfig, RelayIdentity, Replica, Signal, UiReply,
 };
+use tf_collab::replica::RowNote;
 use tf_proto::methods::Delivery;
 use tf_proto::session::{AppendField, HistoryPage, SessionEvent, SessionHave, SessionMeta, SessionSnapshot, TreeInfo, UiRequest};
 use tf_proto::model::{
@@ -43,7 +44,7 @@ use tf_proto::{ApiError, Millis};
 
 use crate::bridge::{BridgeCaps, BridgeHandle};
 use crate::clients::ClientHandle;
-use crate::sync::Fanout;
+use crate::sync::{Fanout, Tree};
 use crate::state::persist::Persist;
 use crate::util::{local_day, now_ms};
 
@@ -86,6 +87,10 @@ const JOIN_GRACE: Duration = Duration::from_secs(8);
 /// A session whose bridge is gone, with no room to fall back to, is dropped once its omp process
 /// is gone (Linux), or after this long elsewhere.
 pub(crate) const DETACHED_FORGET: Duration = Duration::from_secs(600);
+/// For this long after tf-hostd started, an omp session with neither a room nor a bridge reads
+/// as starting, not unshared: bridges reconnect within ~5 s of a restart (a global copy serves
+/// omp processes TeleFlock did not start), and the panes' processes are read in the meantime.
+const STARTUP_GRACE: Duration = JOIN_GRACE;
 
 /// Board-relevant change announced to the state stores.
 #[derive(Debug, Clone)]
@@ -154,6 +159,8 @@ pub(crate) struct SessionState {
     pub(crate) driver: Option<(u64, u64)>,
     /// omp's session file, as the bridge named it (subagent transcripts live next to it).
     pub(crate) session_file: Option<std::path::PathBuf>,
+    /// The row notes persisted for the session ([`crate::notes`]) were handed to the replica.
+    notes_loaded: bool,
     pending: Vec<SessionEvent>,
     last_flush: Instant,
     /// When the armed flush timer fires (one at a time, see [`arm_flush`]).
@@ -188,6 +195,7 @@ impl SessionState {
             bridge_lost: None,
             driver: None,
             session_file: None,
+            notes_loaded: false,
             pending: Vec::new(),
             last_flush: Instant::now(),
             flush_at: None,
@@ -344,8 +352,8 @@ impl OmpSession {
         flush_locked(&mut st);
         let mut snap = st.replica.snapshot(limit);
         st.overlay.apply(&mut snap.meta, st.link == LinkState::Live);
-        snap.meta.tree = st.tree.clone();
-        st.fanout.subscribe(client, agent_id, snap, have, &self.session_id)
+        let st = &mut *st;
+        st.fanout.subscribe(client, agent_id, snap, Tree { tree: st.tree.as_ref(), rev: st.tree_rev }, have, &self.session_id)
     }
 
     pub fn unsubscribe(&self, client_id: &str, agent_id: &str) {
@@ -364,7 +372,9 @@ impl OmpSession {
         flush_locked(&mut st);
     }
 
-    pub fn history(&self, cursor: Option<&str>, limit: usize) -> HistoryPage {
+    /// Rows older than `cursor`; `None` when the session has no row `cursor` (a row a client kept
+    /// from before tf-hostd restarted, say).
+    pub fn history(&self, cursor: Option<&str>, limit: usize) -> Option<HistoryPage> {
         self.lock().replica.history(cursor, limit)
     }
 
@@ -756,9 +766,9 @@ fn flush_locked(st: &mut SessionState) {
     let mut ended = false;
     for ev in &mut events {
         match ev {
+            // The tree goes out with it (`Fanout::send_events`).
             SessionEvent::Reset { snapshot } => {
                 st.overlay.apply(&mut snapshot.meta, live);
-                snapshot.meta.tree = st.tree.clone();
                 st.tree_sent = st.tree_rev;
             }
             SessionEvent::Ended { .. } => ended = true,
@@ -767,7 +777,7 @@ fn flush_locked(st: &mut SessionState) {
     }
     let replica = &st.replica;
     let field_len = |id: &str, field: AppendField| replica.item(id).and_then(|i| crate::sync::field_len(i, field));
-    st.fanout.send_events(&events, &field_len);
+    st.fanout.send_events(&events, Tree { tree: st.tree.as_ref(), rev: st.tree_rev }, &field_len);
     if ended {
         st.meta_due = false;
     }
@@ -782,7 +792,7 @@ fn flush_locked(st: &mut SessionState) {
     // every meta; `sessionSync` ones as a patch when it changed.
     let tree_changed = st.tree_rev != st.tree_sent;
     st.tree_sent = st.tree_rev;
-    st.fanout.send_meta(&meta, st.tree.as_ref(), tree_changed);
+    st.fanout.send_meta(&meta, Tree { tree: st.tree.as_ref(), rev: st.tree_rev }, tree_changed);
 }
 
 /// Merges `append`s into an earlier `append` of the same row and field when nothing in
@@ -906,6 +916,10 @@ struct Registryish {
     awaiting: HashMap<u32, (Instant, Instant)>,
     /// (instance, generation) → when a poll first listed the room ([`JOIN_GRACE`]).
     first_seen: HashMap<(String, u64), Instant>,
+    /// The registry was polled since tf-hostd started: a session it does not list has no room.
+    polled: bool,
+    /// When this daemon's omp data plane started ([`STARTUP_GRACE`]).
+    started: Option<Instant>,
 }
 
 /// What a failed join means for the next one.
@@ -1043,6 +1057,8 @@ pub(crate) struct Inner {
     pub(crate) updates: broadcast::Sender<OmpUpdate>,
     repoll: Notify,
     pub(crate) persist: Arc<Persist>,
+    /// Where the sessions' row notes live ([`crate::notes`]).
+    pub(crate) notes: std::path::PathBuf,
     pub(crate) cancel: CancellationToken,
     /// The companion-extension server: bridges ≥ 2.0 serve their sessions ([`crate::feed`]).
     pub(crate) bridge: BridgeHandle,
@@ -1099,10 +1115,11 @@ impl OmpHandle {
             relay_ok: AtomicBool::new(false),
             relay_down: Mutex::new(None),
             registry,
-            reg: Mutex::new(Registryish::default()),
+            reg: Mutex::new(Registryish { started: Some(Instant::now()), ..Registryish::default() }),
             sessions: RwLock::new(HashMap::new()),
             updates,
             repoll: Notify::new(),
+            notes: crate::notes::dir(persist.home()),
             persist,
             cancel,
             bridge,
@@ -1236,10 +1253,11 @@ impl OmpHandle {
     }
 
     /// Link of an omp session no replica serves (yet). `pids` are the pane's foreground
-    /// processes; `shares_by_default`: omp's global config shares every session on our relay.
-    pub fn link_without_guest(&self, session_id: Option<&str>, pids: &[u32], shares_by_default: bool) -> LinkStatus {
+    /// processes (`None`: not read yet); `shares_by_default`: omp's global config shares every
+    /// session on our relay.
+    pub fn link_without_guest(&self, session_id: Option<&str>, pids: Option<&[u32]>, shares_by_default: bool) -> LinkStatus {
         let bridge = &self.inner.bridge;
-        let bridged = session_id.and_then(|sid| bridge.by_session(sid)).or_else(|| pids.iter().find_map(|p| bridge.by_pid(*p)));
+        let bridged = session_id.and_then(|sid| bridge.by_session(sid)).or_else(|| pids.into_iter().flatten().find_map(|p| bridge.by_pid(*p)));
         if bridged.as_ref().is_some_and(|b| b.caps.data_plane()) {
             return LinkStatus::connecting(LinkReason::Syncing, Some(LinkVia::Bridge), "TeleFlock's bridge in omp is connected; loading the session");
         }
@@ -1253,7 +1271,13 @@ impl OmpHandle {
             // No room yet. An omp that will share is still starting (minutes on a slow host).
             let now = Instant::now();
             reg.awaiting.retain(|_, (_, last)| now.duration_since(*last) < ROOM_WAIT);
-            let Some(&pid) = pids.iter().find(|p| shares_by_default || launched_with_overlay(**p)) else {
+            // tf-hostd itself just started: omp's room list is not read yet, or bridges (which
+            // reconnect within seconds) and the pane's processes may not be known yet. Nothing
+            // says "not shared" so far.
+            if !reg.polled || reg.started.is_some_and(|t| now.duration_since(t) < STARTUP_GRACE) {
+                return LinkStatus::connecting(LinkReason::Starting, None, "TeleFlock just started; waiting for this omp's bridge or collab room");
+            }
+            let Some(&pid) = pids.unwrap_or_default().iter().find(|p| shares_by_default || launched_with_overlay(**p)) else {
                 return LinkStatus::not_shared(
                     LinkReason::NoRoom,
                     "this omp session is not shared with TeleFlock: it has no collab room on the TeleFlock relay and no TeleFlock bridge 2.0",
@@ -1343,20 +1367,27 @@ async fn poll_loop(weak: Weak<Inner>) {
     }
 }
 
-async fn poll_once(inner: &Arc<Inner>) {
-    crate::feed::reconcile(inner);
-    let rows = match inner.registry.poll().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            debug!("registry poll: {e}");
-            return;
-        }
-    };
-    // What the sessions are fed by, read before the registry lock (sessions lock first).
-    let mut joined: HashSet<(String, u64)> = HashSet::new();
-    // Sessions the bridge serves, brings up or may get back within BRIDGE_RETURN: never joined.
-    let mut held: HashSet<String> = HashSet::new();
-    for s in inner.sessions.read().unwrap_or_else(|p| p.into_inner()).values() {
+/// The first poll happened, or the startup grace ([`STARTUP_GRACE`]) just ended: links that
+/// waited for either are read again (`true`: announce it).
+fn startup_over(reg: &mut Registryish, now: Instant) -> bool {
+    let first = !std::mem::replace(&mut reg.polled, true);
+    let grace = reg.started.is_some_and(|t| now.duration_since(t) >= STARTUP_GRACE);
+    if grace {
+        reg.started = None;
+    }
+    first || grace
+}
+
+/// What feeds the sessions, for a registry poll: the collab rooms joined (instance, generation),
+/// and the sessions the bridge serves, brings up or may get back within [`BRIDGE_RETURN`] (their
+/// rooms are never joined). The map's lock is let go before any session's is taken: a session held
+/// for long (a resync rebuilding its replica from a large file) must not hold up the map's
+/// writers (a bridge's hello, a session's end), nor the readers std's `RwLock` queues behind a
+/// waiting writer (every op, the boards).
+fn session_feeds(sessions: &RwLock<HashMap<String, Arc<OmpSession>>>) -> (HashSet<(String, u64)>, HashSet<String>) {
+    let sessions: Vec<Arc<OmpSession>> = sessions.read().unwrap_or_else(|p| p.into_inner()).values().cloned().collect();
+    let (mut joined, mut held) = (HashSet::new(), HashSet::new());
+    for s in sessions {
         let st = s.lock();
         match &st.transport {
             Transport::Collab(r) => {
@@ -1372,12 +1403,29 @@ async fn poll_once(inner: &Arc<Inner>) {
             }
         }
     }
+    (joined, held)
+}
+
+async fn poll_once(inner: &Arc<Inner>) {
+    crate::feed::reconcile(inner);
+    let rows = match inner.registry.poll().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            debug!("registry poll: {e}");
+            if startup_over(&mut inner.reg.lock().unwrap_or_else(|p| p.into_inner()), Instant::now()) {
+                let _ = inner.updates.send(OmpUpdate::Registry);
+            }
+            return;
+        }
+    };
+    // What the sessions are fed by, read before the registry lock (sessions lock first).
+    let (joined, held) = session_feeds(&inner.sessions);
     let mut to_join = Vec::new();
     let changed;
     {
         let mut reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
-        changed = !same_rows(&reg.rows, &rows);
         let now = Instant::now();
+        changed = !same_rows(&reg.rows, &rows) | startup_over(&mut reg, now);
         for row in &rows {
             if let Some(f) = reg.failures.get_mut(&row.instance_id).filter(|f| f.generation == row.generation) {
                 f.seen_at = now;
@@ -1499,6 +1547,8 @@ async fn join(inner: &Arc<Inner>, row: HostEntry, timeouts: JoinTimeouts) -> Res
     let joining = LinkStatus::connecting(LinkReason::Joining, Some(LinkVia::Collab), "joining omp's collab room");
     // A session whose bridge went away keeps its replica and subscribers: the room takes over.
     if let Some(s) = inner.session(&session_id).filter(|s| !s.is_closed()) {
+        // Before the room's snapshot reaches the replica (events wait in `rx`).
+        load_notes(inner, &s).await;
         let mut st = s.lock();
         match st.transport {
             Transport::Detached => {
@@ -1526,6 +1576,7 @@ async fn join(inner: &Arc<Inner>, row: HostEntry, timeouts: JoinTimeouts) -> Res
         }
     }
     let session = Arc::new(OmpSession::new(&session_id, row.pid, &inner.persist, inner.bridge.clone()));
+    load_notes(inner, &session).await;
     {
         let mut st = session.lock();
         st.transport = Transport::Collab(room);
@@ -1554,6 +1605,42 @@ fn persist_originals(inner: &Inner, session_id: &str, signals: &[Signal]) {
         if let Signal::OriginalsKept { id, originals } = signal {
             inner.persist.update(|d| d.originals.entry(session_id.to_owned()).or_default().insert(id.clone(), originals.clone()));
         }
+    }
+}
+
+/// Appends the row notes the replica took ([`Signal::Noted`]) to the session's notes file (see
+/// [`crate::notes`]), off the runtime.
+fn persist_notes(inner: &Inner, session_id: &str, signals: &[Signal]) {
+    let notes: Vec<(String, RowNote)> = signals
+        .iter()
+        .filter_map(|s| match s {
+            Signal::Noted { id, note } => Some((id.clone(), note.clone())),
+            _ => None,
+        })
+        .collect();
+    if notes.is_empty() {
+        return;
+    }
+    let (dir, sid) = (inner.notes.clone(), session_id.to_owned());
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::notes::append(&dir, &sid, &notes) {
+            warn!(session = %sid, "keep row notes: {e}");
+        }
+    });
+}
+
+/// Hands the session's persisted row notes ([`crate::notes`]) to its replica, once, before its
+/// first snapshot: the rows it rebuilds from the session after a tf-hostd restart then come out
+/// as they were built live.
+pub(crate) async fn load_notes(inner: &Inner, session: &OmpSession) {
+    if session.lock().notes_loaded {
+        return;
+    }
+    let (dir, sid) = (inner.notes.clone(), session.session_id.clone());
+    let notes = tokio::task::spawn_blocking(move || crate::notes::load(&dir, &sid)).await.unwrap_or_default();
+    let mut st = session.lock();
+    if !std::mem::replace(&mut st.notes_loaded, true) {
+        st.replica.keep_notes(notes);
     }
 }
 
@@ -1590,6 +1677,7 @@ pub(crate) async fn publish(inner: &Inner, session: &Arc<OmpSession>, update: &t
     }
     if !update.signals.is_empty() {
         persist_originals(inner, sid, &update.signals);
+        persist_notes(inner, sid, &update.signals);
         if update.signals.iter().any(|s| matches!(s, Signal::TurnStarted | Signal::TurnEnded { .. } | Signal::Prompted { .. })) {
             session.journal_kick.notify_one();
         }
@@ -1954,7 +2042,7 @@ mod tests {
     fn state_with(subs: &[&ClientHandle]) -> SessionState {
         let mut fanout = Fanout::default();
         for c in subs {
-            fanout.subscribe(c, "a", Replica::new("s").snapshot(10), None, "s");
+            fanout.subscribe(c, "a", Replica::new("s").snapshot(10), Tree { tree: None, rev: 0 }, None, "s");
         }
         let mut st = SessionState::new(Replica::new("s"));
         st.link = LinkState::Live;
@@ -2179,6 +2267,36 @@ mod tests {
         let (bridge, _sock) = crate::bridge::fake::handle();
         let omp = OmpHandle::start(0, Persist::load(dir.join("state.json")), cancel, bridge.clone()).await;
 
+        // tf-hostd just started: until omp's room list was read and the bridges had their few
+        // seconds to reconnect, a session with no room listed reads as starting, whatever its pane
+        // runs (a global bridge serves omp processes TeleFlock did not start; the pane's processes
+        // may not be read yet), never as unshared.
+        let me = std::process::id();
+        let just_started = LinkStatus::connecting(LinkReason::Starting, None, "TeleFlock just started; waiting for this omp's bridge or collab room");
+        assert_eq!(omp.link_without_guest(Some("s0"), Some(&[me]), false), just_started);
+        assert_eq!(omp.link_without_guest(None, None, false), just_started);
+        omp.inner.reg.lock().unwrap().polled = true;
+        assert_eq!(omp.link_without_guest(Some("s0"), Some(&[me]), false), just_started, "polled, but bridges may still reconnect");
+        let rewind = |by: Duration| {
+            let mut reg = omp.inner.reg.lock().unwrap();
+            reg.started = reg.started.map(|t| t.checked_sub(by).unwrap());
+        };
+        rewind(STARTUP_GRACE - Duration::from_secs(1));
+        assert_eq!(omp.link_without_guest(Some("s0"), Some(&[me]), false), just_started);
+        rewind(Duration::from_secs(1));
+        // Then the truth: no room, no bridge, nothing that shares.
+        let unshared = omp.link_without_guest(Some("s0"), Some(&[me]), false);
+        assert_eq!((unshared.state, unshared.reason, unshared.via), (LinkState::NotShared, Some(LinkReason::NoRoom), None));
+        assert_eq!(omp.link_without_guest(Some("s0"), None, false), unshared);
+        // Before the first poll, the room list says nothing yet either.
+        omp.inner.reg.lock().unwrap().polled = false;
+        assert_eq!(omp.link_without_guest(Some("s0"), Some(&[me]), false), just_started);
+        // The next poll announces the first read and the grace's end, once, so the boards read
+        // their links again.
+        assert!(startup_over(&mut omp.inner.reg.lock().unwrap(), Instant::now()));
+        assert!(!startup_over(&mut omp.inner.reg.lock().unwrap(), Instant::now()));
+        assert_eq!(omp.link_without_guest(Some("s0"), Some(&[me]), false), unshared);
+
         // Started like TeleFlock starts omp (`--config …/omp-overlay.yml`), no room yet.
         let mut child = std::process::Command::new("sh")
             .args(["-c", "sleep 30; :", "omp", "--config", "/tmp/lab/omp-overlay.yml"])
@@ -2190,17 +2308,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let starting = LinkStatus::connecting(LinkReason::Starting, None, "omp is starting; waiting for its TeleFlock bridge or collab room");
-        assert_eq!(omp.link_without_guest(None, &[pid], false), starting);
+        assert_eq!(omp.link_without_guest(Some("s0"), Some(&[pid]), false), starting);
         // Without the overlay it is not shared, unless omp's global config shares every session.
-        let me = std::process::id();
-        let unshared = omp.link_without_guest(None, &[me], false);
+        let unshared = omp.link_without_guest(None, Some(&[me]), false);
         assert_eq!((unshared.state, unshared.reason, unshared.via), (LinkState::NotShared, Some(LinkReason::NoRoom), None));
-        assert_eq!(omp.link_without_guest(None, &[me], true), starting);
+        assert_eq!(omp.link_without_guest(None, Some(&[me]), true), starting);
         // Still no room after the wait: not shared after all.
         for (first, _) in omp.inner.reg.lock().unwrap().awaiting.values_mut() {
             *first = first.checked_sub(ROOM_WAIT).unwrap();
         }
-        let late = omp.link_without_guest(None, &[pid], false);
+        let late = omp.link_without_guest(None, Some(&[pid]), false);
         assert_eq!((late.state, late.reason), (LinkState::NotShared, Some(LinkReason::NoRoom)));
         assert!(late.error.unwrap().contains("has not opened a collab room"));
         let _ = child.kill();
@@ -2214,13 +2331,13 @@ mod tests {
         .unwrap();
         omp.inner.reg.lock().unwrap().rows.push(row);
         assert_eq!(
-            omp.link_without_guest(Some("s1"), &[], false),
+            omp.link_without_guest(Some("s1"), Some(&[]), false),
             LinkStatus::connecting(LinkReason::Starting, None, "waiting for TeleFlock's bridge in omp to connect before joining its collab room")
         );
         let long_ago = Instant::now().checked_sub(JOIN_GRACE).unwrap();
         omp.inner.reg.lock().unwrap().first_seen.insert(("i1".into(), 1), long_ago);
         assert_eq!(
-            omp.link_without_guest(Some("s1"), &[], false),
+            omp.link_without_guest(Some("s1"), Some(&[]), false),
             LinkStatus::connecting(LinkReason::Joining, Some(LinkVia::Collab), "joining omp's collab room")
         );
         {
@@ -2229,7 +2346,7 @@ mod tests {
             f.record(&failed(FailKind::TimedOut), Instant::now());
             reg.failures.insert("i1".into(), f);
         }
-        let failing = omp.link_without_guest(Some("s1"), &[], false);
+        let failing = omp.link_without_guest(Some("s1"), Some(&[]), false);
         assert_eq!((failing.state, failing.reason), (LinkState::Connecting, Some(LinkReason::JoinFailed)));
         assert_eq!(failing.error.as_deref(), Some("join attempt 1 failed: boom; retrying"));
         // A new room generation starts over.
@@ -2238,28 +2355,31 @@ mod tests {
             reg.rows[0].generation = 2;
             reg.first_seen.insert(("i1".into(), 2), long_ago);
         }
-        assert_eq!(omp.link_without_guest(Some("s1"), &[], false).reason, Some(LinkReason::Joining));
+        assert_eq!(omp.link_without_guest(Some("s1"), Some(&[]), false).reason, Some(LinkReason::Joining));
         // A view-only room and one on another relay are not shared, each with its reason.
         omp.inner.reg.lock().unwrap().rows[0].access = "view".into();
-        assert_eq!(omp.link_without_guest(Some("s1"), &[], false).reason, Some(LinkReason::ViewOnly));
+        assert_eq!(omp.link_without_guest(Some("s1"), Some(&[]), false).reason, Some(LinkReason::ViewOnly));
         {
             let mut reg = omp.inner.reg.lock().unwrap();
             reg.rows[0].access = "control".into();
             reg.foreign.insert(("i1".into(), 2));
         }
-        assert_eq!(omp.link_without_guest(Some("s1"), &[], false).reason, Some(LinkReason::SharedElsewhere));
+        assert_eq!(omp.link_without_guest(Some("s1"), Some(&[]), false).reason, Some(LinkReason::SharedElsewhere));
 
         // A bridge that serves sessions itself (≥ 2.0) says hello: the session is syncing through
         // it, whatever the room says; an older bridge changes nothing.
         let mut old = crate::bridge::fake::FakeExt::connect(&bridge).await;
         old.hello_caps(7, "s1", "1.4.0", None).await;
-        assert_eq!(omp.link_without_guest(Some("s1"), &[], false).reason, Some(LinkReason::SharedElsewhere));
+        assert_eq!(omp.link_without_guest(Some("s1"), Some(&[]), false).reason, Some(LinkReason::SharedElsewhere));
+        // An older bridge in an omp that shares nothing: still not shared (Connect shares it through
+        // that bridge's `/collab`).
+        assert_eq!(omp.link_without_guest(Some("s9"), Some(&[7]), false).state, LinkState::NotShared);
         let mut ext = crate::bridge::fake::FakeExt::connect(&bridge).await;
         ext.hello_caps(8, "s2", "2.0.0", Some(serde_json::json!({ "live": 1, "dialogs": true, "subagentCtl": true, "prompt": true })))
             .await;
-        let syncing = omp.link_without_guest(Some("s2"), &[], false);
+        let syncing = omp.link_without_guest(Some("s2"), Some(&[]), false);
         assert_eq!((syncing.state, syncing.reason, syncing.via), (LinkState::Connecting, Some(LinkReason::Syncing), Some(LinkVia::Bridge)));
-        assert_eq!(omp.link_without_guest(None, &[8], false).reason, Some(LinkReason::Syncing));
+        assert_eq!(omp.link_without_guest(None, Some(&[8]), false).reason, Some(LinkReason::Syncing));
         omp.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

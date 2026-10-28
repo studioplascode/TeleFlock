@@ -131,7 +131,7 @@ impl Replica {
     pub fn new(agent_id: impl Into<String>) -> Replica;
     pub fn apply(&mut self, ev: &GuestEvent, now: Millis) -> Update;
     pub fn snapshot(&self, limit: usize) -> SessionSnapshot;        // newest `limit` rows; cursor = oldest row id
-    pub fn history(&self, cursor: Option<&str>, limit: usize) -> HistoryPage;
+    pub fn history(&self, cursor: Option<&str>, limit: usize) -> Option<HistoryPage>;  // None: no row `cursor`
     pub fn item(&self, id: &str) -> Option<&TranscriptItem>;
     pub fn meta(&self) -> &SessionMeta;                              // model, thinking, context, cost, todos, subagents, caps, tps (last turn avg)
     pub fn state(&self) -> &SessionState;  pub fn header(&self) -> Option<&SessionHeader>;
@@ -173,8 +173,10 @@ pub fn transcript_page(jsonl: &str) -> HistoryPage;   // subagent transcript (fe
 ### Row ids and mapping
 
 Ids are stable across snapshot and live frames: user `u<ts>`, assistant/thinking blocks `a<ts>.<block>`,
-tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction `c<entryId>`, notices `n<seq>`,
-retry streaks `r<seq>` (one row per auto-retry streak, updated in place: "Retrying (3/10)…" → "Recovered after 6 retries").
+tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction `c<entryId>`, notices `n<epoch>.<seq>`,
+retry streaks `r<epoch>.<seq>` (one row per auto-retry streak, updated in place: "Retrying (3/10)…" → "Recovered after 6 retries").
+`epoch` is the replica's lifetime (base-36 µs at creation, increasing within the process; reloads keep it): notices
+and retries are live-only, and clients keep rows across tf-hostd restarts, so a later replica never reuses their ids.
 
 - Text/thinking stream as `append {field: text}`; the replica diffs each block of omp's full message against
   what it emitted (omp serializes the message lazily, so the delta field alone is unreliable).

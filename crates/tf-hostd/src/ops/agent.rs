@@ -232,7 +232,9 @@ fn session_history(ctx: &Ctx, p: SessionHistoryParams) -> Result<HistoryPage, Ap
     let sid = session_id(ctx, &p.agent_id)?;
     let s = ctx.omp.session(&sid).ok_or_else(not_shared)?;
     let limit = p.limit.map(|l| l.clamp(1, 2000) as usize).unwrap_or(DEFAULT_LIMIT);
-    Ok(s.history(Some(&p.cursor), limit))
+    // A row the session does not have (a client kept it from before tf-hostd restarted): say so,
+    // never answer with other rows.
+    s.history(Some(&p.cursor), limit).ok_or_else(|| ApiError::new("not_found", format!("row {} is not in the session", p.cursor)))
 }
 
 async fn subagent_transcript(ctx: &Ctx, p: SubagentRef) -> Result<HistoryPage, ApiError> {

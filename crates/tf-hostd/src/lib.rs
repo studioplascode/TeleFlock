@@ -12,6 +12,7 @@ pub mod inject;
 pub mod ipc;
 pub mod journal;
 pub mod logging;
+pub mod notes;
 pub mod omp;
 pub mod ops;
 pub mod originals;

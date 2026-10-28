@@ -12,7 +12,19 @@
 //!
 //! **Ids** are stable across snapshot and live frames: user (and inbound IRC) `u<ts>`,
 //! assistant/thinking blocks `a<ts>.<block>`, tools `t:<toolCallId>`, model/thinking markers
-//! `m<entryId>`, compaction `c<entryId>`, notices `n<seq>`, retry streaks `r<seq>`.
+//! `m<entryId>`, compaction `c<entryId>`, notices `n<epoch>.<seq>`, retry streaks `r<epoch>.<seq>`
+//! (`epoch`: the replica's lifetime, so a later replica of the session never reuses them).
+//!
+//! **Rows end as the session file has them.** A row's final content depends only on the session's
+//! entries (collab's, or omp's session file that tf-hostd reads for bridge-served sessions) and on
+//! what was noted of it live that the file does not keep ([`RowNote`]: the device that sent a
+//! prompt, a steer, how long the model thought; tf-hostd persists notes and hands them back with
+//! [`Replica::keep_notes`]). Live events build the row first; once its entry lands it is computed
+//! again exactly as a snapshot computes it (a tool's arguments from the recorded call, durations
+//! from omp's own timestamps), so a row built live and the same row rebuilt from the file after a
+//! resync or a tf-hostd restart are equal field for field, and clients that cache rows by hash
+//! keep them. Live-only: notices (`n…`, `r…`) and progress a tool reports after its result (async
+//! `task` calls of omp < 18.13, whose late updates refresh the row's view).
 
 mod irc;
 mod spend;
@@ -21,6 +33,7 @@ mod ui;
 mod util;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use tf_proto::{
@@ -54,6 +67,39 @@ pub struct KeptOriginal {
     pub sha256: String,
     /// Where tf-hostd stored it (→ `ImageRef.original`).
     pub path: String,
+}
+
+/// What was seen of a row live that omp's session file does not keep, so the row rebuilt from the
+/// file comes out as it was built live. Each field is set once (the first observation stands) and
+/// never cleared, so notes merge in any order ([`RowNote::merge`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RowNote {
+    /// The TeleFlock device that sent this prompt (user rows): every device shares one collab
+    /// guest, and prompts through the bridge carry no sender at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// The prompt arrived while the agent was producing this turn's output (user rows: a steer).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub steering: bool,
+    /// How long the model thought (thinking rows), measured while the block streamed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_ms: Option<u64>,
+}
+
+impl RowNote {
+    /// Takes the fields of `other` this note does not have yet; true when anything changed.
+    pub fn merge(&mut self, other: &RowNote) -> bool {
+        let before = self.clone();
+        if self.author.is_none() {
+            self.author.clone_from(&other.author);
+        }
+        self.steering |= other.steering;
+        if self.thought_ms.is_none() {
+            self.thought_ms = other.thought_ms;
+        }
+        *self != before
+    }
 }
 
 /// A prompt TeleFlock queued while omp streamed ([`Replica::expect_queued`]).
@@ -110,6 +156,9 @@ pub enum Signal {
     /// A user row's images got originals tf-hostd kept ([`Replica::expect_originals`]), one slot
     /// per image; tf-hostd persists them and hands them back with [`Replica::keep_originals`].
     OriginalsKept { id: String, originals: Vec<Option<String>> },
+    /// Row `id` got a note ([`RowNote`], the row's notes so far): tf-hostd persists it and hands
+    /// it back with [`Replica::keep_notes`] before the session's next snapshot.
+    Noted { id: String, note: RowNote },
 }
 
 /// Result of [`Replica::apply`].
@@ -161,8 +210,20 @@ struct MsgState {
 #[derive(Debug, Clone)]
 struct ToolState {
     name: String,
+    /// When `tool_execution_start` arrived (live): the duration shown until the result lands.
     started: Option<Millis>,
     ended: bool,
+    /// The call's `toolCall` block was seen: the row's arguments and intent are the recorded ones,
+    /// and `tool_execution_start`'s (omp's validated copy) does not replace them.
+    block: bool,
+    /// When omp finished the assistant message that made the call (`completedAt`).
+    completed_at: Option<Millis>,
+}
+
+impl ToolState {
+    fn new(name: &str) -> ToolState {
+        ToolState { name: name.to_owned(), started: None, ended: false, block: false, completed_at: None }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -262,6 +323,9 @@ pub struct Replica {
     active_tools: Vec<(String, ActiveTool)>,
     // bookkeeping
     seq: u64,
+    /// This replica's lifetime in notice and retry ids ([`new_epoch`]): clients keep rows across
+    /// tf-hostd restarts, so a new replica of the session must never reuse an earlier one's ids.
+    epoch: String,
     retry: Option<RetryStreak>,
     counted: HashSet<String>,
     /// The main agent's assistant turns (`None` until the first usage record).
@@ -282,8 +346,9 @@ pub struct Replica {
     /// Prompts TeleFlock sent while omp was streaming, listed in `meta.queue` until their
     /// user row lands (or omp goes idle with nothing queued: aborted, dequeued, dropped).
     queued_sent: VecDeque<QueuedSent>,
-    /// User rows attributed to a device (row id → device), kept across snapshot reloads.
-    authors: HashMap<String, String>,
+    /// What was noted of rows live that the session file does not keep (row id → note), kept
+    /// across snapshot reloads and handed back by tf-hostd after a restart.
+    notes: HashMap<String, RowNote>,
     /// Full-resolution originals of user rows' images (row id → one slot per image): TUI pastes'
     /// source files and copies tf-hostd kept. Kept across snapshot reloads.
     originals: HashMap<String, Vec<Option<String>>>,
@@ -322,6 +387,7 @@ impl Replica {
             rate: VecDeque::new(),
             active_tools: Vec::new(),
             seq: 0,
+            epoch: new_epoch(),
             retry: None,
             counted: HashSet::new(),
             main_spend: None,
@@ -334,7 +400,7 @@ impl Replica {
             file_edits: Vec::new(),
             expected_authors: VecDeque::new(),
             queued_sent: VecDeque::new(),
-            authors: HashMap::new(),
+            notes: HashMap::new(),
             originals: HashMap::new(),
             expected_originals: VecDeque::new(),
             journal: Journal::default(),
@@ -370,6 +436,28 @@ impl Replica {
     /// Restores originals linked earlier (persisted from [`Signal::OriginalsKept`]).
     pub fn keep_originals(&mut self, id: &str, originals: Vec<Option<String>>) {
         self.originals.insert(id.to_owned(), originals);
+    }
+
+    /// Restores notes taken earlier (persisted from [`Signal::Noted`]), merged into those taken
+    /// since. Call it before the session's next snapshot so the rows it rebuilds have them.
+    pub fn keep_notes(&mut self, notes: impl IntoIterator<Item = (String, RowNote)>) {
+        for (id, note) in notes {
+            self.notes.entry(id).or_default().merge(&note);
+        }
+    }
+
+    /// The notes taken of rows so far (row id → note).
+    pub fn notes(&self) -> &HashMap<String, RowNote> {
+        &self.notes
+    }
+
+    /// Notes `add` on row `id`; a change goes out as [`Signal::Noted`] (also while a snapshot
+    /// loads: what was noted then must be kept too).
+    fn note(&mut self, id: &str, add: RowNote, out: &mut Update) {
+        let note = self.notes.entry(id.to_owned()).or_default();
+        if note.merge(&add) {
+            out.signals.push(Signal::Noted { id: id.to_owned(), note: note.clone() });
+        }
     }
 
     /// Lists `text` in `meta.queue` (as a steer, or a follow-up) until its user row lands. Ignored
@@ -414,15 +502,19 @@ impl Replica {
         }
     }
 
-    /// Rows older than `cursor` (an item id from a snapshot/page), newest `limit` of them.
-    pub fn history(&self, cursor: Option<&str>, limit: usize) -> HistoryPage {
-        let end = cursor.and_then(|c| self.order.iter().position(|id| id == c)).unwrap_or(self.order.len());
+    /// Rows older than `cursor` (an item id from a snapshot/page), newest `limit` of them;
+    /// `None` when there is no row `cursor` (one a client kept from an earlier replica).
+    pub fn history(&self, cursor: Option<&str>, limit: usize) -> Option<HistoryPage> {
+        let end = match cursor {
+            Some(c) => self.order.iter().position(|id| id == c)?,
+            None => self.order.len(),
+        };
         let start = end.saturating_sub(limit);
-        HistoryPage {
+        Some(HistoryPage {
             items: self.order[start..end].iter().filter_map(|id| self.items.get(id).cloned()).collect(),
             has_more: start > 0,
             cursor: (start > 0).then(|| self.order[start].clone()),
-        }
+        })
     }
 
     pub fn item(&self, id: &str) -> Option<&TranscriptItem> {
@@ -663,7 +755,7 @@ impl Replica {
     fn load_snapshot(&mut self, snap: &Snapshot, out: &mut Update) {
         let was_running = self.running;
         let agent_id = std::mem::take(&mut self.agent_id);
-        let authors = std::mem::take(&mut self.authors);
+        let notes = std::mem::take(&mut self.notes);
         let expected = std::mem::take(&mut self.expected_authors);
         let originals = std::mem::take(&mut self.originals);
         let expected_originals = std::mem::take(&mut self.expected_originals);
@@ -676,11 +768,13 @@ impl Replica {
         let artifacts = if keep_artifacts { self.artifacts.take() } else { None };
         let playback = if keep_artifacts { std::mem::take(&mut self.playback) } else { Vec::new() };
         let queued_sent = if same_session { std::mem::take(&mut self.queued_sent) } else { VecDeque::new() };
-        // Notice and retry ids (`n<seq>`, `r<seq>`) never repeat with other content after a reload.
-        let seq = self.seq;
+        // Notice and retry ids (`n<epoch>.<seq>`, `r<epoch>.<seq>`) never repeat with other content
+        // after a reload.
+        let (seq, epoch) = (self.seq, std::mem::take(&mut self.epoch));
         *self = Replica::new(agent_id);
         self.seq = seq;
-        self.authors = authors;
+        self.epoch = epoch;
+        self.notes = notes;
         self.expected_authors = expected;
         self.originals = originals;
         self.expected_originals = expected_originals;
@@ -699,9 +793,12 @@ impl Replica {
             self.subs.entry(agent.id.clone()).or_default().snapshot = Some(agent.clone());
         }
         let entries = supersede_retried(&snap.entries);
+        let mut scratch = Update::default();
         for entry in entries {
-            self.entry(entry, &mut Update::default());
+            self.entry(entry, &mut scratch);
         }
+        // What a reload links or notes (a prompt echoed only in the snapshot) must be kept too.
+        out.signals.extend(scratch.signals.into_iter().filter(|s| matches!(s, Signal::Noted { .. } | Signal::OriginalsKept { .. })));
         // Rows from a durable snapshot are final.
         for id in &self.order {
             if let Some(item) = self.items.get_mut(id) {
@@ -824,7 +921,7 @@ impl Replica {
                     }
                     Some("toolResult") => {
                         if fin {
-                            self.tool_result(msg, out);
+                            self.tool_result(msg, true, out);
                         }
                     }
                     Some(_) => {
@@ -841,7 +938,7 @@ impl Replica {
                 let call_id = s(ev, "toolCallId").unwrap_or("").to_owned();
                 let name = s(ev, "toolName").unwrap_or("").to_owned();
                 let result = ev.get("result").cloned().unwrap_or(Value::Null);
-                self.tool_finish(&call_id, &name, &result, b(ev, "isError"), out);
+                self.tool_finish(&call_id, &name, &result, b(ev, "isError"), None, true, out);
             }
             "notice" => {
                 let level = match s(ev, "level") {
@@ -962,7 +1059,7 @@ impl Replica {
             Some(r) if attempt > 1 => r.clone(),
             _ => {
                 self.seq += 1;
-                RetryStreak { id: format!("r{}", self.seq), at: self.now }
+                RetryStreak { id: format!("r{}.{}", self.epoch, self.seq), at: self.now }
             }
         };
         let text = format!("Retrying ({attempt}/{max}) in {delay:.1}s: {}", clip(&error, 160));
@@ -997,7 +1094,7 @@ impl Replica {
 
     fn notice(&mut self, level: NoticeLevel, text: String, source: Option<String>, out: &mut Update) {
         self.seq += 1;
-        let id = format!("n{}", self.seq);
+        let id = format!("n{}.{}", self.epoch, self.seq);
         out.signals.push(Signal::Notice { level, text: text.clone() });
         self.upsert(TranscriptItem::Notice(NoticeItem { id, at: self.now, level, text, source }), out);
     }
@@ -1020,6 +1117,8 @@ impl Replica {
         let usage = msg.get("usage").map(token_usage);
         let stop = s(msg, "stopReason").map(str::to_owned);
         let error = non_empty(msg, "errorMessage").map(str::to_owned);
+        // omp stamps it when the message ended (omp ≥ 18.13): its tool calls start then.
+        let completed_at = u(msg, "completedAt").map(|c| c as Millis);
         let last_live = content.len().saturating_sub(1);
         for (i, blk) in content.iter().enumerate() {
             let kind = s(blk, "type").unwrap_or("");
@@ -1059,12 +1158,17 @@ impl Replica {
                             error: if fin { error.clone() } else { None },
                         })
                     } else {
+                        // Seen streaming before it finished: how long the model thought. Only the
+                        // live stream shows that, so it is noted for rows rebuilt from the file.
+                        if newly_done && self.emit && self.now > started {
+                            self.note(&id, RowNote { thought_ms: Some((self.now - started) as u64), ..RowNote::default() }, out);
+                        }
                         TranscriptItem::Thinking(ThinkingItem {
                             id: id.clone(),
                             at: t,
                             text: text.to_owned(),
                             streaming,
-                            duration_ms: (block_done && self.emit).then(|| (self.now - started).max(0) as u64),
+                            duration_ms: self.notes.get(&id).and_then(|n| n.thought_ms),
                             redacted: kind == "redactedThinking"
                                 || (text.is_empty() && blk.get("thinkingSignature").is_some() && block_done),
                         })
@@ -1078,7 +1182,7 @@ impl Replica {
                     }
                     state.blocks[i].get_or_insert_with(|| BlockState { started: self.now, done: false });
                     self.turn_output = true;
-                    self.tool_call_block(&call_id, blk, t, fin || i < last_live, out);
+                    self.tool_call_block(&call_id, blk, t, completed_at, fin || i < last_live, out);
                 }
                 _ => {}
             }
@@ -1136,7 +1240,6 @@ impl Replica {
                     out.events.push(SessionEvent::Append { id, field, text: delta, at: None });
                 }
             }
-            Some(shown) if !newly_done && new_text == shown => {}
             _ => {
                 if shown.is_none() {
                     let n = new_text.chars().count() as u32;
@@ -1191,10 +1294,12 @@ impl Replica {
         if let Some(slots) = self.originals.get(&id) {
             apply_originals(&mut images, slots);
         }
-        let steering = match self.items.get(&id) {
-            Some(TranscriptItem::User(u)) => u.steering,
-            _ => self.emit && self.running && self.turn_output,
-        };
+        let is_new = !self.items.contains_key(&id);
+        // Arrived while the agent was producing this turn's output: a steer. The session file
+        // can't tell, so it is noted for rows rebuilt from it.
+        if is_new && self.emit && self.running && self.turn_output {
+            self.note(&id, RowNote { steering: true, ..RowNote::default() }, out);
+        }
         let (mut author, synthetic) = match (role, custom_type) {
             (_, Some("collab-prompt")) => (msg.get("details").and_then(|d| non_empty(d, "from")).map(str::to_owned), false),
             (_, Some(other)) => (Some(other.to_owned()), true),
@@ -1202,15 +1307,14 @@ impl Replica {
             _ => (None, b(msg, "synthetic")),
         };
         if !synthetic {
-            if let Some(a) = self.authors.get(&id) {
-                author = Some(a.clone());
+            if let Some(a) = self.notes.get(&id).and_then(|n| n.author.clone()) {
+                author = Some(a);
             } else if let Some(i) = self.expected_authors.iter().position(|(t, _)| t == text.trim()) {
                 let (_, a) = self.expected_authors.remove(i).expect("position is in range");
-                self.authors.insert(id.clone(), a.clone());
+                self.note(&id, RowNote { author: Some(a.clone()), ..RowNote::default() }, out);
                 author = Some(a);
             }
         }
-        let is_new = !self.items.contains_key(&id);
         if is_new && !synthetic && !self.queued_sent.is_empty() {
             // A snapshot replays old rows too: only one at or after the send can be the echo.
             let key = queue_key(&text);
@@ -1218,6 +1322,7 @@ impl Replica {
                 self.queued_sent.remove(i);
             }
         }
+        let steering = self.notes.get(&id).is_some_and(|n| n.steering);
         let item = TranscriptItem::User(UserItem { id, at: t, text: text.clone(), images, author: author.clone(), steering, synthetic });
         self.upsert(item, out);
         if is_new && self.emit {
@@ -1265,15 +1370,18 @@ impl Replica {
 
     // ── tools ──────────────────────────────────────────────────────────
 
-    fn tool_call_block(&mut self, call_id: &str, blk: &Value, at: Millis, args_done: bool, out: &mut Update) {
+    /// A `toolCall` block of an assistant message (streaming, ended, or its entry). Complete, its
+    /// arguments as the session file records them ([`tool_args`]) are the row's for good: that is
+    /// what a rebuild from the file shows, whatever `tool_execution_start` carried.
+    fn tool_call_block(&mut self, call_id: &str, blk: &Value, at: Millis, completed_at: Option<Millis>, args_done: bool, out: &mut Update) {
         let id = tool_id(call_id);
         let name = s(blk, "name").unwrap_or("").to_owned();
-        let mut args = blk.get("arguments").cloned().unwrap_or(Value::Null);
-        let intent = non_empty(blk, "intent").map(str::to_owned).or_else(|| args.get("i").and_then(Value::as_str).map(str::to_owned));
-        if let Value::Object(map) = &mut args {
-            map.remove("i");
-        }
-        self.tools.entry(call_id.to_owned()).or_insert(ToolState { name: name.clone(), started: None, ended: false });
+        let raw = blk.get("arguments").unwrap_or(&Value::Null);
+        let intent = non_empty(blk, "intent").or_else(|| non_empty(raw, "i")).map(str::to_owned);
+        let args = tool_args(raw);
+        let state = self.tools.entry(call_id.to_owned()).or_insert_with(|| ToolState::new(&name));
+        state.block = true;
+        state.completed_at = completed_at.or(state.completed_at);
         match self.items.get(&id) {
             None => {
                 let item = ToolItem {
@@ -1293,14 +1401,16 @@ impl Replica {
                 };
                 self.upsert(TranscriptItem::Tool(item), out);
             }
-            Some(TranscriptItem::Tool(existing)) if args_done && existing.status == ToolStatus::Pending => {
+            Some(TranscriptItem::Tool(existing)) if args_done => {
                 let mut t = existing.clone();
-                if t.args != args || t.intent != intent {
-                    t.title = tools::title(&name, &args);
-                    t.args = args;
-                    t.intent = intent.or(t.intent);
-                    self.upsert(TranscriptItem::Tool(t), out);
+                if !name.is_empty() {
+                    t.tool = name;
                 }
+                t.at = at;
+                t.title = tools::title(&t.tool, &args);
+                t.args = args;
+                t.intent = intent;
+                self.upsert(TranscriptItem::Tool(t), out);
             }
             _ => {}
         }
@@ -1311,7 +1421,7 @@ impl Replica {
         match self.items.get(&id) {
             Some(TranscriptItem::Tool(t)) => t.clone(),
             _ => {
-                let args = args.cloned().unwrap_or(Value::Null);
+                let args = args.map(tool_args).unwrap_or(Value::Null);
                 ToolItem {
                     id,
                     at: self.now,
@@ -1334,19 +1444,28 @@ impl Replica {
     fn tool_start(&mut self, ev: &Value, out: &mut Update) {
         let call_id = s(ev, "toolCallId").unwrap_or("").to_owned();
         let name = s(ev, "toolName").unwrap_or("").to_owned();
-        let args = ev.get("args");
-        let mut t = self.ensure_tool(&call_id, &name, args, non_empty(ev, "intent"));
-        if let Some(a) = args.filter(|a| !a.is_null()) {
-            t.args = a.clone();
-            t.title = tools::title(&name, a);
-        }
-        if let Some(i) = non_empty(ev, "intent") {
-            t.intent = Some(i.to_owned());
+        let args = ev.get("args").filter(|a| !a.is_null());
+        let intent = non_empty(ev, "intent");
+        let mut t = self.ensure_tool(&call_id, &name, args, intent);
+        // The event carries omp's validated copy of the arguments: it stands in only until the
+        // call's own block lands (a join mid-call), as the file never records it.
+        if !self.tools.get(&call_id).is_some_and(|st| st.block) {
+            if let Some(a) = args {
+                t.args = tool_args(a);
+                t.title = tools::title(&name, &t.args);
+            }
+            if let Some(i) = intent {
+                t.intent = Some(i.to_owned());
+            }
         }
         t.status = ToolStatus::Running;
         t.view = tools::view(&name, &t.args, None, None);
         let label = tools::label(&name, &t.args, &t.title);
-        self.tools.insert(call_id.clone(), ToolState { name: name.clone(), started: Some(self.now), ended: false });
+        let now = self.now;
+        let state = self.tools.entry(call_id.clone()).or_insert_with(|| ToolState::new(&name));
+        state.name.clone_from(&name);
+        state.started = Some(now);
+        state.ended = false;
         self.active_tools.retain(|(c, _)| c != &call_id);
         self.active_tools.push((call_id, ActiveTool { name, label, started_at: self.now }));
         self.turn_output = true;
@@ -1391,7 +1510,11 @@ impl Replica {
         }
     }
 
-    fn tool_finish(&mut self, call_id: &str, name: &str, result: &Value, is_error: bool, out: &mut Update) {
+    /// A call's result: `tool_execution_end` (`ended_at` none: its result message follows), or
+    /// its result message (`ended_at`: the message's timestamp), live or as an entry. With the
+    /// message the row is exactly what a rebuild from the file shows. `effects`: also fold the
+    /// result into meta and liveness (not when an entry only settles a row its events finished).
+    fn tool_finish(&mut self, call_id: &str, name: &str, result: &Value, is_error: bool, ended_at: Option<Millis>, effects: bool, out: &mut Update) {
         let name = if name.is_empty() { self.tools.get(call_id).map(|t| t.name.clone()).unwrap_or_default() } else { name.to_owned() };
         let mut t = self.ensure_tool(call_id, &name, None, None);
         let text = content_text(result.get("content"));
@@ -1401,32 +1524,37 @@ impl Replica {
         t.status = tools::status(&name, &text, details, is_error);
         t.output = (!o.is_empty()).then_some(o);
         t.truncated = trunc;
-        t.view = tools::view(&name, &t.args, Some(result), Some(is_error)).or(t.view.take());
+        t.view = tools::view(&name, &t.args, Some(result), Some(is_error));
         t.error = is_error.then(|| clip(first_line(&text), 300)).filter(|e| !e.is_empty());
-        let started = self.tools.get(call_id).and_then(|s| s.started);
-        if t.duration_ms.is_none() {
-            t.duration_ms = started
-                .map(|st| (self.now - st).max(0) as u64)
-                .or_else(|| details.and_then(|d| f(d, "wallTimeMs")).map(|ms| ms as u64));
-        }
-        if let Some(phases) = tools::todo_phases(&name, details) {
-            self.meta.todos = phases;
-            if self.emit {
-                self.journal.todo_edit = None;
+        // From omp's own records, so a rebuild finds the same: the tool's wall time (bash), else
+        // from the call's start (its message ended) to its result. Until that result lands, what
+        // the live events measured.
+        let state = self.tools.get(call_id);
+        let start = state.and_then(|st| st.completed_at).unwrap_or(t.at);
+        let measured = state.and_then(|st| st.started).map(|st| (self.now - st).max(0) as u64);
+        t.duration_ms = details
+            .and_then(|d| f(d, "wallTimeMs"))
+            .map(|ms| ms as u64)
+            .or_else(|| ended_at.map(|end| (end - start).max(0) as u64))
+            .or(measured)
+            .or(t.duration_ms);
+        if effects {
+            if let Some(phases) = tools::todo_phases(&name, details) {
+                self.meta.todos = phases;
+                if self.emit {
+                    self.journal.todo_edit = None;
+                }
+            }
+            if !is_error {
+                self.record_file_edits(call_id, t.view.as_ref());
+            }
+            self.active_tools.retain(|(c, _)| c != call_id);
+            out.pulse(PulseKind::Tool, 1);
+            if is_error && !already_final && self.emit && t.status == ToolStatus::Error {
+                out.signals.push(Signal::ToolError { tool: name.clone(), error: t.error.clone().unwrap_or_default() });
             }
         }
-        if !is_error {
-            self.record_file_edits(call_id, t.view.as_ref());
-        }
-        self.tools
-            .entry(call_id.to_owned())
-            .and_modify(|s| s.ended = true)
-            .or_insert(ToolState { name: name.clone(), started: None, ended: true });
-        self.active_tools.retain(|(c, _)| c != call_id);
-        out.pulse(PulseKind::Tool, 1);
-        if is_error && !already_final && self.emit && t.status == ToolStatus::Error {
-            out.signals.push(Signal::ToolError { tool: name.clone(), error: t.error.clone().unwrap_or_default() });
-        }
+        self.tools.entry(call_id.to_owned()).or_insert_with(|| ToolState::new(&name)).ended = true;
         self.upsert(TranscriptItem::Tool(t), out);
     }
 
@@ -1466,26 +1594,21 @@ impl Replica {
         self.meta.files = agg;
     }
 
-    fn tool_result(&mut self, msg: &Value, out: &mut Update) {
+    fn tool_result(&mut self, msg: &Value, effects: bool, out: &mut Update) {
         let call_id = s(msg, "toolCallId").unwrap_or("").to_owned();
         if call_id.is_empty() {
             return;
         }
         let name = s(msg, "toolName").unwrap_or("").to_owned();
         let result = serde_json::json!({"content": msg.get("content").cloned().unwrap_or(Value::Null), "details": msg.get("details").cloned().unwrap_or(Value::Null)});
-        if !self.emit {
-            // Snapshot: durations from message timestamps.
-            let end = ts(msg);
-            let start = self.items.get(&tool_id(&call_id)).map(|i| match i {
-                TranscriptItem::Tool(t) => t.at,
-                _ => 0,
-            });
-            if let (Some(e), Some(st)) = (end, start) {
-                self.tools.entry(call_id.clone()).or_insert(ToolState { name: name.clone(), started: None, ended: false }).started = Some(st);
-                self.now = e;
-            }
+        let ended_at = ts(msg);
+        if !self.emit
+            && let Some(end) = ended_at
+        {
+            // A snapshot's clock follows the file.
+            self.now = end;
         }
-        self.tool_finish(&call_id, &name, &result, b(msg, "isError"), out);
+        self.tool_finish(&call_id, &name, &result, b(msg, "isError"), ended_at, effects, out);
     }
 
     /// Which tool call a ui-request belongs to (ask tool / approval).
@@ -1543,11 +1666,10 @@ impl Replica {
                         self.count_cost(&entry_id, msg);
                     }
                     Some("toolResult") => {
-                        let skip = self.emit
-                            && self.tools.get(s(msg, "toolCallId").unwrap_or("")).is_some_and(|t| t.ended);
-                        if !skip {
-                            self.tool_result(msg, out);
-                        }
+                        // Live, the call's events already finished it: the entry only settles the
+                        // row as the file keeps it (what a rebuild shows); meta took the result then.
+                        let settled = self.emit && self.tools.get(s(msg, "toolCallId").unwrap_or("")).is_some_and(|t| t.ended);
+                        self.tool_result(msg, !settled, out);
                         if s(msg, "toolName") == Some("task") {
                             self.count_task_cost(&entry_id, msg);
                         }
@@ -1908,6 +2030,25 @@ fn tool_id(call_id: &str) -> String {
     format!("t:{call_id}")
 }
 
+/// A call's arguments as its row shows them: the recorded `toolCall` arguments without omp's
+/// intent field (`i`, shown as the row's `intent`) and without null members (strict-schema
+/// providers send every optional field, as null; omp drops them before the tool runs, which is
+/// the copy `tool_execution_start` carries).
+fn tool_args(raw: &Value) -> Value {
+    fn strip(v: &Value) -> Value {
+        match v {
+            Value::Object(map) => Value::Object(map.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k.clone(), strip(v))).collect()),
+            Value::Array(items) => Value::Array(items.iter().map(strip).collect()),
+            other => other.clone(),
+        }
+    }
+    let mut args = strip(raw);
+    if let Value::Object(map) = &mut args {
+        map.remove("i");
+    }
+    args
+}
+
 fn finalize(item: &mut TranscriptItem) {
     match item {
         TranscriptItem::Assistant(a) => a.streaming = false,
@@ -2062,6 +2203,31 @@ fn subagent_view(id: &str, st: &SubState) -> Subagent {
         tool_count: p.and_then(|p| u(p, "toolCount")).map(|n| n as u32),
         parent_id: snap.and_then(|a| a.parent_id.clone()).or_else(|| st.parent_tool.clone()),
     }
+}
+
+/// A new replica lifetime ([`Replica`]'s `epoch`): microseconds since the Unix epoch in base 36,
+/// strictly increasing within the process. A tf-hostd restart takes far longer than a
+/// microsecond per replica the previous process created, so a later process never repeats one.
+fn new_epoch() -> String {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
+    let mut last = LAST.load(Ordering::Relaxed);
+    let mut v = loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break next,
+            Err(seen) => last = seen,
+        }
+    };
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit((v % 36) as u32, 36).expect("a base-36 digit"));
+        v /= 36;
+        if v == 0 {
+            break;
+        }
+    }
+    digits.iter().rev().collect()
 }
 
 fn empty_meta() -> SessionMeta {

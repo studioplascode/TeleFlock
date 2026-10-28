@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
@@ -49,14 +49,17 @@ pub const PREFERRED_PRIORITY: f64 = 100.0;
 /// Device-code logins wait up to 15 min for the user (GitHub's code lifetime).
 const LINK_TTL: Duration = Duration::from_secs(15 * 60);
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
-/// `omp --mode rpc` start + logout + its provider model refresh.
-const LOGOUT_TIMEOUT: Duration = Duration::from_secs(90);
+/// `omp --mode rpc` start + logout + its provider model refresh. Public for the app's request
+/// timeout of `accounts.unlink` (tf-client `timeout_for`), which must outlast it.
+pub const LOGOUT_TIMEOUT: Duration = Duration::from_secs(90);
 /// An unterminated line that stays unchanged this long is a question omp waits on.
 const PROMPT_QUIET: Duration = Duration::from_millis(150);
 /// How long a submission waits for omp's reaction before it counts as taken.
 const VERDICT_WAIT: Duration = Duration::from_secs(3);
 /// Disabled credentials omp removed on purpose (not worth showing).
 const QUIET_CAUSES: &[&str] = &["replaced by", "deleted by user", "logged out by user"];
+/// Lines of omp's stderr kept for an error message.
+const STDERR_TAIL: usize = 6;
 
 pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
@@ -152,7 +155,8 @@ impl CredRow {
 /// Identity fields read out of the credential JSON (by SQLite; the tokens stay there).
 const IDENTITY_FIELDS: [&str; 6] = ["email", "accountId", "projectId", "orgId", "orgName", "enterpriseUrl"];
 
-/// omp's stored credentials, oldest first. A missing database or table is an empty store.
+/// omp's stored credentials, oldest first, without the MCP servers' OAuth sign-ins omp keeps in the
+/// same table (managed on the MCP page). A missing database or table is an empty store.
 pub(crate) fn read_credentials(db: &Path) -> Result<Vec<CredRow>, String> {
     let Some(conn) = open_ro(db).map_err(|e| e.message)? else { return Ok(vec![]) };
     let cols: Vec<String> = conn
@@ -200,7 +204,14 @@ pub(crate) fn read_credentials(db: &Path) -> Result<Vec<CredRow>, String> {
             })
         })
         .map_err(|e| format!("agent.db: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("agent.db: {e}"))
+    let rows = rows.collect::<Result<Vec<CredRow>, _>>().map_err(|e| format!("agent.db: {e}"))?;
+    Ok(rows.into_iter().filter(|r| !is_mcp_credential(&r.provider)).collect())
+}
+
+/// omp's `isManagedMCPOAuthCredentialId` (`mcp/oauth-flow.ts`): an MCP server's OAuth sign-in
+/// (`mcp_oauth:profile:<profile>:<url>`, older `mcp_oauth:<url>` / `mcp_oauth_<random>`).
+fn is_mcp_credential(provider: &str) -> bool {
+    provider.starts_with("mcp_oauth:") || provider.starts_with("mcp_oauth_")
 }
 
 /// Live sessions per credential id, from omp's session pins (`session:sticky:<provider>:<id>`);
@@ -380,16 +391,15 @@ pub(crate) fn merge(
     let active: Vec<&CredRow> = rows.iter().filter(|r| r.disabled.is_none()).collect();
     let mut out: Vec<LinkedAccount> = Vec::new();
     let quiet = |cause: &str| QUIET_CAUSES.iter().any(|q| cause.starts_with(q));
+    // An expired login omp didn't remove on purpose.
+    let expired = |r: &CredRow| r.oauth && r.disabled.as_deref().is_some_and(|c| !quiet(c));
+    let same_identity = |a: &CredRow, b: &CredRow| a.provider == b.provider && a.identity_key.is_some() && a.identity_key == b.identity_key;
     for row in rows {
-        let shown = match &row.disabled {
-            None => true,
-            // A tombstone of an account that is linked again (same identity) is history.
-            Some(cause) => {
-                row.oauth
-                    && !quiet(cause)
-                    && !active.iter().any(|a| a.provider == row.provider && a.identity_key.is_some() && a.identity_key == row.identity_key)
-            }
-        };
+        // A tombstone of an account that is linked again is history. omp rewrites the cause of
+        // active rows only, so an account that expired, was linked again and expired again leaves
+        // two: the newest one shows.
+        let shown = row.disabled.is_none()
+            || (expired(row) && !active.iter().any(|a| same_identity(a, row)) && !rows.iter().any(|o| o.id > row.id && expired(o) && same_identity(o, row)));
         if !shown {
             continue;
         }
@@ -554,7 +564,8 @@ pub async fn prefer(ctx: &Ctx, key: &str, preferred: bool) -> Result<AccountsSna
         omp_config::set_json(ctx, "auth.accountPolicies", &Value::Array(next)).await?;
         tracing::info!(provider, preferred, "account preference written");
     }
-    snapshot(ctx, true).await
+    // Config only (`set_json` dropped the cached config): the quota report is not read again.
+    snapshot(ctx, false).await
 }
 
 // ───────────────────────────── unlink ─────────────────────────────
@@ -572,7 +583,8 @@ pub async fn unlink(ctx: &Ctx, provider: &str, credential_id: i64) -> Result<Acc
     rpc_logout(&bin, provider, credential_id, &[]).await?;
     tracing::info!(provider, credential_id, "account unlinked");
     accounts_changed().await;
-    snapshot(ctx, true).await
+    // The quota report was just dropped, so it is read again; omp's config didn't change.
+    snapshot(ctx, false).await
 }
 
 /// What a linked or unlinked credential changes elsewhere: the quota report, and the models omp
@@ -588,7 +600,8 @@ fn rpc_args() -> [&'static str; 8] {
 }
 
 /// omp's RPC `logout`: removes one credential the way `/logout` does (and refreshes the provider's
-/// models). `env` is for tests.
+/// models). An omp that exits without answering (a broken config, no model to start with) is
+/// reported with what it said on stderr. `env` is for tests.
 async fn rpc_logout(bin: &Path, provider: &str, credential_id: i64, env: &[(&str, &str)]) -> Result<(), ApiError> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(rpc_args())
@@ -596,7 +609,7 @@ async fn rpc_logout(bin: &Path, provider: &str, credential_id: i64, env: &[(&str
         .env("NO_COLOR", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     for (k, v) in env {
         cmd.env(k, v);
@@ -607,28 +620,76 @@ async fn rpc_logout(bin: &Path, provider: &str, credential_id: i64, env: &[(&str
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let mut child = cmd.spawn().map_err(|e| ApiError::new("omp_error", format!("couldn't start omp: {e}")))?;
     let _tree = TreeGuard(child.id());
+    let tail = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+    let reader = child.stderr.take().map(|err| {
+        let tail = tail.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(err).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                let l = strip_ansi(&l).trim().to_string();
+                if !l.is_empty() {
+                    keep_tail(&mut tail.lock().unwrap_or_else(|p| p.into_inner()), &l);
+                }
+            }
+        })
+    });
     let request = json!({ "id": "tf-logout", "type": "logout", "providerId": provider, "credentialId": credential_id });
     let mut stdin = child.stdin.take().ok_or_else(|| ApiError::new("internal", "omp stdin"))?;
-    stdin.write_all(format!("{request}\n").as_bytes()).await.map_err(|e| ApiError::new("omp_error", format!("omp rpc: {e}")))?;
-    stdin.flush().await.map_err(|e| ApiError::new("omp_error", format!("omp rpc: {e}")))?;
     let stdout = child.stdout.take().ok_or_else(|| ApiError::new("internal", "omp stdout"))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let answer = tokio::time::timeout(LOGOUT_TIMEOUT, async {
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(res) = rpc_response(&line, "tf-logout") {
-                return Some(res);
-            }
-        }
-        None
-    })
+    // A request omp can't take (it exited at start) is reported with its reason below.
+    let sent = async {
+        stdin.write_all(format!("{request}\n").as_bytes()).await?;
+        stdin.flush().await
+    }
     .await
-    .map_err(|_| ApiError::new("timeout", "omp did not answer the logout in time"))?;
+    .is_ok();
+    let mut lines = BufReader::new(stdout).lines();
+    let answer = if sent {
+        tokio::time::timeout(LOGOUT_TIMEOUT, async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(res) = rpc_response(&line, "tf-logout") {
+                    return Some(res);
+                }
+            }
+            None
+        })
+        .await
+        .map_err(|_| ApiError::new("timeout", "omp did not answer the logout in time"))?
+    } else {
+        None
+    };
     drop(stdin);
     match answer {
         Some(Ok(())) => Ok(()),
         Some(Err(e)) => Err(ApiError::new("omp_error", e)),
-        None => Err(ApiError::new("omp_error", "omp exited without answering the logout").with_hint("This omp may be too old for RPC logout; update omp.")),
+        None => {
+            // omp exited: what it printed last may still be in the pipe.
+            if let Some(reader) = reader {
+                let _ = tokio::time::timeout(Duration::from_millis(500), reader).await;
+            }
+            let code = tokio::time::timeout(Duration::from_secs(2), child.wait()).await.ok().and_then(Result::ok).and_then(|s| s.code());
+            let tail = tail.lock().unwrap_or_else(|p| p.into_inner());
+            Err(logout_failure(&tail, code))
+        }
     }
+}
+
+/// Why omp exited without answering the logout: its error line on stderr (`Error: …`, else the last
+/// line it printed), else its exit code.
+fn logout_failure(stderr: &VecDeque<String>, code: Option<i32>) -> ApiError {
+    let error = stderr.iter().rev().find(|l| l.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("error:")));
+    match error.or(stderr.back()) {
+        Some(reason) => ApiError::new("omp_error", reason.clone()),
+        None => ApiError::new("omp_error", format!("omp exited{} without answering the logout", code.map(|c| format!(" with code {c}")).unwrap_or_default())),
+    }
+}
+
+/// Keeps `line` (clipped) as one of the last [`STDERR_TAIL`] lines of omp's stderr.
+fn keep_tail(tail: &mut VecDeque<String>, line: &str) {
+    if tail.len() >= STDERR_TAIL {
+        tail.pop_front();
+    }
+    tail.push_back(clip(line, 300));
 }
 
 /// The verdict of an RPC response line for request `id`.
@@ -911,6 +972,9 @@ enum Waits {
 struct Pending {
     input: FlowInput,
     kind: Waits,
+    /// The question answered (`Waits::Prompt`). omp's logins never ask one again (they fail), so
+    /// another question is the next one and the answer was taken; this very one again refused it.
+    asked: Option<AuthPrompt>,
     until: tokio::time::Instant,
 }
 
@@ -963,9 +1027,8 @@ impl Link {
                 ctl.update(|f| f.message = Some(clip(&line, 300)));
             }
             LoginEvent::Prompt { message, placeholder } => {
-                if self.pending.as_ref().is_some_and(|p| p.kind == Waits::Prompt) {
-                    self.settle(Err(ApiError::new("invalid_params", "omp didn't accept that answer").with_hint("Check it and try again.")));
-                }
+                let again = self.pending.as_ref().is_some_and(|p| p.kind == Waits::Prompt && p.asked.as_ref().is_some_and(|a| a.message == message && a.placeholder == placeholder));
+                self.settle(if again { Err(ApiError::new("invalid_params", "omp didn't accept that answer").with_hint("Check it and try again.")) } else { Ok(()) });
                 self.waits = Waits::Prompt;
                 let secret = is_secret_prompt(&message);
                 ctl.update(|f| {
@@ -974,10 +1037,14 @@ impl Link {
                 });
             }
             LoginEvent::PastePrompt => {
-                if self.pending.as_ref().is_some_and(|p| p.kind == Waits::Paste) {
-                    self.settle(Err(ApiError::new("invalid_params", "that code isn't for this sign-in")
-                        .with_hint("Paste the address the browser landed on after you approved this sign-in, or the code the provider shows.")));
-                }
+                // omp asks for the paste again after one it couldn't use; an answer before it was taken.
+                let again = self.pending.as_ref().is_some_and(|p| p.kind == Waits::Paste);
+                self.settle(if again {
+                    Err(ApiError::new("invalid_params", "that code isn't for this sign-in")
+                        .with_hint("Paste the address the browser landed on after you approved this sign-in, or the code the provider shows."))
+                } else {
+                    Ok(())
+                });
                 self.waits = Waits::Paste;
                 let fallback = self.redirect.is_some();
                 ctl.update(|f| {
@@ -1007,10 +1074,7 @@ impl Link {
             self.failed = Some(msg);
             return;
         }
-        if self.stderr.len() >= 6 {
-            self.stderr.pop_front();
-        }
-        self.stderr.push_back(clip(&l, 300));
+        keep_tail(&mut self.stderr, &l);
     }
 
     async fn input(&mut self, ctl: &FlowCtl, input: FlowInput, stdin: &mut Option<ChildStdin>) {
@@ -1039,6 +1103,7 @@ impl Link {
                     input.reply(Err(ApiError::new("omp_error", format!("omp stopped reading input: {e}"))));
                     return;
                 }
+                let asked = if kind == Waits::Prompt { ctl.snapshot().prompt } else { None };
                 self.waits = Waits::Nothing;
                 ctl.update(|f| {
                     f.prompt = None;
@@ -1047,7 +1112,7 @@ impl Link {
                     }
                     f.message = Some(if kind == Waits::Paste { "Checking the code…" } else { "Sent. Waiting for omp…" }.into());
                 });
-                self.pending = Some(Pending { input, kind, until: tokio::time::Instant::now() + VERDICT_WAIT });
+                self.pending = Some(Pending { input, kind, asked, until: tokio::time::Instant::now() + VERDICT_WAIT });
             }
             // omp reads no paste here (a provider without its paste prompt): deliver the address to
             // its callback server as the browser would have.
@@ -1306,7 +1371,8 @@ mod tests {
 
     // ── stored credentials ──
 
-    /// omp's `auth_credentials` (sqlite-credential-store.ts, 18.13) with three accounts and a key.
+    /// omp's `auth_credentials` (sqlite-credential-store.ts, 18.13) with three accounts and a key,
+    /// plus the MCP OAuth sign-ins omp keeps in the same table (not accounts).
     fn fixture_db(dir: &Path) -> PathBuf {
         let db = dir.join("agent.db");
         let conn = rusqlite::Connection::open(&db).unwrap();
@@ -1320,6 +1386,8 @@ mod tests {
                INSERT INTO auth_credentials VALUES (5, 'deepseek', 'api_key', '{"key":"sk-SECRET","source":"login"}', NULL, NULL, 1700000300, 1700000300);
                INSERT INTO auth_credentials VALUES (6, 'github-copilot', 'oauth', '{"access":"SECRET-G","accountId":"12345","enterpriseUrl":"github.com"}', NULL, 'account:12345', 1700000400, 1700000400);
                INSERT INTO auth_credentials VALUES (7, 'anthropic', 'oauth', '{"access":"SECRET-E","email":"gone@example.com"}', 'deleted by user', 'email:gone@example.com', 1, 1);
+               INSERT INTO auth_credentials VALUES (8, 'mcp_oauth:profile:default:https://mcp.example.com/mcp', 'oauth', '{"access":"SECRET-M","refresh":"SECRET-MR","expires":1}', NULL, NULL, 1700000500, 1700000500);
+               INSERT INTO auth_credentials VALUES (9, 'mcp_oauth_1700000600_abcdefghi', 'oauth', '{"access":"SECRET-L"}', NULL, NULL, 1700000600, 1700000600);
                INSERT INTO cache VALUES ('session:sticky:anthropic:s1', '{"type":"oauth","index":1,"credentialId":2}', 4102444800);"#,
         )
         .unwrap();
@@ -1331,7 +1399,8 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let db = fixture_db(td.path());
         let rows = read_credentials(&db).unwrap();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 7, "MCP servers' sign-ins are no accounts");
+        assert!(rows.iter().all(|r| !r.provider.starts_with("mcp_oauth")));
         let a = &rows[0];
         assert_eq!((a.id, a.provider.as_str(), a.oauth), (1, "anthropic", true));
         assert_eq!(a.email.as_deref(), Some("Work@Example.com"), "exact stored email");
@@ -1481,6 +1550,35 @@ mod tests {
         assert!(prefer_blocked(&nobody, &[&nobody], false).is_some(), "an org alone is no base identity");
     }
 
+    #[test]
+    fn shows_only_the_newest_expiry_of_an_account() {
+        // Expired, linked again, expired again: omp rewrites only active rows' causes, so both stay.
+        let expired = |id: i64| CredRow {
+            id,
+            provider: "anthropic".into(),
+            oauth: true,
+            disabled: Some("oauth refresh failed: invalid_grant".into()),
+            identity_key: Some("email:me@x.y|org:o".into()),
+            email: Some("me@x.y".into()),
+            org_id: Some("o".into()),
+            created_at: Some(id * 1000),
+            ..Default::default()
+        };
+        let other = CredRow { id: 4, provider: "anthropic".into(), oauth: true, identity_key: Some("email:you@x.y".into()), email: Some("you@x.y".into()), ..Default::default() };
+        // omp's usage report lists the identity's disabled credential once.
+        let report = LimitAccount { disabled: true, windows: vec![], ..usage_account("anthropic", "anthropic|email:me@x.y|org:o", "me@x.y", None) };
+        let idents = [Ident { email: Some("me@x.y".into()), org_id: Some("o".into()), ..Default::default() }];
+        let out = merge(&[expired(2), other.clone(), expired(7)], &[report], &idents, &HashMap::new(), &[], &providers(), false);
+        let shown: Vec<(Option<i64>, bool)> = out.iter().map(|a| (a.credential_id, a.disabled)).collect();
+        assert_eq!(shown, [(Some(4), false), (Some(7), true)], "one Re-link row, for the newest expiry");
+        let keys: std::collections::HashSet<&str> = out.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys.len(), out.len(), "unique keys: {out:?}");
+        // Linked again: neither expiry shows.
+        let again = CredRow { id: 9, disabled: None, ..expired(9) };
+        let out = merge(&[expired(2), other, expired(7), again], &[], &[], &HashMap::new(), &[], &providers(), false);
+        assert_eq!(out.iter().map(|a| (a.credential_id, a.disabled)).collect::<Vec<_>>(), [(Some(9), false), (Some(4), false)]);
+    }
+
     // ── the link flow, against a scripted omp ──
 
     /// A stand-in `omp` (`login <provider>`): prints what omp prints, reads answers.
@@ -1581,6 +1679,58 @@ printf '\nLogged in to GitHub Copilot\n'"#,
     }
 
     #[tokio::test]
+    async fn questions_in_a_row_each_take_their_answer() {
+        // Cloudflare AI Gateway's login (Workers AI, Perplexity's email login, Custom endpoints
+        // alike): one question after the other, none asked again.
+        let td = tempfile::tempdir().unwrap();
+        let bin = fake_omp(
+            td.path(),
+            r#"printf 'Paste your Cloudflare API token: '
+read -r token || exit 1
+printf 'Cloudflare account ID: '
+read -r account || exit 1
+printf 'AI Gateway ID (default): '
+read -r gateway || exit 1
+[ "$token|$account|$gateway" = "tok|acc|gw" ] || exit 7
+printf '\nLogged in to Cloudflare AI Gateway\n'"#,
+        );
+        let flow = start_link(&bin, provider("fake-gateway", "Cloudflare AI Gateway"), None, &[]).unwrap();
+        let id = flow.flow_id.clone();
+        for (question, secret, answer) in [("Paste your Cloudflare API token", true, "tok"), ("Cloudflare account ID", false, "acc"), ("AI Gateway ID", false, "gw")] {
+            let asked = until(&id, |f| f.prompt.as_ref().is_some_and(|p| p.message == question)).await;
+            assert_eq!(asked.prompt.unwrap().secret, secret, "{question}");
+            authflow::submit(&id, answer).await.unwrap_or_else(|e| panic!("the answer to `{question}` was refused: {e:?}"));
+        }
+        let done = until(&id, |f| f.state.is_final()).await;
+        assert_eq!(done.state, AuthFlowState::Done, "{done:?}");
+    }
+
+    #[tokio::test]
+    async fn the_same_question_again_refuses_the_answer() {
+        let td = tempfile::tempdir().unwrap();
+        let bin = fake_omp(
+            td.path(),
+            r#"printf 'Base URL (https://api.example.com): '
+read -r url || exit 1
+while [ "$url" != "https://ok.example" ]; do printf 'Base URL (https://api.example.com): '; read -r url || exit 1; done
+printf 'Model ID: '
+read -r model || exit 1
+printf '\nLogged in to Example\n'"#,
+        );
+        let flow = start_link(&bin, provider("fake-custom", "Example"), None, &[]).unwrap();
+        let id = flow.flow_id.clone();
+        until(&id, |f| f.prompt.is_some()).await;
+        let err = authflow::submit(&id, "https://nope.example").await.unwrap_err();
+        assert_eq!((err.code.as_str(), err.message.as_str()), ("invalid_params", "omp didn't accept that answer"));
+        let again = until(&id, |f| f.prompt.is_some()).await;
+        assert_eq!(again.prompt.unwrap().message, "Base URL");
+        authflow::submit(&id, "https://ok.example").await.unwrap();
+        until(&id, |f| f.prompt.as_ref().is_some_and(|p| p.message == "Model ID")).await;
+        authflow::submit(&id, "m1").await.unwrap();
+        assert_eq!(until(&id, |f| f.state.is_final()).await.state, AuthFlowState::Done);
+    }
+
+    #[tokio::test]
     async fn failed_and_cancelled_links() {
         let td = tempfile::tempdir().unwrap();
         let bin = fake_omp(
@@ -1638,5 +1788,29 @@ exit 1"#,
         assert_eq!(req, json!({ "id": "tf-logout", "type": "logout", "providerId": "anthropic", "credentialId": 7 }));
         let bin = fake_omp(td.path(), r#"read -r line; echo '{"id":"tf-logout","type":"response","command":"logout","success":false,"error":"Credential 9 not found"}'"#);
         assert_eq!(rpc_logout(&bin, "anthropic", 9, &[]).await.unwrap_err().message, "Credential 9 not found");
+    }
+
+    #[tokio::test]
+    async fn a_logout_omp_never_answers_reports_its_reason() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            let d = td.path().join(name);
+            std::fs::create_dir(&d).unwrap();
+            d
+        };
+        // omp 18.13.2 in a home without credentials refuses to start.
+        let bin = fake_omp(
+            &dir("nomodel"),
+            r#"read -r line; echo 'warn: telemetry off' >&2; echo 'No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.' >&2; exit 1"#,
+        );
+        let err = rpc_logout(&bin, "anthropic", 7, &[]).await.unwrap_err();
+        assert_eq!(err.message, "No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.");
+        assert_eq!(err.hint, None, "no advice to update omp");
+        // Its error line, not the hint printed after it (colors stripped).
+        let bin = fake_omp(&dir("config"), r#"printf '\033[31mError: Invalid config.yml: auth.accountPolicies[0] has an unknown field\033[0m\n\033[2mFix the file and try again.\033[0m\n' >&2; exit 1"#);
+        assert_eq!(rpc_logout(&bin, "anthropic", 7, &[]).await.unwrap_err().message, "Error: Invalid config.yml: auth.accountPolicies[0] has an unknown field");
+        // Nothing said: its exit code.
+        let bin = fake_omp(&dir("silent"), "exit 3");
+        assert_eq!(rpc_logout(&bin, "anthropic", 7, &[]).await.unwrap_err().message, "omp exited with code 3 without answering the logout");
     }
 }

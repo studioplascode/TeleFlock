@@ -5,7 +5,7 @@ import { persist } from "zustand/middleware";
 import { navigate, useHosts } from "@/core";
 import type { LoginProvider } from "@/core/gen";
 import { Button, cn, IconButton, useIsMobile } from "@/design";
-import { noticeRise, noticeRow } from "@/features/board/notice";
+import { NoticeLine, noticeRank, noticeRise, noticeRow, useNoticeView } from "@/features/board/notice";
 import { linkProviderFor, providerName } from "./providers";
 import { type AccountsNeed, useAccountsNeeded, useAccountsStore } from "./store";
 
@@ -20,6 +20,8 @@ interface NudgeText {
   detail: string;
   /** Board row, after the host name. */
   line: string;
+  /** The folded phone tray's one line, after the host name. */
+  brief: string;
   action: string;
   /** Re-link this provider; absent: open the provider picker. */
   provider?: string;
@@ -33,6 +35,7 @@ function textOf(need: AccountsNeed, providers: readonly LoginProvider[] | undefi
       title: `Your ${name} login expired`,
       detail: `omp on ${host} can't run agents until you link ${expired.label} again.`,
       line: `your ${name} login (${expired.label}) expired, so omp can't run agents`,
+      brief: `${name} login expired`,
       action: "Re-link",
       provider: providers ? linkProviderFor(expired.provider, providers) : expired.provider,
     };
@@ -41,22 +44,25 @@ function textOf(need: AccountsNeed, providers: readonly LoginProvider[] | undefi
     title: "Link an account to run agents",
     detail: `omp on ${host} has no subscription or API key to work with yet. Link ChatGPT, Claude, Copilot, Gemini or an API key.`,
     line: "omp has no subscription or API key yet, so agents can't run",
+    brief: "no account to run agents",
     action: "Link account",
   };
 }
 
 /**
  * Tells a new user why nothing will run: omp on this host has no account (or only expired logins).
- * `row`: one line of the board's notice box (dismissible); `card`: a callout on the host card.
+ * `row`: one notice of the board's notice box (dismissible; `order` = the host's place in the host
+ * list, for the phone tray's ranking); `card`: a callout on the host card.
  */
-export function LinkAccountNudge({ hostId, variant = "row", className }: { hostId: string; variant?: "row" | "card"; className?: string }) {
+export function LinkAccountNudge({ hostId, variant = "row", order = 0, className }: { hostId: string; variant?: "row" | "card"; order?: number; className?: string }) {
   const need = useAccountsNeeded(hostId);
   const host = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
   const providers = useAccountsStore((s) => s.hosts[hostId]?.snapshot?.providers);
   const hidden = useHiddenNudges((s) => s.hostIds.includes(hostId));
   const hide = useHiddenNudges((s) => s.hide);
   const mobile = useIsMobile();
-  if (!need || (variant === "row" && hidden)) return null;
+  const view = useNoticeView(`accounts:${hostId}`, variant === "row" && need && !hidden ? noticeRank("accounts", order) : null);
+  if (!need) return null;
   const t = textOf(need, providers, host);
   const go = () => navigate({ name: "accounts", hostId, link: t.provider ?? "" });
   if (variant === "card")
@@ -74,16 +80,27 @@ export function LinkAccountNudge({ hostId, variant = "row", className }: { hostI
         </Button>
       </div>
     );
+  if (!view) return null;
+  const icon = <KeyRound className="size-3.5 shrink-0 text-accent-hi" aria-hidden />;
+  const link = (
+    <Button size="sm" variant="primary" className="shrink-0" onClick={go}>
+      {t.action}
+    </Button>
+  );
+  if (view === "line")
+    return (
+      <NoticeLine icon={icon} action={link} className={cn("bg-accent/6", className)}>
+        <b className="text-ink">{host}</b> · {t.brief}
+      </NoticeLine>
+    );
   return (
     <motion.div layout layoutDependency={t.line} {...noticeRise} role="status" data-nudge="accounts" className={cn(noticeRow, "bg-accent/6", className)}>
-      <KeyRound className="size-3.5 shrink-0 text-accent-hi" aria-hidden />
+      {icon}
       <p className="min-w-0 flex-1 text-mute">
         <b className="text-ink">{host}</b> · {t.line}
       </p>
       <span className="flex shrink-0 items-center gap-1">
-        <Button size="sm" variant="primary" onClick={go}>
-          {t.action}
-        </Button>
+        {link}
         <IconButton label={`Hide this for ${host}`} size="sm" onClick={() => hide(hostId)}>
           <X />
         </IconButton>

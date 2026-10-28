@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use tf_proto::{ApiError, AuthFlow, AuthFlowList, AuthFlowState, AuthPaste, Empty, HostMethod};
+use tf_proto::{ApiError, AuthFlow, AuthFlowList, AuthFlowState, AuthPaste, Empty, HostMethod, Millis};
 
 use crate::ops::to_value;
 use crate::util::{clip, new_id, now_ms};
@@ -32,11 +32,16 @@ const MAX_INPUT: usize = 16 * 1024;
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long `auth.submit` waits for the driver's verdict on a submission.
 const SUBMIT_REPLY: Duration = Duration::from_secs(20);
+/// How long omp's loopback callback server waits for the browser (`omp login` and MCP sign-ins:
+/// 300 s in omp 18.13): a flow that waits on one fails then, so its countdown ends there.
+const CALLBACK_WAIT: Duration = Duration::from_secs(5 * 60);
 
 struct Shared {
     tx: watch::Sender<AuthFlow>,
     /// Fires when the flow is cancelled, expires or finishes: drivers stop their work.
     stop: CancellationToken,
+    /// When the TTL expires the flow (`expiresAt` unless omp gives up on its callback earlier).
+    expires_at: Millis,
 }
 
 struct Entry {
@@ -91,6 +96,7 @@ pub struct FlowCtl {
 pub fn start(kind: &str, title: impl Into<String>, subject: Option<String>, ttl: Duration) -> FlowCtl {
     let now = now_ms();
     let id = new_id("auth_");
+    let expires_at = now + ttl.as_millis() as Millis;
     let flow = AuthFlow {
         flow_id: id.clone(),
         kind: kind.to_string(),
@@ -108,11 +114,11 @@ pub fn start(kind: &str, title: impl Into<String>, subject: Option<String>, ttl:
         message: None,
         account: None,
         started_at: now,
-        expires_at: Some(now + ttl.as_millis() as i64),
+        expires_at: Some(expires_at),
         updated_at: now,
     };
     let (tx, _) = watch::channel(flow);
-    let shared = Arc::new(Shared { tx, stop: CancellationToken::new() });
+    let shared = Arc::new(Shared { tx, stop: CancellationToken::new(), expires_at });
     let (in_tx, in_rx) = mpsc::unbounded_channel();
     {
         let mut map = flows();
@@ -185,10 +191,12 @@ impl FlowCtl {
     }
 
     /// Publishes the page the user opens (`waiting`). An authorization URL that redirects to a
-    /// loopback callback here also gets its `callbackPort` / `redirectUri` and a paste fallback;
-    /// the redirect is returned for [`replay_redirect`].
+    /// loopback callback here also gets its `callbackPort` / `redirectUri` and a paste fallback, and
+    /// `expiresAt` counts down omp's wait for that callback ([`CALLBACK_WAIT`]); the redirect is
+    /// returned for [`replay_redirect`].
     pub fn publish_url(&self, url: &str, instructions: Option<String>) -> Option<LoopbackRedirect> {
         let redirect = loopback_redirect(url);
+        let callback_ends = redirect.as_ref().map(|_| now_ms() + CALLBACK_WAIT.as_millis() as Millis);
         self.update(|f| {
             f.state = AuthFlowState::Waiting;
             f.url = Some(url.to_string());
@@ -198,6 +206,7 @@ impl FlowCtl {
             if redirect.is_some() && f.paste == AuthPaste::None {
                 f.paste = AuthPaste::Fallback;
             }
+            f.expires_at = Some(callback_ends.map_or(self.shared.expires_at, |at| at.min(self.shared.expires_at)));
         });
         redirect
     }
@@ -687,6 +696,25 @@ mod tests {
         let f = wait(&id, None, None).await.unwrap();
         assert_eq!(f.state, AuthFlowState::Failed);
         assert!(list().iter().any(|f| f.flow_id == id), "finished flows stay listed");
+    }
+
+    #[tokio::test]
+    async fn a_loopback_page_counts_down_omps_callback_wait() {
+        // An account link may wait 15 min (a device code); omp's callback server gives up after 5.
+        let ctl = start("account", "Claude", None, Duration::from_secs(15 * 60));
+        let limit = ctl.snapshot().expires_at.unwrap();
+        let before = now_ms();
+        ctl.publish_url("https://claude.ai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&state=s", None);
+        let at = ctl.snapshot().expires_at.unwrap();
+        assert!((before + 300_000..=now_ms() + 300_000).contains(&at), "{at} is not 5 min after {before}");
+        // A page with no callback here (a device code) waits as long as the flow may.
+        ctl.publish_url("https://github.com/login/device", None);
+        assert_eq!(ctl.snapshot().expires_at, Some(limit));
+        // A flow limited below omp's wait keeps its own limit.
+        let short = start("mcp", "Server", None, Duration::from_secs(60));
+        let limit = short.snapshot().expires_at;
+        short.publish_url("https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback", None);
+        assert_eq!(short.snapshot().expires_at, limit);
     }
 
     #[test]

@@ -39,6 +39,33 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     tokio::fs::rename(&tmp, path).await
 }
 
+/// Atomic write (temp file + rename) of a file only this user can read (0600 on Unix, written
+/// that way from the start).
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        opts.mode(0o600);
+        // A leftover temp file keeps its mode on open: drop it first.
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = opts.open(&tmp)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 /// Write JSON atomically.
 pub async fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ApiError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| ApiError::new("internal", e.to_string()))?;

@@ -66,7 +66,8 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   target and the last repo per target are remembered. Picking a repo (chip menu, empty-state chips,
   Browse…) puts focus in the task box. With no recent repos the empty state offers "Browse for a
   repository…". Under the composer: "New worktree" / "Fan out" open those dialogs prefilled with the
-  host, repo (and the current draft for Fan out).
+  host, repo (and the current draft for Fan out). The composer block is a `data-toast-anchor`: toasts
+  (a persistent needs-you one too) sit above it, never over the task box or its send button.
 - Base: the host's default base, `BranchList.defaultBase` (`origin/<default>` when that
   remote-tracking branch exists), shown on the chip, in the composer hint and on each entry
   (`← origin/main`). Untouched, the send carries no `base`, so a 0.5 hostd fetches and forks from

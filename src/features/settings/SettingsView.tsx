@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Bell, BellRing, Blocks, Bot, Info, KeyRound, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, SlidersHorizontal, Sparkles, SquareTerminal } from "lucide-react";
+import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, Server, Sparkles, SquareTerminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -23,6 +23,8 @@ import { haptic } from "@/features/shell/haptics";
 import { resetFirstUses } from "@/features/shell/hints";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { Term } from "@/features/shell/Term";
+import { Ticks } from "@/features/shell/Ticks";
+import { OMP_PAGES, VIEWS } from "@/features/shell/vocab";
 import { MutedAgents } from "./MutedAgents";
 import { CommitInput, MOTION_COPY, Row, Section, THINKING, useModels } from "./parts";
 import { Templates } from "./Templates";
@@ -285,27 +287,30 @@ export function SettingsView() {
           <Row label="Start in plan mode" description="The agent proposes a plan before touching files.">
             <Switch checked={settings.defaultPlan} onCheckedChange={(defaultPlan) => update({ defaultPlan })} label="Start in plan mode" />
           </Row>
-          <Row label="Close panes of done agents" description="Mark done closes the agent's pane (and its worktree workspace) once it's idle; it resumes with omp --resume when you need it again.">
+          <Row label="Close panes of done agents" description={<Ticks text="Mark done closes the agent's pane (and its worktree workspace) once it's idle; it resumes with `omp --resume` when you need it again." />}>
             <Switch checked={settings.closeDone} onCheckedChange={(closeDone) => update({ closeDone })} label="Close panes of done agents" />
-          </Row>
-          <Row label="omp settings" description="Model roles, tools, compaction and every other omp setting, per host.">
-            <Button size="sm" variant="secondary" icon={<SlidersHorizontal />} onClick={() => navigate({ name: "omp" })}>
-              Open
-            </Button>
-          </Row>
-          <Row label="MCP servers" description="Tool servers omp can use: add, sign in, test and switch them on or off, per host.">
-            <Button size="sm" variant="secondary" icon={<Blocks />} onClick={() => navigate({ name: "mcp" })}>
-              Open
-            </Button>
-          </Row>
-          <Row label="Accounts" description="Subscription logins omp uses: link, unlink and pick the default, per host.">
-            <Button size="sm" variant="secondary" icon={<KeyRound />} onClick={() => navigate({ name: "accounts" })}>
-              Open
-            </Button>
           </Row>
         </Section>
 
         <Templates index={3} />
+
+        <Section
+          index={3}
+          icon={<Server />}
+          title="omp on your hosts"
+          description="omp's own settings, tool servers and logins, per host. They apply to every omp session there, including ones TeleFlock didn't start."
+        >
+          {OMP_PAGES.map((name) => {
+            const { icon: Icon, label, description } = VIEWS[name];
+            return (
+              <Row key={name} label={label} description={`${description}.`}>
+                <Button size="sm" variant="secondary" icon={<Icon />} onClick={() => navigate({ name })}>
+                  Open
+                </Button>
+              </Row>
+            );
+          })}
+        </Section>
 
         <Section index={3} icon={<SquareTerminal />} title="Terminal">
           <Row label="Font size" description={<span className="font-mono" style={{ fontSize: settings.terminalFontSize }}>~/teleflock $ herdr agent list</span>}>

@@ -1,14 +1,14 @@
 # omp settings (`#/omp[/:hostId]`, owner: OmpSettings)
 
 Every setting `omp config` knows, for one host, with omp's own tabs, groups, labels, descriptions
-and choices (architecture §3.10). Entry points: Settings → New agents → omp settings, host card ⋯ →
-omp settings, palette / Ctrl+8, mobile More.
+and choices (architecture §3.10). Entry points: Settings → omp on your hosts → omp settings, host card ⋯ /
+"omp settings" button, the omp area strip, palette / Ctrl+8, mobile More (label, icon and description from `VIEWS.omp`).
 
 | File | Role |
 |---|---|
 | `OmpSettingsView.tsx` | Page: host picker (route host → last shown → first online), search (label, description, key, group), tab rail (desktop) / tab chips (phone), sections, states (offline, older hostd → update hint, `source: "cli"` banner, errors) |
-| `controls.tsx` | `SettingRow` + one control per editor kind; modified dot, reset to default, warning, condition hint, `$ENV` override hint, key |
-| `ModelRoles.tsx` | `modelRoles` editor at the top of the Model tab: built-in chat roles, model-kind roles, custom roles (add/remove); searchable model picker from `host.models` (typed `provider/id` allowed) + thinking level |
+| `controls.tsx` | `SettingRow` + one control per editor kind; modified dot, reset to default, warning, condition hint, `$ENV` override hint, key. omp's descriptions, warnings and option descriptions go through `Ticks` (`shell/Ticks.tsx`): their `backticked` flags and keys render as inline code |
+| `ModelRoles.tsx` | `modelRoles` editor at the top of the Model tab: built-in chat roles, model-kind roles, custom roles (add/remove); searchable model picker from `host.models` (typed `provider/id` allowed) + thinking level; `--model @name` help as inline code |
 | `model.ts` | Pure helpers: omp's tab/group order (`OMP_TABS`, from pi-tui `settings-defs`), `buildTabs`, search, `editorFor`, number/JSON parsing, conditions, role selectors, `applyLocal` (tested in `model.test.ts`) |
 | `useOmpSettings.ts` | `omp.settings` per host + queued `omp.settingsSet` writes (optimistic; the host's answer is applied once the queue drains; a failure toasts and reloads) |
 

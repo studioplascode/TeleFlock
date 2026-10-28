@@ -66,9 +66,14 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   fingerprint}` (must equal the shown fingerprint) reconnects and pins it, `hosts.disconnect` cancels
   (→ `offline`). A key that differs from the pinned one is always `error` (`transport.hostKeyMismatch`).
 * Tunnels (`tunnel.open`) only target the host's loopback: `remoteHost` ∈ `127.0.0.1` (default), `::1`,
-  `localhost`; anything else is `invalid_params`.
-* On reconnect, sessions that were open get a `Session{ev: reset}` (or `ended` if gone); open
-  terminals get `Term{ev: closed}` when the link drops.
+  `localhost`; anything else is `invalid_params`. A sign-in tunnel (`localPort`) closes once the host
+  lists no running sign-in on that callback port (`auth.list`, every 5 s), else 10 min after it was
+  last opened (architecture §3.14).
+* `timeout_for`: 30 s by default; 15 s `term.open`; 180 s for methods that may launch an omp agent
+  and for `accounts.unlink` / `accounts.prefer` (omp's logout and a fresh quota report on the host).
+* On reconnect, sessions that were open get a `Session{ev: reset}` (or `ended` if gone; one hostd
+  has no answer or no session for yet is tried again after 1 s, doubling up to 30 s, while it stays
+  open); open terminals get `Term{ev: closed}` when the link drops.
 * `notification_action`: `action_id` with an `answer` → `agent.answer`; `reply` text → free-text
   answer if the pending request accepts it, else `agent.prompt`; otherwise emits `OpenAgent`.
   Reconnects (≤ 30 s) when the host is offline.

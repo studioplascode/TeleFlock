@@ -1,12 +1,9 @@
 import {
-  Activity,
   Archive,
   ArchiveRestore,
-  BarChart3,
   Bot,
   Check,
   ChevronRight,
-  Clock3,
   Columns2,
   FolderGit2,
   FolderOpen,
@@ -14,15 +11,11 @@ import {
   GitBranchPlus,
   GitFork,
   History,
-  Inbox,
-  LayoutDashboard,
   type LucideIcon,
   MessageSquareReply,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  Server,
-  Settings2,
   SquareTerminal,
   SquareX,
 } from "lucide-react";
@@ -61,7 +54,7 @@ import { paneDetail, paneName } from "@/features/terminal/panes";
 import { useHealthHistory } from "./healthHistory";
 import { agentTier, COLUMN_STATUS, connSummary, PHASE_STATUS } from "./status";
 import { SIDEBAR_DEFAULT_W, SIDEBAR_LABELS_W, SIDEBAR_RAIL_QUERY, toggleSidebar, useSidebarPeek, useSidebarWidth } from "./sidebarState";
-import { ACTIONS, type ActionDef, agentStateId, STATE_SHORT, VIEWS } from "./vocab";
+import { ACTIONS, type ActionDef, agentStateId, STATE_SHORT, type ViewDef, VIEWS } from "./vocab";
 
 const ROLLUP_STATUS: Record<HerdrState, Status> = {
   working: "running",
@@ -84,16 +77,11 @@ function ActionTip({ def }: { def: ActionDef }) {
 }
 
 /** Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer. */
-const NAV: readonly { id: "board" | "inbox" | "activity" | "usage" | "automations"; icon: LucideIcon }[] = [
-  { id: "board", icon: LayoutDashboard },
-  { id: "inbox", icon: Inbox },
-  { id: "activity", icon: Activity },
-  { id: "usage", icon: BarChart3 },
-  { id: "automations", icon: Clock3 },
-];
+const NAV = ["board", "inbox", "activity", "usage", "automations"] as const;
 
-function NavItem({ id, icon: Icon, collapsed, active, badge, unread }: { id: Route["name"] & keyof typeof VIEWS; icon: LucideIcon; collapsed: boolean; active: boolean; badge?: number; unread?: number }) {
-  const def: ActionDef = VIEWS[id];
+function NavItem({ id, collapsed, active, badge, unread }: { id: (typeof NAV)[number]; collapsed: boolean; active: boolean; badge?: number; unread?: number }) {
+  const def: ViewDef = VIEWS[id];
+  const Icon = def.icon;
   const dot = !!unread && (
     <span className={cn("size-1.5 rounded-full bg-accent-hi shadow-[0_0_8px_rgb(163_92_240/0.9)]", collapsed ? "absolute top-1.5 left-2" : "relative")} aria-label={`${unread} unread update${unread === 1 ? "" : "s"}`} />
   );
@@ -631,15 +619,14 @@ export function Sidebar() {
       </div>
 
       <div className={cn("flex flex-col gap-0.5 border-t border-line p-2", collapsed && "items-center")}>
-        {NAV.map((d) => (
+        {NAV.map((id) => (
           <NavItem
-            key={d.id}
-            id={d.id}
-            icon={d.icon}
+            key={id}
+            id={id}
             collapsed={collapsed}
-            active={route.name === d.id}
-            badge={d.id === "inbox" ? needs : undefined}
-            unread={d.id === "inbox" ? unread : undefined}
+            active={route.name === id}
+            badge={id === "inbox" ? needs : undefined}
+            unread={id === "inbox" ? unread : undefined}
           />
         ))}
       </div>
@@ -654,7 +641,7 @@ export function Sidebar() {
               aria-label={VIEWS.hosts.label}
               className={cn("grid size-9 place-items-center rounded-md transition-colors focus-ring", route.name === "hosts" ? "bg-white/7 text-ink" : "text-mute hover:bg-white/6 hover:text-ink")}
             >
-              <Server className="size-4" />
+              <VIEWS.hosts.icon className="size-4" />
             </button>
           </Tooltip>
         ) : (
@@ -712,7 +699,7 @@ export function Sidebar() {
               collapsed ? "w-9 justify-center" : "px-2",
             )}
           >
-            <Settings2 className="size-4" />
+            <VIEWS.settings.icon className="size-4" />
             {!collapsed && <span>{VIEWS.settings.label}</span>}
           </button>
         </Tooltip>

@@ -441,11 +441,12 @@ impl StateHandle {
             let sid = omp_of.get(&id).cloned().or_else(|| a.agent_session.as_ref().and_then(|s| s.session_id().map(str::to_string)));
             let view = sid.as_deref().and_then(|s| store.omp.session(s)).filter(|s| omp_of.get(&id) == Some(&s.session_id)).map(|s| s.view(now));
             // The replica's link, else (no replica yet) what the registry and the bridge say: an omp
-            // that will share but has no room yet (still starting) shows as connecting.
+            // that will share but has no room yet (still starting) shows as connecting, and so does
+            // one whose pane processes are not read yet (`None`: tf-hostd just started).
             let link = match &view {
                 Some(v) => crate::omp::LinkStatus::new(v.link, v.link_reason, v.link_via, v.link_error.clone()),
                 None => {
-                    let pids = if build::is_omp(a) { m.pane_pids.get(&a.pane_id).map(|(p, _)| p.as_slice()).unwrap_or(&[]) } else { &[] };
+                    let pids = if build::is_omp(a) { m.pane_pids.get(&a.pane_id).map(|(p, _)| p.as_slice()) } else { Some(&[][..]) };
                     store.omp.link_without_guest(sid.as_deref(), pids, m.published.info.setup.global_sharing)
                 }
             };

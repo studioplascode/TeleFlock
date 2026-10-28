@@ -275,15 +275,31 @@ impl Lab {
 /// driver's `liveSubscribe` with a resync of what `file` holds (idle, the main agent only).
 async fn bridge_serves(lab: &Lab, session_id: &str, file: &Path, seq: u64) -> FakeExt {
     let mut ext = FakeExt::connect(&lab.bridge).await;
-    let hello = json!({ "t": "hello", "v": 2, "reason": "connect", "pid": std::process::id(), "sessionId": session_id,
-        "sessionFile": file, "cwd": "/w", "ompVersion": "18.13.2", "bridgeVersion": "2.0.0", "tui": true, "caps": caps() });
-    let last = std::fs::read_to_string(file).unwrap().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v["id"].as_str().map(str::to_owned)).last();
-    let resync = json!({ "t": "resync", "seq": seq, "sessionId": session_id, "sessionFile": file, "leafId": last, "lastEntryId": last,
-        "live": { "streaming": false, "frames": [
-            { "t": "state", "state": { "isStreaming": false, "queuedMessageCount": 0, "cwd": "/w", "participants": [] } },
-            { "t": "agents", "agents": [{ "id": "Main", "displayName": "main", "kind": "main", "status": "running" }] } ] } });
-    hello_then_subscribe(&mut ext, hello, resync).await;
+    let resync = idle_resync(session_id, file, seq, last_entry(file).as_deref(), &[]);
+    hello_then_subscribe(&mut ext, hello(session_id, file), resync).await;
     ext
+}
+
+/// A data-plane bridge's hello for `session_id`, its file at `file`, in this process.
+fn hello(session_id: &str, file: &Path) -> Value {
+    json!({ "t": "hello", "v": 2, "reason": "connect", "pid": std::process::id(), "sessionId": session_id,
+        "sessionFile": file, "cwd": "/w", "ompVersion": "18.13.2", "bridgeVersion": "2.0.0", "tui": true, "caps": caps() })
+}
+
+/// An idle resync (the main agent only) naming `file`, `last` as its `lastEntryId`, with
+/// `entries` inlined (as an extension does while it takes the session as never written).
+fn idle_resync(session_id: &str, file: &Path, seq: u64, last: Option<&str>, entries: &[Value]) -> Value {
+    let mut frames: Vec<Value> = entries.iter().map(|entry| json!({ "t": "entry", "entry": entry })).collect();
+    frames.push(json!({ "t": "state", "state": { "isStreaming": false, "queuedMessageCount": 0, "cwd": "/w", "participants": [] } }));
+    frames.push(json!({ "t": "agents", "agents": [{ "id": "Main", "displayName": "main", "kind": "main", "status": "running" }] }));
+    json!({ "t": "resync", "seq": seq, "sessionId": session_id, "sessionFile": file, "leafId": last, "lastEntryId": last,
+        "live": { "streaming": false, "frames": frames } })
+}
+
+/// The id of the last entry in session file `file`.
+fn last_entry(file: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(file).unwrap();
+    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v["id"].as_str().map(str::to_owned)).last()
 }
 
 /// Says `hello` and answers the driver's `liveSubscribe` with `resync`, written before the
@@ -648,5 +664,382 @@ async fn a_bridge_back_within_ten_seconds_keeps_its_room_unjoined() {
     poll_now(&lab, &ops).await;
     tokio::time::resume();
     assert_eq!((count(&ops, "link"), room.joins()), (0, 0));
+    lab.stop().await;
+}
+
+// ───────────────────────────── restarts of the bridge feed ─────────────────────────────
+
+/// What the scripted extension of [`serve_feed`] answers a `liveSubscribe` with; the test can
+/// change it while the extension runs ([`FeedExt::script`]).
+#[derive(Clone, Default)]
+struct FeedScript {
+    /// The session file the resync names.
+    file: PathBuf,
+    /// Its `lastEntryId` (`None`: `null`).
+    last: Option<String>,
+    /// Entries the resync inlines (an extension that takes the session as never written).
+    entries: Vec<Value>,
+    /// A live frame omp produced while the request was on its way: written ahead of every resync
+    /// but the first, numbered like any other frame.
+    stale: Option<Value>,
+}
+
+/// The scripted extension of [`serve_feed`].
+struct FeedExt {
+    script: Arc<Mutex<FeedScript>>,
+    /// When each `liveSubscribe` arrived (tokio's clock).
+    subscribes: Arc<Mutex<Vec<Instant>>>,
+    /// Told of each `liveSubscribe`.
+    subscribed: Arc<tokio::sync::Notify>,
+    frames: mpsc::UnboundedSender<Value>,
+}
+
+/// This many subscriptions while a test waits are a feed starting over in a loop. Such a loop
+/// never lets the runtime idle, so a paused clock never moves: the waits below give up on it
+/// instead of hanging.
+const STORM: usize = 50;
+
+impl FeedExt {
+    fn subscribes(&self) -> Vec<Instant> {
+        self.subscribes.lock().unwrap().clone()
+    }
+
+    /// Writes `frame` as the next `live` frame.
+    fn live(&self, frame: Value) {
+        self.frames.send(frame).unwrap();
+    }
+
+    fn script(&self, change: impl FnOnce(&mut FeedScript)) {
+        change(&mut self.script.lock().unwrap());
+    }
+
+    /// [`until`], failing on a feed that keeps starting over.
+    async fn until(&self, what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let storm = self.subscribes().len() + STORM;
+        while !cond() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(self.subscribes().len() < storm, "the feed keeps starting over while waiting for {what}");
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                _ = self.subscribed.notified() => {}
+            }
+        }
+    }
+
+    /// Lets `time` pass (tokio's clock), or less once the feed has started over [`STORM`] times.
+    async fn wait(&self, time: Duration) {
+        let storm = self.subscribes().len() + STORM;
+        let storming = async {
+            while self.subscribes().len() < storm {
+                self.subscribed.notified().await;
+            }
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(time) => {}
+            _ = storming => {}
+        }
+    }
+}
+
+/// A scripted extension serving `session_id` from a task of its own, numbering and ordering its
+/// frames as the real one does: one `seq` per connection, every `liveSubscribe` answered with an
+/// idle resync ([`FeedScript`]) written before its `res`, any other request with `{}`.
+async fn serve_feed(lab: &Lab, session_id: &str, script: FeedScript) -> FeedExt {
+    let FakeExt { mut lines, mut w } = FakeExt::connect(&lab.bridge).await;
+    w.write_all(format!("{}\n", hello(session_id, &script.file)).as_bytes()).await.unwrap();
+    let script = Arc::new(Mutex::new(script));
+    let subscribes = Arc::new(Mutex::new(Vec::new()));
+    let subscribed = Arc::new(tokio::sync::Notify::new());
+    let (frames, mut queued) = mpsc::unbounded_channel::<Value>();
+    let (current, seen, told, sid) = (script.clone(), subscribes.clone(), subscribed.clone(), session_id.to_owned());
+    tokio::spawn(async move {
+        let mut seq = 0u64;
+        loop {
+            let mut out = Vec::new();
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { return };
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    if req["t"] != "req" {
+                        continue;
+                    }
+                    if req["op"] == "liveSubscribe" {
+                        let n = {
+                            let mut seen = seen.lock().unwrap();
+                            seen.push(Instant::now());
+                            seen.len()
+                        };
+                        told.notify_one();
+                        let script = current.lock().unwrap().clone();
+                        if let Some(frame) = script.stale.filter(|_| n > 1) {
+                            seq += 1;
+                            out.push(json!({ "t": "live", "seq": seq, "f": frame }));
+                        }
+                        seq += 1;
+                        out.push(idle_resync(&sid, &script.file, seq, script.last.as_deref(), &script.entries));
+                    }
+                    out.push(json!({ "t": "res", "id": req["id"], "ok": true, "result": {} }));
+                }
+                Some(frame) = queued.recv() => {
+                    seq += 1;
+                    out.push(json!({ "t": "live", "seq": seq, "f": frame }));
+                }
+            }
+            let text: String = out.iter().map(|v| format!("{v}\n")).collect();
+            if w.write_all(text.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    });
+    FeedExt { script, subscribes, subscribed, frames }
+}
+
+fn has_user_row(s: &OmpSession, text: &str) -> bool {
+    rows(s).iter().any(|i| matches!(i, TranscriptItem::User(u) if u.text == text))
+}
+
+/// A session file entry: a user message.
+fn user_entry(id: &str, text: &str) -> Value {
+    json!({ "type": "message", "id": id, "parentId": null, "timestamp": "2026-10-28T10:00:03.000Z",
+            "message": { "role": "user", "content": text, "timestamp": 1_793_000_003_000_u64 } })
+}
+
+const LIVE: (LinkState, Option<LinkReason>, Option<LinkVia>) = (LinkState::Live, None, Some(LinkVia::Bridge));
+
+#[tokio::test] // current-thread: its clock can be paused
+async fn frames_written_before_a_new_resync_do_not_start_the_feed_over_again() {
+    // omp rewrote the session file mid-turn (a temp file renamed over it): hostd's tail finds
+    // another file and subscribes again. omp goes on streaming, so frames the extension wrote
+    // before it took the new `liveSubscribe` reach the new subscription ahead of its resync. They
+    // belong to the old one: applied, the first would read the old tail (rewritten again) and the
+    // next look like a gap, each starting over (one more resync built by omp, one more full read
+    // of the file) for as long as omp streams.
+    let lab = Lab::start().await;
+    let file = session_file(lab.dir.path(), "s1", "first");
+    let stale = json!({ "t": "event", "event": { "type": "message_start",
+        "message": { "role": "user", "content": [{ "type": "text", "text": "stale" }], "timestamp": 1_793_000_009_000_u64 } } });
+    let ext = serve_feed(&lab, "s1", FeedScript { file: file.clone(), last: Some("e1".into()), stale: Some(stale), ..FeedScript::default() }).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+    ext.live(json!({ "t": "event", "event": { "type": "agent_start" } }));
+    until("the turn runs", || s.is_streaming()).await;
+
+    tokio::time::pause();
+    let mut entry = user_entry("e2", "rewritten");
+    entry["parentId"] = json!("e1");
+    let tmp = lab.dir.path().join("rewrite.tmp");
+    std::fs::write(&tmp, format!("{}{entry}\n", std::fs::read_to_string(&file).unwrap())).unwrap();
+    ext.script(|script| script.last = Some("e2".into()));
+    std::fs::rename(&tmp, &file).unwrap();
+    ext.until("the rewritten file is read", || has_user_row(&s, "rewritten")).await;
+    ext.wait(Duration::from_secs(30)).await;
+    assert_eq!(ext.subscribes().len(), 2, "the feed started over more than once");
+    assert!(!has_user_row(&s, "stale"));
+    assert!(!s.is_streaming(), "the resync says omp is idle");
+    assert_eq!(link_of(&s), LIVE);
+    tokio::time::resume();
+    lab.stop().await;
+}
+
+#[tokio::test] // current-thread: its clock can be paused
+async fn a_session_file_hostd_cannot_read_is_tried_again_with_growing_pauses() {
+    // Every resync names a file hostd cannot read (here a directory). Each subscription makes omp
+    // build a resync and hostd try the file: they come with growing pauses instead of in a loop,
+    // the link says why the session does not load, and Retry (`agent.connect`) ends a pause.
+    let lab = Lab::start().await;
+    let path = lab.dir.path().join("2026-10-28T10-00-00-000Z_s1.jsonl");
+    std::fs::create_dir(&path).unwrap();
+    let ext = serve_feed(&lab, "s1", FeedScript { file: path.clone(), last: Some("e1".into()), ..FeedScript::default() }).await;
+    tokio::time::pause();
+    ext.wait(Duration::from_secs(20)).await;
+    let times = ext.subscribes();
+    // At once, then 0.25, 0.5, 1, 2, 4, 8 s after the one before: 8 by 15.75 s.
+    assert!((5..=9).contains(&times.len()), "{} subscriptions within 20 s", times.len());
+    let gaps: Vec<Duration> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    for (i, gap) in gaps.iter().enumerate().skip(1) {
+        assert!(*gap >= crate::feed::RESTART_PAUSE * 2u32.pow(i as u32 - 1), "pause {i}: {gaps:?}");
+    }
+    let s = lab.session("s1").unwrap();
+    let link = s.link_status();
+    assert_eq!((link.state, link.reason), (LinkState::Connecting, Some(LinkReason::Syncing)));
+    assert!(link.error.as_deref().is_some_and(|e| e.contains("cannot read the session file")), "{link:?}");
+
+    // The file is readable now: Retry does not wait out the pause (the next subscription would
+    // come 11.75 s from now).
+    std::fs::remove_dir(&path).unwrap();
+    session_file(lab.dir.path(), "s1", "readable");
+    let asked = Instant::now();
+    lab.omp.retry_now("s1").await;
+    ext.until("the session loads", || link_of(&s) == LIVE).await;
+    assert!(asked.elapsed() < Duration::from_secs(5), "loaded {:?} after the retry", asked.elapsed());
+    assert!(has_user_row(&s, "readable"));
+    tokio::time::resume();
+    lab.stop().await;
+}
+
+/// A FIFO standing in for a session file: a reader opening it waits until [`Fifo::release`].
+/// Released on drop too, so a failing test leaves no blocking-pool thread behind.
+struct Fifo(PathBuf);
+
+impl Fifo {
+    fn make(path: PathBuf) -> Fifo {
+        use std::os::unix::ffi::OsStrExt as _;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo {}", path.display());
+        Fifo(path)
+    }
+
+    /// Opens the write end and closes it, so a reader that has the FIFO open reads to its end
+    /// (nothing). `false` while no reader has it open.
+    fn release(&self) -> bool {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&self.0).is_ok()
+    }
+}
+
+impl Drop for Fifo {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_asked_for_while_the_session_loads_does_not_start_it_over_once_live() {
+    // The session view offers Retry after 20 s of "Loading the session…": while hostd reads a large
+    // session file. That retry must not start the feed over once the read went live (one more
+    // resync built by omp, one more read of the whole file, a reset for every client).
+    let lab = Lab::start().await;
+    // hostd's read of the session file waits until the test lets it end (empty: the resync
+    // inlines the session's entry).
+    let fifo = Fifo::make(lab.dir.path().join("2026-10-28T10-00-00-000Z_s1.jsonl"));
+    let script = FeedScript { file: fifo.0.clone(), entries: vec![user_entry("e1", "loaded")], ..FeedScript::default() };
+    let ext = serve_feed(&lab, "s1", script).await;
+    until("hostd reads the session file", || lab.session("s1").is_some_and(|s| s.lock().notes_loaded)).await;
+    let s = lab.session("s1").unwrap();
+    assert_eq!(link_of(&s), (LinkState::Connecting, Some(LinkReason::Syncing), Some(LinkVia::Bridge)));
+    lab.omp.retry_now("s1").await;
+    until("the read ends", || fifo.release()).await;
+    until("the session is live", || link_of(&s) == LIVE).await;
+    assert!(has_user_row(&s, "loaded"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(ext.subscribes().len(), 1, "the retry started the feed over after it went live");
+    assert_eq!(link_of(&s), LIVE);
+    lab.stop().await;
+}
+
+#[tokio::test]
+async fn a_session_held_for_long_holds_up_no_other_user_of_the_sessions_map() {
+    // A resync rebuilding a large session's replica holds the session's lock for seconds. The
+    // registry poll reading what feeds each session waits for it, but not with the sessions map
+    // locked: a bridge's hello (a writer) and every op and board reading the map (which std's
+    // `RwLock` queues behind a waiting writer) go on meanwhile.
+    let dir = tempfile::tempdir().unwrap();
+    let persist = Persist::load(dir.path().join("state.json"));
+    let (bridge, _) = fake_bridge::handle();
+    let session = |id: &str| Arc::new(OmpSession::new(id, 1, &persist, bridge.clone()));
+    let (slow, newcomer) = (session("slow"), session("newcomer"));
+    let map = Arc::new(RwLock::new(HashMap::from([("slow".to_owned(), slow.clone()), ("other".to_owned(), session("other"))])));
+    let resync = slow.lock();
+    let poll = {
+        let map = map.clone();
+        std::thread::spawn(move || session_feeds(&map))
+    };
+    // The poll waits for the slow session by now.
+    std::thread::sleep(Duration::from_millis(100));
+    let (done, went_on) = std::sync::mpsc::channel();
+    let writer = {
+        let (map, done) = (map.clone(), done.clone());
+        std::thread::spawn(move || {
+            map.write().unwrap().insert("newcomer".to_owned(), newcomer);
+            let _ = done.send("a hello");
+        })
+    };
+    std::thread::sleep(Duration::from_millis(20));
+    let reader = {
+        let map = map.clone();
+        std::thread::spawn(move || {
+            let other = map.read().unwrap().get("other").cloned();
+            let _ = done.send(if other.is_some() { "an op" } else { "an op without its session" });
+        })
+    };
+    let mut seen: Vec<&str> = (0..2).map(|_| went_on.recv_timeout(Duration::from_secs(2)).expect("held up by the slow session")).collect();
+    seen.sort_unstable();
+    assert_eq!(seen, ["a hello", "an op"]);
+    drop(resync);
+    let (joined, held) = poll.join().unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
+    assert!(joined.is_empty());
+    assert!(held.contains("slow") && held.contains("other"), "{held:?}");
+}
+
+#[tokio::test] // current-thread: its clock can be paused
+async fn a_moved_session_file_is_waited_for_and_the_session_kept_meanwhile() {
+    // omp's `/move` renames the session file, moves the artifacts, and only then points the
+    // session at the new path. hostd's tail finds the file gone and subscribes again; resyncs taken
+    // meanwhile still name the old path, with its last entry, or (from an extension that took the
+    // session as never written) with its entries inlined. Neither replaces the session: hostd
+    // subscribes again, with pauses, until a resync names the file where it is.
+    let lab = Lab::start().await;
+    let file = session_file(lab.dir.path(), "s1", "kept");
+    let ext = serve_feed(&lab, "s1", FeedScript { file: file.clone(), last: Some("e1".into()), ..FeedScript::default() }).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+
+    tokio::time::pause();
+    let moved = lab.dir.path().join("moved").join(file.file_name().unwrap());
+    std::fs::create_dir(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&file, &moved).unwrap();
+    ext.until("hostd subscribes again", || ext.subscribes().len() >= 3).await;
+    ext.script(|script| {
+        script.last = None;
+        script.entries = vec![user_entry("x1", "inlined")];
+    });
+    ext.until("…and again", || ext.subscribes().len() >= 5).await;
+    assert_eq!(link_of(&s), LIVE, "the session goes on as it was");
+    assert!(has_user_row(&s, "kept") && !has_user_row(&s, "inlined"));
+    assert_eq!(s.lock().session_file.as_deref(), Some(file.as_path()));
+
+    // omp points the session at the new path.
+    ext.script(|script| {
+        script.file = moved.clone();
+        script.last = Some("e1".into());
+        script.entries.clear();
+    });
+    ext.until("the moved file serves the session", || s.lock().session_file.as_deref() == Some(moved.as_path())).await;
+    assert!(has_user_row(&s, "kept"));
+    let subscribed = ext.subscribes().len();
+    ext.wait(Duration::from_secs(30)).await;
+    assert_eq!(ext.subscribes().len(), subscribed, "the feed settled on the moved file");
+    tokio::time::resume();
+    lab.stop().await;
+}
+
+#[tokio::test] // current-thread: its clock can be paused
+async fn a_lost_bridge_without_a_room_reads_the_same_on_every_poll() {
+    // The boards show for how long through `linkSince`: a counter in the words would send every
+    // client a board patch per registry poll, for up to 10 minutes.
+    let lab = Lab::start().await;
+    let file = session_file(lab.dir.path(), "s1", "hi");
+    let ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+    drop(ext);
+    until("the bridge is lost", || link_of(&s).1 == Some(LinkReason::BridgeLost)).await;
+    tokio::time::pause();
+    tokio::time::sleep(BRIDGE_RETURN + Duration::from_secs(2)).await;
+    let link = s.link_status();
+    assert!(link.error.as_deref().is_some_and(|e| e.contains("no collab room to fall back to")), "{link:?}");
+    let mut updates = lab.omp.subscribe();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(s.link_status(), link);
+    let mut patches = 0;
+    while let Ok(update) = updates.try_recv() {
+        patches += usize::from(matches!(update, OmpUpdate::Changed { session_id } if session_id == "s1"));
+    }
+    assert_eq!(patches, 0, "the boards were told the session changed while nothing did");
+    tokio::time::resume();
     lab.stop().await;
 }

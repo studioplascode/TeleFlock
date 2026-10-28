@@ -23,6 +23,9 @@
     font-size: var(--text-base);
     line-height: 1.45;
     font-feature-settings: "tnum" 1, "cv11" 1;
+    /* Manrope's common ligatures draw "--" as one dash: CLI flags (`--resume`), and anything a user
+       types with them, must read as typed. */
+    font-variant-ligatures: no-common-ligatures;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overscroll-behavior: none;

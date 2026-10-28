@@ -9,7 +9,7 @@ import { useFirstStepsView } from "./firstSteps";
 import { Kanban, type LaneKeys, applyMoves, arrangementOf } from "./Kanban";
 import { LANES } from "./lanes";
 import { RepoBoard } from "./RepoBoard";
-import { StaleHosts } from "./StaleHosts";
+import { BoardNotices } from "./Notices";
 import { useBoardKeys } from "./useBoardKeys";
 import { useBoardCommands } from "./useBoardCommands";
 import { SelectionBar } from "./SelectionBar";
@@ -77,7 +77,7 @@ export function BoardView() {
   return (
     <div ref={rootRef} className="relative flex h-full min-h-0 flex-col gap-3 p-4 [--bento-h:212px] short:gap-2.5 short:p-3">
       <BoardToolbar searchRef={searchRef} />
-      <StaleHosts />
+      <BoardNotices />
       {bento && short && <BentoStrip firstSteps={firstSteps} live={roomy} />}
       {/* Under ~1130px of board the live terminal tile steps aside (unmounted). */}
       {bento && !short && (

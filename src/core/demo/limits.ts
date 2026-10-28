@@ -66,47 +66,74 @@ function windowAt(spec: WindowSpec, now: number, seed: number): LimitWindow {
   };
 }
 
-function specs(hostId: string): AccountSpec[] {
-  const h = hash(hostId);
-  const off = (h % 97) * 13 * MIN;
-  const claude = (rate5: number, rate7: number, phase: number): WindowSpec[] => [
+/** A host's offset into the reset schedules, so hosts don't reset in lockstep. */
+function offset(hostId: string): number {
+  return (hash(hostId) % 97) * 13 * MIN;
+}
+
+/** Claude's windows (`omp usage` labels): 5 hours, 7 days, 7 days for Opus. */
+function claude(rate5: number, rate7: number, phase: number, off: number): WindowSpec[] {
+  return [
     { id: "anthropic:5h", label: "Claude 5 Hour", window: "5 Hour", durationMs: 5 * HOUR, rate: rate5, phase: phase + off },
     { id: "anthropic:7d", label: "Claude 7 Day", window: "7 Day", durationMs: 7 * DAY, rate: rate7, phase: phase * 7 + off },
     { id: "anthropic:7d:opus", label: "Claude 7 Day (Opus)", window: "7 Day", tier: "opus", durationMs: 7 * DAY, rate: rate7 * 0.6, phase: phase * 7 + off },
   ];
+}
+
+/** ChatGPT's (Codex) windows: 5 hours and 7 days. */
+function codex(rate5: number, rate7: number, phase: number, off: number): WindowSpec[] {
   return [
-    { provider: "anthropic", label: "you@flock.dev", plan: "Max 20x", windows: claude(0.24, 0.0062, 2 * HOUR), resetsAvailable: 1 },
-    { provider: "anthropic", label: "team@acme.io", org: "Acme", plan: "Team", windows: claude(0.06, 0.0072, 4 * HOUR) },
-    {
-      provider: "openai-codex",
-      label: "you@flock.dev",
-      plan: "pro",
-      windows: [
-        { id: "openai-codex:primary", label: "5 hours", window: "5 hours", durationMs: 5 * HOUR, rate: 0.11, phase: HOUR + off },
-        { id: "openai-codex:secondary", label: "7 days", window: "7 days", durationMs: 7 * DAY, rate: 0.0035, phase: 3 * DAY + off },
-      ],
-    },
+    { id: "openai-codex:primary", label: "5 hours", window: "5 hours", durationMs: 5 * HOUR, rate: rate5, phase: phase + off },
+    { id: "openai-codex:secondary", label: "7 days", window: "7 days", durationMs: 7 * DAY, rate: rate7, phase: 3 * DAY + off },
   ];
+}
+
+function specs(hostId: string): AccountSpec[] {
+  const off = offset(hostId);
+  return [
+    { provider: "anthropic", label: "you@flock.dev", plan: "Max 20x", windows: claude(0.24, 0.0062, 2 * HOUR, off), resetsAvailable: 1 },
+    { provider: "anthropic", label: "team@acme.io", org: "Acme", plan: "Team", windows: claude(0.06, 0.0072, 4 * HOUR, off) },
+    { provider: "openai-codex", label: "you@flock.dev", plan: "pro", windows: codex(0.11, 0.0035, HOUR, off) },
+  ];
+}
+
+function keyOf(s: { provider: string; label: string; org?: string }): string {
+  return `${s.provider}|email:${s.label}${s.org ? `|org:${s.org.toLowerCase()}` : ""}`;
+}
+
+function report(s: AccountSpec, now: number, seed: number): LimitAccount {
+  return {
+    key: keyOf(s),
+    provider: s.provider,
+    label: s.label,
+    org: s.org,
+    plan: s.plan,
+    fetchedAt: now - REPORT_LAG,
+    windows: s.windows.map((w) => windowAt(w, now, seed)),
+    resetsAvailable: s.resetsAvailable,
+    notes: [],
+    disabled: false,
+  };
+}
+
+/**
+ * What omp reports for an account linked during the demo (or linked again after it expired):
+ * Claude and ChatGPT accounts report their windows at once, on a pace of their own; other
+ * providers report none.
+ */
+export function demoLinkedReport(hostId: string, now: number, a: { provider: string; label: string; org?: string; plan?: string }): LimitAccount {
+  const h = hash(keyOf(a));
+  const phase = (h % 5) * HOUR;
+  const off = offset(hostId);
+  const windows = a.provider === "anthropic" ? claude(0.05 + (h % 7) / 100, 0.003, phase, off) : a.provider === "openai-codex" ? codex(0.07, 0.002, phase, off) : [];
+  if (windows.length > 0) return report({ ...a, plan: a.plan ?? (a.provider === "anthropic" ? "pro" : "plus"), windows }, now, hash(`${hostId}limits`) + h);
+  return { key: keyOf(a), provider: a.provider, label: a.label, org: a.org, plan: a.plan, windows: [], notes: [], error: "omp reported no limit windows for this account", disabled: false };
 }
 
 /** The demo host's `host.limits` answer at `now`. */
 export function demoLimits(hostId: string, now: number, agents: Agent[], withDisabled: boolean): AccountLimits {
   const seed = hash(`${hostId}limits`);
-  const accounts: LimitAccount[] = specs(hostId).map((s, i) => {
-    const key = `${s.provider}|email:${s.label}${s.org ? `|org:${s.org.toLowerCase()}` : ""}`;
-    return {
-      key,
-      provider: s.provider,
-      label: s.label,
-      org: s.org,
-      plan: s.plan,
-      fetchedAt: now - REPORT_LAG,
-      windows: s.windows.map((w) => windowAt(w, now, seed + i * 7919)),
-      resetsAvailable: s.resetsAvailable,
-      notes: [],
-      disabled: false,
-    };
-  });
+  const accounts: LimitAccount[] = specs(hostId).map((s, i) => report(s, now, seed + i * 7919));
   if (withDisabled)
     accounts.push({
       key: "anthropic|email:old@flock.dev",

@@ -182,6 +182,8 @@ export interface EditorFormProps {
   home?: string;
   /** Settings of the picked template / registry server, above the definition. */
   sourceInputs?: ReactNode;
+  /** Under the URL / the command line: the server they already reach (`SameServerNote`). */
+  sameNote?: ReactNode;
   autoFocusName?: boolean;
 }
 
@@ -198,7 +200,7 @@ function Section({ title, aside, children }: { title: string; aside?: ReactNode;
 }
 
 /** Name, scope, transport and the definition's fields; Advanced holds timeout, SSE and the OAuth app. */
-export function EditorForm({ form: f, onChange, errors, scopeChoice, savedIn, home, sourceInputs, autoFocusName }: EditorFormProps) {
+export function EditorForm({ form: f, onChange, errors, scopeChoice, savedIn, home, sourceInputs, sameNote, autoFocusName }: EditorFormProps) {
   const [advanced, setAdvanced] = useState(() => hasAdvanced(f));
   const patch = (p: Partial<McpForm>) => onChange((x) => ({ ...x, ...p }));
   const patchOAuth = (p: Partial<McpForm["oauth"]>) => onChange((x) => ({ ...x, oauth: { ...x.oauth, ...p } }));
@@ -283,21 +285,24 @@ export function EditorForm({ form: f, onChange, errors, scopeChoice, savedIn, ho
                 />
               )}
             </Field>
-            <Field label="Arguments" error={errors.args} description="Separated by spaces; quote one that contains spaces.">
-              {(id) => (
-                <Input
-                  id={id}
-                  value={f.argsText}
-                  onChange={(e) => patch({ argsText: e.target.value })}
-                  placeholder="-y @modelcontextprotocol/server-memory"
-                  invalid={!!errors.args}
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  className="font-mono text-xs"
-                />
-              )}
-            </Field>
+            <div className="flex flex-col gap-2">
+              <Field label="Arguments" error={errors.args} description="Separated by spaces; quote one that contains spaces.">
+                {(id) => (
+                  <Input
+                    id={id}
+                    value={f.argsText}
+                    onChange={(e) => patch({ argsText: e.target.value })}
+                    placeholder="-y @modelcontextprotocol/server-memory"
+                    invalid={!!errors.args}
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    className="font-mono text-xs"
+                  />
+                )}
+              </Field>
+              {sameNote}
+            </div>
             <Field label="Working folder" hint="optional">
               {(id) => (
                 <Input
@@ -319,22 +324,25 @@ export function EditorForm({ form: f, onChange, errors, scopeChoice, savedIn, ho
           </div>
         ) : (
           <div className="flex flex-col gap-3.5">
-            <Field label="URL" error={errors.url}>
-              {(id) => (
-                <Input
-                  id={id}
-                  value={f.url}
-                  onChange={(e) => patch({ url: e.target.value })}
-                  placeholder="https://mcp.example.com/mcp"
-                  invalid={!!errors.url}
-                  inputMode="url"
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  className="font-mono text-xs"
-                />
-              )}
-            </Field>
+            <div className="flex flex-col gap-2">
+              <Field label="URL" error={errors.url}>
+                {(id) => (
+                  <Input
+                    id={id}
+                    value={f.url}
+                    onChange={(e) => patch({ url: e.target.value })}
+                    placeholder="https://mcp.example.com/mcp"
+                    invalid={!!errors.url}
+                    inputMode="url"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    className="font-mono text-xs"
+                  />
+                )}
+              </Field>
+              {sameNote}
+            </div>
             <div className="flex flex-col gap-1.5">
               <span className="text-2xs font-bold tracking-[0.02em] text-mute">Headers</span>
               <KeyValueRows

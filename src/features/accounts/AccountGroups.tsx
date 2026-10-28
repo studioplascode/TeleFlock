@@ -1,5 +1,5 @@
-import { KeyRound, MoreHorizontal, Plus, RefreshCw, Star, StarOff, TimerReset, Trash2, Users } from "lucide-react";
-import { motion } from "motion/react";
+import { MoreHorizontal, Plus, Star, StarOff, TimerReset, Trash2, Users } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useRef, useState } from "react";
 import { formatPct, formatSpan, projectWindow } from "@/core";
 import type { AccountsSnapshot, LimitWindow, LinkedAccount } from "@/core/gen";
@@ -20,6 +20,7 @@ import {
   formatAge,
   IconButton,
   spring,
+  tween,
   Tile,
   toast,
   Tooltip,
@@ -27,10 +28,11 @@ import {
   useMinWidth,
   useNow,
 } from "@/design";
-import { paceStatus } from "@/features/usage/limitsUi";
+import { formatPlan, paceAlert, paceStatus, tierLabel, windowLabel } from "@/features/usage/limitsUi";
 import { describeError } from "@/features/workspace/shared/errors";
+import { ExpiredLogin } from "./ExpiredLogin";
 import { ProviderMark } from "./ProviderMark";
-import { linkProviderFor, providerLook } from "./providers";
+import { byListOrder, linkProviderFor, providerLook } from "./providers";
 import { preferAccount, unlinkAccount } from "./store";
 
 export interface AccountActions {
@@ -38,24 +40,28 @@ export interface AccountActions {
   link(provider: string): void;
 }
 
-/** One compact quota bar: what's left and when it resets. */
+/**
+ * One compact quota bar: what's left, when it resets and, when the bar turns red or orange, why
+ * (the number stays neutral, like on Usage: 90 % left is not alarming by itself, the pace is).
+ */
 function Quota({ w, fetchedAt, now }: { w: LimitWindow; fetchedAt?: number; now: number }) {
   const pace = projectWindow(w, fetchedAt, now);
   const status = paceStatus(w, pace);
+  const alert = paceAlert(w, pace);
   const used = Math.min(1, pace.used ?? 0);
+  const name = windowLabel(w);
+  const tier = tierLabel(w);
   return (
     <li className="flex min-w-0 flex-col gap-1" data-limit={w.id}>
       <div className="flex items-baseline gap-2 text-[11px] font-bold">
-        <span className="min-w-0 truncate text-ink-2">{w.window ?? w.label}</span>
-        {w.tier && <span className="font-semibold text-mute-2">{w.tier}</span>}
-        <span data-status={status} className={cn("ml-auto shrink-0 tabular", status === "error" || status === "needs-you" ? "st-text" : "text-ink")}>
-          {pace.remaining != null ? `${formatPct(pace.remaining)} left` : "—"}
-        </span>
+        <span className="min-w-0 truncate text-ink-2">{name}</span>
+        {tier && <span className="shrink-0 font-semibold text-mute-2">{tier}</span>}
+        <span className="ml-auto shrink-0 text-ink tabular">{pace.remaining != null ? `${formatPct(pace.remaining)} left` : "—"}</span>
       </div>
       <div
         className="relative h-1.5 overflow-hidden rounded-full bg-white/6"
         role="progressbar"
-        aria-label={`${w.label} used`}
+        aria-label={`${name}${tier ? `, ${tier}` : ""} used`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(used * 100)}
@@ -66,6 +72,14 @@ function Quota({ w, fetchedAt, now }: { w: LimitWindow; fetchedAt?: number; now:
         <span className="flex items-center gap-1 text-[10.5px] font-semibold text-mute-2 tabular">
           <TimerReset className="size-3" /> resets in {formatSpan(pace.resetsInMs)}
         </span>
+      )}
+      {alert && (
+        <Tooltip content={alert.full}>
+          <span data-status={alert.status} data-pace-alert className="self-start text-[10.5px] font-bold st-text tabular">
+            <span aria-hidden>{alert.short}</span>
+            <span className="sr-only">{alert.full}</span>
+          </span>
+        </Tooltip>
       )}
     </li>
   );
@@ -95,7 +109,7 @@ function UnlinkConfirm({ account, providerName, host, lastOne, onOpenChange, onC
   const footer = (
     <div className={cn("flex gap-2", mobile ? "flex-col-reverse" : "justify-end")}>
       <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy} className={cn(mobile && "w-full")}>
-        Keep it
+        Cancel
       </Button>
       <Button variant="danger" icon={<Trash2 />} loading={busy} onClick={run} className={cn(mobile && "w-full")}>
         Unlink
@@ -117,8 +131,10 @@ function UnlinkConfirm({ account, providerName, host, lastOne, onOpenChange, onC
   );
 }
 
-function AccountRow({ account, providerName, host, hostId, lastOne, single, broker, actions, now }: {
+function AccountRow({ account, index, providerName, host, hostId, lastOne, single, broker, actions, now }: {
   account: LinkedAccount;
+  /** Position in its provider's list (rows glide when one above comes or goes). */
+  index: number;
   providerName: string;
   host: string;
   hostId: string;
@@ -136,6 +152,7 @@ function AccountRow({ account, providerName, host, hostId, lastOne, single, brok
   const canUnlink = account.credentialId != null && !account.disabled && !broker;
   const canPrefer = !key && !account.disabled && (account.preferred || !single);
   const prefer = (preferred: boolean) => {
+    if (preferring) return;
     setPreferring(true);
     preferAccount(hostId, account, preferred).then(
       () => toast({ title: preferred ? `omp tries ${account.label} first` : `${account.label} is no longer preferred`, description: preferred ? `For new ${providerName} sessions on ${host}.` : undefined, status: "done", duration: 2600 }),
@@ -168,7 +185,16 @@ function AccountRow({ account, providerName, host, hostId, lastOne, single, brok
   if (account.linkedAt) meta.push(<span>{key ? "added" : "linked"} {formatAge(now - account.linkedAt)}</span>);
   const windows = account.windows.slice(0, mobile ? 2 : 3);
   return (
-    <li className={cn("flex flex-col gap-3 px-5 py-4 max-md:px-4", account.disabled && "bg-error/[0.035]")} data-account={account.key}>
+    <motion.li
+      layout="position"
+      layoutDependency={index}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, transition: tween.fast }}
+      transition={spring.smooth}
+      className={cn("flex flex-col gap-3 px-5 py-4 max-md:px-4", account.disabled && "bg-error/[0.035]")}
+      data-account={account.key}
+    >
       <div className="flex min-w-0 items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -180,7 +206,7 @@ function AccountRow({ account, providerName, host, hostId, lastOne, single, brok
                 Preferred
               </Chip>
             )}
-            {account.plan && <Badge tone="accent">{account.plan}</Badge>}
+            {account.plan && <Chip tone="accent">{formatPlan(account.plan)}</Chip>}
             {key && <Badge>API key</Badge>}
             {account.disabled && <Badge tone="error">Expired</Badge>}
           </div>
@@ -202,7 +228,9 @@ function AccountRow({ account, providerName, host, hostId, lastOne, single, brok
                 size="sm"
                 label={account.preferred ? "Stop preferring" : "Prefer for new sessions"}
                 onClick={() => prefer(!account.preferred)}
-                disabled={preferring || (!account.preferred && !!account.preferBlocked)}
+                // aria-disabled while saving, not disabled: a disabled button drops keyboard focus.
+                aria-disabled={preferring || undefined}
+                disabled={!account.preferred && !!account.preferBlocked}
                 className={cn(account.preferred && "text-accent-hi")}
               >
                 <Star className={cn(account.preferred && "fill-current")} />
@@ -242,18 +270,7 @@ function AccountRow({ account, providerName, host, hostId, lastOne, single, brok
         )}
       </div>
       {account.disabled ? (
-        <div data-status="error" className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg st-soft px-3 py-2 text-xs font-semibold">
-          <KeyRound className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 break-words">
-            omp stopped using this login{account.disabledReason ? `: ${account.disabledReason}` : "."}
-            <span className="block font-medium text-mute">Sign in to it again to bring it back.</span>
-          </span>
-          {actions.linkProvider && (
-            <Button size="sm" variant="secondary" icon={<RefreshCw />} onClick={() => actions.link(actions.linkProvider as string)} className={cn(mobile && "w-full")}>
-              Re-link
-            </Button>
-          )}
-        </div>
+        <ExpiredLogin provider={providerName} reason={account.disabledReason} onRelink={actions.linkProvider ? () => actions.link(actions.linkProvider as string) : undefined} />
       ) : windows.length > 0 ? (
         <ul className={cn("grid gap-y-3", mobile ? "grid-cols-2 gap-x-4" : windows.length === 1 ? "grid-cols-1 gap-x-5 sm:max-w-xs" : "grid-cols-2 gap-x-5 lg:grid-cols-3")}>
           {windows.map((w) => (
@@ -264,11 +281,14 @@ function AccountRow({ account, providerName, host, hostId, lastOne, single, brok
         <p className="text-[11px] font-semibold text-mute-2">{account.windowsError}</p>
       ) : null}
       {confirm && <UnlinkConfirm account={account} providerName={providerName} host={host} lastOne={lastOne} onOpenChange={setConfirm} onConfirm={unlink} />}
-    </li>
+    </motion.li>
   );
 }
 
-/** Linked accounts and keys grouped by provider, in omp's provider order. */
+/**
+ * Linked accounts and keys grouped by provider, in omp's provider order; within a provider in a
+ * steady order ({@link byListOrder}), so preferring an account never moves the row under the pointer.
+ */
 export function AccountGroups({ hostId, host, snapshot, actions }: { hostId: string; host: string; snapshot: AccountsSnapshot; actions: AccountActions }) {
   const now = useNow(30_000);
   const mobile = useIsMobile();
@@ -278,6 +298,7 @@ export function AccountGroups({ hostId, host, snapshot, actions }: { hostId: str
     if (g) g.accounts.push(a);
     else groups.push({ provider: a.provider, accounts: [a] });
   }
+  for (const g of groups) g.accounts.sort(byListOrder);
   const ref = useRef<HTMLDivElement>(null);
   const wide = useMinWidth(ref, 900) && !mobile;
   const tiles = groups.map((g, gi) => {
@@ -301,21 +322,25 @@ export function AccountGroups({ hostId, host, snapshot, actions }: { hostId: str
               </Button>
             )}
           </div>
-          <ul className="divide-y divide-line">
-            {g.accounts.map((a) => (
-              <AccountRow
-                key={a.key}
-                account={a}
-                providerName={name}
-                host={host}
-                hostId={hostId}
-                lastOne={active <= 1}
-                single={oauthActive <= 1}
-                broker={!!snapshot.broker}
-                actions={{ ...actions, linkProvider }}
-                now={now}
-              />
-            ))}
+          <ul className="relative divide-y divide-line">
+            <AnimatePresence initial={false} mode="popLayout">
+              {g.accounts.map((a, i) => (
+                <AccountRow
+                  // An expired login and its re-linked successor can share `key`; credential ids can't.
+                  key={`${a.key}#${a.credentialId ?? ""}`}
+                  account={a}
+                  index={i}
+                  providerName={name}
+                  host={host}
+                  hostId={hostId}
+                  lastOne={active <= 1}
+                  single={oauthActive <= 1}
+                  broker={!!snapshot.broker}
+                  actions={{ ...actions, linkProvider }}
+                  now={now}
+                />
+              ))}
+            </AnimatePresence>
           </ul>
         </Tile>
       </motion.div>

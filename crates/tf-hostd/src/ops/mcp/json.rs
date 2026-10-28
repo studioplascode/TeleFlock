@@ -201,12 +201,13 @@ impl Serialize for J {
                 } else if let Some(u) = n.as_u64() {
                     s.serialize_u64(u)
                 } else {
-                    // JS prints integral doubles without a fraction (`30000`, not `30000.0`).
+                    // JS prints integral doubles without a fraction (`30000`, not `30000.0`), with
+                    // their shortest round-trip digits below 1e21 (`18446744073709552000`). Rust's
+                    // `{}` prints those digits the same way; a cast would saturate past 64 bits.
                     let f = n.as_f64().unwrap_or(0.0);
-                    if f.fract() == 0.0 && f.abs() < 1e21 {
-                        if f < 0.0 { s.serialize_i64(f as i64) } else { s.serialize_u64(f as u64) }
-                    } else {
-                        s.serialize_f64(f)
+                    match format!("{f}").parse::<i128>() {
+                        Ok(i) if f.fract() == 0.0 && f.abs() < 1e21 => s.serialize_i128(i),
+                        _ => s.serialize_f64(f),
                     }
                 }
             }
@@ -351,6 +352,14 @@ mod tests {
         assert_eq!(compact(&parse("[30000.0, -2.0, 0.25, 1e3]").unwrap()), "[30000,-2,0.25,1000]");
         assert_eq!(parse("30000.0").unwrap().as_u64(), Some(30000));
         assert_eq!(parse("-1").unwrap().as_u64(), None);
+        // Past the 64-bit range: JavaScript's digits, never a saturated 18446744073709551615.
+        assert_eq!(
+            compact(&parse("[100000000000000000000, 18446744073709551616, -1e20, -9223372036854775809]").unwrap()),
+            "[100000000000000000000,18446744073709552000,-100000000000000000000,-9223372036854776000]"
+        );
+        let J::Num(n) = parse("123456789012345678901234").unwrap() else { panic!() };
+        let big = compact(&J::Num(n.clone()));
+        assert_eq!(big.parse::<f64>().ok(), n.as_f64(), "{big}: the same number");
     }
 
     #[test]

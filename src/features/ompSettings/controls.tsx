@@ -17,6 +17,7 @@ import {
   Tooltip,
   useIsMobile,
 } from "@/design";
+import { Ticks } from "@/features/shell/Ticks";
 import { conditionInfo, deepEqual, editorFor, enumChoices, formatJson, isModified, memberChoices, parseJson, parseNumber, valueText } from "./model";
 import { ModelRoles } from "./ModelRoles";
 
@@ -138,7 +139,7 @@ function PresetControl({ s, onCommit, kind }: { s: OmpSetting; onCommit: (v: unk
           setCustom(false);
           commitText(v);
         }}
-        options={[...options.map((o) => ({ value: o.value, label: o.label, hint: o.description })), { value: CUSTOM, label: "Custom…" }]}
+        options={[...options.map((o) => ({ value: o.value, label: o.label, hint: o.description && <Ticks text={o.description} /> })), { value: CUSTOM, label: "Custom…" }]}
       />
       {custom && (
         <TextControl
@@ -161,7 +162,15 @@ function ChoiceControl({ s, onCommit }: { s: OmpSetting; onCommit: (v: string) =
   const label = s.label ?? s.id;
   const segmented = choices.length <= 3 && choices.every((c) => c.label.length <= 12) && !choices.some((c) => c.description);
   if (segmented) return <SegmentedControl size="sm" value={current} onValueChange={onCommit} options={choices.map((c) => ({ value: c.value, label: c.label }))} aria-label={label} fill={mobile} />;
-  return <Select aria-label={label} className="w-56 max-md:w-full" value={current} onValueChange={onCommit} options={choices.map((c) => ({ value: c.value, label: c.label, hint: c.description }))} />;
+  return (
+    <Select
+      aria-label={label}
+      className="w-56 max-md:w-full"
+      value={current}
+      onValueChange={onCommit}
+      options={choices.map((c) => ({ value: c.value, label: c.label, hint: c.description && <Ticks text={c.description} /> }))}
+    />
+  );
 }
 
 /** Write-only: the value never comes back from the host. */
@@ -246,7 +255,11 @@ function MembersControl({ s, choices, onCommit }: { s: OmpSetting; choices: OmpS
             <div className="min-w-0">
               <span className="text-sm font-semibold text-ink">{c?.label ?? v}</span>
               {c && c.label !== v && <span className="ml-2 font-mono text-2xs text-mute-2">{v}</span>}
-              {c?.description && <p className="truncate text-2xs text-mute">{c.description}</p>}
+              {c?.description && (
+                <p className="truncate text-2xs text-mute">
+                  <Ticks text={c.description} />
+                </p>
+              )}
               {!c && <p className="text-2xs text-warn">Not one of omp's choices</p>}
             </div>
           );
@@ -264,7 +277,11 @@ function MembersControl({ s, choices, onCommit }: { s: OmpSetting; choices: OmpS
               <DropdownMenuItem key={c.value} onSelect={() => onCommit([...items, c.value])}>
                 <span className="flex min-w-0 flex-col">
                   <span>{c.label}</span>
-                  {c.description && <span className="max-w-72 truncate text-2xs font-normal text-mute">{c.description}</span>}
+                  {c.description && (
+                    <span className="max-w-72 truncate text-2xs font-normal text-mute">
+                      <Ticks text={c.description} />
+                    </span>
+                  )}
                 </span>
               </DropdownMenuItem>
             ))}
@@ -445,10 +462,16 @@ export function SettingRow({ s, ctx, showPlace }: { s: OmpSetting; ctx: RowConte
           {s.warning && (
             <p className="mt-1 flex items-start gap-1.5 text-xs font-semibold text-warn">
               <TriangleAlert className="mt-px size-3.5 shrink-0" />
-              {s.warning}
+              <span>
+                <Ticks text={s.warning} />
+              </span>
             </p>
           )}
-          {s.description && <p className="mt-0.5 text-xs text-mute">{s.description}</p>}
+          {s.description && (
+            <p className="mt-0.5 text-xs text-mute">
+              <Ticks text={s.description} />
+            </p>
+          )}
           <p className="mt-0.5 truncate font-mono text-2xs text-mute-2">
             {s.id}
             {modified && defaultText && defaultText.length <= 48 && <span> · default {defaultText}</span>}

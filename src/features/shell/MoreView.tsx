@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Blocks, Bot, ChevronRight, Clock3, KeyRound, type LucideIcon, Plus, Search, Settings2 } from "lucide-react";
+import { ChevronRight, Plus, Search } from "lucide-react";
 import { motion } from "motion/react";
 import { Button, fadeRise, IconButton, spring, StatusOrb, Tile, useNow } from "@/design";
 import { navigate, type Route, useHosts, useUi } from "@/core";
@@ -11,31 +11,36 @@ import { MobileHeader } from "./MobileHeader";
 import { connSummary, PHASE_STATUS, phaseBusy } from "./status";
 import { VIEWS } from "./vocab";
 
-function LinkRow({ icon: Icon, label, hint, route }: { icon: LucideIcon; label: string; hint?: string; route: Route }) {
+/** The pages More lists, in order. Label, icon and description come from `VIEWS`, like every other entry point. */
+const PAGES = ["usage", "activity", "automations", "omp", "mcp", "accounts", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
+
+function LinkRow({ id }: { id: (typeof PAGES)[number] }) {
+  const { icon: Icon, label, description } = VIEWS[id];
   return (
     <button
       type="button"
       onClick={() => {
         haptic("tick");
-        navigate(route);
+        navigate({ name: id } as Route);
       }}
-      className="flex min-h-12 w-full items-center gap-3 px-3.5 py-1.5 text-left pressable focus-ring active:bg-white/4"
+      className="flex min-h-12 w-full items-center gap-3 px-3.5 py-2 text-left pressable focus-ring active:bg-white/4"
     >
       <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/14 text-accent-hi">
         <Icon className="size-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-md font-bold text-ink">{label}</span>
-        {hint && <span className="block truncate text-xs text-mute">{hint}</span>}
+        {/* Two lines on a narrow phone rather than cut off. */}
+        <span className="line-clamp-2 text-xs text-mute">{description}</span>
       </span>
-      <ChevronRight className="size-4 text-mute-2" />
+      <ChevronRight className="size-4 shrink-0 text-mute-2" />
     </button>
   );
 }
 
 /**
  * Mobile "More" tab: the host list (one connection verb per state, the same as Flock's strip),
- * then Usage, Activity and Settings. Counts live on the Flock tiles, updates in Inbox.
+ * then the pages without a tab of their own. Counts live on the Flock tiles, updates in Inbox.
  */
 export function MoreView() {
   const { profiles, status } = useHosts();
@@ -110,13 +115,9 @@ export function MoreView() {
 
         <motion.div {...fadeRise} transition={{ ...spring.smooth, delay: 0.05 }}>
           <Tile className="divide-y divide-line overflow-hidden">
-            <LinkRow icon={BarChart3} label={VIEWS.usage.label} hint={VIEWS.usage.description} route={{ name: "usage" }} />
-            <LinkRow icon={Activity} label={VIEWS.activity.label} hint={VIEWS.activity.description} route={{ name: "activity" }} />
-            <LinkRow icon={Clock3} label={VIEWS.automations.label} hint={VIEWS.automations.description} route={{ name: "automations" }} />
-            <LinkRow icon={Bot} label={VIEWS.omp.label} hint={VIEWS.omp.description} route={{ name: "omp" }} />
-            <LinkRow icon={Blocks} label={VIEWS.mcp.label} hint={VIEWS.mcp.description} route={{ name: "mcp" }} />
-            <LinkRow icon={KeyRound} label={VIEWS.accounts.label} hint={VIEWS.accounts.description} route={{ name: "accounts" }} />
-            <LinkRow icon={Settings2} label={VIEWS.settings.label} hint={VIEWS.settings.description} route={{ name: "settings" }} />
+            {PAGES.map((id) => (
+              <LinkRow key={id} id={id} />
+            ))}
           </Tile>
         </motion.div>
 

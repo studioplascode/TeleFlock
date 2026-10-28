@@ -7,6 +7,7 @@ import type { SetupFixError, SetupIssue, SetupStatus } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { Term } from "@/features/shell/Term";
+import { Ticks } from "@/features/shell/Ticks";
 import { ExtLink } from "./CopyCommand";
 import { OMP_MIN_VERSION, OMP_URL } from "./kinds";
 
@@ -82,7 +83,7 @@ const CONSENT: Record<string, { kind: "global" | "install"; what: string; why: s
   },
   "install-global-bridge": {
     kind: "global",
-    what: "Copies the TeleFlock companion extension into ~/.omp/agent/extensions/, where every omp session loads it. TeleFlock keeps that copy up to date when it updates itself.",
+    what: "Copies the TeleFlock bridge (TeleFlock's omp extension, teleflock-bridge.ts) into ~/.omp/agent/extensions/, where every omp session loads it. TeleFlock keeps that copy up to date when it updates itself.",
     why: "Every omp session on this host then streams itself to TeleFlock natively (transcript, questions, subagents) and gets precise controls (model, thinking, plan review, rename, compact, fork, follow-up queue, export), including sessions it did not launch, without typing slash commands into the terminal.",
   },
   "install-herdr-integration": {
@@ -133,23 +134,6 @@ const CONSENT: Record<string, { kind: "global" | "install"; what: string; why: s
     undo: "To uninstall, remove the package with the same package manager.",
   },
 };
-
-/** Text with `backticked` commands set as code (tf-hostd quotes commands that way). */
-function Quoted({ text }: { text: string }) {
-  return (
-    <>
-      {text.split("`").map((part, i) =>
-        i % 2 === 1 ? (
-          <code key={i} className="rounded-xs bg-white/6 px-1 font-mono text-2xs break-all text-ink-2">
-            {part}
-          </code>
-        ) : (
-          part
-        ),
-      )}
-    </>
-  );
-}
 
 interface CheckRow {
   id: string;
@@ -212,10 +196,10 @@ function IssueRow({
             {install && issue.fixable && <Badge>Install</Badge>}
             {issue.recommended && <Badge tone="accent">Recommended</Badge>}
           </div>
-          <p className={cn("mt-0.5 text-xs", item ? "text-ink-2" : "text-mute")}>{item?.consequence ?? <Quoted text={issue.detail} />}</p>
+          <p className={cn("mt-0.5 text-xs", item ? "text-ink-2" : "text-mute")}>{item?.consequence ?? <Ticks text={issue.detail} />}</p>
           {item && (
             <p className="mt-0.5 text-xs text-mute">
-              <Quoted text={issue.detail} />
+              <Ticks text={issue.detail} />
             </p>
           )}
           {issue.id === "omp-missing" && (
@@ -232,10 +216,10 @@ function IssueRow({
           {failure && !running && (
             <div className="mt-1.5 rounded-md bg-error/8 p-2 text-xs text-[#ffb1c1]" role="alert">
               <span className="font-bold">Last attempt failed: </span>
-              <Quoted text={failure.error.message} />
+              <Ticks text={failure.error.message} />
               {failure.error.hint && (
                 <p className="mt-0.5 text-mute">
-                  <Quoted text={failure.error.hint} />
+                  <Ticks text={failure.error.hint} />
                 </p>
               )}
             </div>
@@ -264,13 +248,13 @@ function IssueRow({
                       <p>
                         <span className="font-bold text-ink-2">{consent.kind === "install" ? "Runs: " : "Changes: "}</span>
                         <span className="text-mute">
-                          <Quoted text={consent.what} />
+                          <Ticks text={consent.what} />
                         </span>
                       </p>
                       <p>
                         <span className="font-bold text-ink-2">Why: </span>
                         <span className="text-mute">
-                          <Quoted text={consent.why} />
+                          <Ticks text={consent.why} />
                         </span>
                       </p>
                       <p className="text-mute-2">{consent.undo ?? "You can undo it at any time by removing the setting or the file."}</p>

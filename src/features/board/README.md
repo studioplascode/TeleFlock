@@ -7,6 +7,7 @@ The home of the app: the "is everything alive?" surface.
 ```ts
 // src/features/board/BoardView.tsx — desktop home (#/board, #/). Mounts <WhileAwayToast/> itself.
 // Toolbar: repo filter (each repo with its accent icon), search, Status|Repo; the host filter is the title-bar pill and "New task" (D → Dispatch) is the sidebar's primary button.
+// Below it <BoardNotices/> (Notices.tsx): hosts not online, omp without an account, setup gaps, the demo.
 // Bento row: [First steps] · Stats (today's spend, tokens, lane bar, tightest subscription window → Usage) ·
 // Hosts (one row per host: orb, name + hostAccent swatch, latency/phase, cpu, ram bar, load → Hosts) · live terminal.
 // Windows ≤ 820 px tall (`short:`) get the same facts in one ~72 px strip (BentoStrip).
@@ -19,8 +20,8 @@ export function BoardView(): JSX.Element;
 // host-filter sheet driving useHosts().setFilter), "+" FAB above the bottom nav → create sheet (new worktree / agent,
 // fan out, open folder, past sessions).
 // Acting tiles: "need you · Answer →" opens the HUD, "running ↓" scrolls to Running (counts quiet agents: working,
-// no events for QUIET_AFTER_MS), "$ … today ›" opens Usage. One-line offline strip per host (connAction verb) plus
-// <SetupGaps/>. Rows: name · RepoTag, ⋯ (CardMenuButton mobile; Review/Done rows add "Delete worktree…" once the PR
+// no events for QUIET_AFTER_MS), "$ … today ›" opens Usage. Above them <PhoneNotices/> (Notices.tsx): every notice folded
+// into one line until expanded. Rows: name · RepoTag, ⋯ (CardMenuButton mobile; Review/Done rows add "Delete worktree…" once the PR
 // is merged or closed), Review rows with Mark done + Review, ctx/subs/diff/Connect/model meta, swipe Stop turn on
 // running rows. Needs cards show the RepoTag under the agent pill.
 export function FlockHome(): JSX.Element;
@@ -56,9 +57,16 @@ export function resumeParked(key: string): Promise<string | null>; // agent.resu
 // also: setArchived (unarchiving a parked agent resumes it), answerAgent, stopAgent, openAgent, promptAgent,
 // openTerminal (parked: resume first, then the new pane), openAnswerHud, canReview, setMuted, useMuted
 
-// src/features/board/StaleHosts.tsx — host strips above the lanes
-export function StaleHosts(): JSX.Element; // offline/snapshot strip per host (connAction verb) + SetupGaps
-export function SetupGaps(): JSX.Element;  // online host without session sharing / herdr integration → "Fix…" = #/hosts?setup=<id>; dismiss per host (tf.board.setupGaps)
+// src/features/board/Notices.tsx — the notices above the lanes, for the hosts in view, most urgent first
+// (notice.tsx `noticeRank`): host not online (snapshot strip, connAction verb) · omp without an account
+// (accounts/LinkAccountNudge) · setup gap (setupGap.ts: no TeleFlock bridge and no session sharing, else no herdr
+// integration; never for demo hosts; "Fix…" = #/hosts?setup=<id>, dismiss per host in tf.board.setupGaps) · demo.
+export function BoardNotices(): JSX.Element; // desktop: one box, one row per notice
+export function PhoneNotices(): JSX.Element; // phone: NoticeTray, the most urgent notice on one line + its action + "+N ⌄"; expanded: the full rows + "Show less"
+// src/features/board/notice.tsx — row classes, `noticeRank`/`trayTop` (tested), `NoticeTray`, `useNoticeView(key, rank)`
+// (row | line | hidden: every notice stays mounted, so the accounts check keeps running while folded), `NoticeLine`.
+// src/features/board/setupGap.ts — `setupGap` / `boardSetupGap` (tested): the one setup-gap rule for the notices,
+// the phone empty state's Hosts button and the First steps "Finish host setup" tick.
 
 // src/features/board/LiveBits.tsx — card parts shared with the phone rows
 // AgentOrb, AgentHeartbeat ("last event 4s ago"), useQuiet, QuietChip, ToolChip, LiveLine, TpsSparkline ("tok/s"),

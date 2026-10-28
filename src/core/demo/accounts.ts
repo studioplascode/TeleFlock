@@ -1,13 +1,15 @@
 /**
  * Demo `accounts.*`: omp's login providers (18.13's `/login` list), the credentials the demo host
  * stores (the accounts `host.limits` reports, an API key, an expired login) and scripted links
- * through the demo `auth.*` flows (`./auth`). Links, unlinks and the preferred account change what
- * `host.limits` reports too, so Usage and Accounts agree.
+ * through the demo `auth.*` flows (`./auth`) on the providers' real sign-in hosts. Links, unlinks
+ * and the preferred account change what `host.limits` reports too, so Usage and Accounts agree:
+ * a linked (or re-linked) Claude / ChatGPT account reports its windows, and live sessions stay on
+ * the account they started with (a preference steers only sessions that start later).
  */
 import type { AccountLimits, AccountsSnapshot, Agent, AuthFlow, LimitAccount, LinkedAccount, LoginProvider } from "../gen";
 import { apiError } from "../errors";
 import type { DemoAuthFlows, DemoAuthScript } from "./auth";
-import { demoLimits } from "./limits";
+import { demoLimits, demoLinkedReport } from "./limits";
 
 /** `omp auth-broker list --json` of omp 18.13.3 (its `/login` order). */
 export const DEMO_LOGIN_PROVIDERS: LoginProvider[] = (
@@ -66,18 +68,51 @@ export const DEMO_LOGIN_PROVIDERS: LoginProvider[] = (
   ] as const
 ).map(([id, name]) => ({ id, name }));
 
-/** Callback ports of omp's loopback logins (pi-catalog auth rules). */
-const CALLBACK_PORTS: Record<string, [number, string]> = {
-  "openai-codex": [1455, "/auth/callback"],
-  anthropic: [54545, "/callback"],
-  openrouter: [54549, "/callback"],
-  devin: [59653, "/callback"],
-  "google-antigravity": [51121, "/oauth-callback"],
-  "google-gemini-cli": [8085, "/oauth2callback"],
-  "gitlab-duo": [8080, "/callback"],
+/** omp's loopback logins (pi-catalog auth rules): callback port and path, the provider's authorize page. */
+const BROWSER: Record<string, [port: number, path: string, page: string]> = {
+  "openai-codex": [1455, "/auth/callback", "https://auth.openai.com/oauth/authorize"],
+  anthropic: [54545, "/callback", "https://claude.ai/oauth/authorize"],
+  openrouter: [54549, "/callback", "https://openrouter.ai/auth"],
+  devin: [59653, "/callback", "https://app.devin.ai/oauth/authorize"],
+  "google-antigravity": [51121, "/oauth-callback", "https://accounts.google.com/o/oauth2/v2/auth"],
+  "google-gemini-cli": [8085, "/oauth2callback", "https://accounts.google.com/o/oauth2/v2/auth"],
+  "gitlab-duo": [8080, "/callback", "https://gitlab.com/oauth/authorize"],
 };
-const DEVICE: Record<string, true> = { "openai-codex-device": true, "github-copilot": true, "kimi-code": true, "xai-oauth": true, "factory-droid": true, "muse-code": true, kilo: true, cursor: true };
-const PASTE: Record<string, true> = { "zai-coding-plan": true, "gitlab-duo-agent": true };
+/** Device-code logins: the page the code is entered on (Cursor's asks for no code). */
+const DEVICE: Record<string, string> = {
+  "openai-codex-device": "https://auth.openai.com/codex/device",
+  "github-copilot": "https://github.com/login/device",
+  "kimi-code": "https://www.kimi.com/code/device",
+  "xai-oauth": "https://auth.x.ai/device",
+  "factory-droid": "https://app.factory.ai/device",
+  kilo: "https://app.kilo.ai/device",
+  cursor: "https://cursor.com/loginDeepControl",
+};
+/** Logins that show a code to paste back. */
+const PASTE: Record<string, string> = { "zai-coding-plan": "https://z.ai/oauth/authorize", "gitlab-duo-agent": "https://gitlab.com/oauth/authorize" };
+/** Where API-key providers hand out keys (others: the prompt alone). */
+const KEY_PAGES: Record<string, string> = {
+  zai: "https://z.ai/manage-apikey/apikey-list",
+  xai: "https://console.x.ai",
+  deepseek: "https://platform.deepseek.com/api_keys",
+  moonshot: "https://platform.moonshot.ai/console/api-keys",
+  "minimax-code": "https://platform.minimax.io",
+  "alibaba-coding-plan": "https://www.aliyun.com/benefit/scene/tokenplan",
+  "alibaba-token-plan": "https://home.qwencloud.com/billing/subscription/token-plan-individual",
+  cerebras: "https://cloud.cerebras.ai",
+  fireworks: "https://fireworks.ai/account/api-keys",
+  together: "https://api.together.ai/settings/api-keys",
+  nvidia: "https://build.nvidia.com",
+  deepinfra: "https://deepinfra.com/dash/api_keys",
+  huggingface: "https://huggingface.co/settings/tokens",
+  perplexity: "https://www.perplexity.ai/settings/api",
+  "vercel-ai-gateway": "https://vercel.com/dashboard/ai-gateway",
+  "cloudflare-ai-gateway": "https://dash.cloudflare.com/profile/api-tokens",
+  "cloudflare-workers-ai": "https://dash.cloudflare.com/profile/api-tokens",
+  tavily: "https://app.tavily.com",
+  exa: "https://dashboard.exa.ai/api-keys",
+  "ollama-cloud": "https://ollama.com/settings/keys",
+};
 /** Where `-device` logins store their credentials. */
 const STORE_AS: Record<string, string> = { "openai-codex-device": "openai-codex", "zai-coding-plan": "zai" };
 
@@ -104,6 +139,10 @@ export class DemoAccounts {
   private nextId: number;
   private preferred = new Set<string>();
   private linked = 0;
+  /** Live session → the account it runs on (omp pins a session to the account it started with). */
+  private readonly pins = new Map<string, string>();
+  /** Sessions seen on the first report keep the fixture's spread over the accounts. */
+  private seeded = false;
 
   constructor(private readonly host: DemoAccountsHost) {
     const t = host.now();
@@ -124,23 +163,32 @@ export class DemoAccounts {
     if (first) this.preferred.add(keyOf(first));
   }
 
-  /** `host.limits`, minus unlinked accounts, plus linked ones (no report yet). */
+  /** `host.limits`: the fixture's reports minus unlinked accounts, plus the reports of linked ones. */
   limits(withDisabled: boolean): AccountLimits {
-    const base = demoLimits(this.host.id, this.host.now(), this.host.agents(), withDisabled);
+    const now = this.host.now();
+    const base = demoLimits(this.host.id, now, this.host.agents(), withDisabled);
     const live = new Set(this.creds.filter((c) => c.oauth).map(keyOf));
     const active = new Set(this.creds.filter((c) => c.oauth && !c.disabled).map(keyOf));
-    const accounts: LimitAccount[] = base.accounts
-      .filter((a) => live.has(a.key) && (withDisabled || !a.disabled || active.has(a.key)))
-      // A login linked again since the fixture's "expired" report: omp has no windows for it yet.
-      .map((a) => (a.disabled && active.has(a.key) ? { ...a, disabled: false, error: "omp reported no limit windows for this account" } : a));
+    // The fixture's "expired" report of a login linked again since is replaced by a fresh one.
+    const accounts: LimitAccount[] = base.accounts.filter((a) => live.has(a.key) && !(a.disabled && active.has(a.key)));
     for (const c of this.creds) {
-      if (!c.oauth || accounts.some((a) => a.key === keyOf(c)) || base.accounts.some((a) => a.key === keyOf(c))) continue;
-      accounts.push({ key: keyOf(c), provider: c.provider, label: c.label, org: c.org, plan: c.plan, windows: [], notes: [], error: "omp reported no limit windows for this account", disabled: !!c.disabled });
+      if (!c.oauth || accounts.some((a) => a.key === keyOf(c))) continue;
+      if (!c.disabled) accounts.push(demoLinkedReport(this.host.id, now, c));
+      else if (withDisabled) accounts.push({ key: keyOf(c), provider: c.provider, label: c.label, org: c.org, windows: [], notes: [], error: `Disabled by omp: ${c.disabled}`, disabled: true });
     }
-    // A preference routes this host's sessions of its provider to the preferred account.
+    // A session stays on its account while that one works; the preferred account is tried first
+    // only for sessions that start later (and for those whose account was unlinked or expired).
+    const first = !this.seeded;
+    this.seeded = true;
     const sessions = base.sessions.map((s) => {
-      const pref = [...this.preferred].find((k) => k.startsWith(`${s.provider}|`));
-      return pref && live.has(pref) ? { ...s, accountKey: pref } : s.accountKey && live.has(s.accountKey) ? s : { ...s, accountKey: undefined };
+      const pinned = this.pins.get(s.sessionId);
+      if (pinned && active.has(pinned)) return { ...s, accountKey: pinned };
+      const ofProvider = [...active].filter((k) => k.startsWith(`${s.provider}|`));
+      const preferred = ofProvider.find((k) => this.preferred.has(k));
+      const spread = s.accountKey && active.has(s.accountKey) ? s.accountKey : undefined;
+      const accountKey = (first ? spread : preferred) ?? spread ?? preferred ?? ofProvider[0];
+      if (accountKey) this.pins.set(s.sessionId, accountKey);
+      return { ...s, accountKey };
     });
     return { ...base, accounts, sessions };
   }
@@ -237,19 +285,20 @@ export class DemoAccounts {
     const state = Math.abs(hashOf(`${provider}${this.host.now()}`)).toString(16).padStart(12, "0");
     const onDone = () => {
       this.linked += 1;
-      if (expired) expired.disabled = undefined;
+      // Like omp: signing in again stores a new credential (linked now); the expired one is history.
+      if (expired) Object.assign(expired, { id: this.nextId++, disabled: undefined, linkedAt: this.host.now() });
       else if (!this.creds.some((c) => c.provider === storeAs && c.label === account)) this.creds.push({ id: this.nextId++, provider: storeAs, oauth: true, label: account, linkedAt: this.host.now() });
     };
-    const cb = CALLBACK_PORTS[provider];
+    const browser = BROWSER[provider];
     let script: DemoAuthScript;
-    if (cb) {
-      const redirect = encodeURIComponent(`http://localhost:${cb[0]}${cb[1]}`);
+    if (browser) {
+      const redirect = encodeURIComponent(`http://localhost:${browser[0]}${browser[1]}`);
       script = {
         kind: "account",
         title: p.name,
         subject: provider,
         method: "browser",
-        url: `https://login.example/${provider}/authorize?client_id=demo&response_type=code&redirect_uri=${redirect}&state=${state}`,
+        url: `${browser[2]}?client_id=teleflock-demo&response_type=code&redirect_uri=${redirect}&state=${state}`,
         instructions: "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
         account,
         check: (t) => (/code=|^[\w-]{6,}(#[\w-]+)?$/.test(t) ? undefined : "that doesn't look like a sign-in code or address"),
@@ -262,7 +311,7 @@ export class DemoAccounts {
         title: p.name,
         subject: provider,
         method: "device",
-        url: provider === "github-copilot" ? "https://github.com/login/device" : `https://login.example/${provider}/device`,
+        url: provider === "cursor" ? `${DEVICE[provider]}?uuid=${state}&mode=login` : DEVICE[provider],
         userCode: provider === "cursor" ? undefined : code,
         instructions: provider === "cursor" ? "Approve the login in your browser." : `Enter code: ${code}`,
         account: provider === "github-copilot" ? undefined : account,
@@ -274,7 +323,7 @@ export class DemoAccounts {
         title: p.name,
         subject: provider,
         method: "paste",
-        url: `https://login.example/${provider}/authorize?client_id=demo&state=${state}`,
+        url: `${PASTE[provider]}?client_id=teleflock-demo&response_type=code&state=${state}`,
         instructions: "Approve the sign-in, then copy the code the page shows.",
         account,
         check: (t) => (t.length >= 6 ? undefined : "that code is too short"),
@@ -287,7 +336,7 @@ export class DemoAccounts {
         title: p.name,
         subject: provider,
         method: "prompt",
-        url: `https://console.example/${provider}/api-keys`,
+        url: KEY_PAGES[provider],
         instructions: `Create or copy your API key from the ${name} dashboard`,
         prompt: { message: `Paste your ${name} API key`, placeholder: "sk-...", secret: true },
         check: (t) => (t.length >= 8 ? undefined : `${name} rejected that key (401): it is too short to be an API key`),

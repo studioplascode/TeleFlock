@@ -29,7 +29,7 @@ export const GLOSSARY = {
   markDone: { term: "Mark done", text: "Moves a card to Done. The worktree and session stay; drag it back to reopen." },
   stale: { term: "Stale", text: "The last known state of a host that is offline. Frozen and read-only until it reconnects." },
   collab: { term: "Session sharing", text: "omp's collab: TeleFlock joins each session as a private guest on the host, so it sees it live." },
-  bridge: { term: "Bridge", text: "TeleFlock's omp extension. With it, model, queue and tree controls are exact instead of typed keystrokes." },
+  bridge: { term: "TeleFlock bridge", text: "TeleFlock's omp extension. Sessions that load it show up live by themselves, with exact controls (model, queue, tree) instead of typed keystrokes." },
   hostd: { term: "tf-hostd", text: "The small helper TeleFlock installs in ~/.teleflock on each host. It talks to herdr and omp for the app." },
   tinyModel: { term: "Tiny model", text: "omp's tiny model role (modelRoles.tiny). TeleFlock asks it to name branches and agents and to draft messages." },
 } as const satisfies Record<string, { term: string; text: string }>;

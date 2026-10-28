@@ -56,6 +56,8 @@ export interface McpHostEnv {
   ompVersion(): string | undefined;
   /** Demo knob (`?demo&mcp=…`); read from the page URL when absent. */
   knob?: "empty" | "broken" | "error" | null;
+  /** Whether a folder exists on the host (absent: every one does); hostd answers `not_found` for one that doesn't. */
+  folderExists?(path: string): boolean;
 }
 
 const CHECK_MS = 1200;
@@ -574,7 +576,15 @@ export class DemoMcp {
       },
     );
     this.disabledServers.add("linear");
-    if (this.knob === "broken") this.fileErrors.push({ path: `${h}/.codeium/windsurf/mcp_config.json`, message: "Expected ',' or '}' after property value in JSON at position 214 (line 9 column 5)" });
+    if (this.knob === "broken") {
+      this.fileErrors.push({ path: `${h}/.codeium/windsurf/mcp_config.json`, message: "Expected ',' or '}' after property value in JSON at position 214 (line 9 column 5)" });
+      // omp worked until two hours ago: that check's statuses stay; every check since fails.
+      const at = this.env.clock.now() - 2 * 60 * 60_000;
+      for (const r of this.checkable(undefined)) {
+        const o = this.simulate(r.entry.server, r.id);
+        this.results.set(r.id, { fingerprint: this.fingerprint(r), status: o.status, error: o.error, tools: o.tools, serverInfo: o.serverInfo, checkedAt: at });
+      }
+    }
   }
 
   // ---------------------------------------------------------------- resolution
@@ -584,6 +594,9 @@ export class DemoMcp {
     if (cwd === undefined || cwd === null) return undefined;
     if (typeof cwd !== "string" || !cwd.startsWith("/")) throw apiError("invalid_params", `cwd: \`${String(cwd)}\` is not an absolute path`);
     const trimmed = cwd.replace(/\/+$/, "") || "/";
+    if (this.env.folderExists && !this.env.folderExists(trimmed)) {
+      throw apiError("not_found", `${cwd}: No such file or directory (os error 2)`, { hint: "The folder is gone from the host: pick another project." });
+    }
     return trimmed === this.env.home ? undefined : trimmed;
   }
 
@@ -643,10 +656,10 @@ export class DemoMcp {
     const c = this.ctx(cwd);
     const now = this.env.clock.now();
     if (!c.running) {
+      // A failed check's error stays until one succeeds (hostd's slot), the banner with it.
       c.running = true;
       c.startedAt = now;
       c.finishedAt = undefined;
-      c.error = undefined;
       c.pending.clear();
     }
     for (const r of servers) c.pending.add(r.id);
@@ -665,6 +678,7 @@ export class DemoMcp {
         const o = this.simulate(r.entry.server, r.id);
         this.results.set(r.id, { fingerprint: this.fingerprint(r), status: o.status, error: o.error, tools: o.tools, serverInfo: o.serverInfo, checkedAt: now });
       }
+      c.error = undefined;
     }
     c.running = false;
     c.finishedAt = now;
@@ -1104,6 +1118,28 @@ function skipNote(server: McpServerDraft, name: string): string | undefined {
 }
 
 const SECRET_FLAG = /^(--?[\w.-]*)(=(.*))?$/s;
+const URL_ARG = /^[a-z][a-z0-9+.-]*:\/\//i;
+/** hostd's `is_reference`: `${VAR}` (after an optional scheme word) or `!command` holds no secret itself. */
+const REFERENCE = /^\s*(!|((bearer|basic|token) )?\$\{[A-Za-z_]\w*\}\s*$)/i;
+
+/** `Bearer sk-…` → `Bearer ••••••••` (the scheme stays readable), else the mask. */
+function maskedToken(v: string): string {
+  const m = /^(bearer |basic |token )\S/i.exec(v);
+  return m ? `${v.slice(0, (m[1] as string).length)}${DEMO_SECRET_MASK}` : DEMO_SECRET_MASK;
+}
+
+/** hostd's `mask_plain`: a URL's password and secret query values, a credential header line, a bare bearer token, a credential NAME=value. */
+function maskPlain(a: string): string | undefined {
+  if (URL_ARG.test(a)) {
+    const m = maskUrl(a);
+    return m !== a ? m : undefined;
+  }
+  const h = /^([A-Za-z0-9_-]+):(\s*)(.*)$/s.exec(a);
+  if (h) return h[3] && secretName(h[1] as string) && !REFERENCE.test(h[3]) ? `${h[1]}:${h[2]}${maskedToken(h[3])}` : undefined;
+  if (/^(bearer|basic|token) \S+$/i.test(a) && !REFERENCE.test(a)) return maskedToken(a);
+  const e = /^([A-Za-z_]\w*)=(.+)$/s.exec(a);
+  return e && secretName(e[1] as string) && !REFERENCE.test(e[2] as string) ? `${e[1]}=${DEMO_SECRET_MASK}` : undefined;
+}
 
 function maskArgs(args: readonly string[]): string[] {
   const out: string[] = [];
@@ -1112,10 +1148,12 @@ function maskArgs(args: readonly string[]): string[] {
     const m = SECRET_FLAG.exec(a);
     const prev = i > 0 ? (args[i - 1] as string) : "";
     const pm = SECRET_FLAG.exec(prev);
+    const value = m && m[2] !== undefined ? maskPlain(m[3] ?? "") : undefined;
     if (m && m[2] !== undefined && secretName(m[1] ?? "")) out.push(`${m[1]}=${DEMO_SECRET_MASK}`);
+    else if (m && value) out.push(`${m[1]}=${value}`);
     else if (pm && pm[2] === undefined && secretName(pm[1] ?? "") && !a.startsWith("-")) out.push(DEMO_SECRET_MASK);
     else if (a.trim().startsWith("{")) out.push(maskJson(a));
-    else out.push(a);
+    else out.push(maskPlain(a) ?? a);
   }
   return out;
 }
@@ -1189,17 +1227,26 @@ function unmaskDraft(d: McpServerDraft, old: McpServerDraft | undefined): McpSer
 
 function unmaskArg(a: string, i: number, args: readonly string[], old: readonly string[]): string {
   if (!a.includes(DEMO_SECRET_MASK)) return a;
-  const m = SECRET_FLAG.exec(a);
-  if (m && m[3] === DEMO_SECRET_MASK) {
-    const hit = old.find((x) => x.startsWith(`${m[1]}=`));
-    if (!hit) masked(`arguments: enter the hidden value of argument ${i + 1} again`, "Its saved value is hidden.");
-    return hit;
-  }
+  const hidden = () => masked(`arguments: enter the hidden value of argument ${i + 1} again`, "Its saved value is hidden.");
+  // Unchanged: the stored argument listed the same way (same place, else anywhere).
+  const shown = maskArgs(old);
+  const same = shown[i] === a ? i : shown.indexOf(a);
+  if (same >= 0) return old[same] as string;
+  const pre = a.endsWith(DEMO_SECRET_MASK) ? a.slice(0, -DEMO_SECRET_MASK.length) : undefined;
+  if (pre?.endsWith("=")) return old.find((x) => x.startsWith(pre)) ?? hidden();
   if (a === DEMO_SECRET_MASK) {
     const flag = args[i - 1] ?? "";
     const j = old.indexOf(flag);
-    if (j < 0 || j + 1 >= old.length) masked(`arguments: enter the hidden value of argument ${i + 1} again`, "Its saved value is hidden.");
+    if (j < 0 || j + 1 >= old.length) hidden();
     return old[j + 1] as string;
+  }
+  // An edited address: its hidden password and query values from a stored address.
+  if (URL_ARG.test(a)) {
+    for (const o of [old[i], ...old]) {
+      const u = o && URL_ARG.test(o) ? unmaskUrl(a, o) : a;
+      if (!u.includes(DEMO_SECRET_MASK)) return u;
+    }
+    hidden();
   }
   if (a.trim().startsWith("{")) {
     try {
@@ -1216,7 +1263,7 @@ function unmaskArg(a: string, i: number, args: readonly string[], old: readonly 
       return a;
     }
   }
-  return a;
+  return hidden();
 }
 
 function unmaskUrl(url: string, old: string | undefined): string {

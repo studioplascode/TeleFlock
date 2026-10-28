@@ -6,7 +6,7 @@
 //! load unchanged, and older builds ignore the fields they don't know.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -229,6 +229,11 @@ impl Persist {
 
     pub fn read<R>(&self, f: impl FnOnce(&PersistData) -> R) -> R {
         f(&self.data.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// tf-hostd's home: the directory `state.json` is in, where the other stores live too.
+    pub fn home(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new(""))
     }
 
     /// Per-herdr-session view (mutating).

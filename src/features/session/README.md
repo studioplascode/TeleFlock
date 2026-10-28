@@ -28,3 +28,12 @@ snapshot `session.open` returns, the transcript shows under a "Done and closed" 
 (`parked`), `ParkedNotice` (also used by the terminal view) explains it and offers Resume / Terminal. The composer
 keeps working on a parked agent: sending calls `agent.prompt` (the host resumes it with the prompt), the composer
 says "Resuming…" (`useResuming`) until the new agent appears, and the core redirects the route to it.
+
+Transcript (`transcript/Transcript.tsx`): a virtualised list (TanStack Virtual) that sizes rows it hasn't rendered
+yet from `transcript/estimate.ts` (`estimateRowHeight`, tested): per row from its content (a collapsed read / grep
+call is a one-line card, open views by their capped bodies, text by its wrapped lines; phone metrics when dense),
+so the scrollbar stays put while scrolling up measures older rows in (`?demo&long=2000`, production build: the
+scroll height drifted −18.5% with 27 jumps up to 24k px before; +2.2% and no jump over 134 px after).
+
+Toasts keep clear of the composer (`data-toast-anchor`; desktop only where it runs under the toast stack) and, on
+desktop, of an open ask card, which calls `toastAnchorsChanged()` once it has landed or gone.

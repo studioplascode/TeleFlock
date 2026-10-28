@@ -282,7 +282,58 @@ fn json_object_arg(arg: &str) -> Option<J> {
     arg.trim_start().starts_with('{').then(|| json::parse(arg).ok()).flatten().filter(|j| matches!(j, J::Obj(_)))
 }
 
-/// Arguments with secret flag values and secret JSON keys masked.
+/// `scheme://…` (a URL argument, such as a database address).
+fn is_url(arg: &str) -> bool {
+    arg.split_once("://").is_some_and(|(scheme, _)| {
+        let mut c = scheme.chars();
+        c.next().is_some_and(|f| f.is_ascii_alphabetic()) && c.all(|x| x.is_ascii_alphanumeric() || matches!(x, '+' | '-' | '.'))
+    })
+}
+
+/// A token value with its scheme kept readable: `Bearer sk-…` → `Bearer MASK`, else `MASK`.
+fn masked_token(value: &str) -> String {
+    for scheme in ["Bearer ", "Basic ", "Token "] {
+        if value.get(..scheme.len()).is_some_and(|p| p.eq_ignore_ascii_case(scheme)) && value.len() > scheme.len() {
+            return format!("{}{MASK}", &value[..scheme.len()]);
+        }
+    }
+    MASK.to_string()
+}
+
+/// The secret parts of a plain argument masked (`None`: nothing to mask): the password and secret
+/// query values of a URL (`postgresql://app:pw@db/app`), the value of a credential header line
+/// (`Authorization: Bearer sk-…`, as `mcp-remote --header` takes it), a bare `Bearer sk-…` token
+/// and the value of a credential `NAME=value` (as `docker run -e` takes it).
+fn mask_plain(arg: &str) -> Option<String> {
+    if is_url(arg) {
+        let shown = mask_url(arg);
+        return (shown != arg).then_some(shown);
+    }
+    if let Some((name, value)) = arg.split_once(':')
+        && !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        let v = value.trim_start();
+        let pad = &value[..value.len() - v.len()];
+        return is_secret(name, v).then(|| format!("{name}:{pad}{}", masked_token(v)));
+    }
+    // `Bearer sk-…`: a scheme word and one token.
+    let token = masked_token(arg);
+    if token != MASK && arg.split_whitespace().count() == 2 && is_secret("authorization", arg) {
+        return Some(token);
+    }
+    if let Some((name, value)) = arg.split_once('=') {
+        let mut c = name.chars();
+        let env_name = c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_');
+        if env_name && is_secret(name, value) {
+            return Some(format!("{name}={MASK}"));
+        }
+    }
+    None
+}
+
+/// Arguments with their secrets masked: the value of secret flags (`--token=…`, `--api-key …`),
+/// secret keys of a JSON object argument, and the secret parts of plain arguments ([`mask_plain`]).
 pub fn mask_args(args: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(args.len());
     let mut mask_next = false;
@@ -293,17 +344,25 @@ pub fn mask_args(args: &[String]) -> Vec<String> {
         }
         if let Some(name) = flag_name(a) {
             if let Some((n, v)) = name.split_once('=') {
+                let flag = &a[..a.len() - v.len() - 1];
                 if is_secret(n, v) {
-                    out.push(format!("{}={MASK}", &a[..a.len() - v.len() - 1]));
+                    out.push(format!("{flag}={MASK}"));
+                    continue;
+                }
+                if let Some(shown) = mask_plain(v) {
+                    out.push(format!("{flag}={shown}"));
                     continue;
                 }
             } else if secret_name(name) {
                 mask_next = true;
             }
-        } else if let Some(mut j) = json_object_arg(a)
-            && mask_json(&mut j)
-        {
-            out.push(json::compact(&j));
+        } else if let Some(mut j) = json_object_arg(a) {
+            if mask_json(&mut j) {
+                out.push(json::compact(&j));
+                continue;
+            }
+        } else if let Some(shown) = mask_plain(a) {
+            out.push(shown);
             continue;
         }
         out.push(a.clone());
@@ -345,6 +404,13 @@ pub fn unmask_args(draft: &[String], stored: &[String]) -> Result<Vec<String>, A
             && let Some(v) = stored.get(k + 1)
         {
             out.push(v.clone());
+            continue;
+        }
+        // An edited URL argument: its hidden password and query values from a stored URL argument.
+        if is_url(a)
+            && let Some(v) = (i..stored.len()).chain(0..i.min(stored.len())).filter(|&k| is_url(&stored[k])).find_map(|k| unmask_url(a, Some(&stored[k])).ok())
+        {
+            out.push(v);
             continue;
         }
         // An edited JSON argument: fill its masked keys from a stored JSON argument.
@@ -465,7 +531,66 @@ mod tests {
 
     #[test]
     fn plain_arguments_are_untouched() {
-        let args: Vec<String> = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/My Docs", "--port", "8080"].map(String::from).to_vec();
+        let args: Vec<String> =
+            ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/My Docs", "--port", "8080", "C:\\Users\\me", "localhost:5432", "https://mcp.example.com/mcp", "MODE=fast", "Bearer"]
+                .map(String::from)
+                .to_vec();
         assert_eq!(mask_args(&args), args);
+    }
+
+    #[test]
+    fn secrets_in_plain_arguments_are_masked_and_restored() {
+        let stored: Vec<String> = [
+            "-y",
+            "@modelcontextprotocol/server-postgres",
+            "postgresql://app:hunter2@db/app?sslmode=require&password=pw2",
+            "--db-url",
+            "postgres://u:s3cret@h/db",
+            "--header",
+            "Authorization: Bearer sk-live-1",
+            "--header=X-Api-Key:k-2",
+            "Bearer tok-3",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_4",
+            "Authorization: Bearer ${TOKEN}",
+            "postgres://u:${PW}@h/db",
+        ]
+        .map(String::from)
+        .to_vec();
+        let shown = mask_args(&stored);
+        assert_eq!(
+            shown,
+            [
+                "-y".to_string(),
+                "@modelcontextprotocol/server-postgres".into(),
+                format!("postgresql://app:{MASK}@db/app?sslmode=require&password={MASK}"),
+                "--db-url".into(),
+                format!("postgres://u:{MASK}@h/db"),
+                "--header".into(),
+                format!("Authorization: Bearer {MASK}"),
+                format!("--header=X-Api-Key:{MASK}"),
+                format!("Bearer {MASK}"),
+                "-e".into(),
+                format!("GITHUB_PERSONAL_ACCESS_TOKEN={MASK}"),
+                "Authorization: Bearer ${TOKEN}".into(),
+                "postgres://u:${PW}@h/db".into(),
+            ],
+            "references stay visible"
+        );
+        for secret in ["hunter2", "pw2", "s3cret", "sk-live-1", "k-2", "tok-3", "ghp_4"] {
+            assert!(!shown.join(" ").contains(secret), "{secret} shown");
+        }
+        assert_eq!(unmask_args(&shown, &stored).unwrap(), stored, "unchanged args restore verbatim");
+        // An edited address keeps its hidden password; a moved `NAME=value` keeps its value.
+        let mut edited = shown.clone();
+        edited[4] = format!("postgres://u:{MASK}@h2/db");
+        edited.swap(9, 10);
+        let back = unmask_args(&edited, &stored).unwrap();
+        assert_eq!(back[4], "postgres://u:s3cret@h2/db");
+        assert_eq!(back[9], "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_4");
+        // A hidden header value can't move to another header.
+        let mut renamed = shown.clone();
+        renamed[6] = format!("X-Other: Bearer {MASK}");
+        assert!(unmask_args(&renamed, &stored).is_err());
     }
 }

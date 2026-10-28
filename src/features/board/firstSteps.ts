@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getAgentViews, getRoute, getWorkspacesSnapshot, useActivity, useHostState, useHosts, useUi } from "@/core";
 import type { HostActivityEvent } from "@/core";
+import { setupGap } from "./setupGap";
 
 /*
  * First steps (FirstRun P10): a self-retiring checklist in the bento row, ticked by real state changes,
@@ -188,7 +189,7 @@ export function useFirstStepsView(): FirstStepsView | null {
 
   useEffect(() => {
     if (!fs.realHost || fs.realRetired || !realState) return;
-    if (realState.info.setup.globalSharing && realState.info.setup.herdrIntegration) fs.tickReal("setup");
+    if (setupGap(realState.info.setup) === null) fs.tickReal("setup");
     if (realState.agents.length > 0) fs.tickReal("agent");
   }, [fs, realState]);
 

@@ -8,7 +8,7 @@ import type { AccountsSnapshot, AuthFlow } from "@/core/gen";
 import { Button, cn, EmptyState, IconButton, PageHeader, Select, Skeleton, spring, Spinner, Tile, useIsMobile } from "@/design";
 import { isFinalFlow } from "@/features/auth";
 import { MobileHeader } from "@/features/shell/MobileHeader";
-import { OmpAreaNav } from "@/features/shell/OmpArea";
+import { OmpAreaFrame } from "@/features/shell/OmpArea";
 import { AccountGroups } from "./AccountGroups";
 import { LinkAccountSheet } from "./LinkAccountSheet";
 import { ProviderMark } from "./ProviderMark";
@@ -117,6 +117,8 @@ export function AccountsView({ hostId: routeHost, link }: { hostId?: string; lin
   const host = options.find((o) => o.value === hostId)?.label ?? hostId ?? "this host";
   const { snapshot, error, loading, reload } = useHostAccounts(online ? hostId : undefined);
   const [sheet, setSheet] = useState<SheetState>({ n: 0, open: false });
+  /** Links the sheet ran on this host: closed with it (cancelled, or over), never offered by the banner. */
+  const [ran, setRan] = useState<string[]>([]);
   const [spinning, setSpinning] = useState(false);
 
   const openLink = (provider?: string, flowId?: string) => setSheet((s) => ({ n: s.n + 1, open: true, provider, flowId }));
@@ -132,9 +134,8 @@ export function AccountsView({ hostId: routeHost, link }: { hostId?: string; lin
 
   const closeSheet = (open: boolean) => {
     if (open) return;
+    // A sign-in still running is cancelled as the sheet goes; its `onSettled` reads the list again once the host has it.
     setSheet((s) => ({ ...s, open: false }));
-    // Its sign-in was cancelled or finished: the running-link banner must not offer it again.
-    if (hostId) void loadAccounts(hostId);
   };
   const pickHost = (id: string) => {
     setLast(id);
@@ -146,7 +147,7 @@ export function AccountsView({ hostId: routeHost, link }: { hostId?: string; lin
     if (hostId) void loadAccounts(hostId, true).finally(() => setSpinning(false));
   };
 
-  const running: AuthFlow[] = sheet.open ? [] : (snapshot?.flows ?? []).filter((f) => f.kind === "account" && !isFinalFlow(f));
+  const running: AuthFlow[] = sheet.open ? [] : (snapshot?.flows ?? []).filter((f) => f.kind === "account" && !isFinalFlow(f) && !ran.includes(f.flowId));
   const linked: Record<string, number> = {};
   for (const a of snapshot?.accounts ?? []) if (!a.disabled) linked[a.provider] = (linked[a.provider] ?? 0) + 1;
   const active = (snapshot?.accounts ?? []).filter((a) => !a.disabled);
@@ -156,15 +157,24 @@ export function AccountsView({ hostId: routeHost, link }: { hostId?: string; lin
     <Select aria-label="Host" className={cn("h-10", mobile ? "w-full" : "w-52")} value={hostId} onValueChange={pickHost} options={options} />
   );
   const refreshButton = snapshot && (
-    <IconButton label="Read omp's accounts and limits again" onClick={refresh} disabled={spinning}>
+    <IconButton label="Read omp's accounts and limits again" size={mobile ? "lg" : "md"} onClick={refresh} disabled={spinning}>
       <RefreshCw className={cn((spinning || loading) && "animate-spin tf-keep")} />
     </IconButton>
   );
-  const linkButton = snapshot && snapshot.accounts.length > 0 && (
-    <Button variant="primary" icon={<Plus />} onClick={() => openLink()} className={cn(mobile && "w-full")}>
-      Link account
-    </Button>
-  );
+  // Until the first account exists the hero below is the call to action; then the page's primary
+  // action, in the header on phones (the "+" MCP servers and Hosts have there too).
+  const linkButton =
+    snapshot &&
+    snapshot.accounts.length > 0 &&
+    (mobile ? (
+      <IconButton label="Link account" size="lg" variant="primary" onClick={() => openLink()}>
+        <Plus />
+      </IconButton>
+    ) : (
+      <Button variant="primary" icon={<Plus />} onClick={() => openLink()}>
+        Link account
+      </Button>
+    ));
 
   let body: ReactNode;
   if (!hostId) {
@@ -276,25 +286,36 @@ export function AccountsView({ hostId: routeHost, link }: { hostId?: string; lin
       linked={linked}
       provider={sheet.provider}
       flowId={sheet.flowId}
+      onFlow={(id) => setRan((ids) => (ids.includes(id) ? ids : [...ids, id]))}
+      onSettled={() => void loadAccounts(hostId)}
     />
   );
 
   if (mobile)
     return (
       <div className="flex min-h-full flex-col">
-        <MobileHeader title="Accounts" subtitle={host} back actions={refreshButton} />
-        <div className="flex flex-col gap-3 px-3 pt-1 pb-6">
-          <OmpAreaNav current="accounts" hostId={hostId} />
+        <MobileHeader
+          title="Accounts"
+          subtitle={host}
+          back
+          actions={
+            snapshot ? (
+              <>
+                {refreshButton}
+                {linkButton}
+              </>
+            ) : undefined
+          }
+        />
+        <OmpAreaFrame current="accounts" hostId={hostId} mobile>
           {hostPicker}
-          {linkButton}
           {body}
-        </div>
+        </OmpAreaFrame>
         {sheetEl}
       </div>
     );
   return (
-    <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-5 px-8 pt-7 pb-12">
-      <OmpAreaNav current="accounts" hostId={hostId} className="-mb-2" />
+    <OmpAreaFrame current="accounts" hostId={hostId} mobile={false}>
       <PageHeader
         kicker={
           <span className="inline-flex items-center gap-1.5">
@@ -314,6 +335,6 @@ export function AccountsView({ hostId: routeHost, link }: { hostId?: string; lin
       />
       {body}
       {sheetEl}
-    </div>
+    </OmpAreaFrame>
   );
 }

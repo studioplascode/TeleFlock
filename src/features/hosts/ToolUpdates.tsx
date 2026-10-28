@@ -4,6 +4,7 @@ import { Badge, Button, cn, formatAge, Spinner, Switch, toast, useNow } from "@/
 import { core, useHostState } from "@/core";
 import type { ToolUpdate, ToolUpdates } from "@/core/gen";
 import { errorMessage, isApiError } from "@/features/shell/errors";
+import { Ticks } from "@/features/shell/Ticks";
 
 const HOUR = 3_600_000;
 
@@ -39,21 +40,12 @@ function Message({ t }: { t: ToolUpdate }) {
   if (!t.error && !t.note) return null;
   const Icon = t.error ? AlertTriangle : Info;
   // hostd quotes commands in backticks (`herdr update`, `brew upgrade herdr`).
-  const parts = (t.error ?? t.note ?? "").split("`");
   return (
     <li className={cn("flex min-w-0 items-start gap-1.5", t.error ? "text-warn" : "text-mute")}>
       <Icon className="mt-px size-3.5 shrink-0" />
       <span className="min-w-0 break-words">
         <span className="font-semibold">{t.tool}: </span>
-        {parts.map((p, i) =>
-          i % 2 === 1 ? (
-            <code key={i} className="rounded-xs bg-white/6 px-1 font-mono text-2xs text-ink-2">
-              {p}
-            </code>
-          ) : (
-            p
-          ),
-        )}
+        <Ticks text={t.error ?? t.note ?? ""} />
       </span>
     </li>
   );

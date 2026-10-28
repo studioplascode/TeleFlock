@@ -4,14 +4,14 @@ import { core, navigate, toApiError, useHostIds, useHosts, useHostState } from "
 import type { McpServer } from "@/core/gen";
 import { Button, cn, EmptyState, formatAge, IconButton, PageHeader, Select, type SelectOption, Skeleton, Spinner, toast, useIsMobile, useNow } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
-import { OmpAreaNav } from "@/features/shell/OmpArea";
+import { OmpAreaFrame } from "@/features/shell/OmpArea";
 import { VIEWS } from "@/features/shell/vocab";
 import { confirmAction } from "@/features/workspace/shared/overlays";
 import { basename, tildify } from "@/features/workspace/shared/paths";
-import { groupServers, plural, projectFolders, scopeOf, serverKey, shadowedBy } from "./model";
+import { groupServers, lastGoodCheck, plural, projectFolders, type RowTest, scopeOf, serverKey, shadowedBy } from "./model";
 import { Banner, OutdatedHost } from "./parts";
 import { type EditorTab, ServerEditor } from "./ServerEditor";
-import { type RowAction, type RowTest, ServerRow } from "./ServerRow";
+import { type RowAction, ServerRow } from "./ServerRow";
 import { SignInSheet, type SignInTarget } from "./SignIn";
 import { useMcpPrefs } from "./store";
 import { useMcp } from "./useMcp";
@@ -40,7 +40,8 @@ function GroupHeader({ title, detail, count }: { title: string; detail?: ReactNo
   );
 }
 
-function CheckLine({ running, count, finishedAt, ompVersion }: { running: boolean; count: number; finishedAt?: number; ompVersion?: string }) {
+/** "Checked 2m ago · omp 18.13.2"; after a failed check, when it failed and when the last good one was. */
+function CheckLine({ running, count, finishedAt, failed, lastGood, ompVersion }: { running: boolean; count: number; finishedAt?: number; failed: boolean; lastGood?: number; ompVersion?: string }) {
   const now = useNow(30_000);
   if (running) {
     return (
@@ -49,10 +50,20 @@ function CheckLine({ running, count, finishedAt, ompVersion }: { running: boolea
       </span>
     );
   }
+  const version = ompVersion && ` · omp ${ompVersion}`;
+  if (failed) {
+    return (
+      <span className="truncate text-2xs font-semibold text-mute-2">
+        <span className="text-[#ff8aa5]">Check failed{finishedAt !== undefined && ` ${formatAge(now - finishedAt)}`}</span>
+        {lastGood !== undefined && ` · last good one ${formatAge(now - lastGood)}`}
+        {version}
+      </span>
+    );
+  }
   return (
     <span className="truncate text-2xs font-semibold text-mute-2">
       {finishedAt !== undefined ? `Checked ${formatAge(now - finishedAt)}` : "Not checked yet"}
-      {ompVersion && ` · omp ${ompVersion}`}
+      {version}
     </span>
   );
 }
@@ -69,6 +80,7 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
   const workspaces = hostState?.workspaces;
   const picked = useMcpPrefs((s) => (hostId ? s.folders[hostId] : undefined));
   const setFolder = useMcpPrefs((s) => s.setFolder);
+  const forgetFolder = useMcpPrefs((s) => s.forgetFolder);
   const folders = useMemo(() => {
     const list = projectFolders(workspaces ?? [], home);
     // A folder picked earlier stays offered while its workspace is closed.
@@ -83,17 +95,28 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
     if (routeHost && routeHost === hostId) setLastHost(routeHost);
   }, [routeHost, hostId, setLastHost]);
 
+  // A remembered folder that is gone from the host (a deleted worktree): back to All projects.
+  const goneError = q.error?.code === "not_found" ? q.error : undefined;
+  useEffect(() => {
+    if (!goneError || !hostId || !cwd) return;
+    forgetFolder(hostId, cwd);
+    toast({ title: `${basename(cwd)} is gone from ${hostName}`, description: "Showing the MCP servers of all projects." });
+  }, [goneError, hostId, cwd, hostName, forgetFolder]);
+
   // Rows, tests and sheets belong to one host and folder.
   const viewKey = `${hostId ?? ""}\u0000${cwd ?? ""}`;
   const [shownKey, setShownKey] = useState(viewKey);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [tests, setTests] = useState<Record<string, RowTest>>({});
+  /** The row just shown (saved, or opened from the add sheet): it scrolls into view and lights up. */
+  const [flash, setFlash] = useState<{ key: string; n: number } | null>(null);
   const [editor, setEditor] = useState<{ n: number; server?: McpServer; tab?: EditorTab; open: boolean } | null>(null);
   const [signIn, setSignIn] = useState<{ n: number; target: SignInTarget; open: boolean } | null>(null);
   if (shownKey !== viewKey) {
     setShownKey(viewKey);
     setExpanded(new Set());
     setTests({});
+    setFlash(null);
     setEditor(null);
     setSignIn(null);
   }
@@ -108,6 +131,10 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
       }),
     [],
   );
+  const reveal = useCallback((key: string) => {
+    setExpanded((x) => (x.has(key) ? x : new Set(x).add(key)));
+    setFlash((f) => ({ key, n: (f?.n ?? 0) + 1 }));
+  }, []);
   const { mutate, setEnabled, reload } = q;
 
   const onAction = useCallback(
@@ -122,22 +149,25 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
         case "signIn":
           setSignIn((x) => ({ n: (x?.n ?? 0) + 1, target: { name: s.name, scope: scopeOf(s), cwd }, open: true }));
           return;
-        case "test":
+        case "test": {
+          // The outcome stands in for the row's status until a check that ends later replaces it.
+          const since = s.checkedAt;
           setExpanded((x) => (x.has(key) ? x : new Set(x).add(key)));
-          setTests((t) => ({ ...t, [key]: { startedAt: Date.now() } }));
+          setTests((t) => ({ ...t, [key]: { startedAt: Date.now(), since } }));
           core
             .host(hostId)
             .call("mcp.test", ref)
             .then(
-              (result) => setTests((t) => ({ ...t, [key]: { result } })),
+              (result) => setTests((t) => ({ ...t, [key]: { result, at: Date.now(), since } })),
               (e: unknown) => {
                 const err = toApiError(e);
                 setTests((t) => ({ ...t, [key]: { error: [err.message, err.hint].filter(Boolean).join(" — ") } }));
               },
             );
           return;
+        }
         case "signOut":
-          mutate((h) => h.call("mcp.signOut", ref), "Signed out").catch((e: unknown) => {
+          mutate((h) => h.call("mcp.signOut", ref), `Signed out of “${s.name}”`, "change").catch((e: unknown) => {
             toast({ title: `Couldn't sign out of “${s.name}”`, description: toApiError(e).message, status: "error" });
           });
           return;
@@ -149,7 +179,7 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
             danger: true,
           }).then((ok) => {
             if (!ok) return;
-            mutate((h) => h.call("mcp.remove", ref), "Removed").catch((e: unknown) => {
+            mutate((h) => h.call("mcp.remove", ref), `Removed “${s.name}”`, "remove").catch((e: unknown) => {
               const err = toApiError(e);
               toast({ title: `Couldn't remove “${s.name}”`, description: [err.message, err.hint].filter(Boolean).join(" — "), status: "error" });
             });
@@ -189,6 +219,11 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
   );
   const checking = !!data?.check.running;
   const canAdd = !!hostId && online && !!data;
+  // A failed check's banner carries "Check again": the header leaves it out meanwhile (one button),
+  // and so does an empty list (nothing to check).
+  const checkFailed = !!data?.check.error && online && !q.outdated;
+  const canCheck = canAdd && !checkFailed && !!data?.servers.length;
+  const lastGood = data ? lastGoodCheck(data.servers) : undefined;
 
   let body: ReactNode;
   if (!hostId) {
@@ -219,17 +254,27 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
     body = <OutdatedHost onRetry={reload} />;
   } else if (q.error && !data) {
     body = (
-      <EmptyState
-        icon={<CircleAlert />}
-        title="Couldn't read the MCP servers"
-        description={[q.error.message, q.error.hint].filter(Boolean).join(" — ")}
-        action={
-          <Button variant="secondary" icon={<RotateCw />} onClick={reload}>
-            Retry
-          </Button>
-        }
-        className="mt-8"
-      />
+      <div className="flex flex-col gap-3">
+        {scopePicker && <div className={cn("flex", mobile && "flex-col items-stretch")}>{scopePicker}</div>}
+        <EmptyState
+          icon={<CircleAlert />}
+          title="Couldn't read the MCP servers"
+          description={[q.error.message, q.error.hint].filter(Boolean).join(" — ")}
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="secondary" icon={<RotateCw />} onClick={reload}>
+                Retry
+              </Button>
+              {cwd && (
+                <Button variant="ghost" icon={<Globe2 />} onClick={() => setFolder(hostId, undefined)}>
+                  Show all projects
+                </Button>
+              )}
+            </div>
+          }
+          className="mt-5"
+        />
+      </div>
     );
   } else if (!data || !groups) {
     body = (
@@ -262,6 +307,7 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
           expanded={expanded.has(k)}
           shadowNote={shadowNotes.get(k) ?? null}
           test={tests[k]}
+          flash={flash?.key === k ? flash.n : undefined}
           home={home}
           onToggle={toggle}
           onAction={onAction}
@@ -291,9 +337,9 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
           <p className="px-1 text-2xs text-mute-2">
             {data.liveSessions > 0 ? (
               <>
-                Changes reach {plural(data.liveSessions, "running omp session")} automatically.{" "}
+                {plural(data.liveSessions, "running omp session")} {data.liveSessions === 1 ? "gets" : "get"} the changes you make here without a restart. Changed a config file by hand?{" "}
                 <button type="button" onClick={q.reloadSessions} className="rounded-xs font-bold text-mute underline-offset-2 focus-ring hover:text-ink hover:underline">
-                  Reload them now
+                  Reload {data.liveSessions === 1 ? "it" : "them"} now
                 </button>
               </>
             ) : (
@@ -309,9 +355,9 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
       {data.check.error && (
         <Banner
           tone="error"
-          title="The last check failed: statuses may be out of date"
+          title={lastGood !== undefined ? "The last check failed: statuses may be out of date" : "The check failed: no server has a status yet"}
           action={
-            <Button size="sm" variant="secondary" icon={<RefreshCw />} onClick={q.refresh} disabled={checking}>
+            <Button size="sm" variant="secondary" icon={<RefreshCw className={cn(checking && "animate-spin tf-keep")} />} onClick={q.refresh} disabled={checking}>
               Check again
             </Button>
           }
@@ -327,17 +373,21 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
     </div>
   );
 
-  const toolbar = data && online && !q.outdated && (
+  const toolbar = data && online && !q.outdated && (scopePicker || data.servers.length > 0) && (
     <div className={cn("flex items-center gap-3", mobile && "flex-col items-stretch gap-2")}>
       {scopePicker}
-      <div className={cn("flex min-w-0 items-center gap-2", !mobile && "ml-auto")}>
-        <CheckLine
-          running={checking}
-          count={data.servers.filter((s) => s.status === "checking").length || data.servers.filter((s) => s.enabled && !s.shadowed && s.status !== "skipped").length}
-          finishedAt={data.check.finishedAt}
-          ompVersion={data.ompVersion}
-        />
-      </div>
+      {data.servers.length > 0 && (
+        <div className={cn("flex min-w-0 items-center gap-2", !mobile && "ml-auto")}>
+          <CheckLine
+            running={checking}
+            count={data.servers.filter((s) => s.status === "checking").length || data.servers.filter((s) => s.enabled && !s.shadowed && s.status !== "skipped").length}
+            finishedAt={data.check.finishedAt}
+            failed={!!data.check.error}
+            lastGood={lastGood}
+            ompVersion={data.ompVersion}
+          />
+        </div>
+      )}
     </div>
   );
 
@@ -358,7 +408,7 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
           mutate={mutate}
           enabled={editor.server ? (q.pendingEnabled[serverKey(editor.server)] ?? data?.servers.find((x) => serverKey(x) === serverKey(editor.server as McpServer))?.enabled) : undefined}
           setEnabled={setEnabled}
-          onSignedIn={reload}
+          onReveal={reveal}
         />
       )}
       {signIn && (
@@ -383,9 +433,11 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
           actions={
             canAdd ? (
               <>
-                <IconButton label="Check every server again" size="lg" onClick={q.refresh} disabled={checking}>
-                  <RefreshCw className={cn(checking && "animate-spin tf-keep")} />
-                </IconButton>
+                {canCheck && (
+                  <IconButton label="Check every server again" size="lg" onClick={q.refresh} disabled={checking}>
+                    <RefreshCw className={cn(checking && "animate-spin tf-keep")} />
+                  </IconButton>
+                )}
                 <IconButton label="Add a server" size="lg" variant="primary" onClick={() => openEditor(undefined, "popular")}>
                   <Plus />
                 </IconButton>
@@ -393,21 +445,19 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
             ) : undefined
           }
         />
-        <div className="flex flex-col gap-3 px-3 pt-1 pb-6">
-          <OmpAreaNav current="mcp" hostId={hostId} />
+        <OmpAreaFrame current="mcp" hostId={hostId} mobile>
           {hostPicker}
           {toolbar}
           {banners}
           {body}
-        </div>
+        </OmpAreaFrame>
         {sheets}
       </div>
     );
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[1040px] flex-col gap-4 px-8 pt-7 pb-12">
-      <OmpAreaNav current="mcp" hostId={hostId} className="-mb-2" />
+    <OmpAreaFrame current="mcp" hostId={hostId} mobile={false}>
       <PageHeader
         kicker={
           <span className="inline-flex items-center gap-1.5">
@@ -415,11 +465,11 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
           </span>
         }
         title={VIEWS.mcp.label}
-        description="Tool servers omp can use on this host: add them, sign in, test them, switch them on or off. Running sessions pick up every change."
+        description="Tool servers omp can use on this host: add them, sign in, test them, switch them on or off."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {hostPicker}
-            {canAdd && refreshButton("Check again")}
+            {canCheck && refreshButton("Check again")}
             {canAdd && (
               <Button variant="primary" icon={<Plus />} onClick={() => openEditor(undefined, "popular")}>
                 Add server
@@ -427,12 +477,11 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
             )}
           </div>
         }
-        className="mb-1"
       />
       {toolbar}
       {banners}
       {body}
       {sheets}
-    </div>
+    </OmpAreaFrame>
   );
 }

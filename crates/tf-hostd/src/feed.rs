@@ -10,9 +10,14 @@
 //! on a collab room; after a frame that settles something (an entry follows it) the tail is read
 //! once nothing else is queued, and it is polled every [`TAIL_EVERY`]. Every read of the file
 //! runs on the blocking pool, outside the session lock; only applying what it read takes the lock.
-//! A gap in `seq`, a rewritten or moved file, or `agent.connect` subscribe again (a fresh
-//! resync). When the bridge goes away the replica stays (`connecting`, `bridgeLost`);
-//! [`crate::omp`]'s poller lets a published collab room take over after
+//! A gap in `seq`, a rewritten or moved file (also a resync naming a file omp wrote that is not
+//! there: omp is moving it), a file that cannot be read, or `agent.connect` while the session
+//! loads subscribe again (a fresh resync). Frames that reach a new subscription before its resync
+//! were written for the one it replaced and are dropped. Restarts in a row (each subscription
+//! between them ending within [`RESTART_SETTLED`]) pause before subscribing again: not after the
+//! first, then [`RESTART_PAUSE`], doubling. So omp does not rebuild resyncs, nor hostd re-read a
+//! large file, in a loop. When the bridge goes away the replica stays (`connecting`,
+//! `bridgeLost`); [`crate::omp`]'s poller lets a published collab room take over after
 //! [`crate::omp::BRIDGE_RETURN`], and the bridge takes the session back as soon as it returns.
 
 use std::path::{Path, PathBuf};
@@ -40,6 +45,12 @@ const TAIL_EVERY: Duration = Duration::from_millis(250);
 const RESYNC_WAIT: Duration = Duration::from_secs(30);
 /// After this many failed subscriptions in a row a published collab room may take over.
 const SUBSCRIBE_GIVE_UP: u32 = 3;
+/// The second feed restart in a row waits this long before it subscribes again, each further one
+/// twice as long, up to [`RESTART_PAUSE_MAX`]; the first one subscribes at once.
+pub(crate) const RESTART_PAUSE: Duration = Duration::from_millis(250);
+const RESTART_PAUSE_MAX: Duration = Duration::from_secs(30);
+/// A restart of a subscription that lasted this long is the first of a new run (no pause).
+const RESTART_SETTLED: Duration = Duration::from_secs(10);
 /// Largest tail of a subagent transcript rendered (`subagent.transcript`).
 const TRANSCRIPT_MAX: u64 = 64 * 1024 * 1024;
 /// How deep nested subagent transcripts are searched for (`<Id>/<Id>.<Child>.jsonl`, …).
@@ -194,9 +205,11 @@ impl Feeder {
         self.tail.is_some() && self.last_seq.is_some_and(|last| seq == last + 1) && starts_something(frame)
     }
 
-    /// A live frame. Frames before the first resync, and stale ones of an earlier subscription,
-    /// are skipped; a gap means frames were lost. When [`Self::reads_before`] says so, apply a
-    /// read of the file's tail taken after the frame arrived first ([`Self::read_then_frame`]).
+    /// A live frame of the current subscription (the driver drops a subscription's frames until
+    /// its resync is applied, see [`run`]). Frames before the first resync and ones at or before
+    /// the last applied `seq` are skipped; a gap means frames were lost. When
+    /// [`Self::reads_before`] says so, apply a read of the file's tail taken after the frame
+    /// arrived first ([`Self::read_then_frame`]).
     pub(crate) fn frame(&mut self, replica: &mut Replica, seq: u64, frame: HostFrame, now: Millis) -> Result<Update, Restart> {
         let Some(last) = self.last_seq else { return Ok(Update::default()) };
         if seq <= last {
@@ -227,6 +240,12 @@ impl Feeder {
 
     pub(crate) fn put_tail(&mut self, tail: JournalTail) {
         self.tail = Some(tail);
+    }
+
+    /// The feed has read the file at `path` (its tail saw it): a resync naming it while it is gone
+    /// comes from omp moving it, not from a session omp has yet to write.
+    pub(crate) fn has_read(&self, path: &Path) -> bool {
+        self.tail.as_ref().is_some_and(|t| t.seen() && t.path() == path)
     }
 
     /// Applies a read of the file's tail: the entries omp appended since the previous read.
@@ -371,11 +390,12 @@ pub(crate) fn reconcile(inner: &Arc<Inner>) {
             inner.forget(&s, if bye { "omp exited" } else { "omp's TeleFlock bridge did not come back" });
             continue;
         }
-        let secs = waited.as_secs();
+        // The same words on every poll: `linkSince` tells how long it has been (a counter here
+        // would send every client a board patch per poll).
         let changed = s.lock().set_link(LinkStatus::connecting(
             LinkReason::BridgeLost,
             Some(LinkVia::Bridge),
-            format!("TeleFlock's bridge in omp disconnected {secs} s ago and omp has no collab room to fall back to; waiting for the bridge to reconnect"),
+            "TeleFlock's bridge in omp disconnected and omp has no collab room to fall back to; waiting for the bridge to reconnect",
         ));
         if changed {
             let _ = inner.updates.send(OmpUpdate::Changed { session_id: s.session_id.clone() });
@@ -404,12 +424,23 @@ fn owns(st: &omp::SessionState, token: u64) -> bool {
 
 /// How a subscription ended.
 enum End {
-    /// Subscribe again (gap, rewritten file, retry requested, no resync).
+    /// Subscribe again (gap, rewritten or moved file, failed read, no resync).
     Restart(String),
+    /// Subscribe again at once: a retry was asked for while the session was loading.
+    Retry,
     /// The connection closed (`bye`: omp said it was shutting down).
     Closed { bye: bool },
     /// A newer driver or the daemon's end took over.
     Stop,
+}
+
+/// The pause before subscribing again after the `n`th restart in a row: none after the first,
+/// then [`RESTART_PAUSE`] doubling up to [`RESTART_PAUSE_MAX`].
+fn restart_pause(n: u32) -> Duration {
+    if n < 2 {
+        return Duration::ZERO;
+    }
+    RESTART_PAUSE.saturating_mul(1 << (n - 2).min(16)).min(RESTART_PAUSE_MAX)
 }
 
 /// One session's feed on bridge connection `conn`.
@@ -417,6 +448,9 @@ async fn drive(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u6
     let sid = session.session_id.clone();
     let mut feeder = Feeder::default();
     let mut failures = 0u32;
+    // Restarts in a row; each one pauses longer before the next subscription ([`restart_pause`]).
+    // A subscription that lasted RESTART_SETTLED ends the run.
+    let mut restarts = 0u32;
     loop {
         let Some(inner) = weak.upgrade() else { return };
         if session.is_closed() || inner.cancel.is_cancelled() || !current(&session, token) {
@@ -459,10 +493,14 @@ async fn drive(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u6
                 continue;
             }
         };
+        let cancel = inner.cancel.clone();
         drop(inner);
-        match run(&weak, &session, token, feed, &mut feeder).await {
-            End::Restart(why) => {
-                debug!(session = %sid, "bridge feed starts over: {why}");
+        let began = Instant::now();
+        let why = match run(&weak, &session, token, feed, &mut feeder).await {
+            End::Restart(why) => why,
+            End::Retry => {
+                debug!(session = %sid, "bridge feed starts over: a retry was requested");
+                continue;
             }
             End::Closed { bye } => {
                 if let Some(inner) = weak.upgrade() {
@@ -471,11 +509,46 @@ async fn drive(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u6
                 return;
             }
             End::Stop => return,
+        };
+        restarts = if began.elapsed() >= RESTART_SETTLED { 1 } else { restarts + 1 };
+        let pause = restart_pause(restarts);
+        debug!(session = %sid, restarts, pause_ms = pause.as_millis() as u64, "bridge feed starts over: {why}");
+        not_loaded(&weak, &session, token, &why);
+        if !pause.is_zero() {
+            tokio::select! {
+                _ = tokio::time::sleep(pause) => {}
+                // A retry asked for now (or the session's end).
+                _ = session.feed_kick.notified() => {}
+                _ = cancel.cancelled() => return,
+            }
         }
     }
 }
 
-/// Applies one subscription's messages until it ends.
+/// A subscription ended before its resync was applied: while nothing serves the session yet (the
+/// bridge is bringing it up), the link says why and that it is retried. A session the bridge
+/// served goes on showing that (live, its controls still work) until the next resync.
+fn not_loaded(weak: &Weak<Inner>, session: &OmpSession, token: u64, why: &str) {
+    let Some(inner) = weak.upgrade() else { return };
+    let changed = {
+        let mut st = session.lock();
+        owns(&st, token)
+            && matches!(st.transport, Transport::Detached)
+            && st.bridge_lost.is_none()
+            && st.set_link(LinkStatus::connecting(
+                LinkReason::Syncing,
+                Some(LinkVia::Bridge),
+                format!("TeleFlock could not load the session ({why}); retrying"),
+            ))
+    };
+    if changed {
+        let _ = inner.updates.send(OmpUpdate::Changed { session_id: session.session_id.clone() });
+    }
+}
+
+/// Applies one subscription's messages until it ends. Its resync comes first: live frames before
+/// it were written for the subscription it replaced and are dropped (applying them would read the
+/// tail of a file the resync reads again, or see a gap, and start over once more).
 async fn run(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, mut feed: LiveFeed, feeder: &mut Feeder) -> End {
     let mut tick = tokio::time::interval(TAIL_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -497,7 +570,12 @@ async fn run(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, mut feed
                 if session.is_closed() {
                     return End::Stop;
                 }
-                return End::Restart("a retry was requested".into());
+                // Asked for while the session loaded (the kick waited out the resync): this
+                // subscription serves it now, there is nothing to retry.
+                if synced {
+                    continue;
+                }
+                return End::Retry;
             }
             msg = feed.rx.recv() => msg,
             _ = std::future::ready(()), if tail_due => {
@@ -532,8 +610,11 @@ async fn run(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, mut feed
                 tail_due = false;
             }
             Some(LiveMsg::Frame { seq, frame }) => {
-                if !synced && Instant::now() >= resync_by {
-                    return End::Restart("no resync arrived".into());
+                if !synced {
+                    if Instant::now() >= resync_by {
+                        return End::Restart("no resync arrived".into());
+                    }
+                    continue;
                 }
                 // Entries omp wrote before this frame go first: read the tail now that it is here.
                 let read = if feeder.reads_before(seq, &frame) {
@@ -588,20 +669,29 @@ async fn catch_up(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, fee
 }
 
 /// A resync: the file read off the runtime, then everything applied under one lock, and the
-/// session switched over to the bridge (closing the collab guest that fed it, if any).
+/// session switched over to the bridge (closing the collab guest that fed it, if any). The row
+/// notes kept for the session go first ([`omp::load_notes`]): the rows the resync rebuilds from
+/// the file then come out as they were built live.
 async fn apply_resync(inner: &Arc<Inner>, session: &Arc<OmpSession>, token: u64, resync: Resync, feeder: &mut Feeder) -> Result<(), String> {
+    omp::load_notes(inner, session).await;
     let bridged = inner.bridge.by_session(&session.session_id);
     let path = resync.session_file.clone().or_else(|| bridged.as_ref().and_then(|b| b.session_file.clone())).map(PathBuf::from);
     let origin = Origin { session_id: session.session_id.clone(), cwd: bridged.as_ref().map(|b| b.cwd.clone()).unwrap_or_default() };
     let caps = bridged.map(|b| b.caps).unwrap_or_default();
     let read = match path.clone() {
-        Some(path) => {
+        Some(file) => {
             let last = resync.last_entry_id.clone();
             let started = Instant::now();
-            let read = tokio::task::spawn_blocking(move || journal::read_full(&path, last.as_deref()))
+            let read = tokio::task::spawn_blocking(move || journal::read_full(&file, last.as_deref()))
                 .await
                 .map_err(|e| format!("session file read failed: {e}"))?
                 .map_err(|e| format!("cannot read the session file: {e}"))?;
+            // omp wrote this file (the bridge names its last entry, or this feed read it) and it is
+            // gone: omp is moving it (`moveTo` renames it before the session points at the new
+            // path). The replica stays as it is; a later resync names the new path.
+            if !read.exists() && (resync.last_entry_id.is_some() || feeder.has_read(read.tail.path())) {
+                return Err(Restart::Missing.to_string());
+            }
             if resync.last_entry_id.is_some() && !read.found {
                 warn!(session = %session.session_id, "resync entry not in the session file; taking all of it");
             }
@@ -1155,5 +1245,97 @@ mod tests {
         let order: Vec<String> = rows(&replica).iter().map(|i| i.id().to_owned()).collect();
         let (mode, user) = (order.iter().position(|id| id == "maa11bb22"), order.iter().position(|id| id.starts_with('u')));
         assert!(mode.is_some() && user.is_some() && mode < user, "{order:?}");
+    }
+
+    /// The notes an update took, as [`omp::publish`] persists them.
+    fn noted(up: &Update) -> Vec<(String, tf_collab::replica::RowNote)> {
+        up.signals
+            .iter()
+            .filter_map(|s| match s {
+                tf_collab::Signal::Noted { id, note } => Some((id.clone(), note.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_built_live_equal_rows_rebuilt_after_a_restart() {
+        // The recorded run (bridge 2.0.0, omp 18.13.2) with omp's session file growing as omp
+        // wrote it; the desktop app sent the first prompt. What the replica noted goes to the notes
+        // store as tf-hostd keeps it. A tf-hostd started afterwards rebuilds the session from the
+        // file and that store: every row (notices are live-only) is the same, field for field, so
+        // a client holding the rows by hash keeps every one of them.
+        let lines = lines();
+        let hello = lines.iter().find(|l| l["t"] == "hello").unwrap();
+        let origin = Origin { session_id: hello["sessionId"].as_str().unwrap().into(), cwd: hello["cwd"].as_str().unwrap().into() };
+        let sid = origin.session_id.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes");
+        let mut file = GrowingFile::new(dir.path().join("session.jsonl"), SESSION_FILE);
+        let prompt = "Run `echo bridge-ok` with the bash tool, then reply with just: done";
+        let mut replica = Replica::new(sid.clone());
+        replica.expect_prompt(prompt, "desktop");
+        let (mut feeder, mut mirror) = (Feeder::default(), Mirror::default());
+        let mut t = 1_800_000_000_000;
+        for l in &lines {
+            t += 50;
+            let up = match l["t"].as_str().unwrap() {
+                "resync" => feeder.resync(&mut replica, resync_of(l), journal::read_full(file.path(), None).unwrap(), &origin, t),
+                "live" => {
+                    let up = step(&mut feeder, &mut replica, l["seq"].as_u64().unwrap(), HostFrame::from_value(l["f"].clone()), t).unwrap();
+                    // Custom messages are `custom_message` entries: written with the next message.
+                    if let Some(message) = fixture::ended_message(&l["f"]).filter(|m| m["role"] != "custom") {
+                        file.message_ended(message);
+                    }
+                    up
+                }
+                _ => continue,
+            };
+            crate::notes::append(&notes, &sid, &noted(&up)).unwrap();
+            mirror.apply(&up.events);
+        }
+        // What omp wrote after the last frame.
+        let last = fixture::lines(SESSION_FILE).last().unwrap()["id"].as_str().unwrap().to_owned();
+        file.through(&last);
+        let read = read_now(&mut feeder);
+        let up = feeder.apply_read(&mut replica, read, t).unwrap();
+        crate::notes::append(&notes, &sid, &noted(&up)).unwrap();
+        mirror.apply(&up.events);
+        check_mirror(&replica, &mirror);
+
+        // tf-hostd restarted: the session's notes from the store, then the bridge's resync (the file
+        // through its last entry, omp idle).
+        let restart = |notes: Option<&Path>| {
+            let mut fresh = Replica::new(sid.clone());
+            if let Some(dir) = notes {
+                fresh.keep_notes(crate::notes::load(dir, &sid));
+            }
+            let mut resync = resync_of(lines.iter().find(|l| l["t"] == "resync").unwrap());
+            resync.last_entry_id = Some(last.clone());
+            resync.streaming = false;
+            Feeder::default().resync(&mut fresh, resync, journal::read_full(file.path(), Some(&last)).unwrap(), &origin, t + 60_000);
+            fresh
+        };
+        let fresh = restart(Some(&notes));
+        let file_rows = |r: &Replica| rows(r).into_iter().filter(|i| !matches!(i, TranscriptItem::Notice(_))).collect::<Vec<_>>();
+        let (live, again) = (file_rows(&replica), file_rows(&fresh));
+        assert_eq!(live.iter().map(TranscriptItem::id).collect::<Vec<_>>(), again.iter().map(TranscriptItem::id).collect::<Vec<_>>());
+        for (a, b) in live.iter().zip(&again) {
+            assert_eq!(a, b, "row {} built live differs from its rebuild", a.id());
+            assert_eq!(crate::sync::row_hash(a), crate::sync::row_hash(b));
+        }
+        let author = |r: &[TranscriptItem]| {
+            r.iter().find_map(|i| match i {
+                TranscriptItem::User(u) if u.text == prompt => Some(u.author.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(author(&again), Some(Some("desktop".to_owned())), "the prompt's sender survives the restart");
+        // The store is what keeps it: without it the file alone has no sender.
+        assert_eq!(author(&file_rows(&restart(None))), Some(None));
+        // Tool rows carry the recorded call (no intent field, no nulls) and omp's own timings.
+        let bash = bash_rows(&fresh).remove(0);
+        assert_eq!(bash.args, serde_json::json!({ "command": "echo bridge-ok" }));
+        assert_eq!(bash.duration_ms, Some(36), "the bash tool's wall time");
     }
 }

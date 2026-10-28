@@ -159,7 +159,7 @@ export class AgentSim {
         link: def.link ?? "live",
         linkReason: def.link === "notShared" ? "noRoom" : undefined,
         linkVia: def.link === "notShared" ? undefined : def.id === "deps" ? "collab" : "bridge",
-        linkError: def.link === "notShared" ? "omp runs without the TeleFlock extension and isn't sharing a room on TeleFlock's relay (started by hand before the extension was installed)." : undefined,
+        linkError: def.link === "notShared" ? "omp runs without the TeleFlock bridge and isn't sharing a room on TeleFlock's relay (started by hand before the bridge was installed)." : undefined,
         bridge: def.link !== "notShared" && def.id !== "deps",
         fast: false,
         mode: "normal",

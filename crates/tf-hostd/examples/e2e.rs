@@ -581,11 +581,9 @@ fn main() {
     let rejoined_a: Vec<&str> = log_lines(&log, "joined omp session").into_iter().filter(|l| l.contains(&sid_a)).collect();
     println!("[desktop-again] usage before {} / after {}", short(&usage_before, 200), short(&c2.state["usage"], 200));
     assert_eq!(after_rows, before_rows, "A's transcript changed across the restart");
-    if !same_rows {
-        // Known open issue: rows rebuilt from the session file differ from the live ones in
-        // incidental fields (user `author`, tool `args` normalisation, `durationMs`).
-        println!("[desktop-again] KNOWN GLITCH: rows differ field for field after the restart (see above)");
-    }
+    // Rows rebuilt from the session file plus tf-hostd's row notes (the sender of a prompt, …) equal
+    // the live ones field for field: a client holding them by hash keeps every one.
+    assert!(same_rows, "rows rebuilt after the restart differ from the live ones (see above)");
     assert_eq!(unique.len(), after_rows.len(), "a row twice after the restart");
     assert!(notes.is_empty(), "the restart replayed notifications");
     assert!(rejoined_a.is_empty(), "the restarted hostd joined A's collab room: {rejoined_a:?}");

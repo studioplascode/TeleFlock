@@ -1,5 +1,6 @@
 import { FlaskConical, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import type { ReactNode } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { core, navigate, useCore, useHostIds, useHostStale, useHosts, useUi } from "@/core";
@@ -7,7 +8,12 @@ import type { ConnPhase } from "@/core/gen";
 import { Button, IconButton, StatusOrb, cn, formatAge, toast, useNow } from "@/design";
 import { LinkAccountNudge } from "@/features/accounts/LinkAccountNudge";
 import { connAction } from "@/features/hosts/ConnStatusCard";
-import { noticeRise as rise, noticeRow as row } from "./notice";
+import { setupHash } from "@/features/hosts/setupFocus";
+import { phaseBusy } from "@/features/shell/status";
+import { Term } from "@/features/shell/Term";
+import { connWords } from "./FlockActions";
+import { NoticeLine, NoticeTray, noticeBox, noticeRank, noticeRise as rise, noticeRow as row, useNoticeView } from "./notice";
+import { boardSetupGap, type SetupGap as Gap } from "./setupGap";
 
 /** "<host> …" for a host that isn't online. */
 const PHASE_TEXT: Record<ConnPhase, string> = {
@@ -24,24 +30,37 @@ const PHASE_TEXT: Record<ConnPhase, string> = {
   error: "couldn't connect",
 };
 
-const BUSY: Partial<Record<ConnPhase, true>> = { connecting: true, authenticating: true, deploying: true, starting: true, reconnecting: true };
-
-function StaleHost({ hostId }: { hostId: string }) {
+/** A host that isn't online: its cards below are its cached snapshot, read-only until it reconnects. */
+function StaleHost({ hostId, order }: { hostId: string; order: number }) {
   const stale = useHostStale(hostId);
   const st = useHosts((s) => s.status[hostId]);
   const name = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
   const now = useNow(1000);
-  if (!stale || !st) return null;
+  const view = useNoticeView(`stale:${hostId}`, stale && st ? noticeRank("stale", order) : null);
+  if (!view || !st) return null;
   const retryIn = st.nextRetryAt ? Math.max(0, Math.ceil((st.nextRetryAt - now) / 1000)) : null;
   const action = connAction(st, hostId);
+  const orb = <StatusOrb status={st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error" ? "error" : "idle"} size={8} label={null} className="shrink-0" />;
+  const act = action && (
+    <Button size="sm" variant="secondary" className="shrink-0" onClick={action.run}>
+      {action.label}
+    </Button>
+  );
+  if (view === "line")
+    return (
+      <NoticeLine icon={orb} action={act} className="bg-warn/8">
+        <b className="text-ink">{name}</b> <span className={cn(phaseBusy(st.phase) && "tf-shimmer-text")}>{connWords(st, now)}</span>
+        {st.error && <span className="text-[#ff9fb2]"> · {st.error.message}</span>}
+      </NoticeLine>
+    );
   return (
     // Re-renders every second (countdown, age): measure layout only when the row can change size,
     // or every tick re-measures every card on the board (motion measures the whole layout tree).
     <motion.div layout layoutDependency={`${st.phase}/${st.error ? 1 : 0}`} {...rise} role="status" className={cn(row, "bg-warn/8")}>
-      <StatusOrb status={st.phase === "authRequired" || st.phase === "hostKey" || st.phase === "error" ? "error" : "idle"} size={8} label={null} className="shrink-0" />
+      {orb}
       {/* The text wraps inside its own column; the action stays pinned on the right (no extra row on phones). */}
       <p className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-0.5">
-        <span className={cn("text-mute", BUSY[st.phase] && "tf-shimmer-text")}>
+        <span className={cn("text-mute", phaseBusy(st.phase) && "tf-shimmer-text")}>
           <b className="text-ink">{name}</b> {st.phase === "reconnecting" && retryIn !== null ? `reconnects in ${retryIn}s` : PHASE_TEXT[st.phase]}
           {" · "}
           showing its snapshot{st.lastOnlineAt ? ` from ${formatAge(now - st.lastOnlineAt)}` : ""} · cards are read-only until it reconnects
@@ -58,11 +77,7 @@ function StaleHost({ hostId }: { hostId: string }) {
             Details
           </button>
         )}
-        {action && (
-          <Button size="sm" variant="secondary" onClick={action.run}>
-            {action.label}
-          </Button>
-        )}
+        {act}
       </span>
     </motion.div>
   );
@@ -73,33 +88,54 @@ const useDismissedGaps = create<{ hostIds: string[]; dismiss(hostId: string): vo
   persist((set) => ({ hostIds: [], dismiss: (hostId) => set((s) => ({ hostIds: [...s.hostIds, hostId] })) }), { name: "tf.board.setupGaps" }),
 );
 
+/** What a setup gap hides, as consequences: the full row and the folded tray's line. */
+const GAP_TEXT: Record<Gap, { row: ReactNode; line: string }> = {
+  sessions: {
+    row: (
+      <>
+        omp sessions you start by hand won't show up until the <Term id="bridge">TeleFlock bridge</Term>, an omp extension, is on for every session
+      </>
+    ),
+    line: "sessions you start by hand stay hidden",
+  },
+  states: {
+    row: "agents' working / waiting / done states stay unknown until herdr's omp integration is installed",
+    line: "agent states stay unknown",
+  },
+};
+
 /** Online host whose setup hides agents or their state: what's missing, in consequences, with a Fix… link. */
-function SetupGap({ hostId }: { hostId: string }) {
+function SetupGap({ hostId, order }: { hostId: string; order: number }) {
   const online = useHosts((s) => s.status[hostId]?.phase === "online");
   const name = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.name ?? hostId);
+  const kind = useHosts((s) => s.profiles.find((p) => p.id === hostId)?.kind);
   // Only `info` (not every 5 Hz patch of the host's state): this row re-renders when setup changes.
   const setup = useCore((s) => s.hosts[hostId]?.state.info.setup);
   const dismissed = useDismissedGaps((s) => s.hostIds.includes(hostId));
   const dismiss = useDismissedGaps((s) => s.dismiss);
-  if (!online || !setup || dismissed) return null;
-  // Bridge first: the TeleFlock extension serves sessions natively; collab sharing is only the fallback.
-  const gap =
-    !setup.globalBridge && !setup.globalSharing
-      ? "omp sessions you start by hand won't show up until the TeleFlock extension is on for every session"
-      : !setup.herdrIntegration
-        ? "agents' working / waiting / done states stay unknown until herdr's omp integration is installed"
-        : null;
-  if (!gap) return null;
+  const gap = online && !dismissed ? boardSetupGap(kind, setup) : null;
+  const view = useNoticeView(`setup:${hostId}`, gap ? noticeRank("setup", order) : null);
+  if (!view || !gap) return null;
+  const orb = <StatusOrb status="idle" size={8} label={null} className="shrink-0" />;
+  const fix = (
+    <Button size="sm" variant="secondary" className="shrink-0" onClick={() => (window.location.hash = setupHash(hostId))}>
+      Fix…
+    </Button>
+  );
+  if (view === "line")
+    return (
+      <NoticeLine icon={orb} action={fix} className="bg-accent/6">
+        <b className="text-ink">{name}</b> · {GAP_TEXT[gap].line}
+      </NoticeLine>
+    );
   return (
     <motion.div layout layoutDependency={gap} {...rise} role="status" className={cn(row, "bg-accent/6")}>
-      <StatusOrb status="idle" size={8} label={null} className="shrink-0" />
+      {orb}
       <p className="min-w-0 flex-1 text-mute">
-        <b className="text-ink">{name}</b> · {gap}
+        <b className="text-ink">{name}</b> · {GAP_TEXT[gap].row}
       </p>
       <span className="flex shrink-0 items-center gap-1">
-        <Button size="sm" variant="secondary" onClick={() => (window.location.hash = `#/hosts?setup=${encodeURIComponent(hostId)}`)}>
-          Fix…
-        </Button>
+        {fix}
         <IconButton label={`Hide this for ${name}`} size="sm" onClick={() => dismiss(hostId)}>
           <X />
         </IconButton>
@@ -114,19 +150,30 @@ function DemoNotice() {
   const onlyDemo = useHosts((s) => s.profiles.every((p) => p.kind === "demo"));
   const dismissed = useDismissedGaps((s) => s.hostIds.includes("demo"));
   const dismiss = useDismissedGaps((s) => s.dismiss);
-  if (!demoIds || dismissed) return null;
+  const view = useNoticeView("demo", demoIds && !dismissed ? noticeRank("demo") : null);
+  if (!view) return null;
   // `?demo` in a browser is all demo (nothing to leave); the app's "Try the demo" host can be removed.
   const leave = core.backend !== "demo";
+  const icon = <FlaskConical className="size-3.5 shrink-0 text-accent-hi" aria-hidden />;
+  const add = (
+    <Button size="sm" variant="primary" className="shrink-0" onClick={() => useUi.getState().openDialog({ kind: "hostEditor" })}>
+      Add your host
+    </Button>
+  );
+  if (view === "line")
+    return (
+      <NoticeLine icon={icon} action={add} className="bg-accent/6">
+        <b className="text-ink">Demo flock</b> · simulated agents
+      </NoticeLine>
+    );
   return (
     <motion.div layout layoutDependency={leave} {...rise} role="status" className={cn(row, "bg-accent/6")}>
-      <FlaskConical className="size-3.5 shrink-0 text-accent-hi" aria-hidden />
+      {icon}
       <p className="min-w-0 flex-1 text-mute">
         <b className="text-ink">Demo flock</b> · simulated agents, nothing here is real{onlyDemo ? ". Add your herdr host to see your own." : ""}
       </p>
       <span className="flex shrink-0 items-center gap-1">
-        <Button size="sm" variant="primary" onClick={() => useUi.getState().openDialog({ kind: "hostEditor" })}>
-          Add your host
-        </Button>
+        {add}
         {leave && (
           <Button
             size="sm"
@@ -156,42 +203,43 @@ function useShownHosts(): string[] {
   return filter === "all" ? ids : ids.filter((id) => id === filter);
 }
 
-/** Classes of the notice box: one box however many rows, gone when empty. */
-const box = "divide-y divide-line overflow-hidden rounded-lg bg-white/[0.02] shadow-[inset_0_0_0_1px_var(--color-line-2)] empty:hidden";
-
-/** The demo notice, hosts without an account to run agents with, and the setup-gap rows for the
- * hosts in view (board, phone Flock): dismissible. */
-export function SetupGaps({ boxed = true }: { boxed?: boolean }) {
-  const shown = useShownHosts();
-  const rows = (
-    <AnimatePresence initial={false}>
-      <DemoNotice key="demo" />
-      {shown.map((id) => (
-        <LinkAccountNudge key={`accounts:${id}`} hostId={id} />
-      ))}
-      {shown.map((id) => (
-        <SetupGap key={id} hostId={id} />
-      ))}
-    </AnimatePresence>
-  );
-  return boxed ? <div className={box}>{rows}</div> : rows;
-}
-
 /**
- * The board's notice box above the lanes: one row per disconnected host in view (cards below are
- * cached, desaturated and read-only), then the demo notice and setup gaps. One box, however many
- * rows; it disappears when there's nothing to say.
+ * Every notice for the hosts in view, most urgent first (`noticeRank`): hosts that aren't online (their
+ * cards are cached, desaturated and read-only), hosts whose omp has no account to run agents with,
+ * setup gaps, then the demo. Dismissible ones stay hidden per host (the Hosts view keeps showing them).
  */
-export function StaleHosts() {
+function NoticeRows() {
   const shown = useShownHosts();
   return (
-    <div className={box}>
-      <AnimatePresence initial={false}>
-        {shown.map((id) => (
-          <StaleHost key={id} hostId={id} />
-        ))}
-      </AnimatePresence>
-      <SetupGaps boxed={false} />
+    <AnimatePresence initial={false}>
+      {shown.map((id, i) => (
+        <StaleHost key={`stale:${id}`} hostId={id} order={i} />
+      ))}
+      {shown.map((id, i) => (
+        <LinkAccountNudge key={`accounts:${id}`} hostId={id} order={i} />
+      ))}
+      {shown.map((id, i) => (
+        <SetupGap key={`setup:${id}`} hostId={id} order={i} />
+      ))}
+      <DemoNotice key="demo" />
+    </AnimatePresence>
+  );
+}
+
+/** The desktop board's notice box above the lanes: one row per notice, one box, gone when there's nothing to say. */
+export function BoardNotices() {
+  return (
+    <div className={noticeBox}>
+      <NoticeRows />
     </div>
+  );
+}
+
+/** Phone Flock: the same notices folded into one line (the most urgent one, its action, "+N") until expanded. */
+export function PhoneNotices() {
+  return (
+    <NoticeTray>
+      <NoticeRows />
+    </NoticeTray>
   );
 }

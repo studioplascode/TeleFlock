@@ -3,22 +3,55 @@
 //!
 //! A tunnel normally listens on any free port. With `localPort` it listens on exactly that port
 //! (sign-in callbacks: a provider redirects the device's browser to `http://localhost:<port>/…`,
-//! which must reach the callback server listening on the same port on the host).
+//! which must reach the callback server listening on the same port on the host). Such a sign-in
+//! tunnel lives only while its sign-in does: it closes once the host lists no sign-in waiting on
+//! that callback port (`auth.list`, every [`FLOW_CHECK_EVERY`]), and by itself
+//! [`SIGN_IN_TUNNEL_TTL`] after it was last opened.
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-use tf_proto::{ApiError, TunnelInfo, TunnelOpenParams};
+use tf_proto::{ApiError, AuthFlowList, TunnelInfo, TunnelOpenParams};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::conn::HostRt;
 use crate::util::{now_ms, rand_id};
 
+/// A sign-in tunnel closes by itself this long after it was last opened, whatever the host says
+/// (offline, or an older tf-hostd): the app closes it when the sign-in ends, but a window that went
+/// away mid sign-in (reload, crash, closed tab) must not keep a well-known port of this device
+/// (3000, …) forwarded to the host. Sign-ins wait at most 5 min for their callback (omp's limit;
+/// the host stops an MCP sign-in after 6).
+pub(crate) const SIGN_IN_TUNNEL_TTL: Duration = Duration::from_secs(10 * 60);
+/// How often the host is asked whether a sign-in still waits on a sign-in tunnel's port.
+pub(crate) const FLOW_CHECK_EVERY: Duration = Duration::from_secs(5);
+const FLOW_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The host's answer to a [`FlowCheck`].
+pub(crate) type FlowAnswer = Pin<Box<dyn Future<Output = Option<bool>> + Send>>;
+/// Whether a sign-in on the host still waits on a callback port: `Some(false)` once none does,
+/// `None` when the host can't tell now (offline, an older tf-hostd).
+pub(crate) type FlowCheck = Arc<dyn Fn(u16) -> FlowAnswer + Send + Sync>;
+
 struct Tunnel {
     info: TunnelInfo,
-    /// One accept loop per listener (`127.0.0.1`, plus `::1` for a fixed port).
+    /// One accept loop per listener (`127.0.0.1`, plus `::1` for a fixed port), and the watcher of
+    /// a sign-in tunnel.
     tasks: Vec<JoinHandle<()>>,
+    sign_in: Option<SignIn>,
+}
+
+/// A sign-in tunnel's lease, renewed by every open that hands it out.
+#[derive(Clone, Copy)]
+struct SignIn {
+    /// When it closes by itself.
+    closes_at: Instant,
+    /// Opens that handed it out: a host answer from before the latest one says nothing about it.
+    opens: u64,
 }
 
 impl Tunnel {
@@ -29,9 +62,11 @@ impl Tunnel {
     }
 }
 
+type Map = Mutex<BTreeMap<String, Tunnel>>;
+
 #[derive(Default)]
 pub(crate) struct Tunnels {
-    map: Mutex<BTreeMap<String, Tunnel>>,
+    map: Arc<Map>,
     /// Opens run one at a time, so two opens of one target (a UI effect running twice) share
     /// one tunnel instead of the second finding its fixed port taken by the first.
     opening: tokio::sync::Mutex<()>,
@@ -44,8 +79,9 @@ impl Tunnels {
         v
     }
 
-    /// Opens (or returns the existing) tunnel to `remote_host:port` on `rt`'s host.
-    pub async fn open(&self, rt: &Arc<HostRt>, p: TunnelOpenParams) -> Result<TunnelInfo, ApiError> {
+    /// Opens (or returns the existing) tunnel to `remote_host:port` on `rt`'s host. `closed` runs
+    /// when a sign-in tunnel closes by itself (its sign-in ended, or its lease ran out).
+    pub async fn open(&self, rt: &Arc<HostRt>, p: TunnelOpenParams, closed: impl Fn() + Send + 'static) -> Result<TunnelInfo, ApiError> {
         let remote_host = loopback_target(p.remote_host.as_deref())?;
         if p.port == 0 {
             return Err(ApiError::new("invalid_params", "port must be 1-65535"));
@@ -54,11 +90,8 @@ impl Tunnels {
             return Err(ApiError::new("invalid_params", "localPort must be 1-65535"));
         }
         let _one_at_a_time = self.opening.lock().await;
-        {
-            let map = self.map.lock().unwrap();
-            if let Some(info) = reusable(map.values().map(|t| &t.info), &rt.id, &remote_host, p.port, p.local_port)? {
-                return Ok(info);
-            }
+        if let Some(info) = self.reuse(&rt.id, &remote_host, p.port, p.local_port)? {
+            return Ok(info);
         }
         if rt.transport().is_none() {
             return Err(ApiError::new("not_connected", "the host is not connected").retryable());
@@ -78,8 +111,32 @@ impl Tunnels {
             .into_iter()
             .map(|l| tokio::spawn(accept_loop(l, Arc::downgrade(rt), remote_host.clone(), p.port)))
             .collect();
-        self.map.lock().unwrap().insert(info.tunnel_id.clone(), Tunnel { info: info.clone(), tasks });
+        self.add(info.clone(), tasks, p.local_port.map(|_| host_flows(rt)), closed);
         Ok(info)
+    }
+
+    /// An open tunnel that serves the request (see [`reusable`]). A sign-in that gets it again
+    /// renews its lease; a preview that gets a sign-in tunnel keeps it open.
+    fn reuse(&self, host_id: &str, remote_host: &str, port: u16, local_port: Option<u16>) -> Result<Option<TunnelInfo>, ApiError> {
+        let mut map = self.map.lock().unwrap();
+        let Some(info) = reusable(map.values().map(|t| &t.info), host_id, remote_host, port, local_port)? else { return Ok(None) };
+        if let Some(t) = map.get_mut(&info.tunnel_id) {
+            t.sign_in = match (local_port, t.sign_in) {
+                (Some(_), Some(s)) => Some(SignIn { closes_at: Instant::now() + SIGN_IN_TUNNEL_TTL, opens: s.opens + 1 }),
+                _ => None,
+            };
+        }
+        Ok(Some(info))
+    }
+
+    /// Registers a tunnel serving through `tasks`; a sign-in tunnel (`sign_in`: asks its host about
+    /// its sign-in) is also watched.
+    fn add(&self, info: TunnelInfo, mut tasks: Vec<JoinHandle<()>>, sign_in: Option<FlowCheck>, closed: impl Fn() + Send + 'static) {
+        let lease = sign_in.is_some().then(|| SignIn { closes_at: Instant::now() + SIGN_IN_TUNNEL_TTL, opens: 1 });
+        if let (Some(lease), Some(check)) = (lease, sign_in) {
+            tasks.push(tokio::spawn(watch_sign_in(Arc::downgrade(&self.map), info.tunnel_id.clone(), info.remote_port, lease.closes_at, check, closed)));
+        }
+        self.map.lock().unwrap().insert(info.tunnel_id.clone(), Tunnel { info, tasks, sign_in: lease });
     }
 
     pub fn close(&self, tunnel_id: &str) -> bool {
@@ -101,6 +158,56 @@ impl Tunnels {
             }
         }
         !ids.is_empty()
+    }
+}
+
+/// [`FlowCheck`] against `rt`'s host: the sign-ins it runs (`auth.list`).
+fn host_flows(rt: &Arc<HostRt>) -> FlowCheck {
+    let rt = Arc::downgrade(rt);
+    Arc::new(move |port: u16| -> FlowAnswer {
+        let rt = rt.clone();
+        Box::pin(async move {
+            let link = rt.upgrade()?.link()?;
+            let flows = link.request("auth.list", serde_json::json!({}), FLOW_CHECK_TIMEOUT).await.ok()?;
+            let flows: AuthFlowList = serde_json::from_value(flows).ok()?;
+            Some(flows.flows.iter().any(|f| !f.state.is_final() && f.callback_port == Some(port)))
+        })
+    })
+}
+
+/// Closes sign-in tunnel `id` once `waiting` says no sign-in waits on its remote `port` any more, or
+/// its lease has run out (first `due`); then runs `closed`. Ends quietly when the tunnel was closed
+/// meanwhile or a preview took it over.
+async fn watch_sign_in(map: Weak<Map>, id: String, port: u16, mut due: Instant, waiting: FlowCheck, closed: impl Fn()) {
+    let mut check_at = Instant::now() + FLOW_CHECK_EVERY;
+    loop {
+        tokio::time::sleep_until(due.min(check_at)).await;
+        // The lease the host's answer is about: a sign-in that gets the tunnel meanwhile renews it.
+        let mut over = None;
+        if Instant::now() >= check_at {
+            let Some(opens) = map.upgrade().and_then(|m| m.lock().unwrap().get(&id).and_then(|t| t.sign_in)).map(|s| s.opens) else { return };
+            if waiting(port).await == Some(false) {
+                over = Some(opens);
+            }
+            check_at = Instant::now() + FLOW_CHECK_EVERY;
+        }
+        let Some(map) = map.upgrade() else { return };
+        let mut map = map.lock().unwrap();
+        let Some(lease) = map.get(&id).and_then(|t| t.sign_in) else { return };
+        let ended = over == Some(lease.opens);
+        if !ended && Instant::now() < lease.closes_at {
+            due = lease.closes_at;
+            continue;
+        }
+        if let Some(t) = map.remove(&id) {
+            let why = if ended { "its sign-in is over" } else { "by itself" };
+            log::info!("tunnel {id}: sign-in tunnel on port {} closed ({why})", t.info.local_port);
+            // Aborts this task too, at its next await: there is none left.
+            t.stop();
+        }
+        drop(map);
+        closed();
+        return;
     }
 }
 
@@ -136,7 +243,8 @@ fn port_in_use(port: u16, why: Option<String>) -> ApiError {
 }
 
 /// Listeners for a tunnel: any free `127.0.0.1` port, or exactly `local_port` on `127.0.0.1` plus
-/// `::1` when that is free too (browsers may resolve `localhost` to either).
+/// `::1` when this device has IPv6 (browsers may resolve `localhost` to either, and try `::1`
+/// first: another program on `[::1]:<port>` would get the redirect, so that port is busy too).
 async fn bind_local(local_port: Option<u16>) -> Result<Vec<TcpListener>, ApiError> {
     let Some(port) = local_port else {
         let l = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| ApiError::new("io_error", format!("bind: {e}")))?;
@@ -150,6 +258,7 @@ async fn bind_local(local_port: Option<u16>) -> Result<Vec<TcpListener>, ApiErro
     let mut out = vec![v4];
     match TcpListener::bind(("::1", port)).await {
         Ok(v6) => out.push(v6),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(port_in_use(port, None)),
         Err(e) => log::debug!("tunnel: [::1]:{port} not served: {e}"),
     }
     Ok(out)
@@ -196,7 +305,11 @@ fn loopback_target(remote_host: Option<&str>) -> Result<String, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_local, loopback_target, reusable};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Weak};
+    use std::time::Duration;
+
+    use super::{FLOW_CHECK_EVERY, FlowAnswer, FlowCheck, SIGN_IN_TUNNEL_TTL, Tunnels, accept_loop, bind_local, loopback_target, reusable};
     use tf_proto::TunnelInfo;
 
     fn tunnel(host: &str, remote_port: u16, local_port: u16) -> TunnelInfo {
@@ -260,6 +373,135 @@ mod tests {
         assert!(!err.retryable);
         assert!(err.message.contains(&port.to_string()));
         assert!(err.hint.as_deref().unwrap_or_default().contains("pasting"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn port_taken_on_ipv6_loopback_is_port_in_use() {
+        // Another program serves `localhost:<port>` over IPv6 only: a browser that tries `::1`
+        // first would hand it the sign-in, so the tunnel must not claim the port.
+        let Ok(other) = std::net::TcpListener::bind(("::1", 0)) else { return }; // no IPv6 here
+        let port = other.local_addr().unwrap().port();
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+            return; // the IPv4 side is taken too, by chance
+        }
+        let err = bind_local(Some(port)).await.unwrap_err();
+        assert_eq!(err.code, "port_in_use", "{err:?}");
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("the IPv4 listener is not kept");
+    }
+
+    /// The host can't tell (offline, an older tf-hostd): only the lease counts.
+    fn unknown() -> FlowCheck {
+        Arc::new(|_: u16| -> FlowAnswer { Box::pin(async { None }) })
+    }
+
+    /// The host answers after `delay` whether a sign-in waits, as `waits` held when asked.
+    fn host(waits: &Arc<AtomicBool>, delay: Duration) -> FlowCheck {
+        let waits = waits.clone();
+        Arc::new(move |_: u16| -> FlowAnswer {
+            let w = waits.load(Ordering::SeqCst);
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                Some(w)
+            })
+        })
+    }
+
+    /// A sign-in tunnel registered like `Tunnels::open` does, serving no host.
+    async fn sign_in_tunnel(tunnels: &Tunnels, closed: &Arc<AtomicUsize>, check: FlowCheck) -> TunnelInfo {
+        let listener = bind_local(None).await.unwrap().remove(0);
+        let info = tunnel("a", 3000, listener.local_addr().unwrap().port());
+        let task = tokio::spawn(accept_loop(listener, Weak::new(), "127.0.0.1".into(), 3000));
+        let closed = closed.clone();
+        tunnels.add(info.clone(), vec![task], Some(check), move || {
+            closed.fetch_add(1, Ordering::SeqCst);
+        });
+        info
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sign_in_tunnel_closes_once_its_sign_in_is_over() {
+        let tunnels = Tunnels::default();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicBool::new(true));
+        let info = sign_in_tunnel(&tunnels, &closed, host(&waits, Duration::ZERO)).await;
+        // The host's sign-in waits on the callback: the tunnel stays.
+        tokio::time::sleep(FLOW_CHECK_EVERY * 20).await;
+        assert_eq!(tunnels.list().len(), 1);
+        // Over (done, cancelled, expired, or its window went away and it timed out): closed at
+        // the next look, the app told, the port free again.
+        waits.store(false, Ordering::SeqCst);
+        tokio::time::sleep(FLOW_CHECK_EVERY + Duration::from_millis(1)).await;
+        assert!(tunnels.list().is_empty());
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        for _ in 0..10 {
+            tokio::task::yield_now().await; // the aborted accept loop drops its listener
+        }
+        std::net::TcpListener::bind(("127.0.0.1", info.local_port)).expect("the port is released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sign_in_that_gets_the_tunnel_while_the_host_answers_keeps_it() {
+        let tunnels = Tunnels::default();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicBool::new(false));
+        let info = sign_in_tunnel(&tunnels, &closed, host(&waits, Duration::from_secs(1))).await;
+        // The first look (+5 s) finds the last sign-in over; before the answer is back, a new
+        // sign-in on the same port gets the tunnel.
+        tokio::time::sleep(FLOW_CHECK_EVERY + Duration::from_millis(500)).await;
+        assert_eq!(tunnels.reuse("a", "127.0.0.1", 3000, Some(info.local_port)).unwrap().unwrap().tunnel_id, info.tunnel_id);
+        waits.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(tunnels.list().len(), 1, "an answer from before it was handed out again closes nothing");
+        // Once that sign-in is over too: closed.
+        waits.store(false, Ordering::SeqCst);
+        tokio::time::sleep(FLOW_CHECK_EVERY * 2).await;
+        assert!(tunnels.list().is_empty());
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sign_in_tunnel_closes_by_itself_unless_handed_out_again() {
+        let tunnels = Tunnels::default();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let info = sign_in_tunnel(&tunnels, &closed, unknown()).await;
+        let port = info.local_port;
+        // A sign-in gets it again a minute before it was due: its time starts over.
+        tokio::time::sleep(SIGN_IN_TUNNEL_TTL - Duration::from_secs(60)).await;
+        assert_eq!(tunnels.reuse("a", "127.0.0.1", 3000, Some(port)).unwrap().unwrap().tunnel_id, info.tunnel_id);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(tunnels.list().len(), 1, "still open past its first due time");
+        assert_eq!(closed.load(Ordering::SeqCst), 0);
+        // Nobody wanted it for a whole TTL: closed, the app told, the port free again.
+        tokio::time::sleep(SIGN_IN_TUNNEL_TTL).await;
+        assert!(tunnels.list().is_empty());
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        for _ in 0..10 {
+            tokio::task::yield_now().await; // the aborted accept loop drops its listener
+        }
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("the port is released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sign_in_tunnel_taken_over_by_a_preview_or_closed_stays_quiet() {
+        let tunnels = Tunnels::default();
+        let closed = Arc::new(AtomicUsize::new(0));
+        // A preview of the same target gets the sign-in tunnel: it stays open for good, whatever
+        // the host says about sign-ins.
+        let over = Arc::new(AtomicBool::new(false));
+        let kept = sign_in_tunnel(&tunnels, &closed, host(&over, Duration::ZERO)).await;
+        assert_eq!(tunnels.reuse("a", "127.0.0.1", 3000, None).unwrap().unwrap().tunnel_id, kept.tunnel_id);
+        // Closed by the app before it was due: its watcher ends without a word.
+        let gone = tunnel("b", 1455, 1455);
+        tunnels.add(gone.clone(), vec![], Some(unknown()), {
+            let closed = closed.clone();
+            move || {
+                closed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        assert!(tunnels.close(&gone.tunnel_id));
+        tokio::time::sleep(SIGN_IN_TUNNEL_TTL * 3).await;
+        assert_eq!(tunnels.list().iter().map(|t| t.tunnel_id.as_str()).collect::<Vec<_>>(), [kept.tunnel_id.as_str()]);
+        assert_eq!(closed.load(Ordering::SeqCst), 0);
     }
 
     #[test]

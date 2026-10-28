@@ -389,13 +389,13 @@ const EMPTY_SNAPSHOT: Snapshot = { ids: [], byId: new Map() };
 function SubTranscript({ sub, snap, mobile, followSignal }: { sub: Subagent; snap: Snapshot | null; mobile: boolean; followSignal: number }) {
   const running = sub.status === "running";
   const { ids, byId } = snap ?? EMPTY_SNAPSHOT;
-  const kinds = useMemo(() => ids.map((id) => byId.get(id)?.kind), [ids, byId]);
+  const items = useMemo(() => ids.map((id) => byId.get(id)), [ids, byId]);
   const last = byId.get(ids[ids.length - 1] ?? "");
   const lastLive = last != null && ((last.kind === "assistant" && last.streaming) || (last.kind === "thinking" && last.streaming) || (last.kind === "tool" && (last.status === "running" || last.status === "pending")));
   return (
     <TranscriptLog
       ids={ids}
-      kinds={kinds}
+      items={items}
       loading={snap == null}
       ariaLabel={`${sub.name} transcript`}
       followSignal={followSignal}

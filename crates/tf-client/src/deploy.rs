@@ -398,7 +398,7 @@ pub async fn deploy(
     }
     let (put_ext, put_overlay) = (p.ext_sha != ext_sha, p.overlay_sha != overlay_sha);
     if put_ext {
-        progress("Uploading companion extension…".into());
+        progress("Uploading the TeleFlock bridge…".into());
     }
     if local {
         if put_ext {

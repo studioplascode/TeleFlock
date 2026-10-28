@@ -26,14 +26,35 @@ export function usePaletteCommands(commands: PaletteCommand[]): void; // contrib
 // @/features/shell/sheets
 export function openSheet(sheet: { title: ReactNode; description?: ReactNode; content: ReactNode; footer?: ReactNode }): void; // bottom sheet on phones, dialog on desktop
 export function closeSheet(): void;
+
+// @/features/shell/vocab — one word per lane, state and action; `VIEWS`: label, shortcut, description and icon of
+// every page, read by each way to it (sidebar, More, palette, Settings, host cards, the omp area strip); `OMP_PAGES`:
+// the omp area's pages (omp settings, MCP servers, Accounts) in order.
+
+// @/features/shell/Ticks
+export function Ticks(props: { text: string; className?: string }): JSX.Element; // `backticked` spans as inline code (hostd's commands, omp's setting descriptions)
+export function splitTicks(text: string): { text: string; code: boolean }[];     // an unpaired backtick or an empty pair stays literal (Ticks.test.ts)
+
+// @/features/shell/OmpArea
+export function OmpAreaNav(props: { current: OmpAreaPage; hostId?: string; className?: string }): JSX.Element; // the strip linking omp settings, MCP servers, Accounts
+export function OmpAreaFrame(props: { current: OmpAreaPage; hostId?: string; mobile: boolean; children: ReactNode }): JSX.Element;
+// the frame each omp-area page renders in (strip + one width, padding and gap), so the strip never moves between them
 ```
 
 ## Layout contract
 - Routes are FrontCore's (`navigate`/`useRoute`); `src/app/routes.tsx` maps them to screens.
 - Full-bleed screens (session, terminal, review, desktop board) get an `h-full` box and manage their own scroll.
-- Every other screen is wrapped in the shell's scroll container (phones: `PullToRefresh`, default `refreshAll`).
+- Every other screen is wrapped in the shell's scroll container (phones: `PullToRefresh`, default `refreshAll`;
+  desktop: a stable scrollbar gutter, so a page that scrolls sits exactly where one that doesn't would).
   Don't add your own outer scroller or pull-to-refresh; render `MobileHeader` yourself on phones.
-- The phone bottom nav is in-flow below the view (never overlaps content).
+- The phone bottom nav is in-flow below the view (never overlaps content). Pushed screens keep their parent tab
+  lit: everything opened from More (Hosts, Settings, Usage, Activity, Automations and the omp area) lights More.
+- `prefetchViews` (`src/app/routes.tsx`) warms the screens a tap away once the first one is up, one per idle
+  period: session, board / Flock, inbox, Dispatch, terminal, then the omp area (MCP servers, Accounts, omp settings).
+- Toasts keep clear of `[data-toast-anchor]` elements (`src/design/ui/Toast.tsx`): on phones anything along the
+  bottom (tab bar, Flock "+", a session's composer dock, Dispatch's composer); on desktop only what runs under the
+  stack's column (a session's composer and its open question, Dispatch's composer). An anchor that appears without
+  a resize or route change calls `toastAnchorsChanged()`; floating bars may instead publish `--tf-toast-lift`.
 
 Mounted once globally by the shell: FrontOps dialogs (`NewWorktreeDialog`, `NewAgentDialog`,
 `PastSessionsDialog`), FrontBoard `AnswerNextHud`, the command palette, the notification center,

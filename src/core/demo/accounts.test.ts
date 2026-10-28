@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { AccountsSnapshot, AuthFlow, TunnelInfo } from "../gen";
+import type { AccountLimits, AccountsSnapshot, Agent, AuthFlow, TunnelInfo } from "../gen";
+import { DemoAccounts } from "./accounts";
+import { DemoAuthFlows } from "./auth";
 import { ManualClock } from "./clock";
 import { DemoEngine } from "./engine";
 
@@ -100,5 +102,101 @@ describe("demo accounts", () => {
     expect(s.accounts.some((a) => a.label === "team@acme.io")).toBe(false);
     const limits = await r.call<{ accounts: { label: string }[] }>("forge", "host.limits", {});
     expect(limits.accounts.some((a) => a.label === "team@acme.io")).toBe(false);
+  });
+
+  test("re-linking an expired login stores a fresh credential that reports its windows", async () => {
+    const r = rig();
+    const before = (await r.call<AccountsSnapshot>("forge", "accounts.list", {})).accounts.find((a) => a.label === "old@flock.dev");
+    expect(before?.disabled).toBe(true);
+    const started = await r.call<AuthFlow>("forge", "accounts.link", { provider: "anthropic" });
+    const waiting = await r.until(started.flowId, (f) => f.state === "waiting");
+    expect(new URL(waiting.url ?? "").host).toBe("claude.ai");
+    await r.call(null, "tunnel.open", { hostId: "forge", port: 54545, localPort: 54545 });
+    await r.call(null, "app.openExternal", { url: waiting.url });
+    expect((await r.until(started.flowId, (f) => f.state === "done")).account).toBe("old@flock.dev");
+    const s = await r.call<AccountsSnapshot>("forge", "accounts.list", {});
+    const old = s.accounts.filter((a) => a.label === "old@flock.dev");
+    expect(old).toHaveLength(1);
+    expect(old[0]?.disabled).toBe(false);
+    expect(old[0]?.credentialId).not.toBe(before?.credentialId);
+    expect(r.clock.now() - (old[0]?.linkedAt ?? 0)).toBeLessThan(60_000);
+    expect(old[0]?.windows.length).toBeGreaterThan(0);
+    expect(old[0]?.windowsError).toBeUndefined();
+    const limits = await r.call<AccountLimits>("forge", "host.limits", {});
+    const report = limits.accounts.filter((a) => a.label === "old@flock.dev");
+    expect(report.map((a) => [a.disabled, a.windows.length > 0])).toEqual([[false, true]]);
+  });
+
+  test("sign-in pages are the providers' own", async () => {
+    const r = rig();
+    const host = async (provider: string) => {
+      const f = await r.call<AuthFlow>("forge", "accounts.link", { provider });
+      const w = await r.until(f.flowId, (x) => x.state === "waiting");
+      await r.call("forge", "auth.cancel", { flowId: f.flowId });
+      return w.url ? `${new URL(w.url).host}${new URL(w.url).pathname}` : undefined;
+    };
+    expect(await host("openai-codex")).toBe("auth.openai.com/oauth/authorize");
+    expect(await host("google-gemini-cli")).toBe("accounts.google.com/o/oauth2/v2/auth");
+    expect(await host("openai-codex-device")).toBe("auth.openai.com/codex/device");
+    expect(await host("github-copilot")).toBe("github.com/login/device");
+    expect(await host("deepseek")).toBe("platform.deepseek.com/api_keys");
+    // A key prompt without a known key page asks for the key alone.
+    expect(await host("litellm")).toBeUndefined();
+  });
+
+  test("a browser link counts down omp's 5-minute callback wait, then fails like omp; other links keep the host's limit", async () => {
+    const r = rig();
+    const started = await r.call<AuthFlow>("forge", "accounts.link", { provider: "anthropic" });
+    const waiting = await r.until(started.flowId, (f) => f.state === "waiting");
+    const left = (waiting.expiresAt ?? 0) - r.clock.now();
+    expect(left).toBeGreaterThan(4 * 60_000 + 50_000);
+    expect(left).toBeLessThanOrEqual(5 * 60_000);
+    r.clock.advance(left);
+    const over = await r.call<AuthFlow>("forge", "auth.wait", { flowId: started.flowId });
+    expect(over.state).toBe("failed");
+    expect(over.message).toContain("OAuth callback");
+
+    const dev = await r.call<AuthFlow>("forge", "accounts.link", { provider: "github-copilot" });
+    const code = await r.until(dev.flowId, (f) => f.state === "waiting");
+    expect((code.expiresAt ?? 0) - code.startedAt).toBe(10 * 60_000);
+    await r.call("forge", "auth.cancel", { flowId: dev.flowId });
+  });
+});
+
+describe("demo accounts: live sessions", () => {
+  /** DemoAccounts on a manual clock with a settable list of Claude sessions. */
+  function sessions() {
+    const clock = new ManualClock();
+    let agents: Agent[] = [];
+    const accounts = new DemoAccounts({ id: "forge", now: () => clock.now(), agents: () => agents, auth: new DemoAuthFlows(clock, () => false) });
+    const run = (...ids: string[]) => {
+      agents = ids.map((id) => ({ omp: { sessionId: id, model: { provider: "anthropic", id: "claude-opus-5" } } }) as unknown as Agent);
+    };
+    const on = () => Object.fromEntries(accounts.limits(true).sessions.map((s) => [s.sessionId, s.accountKey?.split("|email:")[1]]));
+    const list = () => accounts.call("accounts.list", {}) as AccountsSnapshot;
+    return { accounts, run, on, list };
+  }
+
+  test("omp spreads the sessions it finds; preferring an account moves none of them", () => {
+    const t = sessions();
+    t.run("s1", "s2", "s3", "s4");
+    const spread = t.on();
+    expect(new Set(Object.values(spread))).toEqual(new Set(["you@flock.dev", "team@acme.io|org:acme"]));
+    const team = t.list().accounts.find((a) => a.label === "team@acme.io");
+    const after = t.accounts.call("accounts.prefer", { key: team?.key, preferred: true }) as AccountsSnapshot;
+    expect(t.on()).toEqual(spread);
+    expect(after.accounts.find((a) => a.label === "team@acme.io")?.sessions).toBe(Object.values(spread).filter((k) => k === "team@acme.io|org:acme").length);
+  });
+
+  test("sessions that start later go to the preferred account; an unlinked account's move on", () => {
+    const t = sessions();
+    t.run("s1", "s2");
+    const spread = t.on();
+    const team = t.list().accounts.find((a) => a.label === "team@acme.io");
+    t.accounts.call("accounts.prefer", { key: team?.key, preferred: true });
+    t.run("s1", "s2", "s3");
+    expect(t.on()).toEqual({ ...spread, s3: "team@acme.io|org:acme" });
+    t.accounts.call("accounts.unlink", { provider: "anthropic", credentialId: team?.credentialId });
+    expect(Object.values(t.on())).toEqual(["you@flock.dev", "you@flock.dev", "you@flock.dev"]);
   });
 });

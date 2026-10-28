@@ -487,7 +487,8 @@ export function DispatchView() {
           <span className="shrink-0">{menu}</span>
         </header>
         {thread}
-        <div className="shrink-0 px-2 pt-1 pb-2">
+        {/* toasts (a persistent needs-you one included) sit above the composer, never over it */}
+        <div data-toast-anchor="" className="shrink-0 px-2 pt-1 pb-2">
           {composerEl}
           {entries.length === 0 && alternatives}
         </div>
@@ -535,7 +536,7 @@ export function DispatchView() {
         </span>
       </header>
       <div className="flex min-h-0 w-full max-w-[920px] flex-1 flex-col overflow-hidden rounded-tile glass">{thread}</div>
-      <div className="w-full max-w-[920px] shrink-0">
+      <div data-toast-anchor="" className="w-full max-w-[920px] shrink-0">
         {hint && <p className="mb-1.5 truncate px-2 text-[11px] font-semibold text-mute-2 [@media(max-height:700px)]:hidden">{hint}</p>}
         {composerEl}
         {alternatives}

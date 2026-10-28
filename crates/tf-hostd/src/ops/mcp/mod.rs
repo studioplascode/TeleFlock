@@ -6,13 +6,15 @@
 //!   and disabling follows omp's `setMcpServerEnabled` exactly (the entry's `enabled` flag, else
 //!   the user-level `disabledServers` / `enabledServers` lists for servers of other tools).
 //! - **Status and tools** come from omp: a "check" runs the helper (`helper.rs`) in a throwaway omp
-//!   that discovers every source and connects the servers like a session (startup window 20 s).
-//!   One check per folder at a time; results are kept per server with a fingerprint of its
-//!   definition, so a list answers at once and only changed servers are checked again.
+//!   that discovers every source and connects the servers like a session (startup window 20 s,
+//!   the whole check bounded at 60 s, the servers it started stopped with it). One check per
+//!   folder at a time; results are kept per server with a fingerprint of its definition (and of
+//!   whether it is on and hidden), so a list answers at once and only changed servers are checked
+//!   again. Other tools' servers are on or off as the user-level lists say at the time of the list.
 //! - **Secrets** never leave the host (`secrets.rs`).
 //! - **Running sessions** get every change through omp's `/mcp reload` (`reload.rs`).
 //! - **Sign-in** (`auth.rs`) and sign-out, test and registry search run omp's own code through
-//!   the helper too.
+//!   the helper too, on the row's own definition.
 
 mod auth;
 pub mod files;
@@ -26,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -48,10 +50,12 @@ use json::{Obj, J};
 /// Connect window of a check (omp's sessions wait 250 ms by default, then keep connecting; a check
 /// waits for slow first starts such as an `npx` download).
 const CHECK_WINDOW_MS: u64 = 20_000;
+/// The whole check, waiting for a helper slot included.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// A check result older than this is redone on the next list.
 const CHECK_TTL_MS: Millis = 10 * 60 * 1000;
-/// `mcp.test` must answer within the app's 30 s request timeout.
+/// `mcp.test` must answer within the app's 30 s request timeout: an unanswered server is
+/// `pending` after the window, well before [`TEST_TIMEOUT`].
 const TEST_WINDOW_MS: u64 = 18_000;
 const TEST_TIMEOUT: Duration = Duration::from_secs(26);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(26);
@@ -98,7 +102,13 @@ impl Mcp {
     fn from_ctx(ctx: &Ctx) -> Mcp {
         Mcp {
             agent_dir: omp_agent_dir(),
-            helper: HelperEnv { omp: omp_bin(), ext_dir: ctx.paths.home.join("ext"), run_dir: ctx.paths.run.clone(), agent_dir: None },
+            helper: HelperEnv {
+                omp: omp_bin(),
+                ext_dir: ctx.paths.home.join("ext"),
+                run_dir: ctx.paths.run.clone(),
+                agent_dir: None,
+                slots: helper::Slots::shared(),
+            },
             neutral: ctx.paths.home.join("cache").join("mcp-user"),
         }
     }
@@ -127,11 +137,28 @@ fn folder(cwd: Option<&str>) -> Result<Option<PathBuf>, ApiError> {
     if !p.is_absolute() {
         return Err(ApiError::new("invalid_params", format!("cwd: `{raw}` is not an absolute path")));
     }
-    let real = std::fs::canonicalize(p).map_err(|e| ApiError::new("not_found", format!("{raw}: {e}")))?;
+    let real = std::fs::canonicalize(p)
+        .map_err(|e| ApiError::new("not_found", format!("{raw}: {e}")).with_hint("The folder is gone from the host: pick another project."))?;
     if !real.is_dir() {
         return Err(ApiError::new("invalid_params", format!("cwd: `{raw}` is not a folder")));
     }
-    Ok(Some(real))
+    Ok(Some(match real.to_str().and_then(strip_verbatim) {
+        Some(plain) => PathBuf::from(plain),
+        None => real,
+    }))
+}
+
+/// Windows `canonicalize` answers verbatim paths (`\\?\C:\x`, `\\?\UNC\srv\share\x`); omp works
+/// with plain ones (`C:\x`, `\\srv\share\x`), and the two must agree: they name omp's config
+/// lock and the paths a check result is matched by. `None`: nothing to strip (also elsewhere: a
+/// Unix path never starts with `\\?\`).
+fn strip_verbatim(path: &str) -> Option<String> {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{unc}"));
+    }
+    let rest = path.strip_prefix(r"\\?\")?;
+    let b = rest.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':').then(|| rest.to_string())
 }
 
 // ───────────────────────────── files ─────────────────────────────
@@ -163,24 +190,39 @@ fn servers_of(loaded: &Loaded) -> Option<&Obj> {
     }
 }
 
-/// The user-level `disabledServers` / `enabledServers` lists (from `<agent dir>/mcp.json` only).
-fn user_lists(files: &[NativeFile], user_file: &Path) -> (HashSet<String>, HashSet<String>) {
-    let root = files.iter().find(|f| f.path == user_file).and_then(|f| match &f.loaded {
-        Loaded::Ok(r) => Some(r),
-        _ => None,
-    });
-    let list = |key: &str| -> HashSet<String> {
-        root.and_then(|r| r.get(key)).and_then(J::as_arr).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
-    };
-    (list("disabledServers"), list("enabledServers"))
+/// omp's user-level `disabledServers` / `enabledServers` lists (from `<agent dir>/mcp.json` only).
+#[derive(Debug, Default)]
+struct UserLists {
+    denied: HashSet<String>,
+    forced: HashSet<String>,
 }
 
-/// Fingerprint of a definition (and whether it's on): a check result applies while it matches.
-fn fingerprint(path: &Path, entry: &Obj, enabled: bool) -> u64 {
+impl UserLists {
+    fn of(files: &[NativeFile], user_file: &Path) -> UserLists {
+        let root = files.iter().find(|f| f.path == user_file).and_then(|f| match &f.loaded {
+            Loaded::Ok(r) => Some(r),
+            _ => None,
+        });
+        let list = |key: &str| -> HashSet<String> {
+            root.and_then(|r| r.get(key)).and_then(J::as_arr).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+        };
+        UserLists { denied: list("disabledServers"), forced: list("enabledServers") }
+    }
+
+    /// Whether sessions start `name` whose definition says `entry_enabled` (the denylist wins).
+    fn enabled(&self, name: &str, entry_enabled: bool) -> bool {
+        !self.denied.contains(name) && (entry_enabled || self.forced.contains(name))
+    }
+}
+
+/// Fingerprint of a definition, whether it's on and whether another one hides it: a check result
+/// applies while it matches.
+fn fingerprint(path: &Path, entry: &Obj, enabled: bool, shadowed: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut h);
     json::compact(&J::Obj(entry.clone())).hash(&mut h);
     enabled.hash(&mut h);
+    shadowed.hash(&mut h);
     h.finish()
 }
 
@@ -195,17 +237,17 @@ struct Native {
     fp: u64,
 }
 
-fn natives(files: &[NativeFile], user_file: &Path) -> Vec<Native> {
-    let (denied, forced) = user_lists(files, user_file);
+fn natives(files: &[NativeFile], lists: &UserLists) -> Vec<Native> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for f in files {
         let Some(servers) = servers_of(&f.loaded) else { continue };
         for (name, v) in &servers.0 {
             let Some(entry) = v.as_obj() else { continue };
-            let enabled = !denied.contains(name) && (model::entry_enabled(entry) || forced.contains(name));
+            let enabled = lists.enabled(name, model::entry_enabled(entry));
             let shadowed = !seen.insert(name.clone());
-            out.push(Native { name: name.clone(), origin: f.origin, path: f.path.clone(), entry: entry.clone(), enabled, shadowed, fp: fingerprint(&f.path, entry, enabled) });
+            let fp = fingerprint(&f.path, entry, enabled, shadowed);
+            out.push(Native { name: name.clone(), origin: f.origin, path: f.path.clone(), entry: entry.clone(), enabled, shadowed, fp });
         }
     }
     out
@@ -224,6 +266,9 @@ struct Probed {
     path: Option<String>,
     #[serde(default = "yes")]
     enabled: bool,
+    /// The definition's own `enabled` flag (the user-level lists aside).
+    #[serde(default = "yes")]
+    entry_enabled: bool,
     #[serde(default)]
     shadowed: bool,
     #[serde(default)]
@@ -261,6 +306,8 @@ struct Slot {
     running: Option<watch::Receiver<bool>>,
     error: Option<String>,
     omp_version: Option<String>,
+    /// The user config file this folder's list reads (`<omp agent dir>/mcp.json`).
+    user_file: Option<PathBuf>,
 }
 
 static CHECKS: LazyLock<Mutex<HashMap<PathBuf, Slot>>> = LazyLock::new(Default::default);
@@ -278,11 +325,20 @@ pub(crate) fn mark_dirty(key: &Path, name: &str) {
     checks().entry(key.to_path_buf()).or_default().dirty.insert(name.to_string());
 }
 
+/// Checks `name` again on the next list of every folder that reads `user_file` (a user-level
+/// change: every such list has it).
+pub(crate) fn mark_dirty_everywhere(user_file: &Path, name: &str) {
+    for slot in checks().values_mut().filter(|s| s.user_file.as_deref() == Some(user_file)) {
+        slot.dirty.insert(name.to_string());
+    }
+}
+
 /// Starts a check when results are missing, old or stale (unless one runs). `only`: these
 /// servers; `None`: everything.
-fn maybe_check(mcp: &Mcp, key: &Path, cwd: &Path, natives: &[Native], refresh: bool) {
+fn maybe_check(mcp: &Mcp, key: &Path, cwd: &Path, natives: &[Native], lists: &UserLists, refresh: bool) {
     let mut map = checks();
     let slot = map.entry(key.to_path_buf()).or_default();
+    slot.user_file = Some(mcp.user_file());
     if slot.running.is_some() {
         return;
     }
@@ -292,10 +348,13 @@ fn maybe_check(mcp: &Mcp, key: &Path, cwd: &Path, natives: &[Native], refresh: b
         return;
     }
     let full = refresh || slot.finished_at.is_none_or(|t| now - t > CHECK_TTL_MS) || (slot.error.is_some() && slot.servers.is_empty());
+    // Other tools' servers switched on since their result (through the user-level lists).
+    let switched_on = slot.servers.iter().filter(|p| p.provider != "native" && !p.enabled && lists.enabled(&p.name, p.entry_enabled)).map(|p| p.name.clone());
     let stale: Vec<String> = natives
         .iter()
         .filter(|n| n.enabled && !n.shadowed && slot.fps.get(&fp_key(&n.name, &n.path)) != Some(&n.fp))
         .map(|n| n.name.clone())
+        .chain(switched_on)
         .chain(slot.dirty.iter().cloned())
         .collect::<HashSet<_>>()
         .into_iter()
@@ -319,10 +378,11 @@ fn maybe_check(mcp: &Mcp, key: &Path, cwd: &Path, natives: &[Native], refresh: b
     let (env, key, cwd) = (mcp.helper.clone(), key.to_path_buf(), cwd.to_path_buf());
     tokio::spawn(async move {
         let req = json!({ "op": "probe", "only": only, "timeoutMs": CHECK_WINDOW_MS });
+        let deadline = Instant::now() + CHECK_TIMEOUT;
         let mut version = None;
-        let res = match helper::Running::start(&env, &cwd, req).await {
+        let res = match helper::Running::start(&env, &cwd, req, deadline).await {
             Ok(mut run) => {
-                run.finish(CHECK_TIMEOUT, |l| {
+                run.finish(deadline, |l| {
                     if l.get("t").and_then(Value::as_str) == Some("hello") {
                         version = l.get("ompVersion").and_then(Value::as_str).map(str::to_string);
                     }
@@ -371,7 +431,7 @@ fn merge(prev: &[Probed], fresh: Vec<Probed>, only: Option<&HashSet<String>>) ->
         .map(|p| {
             let kept = p.status == "unchanged" || only.is_some_and(|o| !o.contains(&p.name) && p.status != "disabled");
             match prev.iter().find(|q| q.name == p.name && q.path == p.path).filter(|_| kept) {
-                Some(q) => Probed { enabled: p.enabled, shadowed: p.shadowed, signed_in: p.signed_in, config: p.config.clone(), ..q.clone() },
+                Some(q) => Probed { enabled: p.enabled, entry_enabled: p.entry_enabled, shadowed: p.shadowed, signed_in: p.signed_in, config: p.config.clone(), ..q.clone() },
                 None if p.status == "unchanged" => Probed { status: "unknown".into(), ..p },
                 None => p,
             }
@@ -418,17 +478,18 @@ async fn list_with(mcp: &Mcp, folder: Option<PathBuf>, refresh: bool, wait_ms: u
     let key = cwd.clone();
     let (m, f) = (mcp.clone(), folder.clone());
     let files = tokio::task::spawn_blocking(move || native_files(&m, f.as_deref())).await.map_err(|e| ApiError::new("internal", e.to_string()))?;
-    let nat = natives(&files, &mcp.user_file());
-    maybe_check(mcp, &key, &cwd, &nat, refresh);
+    let lists = UserLists::of(&files, &mcp.user_file());
+    let nat = natives(&files, &lists);
+    maybe_check(mcp, &key, &cwd, &nat, &lists, refresh);
     if wait_ms > 0 {
         wait_check(&key, wait_ms).await;
         // The finished check may have left changed servers behind (edited meanwhile).
-        maybe_check(mcp, &key, &cwd, &nat, false);
+        maybe_check(mcp, &key, &cwd, &nat, &lists, false);
     }
-    Ok(build_list(mcp, folder.as_deref(), &files, &nat, &key, live_sessions))
+    Ok(build_list(mcp, folder.as_deref(), &files, &nat, &lists, &key, live_sessions))
 }
 
-fn build_list(mcp: &Mcp, folder: Option<&Path>, files: &[NativeFile], nat: &[Native], key: &Path, live_sessions: u32) -> McpList {
+fn build_list(mcp: &Mcp, folder: Option<&Path>, files: &[NativeFile], nat: &[Native], lists: &UserLists, key: &Path, live_sessions: u32) -> McpList {
     let map = checks();
     let slot = map.get(key);
     let running = slot.is_some_and(|s| s.running.is_some());
@@ -471,7 +532,8 @@ fn build_list(mcp: &Mcp, folder: Option<&Path>, files: &[NativeFile], nat: &[Nat
             extra,
         });
     }
-    // Other tools' servers, as omp's discovery found them (only known after a check).
+    // Other tools' servers, as omp's discovery found them (only known after a check); on or off
+    // as the user-level lists say now (they may have changed in another folder's list since).
     for p in probed.iter().filter(|p| p.provider != "native") {
         let entry = p.config.as_ref().map(J::from_value).and_then(|j| match j {
             J::Obj(o) => Some(o),
@@ -480,26 +542,38 @@ fn build_list(mcp: &Mcp, folder: Option<&Path>, files: &[NativeFile], nat: &[Nat
         let (server, _) = entry.as_ref().map(model::to_draft).unwrap_or_else(|| {
             (McpServerDraft { transport: McpTransport::Stdio, command: None, args: vec![], cwd: None, env: vec![], url: None, headers: vec![], timeout_ms: None, oauth: None }, vec![])
         });
-        let mut status = if p.enabled { status_of(p) } else { McpStatus::Disabled };
-        if status == McpStatus::Unknown && running {
-            status = McpStatus::Checking;
-        }
+        let enabled = lists.enabled(&p.name, p.entry_enabled);
+        let rechecking = running && slot.is_some_and(|s| s.rechecking.contains(&p.name));
+        // A result taken while it was switched the other way says nothing about it now.
+        let current = enabled == p.enabled && !rechecking && !slot.is_some_and(|s| s.dirty.contains(&p.name));
         let shadowed = p.shadowed || nat.iter().any(|n| n.name == p.name);
+        let status = if !enabled {
+            McpStatus::Disabled
+        } else if shadowed {
+            McpStatus::Skipped
+        } else if current && status_of(p) != McpStatus::Unknown {
+            status_of(p)
+        } else if running {
+            McpStatus::Checking
+        } else {
+            McpStatus::Unknown
+        };
+        let live = current && status != McpStatus::Disabled && status != McpStatus::Checking && status != McpStatus::Unknown;
         servers.push(McpServer {
             name: p.name.clone(),
             origin: McpOrigin::Imported,
             path: p.path.clone(),
             source_label: Some(p.provider_name.clone().unwrap_or_else(|| p.provider.clone())),
             server,
-            enabled: p.enabled,
+            enabled,
             signed_in: p.signed_in,
             shadowed,
-            status: if shadowed && p.enabled { McpStatus::Skipped } else { status },
-            error: p.error.clone(),
-            note: if shadowed { Some("Not loaded: a server with the same name takes precedence.".into()) } else { p.note.clone().or_else(|| auth_note(p)) },
-            tools: if status == McpStatus::Connected { p.tools.clone() } else { vec![] },
-            server_info: p.server_info.clone(),
-            checked_at: (p.at > 0).then_some(p.at),
+            status,
+            error: p.error.clone().filter(|_| live),
+            note: if shadowed { Some("Not loaded: a server with the same name takes precedence.".into()) } else { p.note.clone().or_else(|| auth_note(p)).filter(|_| live) },
+            tools: if live && status == McpStatus::Connected { p.tools.clone() } else { vec![] },
+            server_info: p.server_info.clone().filter(|_| live),
+            checked_at: (live && p.at > 0).then_some(p.at),
             extra: vec![],
         });
     }
@@ -614,16 +688,32 @@ async fn save_files(mcp: &Mcp, p: &McpSaveParams) -> Result<(Option<PathBuf>, bo
     })
     .await?;
     // A rename carries the user-level list entries along (they are keyed by name).
-    if let Some(old) = prev.filter(|o| *o != name) {
+    let renamed = prev.filter(|o| *o != name);
+    if let Some(old) = &renamed {
         let (user, old2, new2) = (mcp.user_file(), old.clone(), name.clone());
         if user.exists() {
             blocking(move || files::modify(&user, |root| Ok(rename_in_lists(root, &old2, &new2)))).await?;
         }
     }
     tracing::info!(scope = ?p.scope, name = %name, "mcp server saved");
+    let project = p.scope == McpScope::Project;
     let key = mcp.cwd_for(folder.as_deref())?;
     mark_dirty(&key, &name);
-    Ok((folder, p.scope == McpScope::Project))
+    // A renamed server may have hidden another one of its old name.
+    if let Some(old) = renamed {
+        recheck_where_shown(mcp, &key, project, &old);
+    }
+    Ok((folder, project))
+}
+
+/// Checks `name` again in the lists a change of `key`'s folder shows in: that folder's for a
+/// project change, every folder's for a user-level one (a removed or renamed server may have hidden
+/// another of its name, which no definition change of that one tells).
+fn recheck_where_shown(mcp: &Mcp, key: &Path, project: bool, name: &str) {
+    mark_dirty(key, name);
+    if !project {
+        mark_dirty_everywhere(&mcp.user_file(), name);
+    }
 }
 
 fn rename_in_lists(root: &mut Obj, old: &str, new: &str) {
@@ -672,7 +762,9 @@ async fn remove_files(mcp: &Mcp, p: &McpServerRef) -> Result<(Option<PathBuf>, b
     })
     .await?;
     tracing::info!(scope = ?scope, name = %p.name, "mcp server removed");
-    Ok((folder, scope == McpScope::Project))
+    let project = scope == McpScope::Project;
+    recheck_where_shown(mcp, &mcp.cwd_for(folder.as_deref())?, project, &p.name);
+    Ok((folder, project))
 }
 
 /// omp's `setMcpServerEnabled`: the `enabled` flag of the first writable definition (the row's
@@ -776,21 +868,28 @@ fn set_in_list(root: &mut Obj, key: &str, name: &str, present: bool) {
 async fn test(mcp: &Mcp, p: McpTestParams) -> Result<McpTestResult, ApiError> {
     let folder = folder(p.cwd.as_deref())?;
     let cwd = mcp.cwd_for(folder.as_deref())?;
-    let mut req = json!({ "op": "test", "name": p.name, "timeoutMs": TEST_WINDOW_MS });
+    let mut req = json!({ "op": "test", "name": p.name, "timeoutMs": TEST_WINDOW_MS, "scope": p.scope });
+    // The row's own definition (`scope`): a hidden one is never mistaken for the one hiding it.
+    let stored = match p.scope {
+        Some(s) => {
+            let (file, found) = file_defining(&scope_dir(mcp, s, folder.as_deref())?, &p.name);
+            let entry = found.then(|| servers_of(&files::read(&file)).and_then(|sv| sv.obj(&p.name)).cloned()).flatten();
+            if entry.is_none() && p.server.is_none() {
+                return Err(ApiError::new("not_found", format!("no server named “{}” in {}", p.name, file.display())));
+            }
+            entry
+        }
+        None => locate(mcp, folder.as_deref(), &p.name, None).and_then(|(f, _)| servers_of(&files::read(&f)).and_then(|sv| sv.obj(&p.name)).cloned()),
+    };
     if let Some(draft) = &p.server {
         // Fill the draft's hidden values from the saved definition, if there is one.
-        let stored = match p.scope {
-            Some(s) => {
-                let (file, found) = file_defining(&scope_dir(mcp, s, folder.as_deref())?, &p.name);
-                found.then(|| servers_of(&files::read(&file)).and_then(|sv| sv.obj(&p.name)).cloned()).flatten()
-            }
-            None => locate(mcp, folder.as_deref(), &p.name, None).and_then(|(f, _)| servers_of(&files::read(&f)).and_then(|sv| sv.obj(&p.name)).cloned()),
-        };
         let mut entry = stored.clone().unwrap_or_default();
         model::apply_draft(&mut entry, draft, stored.as_ref())?;
         req["config"] = J::Obj(entry).to_value();
+    } else if let Some(entry) = stored.filter(|_| p.scope.is_some()) {
+        req["config"] = J::Obj(entry).to_value();
     }
-    let res = helper::call(&mcp.helper, &cwd, req, TEST_TIMEOUT).await?;
+    let res = helper::call(&mcp.helper, &cwd, req, Instant::now() + TEST_TIMEOUT).await?;
     let probed: Probed = serde_json::from_value(json!({
         "name": p.name, "status": res.get("status").cloned().unwrap_or(json!("failed")),
         "error": res.get("error"), "authType": res.get("authType"), "tools": res.get("tools").cloned().unwrap_or(json!([])),
@@ -810,10 +909,17 @@ async fn test(mcp: &Mcp, p: McpTestParams) -> Result<McpTestResult, ApiError> {
     })
 }
 
-/// The sign-in target: a native http/sse server that is on.
+/// The sign-in target: a native http/sse server that is on, defined in an `mcp.json` (omp's
+/// `/mcp reauth` and `/mcp unauth` don't read the `.mcp.json` siblings). omp looks it up from the
+/// project folder for a project server and from the neutral folder for a user one, so a hidden
+/// user server is never taken for the project server of its name.
 async fn auth_target(mcp: &Mcp, folder: Option<PathBuf>, name: &str, scope: Option<McpScope>) -> Result<(auth::Target, McpScope), ApiError> {
     let (file, s) = locate(mcp, folder.as_deref(), name, scope)
         .ok_or_else(|| ApiError::new("not_found", format!("no server named “{name}” in omp's config")).with_hint("Sign-in works for servers in omp's own config files."))?;
+    if file.file_name().is_some_and(|n| n != "mcp.json") {
+        return Err(ApiError::new("invalid_params", format!("“{name}” is defined in {}: omp signs in servers of its mcp.json files only", file.display()))
+            .with_hint(format!("Move it to {} to sign in.", file.with_file_name("mcp.json").display())));
+    }
     let entry = servers_of(&files::read(&file)).and_then(|sv| sv.obj(name)).cloned().unwrap_or_default();
     if model::transport_of(&entry) == McpTransport::Stdio {
         return Err(ApiError::new("invalid_params", format!("“{name}” is a local (stdio) server: it has no sign-in")).with_hint("Give it its credentials through its environment."));
@@ -821,15 +927,22 @@ async fn auth_target(mcp: &Mcp, folder: Option<PathBuf>, name: &str, scope: Opti
     if !model::entry_enabled(&entry) {
         return Err(ApiError::new("invalid_params", format!("“{name}” is switched off")).with_hint("Switch it on first."));
     }
-    let cwd = mcp.cwd_for(folder.as_deref())?;
-    Ok((auth::Target { name: name.to_string(), check_key: cwd.clone(), cwd, project: (s == McpScope::Project).then_some(folder).flatten() }, s))
+    let project = (s == McpScope::Project).then_some(folder.clone()).flatten();
+    let target = auth::Target {
+        name: name.to_string(),
+        path: file,
+        check_key: mcp.cwd_for(folder.as_deref())?,
+        cwd: mcp.cwd_for(project.as_deref())?,
+        project,
+    };
+    Ok((target, s))
 }
 
 async fn sign_out(ctx: &Ctx, mcp: &Mcp, p: McpServerRef) -> Result<McpChanged, ApiError> {
     let folder = folder(p.cwd.as_deref())?;
     let (target, scope) = auth_target(mcp, folder.clone(), &p.name, p.scope).await?;
-    helper::call(&mcp.helper, &target.cwd, json!({ "op": "unauth", "name": p.name }), TEST_TIMEOUT).await?;
-    mark_dirty(&target.check_key, &p.name);
+    helper::call(&mcp.helper, &target.cwd, json!({ "op": "unauth", "name": p.name, "path": target.path }), Instant::now() + TEST_TIMEOUT).await?;
+    recheck_where_shown(mcp, &target.check_key, scope == McpScope::Project, &p.name);
     tracing::info!(name = %p.name, "mcp server signed out");
     changed(ctx, mcp, folder, scope == McpScope::Project).await
 }
@@ -841,7 +954,7 @@ async fn search(mcp: &Mcp, p: McpSearchParams) -> Result<McpSearchResult, ApiErr
     }
     let cwd = mcp.cwd_for(None)?;
     let limit = p.limit.unwrap_or(12).clamp(1, 30);
-    let res = helper::call(&mcp.helper, &cwd, json!({ "op": "search", "query": query, "limit": limit }), SEARCH_TIMEOUT).await?;
+    let res = helper::call(&mcp.helper, &cwd, json!({ "op": "search", "query": query, "limit": limit }), Instant::now() + SEARCH_TIMEOUT).await?;
     let entries = res.get("entries").and_then(Value::as_array).map(|a| a.iter().filter_map(registry_entry).collect()).unwrap_or_default();
     Ok(McpSearchResult { entries })
 }

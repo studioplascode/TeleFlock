@@ -273,7 +273,16 @@ mod tests {
         let first = OmpFileLock::acquire(&file).unwrap();
         assert!(platform::try_acquire(&lock_path(&file)).unwrap().is_none(), "held");
         drop(first);
-        assert!(platform::try_acquire(&lock_path(&file)).unwrap().is_some(), "released");
+        // A child another test thread is forking right now holds a copy of the lock's descriptor
+        // until it execs (close-on-exec), so the release can show a moment late; omp's writer
+        // retries for 5 s. Released means free again within a second, not at this instant.
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        let mut again = platform::try_acquire(&lock_path(&file)).unwrap();
+        while again.is_none() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+            again = platform::try_acquire(&lock_path(&file)).unwrap();
+        }
+        assert!(again.is_some(), "released");
     }
 
     #[test]

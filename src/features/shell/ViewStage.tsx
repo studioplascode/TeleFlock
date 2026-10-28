@@ -1,7 +1,7 @@
 import { AlertOctagon, RotateCcw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Component, type ErrorInfo, type ReactNode, Suspense, useEffect, useState } from "react";
-import { Button, cn, LogoMark, spring, tween } from "@/design";
+import { Button, LogoMark, spring, tween } from "@/design";
 import { navigate, type Route, useRoute } from "@/core";
 import { isFullBleed, prefetchViews, RouteView, routeKey } from "@/app/routes";
 import { PullToRefresh } from "./PullToRefresh";
@@ -130,7 +130,8 @@ export function ViewStage({ mobile }: { mobile: boolean }) {
           ) : mobile ? (
             <PullToRefresh className="min-h-0 flex-1">{view}</PullToRefresh>
           ) : (
-            <div className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain")}>{view}</div>
+            // stable gutter: a page that scrolls sits exactly where one that doesn't would (no sideways jump between them)
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">{view}</div>
           )}
         </motion.div>
       </AnimatePresence>

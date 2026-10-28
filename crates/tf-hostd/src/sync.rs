@@ -90,24 +90,47 @@ pub fn field_len(item: &TranscriptItem, field: AppendField) -> Option<u64> {
     Some(n as u64)
 }
 
+/// The session tree subscribers are sent: `tree` at revision `rev`, which the session bumps on
+/// every change. A revision's hash and shared copy are made once ([`Fanout`] keeps them), not on
+/// every `meta` flush.
+#[derive(Clone, Copy)]
+pub struct Tree<'a> {
+    pub tree: Option<&'a TreeInfo>,
+    pub rev: u64,
+}
+
+/// A tree as subscribers' metas hold it: shared, with its hash.
+#[derive(Clone)]
+struct TreeState {
+    tree: Option<Arc<TreeInfo>>,
+    hash: Hash,
+}
+
+impl TreeState {
+    fn of(tree: Option<&TreeInfo>) -> TreeState {
+        TreeState { hash: hash_json(&tree), tree: tree.map(|t| Arc::new(t.clone())) }
+    }
+}
+
 /// A meta as patches see it: its top-level fields except `tree` (JSON), and the tree.
-pub struct MetaState {
+struct MetaState {
     fields: Map<String, Value>,
     fields_hash: Hash,
-    tree: Option<TreeInfo>,
-    tree_hash: Hash,
+    tree: TreeState,
 }
 
 impl MetaState {
     /// `meta` with its tree.
-    pub fn of(meta: &SessionMeta) -> MetaState {
-        let mut m = meta.clone();
-        let tree = m.tree.take();
-        MetaState::of_parts(&m, tree.as_ref())
+    #[cfg(test)]
+    fn of(meta: &SessionMeta) -> MetaState {
+        let mut bare = meta.clone();
+        let tree = bare.tree.take();
+        MetaState::new(&bare, TreeState::of(tree.as_ref()))
     }
 
-    /// `meta` (its `tree` ignored) with `tree`.
-    pub fn of_parts(meta: &SessionMeta, tree: Option<&TreeInfo>) -> MetaState {
+    /// `meta` with `tree`. `meta` comes without a tree (the replica's never has one): its fields
+    /// are serialized for every `meta` flush, the tree only per revision.
+    fn new(meta: &SessionMeta, tree: TreeState) -> MetaState {
         let fields = match serde_json::to_value(meta) {
             Ok(Value::Object(mut m)) => {
                 m.remove("tree");
@@ -115,14 +138,12 @@ impl MetaState {
             }
             _ => Map::new(),
         };
-        let fields_hash = hash_json(&fields);
-        let tree_hash = hash_json(&tree);
-        MetaState { fields, fields_hash, tree: tree.cloned(), tree_hash }
+        MetaState { fields_hash: hash_json(&fields), fields, tree }
     }
 
     /// [`SessionSync::meta_hash`]: hash of the full meta.
-    pub fn hash(&self) -> String {
-        combine(self.fields_hash, self.tree_hash)
+    fn hash(&self) -> String {
+        combine(self.fields_hash, self.tree.hash)
     }
 }
 
@@ -211,41 +232,37 @@ struct SyncState {
     meta: Arc<MetaState>,
 }
 
-impl SyncState {
-    /// Strips from `snap` (a full window) the rows `held` has with the same hash, and records the
-    /// window as held. `held` empty (or another session): a full snapshot.
-    fn window(snap: &mut SessionSnapshot, hashes: &[Hash], held: &HashMap<&str, Hash>, meta_same: bool, meta: &MetaState, seq: u64) {
-        let mut digests = Vec::new();
-        let mut omitted = 0usize;
-        let mut keep = Vec::with_capacity(snap.items.len());
-        let ids: Vec<String> = snap.items.iter().map(|i| i.id().to_owned()).collect();
-        for (item, &h) in std::mem::take(&mut snap.items).into_iter().zip(hashes) {
-            if held.get(item.id()) == Some(&h) {
-                omitted += 1;
-                continue;
-            }
+/// Which rows of a window (`items`, with their `hashes`) a subscriber holding `held` lacks or
+/// holds with another hash (`true`: send it), and their digests.
+fn lacking(items: &[TranscriptItem], hashes: &[Hash], held: &HashMap<&str, Hash>) -> (Vec<bool>, Vec<RowDigest>) {
+    let mut send = Vec::with_capacity(items.len());
+    let mut digests = Vec::new();
+    for (item, &h) in items.iter().zip(hashes) {
+        let lacks = held.get(item.id()) != Some(&h);
+        if lacks {
             digests.push(RowDigest { id: item.id().to_owned(), h: hex(h) });
-            keep.push(item);
         }
-        snap.items = keep;
+        send.push(lacks);
+    }
+    (send, digests)
+}
+
+impl SyncState {
+    /// Completes a snapshot for the subscriber: `sync` (`order`: the window's ids, when rows were
+    /// left out) and the meta: a placeholder when it holds `meta` already, else with `meta`'s tree.
+    fn finish(snap: &mut SessionSnapshot, order: Option<Vec<String>>, digests: Vec<RowDigest>, meta_same: bool, meta: &MetaState, seq: u64) {
         if meta_same {
             placeholder(&mut snap.meta);
+        } else {
+            snap.meta.tree = meta.tree.tree.as_deref().cloned();
         }
-        let delta = omitted > 0;
-        snap.sync = Some(SessionSync {
-            seq,
-            delta,
-            order: delta.then_some(ids),
-            hashes: digests,
-            meta_hash: meta.hash(),
-            meta_same,
-        });
+        snap.sync = Some(SessionSync { seq, delta: order.is_some(), order, hashes: digests, meta_hash: meta.hash(), meta_same });
     }
 
-    /// A subscriber opening with `have`: its snapshot (`snap`, the full window, becomes what it
-    /// lacks) and its state. `session_id` is the omp session the window belongs to.
-    fn open(snap: &mut SessionSnapshot, have: &SessionHave, session_id: &str, seq: u64) -> SyncState {
-        let meta = Arc::new(MetaState::of(&snap.meta));
+    /// A subscriber opening with `have`: its snapshot (`snap`, the full window with a meta without
+    /// tree, becomes what it lacks) and its state. `session_id` is the omp session the window
+    /// belongs to; `meta` the session's meta with its tree.
+    fn open(snap: &mut SessionSnapshot, have: &SessionHave, session_id: &str, seq: u64, meta: Arc<MetaState>) -> SyncState {
         let hashes: Vec<Hash> = snap.items.iter().map(row_hash).collect();
         let same = have.session_id == session_id;
         let have_rows: HashMap<&str, Hash> = if same {
@@ -259,17 +276,30 @@ impl SyncState {
         };
         let meta_same = same && have.meta_hash.as_deref() == Some(meta.hash().as_str());
         let held = snap.items.iter().zip(&hashes).map(|(i, &h)| (i.id().to_owned(), Some(h))).collect();
-        SyncState::window(snap, &hashes, &have_rows, meta_same, &meta, seq);
+        let (send, digests) = lacking(&snap.items, &hashes, &have_rows);
+        let order = send.contains(&false).then(|| snap.items.iter().map(|i| i.id().to_owned()).collect());
+        snap.items = std::mem::take(&mut snap.items).into_iter().zip(send).filter_map(|(item, send)| send.then_some(item)).collect();
+        SyncState::finish(snap, order, digests, meta_same, &meta, seq);
         SyncState { seq, held, meta }
     }
 
-    /// A live `reset` for this subscriber: the delta against what it holds.
+    /// A live `reset` for this subscriber: the delta against what it holds (only the rows it
+    /// lacks are copied out of `full`).
     fn reset(&mut self, full: &SessionSnapshot, hashes: &[Hash], meta: &Arc<MetaState>, agent_id: &str) -> SessionSnapshot {
-        let mut snap = full.clone();
-        snap.agent_id = agent_id.to_owned();
         let held: HashMap<&str, Hash> = self.held.iter().filter_map(|(id, h)| h.map(|h| (id.as_str(), h))).collect();
+        let (send, digests) = lacking(&full.items, hashes, &held);
+        let order = send.contains(&false).then(|| full.items.iter().map(|i| i.id().to_owned()).collect());
+        let mut snap = SessionSnapshot {
+            agent_id: agent_id.to_owned(),
+            meta: full.meta.clone(),
+            items: full.items.iter().zip(&send).filter(|(_, send)| **send).map(|(item, _)| item.clone()).collect(),
+            has_more: full.has_more,
+            cursor: full.cursor.clone(),
+            ui: full.ui.clone(),
+            sync: None,
+        };
         let meta_same = self.meta.hash() == meta.hash();
-        SyncState::window(&mut snap, hashes, &held, meta_same, meta, self.seq + 1);
+        SyncState::finish(&mut snap, order, digests, meta_same, meta, self.seq + 1);
         self.held = full.items.iter().zip(hashes).map(|(i, &h)| (i.id().to_owned(), Some(h))).collect();
         self.meta = meta.clone();
         snap
@@ -298,14 +328,14 @@ impl SyncState {
         let old = &*self.meta;
         let mut out = Vec::new();
         let set = fields_patch(&old.fields, &now.fields);
-        let tree_changed = old.tree_hash != now.tree_hash;
+        let tree_changed = old.tree.hash != now.tree.hash;
         if !set.is_empty() {
-            out.push(SessionEvent::MetaPatch { set, hash: combine(now.fields_hash, old.tree_hash) });
+            out.push(SessionEvent::MetaPatch { set, hash: combine(now.fields_hash, old.tree.hash) });
         }
         if tree_changed {
-            match &now.tree {
+            match &now.tree.tree {
                 Some(tree) => {
-                    let (upsert, remove) = tree_patch(old.tree.as_ref(), tree);
+                    let (upsert, remove) = tree_patch(old.tree.tree.as_deref(), tree);
                     out.push(SessionEvent::TreePatch { upsert, remove, leaf_id: tree.leaf_id.clone(), hash: now.hash() });
                 }
                 // A tree gone (never happens in practice): the whole meta.
@@ -334,7 +364,9 @@ enum Prepared<'a> {
     Pass(&'a SessionEvent),
 }
 
-fn prepare<'a>(events: &'a [SessionEvent], field_len: &dyn Fn(&str, AppendField) -> Option<u64>) -> Vec<Prepared<'a>> {
+/// `reset_meta` gives a reset's meta state (the snapshot's meta has no tree; at most one reset per
+/// flush survives).
+fn prepare<'a>(events: &'a [SessionEvent], field_len: &dyn Fn(&str, AppendField) -> Option<u64>, reset_meta: &mut dyn FnMut(&SessionMeta) -> Arc<MetaState>) -> Vec<Prepared<'a>> {
     let mut out = Vec::with_capacity(events.len());
     let mut replaced: HashSet<&str> = HashSet::new();
     let mut reset = false;
@@ -345,7 +377,7 @@ fn prepare<'a>(events: &'a [SessionEvent], field_len: &dyn Fn(&str, AppendField)
                 if !reset {
                     reset = true;
                     let hashes = snapshot.items.iter().map(row_hash).collect();
-                    out.push(Prepared::Reset(snapshot, hashes, Arc::new(MetaState::of(&snapshot.meta))));
+                    out.push(Prepared::Reset(snapshot, hashes, reset_meta(&snapshot.meta)));
                 }
             }
             SessionEvent::Upsert { item, .. } if !reset => {
@@ -397,6 +429,9 @@ impl Sub {
 #[derive(Default)]
 pub struct Fanout {
     subs: Vec<Sub>,
+    /// The tree `sessionSync` subscribers' metas hold, by revision ([`Tree::rev`]): hashed and
+    /// copied once per change, dropped when no such subscriber is left.
+    tree: Option<(u64, TreeState)>,
 }
 
 impl Fanout {
@@ -411,49 +446,82 @@ impl Fanout {
     /// Forgets disconnected clients.
     pub fn prune(&mut self) {
         self.subs.retain(|s| !s.client.is_closed());
+        self.settle();
     }
 
     pub fn clear(&mut self) {
         self.subs.clear();
+        self.settle();
     }
 
     pub fn unsubscribe(&mut self, client_id: &str, agent_id: &str) {
         self.subs.retain(|s| !(s.client.id() == client_id && s.agent_id == agent_id));
+        self.settle();
     }
 
     pub fn unsubscribe_client(&mut self, client_id: &str) {
         self.subs.retain(|s| s.client.id() != client_id);
+        self.settle();
+    }
+
+    /// Drops the tree copy nobody needs any more.
+    fn settle(&mut self) {
+        if !self.subs.iter().any(|s| s.sync.is_some()) {
+            self.tree = None;
+        }
+    }
+
+    /// `tree` as metas hold it (computed once per revision).
+    fn tree_state(&mut self, tree: Tree<'_>) -> TreeState {
+        match &self.tree {
+            Some((rev, state)) if *rev == tree.rev => state.clone(),
+            _ => {
+                let state = TreeState::of(tree.tree);
+                self.tree = Some((tree.rev, state.clone()));
+                state
+            }
+        }
     }
 
     /// Subscribes `client` as `agent_id` (replacing its earlier subscription as that agent) and
-    /// returns its snapshot: `snap` (the full window, meta with overlay and tree) as is, or, when
-    /// the client speaks `sessionSync` and sent `have`, what it lacks. `session_id` is the omp
-    /// session the window belongs to when the meta does not say.
-    pub fn subscribe(&mut self, client: &ClientHandle, agent_id: &str, mut snap: SessionSnapshot, have: Option<&SessionHave>, session_id: &str) -> SessionSnapshot {
+    /// returns its snapshot: `snap` (the full window, meta with overlay, without tree) with
+    /// `tree`, or, when the client speaks `sessionSync` and sent `have`, what it lacks.
+    /// `session_id` is the omp session the window belongs to when the meta does not say.
+    pub fn subscribe(&mut self, client: &ClientHandle, agent_id: &str, mut snap: SessionSnapshot, tree: Tree<'_>, have: Option<&SessionHave>, session_id: &str) -> SessionSnapshot {
         let prev = self.subs.iter().position(|s| s.client.id() == client.id() && s.agent_id == agent_id).map(|i| self.subs.remove(i));
-        self.prune();
+        self.subs.retain(|s| !s.client.is_closed());
         // A re-open continues the numbering, so the client can tell the old subscription's
         // messages (seq ≤ the new snapshot's) from the new one's.
         let seq = prev.and_then(|p| p.sync).map_or(0, |s| s.seq);
         snap.agent_id = agent_id.to_owned();
         let sync = match have {
             Some(have) if client.features().session_sync => {
+                let meta = Arc::new(MetaState::new(&snap.meta, self.tree_state(tree)));
                 let current = snap.meta.session_id.clone().unwrap_or_else(|| session_id.to_owned());
-                Some(SyncState::open(&mut snap, have, &current, seq))
+                Some(SyncState::open(&mut snap, have, &current, seq, meta))
             }
-            _ => None,
+            _ => {
+                snap.meta.tree = tree.tree.cloned();
+                None
+            }
         };
         self.subs.push(Sub { client: client.clone(), agent_id: agent_id.to_owned(), tree_on_change: keeps_tree(&client.info().version), sync });
+        self.settle();
         snap
     }
 
-    /// Sends one flush's events (coalesced; `reset`s with overlay and tree applied).
-    /// `field_len` is the current length of a row's field in the replica (`at` of appends).
-    pub fn send_events(&mut self, events: &[SessionEvent], field_len: &dyn Fn(&str, AppendField) -> Option<u64>) {
+    /// Sends one flush's events (coalesced; `reset`s with overlay applied, without tree: they go
+    /// out with `tree`). `field_len` is the current length of a row's field in the replica (`at`
+    /// of appends).
+    pub fn send_events(&mut self, events: &[SessionEvent], tree: Tree<'_>, field_len: &dyn Fn(&str, AppendField) -> Option<u64>) {
         if events.is_empty() {
             return;
         }
-        let prepared = if self.subs.iter().any(|s| s.sync.is_some()) { prepare(events, field_len) } else { Vec::new() };
+        let prepared = if self.subs.iter().any(|s| s.sync.is_some()) {
+            prepare(events, field_len, &mut |meta| Arc::new(MetaState::new(meta, self.tree_state(tree))))
+        } else {
+            Vec::new()
+        };
         for sub in &mut self.subs {
             if sub.sync.is_none() {
                 for ev in events {
@@ -461,6 +529,7 @@ impl Fanout {
                         SessionEvent::Reset { snapshot } => {
                             let mut s = snapshot.clone();
                             s.agent_id = sub.agent_id.clone();
+                            s.meta.tree = tree.tree.cloned();
                             SessionEvent::Reset { snapshot: s }
                         }
                         other => other.clone(),
@@ -489,13 +558,13 @@ impl Fanout {
     /// Sends the session's `meta` (overlay applied, without tree) and `tree`: plain subscribers
     /// get a `meta` (with the tree when it changed, or when their app would drop it), `sessionSync`
     /// ones the patches from the meta they hold.
-    pub fn send_meta(&mut self, meta: &SessionMeta, tree: Option<&TreeInfo>, tree_changed: bool) {
-        let with_tree = tree.filter(|_| tree_changed || self.subs.iter().any(|s| s.sync.is_none() && !s.tree_on_change)).map(|t| {
+    pub fn send_meta(&mut self, meta: &SessionMeta, tree: Tree<'_>, tree_changed: bool) {
+        let with_tree = tree.tree.filter(|_| tree_changed || self.subs.iter().any(|s| s.sync.is_none() && !s.tree_on_change)).map(|t| {
             let mut full = meta.clone();
             full.tree = Some(t.clone());
             full
         });
-        let now = self.subs.iter().any(|s| s.sync.is_some()).then(|| Arc::new(MetaState::of_parts(meta, tree)));
+        let now = self.subs.iter().any(|s| s.sync.is_some()).then(|| Arc::new(MetaState::new(meta, self.tree_state(tree))));
         // Subscribers holding the same meta share one diff.
         let mut patches: Vec<(*const MetaState, Vec<SessionEvent>)> = Vec::new();
         for sub in &mut self.subs {
@@ -621,6 +690,8 @@ mod tests {
         s.items.iter().map(|i| i.id()).collect()
     }
 
+    const NO_TREE: Tree<'static> = Tree { tree: None, rev: 0 };
+
     #[test]
     fn apps_from_0_5_1_keep_their_tree() {
         for (v, keeps) in [("0.5.0", false), ("0.0.0", false), ("dev", false), ("0.5.1-rc.1", true), ("0.5.1", true), ("0.6.0", true)] {
@@ -637,7 +708,7 @@ mod tests {
         let mut f = Fanout::default();
         // First open: nothing cached → a full snapshot with every hash.
         let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
-        let first = f.subscribe(&c, "a", snap(rows.clone(), meta("t")), Some(&have), "s1");
+        let first = f.subscribe(&c, "a", snap(rows.clone(), meta("t")), NO_TREE, Some(&have), "s1");
         let sync = first.sync.clone().unwrap();
         assert!(!sync.delta && sync.order.is_none() && !sync.meta_same);
         assert_eq!(ids(&first), ["u1", "a1", "t1", "u2"]);
@@ -645,7 +716,7 @@ mod tests {
         assert_eq!(first.meta.title.as_deref(), Some("t"));
 
         // Unchanged: nothing but the order.
-        let again = f.subscribe(&c, "a", snap(rows.clone(), meta("t")), Some(&have_of(&first)), "s1");
+        let again = f.subscribe(&c, "a", snap(rows.clone(), meta("t")), NO_TREE, Some(&have_of(&first)), "s1");
         let s = again.sync.as_ref().unwrap();
         assert!(s.delta && s.meta_same && again.items.is_empty() && s.hashes.is_empty());
         assert_eq!(s.order.as_deref().unwrap(), ["u1", "a1", "t1", "u2"]);
@@ -656,7 +727,7 @@ mod tests {
         next.remove(1);
         next[1] = tool("t1", Some("out and more"));
         next.push(assistant("a2", "new"));
-        let delta = f.subscribe(&c, "a", snap(next, meta("t2")), Some(&have_of(&first)), "s1");
+        let delta = f.subscribe(&c, "a", snap(next, meta("t2")), NO_TREE, Some(&have_of(&first)), "s1");
         let s = delta.sync.as_ref().unwrap();
         assert!(s.delta && !s.meta_same);
         assert_eq!(ids(&delta), ["t1", "a2"]);
@@ -667,14 +738,14 @@ mod tests {
         // Another omp session (rotation): a full snapshot whatever the ids say.
         let mut other = have_of(&first);
         other.session_id = "s0".into();
-        let full = f.subscribe(&c, "a", snap(rows.clone(), meta("t")), Some(&other), "s1");
+        let full = f.subscribe(&c, "a", snap(rows.clone(), meta("t")), NO_TREE, Some(&other), "s1");
         assert!(!full.sync.as_ref().unwrap().delta && full.items.len() == 4);
 
         // A client without the feature (or without `have`): today's snapshot.
         let old = client("c2", false);
-        let plain = f.subscribe(&old, "a", snap(rows.clone(), meta("t")), Some(&have_of(&first)), "s1");
+        let plain = f.subscribe(&old, "a", snap(rows.clone(), meta("t")), NO_TREE, Some(&have_of(&first)), "s1");
         assert!(plain.sync.is_none() && plain.items.len() == 4);
-        let plain = f.subscribe(&c, "b", snap(rows, meta("t")), None, "s1");
+        let plain = f.subscribe(&c, "b", snap(rows, meta("t")), NO_TREE, None, "s1");
         assert!(plain.sync.is_none() && plain.items.len() == 4);
     }
 
@@ -688,8 +759,8 @@ mod tests {
         let c = client("c1", true);
         let mut f = Fanout::default();
         let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
-        let first = f.subscribe(&c, "a", snap(old_branch, meta("t")), Some(&have), "s1");
-        let switched = f.subscribe(&c, "a", snap(new_branch, meta("t")), Some(&have_of(&first)), "s1");
+        let first = f.subscribe(&c, "a", snap(old_branch, meta("t")), NO_TREE, Some(&have), "s1");
+        let switched = f.subscribe(&c, "a", snap(new_branch, meta("t")), NO_TREE, Some(&have_of(&first)), "s1");
         let s = switched.sync.as_ref().unwrap();
         assert_eq!(ids(&switched), ["b5", "b6", "b7"]);
         assert_eq!(s.order.as_deref().unwrap(), ["u0", "u1", "u2", "u3", "u4", "b5", "b6", "b7"]);
@@ -704,9 +775,9 @@ mod tests {
         let old = client("c2", false);
         let mut f = Fanout::default();
         let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
-        let s = f.subscribe(&c, "a", snap(vec![assistant("a1", "he")], meta("t")), Some(&have), "s1");
+        let s = f.subscribe(&c, "a", snap(vec![assistant("a1", "he")], meta("t")), NO_TREE, Some(&have), "s1");
         assert_eq!(s.sync.unwrap().seq, 0);
-        f.subscribe(&old, "a", snap(vec![assistant("a1", "he")], meta("t")), None, "s1");
+        f.subscribe(&old, "a", snap(vec![assistant("a1", "he")], meta("t")), NO_TREE, None, "s1");
         // Replica now: a1 = "hello" (two appends), t1 upserted then appended "x", then replaced.
         let events = vec![
             SessionEvent::Append { id: "a1".into(), field: AppendField::Text, text: "l".into(), at: None },
@@ -721,7 +792,7 @@ mod tests {
             ("t1", AppendField::Output) => Some(4),
             _ => None,
         };
-        f.send_events(&events, &lens);
+        f.send_events(&events, NO_TREE, &lens);
         let got = msgs(&c);
         let kinds: Vec<(&str, u64)> = got.iter().map(|m| (m["ev"]["k"].as_str().unwrap(), m["seq"].as_u64().unwrap())).collect();
         assert_eq!(kinds, [("append", 1), ("upsert", 2), ("append", 3), ("upsert", 4), ("btw", 5)]);
@@ -735,9 +806,9 @@ mod tests {
         assert!(plain.iter().all(|m| m.get("seq").is_none() && m["ev"].get("h").is_none() && m["ev"].get("at").is_none()));
 
         // A re-open continues at the last seq.
-        let again = f.subscribe(&c, "a", snap(vec![assistant("a1", "hello")], meta("t")), Some(&have), "s1");
+        let again = f.subscribe(&c, "a", snap(vec![assistant("a1", "hello")], meta("t")), NO_TREE, Some(&have), "s1");
         assert_eq!(again.sync.unwrap().seq, 5);
-        f.send_events(&[SessionEvent::Remove { id: "a1".into() }], &lens);
+        f.send_events(&[SessionEvent::Remove { id: "a1".into() }], NO_TREE, &lens);
         assert_eq!(msgs(&c)[0]["seq"], 6);
     }
 
@@ -750,16 +821,16 @@ mod tests {
         let mut f = Fanout::default();
         let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
         let rows = vec![user("u1", "a"), assistant("a1", "b"), user("u2", "c")];
-        f.subscribe(&c, "a", snap(rows.clone(), meta("t")), Some(&have), "s1");
+        f.subscribe(&c, "a", snap(rows.clone(), meta("t")), NO_TREE, Some(&have), "s1");
         let lens = |_: &str, _: AppendField| Some(2);
-        f.send_events(&[SessionEvent::Append { id: "a1".into(), field: AppendField::Text, text: "x".into(), at: None }], &lens);
-        f.send_events(&[SessionEvent::Upsert { item: user("u3", "d"), h: None }], &lens);
+        f.send_events(&[SessionEvent::Append { id: "a1".into(), field: AppendField::Text, text: "x".into(), at: None }], NO_TREE, &lens);
+        f.send_events(&[SessionEvent::Upsert { item: user("u3", "d"), h: None }], NO_TREE, &lens);
         msgs(&c);
         let mut rows2 = rows.clone();
         rows2[1] = assistant("a1", "bx");
         rows2.push(user("u3", "d"));
         rows2.push(user("u4", "e"));
-        f.send_events(&[SessionEvent::Reset { snapshot: snap(rows2, meta("t")) }], &lens);
+        f.send_events(&[SessionEvent::Reset { snapshot: snap(rows2, meta("t")) }], NO_TREE, &lens);
         let got = msgs(&c);
         assert_eq!(got.len(), 1);
         let s: SessionSnapshot = serde_json::from_value(got[0]["ev"]["snapshot"].clone()).unwrap();
@@ -776,7 +847,7 @@ mod tests {
         let c = client("c1", true);
         let mut f = Fanout::default();
         let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
-        f.subscribe(&c, "a", snap(vec![], meta("t")), Some(&have), "s1");
+        f.subscribe(&c, "a", snap(vec![], meta("t")), NO_TREE, Some(&have), "s1");
         let events = vec![
             SessionEvent::Upsert { item: user("u1", "a"), h: None },
             SessionEvent::Append { id: "u1".into(), field: AppendField::Text, text: "b".into(), at: None },
@@ -784,7 +855,7 @@ mod tests {
             SessionEvent::Reset { snapshot: snap(vec![user("u1", "ab")], meta("t")) },
             SessionEvent::Append { id: "u1".into(), field: AppendField::Text, text: "c".into(), at: None },
         ];
-        f.send_events(&events, &|_, _| Some(3));
+        f.send_events(&events, NO_TREE, &|_, _| Some(3));
         let kinds: Vec<String> = msgs(&c).iter().map(|m| m["ev"]["k"].as_str().unwrap().to_owned()).collect();
         assert_eq!(kinds, ["btw", "reset", "append"]);
     }
@@ -806,16 +877,16 @@ mod tests {
             children: 0,
         };
         let tree1 = TreeInfo { nodes: vec![node("n1", "a"), node("n2", "b")], leaf_id: Some("n2".into()) };
-        let mut m1 = meta("t");
-        m1.tree = Some(tree1.clone());
+        let rev1 = Tree { tree: Some(&tree1), rev: 1 };
         let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
-        let first = f.subscribe(&c, "a", snap(vec![], m1.clone()), Some(&have), "s1");
-        f.subscribe(&plain, "a", snap(vec![], m1.clone()), None, "s1");
-        let mut bare = m1.clone();
-        bare.tree = None;
+        let first = f.subscribe(&c, "a", snap(vec![], meta("t")), rev1, Some(&have), "s1");
+        assert_eq!(first.meta.tree.as_ref(), Some(&tree1), "a full snapshot carries the tree");
+        let opened = f.subscribe(&plain, "a", snap(vec![], meta("t")), rev1, None, "s1");
+        assert_eq!(opened.meta.tree.as_ref(), Some(&tree1));
+        let bare = meta("t");
 
         // Unchanged meta: nothing for the sync subscriber, the full meta for the plain one.
-        f.send_meta(&bare, Some(&tree1), false);
+        f.send_meta(&bare, rev1, false);
         assert!(msgs(&c).is_empty());
         assert_eq!(msgs(&plain).len(), 1);
 
@@ -823,7 +894,7 @@ mod tests {
         let mut m2 = bare.clone();
         m2.title = Some("t2".into());
         m2.cwd = None;
-        f.send_meta(&m2, Some(&tree1), false);
+        f.send_meta(&m2, rev1, false);
         let got = msgs(&c);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["ev"]["k"], "metaPatch");
@@ -836,7 +907,7 @@ mod tests {
 
         // The tree changes: one node, a new one, the leaf.
         let tree2 = TreeInfo { nodes: vec![node("n1", "a"), node("n2", "b2"), node("n3", "c")], leaf_id: Some("n3".into()) };
-        f.send_meta(&m2, Some(&tree2), true);
+        f.send_meta(&m2, Tree { tree: Some(&tree2), rev: 2 }, true);
         let got = msgs(&c);
         assert_eq!(got.len(), 1);
         let SessionEvent::TreePatch { upsert, remove, leaf_id, hash } = serde_json::from_value(got[0]["ev"].clone()).unwrap() else { panic!() };
@@ -850,6 +921,48 @@ mod tests {
         assert_eq!(hash, MetaState::of(&full3).hash());
         let p = msgs(&plain);
         assert!(p[0]["ev"]["meta"].get("tree").is_some(), "plain apps get the changed tree");
+    }
+
+    /// A `meta` flush with the tree unchanged reuses its revision's hash and copy (a big tree costs
+    /// nothing per flush); resets too; a new revision is diffed against the copy the subscriber
+    /// holds; the copy goes with the last `sessionSync` subscriber.
+    #[test]
+    fn the_tree_is_hashed_and_copied_once_per_revision() {
+        let c = client("c1", true);
+        let mut f = Fanout::default();
+        let tree = big_tree(50);
+        let rev1 = Tree { tree: Some(&tree), rev: 1 };
+        let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
+        f.subscribe(&c, "a", snap(vec![user("u1", "a")], meta("t")), rev1, Some(&have), "s1");
+        msgs(&c);
+        let held = |f: &Fanout| f.subs[0].sync.as_ref().unwrap().meta.tree.tree.clone().unwrap();
+        let copy = held(&f);
+        assert_eq!(*copy, tree);
+        for i in 0..3 {
+            let mut m = meta("t");
+            m.tps = Some(i as f32 + 0.5);
+            f.send_meta(&m, rev1, false);
+            assert!(Arc::ptr_eq(&held(&f), &copy), "revision 1's copy");
+        }
+        f.send_events(&[SessionEvent::Reset { snapshot: snap(vec![user("u1", "a")], meta("t")) }], rev1, &|_, _| None);
+        assert!(Arc::ptr_eq(&held(&f), &copy), "a reset holds revision 1's copy too");
+        let kinds: Vec<String> = msgs(&c).iter().map(|m| m["ev"]["k"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(kinds, ["metaPatch", "metaPatch", "metaPatch", "reset"]);
+        // The revision says whether the tree changed: it is not looked at again within one.
+        let other = big_tree(3);
+        f.send_meta(&meta("t"), Tree { tree: Some(&other), rev: 1 }, false);
+        assert!(Arc::ptr_eq(&held(&f), &copy));
+        assert!(msgs(&c).iter().all(|m| m["ev"]["k"] != "treePatch"));
+        // A new revision: a new copy, sent as a patch from the one held.
+        f.send_meta(&meta("t"), Tree { tree: Some(&other), rev: 2 }, true);
+        assert_eq!(*held(&f), other);
+        let got = msgs(&c);
+        let SessionEvent::TreePatch { upsert, remove, leaf_id, .. } = serde_json::from_value(got[0]["ev"].clone()).unwrap() else { panic!("{got:?}") };
+        let mut rebuilt = tree.clone();
+        apply_tree_patch(&mut rebuilt, &upsert, &remove, leaf_id);
+        assert_eq!(rebuilt, other);
+        f.unsubscribe("c1", "a");
+        assert!(f.tree.is_none(), "nobody holds a tree any more");
     }
 
     /// Tree patches rebuild the new tree exactly, node order included (reordered trees fall back
@@ -886,5 +999,49 @@ mod tests {
         assert_eq!(field_len(&tool("t", Some("ab")), AppendField::Text), None);
         let n = TranscriptItem::Notice(NoticeItem { id: "n".into(), at: 0, level: NoticeLevel::Info, text: "x".into(), source: None });
         assert_eq!(field_len(&n, AppendField::Text), Some(1));
+    }
+
+    /// A session tree of `n` nodes like a long omp session's (labels a line of prose).
+    fn big_tree(n: usize) -> TreeInfo {
+        let id = |i: usize| format!("{:08x}", i.wrapping_mul(2_654_435_761) % 0xffff_ffff);
+        let nodes = (0..n)
+            .map(|i| TreeNode {
+                id: id(i),
+                parent_id: (i > 0).then(|| id(i - 1)),
+                kind: if i % 2 == 0 { TreeNodeKind::User } else { TreeNodeKind::Assistant },
+                label: format!("node {i}: the handler returns early when the queue is empty and the parser reads a token…"),
+                at: 1_793_205_532_197 + i as i64,
+                on_path: true,
+                children: 1,
+            })
+            .collect();
+        TreeInfo { nodes, leaf_id: Some(id(n.saturating_sub(1))) }
+    }
+
+    /// Bench: what one `meta` flush (tps, ~2/s while streaming; the tree unchanged) costs a
+    /// session with a big tree and a `sessionSync` subscriber. Release build:
+    /// `cargo test --release -p tf-hostd --lib meta_send_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "bench"]
+    fn meta_send_cost() {
+        for n in [2_000usize, 10_000, 30_000] {
+            let tree = big_tree(n);
+            let c = client("c1", true);
+            let mut f = Fanout::default();
+            let have = SessionHave { session_id: "s1".into(), rows: vec![], meta_hash: None };
+            let rev = Tree { tree: Some(&tree), rev: 1 };
+            f.subscribe(&c, "a", snap(vec![], meta("t")), rev, Some(&have), "s1");
+            msgs(&c);
+            let reps = 20u32;
+            let t = std::time::Instant::now();
+            for i in 0..reps {
+                let mut bare = meta("t");
+                bare.tps = Some(i as f32 + 0.5);
+                f.send_meta(&bare, rev, false);
+            }
+            let per = t.elapsed() / reps;
+            assert_eq!(msgs(&c).len(), reps as usize);
+            println!("tree nodes {n:>6}: meta flush {:>8.3} ms", per.as_secs_f64() * 1e3);
+        }
     }
 }

@@ -730,7 +730,7 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
             severity: Severity::Info,
             title: "Share every omp session with TeleFlock (fallback)".into(),
             detail: format!(
-                "Only needed for omp sessions that run without the TeleFlock extension: omp then shares them on the private relay instead. Sets collab.autoStart=control and collab.relayUrl={want} in omp's global config; rooms stay on this host.{current}"
+                "Only needed for omp sessions that run without the TeleFlock bridge: omp then shares them on the private relay instead. Sets collab.autoStart=control and collab.relayUrl={want} in omp's global config; rooms stay on this host.{current}"
             ),
             fixable: true,
             recommended: false,
@@ -741,7 +741,7 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
         issues.push(SetupIssue {
             id: FIX_GLOBAL_BRIDGE.into(),
             severity: Severity::Warn,
-            title: if bridge_installed { "Update the TeleFlock omp extension".into() } else { "Install the TeleFlock omp extension globally".into() },
+            title: if bridge_installed { "Update the TeleFlock bridge in omp".into() } else { "Install the TeleFlock bridge for every omp session".into() },
             detail: if source {
                 format!(
                     "Lets TeleFlock follow and control omp sessions it did not start (live transcript, questions and approvals, subagents, model and other controls), including sessions herdr restores. Copies {} to {}.",

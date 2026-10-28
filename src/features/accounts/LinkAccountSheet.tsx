@@ -1,12 +1,12 @@
-import { ArrowLeft, Check, ChevronRight, KeyRound, Search, Smartphone, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, KeyRound, LogIn, Search, Smartphone, X } from "lucide-react";
 import { motion } from "motion/react";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { core } from "@/core";
 import type { AuthFlow, LoginProvider } from "@/core/gen";
 import { BottomSheet, Button, Dialog, DialogContent, IconButton, Input, spring, useIsMobile } from "@/design";
 import { RemoteAuthPanel, useRemoteAuth } from "@/features/auth";
 import { ProviderMark } from "./ProviderMark";
-import { matchesProvider, type PickerEntry, pickerSections, providerDetail, providerLook } from "./providers";
+import { type AlternateLogin, alternateLogin, baseLogin, matchesProvider, type PickerEntry, pickerSections, providerDetail, providerLook } from "./providers";
 import { accountLinked } from "./store";
 
 export interface LinkAccountSheetProps {
@@ -23,12 +23,16 @@ export interface LinkAccountSheetProps {
   provider?: string;
   /** Follow this running link instead of starting one (it was started earlier). */
   flowId?: string;
+  /** A sign-in the sheet runs or follows (closing the sheet cancels it while it runs). */
+  onFlow?(flowId: string): void;
+  /** A sign-in it ran ended without a link (failed, expired, cancelled — also by closing the sheet), once the host has it. */
+  onSettled?(): void;
 }
 
 function PopularTile({ entry, linked, onPick, index }: { entry: PickerEntry; linked: number; onPick(id: string): void; index: number }) {
   const p = entry.provider;
   const look = providerLook(p.id, p.name);
-  const detail = look.blurb ?? providerDetail(p);
+  const detail = providerDetail(p);
   return (
     <motion.button
       type="button"
@@ -85,7 +89,7 @@ function Picker({ providers, linked, onPick }: { providers: LoginProvider[]; lin
         autoFocus={!mobile}
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder={`Search ${providers.length} providers`}
+        placeholder={`Search ${popular.length + rest.length} providers`}
         aria-label="Search providers"
         leading={<Search />}
         trailing={
@@ -144,16 +148,20 @@ function LinkFlow({
   onSwitch,
   onClose,
   onAnother,
+  onFlow,
+  onSettled,
 }: {
   hostId: string;
   provider: LoginProvider;
   flowId?: string;
-  alternate?: LoginProvider;
-  /** Leaves this sign-in (cancelling it) for the picker or the provider's browser sign-in. */
+  alternate?: AlternateLogin;
+  /** Leaves this sign-in (cancelling it) for the picker or the account's other login. */
   back?: { label: string; go(): void };
   onSwitch(id: string): void;
   onClose(): void;
   onAnother(): void;
+  onFlow?(flowId: string): void;
+  onSettled?(): void;
 }) {
   const name = providerLook(provider.id, provider.name).name;
   const auth = useRemoteAuth({
@@ -162,8 +170,15 @@ function LinkFlow({
     start: () => core.host(hostId).call("accounts.link", { provider: provider.id }) as Promise<AuthFlow>,
     autoOpen: true,
     onDone: () => accountLinked(hostId),
+    onFinal: (f) => {
+      if (f.state !== "done") onSettled?.();
+    },
   });
-  const offerCode = alternate && (auth.stage === "browser" || auth.stage === "paste");
+  const running = auth.flow?.flowId;
+  useEffect(() => {
+    if (running) onFlow?.(running);
+  }, [running]);
+  const offer = alternate && (auth.stage === "browser" || auth.stage === "paste" || auth.stage === "prompt");
   return (
     <div className="flex flex-col gap-4">
       {back && auth.stage !== "done" && (
@@ -178,20 +193,21 @@ function LinkFlow({
         icon={<ProviderMark id={provider.id} ompName={provider.name} size={26} />}
         onClose={onClose}
         aside={
-          offerCode && (
+          offer && (
             <button
               type="button"
-              onClick={() => onSwitch(alternate.id)}
+              onClick={() => onSwitch(alternate.provider.id)}
               className="flex items-center gap-2 self-start rounded-sm text-xs font-bold text-accent-hi hover:underline focus-ring"
             >
-              <Smartphone className="size-3.5" />
-              Signing in on another device? Use a code instead
+              {alternate.device ? <Smartphone className="size-3.5" /> : <LogIn className="size-3.5" />}
+              {alternate.offer}
             </button>
           )
         }
       />
       {auth.stage === "done" && (
-        <Button variant="ghost" size="sm" onClick={onAnother} className="-mt-2 self-center">
+        // mb on touch screens: its 48 px touch target would reach below the end of the sheet and make it scroll.
+        <Button variant="ghost" size="sm" onClick={onAnother} className="-mt-2 self-center [@media(hover:none)]:mb-2">
           Link another account
         </Button>
       )}
@@ -204,14 +220,14 @@ function LinkFlow({
  * searchable), sign in with the shared remote-auth panel, success. A dialog on desktop, a bottom
  * sheet on phones. Closing it cancels a sign-in still running.
  */
-export function LinkAccountSheet({ hostId, host, open, onOpenChange, providers, linked, provider, flowId }: LinkAccountSheetProps) {
+export function LinkAccountSheet({ hostId, host, open, onOpenChange, providers, linked, provider, flowId, onFlow, onSettled }: LinkAccountSheetProps) {
   const mobile = useIsMobile();
   const [picked, setPicked] = useState<string | undefined>(provider);
   const [attach, setAttach] = useState<string | undefined>(flowId);
   const [attempt, setAttempt] = useState(0);
   const chosen = picked ? providers.find((p) => p.id === picked) : undefined;
-  const alternate = chosen ? providers.find((p) => p.id === `${chosen.id}-device`) : undefined;
-  const base = chosen?.id.endsWith("-device") ? providers.find((p) => `${p.id}-device` === chosen.id) : undefined;
+  const alternate = chosen ? alternateLogin(chosen.id, providers) : undefined;
+  const base = chosen ? baseLogin(chosen.id, providers) : undefined;
   const look = chosen ? providerLook(chosen.id, chosen.name) : undefined;
   const pick = (id: string | undefined) => {
     setAttach(undefined);
@@ -233,10 +249,12 @@ export function LinkAccountSheet({ hostId, host, open, onOpenChange, providers, 
       provider={chosen}
       flowId={attach}
       alternate={alternate}
-      back={provider === chosen.id ? undefined : { label: base ? "Back to the browser sign-in" : "All providers", go: () => pick(base?.id) }}
+      back={provider === chosen.id ? undefined : { label: base?.back ?? "All providers", go: () => pick(base?.provider.id) }}
       onSwitch={(id) => pick(id)}
       onClose={() => onOpenChange(false)}
       onAnother={() => pick(undefined)}
+      onFlow={onFlow}
+      onSettled={onSettled}
     />
   ) : providers.length > 0 ? (
     <Picker providers={providers} linked={linked} onPick={(id) => pick(id)} />

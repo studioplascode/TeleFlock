@@ -1937,6 +1937,28 @@ function bridge(pi: ExtensionAPI) {
 		}
 	};
 
+	/** Ids of the sessions omp has written to disk (seen there once). A resync of one names the file's
+	 *  last entry and carries none of its entries, also while omp moves the file: `moveTo` renames it
+	 *  before it points the session at the new path, so `isSessionOnDisk()` is false meanwhile, and
+	 *  inlining a large session would stall omp's event loop on a huge frame hostd does not need. */
+	const writtenSessions = new Set<string>();
+	/** omp has written the session to disk, now or before (see `writtenSessions`). */
+	const sessionWritten = (sm: ExtensionContext["sessionManager"], file: string | undefined): boolean => {
+		const sid = sm.getSessionId();
+		if (writtenSessions.has(sid)) return true;
+		if (!sessionOnDisk(sm, file)) return false;
+		writtenSessions.add(sid);
+		return true;
+	};
+	const noteWritten = (ctx: ExtensionContext): void => {
+		try {
+			const sm = ctx.sessionManager;
+			sessionWritten(sm, sm.getSessionFile());
+		} catch (err) {
+			bridgeLog(`session file: ${String(err)}`);
+		}
+	};
+
 	const emit = (event: string, data: unknown): void => {
 		const sid = helloSessionId ?? sessionId();
 		if (!sid) return;
@@ -2444,8 +2466,9 @@ function bridge(pi: ExtensionAPI) {
 			out.sessionFile = file ?? null;
 			out.leafId = sm.getLeafId() ?? null;
 			const entries = sm.getEntries();
-			if (sessionOnDisk(sm, file)) {
-				// omp writes title changes asynchronously: the newest other entry is in the file.
+			if (file && sessionWritten(sm, file)) {
+				// omp writes title changes asynchronously: the newest other entry is in the file. While
+				// omp moves the file it is not at `file`: hostd subscribes again until it is.
 				for (let i = entries.length - 1; i >= 0; i--) {
 					const entry = entries[i]!;
 					if ((entry.type as string) === "title_change") continue;
@@ -2453,7 +2476,7 @@ function bridge(pi: ExtensionAPI) {
 					break;
 				}
 			} else {
-				// No file yet (omp writes it with the first assistant message): the entries come along.
+				// Never written (omp writes the file with the first assistant message): the entries come along.
 				for (const entry of entries) if (WIRE_ENTRIES[entry.type]) frames.push({ t: "entry", entry });
 			}
 		} catch (err) {
@@ -2680,10 +2703,12 @@ function bridge(pi: ExtensionAPI) {
 		try {
 			if (!active) return;
 			// Independent of hostd: the session stream and the dialog wrappers (re-wrapped after a mode
-			// re-init replaced omp's UI context) are in place before it subscribes.
+			// re-init replaced omp's UI context) are in place before it subscribes, and a session omp
+			// wrote since is known as written (a stat per tick until then).
 			if (ctxRef) {
 				attachSession(ctxRef);
 				ensureDialogs(ctxRef);
+				noteWritten(ctxRef);
 			}
 			if (connecting && Date.now() - connectStartedAt > AUTH_TIMEOUT_MS) {
 				bridgeLog("hostd did not authenticate in time; reconnecting");
