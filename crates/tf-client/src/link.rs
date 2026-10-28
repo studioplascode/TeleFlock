@@ -176,7 +176,7 @@ impl Link {
         let welcome = tokio::time::timeout(WELCOME_TIMEOUT, async {
             loop {
                 match next_msg(&mut lines).await {
-                    Ok(Some(ServerMsg::Welcome { hostd_version, client_id, protocol })) => {
+                    Ok(Some(ServerMsg::Welcome { hostd_version, client_id, protocol, .. })) => {
                         return Ok((hostd_version, client_id, protocol));
                     }
                     Ok(Some(ServerMsg::Error { error })) => return Err(error),
@@ -552,7 +552,7 @@ mod tests {
     fn hello() -> ClientMsg {
         ClientMsg::Hello {
             protocol: PROTOCOL_VERSION,
-            client: ClientInfo { app: "t".into(), version: "0".into(), platform: "linux".into(), device: "d".into() },
+            client: ClientInfo { app: "t".into(), version: "0".into(), platform: "linux".into(), device: "d".into(), features: None },
             herdr_session: "s".into(),
         }
     }
@@ -566,7 +566,7 @@ mod tests {
             let mut lines = BufReader::new(server_r).lines();
             let h: ClientMsg = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert!(matches!(h, ClientMsg::Hello { .. }));
-            send(&mut server_w, &ServerMsg::Welcome { protocol: PROTOCOL_VERSION, hostd_version: "0.1.0".into(), client_id: "c1".into() }).await;
+            send(&mut server_w, &ServerMsg::Welcome { protocol: PROTOCOL_VERSION, hostd_version: "0.1.0".into(), client_id: "c1".into(), features: None }).await;
             send(&mut server_w, &ServerMsg::Snapshot { rev: 5, state: host_state() }).await;
             // A request.
             let r: ClientMsg = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
@@ -653,7 +653,7 @@ mod tests {
         tokio::spawn(async move {
             let mut lines = BufReader::new(server_r).lines();
             lines.next_line().await.unwrap();
-            send(&mut server_w, &ServerMsg::Welcome { protocol: PROTOCOL_VERSION, hostd_version: "0.1.0".into(), client_id: "c1".into() }).await;
+            send(&mut server_w, &ServerMsg::Welcome { protocol: PROTOCOL_VERSION, hostd_version: "0.1.0".into(), client_id: "c1".into(), features: None }).await;
             send(&mut server_w, &ServerMsg::Snapshot { rev: 1, state: host_state() }).await;
             while let Ok(Some(l)) = lines.next_line().await {
                 if let Ok(ClientMsg::Ping { ts }) = serde_json::from_str(&l) {

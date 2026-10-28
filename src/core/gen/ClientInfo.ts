@@ -12,4 +12,8 @@ platform: string,
 /**
  * Device display name (shown as the author of prompts sent from it).
  */
-device: string, };
+device: string, 
+/**
+ * Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`]).
+ */
+features?: Array<string>, };

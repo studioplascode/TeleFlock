@@ -518,12 +518,57 @@ wire_struct! {
     pub struct SessionSnapshot {
         pub agent_id: String,
         pub meta: SessionMeta,
-        /// Most recent transcript rows, oldest first.
+        /// Most recent transcript rows, oldest first (a delta snapshot: only the rows the client
+        /// lacked or held stale, see [`SessionSync::delta`]).
         pub items: Vec<TranscriptItem>,
         pub has_more: bool,
         /// Pass to `session.history` to page older rows.
         pub cursor: Option<String>,
         pub ui: Option<UiRequest>,
+        /// Present when the client passed `have` (`sessionSync` feature).
+        pub sync: Option<SessionSync>,
+    }
+}
+
+wire_struct! {
+    /// One transcript row a client holds, with the hash the host gave it (`SessionSync::hashes`,
+    /// `upsert.h`). Hashes are opaque: compare for equality only.
+    pub struct RowDigest {
+        pub id: String,
+        pub h: String,
+    }
+}
+
+wire_struct! {
+    /// What a client already holds of an agent's session (`session.open { have }`), so the host
+    /// ships only rows that are missing or stale.
+    pub struct SessionHave {
+        /// omp session id the cached rows belong to; another session gets a full snapshot.
+        pub session_id: String,
+        /// The cached window, newest first (at most 500 rows).
+        pub rows: Vec<RowDigest>,
+        /// [`SessionSync::meta_hash`] of the cached meta.
+        pub meta_hash: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// How a client applies a snapshot it asked for with `have`, and where the live stream starts.
+    pub struct SessionSync {
+        /// Seq of the last event folded into this snapshot; live `session` messages continue at
+        /// `seq + 1` (a gap: re-open with `have`).
+        pub seq: u64,
+        /// `items` holds only the rows the client lacks or holds stale; `order` is the window.
+        pub delta: bool,
+        /// Every row id of the window, oldest first (delta snapshots). Cached rows of the window
+        /// that are not listed are gone (another branch, a rewritten session).
+        pub order: Option<Vec<String>>,
+        /// Hash of each row in `items`.
+        pub hashes: Vec<RowDigest>,
+        /// Hash of the full meta (tree included).
+        pub meta_hash: String,
+        /// The client's cached meta is current: `meta` is a placeholder, keep the cached one.
+        pub meta_same: bool,
     }
 }
 
@@ -539,11 +584,42 @@ pub enum SessionEvent {
     /// Replace everything (first open, resync, session rotation).
     Reset { snapshot: SessionSnapshot },
     /// Insert or replace a row by id (appends when new).
-    Upsert { item: TranscriptItem },
+    Upsert {
+        item: TranscriptItem,
+        /// Row hash (`sessionSync` subscriptions).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        h: Option<String>,
+    },
     /// Streaming append to a row's `text` (user/assistant/thinking) or `output` (tool).
-    Append { id: String, field: AppendField, text: String },
+    Append {
+        id: String,
+        field: AppendField,
+        text: String,
+        /// UTF-8 byte length of the field before this append (`sessionSync` subscriptions): a
+        /// client holding another length missed something and re-opens with `have`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        at: Option<u64>,
+    },
     Remove { id: String },
     Meta { meta: SessionMeta },
+    /// `sessionSync` subscriptions only (the app core turns it into a full `meta` for the UI):
+    /// JSON merge patch of the top-level [`SessionMeta`] fields except `tree` (`null` clears a
+    /// field), and the hash of the full meta after it.
+    MetaPatch {
+        #[ts(type = "Record<string, unknown>")]
+        set: serde_json::Map<String, serde_json::Value>,
+        hash: String,
+    },
+    /// `sessionSync` subscriptions only: tree nodes added or changed, nodes removed, the new
+    /// leaf, and the hash of the full meta after it.
+    TreePatch {
+        upsert: Vec<TreeNode>,
+        remove: Vec<String>,
+        leaf_id: Option<String>,
+        hash: String,
+    },
     /// Pending dialog changed (`null` = none).
     Ui { request: Option<UiRequest> },
     /// Side-question (`agent.btw`, or `/btw` asked in omp's TUI) answer stream, per turn of the

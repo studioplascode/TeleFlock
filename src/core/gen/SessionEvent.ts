@@ -3,9 +3,19 @@ import type { AppendField } from "./AppendField";
 import type { SessionMeta } from "./SessionMeta";
 import type { SessionSnapshot } from "./SessionSnapshot";
 import type { TranscriptItem } from "./TranscriptItem";
+import type { TreeNode } from "./TreeNode";
 import type { UiRequest } from "./UiRequest";
 
 /**
  * Live update for an open session (`session.open` subscribes the client).
  */
-export type SessionEvent = { "k": "reset", snapshot: SessionSnapshot, } | { "k": "upsert", item: TranscriptItem, } | { "k": "append", id: string, field: AppendField, text: string, } | { "k": "remove", id: string, } | { "k": "meta", meta: SessionMeta, } | { "k": "ui", request: UiRequest | null, } | { "k": "btw", btwId: string, turn: number, question?: string, text: string, done: boolean, } | { "k": "ended", reason: string, };
+export type SessionEvent = { "k": "reset", snapshot: SessionSnapshot, } | { "k": "upsert", item: TranscriptItem, 
+/**
+ * Row hash (`sessionSync` subscriptions).
+ */
+h?: string, } | { "k": "append", id: string, field: AppendField, text: string, 
+/**
+ * UTF-8 byte length of the field before this append (`sessionSync` subscriptions): a
+ * client holding another length missed something and re-opens with `have`.
+ */
+at?: number, } | { "k": "remove", id: string, } | { "k": "meta", meta: SessionMeta, } | { "k": "metaPatch", set: Record<string, unknown>, hash: string, } | { "k": "treePatch", upsert: Array<TreeNode>, remove: Array<string>, leafId: string | null, hash: string, } | { "k": "ui", request: UiRequest | null, } | { "k": "btw", btwId: string, turn: number, question?: string, text: string, done: boolean, } | { "k": "ended", reason: string, };

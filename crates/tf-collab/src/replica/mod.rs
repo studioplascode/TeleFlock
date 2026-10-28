@@ -408,6 +408,7 @@ impl Replica {
             cursor: (start > 0).then(|| self.order[start].clone()),
             items,
             ui: self.ui.current().cloned(),
+            sync: None,
         }
     }
 
@@ -1119,7 +1120,7 @@ impl Replica {
                     _ => {}
                 }
                 if self.emit {
-                    out.events.push(SessionEvent::Append { id, field, text: delta });
+                    out.events.push(SessionEvent::Append { id, field, text: delta, at: None });
                 }
             }
             Some(shown) if !newly_done && new_text == shown => {}
@@ -1363,7 +1364,7 @@ impl Replica {
                 t.output = Some(text.clone());
             }
             if self.emit {
-                out.events.push(SessionEvent::Append { id, field: AppendField::Output, text: delta });
+                out.events.push(SessionEvent::Append { id, field: AppendField::Output, text: delta, at: None });
             }
         } else if view_changed || text != shown {
             let mut t = current;
@@ -1816,7 +1817,7 @@ impl Replica {
             None => self.order.push(id.clone()),
         }
         if self.emit {
-            out.events.push(SessionEvent::Upsert { item: item.clone() });
+            out.events.push(SessionEvent::Upsert { item: item.clone(), h: None });
         }
         self.items.insert(id, item);
     }

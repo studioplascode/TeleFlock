@@ -346,7 +346,7 @@ fn first_prompt_in(events: &[SessionEvent]) -> Option<String> {
     };
     events.iter().find_map(|ev| match ev {
         SessionEvent::Reset { snapshot } => snapshot.items.iter().find_map(pick),
-        SessionEvent::Upsert { item } => pick(item),
+        SessionEvent::Upsert { item, .. } => pick(item),
         _ => None,
     })
 }
@@ -475,7 +475,7 @@ fn flush_locked(st: &mut SessionState) {
                 }
                 other => other.clone(),
             };
-            sub.client.send(ServerMsg::Session { agent_id: sub.agent_id.clone(), ev });
+            sub.client.send(ServerMsg::Session { agent_id: sub.agent_id.clone(), ev, seq: None });
         }
     }
     if ended {
@@ -501,7 +501,7 @@ fn flush_locked(st: &mut SessionState) {
             Some(full) if tree_changed || !sub.tree_on_change => full.clone(),
             _ => meta.clone(),
         };
-        sub.client.send(ServerMsg::Session { agent_id: sub.agent_id.clone(), ev: SessionEvent::Meta { meta } });
+        sub.client.send(ServerMsg::Session { agent_id: sub.agent_id.clone(), ev: SessionEvent::Meta { meta }, seq: None });
     }
 }
 
@@ -517,16 +517,16 @@ pub fn coalesce(events: Vec<SessionEvent>) -> (Vec<SessionEvent>, bool) {
                 meta = true;
                 continue;
             }
-            SessionEvent::Append { id, field, text } => {
+            SessionEvent::Append { id, field, text, .. } => {
                 for prev in out.iter_mut().rev() {
                     match prev {
-                        SessionEvent::Append { id: pid, field: pf, text: pt } if pid == id => {
+                        SessionEvent::Append { id: pid, field: pf, text: pt, .. } if pid == id => {
                             if pf == field {
                                 pt.push_str(text);
                                 continue 'next;
                             }
                         }
-                        SessionEvent::Upsert { item } if item.id() == id => break,
+                        SessionEvent::Upsert { item, .. } if item.id() == id => break,
                         SessionEvent::Remove { id: rid } if rid == id => break,
                         SessionEvent::Reset { .. } | SessionEvent::Ended { .. } => break,
                         _ => {}
@@ -1468,7 +1468,7 @@ mod tests {
     use tf_proto::session::{AppendField, NoticeItem, NoticeLevel, TranscriptItem};
 
     fn app(id: &str, t: &str) -> SessionEvent {
-        SessionEvent::Append { id: id.into(), field: AppendField::Text, text: t.into() }
+        SessionEvent::Append { id: id.into(), field: AppendField::Text, text: t.into(), at: None }
     }
 
     #[test]
@@ -1484,7 +1484,7 @@ mod tests {
             app("a", "he"),
             app("b", "1"),
             app("a", "llo"),
-            SessionEvent::Upsert { item: notice },
+            SessionEvent::Upsert { item: notice, h: None },
             app("a", "!"),
             app("b", "2"),
         ]);
@@ -1503,7 +1503,7 @@ mod tests {
             text: "x".into(),
             source: None,
         });
-        let (out, _) = coalesce(vec![app("a", "1"), SessionEvent::Upsert { item }, app("a", "2")]);
+        let (out, _) = coalesce(vec![app("a", "1"), SessionEvent::Upsert { item, h: None }, app("a", "2")]);
         assert_eq!(out.len(), 3);
     }
 
@@ -1533,7 +1533,7 @@ mod tests {
     }
 
     fn client(id: &str, version: &str) -> ClientHandle {
-        let info = tf_proto::host::ClientInfo { app: "teleflock-desktop".into(), version: version.into(), platform: "linux".into(), device: "d".into() };
+        let info = tf_proto::host::ClientInfo { app: "teleflock-desktop".into(), version: version.into(), platform: "linux".into(), device: "d".into(), features: None };
         ClientHandle::new(id.into(), info)
     }
 
@@ -1571,6 +1571,7 @@ mod tests {
         st.tree_rev = 1;
         let upsert = SessionEvent::Upsert {
             item: TranscriptItem::Notice(NoticeItem { id: "n".into(), at: 0, level: NoticeLevel::Info, text: "x".into(), source: None }),
+            h: None,
         };
 
         // Three metas in one flush: one meta, after the other events; the new tree for everyone.

@@ -223,7 +223,7 @@ impl LinkSink for Sink {
         let host_id = rt.id.clone();
         match msg {
             ServerMsg::Pulse { at, pulses } => inner.send(AppEvent::Pulse { host_id, at, pulses }),
-            ServerMsg::Session { agent_id, ev } => {
+            ServerMsg::Session { agent_id, ev, .. } => {
                 if matches!(ev, SessionEvent::Ended { .. }) {
                     rt.view.lock().unwrap().sessions.remove(&agent_id);
                 }
@@ -569,6 +569,7 @@ async fn connect_and_serve(
             version: eng.cfg.version.clone(),
             platform: eng.cfg.platform_name.clone(),
             device: eng.device_name(),
+            features: None,
         },
         herdr_session: profile.herdr_session.clone(),
     };

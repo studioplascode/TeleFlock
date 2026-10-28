@@ -55,14 +55,14 @@ impl Mirror {
                 self.meta = Some(snapshot.meta.clone());
                 self.ui = snapshot.ui.clone();
             }
-            SessionEvent::Upsert { item } => {
+            SessionEvent::Upsert { item, .. } => {
                 let id = item.id().to_owned();
                 if !self.items.contains_key(&id) {
                     self.order.push(id.clone());
                 }
                 self.items.insert(id, item.clone());
             }
-            SessionEvent::Append { id, field, text } => match (self.items.get_mut(id), field) {
+            SessionEvent::Append { id, field, text, .. } => match (self.items.get_mut(id), field) {
                 (Some(TranscriptItem::Assistant(a)), AppendField::Text) => a.text.push_str(text),
                 (Some(TranscriptItem::Thinking(t)), AppendField::Text) => t.text.push_str(text),
                 (Some(TranscriptItem::User(u)), AppendField::Text) => u.text.push_str(text),
@@ -77,6 +77,7 @@ impl Mirror {
             SessionEvent::Ui { request } => self.ui = request.clone(),
             SessionEvent::Ended { reason } => self.ended = Some(reason.clone()),
             SessionEvent::Btw { .. } => {}
+            SessionEvent::MetaPatch { .. } | SessionEvent::TreePatch { .. } => panic!("the replica never emits patches: {ev:?}"),
         }
     }
 
@@ -474,7 +475,7 @@ fn s17_task_completion_probe() {
         .events()
         .into_iter()
         .filter_map(|e| match e {
-            SessionEvent::Upsert { item: TranscriptItem::Tool(t) } => match &t.view {
+            SessionEvent::Upsert { item: TranscriptItem::Tool(t), .. } => match &t.view {
                 Some(ToolView::Task(v)) => Some(&v.agents),
                 _ => None,
             },
@@ -940,7 +941,7 @@ fn cut_images_take_the_journal_blob() {
     assert!(img.data.is_none() && img.url.is_none() && img.blob.is_none(), "a cut payload is not an image: {img:?}");
     let up = rep.apply_journal(&chunk);
     assert!(
-        up.events.iter().any(|e| matches!(e, SessionEvent::Upsert { item: TranscriptItem::User(u) } if u.images[0].blob.as_deref() == Some(hash))),
+        up.events.iter().any(|e| matches!(e, SessionEvent::Upsert { item: TranscriptItem::User(u), .. } if u.images[0].blob.as_deref() == Some(hash))),
         "{:?}",
         up.events
     );
@@ -998,7 +999,7 @@ fn tui_paste_takes_the_attachment_source_as_original() {
     let journal = format!("{notice}\n");
     let up = rep.apply_journal(&crate::guest::TranscriptChunk { text: journal.clone(), new_size: journal.len() as u64, error: None });
     assert!(
-        up.events.iter().any(|e| matches!(e, SessionEvent::Upsert { item: TranscriptItem::User(u) } if u.images[0].original.as_deref() == Some(path))),
+        up.events.iter().any(|e| matches!(e, SessionEvent::Upsert { item: TranscriptItem::User(u), .. } if u.images[0].original.as_deref() == Some(path))),
         "{:?}",
         up.events
     );

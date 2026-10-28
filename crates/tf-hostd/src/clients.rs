@@ -240,6 +240,7 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
         protocol: PROTOCOL_VERSION,
         hostd_version: crate::HOSTD_VERSION.to_string(),
         client_id: client_id.clone(),
+        features: None,
     });
     ctx.state.attach_client(&client);
 
@@ -430,7 +431,7 @@ mod tests {
     use tf_proto::model::Pulse;
 
     fn info() -> ClientInfo {
-        ClientInfo { app: "test".into(), version: "0".into(), platform: "linux".into(), device: "dev".into() }
+        ClientInfo { app: "test".into(), version: "0".into(), platform: "linux".into(), device: "dev".into(), features: None }
     }
 
     #[test]

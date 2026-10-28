@@ -352,6 +352,9 @@ wire_struct! {
         pub agent_id: String,
         /// Max transcript rows in the snapshot (default 200).
         pub limit: Option<u32>,
+        /// What the client caches of this agent's session (`sessionSync` feature): the snapshot
+        /// then ships only missing or stale rows ([`crate::session::SessionSync`]).
+        pub have: Option<crate::session::SessionHave>,
     }
 }
 

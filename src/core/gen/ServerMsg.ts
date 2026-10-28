@@ -7,4 +7,12 @@ import type { SessionEvent } from "./SessionEvent";
 import type { StatePatch } from "./StatePatch";
 import type { TermEvent } from "./TermEvent";
 
-export type ServerMsg = { "t": "welcome", protocol: number, hostdVersion: string, clientId: string, } | { "t": "res", id: number, result: unknown, error: ApiError | null, } | { "t": "snapshot", rev: number, state: HostState, } | { "t": "patch", rev: number, ops: Array<StatePatch>, } | { "t": "pulse", at: number, pulses: Array<Pulse>, } | { "t": "session", agentId: string, ev: SessionEvent, } | { "t": "term", termId: string, ev: TermEvent, } | { "t": "notify", notification: Notification, } | { "t": "pong", ts: number, } | { "t": "error", error: ApiError, };
+export type ServerMsg = { "t": "welcome", protocol: number, hostdVersion: string, clientId: string, 
+/**
+ * The client's features this hostd accepted (absent: none).
+ */
+features?: Array<string>, } | { "t": "res", id: number, result: unknown, error: ApiError | null, } | { "t": "snapshot", rev: number, state: HostState, } | { "t": "patch", rev: number, ops: Array<StatePatch>, } | { "t": "pulse", at: number, pulses: Array<Pulse>, } | { "t": "session", agentId: string, ev: SessionEvent, 
+/**
+ * Position in a `sessionSync` subscription (1, 2, … after the snapshot's `sync.seq`).
+ */
+seq?: number, } | { "t": "term", termId: string, ev: TermEvent, } | { "t": "notify", notification: Notification, } | { "t": "pong", ts: number, } | { "t": "error", error: ApiError, };

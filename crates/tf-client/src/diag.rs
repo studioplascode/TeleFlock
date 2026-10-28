@@ -395,6 +395,7 @@ async fn after_connect(eng: &Arc<Inner>, profile: &HostProfile, t: &dyn Transpor
                 version: eng.cfg.version.clone(),
                 platform: eng.cfg.platform_name.clone(),
                 device: format!("{} (diagnostics)", eng.device_name()),
+                features: None,
             },
             herdr_session: profile.herdr_session.clone(),
         };

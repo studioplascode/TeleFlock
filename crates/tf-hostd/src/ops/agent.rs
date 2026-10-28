@@ -993,7 +993,7 @@ async fn parked_snapshot(ctx: &Ctx, rec: ParkedRecord, limit: Option<u32>) -> Re
     };
     let mut items = tf_collab::replica::transcript_page(&text).items;
     items.drain(..items.len().saturating_sub(limit));
-    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more: false, cursor: None, ui: None })
+    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more: false, cursor: None, ui: None, sync: None })
 }
 
 /// The file, or its last `max` bytes from a line start.
