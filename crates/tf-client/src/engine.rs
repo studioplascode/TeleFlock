@@ -879,20 +879,17 @@ impl Engine {
     async fn host_call(&self, host_id: &str, method: &str, params: Value) -> Result<Value, ApiError> {
         let rt = self.inner.host(host_id).ok_or_else(|| not_found_host(host_id))?;
         let req = HostMethod::parse(method, params.clone())?;
+        let epoch = self.inner.page_epoch.load(Ordering::SeqCst);
+        let host = session_host(&self.inner, &rt);
         let link = match rt.link() {
             Some(l) => l,
             None => {
-                let st = rt.status();
-                let near = matches!(st.phase, ConnPhase::Deploying | ConnPhase::Starting);
-                if near && rt.wanted.load(Ordering::SeqCst) && rt.wait_online(Duration::from_secs(15)).await {
-                    rt.link().ok_or_else(|| self.offline_error(host_id, &rt))?
-                } else {
-                    return Err(self.offline_error(host_id, &rt));
+                if let Some(v) = self.offline_session_call(&host, &req, epoch).await {
+                    return Ok(v);
                 }
+                self.wait_link(host_id, &rt).await?
             }
         };
-        let epoch = self.inner.page_epoch.load(Ordering::SeqCst);
-        let host = session_host(&self.inner, &rt);
         if let HostMethod::SessionClose(p) = &req {
             sessions::closed(&host, &p.agent_id);
         }
@@ -934,6 +931,40 @@ impl Engine {
             });
         }
         Ok(result)
+    }
+
+    /// A session call the app core answers while the host has no link: the copy of a session its
+    /// mirror or the session cache holds (opened with the host once it is online), older rows the
+    /// mirror holds, and a close (nothing is subscribed without a link). `None`: the host must answer.
+    async fn offline_session_call(&self, host: &Arc<dyn SessionHost>, req: &HostMethod, epoch: u64) -> Option<Value> {
+        match req {
+            HostMethod::SessionOpen(p) => {
+                let v = sessions::open_offline(host, p).await?;
+                // The page that asked went away meanwhile: it no longer has the session open.
+                if self.inner.page_epoch.load(Ordering::SeqCst) != epoch {
+                    sessions::closed(host, &p.agent_id);
+                }
+                Some(v)
+            }
+            HostMethod::SessionHistory(p) => sessions::history_offline(host, p),
+            HostMethod::SessionClose(p) => {
+                sessions::closed(host, &p.agent_id);
+                Some(serde_json::json!({}))
+            }
+            _ => None,
+        }
+    }
+
+    /// The host's link; a host that is deploying or starting tf-hostd is waited for (15 s).
+    async fn wait_link(&self, host_id: &str, rt: &HostRt) -> Result<Arc<crate::link::Link>, ApiError> {
+        if let Some(l) = rt.link() {
+            return Ok(l);
+        }
+        let near = matches!(rt.status().phase, ConnPhase::Deploying | ConnPhase::Starting);
+        if near && rt.wanted.load(Ordering::SeqCst) && rt.wait_online(Duration::from_secs(15)).await {
+            return rt.link().ok_or_else(|| self.offline_error(host_id, rt));
+        }
+        Err(self.offline_error(host_id, rt))
     }
 
     fn offline_error(&self, host_id: &str, rt: &HostRt) -> ApiError {
@@ -1408,6 +1439,44 @@ mod tests {
         let rec: CacheRecord = serde_json::from_str(&saved()).unwrap();
         assert_eq!((rec.rev, rec.state.agents.len()), (3, 1));
         assert!(rec.state.health.is_some(), "the health sample rides along with the next real change");
+    }
+
+    /// After an app restart, while the host is not online yet (connecting, deploying tf-hostd),
+    /// a session the cache holds opens from it at once: the agent's session per the cached host
+    /// state, its rows, no controls (each needs the host). Older rows the mirror holds page in,
+    /// and a close needs no host either. A session nothing is held of still needs the host.
+    #[tokio::test]
+    async fn cached_sessions_open_while_the_host_is_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _platform, rt, mut rx) = notify_host(dir.path()).await;
+        // The host state cached by the last run (not live), naming the agent's omp session.
+        let mut cached = agent("a1", tf_proto::Column::Review);
+        cached.omp = Some(
+            serde_json::from_value(serde_json::json!({
+                "sessionId": "s1", "link": "live", "bridge": true, "fast": false, "mode": "normal", "queue": { "steering": [], "followUp": [] }
+            }))
+            .unwrap(),
+        );
+        let mut st = host_state();
+        st.agents = vec![cached, agent("a2", tf_proto::Column::Review)];
+        rt.view.lock().unwrap().state = Some((7, st));
+        let rows = (0..300).map(|i| crate::sessions::tests::user(&format!("u{i}"), "x")).collect();
+        engine.inner.session_cache.store("lab", crate::session_cache::Saved::of(&crate::sessions::tests::data("s1", rows))).await;
+
+        let open = serde_json::json!({ "agentId": "a1", "limit": 200 });
+        let copy: tf_proto::SessionSnapshot = serde_json::from_value(engine.call(Some("lab"), "session.open", open).await.unwrap()).unwrap();
+        assert_eq!(copy.items.len(), 200);
+        assert_eq!((copy.items[0].id(), copy.items[199].id(), copy.cursor.as_deref()), ("u100", "u299", Some("u100")));
+        assert!(!copy.meta.caps.prompt && !copy.meta.caps.model && copy.ui.is_none(), "no controls: {:?}", copy.meta.caps);
+        let page = engine.call(Some("lab"), "session.history", serde_json::json!({ "agentId": "a1", "cursor": "u100", "limit": 50 })).await.unwrap();
+        let page: tf_proto::HistoryPage = serde_json::from_value(page).unwrap();
+        assert_eq!((page.items.len(), page.items[0].id(), page.cursor.as_deref()), (50, "u50", Some("u50")));
+        engine.call(Some("lab"), "session.close", serde_json::json!({ "agentId": "a1" })).await.unwrap();
+        assert!(!crate::sessions::tests::wanted(&rt.sessions, "a1"), "closed: not opened again once the host is online");
+        let e = engine.call(Some("lab"), "session.open", serde_json::json!({ "agentId": "a2" })).await.unwrap_err();
+        assert_eq!(e.code, "not_connected");
+        // The copy is the open's answer; nothing else reached the UI.
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).all(|e| !matches!(e, AppEvent::Session { .. })));
     }
 
     #[tokio::test]

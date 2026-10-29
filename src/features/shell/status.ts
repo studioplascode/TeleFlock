@@ -38,6 +38,21 @@ export const PHASE_LABEL: Record<ConnPhase, string> = {
   error: "Error",
 };
 
+/** "<host> …" for a host that isn't online (board notice, a session shown from its saved copy). */
+export const PHASE_TEXT: Record<ConnPhase, string> = {
+  idle: "is not connected",
+  connecting: "is connecting…",
+  authenticating: "is authenticating…",
+  authRequired: "needs Tailscale sign-in",
+  hostKey: "needs you to verify its host key",
+  deploying: "is updating tf-hostd…",
+  starting: "is starting…",
+  online: "is online",
+  reconnecting: "is reconnecting…",
+  offline: "is offline",
+  error: "couldn't connect",
+};
+
 /** Phases where a connection attempt is in flight (show progress). */
 export function phaseBusy(phase: ConnPhase | undefined): boolean {
   return phase === "connecting" || phase === "authenticating" || phase === "deploying" || phase === "starting" || phase === "reconnecting";

@@ -59,6 +59,18 @@ Everything you can configure in omp is on the **omp settings** page (`Ctrl+8`, a
 
 <img src="docs/assets/readme/omp-settings.webp" alt="omp settings page with omp's tabs and the model roles editor" width="100%">
 
+### MCP servers, signed in from anywhere
+
+The **MCP servers** page, next to omp settings on every host, lists each MCP server omp loads there, user-wide and per project, with its live status and tool count; expand a row to read its tools. Add a server from popular templates, the Smithery registry or by hand (stdio, HTTP or SSE), edit it with its secrets masked, test it, switch it off and on, or remove it. Running sessions pick the change up through omp's own `/mcp reload`, or say they need a restart. Servers you already have are marked in the templates, so nothing gets added twice. A server that needs an OAuth login signs in from the app even when omp runs on a remote host: TeleFlock opens the sign-in page on your device and carries the redirect back to the host on the same port, or takes the address you landed on when that port is busy.
+
+<img src="docs/assets/readme/mcp.webp" alt="MCP servers page with connected servers, tool counts, a sign-in and a failed server" width="100%">
+
+### Your subscriptions, linked from the app
+
+The **Accounts** page shows the subscriptions and API keys omp signs in with on each host (ChatGPT, Claude, GitHub Copilot, Gemini and the rest): every account's plan, its live sessions and its quota windows, with a pace warning before one runs out. **Link account** runs omp's own login on the host and brings the sign-in to you: a page on this device whose redirect comes back to the host over a tunnel, a device code to enter, or a code to paste. Prefer an account for new sessions, re-link an expired login, or unlink one. A host with no usable account says so on the board and offers the link.
+
+<img src="docs/assets/readme/accounts.webp" alt="Accounts page with ChatGPT, Claude and OpenRouter accounts, quota bars and an expired login" width="100%">
+
 ### A native session for every agent
 
 A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. Click any image to open it full screen, then zoom and pan (wheel, pinch, double-click) and page through the rest of the message. When the agent asks, its question becomes a card you answer with a click or `1`–`9`, with each option's trade-off written inside its button (Skip answers nothing). `Enter` sends, or steers the running turn, and `Alt+Enter` queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, images and videos (a video is uploaded to the host with a progress chip, and the agent gets its path; omp reads it with ffmpeg). Whatever you type, anywhere in the app, stays put: drafts and pasted images survive switching agents, closing dialogs and restarts until you send them. Model, thinking, plan, goal and fast mode sit in the header and say whether they are on. The inspector shows how much context is used and how much of your subscription is left, spend by source, throughput, todos, changed files, the session tree (branch, fork, navigate) and more. A fresh agent offers starter prompts.
@@ -66,6 +78,8 @@ A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, b
 | Ask cards | Approvals |
 |---|---|
 | <img src="docs/assets/readme/session-ask.webp" alt="Session with an ask card offering four answers"> | <img src="docs/assets/readme/session-approval.webp" alt="Session with an approval card for a bash command"> |
+
+**Attached natively, even to big swarms.** TeleFlock follows each omp session through the TeleFlock bridge, an extension running inside omp that streams the session's live events and takes questions, approvals and controls over a private local socket, while `tf-hostd` reads the history straight from omp's session file. A session running dozens of subagents stays live, and a restarted host daemon picks every session up again with the same rows. Sessions are also cached on your devices: reopening one, reconnecting or restarting the app fetches only the rows that changed, over a zstd-compressed link. In the lab, a cached re-open of a 1,190-entry session moved about 3 KB instead of 476 KB.
 
 ### Dispatch: fire tasks into fresh worktrees
 
@@ -173,11 +187,11 @@ On the machine that runs herdr and omp:
 4. **Host setup** (on the Hosts page, which opens it by itself while items are open; the board shows a **Fix…** strip too) offers one-tap fixes, each explained by what goes wrong without it. Each runs only when you tick its consent box, every ticked fix runs even when another one fails, and each shows its own outcome:
    - **Install what's missing:** omp (`install-omp`, omp's official installer as a standalone binary into `~/.local/bin`; also the fix when your omp is a node script without node), bun (`install-bun`, when your omp is a bun script and bun is nowhere), herdr (`install-herdr`, herdr's installer, then its server is started), gh (`install-gh`, the latest GitHub CLI release, checksum-verified, into `~/.local/bin`), and git and ffmpeg (`install-git`, `install-ffmpeg`; ffmpeg lets omp read attached videos) through the system package manager when `tf-hostd` runs as root or may use `sudo` without a password, otherwise the item shows the command to run. "What exactly runs?" on each item shows the command.
    - **herdr's omp integration** (`install-herdr-integration`): accurate working/blocked/idle states.
-   - **Share sessions with TeleFlock** (`enable-global-sharing`): sets `collab.autoStart: control` and `collab.relayUrl: ws://127.0.0.1:47466` in omp's global config. Every omp session, including ones you start by hand or herdr restores, then appears live in TeleFlock.
-   - **TeleFlock bridge for every session** (`install-global-bridge`): copies the TeleFlock extension into `~/.omp/agent/extensions/` so precise controls work for every session. `tf-hostd` keeps that copy current from then on (in 0.5.0 an outdated copy loaded next to TeleFlock's own made New session and tree navigation fail); it never creates one you didn't ask for.
+   - **TeleFlock bridge for every session** (`install-global-bridge`, recommended): copies the TeleFlock bridge into `~/.omp/agent/extensions/`, so TeleFlock follows and controls every omp session, including ones you start by hand or herdr restores (herdr's restore drops TeleFlock's own launch flags). `tf-hostd` keeps that copy current from then on; it never creates one you didn't ask for.
+   - **Share sessions with TeleFlock** (`enable-global-sharing`, fallback): sets `collab.autoStart: control` and `collab.relayUrl: ws://127.0.0.1:47466` in omp's global config, so sessions that run without the bridge are still followed through omp's collab room on the host's private relay.
    - **herdr outside login sessions** (`move-herdr-out-of-login-session`, Linux with systemd, root): appears when the running herdr server still lives in the login session that started it. systemd kills everything in a login session's scope when logind tears the session down (on logout with `KillUserProcesses=yes`, or when a restarted logind cleans up sessions that already ended), and every agent goes with it. The fix moves herdr and all its processes into a scope of their own; nothing is stopped or restarted. Non-root users see what to do instead (`loginctl enable-linger`).
 
-   You can skip all of them. Agents started from TeleFlock are shared and bridged per process anyway, an unshared session can be connected with one click (**Connect** injects `/collab` into it, also while the agent is working), and on Linux with systemd the herdr servers TeleFlock starts get their own scope from the start.
+   You can skip all of them. Agents started from TeleFlock carry the bridge anyway, a session without it can be connected with one click (**Connect** injects `/collab` into it, also while the agent is working), and on Linux with systemd the herdr servers TeleFlock starts get their own scope from the start.
 
 5. **AI naming** needs nothing extra: it uses omp's `tiny` model role (or `smol`) on the host. Check it with `omp config get modelRoles`.
 
@@ -200,15 +214,17 @@ flowchart LR
   end
   subgraph host["herdr host"]
     hostd["tf-hostd<br/>(deployed by the app)"]
-    omp["omp TUIs in herdr panes"]
+    omp["omp TUIs in herdr panes<br/>(+ TeleFlock bridge)"]
+    files[("omp session files")]
     herdr[("herdr server")]
     gh["GitHub (git · gh)"]
     tiny["omp one-shot<br/>(tiny model role)"]
   end
-  desk -- "Tailscale SSH · Local · WSL" --> hostd
+  desk -- "Tailscale SSH · Local · WSL<br/>(zstd, cached deltas)" --> hostd
   phone -- "Tailscale SSH" --> hostd
-  omp -- "collab guest (loopback relay)" --> hostd
-  omp -. "teleflock-bridge extension" .-> hostd
+  omp -- "bridge: live events, dialogs, controls" --> hostd
+  files -- "history" --> hostd
+  omp -. "collab room (fallback, loopback relay)" .-> hostd
   hostd <-- "local API" --> herdr
   hostd --> gh
   hostd -- "naming and drafts" --> tiny
@@ -218,8 +234,9 @@ flowchart LR
 - The app's Rust core uploads and starts a small host daemon, `tf-hostd`, over SSH (or locally), and speaks one protocol to it whatever the transport.
 - All your devices share that daemon. When they run different app versions, the host keeps the newest `tf-hostd` and older apps attach to it instead of replacing it, so one device never knocks the other off.
 - On Linux with systemd, `tf-hostd` and any herdr server it starts run in transient scopes of their own (root: the system manager; other users: their user manager when lingering is on), so the SSH login that started them can end, or be cleaned up, without taking the agents down.
-- `tf-hostd` joins each omp session as a private collab guest on a loopback relay. Room keys never leave the host. On a slow host it keeps retrying a join with growing timeouts for as long as omp publishes the room, and resets a room whose joins keep timing out.
-- A companion omp extension adds structured controls (model, thinking, tree, queue, …). When omp loads more than one copy (the global install and TeleFlock's own), only the newest one talks to `tf-hostd`.
+- `tf-hostd` follows each omp session through the TeleFlock bridge, an omp extension that streams the session's live events (messages, tools, subagents at any depth, questions and approvals) over a private local socket and carries every control back, while the history comes straight from omp's session file. Updates are throttled and merged at the source and the stream resynchronizes itself instead of ever dropping a session, so busy sessions stay attached. Sessions without the bridge (an omp started without it) fall back to a private collab guest on a loopback relay; room keys never leave the host.
+- When omp loads more than one copy of the bridge (the global install and TeleFlock's own), only the newest one talks to `tf-hostd`.
+- Each device keeps the sessions it opened in a compressed cache. Opening a cached session shows it at once; reopening, reconnecting or restarting sends what the device holds, and the host answers with only the missing or changed rows. The link to the host is zstd-compressed both ways (older apps and hosts keep the plain protocol).
 - herdr is driven through its local API; git and `gh` run on the host for review and shipping.
 - AI naming runs `omp --mode json` once per request on the host with the `tiny` role (no tools, no session), reads the answer and stops the process.
 - `tf-hostd` also runs the host's automations and keeps omp and herdr up to date; on Linux with systemd a timer restarts it after a reboot while an automation is enabled.
@@ -277,6 +294,12 @@ What has been verified, and how:
 - **0.5.1:** the Rust and frontend suites, plus lab runs against real omp 18.13.1 and herdr 0.9.5 on Linux. Each fix was reproduced first: New session with the old global extension copy loaded next to TeleFlock's own (7 of 10 before, 20 of 20 after); Connect on an unshared omp while it streamed (refused before, live in 0.8 s after); the composer check against 94 real omp screens (52 misread before, none after); a pane whose shell needs 12 s to start (failed at 2 s before, started after); a daemon with `PATH=/usr/bin:/bin` running an omp installed with bun; real installs of bun, omp, herdr and gh into sandbox homes; three resumed 6 MB sessions at 10 % CPU (two showed errors before, all three connected after); a two-line paste into a pane (the first line ran before, both stayed in the prompt after); a suspended app, attach and daemon (reconnected before, kept the link after); a 14.4 MB video read by an omp agent after upload, and a PNG pasted into the terminal attached by omp; password and key sign-in against a real OpenSSH server. The board, session and phone layouts were walked in the demo at 1440×900 and phone widths from 360 to 412 px, and the Calm board, unfocused window and React Compiler coverage were measured before and after in headless Chromium (a frozen Calm board at 4× CPU throttling: 20 → 1.5 frames/s).
 - **0.5.2:** the real flow that 0.5.1 missed, through the UI on a lab host with real omp and herdr: an agent in a new worktree, Mark done, the pane and its workspace closed 11 s later, then Delete worktree on the parked Done card (its pull request reported merged by a stand-in `gh`): the checkout was gone from disk and from `git worktree list`, the branch was kept, and the card stayed in Done with its transcript.
 - **0.5.3:** a test with real git, failing before the fix and passing after: of two worktrees whose folders were deleted, removing one keeps the other registered, and a locked one is refused. On a lab host, Delete worktree on a parked card whose folder had been deleted by hand dropped only that worktree's registration; another missing worktree of the repository stayed listed.
+- **0.6.0:** the Rust suites (tf-hostd 346, tf-collab 81, tf-client 69 tests, clippy clean, Windows test builds checked) and 543 frontend tests, plus labs against real omp 18.13.2/18.13.3 and herdr 0.9.5 on Linux, all in isolated homes and agent dirs:
+  - **Bridge attach:** an agent started from the UI went live through bridge 2.0.0 with no collab join; a prompt streamed; an `ask` answered in the UI reached omp; five parallel subagents (one of them nested) showed live and the session never left `live`; omp with the old 1.4.0 bridge still attached through collab; after a `SIGKILL`ed daemon restart the session came back through its bridge in about 5 s with the same rows, authors and usage. The bridge itself was checked against the real omp binary for answering an `ask` and an approval from the app, subagent chat, nested subagents and an overflow that resynchronized once.
+  - **Session sync:** on a copy of a real 3.5 MB session, the first open moved 78 KB instead of 428 KB, a cached re-open 3 KB instead of 477 KB, a reconnect mid-stream 3 KB instead of 475 KB; every cached row matched a fresh snapshot afterwards. Through the UI, an app restart re-opened a session with 0 rows resent.
+  - **MCP:** a stdio server added from the page connected with its tools in a lab omp session, and was switched off, on and removed with running sessions reloading; an OAuth MCP server signed in through the same-port tunnel from a host in its own network namespace, and through the paste fallback with the device port taken; a server that never answers is reported as pending within the test window and leaves no processes behind.
+  - **Accounts:** the real `omp login` output for Claude and GitHub Copilot (URL, callback port, paste prompt, device code) reached the app through the tunnel; cancel closed the tunnel and stopped `omp login` on the host.
+  - Every 0.6.0 area went through a code review (bridge, session sync, MCP, accounts) and a UX review of the whole app, and their findings were fixed before release.
 - **Packages:** the Windows installer, the signed APK and the Linux .deb, AppImage and Arch package build from this tree. The Linux app was smoke-run: the window renders, the tray starts, a second launch hands its `teleflock://` link to the first, and the .deb installs and runs on a clean Ubuntu 22.04.
 
 **Not yet exercised:**

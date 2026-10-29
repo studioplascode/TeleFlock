@@ -1,8 +1,10 @@
 import { CircleAlert, PlugZap, RefreshCw, ShieldCheck, SquareTerminal, Unplug } from "lucide-react";
 import type { ReactNode } from "react";
-import { type AgentView, navigate, parseAgentKey, useAgent, useSession, useUi } from "@/core";
+import { type AgentView, navigate, parseAgentKey, useAgent, useCore, useSession, useUi } from "@/core";
 import type { LinkReason } from "@/core/gen";
 import { Button, EmptyState, Shimmer, Skeleton, Spinner, useNow } from "@/design";
+import { connAction } from "@/features/hosts/ConnStatusCard";
+import { PHASE_TEXT } from "@/features/shell/status";
 import { hostCall, usePending } from "./api";
 import { ParkedGate } from "./ParkedGate";
 
@@ -62,7 +64,36 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
   const session = useSession(agentKey);
   const [busy, run] = usePending();
   const waited = useLinkWait(agent);
+  const host = useCore((s) => ({ status: s.status[hostId], name: s.profiles.find((p) => p.id === hostId)?.name ?? hostId }), (a, b) => a.status === b.status && a.name === b.name);
   if (!agent) return null;
+
+  // The host isn't online: what shows is the copy of the session saved on this device (the app
+  // core answers the open from it), read-only until the host is back and the delta arrives.
+  if (host.status?.phase !== "online" && session.status !== "ended") {
+    const phase = host.status?.phase ?? "idle";
+    const action = connAction(host.status, hostId);
+    return (
+      <>
+        <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]">
+          <Spinner size={14} label={`${host.name} ${PHASE_TEXT[phase]}`} />
+          <p className="min-w-0 flex-1 text-mute">
+            <b className="text-ink">
+              {host.name} {PHASE_TEXT[phase]}
+            </b>
+            <span className="block truncate">
+              {session.itemIds.length > 0 ? `Showing the copy saved on this device: read-only until ${host.name} is online, then it catches up.` : `The session shows here once ${host.name} is online.`}
+            </span>
+          </p>
+          {action && (
+            <Button size="sm" variant="secondary" onClick={action.run}>
+              {action.label}
+            </Button>
+          )}
+        </div>
+        {session.itemIds.length > 0 && children}
+      </>
+    );
+  }
 
   // Marked done and its pane closed: read-only until it resumes (a message resumes it too).
   if (agent.parked) return <ParkedGate agentKey={agentKey}>{children}</ParkedGate>;

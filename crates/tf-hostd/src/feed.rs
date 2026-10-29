@@ -177,9 +177,13 @@ impl Feeder {
                 _ => None,
             })
             .unwrap_or_default();
+        // Before omp wrote the file, its header as omp will write it: the session's start is in the
+        // file's name (now only for a file named otherwise), so `startedAt` is the same whether the
+        // session was built live or rebuilt from the file after a restart.
         let mut header: SessionHeader = header.and_then(|h| serde_json::from_value(h).ok()).unwrap_or_else(|| SessionHeader {
             id: origin.session_id.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            timestamp: journal::header_timestamp(tail.path(), &origin.session_id)
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             cwd: origin.cwd.clone(),
             title: None,
             extra: serde_json::Map::new(),
@@ -915,7 +919,7 @@ pub(crate) mod fixture {
 mod tests {
     use super::fixture::{self, GrowingFile};
     use super::*;
-    use tf_proto::session::{SessionEvent, SubagentStatus, ToolStatus, TranscriptItem};
+    use tf_proto::session::{SessionEvent, SessionMeta, SubagentStatus, ToolStatus, TranscriptItem};
 
     const SESSION_FILE: &str = fixture::SESSION_1;
 
@@ -1338,5 +1342,111 @@ mod tests {
         let bash = bash_rows(&fresh).remove(0);
         assert_eq!(bash.args, serde_json::json!({ "command": "echo bridge-ok" }));
         assert_eq!(bash.duration_ms, Some(36), "the bash tool's wall time");
+    }
+
+    #[test]
+    fn meta_built_live_equals_meta_rebuilt_after_a_restart() {
+        // The recorded run with omp's session file named as omp names it (written from the first
+        // assistant message on) and the subagents' transcripts read the way tf-hostd's artifact
+        // scan reads them while omp writes: a line of one, then of another. A tf-hostd started
+        // afterwards gets the bridge's resync (the file through its last entry, the live state,
+        // the roster and each subagent's latest lifecycle and progress, omp idle) and reads each
+        // transcript whole, in another order. The meta is the same, cost to the last bit and the
+        // start time included: clients get no meta patch after a restart. Only `tps`, the last
+        // turn's streaming rate, is a measurement a rebuild cannot make.
+        let lines = lines();
+        let hello = lines.iter().find(|l| l["t"] == "hello").unwrap();
+        let origin = Origin { session_id: hello["sessionId"].as_str().unwrap().into(), cwd: hello["cwd"].as_str().unwrap().into() };
+        let first = lines.iter().find(|l| l["t"] == "resync").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let name = Path::new(first["sessionFile"].as_str().unwrap()).file_name().unwrap();
+        let mut file = GrowingFile::new(dir.path().join(name), SESSION_FILE);
+        let mut replica = Replica::new(origin.session_id.clone());
+        let mut feeder = Feeder::default();
+        let mut t = 1_800_000_000_000;
+        // What the bridge keeps for its next resync: the latest state and roster, and per subagent
+        // its latest lifecycle and progress (least recently updated first).
+        let (mut state, mut roster) = (None, None);
+        let mut subs: Vec<(String, Option<Value>, Option<Value>)> = Vec::new();
+        for l in &lines {
+            t += 50;
+            match l["t"].as_str().unwrap() {
+                "resync" => {
+                    feeder.resync(&mut replica, resync_of(l), journal::read_full(file.path(), None).unwrap(), &origin, t);
+                }
+                "live" => {
+                    let f = &l["f"];
+                    match f["t"].as_str() {
+                        Some("state") => state = Some(f.clone()),
+                        Some("agents") => roster = Some(f.clone()),
+                        Some("bus") => {
+                            let lifecycle = f["channel"] == "task:subagent:lifecycle";
+                            let id = if lifecycle { &f["data"]["id"] } else { &f["data"]["progress"]["id"] };
+                            let id = id.as_str().unwrap().to_owned();
+                            let mut sub = subs.iter().position(|s| s.0 == id).map(|i| subs.remove(i)).unwrap_or((id, None, None));
+                            if lifecycle {
+                                sub.1 = Some(f.clone());
+                            } else {
+                                sub.2 = Some(f.clone());
+                            }
+                            subs.push(sub);
+                        }
+                        _ => {}
+                    }
+                    step(&mut feeder, &mut replica, l["seq"].as_u64().unwrap(), HostFrame::from_value(f.clone()), t).unwrap();
+                    if let Some(message) = fixture::ended_message(f).filter(|m| m["role"] != "custom") {
+                        file.message_ended(message);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let last = fixture::lines(SESSION_FILE).last().unwrap()["id"].as_str().unwrap().to_owned();
+        file.through(&last);
+        let read = read_now(&mut feeder);
+        feeder.apply_read(&mut replica, read, t).unwrap();
+
+        // The subagents' transcripts (`<session file>/` in the recording).
+        let artifacts = Path::new(SESSION_FILE).with_extension("");
+        let transcripts = ["NestedPong.jsonl", "ThickMandrill.jsonl", "ThickMandrill/ThickMandrill.PongHelper.jsonl"];
+        let read_lines = |rel: &str| std::fs::read_to_string(artifacts.join(rel)).unwrap().split_inclusive('\n').map(str::to_owned).collect::<Vec<_>>();
+        let mut ledger = tf_collab::ArtifactLedger::default();
+        let mut pending: Vec<(&str, std::collections::VecDeque<String>)> = transcripts.iter().map(|rel| (*rel, read_lines(rel).into())).collect();
+        while pending.iter().any(|(_, l)| !l.is_empty()) {
+            for (rel, l) in &mut pending {
+                if let Some(line) = l.pop_front() {
+                    let calls = ledger.ingest(rel, line.as_bytes());
+                    replica.apply_artifacts(&ledger, &calls, t);
+                }
+            }
+        }
+
+        // tf-hostd restarted.
+        let mut fresh = Replica::new(origin.session_id.clone());
+        let mut resync = resync_of(first);
+        resync.last_entry_id = Some(last.clone());
+        resync.streaming = false;
+        resync.frames = [state, roster]
+            .into_iter()
+            .flatten()
+            .chain(subs.into_iter().flat_map(|(_, lifecycle, progress)| [lifecycle, progress]).flatten())
+            .map(HostFrame::from_value)
+            .collect();
+        Feeder::default().resync(&mut fresh, resync, journal::read_full(file.path(), Some(&last)).unwrap(), &origin, t + 60_000);
+        let mut ledger = tf_collab::ArtifactLedger::default();
+        let calls: Vec<_> = transcripts.iter().rev().flat_map(|rel| ledger.ingest(rel, read_lines(rel).concat().as_bytes())).collect();
+        fresh.apply_artifacts(&ledger, &calls, t + 60_000);
+
+        let (live, again) = (replica.meta(), fresh.meta());
+        let (cost, rebuilt_cost) = (live.cost.as_ref().unwrap(), again.cost.as_ref().unwrap());
+        let split = |c: &tf_proto::model::CostInfo| c.split.as_ref().map(|s| (s.main.to_bits(), s.subagents.to_bits(), s.advisor.to_bits()));
+        assert_eq!((cost.usd.to_bits(), split(cost)), (rebuilt_cost.usd.to_bits(), split(rebuilt_cost)), "{cost:?} vs {rebuilt_cost:?}");
+        assert!(cost.split.as_ref().is_some_and(|s| s.subagents > 0.0035), "the subagent tree bills: {cost:?}");
+        assert_eq!(live.started_at, Some(1_793_205_532_114), "the session's start, from the file's name while omp had not written it");
+        assert_eq!(live.started_at, again.started_at);
+        let done = |m: &SessionMeta| m.subagents.iter().map(|s| (s.id.clone(), s.status, s.started_at, s.ended_at)).collect::<Vec<_>>();
+        assert_eq!(done(live), done(again));
+        assert!(live.tps.is_some() && again.tps.is_none());
+        assert_eq!(SessionMeta { tps: None, ..live.clone() }, again.clone());
     }
 }

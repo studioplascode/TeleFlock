@@ -272,11 +272,13 @@ function AccountRow({ account, index, providerName, host, hostId, lastOne, singl
       {account.disabled ? (
         <ExpiredLogin provider={providerName} reason={account.disabledReason} onRelink={actions.linkProvider ? () => actions.link(actions.linkProvider as string) : undefined} />
       ) : windows.length > 0 ? (
-        <ul className={cn("grid gap-y-3", mobile ? "grid-cols-2 gap-x-4" : windows.length === 1 ? "grid-cols-1 gap-x-5 sm:max-w-xs" : "grid-cols-2 gap-x-5 lg:grid-cols-3")}>
-          {windows.map((w) => (
-            <Quota key={w.id} w={w} fetchedAt={account.windowsAt} now={now} />
-          ))}
-        </ul>
+        <div className="@container">
+          <ul className={cn("grid gap-y-3", mobile ? "grid-cols-2 gap-x-4" : windows.length === 1 ? "grid-cols-1 gap-x-5 sm:max-w-xs" : "grid-cols-2 gap-x-5 @lg:grid-cols-3")}>
+            {windows.map((w) => (
+              <Quota key={w.id} w={w} fetchedAt={account.windowsAt} now={now} />
+            ))}
+          </ul>
+        </div>
       ) : !key && account.windowsError ? (
         <p className="text-[11px] font-semibold text-mute-2">{account.windowsError}</p>
       ) : null}

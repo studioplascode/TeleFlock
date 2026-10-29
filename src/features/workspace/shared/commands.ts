@@ -12,7 +12,9 @@ export function herdrArgv(session: string | undefined, ...rest: (string | false 
 
 /**
  * The launch recipe from `docs/architecture.md` §3.7, plus the follow-ups tf-hostd performs once
- * the agent is idle and linked (plan mode, initial prompt).
+ * the agent is idle and linked (plan mode, initial prompt). The overlay and bridge live in
+ * tf-hostd's home on the host (`~/.teleflock` unless `TF_HOSTD_HOME` moves it), which this app
+ * does not know: the preview names it instead of guessing a path.
  */
 export function agentLaunchLines(session: string | undefined, spec: AgentSpec, pane: string, opts: { name: string; resumeFile?: string }): PreviewLine[] {
   const lines: PreviewLine[] = [
@@ -28,9 +30,9 @@ export function agentLaunchLines(session: string | undefined, spec: AgentSpec, p
         pane,
         "--",
         "--config",
-        "~/.teleflock/omp-overlay.yml",
+        "<tf-hostd home>/omp-overlay.yml",
         "-e",
-        "~/.teleflock/ext/teleflock-bridge.ts",
+        "<tf-hostd home>/ext/teleflock-bridge.ts",
         ...(spec.model ? ["--model", shellQuote(spec.model)] : []),
         ...(spec.thinking ? ["--thinking", spec.thinking] : []),
         ...(opts.resumeFile ? [`--resume=${shellQuote(opts.resumeFile)}`] : []),

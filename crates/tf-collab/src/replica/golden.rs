@@ -456,6 +456,30 @@ fn s07_task_subagent() {
     assert!(r.rows().iter().any(|i| matches!(i, TranscriptItem::User(u) if u.synthetic && u.author.as_deref() == Some("async-result"))));
 }
 
+/// A finished subagent's time is its run as omp measured it (`progress.durationMs`), however long
+/// the agent idles afterwards: about 7 minutes later omp parks it and moves its `lastActivity`,
+/// which the side panel read as the end of the run ("7:02" for a 2 s run). While it runs it has
+/// no end (the panel's timer counts).
+#[test]
+fn s07_parked_subagent_keeps_its_run_time() {
+    let mut r = run("07-task-subagent");
+    let metas: Vec<&SessionMeta> = r.events().into_iter().filter_map(|e| match e { SessionEvent::Meta { meta } => Some(meta), _ => None }).collect();
+    let running: Vec<&Subagent> = metas.iter().flat_map(|m| &m.subagents).filter(|s| s.status == SubagentStatus::Running).collect();
+    assert!(!running.is_empty() && running.iter().all(|s| s.ended_at.is_none()), "{running:?}");
+    let started = r.replica.meta().subagents[0].started_at.unwrap();
+    assert_eq!(r.replica.meta().subagents[0].ended_at, Some(started + 1529), "the run's durationMs");
+    let parked_at = started + 422_000;
+    let roster = serde_json::json!({ "t": "agents", "agents": [
+        { "id": "Main", "displayName": "main", "kind": "main", "status": "running", "hasSessionFile": true, "createdAt": 1_792_533_162_438_i64, "lastActivity": 1_792_533_162_452_i64 },
+        { "id": "ReplyOk", "displayName": "task", "kind": "sub", "parentId": "Main", "status": "parked", "hasSessionFile": true, "createdAt": started, "lastActivity": parked_at },
+    ] });
+    let up = r.replica.apply(&GuestEvent::Frame(HostFrame::from_value(roster)), parked_at);
+    assert!(up.meta_changed, "the status changed");
+    let sub = &r.replica.meta().subagents[0];
+    assert_eq!(sub.status, SubagentStatus::Parked);
+    assert_eq!(sub.ended_at, Some(started + 1529), "parked minutes later, still a 1.5 s run");
+}
+
 /// A ~3 min subagent outlives omp's first completion probe (2 min): its `AgentProgress.completionPercent`
 /// (omp TUI `· 15%`) reaches the meta subagent and the task tool card while it runs, then drops once it ends.
 #[test]

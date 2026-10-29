@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0 on 2026-10-29 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -8,7 +8,26 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ⚠️ **implemented, unverified or partial**: the code path exists, but it was not exercised against a real host, or one platform/variant is missing.
 - ❌ **missing**: there is no UI path.
 
-**hostd path legend**: C = collab guest · B = tf-bridge extension · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+**hostd path legend**: C = collab guest · B = tf-bridge extension (since 0.6.0 also the data plane: live frames + the session file) · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.6.0 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| Sessions served by the bridge: live frames + the session `.jsonl`, no collab join; collab only as the fallback (old bridges, sessions without one) | session view, board | same | bridge 2.0.0 `liveSubscribe` / `live` / `resync`; hostd `bridge.rs`, `feed.rs`, `journal.rs`, `omp.rs` transports (B) | ✅ lab (omp 18.13.2/18.13.3 + herdr 0.9.5: live with relay `guests=0`, prompt streamed, five parallel subagents incl. a nested one stayed live, 1.4.0 bridge still via collab, `SIGKILL` + restart back via the bridge in ~5 s with identical rows); replay tests on recorded bridge frames |
+| Questions and approvals answered from the app through the bridge | AskCard, approval card | same | bridge dialog wrappers, `uiResponse` (B) | ✅ lab (real omp: an `ask` answered from the UI reached omp; an approval answered from a probe) |
+| Subagent chat / stop / revive through the bridge | subagent viewer | same | `agentCmd` (B, `AgentLifecycleManager`) | ✅ lab (chat revived an idle subagent, which answered) |
+| Precise link states (starting, syncing, bridge lost, room closed, fallback…) with the terminal as the fallback | LinkGate | same | `OmpInfo.linkReason` / `linkVia` / `linkSince` | ✅ tests; demo (the bridge-drop strip is not staged in the demo) |
+| Rows identical whether built live or rebuilt after a daemon restart (authors, tool args, durations, meta) | transcript | same | replica notes (`notes.rs`), canonical tool rows | ✅ tests (golden live vs rebuilt, replay with a restart); lab (13–15 rows identical after a restart) |
+| Session sync: delta snapshots from `have`, `seq`, row hashes, append offsets, meta/tree patches | every session view | same | features `sessionSync`; hostd `sync.rs`; tf-client `sessions.rs` (L) | ✅ lab (real 3.5 MB session: first open 428 → 78 KB, cached re-open 477 → 3 KB, reconnect 475 → 3 KB; all rows equal a fresh snapshot); tests |
+| zstd on the hostd ⇄ app link | — | — | feature `zstd`; hostd `clients.rs`; tf-client `link.rs` (L) | ✅ tests (framing, old peers both ways); lab byte counters |
+| Cached sessions on the device, opened at once (also while the host connects or is offline) | session view | same | `session_cache.rs`, `offline_session_call` (L) | ✅ tests; ✅ lab (app restart re-opened with 0 rows resent); ⚠️ the offline strip not browser-checked |
+| MCP servers per host: list with status and tools, add (templates, Smithery registry, custom), edit with masked secrets, test, on/off, remove, reload of running sessions | omp area → MCP servers, host card, palette, Settings | More → MCP servers | `mcp.*`; hostd `ops/mcp/*`, helper `host/teleflock-mcp` | ✅ lab (stdio server connected with its tools in a lab omp; on/off/remove reloaded a running session); demo; tests |
+| MCP OAuth sign-in from the app (same-port tunnel, paste fallback) | MCP servers → Sign in | same | `mcp.authStart` + `auth.*`; `tunnel.open {localPort}` | ✅ lab (host in its own network namespace: tunnel and paste paths against a fake OAuth MCP server) |
+| Subscription accounts per host: plans, live sessions, quota windows, prefer, unlink, re-link | omp area → Accounts, host card, palette, Usage limits Re-link | More → Accounts | `accounts.*`; hostd `ops/accounts.rs` | ✅ demo; tests; ✅ lab (isolated agent dir listing) |
+| Link an account from the app (browser + tunnel, device code, paste, questions) | Accounts → Link account | same | `accounts.link` + `auth.*` (`authflow.rs`) | ✅ lab (Claude and GitHub Copilot `omp login` up to the sign-in page / device code; cancel closed the tunnel and stopped `omp login`); ⚠️ not completed with a real account |
+| First run, board notices, toasts above composers, phone nav for the new pages, long-transcript scroll estimate, prefetch | onboarding, board, session, Dispatch | same | UI | ✅ demo (before/after screenshots at 1440×900 and 412×915) |
+| Pasting an image attached it twice on Chromium webviews (WebView2, Android) | composer, Dispatch, terminal | same | `src/core/clipboardImages.ts` | ✅ headless Chromium 150 (one paste: +2 before, +1 after); test |
 
 ## §0 What 0.5.3 changed
 

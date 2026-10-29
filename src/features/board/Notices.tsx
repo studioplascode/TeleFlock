@@ -4,31 +4,15 @@ import type { ReactNode } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { core, navigate, useCore, useHostIds, useHostStale, useHosts, useUi } from "@/core";
-import type { ConnPhase } from "@/core/gen";
 import { Button, IconButton, StatusOrb, cn, formatAge, toast, useNow } from "@/design";
 import { LinkAccountNudge } from "@/features/accounts/LinkAccountNudge";
 import { connAction } from "@/features/hosts/ConnStatusCard";
 import { setupHash } from "@/features/hosts/setupFocus";
-import { phaseBusy } from "@/features/shell/status";
+import { PHASE_TEXT, phaseBusy } from "@/features/shell/status";
 import { Term } from "@/features/shell/Term";
 import { connWords } from "./FlockActions";
 import { NoticeLine, NoticeTray, noticeBox, noticeRank, noticeRise as rise, noticeRow as row, useNoticeView } from "./notice";
 import { boardSetupGap, type SetupGap as Gap } from "./setupGap";
-
-/** "<host> …" for a host that isn't online. */
-const PHASE_TEXT: Record<ConnPhase, string> = {
-  idle: "is not connected",
-  connecting: "is connecting…",
-  authenticating: "is authenticating…",
-  authRequired: "needs Tailscale sign-in",
-  hostKey: "needs you to verify its host key",
-  deploying: "is updating tf-hostd…",
-  starting: "is starting…",
-  online: "is online",
-  reconnecting: "is reconnecting…",
-  offline: "is offline",
-  error: "couldn't connect",
-};
 
 /** A host that isn't online: its cards below are its cached snapshot, read-only until it reconnects. */
 function StaleHost({ hostId, order }: { hostId: string; order: number }) {

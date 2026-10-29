@@ -1,6 +1,6 @@
 import { BellOff, Focus, GitBranch, Square, SquareTerminal } from "lucide-react";
 import type { Agent } from "@/core/gen";
-import { parseAgentKey, useAgent, useSession, useUi } from "@/core";
+import { parseAgentKey, useAgent, useCore, useSession, useUi } from "@/core";
 import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
 import { Term } from "@/features/shell/Term";
 import { openTerminal } from "@/features/board/agentActions";
@@ -34,8 +34,10 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
   const { tier } = useActivity(beat);
   const status = agentStatus(agent);
   const { muted } = useMute(agentKey);
+  const online = useCore((s) => s.status[hostId]?.phase === "online");
   if (!agent) return null;
-  const live = agent.omp?.link === "live";
+  // Controls need the host (offline, the session is the copy saved on this device).
+  const live = agent.omp?.link === "live" && online;
   const working = agent.column === "running";
   const subs = meta?.subagents.filter((s) => s.status === "running").length ?? agent.omp?.subagents?.live ?? 0;
   const cost = meta?.cost ?? agent.omp?.cost;

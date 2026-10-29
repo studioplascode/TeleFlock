@@ -6,10 +6,11 @@
 //! verifying `seq` and append offsets (any mismatch silently re-opens with `have`), and turns it
 //! back into the plain session events the UI understands (`reset`, `upsert`, `append`, `remove`,
 //! `meta`, …). Mirrors are persisted per host and omp session ([`crate::session_cache`]): after
-//! an app restart the cached rows show at once and only the delta crosses the network. Older rows
-//! paged in once (`session.history`) stay in the mirror and are served from it. Closed mirrors
-//! stay in memory up to a size budget per host, least recently used leaving first (the cache
-//! keeps them); a mirror an open, a re-open or a write is working on never leaves.
+//! an app restart the cached rows show at once, even while the host is still connecting (a copy
+//! without controls; [`open_offline`]), and only the delta crosses the network once it is
+//! online. Older rows paged in once (`session.history`) stay in the mirror and are served from
+//! it. Closed mirrors stay in memory up to a size budget per host, least recently used leaving
+//! first (the cache keeps them); a mirror an open, a re-open or a write is working on never leaves.
 //!
 //! A re-open that fails while the link stays up (no answer, the session not shared yet) is tried
 //! again, waiting longer each time, as long as the UI has the session open; one that cannot work
@@ -25,8 +26,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tf_proto::session::{
-    AppendField, HistoryPage, RowDigest, SessionEvent, SessionHave, SessionMeta, SessionSnapshot, TranscriptItem, TreeInfo, TreeNode,
-    UiRequest,
+    AppendField, Capabilities, HistoryPage, RowDigest, SessionEvent, SessionHave, SessionMeta, SessionSnapshot, TranscriptItem, TreeInfo,
+    TreeNode, UiRequest,
 };
 use tf_proto::{ApiError, SessionHistoryParams, SessionOpenParams};
 
@@ -948,6 +949,73 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
             serde_json::to_value(&snap).map_err(internal)
         }
     }
+}
+
+/// What a session can do while its host has no link: nothing, every control needs the host.
+fn offline_caps() -> Capabilities {
+    Capabilities {
+        prompt: false,
+        steer: false,
+        follow_up: false,
+        abort: false,
+        answer: false,
+        model: false,
+        thinking: false,
+        fast: false,
+        plan: false,
+        goal: false,
+        compact: false,
+        rename: false,
+        fork: false,
+        branch: false,
+        tree: false,
+        btw: false,
+        export: false,
+        handoff: false,
+        subagents: false,
+        bridge: false,
+    }
+}
+
+/// `session.open` from the UI while the host has no link (the app just started and the host is
+/// connecting or deploying, or the host dropped): what the mirror or the cache holds of the
+/// agent's session (the session the host's cached state names) shows at once, a copy that can
+/// do nothing (no controls, no dialog). The mirror is open from now on: once the link is up,
+/// [`reopen`] opens it there with what it holds, and the UI gets the delta as a `reset` (with
+/// the session's controls). `None`: nothing held of the session, or a link is up (open there).
+pub async fn open_offline(host: &Arc<dyn SessionHost>, p: &SessionOpenParams) -> Option<Value> {
+    let agent = p.agent_id.as_str();
+    let limit = p.limit.map_or(DEFAULT_LIMIT, |l| (l as usize).clamp(1, 2000));
+    let sid = host.agent(agent).session_id?;
+    // Held until it returns: a link coming up meanwhile re-opens the mirror after this (`reopen`
+    // takes `opening` too), so it finds the mirror open.
+    let m = host.sessions().mirror(agent);
+    let _one = m.opening.lock().await;
+    load(host, &m, &sid).await;
+    // A link that is up already may have re-opened the open mirrors without this one.
+    if host.link().is_some() {
+        return None;
+    }
+    let snap = {
+        let mut st = m.lock();
+        let mut snap = st.data.as_ref().filter(|d| d.session_id == sid)?.window(agent, limit);
+        snap.meta.caps = offline_caps();
+        snap.ui = None;
+        st.wanted = true;
+        st.limit = limit;
+        st.used = Instant::now();
+        snap
+    };
+    serde_json::to_value(&snap).ok()
+}
+
+/// `session.history` from the UI while the host has no link: the older rows the mirror holds
+/// (`None`: none, the host has to send them).
+pub fn history_offline(host: &Arc<dyn SessionHost>, p: &SessionHistoryParams) -> Option<Value> {
+    let limit = p.limit.map_or(DEFAULT_PAGE, |l| (l as usize).clamp(1, 2000));
+    let m = host.sessions().get(&p.agent_id)?;
+    let page = m.lock().data.as_ref()?.older(&p.cursor, limit)?;
+    serde_json::to_value(&page).ok()
 }
 
 /// `session.history` from the UI: rows the mirror holds come from it (a page it holds only part
@@ -1946,6 +2014,77 @@ pub(crate) mod tests {
         }
     }
 
+    /// An app restart while the host is still connecting (the lab: 11 s of "Deploying tf-hostd"):
+    /// the cached rows show at once, before there is a link, as a copy without controls, and the
+    /// host hears nothing of it. A session the UI closes meanwhile is not opened once the host is
+    /// online; one it keeps open is opened on the link as soon as it is up: only what changed
+    /// crosses the wire, and the UI gets it as a `reset` with the session's controls, then the
+    /// live stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_rows_show_before_the_host_is_online_then_the_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let opens = |side: &Side| side.lock().unwrap().open_requests;
+        {
+            // The app's last run: the session opened, then closed and written to the cache.
+            let host = test_host(dir.path());
+            let dyn_host: Arc<dyn SessionHost> = host.clone();
+            let (link, _) = connect(&host, &side, true, true, "c1").await;
+            ui_open(&host, &link, &side, 200).await;
+            closed(&dyn_host, "a");
+            link.request("session.close", serde_json::json!({ "agentId": "a" }), DEFAULT_TIMEOUT).await.unwrap();
+            persist_all(dyn_host).await;
+            link.close("app quits");
+        }
+        {
+            // While the app is closed: a row changes, one arrives.
+            let mut s = side.lock().unwrap();
+            s.fanout.prune();
+            s.mutate(&SessionEvent::Upsert { item: assistant("a149", "the final answer"), h: None });
+            s.mutate(&SessionEvent::Upsert { item: user("u150", "next question"), h: None });
+        }
+
+        // The app starts again; its host is still connecting.
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let before = opens(&side);
+        let copy: SessionSnapshot = serde_json::from_value(open_offline(&dyn_host, &open_params(200)).await.expect("the cached copy")).unwrap();
+        assert_eq!(copy.items.len(), 200);
+        assert_eq!(copy.items.last(), Some(&assistant("a149", &prose(10_149, 120))), "as cached, before omp changed it");
+        assert_eq!((copy.meta.caps.clone(), copy.ui.clone()), (offline_caps(), None), "a copy without controls");
+        assert_eq!(copy.meta.title.as_deref(), Some("long"));
+        assert!(host.ui.lock().unwrap().is_empty());
+        // The UI closes it, and the host comes online: nothing is opened there.
+        closed(&dyn_host, "a");
+        let (link, _) = connect(&host, &side, true, true, "c2").await;
+        reopen(dyn_host.clone(), link.clone()).await;
+        assert_eq!(opens(&side), before, "the host heard of no open");
+        assert!(host.ui.lock().unwrap().is_empty());
+        link.close("network lost");
+        host.sessions.link_down();
+        side.lock().unwrap().fanout.prune();
+
+        // Opened again while the host is away: the copy again, kept open.
+        let copy: SessionSnapshot = serde_json::from_value(open_offline(&dyn_host, &open_params(200)).await.expect("the copy")).unwrap();
+        let mut ui = Ui::default();
+        ui.apply(&SessionEvent::Reset { snapshot: copy });
+        assert_eq!(opens(&side), before);
+        // The host is online: the session opens there with what the mirror holds.
+        let (link, _) = connect(&host, &side, true, true, "c3").await;
+        let wire = link.totals();
+        reopen(dyn_host.clone(), link.clone()).await;
+        ui.drain(&host);
+        assert_eq!(ui.resets, 2, "the delta came as a reset");
+        assert!(ui.meta.as_ref().is_some_and(|m| m.caps.prompt && m.caps.abort), "with the session's controls");
+        converge(&mut ui, &host, &side).await;
+        assert_eq!(last_open(&side), (vec!["a149".to_string(), "u150".into()], true, true), "only what changed");
+        assert!(link.totals().rx - wire.rx < 4096, "{} bytes", link.totals().rx - wire.rx);
+        // Live from here on.
+        side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a150", "streaming"), h: None });
+        converge(&mut ui, &host, &side).await;
+        assert_eq!(ui.resets, 2);
+    }
+
     /// Waits (up to 5 s) until `f` holds.
     async fn until(what: &str, mut f: impl FnMut() -> bool) {
         for _ in 0..500 {
@@ -1976,6 +2115,11 @@ pub(crate) mod tests {
     /// The mirror of `a` is closed, written to the cache, and held by nobody but the host.
     async fn settled(host: &TestHost) {
         until("the mirror is closed and written", || host.sessions.get("a").is_some_and(|m| Arc::strong_count(&m) == 2 && m.lock().idle())).await;
+    }
+
+    /// The UI has `agent`'s session open (a link that comes up opens it there).
+    pub(crate) fn wanted(sessions: &Sessions, agent: &str) -> bool {
+        sessions.get(agent).is_some_and(|m| m.lock().wanted)
     }
 
     /// A mirror an open is working on never leaves memory, however long ago it was used and

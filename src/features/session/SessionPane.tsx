@@ -1,7 +1,7 @@
 import { Bot } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
-import { navigate, openSession, parseAgentKey, useAgent, useHosts, useSession, useUi } from "@/core";
+import { navigate, openSession, parseAgentKey, useAgent, useCore, useHosts, useSession, useUi } from "@/core";
 import { Button, cn, EmptyState, spring, StatusOrb, toastAnchorsChanged } from "@/design";
 import { ConnStatusCard } from "@/features/hosts/ConnStatusCard";
 import { PHASE_LABEL, PHASE_STATUS, phaseBusy } from "@/features/shell/status";
@@ -94,7 +94,9 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
   const agent = useAgent(agentKey);
   const retry = useOpenSession(agentKey);
   const hotkeys = !compact;
-  const stoppable = agent?.column === "running" && agent.omp?.link === "live";
+  const hostOnline = useCore((s) => s.status[hostId]?.phase === "online");
+  // A cached copy shown while the host is offline cannot stop anything.
+  const stoppable = hostOnline && agent?.column === "running" && agent.omp?.link === "live";
 
   // Esc anywhere in the focused session (outside inputs and overlays) stops the turn.
   useEffect(() => {

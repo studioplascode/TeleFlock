@@ -15,12 +15,18 @@
 //! through the journal. tf-hostd runs next to omp and tails the artifacts dir through
 //! [`ArtifactLedger`]; the replica folds everything into one `CostInfo` so every client agrees.
 //!
+//! **Stable sums.** Costs are floats: adding the same calls in another order can change the
+//! last digit. A total is therefore always added up the same way (each transcript's calls in
+//! file order, the transcripts in path order; the live `progress.cost` of subagents by agent id),
+//! so a session built live and the same session rebuilt after a tf-hostd restart bill the same
+//! amount, bit for bit, and clients see no change.
+//!
 //! **Throughput.** The main agent's rate comes from its streamed deltas. Subagents and advisors
 //! stream nowhere a guest can see, so each of their finished replies is replayed at its real
 //! decode rate (`usage.output` over `duration − ttft`) from the moment tf-hostd reads it:
 //! the area under the sparkline is exact, its timing one reply late.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 use tf_proto::Millis;
@@ -129,22 +135,33 @@ impl ArtifactCall {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct FileTail {
+    kind: ArtifactKind,
     offset: u64,
     /// Bytes after the last newline (a line still being written).
     carry: Vec<u8>,
     /// First line was a session header (`type: session`); `None` until it is complete.
     header: Option<bool>,
+    /// What the transcript's calls billed, added up in file order.
+    spend: Spend,
+}
+
+impl FileTail {
+    fn new(kind: ArtifactKind) -> FileTail {
+        FileTail { kind, offset: 0, carry: Vec::new(), header: None, spend: Spend::default() }
+    }
 }
 
 /// Incremental reader of one session's artifact transcripts. The caller (tf-hostd) owns the
 /// filesystem: it reads the bytes appended past [`Self::offset`] and feeds them to [`Self::ingest`].
+/// Its totals do not depend on the order the bytes arrive in (see "Stable sums" above): while
+/// omp writes, a scan reads a few lines of several transcripts; after a tf-hostd restart, one
+/// scan reads every transcript whole, in whatever order the directory lists them.
 #[derive(Debug, Default)]
 pub struct ArtifactLedger {
-    files: HashMap<String, FileTail>,
-    advisor: Spend,
-    subagents: Spend,
+    /// By path relative to the artifacts dir.
+    files: BTreeMap<String, FileTail>,
 }
 
 impl ArtifactLedger {
@@ -157,7 +174,7 @@ impl ArtifactLedger {
     /// completed. Files that do not start with a session header are ignored.
     pub fn ingest(&mut self, rel: &str, chunk: &[u8]) -> Vec<ArtifactCall> {
         let Some(kind) = ArtifactKind::of(rel) else { return Vec::new() };
-        let tail = self.files.entry(rel.to_owned()).or_default();
+        let tail = self.files.entry(rel.to_owned()).or_insert_with(|| FileTail::new(kind));
         tail.offset += chunk.len() as u64;
         tail.carry.extend_from_slice(chunk);
         let Some(last_nl) = tail.carry.iter().rposition(|b| *b == b'\n') else { return Vec::new() };
@@ -178,24 +195,28 @@ impl ArtifactLedger {
                 Some(true) => {}
             }
             if let Some(call) = ArtifactCall::parse(kind, &entry) {
+                tail.spend.add(&call.spend);
                 calls.push(call);
-            }
-        }
-        for c in &calls {
-            match c.kind {
-                ArtifactKind::Advisor => self.advisor.add(&c.spend),
-                ArtifactKind::Subagent => self.subagents.add(&c.spend),
             }
         }
         calls
     }
 
     pub fn advisor(&self) -> Spend {
-        self.advisor
+        self.total(ArtifactKind::Advisor)
     }
 
     pub fn subagents(&self) -> Spend {
-        self.subagents
+        self.total(ArtifactKind::Subagent)
+    }
+
+    /// Each transcript's spend of `kind`, added up in path order.
+    fn total(&self, kind: ArtifactKind) -> Spend {
+        let mut sum = Spend::default();
+        for t in self.files.values().filter(|t| t.kind == kind) {
+            sum.add(&t.spend);
+        }
+        sum
     }
 }
 
@@ -277,6 +298,38 @@ mod tests {
         let junk = line(assistant(7.0, 1, 0, 1.0, 0.0));
         assert!(l.ingest("other.jsonl", &[junk.clone(), junk].concat()).is_empty());
         assert!((l.subagents().usd - 0.26).abs() < 1e-9);
+    }
+
+    /// The totals are the same, bit for bit, however the lines arrive: while omp writes, a scan
+    /// reads a reply of one transcript, then of another; after a tf-hostd restart one scan reads
+    /// each transcript whole, in the order the directory lists them. Added up as they arrived,
+    /// these costs (real subagent replies) differ in the last digit between the two.
+    #[test]
+    fn totals_do_not_depend_on_the_order_lines_arrive() {
+        let header = line(json!({"type": "session", "id": "s"}));
+        let files: [(&str, [f64; 2]); 3] = [
+            ("Scout.jsonl", [2.8100000000000002e-05, 0.0007311]),
+            ("Probe.jsonl", [2.82e-05, 0.00010804]),
+            ("Scout/Scout.Helper.jsonl", [0.0006979000000000001, 3e-05]),
+        ];
+        let reply = |usd: f64| line(assistant(usd, 1, 0, 1_000.0, 0.0));
+        let mut live = ArtifactLedger::default();
+        for (rel, _) in &files {
+            live.ingest(rel, &header);
+        }
+        for i in 0..2 {
+            for (rel, costs) in &files {
+                live.ingest(rel, &reply(costs[i]));
+            }
+        }
+        let mut rebuilt = ArtifactLedger::default();
+        for (rel, costs) in files.iter().rev() {
+            rebuilt.ingest(rel, &[header.clone(), reply(costs[0]), reply(costs[1])].concat());
+        }
+        assert_eq!(live.subagents().usd.to_bits(), rebuilt.subagents().usd.to_bits(), "{} vs {}", live.subagents().usd, rebuilt.subagents().usd);
+        assert_eq!(live.subagents(), rebuilt.subagents());
+        let sum: f64 = files.iter().flat_map(|(_, c)| c).sum();
+        assert!((live.subagents().usd - sum).abs() < 1e-15);
     }
 
     #[test]

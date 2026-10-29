@@ -236,6 +236,22 @@ fn parse_line(line: &[u8]) -> Option<Value> {
     serde_json::from_slice(line).ok()
 }
 
+/// The `timestamp` of the session header omp writes to `path`, before omp wrote it: omp names a
+/// session file after its header, `<timestamp>_<session id>.jsonl` with the timestamp's `:` and
+/// `.` written as `-` (`session-manager.ts` `fileSafeTimestamp`: `2026-10-28T16-38-52-114Z` for
+/// `2026-10-28T16:38:52.114Z`). `None` for a file named otherwise (`--session <file>`).
+pub fn header_timestamp(path: &Path, session_id: &str) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let safe = name.strip_suffix(".jsonl")?.strip_suffix(session_id)?.strip_suffix('_')?;
+    let b = safe.as_bytes();
+    let shaped = b.len() == 24
+        && b[23] == b'Z'
+        && b[10] == b'T'
+        && [4, 7, 13, 16, 19].iter().all(|&i| b[i] == b'-')
+        && b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19 | 23) || c.is_ascii_digit());
+    shaped.then(|| format!("{}:{}:{}.{}Z", &safe[..13], &safe[14..16], &safe[17..19], &safe[20..23]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +432,20 @@ mod tests {
         drop(f);
         append(&path, &format!("{}\n", entry("e2")));
         assert_eq!(tail.poll(), Poll::Rewritten);
+    }
+
+    #[test]
+    fn the_header_timestamp_is_in_omps_file_name() {
+        let sid = "01a18360-f5d2-776a-a9fb-ebcd5d31fb30";
+        let dir = Path::new("/home/u/.omp/agent/sessions/-w");
+        let stamp = |name: &str| header_timestamp(&dir.join(name), sid);
+        assert_eq!(stamp(&format!("2026-10-28T16-38-52-114Z_{sid}.jsonl")).as_deref(), Some("2026-10-28T16:38:52.114Z"));
+        let at = stamp(&format!("2026-10-28T16-38-52-114Z_{sid}.jsonl")).and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok());
+        assert_eq!(at.map(|t| t.timestamp_millis()), Some(1_793_205_532_114));
+        // Another session's file, a forced name, a mangled stamp.
+        assert_eq!(stamp("2026-10-28T16-38-52-114Z_other.jsonl"), None);
+        assert_eq!(stamp("mine.jsonl"), None);
+        assert_eq!(stamp(&format!("2026-10-28T16:38:52.114Z_{sid}.jsonl")), None);
+        assert_eq!(stamp(&format!("2026-10-28T16-38-52-11xZ_{sid}.jsonl")), None);
     }
 }

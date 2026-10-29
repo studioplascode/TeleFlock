@@ -1,10 +1,11 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff, Paperclip, Pencil, Slash, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
-import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
+import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useCore, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
 import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, isVideoFile, MAX_PROMPT_IMAGE_CHARS, mediaFiles } from "@/core/clipboardImages";
 import { attachVideos, detachDraftVideos, releaseVideos, removeDraftVideo, retryVideos, useDraftVideos, type VideoRef, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import type { CommandInfo, ImageInput } from "@/core/gen";
+import { PHASE_TEXT } from "@/features/shell/status";
 import { openTerminal } from "@/features/board/agentActions";
 import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
@@ -145,9 +146,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   }, [working, mobile]);
   // A parked agent (pane closed when it was marked done) takes prompts: the host resumes it first.
   const resuming = useResuming(agentKey);
+  // Not online: the transcript is the copy saved on this device, and every control needs the host.
+  const hostWait = useCore((s) => (s.status[hostId]?.phase === "online" ? null : `${s.profiles.find((p) => p.id === hostId)?.name ?? hostId} ${PHASE_TEXT[s.status[hostId]?.phase ?? "idle"]}`));
   const disabledReason = !agent
     ? "Agent not found"
-    : agent.parked
+    : hostWait
+      ? hostWait
+      : agent.parked
       ? resuming
         ? "Resuming…"
         : null

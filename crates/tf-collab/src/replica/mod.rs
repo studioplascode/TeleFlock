@@ -584,7 +584,9 @@ impl Replica {
 
     /// omp: `max(subagent tree, completed task results)`. Without artifact access (tests, a
     /// remote omp) the live `progress.cost` sum stands in for the tree; with it, progress still
-    /// covers a subagent whose transcript is not on disk yet. Progress has no token split.
+    /// covers a subagent whose transcript is not on disk yet. Progress has no token split. Every
+    /// sum is added up in a fixed order (progress by agent id: `subs` is ordered; the tree: see
+    /// [`ArtifactLedger`]), so a rebuilt replica bills exactly what the live one did.
     fn subagent_spend(&self) -> Spend {
         let progress = Spend { usd: self.subs.values().filter_map(|s| s.progress.as_ref().and_then(|p| f(p, "cost"))).filter(|c| c.is_finite()).sum(), ..Spend::default() };
         let tree = self.artifacts.map(|a| a.subagents).unwrap_or_default();
@@ -2186,9 +2188,15 @@ fn subagent_view(id: &str, st: &SubState) -> Subagent {
             .or_else(|| arr(p, "recentOutput").last().and_then(Value::as_str).map(|o| clip(o, 120)))
     });
     let started = snap.map(|a| a.created_at).filter(|t| *t > 0);
+    // A finished run ends where omp's own measure of it says (`durationMs`, final with its last
+    // progress; omp's TUI shows the same): the roster's `lastActivity` moves when omp parks the
+    // idle agent minutes later (a 2 s run would read 7:02). It also comes back the same from the
+    // bridge's resync, so a rebuilt replica shows what the live one did. Without progress (an
+    // agent omp restored from disk), its last activity is when its transcript was last written.
+    let ran = p.and_then(|p| f(p, "durationMs")).filter(|d| d.is_finite() && *d > 0.0).map(|d| d.round() as Millis);
     let ended = match status {
         SubagentStatus::Running => None,
-        _ => snap.map(|a| a.last_activity).filter(|t| *t > 0),
+        _ => started.zip(ran).map(|(at, ms)| at + ms).or_else(|| snap.map(|a| a.last_activity).filter(|t| *t > 0)),
     };
     Subagent {
         id: id.to_owned(),
