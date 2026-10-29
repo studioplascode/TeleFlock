@@ -1730,12 +1730,14 @@ pub(crate) mod tests {
     async fn converge(ui: &mut Ui, host: &TestHost, side: &Side) {
         for _ in 0..500 {
             ui.drain(host);
-            let s = side.lock().unwrap();
-            let n = ui.rows.len().min(s.rows.len());
-            if n > 0 && ui.rows[ui.rows.len() - n..] == s.rows[s.rows.len() - n..] && ui.meta.as_ref() == Some(&s.meta) {
+            let converged = {
+                let s = side.lock().unwrap();
+                let n = ui.rows.len().min(s.rows.len());
+                n > 0 && ui.rows[ui.rows.len() - n..] == s.rows[s.rows.len() - n..] && ui.meta.as_ref() == Some(&s.meta)
+            };
+            if converged {
                 return;
             }
-            drop(s);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let s = side.lock().unwrap();

@@ -357,6 +357,7 @@ impl SyncState {
 /// One flush's events as `sessionSync` subscribers get them: appends that a later upsert, remove
 /// or reset of the same row makes moot are dropped (and everything a later reset replaces), the
 /// rest carry `at`; upserts carry `h`; resets their row hashes and meta.
+#[allow(clippy::large_enum_variant, reason = "`Event` is nearly every element: boxing it would allocate per event")]
 enum Prepared<'a> {
     Event(SessionEvent, Option<Hash>),
     Reset(&'a SessionSnapshot, Vec<Hash>, Arc<MetaState>),

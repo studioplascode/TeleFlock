@@ -1974,7 +1974,7 @@ fn arm_flush(session: &Arc<OmpSession>, st: &mut SessionState, at: Instant) {
     st.flush_at = Some(at);
     let s = session.clone();
     tokio::spawn(async move {
-        tokio::time::sleep_until(at.into()).await;
+        tokio::time::sleep_until(at).await;
         let mut st = s.lock();
         if st.flush_at == Some(at) {
             st.flush_at = None;
@@ -2160,6 +2160,7 @@ mod tests {
         assert_eq!(err.kind, FailKind::Transient);
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn bind_failure_is_a_setup_issue() {
         // A port below Linux's ephemeral range (32768–60999): parallel tests that bind

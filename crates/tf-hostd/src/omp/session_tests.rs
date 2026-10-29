@@ -299,7 +299,7 @@ fn idle_resync(session_id: &str, file: &Path, seq: u64, last: Option<&str>, entr
 /// The id of the last entry in session file `file`.
 fn last_entry(file: &Path) -> Option<String> {
     let text = std::fs::read_to_string(file).unwrap();
-    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v["id"].as_str().map(str::to_owned)).last()
+    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v["id"].as_str().map(str::to_owned)).next_back()
 }
 
 /// Says `hello` and answers the driver's `liveSubscribe` with `resync`, written before the

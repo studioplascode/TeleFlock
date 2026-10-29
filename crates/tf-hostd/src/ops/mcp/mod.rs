@@ -692,7 +692,13 @@ async fn save_files(mcp: &Mcp, p: &McpSaveParams) -> Result<(Option<PathBuf>, bo
     if let Some(old) = &renamed {
         let (user, old2, new2) = (mcp.user_file(), old.clone(), name.clone());
         if user.exists() {
-            blocking(move || files::modify(&user, |root| Ok(rename_in_lists(root, &old2, &new2)))).await?;
+            blocking(move || {
+                files::modify(&user, |root| {
+                    rename_in_lists(root, &old2, &new2);
+                    Ok(())
+                })
+            })
+            .await?;
         }
     }
     tracing::info!(scope = ?p.scope, name = %name, "mcp server saved");

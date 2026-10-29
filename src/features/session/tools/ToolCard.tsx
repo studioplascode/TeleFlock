@@ -22,13 +22,14 @@ import {
 } from "lucide-react";
 import { motion } from "motion/react";
 import { type ReactNode, useContext, useMemo, useState } from "react";
-import { linkProps, useAgent, useSession } from "@/core";
+import { linkProps, useAgent, useCore, useSession } from "@/core";
 import type { BashView, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
 import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner } from "@/design";
 import { languageFor } from "../lib/highlight";
 import { ImagePlaceholder, useImageSources } from "../lib/images";
 import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
 import { useSessionUi } from "../state";
+import { withRoster } from "../subagents/roster";
 import { SubagentCard } from "../subagents/Subagents";
 import { SessionCtx, useSessionRef } from "../context";
 import { AnsiText } from "./AnsiText";
@@ -204,21 +205,8 @@ function summary(item: ToolItem): ReactNode {
         </span>
       );
     }
-    case "task": {
-      const live = v.agents.filter((a) => a.status === "running").length;
-      const failed = v.agents.filter((a) => a.status === "failed").length;
-      const estimates = v.agents.flatMap((a) => (a.status === "running" && a.completionPct != null ? [a.completionPct] : []));
-      const done = estimates.length > 0 ? Math.round(estimates.reduce((s, p) => s + p, 0) / estimates.length) : undefined;
-      return live > 0 ? (
-        <span className="text-accent-hi" title={done != null ? "The running subagents' own estimate of how far along their task is (omp asks every few minutes)" : undefined}>
-          {live} live{done != null && ` · ${estimates.length > 1 ? "~" : ""}${done}% done`}
-        </span>
-      ) : failed > 0 ? (
-        <span className="text-error">{failed} failed</span>
-      ) : (
-        <span className="text-done">✓ all done</span>
-      );
-    }
+    case "task":
+      return <TaskSummary agents={v.agents} />;
     case "web":
       return <span>{v.sources.length} source{v.sources.length === 1 ? "" : "s"}</span>;
     default:
@@ -555,8 +543,35 @@ function ImageBody({ view: v, title }: { view: ImageView; title: string }) {
   );
 }
 
-function TaskBody({ agents }: { agents: Subagent[] }) {
+/** A task card's subagents with the session's roster laid over those it still shows running (`withRoster`). */
+function useRosterAgents(agents: Subagent[]): Subagent[] {
+  const key = useContext(SessionCtx)?.key;
+  // Only cards with a running agent subscribe (the roster changes with every progress update).
+  const watch = key != null && agents.some((a) => a.status === "running") ? key : undefined;
+  const roster = useCore((s) => (watch != null ? s.sessions[watch]?.meta?.subagents : undefined));
+  return useMemo(() => withRoster(agents, roster), [agents, roster]);
+}
+
+function TaskSummary({ agents: card }: { agents: Subagent[] }) {
+  const agents = useRosterAgents(card);
+  const live = agents.filter((a) => a.status === "running").length;
+  const failed = agents.filter((a) => a.status === "failed").length;
+  const estimates = agents.flatMap((a) => (a.status === "running" && a.completionPct != null ? [a.completionPct] : []));
+  const done = estimates.length > 0 ? Math.round(estimates.reduce((s, p) => s + p, 0) / estimates.length) : undefined;
+  return live > 0 ? (
+    <span className="text-accent-hi" title={done != null ? "The running subagents' own estimate of how far along their task is (omp asks every few minutes)" : undefined}>
+      {live} live{done != null && ` · ${estimates.length > 1 ? "~" : ""}${done}% done`}
+    </span>
+  ) : failed > 0 ? (
+    <span className="text-error">{failed} failed</span>
+  ) : (
+    <span className="text-done">✓ all done</span>
+  );
+}
+
+function TaskBody({ agents: card }: { agents: Subagent[] }) {
   const { key } = useSessionRef();
+  const agents = useRosterAgents(card);
   return (
     <div className="flex flex-col gap-1.5 p-2">
       {agents.map((a) => (

@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use super::*;
 use tf_proto::McpKeyValue;
@@ -343,7 +342,6 @@ async fn mcp_real_omp_helper() {
     eprintln!("test: {} tools in {} ms", t.tools.len(), t.ms);
     let res = search(&mcp, McpSearchParams { query: "github".into(), limit: Some(3) }).await;
     eprintln!("search: {:?}", res.as_ref().map(|r| r.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>()));
-    let _ = Duration::from_secs(0);
 }
 
 #[test]

@@ -198,6 +198,7 @@ pub struct BridgeSession {
 }
 
 /// One message of a session's live feed ([`BridgeHandle::live_subscribe`]), in wire order.
+#[allow(clippy::large_enum_variant, reason = "`Frame` is nearly every message: boxing it would allocate per live frame")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiveMsg {
     /// Everything in flight, taken between two omp events: the first message of every
@@ -1189,14 +1190,12 @@ fn on_live(shared: &Shared, conn_id: u64, mut msg: Value) {
 fn to_feed(shared: &Shared, conn_id: u64, msg: LiveMsg) {
     let mut reg = lock(&shared.reg);
     let Some(conn) = reg.conns.get_mut(&conn_id) else { return };
-    match &conn.feed {
-        Some(tx) if conn.session.is_some() => {
-            if tx.send(msg).is_err() {
-                // The subscriber is gone (its session ended): stop routing until it re-subscribes.
-                conn.feed = None;
-            }
-        }
-        _ => {}
+    if let Some(tx) = &conn.feed
+        && conn.session.is_some()
+        && tx.send(msg).is_err()
+    {
+        // The subscriber is gone (its session ended): stop routing until it re-subscribes.
+        conn.feed = None;
     }
 }
 

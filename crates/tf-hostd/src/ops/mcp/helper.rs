@@ -560,12 +560,11 @@ mod tree {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// A stand-in omp (a shell script) that follows the helper protocol.
-    #[cfg(unix)]
     fn fake_omp(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("omp");
@@ -574,7 +573,6 @@ mod tests {
         p
     }
 
-    #[cfg(unix)]
     fn env(dir: &Path, omp: PathBuf) -> HelperEnv {
         HelperEnv { omp: Some(omp), ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None, slots: Slots::new(MAX_RUNNING, MAX_SIGN_INS) }
     }
@@ -600,7 +598,6 @@ mod tests {
         panic!("{} never written", file.display());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn request_travels_in_a_private_file_and_events_come_before_the_result() {
         let td = tempfile::tempdir().unwrap();
@@ -631,7 +628,6 @@ printf 'way"}\n{"t":"result","ok":true}\n' >> "$TF_MCP_OUT""#,
         assert!(!out.exists(), "answer file removed");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn errors_exits_and_timeouts_are_reported() {
         let td = tempfile::tempdir().unwrap();
@@ -655,7 +651,6 @@ printf 'way"}\n{"t":"result","ok":true}\n' >> "$TF_MCP_OUT""#,
         assert!(started.elapsed() < Duration::from_secs(5), "stopped, not waited for: {:?}", started.elapsed());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn pasted_input_reaches_the_helper() {
         let td = tempfile::tempdir().unwrap();
@@ -728,7 +723,6 @@ sleep 30"#,
         assert_eq!(pids, [11, 12]);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn slot_waits_end_before_the_deadline_and_sign_ins_have_their_own() {
         let td = tempfile::tempdir().unwrap();

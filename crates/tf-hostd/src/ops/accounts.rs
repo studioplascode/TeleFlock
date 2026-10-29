@@ -86,7 +86,10 @@ fn stamp(bin: &Path) -> BinStamp {
     (bin.to_path_buf(), meta.map(|m| m.len()).unwrap_or(0), mtime)
 }
 
-static PROVIDERS: LazyLock<tokio::sync::Mutex<Option<(BinStamp, Vec<LoginProvider>)>>> = LazyLock::new(Default::default);
+/// The provider list last read, with the binary it was read from.
+type ProviderCache = Option<(BinStamp, Vec<LoginProvider>)>;
+
+static PROVIDERS: LazyLock<tokio::sync::Mutex<ProviderCache>> = LazyLock::new(Default::default);
 
 async fn providers(bin: &Path) -> Result<Vec<LoginProvider>, ApiError> {
     let stamp = stamp(bin);
@@ -1534,7 +1537,7 @@ mod tests {
         assert!(selector_matches(&policy_selector(&fresh[0]), &work));
         // Hand-set lower priorities survive.
         let low = json!({ "provider": "anthropic", "account": { "email": "me@example.com" }, "priority": 5 });
-        let kept = apply_preference(&[low.clone()], "anthropic", &work, true);
+        let kept = apply_preference(std::slice::from_ref(&low), "anthropic", &work, true);
         assert_eq!(kept[0], low);
     }
 
@@ -1579,9 +1582,10 @@ mod tests {
         assert_eq!(out.iter().map(|a| (a.credential_id, a.disabled)).collect::<Vec<_>>(), [(Some(9), false), (Some(4), false)]);
     }
 
-    // ── the link flow, against a scripted omp ──
+    // ── the link flow, against a scripted omp (a shell script: unix only) ──
 
     /// A stand-in `omp` (`login <provider>`): prints what omp prints, reads answers.
+    #[cfg(unix)]
     fn fake_omp(dir: &Path, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("omp");
@@ -1590,10 +1594,12 @@ mod tests {
         bin
     }
 
+    #[cfg(unix)]
     fn provider(id: &str, name: &str) -> LoginProvider {
         LoginProvider { id: id.into(), name: name.into() }
     }
 
+    #[cfg(unix)]
     async fn until(flow_id: &str, pred: impl Fn(&AuthFlow) -> bool) -> AuthFlow {
         let mut rev = None;
         for _ in 0..100 {
@@ -1606,6 +1612,7 @@ mod tests {
         panic!("flow never got there: {:?}", authflow::wait(flow_id, None, None).await.unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn browser_link_with_a_pasted_redirect() {
         let td = tempfile::tempdir().unwrap();
@@ -1649,6 +1656,7 @@ printf '\nLogged in to Fake OAuth as dev@example.com (Org)\nCredentials saved to
         assert_eq!(done.account.as_deref(), Some("dev@example.com (Org)"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn device_link_with_a_question_first() {
         let td = tempfile::tempdir().unwrap();
@@ -1678,6 +1686,7 @@ printf '\nLogged in to GitHub Copilot\n'"#,
         assert_eq!(done.account, None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn questions_in_a_row_each_take_their_answer() {
         // Cloudflare AI Gateway's login (Workers AI, Perplexity's email login, Custom endpoints
@@ -1705,6 +1714,7 @@ printf '\nLogged in to Cloudflare AI Gateway\n'"#,
         assert_eq!(done.state, AuthFlowState::Done, "{done:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_same_question_again_refuses_the_answer() {
         let td = tempfile::tempdir().unwrap();
@@ -1730,6 +1740,7 @@ printf '\nLogged in to Example\n'"#,
         assert_eq!(until(&id, |f| f.state.is_final()).await.state, AuthFlowState::Done);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_and_cancelled_links() {
         let td = tempfile::tempdir().unwrap();
@@ -1772,6 +1783,7 @@ exit 1"#,
         assert_eq!(authflow::wait(&flow.flow_id, None, None).await.unwrap().state, AuthFlowState::Cancelled);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn logout_through_omp_rpc() {
         let td = tempfile::tempdir().unwrap();
@@ -1790,6 +1802,7 @@ exit 1"#,
         assert_eq!(rpc_logout(&bin, "anthropic", 9, &[]).await.unwrap_err().message, "Credential 9 not found");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_logout_omp_never_answers_reports_its_reason() {
         let td = tempfile::tempdir().unwrap();

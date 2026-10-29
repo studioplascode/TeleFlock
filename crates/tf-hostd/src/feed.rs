@@ -889,7 +889,8 @@ pub(crate) mod fixture {
             self.write_through(i);
         }
 
-        /// Appends a line omp did not write in the recorded run.
+        /// Appends a line omp did not write in the recorded run (for the unix-only `omp::session_tests`).
+        #[cfg(unix)]
         pub(crate) fn append(&self, entry: &Value) {
             let mut f = std::fs::OpenOptions::new().append(true).open(&self.path).unwrap();
             writeln!(f, "{entry}").unwrap();
@@ -1010,7 +1011,7 @@ mod tests {
                     let read = journal::read_full(tail_path, None).unwrap();
                     // The fresh session had no file at resync time; with `file` the tail starts at
                     // the file's beginning so its entries arrive as appends, ahead of the frames.
-                    let read = FullRead { header: None, title: None, entries: Vec::new(), found: false, tail: JournalTail::new(&read.tail.path().to_path_buf()) };
+                    let read = FullRead { header: None, title: None, entries: Vec::new(), found: false, tail: JournalTail::new(read.tail.path()) };
                     feeder.resync(&mut replica, resync_of(l), read, &origin, t)
                 }
                 "live" => step(&mut feeder, &mut replica, l["seq"].as_u64().unwrap(), HostFrame::from_value(l["f"].clone()), t).unwrap(),

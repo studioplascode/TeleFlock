@@ -1453,3 +1453,50 @@ fn notes_and_recorded_calls_survive_a_rebuild() {
     assert_eq!(note, RowNote { author: Some("pixel".into()), steering: true, thought_ms: Some(5) });
     assert!(!note.merge(&RowNote::default()));
 }
+
+/// A prompt that starts a run is not a steer, however its row and the run's start interleave. A
+/// bridge-served session reads omp's file ahead of the live frames (tf-hostd applies what the file
+/// holds before a frame that starts something), so the next prompt's entry can land between its
+/// run's `agent_start` and `turn_start`, right after a run that produced output. Lab (omp
+/// 18.13.3, bridge 2.0.0): two of four prompts sent to an idle session read "STEER".
+#[test]
+fn a_prompt_starting_a_run_is_not_a_steer() {
+    let (at0, snap) = snapshot_from(&load("00-join"), false).unwrap();
+    let t0 = at0 + 1000;
+    let ev = |event: serde_json::Value| GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "event", "event": event })));
+    let entry = |id: &str, message: &serde_json::Value| GuestEvent::Frame(HostFrame::Entry {
+        entry: serde_json::json!({ "type": "message", "id": id, "timestamp": "2026-10-28T20:29:08.479Z", "message": message }),
+    });
+    let user = |text: &str, at: Millis| serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": text }], "timestamp": at });
+    let (first, second) = (user("pick a color", t0), user("count to three", t0 + 5000));
+    let reply = serde_json::json!({ "role": "assistant", "content": [{ "type": "text", "text": "Blue" }], "stopReason": "stop",
+        "model": "gpt-6-luna", "timestamp": t0 + 100, "completedAt": t0 + 200 });
+    let frames = vec![
+        (t0, ev(serde_json::json!({ "type": "agent_start" }))),
+        (t0, ev(serde_json::json!({ "type": "turn_start" }))),
+        (t0, ev(serde_json::json!({ "type": "message_start", "message": first }))),
+        (t0, ev(serde_json::json!({ "type": "message_end", "message": first }))),
+        (t0 + 1, entry("e1", &first)),
+        (t0 + 150, ev(serde_json::json!({ "type": "message_update", "message": reply, "assistantMessageEvent": { "type": "text_delta" } }))),
+        (t0 + 200, ev(serde_json::json!({ "type": "message_end", "message": reply }))),
+        (t0 + 201, entry("e2", &reply)),
+        (t0 + 210, ev(serde_json::json!({ "type": "turn_end" }))),
+        (t0 + 210, ev(serde_json::json!({ "type": "agent_end", "messages": [] }))),
+        // The next run: its prompt's entry was read ahead of its `turn_start`.
+        (t0 + 5000, ev(serde_json::json!({ "type": "agent_start" }))),
+        (t0 + 5001, entry("e3", &second)),
+        (t0 + 5001, ev(serde_json::json!({ "type": "turn_start" }))),
+        (t0 + 5001, ev(serde_json::json!({ "type": "message_start", "message": second }))),
+        (t0 + 5001, ev(serde_json::json!({ "type": "message_end", "message": second }))),
+    ];
+    let mut live = Replica::new("x");
+    let mut noted = Vec::new();
+    for (at, frame) in std::iter::once((at0, GuestEvent::Snapshot(snap))).chain(frames) {
+        noted.extend(live.apply(&frame, at).signals.into_iter().filter(|s| matches!(s, Signal::Noted { .. })));
+    }
+    for at in [t0, t0 + 5000] {
+        let Some(TranscriptItem::User(u)) = live.item(&format!("u{at}")) else { panic!("no row u{at}") };
+        assert!(!u.steering, "{u:?}");
+    }
+    assert!(noted.is_empty(), "no steer noted (and persisted): {noted:?}");
+}

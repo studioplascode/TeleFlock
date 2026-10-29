@@ -1031,6 +1031,10 @@ impl Replica {
             }
         }
         self.running = false;
+        // Nothing is being produced once the run is over. A bridge-served session reads omp's file
+        // ahead of the live frames, so the next run's prompt can land between its `agent_start`
+        // and `turn_start`: this run's output must not make that prompt a steer.
+        self.turn_output = false;
         self.status_line = None;
         if was {
             let error = if aborted { None } else { self.last_error.clone().filter(|_| self.last_stop.as_deref() == Some("error")) };
@@ -1514,6 +1518,7 @@ impl Replica {
     /// its result message (`ended_at`: the message's timestamp), live or as an entry. With the
     /// message the row is exactly what a rebuild from the file shows. `effects`: also fold the
     /// result into meta and liveness (not when an entry only settles a row its events finished).
+    #[expect(clippy::too_many_arguments, reason = "the end event and the result message each supply these from their own fields")]
     fn tool_finish(&mut self, call_id: &str, name: &str, result: &Value, is_error: bool, ended_at: Option<Millis>, effects: bool, out: &mut Update) {
         let name = if name.is_empty() { self.tools.get(call_id).map(|t| t.name.clone()).unwrap_or_default() } else { name.to_owned() };
         let mut t = self.ensure_tool(call_id, &name, None, None);
