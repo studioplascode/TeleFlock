@@ -104,7 +104,8 @@ pub(crate) struct Inner {
     io: tokio::sync::Mutex<()>,
     /// Password / key sign-in secrets (`secrets.json`), never part of the profiles.
     secrets: SecretStore,
-    /// Bumped by [`Engine::page_closed`]; opens that complete under an older epoch are released.
+    /// Bumped by [`Engine::page_closed`]; terminal opens that complete under an older epoch are
+    /// released (a session open sees the close through its mirror, [`sessions::OpenTicket`]).
     page_epoch: std::sync::atomic::AtomicU64,
     /// For work started from sync entry points the embedder may call off the runtime
     /// (`resume`, `page_closed` from Tauri window/page callbacks).
@@ -823,8 +824,9 @@ impl Engine {
 
     /// The (single) UI that opened terminals and sessions is gone — webview reload or navigation
     /// in the Tauri shell. Closes every open terminal (releasing its control lease) and
-    /// unsubscribes every session on every host; opens still in flight are released when they
-    /// complete. Multi-client embedders (the devserver) track ownership per client instead.
+    /// unsubscribes every session on every host; opens still in flight are released (terminals
+    /// when they complete; sessions answer that they were closed, leaving nothing subscribed).
+    /// Multi-client embedders (the devserver) track ownership per client instead.
     pub fn page_closed(&self) {
         self.inner.page_epoch.fetch_add(1, Ordering::SeqCst);
         let hosts: Vec<Arc<HostRt>> = self.inner.hosts.lock().unwrap().values().cloned().collect();
@@ -879,13 +881,27 @@ impl Engine {
     async fn host_call(&self, host_id: &str, method: &str, params: Value) -> Result<Value, ApiError> {
         let rt = self.inner.host(host_id).ok_or_else(|| not_found_host(host_id))?;
         let req = HostMethod::parse(method, params.clone())?;
-        let epoch = self.inner.page_epoch.load(Ordering::SeqCst);
         let host = session_host(&self.inner, &rt);
+        if let HostMethod::SessionOpen(p) = &req {
+            return self.session_open(host_id, &rt, &host, p).await;
+        }
+        let epoch = self.inner.page_epoch.load(Ordering::SeqCst);
         let link = match rt.link() {
             Some(l) => l,
             None => {
-                if let Some(r) = self.offline_session_call(&host, &req, epoch).await {
-                    return r;
+                // Answered by the app core while the host has no link: older rows the mirror
+                // holds, and a close (nothing is subscribed without a link).
+                match &req {
+                    HostMethod::SessionHistory(p) => {
+                        if let Some(page) = sessions::history_offline(&host, p) {
+                            return Ok(page);
+                        }
+                    }
+                    HostMethod::SessionClose(p) => {
+                        sessions::closed(&host, &p.agent_id);
+                        return Ok(serde_json::json!({}));
+                    }
+                    _ => {}
                 }
                 self.wait_link(host_id, &rt).await?
             }
@@ -893,20 +909,15 @@ impl Engine {
         if let HostMethod::SessionClose(p) = &req {
             sessions::closed(&host, &p.agent_id);
         }
-        // Sessions go through their mirrors (cache, delta re-opens, cached history pages).
+        // Session history goes through the mirror (pages it holds are not fetched again).
         let result = match &req {
-            HostMethod::SessionOpen(p) => sessions::open(&host, &link, p).await?,
             HostMethod::SessionHistory(p) => sessions::history(&host, &link, p).await?,
             _ => link.request(method, params, timeout_for(method)).await?,
         };
-        // Record what the page opened (checked under the view lock, like `page_closed`'s drain);
-        // if the page went away while the request was in flight, release it at once.
+        // Record the terminals the page opened (checked under the view lock, like `page_closed`'s
+        // drain); one opened while the page went away is released at once.
         let stale = || self.inner.page_epoch.load(Ordering::SeqCst) != epoch;
         let release = match req {
-            HostMethod::SessionOpen(p) => stale().then(|| {
-                sessions::closed(&host, &p.agent_id);
-                ("session.close", serde_json::json!({ "agentId": p.agent_id }))
-            }),
             HostMethod::TermOpen(_) => match result.get("termId").and_then(Value::as_str) {
                 Some(id) => {
                     let mut v = rt.view.lock().unwrap();
@@ -933,28 +944,23 @@ impl Engine {
         Ok(result)
     }
 
-    /// A session call the app core answers while the host has no link: the copy of a session its
-    /// mirror or the session cache holds (opened with the host once it is online; a close that
-    /// lands while it loads, from the UI or a page close, wins), older rows the mirror holds, and
-    /// a close (nothing is subscribed without a link). `None`: the host must answer.
-    async fn offline_session_call(&self, host: &Arc<dyn SessionHost>, req: &HostMethod, epoch: u64) -> Option<Result<Value, ApiError>> {
-        match req {
-            HostMethod::SessionOpen(p) => {
-                let r = sessions::open_offline(host, p).await?;
-                // The page went away before the open took its mirror's close count (the mirror may
-                // not have existed for `page_closed` to close): it no longer has the session open.
-                if r.is_ok() && self.inner.page_epoch.load(Ordering::SeqCst) != epoch {
-                    sessions::closed(host, &p.agent_id);
+    /// `session.open`, through the agent's mirror (cache, delta re-opens). Its ticket is taken
+    /// first: a close from then on (the UI's, a page close) wins over it, whatever it waits for
+    /// (the host's link, its turn, the cache). While the host has no link, the copy the mirror or
+    /// the session cache holds answers at once (opened with the host once it is online); with
+    /// nothing held, the open waits for the link.
+    async fn session_open(&self, host_id: &str, rt: &HostRt, host: &Arc<dyn SessionHost>, p: &tf_proto::SessionOpenParams) -> Result<Value, ApiError> {
+        let ticket = sessions::OpenTicket::take(host, &p.agent_id);
+        let link = match rt.link() {
+            Some(l) => l,
+            None => {
+                if let Some(r) = sessions::open_offline(host, p, &ticket).await {
+                    return r;
                 }
-                Some(r)
+                self.wait_link(host_id, rt).await?
             }
-            HostMethod::SessionHistory(p) => sessions::history_offline(host, p).map(Ok),
-            HostMethod::SessionClose(p) => {
-                sessions::closed(host, &p.agent_id);
-                Some(Ok(serde_json::json!({})))
-            }
-            _ => None,
-        }
+        };
+        sessions::open(host, &link, p, &ticket).await
     }
 
     /// The host's link; a host that is deploying or starting tf-hostd is waited for (15 s).

@@ -266,18 +266,24 @@ export async function refreshAll(): Promise<void> {
 
 const sessionRefs = new Map<string, number>();
 const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** The latest `session.open` per session: only its answer counts (an older one can fail late, closed meanwhile). */
+const sessionLoads = new Map<string, symbol>();
 const SESSION_LINGER_MS = 8000;
 
 async function loadSession(key: string): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
+  const load = Symbol(key);
+  sessionLoads.set(key, load);
   if (!coreStore.getState().sessions[key]) pushInternal({ type: "$sessionLoading", hostId, agentId });
   try {
     const snapshot = await core.host(hostId).call("session.open", { agentId, limit: 200 });
-    if (!sessionRefs.has(key)) return;
+    if (!sessionRefs.has(key) || sessionLoads.get(key) !== load) return;
     pushInternal({ type: "session", hostId, agentId, ev: { k: "reset", snapshot } });
   } catch (err) {
-    if (!sessionRefs.has(key)) return;
+    if (!sessionRefs.has(key) || sessionLoads.get(key) !== load) return;
     pushInternal({ type: "$sessionError", hostId, agentId, error: toApiError(err).toJSON() });
+  } finally {
+    if (sessionLoads.get(key) === load) sessionLoads.delete(key);
   }
 }
 

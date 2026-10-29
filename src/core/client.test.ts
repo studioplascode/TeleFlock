@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { pulseBus } from "./buses";
-import { core, flushCoreEvents, openSession, pushInternal, refreshHost, selectBackend, startCoreWith } from "./client";
+import { closeSession, core, flushCoreEvents, openSession, pushInternal, refreshHost, selectBackend, startCoreWith } from "./client";
 import { ManualClock } from "./demo/clock";
 import type { AppEvent, HostProfile, HostState } from "./gen";
 import { isMuted, useSettings } from "./hooks";
@@ -21,6 +21,8 @@ function labState(agentIds: string[]): HostState {
 
 /** A fake real backend (as tf-client would behave) that records calls. */
 const calls: { hostId: string | null; method: string }[] = [];
+/** Answers for the next `session.open`s, first in first used (then the canned snapshot). */
+const openAnswers: Promise<unknown>[] = [];
 let emit: (e: AppEvent) => void = () => {};
 const fake: CoreTransport = {
   kind: "ws",
@@ -36,7 +38,7 @@ const fake: CoreTransport = {
       case "state.get":
         return labState(["a", "b", "c"]);
       case "session.open":
-        return { agentId: "a", meta: { fast: false, mode: "normal", todos: [], subagents: [], files: [], queue: { steering: [], followUp: [] }, caps: {} }, items: [{ kind: "user", id: "u1", at: 1, text: "hi", images: [], steering: false, synthetic: false }], hasMore: false };
+        return openAnswers.shift() ?? { agentId: "a", meta: { fast: false, mode: "normal", todos: [], subagents: [], files: [], queue: { steering: [], followUp: [] }, caps: {} }, items: [{ kind: "user", id: "u1", at: 1, text: "hi", images: [], steering: false, synthetic: false }], hasMore: false };
       case "settings.set":
         return params;
       default:
@@ -125,6 +127,24 @@ describe("client pipeline", () => {
     expect(coreStore.getState().sessions["lab::a"]?.status).toBe("live");
     expect(coreStore.getState().sessions["lab::a"]?.itemIds).toEqual(["u1"]);
     release();
+  });
+
+  test("only the latest session.open of a session counts: an older one failing late changes nothing", async () => {
+    let failFirst: (e: unknown) => void = () => {};
+    // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+    openAnswers.push(new Promise((_, reject) => (failFirst = reject)));
+    openSession("lab::b");
+    // Closed while that open is in flight, then opened again (answered at once).
+    closeSession("lab::b");
+    openSession("lab::b");
+    await settle();
+    flushCoreEvents();
+    expect(coreStore.getState().sessions["lab::b"]?.status).toBe("live");
+    failFirst({ code: "not_connected", message: "the session was closed while it opened", retryable: true });
+    await settle();
+    flushCoreEvents();
+    expect(coreStore.getState().sessions["lab::b"]?.status).toBe("live");
+    closeSession("lab::b");
   });
 
   test("demo-kind hosts route to the embedded demo engine", async () => {
