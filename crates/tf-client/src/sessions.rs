@@ -425,8 +425,9 @@ struct State {
     plain: bool,
     /// Last opened or closed (closed mirrors leave memory least recently used first).
     used: Instant,
-    /// Closes by the UI ([`closed`]) or a page close ([`Sessions::page_closed`]): an open that
-    /// started before the latest one does not count as open, whatever it awaited meanwhile.
+    /// Closes by the UI ([`closed`]) or a page close ([`Sessions::page_closed`]): an open (the
+    /// UI's, a re-open, a repair) chosen before the latest one does not count as open and opens
+    /// nothing more at hostd, whatever it awaited meanwhile ([`OpenTicket`], [`sync_open`]).
     closes: u64,
 }
 
@@ -569,6 +570,9 @@ pub struct Mirror {
     /// One cache write at a time.
     persisting: tokio::sync::Mutex<()>,
     st: Mutex<State>,
+    /// Test seam: the next [`sync_open`] waits here, right before it marks the open in flight.
+    #[cfg(test)]
+    pause: Mutex<Option<tests::Gate>>,
 }
 
 impl Mirror {
@@ -597,6 +601,8 @@ impl Sessions {
                     opening: tokio::sync::Mutex::new(()),
                     persisting: tokio::sync::Mutex::new(()),
                     st: Mutex::new(State::new()),
+                    #[cfg(test)]
+                    pause: Mutex::new(None),
                 })
             })
             .clone()
@@ -737,27 +743,45 @@ async fn load(host: &Arc<dyn SessionHost>, m: &Arc<Mirror>, session_id: &str) {
 }
 
 /// `session.open` (with what `m` holds) on `link`, merged into `m`; then the messages that came
-/// meanwhile. `announce`: the UI shows this session already and gets the result as a `reset`
-/// (and an `ended`, error `ended`, when the session ended while it opened).
+/// meanwhile. `closes`: the mirror's close count when the caller chose to open it; a close since
+/// (the UI's, a page close) wins wherever it lands, and nothing more is opened at hostd.
+/// `announce`: the UI shows this session already and gets the result as a `reset` (and an
+/// `ended`, error `ended`, when the session ended while it opened).
 /// `Ok(Some(answer))`: hostd answered plainly (a parked agent; the fallback after repeated
 /// repairs), events pass through.
-async fn sync_open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, m: &Arc<Mirror>, limit: usize, session_hint: Option<&str>, announce: bool) -> Result<Option<Value>, ApiError> {
+async fn sync_open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, m: &Arc<Mirror>, limit: usize, session_hint: Option<&str>, announce: bool, closes: u64) -> Result<Option<Value>, ApiError> {
     let agent = m.agent_id.as_str();
+    #[cfg(test)]
+    tests::pause(m).await;
     let mut full = false;
+    // hostd subscribed on an earlier pass (a merge that failed re-opens without the cache).
+    let mut subscribed_before = false;
     'reopen: for _ in 0..=MAX_REPAIRS + 1 {
         let params = {
             let mut st = m.lock();
-            let buffer = match std::mem::take(&mut st.sub) {
-                Sub::Opening { link: l, buffer } if l == link.id => buffer,
-                _ => Vec::new(),
-            };
-            st.sub = Sub::Opening { link: link.id, buffer };
-            let have = match (&st.data, st.plain, full) {
-                (_, true, _) => None,
-                (Some(d), false, false) => Some(d.have(limit)),
-                _ => Some(Data::empty_have(session_hint)),
-            };
-            serde_json::json!({ "agentId": agent, "limit": limit, "have": have })
+            // Checked under the lock that marks the open in flight: a close after it replaces the
+            // mark (seen at the answer), one before it would go unseen.
+            if st.closes != closes {
+                None
+            } else {
+                let buffer = match std::mem::take(&mut st.sub) {
+                    Sub::Opening { link: l, buffer } if l == link.id => buffer,
+                    _ => Vec::new(),
+                };
+                st.sub = Sub::Opening { link: link.id, buffer };
+                let have = match (&st.data, st.plain, full) {
+                    (_, true, _) => None,
+                    (Some(d), false, false) => Some(d.have(limit)),
+                    _ => Some(Data::empty_have(session_hint)),
+                };
+                Some(serde_json::json!({ "agentId": agent, "limit": limit, "have": have }))
+            }
+        };
+        let Some(params) = params else {
+            if subscribed_before && !link.is_closed() {
+                let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
+            }
+            return Err(closed_while_opening());
         };
         let r = link.request("session.open", params, DEFAULT_TIMEOUT).await;
         let subscribed = r.is_ok();
@@ -810,6 +834,7 @@ async fn sync_open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, m: &Arc<Mirror
                 Err(why) if !full => {
                     log::info!("session {agent}: {why}; re-opening without the cache");
                     full = true;
+                    subscribed_before = true;
                     st.sub = Sub::Opening { link: link.id, buffer };
                     continue 'reopen;
                 }
@@ -865,7 +890,7 @@ async fn repair(host: Arc<dyn SessionHost>, link: u64, m: Arc<Mirror>, gap: bool
         let r = {
             let _one = m.opening.lock().await;
             let Some(l) = host.link().filter(|l| l.id == link && !l.is_closed()) else { return };
-            let limit = {
+            let (limit, closes) = {
                 let mut st = m.lock();
                 if first {
                     if !matches!(st.sub, Sub::Opening { link: x, .. } if x == link) {
@@ -876,15 +901,17 @@ async fn repair(host: Arc<dyn SessionHost>, link: u64, m: Arc<Mirror>, gap: bool
                     // Closed meanwhile, or open again.
                     return;
                 }
-                st.limit.max(1)
+                (st.limit.max(1), st.closes)
             };
             let hint = host.agent(&m.agent_id).session_id;
-            sync_open(&host, &l, &m, limit, hint.as_deref(), true).await
+            sync_open(&host, &l, &m, limit, hint.as_deref(), true, closes).await
         };
         first = false;
         match r {
             Ok(_) => return,
             Err(e) if e.code == "ended" => return,
+            // Closed meanwhile: nothing to re-open.
+            Err(_) if !m.lock().wanted => return,
             Err(e) if retry_later(&e) => log::info!("session {}: re-open failed ({}); trying again in {wait:?}", m.agent_id, e.message),
             Err(e) => {
                 m.lock().wanted = false;
@@ -932,8 +959,8 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
         // Closed while it waited (for the link, its turn): nothing to open at hostd.
         return Err(closed_while_opening());
     }
-    // `false`: closed meanwhile, not open.
-    let opened = |m: &Mirror| {
+    // `false`: closed meanwhile, not open. `sub`: the subscription it has, set together.
+    let opened = |sub: Option<Sub>| {
         let mut st = m.lock();
         if st.closes != closes {
             return false;
@@ -941,16 +968,18 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
         st.wanted = true;
         st.limit = limit;
         st.used = Instant::now();
+        if let Some(sub) = sub {
+            st.sub = sub;
+        }
         true
     };
     if !link.features.session_sync {
         let v = link.request("session.open", serde_json::to_value(p).map_err(internal)?, DEFAULT_TIMEOUT).await?;
-        if !opened(m) {
+        if !opened(Some(Sub::Live { link: link.id, seq: None })) {
             // hostd subscribed all the same: release it, or it streams to us until the link ends.
             let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
             return Err(closed_while_opening());
         }
-        m.lock().sub = Sub::Live { link: link.id, seq: None };
         return Ok(v);
     }
     // Subscribed on this link already (another tab, the UI re-opening after our reconnect).
@@ -961,7 +990,7 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
         {
             let snap = d.window(agent, limit);
             drop(st);
-            if !opened(m) {
+            if !opened(None) {
                 return Err(closed_while_opening());
             }
             return serde_json::to_value(&snap).map_err(internal);
@@ -985,9 +1014,10 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
             host.emit(agent, SessionEvent::Reset { snapshot: d.window(agent, limit) });
         }
     }
-    let plain = sync_open(host, link, m, limit, hint.session_id.as_deref(), false).await?;
-    if !opened(m) {
-        // Closed after `sync_open` saw the subscription live: release it all the same.
+    let plain = sync_open(host, link, m, limit, hint.session_id.as_deref(), false, closes).await?;
+    if !opened(None) {
+        // Closed once `sync_open` went live: nothing stays subscribed, here or at hostd.
+        m.lock().sub = Sub::None;
         let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
         return Err(closed_while_opening());
     }
@@ -1155,22 +1185,39 @@ pub async fn reopen(host: Arc<dyn SessionHost>, link: Arc<Link>) {
         let agent = m.agent_id.as_str();
         let r = {
             let _one = m.opening.lock().await;
-            let (wanted, live, limit, cached) = {
+            let (wanted, live, limit, cached, closes) = {
                 let st = m.lock();
-                (st.wanted, matches!(st.sub, Sub::Live { link: l, .. } if l == link.id), st.limit.max(1), st.data.as_ref().map(|d| d.session_id.clone()))
+                (st.wanted, matches!(st.sub, Sub::Live { link: l, .. } if l == link.id), st.limit.max(1), st.data.as_ref().map(|d| d.session_id.clone()), st.closes)
             };
             if !wanted || live {
                 continue;
             }
             if link.features.session_sync {
                 let hint = host.agent(agent).session_id.or(cached);
-                sync_open(&host, &link, &m, limit, hint.as_deref(), true).await.map(|_| ())
+                sync_open(&host, &link, &m, limit, hint.as_deref(), true, closes).await.map(|_| ())
             } else {
                 let r = link.request("session.open", serde_json::json!({ "agentId": agent, "limit": limit }), DEFAULT_TIMEOUT).await;
-                r.and_then(|v| serde_json::from_value::<SessionSnapshot>(v).map_err(internal)).map(|snapshot| {
-                    m.lock().sub = Sub::Live { link: link.id, seq: None };
-                    host.emit(agent, SessionEvent::Reset { snapshot });
-                })
+                match r.and_then(|v| serde_json::from_value::<SessionSnapshot>(v).map_err(internal)) {
+                    Ok(snapshot) => {
+                        let live = {
+                            let mut st = m.lock();
+                            let live = st.closes == closes;
+                            if live {
+                                st.sub = Sub::Live { link: link.id, seq: None };
+                            }
+                            live
+                        };
+                        if live {
+                            host.emit(agent, SessionEvent::Reset { snapshot });
+                            Ok(())
+                        } else {
+                            // Closed while it re-opened: hostd subscribed all the same.
+                            let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
+                            Err(closed_while_opening())
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             }
         };
         match r {
@@ -1178,6 +1225,8 @@ pub async fn reopen(host: Arc<dyn SessionHost>, link: Arc<Link>) {
             Err(e) if e.code == "ended" => {}
             // The link went down: the next one re-opens them all.
             Err(_) if link.is_closed() => return,
+            // Closed meanwhile: nothing to re-open.
+            Err(_) if !m.lock().wanted => {}
             Err(e) if retry_later(&e) => {
                 log::info!("session {agent}: re-open failed ({}); trying again", e.message);
                 tokio::spawn(repair(host.clone(), link.id, m.clone(), false));
@@ -1550,9 +1599,10 @@ pub(crate) mod tests {
     use tf_hostd::sync::{Fanout, Tree};
     use tokio::io::{AsyncWriteExt, BufReader};
 
-    /// Holds tf-hostd's next `session.open`: `reached` fires when it arrives, its answer goes out
-    /// once `release` fires.
-    struct Gate {
+    /// Holds tf-hostd's next `session.open` (or, as [`Mirror::pause`], an open right before it
+    /// marks itself in flight): `reached` fires when it gets there, it goes on once `release`
+    /// fires.
+    pub(super) struct Gate {
         reached: tokio::sync::oneshot::Sender<()>,
         release: tokio::sync::oneshot::Receiver<()>,
     }
@@ -1561,6 +1611,24 @@ pub(crate) mod tests {
         let (reached, reached_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release) = tokio::sync::oneshot::channel();
         (Gate { reached, release }, reached_rx, release_tx)
+    }
+
+    /// [`Mirror::pause`] (called by [`sync_open`]): waits there once, if a test set a pause.
+    pub(super) async fn pause(m: &Mirror) {
+        let g = m.pause.lock().unwrap().take();
+        if let Some(g) = g {
+            let _ = g.reached.send(());
+            let _ = g.release.await;
+        }
+    }
+
+    /// Pauses `agent`'s next open (the UI's, a re-open, a repair) right before it marks itself in
+    /// flight, where no await is and only another thread's close can land: `reached` fires once
+    /// it waits there, `release` lets it go on.
+    fn pause_next_open(host: &TestHost, agent: &str) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        let (g, reached, release) = gate();
+        *host.sessions.mirror(agent).pause.lock().unwrap() = Some(g);
+        (reached, release)
     }
 
     /// tf-hostd's side of one session: the replica's rows and meta, and its subscribers.
@@ -2373,6 +2441,90 @@ pub(crate) mod tests {
             assert_eq!((s.open_requests, s.closes), (0, 0), "sessionSync {speaks}: the host heard nothing");
             assert!(s.fanout.is_empty());
         }
+    }
+
+    /// A close that lands just before an open marks itself in flight at hostd wins: nothing is
+    /// opened there and nothing stays subscribed here, so the next open subscribes again and what
+    /// streams arrives. Before, that open went live and released only hostd; the next open took
+    /// the mirror for live, without a subscription, and its transcript froze.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_just_before_an_open_subscribes_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let (reached, release) = pause_next_open(&host, "a");
+        let opening = tokio::spawn({
+            let (h, l) = (dyn_host.clone(), link.clone());
+            async move { open_now(&h, &l, &open_params(200)).await }
+        });
+        reached.await.unwrap();
+        closed(&dyn_host, "a");
+        release.send(()).unwrap();
+        assert_eq!(opening.await.unwrap().unwrap_err().code, "not_connected");
+        assert_eq!(side.lock().unwrap().open_requests, 0, "nothing opened at hostd");
+        assert!(matches!(host.sessions.get("a").unwrap().lock().sub, Sub::None), "nothing subscribed here");
+        // Opened again: subscribed at hostd, and live.
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        assert_eq!(side.lock().unwrap().open_requests, 1);
+        side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a-live", "streamed"), h: None });
+        converge(&mut ui, &host, &side).await;
+    }
+
+    /// The same for the re-open after a reconnect: a close that lands just before it marks itself
+    /// in flight leaves nothing re-opened at hostd and nothing subscribed here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_just_before_a_reconnect_reopens_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        ui_open(&host, &link, &side, 200).await;
+        link.close("network lost");
+        host.sessions.link_down();
+        side.lock().unwrap().fanout.prune();
+        let before = side.lock().unwrap().open_requests;
+        let (link, _) = connect(&host, &side, true, true, "c2").await;
+        let (reached, release) = pause_next_open(&host, "a");
+        let reopening = tokio::spawn(reopen(dyn_host.clone(), link.clone()));
+        reached.await.unwrap();
+        closed(&dyn_host, "a");
+        release.send(()).unwrap();
+        reopening.await.unwrap();
+        assert_eq!(side.lock().unwrap().open_requests, before, "nothing re-opened at hostd");
+        assert!(matches!(host.sessions.get("a").unwrap().lock().sub, Sub::None), "nothing subscribed here");
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a-live", "streamed"), h: None });
+        converge(&mut ui, &host, &side).await;
+    }
+
+    /// With a tf-hostd that does not speak sessionSync the re-open after a reconnect is a plain
+    /// subscription: a close while hostd answers it wins as well, and hostd is told to let go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_while_a_plain_reopen_waits_for_hostd_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, false, "c1").await;
+        ui_open(&host, &link, &side, 200).await;
+        link.close("network lost");
+        host.sessions.link_down();
+        side.lock().unwrap().fanout.prune();
+        let (link, _) = connect(&host, &side, true, false, "c2").await;
+        let (g, reached, release) = gate();
+        side.lock().unwrap().gate = Some(g);
+        let reopening = tokio::spawn(reopen(dyn_host.clone(), link.clone()));
+        reached.await.unwrap();
+        closed(&dyn_host, "a");
+        release.send(()).unwrap();
+        reopening.await.unwrap();
+        let s = side.lock().unwrap();
+        assert_eq!(s.closes, 1, "hostd was told to let go");
+        assert!(s.fanout.is_empty(), "nothing streams to the app");
+        assert!(matches!(host.sessions.get("a").unwrap().lock().sub, Sub::None), "nothing subscribed here");
     }
 
     /// A notice the mirror kept from before tf-hostd restarted is a row the new tf-hostd does not
