@@ -884,8 +884,8 @@ impl Engine {
         let link = match rt.link() {
             Some(l) => l,
             None => {
-                if let Some(v) = self.offline_session_call(&host, &req, epoch).await {
-                    return Ok(v);
+                if let Some(r) = self.offline_session_call(&host, &req, epoch).await {
+                    return r;
                 }
                 self.wait_link(host_id, &rt).await?
             }
@@ -934,22 +934,24 @@ impl Engine {
     }
 
     /// A session call the app core answers while the host has no link: the copy of a session its
-    /// mirror or the session cache holds (opened with the host once it is online), older rows the
-    /// mirror holds, and a close (nothing is subscribed without a link). `None`: the host must answer.
-    async fn offline_session_call(&self, host: &Arc<dyn SessionHost>, req: &HostMethod, epoch: u64) -> Option<Value> {
+    /// mirror or the session cache holds (opened with the host once it is online; a close that
+    /// lands while it loads, from the UI or a page close, wins), older rows the mirror holds, and
+    /// a close (nothing is subscribed without a link). `None`: the host must answer.
+    async fn offline_session_call(&self, host: &Arc<dyn SessionHost>, req: &HostMethod, epoch: u64) -> Option<Result<Value, ApiError>> {
         match req {
             HostMethod::SessionOpen(p) => {
-                let v = sessions::open_offline(host, p).await?;
-                // The page that asked went away meanwhile: it no longer has the session open.
-                if self.inner.page_epoch.load(Ordering::SeqCst) != epoch {
+                let r = sessions::open_offline(host, p).await?;
+                // The page went away before the open took its mirror's close count (the mirror may
+                // not have existed for `page_closed` to close): it no longer has the session open.
+                if r.is_ok() && self.inner.page_epoch.load(Ordering::SeqCst) != epoch {
                     sessions::closed(host, &p.agent_id);
                 }
-                Some(v)
+                Some(r)
             }
-            HostMethod::SessionHistory(p) => sessions::history_offline(host, p),
+            HostMethod::SessionHistory(p) => sessions::history_offline(host, p).map(Ok),
             HostMethod::SessionClose(p) => {
                 sessions::closed(host, &p.agent_id);
-                Some(serde_json::json!({}))
+                Some(Ok(serde_json::json!({})))
             }
             _ => None,
         }

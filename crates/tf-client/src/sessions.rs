@@ -425,6 +425,9 @@ struct State {
     plain: bool,
     /// Last opened or closed (closed mirrors leave memory least recently used first).
     used: Instant,
+    /// Closes by the UI ([`closed`]) or a page close ([`Sessions::page_closed`]): an open that
+    /// started before the latest one does not count as open, whatever it awaited meanwhile.
+    closes: u64,
 }
 
 impl State {
@@ -440,6 +443,7 @@ impl State {
             repairs: VecDeque::new(),
             plain: false,
             used: Instant::now(),
+            closes: 0,
         }
     }
 
@@ -624,6 +628,7 @@ impl Sessions {
             st.wanted = false;
             st.plain = false;
             st.sub = Sub::None;
+            st.closes += 1;
         }
         open
     }
@@ -837,7 +842,7 @@ async fn sync_open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, m: &Arc<Mirror
             if subscribed && !link.is_closed() {
                 let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
             }
-            return Err(ApiError::new("not_connected", "the session was closed while it opened").retryable());
+            return Err(closed_while_opening());
         }
     }
     m.lock().sub = Sub::None;
@@ -895,22 +900,39 @@ fn retry_later(e: &ApiError) -> bool {
     matches!(e.code.as_str(), "not_connected" | "timeout")
 }
 
+/// An open the UI (or a page close) closed before it finished: it does not count as open.
+fn closed_while_opening() -> ApiError {
+    ApiError::new("not_connected", "the session was closed while it opened").retryable()
+}
+
 /// `session.open` from the UI.
 pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpenParams) -> Result<Value, ApiError> {
     let agent = p.agent_id.as_str();
     let limit = p.limit.map_or(DEFAULT_LIMIT, |l| (l as usize).clamp(1, 2000));
     // Held until it returns: while it is, no eviction forgets the mirror.
     let m = host.sessions().mirror(agent);
+    // A close from now on (the UI's, a page close), one while this waits its turn included,
+    // means the UI no longer has it open.
+    let closes = m.lock().closes;
     let _one = m.opening.lock().await;
+    // `false`: closed meanwhile, not open.
     let opened = |m: &Mirror| {
         let mut st = m.lock();
+        if st.closes != closes {
+            return false;
+        }
         st.wanted = true;
         st.limit = limit;
         st.used = Instant::now();
+        true
     };
     if !link.features.session_sync {
         let v = link.request("session.open", serde_json::to_value(p).map_err(internal)?, DEFAULT_TIMEOUT).await?;
-        opened(&m);
+        if !opened(&m) {
+            // hostd subscribed all the same: release it, or it streams to us until the link ends.
+            let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
+            return Err(closed_while_opening());
+        }
         m.lock().sub = Sub::Live { link: link.id, seq: None };
         return Ok(v);
     }
@@ -922,7 +944,9 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
         {
             let snap = d.window(agent, limit);
             drop(st);
-            opened(&m);
+            if !opened(&m) {
+                return Err(closed_while_opening());
+            }
             return serde_json::to_value(&snap).map_err(internal);
         }
     }
@@ -933,6 +957,10 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
     {
         // The cached rows show at once; the delta follows.
         let st = m.lock();
+        if st.closes != closes {
+            // Closed while the cache loaded: nothing to open at hostd.
+            return Err(closed_while_opening());
+        }
         if !st.wanted
             && hint.live
             && let Some(d) = st.data.as_ref().filter(|d| hint.session_id.as_deref() == Some(d.session_id.as_str()))
@@ -941,7 +969,11 @@ pub async fn open(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpen
         }
     }
     let plain = sync_open(host, link, &m, limit, hint.session_id.as_deref(), false).await?;
-    opened(&m);
+    if !opened(&m) {
+        // Closed after `sync_open` saw the subscription live: release it all the same.
+        let _ = link.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await;
+        return Err(closed_while_opening());
+    }
     match plain {
         Some(v) => Ok(v),
         None => {
@@ -983,13 +1015,16 @@ fn offline_caps() -> Capabilities {
 /// do nothing (no controls, no dialog). The mirror is open from now on: once the link is up,
 /// [`reopen`] opens it there with what it holds, and the UI gets the delta as a `reset` (with
 /// the session's controls). `None`: nothing held of the session, or a link is up (open there).
-pub async fn open_offline(host: &Arc<dyn SessionHost>, p: &SessionOpenParams) -> Option<Value> {
+/// An error: the UI (or a page close) closed it while it loaded; it is not open.
+pub async fn open_offline(host: &Arc<dyn SessionHost>, p: &SessionOpenParams) -> Option<Result<Value, ApiError>> {
     let agent = p.agent_id.as_str();
     let limit = p.limit.map_or(DEFAULT_LIMIT, |l| (l as usize).clamp(1, 2000));
     let sid = host.agent(agent).session_id?;
+    let m = host.sessions().mirror(agent);
+    // As in [`open`]: a close from now on wins.
+    let closes = m.lock().closes;
     // Held until it returns: a link coming up meanwhile re-opens the mirror after this (`reopen`
     // takes `opening` too), so it finds the mirror open.
-    let m = host.sessions().mirror(agent);
     let _one = m.opening.lock().await;
     load(host, &m, &sid).await;
     // A link that is up already may have re-opened the open mirrors without this one.
@@ -998,6 +1033,10 @@ pub async fn open_offline(host: &Arc<dyn SessionHost>, p: &SessionOpenParams) ->
     }
     let snap = {
         let mut st = m.lock();
+        if st.closes != closes {
+            // Marked open now, it would be subscribed by the next link, for a UI that let it go.
+            return Some(Err(closed_while_opening()));
+        }
         let mut snap = st.data.as_ref().filter(|d| d.session_id == sid)?.window(agent, limit);
         snap.meta.caps = offline_caps();
         snap.ui = None;
@@ -1006,7 +1045,7 @@ pub async fn open_offline(host: &Arc<dyn SessionHost>, p: &SessionOpenParams) ->
         st.used = Instant::now();
         snap
     };
-    serde_json::to_value(&snap).ok()
+    Some(serde_json::to_value(&snap).map_err(internal))
 }
 
 /// `session.history` from the UI while the host has no link: the older rows the mirror holds
@@ -1088,6 +1127,7 @@ pub fn closed(host: &Arc<dyn SessionHost>, agent_id: &str) {
         st.plain = false;
         st.sub = Sub::None;
         st.used = Instant::now();
+        st.closes += 1;
     }
     tokio::spawn(persist(host.clone(), m, true));
 }
@@ -2048,7 +2088,7 @@ pub(crate) mod tests {
         let host = test_host(dir.path());
         let dyn_host: Arc<dyn SessionHost> = host.clone();
         let before = opens(&side);
-        let copy: SessionSnapshot = serde_json::from_value(open_offline(&dyn_host, &open_params(200)).await.expect("the cached copy")).unwrap();
+        let copy: SessionSnapshot = serde_json::from_value(open_offline(&dyn_host, &open_params(200)).await.expect("the cached copy").unwrap()).unwrap();
         assert_eq!(copy.items.len(), 200);
         assert_eq!(copy.items.last(), Some(&assistant("a149", &prose(10_149, 120))), "as cached, before omp changed it");
         assert_eq!((copy.meta.caps.clone(), copy.ui.clone()), (offline_caps(), None), "a copy without controls");
@@ -2065,7 +2105,7 @@ pub(crate) mod tests {
         side.lock().unwrap().fanout.prune();
 
         // Opened again while the host is away: the copy again, kept open.
-        let copy: SessionSnapshot = serde_json::from_value(open_offline(&dyn_host, &open_params(200)).await.expect("the copy")).unwrap();
+        let copy: SessionSnapshot = serde_json::from_value(open_offline(&dyn_host, &open_params(200)).await.expect("the copy").unwrap()).unwrap();
         let mut ui = Ui::default();
         ui.apply(&SessionEvent::Reset { snapshot: copy });
         assert_eq!(opens(&side), before);
@@ -2083,6 +2123,92 @@ pub(crate) mod tests {
         side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a150", "streaming"), h: None });
         converge(&mut ui, &host, &side).await;
         assert_eq!(ui.resets, 2);
+    }
+
+    /// A close that lands while an offline open still loads the cache wins, whoever closes (the
+    /// UI, or a page close): the open answers that it was closed, the mirror is not open, and the
+    /// link that comes up later opens nothing at hostd. Before, the open marked the mirror open
+    /// after its load, so the closed session was subscribed again at the next connect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_during_an_offline_load_is_not_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let opens = |side: &Side| side.lock().unwrap().open_requests;
+        {
+            // A copy cached by the app's last run.
+            let host = test_host(dir.path());
+            let dyn_host: Arc<dyn SessionHost> = host.clone();
+            let (link, _) = connect(&host, &side, true, true, "c1").await;
+            ui_open(&host, &link, &side, 200).await;
+            closed(&dyn_host, "a");
+            link.request("session.close", serde_json::json!({ "agentId": "a" }), DEFAULT_TIMEOUT).await.unwrap();
+            persist_all(dyn_host).await;
+            link.close("app quits");
+        }
+        side.lock().unwrap().fanout.prune();
+        for (n, page_close) in [false, true].into_iter().enumerate() {
+            let host = test_host(dir.path());
+            let dyn_host: Arc<dyn SessionHost> = host.clone();
+            let before = opens(&side);
+            let stall = host.cache.stall().await;
+            let opening = tokio::spawn({
+                let h = dyn_host.clone();
+                async move { open_offline(&h, &open_params(200)).await }
+            });
+            // The open holds the mirror (its close count taken) and waits on the stalled cache.
+            until("the open holds the mirror", || host.sessions.get("a").is_some_and(|m| m.opening.try_lock().is_err())).await;
+            if page_close {
+                host.sessions.page_closed();
+            } else {
+                closed(&dyn_host, "a");
+            }
+            drop(stall);
+            let r = opening.await.unwrap();
+            assert!(matches!(&r, Some(Err(e)) if e.code == "not_connected"), "page close {page_close}: {r:?}");
+            assert!(!wanted(&host.sessions, "a"), "page close {page_close}: closed, not open");
+            let (link, _) = connect(&host, &side, true, true, &format!("c{}", n + 2)).await;
+            reopen(dyn_host.clone(), link.clone()).await;
+            assert_eq!(opens(&side), before, "page close {page_close}: the host heard of no open");
+            link.close("done");
+            side.lock().unwrap().fanout.prune();
+        }
+    }
+
+    /// The same for an open with the link up: a close while the open loads the cache means
+    /// nothing is opened at hostd, and the mirror is not open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_while_an_open_loads_the_cache_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let opens = |side: &Side| side.lock().unwrap().open_requests;
+        {
+            let host = test_host(dir.path());
+            let dyn_host: Arc<dyn SessionHost> = host.clone();
+            let (link, _) = connect(&host, &side, true, true, "c1").await;
+            ui_open(&host, &link, &side, 200).await;
+            closed(&dyn_host, "a");
+            link.request("session.close", serde_json::json!({ "agentId": "a" }), DEFAULT_TIMEOUT).await.unwrap();
+            persist_all(dyn_host).await;
+            link.close("app quits");
+        }
+        side.lock().unwrap().fanout.prune();
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c2").await;
+        let before = opens(&side);
+        let stall = host.cache.stall().await;
+        let opening = tokio::spawn({
+            let (h, l) = (dyn_host.clone(), link.clone());
+            async move { open(&h, &l, &open_params(200)).await }
+        });
+        until("the open holds the mirror", || host.sessions.get("a").is_some_and(|m| m.opening.try_lock().is_err())).await;
+        closed(&dyn_host, "a");
+        drop(stall);
+        let e = opening.await.unwrap().unwrap_err();
+        assert_eq!(e.code, "not_connected");
+        assert!(!wanted(&host.sessions, "a"));
+        assert_eq!(opens(&side), before, "nothing was opened at hostd");
+        assert!(side.lock().unwrap().fanout.is_empty(), "nothing streams to the app");
     }
 
     /// Waits (up to 5 s) until `f` holds.
