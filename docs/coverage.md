@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0 on 2026-10-29 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0 and 0.6.1 on 2026-10-29 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,13 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension (since 0.6.0 also the data plane: live frames + the session file) · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.6.1 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| tokio 1.54.1 in the app and `tf-hostd` (1.54.0, in 0.5.0 to 0.6.0, was withdrawn: an `Interval` race could free memory still in use, GHSA-5wjr-9356-4wc8) | — | — | `Cargo.lock` | ✅ Rust workspace tests |
+| A close (from the view, or a page close) that lands while a session open waits its turn or loads the cache wins: the open is not marked open, so no later link subscribes it | session view | same | tf-client `sessions.rs` (close count per mirror), `engine.rs` `offline_session_call` (L) | ✅ tests (offline and online opens with a stalled cache, closed by the view and by a page close; they fail with the fix disabled) |
 
 ## §0 What 0.6.0 changed
 

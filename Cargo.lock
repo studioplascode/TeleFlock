@@ -1108,7 +1108,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.9",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1644,7 +1644,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4486,7 +4486,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4542,7 +4542,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5651,7 +5651,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-teleflock-android"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "jni 0.21.1",
  "log",
@@ -5796,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "teleflock"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "log",
  "percent-encoding",
@@ -5833,7 +5833,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5856,7 +5856,7 @@ dependencies = [
 
 [[package]]
 name = "tf-client"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-compression",
  "bytes",
@@ -5877,7 +5877,7 @@ dependencies = [
 
 [[package]]
 name = "tf-collab"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
@@ -5897,7 +5897,7 @@ dependencies = [
 
 [[package]]
 name = "tf-devserver"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "clap",
@@ -5916,7 +5916,7 @@ dependencies = [
 
 [[package]]
 name = "tf-herdr"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -5928,7 +5928,7 @@ dependencies = [
 
 [[package]]
 name = "tf-hostd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -5959,7 +5959,7 @@ dependencies = [
 
 [[package]]
 name = "tf-proto"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "tf-transport"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6088,9 +6088,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.54.0"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0c168a474b95bfecfe908a65d4bdffc523144b649a74c09c286afb35d53e0bc"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -6916,7 +6916,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

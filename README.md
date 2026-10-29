@@ -300,6 +300,7 @@ What has been verified, and how:
   - **MCP:** a stdio server added from the page connected with its tools in a lab omp session, and was switched off, on and removed with running sessions reloading; an OAuth MCP server signed in through the same-port tunnel from a host in its own network namespace, and through the paste fallback with the device port taken; a server that never answers is reported as pending within the test window and leaves no processes behind.
   - **Accounts:** the real `omp login` output for Claude and GitHub Copilot (URL, callback port, paste prompt, device code) reached the app through the tunnel; cancel closed the tunnel and stopped `omp login` on the host.
   - Every 0.6.0 area went through a code review (bridge, session sync, MCP, accounts) and a UX review of the whole app, and their findings were fixed before release.
+- **0.6.1:** the Rust workspace tests on tokio 1.54.1 (1.54.0, in 0.5.0 to 0.6.0, was withdrawn for a timer race, GHSA-5wjr-9356-4wc8). For closes during an open, tests that stall the cache load, close the session meanwhile (from the view, and by closing the page), then connect: the open does not count as open and the host hears of no open. They fail with the fix disabled.
 - **Packages:** the Windows installer, the signed APK and the Linux .deb, AppImage and Arch package build from this tree. The Linux app was smoke-run: the window renders, the tray starts, a second launch hands its `teleflock://` link to the first, and the .deb installs and runs on a clean Ubuntu 22.04.
 
 **Not yet exercised:**
