@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "TeleFlock",
   "mainBinaryName": "teleflock",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "identifier": "dev.teleflock.app",
   "build": {
     "frontendDist": "../dist",
