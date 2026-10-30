@@ -179,6 +179,36 @@ unavailable for 10 min. Model output is sanitized (labels like `branch:`, `dispa
 prefixes, quotes, backticks, chatter lines, Title Case, trailing periods); the sanitizers and
 parsers are exported for tests, and `aiTesting` swaps the transport and clock.
 
+## Moving an agent to another host (`move.ts`)
+
+The app relays between two hosts (they never talk to each other; architecture §3.28). The UI is
+`src/features/move`; this module is the injectable orchestrator (`HostClient`s plus a
+`{ now, sleep, records }` env, like `uploadVia`).
+
+- `checkMove(src, agentId)` / `probeMove(dst, source, repoPath?)` / `preflightMove(src, dst, agentId, { repoPath? })`:
+  `move.check` on the agent's host, `move.probe` on the target. An old host's `unknown_method` becomes
+  `unsupported` "This host's TeleFlock is too old to move agents". Pure helpers for the choice:
+  `defaultChoice`, `issuesFor`, `blockersOf`, `chosenRepo`, `canMove(source, probe, choice)`.
+- `runMove({ src, dst, srcHostId, agentId, name?, fromLabel, to: { label, hostId }, choice: { repoPath? | cloneTo? | cwd? } }, { onProgress, signal }, env?)`
+  never rejects: `{ ok: true, agentId?, cwd?, sessionFile?, notes, status }` or `{ ok: false, failure }`
+  (`failure`: `error`, `side` source|target|app, `cancelled`, `rolledBack` = the source confirmed its
+  rollback, `unsettled` = a host stayed unreachable, `notes`). Flow: `move.start` (A) → poll
+  `move.status` (700 ms) → `ready` → per part `upload.begin` (B) and `move.read` (A) → `upload.chunk` (B) →
+  `upload.finish {sha256}` (the retry, resync and adaptive-chunk rules of `uploadVia`, sharing its
+  helpers) → `move.receive` (B) → poll → `done` → `move.finish` (A; a failure is a note, not a failure).
+  Any failure before the finish drops the begun uploads and aborts A (`move.abort`, poll to `failed`);
+  a cancel during the receive aborts B first (a B that finished first makes the move succeed).
+  Status polls tolerate transient failures for 3 minutes; then the move is `unsettled` (nothing is
+  rolled back blindly, the record stays).
+- `onProgress(MoveProgress)`: `stage` (preparing, copying, receiving, finishing, cancelling,
+  rollingBack, done, failed), `steps` (A's steps with its `finish` last, a synthetic `copy`, B's steps),
+  `sent` / `total` bytes.
+- Records: every in-flight move is saved (`localStorage` `tf.moves` via `localRecordStore`; tests use
+  `memoryRecordStore`). `reconcileMoves(hosts, env?)` settles leftovers: B `done` (or known done) →
+  `move.finish` on A; B failed or unaware → `move.abort` on A (unless A is done/failed/unaware); a host
+  not online leaves the record. `isMoveActive(moveId)` skips moves this app runs. The move store
+  (`features/move/store.ts`) runs it at start and whenever a host comes online.
+
 ## Demo host (`src/core/demo`)
 
 Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests).
@@ -216,3 +246,13 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
 
 `bun test src/core` — reducers (patch, rev gap, sessions), per-frame batching, demo invariants, AI sanitizers / cache / dedupe / demo answers.
 `src/core/test/bun-test.d.ts` types `bun:test` for the app tsconfig without `@types/bun` globals.
+
+## herdr health in the demo (`demo/herdrHealth.ts`)
+
+Both demo hosts carry `HostInfo.herdrHealth`: forge runs herdr 0.9.5 with 0.9.6 installed (live-handoff update waiting on
+"2 agents working", idle 45 s after start, then the 20-minute idle window counts down), studio-pc runs 0.9.0. `host.herdrRestart
+{force: true}` replaces the server (restarting → starting → up, ~6 s, new epoch), `host.herdrLoad` hands the panes over (updating
+3 s → up, `keptPanes`), `host.herdrConfig` changes the settings (a short `idleMinutes` makes the automatic load visible).
+To see the incident, type `herdr server stop` in a demo shell: down at once (cause `stopped`, the omp agents ended), started again
+after 12 s, or by Restart herdr. Once it runs again, the ended card `soak` (`demo/parking.ts`) gets its `restart` ticket and comes
+back by itself 5 s later, with hostd's note. `bun test src/core/demo/herdrHealth.test.ts src/core/demo/parking.test.ts`.

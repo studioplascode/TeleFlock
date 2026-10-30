@@ -38,6 +38,9 @@ pub struct Paths {
     pub automations: PathBuf,
     /// Files uploaded for prompts (videos) `<home>/uploads/<yyyy-mm-dd>/<name>` (`ops::upload`).
     pub uploads: PathBuf,
+    /// Moves to and from other hosts (`ops::moves`): `<home>/moves/<move id>/`, the source's packed
+    /// parts and the target's undo journal.
+    pub moves: PathBuf,
     /// A home other than the default `~/.teleflock` (lab / dev instance). Derived from the path,
     /// not from whether `TF_HOSTD_HOME` is set: `attach` (run by the app without it) starts the
     /// daemon with `TF_HOSTD_HOME` = its home, and both must derive the same endpoints.
@@ -82,6 +85,7 @@ impl Paths {
             bin: home.join("bin"),
             automations: home.join("automations.json"),
             uploads: home.join("uploads"),
+            moves: home.join("moves"),
             custom,
             run,
             home,
@@ -238,6 +242,10 @@ pub fn create_private_new(path: &Path) -> io::Result<File> {
 /// on unix). Every call writes its own temp file (`.<name>.<pid>.<n>.tmp`), so concurrent
 /// writers never interleave in one file; the last rename wins (callers that need ordering
 /// serialize snapshot + write themselves).
+///
+/// Durable: the temp file is flushed to disk (`sync_all`) before the rename, and the directory
+/// after it (unix; elsewhere the rename is as durable as the platform makes it), so a power loss
+/// leaves the old file or the new one, never an empty file under the final name.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -247,13 +255,156 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mut file = private_options().write(true).create_new(true).open(&tmp)?;
         restrict_open(&file)?;
         file.write_all(bytes)?;
+        file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+    // The rename itself lives in the directory: flush it too. Best effort (some filesystems
+    // refuse to fsync a directory; the file's own bytes are safe either way).
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        let _ = File::open(dir).and_then(|d| d.sync_all());
     }
     result
+}
+
+/// How long a `.name.pid.n.tmp` file must be untouched before [`sweep_stale_tmp`] removes it (a
+/// live write takes milliseconds).
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether `name` is a temp file of [`write_atomic`] (`.<name>.<pid>.<n>.tmp`).
+fn is_tmp_file(name: &str) -> bool {
+    let Some(stem) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".tmp")) else { return false };
+    let mut parts = stem.rsplitn(3, '.');
+    let digits = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    let (n, pid, base) = (parts.next(), parts.next(), parts.next());
+    digits(n) && digits(pid) && base.is_some_and(|b| !b.is_empty())
+}
+
+/// Removes the temp files [`write_atomic`] left behind when its process died between the write
+/// and the rename: in `home` and the directories directly under it, those untouched for a minute.
+/// Returns how many went.
+pub fn sweep_stale_tmp(home: &Path) -> usize {
+    sweep_tmp_older_than(home, STALE_TMP_AGE)
+}
+
+fn sweep_tmp_older_than(home: &Path, min_age: std::time::Duration) -> usize {
+    let mut dirs = vec![home.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(home) {
+        dirs.extend(rd.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()));
+    }
+    let mut removed = 0;
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            if !is_tmp_file(&e.file_name().to_string_lossy()) {
+                continue;
+            }
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age >= min_age);
+            if old && std::fs::remove_file(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Sets an unreadable or corrupt store file aside as `<name>.bad-<ms>` (never overwritten by the
+/// empty store that replaces it) and logs loudly. Returns where it went (`None`: it could not be
+/// renamed, or `path` is gone).
+pub fn set_aside_bad(path: &Path, why: &str) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let bad = path.with_file_name(format!("{name}.bad-{}", crate::util::now_ms()));
+    match std::fs::rename(path, &bad) {
+        Ok(()) => {
+            tracing::error!(path = %path.display(), "{name} is unreadable ({why}); set aside as {} and starting empty", bad.display());
+            Some(bad)
+        }
+        Err(e) => {
+            tracing::error!(path = %path.display(), "{name} is unreadable ({why}) and could not be set aside ({e}); starting empty");
+            None
+        }
+    }
+}
+
+/// Loads a JSON store file: its content, or the default when it does not exist. A file that cannot
+/// be read or parsed (a torn write, a bad disk) is set aside ([`set_aside_bad`]) before the default
+/// takes its place, so the next save never overwrites it.
+pub fn load_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -> T {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            set_aside_bad(path, &e.to_string());
+            T::default()
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => T::default(),
+        Err(e) => {
+            set_aside_bad(path, &format!("read: {e}"));
+            T::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp_file() {
+        let td = tempfile::tempdir().unwrap();
+        let f = td.path().join("state.json");
+        write_atomic(&f, b"one").unwrap();
+        write_atomic(&f, b"two").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 1);
+        assert!(write_atomic(&td.path().join("nodir").join("x"), b"x").is_err());
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 1, "a failed write leaves nothing behind");
+    }
+
+    #[test]
+    fn stale_temp_files_of_a_dead_writer_are_swept() {
+        let td = tempfile::tempdir().unwrap();
+        let sub = td.path().join("agents");
+        std::fs::create_dir(&sub).unwrap();
+        let old = |p: PathBuf| {
+            std::fs::write(&p, b"half").unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+            p
+        };
+        let stale = [old(td.path().join(".state.json.4242.7.tmp")), old(sub.join(".agents.json.4242.0.tmp"))];
+        let fresh = td.path().join(".ledger.json.4242.9.tmp");
+        std::fs::write(&fresh, b"being written").unwrap();
+        // Files that only look alike stay.
+        let keep = [old(td.path().join("state.tmp")), old(td.path().join(".hidden.tmp")), old(td.path().join("state.json")), old(td.path().join(".x.json.abc.1.tmp"))];
+        assert_eq!(sweep_stale_tmp(td.path()), 2);
+        assert!(stale.iter().all(|p| !p.exists()));
+        assert!(fresh.exists(), "a write in flight is left alone");
+        assert!(keep.iter().all(|p| p.exists()));
+    }
+
+    #[test]
+    fn an_unreadable_store_is_set_aside_not_overwritten() {
+        #[derive(Default, serde::Deserialize, PartialEq, Debug)]
+        struct Doc {
+            n: u32,
+        }
+        let td = tempfile::tempdir().unwrap();
+        let f = td.path().join("ledger.json");
+        assert_eq!(load_json::<Doc>(&f), Doc::default(), "no file: empty, nothing set aside");
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
+        std::fs::write(&f, br#"{"n":5}"#).unwrap();
+        assert_eq!(load_json::<Doc>(&f), Doc { n: 5 });
+        std::fs::write(&f, b"").unwrap();
+        assert_eq!(load_json::<Doc>(&f), Doc::default());
+        assert!(!f.exists());
+        let bad: Vec<_> = std::fs::read_dir(td.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(bad.len() == 1 && bad[0].starts_with("ledger.json.bad-"), "{bad:?}");
+    }
 }
 
 #[cfg(test)]

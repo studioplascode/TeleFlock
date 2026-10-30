@@ -8,6 +8,8 @@ import { AgentGlyph, Elapsed, Lightbox, LightboxTrigger, Shimmer, StatusPill, ty
 import { canReview, openAgent, openTerminal, resumeParked } from "@/features/board/agentActions";
 import { LANE_BY_COLUMN } from "@/features/board/lanes";
 import { AgentOrb, LiveLine, QuietChip, useQuiet } from "@/features/board/LiveBits";
+import { RetryLine } from "@/features/board/RetryLine";
+import { retryOf } from "@/features/board/retry";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
 import { ACTIONS, agentStateWord, isFresh } from "@/features/shell/vocab";
 import { AiMark } from "@/features/workspace/shared/ai";
@@ -331,7 +333,7 @@ const ghost = `${action} text-mute hover:bg-white/6 hover:text-ink`;
 
 function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: Shown; entry: DispatchEntry; agentKey?: string; parkedKey?: string; ctx: ThreadContext; online: boolean }) {
   const agent = shown.k === "live" ? shown.agent : undefined;
-  const quiet = useQuiet(agent?.column === "running" && online, agent?.live.lastEventAt);
+  const quiet = useQuiet(agent?.column === "running" && online && !retryOf(agent), agent?.live.lastEventAt);
 
   if (shown.k === "unconfirmed") {
     return (
@@ -432,10 +434,15 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
     );
   }
 
+  const retry = retryOf(agent);
   return (
     <>
       <div className="mt-2 flex min-w-0 items-center gap-2">
-        <LiveLine live={agent.live} running={agent.column === "running" && online} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="min-w-0 flex-1" />
+        {retry && online ? (
+          <RetryLine wait={retry} className="min-w-0 flex-1" />
+        ) : (
+          <LiveLine live={agent.live} running={agent.column === "running" && online} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="min-w-0 flex-1" />
+        )}
         {quiet && <QuietChip since={agent.live.lastEventAt ?? 0} />}
       </div>
       <Actions>

@@ -1,5 +1,6 @@
 import { onAgentMoved, onAgentsPruned } from "./agentLifecycle";
 import { draftImageKeys, getDraftImages, hydrateDraftImages, setDraftImages } from "./draftImages";
+import { draftPastes } from "./draftPastes";
 import { draftKey, draftKeyParts, drafts, useDrafts } from "./drafts";
 import { parseAgentKey } from "./keys";
 import type { CoreState } from "./store/state";
@@ -43,7 +44,7 @@ function moved(key: string, from: string, to: string): string {
   return draftKey(scope, ...parts.map((p) => (p === from ? to : p)));
 }
 
-/** A resumed agent keeps its unsent drafts (text and images) under its new key. */
+/** A resumed agent keeps its unsent drafts (text, images and pastes) under its new key. */
 function moveDrafts(from: string, to: string): void {
   const one = new Set([from]);
   for (const key of drafts.keys()) {
@@ -63,13 +64,27 @@ function moveDrafts(from: string, to: string): void {
       });
     }
   });
+  void draftPastes.keys().then((keys) => {
+    for (const key of keys) {
+      if (!mentions(key, one)) continue;
+      const next = moved(key, from, to);
+      void Promise.all([draftPastes.hydrate(key), draftPastes.hydrate(next)]).then(() => {
+        const pastes = draftPastes.get(key);
+        if (pastes.length && !draftPastes.get(next).length) draftPastes.update(next, () => pastes);
+        draftPastes.update(key, () => []);
+      });
+    }
+  });
 }
 
-/** Forget the drafts (text and images) of agents whose omp session was deleted. */
+/** Forget the drafts (text, images and pastes) of agents whose omp session was deleted. */
 function dropDrafts(agents: ReadonlySet<string>): void {
   drafts.clearWhere((key) => mentions(key, agents));
   void draftImageKeys().then((keys) => {
     for (const key of keys) if (mentions(key, agents)) setDraftImages(key, []);
+  });
+  void draftPastes.keys().then((keys) => {
+    for (const key of keys) if (mentions(key, agents)) draftPastes.update(key, () => []);
   });
 }
 

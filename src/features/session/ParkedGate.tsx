@@ -48,13 +48,15 @@ export function ParkedNotice({ agentKey, terminal = true, className }: { agentKe
 
 /**
  * LinkGate for a parked agent. With the read-only transcript the host sent at `session.open`, the
- * session shows as usual under a "closed" strip; without one (older host, or `parked` error), the
+ * session shows as usual under a "closed" strip (none for an ended card: the header's auto-resume
+ * strip says what happened and offers Continue); without one (older host, or `parked` error), the
  * notice. Either way the composer works: sending resumes the agent with that prompt, and the view
  * follows it to its new id.
  */
 export function ParkedGate({ agentKey, children }: { agentKey: string; children: ReactNode }) {
   const session = useSession(agentKey);
   const resuming = useResuming(agentKey);
+  const ended = useAgent(agentKey)?.parked?.ended;
   const mobile = useIsMobile();
   if (session.status === "error") {
     return (
@@ -66,6 +68,7 @@ export function ParkedGate({ agentKey, children }: { agentKey: string; children:
       </>
     );
   }
+  if (ended && !resuming) return <>{children}</>;
   return (
     <>
       <div

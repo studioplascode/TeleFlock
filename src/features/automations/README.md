@@ -51,13 +51,16 @@ export function describeCron(expr: string): string | null;
 - Card: name, worktree / in-place chip, description (`describeCron`, `Automation` has none) and the
   raw cron, folder, model; next run (relative, absolute on hover; "Paused" while disabled); last
   run chip (started / failed / skipped, error on hover) that opens the agent while it is still on
-  the host. The switch saves the draft with `enabled` flipped (shows the requested state until the
+  the host. The switch saves the draft with `enabled` flipped (`toDraft`: everything it saved, roles and decide for me included; shows the requested state until the
   saved automation arrives). Run now → `automation.run`, toast with "Open agent". Delete asks first
   (agents and worktrees already started stay).
 - Editor: name; worktree vs in place (worktree = a fresh `automation/<slug>-<date>` branch forked
   from the remote's default branch per run); repository / folder (typed, or the FolderBrowser in
   repo mode for worktrees, folder mode otherwise, shown in place of the form; Esc goes back); prompt (required unless plan mode, as in hostd);
-  schedule; model / thinking (host catalog) / plan; catch-up; enabled. Presets: every N minutes
+  schedule; model / thinking (host catalog) / plan; Agent options (each run's agent's own model roles and fallback
+  chains, `features/agentRoles`; hostd's role/chain errors show under them; its decide for me, `features/autoAnswer`,
+  loaded from `Automation.autoAnswer` and saved as `AutomationDraft.autoAnswer` only when set and the host has
+  decide for me: `automationDraft`); catch-up; enabled. Presets: every N minutes
   (N divides 60), every N hours at minute M (N divides 24), daily, weekdays, weekly on chosen days
   (all at HH:MM), custom cron; so runs stay N apart across the hour / midnight.
   An existing cron reads back into the preset that generates exactly it, else custom. The preview

@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { core, draftKey, suggestAgentName, useAiNaming, useAiSuggestion, useDraft, useHostIds, useHostState, useHosts, useSettings, useUi } from "@/core";
 import type { Split, Started, StartTarget, Workspace } from "@/core/gen";
 import { Button, Chip, EmptyState, Field, IconButton, Input, Kbd, SegmentedControl, StatusOrb, type Status, Switch, cn, spring, toast, useIsMobile } from "@/design";
+import { hostTakesRoles } from "@/features/agentRoles/roles";
+import { hostDecides } from "@/features/autoAnswer/format";
 import { ACTIONS } from "@/features/shell/vocab";
 import { FolderBrowser, type FolderPick } from "../worktree/FolderBrowser";
 import { within } from "./shared/ai";
@@ -60,6 +62,8 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
   const [hostId, setHostId] = useState<string | undefined>(initialHostId ?? hostIds[0]);
   const host = useHostState(hostId ?? "");
   const home = host?.info.home;
+  const decides = hostDecides(host?.info);
+  const takesRoles = hostTakesRoles(host?.info);
   const [mode, setMode] = useState<NewAgentMode>(intent?.mode ?? "workspace");
   const [workspaceId, setWorkspaceId] = useState<string | undefined>(initialWorkspaceId);
   const [split, setSplit] = useState<Split>("right");
@@ -131,7 +135,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
         });
         return;
       }
-      const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name: startName }) });
+      const started = await core.host(hostId).call("agent.start", { target, spec: toAgentSpec({ ...agent, name: startName }, decides, takesRoles) });
       if (target.kind === "cwd") clearLabel();
       clearAgent();
       setSubmit({ phase: "done", started });
@@ -142,7 +146,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
   };
 
   const session = host?.info.herdrSession;
-  const spec = toAgentSpec({ ...agent, name });
+  const spec = toAgentSpec({ ...agent, name }, decides, takesRoles);
   const activePane = ws?.tabs.flatMap((t) => t.panes).find((p) => p.focused)?.id ?? ws?.tabs[0]?.panes[0]?.id ?? "<pane>";
   const preview: PreviewLine[] = !target
     ? []

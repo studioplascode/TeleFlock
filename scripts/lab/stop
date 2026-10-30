@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Stops everything a TeleFlock lab started (scripts/lab/run <name>): every process whose
+# environment carries TF_LAB=<name>, herdr servers and their panes included. Processes are found
+# by that marker only, never by name pattern. Afterwards it checks that the caller's own herdr
+# server (the real one, when called from a herdr pane) still answers.
+#
+# Usage: scripts/lab/stop <name> [--purge]     --purge also deletes /tmp/tf-lab-<name>
+set -euo pipefail
+
+[ $# -ge 1 ] || { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+name="$1"
+[[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "lab: bad name '$name'" >&2; exit 64; }
+purge=0
+[ "${2:-}" = "--purge" ] && purge=1
+
+# This script, its parents and its children are never targets, whatever their environment says.
+self_and_ancestors() {
+  local p=$$
+  while [ -n "$p" ] && [ "$p" != 0 ]; do
+    echo "$p"
+    p="$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null || true)"
+  done
+}
+skip=" $(self_and_ancestors | tr '\n' ' ') "
+
+# A lab process is one that carries TF_LAB=<name> in its environment, or an environment value that
+# is a path in the lab's own directory (`/tmp/tf-lab-<name>/…`, e.g. HERDR_SOCKET_PATH, when a
+# launcher dropped the marker), any descendant of one (some daemons, e.g. sshd, overwrite their
+# environment with their process title), or a process with an argument that is, or is an `--opt=`
+# value of, a path in the lab's directory.
+lab_pids() {
+  local d pid stat rest root="/tmp/tf-lab-$name/"
+  local -A marked=() parent=()
+  for d in /proc/[0-9]*; do
+    pid="${d#/proc/}"
+    # /proc/<pid>/stat: "pid (comm) state ppid …"; comm may hold spaces or parentheses.
+    { read -r stat <"$d/stat"; } 2>/dev/null || continue
+    rest="${stat##*) }"
+    read -r _ ppid _ <<<"$rest"
+    parent[$pid]="$ppid"
+    case "$skip" in *" $pid "*) continue ;; esac
+    if grep -qzx -- "TF_LAB=$name" "$d/environ" 2>/dev/null || grep -qzE -- "^[A-Za-z_][A-Za-z0-9_]*=$root" "$d/environ" 2>/dev/null || grep -qzE -- "(^|=)$root" "$d/cmdline" 2>/dev/null; then
+      marked[$pid]=1
+    fi
+  done
+  for pid in "${!parent[@]}"; do
+    case "$skip" in *" $pid "*) continue ;; esac
+    local p="$pid" depth=0
+    while [ -n "$p" ] && [ "$p" != 0 ] && [ "$depth" -lt 64 ]; do
+      if [ -n "${marked[$p]:-}" ]; then echo "$pid"; break; fi
+      p="${parent[$p]:-}"
+      depth=$((depth + 1))
+    done
+  done
+  return 0
+}
+
+# Rounds of TERM, a grace period, then KILL, until a scan finds nothing: a dying parent (a harness,
+# a daemon) can start children after a scan, and those must not outlive the stop.
+stopped=0
+for round in 1 2 3 4 5; do
+  mapfile -t pids < <(lab_pids)
+  [ "${#pids[@]}" -eq 0 ] && break
+  stopped=1
+  for pid in "${pids[@]}"; do
+    printf 'lab %s: TERM %s %s\n' "$name" "$pid" "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-120)"
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for _ in $(seq 1 20); do
+    mapfile -t pids < <(lab_pids)
+    [ "${#pids[@]}" -eq 0 ] && break
+    sleep 0.5
+  done
+  for pid in "${pids[@]}"; do
+    echo "lab $name: KILL $pid"
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  sleep 0.5
+done
+mapfile -t pids < <(lab_pids)
+if [ "${#pids[@]}" -gt 0 ]; then
+  echo "lab $name: WARNING: still running after $round rounds: ${pids[*]}" >&2
+elif [ "$stopped" = 0 ]; then
+  echo "lab $name: nothing running"
+fi
+
+# systemd keepalive units a lab tf-hostd may have installed (only with TF_HOSTD_KEEPALIVE=1; older
+# builds installed them for every home): units whose TF_HOSTD_HOME lies inside this lab.
+if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  reload=0
+  for svc in /etc/systemd/system/teleflock-hostd-*.service; do
+    [ -e "$svc" ] || continue
+    grep -q "^Environment=TF_HOSTD_HOME=/tmp/tf-lab-$name/" "$svc" || continue
+    unit="$(basename "$svc" .service)"
+    systemctl disable --now "$unit.timer" >/dev/null 2>&1 || true
+    systemctl stop "$unit.service" >/dev/null 2>&1 || true
+    rm -f -- "/etc/systemd/system/$unit.service" "/etc/systemd/system/$unit.timer"
+    echo "lab $name: removed systemd units $unit"
+    reload=1
+  done
+  [ "$reload" = 1 ] && systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [ "$purge" = 1 ]; then
+  rm -rf -- "/tmp/tf-lab-$name"
+  echo "lab $name: purged /tmp/tf-lab-$name"
+fi
+
+# The real herdr server must still be there (read-only status query in the caller's context).
+if command -v herdr >/dev/null 2>&1; then
+  if timeout 10 herdr status server >/dev/null 2>&1; then
+    echo "lab $name: the caller's herdr server still answers"
+  else
+    echo "lab $name: WARNING: the caller's herdr server does not answer (was it running?)" >&2
+  fi
+fi

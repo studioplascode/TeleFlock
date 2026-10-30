@@ -1,11 +1,13 @@
-//! Runs the MCP helper extension (`host/teleflock-mcp/teleflock-mcp.ts`, embedded here) in a
-//! throwaway headless omp, so status, tools, sign-in and registry search use omp's own code
-//! (architecture §3.15 "Helper"). One request per process:
+//! Runs a TeleFlock helper extension in a throwaway headless omp, so answers that need omp's code
+//! come from omp itself: the MCP helper (`host/teleflock-mcp/teleflock-mcp.ts`: status, tools,
+//! sign-in and registry search, architecture §3.15 "Helper") and the skills and plugins helper
+//! (`host/teleflock-plugins/teleflock-plugins.ts`, §3.26), both embedded ([`HelperSpec`]). One
+//! request per process:
 //!
 //! ```text
-//! omp --mode rpc --no-session --no-skills --no-rules --no-lsp --no-tools --no-extensions -e <home>/ext/teleflock-mcp.ts
-//!     # cwd = the folder the request is about; env TF_MCP_IN / TF_MCP_OUT [/ TF_MCP_INPUT], NO_COLOR=1,
-//!     # OMP_MCP_STARTUP_TIMEOUT_MS=1
+//! omp --mode rpc --no-session --no-skills --no-rules --no-lsp --no-tools --no-extensions -e <home>/ext/<helper>.ts
+//!     # cwd = the folder the request is about; env <IN> / <OUT> [/ <INPUT>] (TF_MCP_* or
+//!     # TF_PLUGINS_*), NO_COLOR=1, OMP_MCP_STARTUP_TIMEOUT_MS=1
 //! ```
 //!
 //! The request goes through an owner-only file the helper deletes on read (it may hold a draft's
@@ -37,9 +39,39 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
-/// The helper, embedded so it always matches this tf-hostd.
+/// The MCP helper, embedded so it always matches this tf-hostd.
 pub const SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../host/teleflock-mcp/teleflock-mcp.ts"));
-const FILE_NAME: &str = "teleflock-mcp.ts";
+
+/// One helper extension: its embedded source, where it is written, the env names of its request,
+/// answer and input files, and the words its errors use.
+#[derive(Debug)]
+pub struct HelperSpec {
+    pub source: &'static str,
+    /// File name in `<home>/ext`.
+    pub file_name: &'static str,
+    /// Prefix of its files in `<home>/run`.
+    pub stem: &'static str,
+    pub env_in: &'static str,
+    pub env_out: &'static str,
+    pub env_input: &'static str,
+    /// Why there is no slot (`busy`).
+    pub busy: &'static str,
+    /// What installing omp would allow (`omp_error` hint).
+    pub needs_omp: &'static str,
+}
+
+/// The MCP helper (§3.15).
+pub static MCP: HelperSpec = HelperSpec {
+    source: SOURCE,
+    file_name: "teleflock-mcp.ts",
+    stem: "mcp",
+    env_in: "TF_MCP_IN",
+    env_out: "TF_MCP_OUT",
+    env_input: "TF_MCP_INPUT",
+    busy: "omp is busy checking MCP servers on this host",
+    needs_omp: "Install omp (Host setup) to check MCP servers and sign in.",
+};
+
 /// Checks, tests, sign-outs and searches at once (each starts omp and maybe several MCP servers).
 const MAX_RUNNING: usize = 4;
 /// Sign-ins at once (each waits minutes for the user).
@@ -82,7 +114,7 @@ impl Slots {
 
     /// A slot for `op`, waited for at most [`MAX_SLOT_WAIT`] and only while [`MIN_RUN`] would
     /// still be left before `deadline`.
-    async fn take(&self, op: &str, deadline: Instant) -> Result<OwnedSemaphorePermit, ApiError> {
+    async fn take(&self, op: &str, deadline: Instant, busy: &str) -> Result<OwnedSemaphorePermit, ApiError> {
         let sign_in = op == "auth";
         let pool = if sign_in { &self.sign_in } else { &self.work };
         let now = Instant::now();
@@ -91,7 +123,7 @@ impl Slots {
             Ok(Ok(slot)) => Ok(slot),
             Ok(Err(_)) => Err(ApiError::new("internal", "helper slots closed")),
             Err(_) if sign_in => Err(ApiError::new("busy", "Other sign-ins are still waiting on this host").with_hint("Finish or cancel them first.").retryable()),
-            Err(_) => Err(ApiError::new("busy", "omp is busy checking MCP servers on this host").with_hint("Try again in a moment.").retryable()),
+            Err(_) => Err(ApiError::new("busy", busy).with_hint("Try again in a moment.").retryable()),
         }
     }
 }
@@ -99,6 +131,8 @@ impl Slots {
 /// Where and with what the helper runs.
 #[derive(Debug, Clone)]
 pub struct HelperEnv {
+    /// Which helper ([`MCP`], or the skills and plugins one).
+    pub spec: &'static HelperSpec,
     pub omp: Option<PathBuf>,
     /// `<home>/ext` (the helper is written there).
     pub ext_dir: PathBuf,
@@ -112,22 +146,20 @@ pub struct HelperEnv {
 
 impl HelperEnv {
     fn omp(&self) -> Result<&Path, ApiError> {
-        self.omp.as_deref().ok_or_else(|| {
-            ApiError::new("omp_error", "omp is not installed on this host").with_hint("Install omp (Host setup) to check MCP servers and sign in.")
-        })
+        self.omp.as_deref().ok_or_else(|| ApiError::new("omp_error", "omp is not installed on this host").with_hint(self.spec.needs_omp))
     }
 
     /// Writes the embedded helper when the file is missing or differs (an older tf-hostd's copy).
     fn ensure_file(&self) -> Result<PathBuf, ApiError> {
-        let path = self.ext_dir.join(FILE_NAME);
+        let path = self.ext_dir.join(self.spec.file_name);
         let _g = WRITE.lock().unwrap_or_else(|p| p.into_inner());
-        if std::fs::read(&path).is_ok_and(|b| b == SOURCE.as_bytes()) {
+        if std::fs::read(&path).is_ok_and(|b| b == self.spec.source.as_bytes()) {
             return Ok(path);
         }
         let io = |e: std::io::Error| ApiError::new("io_error", format!("{}: {e}", path.display()));
         std::fs::create_dir_all(&self.ext_dir).map_err(io)?;
-        let tmp = self.ext_dir.join(format!(".{FILE_NAME}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, SOURCE).map_err(io)?;
+        let tmp = self.ext_dir.join(format!(".{}.{}.tmp", self.spec.file_name, std::process::id()));
+        std::fs::write(&tmp, self.spec.source).map_err(io)?;
         std::fs::rename(&tmp, &path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             io(e)
@@ -138,7 +170,7 @@ impl HelperEnv {
     fn scratch(&self, stem: &str) -> Result<PathBuf, ApiError> {
         create_private_dir(&self.run_dir).map_err(|e| ApiError::new("io_error", format!("{}: {e}", self.run_dir.display())))?;
         let nanos = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        Ok(self.run_dir.join(format!("mcp-{stem}-{}-{nanos}", std::process::id())))
+        Ok(self.run_dir.join(format!("{}-{stem}-{}-{nanos}", self.spec.stem, std::process::id())))
     }
 }
 
@@ -194,7 +226,7 @@ impl Running {
     pub async fn start(env: &HelperEnv, cwd: &Path, mut req: Value, deadline: Instant) -> Result<Running, ApiError> {
         let omp = env.omp()?.to_path_buf();
         let op = req.get("op").and_then(Value::as_str).unwrap_or("op").to_string();
-        let slot = env.slots.take(&op, deadline).await?;
+        let slot = env.slots.take(&op, deadline, env.spec.busy).await?;
         let ext = env.ensure_file()?;
         let base = env.scratch(&op)?;
         let (req_path, out, input) = (base.with_extension("in.json"), base.with_extension("out.jsonl"), base.with_extension("input"));
@@ -207,9 +239,9 @@ impl Running {
         cmd.args(["--mode", "rpc", "--no-session", "--no-skills", "--no-rules", "--no-lsp", "--no-tools", "--no-extensions", "-e"])
             .arg(&ext)
             .current_dir(cwd)
-            .env("TF_MCP_IN", &req_path)
-            .env("TF_MCP_OUT", &out)
-            .env("TF_MCP_INPUT", &input)
+            .env(env.spec.env_in, &req_path)
+            .env(env.spec.env_out, &out)
+            .env(env.spec.env_input, &input)
             .env("NO_COLOR", "1")
             .env("OMP_MCP_STARTUP_TIMEOUT_MS", "1")
             .stdin(Stdio::null())
@@ -566,15 +598,13 @@ mod tests {
 
     /// A stand-in omp (a shell script) that follows the helper protocol.
     fn fake_omp(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let p = dir.join("omp");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exe::write_exe(&p, format!("#!/bin/sh\n{body}\n"));
         p
     }
 
     fn env(dir: &Path, omp: PathBuf) -> HelperEnv {
-        HelperEnv { omp: Some(omp), ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None, slots: Slots::new(MAX_RUNNING, MAX_SIGN_INS) }
+        HelperEnv { spec: &MCP, omp: Some(omp), ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None, slots: Slots::new(MAX_RUNNING, MAX_SIGN_INS) }
     }
 
     fn soon() -> Instant {
@@ -623,7 +653,7 @@ printf 'way"}\n{"t":"result","ok":true}\n' >> "$TF_MCP_OUT""#,
         let due = req["deadlineAt"].as_i64().unwrap();
         assert!(due > before + 25_000 && due < before + 30_000, "the deadline less the answer margin, on the wall clock: {due} vs {before}");
         assert_eq!(std::fs::read_to_string(format!("{}.window", out.display())).unwrap().trim(), "1", "omp's discovery returns at once");
-        assert_eq!(std::fs::read_to_string(e.ext_dir.join(FILE_NAME)).unwrap(), SOURCE, "helper written next to the bridge");
+        assert_eq!(std::fs::read_to_string(e.ext_dir.join(MCP.file_name)).unwrap(), SOURCE, "helper written next to the bridge");
         drop(run);
         assert!(!out.exists(), "answer file removed");
     }

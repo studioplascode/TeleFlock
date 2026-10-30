@@ -887,10 +887,11 @@ pub async fn link(ctx: &Ctx, provider: &str) -> Result<AuthFlow, ApiError> {
     start_link(&bin, p, shim.as_deref(), &[])
 }
 
-/// A directory with no-op browser openers: first on `omp login`'s `PATH`, so it never opens a
-/// browser on the host (the app opens the URL on the device). `None` on Windows, where omp opens
-/// URLs through PowerShell (a Windows host is the device itself).
-fn no_browser_dir(run: &Path) -> Option<PathBuf> {
+/// A directory with no-op browser openers: first on `omp login`'s `PATH` (and gh's `GH_BROWSER`
+/// for `gh.authStart`), so neither opens a browser on the host (the app opens the URL on the
+/// device). `None` on Windows, where omp opens URLs through PowerShell (a Windows host is the
+/// device itself).
+pub(crate) fn no_browser_dir(run: &Path) -> Option<PathBuf> {
     if cfg!(windows) {
         return None;
     }
@@ -1587,10 +1588,8 @@ mod tests {
     /// A stand-in `omp` (`login <provider>`): prints what omp prints, reads answers.
     #[cfg(unix)]
     fn fake_omp(dir: &Path, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("omp");
-        std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exe::write_exe(&bin, format!("#!/bin/sh\n{script}\n"));
         bin
     }
 

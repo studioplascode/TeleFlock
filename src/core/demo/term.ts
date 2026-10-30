@@ -16,6 +16,8 @@ export interface TermContext {
   branch?: string;
   /** `herdr agent list` rows. */
   agents(): { name: string; state: string; pane: string }[];
+  /** `herdr server stop`: the host's herdr server goes away (the incident, in the demo). */
+  stopHerdr?(): void;
   gitStatus(): string[];
   /** Agent terminal: submit a line as a prompt. */
   prompt?(text: string): void;
@@ -207,6 +209,9 @@ export class DemoTerm {
         if (args[0] === "agent" && args[1] === "list") {
           const rows = this.ctx.agents();
           this.out([`${D}NAME       STATE    PANE${X}`, ...rows.map((r) => `${r.name.padEnd(10)} ${colorState(r.state)}${" ".repeat(Math.max(1, 9 - r.state.length))}${r.pane}`)]);
+        } else if (args[0] === "server" && args[1] === "stop" && this.ctx.stopHerdr) {
+          this.ctx.stopHerdr();
+          this.out([`${D}herdr server stopped${X}`]);
         } else this.out([`herdr 0.9.0 — try ${B}herdr agent list${X}`]);
         break;
       case "bun":

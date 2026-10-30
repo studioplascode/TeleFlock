@@ -75,8 +75,9 @@ pub(crate) struct HostRt {
 }
 
 const NOTIFICATION_RING: usize = 100;
+/// Our own codes that end auto-reconnect; `deploy_failed`: the host can't run the setup (deploy.rs).
 const FATAL_CODES: &[&str] =
-    &["unsupported", "version_mismatch", "invalid_params", "not_found", "permission_denied", "auth_denied"];
+    &["unsupported", "version_mismatch", "deploy_failed", "invalid_params", "not_found", "permission_denied", "auth_denied"];
 /// `TransportError::HostKeyUnconfirmed`: fatal, but parks in `hostKey` instead of `error`.
 const HOST_KEY_UNCONFIRMED: &str = "transport.hostKeyUnconfirmed";
 
@@ -184,6 +185,20 @@ impl HostRt {
         v.notifications.push_back(t);
     }
 
+    /// Notification `id` was posted to the OS after the fact (an escalation): it replaces the OS
+    /// notification of its agent, like a fresh one.
+    pub fn mark_posted(&self, id: &str) {
+        let mut v = self.view.lock().unwrap();
+        let Some(agent) = v.notifications.iter().find(|t| t.n.id == id).map(|t| t.n.agent_id.clone()) else { return };
+        for t in v.notifications.iter_mut() {
+            if t.n.id == id {
+                t.posted = true;
+            } else if !agent.is_empty() && t.n.agent_id == agent {
+                t.posted = false;
+            }
+        }
+    }
+
     /// `hosts.trustKey`: accept the key awaiting confirmation (phase `hostKey`) when the
     /// fingerprint matches what the user was shown. The caller then connects again.
     pub fn approve_host_key(&self, fingerprint: &str) -> Result<(), ApiError> {
@@ -238,7 +253,9 @@ impl LinkSink for Sink {
                 }
                 inner.send(AppEvent::Term { host_id, term_id, ev })
             }
-            ServerMsg::Notify { notification } => inner.on_notify(&rt, notification),
+            ServerMsg::Notify { notification, alert } => inner.on_notify(&rt, notification, alert),
+            ServerMsg::NotifyAlert { id } => inner.on_notify_alert(&rt, &id),
+            ServerMsg::NotifyDone { ids, .. } => inner.on_remote_read(&rt, &ids),
             _ => {}
         }
     }
@@ -597,6 +614,8 @@ async fn connect_and_serve(
         s.hostd_version = Some(hostd_version);
     });
     rt.online.send_replace(true);
+    // A host ≥ 0.7.0 routes notifications to the device in use: tell it what this one is doing.
+    eng.presence_link_up(&link);
     tokio::spawn(sessions::reopen(session_host(eng, rt), link.clone()));
 
     let reason = tokio::select! {

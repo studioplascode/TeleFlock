@@ -10,16 +10,26 @@ export type Route =
   | { name: "inbox" }
   | { name: "activity" }
   | { name: "usage" }
+  /** The week's digest of every host in view, shared as an image. */
+  | { name: "wrapped" }
   | { name: "hosts" }
   | { name: "settings" }
   | { name: "more" }
   | { name: "design" }
+  /** Live transcripts of 4 or 9 agents in a grid (desktop; a big monitor). */
+  | { name: "wall" }
+  /** One orb per agent for a tablet or second screen; the shell's chrome steps aside. */
+  | { name: "ambient" }
   /** Scheduled agent runs of one host (`hostId` absent: the first / last used host). */
   | { name: "automations"; hostId?: string }
   /** omp's own settings (models, roles, tools, …) of one host. */
   | { name: "omp"; hostId?: string }
   /** omp's MCP servers of one host (list, add, sign in, test, enable/disable). */
   | { name: "mcp"; hostId?: string }
+  /** omp's skills and plugins of one host (installed, switches, updates, the registry, marketplaces). */
+  | { name: "plugins"; hostId?: string }
+  /** One host's linked worktrees (pull request, age, changes, size, last agent) and omp's storage cleanup. */
+  | { name: "cleanup"; hostId?: string }
   /** Subscription accounts and API keys omp signs in with on one host; `link` opens the Link
    * account sheet: on that provider (`#/accounts/<hostId>/link/<provider>`), or on the provider
    * picker when empty (`#/accounts/<hostId>/link`). */
@@ -33,10 +43,13 @@ const SIMPLE: Record<string, Route> = {
   inbox: { name: "inbox" },
   activity: { name: "activity" },
   usage: { name: "usage" },
+  wrapped: { name: "wrapped" },
   hosts: { name: "hosts" },
   settings: { name: "settings" },
   more: { name: "more" },
   design: { name: "design" },
+  wall: { name: "wall" },
+  ambient: { name: "ambient" },
 };
 
 const enc = encodeURIComponent;
@@ -55,6 +68,8 @@ export function routeToHash(route: Route): string {
     case "automations":
     case "omp":
     case "mcp":
+    case "plugins":
+    case "cleanup":
       return route.hostId ? `#/${route.name}/${enc(route.hostId)}` : `#/${route.name}`;
     case "accounts":
       if (!route.hostId) return "#/accounts";
@@ -87,7 +102,7 @@ export function parseHash(hash: string): Route {
   const c = dec(parts[3]);
   if (head === "agent" && a && b) return { name: "agent", hostId: a, agentId: b };
   if (head === "review" && a && b) return { name: "review", hostId: a, workspaceId: b };
-  if (head === "automations" || head === "omp" || head === "mcp") return a ? { name: head, hostId: a } : { name: head };
+  if (head === "automations" || head === "omp" || head === "mcp" || head === "plugins" || head === "cleanup") return a ? { name: head, hostId: a } : { name: head };
   if (head === "accounts") {
     if (!a) return { name: "accounts" };
     return b === "link" ? { name: "accounts", hostId: a, link: c ?? "" } : { name: "accounts", hostId: a };

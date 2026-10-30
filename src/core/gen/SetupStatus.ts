@@ -30,4 +30,14 @@ applying?: Array<string>,
  * Open issues whose last fix attempt failed, with why. Absent from older daemons, which
  * fail the whole `host.setupApply` call at the first failing fix instead.
  */
-failed?: Array<SetupFixError>, };
+failed?: Array<SetupFixError>, 
+/**
+ * The GitHub CLI is signed in on the host (`gh auth status`; issue `sign-in-gh`, completed
+ * with `gh.authStart`). Absent: gh is not installed, or an older daemon.
+ */
+ghSignedIn?: boolean, 
+/**
+ * git's `user.name` and `user.email` are set (issue `set-git-identity`, fixed with
+ * `git.setIdentity`). Absent: git is not installed, or an older daemon.
+ */
+gitIdentity?: boolean, };

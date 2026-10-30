@@ -8,7 +8,9 @@
  * `busy` (agent is streaming / dialog open), `agent_blocked`, `timeout`,
  * `herdr_error`, `omp_error`, `git_error`, `gh_error`, `io_error`, `version_mismatch`,
  * `auth_required`, `permission_denied`, `ai_unavailable`, `ai_failed`, `install_failed`
- * (a Host setup install), `port_in_use` / `port_unavailable` (`tunnel.open { localPort }`),
+ * (a Host setup install), `deploy_failed` (the host can't run TeleFlock's setup: its shell
+ * rejects the script, or a program it needs is missing; not retried), `port_in_use` /
+ * `port_unavailable` (`tunnel.open { localPort }`),
  * `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed), `internal`.
  */
 export type ApiError = { code: string, message: string, 

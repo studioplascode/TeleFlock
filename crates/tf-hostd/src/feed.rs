@@ -55,6 +55,26 @@ const RESTART_SETTLED: Duration = Duration::from_secs(10);
 const TRANSCRIPT_MAX: u64 = 64 * 1024 * 1024;
 /// How deep nested subagent transcripts are searched for (`<Id>/<Id>.<Child>.jsonl`, …).
 const TRANSCRIPT_DEPTH: usize = 6;
+/// The replica and omp disagree on whether a turn runs (omp's own word is the bridge's control
+/// state, `idle`, which reaches hostd on a channel of its own) for this long: the live feed missed
+/// something, and a fresh resync settles it ([`check_stall`]).
+const STALL_AFTER: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
+/// A forced resync waits this long after the previous one, twice as long for each further one in
+/// a row, up to [`STALL_BACKOFF_MAX`]; quiet that long, the next run starts over.
+const STALL_BACKOFF: Duration = if cfg!(test) { Duration::from_millis(500) } else { Duration::from_secs(60) };
+const STALL_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+
+/// One session's stall watchdog ([`check_stall`]), kept in its session state.
+#[derive(Debug, Default)]
+pub(crate) struct Stall {
+    /// Since when the replica and omp disagree on whether a turn runs.
+    since: Option<Instant>,
+    /// Resyncs forced in a row, and when the last one was asked for.
+    forced: u32,
+    last: Option<Instant>,
+    /// A forced resync the driver has yet to start, and why ([`run`]).
+    ask: Option<String>,
+}
 
 /// Session entry types omp's collab host replicates as transcript entries (`collab/host.ts`
 /// `WIRE_SESSION_ENTRY_TYPES`); the others only feed the journal (goal, plan mode, side spend).
@@ -353,7 +373,7 @@ pub(crate) fn attach(inner: &Arc<Inner>, b: &BridgeSession) {
             st.set_link(syncing());
         }
     }
-    tokio::spawn(drive(Arc::downgrade(inner), session, b.conn, token));
+    tokio::spawn(supervise(Arc::downgrade(inner), session, b.conn, token));
     let _ = inner.updates.send(OmpUpdate::Registry);
 }
 
@@ -361,8 +381,9 @@ fn syncing() -> LinkStatus {
     LinkStatus::connecting(LinkReason::Syncing, Some(LinkVia::Bridge), "TeleFlock's bridge in omp is connected; loading the session")
 }
 
-/// Runs every registry poll: bridges whose session has no driver get one (a lagged event), and
-/// sessions whose bridge did not come back are said so, then dropped once omp is gone.
+/// Runs every registry poll: bridges whose session has no driver get one (a lagged event),
+/// bridge-served sessions whose live feed missed something get a fresh resync ([`check_stall`]),
+/// and sessions whose bridge did not come back are said so, then dropped once omp is gone.
 pub(crate) fn reconcile(inner: &Arc<Inner>) {
     for b in inner.bridge.sessions() {
         if b.caps.data_plane() && inner.session(&b.session_id).is_none_or(|s| s.lock().driver.is_none_or(|(conn, _)| conn != b.conn)) {
@@ -370,7 +391,9 @@ pub(crate) fn reconcile(inner: &Arc<Inner>) {
         }
     }
     let sessions: Vec<Arc<OmpSession>> = inner.sessions.read().unwrap_or_else(|p| p.into_inner()).values().cloned().collect();
+    let now = Instant::now();
     for s in sessions {
+        check_stall(inner, &s, now);
         let Some((lost_at, bye)) = ({
             let st = s.lock();
             match st.transport {
@@ -405,6 +428,46 @@ pub(crate) fn reconcile(inner: &Arc<Inner>) {
             let _ = inner.updates.send(OmpUpdate::Changed { session_id: s.session_id.clone() });
         }
     }
+}
+
+/// The stall watchdog, on every registry poll: a bridge-served session whose replica says a turn
+/// runs while omp says it is idle, or the other way round, for [`STALL_AFTER`] has a live feed
+/// that missed something (frames hostd could not read, a bug anywhere between omp's events and
+/// the replica). Its driver starts over with a fresh resync, which rebuilds the replica from the
+/// session file and omp's in-flight state. omp's word is the bridge's control state (`idle`, from
+/// `ctx.isIdle()`), which reaches hostd on its own channel; the replica's is its turn (`agent_start`
+/// … `agent_end`) and the live feed's last `state` frame (both from omp's `isStreaming`, so they
+/// agree within a second or two on a healthy feed). Paced by [`STALL_BACKOFF`], doubling while it
+/// keeps happening.
+fn check_stall(inner: &Inner, s: &OmpSession, now: Instant) {
+    let Some(b) = inner.bridge.by_session(&s.session_id) else { return };
+    let omp_busy = !b.state.idle;
+    let mut st = s.lock();
+    let served = matches!(st.transport, Transport::Bridge { .. }) && st.driver.is_some_and(|(conn, _)| conn == b.conn);
+    let replica_busy = st.replica.is_streaming() || st.replica.state().is_streaming;
+    let stall = &mut st.stall;
+    if !served || replica_busy == omp_busy {
+        stall.since = None;
+        if stall.last.is_some_and(|t| now.duration_since(t) >= STALL_BACKOFF_MAX) {
+            stall.forced = 0;
+        }
+        return;
+    }
+    let since = *stall.since.get_or_insert(now);
+    let pause = STALL_BACKOFF.saturating_mul(1 << stall.forced.min(10)).min(STALL_BACKOFF_MAX);
+    if now.duration_since(since) < STALL_AFTER || stall.ask.is_some() || stall.last.is_some_and(|t| now.duration_since(t) < pause) {
+        return;
+    }
+    let why = if replica_busy { "omp's turn ended but the live feed never said so" } else { "omp is working but the live feed never said so" };
+    let secs = now.duration_since(since).as_secs();
+    stall.forced += 1;
+    stall.last = Some(now);
+    stall.since = None;
+    stall.ask = Some(format!("{why} ({secs} s)"));
+    let forced = stall.forced;
+    drop(st);
+    warn!(session = %s.session_id, forced, "{why} for {secs} s; reloading the session from omp");
+    s.feed_kick.notify_one();
 }
 
 fn omp_detached_forget() -> Duration {
@@ -445,6 +508,31 @@ fn restart_pause(n: u32) -> Duration {
         return Duration::ZERO;
     }
     RESTART_PAUSE.saturating_mul(1 << (n - 2).min(16)).min(RESTART_PAUSE_MAX)
+}
+
+/// [`drive`], kept going: a panic in it (say the replica meeting data nobody foresaw) is logged
+/// and the feed starts over with a fresh subscription, after a pause that doubles with each one.
+/// Before, the panic ended the task unseen (the daemon's stderr is /dev/null) and left the
+/// session's driver slot taken: no feed and no new driver for the connection, the link still
+/// `live` and the transcript frozen.
+async fn supervise(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u64) {
+    use futures::FutureExt;
+    let mut panics = 0u32;
+    loop {
+        let driven = std::panic::AssertUnwindSafe(drive(weak.clone(), session.clone(), conn, token)).catch_unwind().await;
+        let Err(panic) = driven else { return };
+        panics += 1;
+        let what = panic.downcast_ref::<&str>().map(|s| (*s).to_owned()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+        tracing::error!(session = %session.session_id, panics, "the bridge feed failed ({what}); starting it over");
+        let Some(cancel) = weak.upgrade().map(|inner| inner.cancel.clone()) else { return };
+        tokio::select! {
+            _ = tokio::time::sleep(restart_pause(panics + 1)) => {}
+            _ = cancel.cancelled() => return,
+        }
+        if session.is_closed() || !current(&session, token) {
+            return;
+        }
+    }
 }
 
 /// One session's feed on bridge connection `conn`.
@@ -573,6 +661,10 @@ async fn run(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, mut feed
             _ = session.feed_kick.notified() => {
                 if session.is_closed() {
                     return End::Stop;
+                }
+                // The stall watchdog wants a fresh resync ([`check_stall`]).
+                if let Some(why) = session.lock().stall.ask.take() {
+                    return End::Restart(why);
                 }
                 // Asked for while the session loaded (the kick waited out the resync): this
                 // subscription serves it now, there is nothing to retry.
@@ -713,6 +805,9 @@ async fn apply_resync(inner: &Arc<Inner>, session: &Arc<OmpSession>, token: u64,
         let update = feeder.resync(&mut st.replica, resync, read, &origin, now);
         let old = std::mem::replace(&mut st.transport, Transport::Bridge { token, caps });
         st.bridge_lost = None;
+        // A resync settles whatever the stall watchdog saw ([`check_stall`]).
+        st.stall.ask = None;
+        st.stall.since = None;
         st.session_file = path;
         st.set_link(LinkStatus::live(LinkVia::Bridge));
         session.set_data_plane(&mut st, Some(caps));
@@ -1342,6 +1437,93 @@ mod tests {
         let bash = bash_rows(&fresh).remove(0);
         assert_eq!(bash.args, serde_json::json!({ "command": "echo bridge-ok" }));
         assert_eq!(bash.duration_ms, Some(36), "the bash tool's wall time");
+    }
+
+    #[test]
+    fn a_refusal_and_a_warning_survive_a_restart() {
+        // omp never writes a refused turn to its session file, and notices are no entries: tf-hostd
+        // keeps both as live rows (`crate::live_rows`), so a tf-hostd started afterwards shows them
+        // where they were.
+        let (sid, t0) = ("01a18769-c0ed-73ef-b9e0-c7c8190764dd", 1_793_300_000_000_i64);
+        let dir = tempfile::tempdir().unwrap();
+        let (path, notes, kept) = (dir.path().join("session.jsonl"), dir.path().join("notes"), dir.path().join("rows"));
+        let message = |id: &str, parent: Option<&str>, msg: Value| {
+            serde_json::json!({ "type": "message", "id": id, "parentId": parent, "timestamp": "2026-10-29T10:00:00.000Z", "message": msg })
+        };
+        let user = |t: i64, text: &str| serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": text }], "timestamp": t });
+        let hello = serde_json::json!({ "role": "assistant", "content": [{ "type": "text", "text": "Hello." }], "stopReason": "stop", "timestamp": t0 + 2 });
+        let header = serde_json::json!({ "type": "session", "version": 3, "id": sid, "timestamp": "2026-10-29T10:00:00.000Z", "cwd": "/w" });
+        let lines = [header, message("e1", None, user(t0 + 1, "hi")), message("e2", Some("e1"), hello)];
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let origin = Origin { session_id: sid.into(), cwd: "/w".into() };
+        let resync = |last: &str| Resync {
+            seq: 1,
+            session_id: sid.into(),
+            session_file: Some(path.display().to_string()),
+            leaf_id: Some(last.into()),
+            last_entry_id: Some(last.into()),
+            streaming: false,
+            frames: vec![HostFrame::State { state: HostState { cwd: "/w".into(), ..HostState::default() } }],
+        };
+        let keep = |up: &Update| {
+            let rows: Vec<_> = up.signals.iter().filter_map(|s| match s {
+                tf_collab::Signal::RowKept { row } => Some(row.clone()),
+                _ => None,
+            }).collect();
+            crate::live_rows::append(&kept, sid, &rows).unwrap();
+            crate::notes::append(&notes, sid, &noted(up)).unwrap();
+        };
+        let mut replica = Replica::new(sid);
+        let (mut feeder, mut mirror) = (Feeder::default(), Mirror::default());
+        let up = feeder.resync(&mut replica, resync("e2"), journal::read_full(&path, Some("e2")).unwrap(), &origin, t0 + 3);
+        mirror.apply(&up.events);
+        let ev = |event: Value| HostFrame::Event { event };
+        let prompt = user(t0 + 5, "now write the exploit");
+        let refused = serde_json::json!({ "role": "assistant", "content": [{ "type": "text", "text": "" }], "stopReason": "error", "timestamp": t0 + 6,
+            "errorMessage": "Refusal (cyber): Exploit development.",
+            "stopDetails": { "type": "refusal", "category": "cyber", "explanation": "Exploit development.", "fallback_credit_token": "fct_secret" } });
+        let frames = [
+            ev(serde_json::json!({ "type": "notice", "level": "warning", "message": "MCP server github failed to start", "source": "extension" })),
+            ev(serde_json::json!({ "type": "agent_start" })),
+            ev(serde_json::json!({ "type": "message_start", "message": prompt })),
+            ev(serde_json::json!({ "type": "message_end", "message": refused })),
+            ev(serde_json::json!({ "type": "agent_end" })),
+        ];
+        for (i, frame) in frames.into_iter().enumerate() {
+            if i == 2 {
+                // omp writes the prompt; the refusal never.
+                let entry = message("e3", Some("e2"), prompt.clone());
+                std::io::Write::write_all(&mut std::fs::OpenOptions::new().append(true).open(&path).unwrap(), format!("{entry}\n").as_bytes()).unwrap();
+            }
+            let up = step(&mut feeder, &mut replica, 2 + i as u64, frame, t0 + 10 + i as i64).unwrap();
+            keep(&up);
+            mirror.apply(&up.events);
+        }
+        check_mirror(&replica, &mirror);
+        let live = rows(&replica);
+        assert_eq!(live.len(), 5, "{live:#?}");
+        assert!(matches!(&live[2], TranscriptItem::Notice(n) if n.text == "MCP server github failed to start"));
+        assert!(matches!(&live[4], TranscriptItem::Assistant(a) if a.refusal.as_ref().and_then(|r| r.category.as_deref()) == Some("cyber")));
+        let stored = std::fs::read_to_string(kept.join(format!("{sid}.jsonl"))).unwrap();
+        assert!(!stored.contains("fct_secret"), "{stored}");
+
+        // tf-hostd restarted: the stores, then the bridge's resync of the file.
+        let restart = |stores: bool| {
+            let mut fresh = Replica::new(sid);
+            if stores {
+                fresh.keep_notes(crate::notes::load(&notes, sid));
+                fresh.keep_rows(crate::live_rows::load(&kept, sid));
+            }
+            Feeder::default().resync(&mut fresh, resync("e3"), journal::read_full(&path, Some("e3")).unwrap(), &origin, t0 + 60_000);
+            fresh
+        };
+        let again = rows(&restart(true));
+        assert_eq!(again, live, "the restart shows what the live session did");
+        for (a, b) in live.iter().zip(&again) {
+            assert_eq!(crate::sync::row_hash(a), crate::sync::row_hash(b), "clients keep the row {}", a.id());
+        }
+        // The file alone has neither.
+        assert_eq!(rows(&restart(false)).len(), 3);
     }
 
     #[test]

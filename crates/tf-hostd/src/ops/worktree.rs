@@ -266,7 +266,7 @@ pub(crate) async fn checkout(ctx: &Ctx, p: &WorktreeCreateParams) -> Result<(Wor
 pub async fn remove(ctx: &Ctx, p: &WorktreeRemoveParams) -> Result<Empty, ApiError> {
     let by_path = p.path.as_deref().map(str::trim).filter(|s| !s.is_empty());
     match (p.workspace_id.trim(), by_path) {
-        ("", Some(path)) => remove_path(ctx, path, p.force, p.trust).await?,
+        ("", Some(path)) => remove_path(ctx, path, p.force, p.trust, None).await?,
         ("", None) => return Err(ApiError::new("invalid_params", "worktree.remove needs a workspaceId or a path")),
         (workspace_id, _) => {
             ctx.herdr.worktree_remove(workspace_id, p.force, p.trust).await.map_err(map_herdr)?;
@@ -278,15 +278,19 @@ pub async fn remove(ctx: &Ctx, p: &WorktreeRemoveParams) -> Result<Empty, ApiErr
 
 /// `worktree.remove {path}`: a linked worktree no herdr workspace holds, a parked agent's (Mark done
 /// closed its workspace). A workspace that holds it after all (reopened since) goes through herdr
-/// as usual. Afterwards no parked card offers to delete it any more.
-async fn remove_path(ctx: &Ctx, path: &str, force: bool, trust: bool) -> Result<(), ApiError> {
+/// as usual. Afterwards no parked card offers to delete it any more. `root`: its repository's main
+/// worktree when the caller knows it (a folder already gone is found there), else the parked
+/// record's.
+pub(crate) async fn remove_path(ctx: &Ctx, path: &str, force: bool, trust: bool, root: Option<&Path>) -> Result<(), ApiError> {
     let path = resolve_path(path)?;
     let same = |other: &str| same_path(Path::new(other), &path);
     let held = ctx.state.snapshot().workspaces.into_iter().find(|w| w.worktree.as_ref().is_some_and(|t| same(&t.path)));
     if let Some(ws) = held {
         ctx.herdr.worktree_remove(&ws.id, force, trust).await.map_err(map_herdr)?;
     } else {
-        let root = ctx.state.parked_all().into_iter().find_map(|r| r.worktree.filter(|w| same(&w.path)).map(|w| PathBuf::from(w.repo_root)));
+        let root = root.map(Path::to_path_buf).or_else(|| {
+            ctx.state.parked_all().into_iter().find_map(|r| r.worktree.filter(|w| same(&w.path)).map(|w| PathBuf::from(w.repo_root)))
+        });
         remove_checkout(&path, root.as_deref(), force, trust).await?;
     }
     ctx.state.forget_parked_worktree(same);
@@ -295,7 +299,7 @@ async fn remove_path(ctx: &Ctx, path: &str, force: bool, trust: bool) -> Result<
 }
 
 /// Same folder: canonical paths when both exist, else the lexically normalized ones.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => normalize_key(&a.display().to_string()) == normalize_key(&b.display().to_string()),
@@ -350,7 +354,7 @@ pub(crate) async fn remove_checkout(path: &Path, repo_root: Option<&Path>, force
 }
 
 /// git's `worktree list|remove` failures with the codes and hints herdr's are mapped to.
-fn remove_failure(msg: &str) -> ApiError {
+pub(crate) fn remove_failure(msg: &str) -> ApiError {
     let lower = msg.to_lowercase();
     let clean = msg.trim().trim_start_matches("fatal: ").trim().to_string();
     if lower.contains("dubious ownership") {

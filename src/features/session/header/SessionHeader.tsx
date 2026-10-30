@@ -2,10 +2,16 @@ import { BellOff, Focus, GitBranch, Square, SquareTerminal } from "lucide-react"
 import type { Agent } from "@/core/gen";
 import { parseAgentKey, useAgent, useCore, useSession, useUi } from "@/core";
 import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
+import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { Term } from "@/features/shell/Term";
 import { openTerminal } from "@/features/board/agentActions";
+import { RecapLine } from "@/features/board/RecapLine";
 import { ACTIONS, agentStateWord, stateTime } from "@/features/shell/vocab";
 import { agentStatus, hostCall, useBeat, useMute } from "../api";
+import { AutoResumeStrip } from "../resume/AutoResumeStrip";
+import { RetryStrip } from "../resume/RetryStrip";
+import { ResumeButton } from "../resume/ResumeButton";
 import { CostTooltip } from "../spend";
 import { ActionsMenu, FastToggle, GoalChip, ModelPicker, PlanToggle, ThinkingPicker } from "./Controls";
 import { LimitsChip } from "./LimitsChip";
@@ -32,13 +38,15 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
   const { meta } = useSession(agentKey);
   const beat = useBeat(agentKey);
   const { tier } = useActivity(beat);
-  const status = agentStatus(agent);
+  // herdr is down: the agent isn't running whatever its cached column says; the pill says what herdr does
+  const herdr = useHerdrDown(hostId);
+  const status = herdr ? herdrOrbStatus(herdr) : agentStatus(agent);
   const { muted } = useMute(agentKey);
   const online = useCore((s) => s.status[hostId]?.phase === "online");
   if (!agent) return null;
   // Controls need the host (offline, the session is the copy saved on this device).
-  const live = agent.omp?.link === "live" && online;
-  const working = agent.column === "running";
+  const live = agent.omp?.link === "live" && online && !herdr;
+  const working = agent.column === "running" && !herdr;
   const subs = meta?.subagents.filter((s) => s.status === "running").length ?? agent.omp?.subagents?.live ?? 0;
   const cost = meta?.cost ?? agent.omp?.cost;
   return (
@@ -61,7 +69,7 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
               {agent.name}
             </h2>
             <StatusPill status={status} activity={tier} size="sm" className="hidden shrink-0 @min-[9.5rem]/id:inline-flex">
-              <StateWord agent={agent} />
+              {herdr ? herdrAgentWord(herdr) : <StateWord agent={agent} />}
             </StatusPill>
             {muted && (
               <Tooltip content="Notifications muted for this agent">
@@ -94,6 +102,7 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
               </Term>
             )}
           </div>
+          <RecapLine agent={agent} className="mt-0.5 max-w-[72ch]" />
         </div>
         {!compact && (
           <div className="hidden w-[112px] shrink-0 @min-[36rem]/hdr:block">
@@ -142,7 +151,10 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
             </Button>
           </Tooltip>
         )}
+        <ResumeButton agentKey={agentKey} />
       </div>
+      <AutoResumeStrip agentKey={agentKey} />
+      <RetryStrip agentKey={agentKey} />
       {live && (
         <div className="flex min-w-0 items-center gap-1.5">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto no-scrollbar">

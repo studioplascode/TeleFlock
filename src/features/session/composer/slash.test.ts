@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { TranscriptItem } from "@/core/gen";
 import { OMP_COMMAND_NAMES } from "@/core/ompCommands";
-import { findCommand, matchCommands, matchSubs, parseSlash, pickFromTranscript, SLASH_COMMANDS } from "./slash";
+import { findCommand, isSlashDraft, matchCommands, matchSubs, parseSlash, pickFromTranscript, SLASH_COMMANDS } from "./slash";
 
 describe("slash catalog", () => {
   test("covers exactly the builtins hostd accepts", async () => {
@@ -15,6 +15,15 @@ describe("slash catalog", () => {
   test("every builtin is reachable from the palette", () => {
     const listed = new Set(matchCommands("").flatMap((c) => [c.name, ...(c.aliases ?? []).map((a) => a.replace(/:$/, ""))]));
     for (const n of OMP_COMMAND_NAMES) expect(listed.has(n)).toBe(true);
+  });
+
+  test("a command is what the user typed: a pasted token or a leading space makes it text", () => {
+    expect(isSlashDraft("/jobs kill all")).toBe(true);
+    expect(isSlashDraft("\n/jobs")).toBe(true);
+    // The draft still holds `[Paste #1 +40 lines]`, whose text may start with "/usr/lib…".
+    expect(isSlashDraft("[Paste #1 +40 lines]")).toBe(false);
+    expect(isSlashDraft(" /etc/hosts is a file")).toBe(false);
+    expect(isSlashDraft("what is /etc/hosts")).toBe(false);
   });
 
   test("parses like omp (whitespace or colon, skill prefix kept)", () => {

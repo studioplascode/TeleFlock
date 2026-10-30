@@ -25,6 +25,7 @@ import { type ReactNode, useContext, useMemo, useState } from "react";
 import { linkProps, useAgent, useCore, useSession } from "@/core";
 import type { BashView, ImageView, Subagent, ToolItem, ToolView } from "@/core/gen";
 import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, spring, Spinner } from "@/design";
+import { useHerdrFreeze } from "@/features/hosts/HerdrControls";
 import { languageFor } from "../lib/highlight";
 import { ImagePlaceholder, useImageSources } from "../lib/images";
 import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
@@ -33,6 +34,7 @@ import { withRoster } from "../subagents/roster";
 import { SubagentCard } from "../subagents/Subagents";
 import { SessionCtx, useSessionRef } from "../context";
 import { AnsiText } from "./AnsiText";
+import { useOpenOnFind } from "../find/reveal";
 import { DiffStatText, FileDiffView } from "./DiffBody";
 import { TodoPhases, todoCounts } from "./TodoList";
 
@@ -123,17 +125,19 @@ function PendingLabel() {
 }
 
 function StatusMeta({ item, extra, settled }: { item: ToolItem; extra?: ReactNode; settled: boolean }) {
+  const frozenAt = useHerdrFreeze(useContext(SessionCtx)?.hostId ?? "");
   // Finished while on screen: the result icon pops in instead of just appearing.
   const pop = settled ? { initial: { scale: 0.2, opacity: 0 }, animate: { scale: 1, opacity: 1, transition: spring.bouncy } } : {};
   return (
-    <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 text-[11.5px] font-semibold whitespace-nowrap text-mute tabular">
+    <span data-find-skip className="ml-auto flex shrink-0 items-center gap-2 pl-2 text-[11.5px] font-semibold whitespace-nowrap text-mute tabular">
       {extra}
       {item.status === "pending" ? (
         <PendingLabel />
       ) : item.status === "running" ? (
-        <span className="flex items-center gap-1.5 text-accent-hi">
-          <Spinner size={12} label="running" />
-          <Elapsed since={item.at} />
+        // herdr is down: the call ended with the pane, its timer stops where the outage began
+        <span className={cn("flex items-center gap-1.5", frozenAt === undefined ? "text-accent-hi" : "text-mute")}>
+          {frozenAt === undefined && <Spinner size={12} label="running" />}
+          <Elapsed since={item.at} until={frozenAt} />
         </span>
       ) : item.status === "ok" ? (
         <span className="flex items-center gap-1">
@@ -236,6 +240,8 @@ export function ToolCard({ item }: { item: ToolItem }) {
     setWasLive(live);
     if (!live) setSettled(true);
   }
+  // Find's current match is in this call: open it (it stays open afterwards, like any card opened).
+  useOpenOnFind(item.id, () => setOpen(true));
   const open = openState ?? (OPEN_BY_DEFAULT[type] || failed);
   const Icon = ICON[kind];
   const hasBody = item.view != null || item.output != null || item.args != null || item.error != null;
@@ -253,7 +259,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
         <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px]", TONE.ask)}>
           <Icon className="size-3" />
         </span>
-        <span className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
+        <span data-find-skip className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
         <span className="flex min-w-0 items-center gap-1 truncate text-[11.5px] font-semibold text-sun-1">
           · answering below
           <ArrowDown className="size-3 shrink-0" />
@@ -291,7 +297,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
         <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px] transition-colors duration-500", live ? "st-soft" : failed ? "bg-error/14 text-error" : TONE[kind])}>
           <Icon className="size-3" />
         </span>
-        <span className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
+        <span data-find-skip className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
         <span className="min-w-0 truncate font-mono text-[11.5px] text-[#e2e2ea]" title={typeof item.title === "string" ? item.title : undefined}>
           {live && type === "generic" ? <Shimmer>{item.title}</Shimmer> : headTitle(item)}
         </span>
@@ -303,7 +309,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
         <div className="border-t border-line">
           <ToolBody item={item} />
           {item.error && <div className="border-t border-error/20 bg-error/[0.06] px-3 py-2 font-mono text-[11.5px] whitespace-pre-wrap text-[#ff9aab]">{item.error}</div>}
-          {item.truncated && <div className="border-t border-line px-3 py-1 text-2xs font-semibold text-mute-2">Output truncated by omp</div>}
+          {item.truncated && <div data-find-skip className="border-t border-line px-3 py-1 text-2xs font-semibold text-mute-2">Output truncated by omp</div>}
         </div>
       )}
     </div>
@@ -319,7 +325,7 @@ function ToolBody({ item }: { item: ToolItem }) {
       return (
         <div>
           {v.files.map((f) => (
-            <FileDiffView key={f.path} file={f} defaultOpen={v.files.length <= 3} />
+            <FileDiffView key={f.path} file={f} defaultOpen={v.files.length <= 3} findRow={item.id} />
           ))}
         </div>
       );
@@ -329,7 +335,12 @@ function ToolBody({ item }: { item: ToolItem }) {
         <div>
           {(v.command.includes("\n") || v.cwd) && (
             <div className="border-b border-line px-3 py-1.5 font-mono text-[11px] text-ink-2">
-              {v.cwd && <div className="mb-0.5 text-2xs text-mute-2">in {v.cwd}</div>}
+              {v.cwd && (
+                <div className="mb-0.5 text-2xs text-mute-2">
+                  <span data-find-skip>in </span>
+                  {v.cwd}
+                </div>
+              )}
               {v.command.includes("\n") && (
                 <pre className="whitespace-pre-wrap">
                   <Highlighted code={v.command} lang="sh" />
@@ -365,7 +376,7 @@ function ToolBody({ item }: { item: ToolItem }) {
       return (
         <div className="max-h-[320px] overflow-y-auto py-1.5">
           <div className="px-3 pb-1 font-mono text-[11px] text-mute">
-            <span className="text-mute-2">query</span> {v.query}
+            <span data-find-skip className="text-mute-2">query</span> {v.query}
           </div>
           {[...groups].map(([path, hits]) => (
             <div key={path} className="px-3 py-1">
@@ -374,7 +385,7 @@ function ToolBody({ item }: { item: ToolItem }) {
                 (h, i) =>
                   (h.text || h.line != null) && (
                     <div key={i} className="flex gap-2 font-mono text-[11px] leading-[1.6]">
-                      <span className="w-10 shrink-0 text-right text-mute-2 tabular">{h.line}</span>
+                      <span data-find-skip className="w-10 shrink-0 text-right text-mute-2 tabular">{h.line}</span>
                       <span className="min-w-0 truncate text-mute">
                         <Highlighted code={h.text ?? ""} lang={languageFor(path)} />
                       </span>
@@ -395,7 +406,7 @@ function ToolBody({ item }: { item: ToolItem }) {
         <div className="px-3 py-2">
           {v.query && (
             <div className="mb-1.5 font-mono text-[11px] text-mute">
-              <span className="text-mute-2">query</span> {v.query}
+              <span data-find-skip className="text-mute-2">query</span> {v.query}
             </div>
           )}
           {v.answer && <Markdown text={v.answer} className="mb-2 text-[12.5px]" />}
@@ -447,7 +458,7 @@ function ToolBody({ item }: { item: ToolItem }) {
               // The sunset card under the transcript carries the options; don't repeat them here.
               <div key={i} className="flex flex-wrap items-center gap-2">
                 {q.question !== item.title && <span className="min-w-0 text-[13px] font-bold text-ink">{q.question}</span>}
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-sun-1/12 px-2.5 py-1 text-[11.5px] font-bold text-sun-1 shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)]">
+                <span data-find-skip className="inline-flex items-center gap-1.5 rounded-full bg-sun-1/12 px-2.5 py-1 text-[11.5px] font-bold text-sun-1 shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)]">
                   <ArrowDown className="tf-loop size-3 animate-bounce" />
                   Answer in the card below · {q.options.length} option{q.options.length === 1 ? "" : "s"}
                 </span>
@@ -474,7 +485,7 @@ function ToolBody({ item }: { item: ToolItem }) {
                 </div>
                 {q.answer != null && !q.options.some((o) => q.answer === o || q.answer?.split(/\s*,\s*/).includes(o)) && (
                   <div className="mt-1.5 rounded-md bg-white/[0.04] px-2.5 py-1.5 text-xs text-ink-2 shadow-hairline">
-                    <span className="kicker mr-2">answer</span>
+                    <span data-find-skip className="kicker mr-2">answer</span>
                     {q.answer}
                   </div>
                 )}
@@ -587,13 +598,13 @@ function GenericBody({ item }: { item: ToolItem }) {
     <div>
       {args && args !== "{}" && (
         <div className="px-1">
-          <div className="kicker px-2 pt-2">args</div>
+          <div data-find-skip className="kicker px-2 pt-2">args</div>
           <CodeBlock code={args} lang="json" className="mx-1 mt-1 mb-2" maxHeight={260} />
         </div>
       )}
       {item.output != null && item.output !== "" && (
         <div className="border-t border-line">
-          <div className="kicker px-3 pt-2">output</div>
+          <div data-find-skip className="kicker px-3 pt-2">output</div>
           <AnsiText text={item.output} follow={item.status === "running"} />
         </div>
       )}

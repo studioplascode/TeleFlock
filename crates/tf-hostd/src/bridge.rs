@@ -152,6 +152,24 @@ pub struct PlanTier {
     pub thinking_level: Option<String>,
 }
 
+/// `getRoleModels` / `setRoleModels` result (bridge ≥ 2.1.0, `caps.roleModels`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RoleModelsState {
+    /// Roles the session layers set (omp runtime overrides and `--config` overlays).
+    pub session: std::collections::BTreeMap<String, String>,
+    /// Roles the host's config sets (global, then project).
+    pub host: std::collections::BTreeMap<String, String>,
+    pub session_chains: std::collections::BTreeMap<String, Vec<String>>,
+    pub host_chains: std::collections::BTreeMap<String, Vec<String>>,
+    /// The session's model now (`provider/id`).
+    pub active: Option<String>,
+    /// The `--config` overlays omp was started with.
+    pub overlays: Vec<String>,
+    /// `setRoleModels`: why the session did not switch to a changed `default` role.
+    pub warning: Option<String>,
+}
+
 /// Data-plane features a bridge announces in `hello.caps` (bridge ≥ 2.0.0; all off before).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,6 +186,45 @@ pub struct BridgeCaps {
     /// `prompt` (text, images, delivery).
     #[serde(default)]
     pub prompt: bool,
+    /// `getRoleModels` / `setRoleModels` (2.1.0): the session's own omp model roles and fallback
+    /// chains, applied as omp runtime overrides (needs omp's settings internals).
+    #[serde(default)]
+    pub role_models: bool,
+    /// `retry` (2.1.0) for the main session: omp's own `AgentSession.retry()` (F5).
+    #[serde(default)]
+    pub retry: bool,
+    /// `retry` for subagents, `resumeTree` and `failedTails` (2.1.0): omp's lifecycle manager,
+    /// task executor and background job manager were found.
+    #[serde(default)]
+    pub resume_tree: bool,
+    /// `turn_error` events (2.1.0) for the main session and its subagents.
+    #[serde(default)]
+    pub turn_error: bool,
+    /// The `context` guard that keeps limit errors out of model requests, and `setAutoResume` (2.1.0).
+    #[serde(default)]
+    pub limit_guard: bool,
+    /// Warnings omp only shows in its TUI reach the live feed as `notice` events (2.1.0): extension
+    /// `ui.notify`, retry fallbacks, config warnings (`key`: one row however often a resync repeats
+    /// it). Assistant messages carry no fallback-credit token.
+    #[serde(default)]
+    pub notices: bool,
+    /// The session's background jobs (2.1.0): `jobs` / `jobCancel` ops and the `jobs` event
+    /// (`ops::jobs`).
+    #[serde(default)]
+    pub jobs: bool,
+    /// `context` (2.1.0): what fills the session's context window, omp's own `/context` breakdown
+    /// (`ops::xray`).
+    #[serde(default)]
+    pub context: bool,
+    /// `restorable` / `restore` (2.1.0): omp's own `hasRestorableTurn` and `--restore`
+    /// (`restoreSession`) for the live session (`crate::restart`).
+    #[serde(default)]
+    pub restore: bool,
+    /// `restore {turn?, subagentIds?}` (2.1.0): omp's restore for the listed parts only, the
+    /// session's own turn and the named subagents (`crate::restart` restores what is safe to
+    /// repeat and nothing else).
+    #[serde(default)]
+    pub restore_select: bool,
 }
 
 impl BridgeCaps {
@@ -192,6 +249,8 @@ pub struct BridgeSession {
     pub state: CtlState,
     pub connected_at: Millis,
     pub caps: BridgeCaps,
+    /// Background jobs on the board card (the latest `jobs` event; `None` while there are none).
+    pub jobs: Option<tf_proto::JobsSummary>,
     /// The connection serving it (a reconnect is a new connection).
     #[serde(skip)]
     pub conn: u64,
@@ -282,6 +341,12 @@ pub enum BridgeEvent {
         done: bool,
         error: Option<String>,
     },
+    /// The session's background jobs changed (bridge ≥ 2.1.0, `caps.jobs`); the summary is in
+    /// [`BridgeSession::jobs`].
+    Jobs { session_id: String },
+    /// A turn of the session's main agent or one of its subagents ended on an error omp gave up on
+    /// (bridge ≥ 2.1.0, `caps.turnError`; docs/bridge-protocol.md "Resume").
+    TurnError { session_id: String, error: TurnError },
 }
 
 impl BridgeEvent {
@@ -295,9 +360,54 @@ impl BridgeEvent {
             | Self::PlanReviewRequested { session_id, .. }
             | Self::PlanReviewResolved { session_id, .. }
             | Self::QueueUpdate { session_id, .. }
-            | Self::BtwDelta { session_id, .. } => session_id,
+            | Self::BtwDelta { session_id, .. }
+            | Self::Jobs { session_id }
+            | Self::TurnError { session_id, .. } => session_id,
         }
     }
+}
+
+/// What stopped one failed turn (`turn_error` event, `failedTails` entry; bridge ≥ 2.1.0).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TurnError {
+    /// omp registry id of the agent that failed (the main agent or a subagent).
+    pub agent_id: String,
+    pub parent_id: Option<String>,
+    /// The main session (else a subagent).
+    pub main: bool,
+    /// The failing session's own omp session id (a subagent's differs from the root's).
+    pub session_id: Option<String>,
+    pub session_file: Option<String>,
+    /// `error` (`failedTails` also lists `aborted` tails).
+    pub stop_reason: String,
+    /// omp's classification: `usageLimit`, `rateLimit` or `other`.
+    pub kind: String,
+    /// omp's rate-limit reason (`QUOTA_EXHAUSTED`, `RATE_LIMIT_EXCEEDED`, …).
+    pub reason: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub error_status: Option<u16>,
+    /// The error text (≤ 500 chars).
+    pub message: String,
+    /// When the provider said to try again (omp's retry-after / reset parser).
+    pub retry_at: Option<Millis>,
+    /// When the turn failed.
+    pub at: Millis,
+    /// `failedTails`: the registry status (`idle`, `parked`, `retrying`, …).
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FailedTails {
+    pub main_id: Option<String>,
+    pub tails: Vec<TurnError>,
+}
+
+#[derive(Deserialize)]
+struct Started {
+    started: bool,
 }
 
 /// Typed bridge failure. Convert with `ApiError::from`.
@@ -675,6 +785,24 @@ impl BridgeHandle {
             .await
     }
 
+    /// The session's own and the host's model roles and fallback chains (`caps.roleModels`).
+    pub async fn get_role_models(&self, session_id: &str) -> Result<RoleModelsState, BridgeError> {
+        self.typed(session_id, "getRoleModels", json!({}), QUICK).await
+    }
+
+    /// Replaces the session's own roles and chains (omp runtime overrides). `overlay`: the
+    /// per-agent `--config` file hostd just rewrote, which the extension reloads first.
+    pub async fn set_role_models(
+        &self,
+        session_id: &str,
+        roles: &std::collections::BTreeMap<String, String>,
+        chains: &std::collections::BTreeMap<String, Vec<String>>,
+        overlay: Option<&str>,
+    ) -> Result<RoleModelsState, BridgeError> {
+        self.typed(session_id, "setRoleModels", json!({ "roles": roles, "fallbackChains": chains, "overlay": overlay }), TUI)
+            .await
+    }
+
     pub async fn set_fast(&self, session_id: &str, on: bool) -> Result<CtlState, BridgeError> {
         self.typed(session_id, "setFast", json!({ "on": on }), TUI)
             .await
@@ -848,6 +976,23 @@ impl BridgeHandle {
 
     pub async fn abort(&self, session_id: &str) -> Result<(), BridgeError> {
         self.unit(session_id, "abort", json!({}), QUICK).await
+    }
+
+    /// omp's F5 (2.1.0 `retry`): the main session's `AgentSession.retry()`, or subagent `agent_id`
+    /// resumed as a job of its parent (`caps.resumeTree`). False: nothing to retry, or busy.
+    pub async fn retry(&self, session_id: &str, agent_id: Option<&str>) -> Result<bool, BridgeError> {
+        let r: Started = self.typed(session_id, "retry", json!({ "agentId": agent_id }), TUI).await?;
+        Ok(r.started)
+    }
+
+    /// The sessions of the omp process whose last turn failed or was stopped (2.1.0 `failedTails`).
+    pub async fn failed_tails(&self, session_id: &str) -> Result<FailedTails, BridgeError> {
+        self.typed(session_id, "failedTails", json!({}), QUICK).await
+    }
+
+    /// Turns the bridge's `context` limit guard on or off for the whole omp process (2.1.0 `limitGuard`).
+    pub async fn set_auto_resume(&self, session_id: &str, on: bool) -> Result<(), BridgeError> {
+        self.unit(session_id, "setAutoResume", json!({ "on": on }), QUICK).await
     }
 }
 
@@ -1134,7 +1279,8 @@ struct ResolvedFrame {
 }
 
 fn on_line(shared: &Shared, conn_id: u64, line: &str) {
-    let msg: Value = match serde_json::from_str(line) {
+    // Lone UTF-16 surrogates (omp cuts text by UTF-16 index) are repaired, not a dropped frame.
+    let msg: Value = match crate::lossy_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
             warn!(conn_id, "bridge: bad json: {e}");
@@ -1218,6 +1364,7 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
         state: h.state.unwrap_or_default(),
         connected_at: now_ms(),
         caps: h.caps,
+        jobs: None,
         conn: conn_id,
     };
     let event = {
@@ -1428,6 +1575,23 @@ fn on_event(shared: &Shared, conn_id: u64, msg: Value) {
             }),
             Err(e) => {
                 warn!("bridge: bad btw_delta: {e}");
+                None
+            }
+        },
+        "jobs" => match serde_json::from_value::<tf_proto::JobsSummary>(data) {
+            Ok(jobs) => {
+                session.jobs = crate::ops::jobs::board_summary(jobs);
+                Some(BridgeEvent::Jobs { session_id })
+            }
+            Err(e) => {
+                warn!("bridge: bad jobs: {e}");
+                None
+            }
+        },
+        "turn_error" => match serde_json::from_value::<TurnError>(data) {
+            Ok(error) => Some(BridgeEvent::TurnError { session_id, error }),
+            Err(e) => {
+                warn!("bridge: bad turn_error: {e}");
                 None
             }
         },
@@ -2078,5 +2242,15 @@ mod tests {
         assert_eq!((req["op"].clone(), req["params"].clone()), (json!("agentCmd"), json!({ "cmd": "chat", "agentId": "Sub", "text": "go on" })));
         ext.ok(&req, json!({})).await;
         call.await.unwrap().unwrap();
+    }
+
+    /// A 2.0.0 bridge announces no 2.1.0 features: each defaults off, so its sessions keep working
+    /// as before.
+    #[test]
+    fn notices_cap_is_off_for_older_bridges() {
+        let old: BridgeCaps = serde_json::from_str(r#"{"live":1,"dialogs":true,"subagentCtl":true,"prompt":true}"#).unwrap();
+        assert!(old.data_plane() && !old.notices);
+        let new: BridgeCaps = serde_json::from_str(r#"{"live":1,"dialogs":true,"subagentCtl":true,"prompt":true,"notices":true}"#).unwrap();
+        assert!(new.notices);
     }
 }

@@ -195,6 +195,11 @@ pub fn validate(mut d: AutomationDraft) -> Result<AutomationDraft, String> {
         return Err("Write the prompt the agent starts with.".into());
     }
     d.model = d.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    let own = crate::agentcfg::AgentOmp { role_models: d.role_models.clone(), fallback_chains: d.fallback_chains.clone() };
+    own.validate().map_err(|e| e.message)?;
+    if let Some(p) = &d.auto_answer {
+        p.validate().map_err(|e| e.message)?;
+    }
     Ok(d)
 }
 
@@ -237,7 +242,10 @@ mod tests {
             model: Some(" ".into()),
             thinking: None,
             plan: false,
+            role_models: Default::default(),
+            fallback_chains: Default::default(),
             catch_up: true,
+            auto_answer: None,
         }
     }
 
@@ -277,6 +285,10 @@ mod tests {
         assert!(bad(&|d| d.cwd = "relative/dir".into()).contains("absolute"));
         assert!(bad(&|d| d.prompt = "".into()).contains("prompt"));
         assert!(bad(&|d| d.worktree = true).contains("git repository"));
+        assert!(bad(&|d| _ = d.role_models.insert("smol".into(), "no-provider".into())).contains("model role `smol`"));
+        assert!(bad(&|d| _ = d.fallback_chains.insert("default".into(), vec!["a b/c".into()])).contains("fallback chain `default`"));
+        let short = tf_proto::autoanswer::AutoAnswer { enabled: true, after_secs: 30, only_when_no_app: false };
+        assert!(bad(&|d| d.auto_answer = Some(short.clone())).contains("afterSecs"));
         // Plan mode may start without a prompt.
         let mut d = draft(dir.path());
         d.prompt = String::new();
@@ -307,7 +319,10 @@ mod tests {
             model: None,
             thinking: Some(tf_proto::ThinkingLevel::High),
             plan: false,
+            role_models: [("smol".to_string(), "openai/gpt-5-mini:low".to_string())].into(),
+            fallback_chains: [("default".to_string(), vec!["anthropic/claude-sonnet-5".to_string(), "openai/*".to_string()])].into(),
             catch_up: true,
+            auto_answer: Some(tf_proto::autoanswer::AutoAnswer { enabled: true, after_secs: 1_200, only_when_no_app: true }),
             herdr_session: "tf-lab".into(),
             created_at: 1,
             updated_at: 2,

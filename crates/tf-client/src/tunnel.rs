@@ -348,7 +348,17 @@ mod tests {
         let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let listeners = bind_local(Some(port)).await.unwrap();
+        // See [`bind_when_free`]: the port may stay busy for a moment after the probe closed.
+        let mut tries = 0;
+        let listeners = loop {
+            match bind_local(Some(port)).await {
+                Err(e) if e.code == "port_in_use" && tries < 500 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => break other.unwrap(),
+            }
+        };
         assert_eq!(listeners[0].local_addr().unwrap().port(), port);
         assert!(listeners[0].local_addr().unwrap().ip().is_loopback());
         for l in &listeners {
@@ -386,7 +396,7 @@ mod tests {
         }
         let err = bind_local(Some(port)).await.unwrap_err();
         assert_eq!(err.code, "port_in_use", "{err:?}");
-        std::net::TcpListener::bind(("127.0.0.1", port)).expect("the IPv4 listener is not kept");
+        bind_when_free(port);
     }
 
     /// The host can't tell (offline, an older tf-hostd): only the lease counts.
@@ -404,6 +414,21 @@ mod tests {
                 Some(w)
             })
         })
+    }
+
+    /// Binds `port` on `127.0.0.1` once it is free, and says when it is not within 5 s. A
+    /// listener that was closed a moment ago can still hold the port: a test thread that forks
+    /// meanwhile gives its child a copy of every open socket, and the copy lasts until the child
+    /// reaches `exec` (milliseconds, more under load). Not the tunnel's doing, so not a failure.
+    fn bind_when_free(port: u16) -> std::net::TcpListener {
+        for _ in 0..500 {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(l) => return l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => panic!("port {port}: {e}"),
+            }
+        }
+        panic!("port {port} is not released");
     }
 
     /// A sign-in tunnel registered like `Tunnels::open` does, serving no host.
@@ -436,7 +461,7 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await; // the aborted accept loop drops its listener
         }
-        std::net::TcpListener::bind(("127.0.0.1", info.local_port)).expect("the port is released");
+        bind_when_free(info.local_port);
     }
 
     #[tokio::test(start_paused = true)]
@@ -478,7 +503,7 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await; // the aborted accept loop drops its listener
         }
-        std::net::TcpListener::bind(("127.0.0.1", port)).expect("the port is released");
+        bind_when_free(port);
     }
 
     #[tokio::test(start_paused = true)]

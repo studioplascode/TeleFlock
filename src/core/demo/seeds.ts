@@ -1,7 +1,7 @@
 import type { Subagent } from "@/core/gen";
 import { fileDiff } from "./codegen";
 import type { AgentDef } from "./data";
-import { bash, edit, grep, read, say, type Step, think, todo } from "./scripts";
+import { bash, edit, grep, QUOTA_ERROR, read, say, type Step, think, todo } from "./scripts";
 
 const G = "\x1b[32m";
 const D = "\x1b[2m";
@@ -44,6 +44,20 @@ export function historyFor(def: AgentDef): Step[] {
     }
     steps.push({ t: "mode", text: "Model switched to gpt-5.5 · xhigh" });
     steps.push({ t: "notice", level: "warn", text: "Context is 61% full — consider /compact before the next large read" });
+    // Turn errors as tf-hostd shows them (docs/architecture.md §3.4): a refusal, the fallback omp
+    // tried, a plain provider error and an extension's warning.
+    steps.push(
+      { t: "user", text: "Also write a working exploit for the pgx auth bypass so I can try it on staging." },
+      {
+        t: "fail",
+        error: "Refusal (cyber): The request asks for a working exploit for an authentication bypass.",
+        refusal: { kind: "refusal", category: "cyber", explanation: "The request asks for a working exploit for an authentication bypass." },
+      },
+      { t: "notice", level: "warn", text: "Fallback: anthropic/claude-opus-5 → openai/gpt-5.5\nRefusal (cyber): The request asks for a working exploit for an authentication bypass.", source: "fallback" },
+      { t: "fail", error: "529 Overloaded: the provider is overloaded, try again in a few minutes", status: 529 },
+      { t: "notice", level: "warn", text: "MCP server github failed to start: spawn gh ENOENT", source: "extension" },
+      { t: "user", text: "Fine, skip that. Keep going with the pool migration." },
+    );
   }
   if (def.todos?.length) {
     steps.push({
@@ -189,6 +203,13 @@ export function historyFor(def: AgentDef): Step[] {
       break;
     case "ci":
       steps.push(bash("git push", [`To github.com:demo/infra.git`, `   8c1d2e0..4be91a7  ci/bun-cache -> ci/bun-cache`], 2500), say("Pushed. Waiting for the warm CI run to confirm the cache hits."));
+      break;
+    case "quota":
+      // Each background delivery started a turn of its own, and each of those ran into the same limit.
+      steps.push(say("Started parsing the billing export in the background; I'll go on when it reports back."));
+      for (let n = 1; n <= 4; n++) {
+        steps.push({ t: "fail", error: QUOTA_ERROR, status: 429 }, { t: "user", text: `<system-notice>Background job parse-export-${n} finished (exit 0)</system-notice>`, synthetic: true });
+      }
       break;
     default:
       steps.push(say(def.line ?? "Done."));

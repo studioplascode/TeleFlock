@@ -9,6 +9,8 @@ import {
   editorFor,
   isModified,
   matchesQuery,
+  keepThinking,
+  FALLBACK_CHAINS_KEY,
   MODEL_ROLES_KEY,
   OMP_TABS,
   OTHER_TAB,
@@ -72,7 +74,10 @@ describe("editors", () => {
     expect(editorFor(byId("compaction.methodOrder"))).toBe("members");
     expect(editorFor(byId("statusLine.leftSegments"))).toBe("members");
     expect(editorFor(byId("contextFiles.extra"))).toBe("json");
-    expect(editorFor(byId("retry.fallbackChains"))).toBe("json");
+    expect(editorFor(byId("retry.fallbackChains"))).toBe("chains");
+    expect(editorFor(byId(FALLBACK_CHAINS_KEY))).toBe("chains");
+    // Only that record: other records stay JSON.
+    expect(editorFor({ ...byId("retry.fallbackChains"), id: "retry.somethingElse" })).toBe("json");
     expect(editorFor({ ...byId("workspace.additionalDirectories"), value: [{ path: "/x" }] })).toBe("json");
   });
 
@@ -136,6 +141,18 @@ describe("model roles", () => {
     expect(formatRoleSelector("openai/gpt-5")).toBe("openai/gpt-5");
   });
 
+  test("a new model keeps the level only when it offers it", () => {
+    const models = [
+      { provider: "a", id: "b", thinking: ["low" as const, "high" as const] },
+      { provider: "a", id: "c", thinking: [] },
+    ];
+    expect(keepThinking(models, "a/b", "high")).toBe("high");
+    expect(keepThinking(models, "a/b", "max")).toBeUndefined();
+    expect(keepThinking(models, "a/c", "max")).toBe("max");
+    expect(keepThinking(models, "x/unknown", "low")).toBe("low");
+    expect(keepThinking(models, "a/b", undefined)).toBeUndefined();
+  });
+
   test("rows: built-ins in omp's order, then custom roles", () => {
     const record = roleRecord({ designer: "openai/gpt-5", default: "a/b:high", junk: 3 });
     expect(record).toEqual({ designer: "openai/gpt-5", default: "a/b:high" });
@@ -167,5 +184,16 @@ describe("demo host", () => {
     demo.set([{ key: "auth.broker.token", value: "secret" }]);
     expect(get("auth.broker.token")).toMatchObject({ redacted: true });
     expect(get("auth.broker.token")?.value).toBeUndefined();
+  });
+
+  test("the retry group's sibling settings and the chains record", () => {
+    const demo = new DemoOmpSettings();
+    const get = (id: string) => demo.get().settings.find((s) => s.id === id);
+    expect(get("retry.modelFallback")?.value).toBe(true);
+    expect(get("retry.fallbackOn")?.values).toEqual(["any", "usage-limit", "except-usage-limit"]);
+    expect(demo.chains()).toEqual(get(FALLBACK_CHAINS_KEY)?.value as Record<string, string[]>);
+    demo.set([{ key: FALLBACK_CHAINS_KEY, value: { "openai/*": ["openrouter/*"] } }]);
+    expect(demo.chains()).toEqual({ "openai/*": ["openrouter/*"] });
+    expect(() => demo.set([{ key: FALLBACK_CHAINS_KEY, value: ["a/b"] }])).toThrow(/record/);
   });
 });

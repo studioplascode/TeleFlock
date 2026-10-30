@@ -14,6 +14,7 @@ import type { TunnelInfo } from "./TunnelInfo";
 import type { TunnelListResult } from "./TunnelListResult";
 import type { TunnelOpenParams } from "./TunnelOpenParams";
 import type { TunnelRef } from "./TunnelRef";
+import type { UiPresence } from "./UiPresence";
 import type { UpdateCheckParams } from "./UpdateCheckParams";
 import type { UpdateStatus } from "./UpdateStatus";
 import type { UrlParams } from "./UrlParams";
@@ -24,6 +25,7 @@ export interface AppMethods {
   "app.openExternal": { params: UrlParams; result: Empty };
   "app.notifyTest": { params: Empty; result: Empty };
   "app.notifyRead": { params: NotifyReadParams; result: Empty };
+  "app.presence": { params: UiPresence; result: Empty };
   "app.updateStatus": { params: Empty; result: UpdateStatus };
   "app.updateCheck": { params: UpdateCheckParams; result: UpdateStatus };
   "app.updateInstall": { params: Empty; result: UpdateStatus };

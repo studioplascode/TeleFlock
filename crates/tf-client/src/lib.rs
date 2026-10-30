@@ -8,6 +8,7 @@ mod diag;
 mod engine;
 mod link;
 mod platform;
+mod presence;
 mod secrets;
 mod session_cache;
 mod sessions;
@@ -18,5 +19,5 @@ mod util;
 
 pub use deploy::HOSTD_VERSION;
 pub use engine::{Engine, EngineConfig, Resume};
-pub use platform::{BadgeState, NotifyStyle, Platform};
+pub use platform::{BadgeState, NotifyStyle, Platform, SystemPresence};
 pub use tf_proto;

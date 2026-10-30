@@ -31,6 +31,8 @@ pub struct TermRegistry {
 struct TermEntry {
     client_id: String,
     pane_id: String,
+    /// Opened in control mode (drives the pane), not as an observer.
+    control: bool,
     input: TerminalInput,
     /// Stops the pump (which drops the event receiver and so kills the bridge).
     stop: CancellationToken,
@@ -80,6 +82,11 @@ impl TermRegistry {
     /// Panes that currently have a TeleFlock terminal attached.
     pub fn panes(&self) -> Vec<String> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).values().map(|e| e.pane_id.clone()).collect()
+    }
+
+    /// Terminals attached in control mode (`herdr_health`: someone is typing in a pane).
+    pub fn controlled(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).values().filter(|e| e.control).count()
     }
 }
 
@@ -231,6 +238,8 @@ async fn start_session(herdr: &tf_herdr::HerdrClient, pane_id: &str, mode: Termi
         if e.code == tf_herdr::code::STREAM_CONFLICT || e.message.contains("already has an attached client") {
             ApiError::new("busy", "another client controls this terminal")
                 .with_hint("Open it with takeover to take control, or open it read-only.")
+        } else if crate::herdr_health::is_connect_failure(&e.message) {
+            crate::herdr_health::down_api_error(None)
         } else {
             map_herdr(e)
         }
@@ -238,6 +247,10 @@ async fn start_session(herdr: &tf_herdr::HerdrClient, pane_id: &str, mode: Termi
 }
 
 pub async fn open(ctx: &Ctx, p: TermOpenParams, client: &ClientHandle) -> Result<TermOpened, ApiError> {
+    // herdr is down: say so (and that it comes back) instead of a socket error.
+    if let Some(e) = crate::herdr_health::down_error(&ctx.herdr_session) {
+        return Err(e);
+    }
     let pane_id = resolve_target(ctx, &p.target).await?;
     let mode = match p.mode {
         TermMode::Control => TerminalMode::Control,
@@ -255,7 +268,10 @@ pub async fn open(ctx: &Ctx, p: TermOpenParams, client: &ClientHandle) -> Result
     let (mut events, input) = session.split();
     let term_id = crate::util::new_id("t");
     let stop = CancellationToken::new();
-    ctx.terms.insert(term_id.clone(), TermEntry { client_id: client.id().to_string(), pane_id: pane_id.clone(), input, stop: stop.clone() });
+    ctx.terms.insert(
+        term_id.clone(),
+        TermEntry { client_id: client.id().to_string(), pane_id: pane_id.clone(), control: matches!(mode, TerminalMode::Control), input, stop: stop.clone() },
+    );
 
     let registry = ctx.terms.clone();
     let herdr = ctx.herdr.clone();

@@ -1,0 +1,18 @@
+/* Find in a session (painter.ts): every match in the rows on screen, and the current one. */
+::highlight(tf-find) {
+  background-color: rgb(250 204 21 / 0.3);
+  color: inherit;
+}
+
+::highlight(tf-find-current) {
+  background-color: rgb(251 146 60 / 0.95);
+  color: rgb(17 17 24);
+}
+
+/* Without the CSS Custom Highlight API (older WebKitGTK) the current match's row gets a ring. */
+@supports not selector(::highlight(tf-find)) {
+  [data-find-active] > * {
+    border-radius: 16px;
+    box-shadow: 0 0 0 2px rgb(251 146 60 / 0.75);
+  }
+}

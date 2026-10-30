@@ -1,4 +1,5 @@
-//! `gh.*` methods: pull request status, create and merge through the GitHub CLI.
+//! `gh.*` methods: pull request status, create and merge through the GitHub CLI; its sign-in
+//! (`gh.authStatus`, `gh.authStart`) lives in [`crate::ops::gh_auth`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,29 +10,29 @@ use tf_proto::{ApiError, ChecksSummary, Empty, HostMethod, MergeMethod, PrCreate
 use crate::clients::ClientHandle;
 use crate::ops::fs::resolve_path;
 use crate::ops::git::{self, CmdOut};
+use crate::ops::gh_auth;
 use crate::ops::{to_value, Ctx};
 
-const PR_FIELDS: &str = "number,url,title,state,isDraft,mergeable,statusCheckRollup";
+const PR_FIELDS: &str = "number,url,title,state,isDraft,mergeable,statusCheckRollup,mergeStateStatus,baseRefName";
 const GH_TIMEOUT: Duration = Duration::from_secs(60);
 const GH_SLOW: Duration = Duration::from_secs(180);
 
-pub async fn handle(_ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
+pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
         HostMethod::GhPrStatus(p) => to_value(pr_status(&resolve_path(&p.cwd)?).await?),
         HostMethod::GhPrCreate(p) => to_value(pr_create(&p).await?),
         HostMethod::GhPrMerge(p) => to_value(pr_merge(&p).await?),
+        HostMethod::GhAuthStatusReq(_) => to_value(gh_auth::auth_status(ctx).await?),
+        HostMethod::GhAuthStart(p) => to_value(gh_auth::auth_start(ctx, p).await?),
         other => Err(ApiError::new("unknown_method", format!("{} is not a gh method", other.name()))),
     }
 }
 
 fn gh_bin() -> Result<PathBuf, ApiError> {
-    git::resolve_bin("gh").ok_or_else(|| {
-        ApiError::new("gh_error", "the GitHub CLI (gh) is not installed on this host")
-            .with_hint("Install it from https://cli.github.com and run `gh auth login` on the host.")
-    })
+    git::resolve_bin("gh").ok_or_else(gh_auth::no_gh)
 }
 
-async fn gh(cwd: &Path, args: &[&str], timeout: Duration) -> Result<CmdOut, ApiError> {
+pub(crate) async fn gh(cwd: &Path, args: &[&str], timeout: Duration) -> Result<CmdOut, ApiError> {
     let bin = gh_bin()?;
     let env = [("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1"), ("NO_COLOR", "1"), ("GIT_TERMINAL_PROMPT", "0"), ("LC_ALL", "C")];
     git::run_cmd(&bin, args, Some(cwd), &env, None, timeout).await.map_err(|e| match e.kind() {
@@ -46,7 +47,7 @@ pub(crate) fn gh_failure(out: &CmdOut) -> ApiError {
     let lower = msg.to_lowercase();
     let err = ApiError::new("gh_error", if msg.is_empty() { format!("gh failed (exit {})", out.code) } else { msg.clone() });
     if lower.contains("gh auth login") || lower.contains("not logged into") || lower.contains("authentication") || lower.contains("http 401") {
-        err.with_hint("gh is not authenticated on this host. Run `gh auth login` there (or set GH_TOKEN for the daemon).")
+        err.with_hint("gh is not signed in on this host. Sign in from Host setup in the app (or run `gh auth login` on the host, or set GH_TOKEN for the daemon).")
     } else if lower.contains("not a git repository") {
         err.with_hint("This folder is not inside a git repository.")
     } else if lower.contains("none of the git remotes") || lower.contains("no git remotes") || lower.contains("could not determine") {
@@ -64,12 +65,12 @@ pub(crate) fn gh_failure(out: &CmdOut) -> ApiError {
     }
 }
 
-fn is_no_pr(out: &CmdOut) -> bool {
+pub(crate) fn is_no_pr(out: &CmdOut) -> bool {
     let m = out.message().to_lowercase();
     m.contains("no pull requests found") || m.contains("could not resolve to a pullrequest") || m.contains("no open pull requests")
 }
 
-/// Parses `gh pr view --json number,url,title,state,isDraft,mergeable,statusCheckRollup`.
+/// Parses `gh pr view --json` with [`PR_FIELDS`].
 pub(crate) fn parse_pr(v: &Value) -> Option<PrInfo> {
     let mergeable = match v.get("mergeable").and_then(Value::as_str) {
         Some("MERGEABLE") => Some(true),
@@ -100,6 +101,8 @@ pub(crate) fn parse_pr(v: &Value) -> Option<PrInfo> {
         draft: v.get("isDraft").and_then(Value::as_bool).unwrap_or(false),
         mergeable,
         checks,
+        merge_state: v.get("mergeStateStatus").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+        base_ref: v.get("baseRefName").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
     })
 }
 
@@ -181,7 +184,7 @@ mod tests {
     fn parses_pr_view_json() {
         let v = json!({
             "number": 42, "url": "https://github.com/o/r/pull/42", "title": "Add thing", "state": "OPEN",
-            "isDraft": true, "mergeable": "CONFLICTING",
+            "isDraft": true, "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY", "baseRefName": "main",
             "statusCheckRollup": [
                 {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
                 {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"},
@@ -195,9 +198,10 @@ mod tests {
         assert_eq!(pr.number, 42);
         assert!(pr.draft);
         assert_eq!(pr.mergeable, Some(false));
+        assert_eq!((pr.merge_state.as_deref(), pr.base_ref.as_deref()), (Some("DIRTY"), Some("main")));
         assert_eq!(pr.checks, Some(ChecksSummary { passed: 3, failed: 1, pending: 2 }));
         let none = parse_pr(&json!({"number": 1, "url": "u", "title": "t", "state": "MERGED", "isDraft": false, "mergeable": "UNKNOWN", "statusCheckRollup": []})).unwrap();
-        assert_eq!((none.mergeable, none.checks), (None, None));
+        assert_eq!((none.mergeable, none.checks, none.merge_state, none.base_ref), (None, None, None, None));
     }
 
     #[test]

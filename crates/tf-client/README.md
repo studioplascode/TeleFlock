@@ -74,6 +74,11 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
 * On reconnect, sessions that were open get a `Session{ev: reset}` (or `ended` if gone; one hostd
   has no answer or no session for yet is tried again after 1 s, doubling up to 30 s, while it stays
   open); open terminals get `Term{ev: closed}` when the link drops.
+* Mirror self-heal (`sessions::heal_due`, every 15 s): an open session whose copy here still shows a
+  running tool or a streaming reply 30 s after host state says the turn ended (card in review or
+  done, hostd's own copy with no tool open and nothing streaming), and that heard nothing from hostd
+  for 30 s, is re-opened with what it holds (`reset` to the UI, a warning in the log); the next one
+  waits 60 s, doubling up to 15 min while it keeps finding the same.
 * `notification_action`: `action_id` with an `answer` → `agent.answer`; `reply` text → free-text
   answer if the pending request accepts it, else `agent.prompt`; otherwise emits `OpenAgent`.
   Reconnects (≤ 30 s) when the host is offline.

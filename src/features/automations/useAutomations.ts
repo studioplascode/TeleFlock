@@ -59,9 +59,24 @@ export function useAutomations(hostId: string | undefined): AutomationsQuery {
   return { data, error: q.error, loading: q.loading, waiting: q.waiting, outdated, reload };
 }
 
-/** The editable draft of a saved automation. */
+/** The editable draft of a saved automation: everything it saved (the card's switch flips `enabled` on it). */
 export function toDraft(a: Automation): AutomationDraft {
-  return { id: a.id, name: a.name, enabled: a.enabled, schedule: a.schedule, cwd: a.cwd, worktree: a.worktree, prompt: a.prompt, model: a.model, thinking: a.thinking, plan: a.plan, catchUp: a.catchUp };
+  return {
+    id: a.id,
+    name: a.name,
+    enabled: a.enabled,
+    schedule: a.schedule,
+    cwd: a.cwd,
+    worktree: a.worktree,
+    prompt: a.prompt,
+    model: a.model,
+    thinking: a.thinking,
+    plan: a.plan,
+    roleModels: a.roleModels,
+    fallbackChains: a.fallbackChains,
+    catchUp: a.catchUp,
+    autoAnswer: a.autoAnswer,
+  };
 }
 
 export interface PreviewState {

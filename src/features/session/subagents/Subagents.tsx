@@ -1,13 +1,16 @@
 import type { Subagent, SubagentStatus } from "@/core/gen";
 import { cn, Elapsed, formatElapsed, formatUsd, Shimmer, type Status, StatusOrb } from "@/design";
 import { SubagentMeters } from "./SubagentMeters";
+import { outcomeOf } from "./grouping";
 
-export const SUB_STATUS: Record<SubagentStatus, Status> = { running: "running", done: "done", failed: "error", aborted: "idle", parked: "review" };
-export const SUB_LABEL: Record<SubagentStatus, string> = { running: "Running", done: "Done", failed: "Failed", aborted: "Aborted", parked: "Parked" };
+/** `parked` (omp's idle park, only from older hostds and caches) is a finished agent: green like done, not its own colour. */
+export const SUB_STATUS: Record<SubagentStatus, Status> = { running: "running", done: "done", failed: "error", aborted: "idle", parked: "done" };
+export const SUB_LABEL: Record<SubagentStatus, string> = { running: "Running", done: "Done", failed: "Failed", aborted: "Stopped", parked: "Done" };
 
 /** One subagent: orb, name, live line, completion estimate + context, timer. Click opens its transcript + controls. */
 export function SubagentCard({ sub, onOpen, dense = false }: { sub: Subagent; onOpen?: () => void; dense?: boolean }) {
   const running = sub.status === "running";
+  const outcome = outcomeOf(sub.status);
   return (
     <button
       type="button"
@@ -31,9 +34,9 @@ export function SubagentCard({ sub, onOpen, dense = false }: { sub: Subagent; on
         <SubagentMeters sub={sub} className="mt-1" />
       </span>
       <span className="flex shrink-0 flex-col items-end gap-0.5 text-2xs font-bold tabular">
-        <span className={cn(sub.status === "done" ? "text-done" : sub.status === "failed" ? "text-error" : "text-mute")}>
-          {sub.status === "done" && "✓ "}
-          {sub.status === "failed" && "✗ "}
+        <span className={cn(outcome === "done" ? "text-done" : outcome === "failed" ? "text-error" : "text-mute")}>
+          {outcome === "done" && "✓ "}
+          {outcome === "failed" && "✗ "}
           {sub.startedAt ? running ? <Elapsed since={sub.startedAt} /> : formatElapsed((sub.endedAt ?? sub.startedAt) - sub.startedAt) : SUB_LABEL[sub.status]}
         </span>
         {!dense && (sub.costUsd != null || sub.toolCount != null) && (

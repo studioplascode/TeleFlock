@@ -5,7 +5,9 @@ import type { LinkReason } from "@/core/gen";
 import { Button, EmptyState, Shimmer, Skeleton, Spinner, useNow } from "@/design";
 import { connAction } from "@/features/hosts/ConnStatusCard";
 import { PHASE_TEXT } from "@/features/shell/status";
+import { useHerdrDown } from "@/features/hosts/HerdrControls";
 import { hostCall, usePending } from "./api";
+import { HerdrGate } from "./HerdrGate";
 import { ParkedGate } from "./ParkedGate";
 
 function openTerminal(agentKey: string, paneId?: string) {
@@ -65,6 +67,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
   const [busy, run] = usePending();
   const waited = useLinkWait(agent);
   const host = useCore((s) => ({ status: s.status[hostId], name: s.profiles.find((p) => p.id === hostId)?.name ?? hostId }), (a, b) => a.status === b.status && a.name === b.name);
+  const herdr = useHerdrDown(hostId);
   if (!agent) return null;
 
   // The host isn't online: what shows is the copy of the session saved on this device (the app
@@ -94,6 +97,9 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
       </>
     );
   }
+
+  // The host's herdr server is not up: its agents ended or can't be seen. Say that, not the collab room.
+  if (herdr && !agent.parked && session.status !== "ended") return <HerdrGate agentKey={agentKey} health={herdr}>{children}</HerdrGate>;
 
   // Marked done and its pane closed: read-only until it resumes (a message resumes it too).
   if (agent.parked) return <ParkedGate agentKey={agentKey}>{children}</ParkedGate>;

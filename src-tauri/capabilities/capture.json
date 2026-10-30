@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "capture-window",
+  "description": "Quick capture window (desktop): events to and from the main window, dragging the undecorated box. Its other calls (capture_*) are app commands.",
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["capture"],
+  "permissions": ["core:event:default", "core:window:allow-start-dragging"]
+}

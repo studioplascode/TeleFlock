@@ -93,6 +93,14 @@ pub struct ParkedRecord {
     /// workspace is still open at the same folder.
     pub workspace_id: Option<String>,
     pub workspace_cwd: Option<String>,
+    /// Moving, or moved, to another host (`ops::moves`). `moving` is read back as `interrupted`
+    /// after a restart: no move survives the daemon.
+    pub moved: Option<tf_proto::ParkedMove>,
+    /// Not marked done: its omp process ended without anyone closing it (herdr stopped or
+    /// crashed, the host restarted, omp crashed or was killed) and nothing runs its session again
+    /// (`crate::restart`). The card sits in Review and comes back where it stopped
+    /// (`Parked.ended`).
+    pub ended: Option<tf_proto::autoresume::AgentEnded>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,13 +201,15 @@ impl Persist {
         if let Err(e) = crate::paths::restrict_file(&path) {
             warn!("restrict {}: {e}", path.display());
         }
-        let data = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<PersistData>(&bytes).unwrap_or_else(|e| {
-                warn!("{}: unreadable ({e}); starting fresh", path.display());
-                PersistData::default()
-            }),
-            Err(_) => PersistData::default(),
-        };
+        // A torn write of an earlier crash leaves temp files behind (`write_atomic`).
+        if let Some(home) = path.parent().filter(|h| !h.as_os_str().is_empty()) {
+            let n = crate::paths::sweep_stale_tmp(home);
+            if n > 0 {
+                tracing::info!("removed {n} stale temp file(s) under {}", home.display());
+            }
+        }
+        // An unreadable file is set aside (`state.json.bad-<ms>`), never overwritten by the next save.
+        let data = crate::paths::load_json::<PersistData>(&path);
         Arc::new(Self {
             path,
             data: Mutex::new(data),
@@ -394,5 +404,21 @@ mod tests {
         p.update(|d| d.version = 1);
         p.save_now();
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn a_corrupt_state_file_is_set_aside_and_a_save_leaves_it_alone() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("state.json");
+        // An empty file under the final name: what a power loss leaves when nothing was synced.
+        std::fs::write(&path, b"").unwrap();
+        let p = Persist::load(path.clone());
+        assert!(p.read(|d| d.sessions.is_empty()));
+        assert!(!path.exists(), "moved aside, not left to be overwritten");
+        p.session("lab", |s| s.turns.insert("t".into(), 1));
+        p.save_now();
+        assert_eq!(Persist::load(path.clone()).read(|d| d.sessions["lab"].turns["t"]), 1);
+        let bad: Vec<_> = std::fs::read_dir(td.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("state.json.bad-")).collect();
+        assert_eq!(bad.len(), 1, "{bad:?}");
     }
 }

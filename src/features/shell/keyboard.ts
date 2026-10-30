@@ -66,6 +66,7 @@ export const SHORTCUTS: readonly ShortcutGroup[] = [
     title: "Session",
     items: [
       { keys: caps(ACTIONS.stopTurn.shortcut), label: ACTIONS.stopTurn.label },
+      { keys: caps(ACTIONS.resumeTurn.shortcut), label: `${ACTIONS.resumeTurn.description} (also Alt R)` },
       { keys: ["1", "…", "9"], label: "Pick an answer" },
       { keys: ["N+1"], label: "Other… (the number after the last option)" },
       { keys: caps(ACTIONS.focusMode.shortcut), label: ACTIONS.focusMode.label },

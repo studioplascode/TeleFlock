@@ -14,8 +14,8 @@ use std::time::Duration;
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
 use serde_json::Value;
-use tf_proto::host::{FEATURE_SESSION_SYNC, FEATURE_ZSTD};
-use tf_proto::{ApiError, ClientMsg, HostState, Millis, ServerMsg, StatePatch};
+use tf_proto::host::{FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::{ApiError, ClientMsg, HostState, Millis, Presence, ServerMsg, StatePatch};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadBuf};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -40,13 +40,20 @@ pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 20 s); `accounts.prefer` reads and writes omp's config around the accounts (a quota report
 /// older than 5 min is read anew). The app must not give up while the host still finishes it.
 pub const ACCOUNTS_CHANGE_TIMEOUT: Duration = Duration::from_secs(180);
+/// `hostSync.*` (except `keyBegin`) run several omp commands on the host, each up to a minute on a
+/// slow one (`omp auth export|import`, `omp config list|set`, a model listing), and `apply` reads
+/// the plan before and after its writes.
+pub const HOST_SYNC_TIMEOUT: Duration = Duration::from_secs(180);
+/// Skill and plugin installs, upgrades, removals and switches run omp's CLI on the host (downloads:
+/// `bun install`, `git clone`, registry tarballs; up to 240 s), then read the list again.
+pub const PLUGINS_CHANGE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Receives everything the daemon pushes. Called from the link's reader task, in order.
 pub trait LinkSink: Send + Sync + 'static {
     /// Full state (initial snapshot or a resync after a revision gap).
     fn snapshot(&self, rev: u64, state: HostState);
     fn patch(&self, rev: u64, ops: Vec<StatePatch>);
-    /// `Pulse`, `Session`, `Term`, `Notify`.
+    /// `Pulse`, `Session`, `Term`, `Notify`, `NotifyAlert`, `NotifyDone`.
     fn push(&self, msg: ServerMsg);
     fn latency(&self, ms: u32);
 }
@@ -56,8 +63,12 @@ pub fn timeout_for(method: &str) -> Duration {
         "term.open" => TERM_OPEN_TIMEOUT,
         // `agent.archive {archived: false}` and `agent.prompt` resume a parked agent.
         "agent.start" | "agent.resume" | "agent.archive" | "agent.prompt" | "host.resume" | "worktree.create"
-        | "automation.run" => LAUNCH_TIMEOUT,
+        // `agent.autoResumeNow` may relaunch omp (a restart ticket brings an ended agent back).
+        | "automation.run" | "agent.autoResumeNow" => LAUNCH_TIMEOUT,
         "accounts.unlink" | "accounts.prefer" => ACCOUNTS_CHANGE_TIMEOUT,
+        "hostSync.export" | "hostSync.plan" | "hostSync.seal" | "hostSync.apply" => HOST_SYNC_TIMEOUT,
+        "skills.install" | "skills.update" | "plugins.install" | "plugins.remove" | "plugins.setEnabled" | "plugins.upgrade"
+        | "plugins.marketplaceAdd" | "plugins.marketplaceUpdate" => PLUGINS_CHANGE_TIMEOUT,
         _ => DEFAULT_TIMEOUT,
     }
 }
@@ -78,7 +89,7 @@ const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 
 /// Wire features this client asks hostd for in `hello` (`tf_proto::host`, point 7).
 pub fn requested_features() -> Vec<String> {
-    vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string()]
+    vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string(), FEATURE_PRESENCE.to_string()]
 }
 
 /// What hostd accepted (`welcome.features`; older daemons send none).
@@ -86,12 +97,14 @@ pub fn requested_features() -> Vec<String> {
 pub struct Features {
     pub zstd: bool,
     pub session_sync: bool,
+    /// Presence reports and routed notifications (hosts ≥ 0.7.0).
+    pub presence: bool,
 }
 
 impl Features {
     fn accepted(features: Option<&[String]>) -> Features {
         let has = |f: &str| features.is_some_and(|all| all.iter().any(|x| x == f));
-        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC) }
+        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE) }
     }
 }
 
@@ -515,6 +528,16 @@ impl Link {
         self.send(&ClientMsg::TermIn { term_id: term_id.to_string(), data })
     }
 
+    /// This device's presence (`presence` feature).
+    pub fn presence(&self, presence: &Presence) -> Result<(), ApiError> {
+        self.send(&ClientMsg::Presence { presence: presence.clone() })
+    }
+
+    /// Notifications this device marked read (`presence` feature).
+    pub fn notify_read(&self, ids: Vec<String>) -> Result<(), ApiError> {
+        self.send(&ClientMsg::NotifyRead { ids })
+    }
+
     /// Graceful goodbye before closing.
     pub fn bye(&self) {
         let _ = self.send(&ClientMsg::Bye);
@@ -537,9 +560,12 @@ impl Link {
                 sink.latency(ms);
             }
             ServerMsg::Welcome { .. } => {}
-            m @ (ServerMsg::Pulse { .. } | ServerMsg::Session { .. } | ServerMsg::Term { .. } | ServerMsg::Notify { .. }) => {
-                sink.push(m)
-            }
+            m @ (ServerMsg::Pulse { .. }
+            | ServerMsg::Session { .. }
+            | ServerMsg::Term { .. }
+            | ServerMsg::Notify { .. }
+            | ServerMsg::NotifyAlert { .. }
+            | ServerMsg::NotifyDone { .. }) => sink.push(m),
             ServerMsg::Snapshot { rev, state } => sink.snapshot(rev, state),
             ServerMsg::Patch { rev, ops } => sink.patch(rev, ops),
             ServerMsg::Error { error } => self.close(&error.to_string()),
@@ -889,5 +915,8 @@ mod tests {
         // omp's config read, read again, written and read around a quota report older than 5 min.
         assert!(timeout_for("accounts.prefer") >= OMP_USAGE_TIMEOUT + config * 4);
         assert_eq!(timeout_for("accounts.list"), DEFAULT_TIMEOUT);
+        // omp's credential export (≤ 60 s) and config reads on both sides of an apply.
+        assert_eq!(timeout_for("hostSync.apply"), HOST_SYNC_TIMEOUT);
+        assert_eq!(timeout_for("hostSync.keyBegin"), DEFAULT_TIMEOUT);
     }
 }

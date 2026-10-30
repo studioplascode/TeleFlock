@@ -60,6 +60,15 @@ const PERSIST_SLACK: Duration = Duration::from_secs(2);
 /// Rows hostd no longer has (live-only rows of an earlier tf-hostd) a history page drops at most
 /// before it gives up on paging further back.
 const UNKNOWN_MAX: usize = 32;
+/// The self-heal ([`heal_due`]): a mirror that shows a turn at work while host state says the
+/// agent finished, and that heard nothing from hostd, for this long is re-opened…
+const HEAL_AFTER: Duration = if cfg!(test) { Duration::from_millis(50) } else { Duration::from_secs(30) };
+/// …then the next one waits this long, twice as long for each further one in a row, up to
+/// [`HEAL_BACKOFF_MAX`] (quiet that long, the next run starts over).
+const HEAL_BACKOFF: Duration = if cfg!(test) { Duration::from_millis(400) } else { Duration::from_secs(60) };
+const HEAL_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+/// Newest rows [`Data::busy`] looks at.
+const BUSY_ROWS: usize = 64;
 
 /// One transcript row the mirror holds, with the hash hostd gave it (`None`: appended to since,
 /// or paged in by `session.history`).
@@ -139,6 +148,17 @@ fn split(mut meta: SessionMeta) -> (SessionMeta, Option<Arc<TreeInfo>>) {
 }
 
 impl Data {
+    /// The newest rows show a turn at work: a running tool, a reply or thinking still streaming.
+    fn busy(&self) -> bool {
+        use tf_proto::session::ToolStatus;
+        self.rows.iter().rev().take(BUSY_ROWS).any(|r| match &r.item {
+            TranscriptItem::Tool(t) => matches!(t.status, ToolStatus::Running | ToolStatus::Pending),
+            TranscriptItem::Assistant(a) => a.streaming,
+            TranscriptItem::Thinking(t) => t.streaming,
+            _ => false,
+        })
+    }
+
     /// What a `session.open` sends when nothing is cached.
     fn empty_have(session_id: Option<&str>) -> SessionHave {
         SessionHave { session_id: session_id.unwrap_or_default().to_owned(), rows: Vec::new(), meta_hash: None }
@@ -389,6 +409,10 @@ pub struct AgentHint {
     pub session_id: Option<String>,
     /// hostd has the session live (an open will most likely succeed).
     pub live: bool,
+    /// Host state says the agent's turn ended: its card is in review or done (herdr does not see
+    /// it working, nothing waits on the user) and hostd's own copy has no tool open and nothing
+    /// streaming.
+    pub finished: bool,
 }
 
 /// Where a mirror's subscription stands.
@@ -429,6 +453,14 @@ struct State {
     /// UI's, a re-open, a repair) chosen before the latest one does not count as open and opens
     /// nothing more at hostd, whatever it awaited meanwhile ([`OpenTicket`], [`sync_open`]).
     closes: u64,
+    /// When the last session message was applied or a snapshot taken: [`heal_due`] leaves a
+    /// mirror alone that hears from hostd.
+    heard: Instant,
+    /// [`heal_due`]: since when the mirror shows a turn at work while host state says the agent
+    /// finished; the re-opens it made in a row, and when the last.
+    stale_since: Option<Instant>,
+    heals: u32,
+    healed_at: Option<Instant>,
 }
 
 impl State {
@@ -445,6 +477,10 @@ impl State {
             plain: false,
             used: Instant::now(),
             closes: 0,
+            heard: Instant::now(),
+            stale_since: None,
+            heals: 0,
+            healed_at: None,
         }
     }
 
@@ -460,6 +496,7 @@ impl State {
             self.changed();
         }
         self.data = Some(d);
+        self.heard = Instant::now();
     }
 
     /// Closed and written to the cache: memory may let it go.
@@ -490,6 +527,7 @@ impl State {
             // Another link's, or a session no longer open.
             _ => return false,
         };
+        self.heard = Instant::now();
         match (last, seq) {
             (None, _) => {
                 let ended = matches!(ev, SessionEvent::Ended { .. });
@@ -924,6 +962,56 @@ async fn repair(host: Arc<dyn SessionHost>, link: u64, m: Arc<Mirror>, gap: bool
     }
 }
 
+/// The self-heal, on the engine's session tick: an open mirror that shows a turn at work (a
+/// running tool, a streaming reply) while host state says the turn ended ([`AgentHint::finished`]:
+/// card in review or done, hostd's own copy idle), and that heard nothing from hostd, for
+/// [`HEAL_AFTER`], missed the messages that settled it, whatever lost them (a subscription gone at
+/// hostd, messages lost on the way). It is re-opened with what it holds ([`repair`]): hostd
+/// subscribes it again and the UI gets the delta as a `reset`. Logged; the next one waits
+/// [`HEAL_BACKOFF`], doubling while it keeps finding the same (hostd's rows may lag its state;
+/// its feed watchdog repairs hostd's copy).
+pub fn heal_due(host: &Arc<dyn SessionHost>) {
+    let Some(link) = host.link() else { return };
+    let now = Instant::now();
+    for m in host.sessions().all() {
+        // Host state first: it is read under the engine's lock, never inside a mirror's.
+        let finished = host.agent(&m.agent_id).finished;
+        let heal = {
+            let mut st = m.lock();
+            let live = matches!(st.sub, Sub::Live { link: l, seq: Some(_) } if l == link.id);
+            if !(st.wanted && live && finished && st.data.as_ref().is_some_and(Data::busy)) {
+                st.stale_since = None;
+                if st.healed_at.is_some_and(|t| now.duration_since(t) >= HEAL_BACKOFF_MAX) {
+                    st.heals = 0;
+                }
+                continue;
+            }
+            let since = *st.stale_since.get_or_insert(now);
+            // After the n-th re-open in a row, the next one waits HEAL_BACKOFF × 2^(n-1).
+            let pause = HEAL_BACKOFF.saturating_mul(1 << st.heals.saturating_sub(1).min(10)).min(HEAL_BACKOFF_MAX);
+            let quiet = now.duration_since(st.heard);
+            if now.duration_since(since) < HEAL_AFTER || quiet < HEAL_AFTER || st.healed_at.is_some_and(|t| now.duration_since(t) < pause) {
+                continue;
+            }
+            st.heals += 1;
+            st.healed_at = Some(now);
+            st.stale_since = None;
+            // Not live any more: messages until the re-open's snapshot are covered by it.
+            st.sub = Sub::None;
+            log::warn!(
+                "session {}: host state says the agent finished, this copy still shows it at work and heard nothing for {} s; re-opening it (#{})",
+                m.agent_id,
+                quiet.as_secs(),
+                st.heals
+            );
+            true
+        };
+        if heal {
+            tokio::spawn(repair(host.clone(), link.id, m, false));
+        }
+    }
+}
+
 /// A failed `session.open` worth trying again: no answer, or no session yet.
 fn retry_later(e: &ApiError) -> bool {
     matches!(e.code.as_str(), "not_connected" | "timeout")
@@ -1055,6 +1143,8 @@ fn offline_caps() -> Capabilities {
         handoff: false,
         subagents: false,
         bridge: false,
+        retry: false,
+        subagent_retry: false,
     }
 }
 
@@ -1305,7 +1395,7 @@ pub(crate) mod tests {
     }
 
     fn assistant(id: &str, text: &str) -> TranscriptItem {
-        TranscriptItem::Assistant(AssistantItem { id: id.into(), at: 2, text: text.into(), streaming: true, model: None, usage: None, stop_reason: None, error: None })
+        TranscriptItem::Assistant(AssistantItem { id: id.into(), at: 2, text: text.into(), streaming: true, model: None, usage: None, stop_reason: None, error: None, error_status: None, refusal: None })
     }
 
     fn tool(id: &str, output: &str) -> TranscriptItem {
@@ -1851,7 +1941,7 @@ pub(crate) mod tests {
             cache: SessionCache::with_budget(cache_dir.to_path_buf(), 1 << 30, idle),
             link: Mutex::new(None),
             ui: Mutex::new(Vec::new()),
-            hint: Mutex::new(AgentHint { session_id: Some("s1".into()), live: true }),
+            hint: Mutex::new(AgentHint { session_id: Some("s1".into()), live: true, finished: false }),
         })
     }
 
@@ -1997,7 +2087,7 @@ pub(crate) mod tests {
         // First open: nothing cached, the whole window.
         let host = test_host(dir.path());
         let (link, _) = connect(&host, &side, true, true, "c1").await;
-        assert_eq!(link.features, crate::link::Features { zstd: true, session_sync: true });
+        assert_eq!(link.features, crate::link::Features { zstd: true, session_sync: true, presence: true });
         let dyn_host: Arc<dyn SessionHost> = host.clone();
         let before = link.totals();
         let first = open_now(&dyn_host, &link, &open_params(200)).await.unwrap();
@@ -2043,7 +2133,7 @@ pub(crate) mod tests {
         // App restart: the cached rows show at once, then only the delta crosses the wire.
         let host = test_host(dir.path());
         let dyn_host: Arc<dyn SessionHost> = host.clone();
-        let (link, _) = connect(&host, &side, true, true, "c2").await;
+        let (link, server) = connect(&host, &side, true, true, "c2").await;
         let before = link.totals();
         let again = open_now(&dyn_host, &link, &open_params(200)).await.unwrap();
         let reopen_bytes = link.totals().rx - before.rx;
@@ -2074,11 +2164,10 @@ pub(crate) mod tests {
         // ones, not the window.
         side.lock().unwrap().change(SessionEvent::Upsert { item: assistant("a152", "streaming"), h: None });
         converge(&mut ui, &host, &side).await;
-        link.close("network lost");
+        link_lost(&link, &server, &side, "network lost").await;
         host.sessions.link_down();
         {
             let mut s = side.lock().unwrap();
-            s.fanout.prune();
             for i in 0..30 {
                 s.change(SessionEvent::Append { id: "a152".into(), field: AppendField::Text, text: format!(" more{i}"), at: None });
             }
@@ -2308,6 +2397,16 @@ pub(crate) mod tests {
         panic!("timed out waiting until {what}");
     }
 
+    /// The link drops, and the fake hostd has noticed (its end of the connection is closed
+    /// asynchronously, by its own task) before it forgets the clients that are gone: a `prune`
+    /// right after `Link::close` forgets nothing, and the dead client's subscription would
+    /// outlive the test's next steps whenever that task runs late.
+    async fn link_lost(link: &Link, server: &ClientHandle, side: &Side, why: &str) {
+        link.close(why);
+        until("hostd noticed the link is gone", || server.is_closed()).await;
+        side.lock().unwrap().fanout.prune();
+    }
+
     /// `session.open` as the engine makes it: its ticket taken as the request arrives.
     async fn open_now(host: &Arc<dyn SessionHost>, link: &Arc<Link>, p: &SessionOpenParams) -> Result<Value, ApiError> {
         open(host, link, p, &OpenTicket::take(host, &p.agent_id)).await
@@ -2367,7 +2466,7 @@ pub(crate) mod tests {
             s.meta.session_id = Some("s2".into());
             s.rows.truncate(60);
         }
-        *host.hint.lock().unwrap() = AgentHint { session_id: Some("s2".into()), live: true };
+        *host.hint.lock().unwrap() = AgentHint { session_id: Some("s2".into()), live: true, finished: false };
         host.ui.lock().unwrap().clear();
         let stall = host.cache.stall().await;
         let opening = tokio::spawn({
@@ -2526,11 +2625,10 @@ pub(crate) mod tests {
         let side: Side = Arc::new(Mutex::new(long_session()));
         let host = test_host(dir.path());
         let dyn_host: Arc<dyn SessionHost> = host.clone();
-        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let (link, server) = connect(&host, &side, true, true, "c1").await;
         ui_open(&host, &link, &side, 200).await;
-        link.close("network lost");
+        link_lost(&link, &server, &side, "network lost").await;
         host.sessions.link_down();
-        side.lock().unwrap().fanout.prune();
         let before = side.lock().unwrap().open_requests;
         let (link, _) = connect(&host, &side, true, true, "c2").await;
         let (reached, release) = pause_next_open(&host, "a");
@@ -2554,11 +2652,10 @@ pub(crate) mod tests {
         let side: Side = Arc::new(Mutex::new(long_session()));
         let host = test_host(dir.path());
         let dyn_host: Arc<dyn SessionHost> = host.clone();
-        let (link, _) = connect(&host, &side, true, false, "c1").await;
+        let (link, server) = connect(&host, &side, true, false, "c1").await;
         ui_open(&host, &link, &side, 200).await;
-        link.close("network lost");
+        link_lost(&link, &server, &side, "network lost").await;
         host.sessions.link_down();
-        side.lock().unwrap().fanout.prune();
         let (link, _) = connect(&host, &side, true, false, "c2").await;
         let (g, reached, release) = gate();
         side.lock().unwrap().gate = Some(g);
@@ -2571,6 +2668,108 @@ pub(crate) mod tests {
         assert_eq!(s.closes, 1, "hostd was told to let go");
         assert!(s.fanout.is_empty(), "nothing streams to the app");
         assert!(matches!(host.sessions.get("a").unwrap().lock().sub, Sub::None), "nothing subscribed here");
+    }
+
+    /// The copy here shows a `wait` still running and hears nothing, while host state says the
+    /// agent finished (its card moved to review): it missed the messages that ended the turn
+    /// (whatever lost them). The self-heal re-opens it once, the UI gets what hostd has, and a
+    /// healthy copy is left alone. Before, the transcript stayed on the running `wait` for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_copy_left_behind_by_a_finished_turn_heals() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        let running = |status| match tool("t-wait", "") {
+            TranscriptItem::Tool(t) => TranscriptItem::Tool(ToolItem { tool: "wait".into(), status, output: None, ..t }),
+            _ => unreachable!(),
+        };
+        side.lock().unwrap().change(SessionEvent::Upsert { item: running(ToolStatus::Running), h: None });
+        converge(&mut ui, &host, &side).await;
+        // The turn ends at hostd; the messages saying so never reach this copy.
+        side.lock().unwrap().mutate(&SessionEvent::Upsert { item: running(ToolStatus::Ok), h: None });
+        let opens = || side.lock().unwrap().open_requests;
+        let before = opens();
+        let check_twice = || async {
+            heal_due(&dyn_host);
+            tokio::time::sleep(HEAL_AFTER * 2).await;
+            heal_due(&dyn_host);
+            tokio::time::sleep(RETRY_FIRST * 4).await;
+        };
+        check_twice().await;
+        assert_eq!(opens(), before, "host state does not say the agent finished: nothing to heal");
+        host.hint.lock().unwrap().finished = true;
+        check_twice().await;
+        converge(&mut ui, &host, &side).await;
+        assert_eq!(opens(), before + 1, "re-opened once");
+        // Healed: nothing more, however long it stays finished.
+        check_twice().await;
+        assert_eq!(opens(), before + 1);
+    }
+
+    /// Runs the self-heal every few ms until agent `a`'s mirror made `n` re-opens in a row (5 s at
+    /// most); when it made the n-th.
+    async fn heal_until(host: &Arc<TestHost>, n: u32) -> Instant {
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        for _ in 0..500 {
+            heal_due(&dyn_host);
+            let m = host.sessions.get("a").unwrap();
+            let (heals, at) = {
+                let st = m.lock();
+                (st.heals, st.healed_at)
+            };
+            if let Some(at) = at.filter(|_| heals >= n) {
+                return at;
+            }
+            tokio::time::sleep(HEAL_AFTER / 5).await;
+        }
+        panic!("no re-open #{n} within 5 s");
+    }
+
+    /// hostd answers the re-open with the same running `wait` (its own copy is the stale one; its
+    /// feed watchdog repairs that): the next re-open waits [`HEAL_BACKOFF`], the one after twice as
+    /// long. A copy that keeps hearing from hostd is left alone, whatever host state says.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_heal_that_finds_the_same_backs_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        let wait = |output: &str| match tool("t-wait", output) {
+            TranscriptItem::Tool(t) => TranscriptItem::Tool(ToolItem { tool: "wait".into(), status: ToolStatus::Running, ..t }),
+            _ => unreachable!(),
+        };
+        side.lock().unwrap().change(SessionEvent::Upsert { item: wait(""), h: None });
+        converge(&mut ui, &host, &side).await;
+        host.hint.lock().unwrap().finished = true;
+        let opens = || side.lock().unwrap().open_requests;
+        let before = opens();
+
+        // Progress keeps coming: nothing to heal.
+        for i in 0..6 {
+            side.lock().unwrap().change(SessionEvent::Upsert { item: wait(&format!("{i}0% done")), h: None });
+            converge(&mut ui, &host, &side).await;
+            heal_due(&dyn_host);
+            tokio::time::sleep(HEAL_AFTER / 2).await;
+        }
+        assert_eq!(opens(), before, "a copy that hears from hostd is left alone");
+
+        // Quiet: re-opened; it still shows the `wait` (hostd has nothing newer), so the next
+        // re-open waits HEAL_BACKOFF, the one after twice as long.
+        let first = heal_until(&host, 1).await;
+        until("the first re-open", || opens() == before + 1).await;
+        let second = heal_until(&host, 2).await;
+        let gap = second - first;
+        assert!(gap >= HEAL_BACKOFF && gap < HEAL_BACKOFF * 2, "the second re-open came {gap:?} after the first");
+        until("the second re-open", || opens() == before + 2).await;
+        let third = heal_until(&host, 3).await;
+        let gap = third - second;
+        assert!(gap >= HEAL_BACKOFF * 2 && gap < HEAL_BACKOFF * 4, "the third re-open came {gap:?} after the second");
+        until("the third re-open", || opens() == before + 3).await;
     }
 
     /// A notice the mirror kept from before tf-hostd restarted is a row the new tf-hostd does not
@@ -2872,14 +3071,14 @@ pub(crate) mod tests {
         let cache = tempfile::tempdir().unwrap();
         let lab_host = || {
             let h = test_host(cache.path());
-            *h.hint.lock().unwrap() = AgentHint { session_id: Some(sid.clone()), live: true };
+            *h.hint.lock().unwrap() = AgentHint { session_id: Some(sid.clone()), live: true, finished: false };
             h
         };
         let host = lab_host();
         let dh: Arc<dyn SessionHost> = host.clone();
         let (new, new_child) = lab_attach(true, Arc::new(TestSink(host.clone()))).await;
         *host.link.lock().unwrap() = Some(new.clone());
-        assert_eq!(new.features, crate::link::Features { zstd: true, session_sync: true });
+        assert_eq!(new.features, crate::link::Features { zstd: true, session_sync: true, presence: true });
         let (_, after_open, after_open_plain) = received(&new, open_now(&dh, &new, &typed)).await;
         closed(&dh, &agent);
         new.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await.unwrap();

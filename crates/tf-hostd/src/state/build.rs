@@ -9,7 +9,7 @@ use tf_proto::model::{
     NotifyAction, NotifyKind, OmpInfo, OptionTone, PaneInfo as WirePane, RepoInfo, SubagentSummary, Tab, TodoSummary,
     Workspace, WorktreeInfo,
 };
-use tf_proto::session::{Capabilities, ChangedFile, PlanReview, Subagent, SubagentStatus, TodoPhase, TodoStatus, UiKind, UiRequest};
+use tf_proto::session::{Capabilities, ChangedFile, PlanReview, Refusal, Subagent, SubagentStatus, TodoPhase, TodoStatus, UiKind, UiRequest};
 use tf_proto::Millis;
 
 use crate::bridge::{BridgeCaps, BridgeSession, PlanReviewInfo};
@@ -26,6 +26,43 @@ pub fn herdr_state(s: AgentStatus) -> HerdrState {
         AgentStatus::Idle => HerdrState::Idle,
         AgentStatus::Done => HerdrState::Done,
         AgentStatus::Unknown => HerdrState::Unknown,
+    }
+}
+
+/// How long herdr's `working` may outlive the end of an agent's wait for background jobs.
+pub const JOBS_SETTLE_MS: Millis = 5_000;
+
+/// An agent whose turn ended while background jobs ran (omp's "Waiting for background jobs").
+/// herdr's omp integration ignores that `agent_end` (`willContinue`), so herdr keeps the agent
+/// `working` until a result wakes it. A job that is cancelled instead delivers nothing: nothing
+/// continues, omp's own screen goes idle, and herdr stays `working` for good. This tells the two
+/// apart: the wait is over (no job running or queued) while herdr still says `working` and the
+/// replica's turn is over, for [`JOBS_SETTLE_MS`] (a result that ends the wait starts its turn
+/// within that).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct JobsWait {
+    waited: bool,
+    over_since: Option<Millis>,
+}
+
+impl JobsWait {
+    /// One board build: the agent is `working` by herdr's word, the replica's turn is `turn_active`,
+    /// and omp `waiting`s on jobs by the bridge's. Returns `(settled, recheck)`: `settled` when the
+    /// wait is over and herdr's `working` is stale (the agent is idle), `recheck` while that is
+    /// still to be decided (build again after the grace).
+    pub fn observe(&mut self, now: Millis, working: bool, turn_active: bool, waiting: bool) -> (bool, bool) {
+        if waiting {
+            self.waited = true;
+            self.over_since = None;
+            return (false, false);
+        }
+        if !self.waited || !working || turn_active {
+            *self = Self::default();
+            return (false, false);
+        }
+        let since = *self.over_since.get_or_insert(now);
+        let settled = now - since >= JOBS_SETTLE_MS;
+        (settled, !settled)
     }
 }
 
@@ -79,8 +116,14 @@ pub fn is_omp(a: &AgentInfo) -> bool {
 pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
     let a = i.herdr;
     let state = herdr_state(a.agent_status);
-    let needs = needs_for(i, state);
-    let col_state = if i.blocked_grace { HerdrState::Working } else { state };
+    let provider = provider_wait(state, i.omp, i.bridge);
+    let needs = needs_for(i, state, provider);
+    let col_state = match provider {
+        _ if i.blocked_grace => HerdrState::Working,
+        Some(ProviderWait::Retrying) => HerdrState::Working,
+        Some(ProviderWait::Failed) => HerdrState::Idle,
+        None => state,
+    };
     let col = column(col_state, needs.is_some(), i.archived);
     let kind = a.agent.clone().unwrap_or_else(|| "unknown".into());
     let name = a.name.clone().or_else(|| a.display_agent.clone()).unwrap_or_else(|| kind.clone());
@@ -127,6 +170,10 @@ pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
         needs,
         diff,
         parked: None,
+        // Filled by the state store from the auto-resume worker's tickets (`crate::recovery`).
+        auto_resume: None,
+        // Filled by the state store from the session's decide-for-me state (`crate::autoanswer`).
+        auto_answer: None,
     }
 }
 
@@ -218,6 +265,8 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&BoardMeta>) -> OmpInfo {
         cost: meta.and_then(|m| m.cost.clone()),
         todos: meta.and_then(|m| m.todos.clone()),
         subagents: meta.and_then(|m| m.subagents.clone()),
+        jobs: i.bridge.and_then(|b| b.jobs.clone()),
+        retry: i.omp.and_then(|v| v.retry.clone()),
         // The session meta carries the bridge's queue merged with the prompts we queued.
         queue: match (ctl, meta) {
             (Some(c), Some(m)) => tf_collab::replica::merge_queue(&c.queue, &m.queue),
@@ -227,11 +276,42 @@ fn omp_info(i: &AgentInputs<'_>, meta: Option<&BoardMeta>) -> OmpInfo {
         },
         turn_started_at: i.turn_started_at,
         last_turn_ended_at: i.last_turn_ended_at,
+        // Filled by the state store from omp's recap journal (`crate::recaps`).
+        recap: None,
     }
 }
 
-/// Needs-you (§3.5): replica dialog, then bridge plan review, then herdr `blocked`.
-fn needs_for(i: &AgentInputs<'_>, state: HerdrState) -> Option<NeedsYou> {
+/// Why herdr's `blocked` is not a question (§3.5). herdr's omp integration reports `blocked` while
+/// omp waits to retry a provider error and after a run ended in one, with no dialog behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderWait {
+    /// omp is waiting to retry a provider error (`OmpInfo.retry`): the agent keeps running.
+    Retrying,
+    /// The last run ended in a provider error and nothing runs since: the agent's turn is over (Review).
+    Failed,
+}
+
+/// What the live omp session explains about herdr's state without a prompt: no dialog or plan review
+/// is pending, and omp waits to retry a provider error (`blocked`, or, with herdr's omp integration
+/// missing or lagging, `idle` while the replica's run is still on) or, `blocked` only, its last run
+/// ended in one. Without a live link, or with a bridge whose dialogs never reach us (a
+/// terminal-only prompt could be what herdr sees after a failed run), `blocked` stays what herdr says.
+pub fn provider_wait(state: HerdrState, omp: Option<&OmpView>, bridge: Option<&BridgeSession>) -> Option<ProviderWait> {
+    let v = omp.filter(|v| v.link == tf_proto::model::LinkState::Live && v.needs.is_none())?;
+    if bridge.is_some_and(|b| b.state.plan_review.is_some()) {
+        return None;
+    }
+    let mid_run = matches!(state, HerdrState::Idle | HerdrState::Done | HerdrState::Unknown) && v.turn_active;
+    if v.retry.is_some() && (state == HerdrState::Blocked || mid_run) {
+        return Some(ProviderWait::Retrying);
+    }
+    let dialogs_seen = bridge.is_none_or(|b| b.caps.live == 0 || b.caps.dialogs);
+    (state == HerdrState::Blocked && v.tail_error.is_some() && dialogs_seen).then_some(ProviderWait::Failed)
+}
+
+/// Needs-you (§3.5): replica dialog, then bridge plan review, then herdr `blocked` that no
+/// provider wait explains.
+fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWait>) -> Option<NeedsYou> {
     if let Some(mut n) = i.omp.and_then(|v| v.needs.clone()) {
         n.since = i.needs_since;
         return Some(n);
@@ -239,7 +319,7 @@ fn needs_for(i: &AgentInputs<'_>, state: HerdrState) -> Option<NeedsYou> {
     if let Some(review) = i.bridge.and_then(|b| b.state.plan_review.as_ref()) {
         return Some(plan_review_needs(review, i.needs_since));
     }
-    if state == HerdrState::Blocked && !i.blocked_grace {
+    if state == HerdrState::Blocked && !i.blocked_grace && provider.is_none() {
         return Some(NeedsYou {
             kind: NeedsKind::Blocked,
             request_id: None,
@@ -348,6 +428,9 @@ pub fn capabilities(live: bool, bridge: bool, data_plane: Option<BridgeCaps>) ->
         handoff: true,
         subagents: live && subagents,
         bridge,
+        // `/retry` through the bridge's composer or keystrokes when omp's own retry is missing.
+        retry: true,
+        subagent_retry: live && data_plane.is_some_and(|c| c.resume_tree),
     }
 }
 
@@ -441,7 +524,10 @@ pub fn workspace_cwd(w: &WorkspaceInfo, ws_tabs: &[&TabInfo], panes: &[PaneInfo]
 
 pub fn needs_notification(agent: &Agent, at: Millis) -> Option<Notification> {
     let n = agent.needs.as_ref()?;
-    let body = if n.question.is_empty() { n.title.clone() } else { clip(&n.question, 200) };
+    let mut body = if n.question.is_empty() { n.title.clone() } else { clip(&n.question, 200) };
+    if let Some(note) = crate::autoanswer::needs_note(agent, at) {
+        body = format!("{body}\n{note}");
+    }
     let actions = if n.answerable && !n.multi {
         n.options
             .iter()
@@ -502,6 +588,30 @@ pub fn error_notification(agent_id: &str, agent_name: &str, text: &str, at: Mill
         agent_id: agent_id.to_string(),
         title: format!("{agent_name} hit an error"),
         body: clip(text, 200),
+        request_id: None,
+        actions: vec![],
+    }
+}
+
+/// How a provider refusal reads on the board's activity and in notifications, the transcript's
+/// words: `Refused · cyber` (`sensitive`: `Flagged by safety filters`).
+pub fn refusal_title(refusal: &Refusal) -> String {
+    let what = if refusal.kind == "sensitive" { "Flagged by safety filters" } else { "Refused" };
+    match refusal.category.as_deref() {
+        Some(category) => format!("{what} · {category}"),
+        None => what.to_owned(),
+    }
+}
+
+/// The provider refused the agent's turn: `text` is omp's error for it.
+pub fn refusal_notification(agent_id: &str, agent_name: &str, refusal: &Refusal, text: &str, at: Millis) -> Notification {
+    Notification {
+        id: new_id("n"),
+        at,
+        kind: NotifyKind::Error,
+        agent_id: agent_id.to_string(),
+        title: format!("{agent_name}: {}", refusal_title(refusal)),
+        body: clip(refusal.explanation.as_deref().unwrap_or(text), 200),
         request_id: None,
         actions: vec![],
     }
@@ -584,6 +694,35 @@ mod tests {
         assert!(agent.archived);
     }
 
+    #[test]
+    fn herdr_working_outliving_a_cancelled_jobs_wait_settles() {
+        let mut w = JobsWait::default();
+        // Waiting on jobs: herdr's `working` is right (a result will wake the agent).
+        assert_eq!(w.observe(1_000, true, false, true), (false, false));
+        assert_eq!(w.observe(9_000, true, false, true), (false, false));
+        // The last job was cancelled: nothing runs or is queued, nothing continues. Wait out the grace.
+        assert_eq!(w.observe(10_000, true, false, false), (false, true));
+        assert_eq!(w.observe(10_000 + JOBS_SETTLE_MS - 1, true, false, false), (false, true));
+        assert_eq!(w.observe(10_000 + JOBS_SETTLE_MS, true, false, false), (true, false));
+        // Stays settled while nothing starts.
+        assert_eq!(w.observe(60_000, true, false, false), (true, false));
+        // A new turn starts: the episode is over.
+        assert_eq!(w.observe(61_000, true, true, false), (false, false));
+        assert_eq!(w.observe(62_000, true, false, false), (false, false));
+    }
+
+    #[test]
+    fn a_result_that_wakes_the_agent_is_never_settled_over() {
+        let mut w = JobsWait::default();
+        assert_eq!(w.observe(1_000, true, false, true), (false, false));
+        // The job finished; its delivery starts the turn within the grace.
+        assert_eq!(w.observe(2_000, true, false, false), (false, true));
+        assert_eq!(w.observe(3_000, true, true, false), (false, false));
+        // herdr's own idle ends the episode too, and an agent that never waited is never touched.
+        assert_eq!(w.observe(4_000, false, false, false), (false, false));
+        assert_eq!(w.observe(50_000, true, false, false), (false, false));
+    }
+
     fn goal(status: &str) -> tf_proto::model::GoalInfo {
         tf_proto::model::GoalInfo { objective: "ship it".into(), status: status.into(), tokens_used: Some(1200), budget: Some(50_000) }
     }
@@ -600,6 +739,7 @@ mod tests {
             state: crate::bridge::CtlState { goal, ..Default::default() },
             connected_at: 0,
             caps: Default::default(),
+            jobs: None,
             conn: 0,
         }
     }
@@ -657,5 +797,167 @@ mod tests {
         assert_eq!(note.actions.len(), 3);
         assert_eq!(note.actions[0].answer.as_ref().unwrap().choices, vec!["o0".to_string()]);
         assert_eq!(note.request_id.as_deref(), Some("r1"));
+    }
+
+    // ── herdr `blocked` that omp's provider retry explains (§3.5) ──
+
+    fn omp_view(link: tf_proto::model::LinkState, asking: bool, retrying: bool, failed: bool) -> OmpView {
+        let wait = tf_proto::model::RetryWait {
+            kind: tf_proto::model::RetryKind::RateLimit,
+            attempt: 1,
+            max_attempts: 10,
+            since: 1_000,
+            retry_at: 295_000,
+            error: "429 rate_limit_error".into(),
+        };
+        let ask = NeedsYou {
+            kind: NeedsKind::Ask,
+            request_id: Some("r1".into()),
+            since: 0,
+            title: "Question".into(),
+            question: "Which one?".into(),
+            detail: None,
+            options: vec![],
+            multi: false,
+            allow_other: false,
+            allow_chat: false,
+            command: None,
+            answerable: true,
+        };
+        OmpView {
+            session_id: "s1".into(),
+            pid: 7,
+            link,
+            link_error: None,
+            link_reason: None,
+            link_via: None,
+            meta: BoardMeta {
+                session_id: Some("s1".into()),
+                session_file: None,
+                title: None,
+                model: None,
+                thinking: None,
+                fast: false,
+                mode: tf_proto::model::OmpMode::Normal,
+                goal: None,
+                context: None,
+                cost: None,
+                queue: tf_proto::model::QueueInfo { steering: vec![], follow_up: vec![] },
+                started_at: None,
+                todos: None,
+                subagents: None,
+                diff: None,
+            },
+            live: Liveness { last_event_at: Some(2_000), streaming: false, thinking: false, tool: None, tps: None, tps_split: None, line: None },
+            needs: asking.then_some(ask),
+            streaming: false,
+            first_prompt: None,
+            turn_active: retrying,
+            last_turn_row_at: None,
+            retry: retrying.then_some(wait),
+            tail_error: failed.then(|| "429 rate_limit_error".to_string()),
+        }
+    }
+
+    /// How the board maps a herdr-blocked omp agent: (column, needs kind) per combination of
+    /// pending dialog, retry wait, provider-error tail, bridge and link.
+    #[test]
+    fn blocked_omp_maps_by_what_explains_it() {
+        use tf_proto::model::LinkState::{Live, NotShared};
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum Br {
+            None,
+            Dialogs,
+            NoDialogs,
+        }
+        let mut a = herdr_agent(AgentStatus::Blocked);
+        a.agent = Some("omp".into());
+        let blocked = Some(NeedsKind::Blocked);
+        //   link     ask    retry  tail   bridge        → column            needs
+        let cases = [
+            (Live, false, false, false, Br::Dialogs, Column::Needs, blocked),
+            (Live, false, false, false, Br::None, Column::Needs, blocked),
+            (Live, false, true, false, Br::Dialogs, Column::Running, None),
+            (Live, false, true, false, Br::None, Column::Running, None),
+            (Live, false, true, false, Br::NoDialogs, Column::Running, None),
+            (Live, false, true, true, Br::Dialogs, Column::Running, None),
+            (Live, false, false, true, Br::Dialogs, Column::Review, None),
+            (Live, false, false, true, Br::None, Column::Review, None),
+            // a bridge whose dialogs never reach us: a terminal-only prompt is possible
+            (Live, false, false, true, Br::NoDialogs, Column::Needs, blocked),
+            // a dialog always wins
+            (Live, true, true, false, Br::Dialogs, Column::Needs, Some(NeedsKind::Ask)),
+            (Live, true, false, true, Br::Dialogs, Column::Needs, Some(NeedsKind::Ask)),
+            // no live structured link: herdr's word stands
+            (NotShared, false, true, true, Br::Dialogs, Column::Needs, blocked),
+        ];
+        for (link, ask, retry, tail, br, column, needs) in cases {
+            let view = omp_view(link, ask, retry, tail);
+            let bridge = match br {
+                Br::None => None,
+                Br::Dialogs | Br::NoDialogs => {
+                    let mut b = bridged(None);
+                    b.caps.live = 1;
+                    b.caps.dialogs = br == Br::Dialogs;
+                    Some(b)
+                }
+            };
+            let mut i = inputs(&a);
+            i.omp = Some(&view);
+            i.bridge = bridge.as_ref();
+            let agent = build_agent(&i);
+            let got = (agent.column, agent.needs.as_ref().map(|n| n.kind));
+            assert_eq!(got, (column, needs), "{link:?} ask={ask} retry={retry} tail={tail} bridge={br:?}");
+            assert_eq!(agent.state, HerdrState::Blocked, "herdr's own state is reported as it is");
+            assert_eq!(agent.omp.as_ref().unwrap().retry.is_some(), retry, "the wait reaches the card");
+        }
+    }
+
+    #[test]
+    fn only_a_blocked_agent_needs_an_explanation() {
+        let mut a = herdr_agent(AgentStatus::Working);
+        a.agent = Some("omp".into());
+        let view = omp_view(tf_proto::model::LinkState::Live, false, true, true);
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        let agent = build_agent(&i);
+        assert_eq!((agent.column, agent.needs.is_none()), (Column::Running, true));
+        assert_eq!(agent.omp.unwrap().retry.map(|r| r.max_attempts), Some(10));
+
+        // The session's one-off grace for a dialog that is not visible yet keeps it running as before.
+        let a = {
+            let mut a = herdr_agent(AgentStatus::Blocked);
+            a.agent = Some("omp".into());
+            a
+        };
+        let view = omp_view(tf_proto::model::LinkState::Live, false, false, false);
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        i.blocked_grace = true;
+        assert_eq!(build_agent(&i).column, Column::Running);
+
+        // An archived agent whose run ended in a provider error stays archived.
+        let view = omp_view(tf_proto::model::LinkState::Live, false, false, true);
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        i.archived = true;
+        assert_eq!(build_agent(&i).column, Column::Done);
+    }
+
+    /// herdr's omp integration missing or behind (it says `idle`) while omp's run is on and it waits to retry.
+    #[test]
+    fn an_idle_agent_in_a_retry_wait_is_still_running() {
+        let mut a = herdr_agent(AgentStatus::Idle);
+        a.agent = Some("omp".into());
+        let mut view = omp_view(tf_proto::model::LinkState::Live, false, true, false);
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        let agent = build_agent(&i);
+        assert_eq!((agent.column, agent.needs.is_none()), (Column::Running, true));
+        // The replica's run is over: the stale wait explains nothing.
+        view.turn_active = false;
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        assert_eq!(build_agent(&i).column, Column::Review);
     }
 }

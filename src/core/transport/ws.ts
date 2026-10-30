@@ -21,7 +21,8 @@ const TERM_OPEN_TIMEOUT = 20_000;
 /**
  * Methods the core gives 180 s (`tf-client` `link::timeout_for`), so this safety net sits just
  * above it: those that may launch an omp agent wait for it on the host (a slow pane shell, omp
- * becoming interactive), account changes for omp's logout and a fresh quota report.
+ * becoming interactive), account changes for omp's logout and a fresh quota report, and copying a
+ * host's omp setup (`hostSync.*`: several omp commands on each host).
  */
 const LONG_METHODS: Record<string, true> = {
   "agent.start": true,
@@ -31,10 +32,30 @@ const LONG_METHODS: Record<string, true> = {
   "host.resume": true,
   "worktree.create": true,
   "automation.run": true,
+  "agent.autoResumeNow": true,
   "accounts.unlink": true,
   "accounts.prefer": true,
+  "hostSync.export": true,
+  "hostSync.plan": true,
+  "hostSync.seal": true,
+  "hostSync.apply": true,
 };
 const LONG_TIMEOUT = 185_000;
+/**
+ * Skill and plugin installs the core gives 300 s (`link::timeout_for`): omp downloads from the
+ * registry, npm or git, clones marketplaces, and a package plugin's removal or switch can run bun.
+ */
+const PLUGIN_METHODS: Record<string, true> = {
+  "skills.install": true,
+  "skills.update": true,
+  "plugins.install": true,
+  "plugins.remove": true,
+  "plugins.setEnabled": true,
+  "plugins.upgrade": true,
+  "plugins.marketplaceAdd": true,
+  "plugins.marketplaceUpdate": true,
+};
+const PLUGIN_TIMEOUT = 305_000;
 
 /**
  * WebSocket transport to `tf-devserver` `/ws`. Reconnects with backoff (0.5 s → 8 s); requests
@@ -118,7 +139,8 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
     call(hostId, method, params) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        const timeout = method === "term.open" ? TERM_OPEN_TIMEOUT : Object.hasOwn(LONG_METHODS, method) ? LONG_TIMEOUT : (opts.timeoutMs ?? 35_000);
+        const timeout =
+          method === "term.open" ? TERM_OPEN_TIMEOUT : Object.hasOwn(LONG_METHODS, method) ? LONG_TIMEOUT : Object.hasOwn(PLUGIN_METHODS, method) ? PLUGIN_TIMEOUT : (opts.timeoutMs ?? 35_000);
         const timer = setTimeout(() => {
           pending.delete(id);
           reject(apiError("timeout", `${method} timed out`, { retryable: true }));

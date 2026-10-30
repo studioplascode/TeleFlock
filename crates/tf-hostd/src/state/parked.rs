@@ -84,10 +84,13 @@ pub fn record_from_agent(
         worktree,
         workspace_id: Some(a.workspace_id.clone()).filter(|w| !w.is_empty()),
         workspace_cwd,
+        moved: None,
+        ended: None,
     })
 }
 
-/// The board card of a parked agent (column Done, archived, no pane, `link: notShared`).
+/// The board card of a parked agent (column Done, archived, no pane, `link: notShared`). An
+/// ended one (its omp ended without anyone closing it, `crate::restart`) sits in Review, not archived.
 pub fn parked_agent(r: &ParkedRecord) -> Agent {
     let omp = OmpInfo {
         session_id: r.session_id.clone(),
@@ -109,9 +112,13 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
         cost: r.cost.clone(),
         todos: None,
         subagents: None,
+        jobs: None,
+        retry: None,
         queue: QueueInfo { steering: vec![], follow_up: vec![] },
         turn_started_at: None,
         last_turn_ended_at: r.last_turn_ended_at,
+        // Filled by the state store from omp's recap journal (`crate::recaps`).
+        recap: None,
     };
     Agent {
         id: r.agent_id.clone(),
@@ -122,8 +129,8 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
         workspace_id: String::new(),
         state: HerdrState::Idle,
         state_since: r.parked_at,
-        column: Column::Done,
-        archived: true,
+        column: if r.ended.is_some() { Column::Review } else { Column::Done },
+        archived: r.ended.is_none(),
         turns: r.turns,
         title: r.title.clone(),
         cwd: r.cwd.clone(),
@@ -138,7 +145,12 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
             at: r.parked_at,
             session_file: r.session_file.clone(),
             worktree: r.worktree.as_ref().map(|w| LinkedWorktree { path: w.path.clone(), repo_root: w.repo_root.clone() }),
+            moved: r.moved.clone(),
+            ended: r.ended.clone(),
         }),
+        auto_resume: None,
+        // The state store's rebuild fills it (an agent's own policy carries over to its resume).
+        auto_answer: None,
     }
 }
 
@@ -176,7 +188,7 @@ pub fn parked_meta(r: &ParkedRecord) -> SessionMeta {
 /// A live agent runs the parked agent's omp session (resumed elsewhere, or by `agent.resume`).
 pub fn same_session(live: &Agent, r: &ParkedRecord) -> bool {
     let Some(o) = &live.omp else { return false };
-    (r.session_id.is_some() && o.session_id == r.session_id) || o.session_file.as_deref() == Some(r.session_file.as_str())
+    (r.session_id.is_some() && o.session_id == r.session_id) || (!r.session_file.is_empty() && o.session_file.as_deref() == Some(r.session_file.as_str()))
 }
 
 /// Why a parked record leaves the board during a rebuild.
@@ -375,6 +387,67 @@ impl StateHandle {
         self.mark_dirty();
     }
 
+    /// herdr reuses agent ids at once: a different agent now lives under the id of a parked card.
+    /// The card moves to `new_id` (its archive mark with it), persisted, so both show on the board.
+    /// False: no such parked card. A card already under `new_id` (made again from the ledger) wins.
+    pub fn rekey_parked(&self, old_id: &str, new_id: &str) -> bool {
+        let mut found = false;
+        self.inner.persist.session(&self.inner.session, |s| {
+            let Some(mut r) = s.parked.remove(old_id) else { return };
+            found = true;
+            r.agent_id = new_id.to_string();
+            s.parked.entry(new_id.to_string()).or_insert(r);
+            if let Some(at) = s.archived.remove(old_id) {
+                s.archived.entry(new_id.to_string()).or_insert(at);
+            }
+        });
+        if found {
+            info!(session = %self.inner.session, old = %old_id, new = %new_id, "parked card moved to a new key: its agent id is used by another agent");
+            self.inner.persist.save_now();
+            self.mark_dirty();
+        }
+        found
+    }
+
+    /// Sets (or clears) a parked agent's move mark (`ops::moves`). False: no such parked agent.
+    pub fn set_parked_move(&self, agent_id: &str, mv: Option<tf_proto::ParkedMove>) -> bool {
+        let mut found = false;
+        self.inner.persist.session(&self.inner.session, |s| {
+            if let Some(r) = s.parked.get_mut(agent_id) {
+                r.moved = mv;
+                found = true;
+            }
+        });
+        if found {
+            self.inner.persist.save_now();
+            self.mark_dirty();
+        }
+        found
+    }
+
+    /// An ended parked agent (`crate::restart`) that will not be brought back (Dismiss, Mark done)
+    /// becomes an ordinary parked one: archived, in Done. False: no such ended agent.
+    pub fn finish_ended(&self, agent_id: &str) -> bool {
+        let now = now_ms();
+        let mut found = false;
+        self.inner.persist.session(&self.inner.session, |s| {
+            let Some(r) = s.parked.get_mut(agent_id).filter(|r| r.ended.is_some()) else { return };
+            r.ended = None;
+            r.archived_at = now;
+            let sid = r.session_id.clone();
+            s.archived.insert(agent_id.to_string(), now);
+            if let Some(sid) = sid {
+                s.archived_sessions.insert(sid, now);
+            }
+            found = true;
+        });
+        if found {
+            self.inner.persist.save_now();
+            self.mark_dirty();
+        }
+        found
+    }
+
     /// The linked worktree at `path` is gone (removed on request): parked records that ran there
     /// forget it, so their cards stop offering to delete it. `same` compares two paths.
     pub fn forget_parked_worktree(&self, same: impl Fn(&str) -> bool) {
@@ -417,6 +490,22 @@ impl StateHandle {
         self.lock().life.resuming.insert(id, (Some(new_id.to_string()), Instant::now()));
         drop(claim);
         self.mark_dirty();
+    }
+
+    /// Every agent id the board knows (live, parked, being resumed) once it is built from a
+    /// loaded herdr snapshot; `None` before that or while herdr is unreachable (an empty board
+    /// then says nothing about which agents are gone).
+    pub fn agent_ids_in_use(&self) -> Option<HashSet<String>> {
+        let m = self.lock();
+        if !(m.mirror.ok && m.built_once) {
+            return None;
+        }
+        let mut ids: HashSet<String> = m.published.agents.iter().map(|a| a.id.clone()).collect();
+        for (old, (new, _)) in &m.life.resuming {
+            ids.insert(old.clone());
+            ids.extend(new.clone());
+        }
+        Some(ids)
     }
 
     /// Removes a parked agent whose session file is gone.
@@ -691,7 +780,15 @@ pub(super) async fn prune_loop(ctx: Arc<Ctx>) {
 async fn prune_pass(ctx: &Ctx, mem: &mut PruneMemory) {
     let h = &ctx.state;
     h.trim_pruned();
-    let parked: Vec<(String, String)> = h.parked_all().into_iter().map(|r| (r.agent_id, r.session_file)).collect();
+    // Per-agent omp overlays (§3.7) of agents the board no longer knows.
+    if let Some(keep) = h.agent_ids_in_use() {
+        let store = crate::agentcfg::Store::new(&ctx.paths);
+        let session = ctx.herdr_session.clone();
+        let _ = tokio::task::spawn_blocking(move || store.sweep(&session, &keep, now_ms())).await;
+    }
+    // Ended cards (`crate::restart`) stay until they are back or dismissed: one that ended in its
+    // first turn has no session file yet (omp writes it with the first reply) and comes back fresh.
+    let parked: Vec<(String, String)> = h.parked_all().into_iter().filter(|r| r.ended.is_none()).map(|r| (r.agent_id, r.session_file)).collect();
     let live: Vec<Agent> = h
         .snapshot()
         .agents
@@ -776,7 +873,7 @@ mod tests {
         assert_eq!((card.column, card.state, card.archived, card.state_since), (Column::Done, HerdrState::Idle, true, 1000));
         // The card carries the worktree, so Delete worktree works once Mark done closed its workspace.
         let checkout = Some(LinkedWorktree { path: "/tmp/lab".into(), repo_root: "/tmp/main".into() });
-        assert_eq!(card.parked, Some(Parked { at: 1000, session_file: "/s/a.jsonl".into(), worktree: checkout }));
+        assert_eq!(card.parked, Some(Parked { at: 1000, session_file: "/s/a.jsonl".into(), worktree: checkout, moved: None, ended: None }));
         assert_eq!(card.live.line.as_deref(), Some("All tests pass."));
         let o = card.omp.unwrap();
         let src = a.omp.unwrap();
@@ -1154,5 +1251,39 @@ mod tests {
         info.hostname = "reprobed".into();
         h.set_info(info);
         assert_eq!(h.snapshot().info.pruned.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_parked_card_moves_to_a_new_key_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = store(dir.path(), "a").await;
+        h.park(record_from_agent(&live_agent(), 1, 2, None, None).unwrap());
+        assert!(!h.rekey_parked("nope", "nope~1"));
+        assert!(h.rekey_parked("term_7", "term_7~1"));
+        h.rebuild();
+        let card = h.agent("term_7~1").expect("the card under its new key");
+        assert_eq!((card.id.as_str(), card.parked.map(|p| p.session_file)), ("term_7~1", Some("/s/a.jsonl".to_string())));
+        assert!(h.agent("term_7").is_none(), "the old key is free for the agent that took it");
+        assert_eq!(h.parked("term_7~1").map(|r| r.agent_id), Some("term_7~1".to_string()));
+        drop(h);
+        let h = store(dir.path(), "b").await;
+        h.rebuild();
+        assert!(h.agent("term_7~1").is_some_and(|a| a.parked.is_some()), "persisted in one step");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finishing_a_move_after_a_crash_leaves_one_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = store(dir.path(), "a").await;
+        let rec = record_from_agent(&live_agent(), 1, 2, None, None).unwrap();
+        h.park(rec.clone());
+        // The card was already made again under the new key (`stale`), then the move is repeated.
+        h.park(ParkedRecord { agent_id: "term_7~ab".into(), ..rec });
+        assert!(h.rekey_parked("term_7", "term_7~ab"));
+        assert!(!h.rekey_parked("term_7", "term_7~ab"), "repeating it changes nothing");
+        assert_eq!(h.parked_all().len(), 1);
+        assert_eq!(h.parked_all()[0].agent_id, "term_7~ab");
     }
 }

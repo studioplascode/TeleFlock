@@ -12,7 +12,7 @@ import { connSummary, PHASE_STATUS, phaseBusy } from "./status";
 import { VIEWS } from "./vocab";
 
 /** The pages More lists, in order. Label, icon and description come from `VIEWS`, like every other entry point. */
-const PAGES = ["usage", "activity", "automations", "omp", "mcp", "accounts", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
+const PAGES = ["usage", "wrapped", "activity", "automations", "ambient", "omp", "mcp", "plugins", "accounts", "cleanup", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
 
 function LinkRow({ id }: { id: (typeof PAGES)[number] }) {
   const { icon: Icon, label, description } = VIEWS[id];

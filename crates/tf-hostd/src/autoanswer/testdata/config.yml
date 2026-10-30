@@ -1,0 +1,24 @@
+# AutoAnswer lab settings (omp 18.13.3, isolated agent dir): every role points at the mock.
+modelRoles:
+  default: mock/lab-1
+  smol: mock/lab-1
+  slow: mock/lab-1
+  vision: mock/lab-1
+  plan: mock/lab-1
+  commit: mock/lab-1
+  tiny: mock/lab-1
+  memory: mock/lab-1
+  task: mock/lab-1
+  advisor: mock/lab-1
+  widget: mock/lab-1
+  judge: mock/lab-1
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

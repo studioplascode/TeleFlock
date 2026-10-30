@@ -27,6 +27,8 @@ import {
 } from "@/design";
 import { PreviewSheet } from "@/features/preview/PreviewButton";
 import { openExternal, openTunnel } from "@/features/preview/store";
+import { useHerdrHealth, useHostName } from "@/features/hosts/HerdrControls";
+import { herdrDown } from "@/features/hosts/herdrHealth";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
 import { localhostUrlRanges } from "./frames";
@@ -159,6 +161,8 @@ export function TerminalPane({
   const conn = useHosts((h) => h.status[hostId]);
   // Unknown status (e.g. a profile not loaded yet) is treated as reachable; term.open reports errors.
   const hostOnline = conn ? conn.phase === "online" : true;
+  const herdr = useHerdrHealth(hostId);
+  const hostName = useHostName(hostId);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
@@ -514,6 +518,20 @@ export function TerminalPane({
     // reclaim it, in case hostd still holds the stale attachment.
     void s.open(mode === "control" && (p.k === "live" || p.k === "opening" || p.k === "closed"));
   }, [hostOnline, mode]);
+
+  /* ---------- herdr back up ---------- */
+  // A server instance answers again (restart, start after a crash, live handoff): attach again instead of waiting for Retry.
+  const herdrEpoch = herdr?.state === "up" ? herdr.epoch : null;
+  const prevEpoch = useRef(herdrEpoch);
+  useEffect(() => {
+    const was = prevEpoch.current;
+    prevEpoch.current = herdrEpoch;
+    const s = sessionRef.current;
+    if (!s || herdrEpoch === null || was === herdrEpoch || !hostOnline) return;
+    const p = s.phase;
+    if ((p.k === "closed" && p.takenOver) || (p.k === "error" && p.error.code === "busy")) return;
+    void s.open(mode === "control" && (p.k === "live" || p.k === "opening" || p.k === "closed"));
+  }, [herdrEpoch, hostOnline, mode]);
 
   /* ---------- sizing ---------- */
   // Control: the box decides the grid (and so the pane's PTY). Observe: the driver's grid comes with
@@ -879,21 +897,25 @@ export function TerminalPane({
   );
 
   const offline = !hostOnline;
-  const live = phase.k === "live" && hostOnline;
-  const dim = offline || phase.k === "closed" || phase.k === "error";
+  // herdr's server is not there: the pane is a stale screen (the overlay says why)
+  const herdrOut = hostOnline && herdrDown(herdr) && !(herdr.state === "unresponsive" && phase.k === "live");
+  const live = phase.k === "live" && hostOnline && !herdrOut;
+  const dim = offline || herdrOut || phase.k === "closed" || phase.k === "error";
   const showExtraKeys = interactive && touchUi;
   const busy = phase.k === "error" && phase.error.code === "busy";
   const chip: { status: Status; label: string } = offline
     ? { status: "idle", label: conn ? PHASE_LABEL[conn.phase] : "Reconnecting" }
-    : phase.k === "live"
-      ? { status: mode === "observe" ? "review" : "running", label: mode === "observe" ? "Observing" : "Live" }
-      : phase.k === "opening"
-        ? { status: "running", label: phase.takeover ? "Taking over" : "Attaching" }
-        : phase.k === "closed"
-          ? { status: phase.takenOver ? "needs-you" : "idle", label: closedCopy(phase.reason, phase.takenOver).title }
-          : phase.k === "error"
-            ? { status: busy ? "needs-you" : "error", label: busy ? "In use" : "Error" }
-            : { status: "idle", label: "Idle" };
+    : herdrOut
+      ? { status: "error", label: "herdr down" }
+      : phase.k === "live"
+        ? { status: mode === "observe" ? "review" : "running", label: mode === "observe" ? "Observing" : "Live" }
+        : phase.k === "opening"
+          ? { status: "running", label: phase.takeover ? "Taking over" : "Attaching" }
+          : phase.k === "closed"
+            ? { status: phase.takenOver ? "needs-you" : "idle", label: closedCopy(phase.reason, phase.takenOver).title }
+            : phase.k === "error"
+              ? { status: busy ? "needs-you" : "error", label: busy ? "In use" : "Error" }
+              : { status: "idle", label: "Idle" };
 
   // While live the chip collapses to its orb so it never covers output; it re-expands on every
   // state change (and on hover) so transitions are still announced.
@@ -987,6 +1009,9 @@ export function TerminalPane({
         mode={mode}
         offline={offline}
         conn={conn}
+        herdr={herdrDown(herdr) && hostOnline ? herdr : undefined}
+        hostId={hostId}
+        hostName={hostName}
         gotFrame={gotFrame}
         onReattach={() => reopen(false)}
         onTakeover={() => reopen(true)}

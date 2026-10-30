@@ -1,12 +1,13 @@
 import { ArrowRight, Check, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useMemo } from "react";
-import { LIMITS_EVERY_MS, navigate, parseAgentKey, useAccountLimits, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useUi } from "@/core";
+import { LIMITS_EVERY_MS, navigate, parseAgentKey, USAGE_BOARD_EVERY_MS, useAccountLimits, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useTodaySpend, useUi } from "@/core";
 import type { Column } from "@/core/gen";
 import { TerminalPane } from "@/features/terminal/TerminalPane";
 import { AgentGlyph, IconButton, NumberTicker, StatusOrb, Tile, TiltCard, cn, formatAge, formatCompact, formatUsd, spring, useNow, useWindowActive, useWindowVisible } from "@/design";
 import { hostAccent } from "@/features/hosts/kinds";
 import { useHealthHistory } from "@/features/shell/healthHistory";
+import { herdrDown } from "@/features/hosts/herdrHealth";
 import { PHASE_STATUS, connSummary } from "@/features/shell/status";
 import { openAgent, openTerminal } from "./agentActions";
 import { type FirstStepsView, useDemoAnswerTicks, useRealAnswerTicks } from "./firstSteps";
@@ -15,26 +16,27 @@ import { type LimitHeadline, limitHeadline } from "./limitHeadline";
 import { LiveLine } from "./LiveBits";
 import { useMostActive } from "./useMostActive";
 
-/** Today's cost/tokens over the hosts in view. */
+/**
+ * Today's cost/tokens over the hosts in view: the Usage page's Today figure (`useTodaySpend`: each
+ * host's indexed hours since local midnight + what it saw live since its last sync).
+ */
 export function useTodayUsage(hostFilter: string): { cost: number; tokens: number } {
-  const cost = useCore((s) => {
-    let sum = 0;
-    for (const [id, h] of Object.entries(s.hosts)) if (hostFilter === "all" || hostFilter === id) sum += h.state.usage.costUsd;
-    return sum;
-  });
-  const tokens = useCore((s) => {
-    let sum = 0;
-    for (const [id, h] of Object.entries(s.hosts)) if (hostFilter === "all" || hostFilter === id) sum += h.state.usage.tokens;
-    return sum;
-  });
-  return { cost, tokens };
+  const ids = useHostIds();
+  const hostIds = hostFilter === "all" ? ids : ids.filter((id) => id === hostFilter);
+  const t = useTodaySpend(hostIds, useWindowActive() ? USAGE_BOARD_EVERY_MS : null, useNow(60_000));
+  return { cost: t.cost, tokens: t.tokens };
 }
 
 /** Lane counts over the hosts in view, as "r,n,v,d" so the selector stays primitive. */
 function useLaneCounts(hostFilter: string): Record<Column, number> {
   const packed = useCore((s) => {
     const c = { running: 0, needs: 0, review: 0, done: 0 };
-    for (const a of Object.values(s.agents)) if (hostFilter === "all" || a.hostId === hostFilter) c[a.column]++;
+    for (const a of Object.values(s.agents)) {
+      if (hostFilter !== "all" && a.hostId !== hostFilter) continue;
+      // nothing runs while its host's herdr is down: those agents are not counted as running
+      if (a.column === "running" && herdrDown(s.hosts[a.hostId]?.state.info.herdrHealth)) continue;
+      c[a.column]++;
+    }
     return `${c.running},${c.needs},${c.review},${c.done}`;
   });
   const [running = 0, needs = 0, review = 0, done = 0] = packed.split(",").map(Number);
@@ -282,7 +284,8 @@ function OpenTerminalButton({ agentKey }: { agentKey: string }) {
 function useLeader(): string | null {
   const filter = useHosts((s) => s.filter);
   const running = useColumnKeys("running", { hostId: filter });
-  const online = useHosts((s) => Object.keys(s.status).filter((id) => s.status[id]?.phase === "online").join("\n"));
+  // herdr down: its agents are not running, so nothing of that host streams
+  const online = useCore((s) => Object.keys(s.status).filter((id) => s.status[id]?.phase === "online" && !herdrDown(s.hosts[id]?.state.info.herdrHealth)).join("\n"));
   const live = useMemo(() => {
     const ok = new Set(online.split("\n"));
     return running.filter((key) => ok.has(parseAgentKey(key).hostId));

@@ -17,6 +17,11 @@ supported: boolean,
  */
 manual: boolean, 
 /**
+ * Installing this copy's update asks for the administrator password (`.deb`: `pkexec`),
+ * so it never starts unattended: the UI offers "Install" in `ready`.
+ */
+needsPassword: boolean, 
+/**
  * Why `supported` is false, for Settings (e.g. installed with pacman, or a debug build).
  */
 unsupportedReason?: string, phase: UpdatePhase, 

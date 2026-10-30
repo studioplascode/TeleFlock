@@ -22,7 +22,7 @@
 //! Credential values never leave the host: not in answers, not in logs (writes log keys only),
 //! not in any command line.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -30,7 +30,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tf_proto::{ApiError, HostMethod, OmpSetting, OmpSettingChange, OmpSettingOption, OmpSettings};
+use tf_proto::{ApiError, HostMethod, OmpSetting, OmpSettingChange, OmpSettingOption, OmpSettingValues, OmpSettings};
+use zeroize::Zeroizing;
 
 use crate::clients::ClientHandle;
 use crate::ops::fs::home_dir;
@@ -57,6 +58,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
     match req {
         HostMethod::OmpSettingsGet(p) => to_value(settings(&Omp::from_ctx(ctx)?, p.refresh.unwrap_or(false)).await?),
         HostMethod::OmpSettingsSet(p) => to_value(set(&Omp::from_ctx(ctx)?, &p.changes).await?),
+        HostMethod::OmpSettingValuesGet(p) => to_value(setting_values(&Omp::from_ctx(ctx)?, &p.keys).await?),
         other => Err(ApiError::new("unknown_method", format!("{} is not an omp method", other.name()))),
     }
 }
@@ -426,6 +428,33 @@ fn map_cli_entry(key: &str, e: &Value) -> Option<OmpSetting> {
 
 // ───────────────────────────── methods ─────────────────────────────
 
+/// Most keys one `omp.settingValues` asks for.
+const MAX_VALUE_KEYS: usize = 64;
+
+async fn setting_values(omp: &Omp, keys: &[String]) -> Result<OmpSettingValues, ApiError> {
+    if keys.len() > MAX_VALUE_KEYS {
+        return Err(ApiError::new("invalid_params", format!("{} keys asked for; at most {MAX_VALUE_KEYS}", keys.len())));
+    }
+    let entries = values(omp, false).await?;
+    Ok(OmpSettingValues { values: pick_values(&entries, keys) })
+}
+
+/// The current value (global config, else omp's default: what `config list` reports) of each of
+/// `keys`. A key `config list` lacks, one without a value (unset, no default: `null`) and a
+/// credential (omp marks it `redacted: true` and sends no value; a value next to that flag is
+/// dropped too) are absent.
+fn pick_values(entries: &Entries, keys: &[String]) -> BTreeMap<String, Value> {
+    keys.iter()
+        .filter_map(|key| {
+            let entry = &entries.iter().find(|(k, _)| k == key)?.1;
+            if flag(entry.get("redacted")) {
+                return None;
+            }
+            entry.get("value").filter(|v| !v.is_null()).map(|v| (key.clone(), v.clone()))
+        })
+        .collect()
+}
+
 async fn settings(omp: &Omp, refresh: bool) -> Result<OmpSettings, ApiError> {
     let (schema, entries) = tokio::join!(schema(omp, refresh), values(omp, refresh));
     let entries = entries?;
@@ -645,6 +674,82 @@ async fn set(omp: &Omp, changes: &[OmpSettingChange]) -> Result<OmpSettings, Api
     settings(omp, false).await
 }
 
+// ───────────────────────────── for `ops/hostsync` ─────────────────────────────
+
+/// The daemon's omp config for another module (`ops/hostsync`). Shares the settings page's caches
+/// and write lock.
+pub(crate) struct OmpAt(Omp);
+
+impl OmpAt {
+    pub(crate) fn from_ctx(ctx: &Ctx) -> Result<OmpAt, ApiError> {
+        Omp::from_ctx(ctx).map(OmpAt)
+    }
+
+    pub(crate) fn bin(&self) -> &Path {
+        &self.0.bin
+    }
+
+    /// What every omp child gets: `NO_COLOR`, and the agent dir when it isn't the daemon's.
+    pub(crate) fn env(&self) -> Vec<(&str, &str)> {
+        self.0.env()
+    }
+
+    /// omp's settings as the settings page shows them (schema, current values, omp's version).
+    pub(crate) async fn settings(&self) -> Result<OmpSettings, ApiError> {
+        settings(&self.0, false).await
+    }
+
+    /// `omp config list --scope global --json` (omp ≥ 18.13.3): the keys omp's global layer sets,
+    /// as written, in omp's order; omp redacts credentials.
+    pub(crate) async fn global_layer(&self) -> Result<Vec<(String, Value)>, ApiError> {
+        let out = self.0.run(&["config", "list", "--scope", "global", "--json"]).await?;
+        if !out.ok() {
+            return Err(ApiError::new("omp_error", format!("omp config list --scope global: {}", omp_message(&out.message()))));
+        }
+        parse_list(&out.stdout).map_err(|e| ApiError::new("omp_error", format!("omp config list --scope global output: {e}")))
+    }
+
+    /// `omp config get <key> --json`: the value omp uses, a credential's included (the source seals
+    /// it). The output is wiped when dropped.
+    pub(crate) async fn value(&self, key: &str) -> Result<Zeroizing<Vec<u8>>, ApiError> {
+        let out = self.0.run(&["config", "get", key, "--json"]).await?;
+        let ok = out.ok();
+        let message = out.stderr.clone();
+        let stdout = Zeroizing::new(out.stdout);
+        if !ok {
+            return Err(ApiError::new("omp_error", format!("omp config get {key}: {}", omp_message(&message))));
+        }
+        Ok(stdout)
+    }
+
+    /// Writes `changes` one at a time, each with its own outcome: a key this omp doesn't know or a
+    /// value it refuses fails that change only. Credential values go through the companion
+    /// extension's settings-write mode, never argv, as for `omp.settingsSet`.
+    pub(crate) async fn set_each(&self, changes: &[OmpSettingChange]) -> Vec<Result<(), ApiError>> {
+        let omp = &self.0;
+        let _writing = WRITES.lock().await;
+        let current = match settings(omp, false).await {
+            Ok(c) => c,
+            Err(e) => return changes.iter().map(|_| Err(e.clone())).collect(),
+        };
+        let kinds: HashMap<&str, &str> = current.settings.iter().map(|s| (s.id.as_str(), s.kind.as_str())).collect();
+        let credentials = credential_keys(&current);
+        let mut out = Vec::with_capacity(changes.len());
+        for change in changes {
+            out.push(match plan(std::slice::from_ref(change), &kinds) {
+                Err(e) => Err(e),
+                Ok(writes) if needs_bridge(&writes, &credentials) => write_credentials(omp, &writes, &current, &credentials).await,
+                Ok(writes) => write_via_cli(omp, &writes).await,
+            });
+        }
+        drop_values();
+        if changes.iter().any(|c| c.key == "modelRoles") {
+            crate::ops::host::invalidate_models().await;
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +845,23 @@ mod tests {
     }
 
     #[test]
+    fn picks_the_asked_for_values_and_never_a_credential() {
+        let entries: Entries = vec![
+            ("paste.largeMenuThreshold".into(), json!({"value": 250, "type": "number", "description": ""})),
+            ("paste.largeMenuEnabled".into(), json!({"value": true, "type": "boolean", "description": ""})),
+            ("theme.dark".into(), json!({"value": null, "type": "string", "description": ""})),
+            ("auth.broker.token".into(), json!({"type": "string", "description": "", "redacted": true})),
+            ("auth.leaky".into(), json!({"value": "s3cr3t", "type": "string", "description": "", "redacted": true})),
+        ];
+        let keys: Vec<String> = ["paste.largeMenuThreshold", "paste.largeMenuEnabled", "theme.dark", "auth.broker.token", "auth.leaky", "no.such.key"].map(String::from).into();
+        let got = pick_values(&entries, &keys);
+        assert_eq!(got, BTreeMap::from([("paste.largeMenuEnabled".to_string(), json!(true)), ("paste.largeMenuThreshold".to_string(), json!(250))]));
+        // Only what was asked for.
+        assert_eq!(pick_values(&entries, &["paste.largeMenuThreshold".to_string()]).len(), 1);
+        assert!(pick_values(&entries, &[]).is_empty());
+    }
+
+    #[test]
     fn dump_errors() {
         assert!(parse_dump(br#"{"settings":null,"error":"Cannot find module"}"#).unwrap_err().contains("Cannot find module"));
         assert!(parse_dump(b"nope").is_err());
@@ -825,10 +947,8 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_omp(dir: &Path, body: &str) -> Omp {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("omp");
-        std::fs::write(&bin, format!("#!/bin/sh\nD={}\n{body}", dir.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exe::write_exe(&bin, format!("#!/bin/sh\nD={}\n{body}", dir.display()));
         let ext = dir.join("ext.ts");
         std::fs::write(&ext, "// TF_OMP_SCHEMA_OUT TF_OMP_SETTINGS_IN").unwrap();
         Omp { bin, ext, cache_dir: dir.join("cache"), run_dir: dir.join("run"), agent_dir: Some(dir.join("agent")) }

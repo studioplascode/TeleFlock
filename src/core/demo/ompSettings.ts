@@ -3,7 +3,7 @@
  * in-memory values, validated the way `omp config set` does (unknown keys, types, enum values,
  * item vocabularies) and with credentials kept write-only.
  */
-import type { OmpSetting, OmpSettingChange, OmpSettings, RoleBinding } from "../gen";
+import type { OmpSetting, OmpSettingChange, OmpSettings, OmpSettingValues, RoleBinding } from "../gen";
 import { apiError } from "../errors";
 import { HOME, ROLES } from "./data";
 import { OMP_SETTINGS_FIXTURE, OMP_VERSION } from "./ompSettingsFixture";
@@ -14,6 +14,8 @@ const DEMO_VALUES: Record<string, unknown> = {
   "compaction.enabled": true,
   "statusLine.leftSegments": ["model", "mode", "path", "git", "pr", "context_pct"],
   "loop.conditionTimeoutMs": 120000,
+  // Codex plan rate-limited → the same models on the API key; the default role's own chain.
+  "retry.fallbackChains": { "openai-codex/*": ["openai/*"], default: ["anthropic/claude-sonnet-5:high", "openai/gpt-5.5:xhigh"] },
 };
 
 function invalid(key: string, message: string): never {
@@ -94,10 +96,31 @@ export class DemoOmpSettings {
     return this.get();
   }
 
+  /** `omp.settingValues`: current values of known, non-credential keys that have one (like tf-hostd). */
+  values(raw: unknown): OmpSettingValues {
+    const keys = Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : [];
+    if (keys.length > 64) throw apiError("invalid_params", "at most 64 keys");
+    const values: Record<string, unknown> = {};
+    for (const key of keys) {
+      const s = this.settings.find((x) => x.id === key);
+      if (s && !s.credential && !s.redacted && s.value !== undefined) values[key] = s.value;
+    }
+    return { values };
+  }
+
   /** `host.models` role bindings from the current `modelRoles`. */
   roles(): RoleBinding[] {
     const v = this.settings.find((s) => s.id === "modelRoles")?.value;
     if (!v || typeof v !== "object" || Array.isArray(v)) return [];
     return Object.entries(v).flatMap(([role, model]) => (typeof model === "string" ? [{ role, model }] : []));
+  }
+
+  /** The current `retry.fallbackChains` (string entries only), like `agent.getRoleModels`' `hostChains`. */
+  chains(): Record<string, string[]> {
+    const v = this.settings.find((s) => s.id === "retry.fallbackChains")?.value;
+    if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+    const out: Record<string, string[]> = {};
+    for (const [key, list] of Object.entries(v)) if (Array.isArray(list)) out[key] = list.filter((e): e is string => typeof e === "string");
+    return out;
   }
 }

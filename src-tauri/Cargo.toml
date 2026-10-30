@@ -45,6 +45,8 @@ tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
 tauri-plugin-snap-layout = "1.0.9"
 # Windows self-update: download, minisign verification and the passive NSIS install.
 tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "system-proxy"] }
+# Quick capture's system-wide shortcut (src/capture.rs; X11 on Linux, none on Wayland).
+tauri-plugin-global-shortcut = "2.4.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
@@ -56,9 +58,25 @@ windows = { version = "0.62", features = [
     "UI_Notifications",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Desktop notifications and idle time over the session bus (xdg_notify.rs, idle.rs). Already in the
+# build through tauri-plugin-single-instance (same default features), so no new crate.
+zbus = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# UNUserNotificationCenter (mac_notify.rs). Same versions tauri/wry use on macOS; only the
+# bindings crate is new to the build.
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-user-notifications = "0.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 tauri-plugin-teleflock-android = { path = "plugins/teleflock-android" }

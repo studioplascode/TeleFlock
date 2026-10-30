@@ -2,7 +2,7 @@
  * Pure helpers of the omp settings page: omp's tab/group layout, search, per-type editors,
  * value parsing/validation and model-role selectors. No React, no I/O (tested in model.test.ts).
  */
-import type { OmpSetting, OmpSettingChange, OmpSettingOption, OmpSettings, ThinkingLevel } from "@/core/gen";
+import type { ModelInfo, OmpSetting, OmpSettingChange, OmpSettingOption, OmpSettings, ThinkingLevel } from "@/core/gen";
 
 /** omp's settings tabs in panel order, with their section groups in order (pi-tui `settings-defs`). */
 export const OMP_TABS: readonly { id: string; label: string; lead: string; groups: readonly string[] }[] = [
@@ -31,6 +31,8 @@ export const OMP_TABS: readonly { id: string; label: string; lead: string; group
 /** Settings omp's panel does not show (config.yml / `omp config set` only), grouped by key prefix. */
 export const OTHER_TAB = "other";
 export const MODEL_ROLES_KEY = "modelRoles";
+/** Edited by the guided fallback-chains editor (JSON on request). */
+export const FALLBACK_CHAINS_KEY = "retry.fallbackChains";
 
 export interface SettingSection {
   /** omp group name, or the key prefix on the Other tab; absent = the tab's ungrouped settings. */
@@ -137,7 +139,7 @@ export function isModified(s: OmpSetting): boolean {
   return !deepEqual(s.value, s.default);
 }
 
-export type EditorKind = "roles" | "secret" | "switch" | "choice" | "number" | "text" | "members" | "list" | "json";
+export type EditorKind = "roles" | "chains" | "secret" | "switch" | "choice" | "number" | "text" | "members" | "list" | "json";
 
 /**
  * Whether the array holds strings: declared so (`items.type`), else a non-empty value (else
@@ -164,6 +166,7 @@ export function memberChoices(s: OmpSetting): OmpSettingOption[] | undefined {
 /** The control a setting gets. */
 export function editorFor(s: OmpSetting): EditorKind {
   if (s.id === MODEL_ROLES_KEY) return "roles";
+  if (s.id === FALLBACK_CHAINS_KEY) return "chains";
   if (s.credential) return "secret";
   switch (s.type) {
     case "boolean":
@@ -289,6 +292,13 @@ export function parseRoleSelector(selector: string): { model: string; thinking?:
 
 export function formatRoleSelector(model: string, thinking?: ThinkingLevel): string {
   return thinking ? `${model}:${thinking}` : model;
+}
+
+/** The level a selector keeps when its model changes: one the new model offers (any, when the catalog doesn't say). */
+export function keepThinking(models: readonly ModelInfo[], model: string, thinking: ThinkingLevel | undefined): ThinkingLevel | undefined {
+  if (!thinking) return undefined;
+  const next = models.find((m) => `${m.provider}/${m.id}` === model);
+  return !next?.thinking.length || next.thinking.includes(thinking) ? thinking : undefined;
 }
 
 /** The `modelRoles` record (string values only). */

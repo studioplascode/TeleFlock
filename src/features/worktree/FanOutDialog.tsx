@@ -2,10 +2,15 @@ import { AnimatePresence, motion } from "motion/react";
 import { ArrowLeft, ArrowRight, Check, GitBranch, LayoutDashboard, Plus, RotateCcw, ShieldAlert, Sparkles, Split, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { core, draftKey, navigate, suggestBranch, useAiNaming, useAiSuggestion, useDraft, useDraftState, useHostIds, useHostState, useHosts, useSettings } from "@/core";
-import type { AgentSpec, AgentTemplate, Started, ThinkingLevel, WorktreeCreateParams } from "@/core/gen";
+import type { AgentSpec, AgentTemplate, AutoAnswer, Started, ThinkingLevel, WorktreeCreateParams } from "@/core/gen";
 import { Button, Chip, Field, IconButton, Input, Select, type SelectOption, SegmentedControl, Shimmer, Switch, Textarea, cn, spring, useIsMobile } from "@/design";
 import { useBoard } from "@/features/board/boardStore";
 import { ACTIONS } from "@/features/shell/vocab";
+import { AgentRolesSection, rolesSummaryChip } from "@/features/agentRoles/AgentRolesSection";
+import { hostTakesRoles, launchMainText, launchOverrides, overridesSummary } from "@/features/agentRoles/roles";
+import { hostDecides, specAutoAnswer } from "@/features/autoAnswer/format";
+import { AutoAnswerSection, autoAnswerChip } from "@/features/autoAnswer/PolicyEditor";
+import { AgentOptions } from "../workspace/shared/AgentOptions";
 import { AiMark } from "../workspace/shared/ai";
 import { useModelCatalog } from "../workspace/shared/AgentFields";
 import { CommandPreview, type PreviewLine } from "../workspace/shared/CommandPreview";
@@ -46,6 +51,12 @@ interface Variant {
   model: string;
   thinking: ThinkingLevel | "default";
   plan: boolean;
+  /** The variant agent's own omp model roles; absent (drafts saved before them) = none. */
+  roleModels?: Record<string, string>;
+  /** Its own omp `retry.fallbackChains`; absent = none. */
+  fallbackChains?: Record<string, string[]>;
+  /** Its own decide-for-me policy; absent = the host default. */
+  autoAnswer?: AutoAnswer;
 }
 
 function variantKeyFor(v: Pick<Variant, "templateId" | "model">, templates: readonly AgentTemplate[]): string {
@@ -91,6 +102,8 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
   const [hostId, setHostId] = useState<string | undefined>(initialHostId ?? hostIds[0]);
   const host = useHostState(hostId ?? "");
   const home = host?.info.home;
+  const decides = hostDecides(host?.info);
+  const takesRoles = hostTakesRoles(host?.info);
   const catalog = useModelCatalog(hostId);
 
   const [step, setStep] = useState(initialCwd ? 1 : 0);
@@ -191,6 +204,8 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
       plan: v.plan,
       // A template's own instructions frame the shared task.
       prompt: t?.prompt ? `${t.prompt.trim()}\n\n${task}` : task,
+      ...launchOverrides(v.roleModels, v.fallbackChains, takesRoles),
+      ...specAutoAnswer(v.autoAnswer, decides),
     };
   };
   const paramsOf = (v: Variant, trustRepo: boolean): WorktreeCreateParams | null =>
@@ -287,7 +302,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
             "--no-focus",
             trust && "--trust-repository",
           ),
-          note: `${nameOf(v)} · ${v.model === DEFAULT ? "default model" : v.model}${v.thinking !== DEFAULT ? ` · ${v.thinking}` : ""}${v.plan ? " · plan" : ""}`,
+          note: [nameOf(v), v.model === DEFAULT ? "default model" : v.model, v.thinking !== DEFAULT && v.thinking, v.plan && "plan", takesRoles && overridesSummary(v.roleModels, v.fallbackChains)].filter(Boolean).join(" · "),
         })),
       ]
     : [];
@@ -498,6 +513,19 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                             <span className="truncate">{effSlug ? branchOf(v) : "…"}</span>
                             {err && <span className="ml-auto shrink-0 font-sans font-semibold text-error">{err}</span>}
                           </div>
+                          {hostId && (
+                            <AgentOptions summary={[takesRoles ? rolesSummaryChip(v.roleModels, v.fallbackChains) : null, autoAnswerChip(decides ? v.autoAnswer : undefined)]} className="mt-2.5">
+                              <AgentRolesSection
+                                hostId={hostId}
+                                roles={v.roleModels ?? {}}
+                                chains={v.fallbackChains ?? {}}
+                                onChange={(patch) => updateVariant(v.id, patch)}
+                                mainModel={launchMainText(catalog?.models ?? [], v.model, v.thinking, catalog?.roles.find((r) => r.role === "default")?.model)}
+                                mainWhere="set on this variant"
+                              />
+                              <AutoAnswerSection hostId={hostId} value={v.autoAnswer} onChange={(autoAnswer) => updateVariant(v.id, { autoAnswer })} />
+                            </AgentOptions>
+                          )}
                         </motion.div>
                       );
                     })}

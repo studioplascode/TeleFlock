@@ -77,13 +77,29 @@ fn has_separator(dir: &Path) -> bool {
     dir.as_os_str().to_string_lossy().contains(sep)
 }
 
-/// The words a probe shell runs and the markers around the PATH it prints. Each marker is
-/// printed from two words, so an echo of the command line never contains it.
+/// The POSIX script a probe runs (`$TF_EXEC`) and the markers around the PATH it prints. Each
+/// marker is printed from two words, so an echo of the command line never contains it.
 fn probe(nonce: &str) -> (String, String, String) {
     let begin = format!("__TF_PATH_BEGIN_{nonce}__");
     let end = format!("__TF_PATH_END_{nonce}__");
     let script = format!("printf '%s' '__TF_PATH_' 'BEGIN_{nonce}__' \"$PATH\" '__TF_PATH_' 'END_{nonce}__'");
     (begin, end, script)
+}
+
+/// What the probe shell runs: hand `$TF_EXEC` to POSIX `sh` (the line tf-transport's
+/// `quote::LOGIN_COMMAND` gives every login shell). sh, bash, zsh, ksh, fish, nushell and csh all
+/// read it the same way; the printf itself (`"$PATH"`) is POSIX, which nushell can't parse.
+#[cfg(unix)]
+const PROBE_COMMAND: &str = r#"exec sh -c 'eval "$TF_EXEC"'"#;
+
+/// An interactive login shell's flags before the command. csh and tcsh take `-l` only on its
+/// own, so they run interactive without it (their rc files set PATH).
+#[cfg(unix)]
+fn probe_flags(shell: &Path) -> &'static [&'static str] {
+    match shell.file_name().and_then(|n| n.to_str()) {
+        Some("csh" | "tcsh") => &["-i", "-c"],
+        _ => &["-i", "-l", "-c"],
+    }
 }
 
 /// The text between the first `begin` and the next `end` in `out` (a shell's stdout, rc-file
@@ -149,7 +165,7 @@ fn passwd_shell() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(shell.to_bytes())))
 }
 
-/// The PATH `shell` has as an interactive login shell: `shell -i -l -c 'printf …'` in `home`,
+/// The PATH `shell` has as an interactive login shell: `shell -i -l -c PROBE_COMMAND` in `home`,
 /// stdin `/dev/null`, stderr dropped, in a session of its own (no controlling terminal to take
 /// over). Stops reading once the PATH is printed; then whatever is left of that session is
 /// killed, also after `timeout`.
@@ -165,7 +181,9 @@ pub fn interactive_path(shell: &Path, home: &Path, timeout: Duration) -> Result<
     );
     let (begin, end, script) = probe(&nonce);
     let mut cmd = std::process::Command::new(shell);
-    cmd.args(["-i", "-l", "-c", &script])
+    cmd.args(probe_flags(shell))
+        .arg(PROBE_COMMAND)
+        .env("TF_EXEC", &script)
         .current_dir(home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -407,28 +425,49 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn interactive_path_reads_between_markers_and_times_out() {
-        use std::os::unix::fs::PermissionsExt;
+        use crate::test_exe::write_exe;
         let td = tempfile::tempdir().unwrap();
         // A "shell" that prints noise around the PATH it was given, then lingers.
         let shell = td.path().join("noisy-sh");
-        std::fs::write(&shell, "#!/bin/sh\necho 'motd: hello'\nshift 3\nPATH=/opt/x/bin:/usr/bin\neval \"$1\"\necho tail\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_exe(&shell, "#!/bin/sh\necho 'motd: hello'\nshift 3\nPATH=/opt/x/bin:/usr/bin\neval \"$1\"\necho tail\nexec sleep 30\n");
         let started = Instant::now();
         assert_eq!(interactive_path(&shell, td.path(), Duration::from_secs(5)).unwrap(), OsString::from("/opt/x/bin:/usr/bin"));
         assert!(started.elapsed() < Duration::from_secs(4), "stops at the end marker, kills the rest");
 
         let hung = td.path().join("hung-sh");
-        std::fs::write(&hung, "#!/bin/sh\necho 'starting…'\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&hung, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_exe(&hung, "#!/bin/sh\necho 'starting…'\nexec sleep 30\n");
         let started = Instant::now();
         let err = interactive_path(&hung, td.path(), Duration::from_millis(400)).unwrap_err();
         assert!(err.contains("no PATH within"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(3));
 
         let silent = td.path().join("silent-sh");
-        std::fs::write(&silent, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&silent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_exe(&silent, "#!/bin/sh\nexit 0\n");
         assert!(interactive_path(&silent, td.path(), Duration::from_secs(2)).unwrap_err().contains("without printing"));
+    }
+
+    /// Whatever the user's shell parses, the probe only needs it to run `PROBE_COMMAND`: a `nu`
+    /// that refuses any other line, and a `tcsh` that refuses `-l` with a command (as tcsh does),
+    /// both report the PATH their rc files set.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_path_asks_any_shell_only_for_the_probe_command() {
+        use crate::test_exe::write_exe;
+        let td = tempfile::tempdir().unwrap();
+        let line = format!("'{}'", PROBE_COMMAND.replace('\'', r"'\''"));
+        for (name, flags, cmd_arg) in [("nu", "-i -l -c", "$4"), ("tcsh", "-i -c", "$3")] {
+            let dir = td.path().join(format!("{name}-home"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let shell = dir.join(name);
+            let n = flags.split(' ').count();
+            let args = (1..=n).map(|i| format!("${i}")).collect::<Vec<_>>().join(" ");
+            let script = format!(
+                "#!/bin/sh\nif [ \"{args}\" != \"{flags}\" ] || [ \"{cmd_arg}\" != {line} ]; then echo \"refused: $*\" >&2; exit 2; fi\nPATH=/opt/{name}/bin:/usr/bin:/bin\nexec sh -c \"{cmd_arg}\"\n"
+            );
+            write_exe(&shell, script);
+            let path = interactive_path(&shell, &dir, Duration::from_secs(5)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(path, OsString::from(format!("/opt/{name}/bin:/usr/bin:/bin")), "{name}");
+        }
     }
 
     #[test]

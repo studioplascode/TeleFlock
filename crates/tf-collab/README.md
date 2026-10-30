@@ -137,7 +137,9 @@ impl Replica {
     pub fn state(&self) -> &SessionState;  pub fn header(&self) -> Option<&SessionHeader>;
     pub fn liveness(&self, now: Millis) -> Liveness;                 // streaming, thinking, tool, live tps (3 s), line
     pub fn ui(&self) -> Option<&UiRequest>;
-    pub fn needs(&self) -> Option<NeedsYou>;                         // Ask / Approval / Input for the pending request
+    pub fn needs(&self) -> Option<NeedsYou>;                         // Ask / Approval / Input for the pending request; ask options
+        // are ★ `recommended` from the ask call's `questions[].recommended` (omp's dialog only preselects it) or omp's
+        // " (Recommended)" label mark (label shown without it, id = omp's exact label); tf-hostd's decide for me picks them
     pub fn answer(&mut self, request_id: &str, answer: &Answer) -> Result<Vec<UiReply>, ApiError>;
         // exact labels (invalid_params otherwise); text → "Other (type your own)" + auto-answered editor;
         // chat → "Chat about this"; multi-select → checkbox toggle loop + "Next →"; cancel → None
@@ -163,20 +165,36 @@ pub struct Update {
     pub liveness_changed: bool,
 }
 pub struct UiReply { pub req_id: u64, pub value: Option<String> }
-pub enum Signal { TurnStarted, TurnEnded { aborted: bool, error: Option<String> }, Prompted { text: String, author: Option<String> },
+pub enum Signal { TurnStarted, TurnEnded { aborted: bool, error: Option<String>, refusal: Option<Refusal> }, Prompted { text: String, author: Option<String> },
     Asked { request_id: String }, UiSettled { request_id: String }, Notice { level: NoticeLevel, text: String },
     ToolError { tool: String, error: String }, ModelChanged { model: ModelRef }, ThinkingChanged { level: ThinkingLevel },
-    Compacted { tokens_before: Option<u64> }, Retry { attempt: u32, max: u32, error: String }, Ended { reason: String } }
+    Compacted { tokens_before: Option<u64> }, Retry { attempt: u32, max: u32, error: String }, Ended { reason: String },
+    OriginalsKept { .. }, Noted { id: String, note: RowNote }, RowKept { row: LiveRow } }
+impl Replica { pub fn keep_rows(&mut self, rows: impl IntoIterator<Item = LiveRow>); pub fn live_rows(&self) -> &[LiveRow]; }
+pub struct LiveRow { pub after: Option<String>, pub item: TranscriptItem }   // a row only seen live, after the row it followed
 pub fn transcript_page(jsonl: &str) -> HistoryPage;   // subagent transcript (fetch_transcript text) with the same mapping
 ```
 
 ### Row ids and mapping
 
-Ids are stable across snapshot and live frames: user `u<ts>`, assistant/thinking blocks `a<ts>.<block>`,
-tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction `c<entryId>`, notices `n<epoch>.<seq>`,
-retry streaks `r<epoch>.<seq>` (one row per auto-retry streak, updated in place: "Retrying (3/10)…" → "Recovered after 6 retries").
-`epoch` is the replica's lifetime (base-36 µs at creation, increasing within the process; reloads keep it): notices
-and retries are live-only, and clients keep rows across tf-hostd restarts, so a later replica never reuses their ids.
+Ids are stable across snapshot and live frames: user `u<ts>`, assistant/thinking blocks `a<ts>.<block>`, the error row
+of a message that failed without text `a<ts>.e`, tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction
+`c<entryId>`, notices `n<epoch>.<seq>` (a standing notice with a `key`, e.g. a config warning: `n:<key>`), retry streaks
+`r<epoch>.<seq>` (one row per auto-retry streak, updated in place: "Retrying (3/10)…" → "Recovered after 6 retries").
+`epoch` is the replica's lifetime (base-36 µs at creation, increasing within the process; reloads keep it): clients keep
+rows across tf-hostd restarts, so a later replica never reuses these ids.
+
+- **Turn errors** (`replica/failure.rs`): a message's outcome (`stopReason`, `error`, `errorStatus`, `refusal`) sits on
+  its last visible text row, else on its error row `a<ts>.e`, for every content shape (`[]`, blank text, thinking or
+  tool calls only). `error` follows omp's presentation: a failed request's `errorMessage` (else `provider error`), an
+  abort's own reason, never a user interrupt or a reasonless abort. A provider refusal (`stopDetails` `refusal` /
+  `sensitive`) carries `refusal {kind, category, explanation}`; omp's fallback credit is never read. Failed attempts
+  omp's auto-retry superseded stay hidden live (`auto_retry_start` drops the error row) and rebuilt
+  (`retried_attempts`: `retryRecovery`, or another assistant message before the next prompt).
+- **Live rows** (`replica/live_rows.rs`): warning and error notices (not collab presence or retry streaks) and a run's
+  terminal error row are kept as `LiveRow`s (`Signal::RowKept`; tf-hostd persists them) and put back after the row
+  each followed when a snapshot rebuilds the transcript, or by time when that row is gone; a refusal comes back
+  without the refused text. Info notices stay live-only; omp's `xd://` mount notices (`source: xdev`, info) are no rows.
 
 - Text/thinking stream as `append {field: text}`; the replica diffs each block of omp's full message against
   what it emitted (omp serializes the message lazily, so the delta field alone is unreliable).
@@ -185,6 +203,8 @@ and retries are live-only, and clients keep rows across tf-hostd restarts, so a 
 - `ToolView`s: bash, edit (omp numbered diff → unified patch), write, read (selector split from `path`),
   grep/glob/find (search), todo (also `meta.todos`), task (also `meta.subagents` from `agents` + `bus`),
   ask (question/options/answer), web_search, image blocks (eval/browser screenshots).
+- Subagent status (`replica/subagents.rs`): a recorded outcome (bus frames, settled `task` results, the
+  `async-result` messages' `details.jobs[]`) wins over the roster's `parked`; `parked` without one reads as `done`.
 - User rows: `author` = collab guest name (`collab-prompt`), `synthetic` for developer reminders and
   custom messages (`author` = customType, e.g. `async-result`); our own join/leave notices are not rows.
 

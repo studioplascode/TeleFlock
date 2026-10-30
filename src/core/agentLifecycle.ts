@@ -3,7 +3,7 @@ import { core, pushInternal } from "./client";
 import { agentKey, parseAgentKey } from "./keys";
 import { getRoute, navigate } from "./nav";
 import { FOLLOW_WINDOW_MS, newlyPruned, prunedKeys, resolveSuccessor } from "./store/lifecycle";
-import type { CoreState } from "./store/state";
+import type { AgentView, CoreState } from "./store/state";
 import { coreStore } from "./store/store";
 import { useUi } from "./ui";
 
@@ -104,6 +104,34 @@ export function resumeAgent(key: string): Promise<string | null> {
   })().finally(() => resuming.delete(key));
   resuming.set(key, run);
   return run;
+}
+
+/**
+ * Resolves with the agent at `key` (followed to its newest key after resumes) once `ready` holds for
+ * it, or null after `timeoutMs`. For flows that act on an agent as soon as it can take it, e.g. a
+ * slash command once a resumed agent's bridge is up.
+ */
+export function whenAgent(key: string, ready: (agent: AgentView) => boolean, timeoutMs: number): Promise<AgentView | null> {
+  // Executor form, as in whenPresent (Promise.withResolvers is not in the ES2023 lib).
+  return new Promise((resolve) => {
+    const check = (s: CoreState): AgentView | null => {
+      const agent = s.agents[resolveSuccessor(s.successors, key) ?? key];
+      return agent && ready(agent) ? agent : null;
+    };
+    const hit = check(coreStore.getState());
+    if (hit) return resolve(hit);
+    const timer = setTimeout(() => {
+      unsub();
+      resolve(null);
+    }, timeoutMs);
+    const unsub = coreStore.subscribe((s) => {
+      const agent = check(s);
+      if (!agent) return;
+      clearTimeout(timer);
+      unsub();
+      resolve(agent);
+    });
+  });
 }
 
 // ---------------------------------------------------------------- following and pruning

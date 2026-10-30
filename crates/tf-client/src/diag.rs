@@ -49,8 +49,10 @@ fn first_line(b: &[u8]) -> String {
 
 /// Finds a tool like tf-hostd does and runs `<tool> --version` (POSIX sh, so a fish login shell
 /// works too): the login PATH, then the well-known install dirs, then (bounded to 6 s) the PATH
-/// of the user's interactive shell, where bun's and nvm's installers add theirs. Prints tagged
-/// lines (login shells may print noise): `tf.missing=1`, or `tf.path`, `tf.via`, `tf.code`, `tf.out`.
+/// of the user's interactive shell, where bun's and nvm's installers add theirs. That shell only
+/// runs the line every shell reads alike, handing the printf to `sh` in `$TF_EXEC` (hostd
+/// `userenv::interactive_path`; csh and tcsh without `-l`). Prints tagged lines (login shells may
+/// print noise): `tf.missing=1`, or `tf.path`, `tf.via`, `tf.code`, `tf.out`.
 const TOOL_PROBE: &str = r#"tool=$1
 found() { command -v "$tool" 2>/dev/null; }
 via=login
@@ -62,7 +64,9 @@ if [ -z "$bin" ]; then
 fi
 if [ -z "$bin" ] && [ -n "$SHELL" ] && [ -x "$SHELL" ]; then
   f=$(mktemp 2>/dev/null || echo "/tmp/tf-diag-path.$$")
-  "$SHELL" -i -l -c "printf '%s' '__TF_PATH_' 'BEGIN__' \"\$PATH\" '__TF_PATH_' 'END__'" </dev/null >"$f" 2>/dev/null &
+  set -- -i -l -c
+  case ${SHELL##*/} in csh|tcsh) set -- -i -c ;; esac
+  TF_EXEC="printf '%s' '__TF_PATH_' 'BEGIN__' \"\$PATH\" '__TF_PATH_' 'END__'" "$SHELL" "$@" 'exec sh -c '\''eval "$TF_EXEC"'\''' </dev/null >"$f" 2>/dev/null &
   p=$!
   ( sleep 6; kill -9 "$p" ) </dev/null >/dev/null 2>&1 &
   k=$!
@@ -480,13 +484,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tool_probe_script_finds_tools_like_hostd() {
-        use std::os::unix::fs::PermissionsExt;
         let td = tempfile::tempdir().unwrap();
-        let exe = |path: std::path::PathBuf, body: &str| {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
+        let exe = |path: std::path::PathBuf, body: &str| tf_hostd::test_exe::write_exe(&path, body);
         // An `env`-style script in ~/.bun/bin whose interpreter lives there too.
         exe(td.path().join(".bun/bin/tfdiag-runtime"), "#!/bin/sh\nshift\necho 'tfdiag 1.2.3'\n");
         exe(td.path().join(".bun/bin/tfdiag-tool"), "#!/usr/bin/env tfdiag-runtime\n");
@@ -507,5 +506,47 @@ mod tests {
         let started = Instant::now();
         assert_eq!(probe(td.path(), Some(&hung), "tfdiag-absent").path, None);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// The interactive shell only has to run the line every shell reads alike, as hostd asks it:
+    /// a `nu` that refuses any other line and a `tcsh` asked without `-l`, plus real shells from
+    /// `TF_TEST_LOGIN_SHELLS` (fish, nushell, zsh, tcsh …), each with its own rc file.
+    #[cfg(unix)]
+    #[test]
+    fn tool_probe_reads_the_interactive_path_of_any_shell() {
+        let td = tempfile::tempdir().unwrap();
+        let home = td.path().join("home");
+        let write = |path: std::path::PathBuf, body: &str, mode: u32| tf_hostd::test_exe::write(&path, body, mode);
+        write(home.join("ishell/bin/tfdiag-node"), "#!/bin/sh\necho v22.1.0\n", 0o755);
+        write(home.join(".config/fish/config.fish"), "set -gx PATH $HOME/ishell/bin $PATH\n", 0o644);
+        write(home.join(".config/nushell/env.nu"), "$env.PATH = ($env.PATH | prepend ($env.HOME | path join 'ishell/bin'))\n", 0o644);
+        write(home.join(".config/nushell/config.nu"), "", 0o644);
+        write(home.join(".zshrc"), "PATH=$HOME/ishell/bin:$PATH\n", 0o644);
+        write(home.join(".tcshrc"), "setenv PATH $HOME/ishell/bin:$PATH\n", 0o644);
+        write(home.join(".bash_profile"), "PATH=$HOME/ishell/bin:$PATH\n", 0o644);
+        let line = format!("'{}'", r#"exec sh -c 'eval "$TF_EXEC"'"#.replace('\'', r"'\''"));
+        let mut shells = Vec::new();
+        for (name, flags, arg) in [("nu", "-i -l -c", "$4"), ("tcsh", "-i -c", "$3")] {
+            let args = (1..=flags.split(' ').count()).map(|i| format!("${i}")).collect::<Vec<_>>().join(" ");
+            let shell = td.path().join("fakes").join(name);
+            let body = format!(
+                "#!/bin/sh\nif [ \"{args}\" != \"{flags}\" ] || [ \"{arg}\" != {line} ]; then echo \"refused: $*\" >&2; exit 2; fi\nPATH=\"$HOME/ishell/bin:$PATH\"\nexec sh -c \"{arg}\"\n"
+            );
+            write(shell.clone(), &body, 0o755);
+            shells.push(shell);
+        }
+        shells.extend(std::env::var("TF_TEST_LOGIN_SHELLS").unwrap_or_default().split(':').filter(|s| !s.is_empty()).map(std::path::PathBuf::from));
+        for shell in shells {
+            let out = std::process::Command::new("sh")
+                .args(["-c", TOOL_PROBE, "sh", "tfdiag-node"])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .env("SHELL", &shell)
+                .output()
+                .unwrap();
+            let p = parse_tool_probe(&String::from_utf8_lossy(&out.stdout)).unwrap_or_default();
+            assert_eq!((p.via.as_str(), p.out.as_str()), ("interactive", "v22.1.0"), "{}: {p:?}", shell.display());
+        }
     }
 }

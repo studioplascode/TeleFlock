@@ -14,9 +14,13 @@ export function herdrArgv(session: string | undefined, ...rest: (string | false 
  * The launch recipe from `docs/architecture.md` §3.7, plus the follow-ups tf-hostd performs once
  * the agent is idle and linked (plan mode, initial prompt). The overlay and bridge live in
  * tf-hostd's home on the host (`~/.teleflock` unless `TF_HOSTD_HOME` moves it), which this app
- * does not know: the preview names it instead of guessing a path.
+ * does not know: the preview names it instead of guessing a path. An agent with roles or fallback
+ * chains of its own gets its own overlay after TeleFlock's; its own `default` role replaces
+ * `--model` / `--thinking`.
  */
 export function agentLaunchLines(session: string | undefined, spec: AgentSpec, pane: string, opts: { name: string; resumeFile?: string }): PreviewLine[] {
+  const own = Object.keys(spec.roleModels ?? {}).length > 0 || Object.keys(spec.fallbackChains ?? {}).length > 0;
+  const ownDefault = spec.roleModels?.default !== undefined;
   const lines: PreviewLine[] = [
     {
       argv: herdrArgv(
@@ -31,10 +35,11 @@ export function agentLaunchLines(session: string | undefined, spec: AgentSpec, p
         "--",
         "--config",
         "<tf-hostd home>/omp-overlay.yml",
+        ...(own ? ["--config", "<tf-hostd home>/agent-config/<this agent>.yml"] : []),
         "-e",
         "<tf-hostd home>/ext/teleflock-bridge.ts",
-        ...(spec.model ? ["--model", shellQuote(spec.model)] : []),
-        ...(spec.thinking ? ["--thinking", spec.thinking] : []),
+        ...(spec.model && !ownDefault ? ["--model", shellQuote(spec.model)] : []),
+        ...(spec.thinking && !ownDefault ? ["--thinking", spec.thinking] : []),
         ...(opts.resumeFile ? [`--resume=${shellQuote(opts.resumeFile)}`] : []),
       ),
     },

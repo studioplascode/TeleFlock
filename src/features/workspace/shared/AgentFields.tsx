@@ -2,8 +2,14 @@ import { ClipboardList, Cpu, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useState } from "react";
 import { useDraftState } from "@/core";
-import type { AgentSpec, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
+import type { AgentSpec, AutoAnswer, ModelCatalog, Settings, ThinkingLevel } from "@/core/gen";
 import { Field, Input, Select, type SelectOption, Switch, Textarea, cn, spring } from "@/design";
+import { AgentRolesSection, rolesSummaryChip, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
+import { launchMainText, launchOverrides } from "@/features/agentRoles/roles";
+import { specAutoAnswer } from "@/features/autoAnswer/format";
+import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
+import { AutoAnswerSection, autoAnswerChip } from "@/features/autoAnswer/PolicyEditor";
+import { AgentOptions } from "./AgentOptions";
 import { AiMark } from "./ai";
 import { AGENT_NAME_MAX, uniqueAgentName } from "./paths";
 import { TemplatePicker } from "./templates";
@@ -20,6 +26,12 @@ export interface AgentDraft {
   thinking: ThinkingLevel | "default";
   plan: boolean;
   prompt: string;
+  /** This agent's own omp model roles (never `default`: Model / Thinking are its main model). */
+  roleModels: Record<string, string>;
+  /** This agent's own omp `retry.fallbackChains`. */
+  fallbackChains: Record<string, string[]>;
+  /** This agent's own decide-for-me policy; undefined = the host default. */
+  autoAnswer?: AutoAnswer;
 }
 
 const DEFAULT = "default";
@@ -34,6 +46,8 @@ export function initialAgentDraft(settings: Pick<Settings, "defaultModel" | "def
     thinking: settings?.defaultThinking ?? DEFAULT,
     plan: settings?.defaultPlan ?? false,
     prompt: "",
+    roleModels: {},
+    fallbackChains: {},
   };
 }
 
@@ -59,7 +73,11 @@ export function useAgentDraft(key: string, init: () => AgentDraft): [AgentDraft,
   return [draft, patch, clearText];
 }
 
-export function toAgentSpec(d: AgentDraft): AgentSpec {
+/**
+ * The launch spec; `decides` = the host has decide for me (`hostDecides`): only such a host gets the agent's own policy;
+ * `takesRoles` = its tf-hostd takes the agent's own roles (`hostTakesRoles`).
+ */
+export function toAgentSpec(d: AgentDraft, decides: boolean, takesRoles = true): AgentSpec {
   return {
     kind: "omp",
     name: d.name.trim() || undefined,
@@ -67,6 +85,8 @@ export function toAgentSpec(d: AgentDraft): AgentSpec {
     thinking: d.thinking === DEFAULT ? undefined : d.thinking,
     plan: d.plan,
     prompt: d.prompt.trim() || undefined,
+    ...launchOverrides(d.roleModels, d.fallbackChains, takesRoles),
+    ...specAutoAnswer(d.autoAnswer, decides),
   };
 }
 
@@ -111,6 +131,8 @@ export interface AgentFieldsProps {
 export function AgentFields({ hostId, draft, onChange, derivedName, suggestedName, takenNames, toggleable, compact }: AgentFieldsProps) {
   const catalog = useModelCatalog(hostId);
   const defaultRole = catalog?.roles.find((r) => r.role === "default")?.model;
+  const decides = !!useHostAutoAnswer(hostId);
+  const takesRoles = useHostTakesRoles(hostId);
 
   const modelOptions = useMemo<SelectOption[]>(() => {
     const opts: SelectOption[] = [{ value: DEFAULT, label: "Host default", hint: defaultRole ?? "omp's default role", icon: <Sparkles /> }];
@@ -192,6 +214,16 @@ export function AgentFields({ hostId, draft, onChange, derivedName, suggestedNam
           />
         )}
       </Field>
+      <AgentOptions summary={[takesRoles ? rolesSummaryChip(draft.roleModels, draft.fallbackChains) : null, autoAnswerChip(decides ? draft.autoAnswer : undefined)]} className={compact ? undefined : "md:col-span-2"}>
+        <AgentRolesSection
+          hostId={hostId}
+          roles={draft.roleModels}
+          chains={draft.fallbackChains}
+          onChange={onChange}
+          mainModel={launchMainText(catalog?.models ?? [], draft.model, draft.thinking, defaultRole)}
+        />
+        <AutoAnswerSection hostId={hostId} value={draft.autoAnswer} onChange={(autoAnswer) => onChange({ autoAnswer })} />
+      </AgentOptions>
     </div>
   );
 

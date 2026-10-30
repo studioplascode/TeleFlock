@@ -1,8 +1,10 @@
 import { AnimatePresence, motion } from "motion/react";
 import { CloudOff, Eye, PlugZap, RotateCcw, Unplug, Zap } from "lucide-react";
 import type { ReactNode } from "react";
-import type { ConnStatus, TermMode } from "@/core/gen";
+import type { ConnStatus, HerdrHealth, TermMode } from "@/core/gen";
 import { Button, Shimmer, Skeleton, Spinner, cn, spring, tween, useNow } from "@/design";
+import { HerdrStatusText, RestartHerdrButton } from "@/features/hosts/HerdrControls";
+import { herdrDown, herdrNotRunning, isHerdrDownError } from "@/features/hosts/herdrHealth";
 import { PHASE_LABEL, phaseBusy } from "@/features/shell/status";
 import type { TermPhase } from "./session";
 
@@ -12,6 +14,10 @@ export interface PaneOverlayProps {
   mode: TermMode;
   offline: boolean;
   conn: ConnStatus | undefined;
+  /** The host's herdr health, when its server is not up the terminal says so instead of a raw attach error. */
+  herdr?: HerdrHealth;
+  hostId: string;
+  hostName: string;
   gotFrame: boolean;
   onReattach(): void;
   onTakeover(): void;
@@ -36,7 +42,10 @@ function RetryIn({ at }: { at: number }) {
 }
 
 /** Attach / reconnect / closed / error states drawn over the terminal grid. */
-export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onReattach, onTakeover, onObserve }: PaneOverlayProps) {
+export function PaneOverlay({ phase, compact, mode, offline, conn, herdr, hostId, hostName, gotFrame, onReattach, onTakeover, onObserve }: PaneOverlayProps) {
+  // herdr's server is not there: the pane can't attach whatever the transport says. It reattaches by itself when herdr is up again.
+  // (a server that is only not answering leaves an attached pane alone: its process keeps streaming)
+  const herdrGone = !offline && ((herdrDown(herdr) && !(herdr.state === "unresponsive" && phase.k === "live")) || (phase.k === "error" && isHerdrDownError(phase.error)));
   const attaching = !offline && !gotFrame && (phase.k === "idle" || phase.k === "opening" || phase.k === "live");
   const reattaching = !offline && gotFrame && phase.k === "opening";
 
@@ -68,6 +77,31 @@ export function PaneOverlay({ phase, compact, mode, offline, conn, gotFrame, onR
             </Banner>
           )}
         </>
+      ),
+    };
+  } else if (herdrGone) {
+    const title = herdrNotRunning(hostName, herdr);
+    view = {
+      key: "herdr-down",
+      node: compact ? (
+        <CompactNote icon={<PlugZap />} text={title} onRetry={onReattach} />
+      ) : (
+        <Banner
+          tone="warn"
+          icon={herdr && (herdr.state === "starting" || herdr.state === "restarting") ? <Spinner size={16} label="Starting herdr" /> : <PlugZap />}
+          title={title}
+          actions={
+            <>
+              {herdr && <RestartHerdrButton hostId={hostId} health={herdr} />}
+              <Button size="sm" variant="ghost" icon={<RotateCcw />} onClick={onReattach}>
+                Retry
+              </Button>
+            </>
+          }
+        >
+          {herdr ? <HerdrStatusText health={herdr} className="block" /> : <span className="block">TeleFlock can't reach herdr's server on {hostName}.</span>}
+          <span className="block text-mute-2">The terminal reattaches by itself when herdr runs again.</span>
+        </Banner>
       ),
     };
   } else if (phase.k === "closed") {

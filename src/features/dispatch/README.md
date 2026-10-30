@@ -24,13 +24,17 @@ export function isInFlight(entryId: string): boolean;               // request q
 export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create settles
 export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted (HostInfo.pruned), and their images
 export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live
-export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean }
+export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean; roleModels?; fallbackChains?; autoAnswer? } // the agent's own omp roles / chains and decide-for-me policy; absent (options saved before them) = none / the host default
 
 // src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
 export const MAX_TASK_IMAGES = 8; // their total: MAX_PROMPT_IMAGE_CHARS (@/core/clipboardImages, 12 MiB base64; relay messages cap at 16 MiB)
 export function saveEntryImages(id, images): Promise<void>; export function loadEntryImages(id): Promise<ImageInput[] | null>;
 export function useEntryImages(id, count): DraftImage[] | null | undefined; // undefined while loading, null = not on this device
 export function deleteEntryImages(ids): void; export function sweepEntryImages(liveIds): Promise<void>;
+
+// src/features/dispatch/quota.ts — Auto's quota term
+export function modelOf(spec): { provider; id } | undefined;      // "provider/id[:level]" → provider + id
+export function useAutoQuotas(hostIds, choice): Record<string, QuotaReading | null | undefined>; // choice "default" → each host's modelRoles.default; host.limits polled every 5 min while the window is active
 
 // src/features/dispatch/auto.ts — host groups as one target (auto.test.ts)
 export function autoTarget(group): string; export function groupOf(target): string | null; export function groupHosts(profiles, group): HostProfile[];
@@ -39,6 +43,14 @@ export function repoIdOf(hostId, root, remotes): string;           // canonical 
 export function groupRepos(hosts: { hostId; recents }[], remotes): GroupRepo[]; // { id, name, roots: { [hostId]: root }, at }
 export function localRepoIds(repo): string[];                      // the "local:<host>:<root>" ids it had before its remote was known
 export function findGroupRepo(repos, id): GroupRepo | undefined;   // by id, else by one of those local ids (threads keep the id they started under)
+
+// src/features/dispatch/send.ts — one send outside any view (the composer and Quick capture both use it)
+export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure
+export function sendTask(world, req): { ok: true; hostId; entry } | { ok: false; title; description? }; // planSend + dispatchTask
+export function dispatchTarget(profiles, hostIds, lastHost): { target; group }; // last host or group, else the first host
+export function dispatchOptions(stored, settings): DispatchOptions;             // last used, else the Settings defaults
+export function dispatchDraftKey(target, repo): string;                         // the composer draft of a thread
+export function dispatchedRepos(threads); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo);
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)
 export const BRANCH_PREFIX = "dispatch/";
@@ -56,7 +68,7 @@ export function slimThreads(threads, maxEntries, maxPrompt): Record<string, Disp
 Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | dataTransfer)` reads
 the files of `items`, else of `files`, never both — WebKitGTK puts pasted screenshots only in `items`, Chromium in both;
 `dragHasFiles`; `attachImages` scales images > 3 MB to ≤ 2560 px and adds them within the caps,
-as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`).
+as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pickHost`, `describeLoad`, `providerQuota`, `explainPick`).
 
 ## Behaviour
 - Top bar: target chip (more than one host, or any host group): single hosts and every host group
@@ -100,23 +112,53 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   single such host is refused with an "update the host" toast. Images no longer on this device (another
   device's thread, cleared storage) show as "N images (not on this device)" and a retry fails
   with a clear error instead of sending without them.
+- Large text pastes: as in the session composer (architecture §6.5, `@/features/session/composer/usePasteAttach`):
+  past 10 lines or 1000 characters a paste becomes omp's `[Paste #N, +L lines]` marker and a chip (first line,
+  size, how it goes); from the host's `paste.largeMenuThreshold` lines on omp's menu opens. The task goes out
+  with every marker expanded (`<attachment>…</attachment>` for a wrapped block), so naming, the thread entry and
+  the agent's first prompt see the full text; the chips persist with the draft like images. **Attach as local
+  file** is shown off ("The new agent has no session yet…"): `local://` resolves inside the agent's omp session,
+  which only exists once `worktree.create` started it, and Auto picks the host only at send. An absolute path in
+  the host's upload dir (what videos use) was not taken: omp's own flow never leaks raw paths into prompts,
+  uploads are pruned after 30 days while the prompt stays in the session, and the file would sit outside the
+  session and repo the agent works in. A wrapped block carries the same text without those trade-offs.
+- Prefilled tasks (`features/capture`): an Android share or Quick capture's "Open in Dispatch"
+  lands in the composer draft of the thread `prefillPlace` picks (a shared GitHub issue's repo
+  when a host has a clone, else the last repo; with none picked yet, the first one picked), added
+  after what the draft held. A banner above the composer says where it came from and offers
+  **Send to agent…** (moves exactly what it added into an agent's composer). The banner goes once
+  the draft is sent or emptied.
 - Auto (host groups, `HostProfile.group`, set in the host editor): the repo chip lists the union of
   the group hosts' repositories, matched by canonical `origin` URL (scp/https/ssh, `.git`, case
   and ports normalised; learned from workspaces into `remotes`) — each host keeps its own checkout
   root. Every send picks the least busy online host that has the repo (`@/core/workload`: running
   agents and dispatches on their way count 1 each, needs-you 0.3, CPU pressure — max of CPU% and
   load/cores — ×2, memory above 85 % steeply; ties → fewer agents on the way, lower CPU, profile
-  order), so consecutive sends alternate between equal hosts. The entry records `hostId`, that
-  host's `repo` root and `placed` ("least busy of 2: 1 running · CPU 34% (studio-pc: …)"), shown on
-  the card as "on <host> · why". Items, retries, trust (`trusted[host + root]`) and naming use the
+  order), so consecutive sends alternate between equal hosts. Each host has its own subscription
+  logins, so the chosen model's quota counts too (`quota.ts` `useAutoQuotas`, `providerQuota`):
+  the model is the send's `options.model`, "Default model" being each host's own `modelRoles.default`
+  (`host.models`); from that host's `host.limits`, per account of the model's provider the window
+  that binds first (shared windows plus the model's tier; `tightestWindow`), then the account with
+  the most room. Its used share adds ×3 (70 % left vs 15 % left ≈ 1.6 running agents); a host
+  without a reading (limits not in yet, API key, no subscription) counts as half used; an exhausted
+  window adds 50, so a task only waits for a reset when no host has room. The entry records
+  `hostId`, that host's `repo` root and `placed` (`explainPick`: "least busy of 2: 1 running · CPU
+  34% · Claude 5 Hour 70% left (studio-pc: …)", led by "most Claude 5 Hour left of 2" when the quota
+  changed the pick), shown on the card as "on <host> · why"; the group chooser's loads show the
+  quota part too. Items, retries, trust (`trusted[host + root]`) and naming use the
   entry's host. The composer hint names the group's hosts and the next pick. No host with the
   repo, or none online → the composer says so and sends nothing. A thread started while the repo
   had no known remote (`local:<host>:<root>`) stays reachable once its remote is learned: it is
   matched by its local id (`findGroupRepo`), and picking the repo goes back to it.
 - A dispatch is one `worktree.create { cwd: root, branch: "dispatch/<slug>", base?, label: slug,
-  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt, images? } }`.
-  A template's prompt frames the message (as in Fan out). With Settings → AI naming on (and the
-  host's omp able to answer), the entry first goes through `naming`: omp's tiny model suggests the
+  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt, images?, roleModels?, fallbackChains?, autoAnswer? } }`.
+  The footer's More options chip (what is set, when anything is) opens "More agent options" (dialog, sheet on phones):
+  the agent's own model roles and fallback chains (`features/agentRoles`) and decide for me (`features/autoAnswer`),
+  kept with the options; picking a template keeps them. The policy goes only to a host with decide for me, checked
+  as each task goes to its host (Auto: the host picked; an older tf-hostd gets none and never decides); the dialog
+  and the chip go by the composer's host (Auto: the next pick). A template's prompt frames the message (as in Fan out). With
+  Settings → AI naming on (and the host's omp able to answer), the entry first goes through
+  `naming`: omp's tiny model suggests the
   slug (`suggestBranch`, 10 s cap, "Naming…" on the card, ✨ beside the result); otherwise, on no
   answer, an agent-like answer ("I need to inspect the repository" is rejected by the sanitizer),
   or after a reload mid-naming, the slug comes from the prompt's lead sentence (`slugFromPrompt`).

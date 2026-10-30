@@ -19,8 +19,14 @@
 //!      messages carry `seq` (1, 2, … from `sync.seq`: a gap means re-open with `have`), rows carry
 //!      hashes (`upsert.h`), appends their start offset (`append.at`), and `meta` becomes
 //!      `metaPatch` / `treePatch`. Clients without it get exactly the older messages.
+//!    * [`FEATURE_PRESENCE`]: the client sends `presence` (what its user is doing) after the
+//!      welcome and on every change, and `notifyRead` for notifications it marked read; hostd
+//!      marks each `notify` with `alert` (post it to the system now, or only list it), sends
+//!      `notifyAlert` when an unseen one escalates to this device and `notifyDone` when another
+//!      device read one (`crate::notify`). Clients without it get every `notify` as before.
 
 use crate::model::{HostState, Notification, Pulse, StatePatch};
+use crate::notify::Presence;
 use crate::session::SessionEvent;
 use crate::term::TermEvent;
 use crate::{ApiError, Millis};
@@ -29,6 +35,8 @@ use crate::{ApiError, Millis};
 pub const FEATURE_ZSTD: &str = "zstd";
 /// Wire feature: cached, resumable session subscriptions (delta snapshots, seq, patches).
 pub const FEATURE_SESSION_SYNC: &str = "sessionSync";
+/// Wire feature: device presence and notification routing (`crate::notify`).
+pub const FEATURE_PRESENCE: &str = "presence";
 
 wire_struct! {
     pub struct ClientInfo {
@@ -39,7 +47,8 @@ wire_struct! {
         pub platform: String,
         /// Device display name (shown as the author of prompts sent from it).
         pub device: String,
-        /// Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`]).
+        /// Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`],
+        /// [`FEATURE_PRESENCE`]).
         pub features: Option<Vec<String>>,
     }
 }
@@ -64,6 +73,12 @@ pub enum ClientMsg {
     /// exactly as produced by xterm.js `onData` (Enter = `\r`).
     TermIn { term_id: String, data: String },
     Ping { ts: Millis },
+    /// ([`FEATURE_PRESENCE`]) What this device's user is doing: after the welcome and on change.
+    Presence { presence: Presence },
+    /// ([`FEATURE_PRESENCE`]) Notifications this device marked read (opened the agent, tapped or
+    /// dismissed the system notification, read the list): tf-hostd stops their escalation and
+    /// retracts them on the other devices.
+    NotifyRead { ids: Vec<String> },
     Bye,
 }
 
@@ -98,7 +113,25 @@ pub enum ServerMsg {
         seq: Option<u64>,
     },
     Term { term_id: String, ev: TermEvent },
-    Notify { notification: Notification },
+    Notify {
+        notification: Notification,
+        /// ([`FEATURE_PRESENCE`]) `true`: post it to the system now; `false`: another device is in
+        /// use, only list it (a `notifyAlert` may follow). Absent: decide locally, as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        alert: Option<bool>,
+    },
+    /// ([`FEATURE_PRESENCE`]) Notification `id` went unseen on the device in use: post it here now
+    /// (unless it was read or resolved meanwhile).
+    NotifyAlert { id: String },
+    /// ([`FEATURE_PRESENCE`]) These notifications were read on another device (`by`): read and
+    /// retracted here too, like a read in this app (pending needs-you ones stay posted).
+    NotifyDone {
+        ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        by: Option<String>,
+    },
     Pong { ts: Millis },
     /// Fatal protocol error; the daemon closes the connection after sending it.
     Error { error: ApiError },

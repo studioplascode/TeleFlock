@@ -2,12 +2,15 @@
 import type { ContextUsage } from "./ContextUsage";
 import type { CostInfo } from "./CostInfo";
 import type { GoalInfo } from "./GoalInfo";
+import type { IdleRecap } from "./IdleRecap";
+import type { JobsSummary } from "./JobsSummary";
 import type { LinkReason } from "./LinkReason";
 import type { LinkState } from "./LinkState";
 import type { LinkVia } from "./LinkVia";
 import type { ModelRef } from "./ModelRef";
 import type { OmpMode } from "./OmpMode";
 import type { QueueInfo } from "./QueueInfo";
+import type { RetryWait } from "./RetryWait";
 import type { SubagentSummary } from "./SubagentSummary";
 import type { ThinkingLevel } from "./ThinkingLevel";
 import type { TodoSummary } from "./TodoSummary";
@@ -31,4 +34,20 @@ linkSince?: number,
 /**
  * The TeleFlock companion extension is loaded in this omp process.
  */
-bridge: boolean, model?: ModelRef, thinking?: ThinkingLevel, fast: boolean, mode: OmpMode, goal?: GoalInfo, context?: ContextUsage, cost?: CostInfo, todos?: TodoSummary, subagents?: SubagentSummary, queue: QueueInfo, turnStartedAt?: number, lastTurnEndedAt?: number, };
+bridge: boolean, model?: ModelRef, thinking?: ThinkingLevel, fast: boolean, mode: OmpMode, goal?: GoalInfo, context?: ContextUsage, cost?: CostInfo, todos?: TodoSummary, subagents?: SubagentSummary, 
+/**
+ * Background jobs of the session and its subagents (bridge ≥ 2.1.0 with `caps.jobs`):
+ * absent while there are none.
+ */
+jobs?: JobsSummary, 
+/**
+ * omp is waiting to retry a provider error (rate limit, usage limit, overload); the
+ * agent is not stuck and nobody has to answer. Absent otherwise.
+ */
+retry?: RetryWait, queue: QueueInfo, turnStartedAt?: number, lastTurnEndedAt?: number, 
+/**
+ * omp's idle recap of where the session stands (history.db `session_recaps`, written
+ * after `recap.idleSeconds` idle), while nothing happened in the session since; absent
+ * otherwise (no recap yet, recaps off, or a newer turn).
+ */
+recap?: IdleRecap, };

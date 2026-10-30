@@ -1,20 +1,48 @@
 import { Check, ChevronsUpDown, Plus, X } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { ModelInfo, OmpSetting, ThinkingLevel } from "@/core/gen";
 import { Button, cn, Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, formatCompact, IconButton, Input, Popover, PopoverContent, PopoverTrigger, Select } from "@/design";
 import { useModels } from "@/features/session/header/useModels";
 import { Ticks } from "@/features/shell/Ticks";
-import { formatRoleSelector, parseRoleSelector, ROLE_NAME, type RoleRow, roleRecord, roleRows, THINKING_LEVELS, withRole } from "./model";
+import { formatRoleSelector, keepThinking, parseRoleSelector, ROLE_NAME, type RoleRow, roleRecord, roleRows, THINKING_LEVELS, withRole } from "./model";
 
 const NO_LEVEL = "__default";
 
-/** Searchable model list of the host; typed `provider/id` text that matches nothing can be used as-is. */
-function ModelCombobox({ value, models, label, onPick }: { value?: string; models: ModelInfo[]; label: string; onPick: (model: string) => void }) {
+export interface ModelComboboxProps {
+  /** `provider/id` (or a wildcard) picked now. */
+  value?: string;
+  models: readonly ModelInfo[];
+  /** Accessible name of the trigger. */
+  label: string;
+  onPick: (model: string) => void;
+  /** Trigger text while nothing is picked. */
+  placeholder?: ReactNode;
+  /** Typed text that matches no model and may be used as-is (default: anything with a `/`). */
+  accept?: (typed: string) => boolean;
+  /** Also offer `provider/*` for every provider of the catalog. */
+  wildcards?: boolean;
+  /** Why a model can't be picked here; its row shows it and is disabled. */
+  unavailable?: (model: string) => string | undefined;
+  invalid?: boolean;
+  disabled?: boolean;
+  /** Trigger button classes (width). */
+  className?: string;
+  /** A trigger of the caller's own (e.g. an "Add" button) instead of the field. */
+  trigger?: ReactNode;
+}
+
+/**
+ * Searchable model list of the host; typed `provider/id` text that matches nothing can be used
+ * as-is. Shared by the Model roles page and the per-agent role and fallback-chain editors.
+ */
+export function ModelCombobox({ value, models, label, onPick, placeholder = "Not set", accept = (typed) => typed.includes("/"), wildcards = false, unavailable, invalid, disabled, className, trigger }: ModelComboboxProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const known = models.find((m) => `${m.provider}/${m.id}` === value);
   const providers = [...new Set(models.map((m) => m.provider))];
   const typed = query.trim();
+  const listed = (id: string) => models.some((m) => `${m.provider}/${m.id}` === id) || (wildcards && providers.some((p) => `${p}/*` === id));
+  const typedWhy = typed ? unavailable?.(typed) : undefined;
   const pick = (model: string) => {
     onPick(model);
     setOpen(false);
@@ -23,26 +51,35 @@ function ModelCombobox({ value, models, label, onPick }: { value?: string; model
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label={label}
-          className="well inline-flex h-9 w-60 min-w-0 items-center justify-between gap-2 rounded-md px-3 text-left text-sm font-semibold text-ink focus-ring max-md:flex-1"
-        >
-          <span className={cn("min-w-0 truncate", !value && "text-mute-2")}>{known ? (known.label ?? known.id) : (value ?? "Not set")}</span>
-          {known && <span className="hidden truncate font-mono text-2xs text-mute-2 sm:inline">{known.provider}</span>}
-          <ChevronsUpDown className="ml-auto size-3.5 shrink-0 text-mute-2" />
-        </button>
+        {trigger ?? (
+          <button
+            type="button"
+            aria-label={label}
+            aria-invalid={invalid || undefined}
+            disabled={disabled}
+            className={cn(
+              "well inline-flex h-9 w-60 min-w-0 items-center justify-between gap-2 rounded-md px-3 text-left text-sm font-semibold text-ink focus-ring disabled:opacity-45 max-md:flex-1",
+              invalid && "shadow-[inset_0_0_0_1.5px_var(--color-error)]",
+              className,
+            )}
+          >
+            <span className={cn("min-w-0 truncate", !value && "text-mute-2")}>{known ? (known.label ?? known.id) : (value ?? placeholder)}</span>
+            {known && <span className="hidden truncate font-mono text-2xs text-mute-2 sm:inline">{known.provider}</span>}
+            <ChevronsUpDown className="ml-auto size-3.5 shrink-0 text-mute-2" />
+          </button>
+        )}
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[min(380px,calc(100vw-24px))] p-0">
         {/* Every typed word must appear in the id or label (cmdk's default fuzzy match is too loose for model ids). */}
         <Command loop filter={(item, search) => (search.toLowerCase().split(/\s+/).every((w) => item.toLowerCase().includes(w)) ? 1 : 0)}>
-          <CommandInput placeholder="Search models or type provider/id" value={query} onValueChange={setQuery} className="h-11 text-sm" />
+          <CommandInput placeholder={wildcards ? "Search models or type provider/id or provider/*" : "Search models or type provider/id"} value={query} onValueChange={setQuery} className="h-11 text-sm" />
           <CommandList className="max-h-[min(360px,50dvh)]">
             <CommandEmpty>{models.length ? "No model matches" : "No models from this host"}</CommandEmpty>
-            {typed.includes("/") && !models.some((m) => `${m.provider}/${m.id}` === typed) && (
+            {typed && accept(typed) && !listed(typed) && (
               <CommandGroup heading="Custom">
-                <CommandItem value={`custom ${typed}`} onSelect={() => pick(typed)} icon={<Plus />}>
+                <CommandItem value={`custom ${typed}`} disabled={!!typedWhy} onSelect={() => pick(typed)} icon={<Plus />}>
                   Use <span className="font-mono">{typed}</span>
+                  {typedWhy && <span className="ml-2 text-2xs text-mute-2">{typedWhy}</span>}
                 </CommandItem>
               </CommandGroup>
             )}
@@ -52,16 +89,31 @@ function ModelCombobox({ value, models, label, onPick }: { value?: string; model
                   .filter((m) => m.provider === p)
                   .map((m) => {
                     const id = `${m.provider}/${m.id}`;
+                    const why = unavailable?.(id);
                     return (
-                      <CommandItem key={id} value={`${id} ${m.label ?? ""}`} onSelect={() => pick(id)} icon={id === value ? <Check className="text-accent-hi" /> : <span className="size-4" />} className="h-10">
+                      <CommandItem key={id} value={`${id} ${m.label ?? ""}`} disabled={!!why} onSelect={() => pick(id)} icon={id === value ? <Check className="text-accent-hi" /> : <span className="size-4" />} className="h-10">
                         <span className="font-bold">{m.label ?? m.id}</span>
                         <span className="ml-2 font-mono text-2xs text-mute-2">{m.id}</span>
-                        {m.contextWindow != null && <span className="ml-2 text-2xs text-mute-2 tabular">{formatCompact(m.contextWindow)}</span>}
+                        {why ? <span className="ml-2 text-2xs text-mute-2">{why}</span> : m.contextWindow != null && <span className="ml-2 text-2xs text-mute-2 tabular">{formatCompact(m.contextWindow)}</span>}
                       </CommandItem>
                     );
                   })}
               </CommandGroup>
             ))}
+            {wildcards && providers.length > 0 && (
+              <CommandGroup heading="Any model of a provider">
+                {providers.map((p) => {
+                  const id = `${p}/*`;
+                  const why = unavailable?.(id);
+                  return (
+                    <CommandItem key={id} value={`${id} any ${p}`} disabled={!!why} onSelect={() => pick(id)} icon={id === value ? <Check className="text-accent-hi" /> : <span className="size-4" />} className="h-10">
+                      <span className="font-mono font-bold">{id}</span>
+                      <span className="ml-2 text-2xs text-mute-2">{why ?? "same model id, this provider"}</span>
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+            )}
           </CommandList>
         </Command>
       </PopoverContent>
@@ -69,12 +121,40 @@ function ModelCombobox({ value, models, label, onPick }: { value?: string; model
   );
 }
 
+export interface ThinkingSelectProps {
+  /** `provider/id` whose levels to offer (omp's all when the catalog doesn't know it). */
+  model?: string;
+  models: readonly ModelInfo[];
+  value?: ThinkingLevel;
+  /** undefined: no explicit level. */
+  onChange: (level: ThinkingLevel | undefined) => void;
+  label: string;
+  /** The option for no explicit level. */
+  defaultLabel?: string;
+  disabled?: boolean;
+  className?: string;
+}
+
+/** The thinking level of a selector: one of its model's levels, or none (`defaultLabel`). */
+export function ThinkingSelect({ model, models, value, onChange, label, defaultLabel = "Model default", disabled, className }: ThinkingSelectProps) {
+  const info = model ? models.find((m) => `${m.provider}/${m.id}` === model) : undefined;
+  const levels: readonly ThinkingLevel[] = info?.thinking.length ? info.thinking : THINKING_LEVELS;
+  const options = [{ value: NO_LEVEL, label: defaultLabel }, ...levels.map((l) => ({ value: l, label: l }))];
+  if (value && !levels.includes(value)) options.push({ value, label: value });
+  return (
+    <Select
+      aria-label={label}
+      className={cn("h-9 w-40 min-w-0 max-md:w-32", className)}
+      disabled={disabled}
+      value={value ?? NO_LEVEL}
+      onValueChange={(v) => onChange(v === NO_LEVEL ? undefined : (levels.find((l) => l === v) ?? value))}
+      options={options}
+    />
+  );
+}
+
 function RoleLine({ row, models, onChange, onRemove }: { row: RoleRow; models: ModelInfo[]; onChange: (selector: string | undefined) => void; onRemove?: () => void }) {
   const parsed = row.selector ? parseRoleSelector(row.selector) : undefined;
-  const info = parsed && models.find((m) => `${m.provider}/${m.id}` === parsed.model);
-  const levels: readonly ThinkingLevel[] = info?.thinking.length ? info.thinking : THINKING_LEVELS;
-  const levelOptions = [{ value: NO_LEVEL, label: "Model default" }, ...levels.map((l) => ({ value: l, label: l }))];
-  if (parsed?.thinking && !levels.includes(parsed.thinking)) levelOptions.push({ value: parsed.thinking, label: parsed.thinking });
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2.5 max-md:py-2">
       <div className="min-w-0 flex-1 basis-48">
@@ -85,23 +165,14 @@ function RoleLine({ row, models, onChange, onRemove }: { row: RoleRow; models: M
         {row.description && <p className="text-xs text-mute">{row.description}</p>}
       </div>
       <div className="flex min-w-0 items-center gap-1.5 max-md:w-full">
-        <ModelCombobox
-          value={parsed?.model}
+        <ModelCombobox value={parsed?.model} models={models} label={`Model for ${row.id}`} onPick={(m) => onChange(formatRoleSelector(m, keepThinking(models, m, parsed?.thinking)))} />
+        <ThinkingSelect
+          model={parsed?.model}
           models={models}
-          label={`Model for ${row.id}`}
-          onPick={(m) => {
-            const next = models.find((x) => `${x.provider}/${x.id}` === m);
-            const keep = parsed?.thinking && (!next?.thinking.length || next.thinking.includes(parsed.thinking));
-            onChange(formatRoleSelector(m, keep ? parsed?.thinking : undefined));
-          }}
-        />
-        <Select
-          aria-label={`Thinking for ${row.id}`}
-          className="h-9 w-40 min-w-0 max-md:w-32"
+          value={parsed?.thinking}
+          label={`Thinking for ${row.id}`}
           disabled={!parsed}
-          value={parsed?.thinking ?? NO_LEVEL}
-          onValueChange={(v) => parsed && onChange(formatRoleSelector(parsed.model, v === NO_LEVEL ? undefined : (levels.find((l) => l === v) ?? parsed.thinking)))}
-          options={levelOptions}
+          onChange={(level) => parsed && onChange(formatRoleSelector(parsed.model, level))}
         />
         {row.selector || onRemove ? (
           <IconButton size="sm" label={row.selector ? `Unassign ${row.id}` : `Remove ${row.id}`} onClick={() => (row.selector ? onChange(undefined) : onRemove?.())}>

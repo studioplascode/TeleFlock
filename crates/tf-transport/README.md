@@ -61,11 +61,22 @@ Differences from the architecture sketch:
 
 **Commands**
 
-- *SSH and WSL* run commands in the user's login shell, so `PATH` includes `~/.local/bin`. The command is built as:
+- *SSH and WSL* run commands in the user's login shell, so `PATH` includes `~/.local/bin`, without that shell ever parsing them (`quote.rs`). Every command becomes the same five words, `sh -c <bootstrap> sh <base64>` (`quote::bootstrap_argv`; SSH sends `exec` and the words as the exec request, WSL hands them to wsl.exe as argv):
   ```
-  exec sh -c 'exec "${SHELL:-/bin/sh}" -lc "$1"' sh '<cd DIR && >exec <env K=V…> argv…'
+  bootstrap:  IFS=;set -f;P=$PATH;PATH=${PATH:+$PATH:}/usr/local/bin:/opt/homebrew/bin:/run/current-system/sw/bin:/usr/bin:/bin;
+              X=$(echo $1|base64 -d 2>/dev/null||echo $1|base64 -D 2>/dev/null||echo $1|openssl base64 -d -A 2>/dev/null
+                  ||echo $1|python3 -m base64 -d 2>/dev/null||perl -MMIME::Base64 -e print+decode_base64+shift $1 2>/dev/null)
+                  &&PATH=$P||{ echo teleflock bootstrap: no base64 decoder found …>&2;exit 127;};eval $X
+  script:     unset IFS;set +f
+              TF_EXEC='unset TF_EXEC;<cd DIR && >exec <env K=V…> argv…'   (POSIX-quoted)
+              export TF_EXEC
+              L=${SHELL:-sh}; case ${L##*/} in sh|ash|dash|bash*|zsh*|ksh*|mksh|lksh|oksh|yash|fish|nu) ;; *) L=sh ;; esac
+              exec "$L" -lc 'exec sh -c '\''eval "$TF_EXEC"'\'''
   ```
-  - Every word is POSIX-quoted, and the quoting also parses correctly in fish.
+  - Every word is plain (`quote::is_plain`: printable ASCII and spaces, no quotes or backslashes), so a Windows command line and every shell split it the same way.
+  - The login shell only runs `quote::LOGIN_COMMAND`, `exec sh -c 'eval "$TF_EXEC"'`, which sh, bash, zsh, ksh, fish and nushell all read the same way. Any other `$SHELL` (csh, tcsh, elvish, xonsh, pwsh, nologin …) is replaced by `sh -l`, which reads /etc/profile and ~/.profile. Only POSIX `sh` parses the command.
+  - The base64 makes the command line a third longer, plus ~250 bytes. The bootstrap `sh` runs before any profile, so it appends the usual directories to `PATH` while it decodes (restored before the script runs) and tries `base64 -d`, `base64 -D` (macOS 12 and older), `openssl`, `python3`, `perl`; with none, exit 127 and a message saying so.
+  - `shell_quote` quotes for `sh` and also for fish; nushell reads `\'` differently, which is why no other shell is handed quoted text.
   - Every level `exec`s the next, so the command is the only process on the channel.
   - `cwd` may be `~` or `~/…`.
 - *Local* runs argv directly, with no shell. On Windows it uses `CREATE_NO_WINDOW`.
@@ -143,9 +154,9 @@ Differences from the architecture sketch:
 
 ## WSL specifics
 
-- Commands run as `wsl.exe -d <distro> --exec sh -c <login wrapper> sh <cmd>`, with `WSL_UTF8=1` set.
-  - `--exec` avoids an extra Windows-side shell layer.
-  - The login wrapper provides PATH, env and cwd in the same way as SSH.
+- Commands run as `wsl.exe -d <distro> --exec sh -c <bootstrap> sh <base64>` (see Commands), with `WSL_UTF8=1` set.
+  - `--exec` avoids a Linux-side `$SHELL -c` layer.
+  - wsl.exe gets one Windows command line, which WSL from the Store splits with `CommandLineToArgvW` (the reverse of Rust's quoting) and other builds may split differently once quotes or backslashes are involved. Every argument is therefore plain, which every rule set splits the same; `connect` and `WslKeepalive::start` refuse a distro name wsl.exe would read back differently (`Config`).
 - When wsl.exe's own stderr is UTF-16, it is re-encoded to UTF-8.
 - `connect` warms the distro up by running `wsl.exe -d <distro> --exec true` directly (no login shell: its profile files can take seconds), and fails with `Wsl(msg)` if the distro is missing.
 - `forward_tcp` maps localhost-like hosts to `127.0.0.1`, since WSL2 forwards localhost.
@@ -167,6 +178,7 @@ Differences from the architecture sketch:
     - `sh -c` exec, and a direct-tcpip proxy
   - Key fixtures in `tests/fixtures/user_*`: ed25519 (plain and passphrase `correct horse`), encrypted PKCS#8 ECDSA, RSA PEM.
   - A TCP proxy cuts or freezes links to test disconnects and keepalive.
+  - The command line (`src/test_support.rs`, used by the `quote` and `wsl` unit tests): a model of Rust's Windows quoting, of wsl.exe's own option parsing up to `--exec`, and of five rule sets for the rest (`CommandLineToArgvW` as Wine implements it, `"` without escapes, `\` escaping anything, only `\"`, and `'` grouping too). Random commands (quotes, backslashes, newlines, tabs, CR, control characters, unicode, long words) and the upload from the nushell report must reach Linux as exactly the words after `--exec` under every rule set, and run there with exactly their argv, env and cwd, through `sh`, bash, zsh, fish and nushell when installed, and a strict login shell (named `nu`) that refuses any line but `LOGIN_COMMAND`. `TF_TEST_LOGIN_SHELLS=/path/nu:/path/fish:…` adds shells (also for tf-client's `tests/wsl_deploy.rs`).
 - Probe a real host:
   ```
   cargo run -p tf-transport --example probe -- ssh <100.x IP> --user <u> -- herdr --version

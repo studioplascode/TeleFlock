@@ -184,6 +184,12 @@ fn not_found(id: &str) -> ApiError {
     ApiError::new("not_found", format!("automation {id} does not exist"))
 }
 
+/// Whether this daemon may install the systemd keepalive: always for the real home, for any other
+/// home (labs, dev builds) only with `TF_HOSTD_KEEPALIVE=1`.
+fn keepalive_allowed(default_home: bool, opt_in: Option<&std::ffi::OsStr>) -> bool {
+    default_home || opt_in.is_some_and(|v| v == "1")
+}
+
 impl Automations {
     fn persist(&self, data: &StoreData) {
         if let Err(e) = data.save(&self.paths.automations) {
@@ -230,7 +236,10 @@ impl Automations {
                 cur.model = d.model;
                 cur.thinking = d.thinking;
                 cur.plan = d.plan;
+                cur.role_models = d.role_models;
+                cur.fallback_chains = d.fallback_chains;
                 cur.catch_up = d.catch_up;
+                cur.auto_answer = d.auto_answer;
                 cur.updated_at = now;
                 id.clone()
             }
@@ -247,7 +256,10 @@ impl Automations {
                     model: d.model,
                     thinking: d.thinking,
                     plan: d.plan,
+                    role_models: d.role_models,
+                    fallback_chains: d.fallback_chains,
                     catch_up: d.catch_up,
+                    auto_answer: d.auto_answer,
                     herdr_session: session.to_string(),
                     created_at: now,
                     updated_at: now,
@@ -340,14 +352,26 @@ impl Automations {
         }
     }
 
-    /// Installs or removes the systemd keepalive to match the enabled set and refreshes the
-    /// reported scheduler status. Serialized; `save`/`delete` callers await it so the next
-    /// `automation.list` reports the new state.
+    /// Installs or removes the systemd keepalive to match the enabled set (and the agent ledger:
+    /// agents to bring back after a reboot, `crate::restart`, only while the host setting "Bring
+    /// agents back after a reboot" is on; automations need the units whatever it says) and refreshes the reported scheduler
+    /// status. Serialized; `save`/`delete` callers await it so the next `automation.list` reports
+    /// the new state. Only the real home (`~/.teleflock`) installs units by default: a lab or dev
+    /// home would leave boot-time units behind that outlive it, so it needs `TF_HOSTD_KEEPALIVE=1`.
     pub async fn sync_keepalive(&self) {
         let _one = self.keepalive.lock().await;
-        let want = self.data.lock().unwrap().any_enabled();
+        let wanted = self.data.lock().unwrap().any_enabled() || crate::restart::wants_keepalive(&self.paths.home);
+        let want = wanted && keepalive_allowed(self.paths.is_default_home(), std::env::var_os("TF_HOSTD_KEEPALIVE").as_deref());
         let status = systemd::reconcile(&self.paths, self.relay_port, want).await;
         *self.scheduler.lock().unwrap() = status;
+    }
+
+    /// What "Bring agents back after a reboot" can do on this host, from the scheduler's own
+    /// status (the last reconcile of the keepalive units) and the host's systemd.
+    pub fn boot_service(&self) -> tf_proto::BootService {
+        let status = self.scheduler.lock().unwrap().clone();
+        let allowed = keepalive_allowed(self.paths.is_default_home(), std::env::var_os("TF_HOSTD_KEEPALIVE").as_deref());
+        systemd::boot_service(&systemd::Target::detect(), allowed, &status)
     }
 
     /// A scheduled (or catch-up) run in the automation's own herdr session.
@@ -440,6 +464,9 @@ impl Automations {
             plan: def.plan,
             prompt: Some(def.prompt.clone()).filter(|p| !p.trim().is_empty()),
             images: vec![],
+            role_models: def.role_models.clone(),
+            fallback_chains: def.fallback_chains.clone(),
+            auto_answer: def.auto_answer.clone(),
         };
         let result = if def.worktree {
             let base = format!("automation/{slug}-{}", cron::stamp(run.at, &cron::local_tz()));
@@ -578,6 +605,15 @@ mod tests {
 
     const H: Millis = 3_600_000;
     const T0: Millis = 1_767_225_600_000; // 2026-01-01T00:00:00Z
+
+    #[test]
+    fn only_the_real_home_installs_the_keepalive_unless_asked() {
+        use std::ffi::OsStr;
+        assert!(keepalive_allowed(true, None));
+        assert!(!keepalive_allowed(false, None), "a lab home leaves no boot-time units behind");
+        assert!(!keepalive_allowed(false, Some(OsStr::new("0"))));
+        assert!(keepalive_allowed(false, Some(OsStr::new("1"))), "a lab that tests the timer opts in");
+    }
 
     #[test]
     fn decide_waits_fires_and_catches_up() {

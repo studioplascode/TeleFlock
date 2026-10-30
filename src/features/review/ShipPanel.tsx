@@ -28,6 +28,8 @@ import { AiMark, SuggestButton } from "../workspace/shared/ai";
 import { describeError } from "../workspace/shared/errors";
 import { type HostQuery, useHostQuery } from "../workspace/shared/useHostQuery";
 import { fileList, patchExcerpt } from "./diff/excerpt";
+import { prNext } from "./fix";
+import { FixActions } from "./FixPanel";
 
 const COMMIT_PROMPT = [
   "Write a git commit message for the current uncommitted changes in this worktree (look at `git status` and `git diff`).",
@@ -75,7 +77,7 @@ export function shipState(status: GitStatusResult, pr: PrInfo | undefined): Ship
     `Commit ${n} file${n === 1 ? "" : "s"}`,
     status.ahead > 0 ? `Push ${status.ahead} commit${status.ahead === 1 ? "" : "s"}` : `Push ${status.branch ?? "branch"}`,
     blocked ? "Nothing to ship" : "Open PR",
-    pr?.state === "CLOSED" ? `PR #${pr.number} closed` : (pr?.checks?.pending ?? 0) > 0 ? `#${pr?.number} checks running` : `Merge #${pr?.number}`,
+    pr ? prNext(pr) : "Merge",
     `Merged · ${ACTIONS.markDone.label}`,
   ][stage] as string;
   return { stage, dirty, unpushed, merged, blocked, next };
@@ -146,7 +148,7 @@ export function ShipPanel({ hostId, workspace, cwd, status, pr, agents, diff, fo
       />
       <PushCard hostId={hostId} cwd={cwd} status={status} unpushed={unpushed} dirty={dirty} onPushed={() => (onChanged(), pr.reload())} active={stage === 1} />
       {info ? (
-        <PrCard hostId={hostId} cwd={cwd} pr={info} loading={pr.loading} onMerged={() => (pr.reload(), onChanged())} active={stage === 3} />
+        <PrCard hostId={hostId} cwd={cwd} workspace={workspace} defaultBranch={status.defaultBranch} pr={info} loading={pr.loading} onMerged={() => (pr.reload(), onChanged())} active={stage === 3} />
       ) : st.blocked && !dirty && !unpushed ? (
         <DefaultBranchCard hostId={hostId} cwd={cwd} reason={st.blocked} />
       ) : (
@@ -685,7 +687,7 @@ function ChecksBar({ checks }: { checks: NonNullable<PrInfo["checks"]> }) {
   );
 }
 
-function PrCard({ hostId, cwd, pr, loading, onMerged, active }: { hostId: string; cwd: string; pr: PrInfo; loading: boolean; onMerged: () => void; active: boolean }) {
+function PrCard({ hostId, cwd, workspace, defaultBranch, pr, loading, onMerged, active }: { hostId: string; cwd: string; workspace: Workspace; defaultBranch?: string; pr: PrInfo; loading: boolean; onMerged: () => void; active: boolean }) {
   const [method, setMethod] = useState<MergeMethod>("squash");
   const [deleteBranch, setDeleteBranch] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -725,6 +727,7 @@ function PrCard({ hostId, cwd, pr, loading, onMerged, active }: { hostId: string
           <ExternalLink className="mt-0.5 size-3.5 shrink-0 text-mute" />
         </button>
         {pr.checks && <ChecksBar checks={pr.checks} />}
+        {!merged && !closed && <FixActions hostId={hostId} cwd={cwd} workspace={workspace} pr={pr} defaultBranch={defaultBranch} />}
         {!merged && !closed && (
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">

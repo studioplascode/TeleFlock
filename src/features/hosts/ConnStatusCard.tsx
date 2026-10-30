@@ -7,6 +7,8 @@ import type { ConnPhase, ConnStatus, HostKeyInfo, SetupIssue } from "@/core/gen"
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
+import { useAppInfo } from "./appInfo";
+import { connDiagnostics } from "./connDiagnostics";
 import { setupHash } from "./setupFocus";
 
 /** The forward path of a connection, shown as a stepper while connecting. */
@@ -21,6 +23,7 @@ const CODE_HINTS: Record<string, string> = {
   version_mismatch: "tf-hostd on the host is a different version. Reconnecting re-deploys the bundled one.",
   herdr_error: "herdr didn't answer. Is herdr installed and on PATH for this user?",
   io_error: "A local I/O error interrupted the connection. Retrying usually helps.",
+  deploy_failed: "Setting up TeleFlock on the host failed in a way retrying won't fix. Copy the diagnostics and report them.",
 };
 
 export function connect(hostId: string): Promise<void> {
@@ -358,20 +361,32 @@ function Reconnecting({ hostId, status }: { hostId: string; status: ConnStatus }
   );
 }
 
+/** A connection that stopped for good: the error, its hint, and what to do (copy a report, try again). */
 function Failed({ hostId, status }: { hostId: string; status: ConnStatus }) {
   const err = status.error;
   const hint = err?.hint ?? (err ? CODE_HINTS[err.code] : undefined);
+  const profile = useHosts((h) => h.profiles.find((p) => p.id === hostId));
+  const app = useAppInfo();
+  const copyDiagnostics = () => {
+    navigator.clipboard.writeText(connDiagnostics({ profile, status, app })).then(
+      () => toast({ title: "Diagnostics copied", description: "Paste them into your report." }),
+      () => toast({ title: "Couldn't copy the diagnostics", status: "error" }),
+    );
+  };
   return (
     <div className="rounded-lg bg-error/8 p-3 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]" role="alert">
       <div className="flex items-start gap-2.5">
         <ServerCrash className="mt-0.5 size-4 shrink-0 text-error" />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-bold text-[#ffb1c1]">{err?.message ?? status.message ?? "The connection failed."}</div>
+          <div className="text-sm font-bold break-words text-[#ffb1c1]">{err?.message ?? status.message ?? "The connection failed."}</div>
           {hint && <p className="mt-1 text-xs text-mute">{hint}</p>}
           {err?.code && <code className="mt-1.5 inline-block rounded-xs bg-black/30 px-1.5 py-0.5 font-mono text-2xs text-mute-2">{err.code}</code>}
         </div>
       </div>
-      <div className="mt-2.5 flex justify-end">
+      <div className="mt-2.5 flex justify-end gap-2">
+        <Button size="sm" variant="ghost" icon={<Copy />} onClick={copyDiagnostics}>
+          Copy diagnostics
+        </Button>
         <Button size="sm" variant="secondary" icon={<RefreshCw />} onClick={() => connect(hostId)}>
           Try again
         </Button>

@@ -1,7 +1,7 @@
 /**
- * Demo `auth.*`: scripted sign-in flows (account links, MCP server OAuth) with the states a real
- * host produces (tf-hostd `authflow.rs`): starting → waiting (URL / device code / paste / question)
- * → done | failed | cancelled | expired, long-polled through `auth.wait`.
+ * Demo `auth.*`: scripted sign-in flows (account links, MCP server OAuth, GitHub CLI sign-ins) with
+ * the states a real host produces (tf-hostd `authflow.rs`): starting → waiting (URL / device code /
+ * paste / question) → done | failed | cancelled | expired, long-polled through `auth.wait`.
  *
  * - browser: finishes ~2.5 s after the app opened its URL while a same-port tunnel to the callback
  *   port is open (the redirect reaches the "host"); without one the browser "lands on an error page"
@@ -15,7 +15,7 @@ import { apiError } from "../errors";
 import type { DemoClock } from "./clock";
 
 export interface DemoAuthScript {
-  kind: "account" | "mcp";
+  kind: "account" | "mcp" | "gh";
   title: string;
   subject?: string;
   method: "browser" | "device" | "paste" | "prompt";
@@ -31,6 +31,10 @@ export interface DemoAuthScript {
   check?(text: string): string | undefined;
   /** Who signed in, once done. */
   account?: string;
+  /** What the host says while it starts (default `Starting omp…`) … */
+  starting?: string;
+  /** … and once done (default `Linked <account>.`). */
+  doneMessage?: string;
   onDone?(flow: AuthFlow): void;
 }
 
@@ -78,7 +82,7 @@ export class DemoAuthFlows {
     this.sweep();
     const now = this.clock.now();
     const flowId = `auth_demo_${++this.seq}`;
-    const flow: AuthFlow = { flowId, kind: script.kind, title: script.title, subject: script.subject, state: "starting", rev: 1, paste: "none", message: "Starting omp…", startedAt: now, expiresAt: now + TTL_MS, updatedAt: now };
+    const flow: AuthFlow = { flowId, kind: script.kind, title: script.title, subject: script.subject, state: "starting", rev: 1, paste: "none", message: script.starting ?? "Starting omp…", startedAt: now, expiresAt: now + TTL_MS, updatedAt: now };
     const e: Entry = { flow, script, waiters: new Set(), cancelTimers: [] };
     this.flows.set(flowId, e);
     e.cancelTimers.push(this.clock.after(START_MS, () => this.publish(e)));
@@ -205,7 +209,7 @@ export class DemoAuthFlows {
     if (final(e.flow.state)) return;
     const who = e.script.account;
     this.change(e, (f) => (f.account = who));
-    this.end(e, "done", who ? `Linked ${who}.` : "Linked.");
+    this.end(e, "done", e.script.doneMessage ?? (who ? `Linked ${who}.` : "Linked."));
     e.script.onDone?.({ ...e.flow });
   }
 

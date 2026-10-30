@@ -1,7 +1,7 @@
 import * as RadixDialog from "@radix-ui/react-dialog";
 import { ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, Lock, MessageSquareDashed, RefreshCw, RotateCcw, Skull, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { core, draftKey, drafts, parseAgentKey, useAgent, useDraft, useSession } from "@/core";
 import type { Subagent } from "@/core/gen";
 import {
@@ -33,6 +33,7 @@ import { TRANSCRIPT_MAX_WIDTH, TranscriptLog } from "../transcript/Transcript";
 import { SubagentMeters } from "./SubagentMeters";
 import { mergeSnapshot, type Snapshot } from "./snapshot";
 import { SUB_LABEL, SUB_STATUS } from "./Subagents";
+import { SubagentRetry } from "../resume/SubagentRetry";
 
 /** How often a running subagent's transcript is re-fetched while the viewer is open and visible. */
 const POLL_MS = 2000;
@@ -175,7 +176,7 @@ function SubagentPanel({ agentKey, sub, mobile, position, onPrev, onNext }: Pane
 
   return (
     <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
-      <Header sub={sub} mobile={mobile} position={position} onPrev={onPrev} onNext={onNext} acting={acting} blocked={blocked} onAct={(a) => void act(a)} />
+      <Header sub={sub} mobile={mobile} position={position} onPrev={onPrev} onNext={onNext} acting={acting} blocked={blocked} onAct={(a) => void act(a)} extra={<SubagentRetry agentKey={agentKey} sub={sub} blocked={blocked} onDone={refresh} />} />
       <div className="relative flex min-h-0 flex-1 flex-col">
         {error && snap && (
           <div role="status" className="absolute inset-x-0 top-2 z-raised mx-auto flex w-fit items-center gap-2 rounded-full glass-blur px-3 py-1.5 text-2xs font-semibold text-warn shadow-d2">
@@ -227,9 +228,11 @@ interface HeaderProps {
   acting: boolean;
   blocked: string | null;
   onAct: (action: "kill" | "revive") => void;
+  /** Extra actions before Kill / Revive (Retry of a failed or stopped subagent). */
+  extra?: ReactNode;
 }
 
-function Header({ sub, mobile, position, onPrev, onNext, acting, blocked, onAct }: HeaderProps) {
+function Header({ sub, mobile, position, onPrev, onNext, acting, blocked, onAct, extra }: HeaderProps) {
   const running = sub.status === "running";
   const status = SUB_STATUS[sub.status];
   const activity = running ? "busy" : "silent";
@@ -286,6 +289,7 @@ function Header({ sub, mobile, position, onPrev, onNext, acting, blocked, onAct 
               </Tooltip>
             </span>
           )}
+          {!mobile && extra}
           {!mobile && action}
           {!mobile && (
             <Tooltip content="Close" shortcut="Esc">
@@ -308,7 +312,12 @@ function Header({ sub, mobile, position, onPrev, onNext, acting, blocked, onAct 
           </span>
         ))}
         <SubagentMeters sub={sub} size="md" />
-        {mobile && <span className="ml-auto">{action}</span>}
+        {mobile && (
+          <span className="ml-auto flex items-center gap-1.5">
+            {extra}
+            {action}
+          </span>
+        )}
       </div>
     </header>
   );

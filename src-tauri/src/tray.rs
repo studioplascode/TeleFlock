@@ -2,7 +2,7 @@
 //!
 //! * Tray icon: app icon with a comet while agents run (orbiting in Lively motion; still in Calm
 //!   and Reduced, and always on Linux) and a pink count badge when agents need you. Tooltip
-//!   "3 running · 2 need you". Menu: Answer next (n), Open, Quit.
+//!   "3 running · 2 need you". Menu: Answer next (n), Quick capture (its shortcut), Open, Quit.
 //! * Windows taskbar: overlay badge (count / running dot), progress bar (while running: the
 //!   indeterminate marquee in Lively, a still full bar otherwise; paused-yellow while something
 //!   needs you) and a flash when a new agent needs you while the window is in the background.
@@ -27,6 +27,7 @@ use crate::{badge, core::CoreState, present};
 
 const TRAY_ID: &str = "main";
 const MENU_ANSWER: &str = "answer-next";
+const MENU_CAPTURE: &str = "quick-capture";
 const MENU_OPEN: &str = "open";
 const MENU_QUIT: &str = "quit";
 const FRAME_MS: u64 = 110;
@@ -38,6 +39,7 @@ pub struct Tray<R: Runtime> {
     base: Vec<u8>,
     state: Mutex<BadgeState>,
     answer_item: MenuItem<R>,
+    capture_item: MenuItem<R>,
     animating: AtomicBool,
     /// Settings → Motion → Lively: only then do the comet orbit and the taskbar show a marquee.
     lively: AtomicBool,
@@ -82,10 +84,11 @@ impl<R: Runtime> Tray<R> {
         let base = base_img.rgba().to_vec();
 
         let answer_item = MenuItem::with_id(app, MENU_ANSWER, "Answer next", false, None::<&str>)?;
+        let capture_item = MenuItem::with_id(app, MENU_CAPTURE, "Quick capture…", true, None::<&str>)?;
         let open = MenuItem::with_id(app, MENU_OPEN, "Open TeleFlock", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, MENU_QUIT, "Quit TeleFlock", true, None::<&str>)?;
         let sep = PredefinedMenuItem::separator(app)?;
-        let menu = Menu::with_items(app, &[&answer_item, &open, &sep, &quit])?;
+        let menu = Menu::with_items(app, &[&answer_item, &capture_item, &open, &sep, &quit])?;
 
         TrayIconBuilder::with_id(TRAY_ID)
             .icon(Image::new_owned(base.clone(), badge::SIZE, badge::SIZE))
@@ -99,6 +102,7 @@ impl<R: Runtime> Tray<R> {
                         core.ui_intent(AppEvent::AnswerNext);
                     }
                 }
+                MENU_CAPTURE => crate::capture::show(app),
                 MENU_OPEN => show_main(app),
                 MENU_QUIT => app.exit(0),
                 _ => {}
@@ -115,9 +119,17 @@ impl<R: Runtime> Tray<R> {
             base,
             state: Mutex::new(BadgeState::default()),
             answer_item,
+            capture_item,
             animating: AtomicBool::new(false),
             lively: AtomicBool::new(false),
         }))
+    }
+
+    /// Shows the Quick capture shortcut beside its item (`None`: off, or not registered).
+    pub fn set_capture_shortcut(&self, accelerator: Option<&str>) {
+        if let Err(e) = self.capture_item.set_accelerator(accelerator) {
+            log::debug!("tray: shortcut {accelerator:?} not shown: {e}");
+        }
     }
 
     fn current(&self) -> BadgeState {

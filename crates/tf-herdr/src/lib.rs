@@ -7,6 +7,8 @@
 //!   helpers (`agent_*`, `workspace_*`, `worktree_*`, `tab_*`, `pane_*`, `snapshot`) sit on it.
 //! - [`HerdrClient::subscribe`] yields coalesced [`HerdrEvent`]s and reconnects with backoff.
 //! - [`HerdrClient::terminal_session`] bridges `herdr terminal session control|observe`.
+//! - [`lifecycle`]: which server process answers ([`HerdrClient::probe`]), starting one with a
+//!   chosen environment, `server.stop` and `server.live_handoff` (tf-hostd's `herdr_health`).
 //!
 //! See `README.md` for the API summary and `docs/research/herdr.md` for the protocol.
 
@@ -15,12 +17,13 @@ mod client;
 pub mod durable;
 mod error;
 mod events;
+pub mod lifecycle;
 pub mod model;
 mod terminal;
 mod transport;
 
 pub use api::{
-    AgentStart, AgentWait, PaneSplit, ReadFormat, ReadOptions, ReadSource, ScrollDirection, SplitDirection, TabCreate,
+    AgentSessionReport, AgentStart, AgentWait, PaneSplit, ReadFormat, ReadOptions, ReadSource, ScrollDirection, SplitDirection, TabCreate,
     WorkspaceCreate, WorktreeCreate, WorktreeOpen, WorktreeScope, WorktreeTarget,
 };
 pub use client::{
@@ -34,4 +37,5 @@ pub use terminal::{
     TERMINAL_START_TIMEOUT, TerminalEvent, TerminalFrame, TerminalInput, TerminalMode, TerminalOptions, TerminalSession,
     parse_terminal_line,
 };
+pub use lifecycle::{LiveHandoff, ProbeFailure, ServerLaunch, ServerProbe};
 pub use transport::{Endpoint, parse_response};

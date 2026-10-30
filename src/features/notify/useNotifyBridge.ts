@@ -60,7 +60,10 @@ function followMoved(from: string, to: string): void {
  * - `notify` → an in-app toast (needs-you toasts offer the first answer inline), a haptic and,
  *   where the OS doesn't play one, a chime; muted agents get none of these (the bell still lists
  *   them). A newer notification of the same agent replaces its toast. On phones, needs-you toasts
- *   stay quiet while a session is open (its "Next waiting" chip shows them);
+ *   stay quiet while a session is open (its "Next waiting" chip shows them).
+ *   A notification the host routed to another device in use (`alert: false`) is only listed: no
+ *   toast, haptic or chime here; when it escalates to this device (same id, `alert: true`) it
+ *   alerts like any other;
  * - `notifyDone` (the request was handled anywhere, or the notification was read on another
  *   surface) → its toast disappears (needs-you toasts only once resolved); the store marks the list
  *   item read / resolved;
@@ -117,6 +120,10 @@ export function useNotifyBridge(): void {
           return;
         }
         if (e.type !== "notify") return;
+        // Routed to another device in use: listed (the store did that) but silent here. The same id
+        // arriving again with `alert: true` is the escalation to this device and alerts like any
+        // notification (its toast replaces that agent's open one).
+        if (e.alert === false) return;
         const n = { ...e.notification, hostId: e.hostId };
         const key = agentKey(n.hostId, n.agentId);
         const open = () => navigate({ name: "agent", hostId: n.hostId, agentId: n.agentId });

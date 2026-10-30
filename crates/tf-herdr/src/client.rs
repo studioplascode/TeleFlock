@@ -176,6 +176,10 @@ impl HerdrClient {
     /// `/dev/null`; on Linux with systemd in its own transient scope, see [`crate::durable`]) and
     /// wait until it answers.
     pub async fn ensure_server(&self) -> Result<Pong> {
+        self.ensure_server_inner(&crate::lifecycle::ServerLaunch::default()).await
+    }
+
+    pub(crate) async fn ensure_server_inner(&self, launch: &crate::lifecycle::ServerLaunch) -> Result<Pong> {
         match self.ping().await {
             Ok(p) => return Ok(p),
             Err(e) if e.is_server_not_running() => {}
@@ -187,7 +191,7 @@ impl HerdrClient {
             Some(s) => log::info!("starting herdr server for session {session:?} in {}", s.unit),
             None => log::info!("starting herdr server for session {session:?}"),
         }
-        let mut child = self.spawn_server(scope.as_ref())?;
+        let mut child = self.spawn_server(scope.as_ref(), launch)?;
         let deadline = tokio::time::Instant::now() + SERVER_START_TIMEOUT;
         let mut last = None;
         let mut up = None;
@@ -200,14 +204,20 @@ impl HerdrClient {
                 }
                 Err(e) => last = Some(e),
             }
-            // systemd-run exits non-zero without exec'ing when it cannot create the scope.
-            if let Some(s) = &scope
-                && let Ok(Some(status)) = child.try_wait()
+            // systemd-run exits non-zero without exec'ing when it cannot create the scope (and
+            // herdr itself exits non-zero when it cannot start): retry directly once, then give up
+            // at once instead of waiting out the start timeout.
+            if let Ok(Some(status)) = child.try_wait()
                 && !status.success()
             {
-                log::warn!("systemd-run could not start herdr in {} ({status}); starting it directly", s.unit);
-                scope = None;
-                child = self.spawn_server(None)?;
+                match &scope {
+                    Some(s) => {
+                        log::warn!("systemd-run could not start herdr in {} ({status}); starting it directly", s.unit);
+                        scope = None;
+                        child = self.spawn_server(None, launch)?;
+                    }
+                    None => return Err(HerdrError::new(code::SERVER_NOT_RUNNING, format!("herdr server exited at start ({status})"))),
+                }
             }
         }
         // Reap it if it ever exits while we live; it is otherwise fully detached.
@@ -229,8 +239,10 @@ impl HerdrClient {
         })
     }
 
-    /// `herdr [--session S] server`, detached; inside `scope` when given.
-    fn spawn_server(&self, scope: Option<&crate::durable::Scope>) -> Result<std::process::Child> {
+    /// `herdr [--session S] server`, detached; inside `scope` when given. Every inherited
+    /// `HERDR_*` variable is removed (a daemon started inside a herdr pane would otherwise point
+    /// the new server at that pane's server, session or config), then `launch.env` is set.
+    fn spawn_server(&self, scope: Option<&crate::durable::Scope>, launch: &crate::lifecycle::ServerLaunch) -> Result<std::process::Child> {
         let mut cmd = match scope {
             Some(s) => s.command(&self.inner.bin, &format!("herdr server (session {}) started by TeleFlock", self.session().unwrap_or("default"))),
             None => std::process::Command::new(&self.inner.bin),
@@ -238,6 +250,10 @@ impl HerdrClient {
         cmd.args(self.session_args()).arg("server");
         for k in PANE_ENV {
             cmd.env_remove(k);
+        }
+        crate::lifecycle::strip_herdr_env(&mut cmd);
+        for (k, v) in &launch.env {
+            cmd.env(k, v);
         }
         cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         if let Some(home) = home_dir() {
@@ -267,7 +283,7 @@ impl HerdrClient {
             Ok(c) => Ok(c),
             Err(e) if scope.is_some() => {
                 log::warn!("cannot run systemd-run ({e}); starting herdr directly");
-                self.spawn_server(None)
+                self.spawn_server(None, launch)
             }
             Err(e) => Err(HerdrError::transport(&format!("spawn {} server", self.inner.bin.display()), e)),
         }

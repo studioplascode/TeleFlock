@@ -25,8 +25,13 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { Term } from "@/features/shell/Term";
 import { Ticks } from "@/features/shell/Ticks";
 import { OMP_PAGES, VIEWS } from "@/features/shell/vocab";
+import { QuickCaptureSettings } from "@/features/capture/QuickCaptureSettings";
+import { HostAlerts } from "@/features/notify/HostAlerts";
+import { AutoAnswerSettings } from "@/features/autoAnswer/HostDefaults";
 import { MutedAgents } from "./MutedAgents";
+import { AutoResumeSettings } from "./AutoResume";
 import { CommitInput, MOTION_COPY, Row, Section, THINKING, useModels } from "./parts";
+import { PresenceRows } from "./PresenceRows";
 import { Templates } from "./Templates";
 import { Updates } from "./Updates";
 
@@ -238,6 +243,7 @@ export function SettingsView() {
               label="Quiet hours"
             />
           </Row>
+          <PresenceRows />
           {info?.capabilities.notifications !== false && (
             <Row label="Test" description="Send a sample notification through the system.">
               <Button
@@ -264,6 +270,8 @@ export function SettingsView() {
         </Section>
 
         <MutedAgents index={2} />
+
+        <HostAlerts index={2} />
 
         <Section index={2} icon={<Bot />} title="New agents" description="Defaults for agents you start from TeleFlock, and what Mark done does to them.">
           <Row label="Model" htmlFor="tf-default-model" wide>
@@ -298,7 +306,7 @@ export function SettingsView() {
           index={3}
           icon={<Server />}
           title="omp on your hosts"
-          description="omp's own settings, tool servers and logins, per host. They apply to every omp session there, including ones TeleFlock didn't start."
+          description="omp's own settings, tool servers, skills, plugins and logins, per host. They apply to every omp session there, including ones TeleFlock didn't start."
         >
           {OMP_PAGES.map((name) => {
             const { icon: Icon, label, description } = VIEWS[name];
@@ -311,6 +319,10 @@ export function SettingsView() {
             );
           })}
         </Section>
+
+        <AutoResumeSettings index={3} />
+
+        <AutoAnswerSettings index={3} />
 
         <Section index={3} icon={<SquareTerminal />} title="Terminal">
           <Row label="Font size" description={<span className="font-mono" style={{ fontSize: settings.terminalFontSize }}>~/teleflock $ herdr agent list</span>}>
@@ -345,6 +357,8 @@ export function SettingsView() {
             </Row>
           )}
         </Section>
+
+        <QuickCaptureSettings index={4} />
 
         <Updates index={5} />
 

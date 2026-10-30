@@ -283,7 +283,7 @@ export function CodeBlock({ code, lang, open = false, tail, className, maxHeight
   };
   return (
     <div className={cn("group/code relative my-2.5 overflow-hidden rounded-md bg-bg-deep/80 shadow-[inset_0_0_0_1px_rgb(255_255_255/0.07)]", className)}>
-      <div className="flex h-7 items-center gap-2 border-b border-line px-3 text-2xs text-mute-2 max-md:h-6 max-md:px-2.5">
+      <div data-find-skip className="flex h-7 items-center gap-2 border-b border-line px-3 text-2xs text-mute-2 max-md:h-6 max-md:px-2.5">
         <span className="font-mono font-semibold tracking-wide">{lang || "text"}</span>
         {open && <span className="tf-shimmer-text tf-loop font-semibold">writing…</span>}
         <button

@@ -1,6 +1,7 @@
-//! systemd keepalive: while at least one automation is enabled, a timer runs
+//! systemd keepalive: while at least one automation is enabled, or the agent ledger holds agents
+//! to bring back after a reboot (`crate::restart`, with auto-resume on), a timer runs
 //! `tf-hostd ensure` (start the daemon if it is not running) at boot and every 10 minutes, so
-//! schedules fire after reboots and crashes with no app connected.
+//! schedules fire and agents come back after reboots and crashes with no app connected.
 //!
 //! - root: system manager units in `/etc/systemd/system`;
 //! - other users: user units in `$XDG_CONFIG_HOME/systemd/user` (`~/.config/systemd/user`), only
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use tf_proto::AutomationScheduler;
+use tf_proto::{AutomationScheduler, BootService};
 
 use crate::paths::Paths;
 
@@ -45,6 +46,34 @@ impl Target {
             Target::System { dir } | Target::User { dir, .. } => Some(dir),
             _ => None,
         }
+    }
+}
+
+/// What the host setting "Bring agents back after a reboot" can really do here: whether a boot
+/// service (the keepalive timer) can be installed for this tf-hostd home (`target`: systemd as
+/// root, or user units with lingering; `allowed`: the real home, or `TF_HOSTD_KEEPALIVE=1`) and
+/// whether the scheduler `status` says it is installed and active.
+pub fn boot_service(target: &Target, allowed: bool, status: &AutomationScheduler) -> BootService {
+    let unavailable = |note: String| BootService { available: false, installed: false, note: Some(note) };
+    match target {
+        Target::None if cfg!(target_os = "linux") => unavailable(
+            "Not available on this host: there is no systemd to install a boot service in, so agents come back after a reboot once TeleFlock or tf-hostd runs here again.".into(),
+        ),
+        Target::None => unavailable(format!(
+            "Not available on this host: boot services are only installed with systemd on Linux (this host runs {}), so agents come back after a reboot once TeleFlock or tf-hostd runs here again.",
+            std::env::consts::OS
+        )),
+        Target::NeedsLinger { user, .. } => unavailable(format!(
+            "Not available yet: systemd stops {user}'s services at logout and does not start them at boot. Run `loginctl enable-linger {user}` on this host."
+        )),
+        Target::System { .. } | Target::User { .. } if !allowed => unavailable(
+            "Not installed by this tf-hostd home: only the default home (~/.teleflock) installs a boot service (development homes opt in with TF_HOSTD_KEEPALIVE=1).".into(),
+        ),
+        Target::System { .. } | Target::User { .. } => BootService {
+            available: true,
+            installed: status.kind == "systemd" && status.persistent,
+            note: status.note.clone().filter(|_| !(status.kind == "systemd" && status.persistent)),
+        },
     }
 }
 
@@ -113,7 +142,7 @@ pub fn render(paths: &Paths, exe: &Path, relay_port: u16, env: &[(&str, String)]
         environment.push_str(&format!("Environment={}\n", quote(&format!("{k}={v}"))));
     }
     let service = format!(
-        "# Written by tf-hostd (TeleFlock automations); removed when no automation is enabled.\n\
+        "# Written by tf-hostd (TeleFlock automations and agent recovery); removed when neither needs it.\n\
          [Unit]\n\
          Description=TeleFlock host daemon keepalive ({home})\n\
          \n\
@@ -124,9 +153,9 @@ pub fn render(paths: &Paths, exe: &Path, relay_port: u16, env: &[(&str, String)]
         quote(&exe.display().to_string()),
     );
     let timer = format!(
-        "# Written by tf-hostd (TeleFlock automations); removed when no automation is enabled.\n\
+        "# Written by tf-hostd (TeleFlock automations and agent recovery); removed when neither needs it.\n\
          [Unit]\n\
-         Description=Keeps the TeleFlock host daemon running for automations ({home})\n\
+         Description=Keeps the TeleFlock host daemon running for automations and agent recovery ({home})\n\
          \n\
          [Timer]\n\
          OnBootSec=1min\n\
@@ -312,7 +341,7 @@ mod tests {
         assert_ne!(units.stem, Paths::new(PathBuf::from("/root/.teleflock"), false).unit_stem());
         assert_eq!(
             units.service,
-            "# Written by tf-hostd (TeleFlock automations); removed when no automation is enabled.\n\
+            "# Written by tf-hostd (TeleFlock automations and agent recovery); removed when neither needs it.\n\
              [Unit]\n\
              Description=TeleFlock host daemon keepalive (/tmp/tf lab)\n\
              \n\
@@ -355,5 +384,31 @@ mod tests {
         assert!(!dir.join(format!("{stem}.service")).exists() && !dir.join(format!("{stem}.timer")).exists());
         assert!(link.symlink_metadata().is_err(), "the enable link is gone too");
         assert!(other.exists(), "another home's units stay");
+    }
+
+    #[test]
+    fn the_boot_service_setting_says_what_this_host_can_do() {
+        let status = |kind: &str, persistent: bool, note: Option<&str>| AutomationScheduler { kind: kind.into(), persistent, note: note.map(Into::into), timezone: "UTC".into() };
+        let system = Target::System { dir: PathBuf::from("/etc/systemd/system") };
+        let user = Target::User { dir: PathBuf::from("/home/u/.config/systemd/user"), runtime_dir: PathBuf::from("/run/user/1000") };
+        // root or a lingering user: available, and installed once the timer is active.
+        for t in [&system, &user] {
+            let off = boot_service(t, true, &status("systemd", false, None));
+            assert_eq!((off.available, off.installed, off.note), (true, false, None));
+            assert!(boot_service(t, true, &status("systemd", true, None)).installed);
+            let broken = boot_service(t, true, &status("systemd", false, Some("The systemd timer is not active (boom).")));
+            assert!(broken.available && !broken.installed && broken.note.as_deref().is_some_and(|n| n.contains("boom")), "{broken:?}");
+        }
+        // A user without lingering: systemd cannot start anything at boot for them.
+        let linger = boot_service(&Target::NeedsLinger { user: "ada".into(), dir: PathBuf::new(), runtime_dir: PathBuf::new() }, true, &status("systemd", false, None));
+        assert!(!linger.available && !linger.installed);
+        assert!(linger.note.unwrap().contains("loginctl enable-linger ada"));
+        // macOS, Windows, Linux without systemd: not available, whatever the scheduler says.
+        let none = boot_service(&Target::None, true, &status("daemon", false, None));
+        assert!(!none.available && !none.installed);
+        assert!(none.note.unwrap().starts_with("Not available on this host"));
+        // A development home installs none.
+        let lab = boot_service(&system, false, &status("systemd", false, None));
+        assert!(!lab.available && lab.note.unwrap().contains("TF_HOSTD_KEEPALIVE=1"));
     }
 }

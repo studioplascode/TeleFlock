@@ -2,7 +2,7 @@ import { BellOff, Brain, Sparkles, Trash2 } from "lucide-react";
 import { AnimatePresence, motion, useAnimate } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { navigate, useAgent, useCore, useHostStale, useHosts } from "@/core";
-import type { Agent, Column } from "@/core/gen";
+import type { Agent, Column, HerdrHealth } from "@/core/gen";
 import {
   AgentGlyph,
   Card,
@@ -19,18 +19,28 @@ import {
   useLivelyMotion,
   useNow,
 } from "@/design";
+import { CountdownChip } from "@/features/autoAnswer/CountdownChip";
+import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { herdrAgentWord, herdrCardTime, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { hostAccent } from "@/features/hosts/kinds";
 import { ShipStepper } from "@/features/review/ShipPanel";
 import { ACTIONS, type AgentStateId, agentStateId, agentStateWord, stateTime } from "@/features/shell/vocab";
 import { archiveWithUndo, canReview, deleteWorktree, openAgent, openTerminal, promptAgent, stopAgent, useMuted } from "./agentActions";
+import { resumeNow } from "@/features/session/resume/actions";
+import { ticketActions } from "@/features/session/resume/words";
 import { CardContextMenu, CardMenuButton } from "./CardMenu";
 import { LANE_BY_COLUMN } from "./lanes";
+import { AutoResumeBadge } from "./AutoResumeBadge";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { ParkedChip } from "./ParkedChip";
+import { RetryLine } from "./RetryLine";
+import { retryOf } from "./retry";
+import { RestingLine } from "./RecapLine";
 import { QuickAnswer } from "./QuickAnswer";
 import { RepoTag } from "./RepoTag";
 import { useShipMemo } from "./shipMemo";
 import { PrProbe, shippedWords, useShippedPr } from "./worktreePr";
+import { JobsMeter, WaitingForJobs } from "./JobsMeter";
 
 const NUDGE_EVERY_MS = 20_000;
 
@@ -134,17 +144,22 @@ const PILL: Record<AgentStateId, string> = {
 };
 
 /** Zone 1, right: the state's time with its verb ("turn 27:24", "waiting 6:13", "finished 25m ago"). Ticks on its own. */
-function StateTime({ agent, state, stale, className }: { agent: Agent & { hostId: string }; state: AgentStateId; stale: boolean; className?: string }) {
+function StateTime({ agent, state, stale, herdr, className }: { agent: Agent & { hostId: string }; state: AgentStateId; stale: boolean; herdr?: HerdrHealth; className?: string }) {
   const lastOnlineAt = useHosts((s) => s.status[agent.hostId]?.lastOnlineAt);
   const reconnecting = useHosts((s) => s.status[agent.hostId]?.phase === "reconnecting" || s.status[agent.hostId]?.phase === "connecting");
-  const ticking = !stale && (state === "running" || state === "needs");
+  const ticking = !stale && !herdr && (state === "running" || state === "needs");
   const now = useNow(ticking ? 1000 : 30_000);
+  // herdr is down: the time stops where the outage began
+  if (herdr && !stale) return <span className={className}>{herdrCardTime(herdr)}</span>;
   if (stale)
     return (
       <span className={cn(className, reconnecting && "tf-shimmer-text")} title="Last seen while the host was online">
         last seen {lastOnlineAt ? formatAge(now - lastOnlineAt) : "—"}
       </span>
     );
+  // an ended card (its omp ended without anyone closing it): since then; its pill says "Ended"
+  const ended = state === "review" || state === "fresh" ? agent.parked?.ended : undefined;
+  if (ended) return <span className={className}>{stateTime("ended", ended.at, now)}</span>;
   const since = state === "needs" ? agent.needs?.since : state === "running" ? (agent.omp?.turnStartedAt ?? agent.stateSince) : agent.stateSince;
   return <span className={className}>{stateTime(state, since, now)}</span>;
 }
@@ -170,7 +185,10 @@ function DeleteWorktreeButton({ agentKey, andDone }: { agentKey: string; andDone
   );
 }
 
-/** Review card zone 4: the next ship step as the primary button (from host state, or what Review last saw), Mark done, Open, Delete worktree once shipped. */
+/**
+ * Review card zone 4: the next ship step as the primary button (from host state, or what Review last saw), Mark done, Open,
+ * Delete worktree once shipped. An ended card leads with its ticket's Continue instead (its workspace went with its pane).
+ */
 function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; agentKey: string }) {
   const repo = useCore((s) => s.hosts[agent.hostId]?.state.workspaces.find((w) => w.id === agent.workspaceId)?.repo);
   const memo = useShipMemo((s) => s.byWorkspace[`${agent.hostId}/${agent.workspaceId}`]);
@@ -180,17 +198,29 @@ function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; ag
   const next =
     dirty > 0 ? `Commit ${dirty} file${dirty === 1 ? "" : "s"}` : ahead > 0 ? `Push ${ahead} commit${ahead === 1 ? "" : "s"}` : memo?.pr !== undefined ? memo.next : ACTIONS.review.label;
   const stage = dirty > 0 ? 0 : ahead > 0 ? 1 : (memo?.stage ?? 0);
+  const ticket = agent.parked?.ended && agent.autoResume ? ticketActions(agent.autoResume, { ended: agent.parked.ended }) : null;
   const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
   return (
     <>
-      <LiveLine live={agent.live} running={false} className="mt-2" />
+      <RestingLine agent={agent} className="mt-2" />
       {memo?.pr !== undefined && (
         <div className="mt-2 w-36" title={`Ship: ${memo.next}`}>
           <ShipStepper stage={stage} blocked={memo.blocked && stage === memo.stage} dots />
         </div>
       )}
       <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={stop} onPointerDown={stop}>
-        {canReview(agent) && (
+        {ticket && (
+          <Tooltip content={ticket.resumeHint}>
+            <button
+              type="button"
+              className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
+              onClick={() => void resumeNow(agentKey)}
+            >
+              {ticket.resume}
+            </button>
+          </Tooltip>
+        )}
+        {canReview(agent) && !agent.parked && (
           <Tooltip content={ACTIONS.review.description}>
             <button
               type="button"
@@ -239,11 +269,18 @@ export interface AgentCardProps {
  */
 export function AgentCard({ agentKey, lane, selected = false, picked = false, floating = false, hero = false }: AgentCardProps) {
   const agent = useAgent(agentKey);
-  const stale = useHostStale(agent?.hostId ?? "");
+  const hostStale = useHostStale(agent?.hostId ?? "");
+  // herdr is down on its host: nothing runs, whatever the cached lane says (no running visuals, no ticking timers).
+  // Review and Done cards keep their state: those agents were idle already.
+  const herdrHealth = useHerdrDown(agent?.hostId ?? "");
+  const herdr = lane === "running" || lane === "needs" ? herdrHealth : undefined;
+  const stale = hostStale || herdr !== undefined;
   const multiHost = useHosts((s) => s.profiles.length > 1);
   const muted = useMuted(agentKey);
   const lively = useLivelyMotion();
-  const quiet = useQuiet(lane === "running" && !stale, agent?.live.lastEventAt);
+  // Waiting for background jobs is silent by design (omp's async wait), not quiet.
+  const retry = retryOf(agent);
+  const quiet = useQuiet(lane === "running" && !stale && !agent?.omp?.jobs?.waiting && !retry, agent?.live.lastEventAt);
   // a muted agent still waits visibly, it just stops tugging at your sleeve
   const nudge = useNudge(lane === "needs" && !stale && !muted);
   const burst = useArrival(agentKey, lane, floating);
@@ -252,13 +289,13 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   // the lane leads the host state during an optimistic drop
   const state: AgentStateId = lane === "review" ? agentStateId({ ...agent, column: "review" }) : lane;
   const fresh = state === "fresh";
-  // a fresh agent that never ran sits calmly (idle), not in review cyan
-  const status = fresh ? "idle" : LANE_BY_COLUMN[lane].status;
+  // a fresh agent that never ran sits calmly (idle), not in review cyan; so does an ended one until it is back
+  const status = herdr ? herdrOrbStatus(herdr) : fresh || (lane === "review" && agent.parked?.ended) ? "idle" : LANE_BY_COLUMN[lane].status;
   const omp = agent.omp;
   const todos = omp?.todos;
   const subs = omp?.subagents?.live ?? 0;
   const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
-  const live = lane === "running" || lane === "needs";
+  const live = (lane === "running" || lane === "needs") && !herdr;
   const isHero = hero && lane === "needs" && !stale && !floating;
   const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
 
@@ -279,6 +316,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         {n.command && !n.question.includes(n.command) && (
           <pre className="mt-2 max-h-20 overflow-hidden rounded-sm well px-2.5 py-1.5 font-mono text-2xs whitespace-pre-wrap text-ink-2">{n.command}</pre>
         )}
+        <CountdownChip agentKey={agentKey} sunset={isHero} className="mt-2" />
         <QuickAnswer agentKey={agentKey} appearance={isHero ? "hero" : "card"} className="mt-2.5" max={4} chat={false} />
       </>
     );
@@ -311,18 +349,24 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   } else if (lane === "running") {
     body = (
       <>
-        <LiveLine live={agent.live} running={!stale} className="mt-2" />
+        {retry && !stale ? (
+          <RetryLine wait={retry} className="mt-2" />
+        ) : agent.omp?.jobs?.waiting && !stale ? (
+          <WaitingForJobs jobs={agent.omp.jobs} className="mt-2" />
+        ) : (
+          <LiveLine live={agent.live} running={!stale} className="mt-2" />
+        )}
         <div className="mt-2 flex min-w-0 items-center gap-2">
-          {/* when quiet, the chip replaces the age label: one signal per fact */}
-          <AgentHeartbeat agentKey={agentKey} status={quiet ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={20} showAge={!quiet} className="min-w-0 flex-1" />
-          {quiet ? <QuietChip since={agent.live.lastEventAt ?? 0} /> : <TpsSparkline tps={agent.live.tps} status={status} />}
+          {/* when quiet, the chip replaces the age label: one signal per fact; a retry wait says it all in its line above */}
+          <AgentHeartbeat agentKey={agentKey} status={quiet || retry ? "idle" : status} lastEventAt={agent.live.lastEventAt} height={20} showAge={!quiet && !retry} className="min-w-0 flex-1" />
+          {quiet ? <QuietChip since={agent.live.lastEventAt ?? 0} /> : !retry && <TpsSparkline tps={agent.live.tps} status={status} />}
         </div>
       </>
     );
   } else if (lane === "done") {
     body = (
       <>
-        {agent.live.line && <p className="mt-1.5 line-clamp-1 text-xs text-mute">{agent.live.line}</p>}
+        <RestingLine agent={agent} lines={1} className="mt-1.5" />
         {/* collapses while there's nothing to offer */}
         <div className="mt-2.5 flex empty:hidden" onClick={stop} onPointerDown={stop}>
           <DeleteWorktreeButton agentKey={agentKey} andDone={false} />
@@ -334,11 +378,12 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   const model = omp?.model;
   const thinking = omp?.thinking && omp.thinking !== "off" ? omp.thinking : undefined;
   const meters =
-    omp?.context || subPct != null || agent.diff || omp?.link === "notShared" || model || thinking ? (
+    omp?.context || subPct != null || omp?.jobs?.running || agent.diff || omp?.link === "notShared" || model || thinking ? (
       // fixed order; wraps onto a second line on narrow cards instead of hiding anything
       <div className="mt-2.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-line pt-2">
         {omp?.context && <ContextMeter pct={omp.context.pct} />}
         {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
+        {omp?.jobs && <JobsMeter jobs={omp.jobs} />}
         {agent.diff && <DiffStat {...agent.diff} muted={lane === "done"} />}
         <ConnectLinkButton agentKey={agentKey} />
         {model && (
@@ -381,13 +426,13 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           data-status={status}
           className={cn(
             "min-w-0 truncate rounded-full px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase",
-            isHero ? "bg-[rgb(40_0_20/0.28)] text-white" : PILL[state],
+            isHero ? "bg-[rgb(40_0_20/0.28)] text-white" : herdr ? "bg-white/6 text-mute" : PILL[state],
           )}
         >
-          {agentStateWord({ ...agent, column: lane })}
+          {herdr ? herdrAgentWord(herdr) : agentStateWord({ ...agent, column: lane })}
           {lane === "running" && agent.live.tool && !stale && <span className="normal-case tracking-normal"> · {agent.live.tool.name}</span>}
         </span>
-        <StateTime agent={agent} state={state} stale={stale} className={cn("ml-auto shrink-0 text-2xs font-bold tabular", lane === "needs" && !isHero ? "text-[#ffb08a]" : "text-mute")} />
+        <StateTime agent={agent} state={state} stale={hostStale} herdr={herdr} className={cn("ml-auto shrink-0 text-2xs font-bold tabular", lane === "needs" && !isHero ? "text-[#ffb08a]" : "text-mute")} />
       </div>
 
       {/* (2) identity + (3) title */}
@@ -420,6 +465,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
               </span>
             )}
             {agent.parked && <ParkedChip agentKey={agentKey} />}
+            <AutoResumeBadge agentKey={agentKey} />
             {multiHost && <HostTag hostId={agent.hostId} />}
             <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} sunset={isHero} />
           </div>

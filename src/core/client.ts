@@ -339,14 +339,14 @@ function reopenSessions(hostId: string | null): void {
 
 const loadingOlder = new Set<string>();
 
-/** Pages older transcript rows into the session. */
-export async function loadOlder(key: string): Promise<void> {
+/** Pages older transcript rows into the session (`limit` rows, 100 by default; Find asks for more to reach a match). */
+export async function loadOlder(key: string, limit = 100): Promise<void> {
   const sess = coreStore.getState().sessions[key];
   if (!sess?.hasMore || !sess.cursor || loadingOlder.has(key)) return;
   loadingOlder.add(key);
   const { hostId, agentId } = parseAgentKey(key);
   try {
-    const page = await core.host(hostId).call("session.history", { agentId, cursor: sess.cursor, limit: 100 });
+    const page = await core.host(hostId).call("session.history", { agentId, cursor: sess.cursor, limit: Math.min(2000, Math.max(1, Math.round(limit))) });
     pushInternal({ type: "$history", hostId, agentId, page });
   } finally {
     loadingOlder.delete(key);

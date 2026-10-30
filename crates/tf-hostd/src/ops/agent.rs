@@ -17,10 +17,11 @@ use tracing::{info, warn};
 use tf_herdr::{AgentStart, PaneSplit, SplitDirection, TabCreate, WorkspaceCreate, WorktreeOpen, WorktreeScope, WorktreeTarget};
 use tf_proto::methods::*;
 use tf_proto::model::{ActivityKind, Agent, HerdrState, LinkState, NeedsKind, OmpMode, ThinkingLevel};
-use tf_proto::session::{HistoryPage, SessionSnapshot};
+use tf_proto::session::{HistoryPage, SessionSnapshot, TranscriptItem, UserItem};
 use tf_proto::term::Split;
 use tf_proto::{ApiError, Empty, HostMethod};
 
+use crate::agentcfg::{AgentOmp, Store};
 use crate::bridge::BridgeError;
 use crate::clients::ClientHandle;
 use crate::inject::{self, When};
@@ -45,15 +46,32 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
             session_close(ctx, &p.agent_id, client);
             to_value(Empty {})
         }
-        M::SessionHistory(p) => to_value(session_history(ctx, p)?),
+        M::SessionHistory(p) => match parked_record(ctx, &p.agent_id) {
+            Some(rec) => to_value(super::search::parked_history(rec.session_file, p, DEFAULT_LIMIT).await?),
+            None => to_value(session_history(ctx, p)?),
+        },
+        M::SessionFind(p) => match parked_record(ctx, &p.agent_id) {
+            Some(rec) => to_value(super::search::find_in_file(rec.session_file, p).await?),
+            None => {
+                let sid = session_id(ctx, &p.agent_id)?;
+                let s = ctx.omp.session(&sid).ok_or_else(not_shared)?;
+                to_value(super::search::find_in_session(s, p).await?)
+            }
+        },
         M::SubagentTranscript(p) => to_value(subagent_transcript(ctx, p).await?),
         M::SessionImage(p) => to_value(session_image(ctx, p).await?),
+        M::SessionArtifactList(p) => to_value(super::artifact_files::list(ctx, &p.agent_id).await?),
+        M::SessionArtifactRead(p) => to_value(super::artifact_files::read(ctx, p).await?),
+        M::SessionWriteLocal(p) => to_value(super::artifact_files::write_local(ctx, p).await?),
+        M::SessionContextXray(p) => to_value(super::xray::get(ctx, &p.agent_id).await?),
 
         M::AgentPrompt(p) => unit(prompt(ctx, p, client).await),
         M::AgentAbort(p) => unit(abort(ctx, &p.agent_id).await),
         M::AgentAnswer(p) => unit(answer(ctx, p).await),
         M::AgentSetModel(p) => unit(set_model(ctx, p).await),
         M::AgentSetThinking(p) => unit(set_thinking(ctx, p).await),
+        M::AgentGetRoleModels(p) => to_value(super::roles::get(ctx, &p.agent_id).await?),
+        M::AgentSetRoleModels(p) => to_value(super::roles::set(ctx, p).await?),
         M::AgentSetFast(p) => unit(set_fast(ctx, p).await),
         M::AgentSetPlan(p) => unit(set_plan(ctx, p).await),
         M::AgentGoal(p) => unit(goal(ctx, p).await),
@@ -79,6 +97,12 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentStop(p) => unit(stop(ctx, p).await),
         M::AgentRenameHandle(p) => unit(rename_handle(ctx, p).await),
         M::AgentResume(p) => to_value(resume_parked(ctx, &p.agent_id, None, None, Vec::new()).await?),
+        M::AgentSetAutoAnswer(p) => unit(crate::autoanswer::set_agent(ctx, p)),
+        M::AgentAutoAnswerCancel(p) => unit(crate::autoanswer::cancel(ctx, p)),
+        M::AgentAutoAnswerPostpone(p) => unit(crate::autoanswer::postpone(ctx, p)),
+        M::AgentAutoResumeNow(p) => to_value(crate::recovery::resume_now(ctx, &p.agent_id).await?),
+        M::AgentAutoResumeCancel(p) => unit(crate::recovery::cancel(ctx, &p.agent_id)),
+        M::AgentRetry(p) => to_value(crate::limit_resume::retry(ctx, &p.agent_id, p.subagent_id.as_deref()).await?),
         other => Err(ApiError::new("unknown_method", format!("`{}` is not an agent method", other.name()))),
     }
 }
@@ -104,7 +128,7 @@ fn parked_record(ctx: &Ctx, agent_id: &str) -> Option<ParkedRecord> {
     ctx.state.parked(agent_id)
 }
 
-fn omp_agent(ctx: &Ctx, agent_id: &str) -> Result<Agent, ApiError> {
+pub(crate) fn omp_agent(ctx: &Ctx, agent_id: &str) -> Result<Agent, ApiError> {
     let a = agent(ctx, agent_id)?;
     if a.kind != "omp" {
         return Err(ApiError::new("unsupported", format!("`{}` is a {} agent; use the terminal", a.name, a.kind)));
@@ -140,7 +164,7 @@ fn not_shared() -> ApiError {
 /// The bridge session id of an agent, when the companion extension is loaded. Right after a session
 /// switch the board's mapping (herdr / collab) can still name the old session while the bridge
 /// already said hello for the new one: then the agent's omp process names the current session.
-fn bridge_sid(ctx: &Ctx, agent_id: &str) -> Option<String> {
+pub(crate) fn bridge_sid(ctx: &Ctx, agent_id: &str) -> Option<String> {
     let sid = ctx.state.omp_session_of(agent_id)?;
     if ctx.bridge.is_connected(&sid) {
         return Some(sid);
@@ -286,6 +310,8 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
     if p.text.trim().is_empty() && p.images.is_empty() {
         return Err(ApiError::new("invalid_params", "empty prompt"));
     }
+    crate::limit_resume::intervened(ctx, &p.agent_id, "prompted");
+    crate::restart::intervened(ctx, &p.agent_id);
     if parked_record(ctx, &p.agent_id).is_some() {
         // Prompting a parked agent resumes it; the launch path submits the prompt once linked.
         info!(agent = %p.agent_id, device = %client.info().device, "prompt resumes a parked agent");
@@ -369,6 +395,7 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
 
 async fn abort(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
     let a = agent(ctx, agent_id)?;
+    crate::limit_resume::intervened(ctx, agent_id, "stopped");
     if a.kind == "omp" {
         if let Ok(s) = guest(ctx, agent_id) {
             return s.abort().await;
@@ -469,6 +496,7 @@ fn check_model(model: &str) -> Result<(), ApiError> {
 
 async fn set_model(ctx: &Ctx, p: SetModelParams) -> Result<(), ApiError> {
     check_model(&p.model)?;
+    crate::limit_resume::intervened(ctx, &p.agent_id, "model changed");
     if let Some(sid) = bridge_sid(ctx, &p.agent_id) {
         ctx.bridge.set_model(&sid, &p.model, p.thinking).await.map_err(bridge_err)?;
         push_meta_overlay(ctx, &sid);
@@ -619,6 +647,7 @@ async fn navigate(ctx: &Ctx, p: EntryParams) -> Result<(), ApiError> {
 }
 
 async fn new_session(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
+    crate::limit_resume::intervened(ctx, agent_id, "new session");
     if let Some(sid) = bridge_sid(ctx, agent_id) {
         ctx.bridge.new_session(&sid).await.map_err(bridge_err)?;
     } else {
@@ -767,15 +796,21 @@ async fn keys(ctx: &Ctx, p: KeysParams) -> Result<(), ApiError> {
 /// `agent.archive`. With `close`, a pending close parks the agent after the undo window
 /// ([`PARK_GRACE`]); un-archiving cancels it, and un-archiving a parked agent resumes it.
 async fn archive(ctx: &Ctx, p: ArchiveParams) -> Result<(), ApiError> {
-    if parked_record(ctx, &p.agent_id).is_some() {
+    if let Some(rec) = parked_record(ctx, &p.agent_id) {
         if !p.archived {
             resume_parked(ctx, &p.agent_id, None, None, Vec::new()).await?;
+        } else if rec.ended.is_some() {
+            // Ended without anyone closing it and not brought back: Mark done files it under Done.
+            crate::restart::mark_done(ctx, &p.agent_id);
         }
         return Ok(());
     }
     agent(ctx, &p.agent_id)?;
     if !ctx.state.set_archived(&p.agent_id, p.archived) {
         return Err(ApiError::new("not_found", format!("no agent `{}`", p.agent_id)));
+    }
+    if p.archived {
+        crate::limit_resume::intervened(ctx, &p.agent_id, "marked done");
     }
     match (p.archived, p.close) {
         (true, Some(true)) => {
@@ -848,9 +883,10 @@ async fn park(ctx: &Ctx, agent_id: &str, undo: &CancellationToken) -> Result<(),
     Ok(())
 }
 
-/// `agent.resume` (also prompting or un-archiving a parked agent, and `host.resume` of its
-/// session file): `omp --resume=<file>` in a new pane with the parked name, model and thinking
-/// level. `target` overrides where (default: its worktree / folder, see [`reopen_target`]).
+/// `agent.resume` (also prompting or un-archiving a parked agent, `host.resume` of its session
+/// file, and `crate::restart` bringing an ended agent back): `omp --resume=<file>` in a new pane
+/// with the parked name, model and thinking level. `target` overrides where (default: its
+/// worktree / folder, see [`reopen_target`]).
 pub(crate) async fn resume_parked(
     ctx: &Ctx,
     agent_id: &str,
@@ -864,16 +900,37 @@ pub(crate) async fn resume_parked(
             None => ApiError::new("not_found", format!("no agent `{agent_id}`")),
         });
     };
+    // A move to another host runs (`ops::moves`): it resumes the agent here itself if it fails.
+    if let Some(m) = rec.moved.as_ref().filter(|m| m.state == tf_proto::ParkedMoveState::Moving) {
+        return Err(ApiError::new("busy", format!("{} is being moved to {}", rec.name, m.to)).retryable());
+    }
     let claim = ctx.state.claim_resume(agent_id).ok_or_else(|| {
         ApiError::new("busy", format!("{} is already being resumed", rec.name)).retryable()
     })?;
     let file = rec.session_file.clone();
+    // Never a second omp on a session that one still runs (the board may not show it yet; herdr
+    // may have been taken down around it): that would fork it.
+    if let Some(pid) = crate::restart::still_running(ctx, agent_id, &file, rec.session_id.as_deref()) {
+        return Err(ApiError::new("busy", format!("omp already runs this session (pid {pid}); it shows up on the board in a moment")).retryable());
+    }
+    if crate::restart::is_fileless(&rec) {
+        // An agent that ended before omp told its session (no id, no file): nothing to check; its
+        // card starts its kept prompt as a new session (Continue), typed input is refused.
+        return crate::restart::resume_without_file(ctx, agent_id, claim, target, prompt, images).await;
+    }
     let check = {
         let file = file.clone();
         tokio::task::spawn_blocking(move || parked::check_file(Path::new(&file))).await
     };
     match check {
         Ok(parked::FileCheck::Present) => {}
+        Ok(parked::FileCheck::Missing) if rec.ended.is_some() => {
+            // An ended card keeps its prompts and settings: omp never wrote a file when its first
+            // turn was cut off, and that is no deleted session. It starts again as a new session
+            // with the prompts it had been given (and what is typed now); a session that was
+            // deleted leaves the card for the user to dismiss. Never pruned here.
+            return crate::restart::resume_without_file(ctx, agent_id, claim, target, prompt, images).await;
+        }
         Ok(parked::FileCheck::Missing) => {
             drop(claim);
             ctx.state.prune_parked(agent_id);
@@ -893,6 +950,10 @@ pub(crate) async fn resume_parked(
     };
     let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().filter(|a| a.parked.is_none()).map(|a| a.name).collect();
     let name = if valid_handle(&rec.name) && !taken.contains(&rec.name) { rec.name.clone() } else { derive_handle(&rec.name, &taken) };
+    // The agent's own omp settings (§3.7) come along; the new agent gets its own overlay. The agent
+    // ledger keeps copies for an agent whose own stores lost them (`crate::restart`).
+    let kept = crate::restart::settings_of(ctx, agent_id);
+    let own = Store::new(&ctx.paths).get(&ctx.herdr_session, agent_id).map(|r| r.omp).or_else(|| kept.as_ref().map(|k| k.0.clone())).unwrap_or_default();
     let spec = AgentSpec {
         name: Some(name.clone()),
         kind: "omp".into(),
@@ -901,12 +962,22 @@ pub(crate) async fn resume_parked(
         plan: false,
         prompt,
         images,
+        role_models: own.role_models,
+        fallback_chains: own.fallback_chains,
+        // Its own decide-for-me policy comes along too.
+        auto_answer: crate::autoanswer::own(ctx, agent_id).or_else(|| kept.and_then(|k| k.1)),
     };
     info!(agent = %agent_id, %name, %file, "resuming parked agent");
-    let started = start_agent(ctx, target, &spec, Some(&file)).await?;
+    let session = SessionArg::Resume(&file);
+    let started = start_agent(ctx, target, &spec, Some(session)).await?;
     let new_id = started.agent_id.clone().unwrap_or_default();
+    if let Err(e) = Store::new(&ctx.paths).forget(&ctx.herdr_session, agent_id) {
+        warn!(agent = %agent_id, "dropping the parked agent's omp settings: {e}");
+    }
+    crate::autoanswer::forget(ctx, agent_id);
     ctx.state.resumed(claim, &new_id);
-    ctx.state.record_activity_as(&new_id, &name, ActivityKind::Unarchived, format!("Resumed {name}"), Some(file));
+    let title = format!("Resumed {name}");
+    ctx.state.record_activity_as(&new_id, &name, ActivityKind::Unarchived, title, Some(file));
     Ok(started)
 }
 
@@ -970,43 +1041,47 @@ async fn linked_worktree(rec: &ParkedRecord, cwd: &Path) -> Option<(String, Stri
     Some((top.display().to_string(), root.display().to_string()))
 }
 
-/// Largest tail of a parked session file read for its read-only transcript.
-const PARKED_READ_MAX: u64 = 16 * 1024 * 1024;
-
 /// `session.open` on a parked agent: a read-only snapshot (meta from the parked record, the last
-/// rows of its session file mapped like a live replica). No subscription, no paging.
+/// rows of its session file mapped like a live replica; `session.history` pages older ones). No
+/// subscription.
 async fn parked_snapshot(ctx: &Ctx, rec: ParkedRecord, limit: Option<u32>) -> Result<SessionSnapshot, ApiError> {
     let limit = limit.map(|l| l.clamp(1, 2000) as usize).unwrap_or(DEFAULT_LIMIT);
-    let path = PathBuf::from(&rec.session_file);
-    let read = tokio::task::spawn_blocking(move || read_tail(&path, PARKED_READ_MAX)).await.map_err(|e| ApiError::new("internal", e.to_string()))?;
-    let text = match read {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            ctx.state.prune_parked(&rec.agent_id);
-            return Err(ApiError::new("not_found", format!("the omp session file {} was deleted", rec.session_file)));
+    let (items, has_more, cursor) = match super::search::parked_rows(rec.session_file.clone(), limit).await {
+        Ok(rows) => rows,
+        Err(e) if e.code == "not_found" => {
+            if rec.ended.is_some() {
+                // An ended agent's first turn may have been cut off before omp wrote its session
+                // file: the prompts the ledger kept stand in for the transcript. The card stays
+                // (it holds those prompts for the relaunch); only a dismissal removes it.
+                let items = kept_prompt_rows(crate::restart::kept_prompts(ctx, &rec.agent_id), rec.parked_at);
+                return Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more: false, cursor: None, ui: None, sync: None });
+            }
+            let file = rec.session_file.clone();
+            let check = tokio::task::spawn_blocking(move || parked::check_file(Path::new(&file))).await.ok();
+            if prunable(&rec, check.as_ref()) {
+                ctx.state.prune_parked(&rec.agent_id);
+            }
+            return Err(e);
         }
-        Err(e) => return Err(crate::ops::fs::io_error(e, Path::new(&rec.session_file))),
+        Err(e) => return Err(e),
     };
-    let mut items = tf_collab::replica::transcript_page(&text).items;
-    items.drain(..items.len().saturating_sub(limit));
-    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more: false, cursor: None, ui: None, sync: None })
+    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more, cursor, ui: None, sync: None })
 }
 
-/// The file, or its last `max` bytes from a line start.
-fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)?;
-    let len = f.metadata()?.len();
-    let mut buf = Vec::new();
-    if len > max {
-        f.seek(SeekFrom::Start(len - max))?;
-        f.take(max).read_to_end(&mut buf)?;
-        let start = buf.iter().position(|b| *b == b'\n').map_or(buf.len(), |i| i + 1);
-        buf.drain(..start);
-    } else {
-        f.read_to_end(&mut buf)?;
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+/// The user rows of the prompts an ended card's agent was given before omp saved its session.
+fn kept_prompt_rows(prompts: Vec<String>, at: tf_proto::Millis) -> Vec<TranscriptItem> {
+    prompts
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| TranscriptItem::User(UserItem { id: format!("kept-{i}"), at, text, images: Vec::new(), author: None, steering: false, synthetic: false }))
+        .collect()
+}
+
+/// A parked card whose session file is missing goes only when the file is certainly gone (its
+/// folder is there, `parked::check_file`) and the card is not an ended agent's: that card keeps
+/// the prompts and settings its relaunch needs, and only a dismissal removes it.
+fn prunable(rec: &ParkedRecord, check: Option<&parked::FileCheck>) -> bool {
+    rec.ended.is_none() && matches!(check, Some(parked::FileCheck::Missing))
 }
 
 async fn connect(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
@@ -1037,6 +1112,7 @@ async fn connect(ctx: &Ctx, agent_id: &str) -> Result<(), ApiError> {
 
 async fn stop(ctx: &Ctx, p: StopParams) -> Result<(), ApiError> {
     let a = agent(ctx, &p.agent_id)?;
+    crate::limit_resume::intervened(ctx, &p.agent_id, "stopped");
     match p.mode {
         StopMode::Interrupt => abort(ctx, &p.agent_id).await?,
         StopMode::Exit => {
@@ -1177,10 +1253,10 @@ fn launch_err(e: tf_herdr::HerdrError, target: &LaunchPane) -> ApiError {
 }
 
 /// The §3.7 launch recipe: resolves (or creates) the pane, then
-/// `herdr agent start <name> --kind omp --pane <pane> -- --config <overlay> -e <ext> …` once its
-/// shell is at a prompt (`LaunchPane::shell_wait`), giving the agent `INTERACTIVE_TIMEOUT` to
-/// come up. Plan mode and the initial prompt are applied once the agent is idle and linked.
-pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentSpec, resume: Option<&str>) -> Result<Started, ApiError> {
+/// `herdr agent start <name> --kind omp --pane <pane> -- --config <overlay> [--config <agent overlay>] -e <ext> …`
+/// once its shell is at a prompt (`LaunchPane::shell_wait`), giving the agent `INTERACTIVE_TIMEOUT`
+/// to come up. Plan mode and the initial prompt are applied once the agent is idle and linked.
+pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentSpec, session: Option<SessionArg<'_>>) -> Result<Started, ApiError> {
     let target: LaunchPane = target.into();
     if let Some(name) = &spec.name {
         if !valid_handle(name) {
@@ -1191,6 +1267,13 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
         check_model(m)?;
     }
     let kind = if spec.kind.trim().is_empty() { "omp".to_string() } else { spec.kind.trim().to_string() };
+    let own = Some(AgentOmp::of(spec)).filter(|o| kind == "omp" && !o.is_empty());
+    if let Some(o) = &own {
+        o.validate()?;
+    }
+    if let Some(p) = spec.auto_answer.as_ref().filter(|_| kind == "omp") {
+        p.validate()?;
+    }
     let (pane_id, workspace_id, cwd) = resolve_pane(ctx, &target).await?;
 
     let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().map(|a| a.name).collect();
@@ -1199,36 +1282,69 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
         None => derive_handle(cwd.as_deref().unwrap_or(&kind), &taken),
     };
 
+    let store = Store::new(&ctx.paths);
+    let mut launch = None;
     let mut args: Vec<String> = Vec::new();
     if kind == "omp" {
-        if ctx.paths.overlay.is_file() {
-            args.push("--config".into());
-            args.push(ctx.paths.overlay.display().to_string());
-        } else {
+        let overlay = ctx.paths.overlay.is_file().then(|| ctx.paths.overlay.display().to_string());
+        if overlay.is_none() {
             warn!(path = %ctx.paths.overlay.display(), "collab overlay missing; the agent will not be shared");
         }
-        if ctx.paths.ext.is_file() {
-            args.push("-e".into());
-            args.push(ctx.paths.ext.display().to_string());
-        } else {
+        let ext = ctx.paths.ext.is_file().then(|| ctx.paths.ext.display().to_string());
+        if ext.is_none() {
             warn!(path = %ctx.paths.ext.display(), "bridge extension missing; controls fall back to injection");
         }
-        if let Some(m) = &spec.model {
-            args.push("--model".into());
-            args.push(m.clone());
+        if let Some(o) = &own {
+            launch = store.prepare(o, &name).map_err(|e| ApiError::new("io_error", format!("writing the agent's omp settings: {e}")))?;
         }
-        if let Some(l) = spec.thinking {
-            args.push("--thinking".into());
-            args.push(level_str(l).into());
-        }
-        if let Some(file) = resume {
-            args.push(format!("--resume={file}"));
-        }
+        let agent_overlay = launch.as_ref().map(|l| l.path.display().to_string());
+        args = omp_args(spec, overlay.as_deref(), agent_overlay.as_deref(), ext.as_deref(), session);
     }
+    // A launch that opens a new omp session records its first prompt and images in the ledger
+    // by hostd itself, durably, before any turn can run (images first, as files; the entry as soon
+    // as the agent id is known): an agent that ends before omp saved its session keeps what it was
+    // given (`crate::restart`). A resume of an existing session records nothing.
+    let first_prompt = if records_first_prompt(&kind, session) {
+        let at = crate::restart::LaunchAt { name: name.clone(), pane_id: pane_id.clone(), workspace_id: workspace_id.clone(), cwd: cwd.clone() };
+        crate::restart::keep_first_prompt(ctx, spec, at).await
+    } else {
+        None
+    };
     info!(%name, %kind, pane = %pane_id, ?args, "agent start");
     let start = AgentStart { name: name.clone(), kind: kind.clone(), pane_id: pane_id.clone(), args, timeout_ms: Some(INTERACTIVE_TIMEOUT.as_millis() as u64) };
-    let started = ctx.herdr.agent_start(&start, target.shell_wait()).await.map_err(|e| launch_err(e, &target))?;
+    let started = match ctx.herdr.agent_start(&start, target.shell_wait()).await {
+        Ok(s) => s,
+        Err(e) => {
+            // herdr gave up waiting for it to be ready (busy at once, slow): it may run anyway,
+            // and herdr dropped its name then (`crate::restart::launch`).
+            let adopted = if e.is(tf_herdr::code::TIMEOUT) {
+                crate::restart::launch::after_timeout(&ctx.herdr, &pane_id, &name, &kind, crate::restart::launch::ADOPT_WAIT).await
+            } else {
+                None
+            };
+            match adopted {
+                Some(agent) => tf_herdr::AgentStarted { agent, argv: Vec::new() },
+                None => {
+                    if let Some(l) = launch {
+                        store.discard(l);
+                    }
+                    return Err(launch_err(e, &target));
+                }
+            }
+        }
+    };
     let agent_id = build::agent_id(&started.agent);
+    if let Some(o) = &own
+        && let Err(e) = store.bind(&ctx.herdr_session, &agent_id, launch.as_ref(), o, now_ms())
+    {
+        warn!(agent = %agent_id, "recording the agent's omp settings: {e}");
+    }
+    if let Some(p) = spec.auto_answer.as_ref().filter(|_| kind == "omp") {
+        crate::autoanswer::bind(ctx, &agent_id, p);
+    }
+    if let Some(k) = first_prompt {
+        crate::restart::record_first_prompt(ctx, &agent_id, k);
+    }
     ctx.state.refresh();
     ctx.omp.repoll();
 
@@ -1247,6 +1363,60 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
     }
     let workspace_id = if started.agent.workspace_id.is_empty() { workspace_id } else { started.agent.workspace_id.clone() };
     Ok(Started { agent_id: Some(agent_id), pane_id, workspace_id })
+}
+
+/// The omp session a launch opens: `--resume=<file>`. Never `--restore`: omp's restore runs a
+/// cut-off tool call again verbatim; only `crate::restart` decides what may go on, through the
+/// bridge once the agent is back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionArg<'a> {
+    Resume(&'a str),
+}
+
+impl SessionArg<'_> {
+    pub fn flag(self) -> String {
+        match self {
+            Self::Resume(file) => format!("--resume={file}"),
+        }
+    }
+}
+
+/// omp's arguments in the §3.7 recipe: TeleFlock's overlay, then the agent's own (its model roles
+/// and fallback chains, merged over the host's config), the bridge, `--model` / `--thinking`
+/// unless the agent's roles set `default` (omp applies `--model` as a runtime `default` override
+/// above every config file, so `roleModels.default` wins by leaving them out), the session flag.
+/// Also the resume command hostd reports to herdr (`crate::restart`, model and thinking left out).
+pub(crate) fn omp_args(spec: &AgentSpec, overlay: Option<&str>, agent_overlay: Option<&str>, ext: Option<&str>, session: Option<SessionArg<'_>>) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    for file in [overlay, agent_overlay].into_iter().flatten() {
+        args.push("--config".into());
+        args.push(file.into());
+    }
+    if let Some(ext) = ext {
+        args.push("-e".into());
+        args.push(ext.into());
+    }
+    if !spec.role_models.contains_key("default") {
+        if let Some(m) = &spec.model {
+            args.push("--model".into());
+            args.push(m.clone());
+        }
+        if let Some(l) = spec.thinking {
+            args.push("--thinking".into());
+            args.push(level_str(l).into());
+        }
+    }
+    if let Some(session) = session {
+        args.push(session.flag());
+    }
+    args
+}
+
+/// Only a launch that opens a NEW omp session records its first prompt in the ledger (and gates the
+/// observer, and moves an earlier agent's entry under the id aside): a `--resume` of an existing
+/// session is the same agent under a new id, and its entry follows it with its history.
+fn records_first_prompt(kind: &str, session: Option<SessionArg<'_>>) -> bool {
+    kind == "omp" && session.is_none()
 }
 
 /// Plan mode, a prompt or images to hand over once the agent is up.
@@ -1401,6 +1571,43 @@ mod tests {
         assert!(check_model("a/ b").is_err());
     }
 
+    #[test]
+    fn an_ended_card_is_never_pruned_for_a_missing_session_file() {
+        use crate::state::parked::FileCheck;
+        let done = ParkedRecord { agent_id: "t1".into(), session_file: "/s/a.jsonl".into(), ..Default::default() };
+        let ended = ParkedRecord {
+            ended: Some(tf_proto::autoresume::AgentEnded {
+                at: 1,
+                cause: tf_proto::autoresume::EndCause::HerdrCrashed,
+                reason: "herdr crashed".into(),
+                turn: tf_proto::autoresume::EndedTurn::Working,
+                last_action: None,
+            }),
+            ..done.clone()
+        };
+        // A Done card whose file is certainly gone goes; no verdict (unmounted home) keeps it.
+        assert!(prunable(&done, Some(&FileCheck::Missing)));
+        assert!(!prunable(&done, Some(&FileCheck::Unknown("empty (unmounted?)".into()))));
+        assert!(!prunable(&done, None));
+        // An agent that ended in its first turn has no file, and its card holds the prompts the
+        // relaunch gives again: never.
+        assert!(!prunable(&ended, Some(&FileCheck::Missing)));
+    }
+
+    #[test]
+    fn the_ledgers_prompts_stand_in_for_the_transcript_of_a_card_without_a_file() {
+        let rows = kept_prompt_rows(vec!["fix the build".into(), "and run the tests".into()], 42);
+        let texts: Vec<(&str, String, i64)> = rows
+            .iter()
+            .map(|r| match r {
+                TranscriptItem::User(u) => (u.id.as_str(), u.text.clone(), u.at),
+                other => panic!("not a user row: {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, vec![("kept-0", "fix the build".to_string(), 42), ("kept-1", "and run the tests".to_string(), 42)]);
+        assert!(kept_prompt_rows(Vec::new(), 1).is_empty(), "nothing kept: an empty transcript, not an error");
+    }
+
     fn spec(prompt: Option<&str>, images: usize, plan: bool) -> AgentSpec {
         AgentSpec {
             name: None,
@@ -1410,7 +1617,53 @@ mod tests {
             plan,
             prompt: prompt.map(str::to_string),
             images: (0..images).map(|i| ImageInput { mime: "image/png".into(), data: format!("AAA{i}") }).collect(),
+            role_models: Default::default(),
+            fallback_chains: Default::default(),
+            auto_answer: None,
         }
+    }
+
+    #[test]
+    fn launch_args_and_role_precedence() {
+        let mut s = spec(None, 0, false);
+        s.model = Some("openai/gpt-5".into());
+        s.thinking = Some(ThinkingLevel::High);
+        let args = |s: &AgentSpec, own: Option<&str>| omp_args(s, Some("/h/omp-overlay.yml"), own, Some("/h/ext/b.ts"), Some(SessionArg::Resume("/s/x.jsonl")));
+        // Without own settings: today's recipe.
+        assert_eq!(
+            args(&s, None),
+            ["--config", "/h/omp-overlay.yml", "-e", "/h/ext/b.ts", "--model", "openai/gpt-5", "--thinking", "high", "--resume=/s/x.jsonl"]
+        );
+        // The agent's overlay comes right after TeleFlock's (omp merges later files over earlier).
+        s.role_models.insert("smol".into(), "openai/gpt-5-mini:low".into());
+        assert_eq!(
+            args(&s, Some("/h/agent-config/ab.yml")),
+            ["--config", "/h/omp-overlay.yml", "--config", "/h/agent-config/ab.yml", "-e", "/h/ext/b.ts", "--model", "openai/gpt-5", "--thinking", "high", "--resume=/s/x.jsonl"]
+        );
+        // `roleModels.default` is the main model: no --model / --thinking to override it.
+        s.role_models.insert("default".into(), "anthropic/claude-opus-5:max".into());
+        assert_eq!(
+            args(&s, Some("/h/agent-config/ab.yml")),
+            ["--config", "/h/omp-overlay.yml", "--config", "/h/agent-config/ab.yml", "-e", "/h/ext/b.ts", "--resume=/s/x.jsonl"]
+        );
+        // Nothing deployed yet: only what exists.
+        assert_eq!(omp_args(&spec(None, 0, false), None, None, None, None), Vec::<String>::new());
+        // The session flag goes last.
+        assert_eq!(
+            omp_args(&spec(None, 0, false), Some("/h/omp-overlay.yml"), None, Some("/h/ext/b.ts"), Some(SessionArg::Resume("/s/x.jsonl"))),
+            ["--config", "/h/omp-overlay.yml", "-e", "/h/ext/b.ts", "--resume=/s/x.jsonl"]
+        );
+    }
+
+    #[test]
+    fn only_a_launch_that_starts_a_new_omp_session_records_a_first_prompt() {
+        // New agent, Dispatch, automations, an ended fileless card's Continue: a new session.
+        assert!(records_first_prompt("omp", None));
+        // A resume of an existing session (herdr's/TeleFlock's relaunch, host.resume, a move's
+        // receive, resume_parked) never records, never gates the observer, never moves an entry
+        // aside: the ledger follows the session to the new agent id (`ends`, end record, plan).
+        assert!(!records_first_prompt("omp", Some(SessionArg::Resume("/s/a.jsonl"))));
+        assert!(!records_first_prompt("claude", None), "only omp agents have a ledger entry");
     }
 
     #[test]
@@ -1437,6 +1690,7 @@ mod tests {
 
     #[test]
     fn undelivered_images_are_explained() {
+        // Ordinary launches (New agent, Dispatch, automations): exactly as in 0.6.1.
         let (title, detail) = undelivered_images(1, true);
         assert_eq!(title, "Image not delivered");
         assert!(detail.contains("text was sent without them"));

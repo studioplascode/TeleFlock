@@ -9,12 +9,17 @@ import { haptic } from "@/features/shell/haptics";
 import { Term } from "@/features/shell/Term";
 import { Ticks } from "@/features/shell/Ticks";
 import { ExtLink } from "./CopyCommand";
+import { useGhAuth } from "./github";
+import { GithubSignInButton, GithubSignInSheet, GitIdentityForm } from "./GithubSetup";
 import { OMP_MIN_VERSION, OMP_URL } from "./kinds";
 
 /**
  * One name and one consequence per setup item, shared by the checklist rows and the issue cards so
  * the same thing is never called two names. The consequence leads; config paths stay in "What exactly changes?".
  */
+/** What an outdated (installed, not current) herdr integration costs: the Update variant of the integration's consequence. */
+const OUTDATED_INTEGRATION = "With the outdated integration herdr can report an agent's working / blocked / idle state wrongly, so lanes and needs-you alerts can go wrong.";
+
 const ITEMS: Record<string, { name: ReactNode; consequence: ReactNode }> = {
   "enable-global-sharing": {
     name: (
@@ -69,6 +74,14 @@ const ITEMS: Record<string, { name: ReactNode; consequence: ReactNode }> = {
     name: "herdr outside login sessions",
     consequence: "Without this, every agent on this host dies when the login session that started herdr is torn down (for example when systemd-logind restarts).",
   },
+  "sign-in-gh": {
+    name: "GitHub CLI signed in",
+    consequence: "Without a sign-in the board shows no pull request status, checks or merges for this host.",
+  },
+  "set-git-identity": {
+    name: "git name and email",
+    consequence: "Without them git refuses to commit on this host, or signs commits with a made-up name.",
+  },
 };
 
 /**
@@ -88,7 +101,7 @@ const CONSENT: Record<string, { kind: "global" | "install"; what: string; why: s
   },
   "install-herdr-integration": {
     kind: "global",
-    what: "Installs herdr's omp integration (~/.omp/agent/extensions/herdr-omp-agent-state.ts) using herdr's own installer.",
+    what: "Installs or updates herdr's omp integration (~/.omp/agent/extensions/herdr-omp-agent-state.ts) using herdr's own installer (`herdr integration install omp`).",
     why: "Lets herdr track omp's working / blocked / idle state, which drives the board columns and needs-you alerts.",
   },
   "move-herdr-out-of-login-session": {
@@ -118,7 +131,7 @@ const CONSENT: Record<string, { kind: "global" | "install"; what: string; why: s
   "install-gh": {
     kind: "install",
     what: "Downloads the latest GitHub CLI release for this host from github.com, checks it against the release's published checksums and copies gh into ~/.local/bin, as your user. No root, no package manager.",
-    why: "The board reads pull request status, checks and merges through gh. Sign in once on the host afterwards: `gh auth login`.",
+    why: "The board reads pull request status, checks and merges through gh. Afterwards, sign in to GitHub from this checklist (or run `gh auth login` on the host).",
     undo: "To uninstall, delete ~/.local/bin/gh.",
   },
   "install-git": {
@@ -171,6 +184,7 @@ function IssueRow({
   selected,
   running,
   failure,
+  action,
   onToggle,
 }: {
   issue: SetupIssue;
@@ -179,6 +193,8 @@ function IssueRow({
   running: boolean;
   /** Why the last attempt at this fix failed. */
   failure?: SetupFixError;
+  /** Done right here instead of with "Apply" (a sign-in, a form). */
+  action?: ReactNode;
   onToggle: (on: boolean) => void;
 }) {
   const consent = CONSENT[issue.id];
@@ -196,7 +212,10 @@ function IssueRow({
             {install && issue.fixable && <Badge>Install</Badge>}
             {issue.recommended && <Badge tone="accent">Recommended</Badge>}
           </div>
-          <p className={cn("mt-0.5 text-xs", item ? "text-ink-2" : "text-mute")}>{item?.consequence ?? <Ticks text={issue.detail} />}</p>
+          <p className={cn("mt-0.5 text-xs", item ? "text-ink-2" : "text-mute")}>
+            {/* an outdated integration (title "Update …") is installed: the missing-integration consequence would be wrong */}
+            {issue.id === "install-herdr-integration" && /^update\b/i.test(issue.title) ? OUTDATED_INTEGRATION : (item?.consequence ?? <Ticks text={issue.detail} />)}
+          </p>
           {item && (
             <p className="mt-0.5 text-xs text-mute">
               <Ticks text={issue.detail} />
@@ -207,6 +226,7 @@ function IssueRow({
               Install omp
             </ExtLink>
           )}
+          {action}
           {running && (
             <p className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-accent-ink" role="status">
               <Spinner size={12} label={install ? "Installing" : "Applying"} />
@@ -285,6 +305,7 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [consented, setConsented] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [signIn, setSignIn] = useState(false);
   /** Fixes the last apply requested, until their outcome has been reported. */
   const requested = useRef<string[] | null>(null);
 
@@ -308,10 +329,17 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
 
   const info = state?.info;
   const live = info?.setup;
-  // While fixes run on the host, follow the checklist tf-hostd republishes after each one.
+  // While fixes run on the host, follow the checklist tf-hostd republishes after each one; also
+  // once GitHub or git's identity changes there (a sign-in from another device).
   useEffect(() => {
-    if (live) setStatus((prev) => (prev?.applying?.length ? live : prev));
+    if (!live) return;
+    setStatus((prev) =>
+      prev && (prev.applying?.length || (live.ghSignedIn !== undefined && live.ghSignedIn !== prev.ghSignedIn) || (live.gitIdentity !== undefined && live.gitIdentity !== prev.gitIdentity))
+        ? live
+        : prev,
+    );
   }, [live]);
+  const gh = useGhAuth(hostId, status);
 
   // Report the outcome once nothing the last apply asked for is still running.
   useEffect(() => {
@@ -350,6 +378,8 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
     { id: "relay", label: <Term id="collab">Collab relay</Term>, ok: status ? status.relay : null, detail: info ? `127.0.0.1:${info.relayPort}` : undefined },
     { id: "sharing", label: ITEMS["enable-global-sharing"]?.name, ok: status ? status.globalSharing : null },
     { id: "bridge", label: ITEMS["install-global-bridge"]?.name, ok: status ? status.globalBridge : null },
+    ...(status?.ghSignedIn !== undefined ? [{ id: "gh", label: ITEMS["sign-in-gh"]?.name, ok: status.ghSignedIn, detail: status.ghSignedIn ? gh.login : undefined }] : []),
+    ...(status?.gitIdentity !== undefined ? [{ id: "git-identity", label: ITEMS["set-git-identity"]?.name, ok: status.gitIdentity }] : []),
   ];
 
   const running = new Set(status?.applying ?? []);
@@ -412,6 +442,13 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
                 selected={selected.has(issue.id)}
                 running={running.has(issue.id)}
                 failure={status.failed?.find((f) => f.id === issue.id)}
+                action={
+                  issue.id === "sign-in-gh" && !gh.unsupported ? (
+                    <GithubSignInButton onClick={() => setSignIn(true)} />
+                  ) : issue.id === "set-git-identity" ? (
+                    <GitIdentityForm hostId={hostId} onSaved={load} />
+                  ) : undefined
+                }
                 onToggle={(on) =>
                   setSelected((prev) => {
                     const next = new Set(prev);
@@ -452,11 +489,12 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
               Re-check
             </Button>
             <Button size="sm" variant="primary" icon={<Wrench />} loading={applying} disabled={chosen.length === 0 || (needsConsent && !consented)} onClick={apply}>
-              Apply {chosen.length > 0 ? `${chosen.length} fix${chosen.length > 1 ? "es" : ""}` : "fixes"}
+              {chosen.length === 1 && /^update\b/i.test(chosen[0]!.title) ? "Update" : `Apply ${chosen.length > 0 ? `${chosen.length} fix${chosen.length > 1 ? "es" : ""}` : "fixes"}`}
             </Button>
           </div>
         </>
       )}
+      <GithubSignInSheet hostId={hostId} open={signIn} onOpenChange={setSignIn} onDone={load} />
     </section>
   );
 }

@@ -16,7 +16,7 @@ export {
   flushCoreEvents,
 } from "./client";
 export { agentKey, parseAgentKey } from "./keys";
-export { markResuming, onAgentMoved, onAgentsPruned, resumeAgent, useResuming } from "./agentLifecycle";
+export { markResuming, onAgentMoved, onAgentsPruned, resumeAgent, useResuming, whenAgent } from "./agentLifecycle";
 export type { PrunedGone } from "./agentLifecycle";
 export { linkProps, openLink, safeHref } from "./links";
 export type { LinkProps } from "./links";
@@ -37,6 +37,7 @@ export type {
 export {
   DEFAULT_SETTINGS,
   getAgentViews,
+  getHostStates,
   getWorkspacesSnapshot,
   loadOlderActivity,
   markAgentNotificationsRead,
@@ -84,6 +85,21 @@ export {
   windowsForModel,
 } from "./limits";
 export type { HostLimits, PaceOutcome, SessionLimits, WindowPace } from "./limits";
+export {
+  bucketStart,
+  calendar,
+  hourOffsetAt,
+  rangeSince,
+  refreshUsage,
+  todaySpend,
+  USAGE_BOARD_EVERY_MS,
+  USAGE_PAGE_EVERY_MS,
+  USAGE_RANGES,
+  usageIsStale,
+  useHostUsage,
+  useTodaySpend,
+} from "./usage";
+export type { Calendar, HostUsage, TodayInput, TodaySpend, UsageRange } from "./usage";
 export { navigate, useRoute, getRoute, parseHash, routeToHash } from "./nav";
 export type { Route, RouteName } from "./nav";
 export { useUi } from "./ui";

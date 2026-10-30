@@ -134,14 +134,17 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
   - `/` slash palette with argument hints.
   - `@` file mention with remote file search.
   - Image paste/drop (P1).
+  - Large pastes become a chip with omp's choice of attachment block, local file or inline text.
+  - `Ctrl+F` finds in the transcript, tool output included.
   - Voice dictation on mobile (P2).
 - **Header controls.** Model picker, thinking selector, plan mode, goal mode (objective + budget), fast mode, each showing whether it is on. Cost shows in the header only while the inspector is hidden.
 - **Inspector** (ordered by what you ask first)
-  - can it keep going: context used and subscription left, as two labelled bars (`ctx 61% used`, `limit 41% left`)
+  - can it keep going: context used and subscription left, as two labelled bars (`ctx 61% used`, `limit 41% left`); **Context X-ray** breaks down what fills the window and compacts with a focus
   - spend: total, main / subagents / advisor, tokens in/out
   - throughput: tok/s sparkline, now/peak, per source
   - todos by phase (with the blocked count)
-  - subagents (steer · kill · revive · view transcript)
+  - subagents (steer · kill · revive · retry · view transcript; finished ones grouped, green or red by outcome, grey Stopped when a crash cut them off)
+  - background jobs (output, Stop) and the session's documents (plans, reports, handoffs, subagent outputs)
   - changed files ± (→ Review)
   - agent chat, BTW (omp's own `/btw`: the same conversations as the TUI and its `/btw` history, including ones asked in the terminal, each with follow-ups and cancel), session tree (fork / branch from any message)
   - actions (⋯ menu, each with a one-line description): compact, hand off, fork, rename, export, new session, mute, stop turn, end session (exit omp / close pane, which asks first)
@@ -167,7 +170,7 @@ P0 is required for v1, P1 is strongly wanted, P2 is a stretch.
 ### Needs-you handling (P0)
 - The **Inbox**: everything waiting on you, oldest first, then unread updates (finished, errors, quiet). The bell peeks at the same updates.
 - **Answer next** HUD (Ctrl+J, or the title-bar needs-you pill): cycles through blocked agents with the full question context, including typed-answer (editor) and confirm requests.
-- Desktop notifications with actions where the OS supports them. Android notifications with action buttons (≤3 options) or inline reply.
+- Notifications with actions where the OS supports them (Windows toasts, Linux and macOS native, Android with action buttons (≤3 options) or inline reply), routed to the device in use first.
 - Per-agent mute and quiet hours (P1).
 
 ### Command palette (P0)
@@ -183,7 +186,7 @@ Navigate to any agent, workspace or host; run any action (each with its one-line
 A unified timeline of all agents (finished, asked, tool failures, commits, PRs). Plus a **"While you were away"** digest on reconnect: finished X, needs you Y, spent $Z.
 
 ### Usage (P1)
-Subscription limits and today first, then cost and tokens per day, per model and per agent; budget hints.
+Subscription limits and today first, then cost and tokens per day or hour in the user's time zone, by model, provider, project and agent type, from omp's own usage index kept current by the host; cache hit rate, error rate, speed, top tools, streaks and records; budget hints.
 
 ### Preview tunnels (P1)
 - Detect `http://localhost:PORT` / `127.0.0.1:PORT` in transcripts and terminal output and offer **Open preview**.
@@ -193,7 +196,7 @@ Subscription limits and today first, then cost and tokens per day, per model and
 Spawn N worktree agents from one prompt with different models or approaches, then compare them in Review.
 
 ### Dispatch
-Fire tasks at a repository like messages in a chat. Pick a host — or a host group as "Auto · <group>" — and a repo (recent repos from open workspaces, or browse) and a base branch (default: `origin/<default>`, fetched before forking); each message creates a `dispatch/<slug>` worktree with an omp agent whose first prompt is the message and its images (attach, paste or drop screenshots; image-only tasks are fine). In Auto, the repos are those of the group's hosts (matched by their origin remote) and each message goes to the least busy online host that has the repo (by running agents, dispatches on their way, CPU, memory); the card says where it went and why. The slug comes from omp's tiny model (fetched while you type, so most sends don't wait), or from the message's lead sentence when AI naming is off, slow or answers like an agent instead of a name. Sends run independently, so many tasks go out back to back. The thread (per host or group + repo, kept across restarts; images kept on the device) shows each message with a live reply card: naming, launch steps, then status, streaming line, inline answers for Needs-you, Open session / Terminal / Review, and readable failures with fixes (trust the repo, retry). Per-dispatch options: template or model + thinking, plan mode. Links under the composer open New worktree and Fan out with the repository filled in.
+Fire tasks at a repository like messages in a chat. Pick a host — or a host group as "Auto · <group>" — and a repo (recent repos from open workspaces, or browse) and a base branch (default: `origin/<default>`, fetched before forking); each message creates a `dispatch/<slug>` worktree with an omp agent whose first prompt is the message and its images (attach, paste or drop screenshots; image-only tasks are fine). In Auto, the repos are those of the group's hosts (matched by their origin remote) and each message goes to the least busy online host that has the repo (by running agents, dispatches on their way, CPU, memory and how much of the chosen model's subscription window is left there); the card says where it went and why. The slug comes from omp's tiny model (fetched while you type, so most sends don't wait), or from the message's lead sentence when AI naming is off, slow or answers like an agent instead of a name. Sends run independently, so many tasks go out back to back. The thread (per host or group + repo, kept across restarts; images kept on the device) shows each message with a live reply card: naming, launch steps, then status, streaming line, inline answers for Needs-you, Open session / Terminal / Review, and readable failures with fixes (trust the repo, retry). Per-dispatch options: template or model + thinking, plan mode, model roles and fallback chains for this agent, decide for me. Links under the composer open New worktree and Fan out with the repository filled in. Tasks also arrive prefilled from Quick capture and, on Android, from the share sheet.
 
 ### AI assistance (P1)
 TeleFlock's AI provider is omp itself: `ai.complete` runs one `omp --mode json` completion on the host with the `tiny` model role (falling back to `smol`), without tools, session, extensions or title, and stops the process as soon as the answer is in. It names Dispatch worktrees, wizard branches and agents, fan-out runs and templates, suggests renames, and drafts commit messages and PR titles/descriptions. Results are marked ✨, always editable, cached for 10 minutes, and replaced by a name from the user's own words when AI naming is off (Settings), unavailable or slow. Prompts are never logged or stored.
@@ -202,13 +205,35 @@ TeleFlock's AI provider is omp itself: `ai.complete` runs one `omp --mode json` 
 Scheduled agents per host: a name, a repository or folder, a fresh worktree per run (`automation/<slug>-<yyyymmdd-hhmm>` from the remote default branch) or in place, a prompt, model/thinking/plan and a schedule (presets every N minutes/hours, daily, weekdays, weekly, or custom cron in the host's time zone, with a live preview of the next runs). tf-hostd starts the agent at each tick whether or not an app is connected and notifies devices; catch-up runs once after a missed tick; a run is skipped while the previous run's agent is still working or needs you. On Linux with systemd a timer keeps tf-hostd running across reboots (root, or users with lingering); elsewhere automations run while tf-hostd runs. The list shows next run, last run (opens its agent), Run now, enable switch and run history.
 
 ### Session history (P2)
-Browse past omp sessions on a host and resume one in a new pane.
+Browse past omp sessions on a host and resume one in a new pane. Past sessions also searches the text of every session on the host.
 
 ### Templates (P2)
 Saved agent presets and prompt snippets.
 
 ### Focus mode (P2)
 A single-agent zen view: just the stream and the composer.
+
+### Overnight runs (P1)
+- **Auto-resume after provider limits.** When an agent or its subagents stop on a usage or rate limit after omp's own retries, tf-hostd schedules a resume for when a limit window of any account omp can use reopens, then continues the subagents and the agent without a new prompt, with no app connected. Limit errors are kept out of every later model request. Overloads and server errors are resumed with a growing pause. The card and the session strip say when, with **Resume now** and **Don't auto-resume**; a per-host switch turns it off. While omp itself retries, the card shows the wait ("Rate limit · retrying in 4:54 (1/10)").
+- **Resume** (`F5`) continues a stopped or failed agent without a new prompt; failed subagents have **Retry**.
+- **Decide for me.** A question that waits longer than the user chose is answered with omp's ★ recommended option: per agent, per Dispatch message, per automation or as the host default, optionally only while no app is connected. Approvals, plan reviews and free-text questions are never answered.
+- **herdr health.** The host notices a stopped or crashed herdr within seconds, says so, and starts it again (backoff or **Restart herdr**); a newer installed herdr is loaded by live handoff once the host is idle.
+- **Bring agents back.** After a herdr restart, an omp crash or a reboot, agents return under their names with their model and settings; a cut-off turn continues only when its last step is safe to repeat. The ones not brought back stay as resumable cards.
+
+### Hosts (P1)
+- **Move an agent to another host** with its branch, uncommitted changes, session, subagents and documents; a failed step rolls everything back.
+- **Make this host like that one:** omp settings, model roles and MCP servers after a diff, sign-ins sealed end to end only on request.
+- **Clean up:** every worktree with pull request state, size and age, bulk removal with the safety checks, omp storage cleanup that never touches sessions, a low-disk notice.
+- **Skills and plugins** next to MCP servers; GitHub CLI sign-in and git identity in Host setup.
+- **Notifications that find you:** the device in use first, the others after a wait, retracted everywhere once handled; with no app connected, push to ntfy, Pushover or a webhook.
+
+### Capture and sharing (P2)
+- **Quick capture** (desktop): a small always-on-top box that sends a task, a screenshot or an answer from any app; opened from the tray, `teleflock://capture` or an optional global shortcut (off until set in Settings).
+- **Share to TeleFlock** (Android): text, links, screenshots and GitHub issues become Dispatch tasks.
+
+### Wall, Ambient and Flock Wrapped (P2)
+- **Wall** (desktop): 2×2 or 3×3 live transcripts that fill themselves with who needs you, then who runs, answerable from any tile. **Ambient mode**: one orb per agent for a spare screen.
+- **Flock Wrapped:** the week as one shareable card (unattended hours, agents run, lines changed, pull requests merged, longest overnight streak, fastest model).
 
 ## 6. Keyboard map (desktop)
 - `Ctrl+K` palette
@@ -223,6 +248,8 @@ A single-agent zen view: just the stream and the composer.
 - `1…9` pick an answer (Other = N+1)
 - Typing: `Enter` send / steer, `Shift+Enter` newline, `Alt+Enter` queue a follow-up (while the agent works); `Ctrl+Enter` submits multi-field forms (wizards, commit, PR)
 - `Esc`: close the overlay, else leave focus mode, else stop the turn (in a session)
+- `F5` / `Alt+R`: Resume the stopped or failed agent in the session (no new prompt); `Ctrl+F` find in the transcript
+- A global shortcut you set in Settings (suggested `Ctrl+Alt+Space`; off until set): Quick capture from any app
 - `Ctrl+\` split
 - `Ctrl+B` sidebar
 - `?` shortcuts sheet (with the Terms glossary)

@@ -5,6 +5,8 @@ import { core, useHostState } from "@/core";
 import type { ToolUpdate, ToolUpdates } from "@/core/gen";
 import { errorMessage, isApiError } from "@/features/shell/errors";
 import { Ticks } from "@/features/shell/Ticks";
+import { useHerdrHealth } from "./HerdrControls";
+import { HerdrSettings, HerdrUpdatePlan } from "./HerdrPlan";
 
 const HOUR = 3_600_000;
 
@@ -58,6 +60,7 @@ function Message({ t }: { t: ToolUpdate }) {
  */
 export function ToolUpdatesRow({ hostId }: { hostId: string }) {
   const tools = useHostState(hostId)?.info.tools;
+  const herdr = useHerdrHealth(hostId);
   const now = useNow(30_000);
   const [pending, setPending] = useState<"check" | "update" | "auto" | null>(null);
   const [unsupported, setUnsupported] = useState(false);
@@ -138,8 +141,15 @@ export function ToolUpdatesRow({ hostId }: { hostId: string }) {
       {(tools.omp.error || tools.omp.note || tools.herdr.error || tools.herdr.note) && (
         <ul className="flex flex-col gap-1">
           <Message t={tools.omp} />
-          <Message t={tools.herdr} />
+          {/* The plan below says what the running herdr does about its newer install: "keeps running X until it restarts" would contradict it. */}
+          <Message t={herdr?.update && tools.herdr.note?.startsWith("The herdr server keeps running") ? { ...tools.herdr, note: undefined } : tools.herdr} />
         </ul>
+      )}
+      {herdr && (
+        <div className="flex min-w-0 flex-col gap-2 border-t border-line pt-2">
+          <HerdrUpdatePlan hostId={hostId} />
+          <HerdrSettings hostId={hostId} />
+        </div>
       )}
     </div>
   );

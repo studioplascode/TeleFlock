@@ -7,4 +7,12 @@ export type Capabilities = { prompt: boolean, steer: boolean, followUp: boolean,
 /**
  * Controls go through the companion extension (precise) instead of keystroke injection.
  */
-bridge: boolean, };
+bridge: boolean, 
+/**
+ * `agent.retry` works for the agent (omp's F5: retry the failed or stopped last turn).
+ */
+retry: boolean, 
+/**
+ * `agent.retry` works for its subagents (bridge ≥ 2.1.0 with omp's task internals).
+ */
+subagentRetry: boolean, };

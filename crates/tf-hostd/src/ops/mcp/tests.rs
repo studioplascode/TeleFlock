@@ -6,7 +6,7 @@ use tf_proto::McpKeyValue;
 fn mcp_at(dir: &Path, omp: Option<PathBuf>) -> Mcp {
     Mcp {
         agent_dir: dir.join("agent"),
-        helper: HelperEnv { omp, ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None, slots: helper::Slots::new(4, 2) },
+        helper: HelperEnv { spec: &helper::MCP, omp, ext_dir: dir.join("ext"), run_dir: dir.join("run"), agent_dir: None, slots: helper::Slots::new(4, 2) },
         neutral: dir.join("neutral"),
     }
 }
@@ -166,21 +166,18 @@ async fn unreadable_files_are_reported_and_left_alone() {
 /// A stand-in omp for the helper's `probe`: logs each request and answers `answer`.
 #[cfg(unix)]
 fn fake_omp(dir: &Path, answer: &str) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join("requests.log");
     let ans = dir.join("answer.json");
     std::fs::write(&ans, format!("{answer}\n")).unwrap();
     let p = dir.join("omp");
-    std::fs::write(
+    crate::test_exe::write_exe(
         &p,
         format!(
             "#!/bin/sh\ncat \"$TF_MCP_IN\" >> {log}; echo >> {log}; rm -f \"$TF_MCP_IN\"\nprintf '{{\"t\":\"hello\",\"ompVersion\":\"18.13.2\"}}\\n' >> \"$TF_MCP_OUT\"\nsleep 0.2\ncat {ans} >> \"$TF_MCP_OUT\"\n",
             log = log.display(),
             ans = ans.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     (p, log)
 }
 

@@ -24,12 +24,14 @@ import type {
   PrInfo,
   PulseKind,
   SessionEvent,
+  SessionRoleModels,
   SetupIssue,
   SetupStatus,
   StatePatch,
   Tab,
   TranscriptItem,
   UiRequest,
+  UsageParams,
   UsageTotals,
   Workspace,
   WorktreeEntry,
@@ -43,10 +45,16 @@ import { demoAiComplete, demoAiLatency } from "./ai";
 import { DemoAutomations } from "./automations";
 import { DemoAccounts } from "./accounts";
 import { DemoAuthFlows } from "./auth";
+import { DemoGithub } from "./github";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
 import { DemoOmpSettings } from "./ompSettings";
+import { type AgentOmp, agentOmpOf, selectorParts } from "./roleModels";
 import { DemoMcp } from "./mcp";
+import { DemoPlugins } from "./plugins";
+import { demoHostSync } from "./hostSync";
+import { DemoCleanup } from "./cleanup";
+import { DemoNotify } from "./notify";
 import { demoFirstPrompt } from "./dispatchAuto";
 import {
   AGENTS,
@@ -75,14 +83,25 @@ import {
   poolTurn,
   PUSH_ASK,
   pushAfter,
+  quotaTurn,
   renderTurn,
 } from "./scripts";
 import { historyFor, longHistory } from "./seeds";
 import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
 import { DemoParking } from "./parking";
+import { DemoResume } from "./resume";
+import { AUTO_ANSWER_OFF, AUTO_ANSWER_ON, DemoAutoAnswer } from "./autoAnswer";
+import { DemoSearch } from "./search";
 import { DemoTerm } from "./term";
+import { DemoHerdr } from "./herdrHealth";
 import { DemoTools } from "./tools";
 import { DemoUploads } from "./uploads";
+import { DemoJobs } from "./jobs";
+import { demoUsageReport } from "./usage";
+import { demoWrapped } from "./wrapped";
+import { demoInsight } from "./insight";
+import { type DemoPr, demoPrView, greenTurn, rebaseTarget, rebaseTurn } from "./fixes";
+import { DEMO_VERSION } from "./version";
 
 export type HostVariant = "forge" | "studio";
 
@@ -91,6 +110,8 @@ const DEMO_CUSTOM_COMMANDS: CommandInfo[] = [
   { name: "review", description: "Review the current diff for bugs and risky changes", source: "prompt" },
   { name: "skill:release-notes", description: "Draft release notes from merged commits", source: "skill" },
   { name: "deploy-preview", description: "Deploy this branch to a preview environment", source: "extension" },
+  // omp's bundled prompt command (Make it green in the ship panel).
+  { name: "green", description: "Generate a prompt to iterate on CI failures until the branch is green", source: "prompt" },
 ];
 
 export interface HostEnv {
@@ -152,16 +173,16 @@ export class DemoHost implements SimHost {
   private readonly removedWs = new Set<string>();
   private pulses = new Map<string, { kind: PulseKind; n: number }>();
   private activityLog: ActivityEvent[] = [];
-  private prs = new Map<string, PrInfo & { createdAt: number }>();
+  private prs = new Map<string, DemoPr>();
   /** Pull requests of linked worktrees whose workspace closed with a parked agent's pane, by worktree path. */
-  private parkedPrs = new Map<string, PrInfo & { createdAt: number }>();
+  private parkedPrs = new Map<string, DemoPr>();
   private info: HostInfo;
   private health: HostHealth;
   private usageTotals: UsageTotals;
   private usageDirty = false;
   private setup: SetupStatus;
-  /** gh's first demo install fails (github.com unreachable), to show a per-fix failure. */
-  private ghInstallTried = false;
+  /** ffmpeg's first demo install fails (the package mirror is unreachable), to show a per-fix failure. */
+  private ffmpegInstallTried = false;
   private tickN = 0;
   private lastDirector = 0;
   private noNeedsSince: number;
@@ -186,11 +207,17 @@ export class DemoHost implements SimHost {
   private keyTrusted = false;
   private everOnline = false;
   private readonly tools: DemoTools;
+  /** herdr's server health and its methods (`./herdrHealth`). */
+  private readonly herdr: DemoHerdr;
   private readonly ompSettings = new DemoOmpSettings();
+  /** Each agent's own omp model roles and fallback chains (launch spec, `agent.setRoleModels`). */
+  private readonly agentOmp = new Map<string, AgentOmp>();
   /** Sign-ins (`auth.*`, `./auth`): account links here, MCP OAuth from the MCP demo. */
   readonly auth: DemoAuthFlows;
   /** omp's accounts and keys (`accounts.*`, `./accounts`); also answers `host.limits`. */
   private readonly accounts: DemoAccounts;
+  /** gh's sign-in and git's identity (`gh.authStatus`, `gh.authStart`, `git.identity`, `git.setIdentity`; `./github`). */
+  private readonly github: DemoGithub;
   /** Done agents' lifecycle (`./parking`): Mark done closes panes, parked agents resume, pruned ones go. */
   private readonly parking = new DemoParking({
     now: () => this.now(),
@@ -247,6 +274,7 @@ export class DemoHost implements SimHost {
       this.subscribed.delete(old);
       sim.agent.id = id;
       this.sims.set(id, sim);
+      this.decide.rekey(old, id);
       this.agentChanged(id);
     },
     remove: (id) => this.removeAgent(id),
@@ -259,13 +287,70 @@ export class DemoHost implements SimHost {
     changed: (id) => this.agentChanged(id),
     activity: (id, kind, title, detail) => this.activity(id, kind, title, detail),
     notify: (id, kind, title, body) => this.notify(id, kind, title, body),
+    herdrUp: () => this.herdr.status().state === "up",
+    autoResume: () => this.resumes.enabled(),
+  });
+  /** Full-text search over past sessions and `session.find` (`./search`); studio-pc plays a tf-hostd before 0.7.0. */
+  private readonly searches = new DemoSearch({
+    now: () => this.now(),
+    supported: () => this.variant === "forge",
+    sessions: () => this.pastSessions(undefined, 1000),
+    rows: (agentId) => this.sims.get(agentId)?.items,
+  });
+  /** omp's retry and auto-resume after provider limits (`./resume`); studio-pc plays a tf-hostd before 0.7.0. */
+  private readonly resumes = new DemoResume({
+    now: () => this.now(),
+    after: (ms, fn) => this.env.clock.after(ms, fn),
+    supported: () => this.variant === "forge",
+    ompSim: (id) => this.ompSim(id),
+    seedSim: (def, wsId) => this.addAgent(def, wsId, this.addPane(wsId, null)),
+    changed: (id) => this.agentChanged(id),
+    metaChanged: (id) => this.metaChanged(id),
+  });
+  /** Decide for me (`./autoAnswer`): forge's default is on after 20 min, studio-pc's off; countdowns and picks at the deadline. */
+  private readonly decide = new DemoAutoAnswer({
+    now: () => this.now(),
+    initial: () => (this.variant === "forge" ? AUTO_ANSWER_ON : AUTO_ANSWER_OFF),
+    sims: this.sims,
+    // before the first connect counts as connected (tf-hostd's start grace)
+    apps: () => this.online || !this.everOnline,
+    seedSim: (def, wsId) => this.addAgent(def, wsId, this.addPane(wsId, null)),
+    setDefault: (autoAnswer) => {
+      this.info = { ...this.info, autoAnswer };
+      if (!this.online) return;
+      this.rev += 1;
+      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
+    },
+    changed: (id) => this.agentChanged(id),
+    activity: (id, kind, title, detail) => this.activity(id, kind, title, detail),
+    notify: (id, kind, title, body) => this.notify(id, kind, title, body),
   });
   /** tf-hostd's automations (`./automations`); studio-pc plays a host whose tf-hostd predates them. */
   private automations?: DemoAutomations;
   /** `upload.*` (videos for prompts, terminal pastes): offsets only, nothing stored. */
   private uploads?: DemoUploads;
+  /** Background jobs and daemon services (`jobs.*`, `services.*`, `./jobs`). */
+  private demoJobs?: DemoJobs;
+  private jobsSim(): DemoJobs {
+    return (this.demoJobs ??= new DemoJobs({
+      now: () => this.now(),
+      agents: () => this.agentsList(),
+      setJobs: (agentId, jobs) => {
+        const sim = this.sims.get(agentId);
+        if (!sim?.agent.omp) return;
+        sim.agent.omp = { ...sim.agent.omp, jobs };
+        this.dirtyAgents.add(agentId);
+      },
+    }));
+  }
   /** omp's MCP servers (`mcp.*`, `./mcp`); studio-pc plays a host whose tf-hostd predates them. */
   private mcp?: DemoMcp;
+  /** omp's skills and plugins (`skills.*`, `plugins.*`, `./plugins`); studio-pc plays a host whose tf-hostd predates them. */
+  private plugins?: DemoPlugins;
+  /** The notification routing (`notify.*`, `./notify`); studio-pc plays a host older than 0.7.0. */
+  private notifyRouting?: DemoNotify;
+  /** The Cleanup page (`cleanup.*`, `./cleanup`); studio-pc plays a host whose tf-hostd predates it. */
+  private cleanup?: DemoCleanup;
 
   constructor(
     private readonly env: HostEnv,
@@ -298,15 +383,6 @@ export class DemoHost implements SimHost {
                 fixable: true,
                 recommended: true,
               },
-              {
-                id: "install-gh",
-                severity: "info",
-                title: "Install the GitHub CLI (gh)",
-                detail:
-                  "Pull request status, checks and merges on the board come from the GitHub CLI. Downloads the latest GitHub CLI release for linux/amd64 from github.com, checks it against the release's checksums and installs gh in ~/.local/bin (no root). Then sign in once on the host: `gh auth login`.",
-                fixable: true,
-                recommended: false,
-              },
               { id: "install-ffmpeg", severity: "info", title: "Install ffmpeg", detail: "omp reads video attachments with ffmpeg and ffprobe. Runs `sudo -n apt-get install -y -q --no-install-recommends ffmpeg` (passwordless sudo).", fixable: true, recommended: false },
             ],
           }
@@ -327,8 +403,27 @@ export class DemoHost implements SimHost {
               },
             ],
           };
+    // forge signs in to GitHub from Host setup; studio-pc is signed in.
+    this.github = new DemoGithub({
+      signedIn: variant !== "forge",
+      home: HOME,
+      auth: this.auth,
+      changed: () => {
+        this.setup = this.github.applyTo(this.setup);
+        this.publishSetup();
+      },
+    });
+    this.setup = this.github.applyTo(this.setup);
     this.tools = new DemoTools(variant, env.clock, (tools, installed) => {
       this.info = { ...this.info, tools, ...(installed === "omp" && this.info.omp ? { omp: { ...this.info.omp, version: tools.omp.current ?? this.info.omp.version } } : {}) };
+      if (!this.online) return;
+      this.rev += 1;
+      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
+    });
+    this.herdr = new DemoHerdr(variant, env.clock, () => [...this.sims.values()].filter((s) => s.omp).length, (herdrHealth) => {
+      this.info = { ...this.info, herdrHealth };
+      // herdr runs again: ended cards get their tickets (hostd's ledger worker)
+      this.parking.herdrChanged();
       if (!this.online) return;
       this.rev += 1;
       this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
@@ -338,16 +433,21 @@ export class DemoHost implements SimHost {
       os: "linux",
       arch: "x86_64",
       home: HOME,
-      hostdVersion: "0.1.0",
-      herdr: { version: "0.9.0", path: "/usr/local/bin/herdr", ok: true },
+      hostdVersion: DEMO_VERSION,
+      // forge's installed herdr is newer than the server it runs (`herdrHealth.update`)
+      herdr: { version: variant === "forge" ? "0.9.6" : "0.9.0", path: "/usr/local/bin/herdr", ok: true },
       omp: { version: "18.12.3", path: `${HOME}/.local/bin/omp`, ok: true },
       herdrSession: profile.herdrSession || "default",
       herdrSessions: ["default", "tf-lab"],
       relayPort: 47466,
       setup: this.setup,
       tools: this.tools.status(),
+      herdrHealth: this.herdr.status(),
+      autoAnswer: this.decide.hostDefault(),
     };
-    this.health = { at: now, cpuPct: 34, cores: variant === "forge" ? 16 : 24, load1: 2.1, memUsed: 21.4e9, memTotal: 64e9, diskFree: 412e9, diskTotal: 1000e9, uptimeS: 86400 * 12 + 3600 * 5 };
+    // studio-pc's disk is nearly full: once it is online the board warns (low-disk notice → Cleanup).
+    const disk = variant === "forge" ? { diskFree: 412e9, diskTotal: 1000e9 } : { diskFree: 6.4e9, diskTotal: 512e9 };
+    this.health = { at: now, cpuPct: 34, cores: variant === "forge" ? 16 : 24, load1: 2.1, memUsed: 21.4e9, memTotal: 64e9, ...disk, uptimeS: 86400 * 12 + 3600 * 5 };
     this.usageTotals = { costUsd: 0, tokens: 0, input: 0, output: 0 };
     this.status = { phase: "idle", since: now, attempt: 0 };
     this.build();
@@ -387,7 +487,13 @@ export class DemoHost implements SimHost {
       this.sims.get("kanban")?.resume(kanbanTurn(), 2500);
       this.sims.get("pool")?.resume(poolTurn(), 4000);
       this.sims.get("ci")?.resume(ciTurn(), 75_000);
-      this.prs.set("w6", { number: 142, url: "https://github.com/demo/teleflock/pull/142", title: "Auto-reconnect SSH and resume herdr attach", state: "OPEN", draft: true, mergeable: true, checks: { passed: 9, failed: 0, pending: 0 }, createdAt: now - 1_500_000 });
+      // quota waits out a 429: it is already in omp's retry wait when the demo opens, and has been quiet for 3 minutes
+      const quota = this.sims.get("quota");
+      quota?.resume(quotaTurn());
+      quota?.tick(0);
+      if (quota) quota.agent.live = { ...quota.agent.live, lastEventAt: now - 200_000 };
+      // reconnect's draft PR conflicts with main: Review offers "Rebase onto origin/main and resolve"
+      this.prs.set("w6", { number: 142, url: "https://github.com/demo/teleflock/pull/142", title: "Auto-reconnect SSH and resume herdr attach", state: "OPEN", draft: true, mergeable: true, checks: { passed: 9, failed: 0, pending: 0 }, createdAt: now - 1_500_000, problem: "conflicts" });
       // gobump's branch was merged: pushed (nothing ahead), so Done offers "Delete worktree"
       this.prs.set("w13", { number: 91, url: "https://github.com/demo/api-gateway/pull/91", title: "Bump Go to 1.25 and drop deprecated helpers", state: "MERGED", draft: false, createdAt: now - 3_000_000 });
       const gobump = this.wss.get("w13")?.ws.repo;
@@ -395,6 +501,8 @@ export class DemoHost implements SimHost {
       this.seedActivity(defs);
       this.usageTotals = { costUsd: 18.42, tokens: 2_310_000, input: 2_080_000, output: 230_000 };
       this.parking.seed();
+      this.resumes.seed();
+      this.decide.seed();
     } else {
       this.usageTotals = { costUsd: 1.31, tokens: 160_000, input: 140_000, output: 20_000 };
       this.sims.get("render")?.resume(renderTurn());
@@ -509,13 +617,15 @@ export class DemoHost implements SimHost {
 
   notify(agentId: string, kind: NotifyKind, title: string, body: string, ui?: UiRequest): void {
     if (!this.online) return;
+    const asking = kind === "needs" ? this.sims.get(agentId) : undefined;
+    const note = asking ? this.decide.needsNote(asking) : null;
     const notification: Notification = {
       id: `n-${this.id}-${this.nextNotif++}`,
       at: this.now(),
       kind,
       agentId,
       title,
-      body,
+      body: note ? `${body}\n${note}` : body,
       requestId: ui?.id,
       actions: ui
         ? ui.options.slice(0, 3).map((o) => ({ id: o.id, label: o.label, answer: { choices: [o.id], cancel: false, chat: false } }))
@@ -602,7 +712,7 @@ export class DemoHost implements SimHost {
       attempt: extra.attempt ?? 0,
       latencyMs: phase === "online" ? 38 + this.rng.int(0, 30) : undefined,
       lastOnlineAt: phase === "online" ? undefined : prevOnline ? now : this.status.lastOnlineAt,
-      hostdVersion: "0.1.0",
+      hostdVersion: DEMO_VERSION,
       ...extra,
     };
     this.env.emit({ type: "hostStatus", hostId: this.id, status: this.status });
@@ -643,6 +753,7 @@ export class DemoHost implements SimHost {
     this.phaseTimer?.();
     for (const t of this.terms.values()) t.close("host removed");
     this.tools.stop();
+    this.herdr.stop();
   }
 
   private connectSequence(withAuth: boolean): void {
@@ -755,6 +866,8 @@ export class DemoHost implements SimHost {
     if (!this.online) return;
     this.tickN++;
     for (const sim of this.sims.values()) sim.tick(TICK);
+    this.decide.tick();
+    if (this.variant === "forge" && this.tickN % 5 === 0) this.jobsSim().tick();
     const now = this.now();
     // Pulses every tick (≤ 10 Hz).
     if (this.pulses.size) {
@@ -857,12 +970,13 @@ export class DemoHost implements SimHost {
     const now = this.now();
     const sims = [...this.sims.values()].filter((s) => s.omp && s.agent.omp?.link === "live");
     const running = sims.filter((s) => s.agent.state === "working");
-    const needs = sims.filter((s) => s.agent.state === "blocked");
+    // a question decide for me picks soon (or that waits for no app) is left to it
+    const needs = sims.filter((s) => s.agent.state === "blocked" && !this.decide.holds(s));
     if (needs.length) this.noNeedsSince = now;
     if (running.length < 2) {
       // an agent whose pull request is merged is finished: it keeps showing "Delete worktree"
       const idle = sims
-        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000 && this.prs.get(s.agent.workspaceId)?.state !== "MERGED")
+        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000 && this.prs.get(s.agent.workspaceId)?.state !== "MERGED" && !this.resumes.holds(s))
         .sort((a, b) => Number(a.agent.archived) - Number(b.agent.archived) || a.agent.stateSince - b.agent.stateSince)[0];
       if (idle) idle.startTurn(DIRECTOR_PROMPTS[this.promptIdx++ % DIRECTOR_PROMPTS.length] as string, { author: OTHER_DEVICE });
     }
@@ -881,7 +995,7 @@ export class DemoHost implements SimHost {
         s.answer(p.request.id, { choices: rec ? [rec.id] : [], text: rec ? undefined : "Looks good, go ahead.", cancel: false, chat: false }, OTHER_DEVICE);
       }
     }
-    const review = sims.filter((s) => s.agent.column === "review" && s.agent.turns > 0).sort((a, b) => a.agent.stateSince - b.agent.stateSince);
+    const review = sims.filter((s) => s.agent.column === "review" && s.agent.turns > 0 && !this.resumes.holds(s)).sort((a, b) => a.agent.stateSince - b.agent.stateSince);
     if (review.length > 3) {
       const oldest = review[0] as AgentSim;
       if (now - oldest.agent.stateSince > 60_000) this.archive(oldest, true, OTHER_DEVICE);
@@ -946,10 +1060,23 @@ export class DemoHost implements SimHost {
   private dispatch(method: string, p: Record<string, unknown>): unknown {
     const parked = this.parking.call(method, p);
     if (parked !== undefined) return parked;
+    const resumed = this.resumes.call(method, p);
+    if (resumed !== undefined) return resumed;
+    const decided = this.decide.call(method, p);
+    if (decided !== undefined) return decided;
+    const searched = this.searches.call(method, p);
+    if (searched !== undefined) return searched;
     if (method.startsWith("automation.")) return (this.automations ??= new DemoAutomations({ supported: this.variant === "forge", now: () => this.now(), herdrSession: this.info.herdrSession, call: (m, q) => this.dispatch(m, q) })).call(method, p);
     if (method.startsWith("upload.")) return (this.uploads ??= new DemoUploads(this.env.clock, HOME)).call(method, p);
+    if (method === "session.artifacts" || method === "session.artifact" || method === "session.writeLocal" || method === "session.context") return demoInsight(method, p, this.sim(p.agentId).agent, this.now(), HOME);
+    if (method.startsWith("jobs.") || method.startsWith("services.")) return this.jobsSim().call(method, p);
+    if (method.startsWith("cleanup."))
+      return (this.cleanup ??= new DemoCleanup({ supported: this.variant === "forge", clock: this.env.clock, state: () => this.hostState(), call: (m, q) => this.dispatch(m, q) })).call(method, p);
     if (method.startsWith("auth.")) return this.auth.call(method, p);
     if (method.startsWith("accounts.")) return this.accounts.call(method, p);
+    if (method.startsWith("gh.auth") || method === "git.identity" || method === "git.setIdentity") return this.github.call(method, p);
+    if (method.startsWith("notify.")) return (this.notifyRouting ??= new DemoNotify({ supported: this.variant === "forge", now: () => this.now() })).call(method, p);
+    if (method.startsWith("hostSync.")) return demoHostSync(this, () => ({ id: this.id, variant: this.variant, clock: this.env.clock, agents: () => this.agentsList(), ompVersion: () => this.info.omp?.version })).call(method, p);
     if (method.startsWith("mcp."))
       return (this.mcp ??= new DemoMcp({
         supported: this.variant === "forge",
@@ -957,6 +1084,15 @@ export class DemoHost implements SimHost {
         home: HOME,
         agents: () => this.agentsList(),
         auth: this.auth,
+        ompVersion: () => this.info.omp?.version,
+        folderExists: (path) => this.isDir(path),
+      })).call(method, p);
+    if (method.startsWith("skills.") || method.startsWith("plugins."))
+      return (this.plugins ??= new DemoPlugins({
+        supported: this.variant === "forge",
+        clock: this.env.clock,
+        home: HOME,
+        agents: () => this.agentsList(),
         ompVersion: () => this.info.omp?.version,
         folderExists: (path) => this.isDir(path),
       })).call(method, p);
@@ -1003,6 +1139,10 @@ export class DemoHost implements SimHost {
         this.control(sim, `Thinking: ${sim.thinking}`);
         return {};
       }
+      case "agent.getRoleModels":
+        return this.roleModels(this.roleSim(p.agentId));
+      case "agent.setRoleModels":
+        return this.setRoleModels(p);
       case "agent.setFast": {
         const sim = this.ompSim(p.agentId);
         sim.fast = Boolean(p.on);
@@ -1092,7 +1232,7 @@ export class DemoHost implements SimHost {
         this.env.clock.after(1600, () => {
           if (!sim.agent.omp) return;
           sim.agent.omp = { ...sim.agent.omp, link: "live", bridge: true, linkReason: undefined, linkVia: "collab", linkSince: this.env.clock.now() };
-          sim.caps = { ...sim.caps, prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true };
+          sim.caps = { ...sim.caps, prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true, retry: true, subagentRetry: true };
           this.agentChanged(sim.agent.id);
         });
         return {};
@@ -1203,6 +1343,8 @@ export class DemoHost implements SimHost {
       case "host.health":
         return this.health;
       case "host.usage":
+        // Apps ≥ 0.7.0 ask for a view; older callers get the legacy daily answer.
+        if (typeof p.view === "string") return demoUsageReport(this.id, this.variant === "forge", p as UsageParams, this.now(), this.usageTotals);
         return this.usageReport(typeof p.days === "number" ? p.days : 14);
       case "host.limits":
         return this.accounts.limits(true);
@@ -1213,6 +1355,8 @@ export class DemoHost implements SimHost {
         return this.ompSettings.get();
       case "omp.settingsSet":
         return this.ompSettings.set(p.changes);
+      case "omp.settingValues":
+        return this.ompSettings.values(p.keys);
       case "host.sessions":
         return { sessions: this.pastSessions(typeof p.cwd === "string" ? p.cwd : undefined, typeof p.limit === "number" ? p.limit : 50) };
       case "host.resume":
@@ -1223,9 +1367,15 @@ export class DemoHost implements SimHost {
         return this.setupApply(Array.isArray(p.fixes) ? (p.fixes as string[]) : []);
       case "host.activity":
         return this.activityPage(p);
+      case "host.wrapped":
+        return demoWrapped(this.id, this.variant === "forge", { since: Number(p.since), until: typeof p.until === "number" ? p.until : undefined }, this.now());
       case "host.toolsUpdate":
       case "host.toolsConfig":
         return this.tools.call(method, p);
+      case "host.herdrRestart":
+      case "host.herdrLoad":
+      case "host.herdrConfig":
+        return this.herdr.call(method, p);
       default:
         throw apiError("unknown_method", `Unknown method ${method}`);
     }
@@ -1245,10 +1395,12 @@ export class DemoHost implements SimHost {
     if (!text) throw apiError("invalid_params", "Empty prompt");
     const delivery = typeof p.delivery === "string" ? p.delivery : "auto";
     if (sim.agent.state === "blocked") throw apiError("agent_blocked", `${sim.agent.name} is waiting for an answer`, { hint: "Answer the pending question first" });
+    const onto = rebaseTarget(text);
     if (sim.agent.state === "working") {
       if (delivery === "followUp") sim.followUp(text);
       else sim.steer(text);
-    } else sim.startTurn(text);
+    } else if (onto && this.askFix(sim)) sim.startTurn(text, { steps: rebaseTurn(onto) });
+    else sim.startTurn(text);
     return {};
   }
 
@@ -1423,6 +1575,7 @@ export class DemoHost implements SimHost {
       case "":
         // Prompt templates, skills and extension commands expand into a prompt.
         if (sim.busy) sim.steer(command);
+        else if (name === "green" && this.askFix(sim)) sim.startTurn(command, { steps: greenTurn() });
         else sim.startTurn(command);
         break;
       default:
@@ -1533,17 +1686,23 @@ export class DemoHost implements SimHost {
     return pane;
   }
 
-  private newAgentFromSpec(spec: Record<string, unknown>, wsId: string, pane: string, fallbackName: string): AgentSim {
+  private newAgentFromSpec(spec: Record<string, unknown>, wsId: string, pane: string, fallbackName: string, own?: AgentOmp): AgentSim {
+    const autoAnswer = this.decide.checkSpec(spec);
     const kind = typeof spec.kind === "string" ? spec.kind : "omp";
     const requested = typeof spec.name === "string" && spec.name ? spec.name : undefined;
     if (requested && !/^[a-z][a-z0-9_-]{0,31}$/.test(requested)) throw apiError("invalid_params", "Agent names are lowercase letters, digits, - and _ (max 32), starting with a letter");
     if (requested && [...this.sims.values()].some((s) => s.agent.name === requested)) throw apiError("herdr_error", `agent name '${requested}' is already taken`);
     const name = requested ?? this.uniqueName(fallbackName);
-    const model = typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
+    // A `default` role of the agent's own is its main model; `model` / `thinking` aren't passed then.
+    const main = own?.roles.default ? selectorParts(own.roles.default) : undefined;
+    const model = main ? modelByRef(main.model)?.label : typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
+    const thinking = main ? main.thinking : (spec.thinking as AgentDef["thinking"]);
     const prompt = demoFirstPrompt(spec);
     // A just-started session: zero turns until its first prompt runs (the UI shows "Ready" / "Starting").
-    const def: AgentDef = { id: name, kind, workspace: wsId, title: prompt?.slice(0, 80) ?? name, column: "review", model: model ?? "opus-5", thinking: (spec.thinking as AgentDef["thinking"]) ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [], fresh: true };
+    const def: AgentDef = { id: name, kind, workspace: wsId, title: prompt?.slice(0, 80) ?? name, column: "review", model: model ?? "opus-5", thinking: thinking ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [], fresh: true };
     const sim = this.addAgent(def, wsId, pane);
+    this.decide.bind(sim, autoAnswer);
+    if (own && (Object.keys(own.roles).length > 0 || Object.keys(own.chains).length > 0)) this.agentOmp.set(sim.agent.id, own);
     sim.agent.state = "idle";
     sim.agent.stateSince = this.now();
     sim.agent.live = { streaming: false, thinking: false, lastEventAt: this.now() };
@@ -1562,9 +1721,58 @@ export class DemoHost implements SimHost {
     return sim;
   }
 
+  /** A live omp agent whose bridge changes model roles (hostd: the bridge's `caps.roleModels`). */
+  private roleSim(agentId: unknown): AgentSim {
+    const sim = this.ompSim(agentId);
+    if (!sim.caps.bridge) {
+      throw apiError("unsupported", `${sim.agent.name}'s omp has no TeleFlock bridge, which changes model roles`, {
+        hint: "Restart the agent so its omp loads the current TeleFlock bridge: Mark done, then Resume it, or start a new agent",
+      });
+    }
+    return sim;
+  }
+
+  /** `agent.getRoleModels`: the agent's own roles and chains, the host's, and the model it runs. */
+  private roleModels(sim: AgentSim, warning?: string): SessionRoleModels {
+    const own = this.agentOmp.get(sim.agent.id);
+    return {
+      session: { ...own?.roles },
+      host: Object.fromEntries(this.ompSettings.roles().map((r) => [r.role, r.model])),
+      sessionChains: Object.fromEntries(Object.entries(own?.chains ?? {}).map(([k, v]) => [k, [...v]])),
+      hostChains: this.ompSettings.chains(),
+      active: sim.model ? `${sim.model.provider}/${sim.model.id}` : undefined,
+      ...(warning ? { warning } : {}),
+    };
+  }
+
+  /** `agent.setRoleModels`: replaces the agent's own maps; a changed `default` (own, else the host's) switches its model like `agent.setModel`. */
+  private setRoleModels(p: Record<string, unknown>): SessionRoleModels {
+    const own = agentOmpOf(p);
+    const sim = this.roleSim(p.agentId);
+    const hostDefault = this.ompSettings.roles().find((r) => r.role === "default")?.model;
+    const before = this.agentOmp.get(sim.agent.id)?.roles.default ?? hostDefault;
+    const after = own.roles.default ?? hostDefault;
+    if (Object.keys(own.roles).length > 0 || Object.keys(own.chains).length > 0) this.agentOmp.set(sim.agent.id, own);
+    else this.agentOmp.delete(sim.agent.id);
+    let warning: string | undefined;
+    if (after && after !== before) {
+      const main = selectorParts(after);
+      const m = modelByRef(main.model);
+      if (!m) warning = `${main.model} isn't one of this host's models; the session stays on ${sim.model?.label ?? sim.model?.id ?? "its model"}`;
+      else {
+        sim.model = { provider: m.provider, id: m.id, label: m.label };
+        if (main.thinking) sim.thinking = main.thinking;
+        this.control(sim, `Model: ${m.label}${sim.thinking ? ` · ${sim.thinking}` : ""}`);
+        this.activity(sim.agent.id, "modelChanged", `${sim.agent.name} switched to ${m.label}`);
+      }
+    }
+    return this.roleModels(sim, warning);
+  }
+
   private startAgent(p: Record<string, unknown>): unknown {
     const target = (p.target ?? {}) as Record<string, unknown>;
     const spec = (p.spec ?? {}) as Record<string, unknown>;
+    const own = agentOmpOf(spec);
     let wsId: string;
     let pane: string;
     if (target.kind === "workspace") {
@@ -1585,7 +1793,7 @@ export class DemoHost implements SimHost {
       wsId = m.ws.id;
       pane = m.ws.tabs[0]?.panes[0]?.id as string;
     } else throw apiError("invalid_params", "target.kind must be workspace, pane or cwd");
-    const sim = this.newAgentFromSpec(spec, wsId, pane, (this.wss.get(wsId)?.ws.label ?? "agent").split(/[·/]/).pop() ?? "agent");
+    const sim = this.newAgentFromSpec(spec, wsId, pane, (this.wss.get(wsId)?.ws.label ?? "agent").split(/[·/]/).pop() ?? "agent", own);
     return { agentId: sim.agent.id, paneId: pane, workspaceId: wsId };
   }
 
@@ -1715,6 +1923,8 @@ export class DemoHost implements SimHost {
   private worktreeCreate(p: Record<string, unknown>): unknown {
     const cwd = this.resolve(this.str(p, "cwd"));
     const branch = this.str(p, "branch").trim();
+    // The agent's own roles are checked before anything is created, like hostd.
+    const own = p.agent && typeof p.agent === "object" ? agentOmpOf(p.agent as Record<string, unknown>) : undefined;
     if (cwd.includes("untrusted") && !p.trust) {
       throw apiError("herdr_error", `fatal: detected dubious ownership in repository at '${cwd}'`, { hint: "Confirm that you trust this repository to continue" });
     }
@@ -1735,7 +1945,7 @@ export class DemoHost implements SimHost {
     let agent: unknown;
     if (p.agent && typeof p.agent === "object") {
       const pane = m.ws.tabs[0]?.panes[0]?.id as string;
-      const sim = this.newAgentFromSpec(p.agent as Record<string, unknown>, m.ws.id, pane, branch.split("/").pop() ?? "agent");
+      const sim = this.newAgentFromSpec(p.agent as Record<string, unknown>, m.ws.id, pane, branch.split("/").pop() ?? "agent", own);
       agent = { agentId: sim.agent.id, paneId: pane, workspaceId: m.ws.id };
     } else {
       m.shellPanes.push(m.ws.tabs[0]?.panes[0]?.id as string);
@@ -1970,12 +2180,20 @@ export class DemoHost implements SimHost {
     return { code: 0, stdout: "", stderr: `To ${m.repo?.remote}\n   ${this.rng.hex(7)}..${this.rng.hex(7)}  ${branch} -> ${branch}\nbranch '${branch}' set up to track 'origin/${branch}'.` };
   }
 
-  private prView(pr: PrInfo & { createdAt: number }): PrInfo {
-    const { createdAt, ...rest } = pr;
-    if (rest.state !== "OPEN") return rest;
-    const age = this.now() - createdAt;
-    const checks = age > 10_000 ? { passed: 9, failed: 0, pending: 0 } : { passed: Math.floor(age / 1200), failed: 0, pending: 9 - Math.floor(age / 1200) };
-    return { ...rest, checks, mergeable: age > 10_000 };
+  /** Marks the pull request of the agent's workspace as being fixed by it (Make it green, rebase). */
+  private askFix(sim: AgentSim): boolean {
+    const pr = this.prs.get(sim.agent.workspaceId);
+    if (!pr?.problem) return false;
+    pr.fixAgent = sim.agent.id;
+    pr.fixAt = this.now();
+    return true;
+  }
+
+  private prView(pr: DemoPr): PrInfo {
+    const sim = pr.fixAgent ? this.sims.get(pr.fixAgent) : undefined;
+    const ended = sim?.agent.omp?.lastTurnEndedAt;
+    const fixedAt = pr.fixAt !== undefined && ended !== undefined && ended > pr.fixAt && !sim?.busy ? ended : undefined;
+    return demoPrView(pr, this.now(), fixedAt);
   }
 
   private prStatus(cwd: string): unknown {
@@ -1993,7 +2211,8 @@ export class DemoHost implements SimHost {
     if (!m.ws.worktree) throw apiError("gh_error", "pull request create failed: head branch is the default branch", { hint: "Create the PR from a feature branch" });
     if (this.prs.has(m.ws.id)) throw apiError("gh_error", `a pull request for branch "${m.ws.repo?.branch}" already exists`);
     const num = this.nextPr++;
-    const pr = { number: num, url: `${m.repo?.remote.replace("git@github.com:", "https://github.com/").replace(/\.git$/, "")}/pull/${num}`, title: this.str(p, "title"), state: "OPEN", draft: Boolean(p.draft), mergeable: false, createdAt: this.now() };
+    // The hero branch's first CI run fails (lint + a reduced-motion test): Review offers "Make it green".
+    const pr: DemoPr = { number: num, url: `${m.repo?.remote.replace("git@github.com:", "https://github.com/").replace(/\.git$/, "")}/pull/${num}`, title: this.str(p, "title"), state: "OPEN", draft: Boolean(p.draft), mergeable: false, createdAt: this.now(), ...(m.ws.id === "w9" ? { problem: "checks" as const } : {}) };
     this.prs.set(m.ws.id, pr);
     const agent = [...this.sims.values()].find((s) => s.agent.workspaceId === m.ws.id);
     this.activity(agent?.agent.id ?? "", "committed", `PR #${num} opened`, pr.title);
@@ -2074,6 +2293,7 @@ export class DemoHost implements SimHost {
         cwd: wsm.path,
         branch: wsm.ws.repo?.branch,
         agents: () => [...this.sims.values()].map((s) => ({ name: s.agent.name, state: s.agent.state, pane: s.agent.paneId })),
+        stopHerdr: () => this.herdr.stopServer(),
         gitStatus: () => {
           const files = this.wsFiles(wsm);
           return files.length ? [`On branch ${wsm.ws.repo?.branch ?? "main"}`, "Changes not staged for commit:", ...files.map((f) => `  \x1b[31m${f.status === "added" ? "new file" : "modified"}:   ${f.path}\x1b[0m`)] : [`On branch ${wsm.ws.repo?.branch ?? "main"}`, "nothing to commit, working tree clean"];
@@ -2159,6 +2379,7 @@ export class DemoHost implements SimHost {
     const installs = fixes.filter((f) => SETUP_INSTALLS[f]);
     const issues: SetupIssue[] = this.setup.issues.filter((i) => installs.includes(i.id) || !fixes.includes(i.id));
     this.setup = {
+      ...this.setup,
       herdrIntegration: this.setup.herdrIntegration || fixes.includes("install-herdr-integration"),
       globalSharing: this.setup.globalSharing || fixes.includes("enable-global-sharing"),
       globalBridge: this.setup.globalBridge || fixes.includes("install-global-bridge"),
@@ -2174,9 +2395,9 @@ export class DemoHost implements SimHost {
 
   private finishInstall(id: string): void {
     const applying = (this.setup.applying ?? []).filter((f) => f !== id);
-    const offline = id === "install-gh" && !this.ghInstallTried;
-    if (id === "install-gh") this.ghInstallTried = true;
-    const error = { code: "install_failed", message: "couldn't download https://api.github.com/repos/cli/cli/releases/latest: curl: (6) Could not resolve host: api.github.com", retryable: false };
+    const offline = id === "install-ffmpeg" && !this.ffmpegInstallTried;
+    if (id === "install-ffmpeg") this.ffmpegInstallTried = true;
+    const error = { code: "install_failed", message: "E: Failed to fetch http://deb.debian.org/debian/pool/main/f/ffmpeg/ffmpeg_7.1.1-1_amd64.deb  Temporary failure resolving 'deb.debian.org' (exit 100)", retryable: false };
     this.setup = offline
       ? { ...this.setup, applying, failed: [...(this.setup.failed ?? []), { id, error }] }
       : { ...this.setup, applying, issues: this.setup.issues.filter((i) => i.id !== id) };

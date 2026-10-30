@@ -92,13 +92,13 @@ export function SameServerNote({ server: s, what, onOpen }: { server: McpServer;
   );
 }
 
-/** The host's tf-hostd answers `unknown_method`: it predates MCP servers. */
-export function OutdatedHost({ onRetry }: { onRetry(): void }) {
+/** The host's tf-hostd answers `unknown_method`: it predates `what` (MCP servers, skills and plugins). */
+export function OutdatedHost({ onRetry, what = "MCP servers" }: { onRetry(): void; what?: string }) {
   return (
     <EmptyState
       icon={<ArrowUpCircle />}
       title="This host needs a newer tf-hostd"
-      description="Its TeleFlock host daemon predates MCP servers. Reconnect the host to deploy the bundled tf-hostd, then come back."
+      description={`Its TeleFlock host daemon predates ${what}. Reconnect the host to deploy the bundled tf-hostd, then come back.`}
       action={
         <Button variant="secondary" icon={<RefreshCw />} onClick={onRetry}>
           Try again

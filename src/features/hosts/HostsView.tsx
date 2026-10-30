@@ -1,4 +1,4 @@
-import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, ShieldCheck, Trash2 } from "lucide-react";
+import { ChevronDown, MoreHorizontal, Pencil, Plus, PowerOff, Server, ShieldCheck, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -25,6 +25,7 @@ import {
 import { core, navigate, useAgentKeys, useCore, useHosts, useHostState, useUi } from "@/core";
 import type { ConnStatus, HostProfile } from "@/core/gen";
 import { LinkAccountNudge } from "@/features/accounts/LinkAccountNudge";
+import { HostSyncMenuItem } from "@/features/hostSync/entry";
 import { errorMessage } from "@/features/shell/errors";
 import { useHealthHistory } from "@/features/shell/healthHistory";
 import { MobileHeader } from "@/features/shell/MobileHeader";
@@ -34,7 +35,9 @@ import { ConnStatusCard, disconnect } from "./ConnStatusCard";
 import { hostAccent, KIND_META, kindBadge, normalizeGroup, profileAddress } from "./kinds";
 import { SetupChecklist } from "./SetupChecklist";
 import { setupFromHash, useSetupFocus } from "./setupFocus";
+import { HerdrHostRow } from "./HerdrControls";
 import { ToolUpdatesRow } from "./ToolUpdates";
+import { ServicesSection } from "./services/ServicesSection";
 
 function gb(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(bytes >= 100 * 1024 ** 3 ? 0 : 1)}`;
@@ -61,7 +64,17 @@ function Health({ hostId }: { hostId: string }) {
         <Sparkline values={mem.length > 1 ? mem : [memPct, memPct]} height={22} status="review" aria-label="Memory history" />
       </div>
       <div className="col-span-2 min-w-0 rounded-md well p-2.5 sm:col-span-1">
-        <div className="kicker">Disk · load</div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="kicker">Disk · load</span>
+          <button
+            type="button"
+            className="rounded-sm text-2xs font-bold text-accent-hi focus-ring hover:underline"
+            title={VIEWS.cleanup.description}
+            onClick={() => navigate({ name: "cleanup", hostId })}
+          >
+            Clean up ›
+          </button>
+        </div>
         <div className="font-display text-lg font-bold tabular">
           {gb(health.diskFree)}
           <span className="text-xs text-mute"> GB free</span>
@@ -141,6 +154,7 @@ function SetupBadge({ issues }: { issues: readonly { recommended: boolean; sever
 function HostCard({ profile, status, index }: { profile: HostProfile; status: ConnStatus | undefined; index: number }) {
   const { openDialog } = useUi();
   const [setupOpen, setSetupOpen] = useState(false);
+  const [servicesOpen, setServicesOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const phase = status?.phase ?? "idle";
   const online = phase === "online";
@@ -207,6 +221,11 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
                   Host setup
                 </DropdownMenuItem>
               )}
+              {online && (
+                <DropdownMenuItem icon={<Server />} onSelect={() => setServicesOpen(true)}>
+                  Services
+                </DropdownMenuItem>
+              )}
               {online &&
                 OMP_PAGES.map((name) => {
                   const { icon: Icon, label } = VIEWS[name];
@@ -216,6 +235,12 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
                     </DropdownMenuItem>
                   );
                 })}
+              {online && <HostSyncMenuItem hostId={profile.id} />}
+              {online && (
+                <DropdownMenuItem icon={<VIEWS.cleanup.icon />} onSelect={() => navigate({ name: "cleanup", hostId: profile.id })}>
+                  {VIEWS.cleanup.label}
+                </DropdownMenuItem>
+              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 danger
@@ -240,9 +265,11 @@ function HostCard({ profile, status, index }: { profile: HostProfile; status: Co
             <Counts hostId={profile.id} />
             <Health hostId={profile.id} />
             <Versions hostId={profile.id} />
+            <HerdrHostRow hostId={profile.id} />
             <ToolUpdatesRow hostId={profile.id} />
             <LinkAccountNudge hostId={profile.id} variant="card" />
             <OmpLinks hostId={profile.id} />
+            <ServicesSection hostId={profile.id} open={servicesOpen} onOpenChange={setServicesOpen} />
             <div className="border-t border-line pt-3 max-md:pt-1">
               <button
                 type="button"

@@ -1,6 +1,6 @@
 //! TeleFlock app shell: embeds the `tf_client` engine and wires it to the webview and the OS
-//! (tray, taskbar, toasts, deep links, single instance on desktop; foreground service,
-//! notifications, haptics on Android).
+//! (tray, taskbar, OS notifications on Windows/Linux/macOS, deep links, single instance on
+//! desktop; foreground service, notifications, haptics on Android).
 
 #[cfg(desktop)]
 mod badge;
@@ -10,8 +10,18 @@ mod platform;
 mod present;
 #[cfg(windows)]
 mod toast;
+#[cfg(desktop)]
+mod idle;
+#[cfg(target_os = "macos")]
+mod mac_notify;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod mac_model;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod toastxml;
+#[cfg(target_os = "linux")]
+mod xdg_notify;
+#[cfg(desktop)]
+mod capture;
 #[cfg(desktop)]
 mod tray;
 mod update;
@@ -50,13 +60,35 @@ fn reveal(app: &AppHandle<Wry>) {
 fn handle_link(app: &AppHandle<Wry>, url: &tauri::Url) {
     let Some(link) = deeplink::parse(url) else { return };
     let Some(core) = app.try_state::<CoreState>() else { return };
+    // Quick capture opens over whatever is in front; the main window stays where it is.
+    if link == Link::Capture {
+        #[cfg(desktop)]
+        capture::show(app);
+        return;
+    }
     reveal(app);
     match link {
         Link::Agent { host_id, notification_id: Some(n), .. } => core.notification_action(host_id, n, None, None),
         Link::Agent { host_id, agent_id, notification_id: None } => core.ui_intent(AppEvent::OpenAgent { host_id, agent_id }),
         Link::AnswerNext => core.ui_intent(AppEvent::AnswerNext),
-        Link::Open => {}
+        Link::Open | Link::Capture => {}
     }
+}
+
+/// What the user does with an OS notification, handed to the engine; a click on the body
+/// (Linux, macOS) also brings the window forward.
+#[cfg(desktop)]
+fn notification_sink(app: &AppHandle<Wry>, core: &CoreState) -> present::Sink {
+    let (app, core) = (app.clone(), Arc::clone(core));
+    Arc::new(move |ev| match ev {
+        present::ToastEvent::Activated { host_id, notification_id, action_id, reply } => {
+            if action_id.is_none() && reply.is_none() {
+                reveal(&app);
+            }
+            core.notification_action(host_id, notification_id, action_id, reply)
+        }
+        present::ToastEvent::Dismissed { host_id, notification_id } => core.engine.notification_dismissed(&host_id, &notification_id),
+    })
 }
 
 fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
@@ -101,21 +133,34 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(&path, include_bytes!("../icons/128x128.png")).ok()?;
             Some(path)
         });
-        let sink_core = Arc::clone(&core);
         let toasts = toast::Toasts::new(
             &app.config().identifier,
             app.config().product_name.as_deref().unwrap_or("TeleFlock"),
             icon.as_deref(),
-            Arc::new(move |ev| match ev {
-                toast::ToastEvent::Activated { host_id, notification_id, action_id, reply } => {
-                    sink_core.notification_action(host_id, notification_id, action_id, reply)
-                }
-                toast::ToastEvent::Dismissed { host_id, notification_id } => {
-                    sink_core.engine.notification_dismissed(&host_id, &notification_id)
-                }
-            }),
+            notification_sink(&handle, &core),
         );
         let _ = shell.toasts.set(toasts);
+    }
+
+    // Linux: D-Bus notifications. The probe of the notification server may wait for an activatable
+    // server to start, so it runs off the setup thread; until it answers the engine sees no
+    // notification support and keeps notifications in the inbox.
+    #[cfg(target_os = "linux")]
+    {
+        let icon_dir = app.path().app_local_data_dir().ok();
+        let (sink, shell) = (notification_sink(&handle, &core), Arc::clone(&shell));
+        std::thread::Builder::new().name("xdg-notify-init".into()).spawn(move || {
+            let identity = xdg_notify::Identity::detect(icon_dir.as_deref(), include_bytes!("../icons/128x128.png"));
+            if let Some(n) = xdg_notify::Notifier::new(sink, identity) {
+                let _ = shell.xdg.set(n);
+            }
+        })?;
+    }
+
+    // macOS: UserNotifications (bundled builds only; asks for the permission on first launch).
+    #[cfg(target_os = "macos")]
+    if let Some(n) = mac_notify::Notifier::new(notification_sink(&handle, &core)) {
+        let _ = shell.mac.set(n);
     }
 
     #[cfg(desktop)]
@@ -124,6 +169,7 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
         tray.update(platform.badge());
         let _ = shell.tray.set(Arc::clone(&tray));
         watch_motion(Arc::clone(&core), tray);
+        capture::install(&handle, Arc::clone(&core));
     }
 
     // Deep links: cold start (argv on desktop, launch intent on Android) and warm.
@@ -162,7 +208,8 @@ fn watch_motion(core: CoreState, tray: Arc<tray::Tray<Wry>>) {
     let lively = |s: &Settings| s.motion == MotionPref::Full;
     tauri::async_runtime::spawn(async move {
         let mut rx = core.engine.subscribe();
-        if let Ok(v) = core.engine.call(None, "settings.get", serde_json::Value::Null).await
+        // `settings.get` takes `{}`; `null` fails to parse as its empty params.
+        if let Ok(v) = core.engine.call(None, "settings.get", serde_json::json!({})).await
             && let Ok(s) = serde_json::from_value::<Settings>(v)
         {
             tray.set_lively(lively(&s));
@@ -185,6 +232,17 @@ fn before_exit(app: &AppHandle<Wry>) {
         && let Some(t) = p.shell.toasts.get()
     {
         t.clear_all();
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(p) = app.try_state::<Arc<TauriPlatform>>() {
+        #[cfg(target_os = "linux")]
+        if let Some(n) = p.shell.xdg.get() {
+            n.clear_all();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(n) = p.shell.mac.get() {
+            n.clear_all();
+        }
     }
     if let Some(core) = app.try_state::<CoreState>() {
         tauri::async_runtime::block_on(core.engine.shutdown());
@@ -283,7 +341,12 @@ pub fn run() {
     {
         // Must be the first plugin. With the deep-link feature, a second instance's
         // `teleflock://` argv is forwarded to the deep-link plugin (→ on_open_url) here.
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| tray::show_main(app)));
+        // The Quick capture link opens its own window, not the main one.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !argv.iter().any(|a| deeplink::is_capture(a)) {
+                tray::show_main(app);
+            }
+        }));
     }
     builder = builder.plugin(tauri_plugin_deep_link::init());
     #[cfg(desktop)]
@@ -298,10 +361,26 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_teleflock_android::init());
     }
 
+    #[cfg(desktop)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        core::core_call,
+        core::core_term_input,
+        core::core_events,
+        capture::capture_status,
+        capture::capture_open,
+        capture::capture_hide,
+        capture::capture_draft,
+        capture::capture_resize,
+        capture::capture_show_main,
+    ]);
+    #[cfg(mobile)]
+    let builder = builder.invoke_handler(tauri::generate_handler![core::core_call, core::core_term_input, core::core_events]);
     let app = builder
-        .invoke_handler(tauri::generate_handler![core::core_call, core::core_term_input, core::core_events])
         .on_page_load(|webview, payload| {
+            // Only the main page owns the engine's page state (terminals, sessions); the Quick
+            // capture page never opens any.
             if payload.event() == PageLoadEvent::Started
+                && webview.label() == "main"
                 && let Some(core) = webview.try_state::<CoreState>()
             {
                 core.page_reset();
@@ -313,6 +392,18 @@ pub fn run() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
+                if let Some(u) = window.try_state::<update::UpdaterState>() {
+                    u.left_front();
+                }
+            }
+            // Hidden behind another window or minimized, or Quick capture lost the focus: a
+            // waiting update may install once the user has been away for a whole grace
+            // (`update::apply`); either window getting the focus again voids that.
+            #[cfg(desktop)]
+            tauri::WindowEvent::Focused(false) if matches!(window.label(), "main" | capture::LABEL) => {
+                if let Some(u) = window.try_state::<update::UpdaterState>() {
+                    u.left_front();
+                }
             }
             tauri::WindowEvent::Focused(true) => {
                 // Android: `activity_resumed` tells the updater instead.
@@ -344,7 +435,14 @@ pub fn run() {
                 api.prevent_exit();
             }
         }
-        RunEvent::Exit => before_exit(app),
+        RunEvent::Exit => {
+            // Before the engine goes down: it reads `settings.autoUpdate`.
+            #[cfg(desktop)]
+            if let Some(u) = app.try_state::<update::UpdaterState>() {
+                u.apply_on_quit();
+            }
+            before_exit(app)
+        }
         // macOS: closing hid the window to the tray; a Dock icon click brings it back.
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { has_visible_windows: false, .. } => tray::show_main(app),

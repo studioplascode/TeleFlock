@@ -161,3 +161,13 @@ export function estimateRowHeight(item: TranscriptItem | undefined, dense: boole
   }
   return h;
 }
+
+/**
+ * Where a transcript that opens at the bottom starts scrolling: its estimated height less one
+ * viewport. The scroll box can't go past that, so a transcript shorter than the viewport starts at 0
+ * and its first rows render (an offset of the whole estimated height, which no scroll event ever
+ * corrected, left a short transcript without its first rows and a gap in their place).
+ */
+export function initialScrollOffset(totalHeight: number, viewportHeight: number): number {
+  return Math.max(0, totalHeight - viewportHeight);
+}

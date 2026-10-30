@@ -1,10 +1,10 @@
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion } from "motion/react";
 import { ArrowUpRight, CalendarDays, FolderGit2, FolderOpen, History, MessagesSquare, RotateCcw, Search, TriangleAlert } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { core, draftKey, navigate, useDraft, useHostIds, useHostState, useHosts, useUi } from "@/core";
-import type { PastSession, Started, StartTarget, Workspace } from "@/core/gen";
-import { Button, EmptyState, Input, Kbd, SegmentedControl, Select, Skeleton, Spinner, StatusOrb, cn, formatAge, spring, useIsMobile, useNow } from "@/design";
+import { agentKey, core, draftKey, navigate, useDraft, useHostIds, useHostState, useHosts, useUi } from "@/core";
+import type { PastSession, SearchSnippet, Started, StartTarget, Workspace } from "@/core/gen";
+import { Button, EmptyState, Input, Kbd, SegmentedControl, Select, Skeleton, Spinner, spring, useIsMobile, useNow } from "@/design";
+import { openFind } from "../session/find/store";
 import { ACTIONS } from "@/features/shell/vocab";
 import { describeError } from "../workspace/shared/errors";
 import { LaunchSuccess, WorkingPanel } from "../workspace/shared/LaunchProgress";
@@ -12,6 +12,10 @@ import { basename, tildify } from "../workspace/shared/paths";
 import { ResponsiveDialog } from "../workspace/shared/ResponsiveDialog";
 import { useDialogSession } from "../workspace/shared/useDialogSession";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
+import { type Entry, mergeEntries, searchNote, searchQuery } from "./searchModel";
+import { type GroupBy, type ListRow, SessionList, stopId } from "./SessionList";
+import { type PreviewTarget, SessionPreview } from "./SessionPreview";
+import { useSessionSearch } from "./useSessionSearch";
 
 /** Scope for the next open (the ui dialog payload only carries the host). */
 let pendingScope: { cwd?: string; workspaceId?: string } | null = null;
@@ -24,8 +28,6 @@ export function openPastSessions(opts: { hostId?: string; cwd?: string; workspac
 
 const LIMIT = 200;
 const NEW_AT_CWD = "__new";
-const HEADER_H = 34;
-const ROW_H = 58;
 const DAY = 86_400_000;
 
 /** Mounted once by the shell; renders while `useUi().dialog.kind === "pastSessions"`. */
@@ -35,9 +37,9 @@ export function PastSessionsDialog() {
   return <PastSessionsBody key={gen} open={open} initialHostId={payload.hostId} onClose={close} />;
 }
 
+/** A keyboard position: a session row (`k` -1) or one of its snippets. */
+type Stop = { s: PastSession; k: number; sn?: SearchSnippet };
 type Submit = { phase: "idle" } | { phase: "working"; since: number; title: string } | { phase: "failed"; title: string; hint?: string } | { phase: "done"; started: Started; title: string };
-type GroupBy = "date" | "repo";
-type ListRow = { t: "head"; key: string; label: string; count: number; live?: boolean } | { t: "item"; key: string; s: PastSession; repo: string; i: number };
 
 /** Repository a session belongs to: its workspace's repo, herdr's worktree dir layout, else the folder. */
 function repoOf(s: PastSession, workspaces: readonly Workspace[]): string {
@@ -71,7 +73,9 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
   const [q, setQ] = useDraft(scope?.cwd ? draftKey("history.search", initialHostId ?? "", scope.cwd) : draftKey("history.search"));
   const [groupBy, setGroupBy] = useState<GroupBy>("date");
   const [selected, setSelected] = useState<string | null>(null);
+  // keyboard position: a session row, then its snippets (see `stops`)
   const [active, setActive] = useState(0);
+  const [preview, setPreview] = useState<PreviewTarget | null>(null);
   const [target, setTarget] = useState<string>(NEW_AT_CWD);
   const [submit, setSubmit] = useState<Submit>({ phase: "idle" });
   const now = useNow(30000);
@@ -80,14 +84,17 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
 
   const sessions = useHostQuery(hostId, "host.sessions", { cwd: scoped ? scope?.cwd : undefined, limit: LIMIT });
   const needle = q.trim().toLowerCase();
+  // message search (hosts ≥ 0.7.0): hits are merged into the list below
+  const contentQuery = searchQuery(q);
+  const search = useSessionSearch(hostId, q, scoped ? scope?.cwd : undefined, open);
 
-  // flat render list: group headers + sessions; `order` is the keyboard order (sessions only)
-  const { rows, order } = useMemo(() => {
-    const all = sessions.data?.sessions ?? [];
-    const matched = needle ? all.filter((s) => `${s.title ?? ""} ${s.cwd ?? ""} ${s.id}`.toLowerCase().includes(needle)) : all;
+  // flat render list: group headers + sessions; `stops` is the keyboard order (a session, then its snippets)
+  const { rows, stops } = useMemo(() => {
+    const matched = mergeEntries(sessions.data?.sessions ?? [], search.hits, needle);
     const startOfToday = new Date(now).setHours(0, 0, 0, 0);
-    const groups = new Map<string, { label: string; live?: boolean; items: { s: PastSession; repo: string }[]; latest: number }>();
-    for (const s of [...matched].sort((a, b) => Number(b.live) - Number(a.live) || b.updatedAt - a.updatedAt)) {
+    const groups = new Map<string, { label: string; live?: boolean; items: { e: Entry; repo: string }[]; latest: number }>();
+    for (const e of [...matched].sort((a, b) => Number(b.s.live) - Number(a.s.live) || b.s.updatedAt - a.s.updatedAt)) {
+      const { s } = e;
       const repo = repoOf(s, workspaces);
       const key = groupBy === "repo" ? `r:${repo}` : s.live ? "live" : `d:${dateBucket(s.updatedAt, startOfToday)}`;
       let g = groups.get(key);
@@ -95,29 +102,33 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
         g = { label: groupBy === "repo" ? repo : s.live ? "Live now" : dateBucket(s.updatedAt, startOfToday), live: groupBy === "date" && s.live, items: [], latest: s.updatedAt };
         groups.set(key, g);
       }
-      g.items.push({ s, repo });
+      g.items.push({ e, repo });
     }
     // date buckets are already chronological (insertion order); repos sort by their newest session
     const ordered = [...groups.entries()];
     if (groupBy === "repo") ordered.sort((a, b) => b[1].latest - a[1].latest);
     const out: ListRow[] = [];
-    const flat: PastSession[] = [];
+    const flat: Stop[] = [];
+    let sessionsSeen = 0;
     for (const [key, g] of ordered) {
       out.push({ t: "head", key: `h:${key}`, label: g.label, count: g.items.length, live: g.live });
-      for (const { s, repo } of g.items) {
-        out.push({ t: "item", key: s.file, s, repo, i: flat.length });
-        flat.push(s);
+      for (const { e, repo } of g.items) {
+        out.push({ t: "item", key: e.s.file, e, repo, i: sessionsSeen++, stop: flat.length });
+        flat.push({ s: e.s, k: -1 });
+        e.hit?.snippets.forEach((sn, k) => flat.push({ s: e.s, k, sn }));
       }
     }
-    return { rows: out, order: flat };
-  }, [sessions.data, needle, groupBy, workspaces, now]);
+    return { rows: out, stops: flat };
+  }, [sessions.data, search.hits, needle, groupBy, workspaces, now]);
+  const sessionCount = rows.filter((r) => r.t === "item").length;
 
-  const current = order.find((s) => s.file === selected);
-  const clampedActive = Math.min(active, Math.max(0, order.length - 1));
+  const current = stops.find((st) => st.k < 0 && st.s.file === selected)?.s ?? (preview && preview.session.file === selected ? preview.session : undefined);
+  const clampedActive = Math.min(active, Math.max(0, stops.length - 1));
+  const activeStop = stops[clampedActive];
 
   const select = (s: PastSession) => {
     setSelected(s.file);
-    setActive(order.indexOf(s));
+    setActive(Math.max(0, stops.findIndex((st) => st.k < 0 && st.s.file === s.file)));
     const match = workspaces.find((w) => w.id === scope?.workspaceId) ?? workspaces.find((w) => s.cwd && (w.cwd === s.cwd || w.worktree?.path === s.cwd));
     setTarget(match?.id ?? NEW_AT_CWD);
     if (submit.phase === "failed") setSubmit({ phase: "idle" });
@@ -136,24 +147,43 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
     }
   };
 
+  /** The agent whose session view shows this file: the live one, or the parked agent that ran it. */
+  const agentOf = (s: PastSession): string | undefined => (s.live && s.agentId ? s.agentId : host?.agents.find((a) => a.parked?.sessionFile === s.file)?.id);
+
   const openLive = (s: PastSession) => {
     if (!hostId || !s.agentId) return;
     onClose();
     navigate({ name: "agent", hostId, agentId: s.agentId });
   };
 
+  /** A snippet was picked: the session view with Find on the match, or the preview of its file. */
+  const openAtMatch = (s: PastSession, sn: SearchSnippet) => {
+    if (!hostId) return;
+    const query = contentQuery ?? q.trim();
+    const agentId = agentOf(s);
+    if (agentId) {
+      openFind(agentKey(hostId, agentId), { query, target: { rowId: sn.rowId, at: sn.at } });
+      onClose();
+      navigate({ name: "agent", hostId, agentId });
+      return;
+    }
+    select(s);
+    setPreview({ session: s, query, rowId: sn.rowId, at: sn.at });
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((i) => Math.min(order.length - 1, i + 1));
+      setActive(Math.min(stops.length - 1, clampedActive + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((i) => Math.max(0, i - 1));
+      setActive(Math.max(0, clampedActive - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const s = order[clampedActive];
-      if (!s) return;
-      if (selected === s.file) {
+      if (!activeStop) return;
+      const { s, sn } = activeStop;
+      if (sn) openAtMatch(s, sn);
+      else if (selected === s.file) {
         if (s.live && s.agentId && !e.ctrlKey && !e.metaKey) openLive(s);
         else void resume(s);
       } else select(s);
@@ -201,7 +231,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
     ) : (
       <div className="flex w-full items-center gap-3">
         <p className="min-w-0 flex-1 truncate text-xs text-mute-2">
-          {sessions.data ? `${order.length === sessions.data.sessions.length ? order.length : `${order.length} of ${sessions.data.sessions.length}`} sessions${sessions.data.sessions.length >= LIMIT ? ` (newest ${LIMIT})` : ""}` : "Loading sessions…"}
+          {sessions.data ? `${sessionCount === sessions.data.sessions.length ? sessionCount : `${sessionCount} of ${sessions.data.sessions.length}`} sessions${sessions.data.sessions.length >= LIMIT ? ` (newest ${LIMIT})` : ""}` : "Loading sessions…"}
         </p>
         {!mobile && (
           <span className="flex items-center gap-2 text-2xs text-mute-2" aria-hidden>
@@ -211,7 +241,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
             </span>
             move
             <Kbd>Enter</Kbd>
-            select, again to resume
+            select, again to resume · matches open in place
           </span>
         )}
         <Button variant="primary" icon={<RotateCcw />} disabled className={mobile ? "flex-1" : undefined}>
@@ -219,6 +249,23 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
         </Button>
       </div>
     );
+
+  const failure =
+    submit.phase === "failed" ? (
+            <motion.div
+              role="alert"
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0, x: [0, -6, 5, -3, 0] }}
+              transition={{ ...spring.smooth, x: { duration: 0.4 } }}
+              className="flex gap-3 rounded-lg bg-error/10 p-3 text-xs shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]"
+            >
+              <TriangleAlert className="size-4 shrink-0 text-error" />
+              <div className="min-w-0">
+                <p className="font-bold">Couldn't resume: {submit.title}</p>
+                {submit.hint && <p className="text-mute">{submit.hint}</p>}
+              </div>
+            </motion.div>
+    ) : null;
 
   let body: ReactNode;
   if (sessions.waiting) {
@@ -256,14 +303,16 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
         ))}
       </div>
     );
-  } else if (order.length === 0) {
+  } else if (sessionCount === 0 && search.status === "searching") {
+    body = <EmptyState compact className="h-full" icon={<Spinner size={20} label="Searching messages" />} title={`Searching for “${q.trim()}”`} description={searchNote(search)} />;
+  } else if (sessionCount === 0) {
     body = (
       <EmptyState
         compact
         className="h-full"
         icon={q ? <Search /> : <MessagesSquare />}
         title={q ? `Nothing matches “${q}”` : scoped ? `No sessions in ${basename(scope?.cwd ?? "")}` : "No past sessions yet"}
-        description={q ? "Titles, folders and session ids are searched." : scoped ? "Sessions from other folders are one tap away." : "omp sessions you run on this host show up here, ready to resume."}
+        description={q ? (search.status === "unsupported" ? "Titles, folders and session ids are searched. This host's TeleFlock is too old to search messages." : search.status === "error" ? `Titles, folders and session ids were searched. ${searchNote(search)}` : contentQuery ? "Titles, folders, session ids and messages were searched." : "Titles, folders and session ids are searched. Type two or more characters to search messages too.") : scoped ? "Sessions from other folders are one tap away." : "omp sessions you run on this host show up here, ready to resume."}
         action={
           q ? (
             <Button
@@ -293,6 +342,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
         onHover={setActive}
         onSelect={(s) => (s.file === selected ? setSelected(null) : select(s))}
         onOpen={(s) => (s.live && s.agentId ? openLive(s) : void resume(s))}
+        onSnippet={openAtMatch}
       />
     );
   }
@@ -317,6 +367,13 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
         <div className="flex h-full flex-col">
           <WorkingPanel since={submit.since} label={`Resuming ${submit.title}`} detail="omp --resume" />
         </div>
+      ) : preview && hostId ? (
+        <div className="flex h-full min-h-[320px] flex-col gap-3">
+          {failure}
+          <div className="min-h-0 flex-1">
+            <SessionPreview key={`${preview.session.file}:${preview.rowId ?? ""}`} hostId={hostId} target={preview} home={home} mobile={mobile} now={now} onBack={() => setPreview(null)} />
+          </div>
+        </div>
       ) : (
         <div className="flex h-full min-h-[320px] flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -329,7 +386,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
                 setActive(0);
               }}
               onKeyDown={onKeyDown}
-              placeholder="Search titles and folders"
+              placeholder={search.status === "unsupported" ? "Search titles and folders" : "Search titles, folders and messages"}
               leading={<Search />}
               boxClassName="min-w-0 flex-1 basis-60"
               aria-label="Search past sessions"
@@ -338,7 +395,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
               role="combobox"
               aria-expanded
               aria-controls="past-sessions-list"
-              aria-activedescendant={order[clampedActive] ? `ps-${order[clampedActive]?.id}` : undefined}
+              aria-activedescendant={activeStop ? stopId(activeStop.s, activeStop.k) : undefined}
             />
             <SegmentedControl
               size="sm"
@@ -368,6 +425,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
                 value={hostId ?? ""}
                 onValueChange={(id) => {
                   setHostId(id);
+                  setPreview(null);
                   setSelected(null);
                   setActive(0);
                 }}
@@ -377,134 +435,18 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
             )}
           </div>
 
-          {submit.phase === "failed" && (
-            <motion.div
-              role="alert"
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0, x: [0, -6, 5, -3, 0] }}
-              transition={{ ...spring.smooth, x: { duration: 0.4 } }}
-              className="flex gap-3 rounded-lg bg-error/10 p-3 text-xs shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]"
-            >
-              <TriangleAlert className="size-4 shrink-0 text-error" />
-              <div className="min-w-0">
-                <p className="font-bold">Couldn't resume: {submit.title}</p>
-                {submit.hint && <p className="text-mute">{submit.hint}</p>}
-              </div>
-            </motion.div>
+          {failure}
+
+          {searchNote(search) && (
+            <p role="status" className="flex items-center gap-2 text-2xs font-semibold text-mute-2">
+              {search.status === "searching" && <Spinner size={12} label="Searching messages" />}
+              {searchNote(search)}
+            </p>
           )}
 
           <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg well">{body}</div>
         </div>
       )}
     </ResponsiveDialog>
-  );
-}
-
-interface SessionListProps {
-  rows: ListRow[];
-  active: number;
-  selected: string | null;
-  needle: string;
-  groupBy: GroupBy;
-  home?: string;
-  now: number;
-  onHover: (i: number) => void;
-  onSelect: (s: PastSession) => void;
-  onOpen: (s: PastSession) => void;
-}
-
-/** Virtualized, grouped session list (up to LIMIT rows). */
-function SessionList({ rows, active, selected, needle, groupBy, home, now, onHover, onSelect, onOpen }: SessionListProps) {
-  // TanStack Virtual mutates one virtualizer instance per scroll; compiler memoization would freeze it.
-  "use no memo";
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => (rows[i]?.t === "head" ? HEADER_H : ROW_H),
-    getItemKey: (i) => rows[i]?.key ?? i,
-    overscan: 8,
-  });
-  const activeRow = rows.findIndex((r) => r.t === "item" && r.i === active);
-
-  useEffect(() => {
-    if (activeRow < 0) return;
-    // keep the group header visible when moving onto a group's first session
-    virtualizer.scrollToIndex(rows[activeRow - 1]?.t === "head" ? activeRow - 1 : activeRow, { align: "auto" });
-  }, [activeRow, rows, virtualizer]);
-
-  return (
-    <div ref={scrollRef} id="past-sessions-list" role="listbox" aria-label="Sessions" className="h-full overflow-y-auto overscroll-contain p-1.5">
-      <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
-        {virtualizer.getVirtualItems().map((vi) => {
-          const r = rows[vi.index] as ListRow;
-          const style = { height: vi.size, transform: `translateY(${vi.start}px)` };
-          if (r.t === "head") {
-            return (
-              <div key={vi.key} role="presentation" className="absolute inset-x-0 top-0 flex items-center gap-2 px-2.5 pt-2" style={style}>
-                {r.live ? <StatusOrb status="running" size={6} label={null} /> : groupBy === "repo" ? <FolderGit2 className="size-3 text-mute-2" /> : null}
-                <span className={cn("kicker", r.live && "text-accent-hi")}>{r.label}</span>
-                <span className="text-2xs font-semibold text-mute-2 tabular">{r.count}</span>
-              </div>
-            );
-          }
-          const { s } = r;
-          const isSel = s.file === selected;
-          const isActive = r.i === active;
-          return (
-            <div
-              key={vi.key}
-              id={`ps-${s.id}`}
-              role="option"
-              aria-selected={isSel}
-              onPointerMove={() => onHover(r.i)}
-              onClick={() => onSelect(s)}
-              onDoubleClick={() => onOpen(s)}
-              className="absolute inset-x-0 top-0 cursor-pointer select-none"
-              style={style}
-            >
-              {(isActive || isSel) && (
-                <motion.span
-                  layoutId={isSel ? undefined : "ps-active"}
-                  transition={spring.snappy}
-                  className={cn("absolute inset-0.5 rounded-md", isSel ? "bg-accent/14 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.5),0_0_22px_-10px_rgb(163_92_240/0.9)]" : "bg-white/5")}
-                  aria-hidden
-                />
-              )}
-              <div className="relative flex h-full items-center gap-3 px-3">
-                <span className="grid size-5 shrink-0 place-items-center">
-                  {s.live ? <StatusOrb status="running" size={9} label={null} /> : <MessagesSquare className={cn("size-4", isSel ? "text-accent" : "text-mute-2")} />}
-                </span>
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="truncate text-sm font-bold">{s.title ? <Highlight text={s.title} needle={needle} /> : <span className="font-semibold text-mute italic">Untitled session</span>}</span>
-                  <span className="flex min-w-0 items-center gap-1.5 text-2xs text-mute-2">
-                    {groupBy === "date" && <span className="shrink-0 rounded-xs bg-white/6 px-1.5 py-px font-semibold text-ink-2">{r.repo}</span>}
-                    <span className="truncate font-mono">{s.cwd ? <Highlight text={tildify(s.cwd, home)} needle={needle} /> : s.file}</span>
-                    {s.messages !== undefined && <span className="shrink-0 tabular">· {s.messages} msgs</span>}
-                  </span>
-                </span>
-                <span className="flex shrink-0 flex-col items-end gap-0.5">
-                  <span className="text-2xs text-mute tabular">{formatAge(now - s.updatedAt)}</span>
-                  {s.live && <span className="text-2xs font-bold text-accent-hi">live</span>}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** First case-insensitive occurrence of `needle` in `text`, marked. */
-function Highlight({ text, needle }: { text: string; needle: string }) {
-  const at = needle ? text.toLowerCase().indexOf(needle) : -1;
-  if (at < 0) return <>{text}</>;
-  return (
-    <>
-      {text.slice(0, at)}
-      <mark className="rounded-[3px] bg-accent/30 text-ink">{text.slice(at, at + needle.length)}</mark>
-      {text.slice(at + needle.length)}
-    </>
   );
 }

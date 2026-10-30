@@ -9,7 +9,8 @@ Owner: HostdOps. Every family exposes
 ops::host::probe_info(ctx).await -> HostInfo        // versions, sessions, setup checklist
 ops::host::setup_status(ctx).await -> SetupStatus   // read-only checklist
 ops::host::health() -> HostHealth                   // sync; /proc on Linux, sysinfo elsewhere
-ops::host::usage_today() -> UsageTotals             // blocking sqlite read (spawn_blocking)
+ops::usage::start(&paths, persist, cancel)           // daemon: host.usage service (+ 30 min index warm-up on the real home; not on Windows or on battery)
+ops::usage::usage_report(ctx, UsageParams).await    // host.usage's answer for other hostd reports (Flock Wrapped)
 ops::host::invalidate_models().await                // next host.models re-fetches
 ops::git::repo_top(&Path).await -> Result<Option<RepoTop>, ApiError> // state store: the worktree of a folder …
 ops::git::repo_info_at(&RepoTop).await -> RepoInfo                   // … and its facts (one status per worktree)
@@ -18,6 +19,9 @@ ops::term::input(ctx, client, term_id, data).await  // ClientMsg::TermIn
 ops::term::client_gone(ctx, client_id).await        // disconnect cleanup
 ops::tools::Tools::load(<home>/tools.json, paths.is_default_home()) // daemon: one updater (auto on by default for ~/.teleflock, off for lab homes); .spawn(cancel)
 ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish HostInfo.tools for that session
+crate::herdr_health::start_session(&Arc<Ctx>)       // Ctx::create: herdr server watch, restarts, idle loads (§3.29)
+crate::herdr_health::launch(&home) -> ServerLaunch   // env for servers TeleFlock starts (Ctx::create, install-herdr)
+crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` while the server is not up (term.open)
 ```
 
 ## Behavior
@@ -81,13 +85,36 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   (`forget_parked_worktree`, persisted); the card stays in Done. The branch is kept either way.
 - **gh.\***: `gh pr view --json number,url,title,state,isDraft,mergeable,statusCheckRollup`;
   "no pull requests found" → `{ pr: null }`.
+- **gh.authStatus / gh.authStart / git.identity / git.setIdentity** (`gh_auth.rs`, architecture
+  §3.12, §3.14): gh's accounts (`gh auth status --json hosts`, text before gh 2.81; one look per gh
+  binary at a time, cached 60 s) and its device-code sign-in as an `auth.*` flow (`kind: "gh"`, one per
+  GitHub host, 15 min): `gh auth login --hostname <h> --git-protocol https --web` with piped stdio, own
+  process group, no-op `GH_BROWSER`/`BROWSER`/`PATH` openers; code + `https://github.com/login/device`
+  from its stderr, `Logged in as <login>` + exit 0 → `done`, then `gh auth setup-git` (`setupGit`, default
+  on) and `HostInfo.setup` republished; cancel kills the group. git's global `user.name` / `user.email`
+  (suggested from `gh api user`) set with `git config --global --replace-all` after validation
+  (`invalid_params` `name: …` / `email: …`). Host setup items `sign-in-gh` (gh installed, no working
+  account, no `GH_TOKEN`/`GITHUB_TOKEN` in the daemon's environment) and `set-git-identity` (git
+  installed, either value unset): not `host.setupApply` fixes, completed with these methods.
 - **term.open**: `Shell` targets default to a new **tab** (never shrinks existing panes);
   `split: right|down` splits the workspace's focused pane; `cwd` only → new workspace. One herdr
   bridge per terminal; frames are forwarded as-is (base64). The stream ends with
   `TermEvent::Closed{reason}` (`terminal attach taken over`, `detached`, …). Disconnect detaches.
   An `agent` target that is parked (pane closed by Mark done) fails with `parked`.
-- **host.usage**: `~/.omp/stats.db` opened `?mode=ro` (as fresh as omp's last stats sync); days
-  are host-local and zero-filled; `input` = input + cache read + cache write tokens.
+- **host.usage** (`usage/`, architecture §3.16): omp's own stats index (`stats.db`, path resolved
+  like omp: `PI_CONFIG_DIR`, `OMP_PROFILE`/`PI_PROFILE`, `PI_CODING_AGENT_DIR`, `XDG_DATA_HOME`,
+  dotenv files; `usage/dbpath.rs`), opened `?mode=ro`. hostd keeps it current with omp's own sync:
+  `omp stats --summary` (output discarded) in the background, single flight, nice 10 / lowest
+  best-effort I/O, own process group, 10 min timeout, in the empty `<home>/cache/omp-stats`; when a
+  request finds the last sync older than 10 min (`refresh: true`: unless one finished within 30 s;
+  failures back off 1 … 30 min) and every 30 min on the real daemon (`TF_HOSTD_USAGE_WARMUP=1|0`
+  overrides). Answers never wait: `index {ready, syncing, syncedAt, added, error, newest}`.
+  With `view` (apps ≥ 0.7.0): `insights` over `since`..`until` in hour buckets aligned to the
+  app's `hourOffset` (UTC hours otherwise), totals and breakdowns (models, providers, projects,
+  agent types, subagents, tiers, tools, sessions, records, all-time activity, agent work time),
+  cached per index stamp + view + window and versioned (`have` → `unchanged`); `live` = the
+  state.json ledger's growth since the last sync. Without `view` (older apps): the legacy
+  `today`/`days`/`models` (host-local days, zero-filled; `input` = input + cache read + cache write).
 - **host.limits** (`limits.rs`): `omp usage --json` (hostd cache 60 s, `refresh` 10 s; omp itself caches
   each account ~5 min, so provider usage endpoints are not hit more often than omp's own TUI does) +
   `omp usage --history --json --days 8` (10 min). Readings of each window's current period (omp history
@@ -102,11 +129,22 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   board's omp agents (a parked agent's session carries its `agentId` with `live: false`).
   **host.resume** refuses live sessions (`busy`; resuming would fork); a parked agent's session file
   resumes that agent (`ops::agent::resume_parked`) at the given target.
+- **search.\*** / **session.find** (`search.rs` → `crate::find`, architecture §3.27): `session.find`
+  searches every row of a session's replica older than `before` (chunks of 256 cloned per lock, on
+  the blocking pool), a parked agent's in its session file. `search.start` searches the top-level
+  session files (newest first, `cwd` scope) in the background: raw-line prefilter, only message /
+  custom-message / compaction / branch-summary entries parsed, per-session count ≤ 1000 and 3
+  snippets with row ids; caps 20 s, 2 GiB, `limit` ≤ 500 sessions; long polls (`search.poll`, ≤ 10 s);
+  stopped by `search.cancel`, the client's next search, its disconnect or 30 s without a poll; ≤ 4
+  running per daemon. `search.read` maps a session file (inside omp's sessions folder only) to rows
+  around a row id or time, paging both ways; the last 3 files stay mapped while unchanged. Parked
+  agents' read-only `session.open` now pages (`hasMore`, `session.history` from the same file).
 - **agent.archive / agent.resume** (`agent.rs`, done-agent lifecycle, architecture §3.5/§3.7):
   `close: true` parks the agent after a 10 s undo window (closes its exclusive workspace, else its
   pane); un-archiving, prompting or `agent.resume` on a parked card relaunch `omp --resume=<file>`
   (worktree reopened via herdr `worktree.open`). Other per-agent methods on a parked card fail with
-  `parked` ("Resume it first"); `session.open` gives a read-only transcript snapshot.
+  `parked` ("Resume it first"); `session.open` gives a read-only transcript snapshot (older rows
+  through `session.history`, `session.find` over the file).
 - **host.setupApply** is one of two config-mutating paths (the other: `omp.settingsSet`, below), and only for explicit fix ids:
   `install-herdr-integration` (herdr `integration.install omp`), `enable-global-sharing`
   (`omp config set collab.autoStart control` + `collab.relayUrl ws://127.0.0.1:<port>`),
@@ -124,7 +162,7 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   `SetupStatus.failed`, fixes still running in `SetupStatus.applying`; the reply comes when the
   batch is done or after 20 s. A consented global bridge copy is kept equal to the uploaded one
   (`refresh_global_bridge`, at daemon start and on every host probe).
-- **omp.settings / omp.settingsSet** (`omp_config.rs`, owner OmpSettings, architecture §3.10): omp's
+- **omp.settings / omp.settingsSet / omp.settingValues** (`omp_config.rs`, owner OmpSettings, architecture §3.10): omp's
   settings schema through the companion extension's dump mode (throwaway `omp --mode rpc … -e
   <home>/ext/teleflock-bridge.ts`, `TF_OMP_SCHEMA_OUT`; cached per omp binary in memory and
   `<home>/cache/omp-settings-schema.json`) + values from `omp config list --json` (10 s);
@@ -134,7 +172,9 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   never uses argv: the extension's settings-write mode (`TF_OMP_SETTINGS_IN`/`_OUT`, bridge ≥ 1.3.0)
   applies it from a 0600 file under `<home>/run` (deleted on read); an older extension → `unsupported`
   (hint: the env override), nothing written. Values cache: a `config list` older than a write never
-  fills it. Credentials never leave the host. Real-omp test (temp `PI_CODING_AGENT_DIR`, or
+  fills it. Credentials never leave the host. `omp.settingValues {keys}` (≤ 64 keys) picks just
+  those keys from the same cached list (`pick_values`: unknown, unset-without-default and
+  `redacted` keys are absent). Real-omp test (temp `PI_CODING_AGENT_DIR`, or
   `TF_LAB_OMP_AGENT_DIR`; scans `/proc/*/cmdline` during the credential write):
   `cargo test -p tf-hostd omp_config -- --ignored --nocapture`.
 - **ai.complete** (`ai.rs`): `omp --mode json --no-session --no-tools --no-extensions --no-skills
@@ -146,6 +186,12 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   one retry with `smol` after a failed attempt when ≥ 1.5 s remain. `timeoutMs` default 20 000,
   clamped 2 000–60 000, semaphore queue included → `timeout` (retryable). 3 omp processes per
   daemon. Prompt and system text are never logged or returned; logs: task, role, model, ms, outcome.
+- **host.herdrRestart / host.herdrLoad / host.herdrConfig** (`crate::herdr_health`, architecture §3.29):
+  routed from `host.rs`; start a down herdr now (`force`: replace a running or unresponsive one), load the
+  installed herdr now (live handoff, else stop + start), per-host `autoRestart` / `idleUpdate` /
+  `idleMinutes` (`<home>/herdr.json`). Answer when done or after 20 s with `HerdrHealth`.
+- **Setup: herdr's omp integration** (`host.rs`): `integration.list` for the state, `herdr integration
+  status` for the versions ("out of date (v9; this herdr ships v10)") and as the fallback without a server.
 - **host.toolsUpdate / host.toolsConfig** (`tools.rs`, architecture §3.9): one updater per daemon,
   first run 2 min after start, then every 6 h + jitter while `auto` (`tools.json`; default on for
   `~/.teleflock`, off for other (lab / dev) homes). Installing runs hold `~/.cache/teleflock-tools.lock` (one installer per user
@@ -178,6 +224,21 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   after 30 days, then oldest first above 10 GiB. `upload::start(&paths, cancel)` (in `Ctx::create`)
   runs that cleanup and the sweeper once per daemon.
 
+- **move.\*** (`moves/`, architecture §3.28): moving an agent to another host; the app relays.
+  `check` (source preflight, asks the remote) / `probe` (target: matching clones, clone path, disk,
+  omp version, model) → `start` (source job: push, binary changes patch from a temporary index,
+  park the agent marked `moving`, `omp session pack`) → `read` (base64 slices ≤ 1 MiB of the packed
+  parts; the app uploads them with `upload.*`) → `receive` (target job: clone?, fetch, checkout or
+  new worktree, apply, `omp session unpack --cwd`, resume; every step journals its undo in
+  `<home>/moves/<id>/target.json`) → `finish` (`omp session moved --to`, card `moved`; idempotent).
+  `status` reports either job; `abort` rolls back (source: the agent resumes where it was). A
+  restart turns `moving` cards into `interrupted` and rolls half-done receives back
+  (`moves::start`, called in `Ctx::create`) — except a receive at the launch boundary (its journal
+  has `launching`): that one is checked against the board/session file until definite (`done`, rollback only when
+  surely absent; meanwhile the status is `confirming`, journal kept) and never rolled back under a
+  live agent (architecture §3.28). `finished_file` / `discard` in `upload.rs` hand the
+  uploaded parts to the receive.
+
 - **mcp.\*** (`mcp/`, architecture §3.15): omp's MCP servers. Config read and written in omp's own
   files and format (`<agent dir>/mcp.json`, `<folder>/.omp/mcp.json`, `.mcp.json` siblings) under omp's
   cross-process lock (`files.rs`: the pi-natives lock name, so a concurrent `/mcp add` never loses an
@@ -190,6 +251,40 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
   change runs omp's `/mcp reload` in the concerned interactive sessions (busy ones when their turn ends;
   `reload.rs`).
 
+- **skills.\*, plugins.\*** (`plugins/`, architecture §3.26): omp's skills (every provider, switched-off
+  ones included, Skillshare registry installs with updates) and plugins (npm / git / local packages,
+  marketplace plugins, marketplaces, catalogs). Reads run omp's own code in the embedded helper
+  `host/teleflock-plugins/teleflock-plugins.ts` (the MCP helper's runner, `HelperSpec` `HELPER`);
+  changes run `omp skill …` / `omp plugin …` without a shell or TTY, one at a time (`cli.rs`: argv
+  rules, omp's error and script-consent texts → `scripts_need_consent`); skill switches edit
+  `disabledExtensions`. Changes reload running sessions with `/reload-plugins` (`mcp/reload.rs`).
+
+- **hostSync.\*** (`hostsync/`, `mcp/sync.rs`, architecture §3.24): make this host like another.
+  `export` (source): omp's global layer as written (`omp config list --scope global`, omp ≥ 18.13.3),
+  user MCP servers masked, sign-ins of `omp auth export` by identity hash; nothing secret. `plan`
+  (target, pure `plan.rs`): one item per setting / role (`modelRoles` + `retry.fallbackChains`) / MCP
+  server (+ `mcpSecrets:<name>`) / sign-in, `add|change|remove|same|unknown|unsupported`, notes.
+  `keyBegin` (target): one-time X25519 key (memory only, 10 min, one use). `seal` (source): the chosen
+  secrets (auth export entries, stored MCP entries, credential setting values) → X25519 + HKDF-SHA256 +
+  AES-256-GCM to that key (`seal.rs`). `apply` (target): plan again, open the box (the sealed ids must
+  be chosen ones and cover every chosen secret), then `omp auth import -` (stdin), `omp config
+  set|reset` per setting (credentials via the extension's settings-write mode), the role records,
+  MCP entries under omp's lock, `/mcp reload`; one result per item. Logs: ids, counts, outcomes; a
+  refused box as a warning with its code, item count and transfer id prefix.
+  Tests: `cargo test -p tf-hostd hostsync ops::mcp::sync`; two-lab run `examples/e2e_hostsync.rs`.
+
+- **cleanup.\*** (`cleanup/`, architecture §3.17): the Cleanup page. `cleanup.worktrees` reports every
+  linked worktree of the repositories the session's workspaces, parked agents and automations name
+  (git facts, admin-dir times, size walk, `gh pr view`, board agents, omp's newest session there),
+  scanned in the background and followed with `waitMs`. `cleanup.remove` checks again (agent working
+  → `busy`, locked → `worktree_locked`, detached HEAD with unsaved commits → `orphan_commits` unless
+  `force`), then removes exactly like `worktree.remove {path}`; the branch stays. `cleanup.storage` /
+  `cleanup.storageRun` run `omp gc --json` with named categories only (`--blobs`, `--wal`,
+  `--compress`; never `--archive` or `--stale`, never without a category): a dry run, or an apply one
+  category at a time.
+
+- **session.artifacts / session.artifact / session.writeLocal / session.context** (`artifact_files.rs`, `xray.rs`, architecture §3.20): the session's artifacts dir (`local://` files, subagent outputs beside their transcripts, saved handoffs), listed without following symlinks and read only inside its kind's real root (relative `/` names, no `.`/`..`, outputs need their transcript); `session.writeLocal {agentId, text}` saves a paste (1 B–4 MiB) as the next `local://paste-<n>.md` (`n` = highest existing + 1; root created 0700 when missing, an existing root untouched; file 0600 via `O_EXCL`, a taken name moves on, symlinks never followed; no session file → `not_found`; the text is never logged); the bridge's `context` breakdown (`caps.context`, else `unsupported` with the restart hint), parsed leniently and bounded. Tests: `cargo test -p tf-hostd ops::artifact_files ops::xray`.
+
 ## Error codes (beyond `tf_proto::ApiError`'s list)
 | code | when | hint tells the user |
 |---|---|---|
@@ -200,6 +295,8 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
 | `dirty_worktree` | remove of a dirty worktree | retry with `force: true` |
 | `not_git_repo` | worktree op outside a repo | pick a repo folder |
 | `group_close_required` | closing a primary workspace with linked worktrees | `group: true` |
+| `worktree_locked` | `cleanup.remove` of a locked worktree (also with `force`) | `git worktree unlock <path>` first |
+| `orphan_commits` | `cleanup.remove` of a detached HEAD whose commit no branch, tag or remote branch contains | branch it (`git switch -c`), or `force` |
 | `busy` | `term.open` while another client controls it; resuming a live session | `takeover: true` / open the agent |
 | `ai_unavailable` | `ai.complete` without omp, or omp has neither the requested role nor `smol` | install omp ≥ 18.12 / assign the tiny role |
 | `ai_failed` | omp exited, reported an error or answered nothing (message: ≤ 300 chars of stderr/error) | — |
@@ -209,6 +306,8 @@ ops::tools::follow(&Arc<Ctx>)                       // Ctx::create: publish Host
 | `checksum_mismatch` | `upload.finish` with a `sha256` the received bytes don't have (the upload is dropped) | upload the file again |
 | `busy` (retryable) | `upload.begin` while 8 uploads run | wait for one to finish |
 | `busy` (retryable) | an agent launch whose new pane's shell never became ready (waited 45 s), or whose chosen pane's shell is not at an idle prompt | slow shell startup files; pick an idle pane |
+| `sealed_invalid` | `hostSync.apply` with a box that doesn't open with the transfer's key (changed on the way, other items than chosen) | start the copy again |
+| `expired` | `hostSync.apply` whose one-time key was used or is older than 10 min | start the copy again |
 
 ## Tests
 `cargo test -p tf-hostd ops::` — parsers (porcelain v2, numstat/name-status `-z`, worktree
@@ -230,3 +329,13 @@ chunks refused; racing duplicates land once), checksum, size and count caps, nam
 per-day uniqueness (never overwriting), owner-only modes, cancel (partial and unsent finished
 file), idle sweep (busy uploads kept), start-up cleanup of an earlier run's partials, pruning by age
 and total.
+`cargo test -p tf-hostd gh_auth` — gh 2.102's `gh auth login` output (no-TTY and interactive wording,
+gh before 2.40), `gh auth status` JSON and text (before 2.40, 2.40–2.80), identity validation and
+profile suggestions, the global config file, the setup items; a scripted `gh` (tempdir): device code
+→ done with `setup-git`, a refused approval → failed with gh's reason, cancel kills gh and its
+background child, Enter answered for the interactive wording, the status cache (one run, the
+checklist not waiting); git identity read and written with a temp `GIT_CONFIG_GLOBAL`.
+`cargo test -p tf-hostd gh_real -- --ignored --nocapture` runs the real gh with a temp `GH_CONFIG_DIR`,
+`HOME`, XDG dirs and `GIT_CONFIG_GLOBAL`: a fresh config is signed in nowhere, the sign-in reaches a
+one-time code and `https://github.com/login/device`, `auth.cancel` leaves no gh process and no
+`hosts.yml` (it never completes a sign-in; needs github.com).

@@ -1,6 +1,6 @@
 ## Default Permission
 
-Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer).
+Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images and items shared to TeleFlock.
 
 #### This default permission set includes the following:
 
@@ -15,6 +15,8 @@ Webview access to haptics, the notification permission flow, battery-optimisatio
 - `allow-start-dictation`
 - `allow-stop-dictation`
 - `allow-cancel-dictation`
+- `allow-share-image`
+- `allow-take-shares`
 
 ## Permission Table
 
@@ -262,6 +264,32 @@ Denies the request_notification_permission command without any pre-configured sc
 <tr>
 <td>
 
+`teleflock-android:allow-share-image`
+
+</td>
+<td>
+
+Enables the share_image command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-share-image`
+
+</td>
+<td>
+
+Denies the share_image command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `teleflock-android:allow-start-dictation`
 
 </td>
@@ -307,6 +335,32 @@ Enables the stop_dictation command without any pre-configured scope.
 <td>
 
 Denies the stop_dictation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-take-shares`
+
+</td>
+<td>
+
+Enables the take_shares command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-take-shares`
+
+</td>
+<td>
+
+Denies the take_shares command without any pre-configured scope.
 
 </td>
 </tr>

@@ -118,5 +118,12 @@ export default defineConfig({
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
     // Assets load from local disk inside Tauri, so bundle size matters far less than on the web.
     chunkSizeWarningLimit: 1024,
+    // Two pages: the app, and the desktop Quick capture window (`src-tauri/src/capture.rs` opens it).
+    rolldownOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        capture: fileURLToPath(new URL("./capture.html", import.meta.url)),
+      },
+    },
   },
 });

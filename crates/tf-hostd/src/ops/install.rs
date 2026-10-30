@@ -194,14 +194,14 @@ fn gh_issue(fetch: bool, pkgs: &Packages) -> SetupIssue {
     let why = "Pull request status, checks and merges on the board come from the GitHub CLI.";
     let target = GhTarget::of(std::env::consts::OS, std::env::consts::ARCH);
     let (fixable, how) = match target {
-        _ if cfg!(windows) => (false, " Install it with `winget install --id GitHub.cli -e`, then run `gh auth login`.".to_string()),
+        _ if cfg!(windows) => (false, " Install it with `winget install --id GitHub.cli -e`, then sign in from Host setup in the app (or run `gh auth login` on the host).".to_string()),
         None => (false, " There is no GitHub CLI release for this OS and architecture; see https://cli.github.com.".to_string()),
         Some(_) if !fetch => (false, needs("Downloading it", Pkg::Curl, pkgs)),
         Some(t) if resolve_bin(t.extractor()).is_none() => (false, needs("Unpacking it", if t.zip { Pkg::Unzip } else { Pkg::Tar }, pkgs)),
         Some(t) => (
             true,
             format!(
-                " Downloads the latest GitHub CLI release for {}/{} from github.com, checks it against the release's checksums and installs gh in ~/.local/bin (no root). Then sign in once on the host: `gh auth login`.",
+                " Downloads the latest GitHub CLI release for {}/{} from github.com, checks it against the release's checksums and installs gh in ~/.local/bin (no root). Then sign in from Host setup in the app (or run `gh auth login` on the host).",
                 t.os, t.arch
             ),
         ),
@@ -443,7 +443,7 @@ pub(crate) async fn apply(ctx: &Ctx, fix: &str) -> Result<(), ApiError> {
     let result = match installed {
         Ok(()) if fix == FIX_HERDR => ctx
             .herdr
-            .ensure_server()
+            .ensure_server_with(&crate::herdr_health::launch(&ctx.paths.home))
             .await
             .map(|_| ())
             .map_err(|e| ApiError::new("herdr_error", format!("herdr is installed, but its server did not start: {e}"))),

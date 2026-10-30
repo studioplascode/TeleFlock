@@ -1,13 +1,22 @@
-import { motion } from "motion/react";
-import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Paperclip, Sparkles, X } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Paperclip, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
 import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
 import { attachVideos, detachDraftVideos, MAX_DRAFT_VIDEOS, removeDraftVideo, retryVideos, useDraftVideos } from "@/core/draftVideos";
 import type { ThinkingLevel } from "@/core/gen";
-import { IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
+import { expandPastes } from "@/core/pastes";
+import { Button, IconButton, Kbd, Lightbox, LightboxTrigger, Popover, PopoverContent, PopoverTrigger, Select, type SelectOption, Switch, Textarea, cn, spring, toast } from "@/design";
+import { AgentRolesSection, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
+import { launchMainText, overridesSummary } from "@/features/agentRoles/roles";
+import { policyChipText } from "@/features/autoAnswer/format";
+import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
+import { AutoAnswerSection } from "@/features/autoAnswer/PolicyEditor";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
+import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
 import { templateSummary } from "@/features/workspace/shared/templates";
+import { PasteChips, PasteMenu } from "@/features/session/composer/PasteChips";
+import { usePasteAttach } from "@/features/session/composer/usePasteAttach";
 import { VideoChips } from "@/features/session/composer/VideoChips";
 import { MAX_TASK_IMAGES } from "./images";
 import { type DispatchOptions, suggestDispatchName } from "./store";
@@ -58,8 +67,13 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const [viewing, setViewing] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const ta = useRef<HTMLTextAreaElement>(null);
-  const latest = useRef(text);
-  latest.current = text;
+  // Large pastes become chips as in the session composer. No "Attach as local file": the agent's
+  // session (where local:// lives) only exists once the task has started it.
+  const paste = usePasteAttach({ draftKey, hostId, text, setText, ta, fileOff: "The new agent has no session yet: attach it as a block or inline" });
+  /** The task as it would be sent: paste tokens expanded. */
+  const expanded = paste.pastes.length ? expandPastes(text, paste.pastes) : text;
+  const latest = useRef(expanded);
+  latest.current = expanded;
   useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus(), text: () => latest.current }), []);
   const disabled = !!disabledReason;
   const canSend = !disabled && (!!text.trim() || images.length > 0 || videos.length > 0);
@@ -67,20 +81,27 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   // Name the task ahead of the send (same call as the send's, cached by ai.ts): after a pause of
   // ~1.2 s with a few words typed, so most sends skip the "Naming…" wait.
   const ai = useAiNaming(hostId);
-  const prefetch = ai && hostId && repo && !disabled ? prefetchKey(text) : null;
+  const prefetch = ai && hostId && repo && !disabled ? prefetchKey(expanded) : null;
   useAiSuggestion(hostId, prefetch, () => (hostId && repo && prefetch ? suggestDispatchName(hostId, repo, prefetch) : Promise.resolve(null)), { debounceMs: 1200 });
 
-  const send = () => {
+  const send = async () => {
     if (!canSend) return;
     const failed = videos.find((v) => v.phase === "failed");
     if (failed) {
       toast({ title: "A video didn't upload", description: `${failed.name}: ${failed.error ?? "unknown error"}. Retry it or remove it.`, status: "error" });
       return;
     }
+    // Paste tokens become their text (or `<attachment>` block), as omp's editor does on submit.
+    const prepared = await paste.prepare(text);
+    if (!prepared.ok) {
+      toast({ title: prepared.title, description: prepared.hint, status: "error" });
+      return;
+    }
     const sent = images;
     const sentVideos = videos.map((v) => v.id);
-    if (!onSend(text.trim(), sent, sentVideos)) return;
+    if (!onSend(prepared.text.trim(), sent, sentVideos)) return;
     clearText();
+    paste.sent(prepared.carried);
     // Only what was sent: an image or video attached meanwhile stays.
     setImages((cur) => cur.filter((i) => !sent.includes(i)));
     // The task waits for its videos' uploads now.
@@ -111,7 +132,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
     if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
-    }
+    } else paste.onPaste(e);
   };
 
   const onDrop = (e: DragEvent) => {
@@ -121,10 +142,10 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing || e.key !== "Enter") return;
+    if (e.nativeEvent.isComposing || paste.onKeyDown(e) || e.key !== "Enter") return;
     if ((!mobile && !e.shiftKey && !e.altKey) || e.ctrlKey || e.metaKey) {
       e.preventDefault();
-      send();
+      void send();
     }
   };
 
@@ -140,6 +161,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
       onDragLeave={() => setDragging(false)}
       onDrop={onDrop}
     >
+      <AnimatePresence>{paste.menu && <PasteMenu key="paste" paste={paste} mobile={mobile} />}</AnimatePresence>
       {images.length > 0 && (
         <div className="flex gap-2 overflow-x-auto px-3 pt-1 pb-2" aria-label="Attached images">
           {images.map((img, i) => (
@@ -160,10 +182,15 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
         </div>
       )}
       <VideoChips videos={videos} onRemove={(id) => removeDraftVideo(draftKey, id)} onRetry={(id) => retryVideos([id])} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 ? "pt-0" : "pt-1")} />
+      <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 || videos.length > 0 ? "pt-0" : "pt-1")} />
       <Textarea
         ref={ta}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true)}
+        onSelect={(e) => paste.onSelect(e.currentTarget)}
+        onCopy={(e) => paste.onCopy(e)}
+        onCut={(e) => paste.onCopy(e, true)}
+        onBlur={() => window.setTimeout(() => document.activeElement !== ta.current && paste.close(), 120)}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         placeholder={placeholder}
@@ -197,6 +224,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
               <Paperclip />
             </IconButton>
             <OptionsPopover hostId={hostId} options={options} onChange={onOptionsChange} mobile={mobile} />
+            <DispatchAgentOptions hostId={hostId} options={options} onChange={onOptionsChange} mobile={mobile} />
             <button
               type="button"
               role="switch"
@@ -283,7 +311,7 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
                 key={t.id}
                 type="button"
                 className={cn(row, t.id === options.templateId && "bg-accent/14 text-ink")}
-                onClick={() => onChange({ templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan })}
+                onClick={() => onChange({ ...options, templateId: t.id, model: t.model ?? DEFAULT, thinking: t.thinking ?? DEFAULT, plan: t.plan })}
               >
                 <LayoutTemplate className="size-4 shrink-0 text-mute" />
                 <span className="flex min-w-0 flex-1 flex-col">
@@ -318,5 +346,73 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
         </label>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/**
+ * More options of the agents dispatched from here: their own model roles and fallback chains, and
+ * decide for me. A footer chip with what is set opens them in a dialog (a sheet on phones).
+ */
+function DispatchAgentOptions({ hostId, options, onChange, mobile }: { hostId?: string; options: DispatchOptions; onChange(o: DispatchOptions): void; mobile: boolean }) {
+  const [open, setOpen] = useState(false);
+  const templates = useSettings((s) => s.templates);
+  const catalog = useModelCatalog(open ? hostId : undefined);
+  const roles = options.roleModels ?? {};
+  const chains = options.fallbackChains ?? {};
+  // The policy counts where the composer's host (Auto: the next pick) has decide for me.
+  const decides = !!useHostAutoAnswer(hostId);
+  const takesRoles = useHostTakesRoles(hostId);
+  const summary = [takesRoles ? overridesSummary(roles, chains) : null, policyChipText(decides ? options.autoAnswer : undefined)].filter(Boolean).join(" · ");
+  const what = "Model roles, fallback chains and decide for me of the dispatched agents";
+  // The main model is the template's, else the model menu's.
+  const template = templates.find((t) => t.id === options.templateId);
+  const model = template ? (template.model ?? DEFAULT) : options.model;
+  const thinking = template ? (template.thinking ?? DEFAULT) : options.thinking;
+  return (
+    <>
+      <button
+        type="button"
+        disabled={!hostId}
+        onClick={() => setOpen(true)}
+        aria-label={summary ? `More agent options: ${summary}` : "More agent options: model roles, fallback chains and decide for me"}
+        title={summary ? `${what}: ${summary}` : what}
+        className={cn(
+          "inline-flex h-7 min-w-0 shrink items-center gap-1 rounded-full px-2.5 text-2xs font-bold pressable focus-ring disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0",
+          summary ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "text-mute hover:bg-white/6 hover:text-ink",
+          mobile ? "max-w-[30vw]" : "max-w-[220px]",
+        )}
+      >
+        <SlidersHorizontal />
+        {summary ? <span className="truncate">{summary}</span> : !mobile && "More options"}
+      </button>
+      {hostId && (
+        <ResponsiveDialog
+          open={open}
+          onOpenChange={setOpen}
+          title="More agent options"
+          description="For the agents you dispatch from here."
+          icon={<SlidersHorizontal />}
+          width={760}
+          tall
+          footer={
+            <Button variant="primary" onClick={() => setOpen(false)} className={mobile ? "flex-1" : undefined}>
+              Done
+            </Button>
+          }
+        >
+          <div className="flex min-w-0 flex-col gap-5 pb-1">
+            <AgentRolesSection
+              hostId={hostId}
+              roles={roles}
+              chains={chains}
+              onChange={(patch) => onChange({ ...options, ...patch })}
+              mainModel={launchMainText(catalog?.models ?? [], model, thinking, catalog?.roles.find((r) => r.role === "default")?.model)}
+              mainWhere="set in the agent options menu"
+            />
+            <AutoAnswerSection hostId={hostId} value={options.autoAnswer} onChange={(autoAnswer) => onChange({ ...options, autoAnswer })} />
+          </div>
+        </ResponsiveDialog>
+      )}
+    </>
   );
 }

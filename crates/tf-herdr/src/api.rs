@@ -189,6 +189,30 @@ pub struct AgentStart {
     pub timeout_ms: Option<u64>,
 }
 
+/// `pane.report_agent_session`: which agent session a pane runs and (herdr ≥ 0.9.4,
+/// `resume_argv`) the exact command that reopens it when herdr restores the pane after a server
+/// restart. herdr types that command into the restored pane's shell, so it must start with a
+/// plain command name and hold no apostrophes or control characters (≤ 64 arguments, ≤ 8192
+/// bytes; `invalid_resume_argv` otherwise). It keeps the command only for the reporter that holds
+/// the pane (with no other reporter holding it: an agent herdr sees running there, of the same
+/// `agent` kind), else `resume_not_accepted`; and drops it when that agent exits while herdr runs.
+/// A report from a `source` other than herdr's own integrations (`herdr:<agent>`) leaves herdr's
+/// session reference alone; a command reported with it wins over herdr's built-in resume.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AgentSessionReport {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_session_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_argv: Option<Vec<String>>,
+}
+
 /// Wait options for `agent.prompt` / `agent.wait`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentWait {
@@ -574,6 +598,12 @@ impl HerdrClient {
     pub async fn pane_process_info(&self, pane_id: &str) -> Result<ProcessInfo> {
         Ok(self.request::<ProcessOne>("pane.process_info", json!({ "pane_id": pane_id })).await?.process_info)
     }
+
+    /// `pane.report_agent_session` ([`AgentSessionReport`]).
+    pub async fn pane_report_agent_session(&self, report: &AgentSessionReport) -> Result<()> {
+        self.request::<IgnoredAny>("pane.report_agent_session", report).await?;
+        Ok(())
+    }
 }
 
 /// `agent.explain` comes back either flat or wrapped (`{"type":…,"explain":{…}}`).
@@ -601,6 +631,19 @@ mod tests {
     fn split_params_shape() {
         let p = serde_json::to_value(PaneSplit { target_pane_id: Some("w1:p1".into()), direction: SplitDirection::Down, ..Default::default() }).unwrap();
         assert_eq!(p, json!({"target_pane_id":"w1:p1","direction":"down","focus":false}));
+    }
+
+    #[test]
+    fn report_session_params_shape() {
+        let r = AgentSessionReport {
+            pane_id: "w1:p1".into(),
+            source: "teleflock".into(),
+            agent: "omp".into(),
+            resume_argv: Some(vec!["omp".into(), "--resume=/s/a.jsonl".into()]),
+            ..Default::default()
+        };
+        let p = serde_json::to_value(r).unwrap();
+        assert_eq!(p, json!({"pane_id":"w1:p1","source":"teleflock","agent":"omp","resume_argv":["omp","--resume=/s/a.jsonl"]}));
     }
 
     #[test]

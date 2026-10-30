@@ -2,6 +2,8 @@ import { cronError, describeSpec, nextRuns, parseCron } from "../cron";
 import { apiError } from "../errors";
 import type { Automation, AutomationDraft, AutomationList, AutomationRun, AutomationTrigger, SchedulePreview, Started, WorktreeCreated } from "../gen";
 import { HOME, repoForPath, slug, WORKTREES } from "./data";
+import { agentOmpOf } from "./roleModels";
+import { checkPolicy } from "./autoAnswer";
 
 /** What the simulated tf-hostd scheduler needs from its demo host. */
 export interface AutomationHostEnv {
@@ -77,6 +79,9 @@ export class DemoAutomations {
       model: "anthropic/claude-sonnet-5",
       thinking: "medium",
       plan: false,
+      // Its subagents on the cheaper model; Codex limits fall back to the API.
+      roleModels: { task: "openai-codex/gpt-6-luna:medium" },
+      fallbackChains: { "openai-codex/*": ["openai/*"] },
       catchUp: true,
     }, now - 21 * DAY);
     const standup = this.add({
@@ -197,8 +202,23 @@ export class DemoAutomations {
     }
     if (d.worktree && !repoForPath(cwd)) throw apiError("invalid_params", `${cwd} is not inside a git repository (turn off “new worktree” to run in the folder itself)`);
     if (!prompt && !d.plan) throw apiError("invalid_params", "Write the prompt the agent starts with.");
+    const own = agentOmpOf(d);
     const now = this.env.now();
-    const fields = { name, enabled: d.enabled, schedule, cwd, worktree: d.worktree, prompt, model: d.model || undefined, thinking: d.thinking, plan: d.plan, catchUp: d.catchUp };
+    const fields = {
+      name,
+      enabled: d.enabled,
+      schedule,
+      cwd,
+      worktree: d.worktree,
+      prompt,
+      model: d.model || undefined,
+      thinking: d.thinking,
+      plan: d.plan,
+      roleModels: Object.keys(own.roles).length > 0 ? own.roles : undefined,
+      fallbackChains: Object.keys(own.chains).length > 0 ? own.chains : undefined,
+      catchUp: d.catchUp,
+      autoAnswer: d.autoAnswer == null ? undefined : checkPolicy(d.autoAnswer),
+    };
     let a: Automation;
     if (d.id) {
       a = this.byId(d.id);
@@ -220,7 +240,7 @@ export class DemoAutomations {
 
   /** Start the agent the way hostd does; a failure is recorded as a failed run (not thrown). */
   private launch(a: Automation, trigger: AutomationTrigger, at: number): AutomationRun {
-    const agent = { kind: "omp", model: a.model, thinking: a.thinking, plan: a.plan, prompt: a.prompt };
+    const agent = { kind: "omp", model: a.model, thinking: a.thinking, plan: a.plan, prompt: a.prompt, roleModels: a.roleModels, fallbackChains: a.fallbackChains, autoAnswer: a.autoAnswer };
     try {
       if (a.worktree) {
         const branch = `automation/${slug(a.name).slice(0, 40)}-${stamp(at)}`;

@@ -1,6 +1,8 @@
 import {
+  ArrowRightLeft,
   Bell,
   BellOff,
+  Boxes,
   Brain,
   Check,
   ChevronDown,
@@ -14,12 +16,14 @@ import {
   Pencil,
   PlugZap,
   Power,
+  Search,
   Send,
   Sparkles,
   Square,
   SquarePlus,
   SquareTerminal,
   Target,
+  Timer,
   X,
   Zap,
 } from "lucide-react";
@@ -28,6 +32,10 @@ import { type ButtonHTMLAttributes, type ReactNode, useState } from "react";
 import { draftKey, parseAgentKey, useAgent, useDraft, useSession, useUi } from "@/core";
 import type { ModelInfo, SessionMeta, ThinkingLevel } from "@/core/gen";
 import { openTerminal } from "@/features/board/agentActions";
+import { openDecideDialog } from "@/features/autoAnswer/DecideDialog";
+import { useCanDecide } from "@/features/autoAnswer/hooks";
+import { useCanMove } from "@/features/move/hosts";
+import { openMoveDialog } from "@/features/move/store";
 import { fuzzyScore } from "@/features/palette/fuzzy";
 import { GLOSSARY } from "@/features/shell/glossary";
 import { haptic } from "@/features/shell/haptics";
@@ -66,7 +74,8 @@ import {
 import { hostCall, useMute, usePending } from "../api";
 import { THINKING_LEVELS } from "../composer/slash";
 import { useSessionUi } from "../state";
-import { useModels } from "./useModels";
+import { useModels, useSessionRoles } from "./useModels";
+import { openFind } from "../find/store";
 
 const chipBase =
   "pressable focus-ring inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-bold whitespace-nowrap shadow-[inset_0_0_0_1px_var(--color-line-2)] disabled:opacity-45 max-md:gap-1 max-md:px-2";
@@ -144,6 +153,7 @@ function ModelList({ agentKey, onDone, mobile = false }: { agentKey: string; onD
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const { catalog, error, loading } = useModels(hostId);
+  const roles = useSessionRoles(hostId, agentId, catalog?.roles);
   const [busy, run] = usePending();
   const [query, setQuery, clearQuery] = useDraft(draftKey("search.model", hostId));
   const [sel, setSel] = useState("");
@@ -168,7 +178,7 @@ function ModelList({ agentKey, onDone, mobile = false }: { agentKey: string; onD
     const id = `${m.provider}/${m.id}`;
     return { value: `${group}|${id}`, selector: id, title: m.label ?? m.id, sub: id, ctx: m.contextWindow };
   };
-  const roleRows: ModelRow[] = (catalog?.roles ?? []).map((r) => ({ value: `role|${r.role}`, selector: r.model, title: `@${r.role}`, sub: r.model, role: r.role }));
+  const roleRows: ModelRow[] = roles.map((r) => ({ value: `role|${r.role}`, selector: r.model, title: `@${r.role}`, sub: r.model, role: r.role }));
 
   const q = query.trim();
   const groups: { heading: string; rows: ModelRow[] }[] = [];
@@ -280,8 +290,29 @@ export function ModelPicker({ agentKey }: { agentKey: string }) {
       </PopoverTrigger>
       <PopoverContent align="start" className="w-[420px] overflow-hidden p-0">
         <ModelList agentKey={agentKey} onDone={() => setOpen(false)} />
+        <RolesEntry agentKey={agentKey} />
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Opens this session's own model roles and fallback chains (`SessionRolesDialog`, `dialog: "roles"`). */
+function RolesEntry({ agentKey, mobile = false }: { agentKey: string; mobile?: boolean }) {
+  const open = () => useSessionUi.getState().openDialog(agentKey, "roles");
+  if (mobile)
+    return (
+      <Button variant="secondary" icon={<Boxes />} className="w-full" onClick={open}>
+        Roles (this session)…
+      </Button>
+    );
+  return (
+    <button type="button" onClick={open} className="flex w-full items-center gap-2.5 border-t border-line px-3.5 py-2.5 text-left hover:bg-white/6 focus-ring">
+      <Boxes className="size-4 shrink-0 text-accent-hi" />
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-semibold text-ink-2">Roles (this session)…</span>
+        <span className="block truncate text-2xs text-mute-2">A model per role and fallback chains, for this agent only</span>
+      </span>
+    </button>
   );
 }
 
@@ -349,7 +380,14 @@ export function ModelThinkingChip({ agentKey }: { agentKey: string }) {
         {t.current && <span className="text-mute">· {t.current}</span>}
         <ChevronDown className="size-3 text-mute" />
       </ControlChip>
-      <BottomSheet open={open} onOpenChange={setOpen} title="Model & thinking" description="For this session only (omp /switch, /effort)" autoFocus={false}>
+      <BottomSheet
+        open={open}
+        onOpenChange={setOpen}
+        title="Model & thinking"
+        description="For this session only (omp /switch, /effort)"
+        autoFocus={false}
+        footer={<RolesEntry agentKey={agentKey} mobile />}
+      >
         {t.enabled && (
           <div className="mb-3 flex flex-col gap-1.5">
             <span className="kicker">
@@ -495,6 +533,8 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
   const { meta } = useSession(agentKey);
   const caps = meta?.caps;
   const mute = useMute(agentKey);
+  const canMove = useCanMove(agentKey);
+  const canDecide = useCanDecide(agentKey);
   const mobile = useIsMobile();
   const [sheet, setSheet] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -541,9 +581,14 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
         run: () => void hostCall(hostId, "agent.export", { agentId }).then((r) => r.ok && toast({ title: "Session exported", description: r.value.path, status: "done" })),
       },
       { key: "newSession", icon: <SquarePlus />, def: ACTIONS.newSession, run: () => open("newSession") },
+      { key: "move", icon: <ArrowRightLeft />, def: ACTIONS.moveHost, disabled: !canMove, run: () => openMoveDialog(agentKey) },
+      ...(canDecide ? [{ key: "decide", icon: <Timer />, def: ACTIONS.decideForMe, run: () => openDecideDialog(agentKey) }] : []),
     ],
   });
-  const view: MenuAction[] = [{ key: "mute", icon: mute.muted ? <Bell /> : <BellOff />, def: mute.muted ? ACTIONS.unmute : ACTIONS.mute, run: () => void mute.toggle() }];
+  const view: MenuAction[] = [
+    { key: "find", icon: <Search />, def: { label: "Find in transcript", shortcut: mobile ? undefined : "Ctrl F", description: "Messages, thinking and tool output, earlier ones included" }, run: () => openFind(agentKey) },
+    { key: "mute", icon: mute.muted ? <Bell /> : <BellOff />, def: mute.muted ? ACTIONS.unmute : ACTIONS.mute, run: () => void mute.toggle() },
+  ];
   if (mobile) view.push({ key: "terminal", icon: <SquareTerminal />, def: ACTIONS.terminal, run: () => openTerminal(agentKey, true) });
   else
     view.push(

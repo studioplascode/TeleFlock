@@ -642,7 +642,7 @@ mod tests {
     }
 
     fn assistant(id: &str, text: &str) -> TranscriptItem {
-        TranscriptItem::Assistant(AssistantItem { id: id.into(), at: 2, text: text.into(), streaming: true, model: None, usage: None, stop_reason: None, error: None })
+        TranscriptItem::Assistant(AssistantItem { id: id.into(), at: 2, text: text.into(), streaming: true, model: None, usage: None, stop_reason: None, error: None, error_status: None, refusal: None })
     }
 
     fn tool(id: &str, output: Option<&str>) -> TranscriptItem {
@@ -669,7 +669,7 @@ mod tests {
 
     fn client(id: &str, sync: bool) -> ClientHandle {
         let info = ClientInfo { app: "teleflock-desktop".into(), version: "0.6.0".into(), platform: "linux".into(), device: "d".into(), features: None };
-        ClientHandle::with_features(id.into(), info, Features { zstd: false, session_sync: sync })
+        ClientHandle::with_features(id.into(), info, Features { session_sync: sync, ..Features::default() })
     }
 
     fn have_of(s: &SessionSnapshot) -> SessionHave {

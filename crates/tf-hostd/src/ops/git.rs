@@ -55,6 +55,8 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
             }
             to_value(out)
         }
+        HostMethod::GitIdentityReq(_) => to_value(crate::ops::gh_auth::identity().await?),
+        HostMethod::GitSetIdentity(p) => to_value(crate::ops::gh_auth::set_identity(ctx, p).await?),
         other => Err(ApiError::new("unknown_method", format!("{} is not a git method", other.name()))),
     }
 }
@@ -301,6 +303,21 @@ async fn git_run<S: AsRef<OsStr>>(
     })
 }
 
+/// [`git`] with extra environment (e.g. a temporary index: `GIT_INDEX_FILE`).
+pub(crate) async fn git_env<S: AsRef<OsStr>>(cwd: &Path, args: &[S], env: &[(&str, &str)], timeout: Duration) -> Result<CmdOut, ApiError> {
+    git_run(cwd, args, None, env, timeout).await
+}
+
+/// [`git`] for commands that talk to a remote (`push`, `fetch`, `clone`, `ls-remote`) without a
+/// person at the keyboard: never prompts, as [`fetch_branch`] (empty `GIT_ASKPASS`,
+/// `SSH_ASKPASS_REQUIRE=never`, ssh `BatchMode` and `ConnectTimeout`).
+pub(crate) async fn git_remote<S: AsRef<OsStr>>(cwd: &Path, args: &[S], timeout: Duration) -> Result<CmdOut, ApiError> {
+    let ssh = batch_ssh_command(cwd).await;
+    let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS_REQUIRE", "never")];
+    env.extend(ssh.as_deref().map(|s| ("GIT_SSH_COMMAND", s)));
+    git_run(cwd, args, None, &env, timeout).await
+}
+
 fn first_arg<S: AsRef<OsStr>>(args: &[S]) -> String {
     args.first().map(|a| a.as_ref().to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -509,6 +526,10 @@ pub(crate) struct WorktreeRecord {
     pub branch: Option<String>,
     pub bare: bool,
     pub detached: bool,
+    /// `locked [<reason>]`: the reason, empty when none was given.
+    pub locked: Option<String>,
+    /// `prunable <reason>`: its folder (or its `.git` file) is gone.
+    pub prunable: bool,
 }
 
 pub(crate) fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeRecord> {
@@ -547,6 +568,16 @@ pub(crate) fn parse_worktree_porcelain(text: &str) -> Vec<WorktreeRecord> {
             "detached" => {
                 if let Some(w) = cur.as_mut() {
                     w.detached = true;
+                }
+            }
+            "locked" => {
+                if let Some(w) = cur.as_mut() {
+                    w.locked = Some(val.to_string());
+                }
+            }
+            "prunable" => {
+                if let Some(w) = cur.as_mut() {
+                    w.prunable = true;
                 }
             }
             _ => {}
@@ -1240,6 +1271,11 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(w[0].branch.as_deref(), Some("main"));
         assert_eq!(w[1].branch.as_deref(), Some("feat/y"));
         assert!(w[2].detached && w[2].branch.is_none());
+        assert!(w.iter().all(|w| w.locked.is_none() && !w.prunable));
+        let text = "worktree /r\nHEAD abc\nbranch refs/heads/main\n\nworktree /w/a\nHEAD def\nbranch refs/heads/a\nlocked\n\nworktree /w/b\nHEAD def\nbranch refs/heads/b\nlocked on a usb disk\n\nworktree /w/c\nHEAD 123\ndetached\nprunable gitdir file points to non-existent location\n\n";
+        let w = parse_worktree_porcelain(text);
+        assert_eq!(w.iter().map(|w| w.locked.as_deref()).collect::<Vec<_>>(), [None, Some(""), Some("on a usb disk"), None]);
+        assert_eq!(w.iter().map(|w| w.prunable).collect::<Vec<_>>(), [false, false, false, true]);
     }
 
     #[test]
@@ -1485,7 +1521,6 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
     #[cfg(unix)]
     #[tokio::test]
     async fn repo_config_programs_never_run_on_reads() {
-        use std::os::unix::fs::PermissionsExt;
         let parent = tempfile::tempdir().unwrap();
         let td = fixture();
         let repo = parent.path().join("repo");
@@ -1494,8 +1529,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         let script = |dir: &Path, name: &str, code: u8| {
             let p = dir.join(name);
             let mark = marks.path().join(format!("{name}.ran"));
-            std::fs::write(&p, format!("#!/bin/sh\ntouch '{}'\nexit {code}\n", mark.display())).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_exe::write_exe(&p, format!("#!/bin/sh\ntouch '{}'\nexit {code}\n", mark.display()));
             p.display().to_string()
         };
         let ran = |name: &str| marks.path().join(format!("{name}.ran")).exists();

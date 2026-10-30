@@ -25,6 +25,17 @@ pub struct BadgeState {
     pub running: u32,
 }
 
+/// What the system knows about its user (desktop shells): input anywhere on the machine, not
+/// only in TeleFlock's window. The engine combines it with what the UI reports (`app.presence`)
+/// into the device presence it sends to hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SystemPresence {
+    /// Time since the last keyboard or pointer input anywhere in the user's session.
+    pub idle: Option<std::time::Duration>,
+    /// The session's screen is locked (nobody can see a notification).
+    pub locked: Option<bool>,
+}
+
 /// Implemented by the embedder. All methods are called from tokio tasks and must not block
 /// for long (dispatch to the UI thread internally if needed).
 pub trait Platform: Send + Sync + 'static {
@@ -51,5 +62,12 @@ pub trait Platform: Send + Sync + 'static {
     /// `AppCapabilities.notifications`.
     fn supports_notifications(&self) -> bool {
         true
+    }
+    /// System-wide input idle time and screen lock (Windows `GetLastInputInfo`, macOS
+    /// `CGEventSourceSecondsSinceLastEventType`, Linux desktop D-Bus services). Called about every
+    /// 15 s off the async runtime (`spawn_blocking`): a D-Bus round trip is fine, more is not.
+    /// Default: unknown, and presence then rests on what the UI reports.
+    fn system_presence(&self) -> SystemPresence {
+        SystemPresence::default()
     }
 }

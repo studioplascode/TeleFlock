@@ -239,7 +239,7 @@ fn s01_prompt_text() {
     assert_eq!(a.usage.as_ref().unwrap().output, 5);
     let sig = r.signals();
     assert!(sig.contains(&&Signal::TurnStarted));
-    assert!(sig.contains(&&Signal::TurnEnded { aborted: false, error: None }));
+    assert!(sig.contains(&&Signal::TurnEnded { aborted: false, error: None, refusal: None }));
     assert!(sig.iter().any(|s| matches!(s, Signal::Prompted { author: Some(a), .. } if a == "teleflock")));
     let cost = r.replica.usage().unwrap();
     assert_eq!(cost.output, 5);
@@ -401,6 +401,41 @@ fn s05_ask_ui_response() {
     assert_eq!(r.replica.answer("2", &wrong).unwrap_err().code, "invalid_params");
 }
 
+/// omp's ask dialog shows its recommendation only as the preselected row (`initialIndex`, also 0
+/// without one); the replica takes it from the ask call (`questions[].recommended`) and marks that
+/// option ★, which decide for me answers with. Same scenario, with `recommended: 1` (Blue).
+#[test]
+fn s05b_ask_recommended_option() {
+    fn recommend(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::Array(qs)) = m.get_mut("questions") {
+                    for q in qs.iter_mut().filter_map(Value::as_object_mut) {
+                        q.insert("recommended".into(), 1.into());
+                    }
+                }
+                m.values_mut().for_each(recommend);
+            }
+            Value::Array(a) => a.iter_mut().for_each(recommend),
+            _ => {}
+        }
+    }
+    let (at0, snap) = snapshot_from(&load("00-join"), false).unwrap();
+    let mut replica = Replica::new("agent");
+    replica.apply(&GuestEvent::Snapshot(snap), at0);
+    for mut row in load("05-ask-ui-response").into_iter().filter(|r| r.dir == "h2g") {
+        let asked = row.frame["t"] == "ui-request";
+        recommend(&mut row.frame);
+        replica.apply(&GuestEvent::Frame(HostFrame::from_value(row.frame)), row.at);
+        if asked {
+            break;
+        }
+    }
+    let needs = replica.needs().expect("the ask is pending");
+    assert_eq!(needs.options.iter().map(|o| (o.id.as_str(), o.recommended)).collect::<Vec<_>>(), [("Red", false), ("Blue", true)]);
+    assert!(replica.ui().unwrap().options[1].recommended);
+}
+
 #[test]
 fn s05a_ask_wrong_label() {
     let r = run("05a-ask-wrong-label");
@@ -417,7 +452,7 @@ fn s06_abort_and_bandwidth() {
     assert_eq!(a.stop_reason.as_deref(), Some("aborted"));
     assert!(!a.streaming);
     assert!(a.text.contains("one") && a.text.len() > 500);
-    assert!(r.signals().contains(&&Signal::TurnEnded { aborted: true, error: None }));
+    assert!(r.signals().contains(&&Signal::TurnEnded { aborted: true, error: None, refusal: None }));
     assert!(rows.iter().any(|i| matches!(i, TranscriptItem::Notice(n) if n.text == "teleflock interrupted")));
     // Bandwidth: compacted session events vs. raw relay frames.
     let ratio = r.raw_h2g as f64 / r.out_bytes as f64;
@@ -474,9 +509,11 @@ fn s07_parked_subagent_keeps_its_run_time() {
         { "id": "ReplyOk", "displayName": "task", "kind": "sub", "parentId": "Main", "status": "parked", "hasSessionFile": true, "createdAt": started, "lastActivity": parked_at },
     ] });
     let up = r.replica.apply(&GuestEvent::Frame(HostFrame::from_value(roster)), parked_at);
-    assert!(up.meta_changed, "the status changed");
+    assert!(!up.meta_changed, "parking a finished subagent changes nothing the user sees");
     let sub = &r.replica.meta().subagents[0];
-    assert_eq!(sub.status, SubagentStatus::Parked);
+    // omp's idle park says "finished", not how: the lifecycle/progress outcome (and the async-result
+    // the file holds) stay green; the wire's `Parked` is never produced any more (it was shown blue).
+    assert_eq!(sub.status, SubagentStatus::Done);
     assert_eq!(sub.ended_at, Some(started + 1529), "parked minutes later, still a 1.5 s run");
 }
 
@@ -701,12 +738,14 @@ fn live_only_ids_are_unique_per_replica_lifetime() {
     first.apply(&retry, at0);
     let before = live_only(&first);
     assert_eq!(before.len(), 2);
-    // A reload rebuilds the rows from the entries (live-only ones go); new ones continue.
+    // A reload rebuilds the rows from the entries: the warning comes back as it was (a kept live
+    // row), the retry streak goes; new ones continue.
     first.apply(&GuestEvent::Snapshot(Snapshot { resync: true, ..snap.clone() }), at0);
     first.apply(&notice("two"), at0);
     let reloaded = live_only(&first);
-    assert_eq!(reloaded.len(), 1);
-    assert!(!before.contains(&reloaded[0]));
+    assert_eq!(reloaded.len(), 2);
+    assert_eq!(reloaded[0], before[0], "the warning, kept");
+    assert!(!before.contains(&reloaded[1]));
     // tf-hostd restarted: a new replica of the same session, the same events.
     let mut second = Replica::new("x");
     second.apply(&GuestEvent::Snapshot(snap), at0);

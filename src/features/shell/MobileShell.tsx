@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect } from "react";
 import { cn, spring, toast } from "@/design";
 import { navigate, type Route, useHosts, useInbox, useNotifications, useRoute, useUi } from "@/core";
+import { isBare } from "@/app/routes";
 import { terminalRouteKey, terminalTabTarget, useLastTerminal } from "@/features/terminal/lastTerminal";
 import { EdgeSwipeBack } from "./EdgeSwipeBack";
 import { haptic } from "./haptics";
@@ -33,11 +34,16 @@ function tabFor(r: Route): Tab {
     case "hosts":
     case "settings":
     case "usage":
+    case "wrapped":
     case "activity":
     case "automations":
     case "omp":
     case "mcp":
+    case "plugins":
     case "accounts":
+    case "cleanup":
+    case "wall":
+    case "ambient":
       return "more";
     default:
       return "board";
@@ -192,7 +198,7 @@ export function MobileShell() {
     route.name === "more" ||
     (route.name === "terminal" && !route.agentId && !route.paneId) ||
     terminalRoot;
-  const nav = !focus && !keyboard && route.name !== "agent";
+  const nav = !focus && !keyboard && route.name !== "agent" && !isBare(route);
   return (
     <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--kb-inset,0px)] pl-[env(safe-area-inset-left)]">
       <main className="relative min-h-0 flex-1">

@@ -33,12 +33,25 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.3"
 # Image originals (originals.rs)
 sha2 = "0.11"
+# Webhook signatures (notify/push.rs): HMAC-SHA256, already in Cargo.lock through russh.
+hmac = "0.13"
 # Automations: cron schedules in the host's time zone (automations/cron.rs)
 jiff = "0.2"
+# herdr's config for the servers TeleFlock starts (herdr_health/managed.rs): the user's
+# config.toml edited in place, comments kept; already in Cargo.lock through proc-macro-crate.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 # zstd streams to clients that speak the `zstd` feature (clients.rs)
 async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 # omp's cross-process config lock names (xxh64), so MCP config writes exclude omp's own (ops/mcp/files.rs)
 twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
+# hostSync sealing (ops/hostsync/seal.rs): X25519 + HKDF-SHA256 + AES-256-GCM, all already in
+# Cargo.lock (curve25519-dalek through russh, hkdf through p256, aes-gcm through tf-collab).
+curve25519-dalek = "5"
+hkdf = "0.13"
+aes-gcm = "0.10"
+zeroize = "1"
+# Find in a session / search every session (find/): substring search, already in Cargo.lock through serde_json.
+memchr = "2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk"] }

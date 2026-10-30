@@ -5,6 +5,7 @@ export type UiDialog =
   | { kind: "newAgent"; hostId?: string; workspaceId?: string }
   | { kind: "pastSessions"; hostId?: string }
   | { kind: "hostEditor"; hostId?: string }
+  | { kind: "hostSync"; hostId?: string; sourceHostId?: string }
   | { kind: "shortcuts" }
   | { kind: "fanOut"; hostId?: string; cwd?: string; prompt?: string };
 
@@ -27,7 +28,7 @@ export interface UiState {
   /** Board keyboard selection (agent key). */
   selectedKey: string | null;
   select(key: string | null): void;
-  /** Session focus mode: title bar stays, sidebar/split/bottom nav hide. */
+  /** Focus mode (the session's and the wall's `F`): title bar stays, sidebar/split/bottom nav hide. */
   focusMode: boolean;
   setFocusMode(on: boolean): void;
 }

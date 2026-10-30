@@ -31,13 +31,16 @@ pub struct Daemon {
     pub persist: Arc<crate::state::persist::Persist>,
     /// Keeps omp and herdr up to date (`<home>/tools.json`).
     pub tools: crate::ops::tools::Tools,
+    /// Presence, notification routing and push channels (`<home>/notify.json`, `crate::notify`).
+    pub notify: crate::notify::Notifier,
     pub shutdown: CancellationToken,
     pub started_at: i64,
     /// Identity of the binary this daemon runs (`attach --replace` compares it).
     pub exe_id: String,
     /// Clients past hello, over every herdr session.
     clients: AtomicUsize,
-    ctxs: tokio::sync::Mutex<HashMap<String, Arc<Ctx>>>,
+    /// One herdr session's context per key, created once ([`Flights`]).
+    ctxs: Flights<Arc<Ctx>>,
 }
 
 impl Daemon {
@@ -76,23 +79,58 @@ impl Daemon {
         stop_policy(requester, &crate::version_line(), self.clients())
     }
 
-    /// The context of one herdr session, created on first use and shared by its clients.
+    /// The context of one herdr session, created on first use and shared by its clients. Creation
+    /// waits for herdr's server to start (up to a minute): only callers for the same session wait
+    /// for it, and it runs to the end even when the caller that began it goes away.
     pub async fn ctx_for(self: &Arc<Self>, session: &str) -> Result<Arc<Ctx>, ApiError> {
         if self.shutdown.is_cancelled() {
             return Err(ApiError::new("shutting_down", "tf-hostd is shutting down").retryable());
         }
-        let mut ctxs = self.ctxs.lock().await;
-        if let Some(ctx) = ctxs.get(session) {
-            return Ok(ctx.clone());
-        }
-        let ctx = Ctx::create(self, session).await?;
-        info!(session, "herdr session context created");
-        ctxs.insert(session.to_string(), ctx.clone());
-        Ok(ctx)
+        let (daemon, name) = (self.clone(), session.to_string());
+        let create = async move {
+            let ctx = Ctx::create(&daemon, &name).await?;
+            info!(session = %name, "herdr session context created");
+            Ok::<_, ApiError>(ctx)
+        };
+        self.ctxs
+            .get_or_try_init(session, create)
+            .await
+            .map_err(|e| ApiError::new("internal", format!("creating the herdr session context failed: {e}")).retryable())?
     }
 
     async fn all_ctxs(&self) -> Vec<Arc<Ctx>> {
-        self.ctxs.lock().await.values().cloned().collect()
+        self.ctxs.all().await
+    }
+}
+
+/// Values created at most once per key, without holding any lock while one is being created:
+/// callers for the same key wait for the one creation, other keys never do. The creation runs in
+/// a task of its own, so a caller that gives up (a client that went away) does not cancel it half
+/// way; a failed creation is forgotten and the next caller tries again.
+struct Flights<T> {
+    cells: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<T>>>>,
+}
+
+impl<T: Clone + Send + Sync + 'static> Flights<T> {
+    fn new() -> Self {
+        Self { cells: tokio::sync::Mutex::new(HashMap::new()) }
+    }
+
+    async fn get_or_try_init<E: Send + 'static>(
+        &self,
+        key: &str,
+        make: impl Future<Output = Result<T, E>> + Send + 'static,
+    ) -> Result<Result<T, E>, tokio::task::JoinError> {
+        let cell = self.cells.lock().await.entry(key.to_string()).or_default().clone();
+        if let Some(v) = cell.get() {
+            return Ok(Ok(v.clone()));
+        }
+        tokio::spawn(async move { cell.get_or_try_init(|| make).await.cloned() }).await
+    }
+
+    /// Every value created so far.
+    async fn all(&self) -> Vec<T> {
+        self.cells.lock().await.values().filter_map(|c| c.get().cloned()).collect()
     }
 }
 
@@ -231,10 +269,11 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     let shutdown = CancellationToken::new();
     let persist = crate::state::persist::Persist::load(paths.state_file.clone());
     persist.spawn_saver(shutdown.child_token());
-    let (originals, notes) = (crate::originals::dir(&paths.home), crate::notes::dir(&paths.home));
+    let (originals, notes, rows) = (crate::originals::dir(&paths.home), crate::notes::dir(&paths.home), crate::live_rows::dir(&paths.home));
     tokio::task::spawn_blocking(move || {
         crate::originals::prune(&originals);
         crate::notes::prune(&notes);
+        crate::live_rows::prune(&rows);
     });
     // The app uploaded this build's extension before starting it: bring a consented global copy
     // up to date before omp loads it again.
@@ -252,6 +291,9 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     // Automatic tool updates default on for the real daemon (`~/.teleflock`), off for lab homes.
     let tools = crate::ops::tools::Tools::load(paths.home.join("tools.json"), paths.is_default_home());
     tools.spawn(shutdown.child_token());
+    // omp's stats index for `host.usage`: synced on demand; warmed every 30 min on the real daemon.
+    crate::ops::usage::start(&paths, persist.clone(), shutdown.child_token());
+    let notify = crate::notify::Notifier::load(&paths.home, shutdown.child_token());
     let mut listener = Listener::start(bound, &paths).with_context(|| format!("bind {}", paths.endpoint()))?;
     info!(endpoint = %paths.endpoint(), "listening");
 
@@ -262,14 +304,27 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
         bridge,
         persist: persist.clone(),
         tools,
+        notify,
         shutdown: shutdown.clone(),
         started_at: now_ms(),
         exe_id: exe_identity(),
         clients: AtomicUsize::new(0),
-        ctxs: tokio::sync::Mutex::new(HashMap::new()),
+        ctxs: Flights::new(),
     });
 
     crate::automations::start(&daemon);
+    // Auto-resume tickets (limits, restarts): due ones resume with no app connected.
+    crate::recovery::start(&daemon);
+    // Limit stops reported by 2.1.0 bridges, their `context` guard (§3.22).
+    crate::limit_resume::start(&daemon);
+    // Decide for me answers with no app connected: watch the sessions that have it on.
+    crate::autoanswer::start(&daemon);
+    // Push channels deliver with no app connected: watch the sessions this host knows (§3.21).
+    crate::notify::start(&daemon);
+    // herdr's servers are watched (and started again) with no app connected (§3.29).
+    crate::herdr_health::start(&daemon);
+    // Agents the ledger holds come back after a reboot with no app connected (§3.25).
+    crate::restart::start(&daemon);
     spawn_signal_handler(shutdown.clone());
 
     let mut conns = tokio::task::JoinSet::new();
@@ -297,6 +352,9 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
         ctx.state.persist_now();
         ctx.close().await;
     }
+    // The agent ledger's last write (after the cards above are saved): awaited, not left to the
+    // workers' detached tails.
+    crate::restart::flush_ledger(&daemon.paths.home, Duration::from_secs(3)).await;
     daemon.omp.shutdown().await;
     daemon.persist.save_now();
     Ok(0)
@@ -359,5 +417,72 @@ mod tests {
         // The same or a newer build replaces it (upgrade, or `tf-hostd stop` of this build).
         assert!(stop_policy(Some(own), own, 2).is_ok());
         assert!(stop_policy(Some("tf-hostd 0.4.0 proto 1"), own, 2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_slow_creation_blocks_only_its_own_key_and_runs_once() {
+        use std::sync::atomic::AtomicU32;
+        let flights = Arc::new(Flights::<u32>::new());
+        let runs = Arc::new(AtomicU32::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let slow = |value: u32| {
+            let (runs, gate) = (runs.clone(), gate.clone());
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                gate.notified().await;
+                Ok::<_, String>(value)
+            }
+        };
+        // Two callers for "a" while its creation waits (a herdr server taking its time to start).
+        let first = tokio::spawn({
+            let (f, make) = (flights.clone(), slow(1));
+            async move { f.get_or_try_init("a", make).await }
+        });
+        let second = tokio::spawn({
+            let (f, make) = (flights.clone(), slow(2));
+            async move { f.get_or_try_init("a", make).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Another key is not held up behind it, and the registry lock is free.
+        let other = tokio::time::timeout(Duration::from_secs(2), flights.get_or_try_init("b", async { Ok::<_, String>(9) })).await;
+        assert_eq!(other.expect("an unrelated session waited for a slow one").unwrap().unwrap(), 9);
+        assert!(tokio::time::timeout(Duration::from_secs(2), flights.all()).await.is_ok());
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "one creation for both callers");
+        gate.notify_one();
+        let (a, b) = (first.await.unwrap().unwrap().unwrap(), second.await.unwrap().unwrap().unwrap());
+        assert_eq!(a, b, "both callers get the one value");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let mut all = flights.all().await;
+        all.sort();
+        assert_eq!(all, vec![a.min(9), a.max(9)]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_creation_is_tried_again_and_a_caller_that_leaves_does_not_cancel_it() {
+        let flights = Flights::<u32>::new();
+        assert_eq!(flights.get_or_try_init("a", async { Err::<u32, _>("boom".to_string()) }).await.unwrap(), Err("boom".to_string()));
+        assert!(flights.all().await.is_empty());
+        assert_eq!(flights.get_or_try_init("a", async { Ok::<_, String>(5) }).await.unwrap(), Ok(5));
+        assert_eq!(flights.get_or_try_init("a", async { Ok::<_, String>(6) }).await.unwrap(), Ok(5), "created once");
+
+        // The caller gives up while the creation runs: it still completes and is kept.
+        let flights = Arc::new(Flights::<u32>::new());
+        let done = Arc::new(tokio::sync::Notify::new());
+        let waiter = tokio::spawn({
+            let (f, done) = (flights.clone(), done.clone());
+            async move {
+                f.get_or_try_init("a", async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    done.notify_one();
+                    Ok::<_, String>(7)
+                })
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        waiter.abort();
+        tokio::time::timeout(Duration::from_secs(2), done.notified()).await.expect("the creation was cancelled with its caller");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(flights.get_or_try_init("a", async { Ok::<_, String>(8) }).await.unwrap(), Ok(7));
     }
 }

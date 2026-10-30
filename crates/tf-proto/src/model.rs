@@ -145,6 +145,12 @@ wire_struct! {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[ts(as = "Option<Vec<SetupFixError>>", optional)]
         pub failed: Vec<SetupFixError>,
+        /// The GitHub CLI is signed in on the host (`gh auth status`; issue `sign-in-gh`, completed
+        /// with `gh.authStart`). Absent: gh is not installed, or an older daemon.
+        pub gh_signed_in: Option<bool>,
+        /// git's `user.name` and `user.email` are set (issue `set-git-identity`, fixed with
+        /// `git.setIdentity`). Absent: git is not installed, or an older daemon.
+        pub git_identity: Option<bool>,
     }
 }
 
@@ -165,6 +171,12 @@ wire_struct! {
         pub setup: SetupStatus,
         /// tf-hostd keeping omp and herdr up to date (absent from older daemons).
         pub tools: Option<ToolUpdates>,
+        /// The host's decide-for-me default (§3.23, `host.autoAnswerSet`); absent from daemons
+        /// without decide-for-me, so apps hide its controls for them.
+        pub auto_answer: Option<crate::autoanswer::AutoAnswer>,
+        /// This herdr session's server: up or down, TeleFlock restarting it, loading a newer
+        /// installed herdr (§3.29). Absent from older daemons, so apps hide the herdr controls.
+        pub herdr_health: Option<crate::herdr::HerdrHealth>,
         /// Agents removed because their omp session file was deleted (omp's cleanup or by hand),
         /// newest first, last 30 days (≤ 200). Clients drop what they keep about them (dispatch
         /// entries, notifications, drafts). Carried in `HostInfo` so older apps ignore it.
@@ -392,6 +404,33 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// What omp's provider error is, by its text and status (`RetryWait.kind`).
+    /// * `rateLimit`: HTTP 429, "rate limit", "too many requests".
+    /// * `usageLimit`: an account usage, quota or credit limit.
+    /// * `overloaded`: the provider is overloaded or at capacity (503, 529, "overloaded").
+    /// * `other`: any other retryable provider error (timeouts, 5xx, dropped streams).
+    pub enum RetryKind { RateLimit, UsageLimit, Overloaded, Other }
+}
+
+wire_struct! {
+    /// omp's own auto-retry of a provider error, while it waits for the next attempt
+    /// (`auto_retry_start` … the retry starting, `auto_retry_end`, an abort). The agent is waiting
+    /// on the provider, not on the user, and not stuck.
+    pub struct RetryWait {
+        pub kind: RetryKind,
+        /// omp's attempt counter (`0` when omp reports none) and its budget.
+        pub attempt: u32,
+        pub max_attempts: u32,
+        /// Host time of `auto_retry_start`.
+        pub since: Millis,
+        /// When omp retries (host time: `since` + omp's delay).
+        pub retry_at: Millis,
+        /// omp's error text, cut.
+        pub error: String,
+    }
+}
+
 wire_struct! {
     /// omp-specific facts about an agent (present when the agent is omp).
     pub struct OmpInfo {
@@ -418,9 +457,28 @@ wire_struct! {
         pub cost: Option<CostInfo>,
         pub todos: Option<TodoSummary>,
         pub subagents: Option<SubagentSummary>,
+        /// Background jobs of the session and its subagents (bridge ≥ 2.1.0 with `caps.jobs`):
+        /// absent while there are none.
+        pub jobs: Option<crate::jobs::JobsSummary>,
+        /// omp is waiting to retry a provider error (rate limit, usage limit, overload); the
+        /// agent is not stuck and nobody has to answer. Absent otherwise.
+        pub retry: Option<RetryWait>,
         pub queue: QueueInfo,
         pub turn_started_at: Option<Millis>,
         pub last_turn_ended_at: Option<Millis>,
+        /// omp's idle recap of where the session stands (history.db `session_recaps`, written
+        /// after `recap.idleSeconds` idle), while nothing happened in the session since; absent
+        /// otherwise (no recap yet, recaps off, or a newer turn).
+        pub recap: Option<IdleRecap>,
+    }
+}
+
+wire_struct! {
+    /// One idle recap omp wrote for a session ("Tests pass; PR body drafted; waiting on …").
+    pub struct IdleRecap {
+        pub text: String,
+        /// When omp journaled it (second precision).
+        pub at: Millis,
     }
 }
 
@@ -529,11 +587,18 @@ wire_struct! {
         /// Marked done and its herdr pane closed: lives in Done until resumed (`agent.resume`,
         /// or prompting it), or until its omp session file is deleted (then `HostInfo.pruned`).
         pub parked: Option<Parked>,
+        /// The agent (or subagents of its omp session) stopped on a provider limit, or a restart
+        /// cut it off mid-turn, and resumes by itself or on Continue (host auto-resume, §3.22, §3.25).
+        pub auto_resume: Option<crate::autoresume::AutoResume>,
+        /// Decide for me (§3.23): the agent's policy, while one applies, and the countdown on its
+        /// pending question.
+        pub auto_answer: Option<crate::autoanswer::AgentAutoAnswer>,
     }
 }
 
 wire_struct! {
-    /// A finished agent whose pane TeleFlock closed when it was marked done.
+    /// A finished agent whose pane TeleFlock closed when it was marked done, or (`ended`) an agent
+    /// whose omp process ended without anyone closing it and that is not back yet.
     pub struct Parked {
         /// When the pane was closed.
         pub at: Millis,
@@ -542,6 +607,13 @@ wire_struct! {
         /// The linked git worktree it ran in. Mark done closed that worktree's herdr workspace, so
         /// `worktree.remove {path}` deletes the checkout (hosts ≥ 0.5.2; older hosts omit it).
         pub worktree: Option<LinkedWorktree>,
+        /// Moving, or moved, to another host (`move.*`, hosts ≥ 0.7.0): resuming a `moved` copy
+        /// here forks it.
+        pub moved: Option<crate::moves::ParkedMove>,
+        /// Its omp process ended without anyone closing it (herdr stopped or crashed, the host
+        /// restarted, omp crashed; hosts ≥ 0.7.0): the card sits in Review, not Done, and comes
+        /// back where it stopped (`Agent.autoResume` kind `restart`, `agent.autoResumeNow`, §3.25).
+        pub ended: Option<crate::autoresume::AgentEnded>,
     }
 }
 

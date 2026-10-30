@@ -854,9 +854,11 @@ async fn installed_version(bin: &Path, tool: Tool) -> Option<String> {
 }
 
 /// Process output: `text` = stdout then stderr, ANSI-stripped (the CLIs print to both).
+#[derive(Debug)]
 pub(crate) struct Out {
     pub(crate) code: i32,
     pub(crate) stdout: String,
+    pub(crate) stderr: String,
     pub(crate) text: String,
 }
 
@@ -879,9 +881,21 @@ pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(
     env: &[(&str, &str)],
     env_remove: &[&str],
 ) -> Result<Out, String> {
+    run_in(&std::env::temp_dir(), bin, args, timeout, env, env_remove).await
+}
+
+/// [`run`] in `cwd`.
+pub(crate) async fn run_in<S: AsRef<std::ffi::OsStr>>(
+    cwd: &Path,
+    bin: &Path,
+    args: &[S],
+    timeout: Duration,
+    env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> Result<Out, String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
-        .current_dir(std::env::temp_dir())
+        .current_dir(cwd)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -922,7 +936,7 @@ pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(
         Ok(out) => {
             let stdout = strip_ansi(&String::from_utf8_lossy(&out.stdout));
             let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
-            Ok(Out { code: out.status.code().unwrap_or(-1), text: format!("{stdout}\n{stderr}"), stdout })
+            Ok(Out { code: out.status.code().unwrap_or(-1), text: format!("{stdout}\n{stderr}"), stdout, stderr })
         }
         Err(e) => Err(format!("{name} {}: {e}", shown())),
     }
@@ -1138,7 +1152,6 @@ mod tests {
     #[cfg(unix)]
     mod fake {
         use super::super::*;
-        use std::os::unix::fs::PermissionsExt;
 
         /// A temp dir with fake `omp`, `herdr` and `curl` scripts. Their behaviour is driven by
         /// files in the dir (`omp.ver`, `omp.check`, …); every invocation appends to `calls`.
@@ -1200,9 +1213,7 @@ printf '{"version":"%s","protocol":22,"endpoint_generation":%s}' "$(cat "$d/herd
             pub fn new() -> Lab {
                 let dir = tempfile::tempdir().unwrap();
                 for (name, body) in [("omp", OMP), ("herdr", HERDR), ("curl", CURL)] {
-                    let p = dir.path().join(name);
-                    std::fs::write(&p, body).unwrap();
-                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    crate::test_exe::write_exe(&dir.path().join(name), body);
                 }
                 let lab = Lab { dir };
                 lab.set("omp.ver", "18.12.3");
@@ -1410,12 +1421,10 @@ printf '{"version":"%s","protocol":22,"endpoint_generation":%s}' "$(cat "$d/herd
     #[tokio::test]
     async fn timeouts_kill_the_whole_process_group() {
         let dir = tempfile::tempdir().unwrap();
-        use std::os::unix::fs::PermissionsExt;
         let tool = dir.path().join("slow");
         let pidfile = dir.path().join("child.pid");
         // An "installer" in the background, then the tool itself hangs.
-        std::fs::write(&tool, format!("#!/bin/sh\nsleep 30 &\necho $! > {}\nsleep 30\n", pidfile.display())).unwrap();
-        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exe::write_exe(&tool, format!("#!/bin/sh\nsleep 30 &\necho $! > {}\nsleep 30\n", pidfile.display()));
         let Err(err) = run::<&str>(&tool, &[], Duration::from_millis(700), &[], &[]).await else { panic!("the hung tool did not time out") };
         assert!(err.contains("timed out"), "{err}");
         let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();

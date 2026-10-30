@@ -18,11 +18,12 @@
 
 mod auth;
 pub mod files;
-mod helper;
+pub(crate) mod helper;
 pub mod json;
 mod model;
-mod reload;
+pub(crate) mod reload;
 mod secrets;
+pub(crate) mod sync;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -103,6 +104,7 @@ impl Mcp {
         Mcp {
             agent_dir: omp_agent_dir(),
             helper: HelperEnv {
+                spec: &helper::MCP,
                 omp: omp_bin(),
                 ext_dir: ctx.paths.home.join("ext"),
                 run_dir: ctx.paths.run.clone(),
@@ -131,7 +133,7 @@ impl Mcp {
 
 /// The `cwd` param: an existing absolute folder, resolved like omp's `process.cwd()` (symlinks
 /// followed), or `None` for the user level.
-fn folder(cwd: Option<&str>) -> Result<Option<PathBuf>, ApiError> {
+pub(crate) fn folder(cwd: Option<&str>) -> Result<Option<PathBuf>, ApiError> {
     let Some(raw) = cwd.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
     let p = Path::new(raw);
     if !p.is_absolute() {

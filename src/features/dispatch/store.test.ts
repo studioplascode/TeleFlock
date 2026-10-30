@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import type { AutoAnswer, HostState, WorktreeCreateParams } from "@/core/gen";
 import type { DispatchEntry } from "./store";
 
 // The store persists to localStorage, which bun doesn't provide: an in-memory stand-in.
@@ -96,5 +97,91 @@ describe("hosts, images and workload", () => {
     };
     // ag2 is already running (counted as an agent), the old start is past the window.
     expect(pendingByHost(threads, new Set(["ag2"]), 70_000)).toEqual({ a: 2, c: 1 });
+  });
+});
+
+describe("the Quick capture webview", () => {
+  test("is told apart from the main window by its page", async () => {
+    const { isCaptureWebview } = await import("./store");
+    expect(isCaptureWebview("/capture.html")).toBe(true);
+    expect(isCaptureWebview("/src/capture/capture")).toBe(true);
+    expect(isCaptureWebview("/")).toBe(false);
+    expect(isCaptureWebview("/index.html")).toBe(false);
+  });
+
+  test("does not fail the main window's uploading entries on load, the main window does", async () => {
+    const entry = { id: "up1", prompt: "x", createdAt: 1, branch: "dispatch/x", name: "x", phase: "uploading", options: { templateId: null, model: "default", thinking: "default", plan: false } };
+    const persisted = () => JSON.stringify({ state: { threads: { "h\u0000/r": [entry] }, lastHost: null, lastRepo: null }, version: 2 });
+    const phaseOf = () => (JSON.parse(mem["tf.dispatch"] ?? "{}") as { state?: { threads?: Record<string, { phase: string }[]> } }).state?.threads?.["h\u0000/r"]?.[0]?.phase;
+    const here = (globalThis as { location?: unknown }).location;
+    try {
+      // Distinct specifiers load the module afresh: its startup code runs once per load.
+      const capture = "./store?capture-window";
+      const main = "./store?main-window";
+      mem["tf.dispatch"] = persisted();
+      (globalThis as { location?: unknown }).location = { pathname: "/capture.html" };
+      const c = (await import(capture)) as typeof import("./store");
+      expect(c.useDispatch.getState().threads["h\u0000/r"]?.[0]?.phase).toBe("uploading");
+      expect(phaseOf()).toBe("uploading");
+
+      mem["tf.dispatch"] = persisted();
+      (globalThis as { location?: unknown }).location = { pathname: "/index.html" };
+      const m = (await import(main)) as typeof import("./store");
+      expect(m.useDispatch.getState().threads["h\u0000/r"]?.[0]?.phase).toBe("failed");
+    } finally {
+      (globalThis as { location?: unknown }).location = here;
+    }
+  });
+});
+
+describe("decide for me", () => {
+  test("a task's own policy goes only to a host with decide for me (Auto: the host it went to)", async () => {
+    // Dynamic, as above: these load the store, which hydrates from localStorage at module load.
+    const { core } = await import("@/core");
+    const { coreStore } = await import("@/core/store/store");
+    const { dispatchTask, threadKey, useDispatch } = await import("./store");
+    const policy: AutoAnswer = { enabled: true, afterSecs: 600, onlyWhenNoApp: true };
+    const host = (autoAnswer?: AutoAnswer) => ({ rev: 1, state: { info: autoAnswer ? { autoAnswer } : {}, agents: [], workspaces: [] } as unknown as HostState });
+    const hosts = coreStore.getState().hosts;
+    // aaNew has decide for me (its default off), aaOld is a tf-hostd from before it.
+    coreStore.setState({ hosts: { ...hosts, aaNew: host({ enabled: false, afterSecs: 1_200, onlyWhenNoApp: false }), aaOld: host() } });
+    const SENDS = 5;
+    const sent = new Map<string, WorktreeCreateParams>();
+    let allSent!: () => void;
+    // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+    const created = new Promise<void>((r) => {
+      allSent = r;
+    });
+    const realHost = core.host;
+    core.host = (hostId) => ({
+      call: (method, params) => {
+        const p = params as unknown as WorktreeCreateParams;
+        if (method === "worktree.create" && hostId.startsWith("aa")) sent.set(`${hostId}/${p.label}`, p);
+        if (sent.size === SENDS) allSent();
+        return Promise.resolve({ path: "/w", branch: p.branch, workspaceId: "w" } as never);
+      },
+    });
+    try {
+      const options = { templateId: null, model: "default", thinking: "default" as const, plan: false };
+      const auto = threadKey("auto:farm", "github.com/acme/decide");
+      const send = (hostId: string, prompt: string, own: boolean, key?: string) =>
+        [hostId, dispatchTask({ key, hostId, repo: "/r/decide", prompt, options: own ? { ...options, autoAnswer: policy } : options, taken: [], suggest: null })] as const;
+      const runs = [
+        send("aaNew", "own policy", true),
+        send("aaNew", "host default", false),
+        send("aaOld", "older host", true),
+        send("aaNew", "auto picked new", true, auto),
+        send("aaOld", "auto picked old", true, auto),
+      ];
+      expect(runs.length).toBe(SENDS);
+      await created;
+      const policies = runs.map(([hostId, e]) => sent.get(`${hostId}/${e.name}`)?.agent?.autoAnswer ?? null);
+      expect(policies).toEqual([policy, null, null, policy, null]);
+      // The composer keeps it for the next send, whichever host that goes to.
+      expect(useDispatch.getState().options?.autoAnswer).toEqual(policy);
+    } finally {
+      core.host = realHost;
+      coreStore.setState({ hosts });
+    }
   });
 });

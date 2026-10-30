@@ -11,9 +11,11 @@
 //! samples 01/02/11). Prefix-diffing is exact in both cases and makes mid-turn joins work too.
 //!
 //! **Ids** are stable across snapshot and live frames: user (and inbound IRC) `u<ts>`,
-//! assistant/thinking blocks `a<ts>.<block>`, tools `t:<toolCallId>`, model/thinking markers
-//! `m<entryId>`, compaction `c<entryId>`, notices `n<epoch>.<seq>`, retry streaks `r<epoch>.<seq>`
-//! (`epoch`: the replica's lifetime, so a later replica of the session never reuses them).
+//! assistant/thinking blocks `a<ts>.<block>`, the error row of a message that failed without text
+//! `a<ts>.e`, tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction `c<entryId>`,
+//! notices `n<epoch>.<seq>` (a standing notice the bridge announces again on every resync, e.g. a
+//! config warning: `n:<key>`), retry streaks `r<epoch>.<seq>` (`epoch`: the replica's lifetime, so a
+//! later replica of the session never reuses them).
 //!
 //! **Rows end as the session file has them.** A row's final content depends only on the session's
 //! entries (collab's, or omp's session file that tf-hostd reads for bridge-served sessions) and on
@@ -23,12 +25,18 @@
 //! again exactly as a snapshot computes it (a tool's arguments from the recorded call, durations
 //! from omp's own timestamps), so a row built live and the same row rebuilt from the file after a
 //! resync or a tf-hostd restart are equal field for field, and clients that cache rows by hash
-//! keep them. Live-only: notices (`n…`, `r…`) and progress a tool reports after its result (async
-//! `task` calls of omp < 18.13, whose late updates refresh the row's view).
+//! keep them. Rows the file never gets are kept as [`LiveRow`]s (`live_rows.rs`: warning and error
+//! notices, a turn's terminal error omp does not persist, i.e. a provider refusal) and put back
+//! where they were. Live-only: info notices, retry streaks and progress a tool reports after its
+//! result (async `task` calls of omp < 18.13, whose late updates refresh the row's view).
 
+mod failure;
 mod irc;
+mod live_rows;
+pub mod retry;
 mod spend;
 mod tools;
+mod subagents;
 mod ui;
 mod util;
 
@@ -40,15 +48,17 @@ use tf_proto::{
     ActiveTool, AppendField, AssistantItem, Capabilities, ChangedFile, CompactionItem, ContextUsage, CostInfo, CostSplit, FileStatus,
     HistoryPage, ImageRef, Liveness, Millis, ModeItem, ModelRef, NeedsYou, NoticeItem, NoticeLevel, OmpMode, PulseKind, QueueInfo,
     SessionEvent, SessionMeta, SessionSnapshot, Subagent, SubagentStatus, ThinkingItem, ThinkingLevel, TodoPhase, TpsSplit,
-    TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo, IrcItem,
+    TokenUsage, ToolItem, ToolStatus, TranscriptItem, UiRequest, UserItem, GoalInfo, IrcItem, Refusal,
 };
 
 use crate::frame::{AgentSnapshot, HostFrame, SessionHeader, SessionState, UiRequestFrame};
 use crate::guest::{EndReason, GuestEvent, Snapshot};
 use util::{arr, b, clip, content_images, content_text, f, first_line, non_empty, s, shown_sha256, ts, u};
 
+pub use live_rows::{LiveRow, MAX_LIVE_ROWS};
 pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, Spend};
 pub use ui::UiReply;
+use failure::{error_row_id, visible_text, Ending};
 use spend::Playback;
 
 /// Rows carried by the `reset` event; older rows page through [`Replica::history`].
@@ -141,7 +151,9 @@ pub fn merge_queue(primary: &QueueInfo, extra: &QueueInfo) -> QueueInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Signal {
     TurnStarted,
-    TurnEnded { aborted: bool, error: Option<String> },
+    /// The run ended: `error` is how its last message failed (omp's words, see
+    /// `failure::Ending`), `refusal` when the provider refused it.
+    TurnEnded { aborted: bool, error: Option<String>, refusal: Option<Refusal> },
     /// A user (or guest, or synthetic) message entered the conversation.
     Prompted { text: String, author: Option<String> },
     Asked { request_id: String },
@@ -159,6 +171,9 @@ pub enum Signal {
     /// Row `id` got a note ([`RowNote`], the row's notes so far): tf-hostd persists it and hands
     /// it back with [`Replica::keep_notes`] before the session's next snapshot.
     Noted { id: String, note: RowNote },
+    /// A row only seen live was kept ([`LiveRow`]): tf-hostd persists it and hands it back with
+    /// [`Replica::keep_rows`] before the session's next snapshot.
+    RowKept { row: LiveRow },
 }
 
 /// Result of [`Replica::apply`].
@@ -237,6 +252,19 @@ struct SubState {
     session_file: Option<String>,
 }
 
+impl SubState {
+    /// A newer `running` (a retry or resume runs the subagent again): a `failed` or `aborted` seen
+    /// before it is stale and must not outrank it.
+    fn restarted(&mut self) {
+        if matches!(self.lifecycle.as_deref(), Some("failed" | "aborted")) {
+            self.lifecycle = None;
+        }
+        if let Some(p) = self.progress.as_mut().filter(|p| matches!(s(p, "status"), Some("failed" | "aborted"))) {
+            p["status"] = Value::String("running".to_owned());
+        }
+    }
+}
+
 /// What the main session journal says that collab does not mirror (`mode_change`, `custom`,
 /// `model_usage`), plus the full images of user rows.
 #[derive(Debug, Clone)]
@@ -309,8 +337,17 @@ pub struct Replica {
     running: bool,
     phase: Phase,
     turn_output: bool,
-    last_stop: Option<String>,
-    last_error: Option<String>,
+    /// How the last assistant message ended (its `message_end`), for `Signal::TurnEnded`.
+    last_ending: Ending,
+    /// The last message that failed without text (its error row is `a<ts>.e`): an auto-retry
+    /// starting next supersedes it.
+    last_failed: Option<Millis>,
+    /// The row carrying the error of this run's last message (and its timestamp), while that is a
+    /// failure: kept as a [`LiveRow`] when the run ends with it (omp does not persist every terminal
+    /// error).
+    turn_failure: Option<(Millis, String)>,
+    /// Failed attempts omp's auto-retry superseded (message timestamps): no error row.
+    retried: HashSet<Millis>,
     last_event_at: Option<Millis>,
     turn_started_at: Option<Millis>,
     /// Streamed chars this turn (for the per-turn average `SessionMeta.tps`).
@@ -327,11 +364,24 @@ pub struct Replica {
     /// tf-hostd restarts, so a new replica of the session must never reuse an earlier one's ids.
     epoch: String,
     retry: Option<RetryStreak>,
+    /// omp is waiting to retry a provider error (`auto_retry_start` … its end, see [`retry`]).
+    retry_wait: Option<tf_proto::RetryWait>,
+    /// How the last run ended when it failed (omp's error text), until the next run starts.
+    tail_error: Option<String>,
     counted: HashSet<String>,
     /// The main agent's assistant turns (`None` until the first usage record).
     main_spend: Option<Spend>,
     /// Completed `task` results (`details.usage`): the floor of the subagent spend.
     task_spend: Spend,
+    /// How finished subagents ended, as the session file recorded it (agent id → outcome); see
+    /// `subagents.rs`. Rebuilt with the replica from the same entries.
+    outcomes: BTreeMap<String, subagents::Outcome>,
+    /// The same, as the subagent transcripts record it (a nested subagent's end is only in its
+    /// parent's transcript); from the [`ArtifactLedger`].
+    artifact_outcomes: BTreeMap<String, subagents::Outcome>,
+    /// Subagents whose own transcript ends mid-turn (their process died under them); from the
+    /// [`ArtifactLedger`].
+    interrupted: std::collections::BTreeSet<String>,
     /// Artifact transcripts (subagent tree, advisor), kept across resyncs of the same session.
     artifacts: Option<Artifacts>,
     /// Subagent/advisor replies being replayed for `Liveness.tps`.
@@ -349,6 +399,9 @@ pub struct Replica {
     /// What was noted of rows live that the session file does not keep (row id → note), kept
     /// across snapshot reloads and handed back by tf-hostd after a restart.
     notes: HashMap<String, RowNote>,
+    /// Rows only seen live, oldest first ([`LiveRow`]), kept across snapshot reloads of the session
+    /// and handed back by tf-hostd after a restart.
+    live_rows: Vec<LiveRow>,
     /// Full-resolution originals of user rows' images (row id → one slot per image): TUI pastes'
     /// source files and copies tf-hostd kept. Kept across snapshot reloads.
     originals: HashMap<String, Vec<Option<String>>>,
@@ -375,8 +428,10 @@ impl Replica {
             running: false,
             phase: Phase::Waiting,
             turn_output: false,
-            last_stop: None,
-            last_error: None,
+            last_ending: Ending::default(),
+            last_failed: None,
+            turn_failure: None,
+            retried: HashSet::new(),
             last_event_at: None,
             turn_started_at: None,
             turn_chars: 0,
@@ -389,9 +444,14 @@ impl Replica {
             seq: 0,
             epoch: new_epoch(),
             retry: None,
+            retry_wait: None,
+            tail_error: None,
             counted: HashSet::new(),
             main_spend: None,
             task_spend: Spend::default(),
+            outcomes: BTreeMap::new(),
+            artifact_outcomes: BTreeMap::new(),
+            interrupted: std::collections::BTreeSet::new(),
             artifacts: None,
             playback: Vec::new(),
             subs: BTreeMap::new(),
@@ -401,6 +461,7 @@ impl Replica {
             expected_authors: VecDeque::new(),
             queued_sent: VecDeque::new(),
             notes: HashMap::new(),
+            live_rows: Vec::new(),
             originals: HashMap::new(),
             expected_originals: VecDeque::new(),
             journal: Journal::default(),
@@ -449,6 +510,38 @@ impl Replica {
     /// The notes taken of rows so far (row id → note).
     pub fn notes(&self) -> &HashMap<String, RowNote> {
         &self.notes
+    }
+
+    /// Restores rows only seen live (persisted from [`Signal::RowKept`], oldest first) ahead of
+    /// those kept since. Call it before the session's next snapshot, which puts them back.
+    pub fn keep_rows(&mut self, rows: impl IntoIterator<Item = LiveRow>) {
+        let mut rows: Vec<LiveRow> = rows.into_iter().filter(|r| !self.live_rows.iter().any(|l| l.item.id() == r.item.id())).collect();
+        rows.append(&mut self.live_rows);
+        let over = rows.len().saturating_sub(MAX_LIVE_ROWS);
+        rows.drain(..over);
+        self.live_rows = rows;
+    }
+
+    /// The rows only seen live kept so far, oldest first.
+    pub fn live_rows(&self) -> &[LiveRow] {
+        &self.live_rows
+    }
+
+    /// Keeps `item` (a row in the transcript, as it is to come back) as a [`LiveRow`] after the row
+    /// before it; goes out as [`Signal::RowKept`].
+    fn keep_row(&mut self, item: TranscriptItem, out: &mut Update) {
+        let id = item.id();
+        let after = match self.order.iter().position(|x| *x == id) {
+            Some(i) => i.checked_sub(1).map(|i| self.order[i].clone()),
+            None => self.order.last().cloned(),
+        };
+        self.live_rows.retain(|r| r.item.id() != id);
+        if self.live_rows.len() >= MAX_LIVE_ROWS {
+            self.live_rows.remove(0);
+        }
+        let row = LiveRow { after, item };
+        self.live_rows.push(row.clone());
+        out.signals.push(Signal::RowKept { row });
     }
 
     /// Notes `add` on row `id`; a change goes out as [`Signal::Noted`] (also while a snapshot
@@ -558,6 +651,33 @@ impl Replica {
         self.turn_started_at.filter(|_| self.running)
     }
 
+    /// omp is waiting to retry a provider error, while that holds ([`retry::STALE_AFTER_MS`] past
+    /// its due time with no end it stops being claimed). Cleared by `auto_retry_end`, the delayed
+    /// continue, an abort and a new run.
+    pub fn retry_wait(&self, now: Millis) -> Option<&tf_proto::RetryWait> {
+        self.retry_wait.as_ref().filter(|w| retry::current(w, now))
+    }
+
+    /// omp's error text when the last run ended in a failure, until a new run starts. omp's
+    /// provider errors (HTTP 429, overload, usage limits) end a run this way once its retries are
+    /// over.
+    pub fn tail_error(&self) -> Option<&str> {
+        self.tail_error.as_deref().filter(|_| !self.running)
+    }
+
+    /// When the newest conversation row (user, assistant, thinking or tool; not notices,
+    /// compactions or mode changes) started: anything omp summed up after this has seen the
+    /// whole conversation so far (tf-hostd's idle recaps).
+    pub fn last_turn_row_at(&self) -> Option<Millis> {
+        self.order.iter().rev().filter_map(|id| self.items.get(id)).find_map(|item| match item {
+            TranscriptItem::User(i) => Some(i.at),
+            TranscriptItem::Assistant(i) => Some(i.at),
+            TranscriptItem::Thinking(i) => Some(i.at),
+            TranscriptItem::Tool(i) => Some(i.at),
+            _ => None,
+        })
+    }
+
     /// Session spend as omp's status line totals it: main (assistant turns + journal
     /// `model_usage`) + subagents (`max` of task results, artifact tree, live progress) +
     /// advisor. `None` until anything was billed. See [`spend`] for the sources.
@@ -599,6 +719,7 @@ impl Replica {
         let mut out = Update::default();
         let before = self.meta.clone();
         self.artifacts = Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() });
+        self.set_artifact_outcomes(ledger.outcomes(), ledger.interrupted());
         self.playback.retain(|p| p.end > now);
         self.playback.extend(calls.iter().filter_map(|c| Playback::of(c, now)));
         self.refresh_meta();
@@ -612,7 +733,7 @@ impl Replica {
     /// The replica's artifact totals differ from `ledger`'s (first scan, a resync of another
     /// session, a rewritten transcript).
     pub fn artifacts_stale(&self, ledger: &ArtifactLedger) -> bool {
-        self.artifacts != Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() })
+        self.artifacts != Some(Artifacts { subagents: ledger.subagents(), advisor: ledger.advisor() }) || self.artifact_outcomes != ledger.outcomes() || self.interrupted != ledger.interrupted()
     }
 
     /// A subagent/advisor reply is still being replayed into `Liveness.tps` at `now`.
@@ -770,6 +891,9 @@ impl Replica {
         let artifacts = if keep_artifacts { self.artifacts.take() } else { None };
         let playback = if keep_artifacts { std::mem::take(&mut self.playback) } else { Vec::new() };
         let queued_sent = if same_session { std::mem::take(&mut self.queued_sent) } else { VecDeque::new() };
+        // Rows only seen live go back into this session's transcript (also the ones tf-hostd handed
+        // back before the first snapshot).
+        let live_rows = if keep_artifacts { std::mem::take(&mut self.live_rows) } else { Vec::new() };
         // Notice and retry ids (`n<epoch>.<seq>`, `r<epoch>.<seq>`) never repeat with other content
         // after a reload.
         let (seq, epoch) = (self.seq, std::mem::take(&mut self.epoch));
@@ -781,6 +905,7 @@ impl Replica {
         self.originals = originals;
         self.expected_originals = expected_originals;
         self.queued_sent = queued_sent;
+        self.live_rows = live_rows;
         self.journal = journal;
         self.artifacts = artifacts;
         self.playback = playback;
@@ -794,11 +919,13 @@ impl Replica {
         for agent in &snap.welcome.agents {
             self.subs.entry(agent.id.clone()).or_default().snapshot = Some(agent.clone());
         }
-        let entries = supersede_retried(&snap.entries);
+        let (entries, retried) = failure::retried_attempts(&snap.entries);
+        self.retried = retried;
         let mut scratch = Update::default();
         for entry in entries {
             self.entry(entry, &mut scratch);
         }
+        live_rows::restore(&mut self.order, &mut self.items, &self.live_rows);
         // What a reload links or notes (a prompt echoed only in the snapshot) must be kept too.
         out.signals.extend(scratch.signals.into_iter().filter(|s| matches!(s, Signal::Noted { .. } | Signal::OriginalsKept { .. })));
         // Rows from a durable snapshot are final.
@@ -852,7 +979,13 @@ impl Replica {
                     }
                 }
                 for a in agents {
-                    self.subs.entry(a.id.clone()).or_default().snapshot = Some(a.clone());
+                    let sub = self.subs.entry(a.id.clone()).or_default();
+                    // Running again after the roster said it was not (a retry or resume): the
+                    // earlier failure is over. A first or repeated `running` proves nothing.
+                    if a.status == "running" && sub.snapshot.as_ref().is_some_and(|prev| prev.status != "running") {
+                        sub.restarted();
+                    }
+                    sub.snapshot = Some(a.clone());
                 }
                 self.subs.retain(|_, s| s.snapshot.is_some() || s.progress.is_some() || s.lifecycle.is_some());
                 out.pulse(PulseKind::Event, 1);
@@ -862,8 +995,8 @@ impl Replica {
                 out.pulse(PulseKind::Event, 1);
             }
             HostFrame::UiRequest { request } => {
-                let call_id = self.call_for_request(request);
-                self.ui.request(request, call_id, self.now);
+                let (call_id, recommended) = self.call_for_request(request);
+                self.ui.request(request, call_id, recommended, self.now);
             }
             HostFrame::UiRequestEnd { req_id } => self.ui.end(*req_id),
             HostFrame::Bye { reason } => self.end(reason.clone(), out),
@@ -881,11 +1014,16 @@ impl Replica {
         let ty = s(ev, "type").unwrap_or("");
         match ty {
             "agent_start" => {
+                // omp's delayed continue (once the retry is due) or a new run: nothing is waited for.
+                if self.retry_wait.as_ref().is_some_and(|w| !self.running || retry::over_at_agent_start(w, self.now)) {
+                    self.retry_wait = None;
+                }
                 if !self.running {
                     out.signals.push(Signal::TurnStarted);
                     self.turn_started_at = Some(self.now);
                     self.turn_chars = 0;
                     self.last_line = None;
+                    self.tail_error = None;
                 }
                 self.running = true;
                 self.phase = Phase::Waiting;
@@ -917,8 +1055,7 @@ impl Replica {
                         }
                         self.assistant(msg, fin, out);
                         if fin {
-                            self.last_stop = s(msg, "stopReason").map(str::to_owned);
-                            self.last_error = non_empty(msg, "errorMessage").map(str::to_owned);
+                            self.last_ending = Ending::of(msg);
                         }
                     }
                     Some("toolResult") => {
@@ -950,6 +1087,11 @@ impl Replica {
                 };
                 let text = s(ev, "message").unwrap_or("").to_owned();
                 let source = s(ev, "source").map(str::to_owned);
+                // omp's `xd://` mount notices (`SessionTools.#notifyXdevMountDelta`): tool plumbing
+                // that lists every mounted MCP tool, not something to read in the conversation.
+                if level == NoticeLevel::Info && source.as_deref() == Some("xdev") {
+                    return;
+                }
                 // Presence churn (our own joins/leaves on every resync) is not transcript-worthy.
                 let presence = source.as_deref() == Some("collab")
                     && (text.ends_with("joined the collab session")
@@ -958,7 +1100,8 @@ impl Replica {
                 if presence {
                     out.signals.push(Signal::Notice { level, text });
                 } else {
-                    self.notice(level, text, source, out);
+                    // A standing notice (bridge ≥ 2.1: config warnings) comes again with every resync.
+                    self.notice_row(level, text, source, non_empty(ev, "key"), out);
                 }
             }
             "auto_compaction_start" => {
@@ -984,7 +1127,8 @@ impl Replica {
     }
 
     fn finish_turn(&mut self, out: &mut Update) {
-        let aborted = self.last_stop.as_deref() == Some("aborted");
+        let ending = std::mem::take(&mut self.last_ending);
+        let aborted = ending.stop.as_deref() == Some("aborted");
         // Close anything still marked live.
         let streaming_ids: Vec<String> = self
             .order
@@ -1038,10 +1182,29 @@ impl Replica {
         // and `turn_start`: this run's output must not make that prompt a steer.
         self.turn_output = false;
         self.status_line = None;
-        if was {
-            let error = if aborted { None } else { self.last_error.clone().filter(|_| self.last_stop.as_deref() == Some("error")) };
-            out.signals.push(Signal::TurnEnded { aborted, error });
+        self.tail_error = ending.error.clone().filter(|_| !aborted);
+        if aborted {
+            self.retry_wait = None;
         }
+        if was {
+            self.keep_turn_failure(out);
+            out.signals.push(Signal::TurnEnded { aborted, error: ending.error, refusal: ending.refusal });
+        }
+    }
+
+    /// The run ended in a failure: its error row is kept as a [`LiveRow`], since omp does not persist
+    /// every terminal error (a provider refusal, never); a rebuild puts it back only where the file
+    /// lacks it. A refusal's row comes back without the text the provider refused. A failed message
+    /// with text is omp's to keep.
+    fn keep_turn_failure(&mut self, out: &mut Update) {
+        let Some((_, id)) = self.turn_failure.take() else { return };
+        let Some(TranscriptItem::Assistant(row)) = self.items.get(&id) else { return };
+        if row.error.is_none() || (!row.text.is_empty() && row.refusal.is_none()) {
+            return;
+        }
+        let mut row = row.clone();
+        row.text.clear();
+        self.keep_row(TranscriptItem::Assistant(row), out);
     }
 
     fn retry_start(&mut self, ev: &Value, out: &mut Update) {
@@ -1049,18 +1212,13 @@ impl Replica {
         let max = u(ev, "maxAttempts").unwrap_or(0) as u32;
         let error = s(ev, "errorMessage").unwrap_or("").to_owned();
         let delay = f(ev, "delayMs").unwrap_or(0.0) / 1000.0;
-        // The failed attempt's empty error row is superseded by the retry notice.
-        let failed: Vec<String> = self
-            .order
-            .iter()
-            .rev()
-            .take(3)
-            .filter(|id| matches!(self.items.get(*id), Some(TranscriptItem::Assistant(a)) if a.text.is_empty() && a.error.is_some()))
-            .cloned()
-            .collect();
-        for id in failed {
-            self.remove(&id, out);
+        // The failed attempt's error row is superseded by the retry notice (and stays away when the
+        // session file brings the attempt back).
+        if let Some(t) = self.last_failed.take() {
+            self.retried.insert(t);
+            self.remove(&error_row_id(t), out);
         }
+        self.turn_failure = None;
         let streak = match &self.retry {
             Some(r) if attempt > 1 => r.clone(),
             _ => {
@@ -1079,11 +1237,13 @@ impl Replica {
         });
         self.upsert(item, out);
         self.retry = Some(streak);
+        self.retry_wait = Some(retry::wait(self.now, attempt, max, delay * 1000.0, &error));
         out.signals.push(Signal::Retry { attempt, max, error });
     }
 
     fn retry_end(&mut self, ev: &Value, out: &mut Update) {
         self.status_line = None;
+        self.retry_wait = None;
         let Some(streak) = self.retry.take() else { return };
         let attempt = u(ev, "attempt").unwrap_or(0);
         let (level, text) = if b(ev, "success") {
@@ -1099,10 +1259,33 @@ impl Replica {
     }
 
     fn notice(&mut self, level: NoticeLevel, text: String, source: Option<String>, out: &mut Update) {
-        self.seq += 1;
-        let id = format!("n{}.{}", self.epoch, self.seq);
+        self.notice_row(level, text, source, None, out);
+    }
+
+    /// A notice row; warnings and errors are kept as [`LiveRow`]s. `key`: a standing notice (a config
+    /// warning) that bridges ≥ 2.1 announce again with every resync: one row per key.
+    fn notice_row(&mut self, level: NoticeLevel, text: String, source: Option<String>, key: Option<&str>, out: &mut Update) {
+        let id = match key {
+            Some(key) => {
+                let id = format!("n:{}", clip(key, 96));
+                if self.items.contains_key(&id) {
+                    return;
+                }
+                id
+            }
+            None => {
+                self.seq += 1;
+                format!("n{}.{}", self.epoch, self.seq)
+            }
+        };
+        let text = failure::cap(&text, failure::ERROR_CAP);
         out.signals.push(Signal::Notice { level, text: text.clone() });
-        self.upsert(TranscriptItem::Notice(NoticeItem { id, at: self.now, level, text, source }), out);
+        let keep = self.emit && live_rows::keeps_notice(level, source.as_deref());
+        let item = TranscriptItem::Notice(NoticeItem { id, at: self.now, level, text, source });
+        self.upsert(item.clone(), out);
+        if keep {
+            self.keep_row(item, out);
+        }
     }
 
     // ── messages ───────────────────────────────────────────────────────
@@ -1121,8 +1304,9 @@ impl Replica {
         }
         let model = s(msg, "model").map(str::to_owned);
         let usage = msg.get("usage").map(token_usage);
-        let stop = s(msg, "stopReason").map(str::to_owned);
-        let error = non_empty(msg, "errorMessage").map(str::to_owned);
+        // How it ended goes on its last text row, else on an error row of its own (`a<ts>.e`).
+        let ending = if fin { Ending::of(msg) } else { Ending::default() };
+        let last_text = content.iter().rposition(visible_text);
         // omp stamps it when the message ended (omp ≥ 18.13): its tool calls start then.
         let completed_at = u(msg, "completedAt").map(|c| c as Millis);
         let last_live = content.len().saturating_sub(1);
@@ -1142,8 +1326,9 @@ impl Replica {
                     let newly_done = block_done && !bs.done;
                     bs.done = block_done;
                     let streaming = !block_done;
-                    // Providers open empty text blocks; a row appears with the first character.
-                    if kind == "text" && text.is_empty() && !self.items.contains_key(&id) {
+                    // Providers open empty text blocks; a row appears with the first character
+                    // that shows.
+                    if kind == "text" && text.trim().is_empty() && !self.items.contains_key(&id) {
                         continue;
                     }
                     if kind == "text" && !text.is_empty() {
@@ -1153,6 +1338,7 @@ impl Replica {
                         }
                     }
                     let item = if kind == "text" {
+                        let ends = fin && last_text == Some(i);
                         TranscriptItem::Assistant(AssistantItem {
                             id: id.clone(),
                             at: t,
@@ -1160,8 +1346,10 @@ impl Replica {
                             streaming,
                             model: if fin { model.clone() } else { None },
                             usage: if fin { usage.clone() } else { None },
-                            stop_reason: if fin { stop.clone() } else { None },
-                            error: if fin { error.clone() } else { None },
+                            stop_reason: if ends { ending.stop.clone() } else { None },
+                            error: if ends { ending.error.clone() } else { None },
+                            error_status: if ends { ending.status } else { None },
+                            refusal: if ends { ending.refusal.clone() } else { None },
                         })
                     } else {
                         // Seen streaming before it finished: how long the model thought. Only the
@@ -1193,24 +1381,46 @@ impl Replica {
                 _ => {}
             }
         }
-        // Provider failures arrive as an assistant message without content. (An empty aborted
-        // message is not an error: the interrupt notice covers it.)
-        let aborted = stop.as_deref() == Some("aborted");
-        if fin && content.is_empty() && !aborted && (error.is_some() || stop.as_deref() == Some("error")) {
-            let item = TranscriptItem::Assistant(AssistantItem {
-                id: format!("a{t}.0"),
-                at: t,
-                text: String::new(),
-                streaming: false,
-                model,
-                usage,
-                stop_reason: stop,
-                error: error.or_else(|| Some("provider error".into())),
-            });
-            self.upsert(item, out);
+        if fin {
+            self.message_ended(t, ending, last_text, model, usage, out);
         }
         state.done = fin;
         self.msgs.insert(t, state);
+    }
+
+    /// A message ended (`message_end`, or its entry) with `ending`: one that failed without text gets
+    /// its error row, unless omp's auto-retry superseded it. Remembers the failure for a retry that
+    /// supersedes it and for the end of the run.
+    fn message_ended(&mut self, t: Millis, ending: Ending, last_text: Option<usize>, model: Option<String>, usage: Option<TokenUsage>, out: &mut Update) {
+        let failed = ending.failed();
+        let errored_row = match last_text {
+            Some(i) => failed.then(|| format!("a{t}.{i}")),
+            None if failed && !self.retried.contains(&t) => {
+                let id = error_row_id(t);
+                let item = AssistantItem {
+                    id: id.clone(),
+                    at: t,
+                    text: String::new(),
+                    streaming: false,
+                    model,
+                    usage,
+                    stop_reason: ending.stop,
+                    error: ending.error,
+                    error_status: ending.status,
+                    refusal: ending.refusal,
+                };
+                self.upsert(TranscriptItem::Assistant(item), out);
+                Some(id)
+            }
+            None => None,
+        };
+        // Newer messages only: a late entry of an older one does not change what the run ends with.
+        if self.last_failed.is_none_or(|f| t >= f) {
+            self.last_failed = (failed && last_text.is_none() && !self.retried.contains(&t)).then_some(t);
+        }
+        if self.emit && self.turn_failure.as_ref().is_none_or(|(f, _)| t >= *f) {
+            self.turn_failure = errored_row.map(|id| (t, id));
+        }
     }
 
     /// Upsert or append a text/thinking row, preferring `append` deltas.
@@ -1265,6 +1475,9 @@ impl Replica {
     fn user_message(&mut self, msg: &Value, entry_ts: Option<Millis>, out: &mut Update) {
         let role = s(msg, "role").unwrap_or("");
         let custom_type = s(msg, "customType");
+        if custom_type == Some("async-result") {
+            self.learn_outcomes(msg.get("details"), "");
+        }
         let t = entry_ts.or_else(|| ts(msg)).unwrap_or(self.now);
         let id = format!("u{t}");
         if custom_type == Some(IMAGE_ATTACHMENT) {
@@ -1526,6 +1739,9 @@ impl Replica {
         let mut t = self.ensure_tool(call_id, &name, None, None);
         let text = content_text(result.get("content"));
         let details = result.get("details");
+        // `task` settles its own children; `wait` (and any tool that lists jobs) reports background
+        // ones.
+        self.learn_outcomes(details, &name);
         let (o, trunc) = cap_output(&text);
         let already_final = matches!(t.status, ToolStatus::Ok | ToolStatus::Error | ToolStatus::Aborted | ToolStatus::Denied);
         t.status = tools::status(&name, &text, details, is_error);
@@ -1618,30 +1834,36 @@ impl Replica {
         self.tool_finish(&call_id, &name, &result, b(msg, "isError"), ended_at, effects, out);
     }
 
-    /// Which tool call a ui-request belongs to (ask tool / approval).
-    fn call_for_request(&self, req: &UiRequestFrame) -> Option<String> {
+    /// Which tool call a ui-request belongs to (ask tool / approval) and, for an ask question, the
+    /// index of its ★ recommended option: the call's `questions[].recommended`, which omp's ask
+    /// dialog only shows as the initially selected row (`initialIndex`, also 0 without one).
+    fn call_for_request(&self, req: &UiRequestFrame) -> (Option<String>, Option<usize>) {
         let title = req.title();
         if let Some(rest) = title.strip_prefix("Allow tool: ") {
             let tool = first_line(rest);
-            return self
+            let call = self
                 .active_tools
                 .iter()
                 .rev()
                 .find(|(c, a)| a.name == tool || self.tools.get(c).is_some_and(|t| t.name == tool))
                 .map(|(c, _)| c.clone())
                 .or_else(|| self.open_tool_named(tool));
+            return (call, None);
         }
         let q = title.strip_prefix("Custom answer: ").unwrap_or(title);
-        self.order.iter().rev().take(40).find_map(|id| match self.items.get(id) {
-            Some(TranscriptItem::Tool(t))
-                if t.tool == "ask"
-                    && matches!(t.status, ToolStatus::Pending | ToolStatus::Running)
-                    && arr(&t.args, "questions").iter().any(|qq| s(qq, "question") == Some(q)) =>
-            {
-                Some(t.call_id.clone())
-            }
-            _ => None,
-        })
+        self.order
+            .iter()
+            .rev()
+            .take(40)
+            .find_map(|id| match self.items.get(id) {
+                Some(TranscriptItem::Tool(t)) if t.tool == "ask" && matches!(t.status, ToolStatus::Pending | ToolStatus::Running) => {
+                    let question = arr(&t.args, "questions").iter().find(|qq| s(qq, "question") == Some(q))?;
+                    let recommended = question.get("recommended").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+                    Some((Some(t.call_id.clone()), recommended))
+                }
+                _ => None,
+            })
+            .unwrap_or((None, None))
     }
 
     fn open_tool_named(&self, tool: &str) -> Option<String> {
@@ -1879,6 +2101,9 @@ impl Replica {
                 let Some(progress) = data.get("progress") else { return };
                 let Some(id) = s(progress, "id") else { return };
                 let sub = self.subs.entry(id.to_owned()).or_default();
+                if s(progress, "status") == Some("running") {
+                    sub.restarted();
+                }
                 sub.progress = Some(progress.clone());
                 sub.description = non_empty(data, "assignment").or_else(|| non_empty(progress, "description")).map(str::to_owned);
                 sub.parent_tool = s(data, "parentToolCallId").map(str::to_owned);
@@ -1886,7 +2111,11 @@ impl Replica {
             "task:subagent:lifecycle" => {
                 let Some(id) = s(data, "id") else { return };
                 let sub = self.subs.entry(id.to_owned()).or_default();
-                sub.lifecycle = s(data, "status").map(str::to_owned);
+                let status = s(data, "status");
+                if status == Some("running") {
+                    sub.restarted();
+                }
+                sub.lifecycle = status.map(str::to_owned);
                 if sub.description.is_none() {
                     sub.description = non_empty(data, "description").map(str::to_owned);
                 }
@@ -1903,7 +2132,7 @@ impl Replica {
         self.subs
             .iter()
             .filter(|(_, s)| s.snapshot.as_ref().is_none_or(|a| a.kind != "main"))
-            .map(|(id, st)| subagent_view(id, st))
+            .map(|(id, st)| subagent_view(id, st, self.outcome_of(id), self.interrupted.contains(id)))
             .collect()
     }
 
@@ -1964,6 +2193,8 @@ impl Replica {
             handoff: false,
             subagents: w,
             bridge: false,
+            retry: w,
+            subagent_retry: false,
         };
         // omp idle with nothing queued: what we listed was delivered, aborted or dropped.
         if self.ended || (!self.running && !st.is_streaming && st.queued_message_count == 0) {
@@ -2141,45 +2372,10 @@ fn last_sentence(text: &str) -> Option<String> {
     Some(if n > 80 { format!("…{}", frag.chars().skip(n - 79).collect::<String>()) } else { frag.to_owned() })
 }
 
-/// Drop provider-error assistant entries (empty content) that a later assistant message superseded
-/// before the next user turn: omp's auto-retry keeps them in the log.
-fn supersede_retried(entries: &[Value]) -> Vec<&Value> {
-    let is_error_only = |e: &Value| {
-        let m = e.get("message");
-        s(e, "type") == Some("message")
-            && m.and_then(|m| s(m, "role")) == Some("assistant")
-            && m.is_some_and(|m| arr(m, "content").is_empty() && s(m, "stopReason") == Some("error"))
-    };
-    let mut out = Vec::with_capacity(entries.len());
-    for (i, e) in entries.iter().enumerate() {
-        if is_error_only(e) {
-            let superseded = entries[i + 1..]
-                .iter()
-                .take_while(|n| {
-                    let role = n.get("message").and_then(|m| s(m, "role"));
-                    s(n, "type") != Some("custom_message") && !matches!(role, Some("user" | "developer"))
-                })
-                .any(|n| n.get("message").and_then(|m| s(m, "role")) == Some("assistant"));
-            if superseded {
-                continue;
-            }
-        }
-        out.push(e);
-    }
-    out
-}
-
-fn subagent_view(id: &str, st: &SubState) -> Subagent {
+fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, interrupted: bool) -> Subagent {
     let p = st.progress.as_ref();
     let snap = st.snapshot.as_ref();
-    let status = match (st.lifecycle.as_deref(), p.and_then(|p| s(p, "status")), snap.map(|a| a.status.as_str())) {
-        (_, _, Some("parked")) => SubagentStatus::Parked,
-        (Some("failed"), ..) | (_, Some("failed"), _) => SubagentStatus::Failed,
-        (Some("aborted"), ..) | (_, Some("aborted"), _) | (_, _, Some("aborted")) => SubagentStatus::Aborted,
-        (Some("completed"), ..) | (_, Some("completed"), _) => SubagentStatus::Done,
-        (_, _, Some("idle")) => SubagentStatus::Done,
-        _ => SubagentStatus::Running,
-    };
+    let status = subagents::status(st, outcome.map(|o| o.status), interrupted);
     let line = p.and_then(|p| {
         non_empty(p, "currentToolIntent")
             .or_else(|| non_empty(p, "lastIntent"))
@@ -2192,8 +2388,10 @@ fn subagent_view(id: &str, st: &SubState) -> Subagent {
     // progress; omp's TUI shows the same): the roster's `lastActivity` moves when omp parks the
     // idle agent minutes later (a 2 s run would read 7:02). It also comes back the same from the
     // bridge's resync, so a rebuilt replica shows what the live one did. Without progress (an
-    // agent omp restored from disk), its last activity is when its transcript was last written.
-    let ran = p.and_then(|p| f(p, "durationMs")).filter(|d| d.is_finite() && *d > 0.0).map(|d| d.round() as Millis);
+    // agent omp restored from disk) the session file's record of the run says the same
+    // (`details.jobs[].durationMs`); an agent no record names ends when its transcript was last
+    // written.
+    let ran = p.and_then(|p| f(p, "durationMs")).filter(|d| d.is_finite() && *d > 0.0).map(|d| d.round() as Millis).or_else(|| outcome.and_then(|o| o.ran));
     let ended = match status {
         SubagentStatus::Running => None,
         _ => started.zip(ran).map(|(at, ms)| at + ms).or_else(|| snap.map(|a| a.last_activity).filter(|t| *t > 0)),
@@ -2283,6 +2481,8 @@ fn empty_meta() -> SessionMeta {
             handoff: false,
             subagents: false,
             bridge: false,
+            retry: false,
+            subagent_retry: false,
         },
         started_at: None,
     }
@@ -2294,7 +2494,9 @@ pub fn transcript_page(jsonl: &str) -> HistoryPage {
     let mut r = Replica::new("");
     r.emit = false;
     let entries: Vec<Value> = jsonl.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
-    for e in supersede_retried(&entries) {
+    let (entries, retried) = failure::retried_attempts(&entries);
+    r.retried = retried;
+    for e in entries {
         r.entry(e, &mut Update::default());
     }
     for id in &r.order {
@@ -2311,6 +2513,12 @@ pub fn transcript_page(jsonl: &str) -> HistoryPage {
 
 #[cfg(test)]
 mod golden;
+
+#[cfg(test)]
+mod turn_errors;
+
+#[cfg(test)]
+mod retry_state;
 
 #[cfg(test)]
 mod sentence_tests {

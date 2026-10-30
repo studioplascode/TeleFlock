@@ -36,6 +36,10 @@ export function installLine(s: UpdateStatus): string {
       return isAndroid ? "Confirm the update in Android's installer." : "Installing. TeleFlock restarts by itself.";
     case "needsPermission":
       return "Allow TeleFlock to install apps in Android settings, then come back.";
+    case "ready":
+      return s.needsPassword
+        ? "Downloaded. Install it when you're ready; it asks for your password."
+        : "Downloaded. TeleFlock installs it when you leave the window, or restart now.";
     default:
       return "";
   }
@@ -76,6 +80,21 @@ function announceManual(status: UpdateStatus | null): void {
   });
 }
 
+/** Versions whose "ready" toast was shown (the status is re-pushed on every change). */
+const readyShown = new Set<string>();
+
+/** An update downloaded by an automatic check waits for the user while the window is in front. */
+function announceReady(status: UpdateStatus | null): void {
+  if (status?.phase !== "ready" || status.latest === undefined || readyShown.has(status.latest)) return;
+  readyShown.add(status.latest);
+  toast({
+    title: `TeleFlock v${status.latest} is ready`,
+    description: status.needsPassword ? "Installing asks for your password." : "TeleFlock restarts to finish updating.",
+    action: { label: status.needsPassword ? "Install" : "Restart now", onClick: () => void core.app("app.updateInstall", {}).catch(() => {}) },
+    duration: 30_000,
+  });
+}
+
 /**
  * Mount once (App). Tauri backend only: shows a progress toast while an update downloads and
  * installs, and on macOS one "vX is available" toast per new version. The checks themselves run
@@ -87,6 +106,7 @@ export function useAutoUpdate(): void {
     const unsub = useUpdateStatus.subscribe((s) => {
       syncToast(s.status);
       announceManual(s.status);
+      announceReady(s.status);
     });
     watchUpdates();
     return unsub;

@@ -30,6 +30,8 @@ export interface SubagentSpec {
   ms: number;
   model?: string;
   lines: string[];
+  /** How it ends when `ms` have passed: default `done`; `parked` is omp's idle park, as older hostds reported a finished agent. */
+  end?: "failed" | "aborted" | "parked";
   /** omp IRC with the parent while the task runs (ms after it starts). */
   irc?: IrcSpec[];
 }
@@ -66,8 +68,12 @@ export type Step =
   | { t: "tool"; spec: ToolSpec }
   | { t: "todo"; task: string; status: "pending" | "inProgress" | "completed" | "abandoned" | "blocked" }
   | { t: "ui"; ui: UiSpec; then: (a: Answer) => Step[] }
-  | { t: "notice"; level: "info" | "warn" | "error"; text: string }
+  | { t: "notice"; level: "info" | "warn" | "error"; text: string; source?: string }
+  /** A turn that failed without text: a provider error (`status`: HTTP) or a refusal. */
+  | { t: "fail"; error: string; status?: number; refusal?: { kind: string; category?: string; explanation?: string } }
   | { t: "mode"; text: string }
+  /** omp waits `ms` before its next attempt at a provider error (`OmpInfo.retry`). */
+  | { t: "retry"; kind: "rateLimit" | "usageLimit" | "overloaded" | "other"; attempt: number; max: number; ms: number; error: string }
   | { t: "wait"; ms: number };
 
 // ------------------------------------------------------------------ builders
@@ -230,9 +236,9 @@ export function poolTurn(): Step[] {
       t: "tool",
       spec: {
         tool: "task",
-        title: "3 subagents exploring query hot paths",
+        title: "7 subagents exploring query hot paths",
         intent: "Parallel investigation of where connections churn",
-        args: { tasks: 3 },
+        args: { tasks: 7 },
         ms: 34_000,
         subagents: [
           {
@@ -278,6 +284,11 @@ export function poolTurn(): Step[] {
               },
             ],
           },
+          // Quick ones that end every way a subagent can, so the panel's completed group has a mix to collapse.
+          { name: "SchemaDiff", description: "Diff tenant schemas for search_path drift", ms: 5_000, model: "luna", lines: ["pg_dump --schema-only", "no drift across 14 tenants"] },
+          { name: "ReplayTrace", description: "Replay last week's slow-query trace against a pool", ms: 8_000, model: "luna", end: "failed", lines: ["loading trace.ndjson", "staging replica refused: too many clients"] },
+          { name: "StaleProbe", description: "Probe idle-in-transaction sessions", ms: 6_000, model: "luna", end: "aborted", lines: ["querying pg_stat_activity", "stopped: superseded by LockAudit"] },
+          { name: "IndexScan", description: "List indexes the pool migration touches", ms: 4_000, model: "luna", end: "parked", lines: ["scanning migrations/", "9 indexes, none affected"] },
         ],
       },
     },
@@ -381,6 +392,19 @@ export function ciTurn(): Step[] {
             ]
           : [say("OK, leaving the branch local. It's ready whenever you want to push.")],
     },
+  ];
+}
+
+/** The error omp's provider answered with while a usage window is used up (what the demo's `quota` agent waits out). */
+export const QUOTA_ERROR = `429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}} retry-after-ms=294000`;
+
+/** `quota`: its provider answered 429; omp waits 4:54 before it tries again, then the turn goes on. */
+export function quotaTurn(): Step[] {
+  return [
+    { t: "retry", kind: "rateLimit", attempt: 1, max: 10, ms: 294_000, error: QUOTA_ERROR },
+    think("The window is back. Continuing with the tenant totals backfill.", 3000),
+    say("Backfilled **14 tenants** from the billing export; totals match the invoices to the cent."),
+    todo("Verify totals against invoices", "completed"),
   ];
 }
 
@@ -717,7 +741,7 @@ export function subagentRow(spec: SubagentSpec, id: string, startedAt: number, n
     id,
     name: spec.name,
     description: spec.description,
-    status: done ? "done" : "running",
+    status: done ? (spec.end ?? "done") : "running",
     startedAt,
     endedAt: done ? startedAt + spec.ms : undefined,
     model: spec.model,

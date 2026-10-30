@@ -11,7 +11,7 @@ export { useNow, onFrame } from "./lib/clock";
 export type { FrameCallback } from "./lib/clock";
 export { useMediaQuery, useIsMobile, useFinePointer, useInView, useMinWidth, useIdleReady } from "./lib/hooks";
 export { isTauri, isAndroid, isWindows, hasCustomWindowChrome } from "./lib/platform";
-export { useWindowActive, useWindowVisible } from "./lib/windowActive";
+export { isWindowActive, isWindowVisible, onWindowActive, onWindowVisible, useWindowActive, useWindowVisible } from "./lib/windowActive";
 export { formatElapsed, formatAge, formatCompact, formatUsd, formatInt } from "./lib/format";
 export { hashString, seededRandom } from "./lib/hash";
 export { DesignProvider } from "./DesignProvider";

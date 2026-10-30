@@ -2,9 +2,11 @@ import { Layers, Pause, Pencil, Play, Send, SquarePlus, Target, Trash2 } from "l
 import { type KeyboardEvent, useState } from "react";
 import { draftKey, drafts, getTranscript, parseAgentKey, suggestTitle, useAgent, useAiNaming, useDraft, useSession } from "@/core";
 import { Button, Dialog, DialogContent, Field, formatCompact, Input, ProgressRing, Textarea } from "@/design";
+import { SessionRolesDialog } from "@/features/agentRoles/SessionRolesDialog";
 import { AiMark, SuggestButton } from "@/features/workspace/shared/ai";
 import { hostCall, usePending } from "../api";
 import { useSessionUi } from "../state";
+import { ContextXray } from "../xray/ContextXray";
 
 /** All modal dialogs of a session, driven by `useSessionUi().dialog[key]`. Mount once per session. */
 export function SessionDialogs({ agentKey }: { agentKey: string }) {
@@ -25,6 +27,8 @@ export function SessionDialogs({ agentKey }: { agentKey: string }) {
       <Dialog open={dialog === "newSession"} onOpenChange={onOpenChange}>
         {dialog === "newSession" && <NewSessionContent agentKey={agentKey} close={close} />}
       </Dialog>
+      <SessionRolesDialog agentKey={agentKey} open={dialog === "roles"} onOpenChange={onOpenChange} />
+      <ContextXray agentKey={agentKey} />
     </>
   );
 }

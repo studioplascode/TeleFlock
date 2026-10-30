@@ -33,7 +33,7 @@ use tf_collab::{
     Access, AgentCmdKind, EndReason, Guest, GuestError, GuestEvent, HostEntry, ImageContent, JoinTimeouts, Registry,
     RegistryError, Relay, RelayConfig, RelayIdentity, Replica, Signal, UiReply,
 };
-use tf_collab::replica::RowNote;
+use tf_collab::replica::{LiveRow, RowNote};
 use tf_proto::methods::Delivery;
 use tf_proto::session::{AppendField, HistoryPage, SessionEvent, SessionHave, SessionMeta, SessionSnapshot, TreeInfo, UiRequest};
 use tf_proto::model::{
@@ -120,6 +120,13 @@ pub struct OmpView {
     pub first_prompt: Option<String>,
     /// The replica is inside a turn (`agent_start` … `agent_end`).
     pub turn_active: bool,
+    /// When the newest conversation row started (`Replica::last_turn_row_at`): idle recaps older
+    /// than this are out of date.
+    pub last_turn_row_at: Option<Millis>,
+    /// omp is waiting to retry a provider error (`Replica::retry_wait`).
+    pub retry: Option<tf_proto::RetryWait>,
+    /// The last run ended in a provider-side failure and nothing runs since (`Replica::tail_error`).
+    pub tail_error: Option<String>,
 }
 
 /// The session meta facts an agent card shows ([`MetaOverlay::board`]).
@@ -157,6 +164,8 @@ pub(crate) struct SessionState {
     pub(crate) bridge_lost: Option<(Instant, bool)>,
     /// The bridge feed driver running for the session: `(connection, token)` ([`crate::feed`]).
     pub(crate) driver: Option<(u64, u64)>,
+    /// The stall watchdog's state for the bridge feed ([`crate::feed::Stall`]).
+    pub(crate) stall: crate::feed::Stall,
     /// omp's session file, as the bridge named it (subagent transcripts live next to it).
     pub(crate) session_file: Option<std::path::PathBuf>,
     /// The row notes persisted for the session ([`crate::notes`]) were handed to the replica.
@@ -194,6 +203,7 @@ impl SessionState {
             transport: Transport::Detached,
             bridge_lost: None,
             driver: None,
+            stall: crate::feed::Stall::default(),
             session_file: None,
             notes_loaded: false,
             pending: Vec::new(),
@@ -602,6 +612,9 @@ impl OmpSession {
             streaming: st.replica.is_streaming(),
             first_prompt: st.first_prompt.clone(),
             turn_active: st.replica.turn_started_at().is_some(),
+            last_turn_row_at: st.replica.last_turn_row_at(),
+            retry: st.replica.retry_wait(now).cloned(),
+            tail_error: st.replica.tail_error().map(str::to_owned),
         }
     }
 
@@ -1059,6 +1072,8 @@ pub(crate) struct Inner {
     pub(crate) persist: Arc<Persist>,
     /// Where the sessions' row notes live ([`crate::notes`]).
     pub(crate) notes: std::path::PathBuf,
+    /// Where the sessions' live rows live ([`crate::live_rows`]).
+    pub(crate) rows: std::path::PathBuf,
     pub(crate) cancel: CancellationToken,
     /// The companion-extension server: bridges ≥ 2.0 serve their sessions ([`crate::feed`]).
     pub(crate) bridge: BridgeHandle,
@@ -1120,6 +1135,7 @@ impl OmpHandle {
             updates,
             repoll: Notify::new(),
             notes: crate::notes::dir(persist.home()),
+            rows: crate::live_rows::dir(persist.home()),
             persist,
             cancel,
             bridge,
@@ -1629,18 +1645,42 @@ fn persist_notes(inner: &Inner, session_id: &str, signals: &[Signal]) {
     });
 }
 
-/// Hands the session's persisted row notes ([`crate::notes`]) to its replica, once, before its
-/// first snapshot: the rows it rebuilds from the session after a tf-hostd restart then come out
-/// as they were built live.
+/// Appends the rows the replica kept ([`Signal::RowKept`]) to the session's live rows file (see
+/// [`crate::live_rows`]), off the runtime.
+fn persist_live_rows(inner: &Inner, session_id: &str, signals: &[Signal]) {
+    let rows: Vec<LiveRow> = signals
+        .iter()
+        .filter_map(|s| match s {
+            Signal::RowKept { row } => Some(row.clone()),
+            _ => None,
+        })
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let (dir, sid) = (inner.rows.clone(), session_id.to_owned());
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::live_rows::append(&dir, &sid, &rows) {
+            warn!(session = %sid, "keep live rows: {e}");
+        }
+    });
+}
+
+/// Hands the session's persisted row notes ([`crate::notes`]) and live rows ([`crate::live_rows`])
+/// to its replica, once, before its first snapshot: the rows it rebuilds from the session after a
+/// tf-hostd restart then come out as they were built live, the live rows where they were.
 pub(crate) async fn load_notes(inner: &Inner, session: &OmpSession) {
     if session.lock().notes_loaded {
         return;
     }
-    let (dir, sid) = (inner.notes.clone(), session.session_id.clone());
-    let notes = tokio::task::spawn_blocking(move || crate::notes::load(&dir, &sid)).await.unwrap_or_default();
+    let (notes_dir, rows_dir, sid) = (inner.notes.clone(), inner.rows.clone(), session.session_id.clone());
+    let (notes, rows) = tokio::task::spawn_blocking(move || (crate::notes::load(&notes_dir, &sid), crate::live_rows::load(&rows_dir, &sid)))
+        .await
+        .unwrap_or_default();
     let mut st = session.lock();
     if !std::mem::replace(&mut st.notes_loaded, true) {
         st.replica.keep_notes(notes);
+        st.replica.keep_rows(rows);
     }
 }
 
@@ -1678,6 +1718,7 @@ pub(crate) async fn publish(inner: &Inner, session: &Arc<OmpSession>, update: &t
     if !update.signals.is_empty() {
         persist_originals(inner, sid, &update.signals);
         persist_notes(inner, sid, &update.signals);
+        persist_live_rows(inner, sid, &update.signals);
         if update.signals.iter().any(|s| matches!(s, Signal::TurnStarted | Signal::TurnEnded { .. } | Signal::Prompted { .. })) {
             session.journal_kick.notify_one();
         }

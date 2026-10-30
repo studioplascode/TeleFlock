@@ -2,7 +2,8 @@ import { Maximize2, SquareTerminal, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { lazy, type PointerEvent as ReactPointerEvent, type ReactNode, Suspense, useRef, useState } from "react";
 import { cn, IconButton, Spinner, spring, StatusOrb, Tooltip } from "@/design";
-import { agentKey, navigate, parseAgentKey, type SplitState, useAgent, useHosts, useUi } from "@/core";
+import { agentKey, navigate, parseAgentKey, type SplitState, useAgent, useHosts, useRoute, useUi } from "@/core";
+import { isBare } from "@/app/routes";
 import type { TermTarget } from "@/core/gen";
 import { COLUMN_STATUS } from "./status";
 
@@ -61,8 +62,9 @@ function SplitBody({ split }: { split: SplitState }) {
  * the right behind a draggable, keyboard-resizable divider. The ratio persists.
  */
 export function SplitFrame({ children }: { children: ReactNode }) {
-  // Focus mode hides the split (it comes back when focus ends).
-  const split = useUi((s) => (s.focusMode ? null : s.split));
+  // Focus mode and bare screens (ambient mode) hide the split (it comes back with them).
+  const bare = isBare(useRoute());
+  const split = useUi((s) => (s.focusMode || bare ? null : s.split));
   const [ratio, setRatio] = useState(readRatio);
   const [dragging, setDragging] = useState(false);
   const frame = useRef<HTMLDivElement>(null);

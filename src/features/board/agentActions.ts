@@ -2,6 +2,7 @@ import { type AgentView, core, getAgentViews, getWorkspacesSnapshot, markResumin
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
 import { haptic } from "@/features/shell/haptics";
+import { confirmResumeMoved } from "@/features/move/resumeGuard";
 import { useSessionUi } from "@/features/session/state";
 import { removeWorktreeTarget, type WorktreeTarget, worktreeTargetOf } from "@/features/workspace/workspaceActions";
 
@@ -36,6 +37,8 @@ export async function answerAgent(key: string, requestId: string, answer: Answer
 export async function setArchived(key: string, archived: boolean): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
   const parked = !archived && getAgentViews().some((a) => a.key === key && a.parked);
+  // a card that moved to another host forks an older copy when it resumes here: ask first
+  if (parked && !(await confirmResumeMoved(key))) return;
   if (parked) markResuming(key, true);
   try {
     await core.host(hostId).call("agent.archive", archived ? { agentId, archived, close: useSettings.getState().closeDone } : { agentId, archived });
@@ -53,6 +56,7 @@ export async function setArchived(key: string, archived: boolean): Promise<void>
  * Resolves to the new agent's key (null when it failed or never showed up; failures toast).
  */
 export async function resumeParked(key: string): Promise<string | null> {
+  if (!(await confirmResumeMoved(key))) return null;
   try {
     const next = await resumeAgent(key);
     haptic("success");

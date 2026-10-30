@@ -31,8 +31,29 @@ import type {
  *         while omp compacts.
  *  2.0.0: data plane (`hello.caps`): `liveSubscribe` live feed + `resync`, `prompt`, `uiResponse`
  *         (the session's dialogs race the TUI against hostd), `agentCmd`; subagent copies relay their
- *         task bus to the owner. */
-const BRIDGE_VERSION = "2.0.0";
+ *         task bus to the owner.
+ *  2.1.0: new `hello.caps` flags, each with its ops/events (docs/bridge-protocol.md "2.1.0"):
+ *         - `roleModels`: `getRoleModels` / `setRoleModels`, the session's own omp model roles and
+ *           fallback chains as runtime overrides (needs omp's settings internals).
+ *         - `notices`: what omp's TUI alone shows reaches the live feed as `notice` events (extension
+ *           `ui.notify`, retry fallbacks, config warnings with a `key`); no fallback credit on messages.
+ *         - `retry`: `retry`, omp's own F5 (`AgentSession.retry()`) for the main session.
+ *         - `resumeTree`: `retry` for subagents, `resumeTree`, `failedTails` (omp's lifecycle manager,
+ *           task executor and background jobs: a subagent resumes as a job of its parent).
+ *         - `turnError`: `turn_error` events for terminal failures of the main session and subagents.
+ *         - `limitGuard`: `setAutoResume` + a `context` guard that keeps provider-limit errors out of
+ *           model requests while hostd's auto-resume is on.
+ *         - `context`: `context`, what fills the session's context window (omp's own `/context` data).
+ *         - `jobs`: `jobs` / `jobCancel` and the `jobs` event, the background jobs (bash, eval, subagent
+ *           tasks) of the session and its subagents, with output tails and omp's job widgets.
+ *         - `restore`: `restorable` / `restore`, omp's own `--restore` (`restoreSession`) for the live session.
+ *         - `restoreSelect`: `restore {turn?, subagentIds?}`, omp's restore for the listed parts only (the
+ *           session's own turn, the named subagents; a subagent's reply cut off mid-stream goes on
+ *           through omp's retry), so hostd repeats nothing unsafe to run twice.
+ *         - (no flag; a fix) every frame is well-formed JSON: half surrogate pairs go out as U+FFFD,
+ *           and a resync too large even clipped is still a resync (hostd repairs 2.0.0's lines).
+ */
+const BRIDGE_VERSION = "2.1.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -214,12 +235,21 @@ interface RelayedBus {
 	from?: string;
 }
 
+/** A failed subagent turn as reported by the bridge copy loaded in that subagent's session (2.1.0). */
+interface ReportedTurn {
+	/** The `turn_error` event data. */
+	data: Json;
+	/** omp's failed assistant message: the same object for every copy watching the session. */
+	message: object;
+}
+
 interface BridgeSlot {
 	/** The active copy per hostd endpoint (socket path or pipe name): the highest `version` wins, on
 	 *  equal versions the first claimant stays. A copy that takes over calls the previous owner's
 	 *  `stop()` (close the socket, stop the timers, clear the status line). 2.0.0 owners add `relay`:
-	 *  copies loaded in subagent sessions hand it the task-bus frames only their session sees. */
-	owners: Record<string, { version: string; stop(): void; relay?(frame: RelayedBus): void }>;
+	 *  copies loaded in subagent sessions hand it the task-bus frames only their session sees. 2.1.0
+	 *  owners add `report`: those copies hand it their session's failed turns (`turn_error`). */
+	owners: Record<string, { version: string; stop(): void; relay?(frame: RelayedBus): void; report?(turn: ReportedTurn): void }>;
 	/** The session command context, stored by whichever copy's /teleflock-control handler omp ran. */
 	cmdCtx?: ExtensionCommandContext;
 	/** Called (and removed) by that handler right after it stored `cmdCtx`. */
@@ -227,6 +257,12 @@ interface BridgeSlot {
 	/** Last dialog request id handed out in this process (2.0.0): ids are never reused, even when
 	 *  another copy takes over, so a late `uiResponse` can never answer an unrelated dialog. */
 	uiReqSeq?: number;
+	/** hostd's auto-resume is on (2.1.0, `setAutoResume`): every copy's `context` guard reads it.
+	 *  Unset until a hostd said so. */
+	autoResume?: boolean;
+	/** One per live copy (2.1.0): registers that copy's `context` guard with omp. Run when hostd turns
+	 *  auto-resume on, so a process with it off pays none of omp's per-request message clone. */
+	armGuards?: Array<() => void>;
 }
 
 function bridgeSlot(): BridgeSlot {
@@ -605,21 +641,35 @@ function clipValue(v: unknown, stringCap: number, arrayLimit: number, depth: num
 	}
 }
 
+/** A string that holds half of a UTF-16 surrogate pair is written by `JSON.stringify` as a `\udXXX`
+ *  escape (valid pairs come out as characters, never escaped). omp cuts text by UTF-16 index in
+ *  places (its completion probe's 80-char `stage`, `truncate()` for job labels, the 8 KiB
+ *  `recentOutput` tail), and so does `clipValue`: an emoji at the cut leaves half of it. serde_json
+ *  refuses such an escape, and hostd dropped the frame, and every resync replaying it (a running
+ *  `wait` repeats its jobs' stages, the tracker replays each subagent's last progress): the
+ *  session stopped updating. Each lone surrogate escape (one not after an escaped backslash)
+ *  becomes U+FFFD, as `String.prototype.toWellFormed` would have it. */
+const LONE_SURROGATE_ESCAPE = /(?<!\\)((?:\\\\)*)\\ud[89a-f][0-9a-f]{2}/g;
+export function wellFormedJson(json: string): string {
+	return json.includes("\\ud") ? json.replace(LONE_SURROGATE_ESCAPE, "$1\\ufffd") : json;
+}
+
 /** `frame` as JSON of at most `maxBytes` UTF-8 bytes: as is, else with long strings and arrays clipped
- *  (as omp's collab shrinks oversized payloads), else a collab-style notice saying what was omitted. */
+ *  (as omp's collab shrinks oversized payloads), else a collab-style notice saying what was omitted.
+ *  Always well-formed (see wellFormedJson). */
 export function frameJson(frame: unknown, maxBytes = MAX_FRAME_BYTES): string {
 	const fits = (json: string | undefined): json is string =>
 		json !== undefined && (json.length * 3 <= maxBytes || Buffer.byteLength(json, "utf8") <= maxBytes);
 	try {
 		const json = JSON.stringify(frame);
-		if (fits(json)) return json;
+		if (fits(json)) return wellFormedJson(json);
 	} catch {
 		// cycles or BigInt: the clip passes below handle both
 	}
 	for (const pass of SHRINK_PASSES) {
 		try {
 			const json = JSON.stringify(clipValue(frame, pass.stringCap, pass.arrayLimit, 0, new WeakSet()));
-			if (fits(json)) return json;
+			if (fits(json)) return wellFormedJson(json);
 		} catch {
 			// next pass
 		}
@@ -632,16 +682,39 @@ export function frameJson(frame: unknown, maxBytes = MAX_FRAME_BYTES): string {
 	});
 }
 
+/** An assistant message without what a refusal hands omp for its fallback-credit redemption: the
+ *  credit handle (token, the frozen request body, the refused content) and the token in
+ *  `stopDetails`. hostd shows refusals from `stopDetails.type/category/explanation` alone. */
+export function withoutFallbackCredit(message: unknown): unknown {
+	if (!isObj(message)) return message;
+	const details = message.stopDetails;
+	const tokenInDetails = isObj(details) && ("fallback_credit_token" in details || "fallback_has_prefill_claim" in details);
+	if (!("fallbackCreditHandle" in message) && !tokenInDetails) return message;
+	const { fallbackCreditHandle: _handle, ...rest } = message;
+	if (isObj(details)) {
+		const { fallback_credit_token: _token, fallback_has_prefill_claim: _claim, ...kept } = details;
+		rest.stopDetails = kept;
+	}
+	return rest;
+}
+
 /** The event as the live feed sends it: collab's shape minus payloads hostd gets elsewhere
  *  (`assistantMessageEvent.partial`/`.message` repeat `message`; `agent_end.messages` and
- *  `turn_end.message`/`.toolResults` repeat the turn's `message_end` frames). */
+ *  `turn_end.message`/`.toolResults` repeat the turn's `message_end` frames) and minus a refusal's
+ *  fallback credit (see withoutFallbackCredit). */
 export function wireEvent(ev: Json): Json {
 	switch (ev.type) {
 		case "message_update": {
 			const ame = ev.assistantMessageEvent;
-			if (!isObj(ame) || !("partial" in ame || "message" in ame)) return ev;
+			const message = withoutFallbackCredit(ev.message);
+			if (!isObj(ame) || !("partial" in ame || "message" in ame)) return message === ev.message ? ev : { ...ev, message };
 			const { partial: _partial, message: _message, ...rest } = ame;
-			return { ...ev, assistantMessageEvent: rest };
+			return { ...ev, message, assistantMessageEvent: rest };
+		}
+		case "message_start":
+		case "message_end": {
+			const message = withoutFallbackCredit(ev.message);
+			return message === ev.message ? ev : { ...ev, message };
 		}
 		case "agent_end": {
 			const { messages: _messages, ...rest } = ev;
@@ -675,6 +748,8 @@ export interface LiveWriterOptions {
 	highWater?: number;
 	overflow?: number;
 	stall?: number;
+	/** Largest `resync` line (default MAX_RESYNC_BYTES; tests lower it). */
+	resyncBytes?: number;
 	/** Queued control frames passed `stall`: hostd stopped reading for good. */
 	onStall?: () => void;
 	log?: (msg: string) => void;
@@ -726,7 +801,7 @@ export class LiveWriter {
 	ctl(obj: unknown): void {
 		let line: string;
 		try {
-			line = `${JSON.stringify(obj)}\n`;
+			line = `${wellFormedJson(JSON.stringify(obj))}\n`;
 		} catch (err) {
 			this.opts.log?.(`unserializable frame: ${String(err)}`);
 			return;
@@ -850,7 +925,17 @@ export class LiveWriter {
 			this.opts.log?.(`resync: ${String(err)}`);
 			frame = { t: "resync", seq: this.seq, live: { streaming: false, frames: [] } };
 		}
-		this.sink.write(`${frameJson(frame, MAX_RESYNC_BYTES)}\n`);
+		const max = this.opts.resyncBytes ?? MAX_RESYNC_BYTES;
+		let json = frameJson(frame, max);
+		if (!json.includes('"t":"resync"')) {
+			// Too large even clipped: a notice in its place would leave hostd waiting for a resync that
+			// never comes. Without its in-flight frames it still restarts the feed (the session file
+			// holds every entry).
+			this.opts.log?.(`resync over ${max} bytes: sent without its in-flight frames`);
+			const live = isObj(frame.live) ? frame.live : {};
+			json = frameJson({ ...frame, live: { streaming: live.streaming === true, frames: [] } }, max);
+		}
+		this.sink.write(`${json}\n`);
 	}
 }
 
@@ -1450,6 +1535,67 @@ function wrappedBy(fn: unknown, token: object): boolean {
 	return false;
 }
 
+// ─── 2.1.0: notices (`caps.notices`) ───────────────────────────────────────────────────────────
+// omp's TUI shows some warnings itself only (extension `ui.notify`, its retry fallbacks, the config
+// warnings in its header); the live feed carries them as collab-shaped `notice` events.
+
+/** omp's retry fallback events as the notices its TUI shows (event-controller.ts
+ *  `#handleRetryFallbackApplied` / `#handleRetryFallbackSucceeded`); `undefined` for other events. */
+export function fallbackNotice(ev: Json): Json | undefined {
+	if (ev.type === "retry_fallback_applied") {
+		const reason = typeof ev.reason === "string" && ev.reason.trim() ? `\n${ev.reason.replace(ANSI, "").trim().slice(0, 400)}` : "";
+		return { type: "notice", level: "warning", message: `Fallback: ${String(ev.from ?? "?")} → ${String(ev.to ?? "?")}${reason}`, source: "fallback" };
+	}
+	if (ev.type === "retry_fallback_succeeded") return { type: "notice", level: "info", message: `Fallback succeeded on ${String(ev.model ?? "?")}`, source: "fallback" };
+	return undefined;
+}
+
+/** The session's standing config warnings (`configWarnings`, then WATCHDOG.yml problems) as notices
+ *  keyed by their text: hostd shows each once however often a resync or a change repeats it. */
+export function configNotices(session: unknown): Json[] {
+	if (!isObj(session)) return [];
+	const all: unknown[] = Array.isArray(session.configWarnings) ? [...session.configWarnings] : [];
+	try {
+		const advisor = typeof session.getAdvisorConfigWarnings === "function" ? (session.getAdvisorConfigWarnings as () => unknown).call(session) : undefined;
+		if (Array.isArray(advisor)) for (const w of advisor) if (typeof w === "string") all.push(`WATCHDOG.yml: ${w}`);
+	} catch {
+		// an omp without advisors
+	}
+	const seen = new Set<string>();
+	const out: Json[] = [];
+	for (const w of all) {
+		const message = typeof w === "string" ? w.replace(ANSI, "").trim() : "";
+		if (!message || seen.has(message)) continue;
+		seen.add(message);
+		out.push({ type: "notice", level: "warning", message, source: "config", key: `config:${crypto.createHash("sha256").update(message).digest("hex").slice(0, 16)}` });
+	}
+	return out;
+}
+
+/** An extension's `ctx.ui.notify(message, type)` as a notice; omp still shows it. */
+export function notifyNotice(message: unknown, type: unknown): Json | undefined {
+	const text = typeof message === "string" ? message.replace(ANSI, "").trim() : "";
+	if (!text) return undefined;
+	return { type: "notice", level: type === "error" ? "error" : type === "warning" ? "warning" : "info", message: text, source: "extension" };
+}
+
+/** Puts `make(original)` in place of `notify` on omp's shared UI context, as installDialogWrappers
+ *  does for the dialogs (another copy's wrapper stays underneath). Returns whether it is wrapped. */
+export function installNotifyWrapper(ui: object, token: object, make: (original: AnyFn) => AnyFn): boolean {
+	const desc = ownMember(ui, "notify");
+	const original: unknown = desc?.value;
+	if (typeof original !== "function") return false;
+	if (wrappedBy(original, token)) return true;
+	const wrapper = make(original as AnyFn) as WrappedFn;
+	wrapper[DIALOG_WRAP] = { token, original: original as AnyFn };
+	try {
+		Object.defineProperty(ui, "notify", { value: wrapper, writable: true, configurable: true, enumerable: desc?.enumerable ?? true });
+	} catch {
+		return false;
+	}
+	return true;
+}
+
 /**
  * Puts `make(name, original)` in place of each dialog member of `ui` that does not carry this copy's
  * wrapper yet (a fresh UI context after a mode re-init, or a wrapper of another bridge copy, which
@@ -1613,6 +1759,10 @@ interface Internals {
 	lifecycle?: { global(): LifecycleLike };
 	interruptLabel: string;
 	approval: ApprovalLabels;
+	/** 2.1.0 `roleModels`: omp's live Settings and its `modelRoles` / `retry.fallbackChains` handles. */
+	roles?: RoleSettings;
+	/** 2.1.0 `retry` / `resumeTree` / `turnError` / `limitGuard`: omp's error classifier and task internals. */
+	resume?: ResumeInternals;
 }
 
 const isSession = (s: unknown): s is AgentSessionLike => !!s && typeof s === "object" && "subscribe" in s && typeof s.subscribe === "function";
@@ -1651,6 +1801,508 @@ function sessionOnDisk(sm: object, file: string | undefined): boolean {
 		}
 	}
 	return !!file && fs.existsSync(file);
+}
+
+// ─── per-session model roles (2.1.0, `caps.roleModels`) ─────────────────────────────────────────
+// One session's own omp model roles and retry fallback chains (docs/bridge-protocol.md "2.1.0").
+// They live in omp's runtime override layer of the process's Settings (`Setting.override`, the
+// layer omp itself uses for `--model` and subagent routing), above every config file; the host's
+// config is never written. tf-hostd also rewrites the agent's `--config` overlay with the same
+// map (what a resume starts from); `setRoleModels` reloads that file first.
+
+/** omp's built-in roles (`config/model-roles.ts`): chat roles, then model-kind roles. */
+const BUILTIN_ROLES = ["default", "smol", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor", "widget", "image", "web", "speech", "dictation", "judge"];
+const ROLE_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+/** Keys never copied into a result object. */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** The slice of omp's `Settings` (the process's live instance) the role ops use. */
+export interface RoleStore {
+	getModelRole(role: string): string | undefined;
+	getModelRoles(): Record<string, string>;
+	getModelRoleProvenance(role: string): string;
+	getGlobalModelRole(role: string): string | undefined;
+	getProjectModelRole(role: string): string | undefined;
+	getGlobalSettings(): unknown;
+	getProjectSettings(): unknown;
+	getConfigFiles(): readonly string[];
+	reloadFromDisk(): Promise<void>;
+}
+/** A registered omp setting (`config/registry` `Setting`). */
+export interface SettingHandle<T> {
+	get(scope: unknown): T;
+	override(scope: unknown, value: T): void;
+	clearOverride(scope: unknown): void;
+}
+export interface RoleSettings {
+	store(): RoleStore;
+	/** `modelRoles` (`config/model-settings`). */
+	roles: SettingHandle<Record<string, string>>;
+	/** `retry.fallbackChains` (`session/settings`). */
+	chains: SettingHandle<Record<string, string[]>>;
+}
+/** `getRoleModels` / `setRoleModels` result. */
+export interface RoleModelsView {
+	/** Roles the session's own layers set: runtime overrides (`--model`, `PI_*_MODEL`, this op) and `--config` overlays. */
+	session: Record<string, string>;
+	/** What the host's config assigns (project over global). */
+	host: Record<string, string>;
+	sessionChains: Record<string, string[]>;
+	hostChains: Record<string, string[]>;
+	/** The session's model now (`provider/id`). */
+	active?: string;
+	/** The `--config` overlays omp was started with. */
+	overlays: string[];
+	warning?: string;
+}
+
+/** `layer.<path…>` of a raw settings layer. */
+function at(layer: unknown, ...keys: string[]): unknown {
+	let v = layer;
+	for (const k of keys) v = isObj(v) ? v[k] : undefined;
+	return v;
+}
+
+/** The `retry.fallbackChains` entries of a value whose chains are string lists. */
+function chainsOf(v: unknown): Record<string, string[]> {
+	const out: Record<string, string[]> = {};
+	if (!isObj(v)) return out;
+	for (const [k, list] of Object.entries(v)) {
+		if (UNSAFE_KEYS.has(k) || !Array.isArray(list)) continue;
+		out[k] = list.filter((s): s is string => typeof s === "string");
+	}
+	return out;
+}
+
+/** The session's own and the host's roles and chains. A session chain equal to the host's chain of
+ *  the same key reads as the host's. */
+export function readRoleModels(rs: RoleSettings, active?: string): RoleModelsView {
+	const store = rs.store();
+	const global = store.getGlobalSettings();
+	const project = store.getProjectSettings();
+	const names = new Set<string>(BUILTIN_ROLES);
+	for (const roles of [store.getModelRoles(), at(global, "modelRoles"), at(project, "modelRoles")]) {
+		if (isObj(roles)) for (const k of Object.keys(roles)) if (!UNSAFE_KEYS.has(k)) names.add(k);
+	}
+	const session: Record<string, string> = {};
+	const host: Record<string, string> = {};
+	for (const role of names) {
+		const hostValue = store.getProjectModelRole(role) ?? store.getGlobalModelRole(role);
+		if (hostValue) host[role] = hostValue;
+		const layer = store.getModelRoleProvenance(role);
+		if (layer === "runtime" || layer === "overlay") {
+			const value = store.getModelRole(role);
+			if (value) session[role] = value;
+		}
+	}
+	const hostChains = { ...chainsOf(at(global, "retry", "fallbackChains")), ...chainsOf(at(project, "retry", "fallbackChains")) };
+	const sessionChains: Record<string, string[]> = {};
+	for (const [key, chain] of Object.entries(chainsOf(rs.chains.get(store)))) {
+		const hostChain = Object.hasOwn(hostChains, key) ? hostChains[key] : undefined;
+		if (!hostChain || hostChain.length !== chain.length || hostChain.some((s, i) => s !== chain[i])) sessionChains[key] = chain;
+	}
+	return { session, host, sessionChains, hostChains, active, overlays: [...store.getConfigFiles()] };
+}
+
+/** `setRoleModels` params: the session's complete own roles and chains, and the overlay hostd rewrote. */
+export interface RoleModelsRequest {
+	roles: Record<string, string>;
+	chains: Record<string, string[]>;
+	overlay?: string;
+}
+
+const selectorOk = (s: string): boolean => s.length > 0 && s.length <= 256 && !/\s/.test(s) && /^[^/]+\/.+$/.test(s);
+
+/** Checks and copies `setRoleModels` params (hostd validates the same rules first). */
+export function roleModelsRequest(p: Params): RoleModelsRequest {
+	const roles: Record<string, string> = {};
+	const rawRoles = p.roles ?? {};
+	if (!isObj(rawRoles)) return fail("invalid_params", '"roles" must be an object');
+	for (const [role, value] of Object.entries(rawRoles)) {
+		if (!ROLE_NAME.test(role)) fail("invalid_params", `bad role name ${JSON.stringify(role)}`);
+		if (typeof value !== "string" || !value.split(",").every(selectorOk)) fail("invalid_params", `role ${role}: bad selector ${JSON.stringify(value)}`);
+		roles[role] = value as string;
+	}
+	const chains: Record<string, string[]> = {};
+	const rawChains = p.fallbackChains ?? {};
+	if (!isObj(rawChains)) return fail("invalid_params", '"fallbackChains" must be an object');
+	for (const [key, list] of Object.entries(rawChains)) {
+		if (!ROLE_NAME.test(key) && !selectorOk(key)) fail("invalid_params", `bad fallback chain key ${JSON.stringify(key)}`);
+		if (!Array.isArray(list) || !list.every(s => typeof s === "string" && selectorOk(s))) fail("invalid_params", `fallback chain ${key}: bad selectors`);
+		chains[key] = [...(list as string[])];
+	}
+	return { roles, chains, overlay: str(p, "overlay") };
+}
+
+/**
+ * Makes `req` the session's own roles and chains: reloads the overlay hostd rewrote (when omp was
+ * started with it), then replaces omp's runtime `modelRoles` / `retry.fallbackChains` overrides
+ * with them (a role or key left out falls back to the overlay, then the host's config). When the
+ * effective `default` role changed, `switchDefault` moves the session onto it; returns its warning.
+ */
+export async function applyRoleModels(rs: RoleSettings, req: RoleModelsRequest, switchDefault: (selector: string) => Promise<string | undefined>): Promise<string | undefined> {
+	const store = rs.store();
+	const before = store.getModelRole("default");
+	if (req.overlay) {
+		const want = path.resolve(req.overlay);
+		if (store.getConfigFiles().some(f => path.resolve(f) === want)) await store.reloadFromDisk();
+	}
+	if (Object.keys(req.roles).length > 0) rs.roles.override(store, { ...req.roles });
+	else rs.roles.clearOverride(store);
+	if (Object.keys(req.chains).length > 0) rs.chains.override(store, Object.fromEntries(Object.entries(req.chains).map(([k, v]) => [k, [...v]])));
+	else rs.chains.clearOverride(store);
+	const after = store.getModelRole("default");
+	return after && after !== before ? switchDefault(after) : undefined;
+}
+
+/** `provider/id[:level]` → the thinking level it names, if any (a non-level suffix is part of the id). */
+export function selectorLevel(selector: string): string | undefined {
+	const first = selector.split(",")[0]?.trim() ?? "";
+	const i = first.lastIndexOf(":");
+	const level = i > 0 ? first.slice(i + 1) : "";
+	return Object.hasOwn(THINKING_LEVELS, level) ? level : undefined;
+}
+
+const isHandle = <T>(v: unknown): v is SettingHandle<T> =>
+	isObj(v) && typeof v.get === "function" && typeof v.override === "function" && typeof v.clearOverride === "function";
+
+/** omp's live `Settings` and its `modelRoles` / `retry.fallbackChains` handles, when this omp has
+ *  them and the subpath imports resolve to the modules omp runs (the root export's `Settings`). */
+async function probeRoleSettings(ns: Record<string, unknown>, load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<RoleSettings | undefined> {
+	const [settingsMod, modelMod, sessionMod] = await Promise.all([
+		load(import("@oh-my-pi/pi-coding-agent/config/settings")),
+		load(import("@oh-my-pi/pi-coding-agent/config/model-settings")),
+		load(import("@oh-my-pi/pi-coding-agent/session/settings")),
+	]);
+	const settings = settingsMod?.Settings;
+	// Another module instance would hold its own, uninitialised Settings.
+	if (!isObj(settings) && typeof settings !== "function") return undefined;
+	if (ns.Settings !== undefined && ns.Settings !== settings) return undefined;
+	const roles: unknown = modelMod?.cfgModelRoles;
+	const chains: unknown = sessionMod?.cfgRetryFallbackChains;
+	if (!isHandle<Record<string, string>>(roles) || !isHandle<Record<string, string[]>>(chains)) return undefined;
+	const isStore = (s: unknown): s is RoleStore =>
+		isObj(s) && ["getModelRole", "getModelRoles", "getModelRoleProvenance", "getGlobalModelRole", "getProjectModelRole", "getConfigFiles", "reloadFromDisk"].every(m => typeof s[m] === "function");
+	// `Settings.instance` throws until omp initialised it (always done before extensions load).
+	const store = (): RoleStore => {
+		const s: unknown = "instance" in settings ? settings.instance : undefined;
+		if (!isStore(s)) throw new BridgeError("unsupported", "omp's settings are not available in this omp");
+		return s;
+	};
+	try {
+		store();
+	} catch {
+		return undefined;
+	}
+	return { store, roles, chains };
+}
+
+// ─── 2.1.0: context breakdown (`caps.context`) ─────────────────────────────────────────────────
+// What fills the session's context window (docs/bridge-protocol.md "Context breakdown"): the data
+// of omp's own `/context` viewer (`session/context-view` `buildSessionContextView`, omp ≥ 18.13.2),
+// attributed to the session's usage exactly as that viewer's overview does (`allocateUsage`). An omp
+// without the viewer gets an estimate from the session's own parts; without omp's AgentSession, the
+// totals of `ctx.getContextUsage()` alone.
+
+/** omp's `ContextViewEntry` (pi-tui `chrome/context-view-model`). */
+export interface ContextEntryLike {
+	readonly id: string;
+	readonly label: string;
+	readonly text: string;
+	readonly tokens: number;
+	readonly info?: string;
+	readonly timestamp?: number;
+	readonly callId?: string;
+	/** Thinking blocks of one message share one weight, held by their group. */
+	readonly thinkingGroup?: { readonly id: string; readonly label: string; readonly tokens: number };
+}
+/** omp's `ContextViewCategory`. */
+export interface ContextCategoryLike {
+	readonly id: string;
+	readonly label: string;
+	/** omp's estimate: the weight the overview attributes usage by. */
+	readonly tokens: number;
+	readonly entries: readonly ContextEntryLike[];
+	readonly children?: readonly ContextCategoryLike[];
+}
+/** omp's `ContextViewData` (`breakdown`: pi-tui `status-line/context-usage` `ContextBreakdown`). */
+export interface ContextViewLike {
+	readonly breakdown: {
+		readonly model?: { readonly name?: string; readonly id?: string } | null;
+		readonly contextWindow: number;
+		readonly usedTokens: number;
+		readonly autoCompactBufferTokens: number;
+		readonly freeTokens: number;
+		readonly thresholdTokens?: number;
+		readonly snapcompact?: { readonly savedTokens?: number };
+	};
+	readonly categories: readonly ContextCategoryLike[];
+}
+/** omp's context modules, when this omp has them. */
+export interface ContextModules {
+	/** `session/context-view` `buildSessionContextView` (omp ≥ 18.13.2). */
+	buildView?: (session: unknown) => ContextViewLike;
+	/** pi-tui `overlays/context-viewer-overview`: the overview's own attribution and labels. */
+	allocate?: (categories: readonly ContextCategoryLike[], usage: number) => ReadonlyMap<ContextCategoryLike, number> | undefined;
+	overviewLabel?: (category: ContextCategoryLike) => string;
+}
+/** The slice of omp's AgentSession the estimate reads. */
+export interface ContextSessionLike {
+	readonly model?: { readonly name?: string; readonly id?: string; readonly contextWindow?: number } | null;
+	readonly systemPrompt?: readonly string[];
+	readonly messages?: readonly unknown[];
+	readonly agent?: {
+		readonly tokenizer?: { countTokens?(text: string): number };
+		readonly state?: { readonly tools?: readonly unknown[]; readonly messages?: readonly unknown[] };
+	};
+	hasBuiltInTool?(name: string): boolean;
+	dropImages?(): unknown;
+}
+
+/** omp's categories in viewer order, with the Overview label where it differs (pi-tui `CONTEXT_CATEGORIES`). */
+const CONTEXT_CATEGORIES: readonly { id: string; label: string; overview?: string }[] = [
+	{ id: "system-prompt", label: "System Prompt", overview: "System Prompt (excluding Skills)" },
+	{ id: "skills", label: "Skills" },
+	{ id: "built-in-tools", label: "Built-in Tools" },
+	{ id: "custom-tools", label: "Custom Tools" },
+	{ id: "user-messages", label: "User / Developer Messages" },
+	{ id: "assistant-messages", label: "Assistant Messages" },
+	{ id: "assistant-thinking", label: "Assistant Thinking" },
+	{ id: "tool-calls", label: "Tool Calls" },
+	{ id: "tool-output", label: "Tool Output" },
+];
+const CONTEXT_PREVIEW = 240;
+/** Biggest entries sent per category; tool output, which usually fills a window, gets more. */
+const CONTEXT_TOP = 5;
+const CONTEXT_TOP_TOOL_OUTPUT = 10;
+
+/** omp's `allocateTokens` (pi-tui `overlays/context-viewer-overview`): largest-remainder split of `total` by `weights`. */
+export function allocateTokens(weights: readonly number[], total: number): number[] | undefined {
+	const sum = weights.reduce((value, weight) => value + weight, 0);
+	if (!(sum > 0) || !Number.isFinite(sum)) return undefined;
+	const shares = weights.map((weight, index) => {
+		const exact = (total * weight) / sum;
+		return { index, tokens: Math.floor(exact), remainder: exact - Math.floor(exact) };
+	});
+	const remaining = total - shares.reduce((value, share) => value + share.tokens, 0);
+	const ranked = [...shares].sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+	for (let index = 0; index < remaining && index < ranked.length; index++) ranked[index]!.tokens++;
+	return shares.map(share => share.tokens);
+}
+
+/** omp's `allocateUsage`: usage to the categories by weight, then each category's share to its children. */
+export function allocateUsage(categories: readonly ContextCategoryLike[], usage: number): Map<ContextCategoryLike, number> | undefined {
+	const allocation = new Map<ContextCategoryLike, number>();
+	const allocate = (siblings: readonly ContextCategoryLike[], total: number): boolean => {
+		const shares = allocateTokens(
+			siblings.map(category => category.tokens),
+			total,
+		);
+		if (!shares) return false;
+		for (const [index, category] of siblings.entries()) {
+			allocation.set(category, shares[index]!);
+			if (category.children) allocate(category.children, shares[index]!);
+		}
+		return true;
+	};
+	return allocate(categories, usage) ? allocation : undefined;
+}
+
+/** The start of an entry's text on one line. */
+export function contextPreview(text: string): string {
+	const flat = text.slice(0, CONTEXT_PREVIEW * 4).replace(/\s+/g, " ").trim();
+	return flat.length > CONTEXT_PREVIEW ? `${flat.slice(0, CONTEXT_PREVIEW - 1)}…` : flat;
+}
+
+const wholeTokens = (n: number | undefined): number | undefined => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.round(n)) : undefined);
+
+/** A category's biggest entries, biggest first. Thinking blocks of one message count once, as their group. */
+function biggestEntries(category: ContextCategoryLike, n: number): Json[] {
+	const items: { entry: ContextEntryLike; label: string; tokens: number; index: number }[] = [];
+	const groups = new Set<string>();
+	for (const [index, entry] of category.entries.entries()) {
+		const group = entry.thinkingGroup;
+		if (group) {
+			if (groups.has(group.id)) continue;
+			groups.add(group.id);
+		}
+		items.push({ entry, label: group ? `Thinking · ${group.label}` : entry.label, tokens: group ? group.tokens : entry.tokens, index });
+	}
+	items.sort((a, b) => b.tokens - a.tokens || a.index - b.index);
+	return items.slice(0, n).map(({ entry, label, tokens }) => ({
+		id: entry.id,
+		label,
+		info: entry.info,
+		tokens: wholeTokens(tokens) ?? 0,
+		preview: contextPreview(entry.text),
+		chars: entry.text.length,
+		at: entry.timestamp,
+		callId: entry.callId,
+	}));
+}
+
+/** The `context` op's answer from omp's viewer data (or an estimate shaped like it). */
+export function summarizeContextView(
+	view: ContextViewLike,
+	opts: { source: "omp" | "estimate"; images: number; dropImages: boolean; modules?: ContextModules; now?: number },
+): Json {
+	const b = view.breakdown;
+	const allocation = (opts.modules?.allocate ?? allocateUsage)(view.categories, b.usedTokens);
+	const label = (category: ContextCategoryLike): string => {
+		try {
+			if (opts.modules?.overviewLabel) return opts.modules.overviewLabel(category);
+		} catch {
+			// the table below
+		}
+		return CONTEXT_CATEGORIES.find(d => d.id === category.id)?.overview ?? category.label;
+	};
+	return {
+		source: opts.source,
+		model: b.model?.name || b.model?.id || undefined,
+		window: wholeTokens(b.contextWindow) ?? 0,
+		used: wholeTokens(b.usedTokens) ?? 0,
+		buffer: wholeTokens(b.autoCompactBufferTokens) ?? 0,
+		free: wholeTokens(b.freeTokens) ?? 0,
+		threshold: wholeTokens(b.thresholdTokens),
+		categories: view.categories.map(category => ({
+			id: category.id,
+			label: label(category),
+			tokens: wholeTokens(allocation?.get(category)),
+			weight: wholeTokens(category.tokens) ?? 0,
+			entries: category.entries.length,
+			children: (category.children ?? []).map(child => ({
+				label: child.label,
+				tokens: wholeTokens(allocation?.get(child)),
+				weight: wholeTokens(child.tokens) ?? 0,
+				entries: child.entries.length,
+			})),
+			top: biggestEntries(category, category.id === "tool-output" ? CONTEXT_TOP_TOOL_OUTPUT : CONTEXT_TOP),
+		})),
+		images: opts.images,
+		dropImages: opts.dropImages,
+		snapcompactSaved: wholeTokens(b.snapcompact?.savedTokens) || undefined,
+		at: opts.now ?? Date.now(),
+	};
+}
+
+/** Image blocks in a session's context messages (what omp's `/shake images` takes out of it). */
+export function countContextImages(messages: readonly unknown[] | undefined): number {
+	let n = 0;
+	for (const m of messages ?? []) {
+		if (!isObj(m) || !Array.isArray(m.content)) continue;
+		for (const block of m.content) if (isObj(block) && block.type === "image") n++;
+	}
+	return n;
+}
+
+function contextBlockText(block: Json): string {
+	switch (block.type) {
+		case "text":
+			return String(block.text ?? "");
+		case "thinking":
+			return String(block.thinking ?? "");
+		case "image":
+			return `[image · ${String(block.mimeType ?? "image")}]`;
+		case "toolCall":
+			return `${String(block.name ?? "")} ${JSON.stringify(block.arguments ?? null)}`;
+		default:
+			return "";
+	}
+}
+
+/**
+ * Data shaped like omp's viewer for an omp without it: each system prompt block, tool definition and
+ * message part counted with the session's tokenizer (else 4 characters a token); the overview then
+ * splits omp's reported usage by these counts. No auto-compaction buffer: its settings are omp's.
+ */
+export function estimateContextView(session: ContextSessionLike, usage: { tokens?: number | null; contextWindow?: number } | undefined): ContextViewLike {
+	const tokenizer = session.agent?.tokenizer;
+	const count = (text: string): number => {
+		try {
+			const n = tokenizer?.countTokens?.(text);
+			if (typeof n === "number" && Number.isFinite(n)) return n;
+		} catch {
+			// estimated below
+		}
+		return Math.ceil(text.length / 4);
+	};
+	type Category = { id: string; label: string; tokens: number; entries: ContextEntryLike[]; children?: Category[] };
+	const categories: Category[] = CONTEXT_CATEGORIES.map(d => ({ id: d.id, label: d.label, tokens: 0, entries: [] }));
+	const byId = new Map(categories.map(c => [c.id, c]));
+	const add = (id: string, entry: Omit<ContextEntryLike, "tokens">, tool?: string): void => {
+		const category = byId.get(id)!;
+		const sized = { ...entry, tokens: count(entry.text) };
+		category.entries.push(sized);
+		category.tokens += sized.tokens;
+		if (tool === undefined) return;
+		category.children ??= [];
+		let group = category.children.find(g => g.label === tool);
+		if (!group) {
+			group = { id, label: tool, tokens: 0, entries: [] };
+			category.children.push(group);
+		}
+		group.entries.push(sized);
+		group.tokens += sized.tokens;
+	};
+	for (const [i, block] of (session.systemPrompt ?? []).entries()) add("system-prompt", { id: `system-prompt/${i}`, label: `System Block ${i + 1}`, text: String(block ?? "") });
+	for (const [i, tool] of (session.agent?.state?.tools ?? []).entries()) {
+		if (!isObj(tool)) continue;
+		const name = String(tool.name ?? "tool");
+		let builtIn = true;
+		try {
+			builtIn = session.hasBuiltInTool?.(name) ?? true;
+		} catch {
+			// counted as built in
+		}
+		const id = builtIn ? "built-in-tools" : "custom-tools";
+		add(id, { id: `${id}/${i}`, label: name, text: JSON.stringify({ name, description: tool.description, parameters: tool.parameters }) });
+	}
+	const messages = session.agent?.state?.messages ?? session.messages ?? [];
+	for (const [i, m] of messages.entries()) {
+		if (!isObj(m)) continue;
+		const at = typeof m.timestamp === "number" ? m.timestamp : undefined;
+		if (m.role === "assistant" && Array.isArray(m.content)) {
+			for (const [j, block] of m.content.entries()) {
+				if (!isObj(block)) continue;
+				const id = block.type === "toolCall" ? "tool-calls" : block.type === "thinking" || block.type === "redactedThinking" ? "assistant-thinking" : "assistant-messages";
+				const label = block.type === "toolCall" ? String(block.name ?? "tool") : `${String(block.type)} · message ${i + 1}`;
+				add(id, { id: `${id}/${i}/${j}`, label, text: contextBlockText(block), timestamp: at, callId: typeof block.id === "string" && block.type === "toolCall" ? block.id : undefined });
+			}
+			continue;
+		}
+		const text = typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter(isObj).map(contextBlockText).join("\n") : "";
+		const tool = m.role === "toolResult" ? String(m.toolName ?? "tool") : m.role === "bashExecution" ? "bash" : m.role === "pythonExecution" ? "python" : undefined;
+		if (tool !== undefined) {
+			const callId = typeof m.toolCallId === "string" ? m.toolCallId : undefined;
+			add("tool-output", { id: `tool-output/${i}`, label: tool, text: text || String(m.output ?? ""), timestamp: at, callId }, tool);
+		} else {
+			add("user-messages", { id: `user-messages/${i}`, label: `${String(m.role ?? "user")} · message ${i + 1}`, text, timestamp: at });
+		}
+	}
+	byId.get("tool-output")!.children?.sort((a, b) => b.tokens - a.tokens);
+	const sum = categories.reduce((total, c) => total + c.tokens, 0);
+	const window = usage?.contextWindow ?? session.model?.contextWindow ?? 0;
+	const used = typeof usage?.tokens === "number" ? usage.tokens : sum;
+	return {
+		breakdown: { model: session.model, contextWindow: window, usedTokens: used, autoCompactBufferTokens: 0, freeTokens: Math.max(0, window - used) },
+		categories,
+	};
+}
+
+/** omp's context modules: a root export when omp has one, else the literal subpath imports omp's
+ *  extension loader maps to its own modules. Loaded on the first `context` request. */
+async function probeContextModules(ns: Record<string, unknown>): Promise<ContextModules> {
+	const load = (mod: Promise<unknown>): Promise<Json | undefined> => settleWithin(mod, 3_000).then(m => (isObj(m) ? m : undefined));
+	const fn = <T>(v: unknown): T | undefined => (typeof v === "function" ? (v as T) : undefined);
+	const [viewMod, overviewMod] = await Promise.all([
+		fn(ns.buildSessionContextView) ? undefined : load(import("@oh-my-pi/pi-coding-agent/session/context-view")),
+		fn(ns.allocateUsage) ? undefined : load(import("@oh-my-pi/pi-tui/overlays/context-viewer-overview")),
+	]);
+	return {
+		buildView: fn(ns.buildSessionContextView) ?? fn(viewMod?.buildSessionContextView),
+		allocate: fn(ns.allocateUsage) ?? fn(overviewMod?.allocateUsage),
+		overviewLabel: fn(ns.overviewLabel) ?? fn(overviewMod?.overviewLabel),
+	};
 }
 
 /**
@@ -1775,6 +2427,682 @@ async function writeSettings(input: string, out: string): Promise<void> {
 	setTimeout(() => process.exit(code), 0);
 }
 
+// ─── 2.1.0: resume (omp's F5, subagent resume, turn errors, the limit guard) ─────────────────────
+// docs/bridge-protocol.md "Resume". Every retry is omp's own `AgentSession.retry()` (F5, `/retry`):
+// it removes the failed or aborted assistant tail (with its synthetic tool results), resets the
+// retry budget and continues without a new prompt. A subagent is resumed the way `omp --restore`
+// resumes one (task/restore.ts): one more `runSubagentFollowUpTurn` registered as a background job
+// of its parent, so the parent receives the ordinary `async-result` under the subagent's id.
+
+/** The parts of pi-ai's error classifier (`@oh-my-pi/pi-ai/error`) the bridge reads. */
+export interface ErrorClassifier {
+	classifyMessage(message: Json): number;
+	is(id: number | undefined, flag: number): boolean;
+	Flag: { UsageLimit: number };
+	parseRateLimitReason?(message: string): string;
+}
+/** pi-ai's `extractProviderRetryHint`: ms until the provider says to try again, when it said. */
+export type RetryHint = (provider: string | undefined, message: string | undefined) => number | undefined;
+
+export type LimitClass = "usageLimit" | "rateLimit" | "other";
+
+/** omp's rate-limit reasons (pi-ai `parseRateLimitReason`) that clear by themselves. */
+const TRANSIENT_LIMIT_REASONS: Record<string, true> = { RATE_LIMIT_EXCEEDED: true, CONCURRENT_LIMIT: true, MODEL_CAPACITY_EXHAUSTED: true };
+// Fallbacks for an omp whose classifier cannot be imported (pi-ai's own patterns are richer).
+const USAGE_LIMIT_TEXT =
+	/usage.?limit|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient|will reset)|insufficient.?(?:balance|quota)|balance.?exhausted|out of (?:extra )?(?:credits|usage)|spend(?:ing)?[\s_-]?(?:limit|cap)\b|exhausted your capacity|resource.?exhausted/i;
+const RATE_LIMIT_TEXT = /rate.?limit|too many requests|overloaded|over capacity|capacity (?:exceeded|exhausted)|concurrent requests?|throttl/i;
+
+/** The HTTP status a provider error text names (`429 …`, `status 429`, `(429)`). */
+function statusInText(text: string): number | undefined {
+	const m = /(?:^|\bstatus[:= ]*|\(|\bHTTP\/\S+\s)([45]\d\d)\b/i.exec(text.trimStart());
+	return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * What a failed turn ran into: an account usage limit (plan window, quota, credits), a temporary
+ * rate limit (429, overload, concurrency) or anything else. omp's own classifier decides when the
+ * bridge could import it; the text fallback errs toward `other`.
+ */
+export function classifyTurnError(
+	m: { api?: unknown; provider?: unknown; model?: unknown; errorId?: unknown; errorMessage?: unknown; errorStatus?: unknown },
+	ai?: ErrorClassifier,
+): { class: LimitClass; reason?: string } {
+	const text = typeof m.errorMessage === "string" ? m.errorMessage : "";
+	const status = typeof m.errorStatus === "number" ? m.errorStatus : statusInText(text);
+	if (ai) {
+		try {
+			// classifyMessage writes `errorId` onto the object it gets: never omp's own message.
+			const id = ai.classifyMessage({
+				api: m.api,
+				provider: m.provider,
+				model: m.model,
+				errorId: typeof m.errorId === "number" ? m.errorId : undefined,
+				errorMessage: text || undefined,
+				errorStatus: status,
+			});
+			const reason = text ? ai.parseRateLimitReason?.(text) : undefined;
+			if (ai.is(id, ai.Flag.UsageLimit)) return { class: "usageLimit", reason };
+			if (status === 429 || status === 529 || (reason !== undefined && TRANSIENT_LIMIT_REASONS[reason])) return { class: "rateLimit", reason };
+			return { class: "other", reason };
+		} catch {
+			// the text classifier below
+		}
+	}
+	if (status === 402 || USAGE_LIMIT_TEXT.test(text)) return { class: "usageLimit" };
+	if (status === 429 || status === 529 || RATE_LIMIT_TEXT.test(text)) return { class: "rateLimit" };
+	return { class: "other" };
+}
+
+/** The longest provider retry hint kept (30 days): a longer or non-finite one is no hint at all
+ *  (`retryAt` = `at` + hint must stay a plain integer hostd's `Millis` accepts). */
+export const RETRY_HINT_MAX_MS = 30 * 24 * 3_600_000;
+
+/** ms until the provider said to try again (`retry-after-ms=…`, "try again in 2 minutes", …):
+ *  omp's own parser when the bridge could import it, else the common phrasings. */
+export function retryHintMs(provider: string | undefined, text: string | undefined, hint?: RetryHint): number | undefined {
+	if (!text) return undefined;
+	const bounded = (ms: number): number | undefined => (Number.isFinite(ms) && ms >= 0 && ms <= RETRY_HINT_MAX_MS ? Math.round(ms) : undefined);
+	if (hint) {
+		try {
+			const ms = hint(provider, text);
+			return typeof ms === "number" ? bounded(ms) : undefined;
+		} catch {
+			// the fallback below
+		}
+	}
+	const exact = /retry-after-ms=(\d+)/i.exec(text);
+	if (exact) return bounded(Number(exact[1]));
+	const m = /\b(?:try again|retry|resets?)\s+(?:in|after)\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b/i.exec(text);
+	if (!m) return undefined;
+	const unit = m[2]!.toLowerCase();
+	const scale = unit === "ms" || unit.startsWith("milli") ? 1 : unit.startsWith("h") ? 3_600_000 : unit.startsWith("m") ? 60_000 : 1_000;
+	return bounded(Number(m[1]) * scale);
+}
+
+const EVAL_STATE_CONTEXT = "eval-state-context";
+/** The failed or aborted assistant message that ends `messages`, if any: omp's
+ *  `retryableAssistantTurnEnd` (trailing eval snapshots and synthetic tool results don't count). */
+export function failedTail(messages: readonly unknown[]): Json | undefined {
+	let end = messages.length;
+	while (end > 0) {
+		const m = messages[end - 1];
+		if (isObj(m) && m.role === "custom" && m.customType === EVAL_STATE_CONTEXT) end--;
+		else if (isObj(m) && m.role === "toolResult" && isObj(m.details) && m.details.__synthetic === true) end--;
+		else break;
+	}
+	const tail = messages[end - 1];
+	if (!isObj(tail) || tail.role !== "assistant") return undefined;
+	return tail.stopReason === "error" || tail.stopReason === "aborted" ? tail : undefined;
+}
+
+/** omp's `INTERRUPTED_TURN_ERROR` (session/exit-diagnostics), used when its module cannot be imported. */
+const INTERRUPTED_TURN_ERROR = "Previous OMP process exited before completing the turn.";
+
+/**
+ * Whether a transcript ends in a reply cut off while it streamed: its last message is an assistant
+ * reply without tool calls that stopped `aborted` and is not exit recovery's abort record. omp's
+ * restore (`hasRestorableTurn`) leaves such a reply alone when no exit record follows it (a
+ * subagent's transcript never gets one); omp's `retry()` goes on with it.
+ */
+export function endsInCutOffReply(entries: readonly unknown[], interruptedTurnError = INTERRUPTED_TURN_ERROR): boolean {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (!isObj(e) || e.type !== "message") continue;
+		const m = e.message;
+		return (
+			isObj(m) &&
+			m.role === "assistant" &&
+			m.stopReason === "aborted" &&
+			m.errorMessage !== interruptedTurnError &&
+			!(Array.isArray(m.content) && m.content.some(c => isObj(c) && c.type === "toolCall"))
+		);
+	}
+	return false;
+}
+
+/** What a model sees instead of a subagent's provider-limit failure while auto-resume is on. Not a
+ *  limit phrase itself (pi-ai's classifier and the fallback both read it as `other`). */
+export const LIMIT_NEUTRAL =
+	"This work was interrupted by a temporary provider limit and is resumed automatically; its result arrives as a new background job result.";
+
+const TASK_RESULT = /<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/g;
+const TAGGED = (tag: string) => new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`);
+/** Up to this much of a failed result's `<output>` is read for its error. omp's
+ *  `formatTaskResultSummary` shows the stderr as the `<output>` when the run printed nothing (a
+ *  provider limit hit right away), and a stderr is a line or two; a longer output is work, and work
+ *  that talks about rate limits is no failure. */
+const LIMIT_OUTPUT_MAX = 1_000;
+
+/** The error text of one `<task-result>` body (omp's `task-summary.md`): `<error>` (the run printed
+ *  output before it failed), else a short `<output>`/`<preview>` (the stderr). */
+function taskResultError(body: string): string | undefined {
+	const error = TAGGED("error").exec(body)?.[1];
+	if (error !== undefined) return error;
+	const output = TAGGED("output").exec(body)?.[1] ?? TAGGED("preview").exec(body)?.[1];
+	return output !== undefined && output.length <= LIMIT_OUTPUT_MAX ? output : undefined;
+}
+
+/** Failed `<task-result>` envelopes (omp's `formatTaskResultSummary`) whose error is a provider
+ *  limit → status `interrupted` and {@link LIMIT_NEUTRAL}. Other envelopes and text stay as they are. */
+export function neutralizeTaskResults(text: string, isLimitText: (error: string) => boolean): string {
+	if (!text.includes("<task-result")) return text;
+	return text.replace(TASK_RESULT, (whole, attrs: string, body: string) => {
+		const status = /\bstatus="([^"]*)"/.exec(attrs)?.[1] ?? "";
+		const error = status.startsWith("failed") ? taskResultError(body) : undefined;
+		if (error === undefined || !isLimitText(error)) return whole;
+		return `<task-result${attrs.replace(/\bstatus="[^"]*"/, 'status="interrupted"')}>\n${LIMIT_NEUTRAL}\n</task-result>`;
+	});
+}
+
+function neutralizeContent(content: unknown, isLimitText: (error: string) => boolean): unknown {
+	if (typeof content === "string") return neutralizeTaskResults(content, isLimitText);
+	if (!Array.isArray(content)) return content;
+	let changed = false;
+	const next = content.map(block => {
+		if (!isObj(block) || block.type !== "text" || typeof block.text !== "string") return block;
+		const text = neutralizeTaskResults(block.text, isLimitText);
+		if (text === block.text) return block;
+		changed = true;
+		return { ...block, text };
+	});
+	return changed ? next : content;
+}
+
+/**
+ * The `context` guard (2.1.0 `caps.limitGuard`, while hostd's auto-resume is on): provider limits
+ * leave what the model sees. Assistant turns that failed on a usage or rate limit go, together with
+ * every tool result paired to their tool calls (so tool-call/result pairing stays valid); a failed
+ * `<task-result>` whose error is such a limit (a subagent stopped on it), in a tool result or a
+ * background job's `async-result`, reads {@link LIMIT_NEUTRAL}. Other errors, aborted turns and all
+ * other content stay. Works on omp's per-request copy: the session and its file are never touched.
+ * `null`: nothing to change.
+ */
+export function guardContext(messages: readonly unknown[], isLimitTurn: (m: Json) => boolean, isLimitText: (error: string) => boolean): unknown[] | null {
+	const out: unknown[] = [];
+	const dropped = new Set<string>();
+	let changed = false;
+	for (const m of messages) {
+		if (!isObj(m)) {
+			out.push(m);
+			continue;
+		}
+		if (m.role === "assistant" && m.stopReason === "error" && isLimitTurn(m)) {
+			for (const block of Array.isArray(m.content) ? m.content : []) {
+				if (isObj(block) && block.type === "toolCall" && typeof block.id === "string") dropped.add(block.id);
+			}
+			changed = true;
+			continue;
+		}
+		if (m.role === "toolResult" && typeof m.toolCallId === "string" && dropped.has(m.toolCallId)) {
+			changed = true;
+			continue;
+		}
+		if (m.role === "toolResult" || m.role === "custom") {
+			const content = neutralizeContent(m.content, isLimitText);
+			if (content !== m.content) {
+				out.push({ ...m, content });
+				changed = true;
+				continue;
+			}
+		}
+		out.push(m);
+	}
+	return changed ? out : null;
+}
+
+/** How much of a subagent transcript's end `restorable`/`restore` read. */
+const TRANSCRIPT_TAIL_BYTES = 4 << 20;
+
+/** The header id and trailing messages of an omp session file (its last `maxBytes`), for a
+ *  transcript no live session holds (a parked subagent). Read-only. */
+export function sessionFileTail(file: string, maxBytes = 1 << 20): { sessionId?: string; messages: Json[] } {
+	const out: { sessionId?: string; messages: Json[] } = { messages: [] };
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(file, "r");
+		const size = fs.fstatSync(fd).size;
+		const head = Buffer.alloc(Math.min(size, 4096));
+		fs.readSync(fd, head, 0, head.length, 0);
+		const first = head.toString("utf8").split("\n")[0] ?? "";
+		try {
+			const header: unknown = JSON.parse(first);
+			if (isObj(header) && header.type === "session" && typeof header.id === "string") out.sessionId = header.id;
+		} catch {
+			// a header cut by the 4 KiB read; the messages still count
+		}
+		const start = Math.max(0, size - maxBytes);
+		const buf = Buffer.alloc(size - start);
+		fs.readSync(fd, buf, 0, buf.length, start);
+		const lines = buf.toString("utf8").split("\n");
+		if (start > 0) lines.shift(); // cut mid-line
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			try {
+				const entry: unknown = JSON.parse(line);
+				if (isObj(entry) && entry.type === "message" && isObj(entry.message)) out.messages.push(entry.message);
+			} catch {
+				// a line omp is still writing
+			}
+		}
+	} catch {
+		// unreadable: no tail
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+	return out;
+}
+
+/** The live AgentSession members `retry`, `resumeTree` and the turn-error watch use. */
+export interface RetrySession extends AgentSessionLike {
+	retry(): Promise<boolean>;
+	waitForIdle?(): Promise<void>;
+	restoreInterruptedTurn?(): Promise<boolean>;
+	readonly isRetrying?: boolean;
+	readonly asyncJobManager?: ResumeJobs;
+	readonly settings?: unknown;
+	readonly sessionManager?: {
+		getSessionId?(): string;
+		getSessionFile?(): string | undefined;
+		getEntries?(): unknown[];
+		buildSessionContext?(options?: Json): { messages?: unknown[] };
+	};
+	readonly agent?: { state?: { streamMessage?: unknown; messages?: unknown[] } };
+}
+export const isRetrySession = (s: unknown): s is RetrySession => isSession(s) && "retry" in s && typeof s.retry === "function";
+
+/** The parts of omp's `AsyncJobManager` a subagent resume uses. */
+export interface ResumeJobs {
+	register(type: string, label: string, run: (ctx: { jobId?: string; signal: AbortSignal }) => Promise<unknown>, options?: Json): string;
+	getAllJobs?(): Array<{ id: string; status?: string; agentId?: string; ownerId?: string; startTime?: number }>;
+	acknowledgeDeliveries?(jobIds: string[]): number;
+}
+
+/**
+ * omp's monitor of a kept-alive subagent's turns that no executor drives (`attachIrcWakeTurnMonitor`:
+ * IRC wakes, focused prompts, bare continuations such as `retry()`) also sees the retried turn and,
+ * once the subagent yields, hands the result to the parent as a job of its own (same agent and
+ * owner, started after `since`). The resume job `jobId` then stays silent, so the parent receives
+ * the result once. True when it does.
+ */
+export function quietIfDelivered(jobs: ResumeJobs, jobId: string, agentId: string, ownerId: string | undefined, since: number): boolean {
+	if (typeof jobs.getAllJobs !== "function" || typeof jobs.acknowledgeDeliveries !== "function") return false;
+	const wake = jobs.getAllJobs().some(j => j.id !== jobId && j.agentId === agentId && j.ownerId === ownerId && (j.startTime ?? 0) >= since);
+	if (wake) jobs.acknowledgeDeliveries([jobId]);
+	return wake;
+}
+
+/** The failed turn `retry()` would resume: the live tail, else (a revived session drops failed turns
+ *  from its provider context) the persisted display transcript, as omp's `retry()` reads it. */
+export function retryableTail(s: RetrySession): Json | undefined {
+	const live = failedTail(s.agent?.state?.messages ?? []);
+	if (live) return live;
+	const lastLive = (s.agent?.state?.messages ?? []).at(-1);
+	if (isObj(lastLive) && lastLive.role === "assistant") return undefined; // a settled turn is authoritative
+	try {
+		return failedTail(s.sessionManager?.buildSessionContext?.({ transcript: true })?.messages ?? []);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Makes the session's next `restoreInterruptedTurn()` omp's `retry()`. omp's follow-up turn
+ * (`runSubagentFollowUpTurn({restore: true})`, the `--restore` path) goes on through
+ * `restoreInterruptedTurn()`, which ends in `retry()` for an interrupted turn but leaves a terminal
+ * failure alone (`hasRestorableTurn`); for a failed turn, `retry()` is that same last step. One shot,
+ * on this instance only; `disarm` restores it.
+ */
+export function armRetry(session: RetrySession): { used(): boolean; disarm(): void } {
+	let used = false;
+	const own = Object.getOwnPropertyDescriptor(session, "restoreInterruptedTurn");
+	const disarm = (): void => {
+		if (own) Object.defineProperty(session, "restoreInterruptedTurn", own);
+		else Reflect.deleteProperty(session, "restoreInterruptedTurn");
+	};
+	Object.defineProperty(session, "restoreInterruptedTurn", {
+		configurable: true,
+		writable: true,
+		value: async (): Promise<boolean> => {
+			used = true;
+			disarm();
+			return session.retry();
+		},
+	});
+	return { used: () => used, disarm };
+}
+
+/** What a resumed subagent run reports (omp's `SingleResult`, the fields the job reads). */
+interface FollowUpResult {
+	aborted?: boolean;
+	exitCode?: number;
+	error?: string;
+	durationMs?: number;
+	structuredOutput?: unknown;
+}
+
+/** The omp internals `retry` / `resumeTree` / the turn-error watch use (2.1.0), each feature-detected. */
+interface ResumeInternals {
+	/** pi-ai's error classifier. */
+	ai?: ErrorClassifier;
+	/** pi-ai's provider retry-after / reset parser. */
+	hint?: RetryHint;
+	/** omp's task internals for resuming a subagent as a job of its parent (all or nothing). */
+	task?: {
+		runFollowUp(options: Json): Promise<FollowUpResult>;
+		summary(result: FollowUpResult, options: { totalDurationMs: number }): string;
+		definition(name: string, init: Json): unknown;
+		sessionInit(entries: unknown[]): Json | null;
+		jobError: new (message: string, structured?: unknown) => Error;
+		maxRuntimeMs(settings: unknown): number;
+	};
+}
+
+/** Probes {@link ResumeInternals}: omp's root exports first (they are the modules omp runs), then
+ *  literal subpath imports, which omp's extension loader maps to its own loaded modules. */
+async function probeResume(ns: Record<string, unknown>, load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<ResumeInternals> {
+	const fn = (v: unknown): ((...args: unknown[]) => unknown) | undefined => (typeof v === "function" ? (v as (...args: unknown[]) => unknown) : undefined);
+	const [errorMod, hintMod, executorMod, summaryMod, reviveMod, sessionMod, asyncMod, taskSettingsMod] = await Promise.all([
+		load(import("@oh-my-pi/pi-ai/error")),
+		load(import("@oh-my-pi/pi-ai/utils/retry-after")),
+		fn(ns.runSubagentFollowUpTurn) ? undefined : load(import("@oh-my-pi/pi-coding-agent/task/executor")),
+		fn(ns.formatTaskResultSummary) ? undefined : load(import("@oh-my-pi/pi-coding-agent/task/result-summary")),
+		fn(ns.persistedAgentDefinition) ? undefined : load(import("@oh-my-pi/pi-coding-agent/task/persisted-revive")),
+		fn(ns.extractSessionInit) ? undefined : load(import("@oh-my-pi/pi-coding-agent/session/session-manager")),
+		fn(ns.AsyncJobError) ? undefined : load(import("@oh-my-pi/pi-coding-agent/async")),
+		load(import("@oh-my-pi/pi-coding-agent/task/settings")),
+	]);
+	const out: ResumeInternals = {};
+	const ai = errorMod ?? (isObj(ns.AIError) ? ns.AIError : undefined);
+	if (ai && fn(ai.classifyMessage) && fn(ai.is) && isObj(ai.Flag) && typeof ai.Flag.UsageLimit === "number") out.ai = ai as unknown as ErrorClassifier;
+	const hint = fn(hintMod?.extractProviderRetryHint) ?? fn(ns.extractProviderRetryHint);
+	if (hint) out.hint = hint as unknown as RetryHint;
+	const run = fn(ns.runSubagentFollowUpTurn) ?? fn(executorMod?.runSubagentFollowUpTurn);
+	const summary = fn(ns.formatTaskResultSummary) ?? fn(summaryMod?.formatTaskResultSummary);
+	const sessionInit = fn(ns.extractSessionInit) ?? fn(sessionMod?.extractSessionInit);
+	// omp's own (task/persisted-revive.ts `persistedAgentDefinition`) when it can be imported.
+	const definition =
+		fn(ns.persistedAgentDefinition) ??
+		fn(reviveMod?.persistedAgentDefinition) ??
+		((name: string, init: Json) => ({ name, description: "", systemPrompt: (Array.isArray(init.systemPrompt) ? init.systemPrompt : []).join("\n\n"), source: "user" }));
+	// A plain Error still carries the text; omp's AsyncJobError also keeps a failed run's structured output.
+	const jobError = (fn(ns.AsyncJobError) ?? fn(asyncMod?.AsyncJobError) ?? Error) as unknown as new (message: string, structured?: unknown) => Error;
+	const maxRuntime = isObj(taskSettingsMod?.cfgTaskMaxRuntimeMs) ? taskSettingsMod.cfgTaskMaxRuntimeMs : undefined;
+	if (run && summary && sessionInit) {
+		out.task = {
+			runFollowUp: run as unknown as (options: Json) => Promise<FollowUpResult>,
+			summary: summary as unknown as (result: FollowUpResult, options: { totalDurationMs: number }) => string,
+			definition: definition as unknown as (name: string, init: Json) => unknown,
+			sessionInit: sessionInit as unknown as (entries: unknown[]) => Json | null,
+			jobError,
+			maxRuntimeMs: settings => {
+				try {
+					const get = fn(maxRuntime?.get);
+					const v = get ? get.call(maxRuntime, settings) : 0;
+					return typeof v === "number" && Number.isFinite(v) ? v : 0;
+				} catch {
+					return 0;
+				}
+			},
+		};
+	}
+	return out;
+}
+
+// ─── 2.1.0: background jobs (`caps.jobs`) ──────────────────────────────────────────────────────
+// The async jobs of the main session and of every subagent below it (docs/bridge-protocol.md
+// "Background jobs"): background bash / eval commands and subagents running as `task` jobs, as omp's
+// own jobs sheet (`/jobs`, the status line's jobs pill) lists them. Read through the main
+// AgentSession (`getAsyncJobTree`, `inspectAsyncJob`, `cancelAsyncJob`, `getRunningJobWidgets`,
+// `hasPendingAsyncWork`; omp ≥ 18.13), else the public `ctx.getAsyncJobSnapshot()` (the main agent's
+// own jobs, no output, no cancel).
+
+/** One job as omp snapshots it (`AsyncJobSnapshotItem`). */
+export interface JobItem {
+	id: string;
+	type?: string;
+	status?: string;
+	label?: string;
+	command?: string;
+	startTime?: number;
+	endTime?: number;
+	agentId?: string;
+	ownerId?: string;
+}
+/** omp's `AsyncJobInspection`. */
+export interface JobInspection {
+	command?: string;
+	cwd?: string;
+	pids?: readonly number[];
+	exitCode?: number;
+	output?: string;
+	artifactId?: string;
+	widget?: unknown;
+}
+/** The slice of omp's AgentSession the jobs ops use (each member feature-detected). */
+export interface JobsSession {
+	getAsyncJobTree?(options?: { recentLimit?: number }): unknown;
+	getAsyncJobSnapshot?(options?: { recentLimit?: number }): unknown;
+	inspectAsyncJob?(id: string): JobInspection | undefined;
+	cancelAsyncJob?(id: string): boolean;
+	getRunningJobWidgets?(): readonly { id: string; view?: unknown }[];
+	hasPendingAsyncWork?(): boolean;
+	readonly asyncJobManager?: { cancel?(id: string, filter?: { ownerId: string | undefined }): boolean };
+}
+/** The session's jobs: running ones oldest first, then the settled ones omp keeps, newest first. */
+export interface JobsList {
+	running: JobItem[];
+	recent: JobItem[];
+	/** The agent the tree is for (its own jobs are the top level); absent from the public snapshot. */
+	rootId?: string;
+}
+/** `JobGlance` (tf-proto): what a glance at a job's widget reads. */
+export interface JobGlanceWire {
+	text: string;
+	label?: string;
+	trend?: string;
+	trendTone?: string;
+}
+/** The `jobs` event (tf-proto `JobsSummary`). */
+export interface JobsSummaryWire {
+	running: number;
+	recent: number;
+	waiting: boolean;
+	glance?: JobGlanceWire;
+	glanceJob?: string;
+}
+/** One job on the wire (tf-proto `Job`). */
+export interface JobWire {
+	id: string;
+	kind: string;
+	status: "running" | "completed" | "failed" | "cancelled";
+	label: string;
+	command?: string;
+	startedAt: number;
+	endedAt?: number;
+	agentId?: string;
+	agentName?: string;
+	ownerId?: string;
+	ownerName?: string;
+	cancellable: boolean;
+	widget?: Json;
+	output?: string;
+	outputCut?: boolean;
+	pids?: number[];
+	exitCode?: number;
+	cwd?: string;
+	artifactId?: string;
+}
+/** The `jobs` op result (tf-proto `JobsView`). */
+export interface JobsViewWire {
+	jobs: JobWire[];
+	waiting: boolean;
+	at: number;
+}
+
+/** Settled jobs listed (omp's jobs sheet shows 10). */
+const RECENT_JOBS = 10;
+/** Output kept per inspected job: the newest part. */
+export const JOB_OUTPUT_MAX = 16 * 1024;
+const JOB_COMMAND_MAX = 4_000;
+const JOB_STATUSES: Record<string, JobWire["status"]> = { running: "running", completed: "completed", failed: "failed", cancelled: "cancelled" };
+/** The summary of a session without jobs: hostd shows nothing, so it is never sent first. */
+export const JOBS_NONE = JSON.stringify({ running: 0, recent: 0, waiting: false });
+
+const plainLine = (v: unknown): string => (typeof v === "string" ? v.replace(ANSI, "").replace(/\s+/g, " ").trim() : "");
+const jobItems = (v: unknown): JobItem[] => (Array.isArray(v) ? v.filter((j): j is JobItem => isObj(j) && typeof j.id === "string" && !!j.id) : []);
+
+/** The jobs omp lists for the session: its job tree when the AgentSession has one, else a snapshot. */
+export function listJobs(session: JobsSession | undefined, ctxSnapshot?: () => unknown): JobsList | undefined {
+	const read = (f: () => unknown): unknown => {
+		try {
+			return f();
+		} catch {
+			return undefined;
+		}
+	};
+	let raw: unknown;
+	if (typeof session?.getAsyncJobTree === "function") raw = read(() => session.getAsyncJobTree!({ recentLimit: RECENT_JOBS }));
+	if (!isObj(raw) && typeof session?.getAsyncJobSnapshot === "function") raw = read(() => session.getAsyncJobSnapshot!({ recentLimit: RECENT_JOBS }));
+	if (!isObj(raw) && ctxSnapshot) raw = read(ctxSnapshot);
+	if (!isObj(raw)) return undefined;
+	const running = jobItems(raw.running).sort((a, b) => (a.startTime ?? 0) - (b.startTime ?? 0));
+	const recent = jobItems(raw.recent).sort((a, b) => (b.startTime ?? 0) - (a.startTime ?? 0)).slice(0, RECENT_JOBS);
+	return { running, recent, rootId: typeof raw.rootId === "string" ? raw.rootId : undefined };
+}
+
+/**
+ * omp's `jobWidgetGlance` (pi-tui `tools/job-widget.ts`): the widget's headline, or a meter's
+ * `140/190` when the headline only restates its numerator; else the latest figure of its first
+ * chart or meter.
+ */
+export function jobGlance(view: unknown): JobGlanceWire | undefined {
+	if (!isObj(view)) return undefined;
+	const blocks = Array.isArray(view.blocks) ? view.blocks.filter(isObj) : [];
+	const headline = isObj(view.headline) ? view.headline : undefined;
+	const text = plainLine(headline?.text);
+	if (headline && text) {
+		const meter = blocks.find(b => b.kind === "meter");
+		const whole = meter ? plainLine(meter.text) : "";
+		const restates = whole.startsWith(text) && /^\s*\/\s*\S/.test(whole.slice(text.length));
+		const label = plainLine(headline.label);
+		const trend = isObj(headline.trend) ? headline.trend : undefined;
+		const trendText = plainLine(trend?.text);
+		return {
+			text: restates ? whole : text,
+			...(label ? { label } : {}),
+			...(trendText ? { trend: trendText, ...(typeof trend?.tone === "string" ? { trendTone: trend.tone } : {}) } : {}),
+		};
+	}
+	for (const b of blocks) {
+		const label = plainLine(b.label);
+		if (b.kind === "spark" && Array.isArray(b.values) && b.values.length > 0 && plainLine(b.last)) return { text: plainLine(b.last), ...(label ? { label } : {}) };
+		if (b.kind === "meter" && plainLine(b.text)) return { text: plainLine(b.text), ...(label ? { label } : {}) };
+	}
+	return undefined;
+}
+
+/** A job's widget on the wire (tf-proto `JobWidget`). */
+export function jobWidget(view: unknown): Json | undefined {
+	if (!isObj(view)) return undefined;
+	const meter = Array.isArray(view.blocks) ? view.blocks.find(b => isObj(b) && b.kind === "meter") : undefined;
+	const value = isObj(meter) && typeof meter.value === "number" && Number.isFinite(meter.value) ? Math.min(1, Math.max(0, meter.value)) : undefined;
+	const glance = jobGlance(view);
+	const stage = plainLine(view.stage);
+	const progressText = isObj(meter) ? plainLine(meter.text) : "";
+	return {
+		title: plainLine(view.title),
+		...(glance ? { glance } : {}),
+		...(stage ? { stage } : {}),
+		...(value !== undefined ? { progress: value } : {}),
+		...(progressText ? { progressText } : {}),
+		state: typeof view.state === "string" ? view.state : "fallback",
+		updatedAt: typeof view.updatedAt === "number" ? view.updatedAt : 0,
+	};
+}
+
+/** omp's `latestJobWidget`: the running job whose live widget (one a spec drives) saw data last. */
+export function latestLiveWidget(widgets: readonly { id: string; view?: unknown }[]): { id: string; view: Json } | undefined {
+	let latest: { id: string; view: Json } | undefined;
+	for (const w of widgets) {
+		const view = w.view;
+		if (!isObj(view) || view.state !== "live") continue;
+		const at = typeof view.updatedAt === "number" ? view.updatedAt : 0;
+		if (!latest || at > (latest.view.updatedAt as number)) latest = { id: w.id, view: { ...view, updatedAt: at } };
+	}
+	return latest;
+}
+
+/** The `jobs` event: counts, the wait, and the freshest live widget's glance. */
+export function jobsSummary(list: JobsList, widgets: readonly { id: string; view?: unknown }[], waiting: boolean): JobsSummaryWire {
+	const latest = latestLiveWidget(widgets.filter(w => list.running.some(j => j.id === w.id)));
+	const glance = latest ? jobGlance(latest.view) : undefined;
+	const label = latest ? plainLine(list.running.find(j => j.id === latest.id)?.label) : "";
+	return { running: list.running.length, recent: list.recent.length, waiting, ...(glance ? { glance, glanceJob: label || latest!.id } : {}) };
+}
+
+/**
+ * A job's output for a reader: ANSI removed, each line as a terminal leaves it after `\r`
+ * redraws (progress bars), at most `max` characters: the newest ones, from a line start.
+ */
+export function jobOutput(text: string, max = JOB_OUTPUT_MAX): { output: string; cut: boolean } {
+	let s = text.length > max * 4 ? text.slice(-max * 4) : text;
+	let cut = s.length < text.length;
+	s = s
+		.replace(ANSI, "")
+		.split("\n")
+		.map(line => {
+			const l = line.replace(/\r+$/, "");
+			const i = l.lastIndexOf("\r");
+			return i >= 0 ? l.slice(i + 1) : l;
+		})
+		.join("\n");
+	if (s.length > max) {
+		s = s.slice(-max);
+		const nl = s.indexOf("\n");
+		if (nl >= 0 && nl < s.length - 1) s = s.slice(nl + 1);
+		cut = true;
+	}
+	return { output: s, cut };
+}
+
+/** One job on the wire; `inspection` adds what omp's jobs sheet shows for the selected job. */
+export function jobWire(
+	job: JobItem,
+	opts: { rootId?: string; name: (id: string) => string | undefined; cancellable: boolean; widget?: unknown; inspection?: JobInspection },
+): JobWire {
+	const status = JOB_STATUSES[job.status ?? ""] ?? "completed";
+	const top = job.ownerId === undefined || job.ownerId === opts.rootId;
+	const ins = opts.inspection;
+	const command = job.command ?? ins?.command;
+	const widget = jobWidget(ins?.widget ?? opts.widget);
+	const out: JobWire = {
+		id: job.id,
+		kind: job.type || "bash",
+		status,
+		label: typeof job.label === "string" ? job.label.slice(0, 500) : job.id,
+		...(command ? { command: command.slice(0, JOB_COMMAND_MAX) } : {}),
+		startedAt: typeof job.startTime === "number" ? job.startTime : 0,
+		...(typeof job.endTime === "number" ? { endedAt: job.endTime } : {}),
+		...(job.agentId ? { agentId: job.agentId, agentName: opts.name(job.agentId) ?? job.agentId } : {}),
+		...(!top && job.ownerId ? { ownerId: job.ownerId, ownerName: opts.name(job.ownerId) ?? job.ownerId } : {}),
+		cancellable: opts.cancellable && status === "running",
+		...(widget ? { widget } : {}),
+	};
+	if (ins) {
+		if (typeof ins.output === "string") {
+			const { output, cut } = jobOutput(ins.output);
+			out.output = output;
+			if (cut) out.outputCut = true;
+		}
+		if (status === "running" && Array.isArray(ins.pids)) out.pids = ins.pids.filter(p => typeof p === "number");
+		if (typeof ins.exitCode === "number") out.exitCode = ins.exitCode;
+		if (typeof ins.cwd === "string" && ins.cwd) out.cwd = ins.cwd;
+		if (typeof ins.artifactId === "string" && ins.artifactId) out.artifactId = ins.artifactId;
+	}
+	return out;
+}
+
 export default async function teleflockBridge(pi: ExtensionAPI) {
 	const schemaOut = process.env.TF_OMP_SCHEMA_OUT;
 	if (schemaOut) {
@@ -1804,7 +3132,7 @@ function bridge(pi: ExtensionAPI) {
 
 	let ctxRef: ExtensionContext | undefined; // latest main-session context
 	// This copy's entry in the process-wide slot (see "one bridge per omp process").
-	const me: BridgeSlot["owners"][string] = { version: BRIDGE_VERSION, stop: () => standDown(), relay: frame => onRelay(frame) };
+	const me: BridgeSlot["owners"][string] = { version: BRIDGE_VERSION, stop: () => standDown(), relay: frame => onRelay(frame), report: turn => onReportedTurn(turn) };
 	let active = false; // between session_start and session_shutdown
 	let sock: net.Socket | undefined;
 	let connected = false;
@@ -1907,6 +3235,8 @@ function bridge(pi: ExtensionAPI) {
 			internals.approval = approvalMod as unknown as ApprovalLabels;
 		}
 		if (typeof messagesMod?.USER_INTERRUPT_LABEL === "string") internals.interruptLabel = messagesMod.USER_INTERRUPT_LABEL;
+		internals.roles = await probeRoleSettings(ns, load);
+		internals.resume = await probeResume(ns, load);
 	})().catch((err: unknown) => bridgeLog(`omp internals: ${String(err)}`));
 
 	// ─── wire ─────────────────────────────────────────────────────────────────────────────────
@@ -2093,7 +3423,10 @@ function bridge(pi: ExtensionAPI) {
 			bridgeVersion: BRIDGE_VERSION,
 			tui: ctx.mode === "tui",
 			// 2.0.0: the data plane; `dialogs` / `subagentCtl` say whether the omp internals they need are there.
-			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true },
+			// 2.1.0: `roleModels` needs omp's settings internals (`getRoleModels` / `setRoleModels`);
+			// `retry` / `resumeTree` / `turnError` / `limitGuard` (resumeCaps) omp's retry and task internals;
+			// `jobs` a job list (omp's public snapshot at least).
+			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true, roleModels: internals.roles !== undefined, ...resumeCaps(ctx), notices: true, context: true, jobs: jobsReady(ctx), restore: restoreReady(ctx), restoreSelect: restoreSelectReady(ctx) },
 			state: readState(ctx),
 		};
 	};
@@ -2112,6 +3445,7 @@ function bridge(pi: ExtensionAPI) {
 			helloSessionId = hello.sessionId;
 			lastStateJson = JSON.stringify(hello.state);
 			lastQueueJson = JSON.stringify(hello.state.queue);
+			lastJobsJson = JOBS_NONE; // the new session's jobs (or this connection's) go out on the next tick
 			send(hello);
 		} catch (err) {
 			bridgeLog(`hello failed: ${String(err)}`);
@@ -2332,6 +3666,7 @@ function bridge(pi: ExtensionAPI) {
 				}
 			});
 			agentSession = s;
+			for (const notice of configNotices(s)) sendNotice(notice);
 		} catch (err) {
 			bridgeLog(`session subscribe: ${String(err)}`);
 		}
@@ -2386,6 +3721,12 @@ function bridge(pi: ExtensionAPI) {
 		const type = typeof ev.type === "string" ? ev.type : "";
 		if (type === "message_start") msgSeq++;
 		tracker.track(ev);
+		// 2.1.0 `caps.notices`: what omp's TUI shows for these goes out as notices.
+		const notice = fallbackNotice(ev);
+		if (notice || type === "config_warnings_changed") {
+			for (const n of notice ? [notice] : configNotices(agentSession)) sendNotice(n);
+			return;
+		}
 		if (STATE_TRIGGERS[type]) scheduleState();
 		if (!WIRE_EVENTS[type]) return;
 		const msgKey = `m${msgSeq}`;
@@ -2493,6 +3834,8 @@ function bridge(pi: ExtensionAPI) {
 			const agents = snapshotAgents();
 			lastAgents = JSON.stringify(agents);
 			frames.push({ t: "agents", agents });
+			// 2.1.0 `caps.notices`: the standing config warnings (keyed: hostd shows each once).
+			for (const event of configNotices(agentSession)) frames.push({ t: "event", event });
 		} catch (err) {
 			bridgeLog(`resync agents: ${String(err)}`);
 		}
@@ -2511,6 +3854,13 @@ function bridge(pi: ExtensionAPI) {
 		return out;
 	};
 
+	/** A notice event (2.1.0 `caps.notices`) on the live feed, while hostd follows this session. */
+	const sendNotice = (event: Json | undefined): void => {
+		if (!event || !ownsSlot() || !writer?.subscribed) return;
+		if (helloSessionId && sessionId() !== helloSessionId) return;
+		feedLive({ t: "event", event });
+	};
+
 	/** Wraps the dialogs of omp's shared UI context (again after a mode re-init gave it a new one). */
 	const ensureDialogs = (ctx: ExtensionContext): void => {
 		try {
@@ -2520,6 +3870,18 @@ function bridge(pi: ExtensionAPI) {
 			}
 			const ui: object = baseContext(ctx).ui;
 			dialogsReady = installDialogWrappers(ui, dialogToken, dialogWrapper);
+			installNotifyWrapper(ui, dialogToken, original =>
+				function (this: unknown, ...args: unknown[]): unknown {
+					if (ownsSlot()) {
+						try {
+							sendNotice(notifyNotice(args[0], args[1]));
+						} catch (err) {
+							bridgeLog(`notify: ${String(err)}`);
+						}
+					}
+					return original.apply(this, args);
+				},
+			);
 		} catch (err) {
 			dialogsReady = false;
 			bridgeLog(`dialogs: ${String(err)}`);
@@ -2545,6 +3907,9 @@ function bridge(pi: ExtensionAPI) {
 		const s = sock;
 		sock = undefined;
 		connected = false;
+		// No hostd to resume anything: the context guard must stop telling models it will.
+		const owner = bridgeSlot().owners[endpoint];
+		if (owner === undefined || owner === me) bridgeSlot().autoResume = undefined;
 		connecting = false;
 		helloSessionId = undefined;
 		// The live feed is per connection: hostd subscribes again after the next hello.
@@ -2660,8 +4025,8 @@ function bridge(pi: ExtensionAPI) {
 							},
 						);
 						showStatus(true);
-						// `caps` needs the omp internals probe (a few module imports, usually long done).
-						void internalsReady.then(() => {
+						// `caps.restore` needs omp's restore modules as well (bounded like the probe's imports).
+						void Promise.all([internalsReady, settleWithin(loadRestore(), 3_000)]).then(() => {
 							if (sock === s && connected) sendHello("connect");
 						});
 						continue;
@@ -2723,6 +4088,7 @@ function bridge(pi: ExtensionAPI) {
 			writer?.flush();
 			sync();
 			btwTick();
+			jobsTick();
 		} catch (err) {
 			bridgeLog(`tick: ${String(err)}`);
 		}
@@ -2762,6 +4128,8 @@ function bridge(pi: ExtensionAPI) {
 			stopTicking(ctxRef);
 			detachLive();
 			dropSocket();
+			// The new copy's hostd connection says it again; until then nothing resumes anything.
+			bridgeSlot().autoResume = undefined;
 			bridgeLog("a newer TeleFlock bridge took over");
 		} catch (err) {
 			bridgeLog(`stand down: ${String(err)}`);
@@ -2778,6 +4146,113 @@ function bridge(pi: ExtensionAPI) {
 		ensureDialogs(ctx);
 		if (connected) safeSync();
 		else connect();
+	};
+
+	// ─── background jobs (2.1.0, `caps.jobs`) ─────────────────────────────────────────────────
+	/** JSON of the last `jobs` event; {@link JOBS_NONE} after every hello, so a session without jobs sends none. */
+	let lastJobsJson = JOBS_NONE;
+	const jobsSession = (): JobsSession | undefined => agentSession as JobsSession | undefined;
+	/** omp's public snapshot (the main agent's own jobs) for when the AgentSession is out of reach. */
+	const publicJobs = (): (() => unknown) | undefined => {
+		const ctx: unknown = ctxRef;
+		if (!isObj(ctx) || typeof ctx.getAsyncJobSnapshot !== "function") return undefined;
+		const snapshot = ctx.getAsyncJobSnapshot;
+		return () => snapshot.call(ctx);
+	};
+	const jobsReady = (ctx: ExtensionContext): boolean => {
+		const c: unknown = ctx;
+		return (isObj(c) && typeof c.getAsyncJobSnapshot === "function") || typeof jobsSession()?.getAsyncJobTree === "function";
+	};
+	/** omp's own async wait (its TUI: "Waiting for background jobs"): the main agent's turn is over and
+	 *  only background work can resume it. */
+	const jobsWaiting = (list: JobsList): boolean => {
+		if (isStreaming()) return false;
+		const s = jobsSession();
+		if (typeof s?.hasPendingAsyncWork === "function") {
+			try {
+				return s.hasPendingAsyncWork() === true;
+			} catch {
+				// judge by the jobs
+			}
+		}
+		const main = list.rootId ?? ctxRef?.agent?.id;
+		return list.running.some(j => j.ownerId === undefined || j.ownerId === main);
+	};
+	/** Live widgets of the main agent's running jobs, read only in the TUI: its status line reads them
+	 *  anyway, and reading one is what lets omp's cheap model write its rules. */
+	const runningWidgets = (): readonly { id: string; view?: unknown }[] => {
+		if (ctxRef?.mode !== "tui") return [];
+		try {
+			const w = jobsSession()?.getRunningJobWidgets?.();
+			return Array.isArray(w) ? w : [];
+		} catch {
+			return [];
+		}
+	};
+	const agentName = (id: string): string | undefined => {
+		try {
+			return internals.registry?.get(id)?.displayName || undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	/** How to cancel a job: through its owner's session (omp's `cancelAsyncJob` checks the owner), else
+	 *  through the job manager with that owner. */
+	const jobCanceller = (job: JobItem, rootId: string | undefined): ((id: string) => boolean) | undefined => {
+		const main = jobsSession();
+		const top = job.ownerId === undefined || job.ownerId === rootId || job.ownerId === ctxRef?.agent?.id;
+		if (top && typeof main?.cancelAsyncJob === "function") return id => main.cancelAsyncJob!(id);
+		const owner = job.ownerId ? internals.registry?.get(job.ownerId)?.session : undefined;
+		if (isObj(owner) && typeof owner.cancelAsyncJob === "function") {
+			const cancel = owner.cancelAsyncJob;
+			return id => cancel.call(owner, id) === true;
+		}
+		const manager = main?.asyncJobManager;
+		if (typeof manager?.cancel === "function") return id => manager.cancel!(id, { ownerId: job.ownerId });
+		return undefined;
+	};
+	/** The `jobs` event: sent on the tick when the summary changed (so at most once a second). */
+	const jobsTick = (): void => {
+		if (!connected || !helloSessionId) return;
+		const list = listJobs(jobsSession(), publicJobs());
+		if (!list) return;
+		const json = JSON.stringify(jobsSummary(list, runningWidgets(), jobsWaiting(list)));
+		if (json === lastJobsJson) return;
+		lastJobsJson = json;
+		emit("jobs", JSON.parse(json));
+	};
+	/** `jobs`: every listed job; the inspected ones (or all) with output, pids, exit code, folder, artifact. */
+	const jobsView = (inspect: ReadonlySet<string> | "all"): JobsViewWire => {
+		const list = listJobs(jobsSession(), publicJobs()) ?? fail("unsupported", "this omp has no background jobs API");
+		const s = jobsSession();
+		const widgets = new Map(runningWidgets().map(w => [w.id, w.view]));
+		const jobs = [...list.running, ...list.recent].map(job => {
+			let inspection: JobInspection | undefined;
+			if ((inspect === "all" || inspect.has(job.id)) && typeof s?.inspectAsyncJob === "function") {
+				try {
+					const r: unknown = s.inspectAsyncJob(job.id);
+					if (isObj(r)) inspection = r as JobInspection;
+				} catch (err) {
+					bridgeLog(`inspect job ${job.id}: ${String(err)}`);
+				}
+			}
+			const rootId = list.rootId ?? ctxRef?.agent?.id; // the public snapshot names no root: it is the main agent
+			const cancellable = jobCanceller(job, rootId) !== undefined;
+			return jobWire(job, { rootId, name: agentName, cancellable, widget: widgets.get(job.id), inspection });
+		});
+		return { jobs, waiting: jobsWaiting(list), at: Date.now() };
+	};
+	/** `jobCancel`: omp cancels the job (its process is killed, a subagent aborted); the jobs after it. */
+	const jobCancel = (id: string): JobsViewWire => {
+		const list = listJobs(jobsSession(), publicJobs()) ?? fail("unsupported", "this omp has no background jobs API");
+		const job = [...list.running, ...list.recent].find(j => j.id === id) ?? fail("not_found", `no background job ${id}`);
+		if (job.status !== "running") fail("not_found", `job ${id} already ${job.status ?? "settled"}`);
+		const cancel = jobCanceller(job, list.rootId) ?? fail("unsupported", "this omp cannot cancel background jobs from an extension");
+		if (!cancel(id)) fail("not_found", `job ${id} is not running any more`);
+		bridgeLog(`cancelled job ${id}`);
+		const view = jobsView(new Set());
+		jobsTick();
+		return view;
 	};
 
 	// ─── requests ─────────────────────────────────────────────────────────────────────────────
@@ -3487,6 +4962,495 @@ function bridge(pi: ExtensionAPI) {
 		}
 	};
 
+	// ─── 2.1.0: continue where it stopped (`caps.restore`, `caps.restoreSelect`, docs/bridge-protocol.md "Restore") ─
+	// omp's own `--restore` for the live session (task/restore.ts `restoreSession`): its subagents
+	// cut off mid-turn go on as background jobs of their parents, then its own interrupted turn.
+	// `restoreSelect`: the same for the parts hostd names only (the turn, chosen subagents).
+	type RestoreFns = {
+		restoreSession?: (session: unknown, options?: Json) => Promise<Json>;
+		hasRestorableTurn?: (entries: unknown[]) => boolean;
+		/** registry/persisted-agents: puts the session's persisted subagents into omp's registry. */
+		ensurePersistedRoster?: (registry: unknown, sessionFile?: string | null) => Promise<unknown>;
+		/** session/exit-diagnostics `INTERRUPTED_TURN_ERROR`: the text of exit recovery's abort record. */
+		interruptedTurnError?: string;
+	};
+	let restoreFns: Promise<RestoreFns> | undefined;
+	let restoreLoaded: RestoreFns = {};
+	/** omp's restore functions: its root exports when it has them (the modules omp runs), else the
+	 *  literal subpath imports, which omp's extension loader maps to its own loaded modules. Once. */
+	const loadRestore = (): Promise<RestoreFns> => {
+		if (restoreFns) return restoreFns;
+		const ns = (isObj((pi as unknown as { pi?: unknown }).pi) ? (pi as unknown as { pi: Json }).pi : {}) as Json;
+		const fnOf = <T>(v: unknown): T | undefined => (typeof v === "function" ? (v as T) : undefined);
+		const own: RestoreFns = {
+			restoreSession: fnOf(ns.restoreSession),
+			hasRestorableTurn: fnOf(ns.hasRestorableTurn),
+			ensurePersistedRoster: fnOf(ns.ensurePersistedRoster),
+			interruptedTurnError: typeof ns.INTERRUPTED_TURN_ERROR === "string" ? ns.INTERRUPTED_TURN_ERROR : undefined,
+		};
+		restoreLoaded = own;
+		if (own.restoreSession && own.hasRestorableTurn && own.ensurePersistedRoster) return (restoreFns = Promise.resolve(own));
+		return (restoreFns = (async () => {
+			const [task, diag, roster] = await Promise.all([
+				own.restoreSession ? undefined : import("@oh-my-pi/pi-coding-agent/task/restore").catch(() => undefined),
+				own.hasRestorableTurn ? undefined : import("@oh-my-pi/pi-coding-agent/session/exit-diagnostics").catch(() => undefined),
+				own.ensurePersistedRoster ? undefined : import("@oh-my-pi/pi-coding-agent/registry/persisted-agents").catch(() => undefined),
+			]);
+			restoreLoaded = {
+				restoreSession: own.restoreSession ?? fnOf(task?.restoreSession),
+				hasRestorableTurn: own.hasRestorableTurn ?? fnOf(diag?.hasRestorableTurn),
+				ensurePersistedRoster: own.ensurePersistedRoster ?? fnOf(roster?.ensurePersistedRoster),
+				interruptedTurnError: own.interruptedTurnError ?? (typeof diag?.INTERRUPTED_TURN_ERROR === "string" ? diag.INTERRUPTED_TURN_ERROR : undefined),
+			};
+			return restoreLoaded;
+		})());
+	};
+	void loadRestore();
+	/** `caps.restore`: omp's restore functions and the live session's restore entry point. */
+	const restoreReady = (ctx: ExtensionContext): boolean =>
+		restoreLoaded.restoreSession !== undefined && restoreLoaded.hasRestorableTurn !== undefined && typeof mainRetry(ctx)?.restoreInterruptedTurn === "function";
+	/** `caps.restoreSelect`: `restore {turn?, subagentIds?}` also needs what omp's `restoreSubagents`
+	 *  uses: its persisted roster, task internals, agent registry and the session's background jobs. */
+	const restoreSelectReady = (ctx: ExtensionContext): boolean =>
+		restoreReady(ctx) &&
+		restoreLoaded.ensurePersistedRoster !== undefined &&
+		internals.resume?.task !== undefined &&
+		internals.registry !== undefined &&
+		mainRetry(ctx)?.asyncJobManager !== undefined;
+	/** A subagent transcript's entries as omp's restore reads them (the header left out), or
+	 *  `undefined` when the file cannot be read. Only the last {@link TRANSCRIPT_TAIL_BYTES} are read:
+	 *  whether a turn is restorable depends on how the transcript ends, and this runs on omp's loop. */
+	const transcriptEntries = (file: string): unknown[] | undefined => {
+		let fd: number | undefined;
+		try {
+			fd = fs.openSync(file, "r");
+			const size = fs.fstatSync(fd).size;
+			const start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
+			const buf = Buffer.alloc(size - start);
+			fs.readSync(fd, buf, 0, buf.length, start);
+			const lines = buf.toString("utf8").split("\n");
+			if (start > 0) lines.shift(); // cut mid-line
+			return lines
+				.flatMap(l => {
+					try {
+						return l ? [JSON.parse(l)] : [];
+					} catch {
+						return [];
+					}
+				})
+				.filter(e => isObj(e) && e.type !== "session");
+		} catch {
+			return undefined;
+		} finally {
+			if (fd !== undefined) fs.closeSync(fd);
+		}
+	};
+	/** Puts the session's persisted subagents into omp's registry, as omp's restore does first (a
+	 *  freshly `--resume`d omp has not read them yet). A failure leaves the registry as it is. */
+	const loadPersistedRoster = async (ctx: ExtensionContext): Promise<void> => {
+		const { ensurePersistedRoster } = await loadRestore();
+		const sessionFile = mainRetry(ctx)?.sessionManager?.getSessionFile?.();
+		if (!ensurePersistedRoster || !internals.registry || !sessionFile) return;
+		try {
+			await ensurePersistedRoster(internals.registry, sessionFile);
+		} catch (err) {
+			bridgeLog(`persisted roster: ${String(err)}`);
+		}
+	};
+	/** `restorable`: what `restore` would go on with (`{turn, subagents}`), by omp's own rules. */
+	const restorableOp = async (ctx: ExtensionContext): Promise<Json> => {
+		const { hasRestorableTurn } = await loadRestore();
+		const main = mainRetry(ctx) ?? fail("unsupported", "this omp has no session to restore");
+		if (!hasRestorableTurn) return fail("unsupported", "this omp has no --restore");
+		await loadPersistedRoster(ctx);
+		const branch = (main.sessionManager as { getBranch?(): unknown[] } | undefined)?.getBranch?.() ?? [];
+		const turn = !main.isStreaming && hasRestorableTurn(branch);
+		const subagents: string[] = [];
+		for (const ref of internals.registry?.list() ?? []) {
+			if (ref.kind !== "sub" || ref.status === "running" || !ref.sessionFile) continue;
+			try {
+				if (fs.existsSync(`${ref.sessionFile}.tombstone`)) continue;
+				// an unreadable transcript: omp's restore skips it too
+				const entries = transcriptEntries(ref.sessionFile);
+				if (entries && hasRestorableTurn(entries)) subagents.push(ref.id);
+			} catch {
+				// omp's rules failed on it: not restorable
+			}
+		}
+		return { turn, subagents };
+	};
+	/** `restore`: omp's `restoreSession` (the `--restore` path) on the live session, now; with `turn` or
+	 *  `subagentIds` (`caps.restoreSelect`) only those parts ({@link restoreChosen}). */
+	const restoreOp = async (ctx: ExtensionContext, p: Params): Promise<Json> => {
+		// A selection (`turn` and/or `subagentIds`) restores only those parts.
+		if ((p.turn ?? p.subagentIds ?? null) !== null) return restoreChosen(ctx, p);
+		const { restoreSession } = await loadRestore();
+		const main = mainRetry(ctx) ?? fail("unsupported", "this omp has no session to restore");
+		if (!restoreSession) return fail("unsupported", "this omp has no --restore");
+		if (main.isStreaming) return fail("busy", "the agent is working");
+		const out = await restoreSession(main, { eventBus: pi.events });
+		return { turn: out?.turn === true, subagents: Array.isArray(out?.subagents) ? out.subagents : [] };
+	};
+	/**
+	 * `restore {turn?, subagentIds?}`: omp's restore for the listed parts only. Once the session's
+	 * persisted subagents are in omp's registry (`ensurePersistedRoster`, as omp's restore does first;
+	 * a freshly `--resume`d omp has not read them yet), each listed subagent, parents before children,
+	 * goes on exactly as omp's `restoreSubagents` (task/restore.ts) revives one: a background job of
+	 * its parent runs omp's follow-up turn with `restore`, which continues through the subagent's own
+	 * `restoreInterruptedTurn()`. A listed subagent whose reply was cut off while it streamed (omp's
+	 * restore leaves it alone) goes on through omp's retry instead, as `retry {agentId}` resumes one.
+	 * Then, with `turn`, the session's own `restoreInterruptedTurn()`. A listed subagent that neither
+	 * revives is `skipped` with the reason; nothing unlisted is touched.
+	 */
+	const restoreChosen = async (ctx: ExtensionContext, p: Params): Promise<Json> => {
+		const raw = p.subagentIds ?? [];
+		if (!Array.isArray(raw) || raw.some(v => typeof v !== "string")) return fail("invalid_params", '"subagentIds" must be an array of strings');
+		const turn = bool(p, "turn") === true;
+		const { hasRestorableTurn, ensurePersistedRoster, interruptedTurnError } = await loadRestore();
+		const main = mainRetry(ctx) ?? fail("unsupported", "this omp has no session to restore");
+		const reg = internals.registry;
+		const task = internals.resume?.task;
+		const jobs = main.asyncJobManager;
+		if (!hasRestorableTurn || !ensurePersistedRoster || !reg || !task || !jobs || typeof main.restoreInterruptedTurn !== "function") {
+			return fail("unsupported", "this omp cannot restore parts of a session (omp's restore, task internals or background jobs are missing)");
+		}
+		if (turn && main.isStreaming) return fail("busy", "the agent is working");
+		const sessionFile = main.sessionManager?.getSessionFile?.();
+		if (raw.length > 0) await loadPersistedRoster(ctx);
+		const running = new Set((jobs.getAllJobs?.() ?? []).flatMap(j => (j.status === "running" && j.agentId ? [j.agentId] : [])));
+		/** Why omp's restore leaves subagent `id` alone; `undefined`: it goes on as a job of its parent. */
+		const revive = async (id: string): Promise<string | undefined> => {
+			const ref = reg.get(id);
+			if (!ref) return "omp does not know this agent";
+			if (ref.kind !== "sub") return "it is not a subagent";
+			const file = ref.sessionFile;
+			if (!file) return "it has no transcript";
+			if (ref.status === "running" || running.has(id)) return "it is running";
+			if (fs.existsSync(`${file}.tombstone`)) return "it was killed";
+			const entries = transcriptEntries(file);
+			if (!entries) return "its transcript cannot be read";
+			const restorable = hasRestorableTurn(entries);
+			const cutReply = !restorable && endsInCutOffReply(entries, interruptedTurnError);
+			if (!restorable && !cutReply) return "its turn was not cut off";
+			const init = task.sessionInit(entries);
+			if (!init) return "its transcript has no session_init to revive it from";
+			if (init.isolated) return "it ran isolated; its worktree is gone";
+			// omp's retry goes on with a cut-off reply: a job of its parent under its id, as `retry {agentId}` runs one.
+			if (cutReply) return (await retrySubagent(ctx, id)) ? undefined : "its turn was not cut off";
+			jobs.register("task", id, async ({ signal }) => restoreJobResult(task, await restoreRun(task, id, ref.displayName ?? id, init, file, signal, main)), {
+				id,
+				agentId: id,
+				ownerId: ref.parentId,
+			});
+			return undefined;
+		};
+		const subagents: string[] = [];
+		const skipped: Array<{ agentId: string; reason: string }> = [];
+		for (const id of parentsFirst(raw as string[])) {
+			let reason: string | undefined = "the session has no file";
+			if (sessionFile) {
+				try {
+					reason = await revive(id);
+				} catch (err) {
+					// e.g. omp's background job limit
+					reason = err instanceof Error ? err.message : String(err);
+				}
+			}
+			if (reason === undefined) subagents.push(id);
+			else skipped.push({ agentId: id, reason });
+		}
+		return { turn: turn && (await main.restoreInterruptedTurn()) === true, subagents, skipped };
+	};
+	/** omp's follow-up turn of subagent `id` that goes on with its cut-off turn (`restore`), with the
+	 *  options omp's `restoreSubagents` gives it (task/restore.ts). */
+	const restoreRun = (
+		task: NonNullable<ResumeInternals["task"]>,
+		id: string,
+		name: string,
+		init: Json,
+		file: string | undefined,
+		signal: AbortSignal,
+		main: RetrySession,
+	): Promise<FollowUpResult> =>
+		task.runFollowUp({
+			id,
+			agent: task.definition(name, init),
+			message: typeof init.task === "string" ? init.task : name,
+			restore: true,
+			structured: Array.isArray(init.tools) && init.tools.includes("yield"),
+			workPoolYieldItems: init.workPoolYieldItems,
+			outputSchema: init.outputSchema,
+			outputSchemaMode: init.outputSchemaMode,
+			signal,
+			eventBus: pi.events,
+			artifactsDir: file ? path.dirname(file) : undefined,
+			maxRuntimeMs: task.maxRuntimeMs(main.settings),
+		});
+	/** A follow-up run's result as omp's task job hands it to the parent (task/restore.ts): the summary,
+	 *  with its structured output; a failed run throws omp's `AsyncJobError`. */
+	const restoreJobResult = (task: NonNullable<ResumeInternals["task"]>, result: FollowUpResult): unknown => {
+		const text = task.summary(result, { totalDurationMs: result.durationMs ?? 0 });
+		if (result.aborted || result.exitCode !== 0 || result.error !== undefined) throw new task.jobError(text, result.structuredOutput);
+		return result.structuredOutput ? { text, structured: result.structuredOutput } : text;
+	};
+
+	// ─── 2.1.0: resume (docs/bridge-protocol.md "Resume") ──────────────────────────────────────
+	/** The main AgentSession, when it has omp's retry (`caps.retry`). */
+	const mainRetry = (ctx: ExtensionContext): RetrySession | undefined => {
+		const s = agentSession ?? findSession(ctx);
+		return isRetrySession(s) ? s : undefined;
+	};
+
+	/** `hello.caps` of the resume features. */
+	const resumeCaps = (ctx: ExtensionContext): { retry: boolean; resumeTree: boolean; turnError: boolean; limitGuard: boolean } => {
+		const main = mainRetry(ctx);
+		return {
+			retry: main !== undefined,
+			resumeTree: main?.asyncJobManager !== undefined && internals.resume?.task !== undefined && internals.lifecycle !== undefined,
+			turnError: internals.registry !== undefined,
+			limitGuard: true,
+		};
+	};
+
+	/** `turn_error` data for the failed `tail` of agent `agentId` (also the entries of `failedTails`). */
+	const turnInfo = (agentId: string, main: boolean, tail: Json, session: RetrySession | undefined, ref: AgentRefLike | undefined, sessionId?: string): Json => {
+		const text = typeof tail.errorMessage === "string" ? tail.errorMessage : "";
+		const provider = typeof tail.provider === "string" ? tail.provider : undefined;
+		const verdict = tail.stopReason === "error" ? classifyTurnError(tail, internals.resume?.ai) : { class: "other" as const };
+		const hint = tail.stopReason === "error" ? retryHintMs(provider, text, internals.resume?.hint) : undefined;
+		const at = typeof tail.timestamp === "number" ? tail.timestamp : Date.now();
+		return {
+			agentId,
+			parentId: main ? null : (ref?.parentId ?? null),
+			main,
+			sessionId: session?.sessionManager?.getSessionId?.() ?? sessionId ?? null,
+			sessionFile: session?.sessionManager?.getSessionFile?.() ?? ref?.sessionFile ?? null,
+			stopReason: tail.stopReason,
+			kind: verdict.class,
+			reason: ("reason" in verdict ? verdict.reason : undefined) ?? null,
+			provider: provider ?? null,
+			model: typeof tail.model === "string" ? tail.model : null,
+			errorStatus: typeof tail.errorStatus === "number" && Number.isInteger(tail.errorStatus) && tail.errorStatus >= 0 && tail.errorStatus <= 65_535 ? tail.errorStatus : null,
+			message: text.slice(0, 500),
+			retryAt: hint === undefined ? null : at + hint,
+			at,
+		};
+	};
+
+	/** Failed messages already sent as `turn_error` (both bridge copies in a session report them). */
+	const reportedTurns = new WeakSet<object>();
+	/** Agents whose ended turn is watched until omp settled it (omp's own retries may still run). */
+	const watchedTurns = new Set<string>();
+
+	const sendTurnError = (turn: ReportedTurn): void => {
+		if (reportedTurns.has(turn.message)) return;
+		reportedTurns.add(turn.message);
+		emit("turn_error", turn.data);
+	};
+
+	/** `me.report`: a copy in a subagent's session hands over that session's terminal failure. */
+	const onReportedTurn = (turn: ReportedTurn): void => {
+		try {
+			if (ownsSlot() && isObj(turn) && isObj(turn.data) && isObj(turn.message)) sendTurnError(turn);
+		} catch (err) {
+			bridgeLog(`turn report: ${String(err)}`);
+		}
+	};
+
+	/**
+	 * A turn of `agentId` ended (`agent_end`) on an error: once omp settled it (`waitForIdle` also
+	 * waits out omp's auto-retry saga), a failed tail no retry is pending for is terminal and goes to
+	 * hostd as `turn_error`: the main session's directly, a subagent's through the owner copy.
+	 */
+	const watchTurn = (agentId: string, main: boolean): void => {
+		if (watchedTurns.has(agentId)) return;
+		const session = main ? (agentSession ?? (ctxRef ? findSession(ctxRef) : undefined)) : internals.registry?.get(agentId)?.session;
+		if (!isRetrySession(session) || failedTail(session.agent?.state?.messages ?? [])?.stopReason !== "error") return;
+		watchedTurns.add(agentId);
+		void (async () => {
+			try {
+				await session.waitForIdle?.();
+				// A retry (omp's own, or a new turn) runs: its own end decides.
+				if (session.isStreaming || session.isRetrying) return;
+				const tail = failedTail(session.agent?.state?.messages ?? []);
+				if (tail?.stopReason !== "error") return;
+				const turn: ReportedTurn = { data: turnInfo(agentId, main, tail, session, internals.registry?.get(agentId)), message: tail };
+				if (main) sendTurnError(turn);
+				else bridgeSlot().owners[endpoint]?.report?.(turn);
+			} catch (err) {
+				bridgeLog(`turn watch ${agentId}: ${String(err)}`);
+			} finally {
+				watchedTurns.delete(agentId);
+			}
+		})();
+	};
+
+	/**
+	 * One follow-up turn of subagent `id` that resumes its failed turn through omp's `retry()`
+	 * ({@link armRetry}). When omp parked and revived the session in between, the run never reached
+	 * the retry (it found the terminal failure and stopped): it runs once more on the live session.
+	 */
+	const driveRetry = async (id: string, name: string, init: Json, file: string | undefined, signal: AbortSignal, main: RetrySession): Promise<FollowUpResult> => {
+		const task = internals.resume?.task;
+		const lifecycle = internals.lifecycle;
+		if (!task || !lifecycle) throw new Error("omp's task internals are gone");
+		for (let attempt = 0; ; attempt++) {
+			const live = await lifecycle.global().ensureLive(id);
+			if (!isRetrySession(live)) throw new Error(`agent ${id} cannot be retried`);
+			const armed = armRetry(live);
+			try {
+				const result = await restoreRun(task, id, name, init, file, signal, main);
+				if (armed.used() || attempt > 0 || signal.aborted) return result;
+			} finally {
+				armed.disarm();
+			}
+		}
+	};
+
+	/**
+	 * Resumes subagent `id` from its failed or stopped last turn the way `omp --restore` resumes one
+	 * (task/restore.ts): a background job of its parent runs omp's follow-up turn ({@link driveRetry})
+	 * and hands the result to the parent as the `async-result` of a job with the subagent's id, unless
+	 * omp's own wake monitor already did ({@link quietIfDelivered}).
+	 * False: it runs, or its last turn neither failed nor was stopped.
+	 */
+	const retrySubagent = async (ctx: ExtensionContext, id: string): Promise<boolean> => {
+		const reg = internals.registry;
+		const lifecycle = internals.lifecycle;
+		const task = internals.resume?.task;
+		const main = mainRetry(ctx);
+		const jobs = main?.asyncJobManager;
+		if (!reg || !lifecycle || !task || !main || !jobs) {
+			return fail("unsupported", "this omp cannot resume subagents from TeleFlock (omp's task internals or background jobs are missing)");
+		}
+		const ref = reg.get(id) ?? fail("not_found", `no agent ${id}`);
+		if (ref.kind !== "sub") return fail("invalid_params", `agent ${id} is not a subagent`);
+		if (ref.status === "running") return false;
+		const live = await lifecycle.global().ensureLive(id);
+		if (!isRetrySession(live)) return fail("unsupported", `agent ${id} cannot be retried`);
+		if (live.isStreaming || !retryableTail(live)) return false;
+		const init = task.sessionInit(live.sessionManager?.getEntries?.() ?? []) ?? fail("unsupported", `agent ${id} has no session contract to resume from`);
+		if (init.isolated === true) return fail("unsupported", `agent ${id} ran isolated; its worktree is gone`);
+		const file = ref.sessionFile ?? live.sessionManager?.getSessionFile?.() ?? undefined;
+		const owner = ref.parentId ?? ctx.agent?.id;
+		jobs.register(
+			"task",
+			id,
+			async ({ jobId, signal }) => {
+				const since = Date.now();
+				const result = await driveRetry(id, ref.displayName ?? id, init, file, signal, main);
+				if (jobId) quietIfDelivered(jobs, jobId, id, owner, since);
+				return restoreJobResult(task, result);
+			},
+			{ id, agentId: id, ownerId: owner },
+		);
+		return true;
+	};
+
+	/** `retry`: omp's F5 for the main session (no `agentId`, or its own), else for that subagent (once
+	 *  omp's registry has the session's persisted subagents: a freshly `--resume`d omp lacks them). */
+	const retryOp = async (ctx: ExtensionContext, p: Params): Promise<{ started: boolean }> => {
+		const agentId = str(p, "agentId");
+		if (agentId && agentId !== ctx.agent?.id) {
+			await loadPersistedRoster(ctx);
+			return { started: await retrySubagent(ctx, agentId) };
+		}
+		const main = mainRetry(ctx) ?? fail("unsupported", "this omp has no retry for its session");
+		return { started: await main.retry() };
+	};
+
+	/** `ids` without repeats, parents before their children (their depth in omp's registry). */
+	const parentsFirst = (ids: readonly string[]): string[] => {
+		const reg = internals.registry;
+		const depth = (id: string): number => {
+			let d = 0;
+			for (let ref = reg?.get(id); ref?.parentId && d < 64; ref = reg?.get(ref.parentId)) d++;
+			return d;
+		};
+		return [...new Set(ids)].sort((a, b) => depth(a) - depth(b));
+	};
+
+	/** `resumeTree`: the subagents first (once omp's registry has the session's persisted ones), parents
+	 *  before their children (a child's result goes to its parent's session), then the main session
+	 *  when its own last turn failed or was stopped. */
+	const resumeTreeOp = async (ctx: ExtensionContext, p: Params): Promise<Json> => {
+		const raw = p.subagentIds ?? [];
+		if (!Array.isArray(raw) || raw.some(v => typeof v !== "string")) return fail("invalid_params", '"subagentIds" must be an array of strings');
+		if (raw.length > 0) await loadPersistedRoster(ctx);
+		const subagents: Json[] = [];
+		for (const id of parentsFirst(raw as string[])) {
+			try {
+				subagents.push({ agentId: id, started: await retrySubagent(ctx, id) });
+			} catch (err) {
+				subagents.push({ agentId: id, started: false, error: err instanceof Error ? err.message : String(err) });
+			}
+		}
+		const main = bool(p, "root") ? mainRetry(ctx) : undefined;
+		const root = main !== undefined && !main.isStreaming && retryableTail(main) !== undefined && (await main.retry());
+		return { root, subagents };
+	};
+
+	/** `failedTails`: the sessions of this process whose last turn failed or was stopped: the main one
+	 *  and every subagent (its live session, else its transcript file). */
+	const failedTailsOp = (ctx: ExtensionContext): Json => {
+		const tails: Json[] = [];
+		const main = mainRetry(ctx);
+		const mainTail = main && !main.isStreaming ? retryableTail(main) : undefined;
+		if (main && mainTail) tails.push({ ...turnInfo(ctx.agent?.id ?? "", true, mainTail, main, undefined), status: main.isRetrying ? "retrying" : "idle" });
+		for (const ref of internals.registry?.list() ?? []) {
+			if (ref.kind !== "sub") continue;
+			const s = ref.session;
+			if (isRetrySession(s)) {
+				const tail = s.isStreaming ? undefined : retryableTail(s);
+				if (tail) tails.push({ ...turnInfo(ref.id, false, tail, s, ref), status: ref.status ?? null });
+			} else if (ref.sessionFile && ref.status !== "running") {
+				const file = sessionFileTail(ref.sessionFile, 256 * 1024);
+				const tail = failedTail(file.messages);
+				if (tail) tails.push({ ...turnInfo(ref.id, false, tail, undefined, ref, file.sessionId), status: ref.status ?? null });
+			}
+		}
+		return { mainId: ctx.agent?.id ?? null, tails };
+	};
+
+	/** omp's context modules (2.1.0 `context`), loaded on the first request. */
+	let contextModules: Promise<ContextModules> | undefined;
+	/** `context`: what fills the session's context window (docs/bridge-protocol.md "Context breakdown"). */
+	const contextOp = async (ctx: ExtensionContext): Promise<Json> => {
+		const session = findSession(ctx) as unknown as ContextSessionLike | undefined;
+		const usage = ctx.getContextUsage();
+		const images = countContextImages(session?.agent?.state?.messages ?? session?.messages);
+		const dropImages = typeof session?.dropImages === "function";
+		if (session) {
+			const modules = await (contextModules ??= probeContextModules(pi.pi ?? {}));
+			if (modules.buildView) {
+				try {
+					return summarizeContextView(modules.buildView(session), { source: "omp", images, dropImages, modules });
+				} catch (err) {
+					bridgeLog(`context view: ${String(err)}`);
+				}
+			}
+			return summarizeContextView(estimateContextView(session, usage), { source: "estimate", images, dropImages });
+		}
+		const window = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+		const used = typeof usage?.tokens === "number" ? usage.tokens : 0;
+		return { source: "usage", model: ctx.model?.name || ctx.model?.id, window, used, buffer: 0, free: Math.max(0, window - used), categories: [], images, dropImages, at: Date.now() };
+	};
+
+	/** `provider/id` of the session's model now. */
+	const activeModel = (ctx: ExtensionContext): string | undefined => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+
+	/** `setRoleModels`: the session follows a changed `default` role (session only, like `setModel`). */
+	const followDefault = async (ctx: ExtensionContext, selector: string): Promise<string | undefined> => {
+		const label = selector.split(",")[0]?.trim() || selector;
+		const stays = `the session stays on ${activeModel(ctx) ?? "its model"}`;
+		const model = ctx.models.resolve("@default");
+		if (!model) return `the default role's model ${label} is not available; ${stays}`;
+		if (!(await pi.setModel(model))) return `no credentials for ${model.provider}/${model.id}; ${stays}`;
+		const level = selectorLevel(selector);
+		if (level) pi.setThinkingLevel(level as ThinkingLevel);
+		return undefined;
+	};
+
 	async function handle(op: string, p: Params): Promise<unknown> {
 		const ctx = ctxRef ?? fail("not_ready", "session not initialised yet");
 		switch (op) {
@@ -3494,6 +5458,8 @@ function bridge(pi: ExtensionAPI) {
 				return { pong: Date.now() };
 			case "getState":
 				return readState(ctx);
+			case "context":
+				return contextOp(ctx);
 			case "setModel": {
 				const spec = str(p, "model", true);
 				const thinking = str(p, "thinking");
@@ -3509,6 +5475,15 @@ function bridge(pi: ExtensionAPI) {
 				if (!THINKING_LEVELS[level]) fail("invalid_params", `unknown thinking level ${level}`);
 				pi.setThinkingLevel(level as ThinkingLevel);
 				return readState(ctx);
+			}
+			case "getRoleModels": {
+				const rs = internals.roles ?? fail("unsupported", "this omp lacks the settings internals that model roles need");
+				return readRoleModels(rs, activeModel(ctx));
+			}
+			case "setRoleModels": {
+				const rs = internals.roles ?? fail("unsupported", "this omp lacks the settings internals that model roles need");
+				const warning = await applyRoleModels(rs, roleModelsRequest(p), selector => followDefault(ctx, selector));
+				return { ...readRoleModels(rs, activeModel(ctx)), warning };
 			}
 			case "setFast": {
 				const on = bool(p, "on") ?? fail("invalid_params", 'missing "on"');
@@ -3704,6 +5679,13 @@ function bridge(pi: ExtensionAPI) {
 				return {};
 			case "getTree":
 				return treeInfo(ctx);
+			case "jobs": {
+				// 2.1.0 `caps.jobs`: the session's background jobs; `inspect` ids (or `inspectAll`) with output.
+				const ids = Array.isArray(p.inspect) ? p.inspect.filter((v): v is string => typeof v === "string").slice(0, 64) : [];
+				return jobsView(bool(p, "inspectAll") === true ? "all" : new Set(ids));
+			}
+			case "jobCancel":
+				return jobCancel(str(p, "id", true));
 			case "getQueue":
 				return readQueue();
 			case "getCommands":
@@ -3740,6 +5722,24 @@ function bridge(pi: ExtensionAPI) {
 			}
 			case "agentCmd":
 				return agentCmd(p);
+			case "retry":
+				return retryOp(ctx, p);
+			case "resumeTree":
+				return resumeTreeOp(ctx, p);
+			case "failedTails":
+				return failedTailsOp(ctx);
+			case "restorable":
+				return restorableOp(ctx);
+			case "restore":
+				return restoreOp(ctx, p);
+			case "setAutoResume": {
+				// Process-wide: the context guard of every copy and session reads it.
+				const on = bool(p, "on") ?? fail("invalid_params", 'missing "on"');
+				const slot = bridgeSlot();
+				slot.autoResume = on;
+				if (on) for (const arm of [...(slot.armGuards ?? [])]) arm();
+				return {};
+			}
 			default:
 				return fail("unknown_op", `unknown op ${op}`);
 		}
@@ -3839,6 +5839,8 @@ function bridge(pi: ExtensionAPI) {
 		"auto_compaction_end",
 		"auto_retry_start",
 		"auto_retry_end",
+		"retry_fallback_applied",
+		"retry_fallback_succeeded",
 	];
 	if (!hasGlobal(omp.AgentRegistry)) standIns.push("message_update", "tool_execution_update");
 	for (const name of standIns) {
@@ -3866,6 +5868,50 @@ function bridge(pi: ExtensionAPI) {
 		} catch (err) {
 			bridgeLog(`task bus: ${String(err)}`);
 		}
+	}
+
+	// 2.1.0 `turnError`: every binding watches its own session's turns; a subagent's copies report a
+	// terminal failure to the owner copy, which sends it with the main session's ones.
+	pi.on("agent_end", (_event, ctx) => {
+		try {
+			if (ctx.agent?.kind === "sub") watchTurn(ctx.agent.id, false);
+			else if (adopt(ctx) && ownsSlot() && ctx.agent?.id) watchTurn(ctx.agent.id, true);
+		} catch (err) {
+			bridgeLog(`turn watch: ${String(err)}`);
+		}
+	});
+
+	// 2.1.0 `limitGuard`: while hostd's auto-resume is on, provider limits leave what the model sees
+	// (guardContext), in every session the bridge is loaded in (main and subagents, every copy).
+	// It changes the request's copy only, and does nothing once it already changed (idempotent).
+	// omp structuredClones every session's messages on each model call as soon as any `context`
+	// handler exists, so the handler is registered only once hostd turned auto-resume on (omp reads
+	// an extension's handler list on every emit, so a late `pi.on` takes effect at once). It stays
+	// registered afterwards and returns early while the flag is off.
+	let guardArmed = false;
+	const armGuard = (): void => {
+		if (guardArmed) return;
+		guardArmed = true;
+		pi.on("context", event => {
+			try {
+				if (bridgeSlot().autoResume !== true) return undefined;
+				const ai = internals.resume?.ai;
+				const next = guardContext(
+					event.messages,
+					m => classifyTurnError(m, ai).class !== "other",
+					text => classifyTurnError({ errorMessage: text }, ai).class !== "other",
+				);
+				return next ? { messages: next as typeof event.messages } : undefined;
+			} catch (err) {
+				bridgeLog(`context guard: ${String(err)}`);
+				return undefined;
+			}
+		});
+	};
+	{
+		const slot = bridgeSlot();
+		(slot.armGuards ??= []).push(armGuard);
+		if (slot.autoResume === true) armGuard(); // loaded (a subagent session) while hostd's auto-resume is on
 	}
 
 	pi.on("goal_updated", (event, ctx) => {
@@ -3902,6 +5948,9 @@ function bridge(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		try {
+			const arms = bridgeSlot().armGuards;
+			const at = arms?.indexOf(armGuard) ?? -1;
+			if (arms && at >= 0) arms.splice(at, 1);
 			if (ctx.agent && ctx.agent.kind !== "main") return;
 			active = false;
 			stopTicking(ctx);

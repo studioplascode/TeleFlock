@@ -1,14 +1,19 @@
 import { Suspense, useEffect } from "react";
 import { AmbientGlow, DesignProvider, LogoMark, Shimmer, Spinner, TitleBar, useIsMobile, useMotionPreference } from "@/design";
 import { useHosts, useRoute, useSettings, useUi } from "@/core";
+import { QuickCaptureBridge } from "@/features/capture/QuickCaptureBridge";
 import { NewAgentDialog } from "@/features/workspace/NewAgentDialog";
+import { MoveDialog } from "@/features/move/MoveDialog";
+import { DecideDialog } from "@/features/autoAnswer/DecideDialog";
 import { NewWorktreeDialog } from "@/features/worktree/NewWorktreeDialog";
 import { PastSessionsDialog } from "@/features/history/PastSessionsDialog";
 import { FanOutDialog } from "@/features/worktree/FanOutDialog";
 import { AnswerNextHud } from "@/features/inbox/AnswerNextHud";
 import { HostEditor } from "@/features/hosts/HostEditor";
+import { HostSyncDialog } from "@/features/hostSync/HostSyncDialog";
 import { Onboarding } from "@/features/hosts/Onboarding";
 import { useNotifyBridge } from "@/features/notify/useNotifyBridge";
+import { usePresenceReporter } from "@/features/notify/usePresenceReporter";
 import { CommandPalette } from "@/features/palette/CommandPalette";
 import { useOverlayBack } from "@/features/shell/backButton";
 import { DesktopShell } from "@/features/shell/DesktopShell";
@@ -28,9 +33,12 @@ function GlobalOverlays() {
       <AnswerNextHud />
       <NewWorktreeDialog />
       <NewAgentDialog />
+      <MoveDialog />
+      <DecideDialog />
       <PastSessionsDialog />
       <FanOutDialog />
       <HostEditor />
+      <HostSyncDialog />
       <ShortcutsSheet />
       <SheetHost />
     </>
@@ -67,6 +75,7 @@ function Frame() {
   const focus = useUi((s) => s.focusMode);
   useMotionSettingSync();
   useNotifyBridge();
+  usePresenceReporter();
   useAutoUpdate();
   useGlobalPulseFeed();
   useGlobalShortcuts();
@@ -120,6 +129,8 @@ export function App() {
   return (
     <DesignProvider>
       <Frame />
+      {/* Quick capture window and Android shares, whatever the Frame shows (onboarding too). */}
+      <QuickCaptureBridge />
     </DesignProvider>
   );
 }

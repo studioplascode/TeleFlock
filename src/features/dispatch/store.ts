@@ -1,9 +1,11 @@
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
-import { aiNamingEnabled, apiError, core, type DraftImage, getAgentViews, suggestBranch, toApiError, useSettings } from "@/core";
-import type { Agent, AgentSpec, BranchList, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
+import { aiNamingEnabled, apiError, core, type DraftImage, getAgentViews, getHostStates, suggestBranch, toApiError, useSettings } from "@/core";
+import type { Agent, AgentSpec, AutoAnswer, BranchList, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
 import { discardVideos, getVideo, releaseVideos, retryVideos, uploadDraftVideos, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import { classifyHerdrError, describeError, type HerdrFailure } from "@/features/workspace/shared/errors";
+import { hostTakesRoles, launchOverrides } from "@/features/agentRoles/roles";
+import { hostDecides, specAutoAnswer } from "@/features/autoAnswer/format";
 import { deleteEntryImages, loadEntryImages, saveEntryImages, sweepEntryImages } from "./images";
 import { BRANCH_PREFIX, type BranchSuggester, baseSlug, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
@@ -37,6 +39,12 @@ export interface DispatchOptions {
   model: string;
   thinking: ThinkingLevel | "default";
   plan: boolean;
+  /** The agent's own omp model roles; absent (options saved before them) = none. */
+  roleModels?: Record<string, string>;
+  /** The agent's own omp `retry.fallbackChains`; absent = none. */
+  fallbackChains?: Record<string, string[]>;
+  /** The agents' own decide-for-me policy; absent = the host default. Sent only to a host that has decide for me. */
+  autoAnswer?: AutoAnswer;
 }
 
 /**
@@ -319,10 +327,11 @@ function slot(key: string): Promise<() => void> {
 }
 
 /**
- * The agent spec of an entry: its images read back from storage (an entry whose images are gone
- * fails), a reference line per uploaded video after the task.
+ * The agent spec of an entry for `hostId`, the host it goes to: its images read back from storage
+ * (an entry whose images are gone fails), a reference line per uploaded video after the task, and
+ * its own decide-for-me policy only when that host has decide for me (Auto: whichever host it got).
  */
-async function specOf(e: DispatchEntry): Promise<AgentSpec> {
+async function specOf(e: DispatchEntry, hostId: string): Promise<AgentSpec> {
   const template = useSettings.getState().templates.find((t) => t.id === e.options.templateId);
   const videos = e.videos ?? [];
   if (videos.some((v) => !v.path)) throw apiError("videos_missing", "The task's videos didn't reach the host", { hint: "Retry uploads them again" });
@@ -340,6 +349,8 @@ async function specOf(e: DispatchEntry): Promise<AgentSpec> {
     // A template's own instructions frame the task (as in Fan out).
     prompt: template?.prompt.trim() ? (task ? `${template.prompt.trim()}\n\n${task}` : template.prompt.trim()) : task,
     ...(images ? { images } : {}),
+    ...launchOverrides(e.options.roleModels, e.options.fallbackChains, hostTakesRoles(getHostStates()[hostId]?.info)),
+    ...specAutoAnswer(e.options.autoAnswer, hostDecides(getHostStates()[hostId]?.info)),
   };
 }
 
@@ -404,7 +415,7 @@ async function run(key: string, id: string): Promise<void> {
       label: e.name,
       existing: false,
       trust: !!store().trusted[threadKey(hostId, repo)],
-      agent: await specOf(e),
+      agent: await specOf(e, hostId),
     });
     store().patch(key, id, {
       phase: "started",
@@ -668,9 +679,18 @@ function afterHydration(): void {
   void sweepEntryImages(live);
 }
 
+/**
+ * The Quick capture window (`capture.html`) is a second webview on the same localStorage and imports this
+ * module for its planning code only; its `inflight` is empty, so every persisted `naming`/`uploading` entry
+ * would look interrupted to it while the main window is still working on it. Only the main window resumes.
+ */
+export const isCaptureWebview = (pathname: string): boolean => /(^|\/)capture(\.html)?\/?$/.test(pathname);
+
 // localStorage is synchronous, so the threads are hydrated by now.
-if (useDispatch.persist.hasHydrated()) afterHydration();
-else useDispatch.persist.onFinishHydration(afterHydration);
+if (typeof location === "undefined" || !isCaptureWebview(location.pathname)) {
+  if (useDispatch.persist.hasHydrated()) afterHydration();
+  else useDispatch.persist.onFinishHydration(afterHydration);
+}
 
 const stripRef = (b: string | undefined) => b?.replace(/^refs\/heads\//, "");
 
@@ -716,7 +736,7 @@ export async function retryDispatch(args: {
       store().patch(key, e.id, { phase: "creating", path: wt.path });
       const target: StartTarget = wt.workspaceId ? { kind: "workspace", workspaceId: wt.workspaceId, split: null } : { kind: "cwd", cwd: wt.path, label: e.name };
       try {
-        const started = await host.call("agent.start", { target, spec: await specOf(e) });
+        const started = await host.call("agent.start", { target, spec: await specOf(e, hostId) });
         store().patch(key, e.id, { phase: "started", startedAt: Date.now(), agentId: started.agentId, paneId: started.paneId, workspaceId: started.workspaceId });
       } catch (err) {
         // The first attempt's agent is still coming up under this name: wait for it.

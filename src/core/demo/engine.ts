@@ -1,11 +1,10 @@
-/** The app version Vite injects (vite.config.ts `define`); absent under bun test. */
-declare const __APP_VERSION__: string | undefined;
 import type { AppEvent, DiagReport, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
 import { type DemoClock, realClock } from "./clock";
 import { DEMO_GROUP } from "./dispatchAuto";
 import { DemoHost, type HostVariant } from "./host";
 import { NotifySync } from "./notifySync";
+import { DEMO_VERSION } from "./version";
 
 export interface DemoEngineOptions {
   /** `backend`: the whole app runs on the demo (app methods too). `embedded`: only demo-kind hosts. */
@@ -177,10 +176,9 @@ export class DemoEngine {
     switch (method) {
       case "app.info":
         return {
-          // Vite injects the package version; bun tests run without it.
-          version: typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "dev",
+          version: DEMO_VERSION,
           platform: "web",
-          hostdVersion: "0.1.0",
+          hostdVersion: DEMO_VERSION,
           dataDir: "(demo: in-memory)",
           capabilities: { local: false, wsl: false, tunnels: true, notifications: typeof Notification !== "undefined", keepAlive: false },
         };
@@ -199,6 +197,8 @@ export class DemoEngine {
         });
         return {};
       }
+      case "app.presence":
+        return {};
       case "app.notifyRead": {
         const hostId = String(p.hostId ?? "");
         if (!this.hosts.has(hostId)) throw apiError("not_found", `Unknown host ${hostId}`);
@@ -334,7 +334,7 @@ export class DemoEngine {
           { id: "ssh", label: "SSH session", status: "ok", detail: "simulated", ms: 12 },
           { id: "herdr", label: "herdr 0.9.0", status: "ok", ms: 8 },
           { id: "omp", label: "omp 18.12.3", status: "ok", ms: 9 },
-          { id: "hostd", label: "tf-hostd 0.1.0", status: "ok", ms: 21 },
+          { id: "hostd", label: `tf-hostd ${DEMO_VERSION}`, status: "ok", ms: 21 },
           { id: "relay", label: "Collab relay :47466", status: "ok", ms: 3 },
           { id: "attach", label: "Attach session default", status: "ok", ms: 14 },
         ],

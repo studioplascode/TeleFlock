@@ -2,6 +2,7 @@
 //! stream the app core pushes to the frontend.
 
 use crate::model::{HostState, Notification, Pulse, StatePatch, ThinkingLevel};
+use crate::notify::DeviceKind;
 use crate::session::SessionEvent;
 use crate::term::TermEvent;
 use crate::{ApiError, Millis};
@@ -172,6 +173,16 @@ wire_struct! {
         /// `omp --resume` when it is needed again. Files without the field load with `true`.
         #[serde(default = "default_true")]
         pub close_done: bool,
+        /// Tell hosts whether this device is in use, so they alert the device you are using first
+        /// and escalate to your phone when nobody saw it (hosts ≥ 0.7.0). Absent: on.
+        pub share_presence: Option<bool>,
+        /// Minutes without input before this device counts as idle (1–60). Absent: 3.
+        pub idle_after_min: Option<u16>,
+        /// What this device is for routing (escalations go to phones). Absent: from the platform.
+        pub device_kind: Option<DeviceKind>,
+        /// Desktop: the system-wide shortcut that opens Quick capture, as an accelerator
+        /// (`Ctrl+Alt+Space`, `Cmd+Shift+Space`). Absent or empty: off until the user sets one.
+        pub capture_shortcut: Option<String>,
     }
 }
 
@@ -262,6 +273,10 @@ wire_enum! {
         /// Android: TeleFlock may not install apps yet; the "install unknown apps" settings
         /// screen was opened. The install resumes when the user comes back.
         NeedsPermission,
+        /// Desktop: an update found by an automatic check is downloaded and verified, and waits
+        /// for the user ("Restart now", or "Install" when `needs_password`) or for the window to
+        /// leave the front (then it installs and restarts by itself).
+        Ready,
         Error,
     }
 }
@@ -276,6 +291,9 @@ wire_struct! {
         /// New versions are downloaded and installed by hand (macOS: no signed updater package):
         /// never installed automatically, and `app.updateInstall` opens the download instead.
         pub manual: bool,
+        /// Installing this copy's update asks for the administrator password (`.deb`: `pkexec`),
+        /// so it never starts unattended: the UI offers "Install" in `ready`.
+        pub needs_password: bool,
         /// Why `supported` is false, for Settings (e.g. installed with pacman, or a debug build).
         pub unsupported_reason: Option<String>,
         pub phase: UpdatePhase,
@@ -310,7 +328,15 @@ pub enum AppEvent {
     Pulse { host_id: String, at: Millis, pulses: Vec<Pulse> },
     Session { host_id: String, agent_id: String, ev: SessionEvent },
     Term { host_id: String, term_id: String, ev: TermEvent },
-    Notify { host_id: String, notification: Notification },
+    Notify {
+        host_id: String,
+        notification: Notification,
+        /// `false`: the host routed it to another device in use; list it without a toast, sound
+        /// or haptic. `true` again (same id) when it escalates to this device. Absent: alert.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        alert: Option<bool>,
+    },
     /// Notifications that no longer need attention, on every surface (in-app toast and list,
     /// OS notification). `resolved`: the needs-you request they asked about was handled
     /// anywhere (answered here, on another device or in omp, cancelled, the agent stopped or

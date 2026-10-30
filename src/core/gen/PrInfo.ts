@@ -5,4 +5,14 @@ export type PrInfo = { number: number, url: string, title: string,
 /**
  * `OPEN` | `CLOSED` | `MERGED`.
  */
-state: string, draft: boolean, mergeable?: boolean, checks?: ChecksSummary, };
+state: string, draft: boolean, mergeable?: boolean, checks?: ChecksSummary, 
+/**
+ * GitHub's `mergeStateStatus`: `BEHIND` (the base moved on and the repo requires an
+ * up-to-date branch), `DIRTY` (conflicts), `BLOCKED`, `UNSTABLE`, `CLEAN`, `HAS_HOOKS`,
+ * `DRAFT`, `UNKNOWN` (hosts ≥ 0.7.0).
+ */
+mergeState?: string, 
+/**
+ * Branch the pull request merges into (`main`; hosts ≥ 0.7.0).
+ */
+baseRef?: string, };

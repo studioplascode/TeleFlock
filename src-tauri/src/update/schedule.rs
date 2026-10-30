@@ -66,11 +66,16 @@ pub struct Schedule {
 
 impl Schedule {
     /// Whether an automatic check should run now. Never while a check or an install runs or
-    /// waits for the user (Android permission screen / installer prompt).
+    /// waits for the user (Android permission screen / installer prompt, a downloaded desktop
+    /// update that is `ready`).
     pub fn due(&self, trigger: Trigger, now: i64, phase: UpdatePhase) -> bool {
         if matches!(
             phase,
-            UpdatePhase::Checking | UpdatePhase::Downloading | UpdatePhase::Installing | UpdatePhase::NeedsPermission
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading
+                | UpdatePhase::Installing
+                | UpdatePhase::NeedsPermission
+                | UpdatePhase::Ready
         ) {
             return false;
         }
@@ -190,7 +195,13 @@ mod tests {
     #[test]
     fn never_while_busy_or_waiting_for_the_user() {
         let s = Schedule::default();
-        for p in [UpdatePhase::Checking, UpdatePhase::Downloading, UpdatePhase::Installing, UpdatePhase::NeedsPermission] {
+        for p in [
+            UpdatePhase::Checking,
+            UpdatePhase::Downloading,
+            UpdatePhase::Installing,
+            UpdatePhase::NeedsPermission,
+            UpdatePhase::Ready,
+        ] {
             assert!(!s.due(Trigger::Foreground, 0, p), "{p:?}");
         }
         for p in [UpdatePhase::Idle, UpdatePhase::UpToDate, UpdatePhase::Available, UpdatePhase::Error] {

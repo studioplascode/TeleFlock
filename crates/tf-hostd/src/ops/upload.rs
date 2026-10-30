@@ -81,6 +81,16 @@ fn registry(paths: &Paths) -> &'static Uploads {
     REGISTRY.get_or_init(|| Uploads::new(paths.uploads.clone()))
 }
 
+/// A finished upload's file (`move.receive` takes the parts of a move this way). Blocking.
+pub fn finished_file(paths: &Paths, id: &str) -> Result<UploadFinished, ApiError> {
+    registry(paths).finish(id, None)
+}
+
+/// Deletes an upload, running or finished (as `upload.cancel`). Blocking.
+pub fn discard(paths: &Paths, id: &str) {
+    registry(paths).cancel(id);
+}
+
 /// Called by the first session context ([`Ctx::create`]): deletes the partial files an earlier
 /// daemon run left, prunes old uploads, then drops idle uploads every 5 min until `cancel`.
 pub fn start(paths: &Paths, cancel: CancellationToken) {

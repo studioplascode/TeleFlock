@@ -9,11 +9,13 @@ import { hostCall } from "./api";
 import { AskCard } from "./ask/AskCard";
 import { Composer } from "./composer/Composer";
 import { SessionCtx } from "./context";
+import { SessionFindBar, useFindHotkey } from "./find/SessionFind";
 import { SessionDialogs } from "./header/Dialogs";
 import { FocusHeader } from "./header/FocusHeader";
 import { SessionHeader } from "./header/SessionHeader";
 import { LinkGate } from "./LinkGate";
 import { NonOmpView } from "./NonOmpView";
+import { useResumeKeys } from "./resume/useResumeKeys";
 import { SubagentViewer } from "./subagents/SubagentViewer";
 import { Transcript, TRANSCRIPT_MAX_WIDTH, TranscriptSkeleton } from "./transcript/Transcript";
 
@@ -47,6 +49,13 @@ export interface SessionPaneProps {
   inspector?: boolean;
   /** Docked just above the composer (the phone's "Next waiting" chip). */
   dock?: ReactNode;
+  /** False leaves the composer out (a wall tile shows it only while it is the active tile). Default true. */
+  composer?: boolean;
+  /**
+   * False drops the sunset bloom behind the ask card: a large blurred layer per pane, which the
+   * wall's nine tiles skip (the card itself stays sunset). Default true.
+   */
+  bloom?: boolean;
   className?: string;
 }
 
@@ -89,7 +98,7 @@ function MissingAgent({ hostId }: { hostId: string }) {
  * One session: header, virtualised transcript, sticky ask card and composer. Used by the
  * desktop SessionView, the mobile pager and the split view.
  */
-export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, ready = true, inspector = false, dock, className }: SessionPaneProps) {
+export function SessionPane({ agentKey, compact = false, header = true, mobile = false, focus = false, ready = true, inspector = false, dock, composer = true, bloom = true, className }: SessionPaneProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const retry = useOpenSession(agentKey);
@@ -112,19 +121,23 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [hotkeys, stoppable, hostId, agentId]);
+  // F5 / Alt+R (omp's retry) while focus is in this session; the route's session also takes them from the page itself.
+  useResumeKeys(agentKey, !compact);
+  // Ctrl+F / Cmd+F: Find in this transcript.
+  useFindHotkey(agentKey, hotkeys);
 
   if (!agent) return <MissingAgent hostId={hostId} />;
 
   return (
     <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
-      <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", mobile || compact ? "gap-2" : "gap-3", compact && "p-2", className)}>
+      <div data-session-root={agentKey} className={cn("flex min-h-0 min-w-0 flex-1 flex-col", mobile || compact ? "gap-2" : "gap-3", compact && "p-2", className)}>
         {agent.omp == null ? (
           <NonOmpView agentKey={agentKey} />
         ) : (
           <>
             {header && (focus ? <FocusHeader agentKey={agentKey} /> : <SessionHeader agentKey={agentKey} compact={compact} inspector={inspector} />)}
             <LinkGate agentKey={agentKey} onRetry={retry}>
-              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} ready={ready} dock={dock} />
+              <SessionBody agentKey={agentKey} hotkeys={hotkeys} mobile={mobile} compact={compact} focus={focus} ready={ready} dock={dock} composer={composer} bloom={bloom} />
             </LinkGate>
           </>
         )}
@@ -133,7 +146,7 @@ export function SessionPane({ agentKey, compact = false, header = true, mobile =
   );
 }
 
-function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean; ready: boolean; dock?: ReactNode }) {
+function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, composer, bloom }: { agentKey: string; hotkeys: boolean; mobile: boolean; compact: boolean; focus: boolean; ready: boolean; dock?: ReactNode; composer: boolean; bloom: boolean }) {
   const { ui } = useSession(agentKey);
   return (
     <>
@@ -146,6 +159,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }:
             <TranscriptSkeleton />
           </div>
         )}
+        {ready && <SessionFindBar agentKey={agentKey} mobile={mobile} />}
       </div>
       <AnimatePresence mode="popLayout" onExitComplete={mobile ? undefined : toastAnchorsChanged}>
         {ui && (
@@ -161,13 +175,15 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }:
             style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
           >
             {/* Sunset bloom: flares as the card lands, then settles into a glow spilling over the transcript. */}
-            <motion.span
-              aria-hidden
-              className="pointer-events-none absolute -inset-x-4 -top-20 bottom-1/2 -z-10 rounded-[64px] bg-[radial-gradient(55%_60%_at_50%_42%,rgb(255_61_119/0.8),rgb(255_122_24/0.35)_55%,transparent_80%)] blur-2xl"
-              initial={{ opacity: 0, scale: 0.6 }}
-              animate={{ opacity: [0, 1, 0.7], scale: [0.6, 1.1, 1] }}
-              transition={{ duration: 1.6, times: [0, 0.3, 1], ease: "easeOut" }}
-            />
+            {bloom && (
+              <motion.span
+                aria-hidden
+                className="pointer-events-none absolute -inset-x-4 -top-20 bottom-1/2 -z-10 rounded-[64px] bg-[radial-gradient(55%_60%_at_50%_42%,rgb(255_61_119/0.8),rgb(255_122_24/0.35)_55%,transparent_80%)] blur-2xl"
+                initial={{ opacity: 0, scale: 0.6 }}
+                animate={{ opacity: [0, 1, 0.7], scale: [0.6, 1.1, 1] }}
+                transition={{ duration: 1.6, times: [0, 0.3, 1], ease: "easeOut" }}
+              />
+            )}
             <div className="min-h-0 overflow-y-auto rounded-tile">
               <AskCard agentKey={agentKey} request={ui} hotkeys={hotkeys} compact={mobile || compact} />
             </div>
@@ -176,13 +192,15 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock }:
       </AnimatePresence>
       {dock}
       {/* toasts keep clear of the composer (phone: the dock; desktop: when it runs under the toast stack) */}
-      <div
-        data-toast-anchor=""
-        className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}
-        style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
-      >
-        <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
-      </div>
+      {composer && (
+        <div
+          data-toast-anchor=""
+          className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}
+          style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
+        >
+          <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />
+        </div>
+      )}
       <SessionDialogs agentKey={agentKey} />
       <SubagentViewer agentKey={agentKey} />
     </>

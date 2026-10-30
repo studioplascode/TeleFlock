@@ -7,8 +7,8 @@ export function composerDraftKey(agentKey: string): string {
   return draftKey("composer", agentKey);
 }
 
-export type SessionDialog = "model" | "goal" | "rename" | "fork" | "handoff" | "compact" | "newSession" | null;
-export type InspectorTab = "overview" | "todos" | "agents" | "chat" | "files" | "tree" | "btw";
+export type SessionDialog = "model" | "roles" | "goal" | "rename" | "fork" | "handoff" | "compact" | "newSession" | "context" | null;
+export type InspectorTab = "overview" | "todos" | "agents" | "jobs" | "artifacts" | "chat" | "files" | "tree" | "btw";
 
 interface SessionUiState {
   dialog: Record<string, SessionDialog>;
@@ -24,6 +24,8 @@ interface SessionUiState {
    * opener's list, used when the session no longer lists this subagent (task card of an old turn).
    */
   subagent: Record<string, { id: string; subs?: Subagent[] } | undefined>;
+  /** Subagents panel: completed group expanded, per agent key (collapsed unless set; kept while the app runs). */
+  completedSubsOpen: Record<string, boolean>;
   openDialog(key: string, d: SessionDialog): void;
   setTab(key: string, t: InspectorTab): void;
   setSheet(key: string, open: boolean): void;
@@ -33,12 +35,15 @@ interface SessionUiState {
   focusItem(key: string, itemId: string): void;
   /** Open (or switch the open viewer to) a subagent of this session. */
   openSubagent(key: string, id: string, subs?: Subagent[]): void;
+  /** Show or hide the Subagents panel's completed group. */
+  setCompletedSubsOpen(key: string, open: boolean): void;
   closeSubagent(key: string): void;
 }
 
 /** View-local UI state shared by header, composer and inspector of one session. */
 export const useSessionUi = create<SessionUiState>()((set) => ({
   dialog: {},
+  completedSubsOpen: {},
   tab: {},
   sheet: {},
   composerFocus: {},
@@ -51,5 +56,6 @@ export const useSessionUi = create<SessionUiState>()((set) => ({
   consumeComposerFocus: (key) => set((s) => (s.composerFocus[key] ? { composerFocus: { ...s.composerFocus, [key]: undefined } } : s)),
   focusItem: (key, itemId) => set((s) => ({ focus: { ...s.focus, [key]: { itemId, nonce: (s.focus[key]?.nonce ?? 0) + 1 } } })),
   openSubagent: (key, id, subs) => set((s) => ({ subagent: { ...s.subagent, [key]: { id, subs: subs ?? s.subagent[key]?.subs } } })),
+  setCompletedSubsOpen: (key, open) => set((s) => ({ completedSubsOpen: { ...s.completedSubsOpen, [key]: open } })),
   closeSubagent: (key) => set((s) => (s.subagent[key] ? { subagent: { ...s.subagent, [key]: undefined } } : s)),
 }));

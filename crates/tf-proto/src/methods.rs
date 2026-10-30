@@ -7,19 +7,40 @@
 //! The generated TypeScript `HostMethods` / `AppMethods` interfaces map method name →
 //! `{ params; result }`.
 
+use std::collections::BTreeMap;
+
 use crate::accounts::{
     AccountLinkParams, AccountPreferParams, AccountUnlinkParams, AccountsListParams, AccountsSnapshot, AuthFlow, AuthFlowList, AuthFlowRef,
     AuthSubmitParams, AuthWaitParams,
 };
 use crate::app::{DiagReport, HostProfile, HostSecrets, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
+use crate::autoanswer::{AutoAnswer, AutoAnswerPostponeParams, AutoAnswerRef, SetAutoAnswerParams};
+use crate::artifacts::{ArtifactContent, ArtifactParams, LocalWriteParams, LocalWritten, SessionArtifacts};
+use crate::autoresume::{AutoResumeConfig, AutoResumeSetParams, RetryParams, RetryResult};
+use crate::cleanup::{CleanupRemoveParams, CleanupReport, CleanupScanParams, CleanupStorage, CleanupStorageParams, CleanupStorageRunParams};
+use crate::find::{SearchPage, SearchPollParams, SearchRef, SearchStartParams, SessionFindParams, SessionFindResult, SessionReadParams, SessionRows};
+use crate::github::{GhAuthStartParams, GhAuthStatus, GitIdentity, GitIdentityParams};
+use crate::jobs::{JobCancelParams, JobsListParams, JobsView, Service, ServiceList, ServiceLogs, ServiceLogsParams, ServiceRef, ServicesListParams};
+use crate::hostsync::{SyncApplied, SyncApplyParams, SyncKey, SyncPlan, SyncPlanParams, SyncProfile, SyncSealParams, SyncSealed};
 use crate::mcp::{
     McpChanged, McpEnableParams, McpList, McpListParams, McpReload, McpReloadParams, McpSaveParams, McpSearchParams, McpSearchResult, McpServerRef,
     McpTestParams, McpTestResult,
 };
-use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates, UsageTotals};
+use crate::plugins::{
+    MarketplaceAddParams, MarketplaceRefParams, PluginCatalog, PluginDiscoverParams, PluginEnableParams, PluginInstallParams, PluginList,
+    PluginRef, PluginUpgradeParams, PluginsChanged, PluginsListParams, SkillEnableParams, SkillInstallParams, SkillList, SkillRemoveParams,
+    SkillSearchParams, SkillSearchResult, SkillUpdateParams, SkillsChanged, SkillsListParams,
+};
+use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates};
+use crate::moves::{MoveCheck, MoveCheckParams, MoveChunk, MoveFinishParams, MoveProbe, MoveProbeParams, MoveReadParams, MoveReceiveParams, MoveRef, MoveStartParams, MoveStatus};
+use crate::notify::{NotifyConfig, NotifyPolicy, NotifyTestParams, NotifyTestResult, PushChannelRef, PushChannelSave, UiPresence};
 use crate::session::{ChangedFile, HistoryPage, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
 use crate::upload::{UploadBeginParams, UploadBegun, UploadChunkParams, UploadFinishParams, UploadFinished, UploadProgress, UploadRef};
+use crate::usage::{UsageParams, UsageReport};
+use crate::wrapped::{WrappedParams, WrappedReport};
+use crate::xray::ContextXray;
+use crate::herdr::{HerdrConfigParams, HerdrHealth, HerdrRestartParams};
 use crate::{Empty, Millis};
 
 macro_rules! methods {
@@ -121,6 +142,46 @@ wire_struct! {
     pub struct SetThinkingParams {
         pub agent_id: String,
         pub level: ThinkingLevel,
+    }
+}
+
+wire_struct! {
+    /// `agent.setRoleModels`: replaces one running agent's own omp model roles and fallback
+    /// chains (bridge ≥ 2.1.0 with `caps.roleModels`). Only that agent's omp process changes; the
+    /// host's omp config stays as it is.
+    pub struct SetRoleModelsParams {
+        pub agent_id: String,
+        /// The agent's complete role map (role → `provider/id[:thinking]`). A role left out uses
+        /// the host's assignment again ("host default"). When the `default` role's model changes,
+        /// the session switches to it (for this session only).
+        #[serde(default)]
+        #[ts(as = "Option<BTreeMap<String, String>>", optional)]
+        pub role_models: BTreeMap<String, String>,
+        /// The agent's complete own `retry.fallbackChains`; a key left out uses the host's chain.
+        #[serde(default)]
+        #[ts(as = "Option<BTreeMap<String, Vec<String>>>", optional)]
+        pub fallback_chains: BTreeMap<String, Vec<String>>,
+    }
+}
+
+wire_struct! {
+    /// `agent.getRoleModels` / `agent.setRoleModels`: the model roles and fallback chains of one
+    /// running omp session, split into the agent's own and the host's. A role or chain key uses
+    /// the agent's own value when it has one, else the host's.
+    pub struct SessionRoleModels {
+        /// The agent's own role assignments: set for it through TeleFlock (at launch or later),
+        /// plus omp's own per-process overrides (`--model`, `PI_SMOL_MODEL`, …).
+        pub session: BTreeMap<String, String>,
+        /// What the host's omp config (global, then project) assigns.
+        pub host: BTreeMap<String, String>,
+        /// The agent's own `retry.fallbackChains` entries.
+        pub session_chains: BTreeMap<String, Vec<String>>,
+        /// The host's `retry.fallbackChains` (global, then project).
+        pub host_chains: BTreeMap<String, Vec<String>>,
+        /// The model the session runs now (`provider/id`).
+        pub active: Option<String>,
+        /// `agent.setRoleModels`: why the active model did not follow a changed `default` role.
+        pub warning: Option<String>,
     }
 }
 
@@ -323,6 +384,24 @@ wire_struct! {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[ts(as = "Option<Vec<ImageInput>>", optional)]
         pub images: Vec<ImageInput>,
+        /// omp model roles for this agent only (role → `provider/id[:thinking]`, e.g. `smol` →
+        /// `openai/gpt-5-mini:low`), written to the agent's own `--config` overlay, never to the
+        /// host's omp config; roles left out use the host's assignment. A `default` entry is the
+        /// agent's main model and wins over `model` / `thinking` (architecture §3.7).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[ts(as = "Option<BTreeMap<String, String>>", optional)]
+        pub role_models: BTreeMap<String, String>,
+        /// omp `retry.fallbackChains` for this agent only: key (a role, `provider/model`,
+        /// `provider/*` or `provider/prefix/*`) → fallback selectors tried in order
+        /// (`provider/id[:thinking]`). Merged over the host's chains; a key here replaces the
+        /// host's chain of the same key.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[ts(as = "Option<BTreeMap<String, Vec<String>>>", optional)]
+        pub fallback_chains: BTreeMap<String, Vec<String>>,
+        /// Decide for me (§3.23) for this agent: answer a question it asks with its ★ recommended
+        /// option(s) after the wait. Absent: the host default; `enabled: false`: never, whatever
+        /// the host default says.
+        pub auto_answer: Option<AutoAnswer>,
     }
 }
 
@@ -669,6 +748,12 @@ wire_struct! {
         pub draft: bool,
         pub mergeable: Option<bool>,
         pub checks: Option<ChecksSummary>,
+        /// GitHub's `mergeStateStatus`: `BEHIND` (the base moved on and the repo requires an
+        /// up-to-date branch), `DIRTY` (conflicts), `BLOCKED`, `UNSTABLE`, `CLEAN`, `HAS_HOOKS`,
+        /// `DRAFT`, `UNKNOWN` (hosts ≥ 0.7.0).
+        pub merge_state: Option<String>,
+        /// Branch the pull request merges into (`main`; hosts ≥ 0.7.0).
+        pub base_ref: Option<String>,
     }
 }
 
@@ -745,33 +830,6 @@ wire_struct! {
 wire_struct! { pub struct TermRef { pub term_id: String } }
 
 // ───────────────────────────── host ─────────────────────────────
-
-wire_struct! { pub struct UsageParams { pub days: u32 } }
-
-wire_struct! {
-    pub struct UsageDay {
-        /// `YYYY-MM-DD` (host local).
-        pub day: String,
-        pub cost_usd: f64,
-        pub tokens: u64,
-    }
-}
-
-wire_struct! {
-    pub struct UsageModel {
-        pub model: String,
-        pub cost_usd: f64,
-        pub tokens: u64,
-    }
-}
-
-wire_struct! {
-    pub struct UsageReport {
-        pub today: UsageTotals,
-        pub days: Vec<UsageDay>,
-        pub models: Vec<UsageModel>,
-    }
-}
 
 wire_struct! {
     pub struct LimitsParams {
@@ -1059,6 +1117,23 @@ wire_struct! {
     pub struct OmpSettingsSetParams { pub changes: Vec<OmpSettingChange> }
 }
 
+wire_struct! {
+    /// `omp.settingValues`: current global values of a few omp settings (at most 64 keys), cheaper
+    /// than the whole schema in `omp.settings`: what the app needs to behave like omp's own TUI
+    /// (e.g. `paste.largeMenuThreshold`).
+    pub struct OmpSettingValuesParams { pub keys: Vec<String> }
+}
+
+wire_struct! {
+    /// `omp.settingValues`.
+    pub struct OmpSettingValues {
+        /// Key → current value (global config, else omp's default). Keys omp doesn't know, unset
+        /// ones without a default, and credentials are absent.
+        #[ts(type = "Record<string, unknown>")]
+        pub values: BTreeMap<String, serde_json::Value>,
+    }
+}
+
 // ───────────────────────────── tool updates ─────────────────────────────
 
 wire_struct! {
@@ -1094,8 +1169,17 @@ wire_struct! {
         pub model: Option<String>,
         pub thinking: Option<ThinkingLevel>,
         pub plan: bool,
+        /// Model roles and fallback chains for each run's agent only (see `AgentSpec`).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[ts(as = "Option<BTreeMap<String, String>>", optional)]
+        pub role_models: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[ts(as = "Option<BTreeMap<String, Vec<String>>>", optional)]
+        pub fallback_chains: BTreeMap<String, Vec<String>>,
         /// Run once when the host comes back after missing scheduled runs (it was off, …).
         pub catch_up: bool,
+        /// Decide for me for each run's agent (see `AgentSpec.autoAnswer`); absent = host default.
+        pub auto_answer: Option<AutoAnswer>,
         /// herdr session the agents start in.
         pub herdr_session: String,
         pub created_at: Millis,
@@ -1165,7 +1249,14 @@ wire_struct! {
         pub model: Option<String>,
         pub thinking: Option<ThinkingLevel>,
         pub plan: bool,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[ts(as = "Option<BTreeMap<String, String>>", optional)]
+        pub role_models: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[ts(as = "Option<BTreeMap<String, Vec<String>>>", optional)]
+        pub fallback_chains: BTreeMap<String, Vec<String>>,
         pub catch_up: bool,
+        pub auto_answer: Option<AutoAnswer>,
     }
 }
 
@@ -1191,12 +1282,19 @@ methods!(HostMethod, "HostMethods", {
     "session.history" => SessionHistory(SessionHistoryParams) -> HistoryPage;
     "session.subagentTranscript" => SubagentTranscript(SubagentRef) -> HistoryPage;
     "session.image" => SessionImage(ImageParams) -> ImageBlob;
+    "session.find" => SessionFind(SessionFindParams) -> SessionFindResult;
+    "session.artifacts" => SessionArtifactList(AgentRef) -> SessionArtifacts;
+    "session.artifact" => SessionArtifactRead(ArtifactParams) -> ArtifactContent;
+    "session.writeLocal" => SessionWriteLocal(LocalWriteParams) -> LocalWritten;
+    "session.context" => SessionContextXray(AgentRef) -> ContextXray;
 
     "agent.prompt" => AgentPrompt(PromptParams) -> Empty;
     "agent.abort" => AgentAbort(AgentRef) -> Empty;
     "agent.answer" => AgentAnswer(AnswerParams) -> Empty;
     "agent.setModel" => AgentSetModel(SetModelParams) -> Empty;
     "agent.setThinking" => AgentSetThinking(SetThinkingParams) -> Empty;
+    "agent.getRoleModels" => AgentGetRoleModels(AgentRef) -> SessionRoleModels;
+    "agent.setRoleModels" => AgentSetRoleModels(SetRoleModelsParams) -> SessionRoleModels;
     "agent.setFast" => AgentSetFast(ToggleParams) -> Empty;
     "agent.setPlan" => AgentSetPlan(ToggleParams) -> Empty;
     "agent.goal" => AgentGoal(GoalParams) -> Empty;
@@ -1222,6 +1320,12 @@ methods!(HostMethod, "HostMethods", {
     "agent.stop" => AgentStop(StopParams) -> Empty;
     "agent.renameHandle" => AgentRenameHandle(HandleParams) -> Empty;
     "agent.resume" => AgentResume(AgentRef) -> Started;
+    "agent.retry" => AgentRetry(RetryParams) -> RetryResult;
+    "agent.autoResumeNow" => AgentAutoResumeNow(AgentRef) -> RetryResult;
+    "agent.autoResumeCancel" => AgentAutoResumeCancel(AgentRef) -> Empty;
+    "agent.setAutoAnswer" => AgentSetAutoAnswer(SetAutoAnswerParams) -> Empty;
+    "agent.autoAnswerCancel" => AgentAutoAnswerCancel(AutoAnswerRef) -> Empty;
+    "agent.autoAnswerPostpone" => AgentAutoAnswerPostpone(AutoAnswerPostponeParams) -> Empty;
 
     "workspace.create" => WorkspaceCreate(WorkspaceCreateParams) -> WorkspaceRef;
     "workspace.rename" => WorkspaceRename(WorkspaceRenameParams) -> Empty;
@@ -1245,6 +1349,11 @@ methods!(HostMethod, "HostMethods", {
     "gh.prStatus" => GhPrStatus(CwdParams) -> PrStatusResult;
     "gh.prCreate" => GhPrCreate(PrCreateParams) -> PrInfo;
     "gh.prMerge" => GhPrMerge(PrMergeParams) -> Empty;
+    // The GitHub CLI's sign-in and git's commit identity (github.rs): Host setup, from any device.
+    "gh.authStatus" => GhAuthStatusReq(Empty) -> GhAuthStatus;
+    "gh.authStart" => GhAuthStart(GhAuthStartParams) -> AuthFlow;
+    "git.identity" => GitIdentityReq(Empty) -> GitIdentity;
+    "git.setIdentity" => GitSetIdentity(GitIdentityParams) -> GitIdentity;
 
     "term.open" => TermOpen(TermOpenParams) -> TermOpened;
     "term.resize" => TermResize(TermResizeParams) -> Empty;
@@ -1257,20 +1366,52 @@ methods!(HostMethod, "HostMethods", {
     "host.models" => HostModels(Empty) -> ModelCatalog;
     "host.sessions" => HostSessions(SessionsParams) -> PastSessions;
     "host.resume" => HostResume(ResumeParams) -> Started;
+    // Full-text search over the host's omp session files (ops/search.rs): started, polled, cancelled.
+    "search.start" => SearchStart(SearchStartParams) -> SearchPage;
+    "search.poll" => SearchPoll(SearchPollParams) -> SearchPage;
+    "search.cancel" => SearchCancel(SearchRef) -> Empty;
+    "search.read" => SearchRead(SessionReadParams) -> SessionRows;
     "host.setup" => HostSetup(Empty) -> SetupStatus;
     "host.setupApply" => HostSetupApply(SetupApplyParams) -> SetupStatus;
     "host.activity" => HostActivity(ActivityParams) -> ActivityPage;
+    "host.wrapped" => HostWrapped(WrappedParams) -> WrappedReport;
     "host.toolsUpdate" => HostToolsUpdate(ToolsUpdateParams) -> ToolUpdates;
     "host.toolsConfig" => HostToolsConfig(ToolsConfigParams) -> ToolUpdates;
+    "host.autoResume" => HostAutoResume(Empty) -> AutoResumeConfig;
+    "host.autoResumeSet" => HostAutoResumeSet(AutoResumeSetParams) -> AutoResumeConfig;
+    "host.autoAnswerSet" => HostAutoAnswerSet(AutoAnswer) -> AutoAnswer;
+    // The herdr server's lifecycle (§3.29, tf-hostd `herdr_health`): start it now, load the
+    // installed herdr now (live handoff, else stop + start), per-host settings.
+    "host.herdrRestart" => HostHerdrRestart(HerdrRestartParams) -> HerdrHealth;
+    "host.herdrLoad" => HostHerdrLoad(Empty) -> HerdrHealth;
+    "host.herdrConfig" => HostHerdrConfig(HerdrConfigParams) -> HerdrHealth;
 
     "omp.settings" => OmpSettingsGet(OmpSettingsParams) -> OmpSettings;
     "omp.settingsSet" => OmpSettingsSet(OmpSettingsSetParams) -> OmpSettings;
+    "omp.settingValues" => OmpSettingValuesGet(OmpSettingValuesParams) -> OmpSettingValues;
 
     "automation.list" => AutomationListReq(Empty) -> AutomationList;
     "automation.save" => AutomationSave(AutomationDraft) -> Automation;
     "automation.delete" => AutomationDelete(AutomationRef) -> Empty;
     "automation.run" => AutomationRunNow(AutomationRef) -> AutomationRun;
     "automation.preview" => AutomationPreview(SchedulePreviewParams) -> SchedulePreview;
+
+    // Cleanup page (cleanup.rs): linked worktrees with their pull requests, sizes and agents; omp's storage gc.
+    "cleanup.worktrees" => CleanupWorktrees(CleanupScanParams) -> CleanupReport;
+    "cleanup.remove" => CleanupRemove(CleanupRemoveParams) -> Empty;
+    "cleanup.storage" => CleanupStorageReq(CleanupStorageParams) -> CleanupStorage;
+    "cleanup.storageRun" => CleanupStorageRun(CleanupStorageRunParams) -> CleanupStorage;
+
+    // Background jobs of an omp session (jobs.rs; bridge ≥ 2.1.0 with `caps.jobs`).
+    "jobs.list" => JobsList(JobsListParams) -> JobsView;
+    "jobs.cancel" => JobsCancel(JobCancelParams) -> JobsView;
+
+    // Processes omp's daemon broker supervises on the host (jobs.rs, `omp ps`).
+    "services.list" => ServicesList(ServicesListParams) -> ServiceList;
+    "services.logs" => ServicesLogs(ServiceLogsParams) -> ServiceLogs;
+    "services.stop" => ServicesStop(ServiceRef) -> Service;
+    "services.kill" => ServicesKill(ServiceRef) -> Service;
+    "services.restart" => ServicesRestart(ServiceRef) -> Service;
 
     "ai.complete" => AiComplete(AiCompleteParams) -> AiCompleteResult;
 
@@ -1279,6 +1420,16 @@ methods!(HostMethod, "HostMethods", {
     "upload.status" => UploadStatus(UploadRef) -> UploadProgress;
     "upload.finish" => UploadFinish(UploadFinishParams) -> UploadFinished;
     "upload.cancel" => UploadCancel(UploadRef) -> Empty;
+
+    // Moving an agent to another host (moves.rs): preflights, source and target jobs, the relay.
+    "move.check" => MoveCheckReq(MoveCheckParams) -> MoveCheck;
+    "move.probe" => MoveProbeReq(MoveProbeParams) -> MoveProbe;
+    "move.start" => MoveStart(MoveStartParams) -> MoveStatus;
+    "move.status" => MoveStatusReq(MoveRef) -> MoveStatus;
+    "move.read" => MoveRead(MoveReadParams) -> MoveChunk;
+    "move.receive" => MoveReceive(MoveReceiveParams) -> MoveStatus;
+    "move.finish" => MoveFinish(MoveFinishParams) -> MoveStatus;
+    "move.abort" => MoveAbort(MoveRef) -> MoveStatus;
 
     // Sign-ins run on the host (accounts.rs): shared by accounts.link and mcp.authStart.
     "auth.list" => AuthList(Empty) -> AuthFlowList;
@@ -1302,6 +1453,39 @@ methods!(HostMethod, "HostMethods", {
     "mcp.authStart" => McpAuthStart(McpServerRef) -> AuthFlow;
     "mcp.signOut" => McpSignOut(McpServerRef) -> McpChanged;
     "mcp.search" => McpSearch(McpSearchParams) -> McpSearchResult;
+
+    // omp's skills and plugins (plugins.rs): installed and registry skills, packages and
+    // marketplace plugins, catalogs, installs and switches, reload of running sessions.
+    "skills.list" => SkillsListReq(SkillsListParams) -> SkillList;
+    "skills.search" => SkillsSearch(SkillSearchParams) -> SkillSearchResult;
+    "skills.install" => SkillsInstall(SkillInstallParams) -> SkillsChanged;
+    "skills.update" => SkillsUpdate(SkillUpdateParams) -> SkillsChanged;
+    "skills.remove" => SkillsRemove(SkillRemoveParams) -> SkillsChanged;
+    "skills.setEnabled" => SkillsSetEnabled(SkillEnableParams) -> SkillsChanged;
+    "plugins.list" => PluginsListReq(PluginsListParams) -> PluginList;
+    "plugins.discover" => PluginsDiscover(PluginDiscoverParams) -> PluginCatalog;
+    "plugins.install" => PluginsInstall(PluginInstallParams) -> PluginsChanged;
+    "plugins.remove" => PluginsRemove(PluginRef) -> PluginsChanged;
+    "plugins.setEnabled" => PluginsSetEnabled(PluginEnableParams) -> PluginsChanged;
+    "plugins.upgrade" => PluginsUpgrade(PluginUpgradeParams) -> PluginsChanged;
+    "plugins.marketplaceAdd" => PluginsMarketplaceAdd(MarketplaceAddParams) -> PluginsChanged;
+    "plugins.marketplaceRemove" => PluginsMarketplaceRemove(MarketplaceRefParams) -> PluginsChanged;
+    "plugins.marketplaceUpdate" => PluginsMarketplaceUpdate(MarketplaceRefParams) -> PluginsChanged;
+    "plugins.reload" => PluginsReload(McpReloadParams) -> McpReload;
+
+    // "Make this host like that one" (hostsync.rs): omp settings, roles, MCP servers, sealed secrets.
+    "hostSync.export" => HostSyncExport(Empty) -> SyncProfile;
+    "hostSync.plan" => HostSyncPlan(SyncPlanParams) -> SyncPlan;
+    "hostSync.keyBegin" => HostSyncKeyBegin(Empty) -> SyncKey;
+    "hostSync.seal" => HostSyncSeal(SyncSealParams) -> SyncSealed;
+    "hostSync.apply" => HostSyncApply(SyncApplyParams) -> SyncApplied;
+
+    // Notifications that find you (notify.rs): routing policy, connected devices, push channels.
+    "notify.config" => NotifyConfigGet(Empty) -> NotifyConfig;
+    "notify.setPolicy" => NotifySetPolicy(NotifyPolicy) -> NotifyConfig;
+    "notify.saveChannel" => NotifySaveChannel(PushChannelSave) -> NotifyConfig;
+    "notify.removeChannel" => NotifyRemoveChannel(PushChannelRef) -> NotifyConfig;
+    "notify.test" => NotifyTest(NotifyTestParams) -> NotifyTestResult;
 });
 
 // ───────────────────────────── app methods ─────────────────────────────
@@ -1394,6 +1578,8 @@ methods!(AppMethod, "AppMethods", {
     "app.openExternal" => AppOpenExternal(UrlParams) -> Empty;
     "app.notifyTest" => AppNotifyTest(Empty) -> Empty;
     "app.notifyRead" => AppNotifyRead(NotifyReadParams) -> Empty;
+    // What the UI sees of the user; the app core reports the device's presence to its hosts.
+    "app.presence" => AppPresence(UiPresence) -> Empty;
     // Self-update: handled by the Tauri shell (src-tauri/src/update), `unsupported` elsewhere.
     "app.updateStatus" => AppUpdateStatus(Empty) -> UpdateStatus;
     "app.updateCheck" => AppUpdateCheck(UpdateCheckParams) -> UpdateStatus;

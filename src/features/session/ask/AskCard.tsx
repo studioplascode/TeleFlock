@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { answerDraftKey, drafts, parseAgentKey, useAgent, useDraft } from "@/core";
 import type { Answer, NeedsKind, NeedsOption, UiRequest } from "@/core/gen";
 import { cn, Elapsed, Spinner } from "@/design";
+import { AskCountdown } from "@/features/autoAnswer/AskCountdown";
 import { OptionTile, SkipButton, isTyping, optionFrame } from "@/features/inbox/AnswerParts";
 import { CONFIRM_OPTIONS, optionAnswer, otherAnswer } from "@/features/inbox/answers";
 import { askText } from "@/features/inbox/askText";
@@ -281,6 +282,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
           {editor ? "Submit" : multi && picked.length > 0 ? `Send ${picked.length} selected` : "Send answer"}
         </button>
       )}
+      {!sent && <AskCountdown agentKey={agentKey} requestId={request.id} compact={compact} />}
 
       {(request.allowChat || request.kind !== "planReview") && (
         <div className={cn("relative flex flex-wrap items-center gap-2 text-xs font-bold", compact ? "mt-2" : "mt-3")}>

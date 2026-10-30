@@ -3,6 +3,7 @@ import type { Capabilities, CommandInfo, SessionMeta, ThinkingLevel, TranscriptI
 import { OMP_COMMANDS, type OmpCommand, type OmpCommandMode, type OmpSubcommand, ompCommandName } from "@/core/ompCommands";
 import { toast } from "@/design";
 import { hostCall } from "../api";
+import { retryTurn } from "../resume/actions";
 import { useSessionUi } from "../state";
 
 export interface SlashContext {
@@ -297,6 +298,14 @@ const NATIVE: Record<string, Native> = {
     handles: (a) => !a || a === "start",
     run: async (c) => ok(await hostCall(c.hostId, "agent.connect", { agentId: c.agentId }, { success: "Sharing with TeleFlock" })),
   },
+  context: {
+    description: "What fills the context window (system prompt, tools, messages, thinking, tool output), with Compact and Drop images",
+    run: (c) => {
+      useSessionUi.getState().openDialog(c.key, "context");
+      return Promise.resolve(true);
+    },
+  },
+  retry: { description: "Resume the failed or stopped last turn (F5)", run: (c) => retryTurn(c.key) },
 };
 
 function fromOmp(o: OmpCommand): SlashCommand {
@@ -418,6 +427,14 @@ export function parseSlash(input: string): { name: string; args: string } | null
   if (!body.startsWith("/") || body.length < 2) return null;
   const name = ompCommandName(body);
   return { name, args: body.slice(1 + name.length).replace(/^:/, "").trim() };
+}
+
+/**
+ * Whether the draft is a command. Judged on what the user typed, before paste tokens become their text
+ * (a pasted log or path that starts with "/" is text); a leading space escapes it (" /path is a file").
+ */
+export function isSlashDraft(typed: string): boolean {
+  return !typed.startsWith(" /") && typed.trim().startsWith("/");
 }
 
 /** Sends a command to omp. `report`/`terminal` show the agent's terminal, where omp renders that part. */

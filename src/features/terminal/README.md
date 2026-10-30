@@ -125,3 +125,8 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
   (workspace › tab · process · folder).
 - Search: Ctrl+F (or context menu / palette "Terminal: Find on screen" / `handle.openSearch()`) opens a find bar (`@xterm/addon-search`): Enter / Shift+Enter next/prev, match count, case toggle, Esc closes. It searches the visible screen (scrollback is 0); scroll to bring older output into view.
 - Tab strip: right-click / long-press a tab → Rename tab… (`tab.rename`), Close tab… (`tab.close`), Close pane… (`pane.close`, shell panes only), each destructive action confirmed.
+- herdr's server is not there (`features/hosts/herdrHealth.ts`): when the host's `herdrHealth` is not up, or the attach error
+  matches `failed to connect to server` / `Is herdr server running` / `server_not_running` / `no herdr server is reachable`,
+  `PaneOverlay` says "herdr isn't running on forge" with the status text ("Starting it again in 12s"), **Restart herdr** and
+  **Retry**, never the raw socket error (a server that only does not answer leaves an attached pane alone). The chip reads
+  "herdr down". The pane reattaches by itself when a server instance answers again (`herdrHealth.epoch` changes while `up`).

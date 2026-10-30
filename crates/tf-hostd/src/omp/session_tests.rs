@@ -1043,3 +1043,31 @@ async fn a_lost_bridge_without_a_room_reads_the_same_on_every_poll() {
     tokio::time::resume();
     lab.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_omp_ended_without_the_feed_saying_so_is_reloaded() {
+    // The live feed lost the end of a turn (frames tf-hostd could not read: bridge 2.0.0 wrote
+    // omp's half surrogate pairs as escapes serde_json refuses). omp's control state says idle,
+    // the replica still runs a `wait`. The stall watchdog subscribes again, and the resync settles
+    // the session. Before, the transcript stayed on the running `wait` for good.
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "hi");
+    let mut ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == (LinkState::Live, None, Some(LinkVia::Bridge)))).await;
+    let s = lab.session("s1").unwrap();
+    ext.send(json!({ "t": "live", "seq": 2, "f": { "t": "event", "event": { "type": "agent_start" } } })).await;
+    ext.send(json!({ "t": "live", "seq": 3, "f": { "t": "event", "event":
+        { "type": "tool_execution_start", "toolCallId": "w1", "toolName": "wait", "args": {} } } }))
+    .await;
+    until("the wait runs", || s.is_streaming() && statuses(&s) == [ToolStatus::Running]).await;
+    // omp's turn ended; the live frames saying so never arrived. Its control state says idle.
+    ext.state_titled("s1", "t").await;
+    let req = ext.recv_req().await;
+    assert_eq!(req["op"], "liveSubscribe", "the watchdog subscribes again");
+    ext.send(idle_resync("s1", &file, 4, last_entry(&file).as_deref(), &[])).await;
+    ext.ok(&req, json!({})).await;
+    until("the resync settles the turn", || !s.is_streaming() && !statuses(&s).contains(&ToolStatus::Running)).await;
+    assert_eq!(link_of(&s), (LinkState::Live, None, Some(LinkVia::Bridge)));
+    lab.stop().await;
+}

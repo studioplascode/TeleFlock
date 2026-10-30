@@ -4,6 +4,8 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { core, draftKey, navigate, suggestAgentName, suggestBranch, useAiNaming, useAiSuggestion, useDraftState, useHostIds, useHostState, useHosts, usePrefs, useSettings, useUi } from "@/core";
 import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
 import { Button, Chip, EmptyState, Input, Kbd, SegmentedControl, Shimmer, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
+import { hostTakesRoles } from "@/features/agentRoles/roles";
+import { hostDecides } from "@/features/autoAnswer/format";
 import { ACTIONS } from "@/features/shell/vocab";
 import { AiMark, within } from "../workspace/shared/ai";
 import { AgentFields, agentNameError, autoAgentName, initialAgentDraft, toAgentSpec, useAgentDraft, useModelCatalog } from "../workspace/shared/AgentFields";
@@ -186,7 +188,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
           label: branch.label.trim() || undefined,
           existing: branch.mode === "existing",
           trust,
-          agent: agent.start ? toAgentSpec({ ...agent, name: agentName }) : undefined,
+          agent: agent.start ? toAgentSpec({ ...agent, name: agentName }, hostDecides(host?.info), hostTakesRoles(host?.info)) : undefined,
         }
       : null;
 

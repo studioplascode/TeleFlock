@@ -23,6 +23,9 @@ wire_struct! {
 }
 
 wire_enum! {
+    /// `Parked` is no longer produced: omp parking an idle subagent says it finished, not how, so
+    /// the replica keeps its known outcome (`Done`/`Failed`/`Aborted`), else `Done`. Older hostds
+    /// and session caches still carry it; clients show it as `Done`.
     pub enum SubagentStatus { Running, Done, Failed, Aborted, Parked }
 }
 
@@ -113,6 +116,12 @@ wire_struct! {
         pub subagents: bool,
         /// Controls go through the companion extension (precise) instead of keystroke injection.
         pub bridge: bool,
+        /// `agent.retry` works for the agent (omp's F5: retry the failed or stopped last turn).
+        #[serde(default)]
+        pub retry: bool,
+        /// `agent.retry` works for its subagents (bridge ≥ 2.1.0 with omp's task internals).
+        #[serde(default)]
+        pub subagent_retry: bool,
     }
 }
 
@@ -186,6 +195,22 @@ wire_struct! {
 }
 
 wire_struct! {
+    /// A provider's refusal of a turn: omp's `stopDetails` of type `refusal` or `sensitive`
+    /// (Anthropic's safety classifiers), without what the provider attached for omp's own use.
+    pub struct Refusal {
+        /// omp's `stopDetails.type`: `refusal` (the model declined) or `sensitive` (a safety filter
+        /// flagged the content).
+        pub kind: String,
+        /// The policy area the provider named, e.g. `cyber`.
+        pub category: Option<String>,
+        /// The provider's explanation.
+        pub explanation: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// An assistant text row, or the error row of a message that failed without any text. A
+    /// message's outcome (`stopReason` … `refusal`) is on its last text row (or its error row) only.
     pub struct AssistantItem {
         pub id: String,
         pub at: Millis,
@@ -194,7 +219,13 @@ wire_struct! {
         pub model: Option<String>,
         pub usage: Option<TokenUsage>,
         pub stop_reason: Option<String>,
+        /// What went wrong, as omp words it: a provider error, a refusal, or an abort's own reason
+        /// (never a user interrupt).
         pub error: Option<String>,
+        /// HTTP status the provider answered the failed request with (omp `errorStatus`).
+        pub error_status: Option<u16>,
+        /// The provider refused the turn (`error` holds omp's text for it).
+        pub refusal: Option<Refusal>,
     }
 }
 

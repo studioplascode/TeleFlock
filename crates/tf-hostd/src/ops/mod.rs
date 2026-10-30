@@ -19,23 +19,36 @@ use crate::state::subs::SessionSubs;
 use crate::state::StateHandle;
 
 pub mod accounts;
+pub mod artifact_files;
 pub mod ai;
 pub mod agent;
 pub mod automation;
+pub mod cleanup;
 pub mod fs;
 pub mod gh;
+pub mod gh_auth;
 pub mod git;
 pub mod host;
+pub mod hostsync;
 pub mod install;
+pub mod jobs;
 pub mod limits;
 pub mod mcp;
+pub mod moves;
 pub mod omp_config;
+pub mod plugins;
+pub mod roles;
+pub mod services;
+pub mod search;
 pub mod scope;
 pub mod term;
 pub mod tools;
 pub mod upload;
+pub mod usage;
 pub mod workspace;
 pub mod worktree;
+pub mod wrapped;
+pub mod xray;
 
 /// Everything a handler needs for one herdr session. Shared (`Arc`) by all clients
 /// attached to that session.
@@ -55,6 +68,10 @@ pub struct Ctx {
     pub sessions: SessionSubs,
     /// Shared across herdr sessions: the daemon's omp/herdr updater.
     pub tools: tools::Tools,
+    /// Decide for me: this session's policies and countdowns (`crate::autoanswer`).
+    pub auto_answer: crate::autoanswer::AutoAnswers,
+    /// Shared across herdr sessions: presence, notification routing and push (`crate::notify`).
+    pub notify: crate::notify::Notifier,
     /// Cancelled when the context closes (daemon shutdown).
     pub cancel: CancellationToken,
     me: Weak<Ctx>,
@@ -75,11 +92,6 @@ impl Ctx {
             }
             Err(e) => return Err(herdr_err(e)),
         };
-        if git::is_executable(herdr.binary())
-            && let Err(e) = herdr.ensure_server().await
-        {
-            tracing::warn!(session, "herdr server not available: {e}");
-        }
         let herdr = Arc::new(herdr);
         let cancel = daemon.shutdown.child_token();
         let ctx = Arc::new_cyclic(|me| Ctx {
@@ -93,12 +105,25 @@ impl Ctx {
             relay_port: daemon.relay_port,
             sessions: SessionSubs::default(),
             tools: daemon.tools.clone(),
+            auto_answer: crate::autoanswer::AutoAnswers::open(&daemon.paths, session),
+            notify: daemon.notify.clone(),
             cancel,
             me: me.clone(),
         });
+        ctx.state.route_notifications(ctx.notify.clone());
+        // herdr's server health (§3.29): the worker is built, and starts the server when none runs
+        // (with TeleFlock's herdr config, `herdr_health::managed`: TeleFlock, not herdr, relaunches
+        // agents after a restart), through its own bookkeeping; it runs once the context is up.
+        let health = crate::herdr_health::begin(&ctx).await;
         tools::follow(&ctx);
         upload::start(&daemon.paths, daemon.shutdown.child_token());
+        crate::autoanswer::start_session(&ctx);
         crate::state::start(&ctx).await;
+        // Restarts, idle updates, `HostInfo.herdrHealth`.
+        health.spawn();
+        crate::restart::start_session(&ctx);
+        crate::limit_resume::follow(&ctx);
+        moves::start(&ctx);
         Ok(ctx)
     }
 
@@ -127,12 +152,20 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
         "term" => term::handle(ctx, req, client).await,
         "host" => host::handle(ctx, req, client).await,
         "omp" => omp_config::handle(ctx, req, client).await,
+        "skills" | "plugins" => plugins::handle(ctx, req).await,
         "automation" => automation::handle(ctx, req, client).await,
+        "cleanup" => cleanup::handle(ctx, req, client).await,
         "ai" => ai::handle(ctx, req, client).await,
         "upload" => upload::handle(ctx, req, client).await,
+        "move" => moves::handle(ctx, req, client).await,
         "auth" => crate::authflow::handle(req).await,
         "accounts" => accounts::handle(ctx, req, client).await,
         "mcp" => mcp::handle(ctx, req, client).await,
+        "hostSync" => hostsync::handle(ctx, req, client).await,
+        "jobs" => jobs::handle(ctx, req).await,
+        "services" => services::handle(ctx, req).await,
+        "search" => search::handle(ctx, req, client).await,
+        "notify" => crate::notify::ops::handle(ctx, req, client).await,
         _ => Err(ApiError::new("unknown_method", format!("unknown method `{}`", req.name()))),
     }
 }
@@ -149,7 +182,8 @@ pub fn herdr_err(e: tf_herdr::HerdrError) -> ApiError {
         "agent_blocked" => ApiError::new("agent_blocked", e.message)
             .with_hint("The agent shows a dialog; answer it or open the terminal"),
         c if c.ends_with("not_found") => ApiError::new("not_found", e.message),
-        "server_not_running" => ApiError::new("herdr_error", e.message).with_hint("herdr is not running on this host"),
+        // Not the socket path and errno: what happened and that it comes back (§3.29).
+        "server_not_running" => crate::herdr_health::down_api_error(None),
         "timeout" => ApiError::new("timeout", e.message),
         _ => ApiError::new("herdr_error", format!("{}: {}", e.code, e.message)),
     };

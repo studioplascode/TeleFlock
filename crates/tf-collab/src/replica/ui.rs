@@ -21,6 +21,8 @@ pub const CHAT_LABEL: &str = "Chat about this";
 pub const NEXT_LABEL: &str = "Next →";
 pub const CUSTOM_ANSWER_PREFIX: &str = "Custom answer: ";
 pub const APPROVAL_PREFIX: &str = "Allow tool: ";
+/// omp's mark on the recommended option of a plain select (`addRecommendedSuffix`).
+pub const RECOMMENDED_SUFFIX: &str = " (Recommended)";
 
 /// A `ui-response` to send through [`crate::Guest::ui_response`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +95,9 @@ fn multi_step(frame: &UiRequestFrame, want: &[String]) -> Result<String, ApiErro
     Err(invalid("select at least one option"))
 }
 
-fn map(frame: &UiRequestFrame, call_id: Option<String>, now: Millis) -> (UiRequest, NeedsYou) {
+/// `recommended`: the index of the ★ recommended option among an ask question's own options (the
+/// ask tool call's `recommended`).
+fn map(frame: &UiRequestFrame, call_id: Option<String>, recommended: Option<usize>, now: Millis) -> (UiRequest, NeedsYou) {
     let id = frame.req_id().to_string();
     match frame {
         UiRequestFrame::Editor { title, prefill, .. } => {
@@ -182,15 +186,25 @@ fn map(frame: &UiRequestFrame, call_id: Option<String>, now: Millis) -> (UiReque
             let allow_other = options.iter().any(|o| o.label() == OTHER_LABEL);
             let allow_chat = options.iter().any(|o| o.label() == CHAT_LABEL);
             let multi = is_checkbox(frame);
+            // The ★ recommendation: omp's ask dialog only preselects it, so it comes from the tool
+            // call; omp's plain select also marks its label. The id stays the exact label omp
+            // offered, the label reads without omp's mark.
             let opts: Vec<NeedsOption> = options
                 .iter()
                 .filter(|o| !matches!(o.label(), OTHER_LABEL | CHAT_LABEL | NEXT_LABEL))
-                .map(|o| NeedsOption {
-                    id: o.label().to_owned(),
-                    label: o.label().to_owned(),
-                    description: o.description().map(str::to_owned),
-                    recommended: false,
-                    tone: OptionTone::Neutral,
+                .enumerate()
+                .map(|(i, o)| {
+                    let (label, marked) = match o.label().strip_suffix(RECOMMENDED_SUFFIX) {
+                        Some(l) if !l.trim().is_empty() => (l, true),
+                        _ => (o.label(), false),
+                    };
+                    NeedsOption {
+                        id: o.label().to_owned(),
+                        label: label.to_owned(),
+                        description: o.description().map(str::to_owned),
+                        recommended: marked || recommended == Some(i),
+                        tone: OptionTone::Neutral,
+                    }
                 })
                 .collect();
             let ask = allow_other || allow_chat || frame_has_marker(frame);
@@ -247,12 +261,12 @@ impl UiState {
         std::mem::take(&mut self.replies)
     }
 
-    pub(crate) fn request(&mut self, frame: &UiRequestFrame, call_id: Option<String>, now: Millis) {
+    pub(crate) fn request(&mut self, frame: &UiRequestFrame, call_id: Option<String>, recommended: Option<usize>, now: Millis) {
         let req_id = frame.req_id();
         if self.pending.contains_key(&req_id) {
             return;
         }
-        let (req, needs) = map(frame, call_id, now);
+        let (req, needs) = map(frame, call_id, recommended, now);
         let mut hidden = false;
         match (&self.driver, frame) {
             (Some(Driver::Other { text }), UiRequestFrame::Editor { title, .. }) if title.starts_with(CUSTOM_ANSWER_PREFIX) => {
@@ -370,11 +384,12 @@ mod tests {
     #[test]
     fn single_select_exact_labels() {
         let mut ui = UiState::default();
-        ui.request(&ask(2, false, vec![], false), None, 0);
+        ui.request(&ask(2, false, vec![], false), None, None, 0);
         let req = ui.current().unwrap();
         assert_eq!(req.kind, UiKind::Select);
         assert!(req.allow_other && req.allow_chat);
         assert_eq!(req.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Red", "Blue", "Green"]);
+        assert!(req.options.iter().all(|o| !o.recommended), "no recommendation: nothing is ★");
         assert!(ui.answer("2", &answer(&["blue"], None)).is_err());
         assert_eq!(ui.answer("2", &answer(&["Blue"], None)).unwrap(), vec![UiReply { req_id: 2, value: Some("Blue".into()) }]);
         let chat = Answer { chat: true, ..answer(&[], None) };
@@ -385,12 +400,35 @@ mod tests {
     }
 
     #[test]
+    fn recommended_option_from_the_call_or_omps_mark() {
+        // omp's ask dialog: the call's `recommended` (an index among the question's options).
+        let mut ui = UiState::default();
+        ui.request(&ask(2, false, vec![], false), Some("call_1".into()), Some(1), 0);
+        let n = ui.needs(true).unwrap();
+        assert_eq!(n.options.iter().map(|o| o.recommended).collect::<Vec<_>>(), [false, true, false]);
+        assert!(ui.current().unwrap().options[1].recommended);
+        // An index past the options marks nothing.
+        let mut ui = UiState::default();
+        ui.request(&ask(3, true, vec![], false), None, Some(7), 0);
+        assert!(ui.needs(true).unwrap().options.iter().all(|o| !o.recommended));
+        // omp's plain select marks the label: the label reads without it, the id stays exact.
+        let mut ui = UiState::default();
+        let mut f = ask(4, false, vec![], false);
+        let UiRequestFrame::Select { options, .. } = &mut f else { unreachable!() };
+        options[2] = SelectItem::Label(format!("Green{RECOMMENDED_SUFFIX}"));
+        ui.request(&f, None, None, 0);
+        let green = &ui.needs(true).unwrap().options[2];
+        assert_eq!((green.id.as_str(), green.label.as_str(), green.recommended), ("Green (Recommended)", "Green", true));
+        assert_eq!(ui.answer("4", &answer(&["Green (Recommended)"], None)).unwrap()[0].value.as_deref(), Some("Green (Recommended)"));
+    }
+
+    #[test]
     fn other_drives_editor() {
         let mut ui = UiState::default();
-        ui.request(&ask(3, false, vec![], false), None, 0);
+        ui.request(&ask(3, false, vec![], false), None, None, 0);
         assert_eq!(ui.answer("3", &answer(&[], Some("teal"))).unwrap()[0].value.as_deref(), Some(OTHER_LABEL));
         ui.end(3);
-        ui.request(&UiRequestFrame::Editor { req_id: 4, title: "Custom answer: Colors?".into(), prefill: None }, None, 0);
+        ui.request(&UiRequestFrame::Editor { req_id: 4, title: "Custom answer: Colors?".into(), prefill: None }, None, None, 0);
         assert_eq!(ui.take_replies(), vec![UiReply { req_id: 4, value: Some("teal".into()) }]);
         assert!(ui.current().is_none(), "driven editor stays hidden");
     }
@@ -398,19 +436,19 @@ mod tests {
     #[test]
     fn multi_select_loop() {
         let mut ui = UiState::default();
-        ui.request(&ask(5, true, vec![], false), None, 0);
+        ui.request(&ask(5, true, vec![], false), None, None, 0);
         assert_eq!(ui.current().unwrap().kind, UiKind::MultiSelect);
         assert_eq!(ui.answer("5", &answer(&["Red", "Green"], None)).unwrap()[0].value.as_deref(), Some("Red"));
         ui.end(5);
-        ui.request(&ask(6, true, vec![0], true), None, 0);
+        ui.request(&ask(6, true, vec![0], true), None, None, 0);
         assert_eq!(ui.take_replies()[0].value.as_deref(), Some("Green"));
         ui.end(6);
-        ui.request(&ask(7, true, vec![0, 2], true), None, 0);
+        ui.request(&ask(7, true, vec![0, 2], true), None, None, 0);
         assert_eq!(ui.take_replies()[0].value.as_deref(), Some(NEXT_LABEL));
         assert!(ui.current().is_none());
         ui.end(7);
         // Loop finished: the next request is visible again.
-        ui.request(&ask(8, true, vec![], false), None, 0);
+        ui.request(&ask(8, true, vec![], false), None, None, 0);
         assert!(ui.current().is_some());
     }
 
@@ -427,7 +465,7 @@ mod tests {
             markable_count: None,
             help_text: None,
         };
-        ui.request(&f, Some("call_1".into()), 10);
+        ui.request(&f, Some("call_1".into()), None, 10);
         let n = ui.needs(true).unwrap();
         assert_eq!(n.kind, NeedsKind::Approval);
         assert_eq!(n.title, "Allow bash?");

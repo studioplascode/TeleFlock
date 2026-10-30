@@ -77,7 +77,7 @@ function ActionTip({ def }: { def: ActionDef }) {
 }
 
 /** Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer. */
-const NAV = ["board", "inbox", "activity", "usage", "automations"] as const;
+const NAV = ["board", "inbox", "activity", "usage", "wrapped", "automations", "wall", "ambient"] as const;
 
 function NavItem({ id, collapsed, active, badge, unread }: { id: (typeof NAV)[number]; collapsed: boolean; active: boolean; badge?: number; unread?: number }) {
   const def: ViewDef = VIEWS[id];

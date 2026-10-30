@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import { spring, TitleBar } from "@/design";
-import { useUi } from "@/core";
+import { useRoute, useUi } from "@/core";
+import { isBare } from "@/app/routes";
 import { NotificationBell } from "@/features/notify/NotificationCenter";
 import { Sidebar } from "./Sidebar";
 import { SplitFrame } from "./SplitView";
@@ -9,11 +10,12 @@ import { ViewStage } from "./ViewStage";
 
 /**
  * Desktop frame: custom title bar, collapsible sidebar, routed views with an optional split.
- * Focus mode (`useUi().focusMode`, owned by the session) slides the sidebar and split away; the
- * title bar stays for the window controls and drag region.
+ * Focus mode (`useUi().focusMode`: the session's and the wall's F) and bare screens (ambient mode,
+ * `isBare`) slide the sidebar and split away; the title bar stays for the window controls and drag region.
  */
 export function DesktopShell() {
-  const focus = useUi((s) => s.focusMode);
+  const bare = isBare(useRoute());
+  const focus = useUi((s) => s.focusMode) || bare;
   return (
     <div className="flex h-full flex-col">
       <TitleBar

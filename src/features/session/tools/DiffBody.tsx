@@ -5,6 +5,7 @@ import { cn } from "@/design";
 import { highlight, languageFor, TOKEN_CLASS } from "../lib/highlight";
 import { lruMemo } from "../lib/lru";
 import { Highlighted } from "../markdown/Markdown";
+import { useOpenOnFind } from "../find/reveal";
 
 interface DiffLine {
   kind: "add" | "del" | "ctx" | "hunk" | "meta";
@@ -103,7 +104,7 @@ const COLLAPSED_LINES = 36;
 
 export function DiffStatText({ added, removed, className }: { added: number; removed: number; className?: string }) {
   return (
-    <span className={cn("font-mono text-[11px] font-semibold whitespace-nowrap tabular", className)}>
+    <span data-find-skip className={cn("font-mono text-[11px] font-semibold whitespace-nowrap tabular", className)}>
       <span className="text-add">+{added}</span> <span className="text-del">−{removed}</span>
     </span>
   );
@@ -111,9 +112,18 @@ export function DiffStatText({ added, removed, className }: { added: number; rem
 
 const STATUS_ICON: Partial<Record<FileDiff["status"], typeof FileDiffIcon>> = { added: FilePlus2, untracked: FilePlus2, deleted: FileX2, renamed: FileSymlink };
 
-export function FileDiffView({ file, defaultOpen = true }: { file: FileDiff; defaultOpen?: boolean }) {
+/** One file of a diff. `findRow`: the transcript row it is in, so Find's current match there opens it. */
+export function FileDiffView({ file, defaultOpen = true, findRow }: { file: FileDiff; defaultOpen?: boolean; findRow?: string }) {
   const [open, setOpen] = useState(defaultOpen);
   const [all, setAll] = useState(false);
+  useOpenOnFind(
+    findRow ?? "",
+    () => {
+      setOpen(true);
+      setAll(true);
+    },
+    `${file.path}\n${file.patch}`,
+  );
   const lines = parsePatch(file.patch);
   const lang = languageFor(file.lang ?? file.path);
   const shown = all ? lines : lines.slice(0, COLLAPSED_LINES);
@@ -131,7 +141,7 @@ export function FileDiffView({ file, defaultOpen = true }: { file: FileDiff; def
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-2" title={file.path}>
           {file.path}
         </span>
-        {file.status !== "modified" && <span className="rounded-full bg-white/6 px-1.5 text-[9.5px] font-bold tracking-wider text-mute uppercase">{file.status}</span>}
+        {file.status !== "modified" && <span data-find-skip className="rounded-full bg-white/6 px-1.5 text-[9.5px] font-bold tracking-wider text-mute uppercase">{file.status}</span>}
         <DiffStatText added={file.added} removed={file.removed} />
         <ChevronDown className={cn("size-3.5 shrink-0 text-mute-2 transition-transform", !open && "-rotate-90")} />
       </button>
@@ -155,6 +165,7 @@ export function FileDiffView({ file, defaultOpen = true }: { file: FileDiff; def
                 ) : (
                   <tr key={i} className={cn(l.kind === "add" && "bg-add/[0.055]", l.kind === "del" && "bg-del/[0.06]")}>
                     <td
+                      data-find-skip
                       className={cn(
                         "w-0 px-1.5 text-right text-mute-2/70 select-none tabular",
                         l.kind === "add" && "shadow-[inset_2px_0_0_var(--color-add)]",
@@ -164,11 +175,11 @@ export function FileDiffView({ file, defaultOpen = true }: { file: FileDiff; def
                     >
                       {l.kind === "add" ? "" : l.oldNo}
                     </td>
-                    <td className="w-0 px-1.5 text-right text-mute-2/70 select-none tabular" style={{ minWidth: `${width + 1}ch` }}>
+                    <td data-find-skip className="w-0 px-1.5 text-right text-mute-2/70 select-none tabular" style={{ minWidth: `${width + 1}ch` }}>
                       {l.kind === "del" ? "" : l.newNo}
                     </td>
                     <td className="pr-3 whitespace-pre">
-                      <span className={cn("inline-block w-4 select-none", l.kind === "add" ? "text-add" : l.kind === "del" ? "text-del" : "text-mute-2")}>
+                      <span data-find-skip className={cn("inline-block w-4 select-none", l.kind === "add" ? "text-add" : l.kind === "del" ? "text-del" : "text-mute-2")}>
                         {l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}
                       </span>
                       <span className={cn(l.kind === "del" && "opacity-85")}>
@@ -183,6 +194,7 @@ export function FileDiffView({ file, defaultOpen = true }: { file: FileDiff; def
           {lines.length > COLLAPSED_LINES && (
             <button
               type="button"
+              data-find-skip
               onClick={() => setAll((a) => !a)}
               className={cn(
                 "focus-ring relative flex w-full items-center justify-center gap-1.5 py-1.5 font-sans text-2xs font-bold text-accent-hi hover:text-ink",

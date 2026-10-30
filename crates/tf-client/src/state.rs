@@ -70,8 +70,12 @@ pub(crate) mod fixtures {
                     issues: vec![],
                     applying: vec![],
                     failed: vec![],
+                    gh_signed_in: None,
+                    git_identity: None,
                 },
                 tools: None,
+                auto_answer: None,
+                herdr_health: None,
                 pruned: Vec::new(),
             },
             health: None,
@@ -112,6 +116,8 @@ pub(crate) mod fixtures {
             needs: None,
             parked: None,
             diff: None,
+            auto_resume: None,
+            auto_answer: None,
         }
     }
 }

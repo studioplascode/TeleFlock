@@ -18,6 +18,9 @@ describe("notice tray", () => {
   test("a kind outranks any host position", () => {
     expect(noticeRank("stale", 999)).toBeLessThan(noticeRank("accounts", 0));
     expect(noticeRank("setup", 999)).toBeLessThan(noticeRank("demo", 0));
+    // a host whose herdr is down comes right after an offline host, before everything about its setup
+    expect(noticeRank("stale", 999)).toBeLessThan(noticeRank("herdr", 0));
+    expect(noticeRank("herdr", 999)).toBeLessThan(noticeRank("accounts", 0));
   });
 
   test("one notice has nothing more; none has no line", () => {

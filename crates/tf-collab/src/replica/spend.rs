@@ -26,11 +26,12 @@
 //! decode rate (`usage.output` over `duration − ttft`) from the moment tf-hostd reads it:
 //! the area under the sparkline is exact, its timing one reply late.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use tf_proto::Millis;
 
+use super::subagents::{self, Outcome, TailTurn};
 use super::util::{f, s, u};
 
 /// Replies that finished longer ago than this are history, not throughput.
@@ -145,11 +146,16 @@ struct FileTail {
     header: Option<bool>,
     /// What the transcript's calls billed, added up in file order.
     spend: Spend,
+    /// How its subagents' runs ended, as its records say (a parent's transcript records the end
+    /// of the children it started); a later record of an agent replaces an earlier one.
+    outcomes: BTreeMap<String, Outcome>,
+    /// Where the transcript's last turn stands (cut off by a dying process or not).
+    turn: TailTurn,
 }
 
 impl FileTail {
     fn new(kind: ArtifactKind) -> FileTail {
-        FileTail { kind, offset: 0, carry: Vec::new(), header: None, spend: Spend::default() }
+        FileTail { kind, offset: 0, carry: Vec::new(), header: None, spend: Spend::default(), outcomes: BTreeMap::new(), turn: TailTurn::default() }
     }
 }
 
@@ -198,8 +204,38 @@ impl ArtifactLedger {
                 tail.spend.add(&call.spend);
                 calls.push(call);
             }
+            let (details, tool) = match s(&entry, "type") {
+                Some("custom_message") => (entry.get("details"), ""),
+                Some("message") => entry.get("message").map_or((None, ""), |m| (m.get("details"), s(m, "toolName").unwrap_or(""))),
+                _ => (None, ""),
+            };
+            for (id, outcome) in details.map(|d| subagents::recorded(d, tool)).unwrap_or_default() {
+                tail.outcomes.insert(id, outcome);
+            }
+            tail.turn.note(&entry);
         }
         calls
+    }
+
+    /// How the subagents' runs ended, as the transcripts record it: each transcript's records in
+    /// file order, the transcripts in path order, so the result does not depend on when bytes arrive.
+    pub(super) fn outcomes(&self) -> BTreeMap<String, Outcome> {
+        let mut all = BTreeMap::new();
+        for t in self.files.values() {
+            all.extend(t.outcomes.iter().map(|(id, o)| (id.clone(), *o)));
+        }
+        all
+    }
+
+    /// The subagents whose own transcript ends mid-turn: omp's process died under them.
+    pub(super) fn interrupted(&self) -> BTreeSet<String> {
+        self.files
+            .iter()
+            .filter(|(_, t)| t.kind == ArtifactKind::Subagent && t.turn.cut_off())
+            .filter_map(|(rel, _)| rel.rsplit('/').next()?.strip_suffix(".jsonl"))
+            .filter(|id| !id.starts_with("__advisor"))
+            .map(str::to_owned)
+            .collect()
     }
 
     pub fn advisor(&self) -> Spend {

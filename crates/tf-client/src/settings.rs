@@ -21,6 +21,10 @@ pub fn default_settings(device_name: String) -> Settings {
         templates: Vec::new(),
         auto_update: true,
         close_done: true,
+        share_presence: None,
+        idle_after_min: None,
+        device_kind: None,
+        capture_shortcut: None,
     }
 }
 
@@ -52,8 +56,15 @@ pub fn validate(mut s: Settings) -> Result<Settings, ApiError> {
         return Err(ApiError::new("invalid_params", "terminalFontSize must be between 6 and 40"));
     }
     s.device_name = s.device_name.trim().chars().take(64).collect();
+    // Absent = the platform default, empty = off: both kept as they are; the shell parses it.
+    if let Some(k) = s.capture_shortcut.as_mut() {
+        *k = k.trim().chars().take(64).collect();
+    }
     if s.default_model.as_deref().is_some_and(|m| m.trim().is_empty()) {
         s.default_model = None;
+    }
+    if s.idle_after_min.is_some_and(|m| !(1..=60).contains(&m)) {
+        return Err(ApiError::new("invalid_params", "idleAfterMin must be between 1 and 60"));
     }
     Ok(s)
 }
@@ -162,6 +173,16 @@ mod tests {
         assert_eq!(v.quiet_end, None);
         s.terminal_font_size = 2;
         assert_eq!(validate(s).unwrap_err().code, "invalid_params");
+    }
+
+    #[test]
+    fn capture_shortcut_keeps_off_and_trims() {
+        let mut s = default_settings("d".into());
+        assert_eq!(validate(s.clone()).unwrap().capture_shortcut, None);
+        s.capture_shortcut = Some("  Ctrl+Shift+K ".into());
+        assert_eq!(validate(s.clone()).unwrap().capture_shortcut.as_deref(), Some("Ctrl+Shift+K"));
+        s.capture_shortcut = Some(" ".into());
+        assert_eq!(validate(s).unwrap().capture_shortcut.as_deref(), Some(""));
     }
 
     #[test]

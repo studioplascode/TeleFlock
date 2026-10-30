@@ -1,8 +1,14 @@
 import { ArrowLeft, ClipboardList, Clock3, FolderGit2, FolderOpen, FolderSearch, GitBranchPlus, History, Power, Sparkles } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { core, toApiError, useHostState } from "@/core";
-import type { Automation, AutomationDraft, ThinkingLevel } from "@/core/gen";
+import type { Automation, AutomationDraft, AutoAnswer, ThinkingLevel } from "@/core/gen";
 import { Button, Field, Input, SegmentedControl, Select, type SelectOption, Switch, Textarea, toast, useIsMobile } from "@/design";
+import { AgentRolesSection, rolesSummaryChip, useHostTakesRoles } from "@/features/agentRoles/AgentRolesSection";
+import { launchMainText, launchOverrides } from "@/features/agentRoles/roles";
+import { specAutoAnswer } from "@/features/autoAnswer/format";
+import { useHostAutoAnswer } from "@/features/autoAnswer/hooks";
+import { AutoAnswerSection, autoAnswerChip } from "@/features/autoAnswer/PolicyEditor";
+import { AgentOptions } from "@/features/workspace/shared/AgentOptions";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
 import { basename, tildify } from "@/features/workspace/shared/paths";
 import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
@@ -22,13 +28,19 @@ interface Form {
   model: string;
   thinking: ThinkingLevel | typeof DEFAULT;
   plan: boolean;
+  /** The agent's own omp model roles and fallback chains. */
+  roleModels: Record<string, string>;
+  fallbackChains: Record<string, string[]>;
+  /** Each run's agent's own decide-for-me policy; undefined = the host default. */
+  autoAnswer?: AutoAnswer;
   catchUp: boolean;
   enabled: boolean;
   schedule: ScheduleDraft;
 }
 
-function initialForm(a: Automation | undefined): Form {
-  if (!a) return { name: "", cwd: "", worktree: true, prompt: "", model: DEFAULT, thinking: DEFAULT, plan: false, catchUp: true, enabled: true, schedule: DEFAULT_SCHEDULE };
+/** The form of a new automation, or of the saved one being edited. */
+export function initialForm(a: Automation | undefined): Form {
+  if (!a) return { name: "", cwd: "", worktree: true, prompt: "", model: DEFAULT, thinking: DEFAULT, plan: false, roleModels: {}, fallbackChains: {}, catchUp: true, enabled: true, schedule: DEFAULT_SCHEDULE };
   return {
     name: a.name,
     cwd: a.cwd,
@@ -37,16 +49,43 @@ function initialForm(a: Automation | undefined): Form {
     model: a.model ?? DEFAULT,
     thinking: a.thinking ?? DEFAULT,
     plan: a.plan,
+    roleModels: a.roleModels ?? {},
+    fallbackChains: a.fallbackChains ?? {},
+    autoAnswer: a.autoAnswer,
     catchUp: a.catchUp,
     enabled: a.enabled,
     schedule: cronToSchedule(a.schedule),
   };
 }
 
-type FieldKey = "name" | "cwd" | "prompt" | "schedule";
+/**
+ * What Save sends (`automation.save`): the form with the thinking level it shows. `decides` = the
+ * host has decide for me; only such a host gets the runs' own policy. `takesRoles` = its tf-hostd
+ * takes the runs' own roles.
+ */
+export function automationDraft(form: Form, id: string | undefined, decides: boolean, takesRoles = true): AutomationDraft {
+  return {
+    id,
+    name: form.name.trim(),
+    enabled: form.enabled,
+    schedule: scheduleToCron(form.schedule),
+    cwd: form.cwd.trim(),
+    worktree: form.worktree,
+    prompt: form.prompt.trim(),
+    model: form.model === DEFAULT ? undefined : form.model,
+    thinking: form.thinking === DEFAULT ? undefined : form.thinking,
+    plan: form.plan,
+    ...launchOverrides(form.roleModels, form.fallbackChains, takesRoles),
+    catchUp: form.catchUp,
+    ...specAutoAnswer(form.autoAnswer, decides),
+  };
+}
+
+type FieldKey = "name" | "cwd" | "prompt" | "schedule" | "roles";
 
 /** The field a save error is about (tf-hostd's `store::validate` messages), shown under it; else null. */
 function errorField(message: string): FieldKey | null {
+  if (/model role|fallback chain/i.test(message)) return "roles";
   if (/\bnames?\b/i.test(message)) return "name";
   if (/\bprompt\b/i.test(message)) return "prompt";
   if (/repository|folder|absolute path/i.test(message)) return "cwd";
@@ -94,6 +133,8 @@ export interface AutomationEditorProps {
 export function AutomationEditor({ hostId, automation, timezone, open, onOpenChange, onSaved }: AutomationEditorProps) {
   const mobile = useIsMobile();
   const home = useHostState(hostId)?.info.home;
+  const decides = !!useHostAutoAnswer(hostId);
+  const takesRoles = useHostTakesRoles(hostId);
   const [form, setForm] = useState<Form>(() => initialForm(automation));
   const [browsing, setBrowsing] = useState(false);
   const [pick, setPick] = useState<FolderPick | null>(null);
@@ -128,24 +169,12 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
     cwd: touched && !form.cwd.trim() ? (form.worktree ? "Pick a repository" : "Pick a folder") : null,
     prompt: touched && !form.prompt.trim() && !form.plan ? "Tell the agent what to do (or turn on plan mode)" : null,
   };
-  const fieldError = (k: FieldKey) => (error?.field === k ? error.message : null) ?? (k === "schedule" ? null : missing[k]);
+  const fieldError = (k: FieldKey) => (error?.field === k ? error.message : null) ?? (k === "schedule" || k === "roles" ? null : missing[k]);
 
   const save = async () => {
     setTouched(true);
     if (!form.name.trim() || !form.cwd.trim() || (!form.prompt.trim() && !form.plan) || scheduleProblem) return;
-    const draft: AutomationDraft = {
-      id: automation?.id,
-      name: form.name.trim(),
-      enabled: form.enabled,
-      schedule: cron,
-      cwd: form.cwd.trim(),
-      worktree: form.worktree,
-      prompt: form.prompt.trim(),
-      model: form.model === DEFAULT ? undefined : form.model,
-      thinking: thinking === DEFAULT ? undefined : thinking,
-      plan: form.plan,
-      catchUp: form.catchUp,
-    };
+    const draft = automationDraft({ ...form, thinking }, automation?.id, decides, takesRoles);
     setSaving(true);
     try {
       const saved = await core.host(hostId).call("automation.save", draft);
@@ -311,6 +340,19 @@ export function AutomationEditor({ hostId, automation, timezone, open, onOpenCha
               </Field>
               <div className="md:col-span-2">
                 <ToggleRow icon={<ClipboardList />} title="Plan mode" description="The agent proposes a plan and waits for your approval before editing" checked={form.plan} onChange={(plan) => patch({ plan })} />
+              </div>
+              <div className="flex min-w-0 flex-col gap-1.5 md:col-span-2">
+                <AgentOptions summary={[takesRoles ? rolesSummaryChip(form.roleModels, form.fallbackChains) : null, autoAnswerChip(decides ? form.autoAnswer : undefined)]} defaultOpen={!!fieldError("roles")}>
+                  <AgentRolesSection
+                    hostId={hostId}
+                    roles={form.roleModels}
+                    chains={form.fallbackChains}
+                    onChange={patch}
+                    mainModel={launchMainText(catalog?.models ?? [], form.model, thinking, defaultRole)}
+                  />
+                  <AutoAnswerSection hostId={hostId} value={form.autoAnswer} onChange={(autoAnswer) => patch({ autoAnswer })} />
+                </AgentOptions>
+                {fieldError("roles") && <p className="text-xs font-semibold text-error">{fieldError("roles")}</p>}
               </div>
             </div>
           </Section>

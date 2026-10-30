@@ -349,8 +349,32 @@ async fn pump(mut r: impl AsyncRead + Unpin, wr: Arc<ChannelWriteHalf<Msg>>, ext
     }
 }
 
+/// What a TeleFlock exec request runs: `exec sh -c '<bootstrap>' sh <base64 script>`
+/// (`tf_transport::quote::remote_command`) → the decoded script, which holds the command's words.
+fn decoded_script(command: &str) -> String {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0);
+    for v in command.rsplit(' ').next().unwrap_or_default().bytes().filter_map(value) {
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Run an exec request the way sshd does: `sh -c <command>` with stdio on the channel.
 async fn run_exec(channel: Channel<Msg>, command: String, home: PathBuf) {
+    let ignore_signal = decoded_script(&command).contains("tf-ignore-signal");
     let (mut rd, wr) = channel.split();
     let wr = Arc::new(wr);
     let mut child = match tokio::process::Command::new("sh")
@@ -400,7 +424,7 @@ async fn run_exec(channel: Channel<Msg>, command: String, home: PathBuf) {
                 }
                 Some(ChannelMsg::Eof) => stdin = None,
                 // Commands carrying `tf-ignore-signal` simulate a host without signal support.
-                Some(ChannelMsg::Signal { .. }) if !command.contains("tf-ignore-signal") => { let _ = child.start_kill(); }
+                Some(ChannelMsg::Signal { .. }) if !ignore_signal => { let _ = child.start_kill(); }
                 Some(ChannelMsg::Close) | None => { rd_open = false; let _ = child.start_kill(); }
                 Some(_) => {}
             },

@@ -29,20 +29,10 @@ use windows::{
     core::{HSTRING, IInspectable, Interface, Ref},
 };
 
-use crate::present::Presentation;
+use crate::present::{Presentation, Sink, ToastEvent};
 use crate::toastxml::{ARG_ACTION, ARG_REPLY, INPUT_ID, short_tag, toast_xml};
 
 const GROUP: &str = "agents";
-
-/// What the user did with a toast.
-pub enum ToastEvent {
-    /// A button (`action_id`) or the inline reply (`reply`).
-    Activated { host_id: String, notification_id: String, action_id: Option<String>, reply: Option<String> },
-    /// Closed by the user.
-    Dismissed { host_id: String, notification_id: String },
-}
-
-pub type Sink = Arc<dyn Fn(ToastEvent) + Send + Sync>;
 
 /// Live toasts by (short) tag: the notification id shown under that tag, and the COM object
 /// (kept alive for its event handlers).

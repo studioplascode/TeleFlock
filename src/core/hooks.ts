@@ -137,6 +137,11 @@ export function useHostStates(): Record<string, HostState> {
   return useCore(hostStates);
 }
 
+/** Non-reactive: every known HostState (event handlers outside React, e.g. Quick capture). */
+export function getHostStates(): Record<string, HostState> {
+  return hostStates(coreStore.getState());
+}
+
 function hostOrder(s: CoreState): string[] {
   const ids = s.profiles.map((p) => p.id);
   for (const id of Object.keys(s.hosts)) if (!ids.includes(id)) ids.push(id);

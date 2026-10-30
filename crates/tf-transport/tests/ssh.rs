@@ -27,9 +27,7 @@ fn home() -> TempDir {
     std::fs::create_dir_all(home.0.join(".local/bin")).unwrap();
     std::fs::write(home.0.join(".profile"), "PATH=\"$HOME/.local/bin:$PATH\"\nexport PATH\n").unwrap();
     let script = home.0.join(".local/bin/tf-hello");
-    std::fs::write(&script, "#!/bin/sh\necho \"hello from login PATH: $*\"\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    tf_hostd::test_exe::write_exe(&script, "#!/bin/sh\necho \"hello from login PATH: $*\"\n");
     home
 }
 

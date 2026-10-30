@@ -171,6 +171,8 @@ export interface AgentDef {
   files?: ChangedFile[];
   todos?: TodoPhase[];
   line?: string;
+  /** omp's idle recap (`OmpInfo.recap`), written four minutes into the idle stretch. */
+  recap?: string;
   link?: "live" | "notShared";
   /** Freshly started session: idle, zero turns, no history (the UI labels it "Ready"). */
   fresh?: boolean;
@@ -210,6 +212,13 @@ export const AGENTS: AgentDef[] = [
     todos: [phase("CI cache", [["Cache ~/.bun/install/cache", "completed"], ["Cache .turbo with remote fallback", "completed"], ["Wire cache keys to bun.lock", "completed"], ["Verify a warm run", "inProgress"]])],
   },
   {
+    // omp is waiting out a 429 (`OmpInfo.retry`): Running, not Needs you, and never "quiet".
+    id: "quota", kind: "omp", workspace: "w2", column: "running", model: "opus-5", thinking: "high", since: 540, age: 1500, ctxPct: 29, cost: 0.94,
+    title: "Backfill tenant usage totals from the billing export",
+    files: [f("scripts/backfill_usage.go", 92, 0, "added"), f("internal/billing/export.go", 41, 7)],
+    todos: [phase("Backfill", [["Parse the billing export", "completed"], ["Write per-tenant totals", "inProgress"], ["Verify totals against invoices", "pending"]])],
+  },
+  {
     id: "push", kind: "omp", workspace: "w5", column: "needs", model: "opus-5", thinking: "high", since: 360, age: 1080, ctxPct: 41, cost: 1.84,
     title: "Android push notifications when an agent gets blocked",
     files: [
@@ -246,6 +255,7 @@ export const AGENTS: AgentDef[] = [
     id: "hero", kind: "omp", workspace: "w9", column: "review", model: "sonnet-5", thinking: "medium", since: 3120, age: 4200, ctxPct: 58, cost: 3.55,
     title: "New hero with an animated flock illustration",
     line: "✓ Lighthouse 98 · preview screenshot",
+    recap: "New flock hero is done: Lighthouse 98 and a preview screenshot are in the PR. Next: your call on dropping HeroLegacy.tsx before merging.",
     files: [
       f("src/components/Hero.tsx", 420, 160),
       f("src/components/Flock.tsx", 380, 0, "added"),
@@ -261,6 +271,7 @@ export const AGENTS: AgentDef[] = [
   {
     id: "docs", kind: "omp", workspace: "w1", column: "done", model: "sonnet-5", thinking: "low", since: 7200, age: 9000, ctxPct: 33, cost: 0.94,
     title: "README and architecture overview", line: "merged #139 · 2h ago",
+    recap: "README and the architecture overview are merged in #139. Nothing left to do; the docs site rebuilds on its own.",
     files: [],
   },
   {

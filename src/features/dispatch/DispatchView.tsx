@@ -1,10 +1,8 @@
 import { AnimatePresence, motion } from "motion/react";
 import { Eraser, FolderGit2, FolderSearch, MoreHorizontal, Send, Server, Shuffle } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { type DraftImage, draftKey, navigate, useHostIds, useHostStates, useHosts, useSettings, useUi } from "@/core";
-import type { ConnStatus, HostState } from "@/core/gen";
-import { IMAGES_TOO_LARGE, imageChars, MAX_PROMPT_IMAGE_CHARS } from "@/core/clipboardImages";
-import { describeLoad, type HostLoad, hostLoad, pickHost, rankHosts } from "@/core/workload";
+import { type DraftImage, navigate, useHostIds, useHostStates, useHosts, useSettings, useUi } from "@/core";
+import { pickHost, rankHosts } from "@/core/workload";
 import {
   Button,
   DropdownMenu,
@@ -19,28 +17,28 @@ import {
   toast,
   useIsMobile,
 } from "@/design";
-import { hostGroups, versionBelow } from "@/features/hosts/kinds";
+import { PrefillBanner } from "@/features/capture/PrefillBanner";
+import { hostGroups } from "@/features/hosts/kinds";
 import { ACTIONS } from "@/features/shell/vocab";
 import { confirmAction } from "@/features/workspace/shared/overlays";
 import { basename, tildify } from "@/features/workspace/shared/paths";
 import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
-import { autoTarget, canonicalRemote, findGroupRepo, groupHosts, groupOf, groupRepos, localRepoIds, remoteKey } from "./auto";
+import { canonicalRemote, findGroupRepo, groupHosts, groupRepos, localRepoIds, remoteKey } from "./auto";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
 import { BasePicker, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
 import {
   type DispatchEntry,
-  type DispatchOptions,
-  dispatchTask,
   entryHost,
   entryRepo,
   isInFlight,
   onDispatchSettled,
-  pendingByHost,
   retryDispatch,
   threadKey,
   useDispatch,
 } from "./store";
+import { dispatchDraftKey, dispatchOptions, dispatchTarget, dispatchedRepos, loadsOf, sendTask } from "./send";
+import { useAutoQuotas } from "./quota";
 import { recentRepos, resolveAgent, threadBase } from "./thread";
 
 const EMPTY: DispatchEntry[] = [];
@@ -48,26 +46,6 @@ const NO_HOSTS: string[] = [];
 /** Entries rendered before "Show earlier". */
 const PAGE = 60;
 const COUNT_LABEL = { needs: "need you", running: "running", review: "to review" } as const;
-/** Image prompts need hostd 0.5 (older daemons ignore `agent.images`). */
-const IMAGES_MIN_HOSTD = "0.5";
-
-/** Current load of `ids` (Auto): health, agents, and the dispatches on their way to each. */
-function loadsOf(ids: readonly string[], states: Readonly<Record<string, HostState>>, status: Readonly<Record<string, ConnStatus>>, threads: Readonly<Record<string, DispatchEntry[]>>): HostLoad[] {
-  const running = new Set<string>();
-  for (const h of ids) for (const a of states[h]?.agents ?? []) if (a.column === "running") running.add(a.id);
-  const pending = pendingByHost(threads, running, Date.now());
-  return ids.map((h) => {
-    const agents = states[h]?.agents ?? [];
-    return hostLoad({
-      hostId: h,
-      online: status[h]?.phase === "online",
-      health: states[h]?.health,
-      running: agents.filter((a) => a.column === "running").length,
-      needs: agents.filter((a) => a.column === "needs").length,
-      pending: pending[h] ?? 0,
-    });
-  });
-}
 
 /**
  * `#/dispatch`: pick a repo, then every message creates a fresh worktree (`dispatch/<slug>`) with
@@ -88,9 +66,7 @@ export function DispatchView() {
 
   // Target: the last host or group used, else the first host.
   const groups = useMemo(() => hostGroups(profiles), [profiles]);
-  const lastGroup = groupOf(lastHost)?.toLowerCase();
-  const auto = lastGroup ? (groups.find((g) => g.toLowerCase() === lastGroup) ?? null) : null;
-  const target = auto ? autoTarget(auto) : lastHost && hostIds.includes(lastHost) ? lastHost : hostIds[0];
+  const { target, group: auto } = dispatchTarget(profiles, hostIds, lastHost);
   const members = useMemo(() => (auto ? groupHosts(profiles, auto).map((p) => p.id) : NO_HOSTS), [auto, profiles]);
   const repo = useDispatch((s) => (target ? (s.lastRepo[target] ?? null) : null));
   const key = target && repo ? threadKey(target, repo) : null;
@@ -109,17 +85,7 @@ export function DispatchView() {
   }, [states]);
 
   // Repos dispatched to, per host (single-host and Auto threads alike).
-  const dispatched = useMemo(() => {
-    const out: Record<string, Record<string, number>> = {};
-    for (const [k, list] of Object.entries(threads)) {
-      for (const e of list) {
-        const per = (out[entryHost(k, e)] ??= {});
-        const root = entryRepo(k, e);
-        per[root] = Math.max(per[root] ?? 0, e.createdAt);
-      }
-    }
-    return out;
-  }, [threads]);
+  const dispatched = useMemo(() => dispatchedRepos(threads), [threads]);
 
   // Single host: its recent repos. Auto: the union over the group, one row per repository.
   const hostId = auto ? null : (target ?? null);
@@ -141,13 +107,23 @@ export function DispatchView() {
     [auto, pooled, members, nameOf, recents, home],
   );
 
-  // Workload: each group's hosts for the picker; the repo's hosts for Auto sends (`preview` = the
-  // host the next send would go to; its branches and naming stand in for the group's).
-  const groupChoices = useMemo<GroupChoice[]>(
-    () => groups.map((g) => ({ group: g, loads: rankHosts(loadsOf(groupHosts(profiles, g).map((p) => p.id), states, status, threads)) })),
-    [groups, profiles, states, status, threads],
+  // Composer options: last used, else the Settings defaults.
+  const { templates, defaultModel, defaultThinking, defaultPlan } = useSettings();
+  const stored = useDispatch((s) => s.options);
+  const options = useMemo(
+    () => dispatchOptions(stored, { templates, defaultModel, defaultThinking, defaultPlan }),
+    [stored, templates, defaultModel, defaultThinking, defaultPlan],
   );
-  const preview = useMemo(() => (candidates.length ? pickHost(loadsOf(candidates, states, status, threads)) : null), [candidates, states, status, threads]);
+
+  // Workload: each group's hosts for the picker; the repo's hosts for Auto sends (`preview` = the
+  // host the next send would go to; its branches and naming stand in for the group's). The chosen
+  // model's quota window on each of the repo's hosts counts too (`quota.ts`).
+  const quotas = useAutoQuotas(candidates, options.model);
+  const groupChoices = useMemo<GroupChoice[]>(
+    () => groups.map((g) => ({ group: g, loads: rankHosts(loadsOf(groupHosts(profiles, g).map((p) => p.id), states, status, threads, quotas)) })),
+    [groups, profiles, states, status, threads, quotas],
+  );
+  const preview = useMemo(() => (candidates.length ? pickHost(loadsOf(candidates, states, status, threads, quotas)) : null), [candidates, states, status, threads, quotas]);
   const workHost = hostId ?? preview?.hostId ?? candidates[0];
   const workRepo = hostId ? repo : workHost ? autoRepo?.roots[workHost] : undefined;
 
@@ -160,18 +136,6 @@ export function DispatchView() {
   const legacyBase = useDispatch((s) => (key ? s.legacyBases[key] === true : false));
   const base = threadBase(branches.data, storedBase, legacyBase);
 
-  // Composer options: last used, else the Settings defaults.
-  const settings = useSettings();
-  const stored = useDispatch((s) => s.options);
-  const options = useMemo<DispatchOptions>(() => {
-    if (stored) return stored.templateId && !settings.templates.some((t) => t.id === stored.templateId) ? { ...stored, templateId: null } : stored;
-    return { templateId: null, model: settings.defaultModel ?? "default", thinking: settings.defaultThinking ?? "default", plan: settings.defaultPlan };
-  }, [stored, settings.templates, settings.defaultModel, settings.defaultThinking, settings.defaultPlan]);
-
-  // Names that are not free on the single host: existing branches and live agents (the store adds
-  // the host's dispatches; Auto sends look the picked host's branches up themselves).
-  const taken = useRef<string[]>([]);
-  taken.current = hostId ? [...(branches.data?.branches.map((b) => b.name) ?? []), ...(single?.agents.map((a) => a.name) ?? [])] : [];
   const statesRef = useRef(states);
   statesRef.current = states;
 
@@ -209,67 +173,13 @@ export function DispatchView() {
   const composer = useRef<DispatchComposerHandle>(null);
   const send = (prompt: string, images: readonly DraftImage[], videos: readonly string[]): boolean => {
     if (!target || !repo || !key) return false;
-    if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) {
-      toast({ title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.`, status: "error" });
-      return false;
-    }
-    // Image prompts need a hostd known to be 0.5+ (older ones drop `agent.images` silently).
-    const takesImages = (h: string) => {
-      const version = states[h]?.info.hostdVersion;
-      return profiles.find((p) => p.id === h)?.kind === "demo" || (!!version && !versionBelow(version, IMAGES_MIN_HOSTD));
-    };
-    let to = hostId;
-    let root = repo;
-    let placed: string | undefined;
-    if (auto) {
-      if (!autoRepo || !candidates.length) {
-        toast({ title: `No host of ${auto} has ${repoName}`, description: "Pick another repository, or a single host to browse for it.", status: "error" });
-        return false;
-      }
-      const able = images.length ? candidates.filter(takesImages) : candidates;
-      if (!able.length) {
-        toast({ title: `No host of ${auto} with ${repoName} can take images yet`, description: `Images need TeleFlock host daemon ${IMAGES_MIN_HOSTD} or newer on ${candidates.map(nameOf).join(", ")}: update one from Hosts, or send the task without images.`, status: "error" });
-        return false;
-      }
-      // Fresh numbers: the dispatches just sent count against their host right away.
-      const ranked = rankHosts(loadsOf(able, states, status, useDispatch.getState().threads));
-      const pick = pickHost(ranked);
-      if (!pick) {
-        toast({ title: `No host of ${auto} with ${repoName}${able.length < candidates.length ? " that takes images" : ""} is online`, description: able.map(nameOf).join(", "), status: "error" });
-        return false;
-      }
-      to = pick.hostId;
-      root = autoRepo.roots[pick.hostId] ?? repo;
-      const others = ranked.filter((l) => l !== pick && l.available).map((l) => `${nameOf(l.hostId)}: ${describeLoad(l)}`);
-      placed = `least busy of ${able.length}: ${describeLoad(pick)}${others.length ? ` (${others.join("; ")})` : ""}`;
-    }
-    if (!to) return false;
-    if (images.length && !takesImages(to)) {
-      const version = states[to]?.info.hostdVersion;
-      toast({
-        title: `${nameOf(to)} can't take images yet`,
-        description: `${version ? `Its TeleFlock host daemon (${version}) is older than ${IMAGES_MIN_HOSTD}` : `Its TeleFlock host daemon version isn't known yet (images need ${IMAGES_MIN_HOSTD} or newer)`}: update it from Hosts, or send the task without images.`,
-        status: "error",
-      });
-      return false;
-    }
-    // The view's branch list is the preview host's (Auto) or not in yet: resolve the base on `to`.
-    const resolveBase = auto || !branches.data ? { stored: storedBase, legacy: legacyBase } : undefined;
-    dispatchTask({
-      key,
-      hostId: to,
-      repo: root,
-      prompt,
-      images,
-      videos,
-      base: base.param,
-      baseLabel: base.shown,
-      placed,
-      options,
-      taken: auto ? (states[to]?.agents.map((a) => a.name) ?? []) : taken.current,
-      resolveBase,
-    });
-    return true;
+    // The view's branch list is the single host's (Auto's is the preview host's, the stand-in base).
+    const sent = sendTask(
+      { profiles, status, states, dispatch: useDispatch.getState(), quotas },
+      { target, repo, prompt, images, videos, options, branches: auto ? undefined : branches.data, baseHint: base },
+    );
+    if (!sent.ok) toast({ title: sent.title, description: sent.description, status: "error" });
+    return sent.ok;
   };
 
   const retry = useCallback(
@@ -426,7 +336,7 @@ export function DispatchView() {
       ref={composer}
       hostId={workHost}
       repo={workRepo}
-      draftKey={draftKey("dispatch.task", target ?? "", repo ?? "")}
+      draftKey={dispatchDraftKey(target ?? "", repo ?? "")}
       uploadHost={hostId}
       options={options}
       onOptionsChange={useDispatch.getState().setOptions}
@@ -489,6 +399,7 @@ export function DispatchView() {
         {thread}
         {/* toasts (a persistent needs-you one included) sit above the composer, never over it */}
         <div data-toast-anchor="" className="shrink-0 px-2 pt-1 pb-2">
+          <PrefillBanner target={target} repo={repo} mobile />
           {composerEl}
           {entries.length === 0 && alternatives}
         </div>
@@ -538,6 +449,7 @@ export function DispatchView() {
       <div className="flex min-h-0 w-full max-w-[920px] flex-1 flex-col overflow-hidden rounded-tile glass">{thread}</div>
       <div data-toast-anchor="" className="w-full max-w-[920px] shrink-0">
         {hint && <p className="mb-1.5 truncate px-2 text-[11px] font-semibold text-mute-2 [@media(max-height:700px)]:hidden">{hint}</p>}
+        <PrefillBanner target={target} repo={repo} mobile={false} />
         {composerEl}
         {alternatives}
       </div>

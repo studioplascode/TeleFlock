@@ -1,4 +1,4 @@
-import { ArchiveRestore, Bell, BellOff, CheckCheck, CheckSquare, ExternalLink, GitCompare, MessageSquare, MessageSquareReply, MoreHorizontal, Play, Square, SquareTerminal, Trash2 } from "lucide-react";
+import { ArchiveRestore, ArrowRightLeft, Bell, BellOff, CheckCheck, CheckSquare, ExternalLink, GitCompare, MessageSquare, MessageSquareReply, MoreHorizontal, Play, RotateCw, Square, SquareTerminal, Timer, TimerOff, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { navigate, useAgent, useCore } from "@/core";
 import type { Column } from "@/core/gen";
@@ -19,8 +19,14 @@ import {
 } from "@/design";
 import { ACTIONS, isFresh } from "@/features/shell/vocab";
 import { archiveWithUndo, canReview, deleteWorktree, markDoneAndRemove, openAgent, openAnswerHud, openTerminal, promptAgent, resumeParked, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
+import { cancelAutoResume, resumeNow } from "@/features/session/resume/actions";
+import { ticketActions } from "@/features/session/resume/words";
 import { useBoard } from "./boardStore";
+import { useCanMove } from "@/features/move/hosts";
+import { openMoveDialog } from "@/features/move/store";
 import { shippedWords, useShippedPr } from "./worktreePr";
+import { openDecideDialog } from "@/features/autoAnswer/DecideDialog";
+import { useCanDecide } from "@/features/autoAnswer/hooks";
 
 /* ───────────── the card menu (⋯ button and right-click) ───────────── */
 
@@ -46,14 +52,24 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
   });
   // merged or closed pull request (Review/Done cards ask gh lazily; see worktreePr)
   const shipped = useShippedPr(agentKey, lane === "review" || lane === "done");
+  const canMove = useCanMove(agentKey);
+  const canDecide = useCanDecide(agentKey);
   if (!agent) return [];
   const { openSession, terminal, answer, review, markDone, markDoneRemove, deleteWorktree: deleteWt, reopen, resume, stopTurn, mute, unmute, select } = ACTIONS;
   const items: Item[] = [];
   if (lane === "needs") items.push({ id: "answer", ...answer, icon: <MessageSquareReply />, run: () => openAnswerHud(agentKey) });
   if (isFresh(agent)) items.push({ id: "prompt", label: "Prompt…", description: "Open the session with the composer focused", icon: <MessageSquare />, run: () => promptAgent(agentKey) });
   items.push({ id: "open", ...openSession, shortcut: mobile ? undefined : openSession.shortcut, icon: <ExternalLink />, run: () => openAgent(agentKey) });
-  // parked (pane closed when it was marked done): Resume brings it back; Terminal resumes first
-  if (agent.parked) items.push({ id: "resume", ...resume, icon: <Play />, run: () => void resumeParked(agentKey) });
+  // parked (pane closed when it was marked done): Resume brings it back; Terminal resumes first. An ended card
+  // (its omp ended without anyone closing it) comes back through its ticket's Continue instead.
+  const ended = agent.parked?.ended;
+  if (agent.parked && !ended) items.push({ id: "resume", ...resume, icon: <Play />, run: () => void resumeParked(agentKey) });
+  // stopped on a provider limit, or ended: resume (continue) it now, or let it be
+  const ticket = agent.autoResume ? ticketActions(agent.autoResume, { ended }) : null;
+  if (ticket) {
+    items.push({ id: "resumeNow", label: ticket.resume, description: ticket.resumeHint, icon: <RotateCw />, run: () => void resumeNow(agentKey) });
+    items.push({ id: "noAutoResume", label: ticket.cancel, description: ticket.cancelHint, icon: ticket.dismiss ? <X /> : <TimerOff />, run: () => void cancelAutoResume(agentKey, ticket.dismiss) });
+  }
   items.push({
     id: "term",
     ...terminal,
@@ -62,6 +78,10 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
     icon: <SquareTerminal />,
     run: () => openTerminal(agentKey, mobile),
   });
+  // omp agents, with a second connected host to go to (the dialog's preflight has the last word)
+  if (canMove) items.push({ id: "move", ...ACTIONS.moveHost, icon: <ArrowRightLeft />, run: () => openMoveDialog(agentKey) });
+  // omp agents on a host with decide for me (its own policy; the ask card handles one question)
+  if (canDecide) items.push({ id: "decide", ...ACTIONS.decideForMe, icon: <Timer />, run: () => openDecideDialog(agentKey) });
   // a parked agent's workspace may be gone with its pane
   if ((lane === "review" || lane === "done") && canReview(agent) && !agent.parked)
     items.push({ id: "review", ...review, icon: <GitCompare />, run: () => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId }) });

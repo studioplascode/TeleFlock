@@ -2,12 +2,18 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
-import { getTranscript, loadOlder, useAgent, useSession, useSessionItem } from "@/core";
+import { getTranscript, loadOlder, useAgent, useCore, useSession, useSessionItem } from "@/core";
 import type { TranscriptItem } from "@/core/gen";
 import { cn, Elapsed, Shimmer, Skeleton, spring, StatusOrb, useIdleReady } from "@/design";
+import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { useTranscriptFind } from "../find/hooks";
+import { type TranscriptFind, useFindPainter } from "../find/painter";
+import { FindScopeCtx } from "../find/reveal";
 import { useSessionUi } from "../state";
-import { estimateRowHeight } from "./estimate";
+import { estimateRowHeight, initialScrollOffset } from "./estimate";
 import { EmptyTranscript } from "./FreshStart";
+import { LimitRunRow } from "./LimitRunRow";
+import { foldLimitRuns, limitSignature } from "./limitRuns";
 import { Row } from "./rows";
 
 const STICK_PX = 56;
@@ -49,26 +55,45 @@ export interface TranscriptProps extends TranscriptLayout {
 export function Transcript({ agentKey, ...layout }: TranscriptProps) {
   const session = useSession(agentKey);
   const focus = useSessionUi((s) => s.focus[agentKey]);
-  const ids = session.itemIds;
+  const find = useTranscriptFind(agentKey);
+  const rawIds = session.itemIds;
+  // Which rows are provider-limit errors (or system turns): a row can turn into one in place, keeping its id.
+  const limits = useCore((s) => {
+    const e = s.sessions[agentKey];
+    return e ? limitSignature(e.itemIds, e.items) : "";
+  });
   // Items in id order: row height estimates before rows are measured (keeps the scrollbar steady).
-  const items = useMemo(() => {
+  const rawItems = useMemo(() => {
     const byId = new Map(getTranscript(agentKey).items.map((it) => [it.id, it]));
-    return ids.map((id) => byId.get(id));
-  }, [agentKey, ids]);
+    return rawIds.map((id) => byId.get(id));
+    // `limits` re-reads the items when a row turns into an error without a new id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentKey, rawIds, limits]);
+  // Consecutive provider-limit errors read as one row; while Find is open every row stays, so its matches can be reached.
+  const finding = find?.needle != null;
+  const folded = useMemo(() => (finding ? null : foldLimitRuns(rawIds, rawItems)), [finding, rawIds, rawItems]);
+  const ids = folded?.ids ?? rawIds;
+  const items = folded?.items ?? rawItems;
   return (
-    <TranscriptLog
-      {...layout}
-      ids={ids}
-      items={items}
-      loading={session.status === "loading"}
-      hasMore={session.hasMore}
-      onLoadOlder={() => loadOlder(agentKey)}
-      renderRow={(id, prevId, nextId, rail) => <Row agentKey={agentKey} itemId={id} prevId={prevId} nextId={nextId} rail={rail} />}
-      empty={<EmptyTranscript agentKey={agentKey} />}
-      footer={<WorkingFooter agentKey={agentKey} lastId={ids[ids.length - 1]} />}
-      jumpLabel={(unseen) => <JumpLabel agentKey={agentKey} unseen={unseen} />}
-      focus={focus}
-    />
+    <FindScopeCtx.Provider value={agentKey}>
+      <TranscriptLog
+        {...layout}
+        ids={ids}
+        items={items}
+        loading={session.status === "loading"}
+        hasMore={session.hasMore}
+        onLoadOlder={() => loadOlder(agentKey)}
+        renderRow={(id, prevId, nextId, rail) => {
+          const run = folded?.runs.get(id);
+          return run ? <LimitRunRow agentKey={agentKey} run={run} /> : <Row agentKey={agentKey} itemId={id} prevId={prevId} nextId={nextId} rail={rail} />;
+        }}
+        empty={<EmptyTranscript agentKey={agentKey} />}
+        footer={<WorkingFooter agentKey={agentKey} lastId={ids[ids.length - 1]} />}
+        jumpLabel={(unseen) => <JumpLabel agentKey={agentKey} unseen={unseen} />}
+        focus={focus}
+        find={find}
+      />
+    </FindScopeCtx.Provider>
   );
 }
 
@@ -95,6 +120,8 @@ export interface TranscriptLogProps extends TranscriptLayout {
   focus?: { itemId: string; nonce: number };
   /** A new non-zero value sticks to the bottom and scrolls there (e.g. after the user sent a message). */
   followSignal?: number;
+  /** Find in transcript: matches to highlight in the rendered rows, and the current one to bring into view. */
+  find?: TranscriptFind;
 }
 
 /**
@@ -115,6 +142,7 @@ export function TranscriptLog({
   ariaLabel = "Transcript",
   focus,
   followSignal = 0,
+  find,
   className,
   padX = 20,
   dense = false,
@@ -131,6 +159,7 @@ export function TranscriptLog({
   const anchor = useRef<{ id: string; delta: number } | null>(null);
   // 0, not ids.length: a transcript mounting with rows already loaded lands at the bottom instantly.
   const lastCount = useRef(0);
+  const lastId = useRef<string | undefined>(undefined);
   const glideRaf = useRef(0);
   const settled = useIdleReady(400);
   const settledRef = useRef(settled);
@@ -139,6 +168,7 @@ export function TranscriptLog({
   // Stable while the rows are: a new getItemKey makes the virtualizer re-measure every row (O(n))
   // on each render, which scrolling a long transcript does dozens of times a second.
   const estimate = useCallback((i: number) => estimateRowHeight(items[i], dense), [items, dense]);
+  const initialHeight = typeof window === "undefined" ? 800 : window.innerHeight;
   const itemKey = useCallback((i: number) => ids[i] ?? i, [ids]);
   const virtualizer = useVirtualizer({
     count: ids.length,
@@ -151,8 +181,8 @@ export function TranscriptLog({
     paddingStart: 16,
     // First render already sits at the bottom (where the layout effect scrolls to), so opening a
     // session builds only the last screenful of rows instead of the top ones and then the bottom.
-    initialOffset: () => ids.reduce((sum, _, i) => sum + estimate(i) + (dense ? ROW_GAP_DENSE : ROW_GAP), 0),
-    initialRect: { width: 0, height: typeof window === "undefined" ? 800 : window.innerHeight },
+    initialOffset: () => initialScrollOffset(ids.reduce((sum, _, i) => sum + estimate(i) + (dense ? ROW_GAP_DENSE : ROW_GAP), 0), initialHeight),
+    initialRect: { width: 0, height: initialHeight },
     // Scrolling re-renders with React's normal batching instead of flushSync inside every scroll
     // event: rows entering view mount once per frame, not once per event (overscan covers the edge).
     useFlushSync: false,
@@ -163,6 +193,17 @@ export function TranscriptLog({
     setStuck(v);
     if (v) setUnseen(0);
   };
+
+  useFindPainter({
+    find,
+    scrollRef,
+    contentRef,
+    ids,
+    scrollToIndex: (index) => virtualizer.scrollToIndex(index, { align: "center" }),
+    unstick: () => {
+      if (stick.current) setStick(false);
+    },
+  });
 
   const toBottom = (smooth = false) => {
     const el = scrollRef.current;
@@ -214,6 +255,8 @@ export function TranscriptLog({
   useLayoutEffect(() => {
     const prev = lastCount.current;
     lastCount.current = ids.length;
+    const prevLast = lastId.current;
+    lastId.current = ids[ids.length - 1];
     const a = anchor.current;
     if (a) {
       // Prepend: keep the previously first-visible row exactly where it was.
@@ -229,7 +272,12 @@ export function TranscriptLog({
       // First paint of a session lands at the bottom instantly; later rows glide in.
       if (prev === 0) toBottom();
       else glide();
-    } else if (ids.length > prev) setUnseen((n) => n + (ids.length - prev));
+    } else if (ids.length > prev) {
+      // Only rows after the previous last one are new: older ones paged in (Find) are not.
+      const at = prevLast === undefined ? -1 : ids.lastIndexOf(prevLast);
+      const added = at < 0 ? ids.length - prev : ids.length - 1 - at;
+      if (added > 0) setUnseen((n) => n + added);
+    }
   }, [ids]);
 
   // Jump to a row (Chat tab): unstick, centre it, then flash it once it has rendered. Only
@@ -336,6 +384,7 @@ export function TranscriptLog({
                     key={v.key}
                     data-index={v.index}
                     data-row-id={id}
+                    data-find-active={find?.active?.id === id || undefined}
                     ref={virtualizer.measureElement}
                     className="absolute top-0 left-0 w-full [contain:layout_style]"
                     style={{ transform: `translateY(${v.start}px)` }}
@@ -386,7 +435,9 @@ function JumpLabel({ agentKey, unseen }: { agentKey: string; unseen: number }) {
 function WorkingFooter({ agentKey, lastId }: { agentKey: string; lastId: string | undefined }) {
   const agent = useAgent(agentKey);
   const last = useSessionItem(agentKey, lastId ?? "");
-  const running = agent?.column === "running";
+  // herdr is down: nothing runs, whatever the cached column says
+  const herdrDown = useHerdrDown(agent?.hostId ?? "") !== undefined;
+  const running = agent?.column === "running" && !herdrDown;
   const lastLive =
     last != null &&
     ((last.kind === "assistant" && last.streaming) || (last.kind === "thinking" && last.streaming) || (last.kind === "tool" && (last.status === "running" || last.status === "pending")));

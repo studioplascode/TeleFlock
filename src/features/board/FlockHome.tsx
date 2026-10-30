@@ -3,8 +3,13 @@ import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useEffect } from "react";
 import { navigate, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useHostStale, useHostStates, useUi } from "@/core";
 import type { Column } from "@/core/gen";
+import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { herdrAgentWord, herdrCardTime, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
+import { CountdownChip } from "@/features/autoAnswer/CountdownChip";
 import { askText } from "@/features/inbox/askText";
+import { resumeNow } from "@/features/session/resume/actions";
+import { ticketActions } from "@/features/session/resume/words";
 import { ACTIONS, isFresh, LANE_TITLE, NEEDS_WORD, STATE_WORD, stateTime } from "@/features/shell/vocab";
 import {
   AgentGlyph,
@@ -34,8 +39,13 @@ import { useTodayUsage } from "./BentoRow";
 import { useBoard } from "./boardStore";
 import { FlockFab, HostChip, RepoChip } from "./FlockActions";
 import { LANE_BY_COLUMN, QUIET_AFTER_MS } from "./lanes";
+import { AutoResumeBadge } from "./AutoResumeBadge";
+import { JobsMeter, WaitingForJobs } from "./JobsMeter";
+import { RetryLine } from "./RetryLine";
+import { retryOf } from "./retry";
 import { AgentHeartbeat, AgentOrb, ConnectLinkButton, ContextMeter, LiveLine, QuietChip, SubagentsDone, TpsSparkline, useQuiet } from "./LiveBits";
 import { ParkedChip } from "./ParkedChip";
+import { RecapLine } from "./RecapLine";
 import { PhoneNotices } from "./Notices";
 import { QuickAnswer } from "./QuickAnswer";
 import { RepoTag } from "./RepoTag";
@@ -110,7 +120,7 @@ function Widgets() {
       const a = s.agents[k];
       const at = a?.live.lastEventAt;
       const online = a !== undefined && (s.hosts[a.hostId] === undefined || s.status[a.hostId]?.phase === "online");
-      return online && at !== undefined && now - at > QUIET_AFTER_MS ? n + 1 : n;
+      return online && at !== undefined && !retryOf(a) && now - at > QUIET_AFTER_MS ? n + 1 : n;
     }, 0),
   );
   const tile = "flex h-24 flex-col justify-between rounded-[20px] p-3";
@@ -191,6 +201,7 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
             {agent.name} · {NEEDS_WORD[n.kind]}
           </span>
           {muted && <BellOff className="size-3.5 shrink-0 text-mute-2" aria-label="Notifications muted" />}
+          <AutoResumeBadge agentKey={agentKey} />
           <span className="ml-auto shrink-0 text-xs font-bold whitespace-nowrap text-[#ffb08a]">
             waiting <Elapsed since={n.since} />
           </span>
@@ -202,6 +213,7 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
         <p className="mt-1.5 font-display text-lg leading-snug font-bold text-ink">{headline}</p>
         {body && <p className="mt-1 line-clamp-3 text-sm whitespace-pre-line text-mute">{body}</p>}
         {n.command && <pre className="mt-2 overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs text-ink-2">{n.command}</pre>}
+        <CountdownChip agentKey={agentKey} className="mt-2.5" />
         <QuickAnswer agentKey={agentKey} appearance="big" mobile className="mt-3" />
       </div>
     </SwipeRow>
@@ -220,11 +232,12 @@ function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }
   const subs = omp?.subagents?.live ?? 0;
   const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
   const model = omp?.model ? `${omp.model.label ?? omp.model.id}${omp.thinking && omp.thinking !== "off" ? ` · ${omp.thinking}` : ""}` : null;
-  if (!omp?.context && subPct == null && !(diff && agent.diff) && omp?.link !== "notShared" && !model) return null;
+  if (!omp?.context && subPct == null && !omp?.jobs?.running && !(diff && agent.diff) && omp?.link !== "notShared" && !model) return null;
   return (
     <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 @container">
       {omp?.context && <ContextMeter pct={omp.context.pct} barClassName="@max-[300px]:hidden" />}
       {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
+      {omp?.jobs && <JobsMeter jobs={omp.jobs} />}
       {diff && agent.diff && <DiffStat {...agent.diff} />}
       <span className="contents" {...stopRow}>
         <ConnectLinkButton agentKey={agentKey} />
@@ -236,16 +249,23 @@ function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }
 
 function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const agent = useAgent(agentKey);
-  const stale = useHostStale(agent?.hostId ?? "");
+  // herdr is down on its host: nothing runs, whatever the cached lane says (Review and Done rows were idle already)
+  const herdrHealth = useHerdrDown(agent?.hostId ?? "");
+  const herdr = column === "running" || column === "needs" ? herdrHealth : undefined;
+  const stale = useHostStale(agent?.hostId ?? "") || herdr !== undefined;
   const muted = useMuted(agentKey);
-  const quiet = useQuiet(column === "running" && !stale, agent?.live.lastEventAt);
+  const retry = retryOf(agent);
+  const quiet = useQuiet(column === "running" && !stale && !retry && !agent?.omp?.jobs?.waiting, agent?.live.lastEventAt);
   const now = useNow(30_000);
   if (!agent) return null;
   // the lane the row is drawn in leads the host state during an optimistic move
   const fresh = column === "review" && isFresh(agent);
   const state = fresh ? "fresh" : column;
-  // a fresh agent that never ran sits calmly (idle), not in review cyan
-  const status = fresh ? "idle" : LANE_BY_COLUMN[column].status;
+  // an ended card (its omp ended without anyone closing it): its time counts from then; its ticket's Continue leads
+  const ended = column === "review" ? agent.parked?.ended : undefined;
+  const ticket = ended && agent.autoResume ? ticketActions(agent.autoResume, { ended }) : null;
+  // a fresh agent that never ran sits calmly (idle), not in review cyan; so does an ended one until it is back
+  const status = herdr ? herdrOrbStatus(herdr) : fresh || ended ? "idle" : LANE_BY_COLUMN[column].status;
   const todos = agent.omp?.todos;
   return (
     <SwipeRow id={agentKey} actions={swipeActions(agentKey, column)} onOpen={() => openAgent(agentKey)}>
@@ -254,26 +274,29 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
           {todos && todos.total > 0 ? (
             <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={36} stroke={3.5} />
           ) : (
-            <AgentGlyph name={agent.name} size={36} status={column === "running" ? status : undefined} />
+            <AgentGlyph name={agent.name} size={36} status={column === "running" && !herdr ? status : undefined} />
           )}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex min-h-8 items-center gap-1.5">
-            {column === "running" && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
+            {column === "running" && !herdr && <AgentOrb agentKey={agentKey} status={status} tool={agent.live.tool} quiet={quiet} size={7} />}
             <span data-morph="name" data-morph-key={agentKey} className="min-w-[4ch] truncate text-sm font-extrabold text-ink">
               {agent.name}
             </span>
             {muted && <BellOff className="size-3 shrink-0 text-mute-2" aria-label="Notifications muted" />}
             {agent.parked && <ParkedChip agentKey={agentKey} />}
+            <AutoResumeBadge agentKey={agentKey} />
             {/* takes only the room the name, time and ⋯ leave: the branch gives way first, then the repo name (the chip keeps its icon) */}
             <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="min-w-6 flex-[1_1_0]" />
             <span className="ml-auto shrink-0 font-mono text-2xs text-mute tabular">
-              {column === "running" ? (
+              {herdr ? (
+                herdrCardTime(herdr)
+              ) : column === "running" ? (
                 <>
                   turn <Elapsed since={agent.omp?.turnStartedAt ?? agent.stateSince} />
                 </>
               ) : (
-                stateTime(state, agent.stateSince, now)
+                ended ? stateTime("ended", ended.at, now) : stateTime(state, agent.stateSince, now)
               )}
             </span>
             <span className="shrink-0">
@@ -282,20 +305,27 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
           </div>
           <p className={cn("pr-1.5 font-semibold text-ink-2", column === "done" ? "truncate text-xs" : "line-clamp-2 text-sm leading-snug")}>{agent.title || agent.name}</p>
           <div className="pr-1.5">
-            {column === "running" && (
+            {herdr && <p className="mt-1 text-xs font-semibold text-mute">{herdrAgentWord(herdr)}</p>}
+            {column === "running" && !herdr && (
               <>
-                <LiveLine live={agent.live} running={!stale} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="mt-1" />
+                {retry ? (
+                  <RetryLine wait={retry} className="mt-1" />
+                ) : agent.omp?.jobs?.waiting ? (
+                  <WaitingForJobs jobs={agent.omp.jobs} className="mt-1" />
+                ) : (
+                  <LiveLine live={agent.live} running={!stale} turnStartedAt={agent.omp?.turnStartedAt ?? agent.stateSince} className="mt-1" />
+                )}
                 <div className="mt-1 flex items-center gap-2">
-                  {/* one signal per fact: while quiet, the quiet chip stands in for the heartbeat's age (and the flat tok/s) */}
+                  {/* one signal per fact: while quiet, the quiet chip stands in for the heartbeat's age (and the flat tok/s); a retry wait is said in its line */}
                   <AgentHeartbeat
                     agentKey={agentKey}
-                    status={quiet ? "idle" : status}
+                    status={quiet || retry ? "idle" : status}
                     lastEventAt={agent.live.lastEventAt}
-                    showAge={!quiet}
+                    showAge={!quiet && !retry}
                     height={16}
                     className="min-w-0 flex-1"
                   />
-                  {quiet ? <QuietChip since={agent.live.lastEventAt ?? 0} className="shrink-0" /> : <TpsSparkline tps={agent.live.tps} status={status} />}
+                  {quiet ? <QuietChip since={agent.live.lastEventAt ?? 0} className="shrink-0" /> : !retry && <TpsSparkline tps={agent.live.tps} status={status} />}
                 </div>
                 <RowMeta agentKey={agentKey} />
               </>
@@ -318,6 +348,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
             )}
             {column === "review" && !fresh && (
               <>
+                <RecapLine agent={agent} lines={2} className="mt-1" />
                 <RowMeta agentKey={agentKey} />
                 <div className="mt-1.5 flex items-center justify-end gap-1.5" {...stopRow}>
                   <button
@@ -328,7 +359,17 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
                   >
                     {ACTIONS.markDone.label}
                   </button>
-                  {canReview(agent) && (
+                  {ticket && (
+                    <button
+                      type="button"
+                      className="min-h-9 rounded-sm bg-accent px-3 py-1 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring"
+                      title={ticket.resumeHint}
+                      onClick={() => void resumeNow(agentKey)}
+                    >
+                      {ticket.resume}
+                    </button>
+                  )}
+                  {canReview(agent) && !agent.parked && (
                     <button
                       type="button"
                       data-status="review"
@@ -342,6 +383,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
                 </div>
               </>
             )}
+            {column === "done" && <RecapLine agent={agent} className="mt-0.5" />}
             {column === "done" && agent.diff && (
               <div className="mt-0.5">
                 <DiffStat {...agent.diff} />

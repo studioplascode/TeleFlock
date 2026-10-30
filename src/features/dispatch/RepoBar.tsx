@@ -15,7 +15,7 @@ import {
   cn,
   useIsMobile,
 } from "@/design";
-import { PHASE_STATUS } from "@/features/shell/status";
+import { PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
 import { FolderBrowser, type FolderPick } from "@/features/worktree/FolderBrowser";
 import { autoTarget, groupOf } from "./auto";
@@ -70,7 +70,7 @@ export function HostPicker({
                 <span key={l.hostId} className="flex min-w-0 items-center gap-1.5 text-2xs font-medium text-mute-2">
                   <StatusOrb status={PHASE_STATUS[status[l.hostId]?.phase ?? "idle"]} size={6} label={null} />
                   <span className="shrink-0 font-semibold text-mute">{nameOf(l.hostId)}</span>
-                  <span className="truncate">{l.available ? describeLoad(l) : (status[l.hostId]?.phase ?? "offline")}</span>
+                  <span className="truncate">{l.available ? describeLoad(l) : PHASE_LABEL[status[l.hostId]?.phase ?? "idle"]}</span>
                 </span>
               ))}
             </span>
@@ -82,7 +82,7 @@ export function HostPicker({
         {hostIds.map((id) => (
           <DropdownMenuItem key={id} icon={<Server />} onSelect={() => onChange(id)}>
             <span className="flex-1 truncate">{nameOf(id)}</span>
-            <span className="text-2xs text-mute">{status[id]?.phase ?? "idle"}</span>
+            <span className="text-2xs text-mute">{PHASE_LABEL[status[id]?.phase ?? "idle"]}</span>
             {id === target && <Check className="size-4 text-accent-hi" />}
           </DropdownMenuItem>
         ))}

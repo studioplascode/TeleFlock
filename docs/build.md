@@ -393,6 +393,24 @@ published release reaches running apps within roughly an hour (sooner when the u
 app up). Failures back off (30 min doubling to 12 h). That is at most ~3 anonymous API requests
 per hour and device, far below GitHub's 60 per hour and IP.
 
+Installed apps v0.2.0 to v0.6.1 never ran these automatic checks: they read `settings.autoUpdate`
+with `null` params, which `settings.get` rejects, and took that as "off". They update only when
+the user presses **Check for updates** in Settings → Updates (which installs right away while
+Automatic updates is on); releases after v0.6.1 check by themselves.
+
+What an automatic check does with a found release on Windows and Linux (the first unattended
+update of an installed app must not surprise anyone): it downloads and verifies the package in
+the background, then waits as **Update ready · Restart now** while the user is in front: the main
+window shown, not minimized and focused, or Quick capture in use (focused, text typed in it, or
+holding pasted images or a send in flight, which live in memory only). Once the user has been
+away for 20 s *without a break* (and Automatic updates is still on) it installs and restarts:
+returning to either window or touching capture during those 20 s starts the count over, so a quick
+alt-tab, or away, back and away again, never installs early. The AppImage also
+installs when the app quits. The `.deb` runs `pkexec dpkg -i` (a polkit password prompt), so it
+never installs unattended: it stays **Update ready · Install** until the user clicks. A manual
+**Check for updates** or a click on the button installs at once. Android (system installer
+prompt) and macOS (manual download) are unchanged.
+
 Checks before an update installs:
 - Windows / Linux: `latest.json` must announce exactly the release tag's version, the
   package must carry a valid minisign signature from the key in `plugins.updater.pubkey`, and
@@ -512,8 +530,11 @@ Smoke runs (Xvfb + private D-Bus session, `[observed]`):
   checks GitHub (`update: 0.1.0 is up to date`).
 
 Linux behaviour: same undecorated window and custom title bar as Windows (opaque, no Mica); tray
-via libayatana-appindicator (static icon, no comet animation); no OS notifications (inbox + tray
-badge; Settings explains it and hides the test button); deep links via the desktop entry (`.deb`,
+via libayatana-appindicator (static icon, no comet animation); OS notifications over D-Bus
+(`org.freedesktop.Notifications`: the runtime needs only a desktop notification service on the
+session bus, which every desktop provides, and no new package dependency: zbus is already in the
+binary, so `.deb` / Arch / AppImage dependencies are unchanged); without a server (bare window
+manager) notifications stay in the inbox + tray badge and Settings hides the test button; deep links via the desktop entry (`.deb`,
 Arch) or self-registration (AppImage). Not exercised: a real desktop session (GNOME/KDE tray
 rendering, `pkexec` update prompt, AppImage self-replacement), aarch64 Linux (not built).
 
@@ -524,7 +545,14 @@ No Mac here and no Apple Developer Program: `.github/workflows/macos.yml` builds
 not notarized, packed as `TeleFlock_<ver>_universal.dmg` and attached to the release of the
 pushed `v*` tag. It embeds macOS `tf-hostd` builds (Local mode on the Mac). `tauri.macos.conf.json`
 keeps the native traffic lights (`titleBarStyle: Overlay`); the Dock icon reopens the hidden
-window; links open with `open`; no OS notifications (as on Linux).
+window; links open with `open`.
+
+Notifications use `UNUserNotificationCenter` and need the bundled, signed `.app` (ad-hoc is
+enough): the app asks for the notification permission at first launch (System Settings →
+Notifications → TeleFlock changes it later; a denial found at startup keeps notifications in the
+app for that run). A `tauri dev` / bare `target/` binary has no bundle identifier, gets none and
+keeps notifications in the inbox and tray badge. Not exercised on a Mac: the notifier itself
+(`mac_notify.rs` is type-checked for `aarch64-apple-darwin` only).
 
 First launch (Gatekeeper rejects un-notarized apps downloaded from the internet): drag
 TeleFlock to Applications, open it once, then System Settings → Privacy & Security → **Open

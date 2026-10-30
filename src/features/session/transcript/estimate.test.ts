@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolItem, TranscriptItem } from "@/core/gen";
-import { estimateRowHeight, wrappedLines } from "./estimate";
+import { estimateRowHeight, initialScrollOffset, wrappedLines } from "./estimate";
 
 const tool = (over: Partial<ToolItem>): TranscriptItem => ({ kind: "tool", id: "t", at: 0, callId: "c", tool: "read", title: "x", args: {}, status: "ok", truncated: false, ...over });
 const user = (text: string): TranscriptItem => ({ kind: "user", id: "u", at: 0, text, images: [], steering: false, synthetic: false });
@@ -57,5 +57,12 @@ describe("estimateRowHeight", () => {
     const first = said("one line");
     const grown = { ...first, text: lines(30) } as TranscriptItem;
     expect(estimateRowHeight(grown, false)).toBeGreaterThan(estimateRowHeight(first, false));
+  });
+});
+
+describe("initialScrollOffset", () => {
+  test("a transcript shorter than the viewport starts at the top; a longer one at its bottom", () => {
+    expect(initialScrollOffset(520, 892)).toBe(0);
+    expect(initialScrollOffset(5000, 892)).toBe(4108);
   });
 });

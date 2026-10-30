@@ -38,7 +38,7 @@ export function Updates({ index }: { index: number }) {
   if (core.backend !== "tauri" || !status) return null;
 
   const busy = status.phase === "checking" || status.phase === "downloading" || status.phase === "installing";
-  const canInstall = status.phase === "available" || status.phase === "needsPermission";
+  const canInstall = status.phase === "available" || status.phase === "needsPermission" || status.phase === "ready";
   const run = (p: Promise<unknown>) =>
     p.catch((err: unknown) => toast({ title: `Couldn't update: ${errorMessage(err)}`, status: "error" }));
 
@@ -64,7 +64,13 @@ export function Updates({ index }: { index: number }) {
         {status.supported &&
           (canInstall ? (
             <Button size="sm" variant="primary" icon={<Download />} onClick={() => run(core.app("app.updateInstall", {}))}>
-              {status.manual ? `Download v${status.latest}` : `Update to v${status.latest}`}
+              {status.phase === "ready"
+                ? status.needsPassword
+                  ? "Install"
+                  : "Restart now"
+                : status.manual
+                  ? `Download v${status.latest}`
+                  : `Update to v${status.latest}`}
             </Button>
           ) : (
             <Button
@@ -84,7 +90,7 @@ export function Updates({ index }: { index: number }) {
         description={
           status.manual
             ? "Check at launch, hourly and when TeleFlock comes back to the front. On macOS you install new versions yourself from the downloaded .dmg."
-            : "Check at launch, hourly and when TeleFlock comes back to the front, and install new versions right away."
+            : "Check at launch, hourly and when TeleFlock comes back to the front. New versions download in the background and install once you're away from the window; a Linux .deb waits for you to click Install."
         }
       >
         <Switch

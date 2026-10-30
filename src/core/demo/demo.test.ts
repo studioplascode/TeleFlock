@@ -37,7 +37,7 @@ describe("demo engine", () => {
     expect(r.state.status.forge?.phase).toBe("online");
     const c = columns(r.state, "forge");
     for (const col of ["running", "needs", "review", "done"] as Column[]) expect(c[col].length).toBeGreaterThan(0);
-    expect(c.needs.sort()).toEqual(["limits", "push"]);
+    expect(c.needs.sort()).toEqual(["flags", "limits", "push"]);
     expect(Object.values(r.state.agents).some((a) => a.kind !== "omp")).toBe(true);
   });
 
@@ -478,5 +478,22 @@ describe("demo engine", () => {
     expect(await r.call(null, "hosts.secretStatus", { hostId: "lan" })).toEqual({ password: false, privateKey: false, passphrase: true });
     await r.call(null, "hosts.remove", { hostId: "lan" });
     await expect(r.call(null, "hosts.secretStatus", { hostId: "lan" })).rejects.toMatchObject({ code: "not_found" });
+  });
+});
+
+describe("demo: omp waits out a provider rate limit", () => {
+  test("the agent keeps running with a retry wait, and goes on once it is due", () => {
+    const r = rig();
+    r.clock.advance(5000);
+    const q = r.state.agents[agentKey("forge", "quota")];
+    expect(q?.column).toBe("running");
+    expect(q?.needs).toBeUndefined();
+    const wait = q?.omp?.retry;
+    expect(wait).toMatchObject({ kind: "rateLimit", attempt: 1, maxAttempts: 10 });
+    // 4:54 from when the demo opened (the clock has run 5 s since)
+    expect((wait?.retryAt ?? 0) - r.clock.now()).toBeGreaterThan(280_000);
+    expect(q?.live.lastEventAt).toBeLessThan(r.clock.now() - 90_000);
+    r.clock.advance(300_000);
+    expect(r.state.agents[agentKey("forge", "quota")]?.omp?.retry).toBeUndefined();
   });
 });

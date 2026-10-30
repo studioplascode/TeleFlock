@@ -226,14 +226,15 @@ fn anchor_before(bytes: &[u8], end: usize) -> Vec<u8> {
 }
 
 /// One JSON line (`\n` / `\r\n` stripped); `None` for blank or malformed lines, which omp's own
-/// loader skips too.
+/// loader skips too. Lone UTF-16 surrogates, which omp's JS loader reads fine, are repaired
+/// ([`crate::lossy_json`]) instead of dropping the entry.
 fn parse_line(line: &[u8]) -> Option<Value> {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.iter().all(u8::is_ascii_whitespace) {
         return None;
     }
-    serde_json::from_slice(line).ok()
+    crate::lossy_json::from_slice(line).ok()
 }
 
 /// The `timestamp` of the session header omp writes to `path`, before omp wrote it: omp names a

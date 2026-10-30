@@ -107,6 +107,22 @@ pub(crate) async fn invalidate() {
 
 /// [`limits`] plus who each account is (`idents[i]` belongs to `accounts[i]`).
 pub(crate) async fn limits_with_idents(ctx: &Ctx, refresh: bool) -> Result<(AccountLimits, Vec<Ident>), ApiError> {
+    let live: Vec<(String, String)> = ctx
+        .state
+        .snapshot()
+        .agents
+        .into_iter()
+        .filter_map(|a| {
+            let omp = a.omp?;
+            Some((omp.session_id?, omp.model?.provider))
+        })
+        .collect();
+    limits_for(live, refresh).await
+}
+
+/// [`limits_with_idents`] for the given `(omp session id, provider)` pairs, without a [`Ctx`]: the
+/// auto-resume checks run with no app connected (`crate::limit_resume`). Shares the cache.
+pub(crate) async fn limits_for(live: Vec<(String, String)>, refresh: bool) -> Result<(AccountLimits, Vec<Ident>), ApiError> {
     let (fetched_at, accounts, error) = {
         let mut c = CACHE.lock().await;
         let max_age = if refresh { REFRESH_MIN } else { TTL };
@@ -129,16 +145,6 @@ pub(crate) async fn limits_with_idents(ctx: &Ctx, refresh: bool) -> Result<(Acco
             .collect();
         (c.fetched.map(|(_, at)| at).unwrap_or(now), accounts, c.error.clone())
     };
-    let live: Vec<(String, String)> = ctx
-        .state
-        .snapshot()
-        .agents
-        .into_iter()
-        .filter_map(|a| {
-            let omp = a.omp?;
-            Some((omp.session_id?, omp.model?.provider))
-        })
-        .collect();
     let db = omp_agent_dir().join("agent.db");
     let pairs: Vec<(String, Ident)> = accounts.iter().map(|p| (p.account.key.clone(), p.ident.clone())).collect();
     let sessions = tokio::task::spawn_blocking(move || session_accounts(&db, &live, &pairs))

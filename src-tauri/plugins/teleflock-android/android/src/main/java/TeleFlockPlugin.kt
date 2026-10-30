@@ -86,6 +86,15 @@ class UrlArgs {
 }
 
 @InvokeArg
+class ShareImageArgs {
+    /** File name the receiving app sees (`flock-wrapped-2026-10-26.png`). */
+    lateinit var name: String
+    /** The PNG, base64. */
+    lateinit var data: String
+    var text: String? = null
+}
+
+@InvokeArg
 class InstallApkArgs {
     lateinit var path: String
     var openSettings: Boolean = true
@@ -123,6 +132,27 @@ class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivit
     override fun load(webView: WebView) {
         Notifications.ensureChannels(activity)
         watchNetwork(activity.applicationContext)
+        // A share that launched the app cold.
+        activity.intent?.let { if (Share.isShare(it)) acceptShare(it) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        if (Share.isShare(intent)) acceptShare(intent)
+    }
+
+    /** Reads the share, then tells the page (`share` event); the page takes it with `take_shares`. */
+    private fun acceptShare(intent: Intent) {
+        Share.accept(activity, intent) {
+            activity.runOnUiThread { trigger("share", JSObject()) }
+        }
+    }
+
+    /** Every share read so far (`{ shares: [{ id, text?, subject?, images: [{ mime, data, name? }], skipped? }] }`). */
+    @Command
+    fun takeShares(invoke: Invoke) {
+        val r = JSObject()
+        r.put("shares", Share.take())
+        invoke.resolve(r)
     }
 
     override fun onPause(activity: AppCompatActivity) {
@@ -380,6 +410,35 @@ class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivit
             invoke.resolve()
         } catch (e: ActivityNotFoundException) {
             invoke.reject("no app can open $url", "NO_HANDLER", e)
+        }
+    }
+
+    /**
+     * Opens the system share sheet with a PNG the webview drew (the Flock Wrapped poster; Android's
+     * WebView has no Web Share). Written to `<cache>/shared/<name>` (the last one only) and offered
+     * read-only through the app's FileProvider (`res/xml/file_paths.xml` covers the cache dir).
+     */
+    @Command
+    fun shareImage(invoke: Invoke) {
+        val a = invoke.parseArgs(ShareImageArgs::class.java)
+        try {
+            val dir = File(activity.cacheDir, "shared").apply { mkdirs() }
+            dir.listFiles()?.forEach { it.delete() }
+            val name = a.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "image.png" }
+            val file = File(dir, name)
+            file.writeBytes(android.util.Base64.decode(a.data, android.util.Base64.DEFAULT))
+            val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", file)
+            val send = Intent(Intent.ACTION_SEND)
+                .setType("image/png")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            a.text?.takeIf { it.isNotBlank() }?.let { send.putExtra(Intent.EXTRA_TEXT, it) }
+            // The share sheet previews the image from the clip data, with the same read grant.
+            send.clipData = android.content.ClipData.newRawUri(name, uri)
+            activity.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            invoke.resolve()
+        } catch (e: Exception) { // bad base64, IllegalArgumentException (path outside the provider), ActivityNotFoundException
+            invoke.reject(e.message ?: "couldn't share the image", "SHARE_FAILED", e)
         }
     }
 

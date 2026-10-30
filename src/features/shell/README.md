@@ -29,28 +29,30 @@ export function closeSheet(): void;
 
 // @/features/shell/vocab — one word per lane, state and action; `VIEWS`: label, shortcut, description and icon of
 // every page, read by each way to it (sidebar, More, palette, Settings, host cards, the omp area strip); `OMP_PAGES`:
-// the omp area's pages (omp settings, MCP servers, Accounts) in order.
+// the omp area's pages (omp settings, MCP servers, Skills & plugins, Accounts) in order.
 
 // @/features/shell/Ticks
 export function Ticks(props: { text: string; className?: string }): JSX.Element; // `backticked` spans as inline code (hostd's commands, omp's setting descriptions)
 export function splitTicks(text: string): { text: string; code: boolean }[];     // an unpaired backtick or an empty pair stays literal (Ticks.test.ts)
 
 // @/features/shell/OmpArea
-export function OmpAreaNav(props: { current: OmpAreaPage; hostId?: string; className?: string }): JSX.Element; // the strip linking omp settings, MCP servers, Accounts
+export function OmpAreaNav(props: { current: OmpAreaPage; hostId?: string; className?: string }): JSX.Element; // the strip linking omp settings, MCP servers, Skills & plugins, Accounts; with ≥ 2 hosts it ends with "Copy from host…" (src/features/hostSync)
 export function OmpAreaFrame(props: { current: OmpAreaPage; hostId?: string; mobile: boolean; children: ReactNode }): JSX.Element;
 // the frame each omp-area page renders in (strip + one width, padding and gap), so the strip never moves between them
 ```
 
 ## Layout contract
 - Routes are FrontCore's (`navigate`/`useRoute`); `src/app/routes.tsx` maps them to screens.
-- Full-bleed screens (session, terminal, review, desktop board) get an `h-full` box and manage their own scroll.
+- Full-bleed screens (session, terminal, review, desktop board and wall, ambient) get an `h-full` box and manage their own scroll.
+- Bare screens (`isBare`: ambient mode) also take the sidebar's and split's room on desktop and the bottom nav's on
+  phones; the title bar stays. Focus mode (the session's and the wall's `F`) hides the sidebar and split the same way.
 - Every other screen is wrapped in the shell's scroll container (phones: `PullToRefresh`, default `refreshAll`;
   desktop: a stable scrollbar gutter, so a page that scrolls sits exactly where one that doesn't would).
   Don't add your own outer scroller or pull-to-refresh; render `MobileHeader` yourself on phones.
 - The phone bottom nav is in-flow below the view (never overlaps content). Pushed screens keep their parent tab
-  lit: everything opened from More (Hosts, Settings, Usage, Activity, Automations and the omp area) lights More.
+  lit: everything opened from More (Hosts, Settings, Usage, Activity, Automations, Ambient and the omp area) lights More.
 - `prefetchViews` (`src/app/routes.tsx`) warms the screens a tap away once the first one is up, one per idle
-  period: session, board / Flock, inbox, Dispatch, terminal, then the omp area (MCP servers, Accounts, omp settings).
+  period: session, board / Flock, inbox, Dispatch, terminal, then the omp area (MCP servers, Skills & plugins, Accounts, omp settings).
 - Toasts keep clear of `[data-toast-anchor]` elements (`src/design/ui/Toast.tsx`): on phones anything along the
   bottom (tab bar, Flock "+", a session's composer dock, Dispatch's composer); on desktop only what runs under the
   stack's column (a session's composer and its open question, Dispatch's composer). An anchor that appears without
@@ -58,12 +60,13 @@ export function OmpAreaFrame(props: { current: OmpAreaPage; hostId?: string; mob
 
 Mounted once globally by the shell: FrontOps dialogs (`NewWorktreeDialog`, `NewAgentDialog`,
 `PastSessionsDialog`), FrontBoard `AnswerNextHud`, the command palette, the notification center,
-the host editor (`useUi().dialog.kind === "hostEditor"`), the shortcuts sheet (`kind: "shortcuts"`) and the toaster.
+the host editor (`useUi().dialog.kind === "hostEditor"`), the "make this host like another" dialog (`kind: "hostSync"`,
+`src/features/hostSync`), the shortcuts sheet (`kind: "shortcuts"`) and the toaster.
 
 ## Desktop sidebar
 Top to bottom: **＋ New task** (`D`, opens Dispatch) · launcher row (New worktree · New agent · Fan out ·
 Open folder · Past sessions; labelled from 240 px, wrapping onto a second or third row, icon-only below; drag the right edge to
-resize, double-click resets) · nav Board · Inbox · Activity · Usage (Inbox badge = needs count, dot =
+resize, double-click resets) · nav Board · Inbox · Activity · Usage · Automations · Wall · Ambient (Inbox badge = needs count, dot =
 unread updates) · HOSTS (header "Manage ›" → Hosts; each row: orb · colour swatch · name · latency, then
 CPU sparkline + RAM bar, or the phase/reason and a Connect/Retry/Sign in/Verify button) · WORKSPACES tree
 (all remaining height) · footer ⚙ Settings + collapse. Labels, keys and tooltips come from `vocab.ts`.

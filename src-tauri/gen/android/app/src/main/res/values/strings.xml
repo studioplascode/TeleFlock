@@ -1,4 +1,6 @@
 <resources>
     <string name="app_name">"TeleFlock"</string>
     <string name="main_activity_title">"TeleFlock"</string>
+    <!-- The share sheet's entry: a task for Dispatch. -->
+    <string name="share_label">"New task in TeleFlock"</string>
 </resources>

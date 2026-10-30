@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiError, core, type HostClient, toApiError, useHosts } from "@/core";
 import type { ApiError, McpChanged, McpList, McpServer } from "@/core/gen";
-import { toast } from "@/design";
+import { type ToastInput, toast } from "@/design";
 import { type AnswerKind, AnswerOrder } from "./answers";
 import { type ReloadChange, reloadNote, scopeOf, serverKey, shareList } from "./model";
 
@@ -36,13 +36,18 @@ interface State {
   loading: boolean;
 }
 
-/** One quiet toast about a change ("Removed “x”") and what it did to running sessions; none when no session ran. */
-export function toastReload(title: string, changed: Pick<McpChanged, "reload">, change: ReloadChange): void {
+/**
+ * One quiet toast about a change ("Removed “x”") and what it did to running sessions, then extra
+ * `lines` (a note, omp's own lines) and an optional `action`; none when no session ran and there
+ * is nothing more to say.
+ */
+export function toastReload(title: string, changed: Pick<McpChanged, "reload">, change: ReloadChange, extra: { lines?: readonly (string | undefined)[]; action?: ToastInput["action"] } = {}): void {
   const note = reloadNote(changed.reload, change);
   const errors = changed.reload.errors;
-  if (!note && errors.length === 0) return;
-  const description = [note && note.charAt(0).toUpperCase() + note.slice(1), ...errors].filter(Boolean).join(" · ");
-  toast({ title, description, status: errors.length ? "error" : undefined, duration: errors.length ? 6000 : 3500 });
+  const lines = (extra.lines ?? []).filter((l): l is string => !!l);
+  if (!note && errors.length === 0 && lines.length === 0) return;
+  const description = [note && note.charAt(0).toUpperCase() + note.slice(1), ...lines, ...errors].filter(Boolean).join(" · ");
+  toast({ title, description, status: errors.length ? "error" : undefined, duration: errors.length ? 6000 : extra.action ? 6000 : 3500, action: extra.action });
 }
 
 /**

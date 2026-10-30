@@ -51,7 +51,8 @@ export function agentStatus(agent: Agent | undefined): Status {
     case "running":
       return "running";
     case "review":
-      return agent.turns === 0 && agent.state !== "done" ? "idle" : "review";
+      // an ended card (its omp ended without anyone closing it) sits calmly, like the board shows it
+      return agent.parked?.ended || (agent.turns === 0 && agent.state !== "done") ? "idle" : "review";
     case "done":
       return "done";
   }

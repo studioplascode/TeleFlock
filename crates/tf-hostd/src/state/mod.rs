@@ -11,6 +11,7 @@ pub mod build;
 pub mod parked;
 pub mod persist;
 pub mod procs;
+pub mod recaps;
 pub mod subs;
 
 use std::collections::{HashMap, HashSet};
@@ -81,17 +82,24 @@ struct Track {
     /// The link the board last showed (state, reason, path) and since when (`OmpInfo.linkSince`).
     link_key: Option<(LinkState, Option<LinkReason>, Option<LinkVia>)>,
     link_since: Millis,
+    /// The agent's wait for background jobs, to tell a finished wait from a stale herdr `working`.
+    jobs_wait: build::JobsWait,
 }
 
 #[derive(Default)]
 struct Mirror {
     ok: bool,
+    /// herdr's server went away (`herdr_gone`): publish the empty view even after the events
+    /// stream reports its disconnect (`ok` false), until a snapshot of a new server lands.
+    gone: bool,
     workspaces: Vec<WorkspaceInfo>,
     tabs: Vec<TabInfo>,
     panes: Vec<PaneInfo>,
     agents: Vec<AgentInfo>,
     /// Last terminal activity per pane (`pane_updated`).
     activity: HashMap<String, Millis>,
+    /// When the last full pull of herdr's state was asked for.
+    pulled_at: Millis,
 }
 
 /// Repository facts of one folder.
@@ -107,6 +115,8 @@ struct RepoEntry {
 struct Inner {
     rev: u64,
     published: HostState,
+    /// When the herdr view the published board was built from was pulled (`Mirror::pulled_at`).
+    published_at: Millis,
     sinks: Vec<ClientHandle>,
     mirror: Mirror,
     tracks: HashMap<String, Track>,
@@ -122,6 +132,8 @@ struct Inner {
     health: Option<HostHealth>,
     built_once: bool,
     life: parked::Lifecycle,
+    /// omp session id → its newest idle recap ([`recaps`]); cards show the current ones.
+    recaps: HashMap<String, tf_proto::model::IdleRecap>,
 }
 
 struct Store {
@@ -135,6 +147,12 @@ struct Store {
     repo_kick: Notify,
     /// A client attached (host facts are re-probed).
     connected: Notify,
+    /// Decide for me (`crate::autoanswer`): gives each built agent its `autoAnswer` and the host
+    /// its default; set once by the session's context.
+    auto_answer: std::sync::OnceLock<crate::autoanswer::AutoAnswers>,
+    /// Routes notifications by presence (`crate::notify`); set once by the session's context.
+    /// Unset (tests): every client gets every notification, as before.
+    notifier: std::sync::OnceLock<crate::notify::Notifier>,
 }
 
 /// Cheap, cloneable handle to the store of one herdr session.
@@ -156,6 +174,7 @@ impl StateHandle {
                 m: Mutex::new(Inner {
                     rev: 0,
                     published: HostState { info, health: None, workspaces: vec![], agents: vec![], usage },
+                    published_at: 0,
                     sinks: Vec::new(),
                     mirror: Mirror::default(),
                     tracks: HashMap::new(),
@@ -167,13 +186,26 @@ impl StateHandle {
                     health: None,
                     built_once: false,
                     life: parked::Lifecycle::default(),
+                    recaps: HashMap::new(),
                 }),
                 dirty: Notify::new(),
                 resnap: Notify::new(),
                 repo_kick: Notify::new(),
                 connected: Notify::new(),
+                auto_answer: std::sync::OnceLock::new(),
+                notifier: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Hands the store the session's decide-for-me state (once, before the first build).
+    pub fn set_auto_answer(&self, aa: crate::autoanswer::AutoAnswers) {
+        let _ = self.inner.auto_answer.set(aa);
+    }
+
+    /// Hands the store the daemon's notification router (once, by the session's context).
+    pub fn route_notifications(&self, notifier: crate::notify::Notifier) {
+        let _ = self.inner.notifier.set(notifier);
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -183,6 +215,13 @@ impl StateHandle {
     /// Current board state.
     pub fn snapshot(&self) -> HostState {
         self.lock().published.clone()
+    }
+
+    /// Current board state and the instant its herdr view was last pulled (asked for): the board
+    /// shows nothing older than that. 0 before the first pull.
+    pub fn snapshot_at(&self) -> (HostState, Millis) {
+        let m = self.lock();
+        (m.published.clone(), m.published_at)
     }
 
     pub fn agent(&self, agent_id: &str) -> Option<Agent> {
@@ -301,6 +340,8 @@ impl StateHandle {
         let mut m = self.lock();
         info.tools = m.published.info.tools.clone();
         info.pruned = m.published.info.pruned.clone();
+        info.auto_answer = m.published.info.auto_answer.clone();
+        info.herdr_health = m.published.info.herdr_health.clone();
         if m.published.info != info {
             m.published.info = info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
@@ -315,6 +356,34 @@ impl StateHandle {
             let info = m.published.info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
         }
+    }
+
+    /// Publishes the herdr server's health (`HostInfo.herdrHealth`, `crate::herdr_health`).
+    pub fn set_herdr_health(&self, health: Option<tf_proto::HerdrHealth>) {
+        let mut m = self.lock();
+        if m.published.info.herdr_health != health {
+            m.published.info.herdr_health = health;
+            let info = m.published.info.clone();
+            broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
+        }
+    }
+
+    /// herdr's server went away (`crate::herdr_health`), and every pane process of the session
+    /// with it: drops the herdr view so no card shows a dead agent running. Parked and ended
+    /// cards stay; the next snapshot of a new server fills the board again.
+    pub fn herdr_gone(&self) {
+        {
+            let mut m = self.lock();
+            m.mirror = Mirror { ok: true, gone: true, ..Default::default() };
+            m.pane_pids.clear();
+            m.pane_procs = procs::PaneProcs::default();
+        }
+        self.mark_dirty();
+    }
+
+    /// Pane → its shell's pid, where known (`crate::herdr_health`'s idle check).
+    pub fn pane_shells(&self) -> HashMap<String, u32> {
+        self.lock().pane_procs.shells()
     }
 
     fn set_health(&self, health: HostHealth) {
@@ -390,11 +459,17 @@ impl StateHandle {
         *m.pulses.entry((agent_id.to_string(), kind)).or_default() += n;
     }
 
-    /// Broadcasts a notification to every client of this session.
+    /// Hands a notification to every client of this session: through the notification router
+    /// (presence, escalation, push) when the context set one, else as is.
     fn notify(&self, m: &mut Inner, n: Notification) {
+        m.sinks.retain(|c| !c.is_closed());
+        if let Some(router) = self.inner.notifier.get() {
+            let agent_name = m.tracks.get(&n.agent_id).map(|t| t.name.clone());
+            router.post(self, &self.inner.session, &m.sinks, n, agent_name);
+            return;
+        }
         info!(session = %self.inner.session, agent = %n.agent_id, kind = ?n.kind, "notify: {}", n.title);
-        if let Some(line) = line_of(&ServerMsg::Notify { notification: n }) {
-            m.sinks.retain(|c| !c.is_closed());
+        if let Some(line) = line_of(&ServerMsg::Notify { notification: n, alert: None }) {
             for c in &m.sinks {
                 c.send_line(line.clone(), false);
             }
@@ -432,6 +507,12 @@ impl StateHandle {
         let mut started: Vec<(String, String)> = Vec::new();
         let mut model_changes: Vec<(String, String, String)> = Vec::new();
         let mut recheck = false;
+        // When a retry wait nobody ended (a dropped feed) stops holding: the board maps again then.
+        let mut retry_stale: Option<Millis> = None;
+        // agent id → the replica's newest conversation row (idle recaps older than it are out of date)
+        let mut last_rows: HashMap<String, Millis> = HashMap::new();
+        // An app is connected to this session (decide for me's `onlyWhenNoApp`).
+        let apps = m.sinks.iter().any(|c| !c.is_closed());
 
         for a in &m.mirror.agents {
             let id = build::agent_id(a);
@@ -472,6 +553,7 @@ impl StateHandle {
                 turn_aborted: false,
                 link_key: None,
                 link_since: now,
+                jobs_wait: build::JobsWait::default(),
             });
             track.name = name;
             track.omp_session = sid.clone();
@@ -487,6 +569,18 @@ impl StateHandle {
             // ≥ 1.5 s count as turns.
             let linked = view.as_ref().is_some_and(|v| v.link == tf_proto::model::LinkState::Live);
             let turn_active = view.as_ref().is_some_and(|v| v.turn_active);
+            // herdr keeps an agent that waits for background jobs `working` (omp's `willContinue`);
+            // if the last job is cancelled nothing ever continues and that `working` never ends.
+            let waiting = bridge.as_ref().is_some_and(|b| b.jobs.as_ref().is_some_and(|j| j.waiting));
+            let (jobs_settled, jobs_recheck) = track.jobs_wait.observe(now, linked && state == HerdrState::Working, turn_active, waiting);
+            recheck |= jobs_recheck;
+            let settled_herdr;
+            let (a, state) = if jobs_settled {
+                settled_herdr = tf_herdr::AgentInfo { agent_status: tf_herdr::AgentStatus::Idle, ..a.clone() };
+                (&settled_herdr, HerdrState::Idle)
+            } else {
+                (a, state)
+            };
             let mut turn_ended = false;
             if track.state != state {
                 if state == HerdrState::Working && track.working_since.is_none() {
@@ -536,6 +630,11 @@ impl StateHandle {
             if blocked_grace {
                 recheck = true;
             }
+            let provider_wait = build::provider_wait(state, view.as_ref(), bridge.as_ref());
+            if let (Some(build::ProviderWait::Retrying), Some(w)) = (provider_wait, view.as_ref().and_then(|v| v.retry.as_ref())) {
+                let at = w.retry_at.saturating_add(tf_collab::replica::retry::STALE_AFTER_MS);
+                retry_stale = Some(retry_stale.map_or(at, |t| t.min(at)));
+            }
             if fresh && m.built_once {
                 started.push((id.clone(), track.name.clone()));
             }
@@ -546,7 +645,7 @@ impl StateHandle {
                 .as_ref()
                 .and_then(|v| v.needs.as_ref().map(build::needs_key))
                 .or_else(|| bridge.as_ref().and_then(|b| b.state.plan_review.as_ref().map(|r| format!("plan:{}", r.review_id))))
-                .or_else(|| (state == HerdrState::Blocked && !blocked_grace).then(|| "blocked".to_string()));
+                .or_else(|| (state == HerdrState::Blocked && !blocked_grace && provider_wait.is_none()).then(|| "blocked".to_string()));
             if pre_needs_key != track.needs_key {
                 track.needs_key = pre_needs_key;
                 track.needs_since = now;
@@ -570,7 +669,11 @@ impl StateHandle {
                 last_turn_ended_at: track.last_turn_ended_at,
                 blocked_grace,
             };
-            let agent = build::build_agent(&inputs);
+            let mut agent = build::build_agent(&inputs);
+            agent.auto_answer = store.auto_answer.get().and_then(|aa| aa.observe(&agent, now, apps));
+            if let Some(t) = view.as_ref().and_then(|v| v.last_turn_row_at) {
+                last_rows.insert(id.clone(), t);
+            }
             let model = agent.omp.as_ref().and_then(|o| o.model.as_ref()).map(|m| format!("{}/{}", m.provider, m.id));
             if let (Some(prev), Some(cur)) = (&track.model, &model) {
                 if prev != cur {
@@ -581,7 +684,13 @@ impl StateHandle {
                 track.model = model;
             }
             let silent = agent.live.last_event_at.map(|t| now - t).unwrap_or(0);
-            let quiet = state == HerdrState::Working && silent > build::QUIET_MS && !track.quiet_notified;
+            // Waiting for background jobs (omp's async wait) is silent by design, not stuck.
+            let quiet = state == HerdrState::Working
+                && silent > build::QUIET_MS
+                && !track.quiet_notified
+                && !crate::ops::jobs::waiting(&agent)
+                // omp waits to retry a provider error: the card says so, quiet would be wrong.
+                && agent.omp.as_ref().is_none_or(|o| o.retry.is_none());
             if quiet {
                 track.quiet_notified = true;
             }
@@ -610,6 +719,8 @@ impl StateHandle {
         m.tracks.retain(|k, _| seen.contains(k));
         m.omp_of = omp_of;
         parked::merge_into(self, m, &persisted, &seen, &mut agents);
+        recaps::attach(&mut agents, &m.recaps, &last_rows);
+        crate::recovery::attach(&store.session, &mut agents);
 
         // Persist turns, first-seen, auto-unarchive.
         if !new_turns.is_empty() || !unarchive.is_empty() || seen.iter().any(|id| !persisted.first_seen.contains_key(id)) {
@@ -636,7 +747,7 @@ impl StateHandle {
             });
         }
 
-        let workspaces = if m.mirror.ok || !m.mirror.workspaces.is_empty() {
+        let workspaces = if m.mirror.ok || m.mirror.gone || !m.mirror.workspaces.is_empty() {
             m.pane_procs.refresh();
             let repos = &m.repos;
             build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, |cwd| repos.get(cwd).and_then(|e| e.info.as_ref()), &m.pane_procs)
@@ -651,6 +762,7 @@ impl StateHandle {
         info.setup.issues.retain(|i| !crate::omp::RELAY_ISSUE_IDS.contains(&i.id.as_str()));
         info.setup.issues.extend(store.omp.relay_issue());
         info.pruned = persisted.pruned.clone();
+        info.auto_answer = store.auto_answer.get().map(|aa| aa.host_default());
 
         // Diff.
         let mut ops = Vec::new();
@@ -666,6 +778,7 @@ impl StateHandle {
         m.published.workspaces = workspaces;
         m.published.agents = agents;
         m.published.usage = usage;
+        m.published_at = m.mirror.pulled_at;
         if !ops.is_empty() {
             broadcast_patch(m, ops);
         }
@@ -735,6 +848,14 @@ impl StateHandle {
                 h.mark_dirty();
             });
         }
+        if let Some(at) = retry_stale {
+            let h = self.clone();
+            let wait = (at - now_ms()).clamp(0, 3_600_000) as u64 + 100;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                h.mark_dirty();
+            });
+        }
         record_acts(acts, self);
     }
 
@@ -768,6 +889,12 @@ impl StateHandle {
         for (agent_id, name) in agents {
             for sig in signals {
                 match sig {
+                    Signal::TurnEnded { error: Some(err), refusal: Some(refusal), .. } => {
+                        let detail = refusal.explanation.clone().unwrap_or_else(|| err.clone());
+                        self.push_activity(&agent_id, &name, ActivityKind::Error, build::refusal_title(refusal), Some(detail));
+                        let mut m = self.lock();
+                        self.notify(&mut m, build::refusal_notification(&agent_id, &name, refusal, err, now_ms()));
+                    }
                     Signal::TurnEnded { error: Some(err), .. } => {
                         self.push_activity(&agent_id, &name, ActivityKind::Error, "Turn failed".into(), Some(err.clone()));
                         let mut m = self.lock();
@@ -876,8 +1003,12 @@ fn initial_info(session: &str, relay_port: u16, relay: bool) -> HostInfo {
             issues: vec![],
             applying: vec![],
             failed: vec![],
+            gh_signed_in: None,
+            git_identity: None,
         },
         tools: None,
+        auto_answer: None,
+        herdr_health: None,
         pruned: Vec::new(),
     }
 }
@@ -905,6 +1036,7 @@ pub async fn start(ctx: &Arc<Ctx>) {
         Ok(mut info) => {
             let mut m = h.lock();
             info.tools = m.published.info.tools.take();
+            info.herdr_health = m.published.info.herdr_health.take();
             m.published.info = info;
         }
         Err(_) => warn!(session = %ctx.herdr_session, "host info probe timed out"),
@@ -922,11 +1054,13 @@ pub async fn start(ctx: &Arc<Ctx>) {
     tokio::spawn(repo_loop(ctx.arc()));
     tokio::spawn(host_loop(ctx.arc()));
     tokio::spawn(parked::prune_loop(ctx.arc()));
+    tokio::spawn(recaps::run(ctx.arc()));
 }
 
 fn apply_snapshot(h: &StateHandle, snap: tf_herdr::Snapshot) {
     let mut m = h.lock();
     m.mirror.ok = true;
+    m.mirror.gone = false;
     m.mirror.workspaces = snap.workspaces;
     m.mirror.tabs = snap.tabs;
     let live: HashSet<String> = snap.panes.iter().map(|p| p.pane_id.clone()).collect();
@@ -988,9 +1122,17 @@ async fn herdr_loop(ctx: Arc<Ctx>) {
 
 async fn snapshot_now(ctx: &Arc<Ctx>, status_panes: &mut Vec<String>, stream: &tf_herdr::EventStream) {
     let h = &ctx.state;
+    // While herdr is down there is nothing to read; the health watch re-snapshots once a server
+    // answers again (and its log says what happened, once, instead of every 15 s).
+    if crate::herdr_health::current(&ctx.herdr_session).is_some_and(|hh| hh.panes_lost()) {
+        return;
+    }
+    // The pull is asked for now: what it answers is the herdr view as of at least this instant.
+    let asked = now_ms();
     match ctx.herdr.snapshot().await {
         Ok(snap) => {
             apply_snapshot(h, snap);
+            h.lock().mirror.pulled_at = asked;
             let panes = agent_panes(h);
             if panes != *status_panes {
                 stream.set_status_panes(panes.clone());
@@ -1121,6 +1263,11 @@ fn handle_herdr_event(h: &StateHandle, ev: tf_herdr::HerdrEvent) -> bool {
             }
         }
         E::PaneFocused { .. } | E::WorkspaceFocused { .. } | E::TabFocused { .. } => return true,
+        E::PaneExited { pane_id, .. } => {
+            // Its process died (not a close): an agent gone with it ended (`crate::restart`).
+            crate::restart::pane_exited(&h.inner.session, &pane_id);
+            return true;
+        }
         E::Other { .. } => {}
         _ => return true,
     }

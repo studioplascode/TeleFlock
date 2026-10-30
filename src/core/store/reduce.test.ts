@@ -50,7 +50,7 @@ function snap(items: TranscriptItem[], extra: Partial<SessionSnapshot> = {}): Se
       subagents: [],
       files: [],
       queue: { steering: [], followUp: [] },
-      caps: { prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true },
+      caps: { prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true, retry: true, subagentRetry: true },
     },
     items,
     hasMore: false,

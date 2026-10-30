@@ -268,18 +268,58 @@ pub fn parse_probe(out: &str) -> Result<Probe, ApiError> {
     Ok(p)
 }
 
+/// A host command that failed: `io_error` (retryable), or `deploy_failed` when its output shows
+/// that every attempt will fail the same way ([`deterministic`]); that code is fatal, so the
+/// connection stops retrying and shows the error (conn.rs `FATAL_CODES`).
 fn exec_err(what: &str, out: &tf_transport::Output) -> ApiError {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let msg = stderr.trim();
-    ApiError::new(
-        "io_error",
-        format!(
-            "{what} failed (exit {}){}",
-            out.status.code.map(|c| c.to_string()).unwrap_or_else(|| out.status.signal.clone().unwrap_or_default()),
-            if msg.is_empty() { String::new() } else { format!(": {msg}") }
-        ),
-    )
-    .retryable()
+    let message = format!(
+        "{what} failed (exit {}){}",
+        out.status.code.map(|c| c.to_string()).unwrap_or_else(|| out.status.signal.clone().unwrap_or_default()),
+        if msg.is_empty() { String::new() } else { format!(": {msg}") }
+    );
+    match deterministic(out.status.code, msg) {
+        Some(hint) => ApiError::new("deploy_failed", message).with_hint(hint),
+        None => ApiError::new("io_error", message).retryable(),
+    }
+}
+
+/// Why a failed host command will fail the same way on every attempt (as the hint to show), or
+/// `None` when another attempt can succeed: a cold or busy WSL VM (wsl.exe's own errors exit
+/// with -1), a dropped link, a corrupted transfer (checksum mismatch), a full disk, and
+/// whatever a broken profile file prints on every login (it is at the top of stderr, and a
+/// shell that couldn't run our script exits 2, 126 or 127, not 1). The fatal code stops all
+/// retries, so it needs the exit code and the *last* lines of stderr to agree.
+fn deterministic(code: Option<i32>, stderr: &str) -> Option<&'static str> {
+    // What dash, bash, busybox, zsh, tcsh, fish and nushell print for a script they can't parse.
+    const SYNTAX: [&str; 7] = [
+        "syntax error",
+        "parse error",
+        "unterminated quoted string",
+        "unexpected eof while looking for matching",
+        "unmatched '",
+        "quotes are not balanced",
+        "nu::parser::",
+    ];
+    /// Lines of stderr that count: the shell's complaint about the script comes last.
+    const TAIL_LINES: usize = 3;
+    let code = code.filter(|c| matches!(c, 2 | 3 | 126 | 127))?;
+    let mut tail: Vec<&str> = stderr.lines().rev().filter(|l| !l.trim().is_empty()).take(TAIL_LINES).collect();
+    tail.reverse();
+    let e = tail.join("\n").to_ascii_lowercase();
+    if code != 3 && SYNTAX.iter().any(|p| e.contains(p)) {
+        return Some(
+            "The host's shell rejected TeleFlock's setup script, so retrying can't help. Copy the diagnostics and report them; the host's login shell (`echo $SHELL`) and its profile files are the usual suspects.",
+        );
+    }
+    let missing = match code {
+        3 => e.contains("neither sha256sum nor shasum"),
+        126 => e.contains("permission denied"),
+        127 => e.contains("not found") || e.contains("no base64 decoder"),
+        _ => false,
+    };
+    missing.then_some("A program TeleFlock's setup needs can't run on the host (see the message). Install or fix it there, then try again.")
 }
 
 /// Runs the probe on a remote (SSH/WSL) host. 60 s: every WSL `exec` starts `wsl.exe` and a
@@ -387,7 +427,7 @@ pub async fn deploy(
             // Could not run it (slow host, transport hiccup): retry the connect, not a dead end.
             let v = run_version(t, &hostd_path).await?;
             if v != expected {
-                return Err(version_mismatch(&format!("deployed tf-hostd reports `{v}`"), &expected));
+                return Err(version_mismatch("the deployed tf-hostd", &v, &expected, false));
             }
         } else {
             // The upload script runs its `--version` before replacing anything: no extra spawn,
@@ -421,9 +461,18 @@ pub async fn deploy(
     Ok(Deployed { hostd: hostd_path, replaced: need_hostd && !p.version.is_empty(), newer: None })
 }
 
-fn version_mismatch(what: &str, expected: &str) -> ApiError {
-    ApiError::new("version_mismatch", format!("{what}, this app expects `{expected}`"))
-        .with_hint("rebuild tf-hostd and the app from the same source tree")
+/// The tf-hostd this app deployed does not report the version the app expects (`reported`: the
+/// first line of its `--version`, empty when it did not run). Fatal: the same binary reports the
+/// same on every attempt.
+fn version_mismatch(what: &str, reported: &str, expected: &str, kept: bool) -> ApiError {
+    let kept = if kept { " (the installed one is kept)" } else { "" };
+    if reported.is_empty() {
+        ApiError::new("version_mismatch", format!("{what} did not run on the host: it printed no version{kept}"))
+            .with_hint("The host can't execute it: built for another CPU, a noexec mount under ~/.teleflock, or a missing loader. Copy the diagnostics and report them.")
+    } else {
+        ApiError::new("version_mismatch", format!("{what} reports `{reported}`, this app expects `{expected}`{kept}"))
+            .with_hint("The app's bundled tf-hostd is another build: rebuild tf-hostd and the app from the same source tree.")
+    }
 }
 
 async fn put_local(home: &str, rel: &str, bytes: &[u8], sha: &str) -> Result<(), ApiError> {
@@ -511,7 +560,7 @@ async fn upload_remote(t: &dyn Transport, home: &str, files: &[Upload<'_>], stdi
     {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let v = stdout.lines().find_map(|l| l.trim_end_matches('\r').strip_prefix("tf.version=")).unwrap_or_default();
-        return Err(version_mismatch(&format!("the uploaded tf-hostd reports `{v}` (the installed one is kept)"), expected));
+        return Err(version_mismatch("the uploaded tf-hostd", v, expected, true));
     }
     let names: Vec<&str> = files.iter().map(|f| f.rel).collect();
     Err(exec_err(&format!("upload {}", names.join(", ")), &out))
@@ -655,9 +704,103 @@ mod tests {
         // Built for another architecture: it does not run at all.
         let e = upload(b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0".to_vec()).await.unwrap_err();
         assert_eq!(e.code, "version_mismatch");
-        assert!(e.message.contains("reports ``"), "{}", e.message);
+        assert!(e.message.contains("did not run on the host") && e.hint.is_some(), "{e:?}");
         assert_eq!(installed(), script(expected), "the installed tf-hostd is kept");
         assert_eq!(std::fs::read_to_string(dir.path().join("bin/tf-hostd.sha256")).unwrap(), sha256_hex(&script(expected)));
+    }
+
+    /// A script the host's shell can't parse, or a program the setup needs that can't run, fails
+    /// the same way on every attempt: fatal, with a hint. A cold WSL VM, a corrupted transfer or
+    /// a full disk may pass next time.
+    #[test]
+    fn deterministic_failures_are_not_retried() {
+        let out = |code: Option<i32>, stderr: &str| tf_transport::Output {
+            status: tf_transport::ExitStatus { code, signal: code.is_none().then(|| "KILL".to_string()) },
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        for (code, stderr) in [
+            (2, "sha256sum: 4: Syntax error: Unterminated quoted string"),
+            (2, "bash: -c: line 4: syntax error near unexpected token `fi'"),
+            (2, "bash: -c: line 1: unexpected EOF while looking for matching `''"),
+            (2, "sh: syntax error: unterminated quoted string"),
+            (2, "~/.profile: line 3: warning\nzsh:1: unmatched '"),
+            (127, "teleflock bootstrap: no base64 decoder (base64, openssl, python3 or perl) found on the host"),
+            (127, "fish: Unexpected end of string, quotes are not balanced"),
+            (3, "neither sha256sum nor shasum is installed on the host"),
+            (127, "sh: 1: base64: not found"),
+            (126, "sh: 1: exec: /usr/bin/nu: Permission denied"),
+        ] {
+            let e = exec_err("upload bin/tf-hostd", &out(Some(code), stderr));
+            assert_eq!((e.code.as_str(), e.retryable), ("deploy_failed", false), "{stderr}");
+            assert!(e.message.ends_with(stderr) && e.hint.is_some(), "{e:?}");
+            assert!(crate::conn::is_fatal(&e), "{e:?}");
+        }
+        for (code, stderr) in [
+            (Some(-1), "The operation timed out because a response was not received from the virtual machine or container. Error code: Wsl/Service/CreateInstance/HCS_E_CONNECTION_TIMEOUT"),
+            (Some(4), "checksum mismatch for bin/tf-hostd: got 0f, expected 1a"),
+            (Some(1), "cat: write error: No space left on device"),
+            (Some(127), "sh: 1: cannot open /tmp/x: No such file"),
+            // Profile noise on every login must not turn a later transient failure fatal.
+            (Some(1), "zsh:1: unmatched '"),
+            (Some(1), "Error: nu::parser::unclosed_delimiter"),
+            (Some(2), "bash: /home/u/.bashrc: line 9: syntax error: unexpected end of file\nsh: 1: base64: not found\nx\ny\nz"),
+            (Some(127), "/home/u/.profile: foo: not found\ncat: write error: No space left on device\nupload failed\nretry later"),
+            // wsl.exe's own failures exit with -1; a signal leaves no code.
+            (Some(-1), "syntax error"),
+            (None, "syntax error"),
+        ] {
+            let e = exec_err("upload bin/tf-hostd", &out(code, stderr));
+            assert_eq!((e.code.as_str(), e.retryable), ("io_error", true), "{stderr}");
+            assert!(!crate::conn::is_fatal(&e), "{e:?}");
+        }
+    }
+
+    /// The report: `upload bin/tf-hostd failed (exit 2): sha256sum: 4: Syntax error: Unterminated
+    /// quoted string` on every attempt, from a WSL host whose login shell was nushell. The upload
+    /// runs the way WSL runs it (the bootstrap words, all plain) through a login shell that runs
+    /// nothing but TeleFlock's fixed login command, so no login shell parses the script.
+    #[cfg(unix)]
+    #[test]
+    fn reported_upload_runs_through_any_login_shell() {
+        use std::io::Write;
+        use std::process::Stdio;
+        use tf_transport::quote;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Named like a shell TeleFlock runs as a login shell (others fall back to `sh -l`); it
+        // leaves a mark, so the test proves it ran.
+        let shell = dir.path().join("nu");
+        let strict = format!(
+            "#!/bin/sh\n[ \"$1\" = -lc ] && [ \"$2\" = {} ] || {{ echo \"refused: $2\" >&2; exit 2; }}\ntouch \"$HOME/.login-shell-ran\"\nexec sh -c \"$2\"\n",
+            quote::shell_quote(quote::LOGIN_COMMAND)
+        );
+        tf_hostd::test_exe::write_exe(&shell, strict);
+        let expected = expected_version_line();
+        let hostd = format!("#!/bin/sh\necho '{expected}'\n").into_bytes();
+        let sha = sha256_hex(&hostd);
+        let tf = home.join(".teleflock");
+        let script = upload_script(&tf.to_string_lossy(), &[Upload { rel: "bin/tf-hostd", sha: &sha, inline: None, hostd_version: Some(&expected) }]);
+        let words = quote::bootstrap_argv(&Cmd::new(["sh", "-c", &script]));
+        assert!(words.iter().all(|w| quote::is_plain(w)), "{words:?}");
+        let mut child = std::process::Command::new(&words[0])
+            .args(&words[1..])
+            .env_clear()
+            .env("HOME", &home)
+            .env("SHELL", &shell)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&hostd).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read(tf.join("bin/tf-hostd")).unwrap(), hostd);
+        assert_eq!(std::fs::read_to_string(tf.join("bin/tf-hostd.sha256")).unwrap(), sha);
+        assert!(home.join(".login-shell-ran").exists(), "the login shell ran");
     }
 
     /// Every embedded binary decompresses to exactly the bytes its stamp describes.

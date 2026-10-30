@@ -8,7 +8,15 @@ Owner: HostdHerdr. Everything is `async` (tokio); `HerdrClient` is `Clone` (an `
 ```rust
 HerdrClient::discover(session: Option<&str>) -> Result<HerdrClient>          // None = default session
 HerdrClient::discover_with(session, DiscoverOptions { bin, socket, request_timeout }) -> Result<HerdrClient>
-client.ensure_server() -> Result<Pong>     // ping; else spawn `herdr [--session S] server` detached (setsid, </dev/null; own systemd scope, see below), wait ≤15 s
+client.ensure_server() -> Result<Pong>     // ping; else spawn `herdr [--session S] server` detached (setsid, </dev/null; own systemd scope, see below), wait ≤45 s
+client.ensure_server_with(&ServerLaunch { env }) -> Result<Pong>   // same, with extra env for the server (tf-hostd: HERDR_CONFIG_PATH)
+client.probe(timeout) -> Result<ServerProbe { pid, pong }, ProbeFailure>   // ping on a connection whose peer pid it reads first;
+                                           // Missing (no socket) | Refused (stale socket) | Silent (no answer) | Other
+client.stop_server() -> Result<()>        // server.stop, then wait ≤30 s until the socket is gone or refuses
+client.live_handoff(&LiveHandoff { import_exe, expected_version }) -> Result<()>   // server.live_handoff (≤240 s)
+client.installed_version() -> Result<String>   // `herdr --version` of this binary, as the server's ping would say it
+client.integration_status() -> Result<String>  // `herdr integration status` (no server needed)
+lifecycle::{process_start_ticks, environ_value, process_exe}   // Linux /proc helpers (zombies count as gone)
 client.ping() -> Result<Pong>              // running server's version/protocol/capabilities (cached: client.server())
 client.server_at_least((0, 9, 2)) -> bool
 client.status() -> Result<Status>          // `herdr status --json`
@@ -22,7 +30,7 @@ client.session() / binary() / endpoint()
   (`<config>` = `$XDG_CONFIG_HOME/herdr` | `~/.config/herdr` | `%APPDATA%\herdr`). Windows connects to the named
   pipe `\\.\pipe\<full socket path>`.
 - Inherited pane env (`HERDR_SOCKET_PATH`, `HERDR_SESSION`, ...) is stripped from every spawned CLI, so the target
-  session is always explicit.
+  session is always explicit; a spawned server loses every inherited `HERDR_*` variable (then gets `ServerLaunch.env`).
 - A stopped server is not a discovery error; requests then fail with `server_not_running`.
 - `durable::Scope::plan(prefix)`: on Linux with systemd, `ensure_server` starts the server through
   `systemd-run --scope --collect --unit=teleflock-herdr-<session>-<pid>-<ms>.scope` (system manager for root;

@@ -197,12 +197,17 @@ function useEntries(): Entry[] {
     { id: "inbox", keys: ["needs you", "questions", "updates", "notifications"] },
     { id: "activity", keys: ["timeline", "feed", "history"] },
     { id: "usage", keys: ["cost", "tokens", "spend", "limits", "subscription"] },
+    { id: "wrapped", keys: ["wrapped", "week", "weekly", "digest", "recap", "summary", "share", "stats", "image"] },
     { id: "hosts", keys: ["machines", "connections"] },
     { id: "settings", keys: ["preferences", "options"] },
     { id: "automations", keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
     { id: "omp", keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },
-    { id: "mcp", keys: ["mcp", "tools", "servers", "model context protocol", "integrations", "plugins", "oauth"] },
+    { id: "mcp", keys: ["mcp", "tools", "servers", "model context protocol", "integrations", "oauth"] },
+    { id: "plugins", keys: ["skills", "plugins", "marketplace", "claude code plugins", "skill registry", "skillshare", "install", "extensions", "npm", "commands", "hooks"] },
     { id: "accounts", keys: ["accounts", "login", "sign in", "subscription", "provider", "claude", "chatgpt", "codex", "link account"] },
+    { id: "cleanup", keys: ["janitor", "worktrees", "disk", "space", "prune", "merged", "stale", "gc", "storage", "delete worktrees", "free space"] },
+    { id: "wall", keys: ["grid", "monitor", "big screen", "tiles", "2x2", "3x3", "split", "side by side", "transcripts"] },
+    { id: "ambient", keys: ["orbs", "tablet", "second screen", "display", "kiosk", "glance", "chime", "dashboard"] },
   ];
   for (const v of views) {
     const def: ViewDef = VIEWS[v.id];

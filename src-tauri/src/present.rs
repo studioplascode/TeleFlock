@@ -100,6 +100,18 @@ pub fn tag(host_id: &str, n: &Notification) -> String {
     if n.agent_id.is_empty() { format!("{host_id}/{}", n.id) } else { format!("{host_id}/{}", n.agent_id) }
 }
 
+/// What the user did with an OS notification (every desktop notifier reports through this).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToastEvent {
+    /// A button (`action_id`), the inline reply (`reply`), or the body itself (both `None`;
+    /// only Linux and macOS report that: Windows routes body clicks through the deep link).
+    Activated { host_id: String, notification_id: String, action_id: Option<String>, reply: Option<String> },
+    /// Closed by the user.
+    Dismissed { host_id: String, notification_id: String },
+}
+
+pub type Sink = std::sync::Arc<dyn Fn(ToastEvent) + Send + Sync>;
+
 /// "3 running · 2 need you" (tray tooltip, Android keep-alive text).
 pub fn summary(running: u32, needs: u32) -> String {
     match (running, needs) {

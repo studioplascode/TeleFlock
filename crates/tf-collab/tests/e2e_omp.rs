@@ -271,7 +271,7 @@ async fn e2e_against_real_omp() {
     s.pump("abort", 60, |s| s.turn_ended(mark.1).is_some()).await;
     let ended = s.turn_ended(mark.1).cloned().unwrap();
     eprintln!("[abort] {:?} after {:?}", ended, t_abort.elapsed());
-    assert_eq!(ended, Signal::TurnEnded { aborted: true, error: None });
+    assert_eq!(ended, Signal::TurnEnded { aborted: true, error: None, refusal: None });
 
     let raw = relay.stats().bytes_h2g - raw0;
     let out = s.out_bytes - out0;

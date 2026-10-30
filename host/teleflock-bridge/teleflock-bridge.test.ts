@@ -8,6 +8,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import teleflockBridge, {
+	applyRoleModels,
 	DialogHub,
 	fallbackApproval,
 	frameJson,
@@ -16,10 +17,20 @@ import teleflockBridge, {
 	LiveWriter,
 	raceDialog,
 	raceMember,
+	readRoleModels,
+	type RoleSettings,
+	type RoleStore,
+	roleModelsRequest,
 	runGuestAsk,
+	selectorLevel,
 	Throttle,
 	type Timers,
 	wireEvent,
+	wellFormedJson,
+	configNotices,
+	fallbackNotice,
+	installNotifyWrapper,
+	notifyNotice,
 } from "./teleflock-bridge";
 
 type Json = Record<string, unknown>;
@@ -130,6 +141,10 @@ function fakeTui() {
 		askDialog: dialog("askDialog", 1, undefined),
 		approve: dialog("approve", 1, "deny"),
 		setStatus: (_key: string, _text: string | undefined) => {},
+		notified: [] as unknown[][],
+		notify(...args: unknown[]) {
+			this.notified.push(args);
+		},
 		theme: { fg: (_color: string, text: string) => text },
 	};
 	return { target, open, runnerUi: trackUserWaits(target) as typeof target };
@@ -249,6 +264,32 @@ describe("LiveWriter", () => {
 		w.ctl({ t: "event", data: "x".repeat(60) });
 		expect(stalled).toBe(1);
 	});
+
+	test("a resync too large even clipped still goes out as a resync, without its in-flight frames", () => {
+		const sink = new FakeSink();
+		const keys: Json = {};
+		for (let i = 0; i < 400; i++) keys[`key-${i}-${"k".repeat(20)}`] = 1;
+		const logs: string[] = [];
+		const w = new LiveWriter(sink, {
+			resyncBytes: 2_000,
+			log: m => logs.push(m),
+			resync: seq => ({ t: "resync", seq, sessionId: "s1", lastEntryId: "e9", live: { streaming: true, frames: [{ t: "agents", keys }] } }),
+		});
+		w.start();
+		const [resync] = sink.frames();
+		// Before, a notice took its place and hostd waited for a resync that never came.
+		expect(resync).toEqual({ t: "resync", seq: 1, sessionId: "s1", lastEntryId: "e9", live: { streaming: true, frames: [] } });
+		expect(logs.some(l => l.includes("without its in-flight frames"))).toBe(true);
+	});
+
+	test("control frames with half a surrogate pair are written well-formed", () => {
+		const sink = new FakeSink();
+		const w = new LiveWriter(sink, { resync: seq => ({ t: "resync", seq }) });
+		// A session title cut inside an emoji (omp cuts text by UTF-16 index).
+		w.ctl({ t: "hello", state: { title: "Abgleich 🔍".slice(0, 10) } });
+		expect(sink.lines[0]).not.toMatch(/\\ud[89a-f][0-9a-f]{2}/);
+		expect((sink.frames()[0]!.state as Json).title).toBe("Abgleich \ufffd");
+	});
 });
 
 describe("frames", () => {
@@ -265,6 +306,26 @@ describe("frames", () => {
 		const cyclic: Json = { t: "bus", data: {} };
 		(cyclic.data as Json).self = cyclic;
 		expect(() => JSON.parse(frameJson(cyclic))).not.toThrow();
+	});
+
+	test("half a surrogate pair goes out as U+FFFD: hostd's serde_json refuses lone surrogate escapes", () => {
+		// What omp 18.13.3 sends while a `wait` runs: its completion probe cuts a subagent's `stage`
+		// to 80 UTF-16 units (`slice(0, 79)` + "…"), its progress keeps an 8 KiB `recentOutput` tail.
+		const stage = `${"Querverweise prüfen 🔍 und die Eingriffe abgleichen".slice(0, 21)}…`;
+		const tail = "🚀 weiter mit den Karten".slice(1);
+		const progress = { id: "QuerEingriffe", stage, recentOutput: [tail], completionPercent: 70 };
+		const frame = { t: "bus", channel: "task:subagent:progress", data: { progress } };
+		expect(JSON.stringify(frame)).toMatch(/\\ud83d/); // what bridge 2.0.0 wrote
+		const json = frameJson(frame);
+		expect(json).not.toMatch(/\\ud[89a-f][0-9a-f]{2}/);
+		const sent = JSON.parse(json) as { data: { progress: typeof progress } };
+		expect(sent.data.progress.stage).toBe("Querverweise prüfen \ufffd…");
+		expect(sent.data.progress.recentOutput).toEqual(["\ufffd weiter mit den Karten"]);
+		// Whole pairs, other escapes and text that only looks like an escape stay as they are.
+		const kept = JSON.stringify({ a: "🚀 ok", b: "C:\\udir \\ud83d", c: "\u0001 \"q\"" });
+		expect(wellFormedJson(kept)).toBe(kept);
+		// After an escaped backslash a lone surrogate is still repaired.
+		expect(JSON.parse(wellFormedJson(JSON.stringify({ x: "\\🔍".slice(0, 2) })))).toEqual({ x: "\\\ufffd" });
 	});
 
 	test("wireEvent drops the payloads that repeat other frames", () => {
@@ -791,8 +852,8 @@ describe("extension against a fake hostd", () => {
 		const hostd = await startHostd();
 		const omp = await bridged(hostd);
 		const hello = hostd.lines.find(l => l.t === "hello")!;
-		expect(hello.bridgeVersion).toBe("2.0.0");
-		expect(hello.caps).toEqual({ live: 1, dialogs: true, subagentCtl: false, prompt: true });
+		expect(hello.bridgeVersion).toBe("2.1.0");
+		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true });
 
 		const res = await request(hostd, "liveSubscribe");
 		expect(res.ok).toBe(true);
@@ -1090,5 +1151,239 @@ describe("LiveTracker", () => {
 		t.track({ type: "agent_end" });
 		expect(t.frames()).toEqual([]);
 		expect(t.streaming).toBe(false);
+	});
+});
+
+// ─── per-session model roles (2.1.0 `caps.roleModels`) ─────────────────────────────────────────
+
+/** omp's settings layers as the role ops see them: global → project → `--config` overlays →
+ *  runtime overrides; `disk` is what the overlay files hold now (hostd rewrote them). */
+function fakeRoleSettings(init: { global?: Json; project?: Json; overlay?: Json; runtime?: Json; files?: string[]; disk?: Json } = {}) {
+	const state = { global: init.global ?? {}, project: init.project ?? {}, overlay: init.overlay ?? {}, runtime: init.runtime ?? {}, disk: init.disk ?? {}, reloads: 0 };
+	const layers = (): Json[] => [state.runtime, state.overlay, state.project, state.global];
+	const roleIn = (layer: Json, role: string): string | undefined => {
+		const v = (layer.modelRoles as Json | undefined)?.[role];
+		return typeof v === "string" ? v : undefined;
+	};
+	const chainsIn = (layer: Json): Json => ((layer.retry as Json | undefined)?.fallbackChains as Json | undefined) ?? {};
+	const store: RoleStore = {
+		getModelRole: role => layers().map(l => roleIn(l, role)).find(v => v !== undefined),
+		getModelRoles: () => Object.assign({}, ...layers().reverse().map(l => (l.modelRoles as Json | undefined) ?? {})),
+		getModelRoleProvenance: role => ["runtime", "overlay", "project", "global"][layers().findIndex(l => roleIn(l, role) !== undefined)] ?? "default",
+		getGlobalModelRole: role => roleIn(state.global, role),
+		getProjectModelRole: role => roleIn(state.project, role),
+		getGlobalSettings: () => structuredClone(state.global),
+		getProjectSettings: () => structuredClone(state.project),
+		getConfigFiles: () => init.files ?? [],
+		reloadFromDisk: async () => {
+			state.reloads++;
+			state.overlay = structuredClone(state.disk);
+		},
+	};
+	const rs: RoleSettings = {
+		store: () => store,
+		roles: {
+			get: () => store.getModelRoles(),
+			override: (_scope, value) => void (state.runtime.modelRoles = value),
+			clearOverride: () => void delete state.runtime.modelRoles,
+		},
+		chains: {
+			get: () => Object.assign({}, ...layers().reverse().map(chainsIn)),
+			override: (_scope, value) => void (state.runtime.retry = { ...(state.runtime.retry as Json | undefined), fallbackChains: value }),
+			clearOverride: () => void delete state.runtime.retry,
+		},
+	};
+	return { rs, state };
+}
+
+describe("per-session model roles", () => {
+	const host = {
+		global: { modelRoles: { default: "a/g", smol: "a/s" }, retry: { fallbackChains: { default: ["a/x"] } } },
+		project: { modelRoles: { smol: "p/s" } },
+	};
+
+	test("the session's own roles and chains read apart from the host's", () => {
+		const { rs } = fakeRoleSettings({
+			...host,
+			overlay: { modelRoles: { task: "o/t" }, retry: { fallbackChains: { task: ["o/y"], default: ["a/x"] } } },
+			runtime: { modelRoles: { default: "r/d:high" } },
+			files: ["/h/omp-overlay.yml", "/h/agent-config/a1.yml"],
+		});
+		const view = readRoleModels(rs, "r/d");
+		expect(view.session).toEqual({ default: "r/d:high", task: "o/t" });
+		expect(view.host).toEqual({ default: "a/g", smol: "p/s" });
+		expect(view.hostChains).toEqual({ default: ["a/x"] });
+		// An overlay chain equal to the host's chain of that key reads as the host's.
+		expect(view.sessionChains).toEqual({ task: ["o/y"] });
+		expect(view).toMatchObject({ active: "r/d", overlays: ["/h/omp-overlay.yml", "/h/agent-config/a1.yml"] });
+	});
+
+	test("set reloads the agent's overlay, replaces the runtime layer and follows a changed default", async () => {
+		const file = "/h/agent-config/a1.yml";
+		const { rs, state } = fakeRoleSettings({
+			...host,
+			overlay: { modelRoles: { task: "o/t" } },
+			runtime: { modelRoles: { default: "r/d:high" } },
+			files: ["/h/omp-overlay.yml", file],
+			disk: { modelRoles: { smol: "n/s:low" } },
+		});
+		const followed: string[] = [];
+		const warning = await applyRoleModels(rs, { roles: { smol: "n/s:low" }, chains: { default: ["n/z:off"] }, overlay: file }, async selector => {
+			followed.push(selector);
+			return "no credentials for a/g";
+		});
+		expect(state.reloads).toBe(1);
+		const view = readRoleModels(rs);
+		// `task` (gone from the rewritten overlay) and `default` (gone from the runtime layer) are the host's again.
+		expect(view.session).toEqual({ smol: "n/s:low" });
+		expect(rs.store().getModelRole("default")).toBe("a/g");
+		expect(view.sessionChains).toEqual({ default: ["n/z:off"] });
+		expect(followed).toEqual(["a/g"]);
+		expect(warning).toBe("no credentials for a/g");
+	});
+
+	test("a session without that overlay reloads nothing; an unchanged default switches nothing; empty maps clear", async () => {
+		const { rs, state } = fakeRoleSettings({ ...host, files: ["/h/omp-overlay.yml"] });
+		let followed = 0;
+		const follow = async () => {
+			followed++;
+			return undefined;
+		};
+		await applyRoleModels(rs, { roles: { smol: "x/y" }, chains: {}, overlay: "/h/agent-config/other.yml" }, follow);
+		expect(state.reloads).toBe(0);
+		expect(followed).toBe(0);
+		expect(readRoleModels(rs).session).toEqual({ smol: "x/y" });
+		await applyRoleModels(rs, { roles: {}, chains: {} }, follow);
+		expect(readRoleModels(rs).session).toEqual({});
+		expect(state.runtime).toEqual({});
+	});
+
+	test("set params are checked", () => {
+		expect(roleModelsRequest({ roles: { smol: "a/b:low", designer: "x/y,z/w" }, fallbackChains: { "a/*": ["b/*"], task: [] }, overlay: "/f.yml" })).toEqual({
+			roles: { smol: "a/b:low", designer: "x/y,z/w" },
+			chains: { "a/*": ["b/*"], task: [] },
+			overlay: "/f.yml",
+		});
+		expect(roleModelsRequest({})).toEqual({ roles: {}, chains: {}, overlay: undefined });
+		const code = (p: Json): string | undefined => {
+			try {
+				roleModelsRequest(p);
+				return undefined;
+			} catch (e) {
+				return (e as { code?: string }).code;
+			}
+		};
+		expect(code({ roles: { "1st": "a/b" } })).toBe("invalid_params");
+		expect(code({ roles: JSON.parse('{"__proto__":"a/b"}') as Json })).toBe("invalid_params");
+		expect(code({ roles: { smol: "gpt-5" } })).toBe("invalid_params");
+		expect(code({ roles: { smol: "a/b c" } })).toBe("invalid_params");
+		expect(code({ roles: [] })).toBe("invalid_params");
+		expect(code({ fallbackChains: { "bad key": ["a/b"] } })).toBe("invalid_params");
+		expect(code({ fallbackChains: { default: "a/b" } })).toBe("invalid_params");
+	});
+
+	test("thinking suffixes", () => {
+		expect(selectorLevel("a/b:high")).toBe("high");
+		expect(selectorLevel("a/b:low,c/d")).toBe("low");
+		expect(selectorLevel("ollama/llama3:8b")).toBeUndefined();
+		expect(selectorLevel("a/b:constructor")).toBeUndefined();
+		expect(selectorLevel("a/b")).toBeUndefined();
+	});
+
+	test("a bridge without omp's settings internals announces no roleModels and refuses the ops", async () => {
+		const hostd = await startHostd();
+		await bridged(hostd);
+		const hello = hostd.lines.find(l => l.t === "hello")!;
+		expect((hello.caps as Json).roleModels).toBe(false);
+		const res = await request(hostd, "getRoleModels");
+		expect(res).toMatchObject({ ok: false, error: { code: "unsupported" } });
+	});
+});
+
+describe("refusals on the live feed", () => {
+	test("assistant messages leave without the fallback credit omp keeps for itself", () => {
+		const message = {
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: "Refusal (cyber): exploit code",
+			stopDetails: { type: "refusal", category: "cyber", explanation: "exploit code", fallback_credit_token: "fct_secret", fallback_has_prefill_claim: true },
+			fallbackCreditHandle: { token: "fct_secret", params: { messages: ["the whole request"] } },
+		};
+		for (const type of ["message_start", "message_update", "message_end"]) {
+			const ev = type === "message_update" ? { type, message, assistantMessageEvent: { type: "done", partial: message } } : { type, message };
+			const sent = JSON.stringify(wireEvent(ev));
+			expect(sent).not.toContain("fct_secret");
+			expect(sent).not.toContain("the whole request");
+			expect(JSON.parse(sent).message.stopDetails).toEqual({ type: "refusal", category: "cyber", explanation: "exploit code" });
+		}
+		// omp's own object is untouched, and messages without credit go out as they are.
+		expect(message.fallbackCreditHandle.token).toBe("fct_secret");
+		const plain = { type: "message_end", message: { role: "assistant", content: [], stopReason: "stop" } };
+		expect(wireEvent(plain)).toBe(plain);
+	});
+});
+
+describe("notices (caps.notices)", () => {
+	test("omp's TUI-only warnings map to notice events", () => {
+		expect(fallbackNotice({ type: "retry_fallback_applied", from: "anthropic/claude-opus-5", to: "openai/gpt-6-luna", role: "default", reason: "Refusal (cyber): x" })).toEqual({
+			type: "notice",
+			level: "warning",
+			message: "Fallback: anthropic/claude-opus-5 → openai/gpt-6-luna\nRefusal (cyber): x",
+			source: "fallback",
+		});
+		expect(fallbackNotice({ type: "retry_fallback_succeeded", model: "openai/gpt-6-luna", role: "default" })).toMatchObject({ level: "info", message: "Fallback succeeded on openai/gpt-6-luna" });
+		expect(fallbackNotice({ type: "agent_end" })).toBeUndefined();
+		expect(notifyNotice("\x1b[33mDeploy failed\x1b[0m", "error")).toEqual({ type: "notice", level: "error", message: "Deploy failed", source: "extension" });
+		expect(notifyNotice("hi", undefined)).toMatchObject({ level: "info" });
+		expect(notifyNotice("  ", "warning")).toBeUndefined();
+		const session = { configWarnings: ["unknown model foo/bar", "unknown model foo/bar"], getAdvisorConfigWarnings: () => ["no advisor model"] };
+		const notices = configNotices(session);
+		expect(notices.map(n => n.message)).toEqual(["unknown model foo/bar", "WATCHDOG.yml: no advisor model"]);
+		expect(notices[0]!.key).toBe(configNotices({ configWarnings: ["unknown model foo/bar"] })[0]!.key);
+		expect(String(notices[0]!.key)).toMatch(/^config:[0-9a-f]{16}$/);
+	});
+
+	test("the notify wrapper sends the notice and omp still shows it", () => {
+		const tui = fakeTui();
+		const sent: unknown[] = [];
+		const make = (original: (...a: unknown[]) => unknown) =>
+			function (this: unknown, ...args: unknown[]) {
+				sent.push(notifyNotice(args[0], args[1]));
+				return original.apply(this, args);
+			};
+		const token = {};
+		expect(installNotifyWrapper(tui.runnerUi, token, make)).toBe(true);
+		const before = Object.getOwnPropertyDescriptor(tui.target, "notify")!.value;
+		expect(installNotifyWrapper(tui.runnerUi, token, make)).toBe(true);
+		expect(Object.getOwnPropertyDescriptor(tui.target, "notify")!.value).toBe(before);
+		// Any proxy over the shared context (extensions, tools) calls it.
+		(trackUserWaits(tui.target) as typeof tui.target).notify("MCP server github failed to start", "warning");
+		expect(sent).toEqual([{ type: "notice", level: "warning", message: "MCP server github failed to start", source: "extension" }]);
+		expect(tui.target.notified).toEqual([["MCP server github failed to start", "warning"]]);
+		expect(installNotifyWrapper({ select() {} }, token, make)).toBe(false);
+	});
+
+	test("the live feed carries them: fallbacks and notify live, config warnings in every resync", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd);
+		const hello = hostd.lines.find(l => l.t === "hello")!;
+		expect((hello.caps as Json).notices).toBe(true);
+		(omp.session as unknown as Json).configWarnings = ["retry.fallbackChains: unknown model foo/bar"];
+		await request(hostd, "liveSubscribe");
+		const resync = hostd.lines.find(l => l.t === "resync") as Json & { live: { frames: Json[] } };
+		const keyed = resync.live.frames.filter(f => f.t === "event" && (f.event as Json).type === "notice");
+		expect(keyed).toEqual([{ t: "event", event: expect.objectContaining({ level: "warning", source: "config", message: "retry.fallbackChains: unknown model foo/bar" }) }]);
+		omp.session.emit({ type: "retry_fallback_applied", from: "a/x", to: "b/y", role: "default" });
+		omp.tui.runnerUi.notify("Lab warning", "warning");
+		omp.session.emit({ type: "config_warnings_changed" });
+		await until(() => hostd.live().filter(l => l.t === "live" && (l.f.event as Json | undefined)?.type === "notice").length >= 3);
+		const notices = hostd.live().filter(l => l.t === "live").map(l => l.f.event as Json);
+		expect(notices.map(n => [n.source, n.message])).toEqual([
+			["fallback", "Fallback: a/x → b/y"],
+			["extension", "Lab warning"],
+			["config", "retry.fallbackChains: unknown model foo/bar"],
+		]);
+		expect(notices[2]!.key).toBe((keyed[0]!.event as Json).key);
 	});
 });

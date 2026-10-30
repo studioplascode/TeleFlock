@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# herdr as seen from inside a TeleFlock lab (scripts/lab/run puts this directory first on PATH).
+# Runs the real herdr only when the environment is a lab's own: HOME and XDG_CONFIG_HOME under
+# /tmp/tf-lab-*, and any inherited socket path pointing into the lab. Anything else is refused,
+# so a lab command can never address the real server.
+set -euo pipefail
+
+die() { echo "lab herdr: $*" >&2; exit 70; }
+[ -n "${TF_LAB:-}" ] || die "not inside scripts/lab/run"
+lab_root="/tmp/tf-lab-$TF_LAB"
+case "${HOME:-}" in "$lab_root"/*) ;; *) die "HOME=$HOME is not under $lab_root" ;; esac
+case "${XDG_CONFIG_HOME:-}" in "$lab_root"/*) ;; *) die "XDG_CONFIG_HOME is not under $lab_root" ;; esac
+if [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+  case "$HERDR_SOCKET_PATH" in "$lab_root"/*) ;; *) die "HERDR_SOCKET_PATH=$HERDR_SOCKET_PATH is outside the lab" ;; esac
+fi
+
+# The next herdr on PATH after this wrapper.
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+real=""
+IFS=: read -ra dirs <<<"$PATH"
+for d in "${dirs[@]}"; do
+  [ "$d" = "$self_dir" ] && continue
+  if [ -x "$d/herdr" ] && [ ! "$d/herdr" -ef "${BASH_SOURCE[0]}" ]; then real="$d/herdr"; break; fi
+done
+[ -n "$real" ] || die "no herdr binary on PATH"
+exec "$real" "$@"

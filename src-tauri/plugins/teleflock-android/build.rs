@@ -12,6 +12,8 @@ const COMMANDS: &[&str] = &[
     "start_dictation",
     "stop_dictation",
     "cancel_dictation",
+    "take_shares",
+    "share_image",
 ];
 
 fn main() {

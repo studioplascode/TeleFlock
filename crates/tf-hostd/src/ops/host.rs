@@ -1,6 +1,6 @@
-//! `host.*` methods: health, usage (omp `stats.db`, read-only), model catalog, past
-//! sessions + resume, setup checklist + fixes, activity; plus [`probe_info`] /
-//! [`setup_status`] / [`health`] for the state store.
+//! `host.*` methods: health, model catalog, past sessions + resume, setup checklist + fixes,
+//! activity; plus [`probe_info`] / [`setup_status`] / [`health`] for the state store.
+//! `host.usage` lives in [`crate::ops::usage`], `host.limits` in [`crate::ops::limits`].
 //!
 //! Nothing here mutates omp or herdr configuration or installs anything except [`setup_apply`],
 //! which only runs when a client calls `host.setupApply` with explicit fix ids, and
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tf_proto::{
     ActivityPage, AgentSpec, ApiError, HostHealth, HostInfo, HostMethod, ModelCatalog, ModelInfo, PastSession, PastSessions,
     ResumeParams, RoleBinding, SessionsParams, SetupFixError, SetupIssue, SetupStatus, Severity, Started, ThinkingLevel,
-    UsageDay, UsageModel, UsageReport, UsageTotals, VersionInfo,
+    VersionInfo,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{info, warn};
@@ -45,10 +45,7 @@ const SESSION_COUNT_MAX: u64 = 16 * 1024 * 1024;
 pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
         HostMethod::HostHealthReq(_) => to_value(health()),
-        HostMethod::HostUsage(p) => {
-            let days = p.days.clamp(1, 366);
-            to_value(tokio::task::spawn_blocking(move || usage(&stats_db(), days)).await.map_err(join_err)??)
-        }
+        HostMethod::HostUsage(p) => crate::ops::usage::handle(ctx, p).await,
         HostMethod::HostLimits(p) => to_value(crate::ops::limits::limits(ctx, p.refresh.unwrap_or(false)).await?),
         HostMethod::HostModels(_) => to_value(models().await?),
         HostMethod::HostSessions(p) => to_value(sessions(ctx, &p).await?),
@@ -59,7 +56,14 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
             let (events, has_more) = ctx.state.activity_page(p.before, p.limit.unwrap_or(50).clamp(1, 500) as usize, p.agent_id.as_deref());
             to_value(ActivityPage { events, has_more })
         }
+        HostMethod::HostWrapped(p) => crate::ops::wrapped::handle(ctx, p).await,
         HostMethod::HostToolsUpdate(_) | HostMethod::HostToolsConfig(_) => crate::ops::tools::handle(ctx, req).await,
+        HostMethod::HostAutoAnswerSet(p) => to_value(crate::autoanswer::set_default(ctx, p)?),
+        HostMethod::HostAutoResume(_) => to_value(crate::recovery::config()?),
+        HostMethod::HostAutoResumeSet(p) => to_value(crate::recovery::set_config(p.enabled, p.bring_back)?),
+        HostMethod::HostHerdrRestart(_) | HostMethod::HostHerdrLoad(_) | HostMethod::HostHerdrConfig(_) => {
+            crate::herdr_health::handle(ctx, req).await
+        }
         other => Err(ApiError::new("unknown_method", format!("{} is not a host method", other.name()))),
     }
 }
@@ -73,10 +77,6 @@ fn join_err(e: tokio::task::JoinError) -> ApiError {
 /// omp's agent dir (`PI_CODING_AGENT_DIR`, else `~/.omp/agent`).
 pub(crate) fn omp_agent_dir() -> PathBuf {
     std::env::var_os("PI_CODING_AGENT_DIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| home_dir().join(".omp").join("agent"))
-}
-
-fn stats_db() -> PathBuf {
-    home_dir().join(".omp").join("stats.db")
 }
 
 /// The omp TeleFlock runs: the first one on PATH or in the well-known dirs that can start. A
@@ -219,7 +219,7 @@ mod platform {
     }
 }
 
-// ───────────────────────────── usage ─────────────────────────────
+// ───────────────────────────── read-only SQLite (omp's databases) ─────────────────────────────
 
 pub(crate) fn open_ro(path: &Path) -> Result<Option<rusqlite::Connection>, ApiError> {
     if !path.exists() {
@@ -250,77 +250,6 @@ fn uri_path(p: &Path) -> String {
         out.insert(0, '/');
     }
     out
-}
-
-fn sql_err(e: rusqlite::Error) -> ApiError {
-    ApiError::new("io_error", format!("stats.db: {e}"))
-}
-
-/// Usage totals from omp's `stats.db` (read-only): today, the last `days` local days
-/// (oldest first, zero-filled) and per-model totals over that window. `stats.db` is as
-/// current as omp's last stats sync.
-pub fn usage(db: &Path, days: u32) -> Result<UsageReport, ApiError> {
-    let empty = || UsageTotals { cost_usd: 0.0, tokens: 0, input: 0, output: 0 };
-    let Some(conn) = open_ro(db)? else {
-        return Ok(UsageReport { today: empty(), days: zero_days(days), models: vec![] });
-    };
-    let today = conn
-        .query_row(
-            "SELECT COALESCE(SUM(cost_total),0), COALESCE(SUM(total_tokens),0),
-                    COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens),0), COALESCE(SUM(output_tokens),0)
-             FROM messages
-             WHERE timestamp >= CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER) * 1000",
-            [],
-            |r| Ok(UsageTotals { cost_usd: r.get(0)?, tokens: r.get::<_, i64>(1)? as u64, input: r.get::<_, i64>(2)? as u64, output: r.get::<_, i64>(3)? as u64 }),
-        )
-        .map_err(sql_err)?;
-    let back = format!("-{} days", days.saturating_sub(1));
-    let mut stmt = conn
-        .prepare(
-            "WITH RECURSIVE d(day) AS (
-                 SELECT date('now','localtime', ?1)
-                 UNION ALL SELECT date(day, '+1 day') FROM d WHERE day < date('now','localtime')
-             ),
-             agg AS (
-                 SELECT date(timestamp/1000,'unixepoch','localtime') AS day, SUM(cost_total) AS cost, SUM(total_tokens) AS tokens
-                 FROM messages
-                 WHERE timestamp >= CAST(strftime('%s', date('now','localtime', ?1), 'utc') AS INTEGER) * 1000
-                 GROUP BY 1
-             )
-             SELECT d.day, COALESCE(agg.cost,0), COALESCE(agg.tokens,0) FROM d LEFT JOIN agg ON agg.day = d.day ORDER BY d.day",
-        )
-        .map_err(sql_err)?;
-    let days_v = stmt
-        .query_map([&back], |r| Ok(UsageDay { day: r.get(0)?, cost_usd: r.get(1)?, tokens: r.get::<_, i64>(2)? as u64 }))
-        .map_err(sql_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(sql_err)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT provider || '/' || model, SUM(cost_total), SUM(total_tokens) FROM messages
-             WHERE timestamp >= CAST(strftime('%s', date('now','localtime', ?1), 'utc') AS INTEGER) * 1000
-             GROUP BY provider, model ORDER BY 2 DESC, 3 DESC",
-        )
-        .map_err(sql_err)?;
-    let models = stmt
-        .query_map([&back], |r| Ok(UsageModel { model: r.get(0)?, cost_usd: r.get(1)?, tokens: r.get::<_, i64>(2)? as u64 }))
-        .map_err(sql_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(sql_err)?;
-    Ok(UsageReport { today, days: days_v, models })
-}
-
-fn zero_days(days: u32) -> Vec<UsageDay> {
-    let now = crate::util::now_ms();
-    (0..days as i64)
-        .rev()
-        .map(|i| UsageDay { day: crate::util::local_day(now - i * 86_400_000), cost_usd: 0.0, tokens: 0 })
-        .collect()
-}
-
-/// Today's totals (host-local day) for the board ticker.
-pub fn usage_today() -> UsageTotals {
-    usage(&stats_db(), 1).map(|r| r.today).unwrap_or(UsageTotals { cost_usd: 0.0, tokens: 0, input: 0, output: 0 })
 }
 
 // ───────────────────────────── models ─────────────────────────────
@@ -488,12 +417,13 @@ pub(crate) fn parse_session_head(first: &str, second: &str) -> SessionHead {
 }
 
 /// `<ts>_<uuid>.jsonl` → `<uuid>`.
-fn id_from_file_name(p: &Path) -> Option<String> {
+pub(crate) fn id_from_file_name(p: &Path) -> Option<String> {
     let stem = p.file_stem()?.to_str()?;
     stem.rsplit_once('_').map(|(_, id)| id.to_string())
 }
 
-fn read_head(p: &Path) -> SessionHead {
+/// Title slot and header of a session file (the first 64 KiB).
+pub(crate) fn read_head(p: &Path) -> SessionHead {
     let Ok(f) = std::fs::File::open(p) else { return SessionHead::default() };
     let mut r = std::io::BufReader::new(f.take(64 * 1024));
     let (mut a, mut b) = (String::new(), String::new());
@@ -517,7 +447,8 @@ fn count_messages(p: &Path, size: u64) -> Option<u32> {
     Some(n)
 }
 
-fn session_titles() -> HashMap<String, String> {
+/// omp's session titles (`<agent dir>/history.db`, read-only): session id → title.
+pub(crate) fn session_titles() -> HashMap<String, String> {
     let db = omp_agent_dir().join("history.db");
     let Ok(Some(conn)) = open_ro(&db) else { return HashMap::new() };
     let Ok(mut stmt) = conn.prepare("SELECT session_id, title FROM session_titles") else { return HashMap::new() };
@@ -584,7 +515,7 @@ pub(crate) fn scan_sessions(dir: &Path, cwd: Option<&Path>, limit: usize, live: 
 
 /// Session file / session id → (agent id, running) for every omp agent on the board (parked
 /// agents are not running).
-fn live_sessions(ctx: &Ctx) -> HashMap<String, (String, bool)> {
+pub(crate) fn live_sessions(ctx: &Ctx) -> HashMap<String, (String, bool)> {
     let mut m = HashMap::new();
     for a in ctx.state.snapshot().agents {
         if let Some(omp) = &a.omp {
@@ -629,8 +560,41 @@ pub async fn resume(ctx: &Ctx, p: ResumeParams) -> Result<Started, ApiError> {
         return Err(ApiError::new("busy", format!("this session is open in agent {name}"))
             .with_hint("Resuming a live session would fork it. Open that agent instead."));
     }
-    let spec = AgentSpec { name: None, kind: "omp".into(), model: None, thinking: None, plan: false, prompt: None, images: Vec::new() };
-    crate::ops::agent::start_agent(ctx, p.target, &spec, Some(&file_s)).await
+    // Never a second omp on one session, even one the board does not show yet.
+    if let Some(pid) = crate::restart::herdr::omp_running(&file_s, Some(&id).filter(|s| !s.is_empty()).map(String::as_str), &[]) {
+        return Err(ApiError::new("busy", format!("omp already runs this session (pid {pid})")).with_hint("It shows up on the board in a moment; open that agent instead."));
+    }
+    let spec = AgentSpec {
+        name: resume_name(ctx, &file, &id).await,
+        kind: "omp".into(),
+        model: None,
+        thinking: None,
+        plan: false,
+        prompt: None,
+        images: Vec::new(),
+        role_models: Default::default(),
+        fallback_chains: Default::default(),
+        auto_answer: None,
+    };
+    crate::ops::agent::start_agent(ctx, p.target, &spec, Some(crate::ops::agent::SessionArg::Resume(&file_s))).await
+}
+
+/// The name a resumed session's agent gets (`host.resume`): the one its agent had (the agent
+/// ledger, `crate::restart`), else one made from the session's title; unique among the board's
+/// live agents. `None`: neither is known (the launch derives one from the folder).
+async fn resume_name(ctx: &Ctx, file: &Path, id: &str) -> Option<String> {
+    let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().filter(|a| a.parked.is_none()).map(|a| a.name).collect();
+    let path = file.to_path_buf();
+    let head = tokio::task::spawn_blocking(move || read_head(&path)).await.ok()?;
+    let sid = head.id.clone().or_else(|| Some(id.to_string()).filter(|s| !s.is_empty()));
+    if let Some(name) = crate::restart::name_for(ctx, &file.display().to_string(), sid.as_deref()) {
+        return Some(crate::restart::unique_name(&name, &taken));
+    }
+    let titled = match sid.clone() {
+        Some(s) => tokio::task::spawn_blocking(move || session_titles().remove(&s)).await.ok().flatten(),
+        None => None,
+    };
+    crate::restart::name_from_title(&titled.or(head.title)?, &taken)
 }
 
 // ───────────────────────────── setup ─────────────────────────────
@@ -646,34 +610,68 @@ fn relay_url(port: u16) -> String {
 #[derive(Debug, PartialEq)]
 enum IntegrationState {
     Current,
-    Outdated,
+    /// Installed version and the one this herdr ships (`v9`, `v10`), when herdr said.
+    Outdated(Option<(String, String)>),
     Missing,
     Unknown,
 }
 
+/// herdr's omp integration: the server's `integration.list` for the state, `herdr integration
+/// status` (no server needed) for the versions, and as the fallback.
 async fn herdr_integration(ctx: &Ctx) -> IntegrationState {
-    match ctx.herdr.request::<Value>("integration.list", json!({})).await {
-        Ok(v) => {
-            let state = v
-                .get("integrations")
-                .and_then(Value::as_array)
-                .and_then(|a| a.iter().find(|i| i.get("target").and_then(Value::as_str) == Some("omp")))
-                .and_then(|i| i.get("state").and_then(Value::as_str))
-                .unwrap_or("");
-            match state {
-                "current" | "installed" => IntegrationState::Current,
-                "outdated" => IntegrationState::Outdated,
-                "not_installed" => IntegrationState::Missing,
-                _ => IntegrationState::Unknown,
-            }
-        }
-        Err(_) => {
-            if omp_agent_dir().join("extensions").join("herdr-omp-agent-state.ts").is_file() {
-                IntegrationState::Current
-            } else {
-                IntegrationState::Unknown
-            }
-        }
+    let (listed, status) = tokio::join!(ctx.herdr.request::<Value>("integration.list", json!({})), ctx.herdr.integration_status());
+    let cli = status.ok().as_deref().and_then(omp_integration_line).map(parse_integration_line);
+    let state = match listed {
+        Ok(v) => match v
+            .get("integrations")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find(|i| i.get("target").and_then(Value::as_str) == Some("omp")))
+            .and_then(|i| i.get("state").and_then(Value::as_str))
+            .unwrap_or("")
+        {
+            "current" | "installed" => IntegrationState::Current,
+            "outdated" => IntegrationState::Outdated(None),
+            "not_installed" => IntegrationState::Missing,
+            _ => IntegrationState::Unknown,
+        },
+        Err(_) => match &cli {
+            Some(s) => match s {
+                IntegrationState::Outdated(_) => IntegrationState::Outdated(None),
+                IntegrationState::Current => IntegrationState::Current,
+                IntegrationState::Missing => IntegrationState::Missing,
+                IntegrationState::Unknown => IntegrationState::Unknown,
+            },
+            None if omp_agent_dir().join("extensions").join("herdr-omp-agent-state.ts").is_file() => IntegrationState::Current,
+            None => IntegrationState::Missing,
+        },
+    };
+    match (state, cli) {
+        (IntegrationState::Outdated(_), Some(IntegrationState::Outdated(v))) => IntegrationState::Outdated(v),
+        (s, _) => s,
+    }
+}
+
+/// The `omp:` line of `herdr integration status`.
+fn omp_integration_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| l.starts_with("omp:"))
+}
+
+/// `omp: outdated (v9 < v10) (<path>)`, `omp: current (v10) (<path>)`, `omp: not installed`,
+/// `omp: needs repair (v10) (<path>)`.
+fn parse_integration_line(line: &str) -> IntegrationState {
+    let rest = line.trim_start_matches("omp:").trim();
+    let versions = rest.split_once('(').and_then(|(_, r)| r.split_once(')')).and_then(|(inner, _)| {
+        let (a, b) = inner.split_once('<')?;
+        Some((a.trim().to_string(), b.trim().to_string()))
+    });
+    if rest.starts_with("outdated") || rest.starts_with("needs repair") {
+        IntegrationState::Outdated(versions)
+    } else if rest.starts_with("current") {
+        IntegrationState::Current
+    } else if rest.starts_with("not installed") {
+        IntegrationState::Missing
+    } else {
+        IntegrationState::Unknown
     }
 }
 
@@ -681,14 +679,15 @@ async fn herdr_integration(ctx: &Ctx) -> IntegrationState {
 pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
     let port = ctx.relay_port;
     let omp = omp_bin();
-    let (integration, sharing, login_bound, missing) = tokio::join!(
+    let (integration, sharing, login_bound, missing, github) = tokio::join!(
         herdr_integration(ctx),
         async {
             let bin = omp.as_ref()?;
             Some(collab_settings(bin).await)
         },
         scope::herdr_in_login_session(&ctx.herdr.endpoint().socket),
-        install::missing(ctx)
+        install::missing(ctx),
+        crate::ops::gh_auth::setup(ctx)
     );
     let installed = bridge_install_path();
     let bridge_installed = installed.is_file();
@@ -697,15 +696,18 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
 
     // What is not installed comes first: everything else builds on omp and herdr.
     let mut issues = missing.core;
-    match integration {
+    match &integration {
         // herdr's own installer installs it, once herdr is there.
         _ if missing.herdr => {}
         IntegrationState::Current => {}
-        IntegrationState::Outdated => issues.push(SetupIssue {
+        IntegrationState::Outdated(versions) => issues.push(SetupIssue {
             id: FIX_HERDR_INTEGRATION.into(),
             severity: Severity::Warn,
             title: "Update herdr's omp integration".into(),
-            detail: "herdr's omp state integration is outdated; agent states may be reported incorrectly.".into(),
+            detail: format!(
+                "herdr's omp integration is out of date{}: until it is updated, herdr may show omp agents as idle while they work, or miss that they wait for you (runs `herdr integration install omp`).",
+                versions.as_ref().map(|(have, want)| format!(" ({have}; this herdr ships {want})")).unwrap_or_default()
+            ),
             fixable: true,
             recommended: true,
         }),
@@ -758,8 +760,19 @@ pub async fn setup_status(ctx: &Ctx) -> SetupStatus {
     issues.extend(login_bound.map(|b| scope::issue(&b, &ctx.herdr_session)));
     issues.extend(ctx.omp.relay_issue());
     issues.extend(missing.extras);
+    issues.extend(github.issues);
     let (applying, failed) = lock(&APPLYING).report(&issues);
-    SetupStatus { herdr_integration: integration == IntegrationState::Current, global_sharing, global_bridge: bridge_installed, relay, issues, applying, failed }
+    SetupStatus {
+        herdr_integration: integration == IntegrationState::Current,
+        global_sharing,
+        global_bridge: bridge_installed,
+        relay,
+        issues,
+        applying,
+        failed,
+        gh_signed_in: github.gh_signed_in,
+        git_identity: github.git_identity,
+    }
 }
 
 /// (size, mtime) of a file: what the probe caches below are keyed on.
@@ -996,7 +1009,7 @@ where
 }
 
 /// Re-probes the host and publishes `HostInfo`; returns its checklist.
-async fn publish(ctx: &Ctx) -> SetupStatus {
+pub(crate) async fn publish(ctx: &Ctx) -> SetupStatus {
     let info = probe_info(ctx).await;
     let setup = info.setup.clone();
     ctx.state.set_info(info);
@@ -1124,7 +1137,7 @@ fn version_string(raw: &str) -> String {
     }
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     #[cfg(unix)]
     {
         let mut buf = [0u8; 256];
@@ -1212,6 +1225,10 @@ pub async fn probe_info(ctx: &Ctx) -> HostInfo {
         relay_port: ctx.relay_port,
         setup,
         tools: None,
+        // Kept by the state store (`set_info`): the session's decide-for-me default.
+        auto_answer: None,
+        // Kept by the state store (`set_info`): the herdr server's health (`crate::herdr_health`).
+        herdr_health: None,
         pruned: Vec::new(),
     }
 }
@@ -1226,6 +1243,17 @@ mod tests {
         assert_eq!(parse_version("herdr 0.9.0"), Some((0, 9, 0)));
         assert_eq!(parse_version("v2"), Some((2, 0, 0)));
         assert_eq!(version_string("omp/18.12.3"), "18.12.3");
+    }
+
+    #[test]
+    fn integration_status_lines() {
+        let text = "pi: current (v4) (/root/.pi/agent/extensions/herdr.ts)\nomp: outdated (v9 < v10) (/root/.omp/agent/extensions/herdr-omp-agent-state.ts)\n";
+        let line = omp_integration_line(text).unwrap();
+        assert_eq!(parse_integration_line(line), IntegrationState::Outdated(Some(("v9".into(), "v10".into()))));
+        assert_eq!(parse_integration_line("omp: needs repair (v10) (/x)"), IntegrationState::Outdated(None));
+        assert_eq!(parse_integration_line("omp: current (v10) (/x)"), IntegrationState::Current);
+        assert_eq!(parse_integration_line("omp: not installed"), IntegrationState::Missing);
+        assert_eq!(omp_integration_line("pi: current (v4) (/x)\n"), None);
     }
 
     #[test]
@@ -1294,49 +1322,6 @@ mod tests {
         assert_eq!(only_x.len(), 1);
         assert_eq!(only_x[0].cwd.as_deref(), Some("/tmp/x"));
         assert_eq!(scan_sessions(td.path(), None, 1, &HashMap::new()).len(), 1);
-    }
-
-    fn stats_fixture(path: &Path) {
-        let c = rusqlite::Connection::open(path).unwrap();
-        c.execute_batch(
-            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_file TEXT, model TEXT, provider TEXT, timestamp INTEGER,
-               input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
-               total_tokens INTEGER, cost_total REAL);",
-        )
-        .unwrap();
-        let now = crate::util::now_ms();
-        let rows = [
-            (now, "m1", "p", 10, 5, 100, 0, 115, 1.5),
-            (now, "m2", "q", 1, 1, 0, 0, 2, 0.25),
-            (now - 2 * 86_400_000, "m1", "p", 1000, 0, 0, 0, 1000, 10.0),
-            (now - 40 * 86_400_000, "m1", "p", 1, 1, 1, 1, 4, 99.0),
-        ];
-        for (ts, model, prov, i, o, cr, cw, t, cost) in rows {
-            c.execute(
-                "INSERT INTO messages (session_file, model, provider, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_total) VALUES ('f',?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                rusqlite::params![model, prov, ts, i, o, cr, cw, t, cost],
-            )
-            .unwrap();
-        }
-    }
-
-    #[test]
-    fn usage_report_from_stats_db() {
-        let td = tempfile::tempdir().unwrap();
-        let db = td.path().join("stats.db");
-        stats_fixture(&db);
-        let r = usage(&db, 7).unwrap();
-        assert!((r.today.cost_usd - 1.75).abs() < 1e-9);
-        assert_eq!((r.today.tokens, r.today.input, r.today.output), (117, 111, 6));
-        assert_eq!(r.days.len(), 7);
-        assert_eq!(r.days.last().unwrap().day, crate::util::local_day(crate::util::now_ms()));
-        assert!((r.days.iter().map(|d| d.cost_usd).sum::<f64>() - 11.75).abs() < 1e-9);
-        assert_eq!(r.models[0].model, "p/m1");
-        assert!((r.models[0].cost_usd - 11.5).abs() < 1e-9);
-        // read-only: the file is untouched and a missing db is just empty
-        let missing = usage(&td.path().join("nope.db"), 3).unwrap();
-        assert_eq!(missing.days.len(), 3);
-        assert!(missing.models.is_empty());
     }
 
     #[test]

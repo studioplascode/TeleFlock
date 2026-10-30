@@ -67,6 +67,11 @@ impl PaneProcs {
         self.by_pane.retain(|k, _| live.contains(k));
     }
 
+    /// Pane → its shell's pid, where known (`herdr_health`: background jobs of idle shells).
+    pub fn shells(&self) -> HashMap<String, u32> {
+        self.by_pane.iter().filter_map(|(k, e)| Some((k.clone(), e.shell_pid?))).collect()
+    }
+
     /// Re-reads the foreground process of panes not read for [`READ_EVERY`] (Linux; no-op elsewhere).
     pub fn refresh(&mut self) {
         if !cfg!(target_os = "linux") {

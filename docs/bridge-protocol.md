@@ -84,7 +84,7 @@ interface BridgeSlot {
 - `reason`: `connect` (new connection) or `switch` (same connection, new omp session).
 - `tui`: omp runs the interactive TUI (`ctx.mode === "tui"`). Ops marked **TUI** below need it.
 - `bridgeVersion`: omp loads the extension once per process, so a session keeps the bridge it started with. 1.1.0 runs `btw` through omp's own `/btw` (follow-ups, `getBtwHistory`); hostd refuses a `btwId` follow-up to an older bridge with `unsupported` and the hint to restart the agent. 1.2.0 adds the schema-dump mode (see "Schema dump"); 1.3.0 the settings-write mode (see "Settings write"); 1.4.0 the process slot ([One bridge per omp process](#one-bridge-per-omp-process-bridge--140)); 2.0.0 the [data plane](#data-plane-bridge--200).
-- `caps` (2.0.0; absent before): `live` is the live-feed version (1); `prompt` that the `prompt` op exists; `dialogs` that the dialog wrappers sit on omp's UI context (false without a UI, e.g. print mode); `subagentCtl` that omp's `AgentLifecycleManager` (the instance omp runs) was found, so `agentCmd` works. hostd serves a session from the bridge, without collab, when `caps.live ≥ 1`.
+- `caps` (2.0.0; absent before): `live` is the live-feed version (1); `prompt` that the `prompt` op exists; `dialogs` that the dialog wrappers sit on omp's UI context (false without a UI, e.g. print mode); `subagentCtl` that omp's `AgentLifecycleManager` (the instance omp runs) was found, so `agentCmd` works. hostd serves a session from the bridge, without collab, when `caps.live ≥ 1`. 2.1.0 adds one flag per feature: see [Bridge 2.1.0](#bridge-210).
 - hostd keys sessions by `sessionId`. When two connections claim the same id, the latest `hello` wins, with one exception for two connections of the **same pid** (several copies in one process, at least one older than 1.4.0): only the copy with the highest `bridgeVersion` (semver) is routed. An older copy's `hello` is answered with `welcome` but registers nothing (it drops a session it was still routed for), its events are ignored and no request reaches it. Equal versions fall back to "latest `hello` wins". A different pid always takes the session over (a new process resumed it).
 
 ### `event`
@@ -261,7 +261,8 @@ The extension never blocks omp and never fails because hostd is slow.
 - **One ordered writer per connection.** Every frame, control frames (`res`, `event`, `hello`, `bye`) included, goes through it, so nothing overtakes anything. While the socket holds more than **1 MiB** unsent (`writableLength`), frames wait in the writer's queue, where a queued `message_update` (per message), `tool_execution_update` (per tool call), subagent progress (per subagent), `state` or `agents` frame is **replaced** by its newest version: the stale one is dropped and the new one appended, so what arrives is always a subsequence of what omp produced. Starts, ends, lifecycle and dialog frames are never dropped. The queue drains on the socket's `drain` event (and every tick).
 - **Overflow.** When the queued non-replaceable live frames pass **16 MiB**, every queued live frame is dropped and one `resync` takes their place, built when it is written; live frames produced while it waits are covered by it and skipped. Control frames stay.
 - **Stall.** Queued control frames past 64 MiB mean hostd stopped reading: the extension drops the connection and reconnects on the 5 s schedule.
-- **Frame size.** A live frame over 8 MiB of JSON is clipped (long strings and arrays cut with a marker, like omp's collab shrink), else replaced by a collab-style `notice` naming what was omitted; a `resync` is bounded at 48 MiB. hostd's line limit is 64 MiB.
+- **Frame size.** A live frame over 8 MiB of JSON is clipped (long strings and arrays cut with a marker, like omp's collab shrink), else replaced by a collab-style `notice` naming what was omitted; a `resync` is bounded at 48 MiB, and one still too large after clipping goes out without its in-flight frames (still a `resync`: a notice in its place left hostd waiting for one). hostd's line limit is 64 MiB.
+- **Well-formed JSON** (bridge 2.1.0; no caps flag, hostd copes with older bridges). omp cuts text by UTF-16 index (its completion probe's 80-character subagent `stage`, `truncate()` for job labels, the 8 KiB `recentOutput` tail), so a string can end in half a surrogate pair, which `JSON.stringify` writes as a `\udXXX` escape that serde_json refuses. Every frame the writer sends has such escapes replaced by `\ufffd` (`wellFormedJson`); hostd decodes lines that still carry one (an older bridge, omp's session file) the same way (`lossy_json.rs`). Before, hostd dropped each such frame, and every resync while the value stayed in flight (a running `wait` repeats its jobs' stages every 500 ms, the resync replays each subagent's last progress): the session stopped updating while it looked live.
 - **Lab knob.** `TF_BRIDGE_LIVE_LIMITS=<highWater>,<overflow>` (bytes) in omp's environment lowers the two limits, so a paused fake hostd (`probe.ts` `pause`) shows backpressure and an overflow with an ordinary turn.
 
 #### Session switch
@@ -287,12 +288,155 @@ What hostd sees (collab's `ui-request` kinds) and how its `value` maps back:
 
 `reqId`s are positive integers, unique for the omp process's lifetime (never reused, also across a bridge takeover).
 
+The ask dialog's select carries the question's ★ recommendation only as `initialIndex` (0 also without one), exactly as omp's collab mirroring does; hostd reads it from the ask call's `questions[].recommended` instead (decide for me, architecture §3.23). No op or caps flag is involved.
+
 ### Subagents
 
 - **Bus.** omp emits `task:subagent:progress` / `task:subagent:lifecycle` for a subagent on its spawner's session bus (that session's `pi.events`) and on a root observability bus that extensions cannot reach. The main session's binding mirrors its bus (direct subagents). Every subagent session loads the extension too: that binding hands its own bus (its children, which no bus an extension sees otherwise carries) to the owner copy through `owners[endpoint].relay`, at every depth. The owner sends each payload object once (two copies in one session relay the same object), unchanged, as a collab `bus` frame; progress is replaceable per `progress.id`.
 - **Roster.** From omp's `AgentRegistry.global()` (`list()`, advisors excluded; `onChange` → `agents` frame). Without the registry: the main agent plus every subagent a lifecycle frame named (`started` → running, `completed` → idle, else aborted; `parentId` = the relaying session's agent id).
 - **Transcripts.** Every roster entry carries `sessionFile`; hostd reads subagent transcripts from those files.
 - **Control.** `agentCmd` (above) uses omp's `AgentLifecycleManager`, imported from `@oh-my-pi/pi-coding-agent/registry/agent-lifecycle` and used only when it is the instance omp runs (its `AgentRegistry` module is the one behind `pi.pi.AgentRegistry`).
+
+## Bridge 2.1.0
+
+TeleFlock 0.7.0. Every 2.1.0 feature has its own `hello.caps` flag (absent or `false` = off), and hostd keeps serving 2.0.0 bridges: a session keeps the bridge its omp process loaded, so a request for a feature the session's bridge lacks gets `unsupported` with the hint to restart the agent (Mark done, then Resume).
+
+| flag | ops / events | |
+|---|---|---|
+| `roleModels` | `getRoleModels`, `setRoleModels` | [Session model roles](#session-model-roles-capsrolemodels) |
+| `notices` | `notice` live events (`level`, `message`, `source`, `key?`) | [Notices](#notices-capsnotices) |
+| `retry` | `retry` (main session) | [Resume](#resume-capsretry-capsresumetree-capsturnerror-capslimitguard) |
+| `resumeTree` | `retry {agentId}` for subagents, `resumeTree`, `failedTails` | [Resume](#resume-capsretry-capsresumetree-capsturnerror-capslimitguard) |
+| `turnError` | `turn_error` events | [Resume](#resume-capsretry-capsresumetree-capsturnerror-capslimitguard) |
+| `limitGuard` | `setAutoResume`, the `context` limit guard | [Resume](#resume-capsretry-capsresumetree-capsturnerror-capslimitguard) |
+| `context` | `context` | [Context breakdown](#context-breakdown-capscontext) |
+| `jobs` | `jobs`, `jobCancel`; `jobs` events | [Background jobs](#background-jobs-capsjobs) |
+| `restore` | `restorable`, `restore` | [Restore](#restore-capsrestore-capsrestoreselect) |
+| `restoreSelect` | `restore {turn?, subagentIds?}`: only the listed parts | [Restore](#restore-capsrestore-capsrestoreselect) |
+
+### Restore (`caps.restore`, `caps.restoreSelect`)
+
+Continue where it stopped (architecture §3.25): omp's own `--restore` for the live session, so hostd can continue a session a restart cut off without restarting omp. Uses `@oh-my-pi/pi-coding-agent/task/restore` (`restoreSession`) and `session/exit-diagnostics` (`hasRestorableTurn`), feature-detected (omp ≥ 18.10.3); the flag is set when both load and the main session has `restoreInterruptedTurn`.
+
+| op | params | result | Mechanism | hostd timeout |
+|---|---|---|---|---|
+| `restorable` | – | `{turn, subagents: string[]}` | (subagent transcripts: only their last 4 MiB are read) `hasRestorableTurn` over the main session's branch (false while it streams), and over every non-running subagent's transcript without a `.tombstone`; the session's persisted subagents are put into omp's registry first (`ensurePersistedRoster` when found, as omp's restore does), so a freshly `--resume`d omp lists them too | 30 s |
+| `restore` | – | `{turn, subagents}` (omp's `RestoreOutcome`) | `restoreSession(mainSession, {eventBus: pi.events})`: the cut-off subagents go on as background jobs of their parents (parents first), then the session's own interrupted turn (closed first when no exit was recorded, then retried as F5 does). `busy` while it streams | 30 s |
+| `restore` (`restoreSelect`) | `turn?: bool`, `subagentIds?: string[]` (either one makes it a selection) | `{turn, subagents: string[], skipped: [{agentId, reason}]}` | Only the listed parts ([Selection](#selection-capsrestoreselect)). `busy` when `turn` is set while the session streams (before anything goes on) | 30 s |
+
+#### Selection (`caps.restoreSelect`)
+
+omp's restore runs every cut-off tool call again as it was (the session's own turn and every cut-off subagent's), which is unsafe for `bash`, `edit` and the like. With a selection hostd restores only the parts whose cut-off calls are read-only (architecture §3.25) and continues the rest another way.
+- **Flag.** Set when `restore` is, and omp's `ensurePersistedRoster` (`@oh-my-pi/pi-coding-agent/registry/persisted-agents`; a root export of that name wins), the task internals `resumeTree` uses (`runSubagentFollowUpTurn`, `formatTaskResultSummary`, `extractSessionInit`), omp's agent registry and the main session's `asyncJobManager` were found. hostd sends a selection only to a bridge with the flag; otherwise `restore {}`, and only when everything it would restore is safe. `restore` without `turn` and `subagentIds` (or both `null`) is the op above, unchanged.
+- **Subagents.** First `ensurePersistedRoster(registry, sessionFile)`, as omp's restore does: a freshly `--resume`d omp has not read its persisted subagents into the registry yet. Then each listed id once, parents before their children (depth by registry `parentId`), exactly as omp 18.13.3 `restoreSubagents` revives one: `asyncJobManager.register("task", id, run, {id, agentId: id, ownerId: parentId})`, `run` = `runSubagentFollowUpTurn({id, agent: persistedAgentDefinition(displayName, init), message: init.task, restore: true, structured: init.tools includes "yield", workPoolYieldItems, outputSchema, outputSchemaMode, signal, eventBus: pi.events, artifactsDir: dirname(sessionFile), maxRuntimeMs})` from its `session_init`. The subagent goes on through omp's own `restoreInterruptedTurn()` (no `armRetry`, unlike `retry`), and its parent receives omp's task summary (a failed run: `AsyncJobError` with its structured output). `subagents` lists them in that order.
+- **Cut-off reply.** A listed subagent that `hasRestorableTurn` rejects but whose transcript ends in a reply cut off while it streamed (its last message an assistant reply without `toolCall` parts, `stopReason: "aborted"`, `errorMessage` not exit recovery's `INTERRUPTED_TURN_ERROR`: omp saves it with no exit record, so its restore leaves it alone) goes on through omp's retry, exactly as `retry {agentId}` resumes one, after the same tombstone, running and `session_init` checks; it is listed in `subagents` like the others, and an error of that retry is its skip reason. hostd lists such a subagent only when its parent was busy when omp ended.
+- **Skipped** (`reason`, one line), checked in this order: `omp does not know this agent`, `it is not a subagent`, `it has no transcript`, `it is running` (registry status `running`, or a running job of that agent, so a repeated `restore` never runs one twice), `it was killed` (`<transcript>.tombstone`), `its transcript cannot be read`, `its turn was not cut off` (`hasRestorableTurn` over its entries, the header left out, and no cut-off reply; also a cut-off reply omp's retry finds nothing to retry in), `its transcript has no session_init to revive it from`, `it ran isolated; its worktree is gone`; `the session has no file` for every listed one of a session without a file; omp's own message when it refuses the job (its running-job cap). A subagent that is not listed is never restored.
+- **Turn.** Only with `turn: true`: the main session's `restoreInterruptedTurn()`, after the subagents (the order `restoreSession` uses); `turn` is its answer. Subagents alone go on while the session streams.
+
+### Background jobs (`caps.jobs`)
+
+The session's async background jobs and those of every subagent below it, as omp's own jobs sheet (`/jobs`, the status line's jobs pill) lists them: background `bash` / `eval` commands and subagents running as `task` jobs (hostd `jobs.*`, architecture "Background jobs and services"). Read from the main AgentSession: `getAsyncJobTree({recentLimit: 10})` (the whole tree), `inspectAsyncJob(id)`, `cancelAsyncJob(id)`, `getRunningJobWidgets()`, `hasPendingAsyncWork()` (omp ≥ 18.13, each feature-detected); without them the public `ctx.getAsyncJobSnapshot()` (the main agent's own jobs: no output, nothing cancels). The flag is set when either is there.
+
+| op | params | result | Mechanism | hostd timeout |
+|---|---|---|---|---|
+| `jobs` | `inspect?: string[]` (≤ 64 ids), `inspectAll?` | `JobsView` | the job tree; inspected jobs add omp's inspection | 10 s |
+| `jobCancel` | `id` | `JobsView` (after the cancel) | the owner's session `cancelAsyncJob` (omp checks the owner: the main session for its own and its `task` jobs, a subagent's session for a subagent's), else `asyncJobManager.cancel(id, {ownerId})`. A job that is not running: `not_found`; no cancel API: `unsupported` | 10 s |
+
+```ts
+type JobsView = { jobs: Job[]; waiting: boolean; at: number };   // running (oldest first), then ≤ 10 settled (newest first)
+type Job = {
+  id: string; kind: "bash" | "eval" | "task"; status: "running" | "completed" | "failed" | "cancelled";
+  label: string; command?: string;                // command ≤ 4000 characters
+  startedAt: number; endedAt?: number;
+  agentId?: string; agentName?: string;           // the subagent a task job runs
+  ownerId?: string; ownerName?: string;           // a subagent that started the job (absent: the main agent)
+  cancellable: boolean;                           // running, and a cancel path exists
+  widget?: { title: string; glance?: Glance; stage?: string; progress?: number; progressText?: string;
+             state: "authoring" | "live" | "fallback"; updatedAt: number };
+  // inspected jobs only:
+  output?: string; outputCut?: true;              // ≤ 16 KiB, the newest part from a line start; ANSI removed, `\r` redraws collapsed
+  pids?: number[]; exitCode?: number; cwd?: string; artifactId?: string;
+};
+type Glance = { text: string; label?: string; trend?: string; trendTone?: string }; // omp's jobWidgetGlance
+```
+
+- **`jobs` event** (`data: {running, recent, waiting, glance?, glanceJob?}`): checked on every 1 s tick, sent when it changed (and right after a `jobCancel`); never sent while there are no jobs after a `hello` (each hello starts from "none"). `glance` is omp's `jobWidgetGlance` of the running job whose `live` widget saw data last (`latestJobWidget`, the figure omp's status line appends, e.g. `140/190` `tests`), `glanceJob` that job's label.
+- **`waiting`**: omp's own async wait ("Waiting for background jobs"): not streaming and `hasPendingAsyncWork()` (a running job or a queued delivery will wake the agent); without that method, not streaming with a running job of the main agent. herdr keeps such an agent `working` (omp's `agent_end` carries `willContinue`), so hostd shows the wait instead of "quiet" and sends no quiet notification.
+- **Widgets** are read only when omp runs its TUI: its status line reads them anyway, and reading a running job's widget is what lets omp's cheap model write that widget's rules. Inspection (`inspectAsyncJob`) reads the inspected job's widget, as omp's jobs sheet does for its selected job.
+
+### Context breakdown (`caps.context`)
+
+What fills the session's context window; hostd's `session.context` (architecture §3.20, `ops/xray.rs`). Every 2.1.0 bridge has the op; the answer's `source` says what it rests on:
+- `omp`: omp's own `/context` data: `buildSessionContextView(session)` (`@oh-my-pi/pi-coding-agent/session/context-view`, omp ≥ 18.13.2; a root export of that name wins) on the main AgentSession, and the overview's attribution `allocateUsage` / `overviewLabel` (`@oh-my-pi/pi-tui/overlays/context-viewer-overview`, else the bridge's copy of the same largest-remainder split). The numbers are what omp's `/context` overview lists at that moment.
+- `estimate`: no such module: every system prompt block, tool definition (`hasBuiltInTool` splits built-in from custom) and message part counted with the session's tokenizer (else 4 characters a token), and `ctx.getContextUsage().tokens` split by those counts; no auto-compaction buffer.
+- `usage`: no AgentSession: `ctx.getContextUsage()` totals only, no categories.
+
+The modules load on the first request (literal subpath imports), never at hello. omp tokenizes the whole history for this, as its `/context` does.
+
+| op | params | result | hostd timeout |
+|---|---|---|---|
+| `context` | – | `{source, model?, window, used, buffer, free, threshold?, categories, images, dropImages, snapcompactSaved?, at}` | 30 s |
+
+`categories` in omp's order (`system-prompt`, `skills`, `built-in-tools`, `custom-tools`, `user-messages`, `assistant-messages`, `assistant-thinking`, `tool-calls`, `tool-output`): `{id, label (the overview's), tokens? (the attributed share of used; absent where omp shows "—"), weight (omp's estimate), entries, children: [{label, tokens?, weight, entries}] (tool output per tool), top: [{id, label, info?, tokens, preview (≤ 240 chars, one line), chars, at?, callId?}] (5 biggest; tool output 10; one message's thinking blocks count once, as their group)}`. `images`: image blocks in the context messages; `dropImages`: the AgentSession has `dropImages` (omp's `/shake images`). hostd caps every list and string and clamps numbers to whole tokens.
+
+### Session model roles (`caps.roleModels`)
+
+One session's own omp model roles (`modelRoles`) and retry fallback chains (`retry.fallbackChains`); architecture §3.7. The flag is set when the extension found omp's live `Settings` (`@oh-my-pi/pi-coding-agent/config/settings`, the same class as the root export `Settings`, so the module instance omp runs) and the `cfgModelRoles` / `cfgRetryFallbackChains` setting handles (`config/model-settings`, `session/settings`).
+
+| op | params | result | Mechanism | hostd timeout |
+|---|---|---|---|---|
+| `getRoleModels` | – | `RoleModels` | read (below) | 10 s |
+| `setRoleModels` | `roles: {role: selector}`, `fallbackChains: {key: selector[]}`, `overlay?` (absolute path) | `RoleModels` with `warning?` | below | 30 s |
+
+```ts
+type RoleModels = {
+  session: Record<string, string>;         // roles the session's own layers set: omp runtime overrides
+                                           // (--model, PI_SMOL_MODEL…, setRoleModels) and --config overlays
+  host: Record<string, string>;            // what the host's config assigns (project, else global)
+  sessionChains: Record<string, string[]>; // effective chains that differ from the host's chain of that key
+  hostChains: Record<string, string[]>;    // global chains, project keys over them
+  active?: string;                         // the session's model now (provider/id)
+  overlays: string[];                      // the --config files omp was started with
+  warning?: string;                        // setRoleModels: why the session did not follow a changed default
+};
+```
+
+- **Read.** Roles: omp's 16 built-in roles plus every role a layer names. A role is the session's when `settings.getModelRoleProvenance(role)` is `runtime` or `overlay`; `host[role]` is `getProjectModelRole(role) ?? getGlobalModelRole(role)`. Chains: `cfgRetryFallbackChains.get(settings)` against the global and project layers (`getGlobalSettings()` / `getProjectSettings()`); a session chain equal to the host's chain of the same key reads as the host's.
+- **Write.** `roles` and `fallbackChains` are the session's complete maps: a role or key left out uses the host's again ("host default"). In order:
+  1. when `overlay` is one of the files omp was started with (`settings.getConfigFiles()`), `settings.reloadFromDisk()`: hostd rewrote that per-agent overlay with the same maps (omp's config watcher would read it too, later);
+  2. `cfgModelRoles.override(settings, roles)` and `cfgRetryFallbackChains.override(settings, fallbackChains)` replace omp's runtime override of each (an empty map: `clearOverride`). That layer outranks every config file, so it also replaces `--model` / `PI_*_MODEL` overrides of the roles;
+  3. when the effective `default` role changed, the session switches to it like `setModel` (session only): `ctx.models.resolve("@default")`, `pi.setModel`, and the selector's `:thinking` through `pi.setThinkingLevel`. A model omp cannot resolve or has no credentials for leaves the session on its model and comes back as `warning`.
+- **Scope.** omp keeps one `Settings` per process: the maps hold for the agent's pane (also after `/new`); subagents spawned later inherit them (the task tool resolves `@task` through them), running ones keep what they started with. Nothing is written to the host's omp config.
+- **Checks.** Role names `^[A-Za-z][A-Za-z0-9_-]{0,31}$`; selectors `provider/rest` without whitespace, ≤ 256 characters (role values may be comma lists of them); chain keys a role name or a selector (`provider/model[:thinking]`, `provider/*`, `provider/prefix/*`). Anything else is `invalid_params`; without the flag, `unsupported`.
+
+### Notices (`caps.notices`)
+
+Warnings omp's TUI shows by itself reach the live feed as collab `notice` events (`{"type":"notice","level":"info"|"warning"|"error","message","source","key"?}`), the shape omp's own `AgentSession.emitNotice` notices have (those were already on the feed):
+- **`source: "extension"`**: `ctx.ui.notify(message, type)` of any extension or command. The bridge wraps `notify` on omp's shared UI context the way it wraps the dialogs ([Dialogs](#dialogs)); the wrapper sends the notice (ANSI stripped) and calls omp's own, so the TUI still shows it. Footer status, working messages and widgets stay out.
+- **`source: "fallback"`**: omp's `retry_fallback_applied` (`warning`, `Fallback: <from> → <to>`, the reason on a second line) and `retry_fallback_succeeded` (`info`, `Fallback succeeded on <model>`), as omp's TUI words them.
+- **`source: "config"`, with `key`**: every entry of `session.configWarnings` (fallback-chain validation, model registry) and of `getAdvisorConfigWarnings()` (`WATCHDOG.yml: …`), `key` `config:<sha-256 of the text, 16 hex>`. Sent when the extension attaches to the session, on `config_warnings_changed`, and in every `resync` (after `agents`). hostd shows one row per key (`n:<key>`), however often they come.
+
+hostd keeps warning and error notices as live rows across resyncs and restarts (architecture §3.4); omp's `xd://` mount notices (`source: "xdev"`, info) are no rows. A 2.0.0 bridge sends none of these, and its sessions work as before.
+
+### Refusals on the live feed (no flag)
+
+An Anthropic refusal (omp `stopReason: "error"`, `stopDetails.type` `refusal` / `sensitive`) hands omp a fallback credit: `message.fallbackCreditHandle` (the token, the frozen request body, the refused content) and `stopDetails.fallback_credit_token` / `fallback_has_prefill_claim`. 2.1.0 bridges send assistant messages (`message_start` / `message_update` / `message_end`, also in a `resync`) without them (`withoutFallbackCredit`), omp's own object untouched; `stopDetails.type`, `category` and `explanation` stay. hostd never needed them (the replica reads only those three fields and `errorMessage`, `errorStatus`), so this changes nothing a 2.0.0 bridge's session relies on.
+
+### Resume (`caps.retry`, `caps.resumeTree`, `caps.turnError`, `caps.limitGuard`)
+
+omp's F5 for TeleFlock (`agent.retry`) and the bridge half of auto-resume after provider limits (architecture §3.22). Every retry is omp's own `AgentSession.retry()` (`session/turn-recovery.ts`): it removes the failed or aborted assistant tail and its synthetic tool results (or, for a fully failed tool batch, re-runs the calls), resets the retry budget and continues **without a new prompt**. Never `sendUserMessage`, `sendMessage(triggerTurn)` or `Agent.continue()`.
+
+- **Flags.** `retry`: the main AgentSession (registry ref) has `retry()`. `resumeTree`: additionally omp's `AgentLifecycleManager`, the task internals (`runSubagentFollowUpTurn`, `formatTaskResultSummary`, `extractSessionInit`: root exports first, else `task/executor`, `task/result-summary`, `session/session-manager`; `task/persisted-revive`, `async` `AsyncJobError` and `task/settings` `cfgTaskMaxRuntimeMs` when importable) and the main session's `asyncJobManager` (omp's `async.enabled`). `turnError`: the agent registry. `limitGuard`: always. The classifier is pi-ai's (`@oh-my-pi/pi-ai/error` `classifyMessage` / `Flag.UsageLimit` / `parseRateLimitReason`, `utils/retry-after` `extractProviderRetryHint`; all import in omp 18.13.3), else a status/text fallback.
+
+| op | params | result | Mechanism | hostd timeout |
+|---|---|---|---|---|
+| `retry` | `agentId?` (absent or the main agent's id: the main session) | `{started}` | Main: `AgentSession.retry()` (`false`: streaming, compacting, retrying, or no failed/aborted tail). Subagent (needs `resumeTree`): omp's persisted roster first (`ensurePersistedRoster` when found, as for `restore`: a freshly `--resume`d omp's registry lacks its subagents), then `ensureLive`; when its tail (live state, else the display transcript as omp's `retry()` reads it) failed or was stopped, a background job `register("task", id, …, {id, agentId: id, ownerId: parentId})` runs omp's `runSubagentFollowUpTurn({restore: true, …from its session_init})` with the session's next `restoreInterruptedTurn()` armed to be omp's `retry()` (that call ends in `retry()` for an interrupted turn, but `hasRestorableTurn` leaves a terminal failure alone). The parent receives the ordinary `async-result` under the subagent's id, as after `omp --restore`, once: omp's own monitor of a kept-alive subagent (`attachIrcWakeTurnMonitor`) also sees the retried turn and, when it yields, hands the result to the parent as a job of its own (same agent and owner, started during the run); the bridge's job then acknowledges its own delivery (`acknowledgeDeliveries`, when omp's job manager has it and `getAllJobs`). A run that never reached the retry (omp parked and revived the session meanwhile) runs once more. `false`: running, or nothing to retry; `not_found`; `invalid_params` (not a subagent); `unsupported` (no session contract, isolated, internals missing). | 30 s |
+| `resumeTree` | `subagentIds: string[]`, `root: bool` | `{root, subagents: [{agentId, started, error?}]}` | The subagents as `retry` does them, parents before children (a child's result goes to its parent's session), a failure in its own entry; then `retry()` of the main session when `root` and its own tail failed or was stopped. | 60 s |
+| `failedTails` | – | `{mainId, tails: [TailInfo & {status}]}` | The main session and every subagent whose last turn failed or was stopped: live sessions from their state (or display transcript), parked ones from the last 256 KiB of their transcript file (read-only). `status`: the registry status (`retrying`: the main session is in omp's retry saga). For hostd's reconcile after a restart. | 10 s |
+| `setAutoResume` | `on` | `{}` | Process-wide (`BridgeSlot.autoResume`, optional): the `context` guard of every copy and session reads it. Off until a hostd said so; cleared when the socket drops, a newer copy takes over or the main session shuts down (hostd says it again at every hello and session switch), so a guard never promises a resume nobody will do. The `context` handler itself is registered with omp only once an `on: true` arrives (every copy registers it then; a copy loaded later does so at load): omp structured-clones a session's messages on every model call as soon as any `context` handler exists. | 10 s |
+
+- **`turn_error` event** (`turnError`): `TailInfo` = `{agentId, parentId|null, main, sessionId, sessionFile, stopReason: "error", kind: "usageLimit"|"rateLimit"|"other", reason|null (pi-ai rate-limit reason, e.g. `QUOTA_EXHAUSTED`), provider, model, errorStatus|null, message (≤ 500 chars), retryAt|null (the failed message's time + omp's parsed retry-after/reset; null for a hint beyond 30 days; errorStatus null outside 0–65535), at}`. Sent once per failed message when a turn of the main session or any subagent ends on an `error` tail that omp settled: after `agent_end` the binding awaits `AgentSession.waitForIdle()` (which waits out omp's own auto-retry saga); still not streaming, not `isRetrying`, tail still that failed message → terminal. Each binding watches its own session; a subagent's copies hand it to the owner through `owners[endpoint].report` (`BridgeSlot`, optional), which deduplicates by message and sends it under the main session id. Aborted turns (Esc) send nothing.
+- **`context` guard** (`limitGuard`, while `setAutoResume {on: true}`): registered, once auto-resume is on, in every binding (main and subagent sessions, every copy), on omp's per-request copy only; the session and its file are never changed. Assistant turns with `stopReason: "error"` that classify as a usage or rate limit go, together with every tool result paired to their tool calls (pairing stays valid); in tool results and custom messages (`async-result`), a `<task-result … status="failed …">` whose `<error>` (else its output, ≤ 1 000 chars: omp shows the stderr there when the run printed nothing) is such a limit becomes `status="interrupted"` with one line: "This work was interrupted by a temporary provider limit and is resumed automatically; its result arrives as a new background job result." Other errors, aborted turns, successful results and all other text stay. Idempotent: the line is no limit phrase and `interrupted` is not `failed`.
 
 ## TUI mechanics (why some ops need the TUI)
 

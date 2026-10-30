@@ -2,16 +2,17 @@ import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { navigate } from "@/core";
 import { cn } from "@/design";
+import { CopyFromHostButton } from "@/features/hostSync/entry";
 import { haptic } from "./haptics";
 import { OMP_PAGES, VIEWS } from "./vocab";
 
 /** omp's per-host pages, in nav order. */
-export type OmpAreaPage = "omp" | "mcp" | "accounts";
+export type OmpAreaPage = "omp" | "mcp" | "plugins" | "accounts";
 
 const PAGES: readonly { name: OmpAreaPage; icon: LucideIcon; label: string }[] = OMP_PAGES.map((name) => ({ name, icon: VIEWS[name].icon, label: VIEWS[name].label }));
 
 /**
- * omp's per-host pages (settings, MCP servers, accounts) as one area: a strip at the top of each links to the
+ * omp's per-host pages (settings, MCP servers, skills & plugins, accounts) as one area: a strip at the top of each links to the
  * others for the same host, so finding one of them finds all of them.
  */
 export function OmpAreaNav({ current, hostId, className }: { current: OmpAreaPage; hostId?: string; className?: string }) {
@@ -39,6 +40,7 @@ export function OmpAreaNav({ current, hostId, className }: { current: OmpAreaPag
           </button>
         );
       })}
+      <CopyFromHostButton hostId={hostId} />
     </nav>
   );
 }

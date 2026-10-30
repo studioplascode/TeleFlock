@@ -1,12 +1,17 @@
 import { AlertTriangle, Brain, ChevronDown, CircleAlert, CornerDownRight, Info, Layers, Repeat2, Sparkles } from "lucide-react";
-import { memo, useState } from "react";
-import { ircOf, useCore, useSessionItem, useSettings } from "@/core";
+import { memo, useContext, useState } from "react";
+import { ircOf, useAgent, useCore, useSessionItem, useSettings } from "@/core";
 import type { AssistantItem, CompactionItem, ImageRef, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
-import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, Lightbox, LightboxTrigger, LogoMark, Shimmer, Tooltip } from "@/design";
+import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, Lightbox, LightboxTrigger, LogoMark, Shimmer, Tooltip, useNow } from "@/design";
+import { useHerdrFreeze } from "@/features/hosts/HerdrControls";
+import { SessionCtx } from "../context";
 import { IrcBubble } from "../irc/IrcBubble";
 import { Markdown } from "../markdown/Markdown";
+import { useOpenOnFind } from "../find/reveal";
 import { ImagePlaceholder, useImageSources, useOriginal } from "../lib/images";
 import { ToolCard } from "../tools/ToolCard";
+import { ErrorCard } from "./ErrorCard";
+import { retryNoticeText } from "./limitRuns";
 
 /** `in:<peer>` / `out:<peer>` for IRC rows (consecutive rows with the same key group), else null. */
 export function ircThreadKey(item: TranscriptItem | undefined): string | null {
@@ -39,6 +44,7 @@ export const Row = memo(function Row({ agentKey, itemId, prevId, nextId, rail = 
   const prevIrc = useCore((s) => (prevId != null ? ircThreadKey(s.sessions[agentKey]?.items[prevId]) : null));
   const nextIrc = useCore((s) => (nextId != null ? ircThreadKey(s.sessions[agentKey]?.items[nextId]) : null));
   if (!item) return null;
+  if (item.kind === "notice" && item.source === "retry") return <RetryNoticeRow agentKey={agentKey} item={item} />;
   const irc = ircThreadKey(item);
   return <ItemRow item={item} rail={rail} up={prevTool} down={nextTool} ircPrev={irc != null && prevIrc === irc} ircNext={irc != null && nextIrc === irc} />;
 });
@@ -139,7 +145,7 @@ function UserRow({ item }: { item: UserItem }) {
   }
   return (
     <div className="flex flex-col items-end gap-1 pt-2 max-md:gap-0.5 max-md:pt-0.5">
-      <div className="flex items-center gap-2 pr-1 text-[11px] font-bold text-mute-2">
+      <div data-find-skip className="flex items-center gap-2 pr-1 text-[11px] font-bold text-mute-2">
         {item.steering && (
           <span className="flex items-center gap-1 rounded-full bg-accent/14 px-2 py-0.5 text-[10px] tracking-wider text-accent-hi uppercase" title="Sent while the agent was working">
             <CornerDownRight className="size-3" />
@@ -199,6 +205,7 @@ function UserImages({ images }: { images: ImageRef[] }) {
 
 function SyntheticTurn({ item }: { item: UserItem }) {
   const [open, setOpen] = useState(false);
+  useOpenOnFind(item.id, () => setOpen(true));
   return (
     <button
       type="button"
@@ -206,7 +213,7 @@ function SyntheticTurn({ item }: { item: UserItem }) {
       aria-expanded={open}
       className="focus-ring max-w-[min(720px,88%)] rounded-lg bg-white/[0.025] px-3 py-1.5 text-left text-xs text-mute shadow-hairline hover:bg-white/[0.04]"
     >
-      <span className="flex items-center gap-1.5 font-semibold">
+      <span data-find-skip className="flex items-center gap-1.5 font-semibold">
         <Repeat2 className="size-3" />
         {item.author === "advisor" ? "Advisor note" : "System turn"}
         <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
@@ -231,7 +238,7 @@ function AssistantRow({ item }: { item: AssistantItem }) {
         <LogoMark size={16} mono className="text-white" title="omp" />
       </span>
       <div className="min-w-0 flex-1">
-        <div className="mb-0.5 flex items-center gap-2 text-[11.5px] font-extrabold text-ink">
+        <div data-find-skip className="mb-0.5 flex items-center gap-2 text-[11.5px] font-extrabold text-ink">
           omp
           {item.model && <span className="font-mono text-[10.5px] font-semibold text-mute-2">{item.model}</span>}
           <span className="font-semibold text-mute-2 tabular">{clock(item.at)}</span>
@@ -246,12 +253,7 @@ function AssistantRow({ item }: { item: AssistantItem }) {
           )}
         </div>
         {item.text || item.streaming ? <Markdown text={item.text} streaming={item.streaming} /> : null}
-        {item.error && (
-          <div className="mt-1.5 flex items-start gap-2 rounded-md bg-error/10 px-3 py-2 text-xs text-[#ff9aab] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]">
-            <CircleAlert className="mt-px size-3.5 shrink-0" />
-            <span className="whitespace-pre-wrap">{item.error}</span>
-          </div>
-        )}
+        {item.error && <ErrorCard item={item} />}
         {stopped && !item.error && <div className="mt-1 text-2xs font-semibold text-mute-2">stopped: {item.stopReason}</div>}
       </div>
     </div>
@@ -260,12 +262,16 @@ function AssistantRow({ item }: { item: AssistantItem }) {
 
 function ThinkingRow({ item }: { item: ThinkingItem }) {
   const [open, setOpen] = useState(false);
-  const live = item.streaming;
+  useOpenOnFind(item.id, () => setOpen(true));
+  // herdr is down: the thought ended with the pane; its timer stops where the outage began
+  const frozenAt = useHerdrFreeze(useContext(SessionCtx)?.hostId ?? "");
+  const live = item.streaming && frozenAt === undefined;
   const tail = live ? item.text.slice(-420) : "";
   return (
     <div className="pl-[var(--tf-gutter,38px)]">
       <button
         type="button"
+        data-find-skip
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         disabled={item.redacted && !live}
@@ -307,14 +313,21 @@ const NOTICE_TONE: Record<NoticeItem["level"], { icon: typeof Info; cls: string 
   error: { icon: CircleAlert, cls: "bg-error/[0.08] text-[#ff9aab] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]" },
 };
 
-function NoticeRow({ item }: { item: NoticeItem }) {
+/** omp's "Retrying (n/m) in Xs" notice with a live countdown while that retry is the one omp waits for. */
+function RetryNoticeRow({ agentKey, item }: { agentKey: string; item: NoticeItem }) {
+  const wait = useAgent(agentKey)?.omp?.retry;
+  const now = useNow(wait ? 1000 : null);
+  return <NoticeRow item={item} text={retryNoticeText(item.text, wait, now)} />;
+}
+
+function NoticeRow({ item, text = item.text }: { item: NoticeItem; text?: string }) {
   const tone = NOTICE_TONE[item.level];
   const Icon = tone.icon;
   return (
     <div className="pl-[var(--tf-gutter,38px)]">
       <div role={item.level === "error" ? "alert" : undefined} className={cn("flex items-start gap-2 rounded-md px-3 py-1.5 text-xs shadow-hairline", tone.cls)}>
         <Icon className="mt-px size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 whitespace-pre-wrap">{item.text}</span>
+        <span className="min-w-0 flex-1 whitespace-pre-wrap">{text}</span>
         {item.source && <span className="shrink-0 font-mono text-[10.5px] opacity-70">{item.source}</span>}
       </div>
     </div>
@@ -323,9 +336,10 @@ function NoticeRow({ item }: { item: NoticeItem }) {
 
 function CompactionRow({ item }: { item: CompactionItem }) {
   const [open, setOpen] = useState(false);
+  useOpenOnFind(item.id, () => setOpen(true));
   return (
     <div className="py-1">
-      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="focus-ring group/cmp flex w-full items-center gap-3 rounded-md text-left">
+      <button type="button" data-find-skip onClick={() => setOpen((o) => !o)} aria-expanded={open} className="focus-ring group/cmp flex w-full items-center gap-3 rounded-md text-left">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-review/40" />
         <span className="flex items-center gap-1.5 rounded-full bg-review/10 px-3 py-1 text-[11px] font-bold text-review shadow-[inset_0_0_0_1px_rgb(34_211_238/0.3)]">
           <Layers className="size-3" />
@@ -344,7 +358,7 @@ function ModeRow({ item }: { item: ModeItem }) {
     <div className="flex items-center gap-3 py-0.5 text-[11px] font-semibold text-mute-2">
       <span className="h-px flex-1 bg-line" />
       <span className="max-w-[70%] truncate">{item.text}</span>
-      <span className="font-normal tabular">{clock(item.at)}</span>
+      <span data-find-skip className="font-normal tabular">{clock(item.at)}</span>
       <span className="h-px flex-1 bg-line" />
     </div>
   );

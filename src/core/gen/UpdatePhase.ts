@@ -3,4 +3,4 @@
 /**
  * Self-update lifecycle of the app (Tauri shell, GitHub releases).
  */
-export type UpdatePhase = "idle" | "checking" | "upToDate" | "available" | "downloading" | "installing" | "needsPermission" | "error";
+export type UpdatePhase = "idle" | "checking" | "upToDate" | "available" | "downloading" | "installing" | "needsPermission" | "ready" | "error";

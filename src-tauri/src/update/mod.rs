@@ -20,15 +20,27 @@
 //! Automatic checks run here, not in the webview (which is gone on Android while the keep-alive
 //! service keeps the process up without an activity): shortly after launch, about hourly, and
 //! when the app comes back to the front (window focus, `MainActivity.onResume`) if the last
-//! check is 20 minutes old (`schedule`). They only run while `settings.autoUpdate` is on and
-//! install what they find like a manual check with install does. Android starts the installer
-//! only while the app is in front; otherwise the verified APK waits for the next resume.
+//! check is 20 minutes old (`schedule`). They only run while `settings.autoUpdate` is on.
+//! Android starts the installer only while the app is in front; otherwise the verified APK
+//! waits for the next resume.
+//!
+//! What an automatic check finds must not surprise the user (`apply`): on Windows and Linux it
+//! is downloaded in the background and verified, then waits as `UpdatePhase::Ready` ("Restart
+//! now") while the user is in front: the main window shown, not minimized and focused, or Quick
+//! capture in use (focused, text typed in it, or holding pasted images or a send in flight; they
+//! live in memory only). It installs and restarts by itself once the user has been away for an
+//! uninterrupted `apply::AWAY_GRACE`: any return (either window focused, capture opened or typed
+//! in) voids the pending timers, so alt-tabbing away, back and away again counts only the last
+//! absence. The AppImage also installs when the app quits (the quit is the user's own and nothing
+//! restarts). The `.deb` (`pkexec` password prompt) never installs unattended: it
+//! stays `ready` until the user clicks **Install**. A manual check or click installs at once.
 //!
 //! The webview drives it through `core_call` app methods answered here instead of the engine
 //! (`app.updateStatus`, `app.updateCheck`, `app.updateInstall`); progress is pushed as
 //! `AppEvent::Update` on the regular event channel. Failures never surface on their own: they
 //! are logged and kept in the status for Settings, and automatic checks back off.
 
+mod apply;
 mod net;
 pub mod release;
 mod schedule;
@@ -41,6 +53,9 @@ use tauri::{AppHandle, Wry};
 use tf_proto::{ApiError, AppEvent, AppMethod, Settings, UpdateCheckParams, UpdatePhase, UpdateStatus};
 use tokio::sync::Notify;
 
+#[cfg(desktop)]
+use self::apply::Apply;
+use self::apply::Origin;
 use self::release::{Candidate, Target};
 use self::schedule::{Outcome, Schedule, Trigger};
 use crate::core::CoreState;
@@ -61,6 +76,20 @@ pub struct Updater {
     state: Mutex<State>,
     /// Wakes the automatic checks: the app came back to the front.
     foreground: Notify,
+    /// Desktop: the departures an automatic install waits out (`apply::Away`).
+    #[cfg(desktop)]
+    away: apply::Away,
+    /// Desktop: the downloaded, verified package of an update that waits as `UpdatePhase::Ready`.
+    #[cfg(desktop)]
+    pending: Mutex<Option<Pending>>,
+}
+
+/// A downloaded update the plugin can still install (`apply`).
+#[cfg(desktop)]
+struct Pending {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
+    version: Version,
 }
 
 struct State {
@@ -86,6 +115,22 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// `settings.autoUpdate`; settings that can't be read count as off (never install unasked).
+async fn auto_update_enabled(engine: &tf_client::Engine) -> bool {
+    // `settings.get` takes `Empty`: its params must be `{}` (`null` is rejected as invalid_params).
+    let settings = engine
+        .call(None, "settings.get", Value::Object(Default::default()))
+        .await
+        .and_then(|v| serde_json::from_value::<Settings>(v).map_err(|e| ApiError::new("internal", e.to_string())));
+    match settings {
+        Ok(s) => s.auto_update,
+        Err(e) => {
+            log::warn!("update: can't read settings ({e}); skipping the automatic update");
+            false
+        }
+    }
+}
+
 impl Updater {
     pub fn new(app: AppHandle<Wry>, core: CoreState) -> UpdaterState {
         let version = app.package_info().version.clone();
@@ -102,6 +147,7 @@ impl Updater {
             current: version.to_string(),
             supported: target.is_ok(),
             manual: target == Ok(Target::MacOs),
+            needs_password: target.is_ok_and(apply::needs_password),
             unsupported_reason: target.err().map(str::to_owned),
             phase: UpdatePhase::Idle,
             latest: None,
@@ -123,6 +169,10 @@ impl Updater {
                 prompt_pending: false,
             }),
             foreground: Notify::new(),
+            #[cfg(desktop)]
+            away: apply::Away::default(),
+            #[cfg(desktop)]
+            pending: Mutex::new(None),
         })
     }
 
@@ -137,8 +187,11 @@ impl Updater {
         });
     }
 
-    /// The app is in front again (window focused, activity resumed): may trigger a check.
+    /// The app is in front again (window focused, activity resumed): may trigger a check, and
+    /// voids a pending automatic install (the user's absence must be uninterrupted).
     pub fn foreground(&self) {
+        #[cfg(desktop)]
+        self.away.returned();
         self.foreground.notify_one();
     }
 
@@ -148,11 +201,28 @@ impl Updater {
             let s = self.lock();
             s.schedule.due(trigger, now_ms(), s.status.phase)
         };
-        if !due || !self.auto_update_enabled().await {
+        if !due || !auto_update_enabled(&self.core.engine).await {
             return;
         }
         log::info!("update: automatic check ({trigger:?})");
-        self.check(UpdateCheckParams { install: true }).await;
+        self.check(UpdateCheckParams { install: true }, Origin::Automatic).await;
+    }
+
+    /// Desktop: the main window or Quick capture left the front (hidden, minimized, lost the
+    /// focus, put away, emptied). A downloaded update that waits installs once the user stays
+    /// away for [`apply::AWAY_GRACE`] without a break.
+    #[cfg(desktop)]
+    pub fn left_front(self: &Arc<Self>) {
+        if self.lock().status.phase == UpdatePhase::Ready {
+            self.settle();
+        }
+    }
+
+    /// Desktop: the user is working in a window of the app (Quick capture shown or typed in):
+    /// whatever departure was being timed is void.
+    #[cfg(desktop)]
+    pub fn active(&self) {
+        self.away.returned();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -188,30 +258,20 @@ impl Updater {
     pub async fn call(self: &Arc<Self>, method: &str, params: Value) -> Result<Value, ApiError> {
         let status = match AppMethod::parse(method, params)? {
             AppMethod::AppUpdateStatus(_) => self.status(),
-            AppMethod::AppUpdateCheck(p) => self.check(p).await,
-            AppMethod::AppUpdateInstall(_) => self.install()?,
+            AppMethod::AppUpdateCheck(p) => self.check(p, Origin::Manual).await,
+            AppMethod::AppUpdateInstall(_) => self.install(Origin::Manual)?,
             m => return Err(ApiError::new("unknown_method", format!("{} is not an update method", m.name()))),
         };
         serde_json::to_value(status).map_err(|e| ApiError::new("internal", e.to_string()))
     }
 
-    /// `settings.autoUpdate`; settings that can't be read count as off (never install unasked).
-    async fn auto_update_enabled(&self) -> bool {
-        match self.core.engine.call(None, "settings.get", Value::Null).await {
-            Ok(v) => serde_json::from_value::<Settings>(v).is_ok_and(|s| s.auto_update),
-            Err(e) => {
-                log::warn!("update: can't read settings ({e}); skipping the automatic update");
-                false
-            }
-        }
-    }
-
     /// Looks for a newer release; resolves once discovery is done (the install, if any, runs on).
-    pub async fn check(self: &Arc<Self>, p: UpdateCheckParams) -> UpdateStatus {
+    pub async fn check(self: &Arc<Self>, p: UpdateCheckParams, origin: Origin) -> UpdateStatus {
         let Some(target) = self.target else { return self.status() };
         {
             let mut s = self.lock();
-            if busy(s.status.phase) {
+            // A downloaded update waits for the user: a new check would replace it.
+            if busy(s.status.phase) || s.status.phase == UpdatePhase::Ready {
                 return s.status.clone();
             }
             s.status.phase = UpdatePhase::Checking;
@@ -251,12 +311,20 @@ impl Updater {
             let outcome = if install { Outcome::Installing } else { Outcome::Done };
             s.schedule.checked(now_ms(), outcome, schedule::jitter());
         });
-        if install { self.install().unwrap_or(status) } else { status }
+        if install { self.install(origin).unwrap_or(status) } else { status }
     }
 
     /// Starts downloading + installing the release found by the last check. Manual platforms
-    /// (macOS): opens the release's package in the browser instead and stays `available`.
-    pub fn install(self: &Arc<Self>) -> Result<UpdateStatus, ApiError> {
+    /// (macOS): opens the release's package in the browser instead and stays `available`. A
+    /// downloaded update that waits (`ready`) installs now. An `Automatic` origin only
+    /// downloads: the install follows when `apply::decide` allows it.
+    pub fn install(self: &Arc<Self>, origin: Origin) -> Result<UpdateStatus, ApiError> {
+        #[cfg(desktop)]
+        if self.lock().status.phase == UpdatePhase::Ready
+            && let Some(status) = self.apply_pending()
+        {
+            return Ok(status);
+        }
         let candidate = {
             let mut s = self.lock();
             if busy(s.status.phase) {
@@ -283,7 +351,7 @@ impl Updater {
         let me = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             log::info!("update: installing {}", candidate.tag);
-            if let Err(e) = me.run_install(&candidate).await {
+            if let Err(e) = me.run_install(&candidate, origin).await {
                 me.fail(format!("updating to {} failed: {e}", candidate.version));
             }
         });
@@ -303,10 +371,11 @@ impl Updater {
         }
     }
 
-    async fn run_install(self: &Arc<Self>, c: &Candidate) -> Result<(), String> {
+    #[cfg_attr(not(desktop), allow(unused_variables))]
+    async fn run_install(self: &Arc<Self>, c: &Candidate, origin: Origin) -> Result<(), String> {
         match &c.assets {
             #[cfg(desktop)]
-            release::Assets::Manifest { manifest_url } => self.install_plugin(manifest_url, &c.version).await,
+            release::Assets::Manifest { manifest_url } => self.install_plugin(manifest_url, &c.version, origin).await,
             #[cfg(target_os = "android")]
             release::Assets::Android { apk_name, apk_url, sha256_url } => {
                 self.install_android(apk_name, apk_url, sha256_url).await
@@ -321,7 +390,7 @@ impl Updater {
     /// `plugins.updater.requireSignedVersion` makes the plugin reject a package whose signature
     /// was made for another version, so an older signed package can't be replayed under a newer tag.
     #[cfg(desktop)]
-    async fn install_plugin(self: &Arc<Self>, manifest_url: &str, version: &Version) -> Result<(), String> {
+    async fn install_plugin(self: &Arc<Self>, manifest_url: &str, version: &Version, origin: Origin) -> Result<(), String> {
         use tauri_plugin_updater::UpdaterExt;
         let url: tauri::Url = manifest_url.parse().map_err(|e| format!("bad manifest URL: {e}"))?;
         let app = self.app.clone();
@@ -365,14 +434,32 @@ impl Updater {
             )
             .await
             .map_err(|e| e.to_string())?;
+        let pending = Pending { update, bytes, version: version.clone() };
+        if origin == Origin::Manual {
+            self.update(|s| {
+                s.status.phase = UpdatePhase::Installing;
+                s.status.progress = None;
+            });
+            return self.install_pending(pending).await;
+        }
+        // Not asked for by the user: keep the verified package and let `apply::decide` pick the
+        // moment (the window leaving the front, a click, the quit).
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(pending);
+        log::info!("update: {version} downloaded; waiting for the window to leave the front or for the user");
         self.update(|s| {
-            s.status.phase = UpdatePhase::Installing;
+            s.status.phase = UpdatePhase::Ready;
             s.status.progress = None;
         });
-        // Windows: starts the passive installer (it relaunches TeleFlock) and exits the process.
-        // Linux: replaces the AppImage or runs `pkexec dpkg -i` (which waits for the password
-        // prompt). Off the async workers: both block.
-        tauri::async_runtime::spawn_blocking(move || update.install(bytes))
+        self.settle();
+        Ok(())
+    }
+
+    /// Runs the plugin's install and restarts. Windows: starts the passive installer (it
+    /// relaunches TeleFlock) and exits the process. Linux: replaces the AppImage or runs
+    /// `pkexec dpkg -i` (which waits for the password prompt). Off the async workers: both block.
+    #[cfg(desktop)]
+    async fn install_pending(self: &Arc<Self>, p: Pending) -> Result<(), String> {
+        tauri::async_runtime::spawn_blocking(move || p.update.install(p.bytes))
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
@@ -381,6 +468,87 @@ impl Updater {
         log::info!("update: installed, restarting");
         self.app.request_restart();
         Ok(())
+    }
+
+    /// Takes the waiting package and installs it in the background (`ready` → `installing`).
+    /// `None` when there is none (already taken).
+    #[cfg(desktop)]
+    fn apply_pending(self: &Arc<Self>) -> Option<UpdateStatus> {
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        let status = self.update(|s| {
+            s.status.phase = UpdatePhase::Installing;
+            s.status.progress = None;
+            s.status.error = None;
+        });
+        let me = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            let version = pending.version.clone();
+            if let Err(e) = me.install_pending(pending).await {
+                me.fail(format!("updating to {version} failed: {e}"));
+            }
+        });
+        Some(status)
+    }
+
+    /// The user is in front of the app: the main window is shown, not minimized and focused (an
+    /// unreadable window counts as in front), or Quick capture is in use (`apply::capture_in_front`).
+    #[cfg(desktop)]
+    fn in_front(&self) -> bool {
+        use tauri::Manager;
+        let main = self.app.get_webview_window("main").is_some_and(|w| {
+            apply::in_front(
+                w.is_visible().unwrap_or(true),
+                w.is_minimized().unwrap_or(false),
+                w.is_focused().unwrap_or(true),
+            )
+        });
+        let c = crate::capture::usage(&self.app);
+        main || apply::capture_in_front(c.visible, c.focused, c.typing, c.unsaved)
+    }
+
+    /// After [`apply::AWAY_GRACE`] of uninterrupted absence (no return to the front, no later
+    /// departure: [`apply::Away`]), installs the waiting update if the user is not in front then
+    /// (and `settings.autoUpdate` is still on). The departure is recorded now, not when the task
+    /// first runs.
+    #[cfg(desktop)]
+    fn settle(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        let departure = self.away.left();
+        tauri::async_runtime::spawn(async move {
+            if !me.away.stayed_away(departure, apply::AWAY_GRACE).await {
+                return;
+            }
+            let Some(target) = me.target else { return };
+            if me.lock().status.phase != UpdatePhase::Ready
+                || apply::decide(Origin::Automatic, target, me.in_front()) != Apply::Now
+                || !auto_update_enabled(&me.core.engine).await
+            {
+                return;
+            }
+            // The settings read yielded: the user may have come back meanwhile.
+            if !me.away.unchanged(departure) {
+                return;
+            }
+            log::info!("update: the user is out of the way, installing");
+            me.apply_pending();
+        });
+    }
+
+    /// `RunEvent::Exit`: installs a waiting update that doesn't restart anything (the AppImage,
+    /// `apply::applies_on_quit`) so the next start runs the new version.
+    #[cfg(desktop)]
+    pub fn apply_on_quit(&self) {
+        if !self.target.is_some_and(apply::applies_on_quit) {
+            return;
+        }
+        let Some(pending) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+        if !tauri::async_runtime::block_on(auto_update_enabled(&self.core.engine)) {
+            return;
+        }
+        log::info!("update: installing {} before quitting", pending.version);
+        if let Err(e) = pending.update.install(pending.bytes) {
+            log::warn!("update: installing {} at quit failed: {e}", pending.version);
+        }
     }
 
     #[cfg(target_os = "android")]
@@ -462,6 +630,54 @@ impl Updater {
         tauri::async_runtime::spawn(async move {
             if let Err(e) = me.launch_apk(open_settings) {
                 me.fail(e);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tf_client::{BadgeState, Engine, EngineConfig, NotifyStyle, Platform};
+    use tf_proto::{HostProfile, Notification};
+
+    use super::*;
+
+    struct NullPlatform;
+    impl Platform for NullPlatform {
+        fn notify(&self, _: Option<&HostProfile>, _: &Notification, _: NotifyStyle) {}
+        fn open_external(&self, _: &str) -> Result<(), ApiError> {
+            Ok(())
+        }
+        fn set_keep_alive(&self, _: bool) {}
+        fn set_badge(&self, _: BadgeState) {}
+        fn device_name(&self) -> String {
+            "test-box".into()
+        }
+    }
+
+    /// Every automatic check asks this gate first, against the real engine: on for a fresh
+    /// install (the default), then whatever the user saved. It used to send `null` params, which
+    /// `settings.get` rejects (`invalid_params`), so it always answered "off" and no automatic
+    /// check ever ran.
+    #[test]
+    fn automatic_checks_read_the_auto_update_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = EngineConfig {
+            data_dir: dir.path().to_path_buf(),
+            platform_name: "linux".into(),
+            client_app: "teleflock-test".into(),
+            version: "0.1.0".into(),
+            hostd_bins_override: None,
+        };
+        tauri::async_runtime::block_on(async {
+            let (engine, _rx) = Engine::start(cfg, Arc::new(NullPlatform)).await;
+            assert!(auto_update_enabled(&engine).await, "on by default");
+            let saved = engine.call(None, "settings.get", serde_json::json!({})).await.unwrap();
+            let mut settings: Settings = serde_json::from_value(saved).unwrap();
+            for on in [false, true] {
+                settings.auto_update = on;
+                engine.call(None, "settings.set", serde_json::to_value(&settings).unwrap()).await.unwrap();
+                assert_eq!(auto_update_enabled(&engine).await, on);
             }
         });
     }

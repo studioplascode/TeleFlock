@@ -24,6 +24,8 @@ mod local;
 pub mod quote;
 mod ssh;
 mod wsl;
+#[cfg(test)]
+mod test_support;
 
 pub use error::TransportError;
 pub use local::LocalTransport;
@@ -47,8 +49,9 @@ pub trait Transport: Send + Sync {
     async fn close(&self);
 }
 
-/// A command as argv. Remote kinds (SSH, WSL) run it in the user's login shell
-/// (`$SHELL -lc`, POSIX-quoted) so PATH includes `~/.local/bin`; Local runs argv directly.
+/// A command as argv. Remote kinds (SSH, WSL) run it in the user's login shell, so PATH
+/// includes `~/.local/bin`, without that shell parsing it ([`quote::bootstrap_argv`]); Local runs
+/// argv directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cmd {
     pub argv: Vec<String>,

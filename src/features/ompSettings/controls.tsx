@@ -19,6 +19,7 @@ import {
 } from "@/design";
 import { Ticks } from "@/features/shell/Ticks";
 import { conditionInfo, deepEqual, editorFor, enumChoices, formatJson, isModified, memberChoices, parseJson, parseNumber, valueText } from "./model";
+import { FallbackChainsSetting } from "./FallbackChainsSetting";
 import { ModelRoles } from "./ModelRoles";
 
 /** Typing pause before a text field saves (blur and Enter save at once). */
@@ -385,6 +386,8 @@ function Control({ s, ctx }: { s: OmpSetting; ctx: RowContext }) {
   switch (editorFor(s)) {
     case "roles":
       return <ModelRoles setting={s} hostId={ctx.hostId} onCommit={set} />;
+    case "chains":
+      return <FallbackChainsSetting s={s} ctx={ctx} onCommit={set} json={<JsonControl s={s} onCommit={set} />} />;
     case "secret":
       return <SecretControl s={s} onSet={set} onClear={() => set(null)} />;
     case "switch":
@@ -426,7 +429,7 @@ function Control({ s, ctx }: { s: OmpSetting; ctx: RowContext }) {
   }
 }
 
-const WIDE = new Set(["roles", "members", "list", "json"]);
+const WIDE = new Set(["roles", "chains", "members", "list", "json"]);
 
 /** One omp setting: label, hints, key, control, modified dot and reset. */
 export function SettingRow({ s, ctx, showPlace }: { s: OmpSetting; ctx: RowContext; showPlace?: string }) {

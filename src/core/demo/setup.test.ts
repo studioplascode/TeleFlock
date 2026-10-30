@@ -22,27 +22,27 @@ function rig() {
 }
 
 describe("demo host setup", () => {
-  test("config fixes apply at once; installs run after the reply, each on its own", async () => {
+  test("config fixes apply at once; installs run after the reply, and a failed one stays open", async () => {
     const r = rig();
-    const reply = await r.apply(["enable-global-sharing", "install-gh", "install-ffmpeg"]);
+    const reply = await r.apply(["enable-global-sharing", "install-ffmpeg"]);
     expect(reply.globalSharing).toBe(true);
-    expect(reply.applying).toEqual(["install-gh", "install-ffmpeg"]);
-    expect(reply.issues.map((i) => i.id)).toContain("install-gh");
+    expect(reply.applying).toEqual(["install-ffmpeg"]);
+    expect(reply.issues.map((i) => i.id)).toContain("install-ffmpeg");
+    expect(reply.issues.map((i) => i.id)).not.toContain("enable-global-sharing");
+    // A batch keeps the GitHub items' fields.
+    expect([reply.ghSignedIn, reply.gitIdentity]).toEqual([false, false]);
 
     r.clock.advance(3500);
-    // gh's first attempt fails (github.com unreachable); ffmpeg still runs.
-    expect(r.setup()?.applying).toEqual(["install-ffmpeg"]);
-    expect(r.setup()?.failed?.map((f) => [f.id, f.error.code])).toEqual([["install-gh", "install_failed"]]);
-    r.clock.advance(3500);
+    // ffmpeg's first attempt fails (the package mirror is unreachable).
     expect(r.setup()?.applying).toEqual([]);
-    expect(r.setup()?.issues.map((i) => i.id)).not.toContain("install-ffmpeg");
-    expect(r.setup()?.issues.map((i) => i.id)).toContain("install-gh");
+    expect(r.setup()?.failed?.map((f) => [f.id, f.error.code])).toEqual([["install-ffmpeg", "install_failed"]]);
+    expect(r.setup()?.issues.map((i) => i.id)).toContain("install-ffmpeg");
 
     // A retry hides the old failure while it runs and clears it when it works.
-    const retry = await r.apply(["install-gh"]);
-    expect([retry.applying, retry.failed]).toEqual([["install-gh"], []]);
+    const retry = await r.apply(["install-ffmpeg"]);
+    expect([retry.applying, retry.failed]).toEqual([["install-ffmpeg"], []]);
     r.clock.advance(3500);
-    expect(r.setup()?.issues.map((i) => i.id)).not.toContain("install-gh");
+    expect(r.setup()?.issues.map((i) => i.id)).not.toContain("install-ffmpeg");
     expect(r.setup()?.failed).toEqual([]);
   });
 });

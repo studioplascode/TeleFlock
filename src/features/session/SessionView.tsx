@@ -80,7 +80,7 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
   // focus mode and the rail are all that move these two: they measure their layout only when one changes
   const arrangement = `${focus}/${rail}`;
   return (
-    <div ref={box} className="@container relative flex h-full min-h-0 gap-5 p-4 pt-3" data-focus={focus || undefined}>
+    <div ref={box} data-session-root={key} className="@container relative flex h-full min-h-0 gap-5 p-4 pt-3" data-focus={focus || undefined}>
       <motion.div
         layout
         layoutDependency={arrangement}

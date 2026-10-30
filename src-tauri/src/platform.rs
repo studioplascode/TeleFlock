@@ -1,5 +1,6 @@
-//! `tf_client::Platform` for the Tauri shell (Windows, Android; Linux and macOS without OS
-//! notifications: tray badge and in-app inbox only).
+//! `tf_client::Platform` for the Tauri shell: OS notifications on Windows (toasts), Linux
+//! (D-Bus), macOS (UserNotifications, bundled builds) and Android; tray badge and system
+//! presence (idle time, screen lock) on the desktop.
 
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -7,7 +8,7 @@ use std::sync::{
 };
 
 use tauri::{AppHandle, Wry};
-use tf_client::{BadgeState, NotifyStyle, Platform};
+use tf_client::{BadgeState, NotifyStyle, Platform, SystemPresence};
 use tf_proto::{ApiError, HostProfile, Notification};
 
 use crate::present;
@@ -19,6 +20,12 @@ pub struct Shell {
     pub tray: OnceLock<Arc<crate::tray::Tray<Wry>>>,
     #[cfg(windows)]
     pub toasts: OnceLock<crate::toast::Toasts>,
+    /// Linux: the D-Bus notifier, set once a notification server answered (off the setup thread).
+    #[cfg(target_os = "linux")]
+    pub xdg: OnceLock<crate::xdg_notify::Notifier>,
+    /// macOS: `UNUserNotificationCenter`, set for bundled builds only.
+    #[cfg(target_os = "macos")]
+    pub mac: OnceLock<crate::mac_notify::Notifier>,
 }
 
 pub struct TauriPlatform {
@@ -141,8 +148,16 @@ impl Platform for TauriPlatform {
                 log::warn!("notification failed: {e}");
             }
         }
-        #[cfg(not(any(windows, target_os = "android")))]
-        log::info!("notification (no OS notifications on this platform): {} — {}", p.title, p.body);
+        #[cfg(target_os = "linux")]
+        if let Some(n) = self.shell.xdg.get() {
+            n.show(&p);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(n) = self.shell.mac.get() {
+            n.show(&p);
+        }
+        #[cfg(not(any(windows, target_os = "android", target_os = "linux", target_os = "macos")))]
+        log::debug!("notification (no OS notifications on this platform): {}", p.tag);
     }
 
     fn retract(&self, host_id: &str, n: &Notification) {
@@ -158,7 +173,15 @@ impl Platform for TauriPlatform {
                 log::warn!("retracting notification failed: {e}");
             }
         }
-        #[cfg(not(any(windows, target_os = "android")))]
+        #[cfg(target_os = "linux")]
+        if let Some(x) = self.shell.xdg.get() {
+            x.retract(&tag, &n.id);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(x) = self.shell.mac.get() {
+            x.retract(&tag, &n.id);
+        }
+        #[cfg(not(any(windows, target_os = "android", target_os = "linux", target_os = "macos")))]
         log::debug!("retract notification {} ({tag})", n.id);
     }
 
@@ -240,7 +263,19 @@ impl Platform for TauriPlatform {
     }
 
     fn supports_notifications(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.shell.xdg.get().is_some();
+        #[cfg(target_os = "macos")]
+        return self.shell.mac.get().is_some_and(|n| n.available());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         cfg!(any(windows, target_os = "android"))
+    }
+
+    fn system_presence(&self) -> SystemPresence {
+        #[cfg(desktop)]
+        return crate::idle::system_presence();
+        #[cfg(not(desktop))]
+        SystemPresence::default()
     }
 }
 

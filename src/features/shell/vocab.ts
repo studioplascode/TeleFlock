@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Blocks, Clock3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
+import { Activity, BarChart3, Blocks, BrushCleaning, Clock3, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Orbit, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
 import type { Agent, Column, NeedsKind } from "@/core/gen";
 import { formatAge, formatElapsed } from "@/design";
 
@@ -72,19 +72,23 @@ export const STATE_SHORT: Record<AgentStateId, string> = {
   done: "Done",
 };
 
-/** The pill word for an agent: the needs kind while it waits on you ("Question"), else its state. */
-export function agentStateWord(a: Pick<Agent, "column" | "turns" | "title" | "needs">): string {
+/** An ended card's pill (`Parked.ended`: its omp ended without anyone closing it; it sits in Review until it is back). */
+export const ENDED_WORD = "Ended";
+
+/** The pill word for an agent: the needs kind while it waits on you ("Question"), "Ended" for an ended card, else its state. */
+export function agentStateWord(a: Pick<Agent, "column" | "turns" | "title" | "needs" | "parked">): string {
   if (a.column === "needs" && a.needs) return NEEDS_WORD[a.needs.kind];
+  if (a.column === "review" && a.parked?.ended) return ENDED_WORD;
   return STATE_WORD[agentStateId(a)];
 }
 
 /**
  * The time on a card, with the verb that says what it measures: "turn 27:24", "waiting 6:13",
- * "finished 25m ago". Fresh and done agents show the bare age ("46s ago", "2h ago"): their state
- * word ("Waiting for prompt", "Done") already is the verb. `since` is the state's start
- * (stateSince / needs.since / turn start).
+ * "finished 25m ago". Fresh, done and ended agents show the bare age ("46s ago", "2h ago"): their
+ * state word ("Waiting for prompt", "Done", "Ended") already is the verb. `since` is the state's start
+ * (stateSince / needs.since / turn start; `Parked.ended.at` for an ended card).
  */
-export function stateTime(state: AgentStateId, since: number | undefined, now: number): string | null {
+export function stateTime(state: AgentStateId | "ended", since: number | undefined, now: number): string | null {
   if (since === undefined) return null;
   const ms = Math.max(0, now - since);
   switch (state) {
@@ -94,6 +98,7 @@ export function stateTime(state: AgentStateId, since: number | undefined, now: n
       return `waiting ${formatElapsed(ms)}`;
     case "fresh":
     case "done":
+    case "ended":
       return formatAge(ms);
     case "review":
       return `finished ${formatAge(ms)}`;
@@ -122,6 +127,8 @@ export const ACTIONS = {
   fanOut: { label: "Fan out", description: "One task on 2–5 agents, each in its own worktree; keep the best" },
   openFolder: { label: "Open folder", description: "Add any folder as a workspace, with or without an agent" },
   pastSessions: { label: "Past sessions", description: "Resume an earlier omp session in a new pane" },
+  quickCapture: { label: "Quick capture", description: "A small box over any app: send a task, paste a screenshot, answer the next question" },
+  sendToAgent: { label: "Send to agent…", description: "Put the task in an agent's composer instead of starting a new one" },
 
   // ── one agent ──
   openSession: { label: "Open session", shortcut: "Enter", description: "Transcript, composer and controls" },
@@ -135,7 +142,13 @@ export const ACTIONS = {
   deleteWorktree: { label: "Delete worktree…", description: "Its pull request is merged or closed: delete the checkout folder (asks first); the branch stays" },
   reopen: { label: "Reopen", description: "Move it back to Review" },
   resume: { label: "Resume", description: "Reopen the closed omp session in a new pane" },
+  moveHost: { label: "Move to host…", description: "Continue this agent on another connected host: its branch, changes and session travel along" },
   stopTurn: { label: "Stop turn", shortcut: "Esc", description: "Interrupt the current turn; the session stays" },
+  resumeTurn: { label: "Resume", shortcut: "F5", slash: "/retry", description: "Resume the stopped turn" },
+  resumeNow: { label: "Resume now", description: "Resume it and its stopped subagents now, without waiting for the limit" },
+  noAutoResume: { label: "Don't auto-resume", description: "It stays stopped until you resume it" },
+  dismissAutoResume: { label: "Dismiss", description: "Forget this stop; resume it yourself when you want" },
+  decideForMe: { label: "Decide for me…", description: "Let the host pick the ★ recommended option when a question of this agent waits too long" },
   exitOmp: { label: "Exit omp (keep pane)", description: "Quit omp; the herdr pane stays open" },
   closePane: { label: "Close pane…", description: "Quit omp and close its herdr pane (asks first)" },
   mute: { label: "Mute notifications", description: "No sound or OS notification from it; its card stays" },
@@ -169,17 +182,22 @@ export const VIEWS = {
   inbox: { label: "Inbox", shortcut: "Ctrl 2", description: "What needs you, then unread updates", icon: Inbox },
   activity: { label: "Activity", shortcut: "Ctrl 3", description: "Everything that happened, newest first", icon: Activity },
   usage: { label: "Usage", shortcut: "Ctrl 4", description: "Spend, tokens and subscription limits", icon: BarChart3 },
+  wrapped: { label: "Flock Wrapped", description: "Your flock's week on one card, to share as an image", icon: PartyPopper },
   hosts: { label: "Hosts", shortcut: "Ctrl 5", description: "Connections, health and setup", icon: Server },
   settings: { label: "Settings", shortcut: "Ctrl 6", description: "Notifications, motion, hints and AI naming", icon: Settings2 },
   dispatch: { label: "Dispatch", shortcut: "D", description: "Send tasks to a repository like messages", icon: Send },
   automations: { label: "Automations", shortcut: "Ctrl 7", description: "Agents a host starts on a schedule", icon: Clock3 },
   omp: { label: "omp settings", shortcut: "Ctrl 8", description: "omp's models, roles, tools and every other setting, per host", icon: SlidersHorizontal },
   mcp: { label: "MCP servers", description: "Tool servers omp can use, per host: add, sign in, test, turn on or off", icon: Blocks },
+  plugins: { label: "Skills & plugins", description: "Skills and plugins omp loads, per host: install from the registry or a marketplace, update, turn on or off", icon: Puzzle },
   accounts: { label: "Accounts", description: "Subscription logins omp uses, per host: link, unlink, pick the default", icon: KeyRound },
+  cleanup: { label: "Cleanup", description: "Worktrees per host, by pull request, age and size: delete merged or stale ones; omp's storage", icon: BrushCleaning },
+  wall: { label: "Wall", description: "Live transcripts side by side, 2×2 or 3×3, answered in place: for a big monitor", icon: Grid3x3 },
+  ambient: { label: "Ambient", description: "One orb per agent for a tablet or second screen: glows when one needs you, chimes if you like", icon: Orbit },
 } as const satisfies Record<string, ViewDef>;
 
 /** omp's own per-host pages (the omp area), in the order every entry point lists them. */
-export const OMP_PAGES = ["omp", "mcp", "accounts"] as const;
+export const OMP_PAGES = ["omp", "mcp", "plugins", "accounts"] as const;
 
 /**
  * Send keys, one contract everywhere. Single message boxes (session composer, Dispatch, Other…,

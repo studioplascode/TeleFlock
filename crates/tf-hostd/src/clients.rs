@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, PROTOCOL_VERSION};
 
 use crate::daemon::Daemon;
@@ -52,13 +52,15 @@ pub struct Features {
     pub zstd: bool,
     /// Cached, resumable session subscriptions ([`crate::sync`]).
     pub session_sync: bool,
+    /// Presence reports and routed notifications ([`crate::notify`]).
+    pub presence: bool,
 }
 
 impl Features {
     /// The features of `requested` (`hello`'s `client.features`) this hostd speaks.
     pub fn negotiate(requested: Option<&[String]>) -> Features {
         let has = |f: &str| requested.is_some_and(|r| r.iter().any(|x| x == f));
-        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC) }
+        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE) }
     }
 
     /// `welcome.features`: the accepted ones (none for a client that asked for none, which then
@@ -71,6 +73,9 @@ impl Features {
         }
         if self.session_sync {
             out.push(FEATURE_SESSION_SYNC.to_string());
+        }
+        if self.presence {
+            out.push(FEATURE_PRESENCE.to_string());
         }
         Some(out)
     }
@@ -303,6 +308,8 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     )
     .await;
     ctx.state.attach_client(&client);
+    ctx.notify.client_attached(&session, &client);
+    ctx.auto_answer.clients_changed();
 
     let writer = tokio::spawn(write_loop(client.clone(), write));
     let mut reader = framed_reader(reader, features);
@@ -362,6 +369,8 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
             ClientMsg::Ping { ts } => {
                 client.send(ServerMsg::Pong { ts });
             }
+            ClientMsg::Presence { presence } => ctx.notify.presence_changed(&client, presence),
+            ClientMsg::NotifyRead { ids } => ctx.notify.notify_read(&client, ids),
             ClientMsg::Hello { .. } => {
                 client.send(ServerMsg::Error { error: ApiError::new("invalid_params", "duplicate hello") });
             }
@@ -379,6 +388,8 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     client.close();
     let _ = writer.await;
     ctx.state.detach_client(&client_id);
+    ctx.notify.client_detached(&client_id);
+    ctx.auto_answer.clients_changed();
     ops::agent::client_gone(&ctx, &client_id);
     ops::term::client_gone(&ctx, &client_id).await;
     info!(client = %client_id, "client disconnected");
@@ -557,10 +568,10 @@ mod tests {
         // An old client asks for nothing and gets the welcome it always got.
         assert_eq!(Features::negotiate(None), Features::default());
         assert_eq!(Features::default().welcome(None), None);
-        let all = vec!["zstd".to_string(), "sessionSync".into(), "fromTheFuture".into()];
+        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "fromTheFuture".into()];
         let f = Features::negotiate(Some(&all));
-        assert_eq!(f, Features { zstd: true, session_sync: true });
-        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into()]));
+        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true });
+        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into()]));
         let unknown = vec!["fromTheFuture".to_string()];
         let f = Features::negotiate(Some(&unknown));
         assert_eq!((f, f.welcome(Some(&unknown))), (Features::default(), Some(vec![])));
@@ -587,7 +598,7 @@ mod tests {
     /// compresses repeated JSON.
     #[tokio::test]
     async fn zstd_batches_flush_and_survive_partial_reads() {
-        let zstd = Features { zstd: true, session_sync: false };
+        let zstd = Features { zstd: true, ..Features::default() };
         let c = ClientHandle::with_features("c1".into(), info(), zstd);
         let (w, r) = tokio::io::duplex(1 << 20);
         let (counted_tx, counted) = tokio::io::duplex(1 << 20);
@@ -647,7 +658,7 @@ mod tests {
         let mut line = String::new();
         assert!(read_line(&mut reader, &mut line).await.unwrap());
         assert_eq!(line, "{\"t\":\"hello\"}");
-        let mut rest = framed_reader(reader, Features { zstd: true, session_sync: false });
+        let mut rest = framed_reader(reader, Features { zstd: true, ..Features::default() });
         assert!(read_line(&mut rest, &mut line).await.unwrap());
         assert_eq!(serde_json::from_str::<ClientMsg>(&line).unwrap(), ClientMsg::Ping { ts: 7 });
         assert!(read_line(&mut rest, &mut line).await.unwrap());

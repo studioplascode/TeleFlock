@@ -11,7 +11,8 @@ use serde_json::Value;
 use tf_proto::{
     Answer, ApiError, AppCapabilities, AppEvent, AppInfo, AppMethod, ConnPhase, ConnStatus, Delivery, Empty,
     HostKind, HostMethod, HostProfile, HostSaveParams, HostSecrets, HostState, HostStatusEntry, HostsListResult, NeedsKind,
-    NeedsYou, Notification, NotifyKind, Settings, SshAuth, StatePatch, TunnelListResult, WslDistrosResult,
+    NeedsYou, Notification, NotifyKind, Presence, PresenceState, Settings, SshAuth, StatePatch, TunnelListResult, UiPresence,
+    WslDistrosResult,
 };
 use tf_transport::TransportError;
 use tokio::sync::broadcast;
@@ -19,8 +20,9 @@ use tokio::task::JoinHandle;
 
 use crate::conn::{self, ConnCmd, HostRt, HostView, Tracked};
 use crate::deploy::{Artifacts, HOSTD_VERSION};
-use crate::link::timeout_for;
+use crate::link::{Link, timeout_for};
 use crate::platform::{BadgeState, NotifyStyle, Platform};
+use crate::presence;
 use crate::secrets::{self, SecretStore};
 use crate::settings::{default_settings, in_quiet_hours, is_muted, local_minutes_now, validate, wants};
 use crate::session_cache::SessionCache;
@@ -112,6 +114,17 @@ pub(crate) struct Inner {
     runtime: tokio::runtime::Handle,
     /// What the session mirrors persist (`data_dir/sessions`).
     session_cache: SessionCache,
+    /// What the UI last reported (`app.presence`) and the presence last sent to hosts.
+    presence: Mutex<PresenceInputs>,
+    /// One presence refresh at a time, in the order read ([`presence::Refresh`]).
+    presence_turns: presence::Refresh,
+}
+
+/// Inputs and output of this device's presence ([`presence`]).
+#[derive(Default)]
+struct PresenceInputs {
+    ui: Option<UiPresence>,
+    sent: Option<Presence>,
 }
 
 /// [`SessionHost`] of one host for the session mirrors.
@@ -143,12 +156,22 @@ impl SessionHost for EngineHost {
 
     fn agent(&self, agent_id: &str) -> AgentHint {
         let v = self.rt.view.lock().unwrap();
-        let omp = v.state.as_ref().and_then(|(_, s)| s.agents.iter().find(|a| a.id == agent_id)).and_then(|a| a.omp.as_ref());
+        let agent = v.state.as_ref().and_then(|(_, s)| s.agents.iter().find(|a| a.id == agent_id));
+        let omp = agent.and_then(|a| a.omp.as_ref());
         AgentHint {
             session_id: omp.and_then(|o| o.session_id.clone()),
             live: v.live && omp.is_some_and(|o| o.link == tf_proto::LinkState::Live),
+            finished: v.live && agent.is_some_and(turn_ended),
         }
     }
+}
+
+/// Host state says `a`'s turn ended ([`AgentHint::finished`]): herdr no longer sees it working (its
+/// card is in review or done, nothing waits on the user), and hostd's own copy of its session has
+/// nothing at work (no tool call open, nothing streaming). The second half keeps a card that sits
+/// in review while omp works (herdr without omp's integration never sees it working) from counting.
+fn turn_ended(a: &tf_proto::Agent) -> bool {
+    matches!(a.column, tf_proto::Column::Review | tf_proto::Column::Done) && a.live.tool.is_none() && !a.live.streaming && !a.live.thinking
 }
 
 /// The session mirrors' view of `rt`.
@@ -331,17 +354,41 @@ impl Inner {
     }
 
     /// Notification policy: always forward to the UI; reach the OS per settings, per-agent
-    /// mute and quiet hours.
-    pub fn on_notify(&self, rt: &HostRt, n: Notification) {
-        self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n.clone() });
+    /// mute and quiet hours. A host that routes by presence says whether this device alerts
+    /// (`alert: false`: another device is in use; it may escalate here later, `notifyAlert`); a
+    /// device that does not share its presence alerts for everything, like older apps.
+    pub fn on_notify(&self, rt: &HostRt, n: Notification, alert: Option<bool>) {
+        let alert = alert.filter(|_| presence::sharing(&self.settings()));
+        self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n.clone(), alert });
         // tf-hostd publishes the state carrying the request before notifying about it.
         let seen = n.kind == NotifyKind::Needs && request_pending(rt, &n) == Some(true);
-        let style = self.os_style(rt, &n);
+        let style = if alert == Some(false) { None } else { self.os_style(rt, &n) };
         rt.remember_notification(Tracked { n: n.clone(), posted: style.is_some(), seen, read: false, resolved: false });
         if let Some(style) = style {
             let profile = self.profile(&rt.id);
             self.platform.notify(profile.as_ref(), &n, style);
         }
+    }
+
+    /// The host escalated notification `id` here: nobody saw it on the device in use. Posted now
+    /// (unless it was read, resolved or posted meanwhile), and the UI alerts for it.
+    pub fn on_notify_alert(&self, rt: &HostRt, id: &str) {
+        let Some(t) = rt.find_notification(id) else { return };
+        if t.read || t.resolved || t.posted {
+            return;
+        }
+        if let Some(style) = self.os_style(rt, &t.n) {
+            rt.mark_posted(id);
+            let profile = self.profile(&rt.id);
+            self.platform.notify(profile.as_ref(), &t.n, style);
+        }
+        self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: t.n, alert: Some(true) });
+    }
+
+    /// Read on another device (`notifyDone`): read here too, like a read in this app, without
+    /// telling the host again.
+    pub fn on_remote_read(&self, rt: &HostRt, ids: &[String]) {
+        self.settle_read(rt, |n| ids.contains(&n.id));
     }
 
     /// How `n` reaches the OS, or `None` when it stays in the app.
@@ -378,14 +425,23 @@ impl Inner {
     }
 
     /// Marks the matching unread notifications read; their OS notifications are retracted
-    /// unless they ask about a request that is still pending.
+    /// unless they ask about a request that is still pending. A host that routes by presence
+    /// learns it: it stops escalating them and retracts them on its other devices.
     pub fn mark_read(&self, rt: &HostRt, matches: impl Fn(&Notification) -> bool) {
+        let ids = self.settle_read(rt, matches);
+        tell_read(rt, ids);
+    }
+
+    /// [`Self::mark_read`] without telling the host; returns the ids that became read.
+    fn settle_read(&self, rt: &HostRt, matches: impl Fn(&Notification) -> bool) -> Vec<String> {
         let mut done = Settled::default();
         for t in rt.view.lock().unwrap().notifications.iter_mut().filter(|t| !t.read && matches(&t.n)) {
             let pending = t.n.kind == NotifyKind::Needs && !t.resolved;
             done.settle(t, false, !pending);
         }
+        let ids = done.ids.clone();
         self.finish(rt, done, false);
+        ids
     }
 
     /// The user dismissed the OS notification: it is gone there, and read in the app.
@@ -395,7 +451,84 @@ impl Inner {
             t.posted = false;
             done.settle(t, false, false);
         }
+        let ids = done.ids.clone();
         self.finish(rt, done, false);
+        tell_read(rt, ids);
+    }
+
+    // ───────────────────────────── presence ─────────────────────────────
+
+    /// What this device reports now: the UI's last report, the system's idle time and lock, the
+    /// device settings. Not sharing it: always `idle`, so hosts never take this device for the
+    /// one in use (it alerts for everything by itself).
+    async fn current_presence(&self) -> Presence {
+        let sys = presence::read_system(self.platform.clone(), presence::SYSTEM_DEADLINE).await;
+        let ui = self.presence.lock().unwrap().ui.clone().unwrap_or(UiPresence { visible: false, focused: false, input_at: None });
+        let settings = self.settings();
+        let mut p = presence::compute(&ui, sys, &settings, &self.cfg.platform_name, self.platform.supports_notifications(), now_ms());
+        if !presence::sharing(&settings) {
+            p.state = PresenceState::Idle;
+        }
+        p
+    }
+
+    /// Live links to hosts that route by presence.
+    fn presence_links(&self) -> Vec<Arc<Link>> {
+        let hosts: Vec<Arc<HostRt>> = self.hosts.lock().unwrap().values().cloned().collect();
+        hosts.iter().filter_map(|rt| rt.link()).filter(|l| l.features.presence).collect()
+    }
+
+    /// Re-evaluates this device's presence; a change (state, kind, system notifications) goes to
+    /// every host that routes by it. Reading and sending happen in one turn, so hosts get the
+    /// newest presence last.
+    pub async fn refresh_presence(&self) {
+        self.presence_turns
+            .exclusive(async {
+                let links = self.presence_links();
+                if links.is_empty() {
+                    return;
+                }
+                let p = self.current_presence().await;
+                let changed = {
+                    let mut s = self.presence.lock().unwrap();
+                    let changed = presence::changed(s.sent.as_ref(), &p);
+                    s.sent = Some(p.clone());
+                    changed
+                };
+                if changed {
+                    log::debug!("presence: {:?} ({:?})", p.state, p.device);
+                    for link in links {
+                        let _ = link.presence(&p);
+                    }
+                }
+            })
+            .await
+    }
+
+    /// Refreshes presence in the background, for request handlers that must not wait on the
+    /// system (a desktop service that doesn't answer): requests while one is queued share it.
+    fn request_presence_refresh(self: &Arc<Self>) {
+        if self.presence_turns.claim() {
+            let me = self.clone();
+            tokio::spawn(async move { me.refresh_presence().await });
+        }
+    }
+
+    /// A link to a host that routes by presence came up: it learns this device's presence.
+    pub fn presence_link_up(self: &Arc<Self>, link: &Arc<Link>) {
+        if !link.features.presence {
+            return;
+        }
+        let (me, link) = (self.clone(), link.clone());
+        tokio::spawn(async move {
+            me.presence_turns
+                .exclusive(async {
+                    let p = me.current_presence().await;
+                    me.presence.lock().unwrap().sent = Some(p.clone());
+                    let _ = link.presence(&p);
+                })
+                .await
+        });
     }
 
     /// The host was removed: nothing of it may stay on screen.
@@ -476,6 +609,17 @@ impl Settled {
             t.posted = false;
             self.retract.push(t.n.clone());
         }
+    }
+}
+
+/// Tells a host that routes by presence which of its notifications this device read: it stops
+/// escalating them and retracts them on its other devices.
+fn tell_read(rt: &HostRt, ids: Vec<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    if let Some(link) = rt.link().filter(|l| l.features.presence) {
+        let _ = link.notify_read(ids);
     }
 }
 
@@ -684,6 +828,8 @@ impl Engine {
             page_epoch: std::sync::atomic::AtomicU64::new(0),
             runtime: tokio::runtime::Handle::current(),
             session_cache,
+            presence: Mutex::new(PresenceInputs::default()),
+            presence_turns: presence::Refresh::default(),
         });
         let engine = Engine { inner: inner.clone() };
 
@@ -721,7 +867,8 @@ impl Engine {
                 }
             }
         });
-        // Changed session mirrors to the session cache.
+        // Changed session mirrors to the session cache; open ones left behind by a finished turn
+        // are re-opened (`sessions::heal_due`).
         let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(SESSION_CACHE_EVERY);
@@ -731,8 +878,21 @@ impl Engine {
                 let Some(inner) = weak.upgrade() else { break };
                 let hosts: Vec<Arc<HostRt>> = inner.hosts.lock().unwrap().values().cloned().collect();
                 for rt in hosts {
-                    sessions::persist_due(session_host(&inner, &rt)).await;
+                    let host = session_host(&inner, &rt);
+                    sessions::heal_due(&host);
+                    sessions::persist_due(host).await;
                 }
+            }
+        });
+        // This device's presence: the system's idle time changes without any event.
+        let weak = Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(presence::TICK);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(inner) = weak.upgrade() else { break };
+                inner.refresh_presence().await;
             }
         });
         (engine, rx)
@@ -1111,6 +1271,11 @@ impl Engine {
                 i.platform.notify(None, &n, NotifyStyle { sound: s.notify_sound, silent: false, reply: false });
                 to_value(&Empty {})
             }
+            AppMethod::AppPresence(p) => {
+                i.presence.lock().unwrap().ui = Some(p);
+                i.request_presence_refresh();
+                to_value(&Empty {})
+            }
             AppMethod::AppNotifyRead(p) => {
                 let rt = i.host(&p.host_id).ok_or_else(|| not_found_host(&p.host_id))?;
                 i.mark_read(&rt, |n| p.agent_id.as_ref().is_none_or(|a| *a == n.agent_id));
@@ -1280,6 +1445,7 @@ impl Engine {
                     i.send(AppEvent::Settings { settings: s.clone() });
                 }
                 i.refresh_keep_alive();
+                i.request_presence_refresh();
                 to_value(&s)
             }
             AppMethod::TunnelOpen(p) => {
@@ -1487,6 +1653,36 @@ mod tests {
         assert!(std::iter::from_fn(|| rx.try_recv().ok()).all(|e| !matches!(e, AppEvent::Session { .. })));
     }
 
+    /// The self-heal's "host state says the turn ended" (`AgentHint::finished`): the card in
+    /// review or done and hostd's own copy idle, from a live host. A card that sits in review
+    /// while hostd still has a tool open or a reply streaming (herdr without omp's integration
+    /// never sees omp working) does not count, nor does cached state from before the link.
+    #[tokio::test]
+    async fn the_heal_hears_a_turn_ended_from_live_host_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _platform, rt, _rx) = notify_host(dir.path()).await;
+        let host = session_host(&engine.inner, &rt);
+        let finished = |a: tf_proto::Agent| {
+            let mut st = host_state();
+            st.agents = vec![a];
+            engine.inner.apply_snapshot(&rt, 1, st);
+            host.agent("a1").finished
+        };
+        let tool = tf_proto::ActiveTool { name: "wait".into(), label: "wait".into(), started_at: 1 };
+        let mut at_work = agent("a1", tf_proto::Column::Review);
+        at_work.live.tool = Some(tool);
+        assert!(!finished(at_work), "hostd still has the `wait` open");
+        let mut streaming = agent("a1", tf_proto::Column::Done);
+        streaming.live.streaming = true;
+        assert!(!finished(streaming));
+        assert!(!finished(agent("a1", tf_proto::Column::Running)));
+        assert!(!finished(agent("a1", tf_proto::Column::Needs)));
+        assert!(finished(agent("a1", tf_proto::Column::Review)));
+        assert!(finished(agent("a1", tf_proto::Column::Done)));
+        rt.view.lock().unwrap().live = false;
+        assert!(!host.agent("a1").finished, "cached state, not the host's word");
+    }
+
     #[tokio::test]
     async fn app_methods_persist_and_replay() {
         let dir = tempfile::tempdir().unwrap();
@@ -1565,6 +1761,15 @@ mod tests {
         }
     }
 
+    /// [`wait_event`], unless `seen` already holds a match: events that do not depend on each
+    /// other (the host's first snapshot and the notification it carries, the `online` status)
+    /// reach the channel in either order, so one that came early is not waited for again.
+    async fn wait_seen(rx: &mut broadcast::Receiver<AppEvent>, seen: &mut Vec<AppEvent>, pred: impl Fn(&AppEvent) -> bool) {
+        if !seen.iter().any(&pred) {
+            wait_event(rx, seen, pred).await;
+        }
+    }
+
     fn phase_is(ev: &AppEvent, phase: ConnPhase) -> bool {
         matches!(ev, AppEvent::HostStatus { status, .. } if status.phase == phase)
     }
@@ -1628,8 +1833,8 @@ mod tests {
             dedup,
             [ConnPhase::Idle, ConnPhase::Connecting, ConnPhase::Deploying, ConnPhase::Starting, ConnPhase::Online]
         );
-        assert!(seen.iter().any(|e| matches!(e, AppEvent::HostSnapshot { rev: 1, state, .. } if state.agents.len() == 2)));
-        wait_event(&mut rx, &mut seen, |e| matches!(e, AppEvent::Notify { .. })).await;
+        wait_seen(&mut rx, &mut seen, |e| matches!(e, AppEvent::HostSnapshot { rev: 1, state, .. } if state.agents.len() == 2)).await;
+        wait_seen(&mut rx, &mut seen, |e| matches!(e, AppEvent::Notify { .. })).await;
         let log = std::fs::read_to_string(home.path().join("attach.log")).unwrap();
         assert_eq!(log.trim(), "attach --session tf-lab --relay-port 47999");
         assert!(std::fs::read_to_string(home.path().join("omp-overlay.yml")).unwrap().contains("127.0.0.1:47999"));
@@ -1769,11 +1974,11 @@ mod tests {
             request_id: None,
             actions: vec![],
         };
-        engine.inner.on_notify(&rt, note("a1"));
-        engine.inner.on_notify(&rt, note("a2"));
+        engine.inner.on_notify(&rt, note("a1"), None);
+        engine.inner.on_notify(&rt, note("a2"), None);
         let ids: Vec<String> = (0..2)
             .map(|_| match rx.try_recv().unwrap() {
-                AppEvent::Notify { host_id, notification } if host_id == "lab" => notification.agent_id,
+                AppEvent::Notify { host_id, notification, .. } if host_id == "lab" => notification.agent_id,
                 other => panic!("{other:?}"),
             })
             .collect();
@@ -1861,7 +2066,7 @@ mod tests {
         st.agents = vec![asking("a1", "r1"), asking("a2", "r2"), asking("a3", "r3"), asking("a4", "r4")];
         i.apply_snapshot(&rt, 1, st);
         for (id, a, r) in [("n1", "a1", "r1"), ("n2", "a2", "r2"), ("n3", "a3", "r3"), ("n4", "a4", "r4")] {
-            i.on_notify(&rt, note(id, NotifyKind::Needs, a, Some(r)));
+            i.on_notify(&rt, note(id, NotifyKind::Needs, a, Some(r)), None);
         }
         assert_eq!(platform.notified.lock().unwrap().len(), 4);
         assert!(done(&mut rx).is_empty());
@@ -1875,7 +2080,7 @@ mod tests {
         i.apply_patch(&rt, 3, vec![upsert(asking("a2", "r2b"))]);
         assert_eq!(platform.take_retracted(), ["n2"]);
         assert_eq!(done(&mut rx), [(ids(&["n2"]), true)]);
-        i.on_notify(&rt, note("n2b", NotifyKind::Needs, "a2", Some("r2b")));
+        i.on_notify(&rt, note("n2b", NotifyKind::Needs, "a2", Some("r2b")), None);
         i.apply_patch(&rt, 4, vec![upsert(asking("a4", "r4"))]);
         assert!(platform.take_retracted().is_empty(), "pending requests keep their notifications");
         assert!(done(&mut rx).is_empty());
@@ -1891,7 +2096,7 @@ mod tests {
 
         // A newer notification of the same agent replaced n2b on the OS: resolving n2b must not
         // retract it.
-        i.on_notify(&rt, note("f2", NotifyKind::Finished, "a2", None));
+        i.on_notify(&rt, note("f2", NotifyKind::Finished, "a2", None), None);
         i.apply_patch(&rt, 7, vec![upsert(agent("a2", tf_proto::Column::Review))]);
         assert!(platform.take_retracted().is_empty());
         assert_eq!(done(&mut rx), [(ids(&["n2b"]), true)]);
@@ -1913,9 +2118,9 @@ mod tests {
         let mut st = host_state();
         st.agents = vec![asking("a1", "r1"), agent("a2", tf_proto::Column::Review)];
         i.apply_snapshot(&rt, 1, st);
-        i.on_notify(&rt, note("nN", NotifyKind::Needs, "a1", Some("r1")));
-        i.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None));
-        i.on_notify(&rt, note("nE", NotifyKind::Error, "a3", None));
+        i.on_notify(&rt, note("nN", NotifyKind::Needs, "a1", Some("r1")), None);
+        i.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None), None);
+        i.on_notify(&rt, note("nE", NotifyKind::Error, "a3", None), None);
 
         // Opened a2's session in the app.
         engine.call(None, "app.notifyRead", serde_json::json!({"hostId": "lab", "agentId": "a2"})).await.unwrap();
@@ -1937,7 +2142,7 @@ mod tests {
         assert_eq!(done(&mut rx), [(ids(&["nN"]), true)]);
 
         // Body tap on an OS notification: opens the agent, read and retracted.
-        i.on_notify(&rt, note("nG", NotifyKind::Finished, "a2", None));
+        i.on_notify(&rt, note("nG", NotifyKind::Finished, "a2", None), None);
         engine.notification_action("lab", "nG", None, None).await.unwrap();
         assert_eq!(platform.take_retracted(), ["nG"]);
         let evs: Vec<AppEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -1953,8 +2158,8 @@ mod tests {
         let mut st = host_state();
         st.agents = vec![asking("a1", "r1")];
         engine.inner.apply_snapshot(&rt, 1, st);
-        engine.inner.on_notify(&rt, note("nN", NotifyKind::Needs, "a1", Some("r1")));
-        engine.inner.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None));
+        engine.inner.on_notify(&rt, note("nN", NotifyKind::Needs, "a1", Some("r1")), None);
+        engine.inner.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None), None);
         drop(rt);
         engine.call(None, "hosts.remove", serde_json::json!({"hostId": "lab"})).await.unwrap();
         assert_eq!(platform.take_retracted(), ["nN", "nF"]);

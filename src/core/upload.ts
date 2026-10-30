@@ -24,14 +24,24 @@ export const MIN_CHUNK = 64 * 1024;
 export const FIRST_CHUNK = 256 * 1024;
 export const MAX_CHUNK = 1024 * 1024;
 /** Each chunk should take about this long at the measured rate. */
-const CHUNK_MS = 3_000;
+export const CHUNK_MS = 3_000;
 /** Consecutive failures are retried for this long before the upload gives up. */
-const GIVE_UP_MS = 10 * 60_000;
-const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+export const GIVE_UP_MS = 10 * 60_000;
+export const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 /** Times the host may lose an upload (daemon restart, idle for an hour) before it fails. */
-const MAX_RESTARTS = 3;
+export const MAX_RESTARTS = 3;
 /** Codes worth another try besides `retryable` errors. */
 const TRANSIENT: Record<string, true> = { timeout: true, not_connected: true, disconnected: true };
+
+/** Worth another try: a retryable error, a timeout or a lost connection. */
+export function isTransientError(err: { code: string; retryable?: boolean }): boolean {
+  return !!err.retryable || !!TRANSIENT[err.code];
+}
+
+/** A chunk that timed out: half the size, 64 KiB steps, never below `MIN_CHUNK`. */
+export function halveChunk(chunk: number): number {
+  return Math.max(MIN_CHUNK, Math.floor(chunk / 2 / MIN_CHUNK) * MIN_CHUNK);
+}
 
 export interface UploadOptions {
   /** After each chunk the host confirmed: bytes it has, of `total`. */
@@ -156,10 +166,10 @@ export async function uploadVia(host: HostClient, file: Blob & { name?: string }
           step = "status";
           continue;
         }
-        if (!(err.retryable || TRANSIENT[err.code])) throw err;
+        if (!isTransientError(err)) throw err;
         failingSince ??= env.now();
         if (env.now() - failingSince > GIVE_UP_MS) throw err;
-        if (err.code === "timeout" && step === "chunk") chunk = Math.max(MIN_CHUNK, Math.floor(chunk / 2 / MIN_CHUNK) * MIN_CHUNK);
+        if (err.code === "timeout" && step === "chunk") chunk = halveChunk(chunk);
         await env.sleep(BACKOFF_MS[Math.min(failures, BACKOFF_MS.length - 1)] ?? 1_000, signal);
         failures++;
         // The request may have landed (only its answer was lost): ask where the upload stands.

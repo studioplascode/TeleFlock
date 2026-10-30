@@ -1,4 +1,6 @@
-import { Bot, FileCode2, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Reply, Send, Square, Workflow } from "lucide-react";
+import { Bot, Cpu, FileCode2, FileText, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Reply, Send, Square, Workflow } from "lucide-react";
+import { JobsPanel } from "../jobs/JobsPanel";
+import { ArtifactsPanel, ArtifactsTab } from "../artifacts/ArtifactsPanel";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useCore, useDraft, useIrcEntries, useSession } from "@/core";
 import { SessionCtx } from "../context";
@@ -10,7 +12,8 @@ import { errorText, hostCall, usePending } from "../api";
 import { ChatThreads, useIrcUnreadCount } from "../irc/ChatThreads";
 import { Markdown } from "../markdown/Markdown";
 import { type InspectorTab, useSessionUi } from "../state";
-import { SubagentCard } from "../subagents/Subagents";
+import { groupSubagents } from "../subagents/grouping";
+import { SubagentList } from "../subagents/SubagentList";
 import { DiffStatText } from "../tools/DiffBody";
 import { TodoPhases, todoCounts } from "../tools/TodoList";
 import { SPENDERS, SpendTile } from "../spend";
@@ -59,14 +62,30 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
       <div className="flex flex-col gap-2">
         {/* Can it keep going: context used and subscription left, as bars that say which way they count. */}
         <div className={cn(TILE, "flex flex-wrap gap-x-4 gap-y-2.5")} aria-label="Can it keep going">
-          <Meter
-            term={<Term id="context">ctx</Term>}
-            reading={ctx ? `${Math.round(ctx.pct)}% used` : "—"}
-            fill={ctx?.pct ?? 0}
-            status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined}
-            label={ctx ? `Context ${Math.round(ctx.pct)}% used` : "Context unknown"}
-            detail={ctx ? `${formatCompact(ctx.tokens)} / ${formatCompact(ctx.window)}` : undefined}
-          />
+          <button
+            type="button"
+            title="Context X-ray: what fills the context window"
+            onClick={() => {
+              const ui = useSessionUi.getState();
+              ui.setSheet(agentKey, false);
+              ui.openDialog(agentKey, "context");
+            }}
+            className="focus-ring flex min-w-0 flex-1 rounded-sm text-left"
+          >
+            <Meter
+              term={<Term id="context">ctx</Term>}
+              reading={ctx ? `${Math.round(ctx.pct)}% used` : "—"}
+              fill={ctx?.pct ?? 0}
+              status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined}
+              label={ctx ? `Context ${Math.round(ctx.pct)}% used` : "Context unknown"}
+              detail={
+                <>
+                  {ctx ? `${formatCompact(ctx.tokens)} / ${formatCompact(ctx.window)} · ` : ""}
+                  <span className="text-accent-hi">X-ray</span>
+                </>
+              }
+            />
+          </button>
           <LimitsMeter agentKey={agentKey} tps={tps ?? undefined} />
         </div>
         <SpendTile cost={cost} />
@@ -124,7 +143,7 @@ export function SubagentsPanel({ agentKey }: { agentKey: string }) {
   const { meta } = useSession(agentKey);
   const subs = meta?.subagents ?? [];
   if (subs.length === 0) return null;
-  const live = subs.filter((s) => s.status === "running").length;
+  const { running, failed } = groupSubagents(subs);
   return (
     <Pane
       id="agents"
@@ -134,13 +153,19 @@ export function SubagentsPanel({ agentKey }: { agentKey: string }) {
         </Term>
       }
       label="Subagents"
-      aside={live ? <span className="text-accent-hi">{live} live</span> : `${subs.length} done`}
+      aside={
+        running || failed ? (
+          <>
+            {running > 0 && <span className="text-accent-hi">{running} live</span>}
+            {running > 0 && failed > 0 && " · "}
+            {failed > 0 && <span className="text-error">{failed} failed</span>}
+          </>
+        ) : (
+          `${subs.length} done`
+        )
+      }
     >
-      <div className="flex flex-col gap-1">
-        {subs.map((s) => (
-          <SubagentCard key={s.id} sub={s} dense onOpen={() => useSessionUi.getState().openSubagent(agentKey, s.id)} />
-        ))}
-      </div>
+      <SubagentList agentKey={agentKey} subs={subs} />
     </Pane>
   );
 }
@@ -540,11 +565,13 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
       <OverviewPanel agentKey={agentKey} />
       {ready ? (
         <>
+          <BtwPanel agentKey={agentKey} />
           <TodosPanel agentKey={agentKey} />
           <SubagentsPanel agentKey={agentKey} />
+          <JobsPanel agentKey={agentKey} />
+          <ArtifactsPanel agentKey={agentKey} />
           <FilesPanel agentKey={agentKey} />
           <ChatPanel agentKey={agentKey} />
-          <BtwPanel agentKey={agentKey} />
           <TreePanel agentKey={agentKey} />
         </>
       ) : (
@@ -560,11 +587,13 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
 
 const TABS: { value: InspectorTab; label: string; icon: ReactNode }[] = [
   { value: "overview", label: "Session", icon: <Gauge /> },
+  { value: "btw", label: "btw", icon: <MessageCircleQuestion /> },
   { value: "todos", label: "Todos", icon: <ListTodo /> },
   { value: "agents", label: "Agents", icon: <Bot /> },
+  { value: "jobs", label: "Jobs", icon: <Cpu /> },
+  { value: "artifacts", label: "Docs", icon: <FileText /> },
   { value: "files", label: "Files", icon: <FileCode2 /> },
   { value: "chat", label: "Chat", icon: <MessagesSquare /> },
-  { value: "btw", label: "btw", icon: <MessageCircleQuestion /> },
   { value: "tree", label: "Tree", icon: <Workflow /> },
 ];
 
@@ -582,7 +611,7 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
   return (
     <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
     <div className="flex flex-col gap-3 pb-2">
-      <div role="tablist" aria-label="Inspector" className="grid grid-cols-7 gap-0.5 rounded-md well p-1">
+      <div role="tablist" aria-label="Inspector" className="grid gap-0.5 rounded-md well p-1" style={{ gridTemplateColumns: `repeat(${TABS.length}, minmax(0, 1fr))` }}>
         {TABS.map((t) => {
           const on = t.value === tab;
           return (
@@ -609,6 +638,8 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
       {tab === "overview" && <OverviewPanel agentKey={agentKey} />}
       {tab === "todos" && <TodosPanel agentKey={agentKey} />}
       {tab === "agents" && <SubagentsPanel agentKey={agentKey} />}
+      {tab === "jobs" && <JobsPanel agentKey={agentKey} always />}
+      {tab === "artifacts" && <ArtifactsTab agentKey={agentKey} />}
       {tab === "chat" && <ChatPanel agentKey={agentKey} />}
       {tab === "files" && <FilesPanel agentKey={agentKey} />}
       {tab === "tree" && <TreePanel agentKey={agentKey} />}

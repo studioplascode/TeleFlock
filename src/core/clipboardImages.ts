@@ -124,8 +124,8 @@ async function fileToImageInput(file: File): Promise<DraftImage> {
   return { mime, data, preview: `data:${mime};base64,${data}` };
 }
 
-/** Image files read as prompt images, very large ones scaled down first (`shrinkImage`). */
-async function readImages(files: readonly File[]): Promise<DraftImage[]> {
+/** Image files read as prompt images, very large ones scaled down first (`shrinkImage`). No draft is touched. */
+export async function readImages(files: readonly File[]): Promise<DraftImage[]> {
   const out: DraftImage[] = [];
   // One at a time: a batch of big screenshots decoded at once is a lot of memory.
   for (const f of files) if (f.type.startsWith("image/")) out.push(await fileToImageInput(await shrinkImage(f)));

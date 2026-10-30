@@ -5,6 +5,8 @@ import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, use
 import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, isVideoFile, MAX_PROMPT_IMAGE_CHARS, mediaFiles } from "@/core/clipboardImages";
 import { attachVideos, detachDraftVideos, releaseVideos, removeDraftVideo, retryVideos, useDraftVideos, type VideoRef, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import type { CommandInfo, ImageInput } from "@/core/gen";
+import { useHerdrDown, useHostName } from "@/features/hosts/HerdrControls";
+import { herdrNotRunning } from "@/features/hosts/herdrHealth";
 import { PHASE_TEXT } from "@/features/shell/status";
 import { openTerminal } from "@/features/board/agentActions";
 import type { OmpSubcommand } from "@/core/ompCommands";
@@ -14,8 +16,10 @@ import { errorText, hostCall, usePending } from "../api";
 import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
 import { useQueueChips, usePendingQueue, userRowsWithText } from "./queue";
-import { findCommand, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
+import { findCommand, isSlashDraft, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
 import { useDictation } from "./useDictation";
+import { PasteChips, PasteMenu } from "./PasteChips";
+import { usePasteAttach } from "./usePasteAttach";
 import { VideoChips } from "./VideoChips";
 
 /**
@@ -120,6 +124,15 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const searchSeq = useRef(0);
   /** Retires the "steer vs follow-up" caption (set while it is mounted). */
   const steerDone = useRef<(() => void) | null>(null);
+  // Large pastes become chips, as in omp's editor; "Attach as local file" saves into the session.
+  const paste = usePasteAttach({
+    draftKey,
+    hostId,
+    text,
+    setText,
+    ta,
+    saveFile: (t) => core.host(hostId).call("session.writeLocal", { agentId, text: t }),
+  });
 
   const caps = meta?.caps;
   const working = agent?.column === "running" || agent?.live.streaming === true || agent?.live.tool != null;
@@ -148,11 +161,16 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const resuming = useResuming(agentKey);
   // Not online: the transcript is the copy saved on this device, and every control needs the host.
   const hostWait = useCore((s) => (s.status[hostId]?.phase === "online" ? null : `${s.profiles.find((p) => p.id === hostId)?.name ?? hostId} ${PHASE_TEXT[s.status[hostId]?.phase ?? "idle"]}`));
+  // herdr is down on the host: that is the reason, not the link to omp
+  const herdr = useHerdrDown(hostId);
+  const hostName = useHostName(hostId);
   const disabledReason = !agent
     ? "Agent not found"
     : hostWait
       ? hostWait
-      : agent.parked
+      : herdr && !agent.parked
+        ? herdrNotRunning(hostName, herdr)
+        : agent.parked
       ? resuming
         ? "Resuming…"
         : null
@@ -296,11 +314,24 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   };
 
   const send = async (followUp: boolean) => {
-    const body = text.trim();
-    if (!body && images.length === 0 && videos.length === 0) return;
-    if (body.startsWith("/") && images.length === 0 && videos.length === 0) {
+    if (!text.trim() && images.length === 0 && videos.length === 0) return;
+    // Paste tokens become their text (or `<attachment>` block) first, as omp's editor does on submit.
+    const prepared = await paste.prepare(text);
+    if (!prepared.ok) {
+      toast({ title: prepared.title, description: prepared.hint, status: "error" });
+      return;
+    }
+    const full = prepared.text;
+    const body = full.trim();
+    // A leading space escapes a slash: " /path is a file" goes to the model as text. A command is judged on
+    // what was typed (paste tokens still unexpanded), so a pasted log or path that starts with "/" is text.
+    const escaped = text.startsWith(" /");
+    if (isSlashDraft(text) && images.length === 0 && videos.length === 0) {
       const okRun = await run(runSlash(slashCtx, body));
-      if (okRun) setText("");
+      if (okRun) {
+        setText("");
+        paste.sent(prepared.carried);
+      }
       return;
     }
     if (disabledReason) {
@@ -316,8 +347,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       toast({ title: "Sending once the videos are uploaded", status: "idle", duration: 2600 });
       return;
     }
-    // Leading space escapes a slash: " /path is a file" goes to the model as text.
-    const typed = text.startsWith(" /") ? text.slice(1) : text.trim();
+    const typed = escaped ? full.slice(1) : body;
     // Videos go as one line each with their path on the host, once uploaded (the agent reads them).
     const sentVideos = videos.map((v) => v.id);
     let refs: VideoRef[] = [];
@@ -363,6 +393,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       // Sent: off the draft, their files stay on the host for the agent.
       detachDraftVideos(draftKey, sentVideos);
       releaseVideos(sentVideos);
+      paste.sent(prepared.carried);
       setPopup(null);
       if (delivery === "followUp") steerDone.current?.();
     }
@@ -391,6 +422,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
+    if (paste.onKeyDown(e)) return;
     const items = popup?.items ?? [];
     if (popup && items.length > 0) {
       if (e.key === "ArrowDown") {
@@ -447,13 +479,13 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     }
   };
 
-  const onPaste = (e: ClipboardEvent) => {
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     // `items` too: WebKitGTK (Linux) lists pasted screenshots only there.
     const files = mediaFiles(e.clipboardData);
     if (files.length > 0) {
       e.preventDefault();
       void addFiles(files);
-    }
+    } else paste.onPaste(e);
   };
 
   const onDrop = (e: DragEvent) => {
@@ -517,7 +549,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       onDrop={onDrop}
     >
       <AnimatePresence>
-        {popup && (popup.items.length > 0 || popup.kind === "mention") && (
+        {popup && !paste.menu && (popup.items.length > 0 || popup.kind === "mention") && (
           <motion.div
             key={popup.kind}
             initial={{ opacity: 0, y: 8, scale: 0.98 }}
@@ -631,6 +663,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           </motion.div>
         )}
       </AnimatePresence>
+      <AnimatePresence>{paste.menu && <PasteMenu key="paste" paste={paste} mobile={mobile} />}</AnimatePresence>
 
       <AnimatePresence initial={false}>
         {queued.length > 0 && (
@@ -722,6 +755,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           mobile={mobile}
           className={cn("px-3 pb-1", images.length > 0 ? "pt-1" : "pt-3")}
         />
+        <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-1", images.length > 0 || videos.length > 0 ? "pt-1" : "pt-3")} />
         <Lightbox
           images={images.map((img, i) => ({ src: img.preview, alt: `attachment ${i + 1}` }))}
           index={viewing !== null && viewing < images.length ? viewing : null}
@@ -731,14 +765,23 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           ref={ta}
           value={dictation.listening && dictation.interim ? `${text}${text && !text.endsWith(" ") ? " " : ""}${dictation.interim}` : text}
           onChange={(e) => {
-            setText(e.target.value);
-            updatePopup(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            const r = paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true);
+            updatePopup(r.text, r.caret);
           }}
           onSelect={(e) => {
             const el = e.currentTarget;
+            paste.onSelect(el);
             if (popup?.kind === "mention" || el.value.includes("@")) updatePopup(el.value, el.selectionStart ?? el.value.length);
           }}
-          onBlur={() => window.setTimeout(() => setPopup(null), 120)}
+          onCopy={(e) => paste.onCopy(e)}
+          onCut={(e) => paste.onCopy(e, true)}
+          onBlur={() =>
+            window.setTimeout(() => {
+              setPopup(null);
+              // Clicked elsewhere: omp's menu keeps the paste inline, a chip's menu closes.
+              if (document.activeElement !== ta.current) paste.close();
+            }, 120)
+          }
           onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={placeholder}

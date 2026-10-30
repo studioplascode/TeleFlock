@@ -403,6 +403,18 @@
           "markdownDescription": "Denies the request_notification_permission command without any pre-configured scope."
         },
         {
+          "description": "Enables the share_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-image",
+          "markdownDescription": "Enables the share_image command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-image",
+          "markdownDescription": "Denies the share_image command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_dictation command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-dictation",
@@ -427,10 +439,22 @@
           "markdownDescription": "Denies the stop_dictation command without any pre-configured scope."
         },
         {
-          "description": "Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer).\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`\n- `allow-request-microphone-permission`\n- `allow-open-app-settings`\n- `allow-dictation-available`\n- `allow-start-dictation`\n- `allow-stop-dictation`\n- `allow-cancel-dictation`",
+          "description": "Enables the take_shares command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-take-shares",
+          "markdownDescription": "Enables the take_shares command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the take_shares command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-take-shares",
+          "markdownDescription": "Denies the take_shares command without any pre-configured scope."
+        },
+        {
+          "description": "Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images and items shared to TeleFlock.\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`\n- `allow-request-microphone-permission`\n- `allow-open-app-settings`\n- `allow-dictation-available`\n- `allow-start-dictation`\n- `allow-stop-dictation`\n- `allow-cancel-dictation`\n- `allow-share-image`\n- `allow-take-shares`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Webview access to haptics, the notification permission flow, battery-optimisation status and dictation (microphone permission flow, system speech recognizer).\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`\n- `allow-request-microphone-permission`\n- `allow-open-app-settings`\n- `allow-dictation-available`\n- `allow-start-dictation`\n- `allow-stop-dictation`\n- `allow-cancel-dictation`"
+          "markdownDescription": "Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images and items shared to TeleFlock.\n#### This default permission set includes:\n\n- `allow-haptic`\n- `allow-notification-permission`\n- `allow-request-notification-permission`\n- `allow-battery-status`\n- `allow-request-ignore-battery-optimizations`\n- `allow-request-microphone-permission`\n- `allow-open-app-settings`\n- `allow-dictation-available`\n- `allow-start-dictation`\n- `allow-stop-dictation`\n- `allow-cancel-dictation`\n- `allow-share-image`\n- `allow-take-shares`"
         }
       ]
     }

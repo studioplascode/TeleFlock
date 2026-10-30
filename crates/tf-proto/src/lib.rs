@@ -41,25 +41,55 @@ macro_rules! wire_enum {
 }
 
 pub mod accounts;
+pub mod autoanswer;
+pub mod artifacts;
+pub mod autoresume;
 pub mod app;
+pub mod cleanup;
+pub mod find;
+pub mod github;
 pub mod host;
+pub mod herdr;
+pub mod hostsync;
+pub mod jobs;
 pub mod mcp;
 pub mod methods;
 pub mod model;
+pub mod moves;
+pub mod notify;
+pub mod plugins;
 pub mod session;
 pub mod term;
 pub mod upload;
+pub mod usage;
 pub mod version;
+pub mod wrapped;
+pub mod xray;
 
 pub use accounts::*;
+pub use artifacts::*;
+pub use autoanswer::*;
+pub use autoresume::*;
 pub use app::*;
+pub use cleanup::*;
+pub use find::*;
+pub use github::*;
+pub use herdr::*;
 pub use host::*;
+pub use hostsync::*;
+pub use jobs::*;
 pub use mcp::*;
 pub use methods::*;
+pub use moves::*;
 pub use model::*;
+pub use notify::*;
+pub use plugins::*;
 pub use session::*;
 pub use term::*;
 pub use upload::*;
+pub use usage::*;
+pub use wrapped::*;
+pub use xray::*;
 
 /// Epoch milliseconds.
 pub type Millis = i64;
@@ -83,7 +113,9 @@ wire_struct! {
     /// `busy` (agent is streaming / dialog open), `agent_blocked`, `timeout`,
     /// `herdr_error`, `omp_error`, `git_error`, `gh_error`, `io_error`, `version_mismatch`,
     /// `auth_required`, `permission_denied`, `ai_unavailable`, `ai_failed`, `install_failed`
-    /// (a Host setup install), `port_in_use` / `port_unavailable` (`tunnel.open { localPort }`),
+    /// (a Host setup install), `deploy_failed` (the host can't run TeleFlock's setup: its shell
+    /// rejects the script, or a program it needs is missing; not retried), `port_in_use` /
+    /// `port_unavailable` (`tunnel.open { localPort }`),
     /// `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed), `internal`.
     pub struct ApiError {
         pub code: String,

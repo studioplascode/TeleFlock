@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Runs a command inside an isolated TeleFlock lab.
+#
+# A lab gets its own HOME, XDG dirs, tf-hostd home and omp agent dir under /tmp/tf-lab-<name>, and
+# a clean environment: nothing inherited from the caller's herdr pane (HERDR_SOCKET_PATH,
+# HERDR_SESSION, HERDR_PANE_ID, …) or omp session (PI_SESSION_FILE, …) survives. herdr, tf-hostd,
+# tf-devserver and omp started here can therefore only reach this lab's own servers and state,
+# never the real ones; even a bare `herdr server stop` inside a lab stops the lab's server.
+# The lab has no model credentials: configure a local mock provider in its omp agent dir.
+#
+# Usage: scripts/lab/run <name> [--] <command> [args…]
+#        scripts/lab/run <name> --print-env        show the lab environment and exit
+#        scripts/lab/run <name> --paths            show the lab's directories and herdr socket
+# <name>: [a-z0-9][a-z0-9-]*. Name the lab's herdr sessions tf-lab-<name>.
+# Stop everything a lab started with scripts/lab/stop <name>.
+set -euo pipefail
+
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+[ $# -ge 2 ] || usage
+name="$1"
+shift
+[[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "lab: bad name '$name' (use [a-z0-9-])" >&2; exit 64; }
+[ "${1:-}" = "--" ] && shift
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="/tmp/tf-lab-$name"
+home="$root/home"
+xdg="$root/xdg"
+mkdir -p "$home" "$xdg/config" "$xdg/data" "$xdg/state" "$xdg/cache" "$root/run" "$root/teleflock" "$root/omp-agent"
+chmod 700 "$root/run"
+
+# Tools live in the caller's HOME (omp, herdr, bun, cargo); the lab sees them through PATH only.
+caller_home="${HOME:-/root}"
+lab_path="$repo/scripts/lab/bin:$caller_home/.local/bin:$caller_home/.bun/bin:$caller_home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# A login shell in the lab (tf-hostd reads PATH from `$SHELL -i -l`) must find the same tools.
+for rc in .profile .bashrc; do
+  [ -e "$home/$rc" ] || printf 'export PATH="%s"\n' "$lab_path" >"$home/$rc"
+done
+
+env_vars=(
+  "TF_LAB=$name"
+  "PATH=$lab_path"
+  "HOME=$home"
+  "USER=${USER:-root}"
+  "LOGNAME=${LOGNAME:-${USER:-root}}"
+  "SHELL=/bin/bash"
+  "TERM=${TERM:-xterm-256color}"
+  "LANG=${LANG:-C.UTF-8}"
+  "XDG_CONFIG_HOME=$xdg/config"
+  "XDG_DATA_HOME=$xdg/data"
+  "XDG_STATE_HOME=$xdg/state"
+  "XDG_CACHE_HOME=$xdg/cache"
+  "XDG_RUNTIME_DIR=$root/run"
+  "TF_HOSTD_HOME=$root/teleflock"
+  "PI_CODING_AGENT_DIR=$root/omp-agent"
+  "CARGO_HOME=${CARGO_HOME:-$caller_home/.cargo}"
+  "RUSTUP_HOME=${RUSTUP_HOME:-$caller_home/.rustup}"
+  "BUN_INSTALL=${BUN_INSTALL:-$caller_home/.bun}"
+)
+# omp unpacks its native modules per HOME; share the caller's copy instead of unpacking again.
+[ -d "$caller_home/.omp/natives" ] && env_vars+=("PI_NATIVES_DIR=$caller_home/.omp/natives")
+
+# The lab's default herdr socket must not be the caller's (it is not: XDG_CONFIG_HOME moved).
+lab_socket="$xdg/config/herdr/herdr.sock"
+real_socket="${HERDR_SOCKET_PATH:-$caller_home/.config/herdr/herdr.sock}"
+[ "$lab_socket" != "$real_socket" ] || { echo "lab: refusing, lab socket equals the real one ($real_socket)" >&2; exit 70; }
+
+case "${1:-}" in
+  --print-env) printf '%s\n' "${env_vars[@]}"; exit 0 ;;
+  --paths)
+    printf 'root    %s\nhome    %s\nhostd   %s\nomp     %s\nherdr   %s (default session; tf-lab-* sessions under %s/config/herdr/sessions)\n' \
+      "$root" "$home" "$root/teleflock" "$root/omp-agent" "$lab_socket" "$xdg"
+    exit 0 ;;
+  "") usage ;;
+esac
+
+cd "${TF_LAB_CWD:-$PWD}"
+exec env -i "${env_vars[@]}" "$@"

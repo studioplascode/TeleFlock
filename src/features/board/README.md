@@ -7,7 +7,7 @@ The home of the app: the "is everything alive?" surface.
 ```ts
 // src/features/board/BoardView.tsx — desktop home (#/board, #/). Mounts <WhileAwayToast/> itself.
 // Toolbar: repo filter (each repo with its accent icon), search, Status|Repo; the host filter is the title-bar pill and "New task" (D → Dispatch) is the sidebar's primary button.
-// Below it <BoardNotices/> (Notices.tsx): hosts not online, omp without an account, setup gaps, the demo.
+// Below it <BoardNotices/> (Notices.tsx): hosts not online, omp without an account, low disk space, setup gaps, the demo.
 // Bento row: [First steps] · Stats (today's spend, tokens, lane bar, tightest subscription window → Usage) ·
 // Hosts (one row per host: orb, name + hostAccent swatch, latency/phase, cpu, ram bar, load → Hosts) · live terminal.
 // Windows ≤ 820 px tall (`short:`) get the same facts in one ~72 px strip (BentoStrip).
@@ -36,12 +36,16 @@ export function AnswerNextHud(): JSX.Element | null;
 export function ActivityView(): JSX.Element;
 // src/features/activity/WhileAwayToast.tsx — reconnect digest (finished / needs / cost delta per host)
 export function WhileAwayToast(): null;
-// src/features/usage/UsageView.tsx — #/usage: cost/tokens (`host.usage`) + "Subscriptions & limits"
+// src/features/usage/UsageView.tsx — #/usage: spend history and insights from omp's stats index (`host.usage`, see
+// src/features/usage/README.md) + "Subscriptions & limits"
 // (LimitsSection.tsx, `host.limits` via `useAccountLimits`): one tile per account (merged across hosts by
 // `LimitAccount.key`), each window's % left, reset countdown, %/h pace and "hit the limit in ~X" /
 // "resets before you run out"; striped bar = projected use at reset. `limitsUi.ts` (provider names,
 // tint) is shared with the inspector LimitsTile / header LimitsChip and the board Stats tile.
 export function UsageView(): JSX.Element;
+// src/features/board/BentoRow.tsx — useTodayUsage(hostFilter): the Stats tile / strip / Flock home Today figure is
+// `useTodaySpend` (src/core/usage.ts), the same as the Usage page's Today tile: indexed hours since this device's
+// midnight + live spend since each host's last sync; asked every 5 min while the window is active (live part ticks).
 
 // src/features/board/QuickAnswer.tsx — inline answer controls for a NeedsYou (agent.answer), drawn with the shared option
 // model in src/features/inbox/AnswerParts.tsx (also used by session AskCard): number badges, "★ recommended" outline,
@@ -59,7 +63,8 @@ export function resumeParked(key: string): Promise<string | null>; // agent.resu
 
 // src/features/board/Notices.tsx — the notices above the lanes, for the hosts in view, most urgent first
 // (notice.tsx `noticeRank`): host not online (snapshot strip, connAction verb) · omp without an account
-// (accounts/LinkAccountNudge) · setup gap (setupGap.ts: no TeleFlock bridge and no session sharing, else no herdr
+// (accounts/LinkAccountNudge) · low disk space (cleanup/LowDiskNotice: online host under 2 GiB free, or under 10 GiB
+// and 15 %; "Clean up…" = #/cleanup/<id>; hidden for a day unless it gets worse) · setup gap (setupGap.ts: no TeleFlock bridge and no session sharing, else no herdr
 // integration; never for demo hosts; "Fix…" = #/hosts?setup=<id>, dismiss per host in tf.board.setupGaps) · demo.
 export function BoardNotices(): JSX.Element; // desktop: one box, one row per notice
 export function PhoneNotices(): JSX.Element; // phone: NoticeTray, the most urgent notice on one line + its action + "+N ⌄"; expanded: the full rows + "Show less"
@@ -71,6 +76,11 @@ export function PhoneNotices(): JSX.Element; // phone: NoticeTray, the most urge
 // src/features/board/LiveBits.tsx — card parts shared with the phone rows
 // AgentOrb, AgentHeartbeat ("last event 4s ago"), useQuiet, QuietChip, ToolChip, LiveLine, TpsSparkline ("tok/s"),
 // ContextMeter ("ctx 61%", neutral until 80 %), SubagentsDone ("subs 59%"), ConnectLinkButton (not-shared → /collab)
+
+// src/features/board/RecapLine.tsx (+ pure recap.ts, tested) — omp's idle recap (`OmpInfo.recap`, hostd sends it only while
+// current): RestingLine (Review/Done cards: recap with a scroll mark and its age in the tooltip, else `live.line`),
+// RecapLine (recap only: phone Review/Done rows, desktop session header, phone session under the chips), RecapText.
+// currentRecap(agent) / restingLine(agent): never for running or needs-you agents.
 
 // src/features/board/RepoTag.tsx — where an agent works, on every agent surface (cards, phone rows, Inbox/HUD header)
 export function RepoTag(props: { hostId: string; repo?: string; branch?: string; cwd?: string; sunset?: boolean; className?: string }): JSX.Element | null;
@@ -125,6 +135,61 @@ Reopen (resumes too) and, once its worktree's pull request is merged or closed, 
 worktree workspace may be gone), no Connect. Dragging one back to Review
 resumes it; the card then reappears under the new id (the optimistic move clears when the old one leaves).
 
+**Ended cards** (`Agent.parked.ended`, hosts ≥ 0.7.0, docs/architecture.md §3.25: the agent's omp ended without anyone
+closing it — herdr stopped or crashed, a reboot, omp crashed): the card stays in Review, calm (idle status), its pill
+says "Ended" (`agentStateWord`) and its time counts from `ended.at` ("25m ago"; phone rows the same). One chip,
+`EndedChip` (through `ParkedChip`, in place of "closed" and of the auto-resume chip), reads "ended 13:58" (24-hour
+clock); with its `restart` ticket "coming back" / "coming back…" (Hourglass, then RotateCw), and "ended 13:58" with a
+Hand while it waits for Continue. Its tooltip has "Ended at 13:58 (herdr stopped)" and what it was doing in hostd's
+words ("It was in bash: sleep 30; echo done >> /tmp/c.out", "It was writing a reply", "It was idle"), the ticket's
+line ("Bringing it back in 0:05", "Ended: herdr stopped · Auto-resume is off on this host"), or, while herdr is down
+(`useHerdrDown`) and there is no ticket, "· comes back when herdr runs again". With a ticket its Continue (Continue
+now) leads the card body in place of Review (its workspace went with its pane), on the phone row too, and the ⋯ menu
+offers Continue / Dismiss (or Don't auto-continue) instead of the parked Resume. Mark done files it in Done as an
+ordinary parked card.
+
+**Auto-resume chip** (`AutoResumeBadge`, every lane, phone rows and phone needs cards too; hosts ≥ 0.7.0): an agent
+whose session stopped on a provider limit (`Agent.autoResume`) shows "Limit · ~03:00" (resumes around then; weekday
+or date when not today), "Limit · checking", "Resuming…", "Resume by hand" (it won't resume by itself); a live agent
+cut off mid-turn (`restart`) "Continuing soon" / "Continuing…" / "Continue by hand"; the tooltip has the reason,
+provider · model and since (wording shared with the session strip, `features/session/resume/words.ts`). Ended cards
+show their ticket in `EndedChip` instead. The ⋯ / right-click menu adds Resume now (Continue) and Don't auto-resume
+(Dismiss), with the ticket's own hints. Static styles; the minute clock (seconds while a restart counts down).
+Settings → "Auto-resume after usage limits" switches it per host (`host.autoResumeSet`; a host without it: "Update
+TeleFlock on this host"); its second row, "Bring agents back after a reboot", is the consent for the host's boot service
+(`bringBack`, default on; off removes the units the agents asked for, an enabled automation keeps its own).
+
+**Provider retry line** (`RetryLine`, running cards, phone rows, Dispatch replies; `retryOf(agent)` in `retry.ts`): while omp waits to
+retry a provider error (`OmpInfo.retry`, bridge/collab `auto_retry_start` … `auto_retry_end`; docs/architecture.md §3.5 "Provider
+retry") the agent stays in Running and its line reads "Rate limit · retrying in 4:54 (1/10)" (kind words "Rate limit",
+"Usage limit", "Overloaded", "Provider error"; seconds clock; "retrying now…" once due) in place of "Thinking…". The quiet
+treatment is off for it everywhere: no quiet chip or amber ring (`useQuiet` callers pass `!retryOf(agent)`), no heartbeat age,
+FlockHome's "running" tile does not count it. The session header and the phone session show the same words as a strip
+(`features/session/resume/RetryStrip`, shared helpers in `words.ts`). Once omp gave up, `Agent.autoResume` wins and the retry
+is gone. Demo agent `quota` shows it.
+
+**Decide for me chip** (`features/autoAnswer/CountdownChip`, Needs-you cards: desktop above the quick answers, white
+on the sunset hero card, and the phone needs card; hosts ≥ 0.7.0): while the question shown has a decide-for-me
+countdown (`Agent.autoAnswer`) the card says "auto-picks in 12:40" (seconds clock), "when no app · 12:40 left" (it
+stands while an app is connected) or "auto-picking…"; the tooltip names the ★ option. A cancelled countdown shows
+nothing here (the ask card in the session has Cancel, +10 min, +1 h and Restart). Static styles. The ⋯ / right-click
+menu of an omp agent on a host with decide for me has "Decide for me…" (`features/autoAnswer/DecideDialog`: its own
+policy, `agent.setAutoAnswer`).
+
 ## Board keyboard (desktop, only while the board is mounted and focus is not in a text field)
 `J`/`K` (or arrows) move selection (`useUi().select`), `H`/`L` jump lanes, `Enter` open session, `A` answer (opens the
 HUD at the selected card), `T` terminal split, `X` select, `/` focus search, `Esc` clear selection.
+
+## herdr not up (`features/hosts/HerdrNotice.tsx`, `herdrHealth.ts`)
+
+`HostInfo.herdrHealth` (architecture §6.6) puts a notice kind `herdr` in the tray, right after a host that isn't online
+(`noticeRank`): per online host whose herdr server is not up (`down`, `starting`, `restarting`, `unresponsive`, and the
+live handoff `updating`) a row "forge · herdr stopped at 13:58 · 9 agents ended" with the status under it ("Starting it
+again in 12s", "Attempt 3 failed: … · next try in 60s", "Automatic restart is off for this host", "herdr kept stopping soon after
+each start, so TeleFlock stopped restarting it by itself" when it keeps dying within a minute of each start) and **Restart herdr**
+(`host.herdrRestart`; when `unresponsive` it forces, after a confirm saying every agent and terminal of the session
+ends). The folded phone tray shows the headline as its line. For a minute after a server this device saw down is back:
+"herdr is running again". Cards of a host whose herdr is not up never show Running visuals: the running and needs-you
+cards (desktop `AgentCard`, phone `AgentRow`) say "herdr stopped" instead of the state word, stop their timers (the time
+slot reads "since 13:58"), and are dimmed like a stale host's; review and done cards keep their state. Agents of such a
+host are not counted as running in the bento strip and are never the live-terminal tile's leader.

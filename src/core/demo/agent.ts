@@ -50,6 +50,7 @@ type Active =
   | { k: "think"; itemId: string; start: number; ms: number; text: string; shown: number }
   | { k: "say"; itemId: string; text: string; shown: number; rate: number }
   | { k: "tool"; itemId: string; start: number; spec: ToolSpec; outShown: number; output: string; subIds: string[]; irc: Map<string, string> }
+  | { k: "retry"; until: number }
   | { k: "wait"; until: number };
 
 interface PendingUi {
@@ -165,6 +166,7 @@ export class AgentSim {
         mode: "normal",
         queue: { steering: [], followUp: [] },
       };
+      if (def.recap) this.agent.omp.recap = { text: def.recap, at: now - Math.max(0, def.since - 240) * 1000 };
     }
     this.refreshDerived();
   }
@@ -409,11 +411,15 @@ export class AgentSim {
         this.setTodo(step.task, step.status);
         break;
       case "notice":
-        this.put({ kind: "notice", id: this.id(), at, level: step.level, text: step.text, source: "omp" }, false);
+        this.put({ kind: "notice", id: this.id(), at, level: step.level, text: step.text, source: step.source ?? "omp" }, false);
+        break;
+      case "fail":
+        this.put(this.failRow(step, at), false);
         break;
       case "mode":
         this.put({ kind: "mode", id: this.id(), at, text: step.text }, false);
         break;
+      case "retry":
       case "wait":
         break;
     }
@@ -461,7 +467,8 @@ export class AgentSim {
       replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan", title: this.agent.title, branch: this.agent.branch, changed: this.files });
     this.cur = null;
     this.setState("working");
-    if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now };
+    // A new turn makes the idle recap out of date (the host stops sending it).
+    if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now, recap: undefined };
     this.turnOut = 0;
     this.inputTokens(4000 + this.host.rng.int(0, 9000));
     this.host.metaChanged(this.agent.id);
@@ -475,6 +482,20 @@ export class AgentSim {
   }
 
   private backdate = 0;
+
+  /** omp's retry (F5, `agent.retry`): the failed or stopped last turn runs again, without a new user row. */
+  retryTurn(steps: Step[]): void {
+    const now = this.host.now();
+    this.termLine("\r\n\x1b[2m↻ retrying the last turn\x1b[0m\r\n");
+    this.host.activity(this.agent.id, "prompted", `${this.agent.name} retried its last turn`);
+    this.queue = steps;
+    this.cur = null;
+    this.setState("working");
+    if (this.agent.omp) this.agent.omp = { ...this.agent.omp, turnStartedAt: now };
+    this.turnOut = 0;
+    this.inputTokens(4000 + this.host.rng.int(0, 9000));
+    this.host.metaChanged(this.agent.id);
+  }
 
   /** Queued like omp's steering queue: listed in `queue.steering` until the next step boundary. */
   steer(text: string, author?: string): void {
@@ -601,8 +622,8 @@ export class AgentSim {
     }
   }
 
-  /** Resolves the pending dialog. Returns false if `requestId` doesn't match. */
-  answer(requestId: string, answer: Answer, author?: string): boolean {
+  /** Resolves the pending dialog. Returns false if `requestId` doesn't match. `logged: false`: the caller records the activity (decide for me). */
+  answer(requestId: string, answer: Answer, author?: string, logged = true): boolean {
     const p = this.pending;
     if (!p || p.request.id !== requestId) return false;
     const now = this.host.now();
@@ -634,7 +655,7 @@ export class AgentSim {
     this.host.session(this.agent.id, { k: "ui", request: null });
     const kind: ActivityKind = approval ? (allowed ? "approved" : "denied") : "answered";
     const detail = answer.text ?? (answer.choices.join(", ") || (answer.chat ? "Chat about this" : answer.cancel ? "Skipped" : ""));
-    this.host.activity(this.agent.id, kind, `${author ?? "You"} ${kind} ${this.agent.name}`, detail);
+    if (logged) this.host.activity(this.agent.id, kind, `${author ?? "You"} ${kind} ${this.agent.name}`, detail);
     if (answer.chat) this.put({ kind: "user", id: this.id(), at: now, text: "Let's chat about this first.", images: [], author, steering: false, synthetic: false });
     this.queue = [...p.then(answer), ...this.queue];
     this.cur = null;
@@ -678,7 +699,7 @@ export class AgentSim {
     this.agent.turns += 1;
     const started = this.agent.omp?.turnStartedAt;
     if (started !== undefined && now - started > 200 && this.turnOut > 0) this.lastTurnTps = Math.round((this.turnOut / ((now - started) / 1000)) * 10) / 10;
-    if (this.agent.omp) this.agent.omp = { ...this.agent.omp, lastTurnEndedAt: now };
+    if (this.agent.omp) this.agent.omp = { ...this.agent.omp, lastTurnEndedAt: now, retry: undefined };
     const lastSay = [...this.items].reverse().find((x) => x.kind === "assistant");
     const summary = lastSay?.kind === "assistant" ? firstSentence(lastSay.text) : "Turn finished";
     this.agent.live = { ...this.agent.live, line: summary };
@@ -805,6 +826,15 @@ export class AgentSim {
         }
         return true;
       }
+      case "retry": {
+        const retryAt = now + step.ms;
+        this.put({ kind: "notice", id: this.id(), at: now, level: "warn", text: `Retrying (${step.attempt}/${step.max}) in ${(step.ms / 1000).toFixed(1)}s: ${step.error}`, source: "retry" });
+        if (this.agent.omp) this.agent.omp = { ...this.agent.omp, retry: { kind: step.kind, attempt: step.attempt, maxAttempts: step.max, since: now, retryAt, error: step.error } };
+        this.agent.live = { ...this.agent.live, line: `Retrying (${step.attempt}/${step.max})…` };
+        this.cur = { k: "retry", until: retryAt };
+        this.host.agentChanged(this.agent.id);
+        return true;
+      }
       case "wait":
         this.cur = { k: "wait", until: now + step.ms };
         return true;
@@ -814,7 +844,12 @@ export class AgentSim {
     }
   }
 
-  private instantLive(step: Extract<Step, { t: "user" | "todo" | "notice" | "mode" }>, now: number): void {
+  /** The error row of a turn that failed without text (as tf-hostd builds it: `a<ts>.e`). */
+  private failRow(step: Extract<Step, { t: "fail" }>, at: number): TranscriptItem {
+    return { kind: "assistant", id: this.id(), at, text: "", streaming: false, model: this.model?.label, stopReason: "error", error: step.error, errorStatus: step.status, refusal: step.refusal };
+  }
+
+  private instantLive(step: Extract<Step, { t: "user" | "todo" | "notice" | "mode" | "fail" }>, now: number): void {
     switch (step.t) {
       case "user":
         this.put({ kind: "user", id: this.id(), at: now, text: step.text, images: [], author: step.author, steering: step.steering ?? false, synthetic: step.synthetic ?? false });
@@ -825,8 +860,15 @@ export class AgentSim {
         this.host.metaChanged(this.agent.id);
         this.termLine(`\x1b[2m  ${TODO_STATUS_LABEL[step.status] ?? "·"} ${step.task}\x1b[0m\r\n`);
         break;
+      case "fail": {
+        this.put(this.failRow(step, now));
+        const title = step.refusal ? `${this.agent.name}: ${step.refusal.kind === "sensitive" ? "Flagged by safety filters" : "Refused"}${step.refusal.category ? ` · ${step.refusal.category}` : ""}` : `${this.agent.name} hit an error`;
+        this.host.notify(this.agent.id, "error", title, step.refusal?.explanation ?? step.error);
+        this.host.activity(this.agent.id, "error", step.refusal ? title : "Turn failed", step.refusal?.explanation ?? step.error);
+        break;
+      }
       case "notice":
-        this.put({ kind: "notice", id: this.id(), at: now, level: step.level, text: step.text, source: "omp" });
+        this.put({ kind: "notice", id: this.id(), at: now, level: step.level, text: step.text, source: step.source ?? "omp" });
         if (step.level === "error") {
           this.host.notify(this.agent.id, "error", `${this.agent.name}: error`, step.text);
           this.host.activity(this.agent.id, "error", `${this.agent.name} hit an error`, step.text);
@@ -843,6 +885,11 @@ export class AgentSim {
     const c = this.cur;
     if (!c) return true;
     switch (c.k) {
+      case "retry":
+        if (now < c.until) return false;
+        if (this.agent.omp) this.agent.omp = { ...this.agent.omp, retry: undefined };
+        this.host.agentChanged(this.agent.id);
+        return true;
       case "wait":
         return now >= c.until;
       case "think": {
@@ -1158,6 +1205,8 @@ function capsFor(live: boolean, readOnly: boolean): Capabilities {
     handoff: on,
     subagents: on,
     bridge: on,
+    retry: on,
+    subagentRetry: on,
   };
 }
 

@@ -38,6 +38,15 @@ export function parseFanOutBranch(branch?: string): { slug: string; variant: str
 
 // Templates (Settings.templates): picker + "Save as template" live inside AgentFields (New worktree / New agent);
 // helpers in workspace/shared/templates.tsx (applyTemplate, matchingTemplate, saveDraftAsTemplate).
+// Agent options (workspace/shared/AgentOptions.tsx): <AgentOptions summary={chips} defaultOpen?>{<AgentOptionsSection title note?>…}</AgentOptions>,
+// a collapsed "Agent options" box whose header shows each section's chip; in AgentFields (New worktree / New agent),
+// each Fan out variant and the automation editor (Dispatch: "More agent options" dialog). Sections: the agent's own
+// model roles + fallback chains (features/agentRoles AgentRolesSection → AgentSpec.roleModels / fallbackChains; the
+// launch preview then adds `--config <tf-hostd home>/agent-config/<this agent>.yml`, and an own `default` role replaces
+// `--model` / `--thinking`); decide for me (features/autoAnswer AutoAnswerSection: Host default · Off · On with the wait
+// and "only while no app is connected" → AgentSpec.autoAnswer / AutomationDraft.autoAnswer; `toAgentSpec(draft, decides)`
+// sends it only when set and the host has decide for me (`HostInfo.autoAnswer`), an older tf-hostd's section says to update).
+// Templates carry neither roles nor decide for me: applying one keeps them, Save as template leaves them out.
 // Branch/agent slugs from free text: workspace/shared/slug.ts (slugify, slugFromPrompt), used by Fan out and Dispatch.
 // AI naming (omp's tiny model via @/core ai.ts; marks/buttons in workspace/shared/ai.tsx), each with its deterministic fallback:
 //   New worktree: "Name it from the task" (new branch, empty name) → suggestBranch at Create (worktree/autoName.ts dedupes

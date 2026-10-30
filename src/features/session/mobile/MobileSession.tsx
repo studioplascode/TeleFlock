@@ -7,9 +7,15 @@ import { MobileHeader } from "@/features/shell/MobileHeader";
 import { haptic } from "@/features/shell/haptics";
 import { useFirstUse } from "@/features/shell/hints";
 import { agentStateWord, NEEDS_WORD } from "@/features/shell/vocab";
+import { RecapLine } from "@/features/board/RecapLine";
+import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { agentStatus, useBeat } from "../api";
 import { ActionsMenu, FastToggle, GoalChip, ModelThinkingChip, PlanToggle } from "../header/Controls";
 import { InspectorTabs } from "../inspector/Inspector";
+import { AutoResumeStrip } from "../resume/AutoResumeStrip";
+import { RetryStrip } from "../resume/RetryStrip";
+import { ResumeButton } from "../resume/ResumeButton";
 import { SessionPane } from "../SessionPane";
 import { useSessionUi } from "../state";
 
@@ -38,8 +44,9 @@ function openKey(k: string) {
 
 function Peek({ agentKey, side }: { agentKey: string | undefined; side: "left" | "right" }) {
   const agent = useAgent(agentKey ?? "");
+  const herdr = useHerdrDown(agent?.hostId ?? "");
   if (!agent) return null;
-  const status = agentStatus(agent);
+  const status = herdr ? herdrOrbStatus(herdr) : agentStatus(agent);
   return (
     <div
       data-status={status}
@@ -52,9 +59,9 @@ function Peek({ agentKey, side }: { agentKey: string | undefined; side: "left" |
       <AgentGlyph name={agent.name} size={40} status={status} />
       <div className="w-full truncate font-display text-sm font-bold text-ink">{agent.name}</div>
       <StatusPill status={status} size="sm">
-        {agentStateWord(agent)}
+        {herdr ? herdrAgentWord(herdr) : agentStateWord(agent)}
       </StatusPill>
-      {agent.live.line && <div className="line-clamp-2 text-[10.5px] text-mute">{agent.live.line}</div>}
+      {agent.live.line && !herdr && <div className="line-clamp-2 text-[10.5px] text-mute">{agent.live.line}</div>}
     </div>
   );
 }
@@ -126,7 +133,8 @@ function PagerDots({ keys, current, inline = false, onList, hintDone }: { keys: 
 
 function Dot({ k, on }: { k: string; on: boolean }) {
   const agent = useAgent(k);
-  const status = agentStatus(agent);
+  const herdr = useHerdrDown(agent?.hostId ?? "");
+  const status = herdr ? herdrOrbStatus(herdr) : agentStatus(agent);
   return (
     <button type="button" role="tab" aria-selected={on} aria-label={agent?.name ?? k} onClick={() => openKey(k)} className="grid h-6 min-w-6 place-items-center px-0.5 focus-ring">
       <span
@@ -140,8 +148,9 @@ function Dot({ k, on }: { k: string; on: boolean }) {
 /** One agent in the pager list sheet. */
 function PagerRow({ k, current, onPick }: { k: string; current: boolean; onPick: () => void }) {
   const agent = useAgent(k);
+  const herdr = useHerdrDown(agent?.hostId ?? "");
   if (!agent) return null;
-  const status = agentStatus(agent);
+  const status = herdr ? herdrOrbStatus(herdr) : agentStatus(agent);
   return (
     <button
       type="button"
@@ -158,7 +167,7 @@ function PagerRow({ k, current, onPick }: { k: string; current: boolean; onPick:
         <span className="block truncate text-xs text-mute">{agent.title || [agent.repo, agent.branch].filter(Boolean).join(" · ")}</span>
       </span>
       <StatusPill status={status} size="sm">
-        {agentStateWord(agent)}
+        {herdr ? herdrAgentWord(herdr) : agentStateWord(agent)}
       </StatusPill>
     </button>
   );
@@ -260,12 +269,13 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
     else void animate(x, 0, { type: "spring", bounce: 0.3, visualDuration: 0.35 });
   };
 
-  const status = agentStatus(agent);
+  const herdr = useHerdrDown(agent?.hostId ?? "");
+  const status = herdr ? herdrOrbStatus(herdr) : agentStatus(agent);
   const omp = agent?.omp != null && agent.omp.link === "live";
   // Non-omp agents open straight onto a terminal: its first row would sit under floating dots.
   const terminal = agent != null && agent.omp == null;
   return (
-    <div className="flex h-full min-h-0 flex-col" data-status={status}>
+    <div className="flex h-full min-h-0 flex-col" data-status={status} data-session-root={key}>
       <MobileHeader
         back
         title={
@@ -280,6 +290,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         actions={
           omp ? (
             <>
+              <ResumeButton agentKey={key} mobile />
               <IconButton label="Inspector" size="lg" onClick={() => useSessionUi.getState().setSheet(key, true)}>
                 <PanelBottomOpen />
               </IconButton>
@@ -295,6 +306,8 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           ) : undefined
         }
       />
+      <AutoResumeStrip agentKey={key} mobile />
+      <RetryStrip agentKey={key} mobile />
       {omp && (
         // scrolls sideways on narrow phones: the edge with more chips past it fades
         <div className="flex shrink-0 gap-1 overflow-x-auto overscroll-x-contain px-2 pb-1.5 no-scrollbar scroll-fade-x">
@@ -304,6 +317,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           <GoalChip agentKey={key} />
         </div>
       )}
+      {agent && <RecapLine agent={agent} lines={2} className="mx-3 mb-1.5 shrink-0" />}
       {terminal && <PagerDots keys={keys} current={key} inline onList={() => setList(true)} hintDone={hintDone} />}
       <div
         ref={(el) => {
@@ -338,7 +352,7 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
         </motion.div>
       </div>
       {omp && (
-        <BottomSheet open={sheet} onOpenChange={(o) => useSessionUi.getState().setSheet(key, o)} title={agent?.name ?? "Session"} description="Context, todos, subagents, agent chat, files, tree and btw">
+        <BottomSheet open={sheet} onOpenChange={(o) => useSessionUi.getState().setSheet(key, o)} title={agent?.name ?? "Session"} description="Context, btw, todos, subagents, files, agent chat and tree">
           <InspectorBody agentKey={key} />
         </BottomSheet>
       )}

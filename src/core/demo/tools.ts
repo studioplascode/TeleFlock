@@ -37,8 +37,10 @@ export class DemoTools {
     const now = clock.now();
     const tool = (name: Tool, current: string, extra: Partial<ToolUpdate> = {}): ToolUpdate => ({ tool: name, current, checkedAt: now - 3 * MIN, updating: false, ...extra });
     if (variant === "forge") {
-      this.releases = { omp: { latest: "18.12.6" }, herdr: { latest: "0.9.0" } };
-      this.s = { auto: true, omp: tool("omp", "18.12.3", { latest: "18.12.6" }), herdr: tool("herdr", "0.9.0", { updatedAt: now - 26 * 60 * MIN }), nextCheckAt: now + 2 * MIN };
+      // herdr 0.9.6 is installed; the running server (`herdrHealth`, ./herdrHealth) still is 0.9.5
+      this.releases = { omp: { latest: "18.12.6" }, herdr: { latest: "0.9.6" } };
+      const herdrNote = "The herdr server keeps running 0.9.5 until it restarts; agents keep running.";
+      this.s = { auto: true, omp: tool("omp", "18.12.3", { latest: "18.12.6" }), herdr: tool("herdr", "0.9.6", { updatedAt: now - 26 * 60 * MIN, note: herdrNote }), nextCheckAt: now + 2 * MIN };
     } else {
       const managed = "Installed with Homebrew: run `brew update && brew upgrade herdr`.";
       this.releases = { omp: { latest: "18.12.3" }, herdr: { latest: "0.9.5", managed } };
