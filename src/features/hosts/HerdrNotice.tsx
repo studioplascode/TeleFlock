@@ -68,7 +68,7 @@ export function HerdrNotice({ hostId, order }: { hostId: string; order: number }
         <span className="text-mute">
           <b className="text-ink">{name}</b> · <span className={cn("font-semibold text-ink-2", busy && "tf-shimmer-text")}>{back ?? herdrHeadline(health)}</span>
         </span>
-        {!back && <HerdrStatusText health={health} className={cn("min-w-0 text-mute", health.error && health.state === "down" && "text-[#ff9fb2]")} />}
+        {!back && <HerdrStatusText health={health} className={cn("min-w-0 text-mute", health.error && health.state === "down" && "text-error-ink")} />}
       </p>
       {act}
     </motion.div>

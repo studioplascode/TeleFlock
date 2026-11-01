@@ -8,16 +8,15 @@ const tileVariants: Record<TileVariant, string> = {
   /** Bento tile: tile-2→tile-1 gradient, 28px radius, layered depth. */
   default: "tile",
   /** Quiet lane/background container: hairline, no gradient. */
-  flat: "rounded-tile bg-white/[0.018] shadow-hairline",
+  flat: "rounded-tile bg-ink/[0.018] shadow-hairline",
   /** Frosted floating pane (session view, sheets over content). */
   glass: "rounded-tile glass",
   /** Terminal/well surface. */
-  deep: "rounded-tile bg-bg-deep shadow-[var(--shadow-d2),inset_0_0_0_1px_rgb(255_255_255/0.06)]",
-  /** Needs-you hero: sunset gradient with pulsing glow. */
-  sunset:
-    "rounded-tile text-white sun-pulse shadow-[inset_0_1px_0_rgb(255_255_255/0.35)] [background:radial-gradient(120%_130%_at_100%_0%,rgb(255_61_119/0.95)_0%,transparent_60%),radial-gradient(90%_120%_at_0%_100%,#ff7a18_0%,transparent_70%),linear-gradient(135deg,#ff7a18,#ff3d77)]",
-  /** Brand hero tile in the omp gradient. */
-  omp: "rounded-tile text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-accent)] [background:radial-gradient(110%_120%_at_100%_0%,rgb(240_83_208/0.9)_0%,transparent_60%),linear-gradient(135deg,#a15eef,#7fa2e7)]",
+  deep: "rounded-tile bg-bg-deep shadow-[var(--shadow-d2),inset_0_0_0_1px_var(--color-line)]",
+  /** Needs-you hero: sunset gradient with pulsing glow; text tokens re-mapped to --color-on-sun (card-sunset). */
+  sunset: "rounded-tile card-sunset sun-pulse shadow-[inset_0_1px_0_rgb(255_255_255/0.35)]",
+  /** Brand hero tile in the omp gradient; text tokens re-mapped to --color-on-accent (card-omp). */
+  omp: "rounded-tile card-omp shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-accent)]",
 };
 
 export interface TileProps extends HTMLAttributes<HTMLDivElement> {
@@ -48,7 +47,7 @@ export function Card({ asChild = false, selected = false, className, ...rest }: 
       data-selected={selected || undefined}
       className={cn(
         "card-surface p-3",
-        selected && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_rgb(163_92_240/0.7),0_0_24px_-6px_rgb(163_92_240/0.6)]",
+        selected && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-accent)_70%,transparent),0_0_24px_-6px_color-mix(in_srgb,var(--color-accent)_60%,transparent)]",
         className,
       )}
       {...rest}

@@ -30,8 +30,8 @@ export function ContextMeter({ pct, barClassName }: { pct: number; barClassName?
         <span className={cn("font-mono text-2xs tabular", hot ? "text-warn" : "text-mute")}>
           ctx <b className={cn("font-bold", hot ? "text-warn" : "text-ink-2")}>{Math.round(pct)}%</b>
         </span>
-        <span className={cn("h-1 w-8 overflow-hidden rounded-full bg-white/8", barClassName)} aria-hidden>
-          <span className={cn("block h-full rounded-full transition-[width] duration-700", hot ? "bg-warn" : "bg-white/35")} style={{ width: `${Math.min(100, pct)}%` }} />
+        <span className={cn("h-1 w-8 overflow-hidden rounded-full bg-ink/8", barClassName)} aria-hidden>
+          <span className={cn("block h-full rounded-full transition-[width] duration-700", hot ? "bg-warn" : "bg-ink/37")} style={{ width: `${Math.min(100, pct)}%` }} />
         </span>
       </span>
     </Tooltip>
@@ -166,7 +166,7 @@ export function QuietChip({ since, className }: { since: number; className?: str
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-full bg-warn/12 px-2 py-0.5 text-2xs font-bold text-warn shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]",
+        "inline-flex shrink-0 items-center gap-1 rounded-full bg-warn/12 px-2 py-0.5 text-2xs font-bold text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]",
         className,
       )}
       title="No events while working — it may be stuck. Open the terminal to check."

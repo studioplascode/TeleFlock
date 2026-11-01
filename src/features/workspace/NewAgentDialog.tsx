@@ -228,7 +228,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                 initial={{ opacity: 0, y: -6 }}
                 animate={{ opacity: 1, y: 0, x: [0, -6, 5, -3, 0] }}
                 transition={{ ...spring.smooth, x: { duration: 0.4 } }}
-                className="flex gap-3 rounded-lg bg-error/10 p-3.5 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]"
+                className="flex gap-3 rounded-lg bg-error/10 p-3.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]"
               >
                 <TriangleAlert className="mt-0.5 size-4 shrink-0 text-error" />
                 <div className="min-w-0 flex-1 text-xs">
@@ -287,7 +287,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
                             onClick={() => setWorkspaceId(w.id)}
                             className={cn(
                               "relative flex items-center gap-2.5 rounded-md px-3 py-2 text-left transition-colors focus-ring pressable",
-                              on ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]" : "hover:bg-white/6",
+                              on ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "hover:bg-ink/6",
                             )}
                           >
                             <StatusOrb status={ROLLUP_STATUS[w.rollup]} size={8} label={null} />

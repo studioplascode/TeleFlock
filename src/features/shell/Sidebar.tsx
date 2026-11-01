@@ -83,7 +83,7 @@ function NavItem({ id, collapsed, active, badge, unread }: { id: (typeof NAV)[nu
   const def: ViewDef = VIEWS[id];
   const Icon = def.icon;
   const dot = !!unread && (
-    <span className={cn("size-1.5 rounded-full bg-accent-hi shadow-[0_0_8px_rgb(163_92_240/0.9)]", collapsed ? "absolute top-1.5 left-2" : "relative")} aria-label={`${unread} unread update${unread === 1 ? "" : "s"}`} />
+    <span className={cn("size-1.5 rounded-full bg-accent-hi shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_90%,transparent)]", collapsed ? "absolute top-1.5 left-2" : "relative")} aria-label={`${unread} unread update${unread === 1 ? "" : "s"}`} />
   );
   return (
     <Tooltip content={<ActionTip def={def} />} shortcut={def.shortcut} side="right">
@@ -93,12 +93,12 @@ function NavItem({ id, collapsed, active, badge, unread }: { id: (typeof NAV)[nu
         aria-current={active ? "page" : undefined}
         className={cn(
           "relative flex h-9 w-full items-center gap-3 rounded-md px-2.5 text-sm font-bold transition-colors focus-ring",
-          active ? "text-ink" : "text-mute hover:bg-white/4 hover:text-ink",
+          active ? "text-ink" : "text-mute hover:bg-ink/4 hover:text-ink",
           collapsed && "justify-center px-0",
         )}
       >
-        {active && <motion.span layoutId="tf-nav-active" transition={spring.snappy} className="absolute inset-0 rounded-md bg-white/7 shadow-[inset_0_0_0_1px_var(--color-line-2)]" aria-hidden />}
-        {active && <motion.span layoutId="tf-nav-bar" transition={spring.snappy} className="absolute top-2 bottom-2 -left-2 w-[3px] rounded-full bg-omp shadow-[0_0_10px_rgb(163_92_240/0.9)]" aria-hidden />}
+        {active && <motion.span layoutId="tf-nav-active" transition={spring.snappy} className="absolute inset-0 rounded-md bg-ink/7 shadow-[inset_0_0_0_1px_var(--color-line-2)]" aria-hidden />}
+        {active && <motion.span layoutId="tf-nav-bar" transition={spring.snappy} className="absolute top-2 bottom-2 -left-2 w-[3px] rounded-full bg-omp shadow-[0_0_10px_color-mix(in_srgb,var(--color-accent)_90%,transparent)]" aria-hidden />}
         <Icon className={cn("relative size-4 shrink-0", active && "text-accent-hi")} />
         {!collapsed && <span className="relative flex-1 truncate text-left">{def.label}</span>}
         {dot}
@@ -129,7 +129,7 @@ function AgentRow({ agentKey: key, depth, index }: { agentKey: string; depth: nu
           title={a.live.line ?? a.title}
           className={cn(
             "group relative flex h-7 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-xs font-semibold transition-colors focus-ring",
-            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]" : "text-ink-2 hover:bg-white/4",
+            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "text-ink-2 hover:bg-ink/4",
           )}
           style={{ paddingLeft: 8 + depth * 14 }}
         >
@@ -196,7 +196,7 @@ function ShellRow({ hostId, pane, tabLabel, depth }: { hostId: string; pane: Pan
           title={[name, `tab ${tabLabel}`, detail].filter(Boolean).join(" · ")}
           className={cn(
             "flex h-6 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-[11px] font-semibold transition-colors focus-ring",
-            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]" : "text-mute hover:bg-white/4 hover:text-ink-2",
+            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "text-mute hover:bg-ink/4 hover:text-ink-2",
           )}
           style={{ paddingLeft: 8 + depth * 14 }}
         >
@@ -240,7 +240,7 @@ function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; n
           // Plain folders have no review screen: the row only carries the right-click menu, so no pointer.
           className={cn(
             "flex h-7 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-xs font-bold transition-colors focus-ring",
-            active ? "bg-white/7 text-ink" : "text-mute hover:bg-white/4 hover:text-ink-2",
+            active ? "bg-ink/7 text-ink" : "text-mute hover:bg-ink/4 hover:text-ink-2",
             !ws.repo && "cursor-default",
           )}
           style={{ paddingLeft: nested ? 22 : 8 }}
@@ -323,7 +323,7 @@ function RepoTree({ hostId, group }: { hostId: string; group: RepoGroup }) {
   }
   return (
     <li>
-      <div className="group/repo flex h-7 items-center gap-1 rounded-sm pr-1 hover:bg-white/3">
+      <div className="group/repo flex h-7 items-center gap-1 rounded-sm pr-1 hover:bg-ink/3">
         <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm pl-1 text-left text-xs font-extrabold text-ink focus-ring">
           <motion.span animate={{ rotate: open ? 90 : 0 }} transition={spring.snappy} className="grid place-items-center">
             <ChevronRight className="size-3.5 text-mute-2" />
@@ -390,8 +390,8 @@ function HostHealth({ hostId, name }: { hostId: string; name: string }) {
       <Sparkline values={cpu.length > 1 ? cpu : [health.cpuPct, health.cpuPct]} height={12} status="idle" live={false} className="min-w-0 flex-1" aria-label={`${name} CPU`} />
       <span className="w-7 text-right font-mono tabular">{cpuPct}%</span>
       <span className="ml-1">ram</span>
-      <span className="relative h-1 w-8 shrink-0 overflow-hidden rounded-full bg-white/8" aria-hidden>
-        <span className={cn("tf-glide-width absolute inset-y-0 left-0 rounded-full", mem >= 90 ? "bg-warn" : "bg-white/45")} style={{ width: `${mem}%` }} />
+      <span className="relative h-1 w-8 shrink-0 overflow-hidden rounded-full bg-ink/8" aria-hidden>
+        <span className={cn("tf-glide-width absolute inset-y-0 left-0 rounded-full", mem >= 90 ? "bg-warn" : "bg-ink/47")} style={{ width: `${mem}%` }} />
       </span>
       <span className="w-7 text-right font-mono tabular">{mem}%</span>
     </span>
@@ -420,7 +420,7 @@ function HostRow({ id, collapsed }: { id: string; collapsed: boolean }) {
           type="button"
           onClick={action ? action.run : () => setFilter(filterTo)}
           aria-pressed={action ? undefined : selected}
-          className={cn("grid size-9 place-items-center rounded-md focus-ring hover:bg-white/5", selected && "bg-white/7")}
+          className={cn("grid size-9 place-items-center rounded-md focus-ring hover:bg-ink/5", selected && "bg-ink/7")}
           aria-label={action ? `${action.label} ${profile.name}: ${summary}` : `${profile.name}: ${summary}`}
         >
           {orb}
@@ -429,7 +429,7 @@ function HostRow({ id, collapsed }: { id: string; collapsed: boolean }) {
     );
   }
   return (
-    <div className={cn("flex items-center gap-1 rounded-md transition-colors", selected ? "bg-white/7 shadow-[inset_0_0_0_1px_var(--color-line-2)]" : "hover:bg-white/4")}>
+    <div className={cn("flex items-center gap-1 rounded-md transition-colors", selected ? "bg-ink/7 shadow-[inset_0_0_0_1px_var(--color-line-2)]" : "hover:bg-ink/4")}>
       <button
         type="button"
         onClick={() => setFilter(filterTo)}
@@ -469,7 +469,7 @@ function Launcher({ def, icon: Icon, onClick, collapsed, labelled }: { def: Acti
         type="button"
         onClick={onClick}
         className={cn(
-          "flex items-center gap-2 rounded-md text-xs font-bold text-mute transition-colors pressable focus-ring hover:bg-white/6 hover:text-ink",
+          "flex items-center gap-2 rounded-md text-xs font-bold text-mute transition-colors pressable focus-ring hover:bg-ink/6 hover:text-ink",
           labelled ? "h-8 px-2" : collapsed ? "size-9 justify-center" : "size-8 justify-center",
         )}
         aria-label={def.label}
@@ -566,7 +566,7 @@ export function Sidebar() {
         {overlay && (
           <motion.div
             key="scrim"
-            className="fixed inset-0 bg-[rgb(5_5_9/0.5)]"
+            className="fixed inset-0 bg-scrim/50"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -581,9 +581,9 @@ export function Sidebar() {
       animate={{ width: collapsed ? COLLAPSED_W : width }}
       transition={dragging ? { duration: 0 } : spring.smooth}
       className={cn(
-        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-[rgb(13_13_19/0.55)]",
+        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-chrome/55",
         rail && "absolute inset-y-0 left-0",
-        overlay && "bg-[rgb(15_15_22/0.94)] shadow-[var(--shadow-d3),1px_0_0_var(--color-line-2)]",
+        overlay && "bg-chrome/94 shadow-[var(--shadow-d3),1px_0_0_var(--color-line-2)]",
         dragging && "select-none",
       )}
       aria-label="Sidebar"
@@ -602,7 +602,7 @@ export function Sidebar() {
               variant="primary"
               size="sm"
               icon={<Plus />}
-              trailing={<Kbd className="ml-auto h-[18px] bg-white/15 text-white/85 shadow-none">{ACTIONS.newTask.shortcut}</Kbd>}
+              trailing={<Kbd className="ml-auto h-[18px] bg-on-accent/15 text-on-accent/85 shadow-none">{ACTIONS.newTask.shortcut}</Kbd>}
               onClick={() => navigate({ name: "dispatch" })}
               aria-current={dispatching ? "page" : undefined}
               className={cn("h-9 w-full justify-start text-sm", dispatching && "ring-2 ring-accent-hi/60")}
@@ -639,7 +639,7 @@ export function Sidebar() {
               onClick={() => navigate({ name: "hosts" })}
               aria-current={route.name === "hosts" ? "page" : undefined}
               aria-label={VIEWS.hosts.label}
-              className={cn("grid size-9 place-items-center rounded-md transition-colors focus-ring", route.name === "hosts" ? "bg-white/7 text-ink" : "text-mute hover:bg-white/6 hover:text-ink")}
+              className={cn("grid size-9 place-items-center rounded-md transition-colors focus-ring", route.name === "hosts" ? "bg-ink/7 text-ink" : "text-mute hover:bg-ink/6 hover:text-ink")}
             >
               <VIEWS.hosts.icon className="size-4" />
             </button>
@@ -652,7 +652,7 @@ export function Sidebar() {
                 type="button"
                 onClick={() => navigate({ name: "hosts" })}
                 aria-current={route.name === "hosts" ? "page" : undefined}
-                className={cn("flex h-6 items-center gap-0.5 rounded-sm px-1.5 text-2xs font-bold transition-colors focus-ring", route.name === "hosts" ? "bg-white/7 text-ink" : "text-mute hover:bg-white/6 hover:text-ink")}
+                className={cn("flex h-6 items-center gap-0.5 rounded-sm px-1.5 text-2xs font-bold transition-colors focus-ring", route.name === "hosts" ? "bg-ink/7 text-ink" : "text-mute hover:bg-ink/6 hover:text-ink")}
               >
                 Manage
                 <ChevronRight className="size-3" />
@@ -695,7 +695,7 @@ export function Sidebar() {
             aria-label={VIEWS.settings.label}
             className={cn(
               "flex h-8 items-center gap-2 rounded-md text-xs font-bold transition-colors focus-ring",
-              settingsActive ? "bg-white/7 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]" : "text-mute hover:bg-white/6 hover:text-ink",
+              settingsActive ? "bg-ink/7 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]" : "text-mute hover:bg-ink/6 hover:text-ink",
               collapsed ? "w-9 justify-center" : "px-2",
             )}
           >

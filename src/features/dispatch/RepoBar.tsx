@@ -21,7 +21,7 @@ import { FolderBrowser, type FolderPick } from "@/features/worktree/FolderBrowse
 import { autoTarget, groupOf } from "./auto";
 
 const chip =
-  "inline-flex h-8 min-w-0 items-center gap-1.5 rounded-full bg-white/[0.04] px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-white/8 hover:text-ink data-[state=open]:bg-white/10 data-[state=open]:text-ink disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0";
+  "inline-flex h-8 min-w-0 items-center gap-1.5 rounded-full bg-ink/[0.04] px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-ink/8 hover:text-ink data-[state=open]:bg-ink/10 data-[state=open]:text-ink disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0";
 
 /** A host group offered as one Auto target, with its hosts' current load (least busy first). */
 export interface GroupChoice {
@@ -128,7 +128,7 @@ export function RepoPicker({
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger className={cn(chip, repo ? "" : "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]", className)} aria-label="Repository">
+        <DropdownMenuTrigger className={cn(chip, repo ? "" : "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]", className)} aria-label="Repository">
           <FolderGit2 className={repo ? "text-accent-hi" : undefined} />
           <span className="min-w-0 truncate">{repo ? (current?.name ?? repo.split(/[\\/]/).pop()) : "Pick a repository"}</span>
           {current && !mobile && <span className="min-w-0 truncate font-mono text-2xs font-medium text-mute-2 max-lg:hidden">{current.detail}</span>}

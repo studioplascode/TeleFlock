@@ -47,12 +47,13 @@ jobs:
           path: target/hostd-dist
 
       - name: Tauri Linux deps
-        # Same list as packaging/linux/Dockerfile.
+        # Same list as packaging/linux/Dockerfile (ibus-gtk3 / fcitx5-frontend-gtk3: the AppImage
+        # bundles the input-method modules installed here).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential \
-            pkg-config curl wget file patchelf xdg-utils
+            pkg-config curl wget file patchelf xdg-utils ibus-gtk3 fcitx5-frontend-gtk3
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:

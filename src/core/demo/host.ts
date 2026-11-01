@@ -1117,9 +1117,10 @@ export class DemoHost implements SimHost {
         this.ompSim(p.agentId).abort();
         return {};
       case "agent.answer": {
+        // `back` (multi-question asks) is refused with `invalid_params` where the question has no `step.canBack`.
         const sim = this.ompSim(p.agentId);
-        const answer = p.answer as { choices?: string[]; text?: string; cancel?: boolean; chat?: boolean } | undefined;
-        const ok = sim.answer(this.str(p, "requestId"), { choices: answer?.choices ?? [], text: answer?.text, cancel: answer?.cancel ?? false, chat: answer?.chat ?? false });
+        const answer = p.answer as { choices?: string[]; text?: string; cancel?: boolean; chat?: boolean; back?: boolean } | undefined;
+        const ok = sim.answer(this.str(p, "requestId"), { choices: answer?.choices ?? [], text: answer?.text, cancel: answer?.cancel ?? false, chat: answer?.chat ?? false, back: answer?.back === true });
         if (!ok) throw apiError("not_found", "That question was already answered", { hint: "Refresh the card" });
         return {};
       }

@@ -83,7 +83,7 @@ function ViewedProgress({ done, total }: { done: number; total: number }) {
   const all = done === total;
   return (
     <span className={cn("flex shrink-0 items-center gap-1.5 text-2xs font-semibold tabular", all ? "text-done" : "text-mute")} aria-label={`${done} of ${total} files viewed`}>
-      <span className="relative h-1 w-10 overflow-hidden rounded-full bg-white/8" aria-hidden>
+      <span className="relative h-1 w-10 overflow-hidden rounded-full bg-ink/8" aria-hidden>
         <motion.span className="absolute inset-y-0 left-0 rounded-full bg-done" initial={false} animate={{ width: `${(done / total) * 100}%` }} transition={spring.smooth} />
       </span>
       {all ? (
@@ -103,7 +103,7 @@ function LiveBanner({ hostId, working, compact }: { hostId: string; working: Age
   const who = working.length === 1 ? `${first.name} is` : `${working.map((a) => a.name).join(", ")} are`;
   return (
     <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="shrink-0 overflow-hidden">
-      <div className="relative flex items-center gap-2.5 overflow-hidden rounded-md bg-accent/[0.08] py-1.5 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]" role="status">
+      <div className="relative flex items-center gap-2.5 overflow-hidden rounded-md bg-accent/[0.08] py-1.5 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]" role="status">
         <span className="tf-loop pointer-events-none absolute inset-x-0 bottom-0 h-px animate-gradient-pan bg-omp bg-[length:200%_100%]" aria-hidden />
         <StatusOrb status="running" size={8} label={null} />
         <span className="shrink-0 text-xs font-bold text-ink">{who} still working</span>
@@ -466,7 +466,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
               onClick={() => toggleViewed(open.path)}
               className={cn(
                 "pressable flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-md text-sm font-bold transition-colors focus-ring",
-                seen ? "bg-done/14 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.35)]" : "bg-tile-3 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]",
+                seen ? "bg-done/14 text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_35%,transparent)]" : "bg-tile-3 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]",
               )}
             >
               <span className={cn("grid size-4 place-items-center rounded-[5px] [&_svg]:size-3", seen ? "bg-done text-bg-deep" : "shadow-[inset_0_0_0_1.5px_var(--color-mute)]")} aria-hidden>
@@ -600,7 +600,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   return (
     <div className="flex h-full flex-col gap-3 p-4">
       <header className="flex items-center gap-3">
-        <div className="grid size-10 shrink-0 place-items-center rounded-md bg-omp text-white shadow-glow-accent">
+        <div className="grid size-10 shrink-0 place-items-center rounded-md bg-omp text-on-accent shadow-glow-accent">
           <FileDiff className="size-5" />
         </div>
         <div className="@container flex min-w-0 flex-1 flex-col gap-1">

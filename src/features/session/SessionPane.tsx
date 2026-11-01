@@ -178,7 +178,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
             {bloom && (
               <motion.span
                 aria-hidden
-                className="pointer-events-none absolute -inset-x-4 -top-20 bottom-1/2 -z-10 rounded-[64px] bg-[radial-gradient(55%_60%_at_50%_42%,rgb(255_61_119/0.8),rgb(255_122_24/0.35)_55%,transparent_80%)] blur-2xl"
+                className="pointer-events-none absolute -inset-x-4 -top-20 bottom-1/2 -z-10 rounded-[64px] bg-[radial-gradient(55%_60%_at_50%_42%,color-mix(in_srgb,var(--color-sun-2)_80%,transparent),color-mix(in_srgb,var(--color-sun-1)_35%,transparent)_55%,transparent_80%)] blur-2xl"
                 initial={{ opacity: 0, scale: 0.6 }}
                 animate={{ opacity: [0, 1, 0.7], scale: [0.6, 1.1, 1] }}
                 transition={{ duration: 1.6, times: [0, 0.3, 1], ease: "easeOut" }}
@@ -195,7 +195,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
       {composer && (
         <div
           data-toast-anchor=""
-          className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_rgb(163_92_240/0.35)]")}
+          className={cn("mx-auto w-full", focus && "rounded-[24px] shadow-[0_24px_60px_-16px_rgb(0_0_0/0.75),0_0_40px_-12px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]")}
           style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
         >
           <Composer agentKey={agentKey} mobile={mobile} autoFocus={!mobile && !compact} />

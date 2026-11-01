@@ -195,7 +195,7 @@ function Bar({ scope, source, mobile = false, onClose, className }: FindBarProps
       transition={spring.snappy}
       onKeyDown={onKeyDown}
       className={cn(
-        "absolute z-raised flex flex-col rounded-md bg-[linear-gradient(180deg,rgb(34_34_46/0.97),rgb(25_25_33/0.97))] shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] backdrop-blur-xl",
+        "absolute z-raised flex flex-col rounded-md bg-[linear-gradient(180deg,color-mix(in_srgb,var(--color-pop-1)_97%,transparent),color-mix(in_srgb,var(--color-pop-2)_97%,transparent))] shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] backdrop-blur-xl",
         mobile ? "inset-x-2 top-1.5" : "top-2 right-3 w-[380px] max-w-[calc(100%-24px)]",
         className,
       )}
@@ -218,7 +218,7 @@ function Bar({ scope, source, mobile = false, onClose, className }: FindBarProps
         />
         <span
           aria-live="polite"
-          className={cn("min-w-12 shrink-0 text-right font-mono text-2xs font-bold tabular-nums", needle && total === 0 && !remotePending ? "text-[#ff8aa5]" : "text-mute")}
+          className={cn("min-w-12 shrink-0 text-right font-mono text-2xs font-bold tabular-nums", needle && total === 0 && !remotePending ? "text-error-ink" : "text-mute")}
         >
           {count || (remotePending ? <Shimmer>…</Shimmer> : null)}
         </span>

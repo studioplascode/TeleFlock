@@ -2,6 +2,10 @@
 import type { AppInfo } from "./AppInfo";
 import type { DiagReport } from "./DiagReport";
 import type { Empty } from "./Empty";
+import type { ForwardList } from "./ForwardList";
+import type { ForwardRemoveParams } from "./ForwardRemoveParams";
+import type { ForwardSaveParams } from "./ForwardSaveParams";
+import type { ForwardStopParams } from "./ForwardStopParams";
 import type { HostProfile } from "./HostProfile";
 import type { HostRef } from "./HostRef";
 import type { HostSaveParams } from "./HostSaveParams";
@@ -43,4 +47,8 @@ export interface AppMethods {
   "tunnel.open": { params: TunnelOpenParams; result: TunnelInfo };
   "tunnel.close": { params: TunnelRef; result: Empty };
   "tunnel.list": { params: Empty; result: TunnelListResult };
+  "forward.list": { params: Empty; result: ForwardList };
+  "forward.save": { params: ForwardSaveParams; result: ForwardList };
+  "forward.remove": { params: ForwardRemoveParams; result: ForwardList };
+  "forward.stop": { params: ForwardStopParams; result: ForwardList };
 }

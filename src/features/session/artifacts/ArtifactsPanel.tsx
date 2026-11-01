@@ -93,8 +93,8 @@ function ArtifactsSection({ agentKey, list, groups }: { agentKey: string; list: 
                   onClick={() => setOpen(r)}
                   title={r.ref}
                   className={cn(
-                    "focus-ring pressable flex w-full items-center gap-2 rounded-[10px] px-1.5 py-1.5 text-left hover:bg-white/[0.04] [&>svg]:size-3.5 [&>svg]:shrink-0",
-                    r.section === "review" ? "bg-accent/10 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]" : "text-mute-2",
+                    "focus-ring pressable flex w-full items-center gap-2 rounded-[10px] px-1.5 py-1.5 text-left hover:bg-ink/[0.04] [&>svg]:size-3.5 [&>svg]:shrink-0",
+                    r.section === "review" ? "bg-accent/10 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]" : "text-mute-2",
                   )}
                 >
                   {ICON[r.section]}

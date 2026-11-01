@@ -36,7 +36,7 @@ function Chip({ ar, className }: { ar: AutoResume; className?: string }) {
         data-testid="auto-resume-badge"
         className={cn(
           "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-bold whitespace-nowrap",
-          w.tone === "busy" ? "bg-white/6 text-mute" : "bg-warn/12 text-warn",
+          w.tone === "busy" ? "bg-ink/6 text-mute" : "bg-warn/12 text-warn",
           className,
         )}
       >

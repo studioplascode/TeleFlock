@@ -19,6 +19,8 @@ mod mac_model;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod toastxml;
 #[cfg(target_os = "linux")]
+mod edit_keys;
+#[cfg(target_os = "linux")]
 mod xdg_notify;
 #[cfg(desktop)]
 mod capture;
@@ -170,6 +172,11 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
         let _ = shell.tray.set(Arc::clone(&tray));
         watch_motion(Arc::clone(&core), tray);
         capture::install(&handle, Arc::clone(&core));
+    }
+    // Linux: paste / delete keys a virtual keyboard sends that GTK 3 can't bind (edit_keys.rs).
+    #[cfg(target_os = "linux")]
+    if let Some(main) = app.get_webview_window("main") {
+        edit_keys::install(&main);
     }
 
     // Deep links: cold start (argv on desktop, launch intent on Android) and warm.

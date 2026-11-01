@@ -86,8 +86,8 @@ export function GithubSignInSheet({ hostId, open, onOpenChange, onDone }: { host
             <li>You enter it at github.com/login/device in this device's browser and authorize GitHub CLI.</li>
             <li>gh keeps the sign-in on {host}; TeleFlock keeps no copy.</li>
           </ol>
-          <label htmlFor={checkId} className="flex cursor-pointer items-start gap-2.5 rounded-md bg-white/[0.03] p-2.5 text-xs text-ink-2 shadow-hairline">
-            <input id={checkId} type="checkbox" className="mt-0.5 size-4 shrink-0 accent-[#a35cf0]" checked={setupGit} onChange={(e) => setSetupGit(e.target.checked)} />
+          <label htmlFor={checkId} className="flex cursor-pointer items-start gap-2.5 rounded-md bg-ink/[0.03] p-2.5 text-xs text-ink-2 shadow-hairline">
+            <input id={checkId} type="checkbox" className="mt-0.5 size-4 shrink-0 accent-accent" checked={setupGit} onChange={(e) => setSetupGit(e.target.checked)} />
             <span className="flex flex-col gap-0.5">
               <span className="font-semibold">
                 <Ticks text="Also use it for git over HTTPS (`gh auth setup-git`)" />

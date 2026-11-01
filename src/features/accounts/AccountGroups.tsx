@@ -59,7 +59,7 @@ function Quota({ w, fetchedAt, now }: { w: LimitWindow; fetchedAt?: number; now:
         <span className="ml-auto shrink-0 text-ink tabular">{pace.remaining != null ? `${formatPct(pace.remaining)} left` : "—"}</span>
       </div>
       <div
-        className="relative h-1.5 overflow-hidden rounded-full bg-white/6"
+        className="relative h-1.5 overflow-hidden rounded-full bg-ink/6"
         role="progressbar"
         aria-label={`${name}${tier ? `, ${tier}` : ""} used`}
         aria-valuemin={0}

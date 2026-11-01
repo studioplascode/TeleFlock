@@ -147,8 +147,8 @@ function HostRow({ hostId, dense = false }: { hostId: string; dense?: boolean })
         </span>
         <span className="inline-flex items-center gap-1">
           ram
-          <span className="h-1 w-10 overflow-hidden rounded-full bg-white/8" aria-hidden>
-            <span className={cn("tf-glide-width block h-full rounded-full", memPct >= 90 ? "bg-warn" : "bg-white/35")} style={{ width: `${memPct}%` }} />
+          <span className="h-1 w-10 overflow-hidden rounded-full bg-ink/8" aria-hidden>
+            <span className={cn("tf-glide-width block h-full rounded-full", memPct >= 90 ? "bg-warn" : "bg-ink/37")} style={{ width: `${memPct}%` }} />
           </span>
           <b className={cn("text-ink-2", dense && "hidden @min-[22rem]:inline")}>
             {gb(health.memUsed)}/{gb(health.memTotal)} GB
@@ -241,7 +241,7 @@ export function FirstStepsTile({ view, className }: { view: FirstStepsView; clas
             <p className="text-sm text-mute">That's the whole loop: answer, steer, review, dispatch, find anything. Your own machines work the same way.</p>
             <button
               type="button"
-              className="inline-flex h-8 items-center gap-1.5 rounded-sm bg-accent px-3 text-xs font-extrabold text-white shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
+              className="inline-flex h-8 items-center gap-1.5 rounded-sm bg-accent px-3 text-xs font-extrabold text-on-accent shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
               onClick={() => addRealHost(view)}
             >
               Add your real host <ArrowRight className="size-3.5" />
@@ -253,7 +253,7 @@ export function FirstStepsTile({ view, className }: { view: FirstStepsView; clas
               <li key={s.id} className="flex min-w-0 items-center gap-2 text-xs" title={`${s.label}: ${s.how}`}>
                 <span
                   data-status={s.done ? "done" : undefined}
-                  className={cn("grid size-4 shrink-0 place-items-center rounded-full text-[9px] font-extrabold", s.done ? "st-soft" : "bg-white/6 text-mute")}
+                  className={cn("grid size-4 shrink-0 place-items-center rounded-full text-[9px] font-extrabold", s.done ? "st-soft" : "bg-ink/6 text-mute")}
                 >
                   {s.done ? <Check className="size-2.5" strokeWidth={3} /> : i + 1}
                 </span>
@@ -350,7 +350,7 @@ export function LiveTerminalTile({ className }: { className?: string }) {
 function StripCell({ label, onClick, children, className }: { label: string; onClick?: () => void; children: ReactNode; className?: string }) {
   const cls = cn("flex h-full min-w-0 flex-col justify-center gap-1 px-4 text-left", className);
   return onClick ? (
-    <button type="button" aria-label={label} onClick={onClick} className={cn(cls, "rounded-tile focus-ring hover:bg-white/[0.03]")}>
+    <button type="button" aria-label={label} onClick={onClick} className={cn(cls, "rounded-tile focus-ring hover:bg-ink/[0.03]")}>
       {children}
     </button>
   ) : (

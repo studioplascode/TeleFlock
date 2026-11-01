@@ -17,7 +17,7 @@ function BarButton({ label, count, icon, onClick, tone = "neutral", mobile }: { 
       className={cn(
         "flex shrink-0 items-center gap-1.5 rounded-md font-bold whitespace-nowrap pressable focus-ring [&_svg]:size-4",
         mobile ? "h-12 flex-col justify-center gap-0.5 px-2.5 text-[10.5px]" : "h-9 px-3 text-xs",
-        tone === "accent" ? "text-accent-ink hover:bg-accent/20" : "text-ink hover:bg-white/8",
+        tone === "accent" ? "text-accent-ink hover:bg-accent/20" : "text-ink hover:bg-ink/8",
       )}
     >
       {icon}
@@ -98,7 +98,7 @@ export function SelectionBar({ mobile = false }: { mobile?: boolean }) {
             mobile
               ? "fixed bottom-[calc(84px+env(safe-area-inset-bottom))] max-w-[calc(100vw-20px)] overflow-x-auto no-scrollbar"
               : "absolute bottom-6 max-w-[calc(100%-24px)] flex-wrap justify-center gap-y-1",
-            "left-1/2 z-sticky flex w-max items-center gap-x-1 rounded-lg glass-blur p-1.5 shadow-[var(--shadow-d3),0_0_0_1px_rgb(163_92_240/0.35),0_18px_50px_-12px_rgb(163_92_240/0.5)]",
+            "left-1/2 z-sticky flex w-max items-center gap-x-1 rounded-lg glass-blur p-1.5 shadow-[var(--shadow-d3),0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_18px_50px_-12px_color-mix(in_srgb,var(--color-accent)_50%,transparent)]",
           )}
           style={{ x: "-50%" }}
         >

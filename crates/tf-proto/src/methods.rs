@@ -41,6 +41,7 @@ use crate::usage::{UsageParams, UsageReport};
 use crate::wrapped::{WrappedParams, WrappedReport};
 use crate::xray::ContextXray;
 use crate::herdr::{HerdrConfigParams, HerdrHealth, HerdrRestartParams};
+use crate::forward::{ForwardList, ForwardRemoveParams, ForwardSaveParams, ForwardStopParams};
 use crate::{Empty, Millis};
 
 macro_rules! methods {
@@ -1598,6 +1599,11 @@ methods!(AppMethod, "AppMethods", {
     "tunnel.open" => TunnelOpen(TunnelOpenParams) -> TunnelInfo;
     "tunnel.close" => TunnelClose(TunnelRef) -> Empty;
     "tunnel.list" => TunnelList(Empty) -> TunnelListResult;
+    // Host-to-host forwarding (forward.rs), relayed and saved by this app core.
+    "forward.list" => ForwardListReq(Empty) -> ForwardList;
+    "forward.save" => ForwardSave(ForwardSaveParams) -> ForwardList;
+    "forward.remove" => ForwardRemove(ForwardRemoveParams) -> ForwardList;
+    "forward.stop" => ForwardStop(ForwardStopParams) -> ForwardList;
 });
 
 #[cfg(test)]

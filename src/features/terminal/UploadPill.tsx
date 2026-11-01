@@ -23,7 +23,7 @@ export function UploadPill({ uploads, touch }: { uploads: TermUploads; touch: bo
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, scale: 0.95 }}
           transition={spring.snappy}
-          className="pointer-events-auto flex min-w-0 items-center gap-1.5 rounded-full bg-[rgb(20_20_28/0.82)] py-[3px] pr-[3px] pl-[5px] text-2xs font-bold text-ink-2 shadow-[inset_0_0_0_1px_var(--color-line-2)] backdrop-blur"
+          className="pointer-events-auto flex min-w-0 items-center gap-1.5 rounded-full bg-tile-1/82 py-[3px] pr-[3px] pl-[5px] text-2xs font-bold text-ink-2 shadow-[inset_0_0_0_1px_var(--color-line-2)] backdrop-blur"
         >
           <ProgressRing done={p.sent} total={p.total} size={16} stroke={2.5} label={null} ariaLabel={`Uploading ${p.label}`} />
           <span className="max-w-36 truncate">{p.label}</span>
@@ -33,7 +33,7 @@ export function UploadPill({ uploads, touch }: { uploads: TermUploads; touch: bo
             aria-label="Cancel upload"
             title="Cancel upload"
             className={cn(
-              "grid shrink-0 place-items-center rounded-full text-mute transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15",
+              "grid shrink-0 place-items-center rounded-full text-mute transition-colors hover:bg-ink/10 hover:text-ink active:bg-ink/15",
               touch ? "size-7 [&_svg]:size-4" : "size-5 [&_svg]:size-3",
             )}
             onClick={(e) => {

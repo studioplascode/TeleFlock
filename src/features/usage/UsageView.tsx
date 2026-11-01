@@ -41,36 +41,36 @@ function TodayTile({ t }: { t: TodaySpend }) {
   return (
     <Tile variant="omp" className={cn("flex min-h-56 flex-col p-5 max-md:min-h-0 max-md:p-4", !mobile && "@container @3xl:[--fit-max:var(--text-mega)]")}>
       <div className="flex items-center gap-2">
-        <span className="kicker text-white/80">Today</span>
+        <span className="kicker text-on-accent/80">Today</span>
         {t.live > 0 && (
           <Tooltip content={`${formatUsd(t.live)} seen live since the hosts' last sync (indexed at the next one)`}>
-            <span tabIndex={0} className="rounded-full bg-white/18 px-2 py-0.5 text-[10px] font-extrabold tracking-[0.06em] text-white uppercase">live</span>
+            <span tabIndex={0} className="rounded-full bg-on-accent/18 px-2 py-0.5 text-[10px] font-extrabold tracking-[0.06em] text-on-accent uppercase">live</span>
           </Tooltip>
         )}
       </div>
       <NumberTicker value={t.cost} format={(n) => usd(n, t.unpriced)} className={cn("mt-2 font-display font-bold", mobile ? "mt-1 text-hero" : "text-hero-fit")} />
-      <span className="mt-1 text-sm font-semibold text-white/85">
-        <NumberTicker value={t.tokens} format={formatCompact} className="font-bold text-white" /> tokens · {t.requests} requests
+      <span className="mt-1 text-sm font-semibold text-on-accent/85">
+        <NumberTicker value={t.tokens} format={formatCompact} className="font-bold text-on-accent" /> tokens · {t.requests} requests
       </span>
       <div className="mt-3 flex h-8 items-end gap-[2px]" aria-hidden>
         {t.byHour.map((c, h) => (
-          <div key={h} className={cn("flex-1 rounded-t-[2px]", h === new Date(now).getHours() ? "bg-white" : "bg-white/30")} style={{ height: `${Math.max(4, (c / peak) * 100)}%` }} />
+          <div key={h} className={cn("flex-1 rounded-t-[2px]", h === new Date(now).getHours() ? "bg-on-accent" : "bg-on-accent/30")} style={{ height: `${Math.max(4, (c / peak) * 100)}%` }} />
         ))}
       </div>
-      <div className="mt-auto grid grid-cols-3 gap-3 pt-3 text-xs font-semibold text-white/80 [&>span]:min-w-0 [&_b]:truncate">
+      <div className="mt-auto grid grid-cols-3 gap-3 pt-3 text-xs font-semibold text-on-accent/80 [&>span]:min-w-0 [&_b]:truncate">
         <span>
-          <b className="block font-display text-lg text-white">{formatCompact(t.input)}</b>in
+          <b className="block font-display text-lg text-on-accent">{formatCompact(t.input)}</b>in
         </span>
         <span>
-          <b className="block font-display text-lg text-white">{formatCompact(t.output)}</b>out
+          <b className="block font-display text-lg text-on-accent">{formatCompact(t.output)}</b>out
         </span>
         <span title="Average spend per hour since midnight on this device, projected over 24 h">
-          <b className="block font-display text-lg text-white">{formatUsd(pace)}/h</b>
+          <b className="block font-display text-lg text-on-accent">{formatUsd(pace)}/h</b>
           <span className="block truncate">~{formatUsd(pace * 24)} / day</span>
         </span>
       </div>
       {(t.approx.length > 0 || t.unpriced > 0) && (
-        <p className="mt-2 text-[10.5px] font-semibold text-white/70">
+        <p className="mt-2 text-[10.5px] font-semibold text-on-accent/70">
           {t.unpriced > 0 ? `${t.unpriced} request${t.unpriced === 1 ? "" : "s"} without a price · ` : ""}
           {t.approx.length > 0 ? "some hosts report live spend only until their index answers" : ""}
         </p>
@@ -107,7 +107,7 @@ function SpendChart({ days, today, className }: { days: ReturnType<typeof daySer
                 <div tabIndex={0} className="group flex h-full min-w-0 flex-1 flex-col justify-end focus-ring rounded-t-[4px]">
                   <div
                     data-status={last ? "running" : "idle"}
-                    className={cn("w-full min-h-[3px] rounded-t-[4px] rounded-b-[2px]", last ? "st-bg" : "bg-white/12 group-hover:bg-accent/50")}
+                    className={cn("w-full min-h-[3px] rounded-t-[4px] rounded-b-[2px]", last ? "st-bg" : "bg-ink/12 group-hover:bg-accent/50")}
                     style={{ height: `${(b.cost / max) * 100}%` }}
                   />
                 </div>
@@ -175,7 +175,7 @@ function AgentCostRow({ agentKey, max }: { agentKey: string; max: number }) {
           <span className="font-extrabold text-ink">{agent.name}</span>
           <span className="truncate font-mono text-2xs text-mute-2">{agent.omp?.model?.label ?? agent.omp?.model?.id ?? agent.kind}</span>
         </div>
-        <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/6">
+        <div className="mt-1 h-1 overflow-hidden rounded-full bg-ink/6">
           <div data-status={agent.column === "running" ? "running" : "idle"} className="h-full rounded-full st-bg" style={{ width: `${max > 0 ? (spent / max) * 100 : 0}%` }} />
         </div>
       </div>

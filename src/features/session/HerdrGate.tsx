@@ -24,7 +24,7 @@ export function HerdrGate({ agentKey, health, children }: { agentKey: string; he
     return (
       <>
         {/* max-md:mt-6 keeps the phone pager's floating dots off the first line */}
-        <div role="status" data-testid="herdr-gate" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs max-md:mt-6 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]">
+        <div role="status" data-testid="herdr-gate" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs max-md:mt-6 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_25%,transparent)]">
           <Power className="size-3.5 shrink-0 text-warn" aria-hidden />
           {/* basis, not 0: on a phone the buttons wrap below the text instead of squeezing it into a sliver */}
           <p className="min-w-0 flex-[1_1_16rem] text-mute">

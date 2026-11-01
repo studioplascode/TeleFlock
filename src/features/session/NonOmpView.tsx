@@ -2,6 +2,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CornerDownLeft, Maximize2, S
 import { type ReactNode, useRef } from "react";
 import { draftKey, navigate, parseAgentKey, useAgent, useDraft } from "@/core";
 import { AgentGlyph, Chip, cn, Elapsed, Heartbeat, IconButton, Input, StatusPill, useActivity, useIsMobile } from "@/design";
+import { HostBadge } from "@/features/hosts/HostBadge";
 import { TerminalPane, type TerminalHandle } from "@/features/terminal";
 import { agentStatus, hostCall, useBeat } from "./api";
 
@@ -45,6 +46,7 @@ export function NonOmpView({ agentKey }: { agentKey: string }) {
             <div className="flex items-center gap-2.5">
               <h2 className="truncate font-display text-[19px] font-bold tracking-[-0.02em]">{agent.name}</h2>
               <Chip>{agent.kind}</Chip>
+              <HostBadge hostId={hostId} className="max-w-[10rem]" />
               <StatusPill status={status} activity={tier} size="sm">
                 {HERDR_LABEL[agent.state]}
               </StatusPill>
@@ -65,7 +67,7 @@ export function NonOmpView({ agentKey }: { agentKey: string }) {
           </IconButton>
         </header>
       )}
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-tile bg-bg-deep shadow-[var(--shadow-d2),inset_0_0_0_1px_rgb(255_255_255/0.06)]">
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-tile bg-bg-deep shadow-[var(--shadow-d2),inset_0_0_0_1px_var(--color-line)]">
         <TerminalPane hostId={hostId} target={{ kind: "agent", agentId }} handleRef={term} className="absolute inset-0" />
       </div>
       <div className={cn("flex items-center gap-2", mobile && "flex-col items-stretch")}>

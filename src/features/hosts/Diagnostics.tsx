@@ -110,10 +110,10 @@ const PLANNED: Record<HostKind, readonly { id: string; label: string }[]> = {
 };
 
 const STATUS_META: Record<DiagStatus, { cls: string; label: string }> = {
-  ok: { cls: "bg-done/18 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.4)]", label: "OK" },
-  warn: { cls: "bg-warn/16 text-warn shadow-[inset_0_0_0_1px_rgb(251_191_36/0.4)]", label: "Warning" },
-  fail: { cls: "bg-error/16 text-error shadow-[inset_0_0_0_1px_rgb(255_77_94/0.45)]", label: "Failed" },
-  skip: { cls: "bg-white/6 text-mute-2", label: "Skipped" },
+  ok: { cls: "bg-done/18 text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_40%,transparent)]", label: "OK" },
+  warn: { cls: "bg-warn/16 text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_40%,transparent)]", label: "Warning" },
+  fail: { cls: "bg-error/16 text-error shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_45%,transparent)]", label: "Failed" },
+  skip: { cls: "bg-ink/6 text-mute-2", label: "Skipped" },
 };
 
 function StatusIcon({ status }: { status: DiagStatus }) {
@@ -194,8 +194,8 @@ export function Diagnostics({ kind, auth = "tailscale", report, running }: Diagn
                 {state === "active" ? (
                   <Spinner size={22} label={`Checking ${s.label}`} />
                 ) : (
-                  <span className={cn("grid size-6 place-items-center rounded-full", state === "passed" ? "bg-accent/18" : "bg-white/5")}>
-                    <span className={cn("size-1.5 rounded-full", state === "passed" ? "bg-accent-hi" : "bg-white/25")} />
+                  <span className={cn("grid size-6 place-items-center rounded-full", state === "passed" ? "bg-accent/18" : "bg-ink/5")}>
+                    <span className={cn("size-1.5 rounded-full", state === "passed" ? "bg-accent-hi" : "bg-ink/25")} />
                   </span>
                 )}
                 {state === "active" ? (
@@ -228,7 +228,7 @@ export function Diagnostics({ kind, auth = "tailscale", report, running }: Diagn
                     </span>
                     {s.ms !== undefined && <span className="ml-auto font-mono text-2xs text-mute-2 tabular">{s.ms} ms</span>}
                   </div>
-                  {s.detail && <p className={cn("mt-0.5 text-xs break-words", s.status === "fail" ? "text-[#ff9aae]" : "text-mute")}>{s.detail}</p>}
+                  {s.detail && <p className={cn("mt-0.5 text-xs break-words", s.status === "fail" ? "text-error-ink" : "text-mute")}>{s.detail}</p>}
                   {fix && <FixLine fix={fix} />}
                 </div>
               </motion.li>

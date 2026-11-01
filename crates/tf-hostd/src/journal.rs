@@ -154,6 +154,27 @@ impl JournalTail {
         JournalTail { path: path.to_path_buf(), id: None, seen: false, offset: 0, anchor: Vec::new() }
     }
 
+    /// A tail continuing at `offset` of the regular file `path`, a line boundary a reader of the
+    /// file reached before (a collab journal read, an earlier tail): what omp appends from there on
+    /// is new. `None` when `offset` is past the end or not right after a line (the file was
+    /// rewritten meanwhile: read it again from the start). Blocking I/O.
+    pub fn resume(path: &Path, offset: u64) -> std::io::Result<Option<JournalTail>> {
+        let (len, _) = stat(path)?;
+        if offset == 0 || offset > len {
+            return Ok(None);
+        }
+        let mut file = File::open(path)?;
+        let id = file_id(&file.metadata()?);
+        let start = offset.saturating_sub(ANCHOR as u64);
+        file.seek(SeekFrom::Start(start))?;
+        let mut anchor = Vec::with_capacity(ANCHOR);
+        (&mut file).take(offset - start).read_to_end(&mut anchor)?;
+        if anchor.last() != Some(&b'\n') {
+            return Ok(None);
+        }
+        Ok(Some(JournalTail { path: path.to_path_buf(), id, seen: true, offset, anchor }))
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -227,14 +248,14 @@ fn anchor_before(bytes: &[u8], end: usize) -> Vec<u8> {
 
 /// One JSON line (`\n` / `\r\n` stripped); `None` for blank or malformed lines, which omp's own
 /// loader skips too. Lone UTF-16 surrogates, which omp's JS loader reads fine, are repaired
-/// ([`crate::lossy_json`]) instead of dropping the entry.
+/// ([`tf_collab::lossy_json`]) instead of dropping the entry.
 fn parse_line(line: &[u8]) -> Option<Value> {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.iter().all(u8::is_ascii_whitespace) {
         return None;
     }
-    crate::lossy_json::from_slice(line).ok()
+    tf_collab::lossy_json::from_slice(line).ok()
 }
 
 /// The `timestamp` of the session header omp writes to `path`, before omp wrote it: omp names a
@@ -251,6 +272,82 @@ pub fn header_timestamp(path: &Path, session_id: &str) -> Option<String> {
         && [4, 7, 13, 16, 19].iter().all(|&i| b[i] == b'-')
         && b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19 | 23) || c.is_ascii_digit());
     shaped.then(|| format!("{}:{}:{}.{}Z", &safe[..13], &safe[14..16], &safe[17..19], &safe[20..23]))
+}
+
+/// Session entry types omp's collab host replicates as transcript entries (`collab/host.ts`
+/// `WIRE_SESSION_ENTRY_TYPES`); the others only feed the journal (goal, plan mode, side spend).
+pub fn is_wire_type(entry_type: &str) -> bool {
+    matches!(entry_type, "message" | "custom_message" | "compaction" | "branch_summary" | "model_change" | "thinking_level_change")
+}
+
+/// The newest transcript entry of a session file ([`newest_entry`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Newest {
+    /// omp's entry id.
+    pub id: String,
+    /// An assistant message that ended its run (`stopReason` `stop`, `length` or `aborted`): omp's
+    /// turn is over unless something comes after it.
+    pub turn_end: bool,
+}
+
+/// The bytes [`newest_entry`] reads first from the end of a session file; four times as many on
+/// each further pass while the newest lines do not fit, up to [`NEWEST_MAX`].
+const NEWEST_FIRST: u64 = 256 * 1024;
+const NEWEST_MAX: u64 = 16 * 1024 * 1024;
+/// Lines [`newest_entry`] looks at from the end for a transcript entry (journal-only entries such
+/// as `model_usage` or `custom` come after one).
+const NEWEST_LINES: usize = 64;
+
+/// A session file's size and change time (one `stat`). Anything but a regular file is an error:
+/// opening a FIFO or a device to read it could block for good. Blocking I/O.
+pub fn stat(path: &Path) -> std::io::Result<(u64, Option<std::time::SystemTime>)> {
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    Ok((meta.len(), meta.modified().ok()))
+}
+
+/// The newest transcript entry among the complete lines of the first `len` bytes of `path`, read
+/// from the end: what omp wrote last that a copy of the session must show. `None` when there is
+/// none (a header only), or when the newest lines are too long to read whole. Blocking I/O; reads
+/// a few hundred KiB unless the last lines are huge.
+pub fn newest_entry(path: &Path, len: u64) -> std::io::Result<Option<Newest>> {
+    let mut file = File::open(path)?;
+    let mut want = NEWEST_FIRST;
+    loop {
+        let take = want.min(len);
+        file.seek(SeekFrom::Start(len - take))?;
+        let mut buf = Vec::with_capacity(take as usize);
+        (&mut file).take(take).read_to_end(&mut buf)?;
+        // A trailing partial line (omp is writing it) does not count yet.
+        let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+            if take == len || want >= NEWEST_MAX {
+                return Ok(None);
+            }
+            want *= 4;
+            continue;
+        };
+        let lines: Vec<&[u8]> = buf[..=last_nl].split_inclusive(|&b| b == b'\n').collect();
+        // The window's first line may start before it.
+        let whole = if take == len { 0 } else { 1 };
+        for line in lines.iter().skip(whole).rev().take(NEWEST_LINES) {
+            let Some(v) = parse_line(line) else { continue };
+            if !v.get("type").and_then(Value::as_str).is_some_and(is_wire_type) {
+                continue;
+            }
+            let Some(id) = v.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) else { continue };
+            let msg = v.get("message");
+            let turn_end = msg.and_then(|m| m.get("role")).and_then(Value::as_str) == Some("assistant")
+                && matches!(msg.and_then(|m| m.get("stopReason")).and_then(Value::as_str), Some("stop" | "length" | "aborted"));
+            return Ok(Some(Newest { id: id.to_owned(), turn_end }));
+        }
+        // Every line looked at: none (or the window's first, cut line was the one).
+        if take == len || lines.len() > NEWEST_LINES || want >= NEWEST_MAX {
+            return Ok(None);
+        }
+        want *= 4;
+    }
 }
 
 #[cfg(test)]
@@ -448,5 +545,51 @@ mod tests {
         assert_eq!(stamp("mine.jsonl"), None);
         assert_eq!(stamp(&format!("2026-10-28T16:38:52.114Z_{sid}.jsonl")), None);
         assert_eq!(stamp(&format!("2026-10-28T16-38-52-11xZ_{sid}.jsonl")), None);
+    }
+
+    fn assistant(id: &str, stop: &str, text: &str) -> String {
+        format!(
+            r#"{{"type":"message","id":"{id}","parentId":null,"timestamp":"2026-10-28T10:00:02.000Z","message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}],"stopReason":"{stop}","timestamp":2}}}}"#
+        )
+    }
+
+    fn newest(path: &Path) -> Option<Newest> {
+        newest_entry(path, std::fs::metadata(path).unwrap().len()).unwrap()
+    }
+
+    #[test]
+    fn the_newest_transcript_entry_is_read_from_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        append(&path, &format!("{TITLE}\n{HEADER}\n"));
+        assert_eq!(newest(&path), None, "a header only");
+        append(&path, &format!("{}\n{}\n", entry("e1"), assistant("e2", "toolUse", "looking")));
+        assert_eq!(newest(&path), Some(Newest { id: "e2".into(), turn_end: false }));
+        // Journal-only lines and a line omp is still writing come after it: still e2.
+        append(&path, &format!("{}\n", assistant("e3", "stop", "done")));
+        append(&path, r#"{"type":"model_usage","id":"u1","usage":{"input":1}}"#);
+        append(&path, "\n");
+        append(&path, r#"{"type":"custom","id":"c1","customType":"x","data":{}}"#);
+        append(&path, "\n{\"type\":\"message\",\"id\":\"e4\",\"mess");
+        assert_eq!(newest(&path), Some(Newest { id: "e3".into(), turn_end: true }), "a run that ended");
+        // An aborted run ended too, an error may be retried.
+        append(&path, &format!("age\":{{\"role\":\"user\",\"content\":\"next\",\"timestamp\":3}}}}\n{}\n", assistant("e5", "aborted", "")));
+        assert_eq!(newest(&path), Some(Newest { id: "e5".into(), turn_end: true }));
+        append(&path, &format!("{}\n", assistant("e6", "error", "")));
+        assert_eq!(newest(&path), Some(Newest { id: "e6".into(), turn_end: false }));
+    }
+
+    #[test]
+    fn newest_lines_longer_than_the_first_read_are_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let big = "ä".repeat(700 * 1024);
+        append(&path, &format!("{TITLE}\n{HEADER}\n{}\n{}\n", entry("e1"), assistant("e2", "stop", &big)));
+        assert_eq!(newest(&path), Some(Newest { id: "e2".into(), turn_end: true }));
+        // Many journal-only lines after it, each bigger than the first read.
+        for i in 0..3 {
+            append(&path, &format!("{{\"type\":\"custom\",\"id\":\"c{i}\",\"data\":\"{}\"}}\n", "x".repeat(300 * 1024)));
+        }
+        assert_eq!(newest(&path), Some(Newest { id: "e2".into(), turn_end: true }));
     }
 }

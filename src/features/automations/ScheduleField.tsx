@@ -94,7 +94,7 @@ export function ScheduleField({ draft, onChange, preview, timezone, error }: Sch
       <div className="flex flex-wrap items-center gap-2">
         <Select value={draft.kind} onValueChange={(v) => setKind(v as PresetKind)} options={KINDS.map((k) => ({ value: k, label: PRESET_LABELS[k] }))} aria-label="Schedule" className="min-w-44 max-md:flex-1" />
         {draft.kind !== "custom" && (
-          <code className="ml-auto rounded-xs bg-black/25 px-1.5 py-0.5 font-mono text-2xs text-mute" title="The cron expression this preset saves">
+          <code className="ml-auto rounded-xs bg-bg-deep/25 px-1.5 py-0.5 font-mono text-2xs text-mute" title="The cron expression this preset saves">
             {cron}
           </code>
         )}
@@ -134,7 +134,7 @@ export function ScheduleField({ draft, onChange, preview, timezone, error }: Sch
                   }}
                   className={cn(
                     "grid h-9 min-w-10 flex-1 place-items-center rounded-md px-2 text-xs font-bold pressable focus-ring max-w-14",
-                    on ? "bg-accent/22 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.5)]" : "well text-mute hover:text-ink",
+                    on ? "bg-accent/22 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_50%,transparent)]" : "well text-mute hover:text-ink",
                   )}
                 >
                   {d.short}

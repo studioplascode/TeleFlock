@@ -4,7 +4,7 @@
  */
 
 // tokens & helpers
-export { STATUS, STATUSES, MOBILE_MAX_WIDTH, color, gradient, radius, z } from "./tokens";
+export { STATUS, STATUSES, MOBILE_MAX_WIDTH, radius, z } from "./tokens";
 export type { Status, StatusMeta } from "./tokens";
 export { cn } from "./lib/cn";
 export { useNow, onFrame } from "./lib/clock";
@@ -15,6 +15,20 @@ export { isWindowActive, isWindowVisible, onWindowActive, onWindowVisible, useWi
 export { formatElapsed, formatAge, formatCompact, formatUsd, formatInt } from "./lib/format";
 export { hashString, seededRandom } from "./lib/hash";
 export { DesignProvider } from "./DesignProvider";
+
+// themes
+export { startTheme, useThemeVersion, onThemeChange, readThemeVar, readThemeColor, resolveColor, readThemeDefaults, previewCss, PREVIEW_STYLE_ATTR, THEME_ESCAPE_KEYS } from "./theme/apply";
+export { over, parseColor, withAlpha } from "./theme/color";
+export { useThemeStore, THEME_STORAGE_KEY } from "./theme/store";
+export type { ThemeStore, ThemeResult } from "./theme/store";
+export { PRESETS, DEFAULT_THEME_ID, presetById } from "./theme/presets";
+export type { ThemePreset } from "./theme/presets";
+export { MAX_CUSTOM_THEMES, TRIAL_MS, shownThemeId, customById } from "./theme/model";
+export type { CustomTheme, ThemeTrial } from "./theme/model";
+export { inspectThemeCss, hasErrors, themeTemplate, withThemeName, themeFileName, nameFromFileName, MAX_THEME_LENGTH } from "./theme/css";
+export type { ThemeIssue, ThemeCssInfo } from "./theme/css";
+export { THEME_VAR_GROUPS, THEME_VARS, TERMINAL_KEYS, ANSI_VARS } from "./theme/vars";
+export type { ThemeVar, ThemeVarGroup } from "./theme/vars";
 
 // motion & liveness
 export { spring, tween, pressMotion, fadeRise, popIn } from "./motion/springs";

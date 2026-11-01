@@ -2,11 +2,11 @@ import { useAgent } from "@/core";
 import { AgentGlyph, Elapsed, Shimmer, cn } from "@/design";
 import { HostTag } from "@/features/board/AgentCard";
 import { RepoTag } from "@/features/board/RepoTag";
+import { AgentSaid } from "@/features/session/ask/AgentSaid";
+import { clipContext, withoutQuestion } from "@/features/session/ask/askContext";
 import { NEEDS_WORD } from "@/features/shell/vocab";
 import { askText } from "./askText";
 import { useLastAssistant } from "./useLastAssistant";
-
-const TAIL_CHARS = 700;
 
 /** Agent identity row for a needs-you item: glyph, name, repo chip · branch, host, waiting timer. */
 export function NeedsHeader({ agentKey, className }: { agentKey: string; className?: string }) {
@@ -30,7 +30,7 @@ export function NeedsHeader({ agentKey, className }: { agentKey: string; classNa
         </div>
       </div>
       {agent.needs && (
-        <span className="shrink-0 text-xs font-bold text-[#ffb08a] tabular">
+        <span className="shrink-0 text-xs font-bold text-sun-ink tabular">
           waiting <Elapsed since={agent.needs.since} />
         </span>
       )}
@@ -38,21 +38,25 @@ export function NeedsHeader({ agentKey, className }: { agentKey: string; classNa
   );
 }
 
-/** What the agent said right before asking (tail of its last assistant message). */
+/**
+ * What the agent said right before asking, without the question itself: the host's `needs.context`
+ * when it sends one (asks, hosts ≥ 0.8.0; empty = it wrote nothing; the session stays closed), else
+ * the end of its last assistant message from the transcript (held open while this is shown).
+ */
 export function LastAssistantText({ agentKey, enabled = true, className }: { agentKey: string; enabled?: boolean; className?: string }) {
-  const { text, loading } = useLastAssistant(agentKey, enabled);
-  if (!text && !loading) return null;
-  const tail = text && text.length > TAIL_CHARS ? `…${text.slice(text.length - TAIL_CHARS)}` : text;
+  const needs = useAgent(agentKey)?.needs;
+  const context = needs?.context;
+  const { text, loading } = useLastAssistant(agentKey, enabled && context === undefined);
+  const question = needs ? askText({ title: needs.title, message: needs.question, command: needs.command, approval: needs.kind === "approval" }).headline : "";
+  const said = withoutQuestion(context ?? clipContext(text ?? ""), question);
+  if (said) return <AgentSaid key={needs?.requestId} text={said} variant="panel" className={className} />;
+  if (context !== undefined || text || !loading) return null;
   return (
     <div className={cn("relative rounded-md well px-3.5 py-2.5 max-md:px-3 max-md:py-2", className)}>
       <span className="kicker">Agent said</span>
-      {tail ? (
-        <p className="mt-1 max-h-40 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap text-ink-2 max-md:max-h-32 max-md:leading-normal">{tail}</p>
-      ) : (
-        <p className="mt-1 text-sm">
-          <Shimmer>Loading the conversation…</Shimmer>
-        </p>
-      )}
+      <p className="mt-1 text-sm">
+        <Shimmer>Loading the conversation…</Shimmer>
+      </p>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useId } from "react";
 import { cn } from "../lib/cn";
-import { STATUS, type Status } from "../tokens";
+import type { Status } from "../tokens";
 
 export interface SparklineProps {
   values: readonly number[];
@@ -43,7 +43,6 @@ function smoothPath(pts: readonly [number, number][]): string {
  */
 export function Sparkline({ values, status = "running", height = 32, fill = true, live = true, className, ...rest }: SparklineProps) {
   const id = `tf-spark-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
-  const meta = STATUS[status];
   const pad = 3;
   const min = Math.min(...values, 0);
   const max = Math.max(...values, 1e-9);
@@ -57,16 +56,16 @@ export function Sparkline({ values, status = "running", height = 32, fill = true
   const area = pts.length ? `${line} L${VB_W},${height} L0,${height} Z` : "";
   const last = pts[pts.length - 1];
   return (
-    <div className={cn("relative w-full", className)} style={{ height }} role="img" aria-label={rest["aria-label"] ?? "Activity sparkline"}>
+    <div data-status={status} className={cn("relative w-full", className)} style={{ height }} role="img" aria-label={rest["aria-label"] ?? "Activity sparkline"}>
       <svg viewBox={`0 0 ${VB_W} ${height}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full overflow-visible">
         <defs>
           <linearGradient id={`${id}-s`} x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0" stopColor={meta.c1} />
-            <stop offset="1" stopColor={meta.c2} />
+            <stop offset="0" style={{ stopColor: "var(--st-1)" }} />
+            <stop offset="1" style={{ stopColor: "var(--st-2)" }} />
           </linearGradient>
           <linearGradient id={`${id}-f`} x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0" stopColor={meta.c2} stopOpacity="0.35" />
-            <stop offset="1" stopColor={meta.c2} stopOpacity="0" />
+            <stop offset="0" style={{ stopColor: "var(--st-2)" }} stopOpacity="0.35" />
+            <stop offset="1" style={{ stopColor: "var(--st-2)" }} stopOpacity="0" />
           </linearGradient>
         </defs>
         {fill && <path className="tf-spark-path" style={{ d: `path("${area}")` }} fill={`url(#${id}-f)`} />}
@@ -89,7 +88,7 @@ export function Sparkline({ values, status = "running", height = 32, fill = true
           aria-hidden
         >
           <span className="tf-orb__halo tf-loop" />
-          <span className="tf-orb__core tf-loop" style={{ background: "#fff" }} />
+          <span className="tf-orb__core tf-loop" style={{ background: "var(--color-ink)" }} />
         </span>
       )}
     </div>

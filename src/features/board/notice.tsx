@@ -7,7 +7,7 @@ import { cn, spring } from "@/design";
 export const noticeRow = "flex items-center gap-3 px-4 py-2 text-xs max-md:px-3";
 
 /** The notice box: one box however many rows, gone when empty. */
-export const noticeBox = "divide-y divide-line overflow-hidden rounded-lg bg-white/[0.02] shadow-[inset_0_0_0_1px_var(--color-line-2)] empty:hidden";
+export const noticeBox = "divide-y divide-line overflow-hidden rounded-lg bg-ink/[0.02] shadow-[inset_0_0_0_1px_var(--color-line-2)] empty:hidden";
 
 /** How a notice row comes and goes. */
 export const noticeRise = { initial: { opacity: 0, y: -8 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: -8 }, transition: spring.smooth } as const;
@@ -88,7 +88,7 @@ export function NoticeLine({ icon, children, action, className }: { icon: ReactN
         aria-expanded={false}
         aria-label={more > 0 ? `Show all ${more + 1} notices` : "Show the whole notice"}
         onClick={tray?.expand}
-        className="flex h-8 min-w-8 shrink-0 items-center justify-center gap-0.5 rounded-full bg-white/[0.06] px-2 text-2xs font-bold text-mute tabular pressable focus-ring hover:text-ink"
+        className="flex h-8 min-w-8 shrink-0 items-center justify-center gap-0.5 rounded-full bg-ink/[0.06] px-2 text-2xs font-bold text-mute tabular pressable focus-ring hover:text-ink"
       >
         {more > 0 && `+${more}`}
         <ChevronDown className="size-4" />

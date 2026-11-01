@@ -139,7 +139,7 @@ export function AutomationCard({ hostId, automation: a, home, now, onEdit, onHis
           <div className="min-w-0 flex-1">{info}</div>
           <div className="pt-1">{sw}</div>
         </div>
-        <div className="grid grid-cols-2 gap-3 rounded-md bg-black/15 px-3 py-2.5">
+        <div className="grid grid-cols-2 gap-3 rounded-md bg-bg-deep/15 px-3 py-2.5">
           <div className="flex min-w-0 flex-col gap-1">
             <span className="kicker">Next run</span>
             <span className="text-sm font-semibold">{next}</span>

@@ -21,7 +21,7 @@ function Strip({ wait, mobile }: { wait: RetryWait; mobile: boolean }) {
     <div
       role="status"
       data-testid="retry-strip"
-      className={cn("flex min-w-0 items-center gap-x-2 rounded-md bg-warn/10 px-2.5 py-1.5 text-xs text-warn shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]", mobile && "mx-2 mb-1.5 shrink-0")}
+      className={cn("flex min-w-0 items-center gap-x-2 rounded-md bg-warn/10 px-2.5 py-1.5 text-xs text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_25%,transparent)]", mobile && "mx-2 mb-1.5 shrink-0")}
     >
       <Tooltip
         content={

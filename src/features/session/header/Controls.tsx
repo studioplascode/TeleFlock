@@ -84,7 +84,7 @@ function ControlChip({ on, children, className, ...rest }: ButtonHTMLAttributes<
   return (
     <button
       type="button"
-      className={cn(chipBase, on ? "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)]" : "bg-white/[0.05] text-ink-2 hover:bg-white/[0.09]", className)}
+      className={cn(chipBase, on ? "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_45%,transparent)]" : "bg-ink/[0.05] text-ink-2 hover:bg-ink/[0.09]", className)}
       {...rest}
     >
       {children}
@@ -98,7 +98,7 @@ function StateTag({ on, children }: { on: boolean; children: ReactNode }) {
     <span
       className={cn(
         "rounded-full px-1.5 py-px text-[9.5px] font-extrabold tracking-wider uppercase transition-colors duration-200 max-md:px-1",
-        on ? "bg-accent text-white shadow-[0_0_8px_rgb(163_92_240/0.55)]" : "bg-white/8 text-mute",
+        on ? "bg-accent text-on-accent shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "bg-ink/8 text-mute",
       )}
     >
       {children}
@@ -257,7 +257,7 @@ function ModelList({ agentKey, onDone, mobile = false }: { agentKey: string; onD
                   onSelect={() => void pick(r.selector)}
                   disabled={busy}
                   aria-current={isCurrent || undefined}
-                  className={cn(mobile && "min-h-12", isCurrent && "bg-accent/10 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]")}
+                  className={cn(mobile && "min-h-12", isCurrent && "bg-accent/10 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]")}
                   icon={r.role ? <Sparkles /> : isCurrent ? <Check className="text-accent-hi" /> : <span className="size-4" />}
                 >
                   <span className="font-bold">{r.title}</span>
@@ -306,7 +306,7 @@ function RolesEntry({ agentKey, mobile = false }: { agentKey: string; mobile?: b
       </Button>
     );
   return (
-    <button type="button" onClick={open} className="flex w-full items-center gap-2.5 border-t border-line px-3.5 py-2.5 text-left hover:bg-white/6 focus-ring">
+    <button type="button" onClick={open} className="flex w-full items-center gap-2.5 border-t border-line px-3.5 py-2.5 text-left hover:bg-ink/6 focus-ring">
       <Boxes className="size-4 shrink-0 text-accent-hi" />
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-semibold text-ink-2">Roles (this session)…</span>
@@ -511,11 +511,11 @@ function SheetAction({ action, onPick }: { action: MenuAction; onPick: () => voi
       type="button"
       disabled={action.disabled}
       onClick={onPick}
-      className="flex min-h-13 w-full items-center gap-3 rounded-lg bg-white/[0.035] px-3 py-1.5 text-left pressable focus-ring disabled:opacity-40"
+      className="flex min-h-13 w-full items-center gap-3 rounded-lg bg-ink/[0.035] px-3 py-1.5 text-left pressable focus-ring disabled:opacity-40"
     >
-      <span className={cn("grid size-8 shrink-0 place-items-center rounded-md bg-white/[0.06] [&_svg]:size-4.5", action.danger ? "text-[#ff8aa5]" : "text-accent-hi")}>{action.icon}</span>
+      <span className={cn("grid size-8 shrink-0 place-items-center rounded-md bg-ink/[0.06] [&_svg]:size-4.5", action.danger ? "text-error-ink" : "text-accent-hi")}>{action.icon}</span>
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate text-md font-bold", action.danger ? "text-[#ff8aa5]" : "text-ink")}>{action.def.label}</span>
+        <span className={cn("block truncate text-md font-bold", action.danger ? "text-error-ink" : "text-ink")}>{action.def.label}</span>
         {action.def.description && <span className="block truncate text-xs text-mute">{action.def.description}</span>}
       </span>
     </button>
@@ -621,7 +621,7 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
   });
 
   const defaultTrigger = (
-    <button type="button" aria-label="Session actions" className={cn(chipBase, "w-8 justify-center bg-white/[0.05] px-0 text-ink-2 hover:bg-white/[0.09] max-md:px-0")}>
+    <button type="button" aria-label="Session actions" className={cn(chipBase, "w-8 justify-center bg-ink/[0.05] px-0 text-ink-2 hover:bg-ink/[0.09] max-md:px-0")}>
       <MoreHorizontal className="size-4" />
     </button>
   );

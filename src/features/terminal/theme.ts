@@ -1,39 +1,24 @@
 import type { ITheme } from "@xterm/xterm";
-import { color } from "@/design";
+import { readThemeColor, TERMINAL_KEYS, withAlpha } from "@/design";
 
 /**
- * xterm palette derived from the Bento × omp tokens (dark only). Tuned against `bg-deep`: every
- * normal/bright colour clears 4.5:1 except `black`, which programs use as a background shade.
+ * The xterm palette of the current theme: the `--term-*` variables (tokens.css for the default,
+ * tuned against its background: every normal/bright colour clears 4.5:1 except `black`, which
+ * programs use as a background shade). Call again after a theme change (`onThemeChange`).
  */
-export const termTheme: ITheme = {
-  background: color.bgDeep,
-  foreground: color.ink2,
-  cursor: color.accentHi,
-  cursorAccent: color.bgDeep,
-  selectionBackground: "rgba(163, 92, 240, 0.38)",
-  selectionInactiveBackground: "rgba(163, 92, 240, 0.2)",
-  selectionForeground: color.ink,
-  scrollbarSliderBackground: "rgba(255, 255, 255, 0.08)",
-  scrollbarSliderHoverBackground: "rgba(255, 255, 255, 0.16)",
-  scrollbarSliderActiveBackground: "rgba(163, 92, 240, 0.4)",
-  black: "#1b1b25",
-  red: "#ff5c7a",
-  green: "#a3e635",
-  yellow: color.warn,
-  blue: "#6f9cff",
-  magenta: color.accentHi,
-  cyan: color.review,
-  white: color.ink2,
-  // mute-2 (#6e6e82) is ~4:1 on bg-deep; this is ~5.2:1 so dim/comment text stays readable.
-  brightBlack: "#80809a",
-  brightRed: "#ff8aa5",
-  brightGreen: "#c4f06b",
-  brightYellow: "#fde68a",
-  brightBlue: color.ompBlue,
-  brightMagenta: color.ompPink,
-  brightCyan: "#67e8f9",
-  brightWhite: color.ink,
-};
+export function termTheme(): ITheme {
+  const theme: Record<string, string> = {};
+  for (const [key, name] of TERMINAL_KEYS) theme[key] = readThemeColor(name, key === "background" ? "#07070b" : "#dcdce4");
+  const { foreground = "#dcdce4", cursor = foreground, selectionBackground = "rgba(163, 92, 240, 0.38)", brightWhite = "#f5f5f7" } = theme;
+  return {
+    ...theme,
+    selectionInactiveBackground: withAlpha(selectionBackground, 0.55),
+    selectionForeground: brightWhite,
+    scrollbarSliderBackground: withAlpha(foreground, 0.1),
+    scrollbarSliderHoverBackground: withAlpha(foreground, 0.2),
+    scrollbarSliderActiveBackground: withAlpha(cursor, 0.45),
+  };
+}
 
 /** Bundled terminal text font (`@fontsource-variable/fira-code`, imported by src/design/styles/index.css). */
 export const TERM_FONT = "Fira Code Variable";

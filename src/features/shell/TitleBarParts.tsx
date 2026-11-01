@@ -41,7 +41,7 @@ export function HostPill() {
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="flex h-7 items-center gap-2 rounded-full bg-white/5 pr-2 pl-2.5 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-white/9 data-[state=open]:bg-white/10"
+          className="flex h-7 items-center gap-2 rounded-full bg-ink/5 pr-2 pl-2.5 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-ink/9 data-[state=open]:bg-ink/10"
           aria-label={`Host: ${label}, ${detail}`}
         >
           <StatusOrb status={orb} size={8} label={null} />
@@ -132,7 +132,7 @@ export function SearchField() {
     <button
       type="button"
       onClick={() => setPalette(true)}
-      className="group flex h-7 w-[220px] items-center gap-2 rounded-full bg-black/25 pr-1.5 pl-3 text-xs text-mute-2 shadow-[inset_0_0_0_1px_var(--color-line-2)] transition-[box-shadow,background-color] focus-ring hover:bg-black/35 hover:shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)] max-[959px]:w-7 max-[959px]:justify-center max-[959px]:px-0 lg:w-[300px]"
+      className="group flex h-7 w-[220px] items-center gap-2 rounded-full bg-bg-deep/75 pr-1.5 pl-3 text-xs text-mute-2 shadow-[inset_0_0_0_1px_var(--color-line-2)] transition-[box-shadow,background-color] focus-ring hover:bg-bg-deep/90 hover:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_45%,transparent)] max-[959px]:w-7 max-[959px]:justify-center max-[959px]:px-0 lg:w-[300px]"
       aria-label="Search and commands (Ctrl+K)"
       title="Search and commands (Ctrl+K)"
     >
@@ -161,7 +161,7 @@ export function NeedsCounter() {
             <button
               type="button"
               onClick={() => setAnswerNext(true)}
-              className="relative flex h-7 items-center gap-1.5 rounded-full bg-sun pr-3 pl-2 text-xs font-extrabold text-white pressable focus-ring"
+              className="relative flex h-7 items-center gap-1.5 rounded-full bg-sun pr-3 pl-2 text-xs font-extrabold text-on-sun pressable focus-ring"
               aria-label={`${needs} agent${needs === 1 ? "" : "s"} need you: ${ACTIONS.answerNext.label}`}
             >
               {/* The glow as its own layer, keyed like the ping: replays without remounting the focusable button. Inline position: `sun-pulse` sets `relative`. */}

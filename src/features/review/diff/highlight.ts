@@ -201,17 +201,17 @@ export function tokenize(text: string, family: Family): Token[] {
   return out;
 }
 
-/** Token colours (Tailwind classes) tuned for the dark diff background. */
+/** Token colours (Tailwind classes): the theme's `--syntax-*` colours, shared with transcript code. */
 export const TOKEN_CLASS: Record<TokenKind, string> = {
-  kw: "text-[#c4a1ff]",
-  str: "text-[#a5e3a0]",
-  num: "text-[#ffb86b]",
-  com: "text-mute-2 italic",
-  type: "text-[#7fd4ff]",
-  fn: "text-[#82aaff]",
-  prop: "text-[#f6a6d8]",
-  tag: "text-[#ff8fa3]",
-  attr: "text-[#ffcb6b]",
-  op: "text-[#89ddff]",
+  kw: "text-(--syntax-keyword)",
+  str: "text-(--syntax-string)",
+  num: "text-(--syntax-number)",
+  com: "text-(--syntax-comment) italic",
+  type: "text-(--syntax-type)",
+  fn: "text-(--syntax-function)",
+  prop: "text-(--syntax-property)",
+  tag: "text-(--syntax-tag)",
+  attr: "text-(--syntax-attribute)",
+  op: "text-(--syntax-operator)",
   plain: "",
 };

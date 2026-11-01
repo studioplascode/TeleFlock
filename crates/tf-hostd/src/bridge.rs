@@ -486,6 +486,8 @@ struct Conn {
     /// Live feed of `session` ([`BridgeHandle::live_subscribe`]); dropped (ending the feed) when
     /// the session switches or is taken away from this connection.
     feed: Option<mpsc::UnboundedSender<LiveMsg>>,
+    /// Ends the connection from hostd's side ([`BridgeHandle::close_conn`]).
+    stop: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Default)]
@@ -601,6 +603,15 @@ impl BridgeHandle {
         self.reg().by_session.contains_key(session_id)
     }
 
+    /// Closes connection `conn` from hostd's side, as if the extension had: its pending requests
+    /// fail, its sessions go, and the extension dials again (a new connection, a new `hello`). For a
+    /// connection whose bridge stopped answering ([`crate::feed`]).
+    pub fn close_conn(&self, conn: u64) {
+        if let Some(c) = self.reg().conns.get(&conn) {
+            c.stop.cancel();
+        }
+    }
+
     fn reg(&self) -> std::sync::MutexGuard<'_, Registry> {
         lock(&self.inner.shared.reg)
     }
@@ -711,7 +722,8 @@ impl BridgeHandle {
     }
 
     /// Answers dialog `req_id` (a `ui-request` live frame) with an exact option label or editor
-    /// text; `None` cancels (the same values a collab guest sends).
+    /// text, or an ask question's `nav.back` (bridge ≥ 2.2.0); `None` cancels (the same values a
+    /// collab guest sends).
     pub async fn ui_response(&self, session_id: &str, req_id: u64, value: Option<&str>) -> Result<(), BridgeError> {
         self.unit(session_id, "uiResponse", json!({ "reqId": req_id, "value": value }), QUICK)
             .await
@@ -1120,6 +1132,7 @@ where
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     // First frame on every connection: proves to the extension that this is the real hostd.
     let _ = tx.send(json!({ "t": "auth", "v": BRIDGE_PROTOCOL, "secret": shared.secret }).to_string());
+    let stop = tokio_util::sync::CancellationToken::new();
     lock(&shared.reg).conns.insert(
         conn_id,
         Conn {
@@ -1128,6 +1141,7 @@ where
             hello: None,
             pending: HashMap::new(),
             feed: None,
+            stop: stop.clone(),
         },
     );
     debug!(conn_id, "bridge connection");
@@ -1148,7 +1162,14 @@ where
         let mut buf = Vec::new();
         loop {
             buf.clear();
-            match read_line(&mut reader, &mut buf).await {
+            let read = tokio::select! {
+                read = read_line(&mut reader, &mut buf) => read,
+                _ = stop.cancelled() => {
+                    debug!(conn_id, "bridge connection closed by hostd");
+                    break;
+                }
+            };
+            match read {
                 Ok(false) => break,
                 Ok(true) => match std::str::from_utf8(&buf) {
                     Ok(line) if line.trim().is_empty() => {}
@@ -1280,7 +1301,7 @@ struct ResolvedFrame {
 
 fn on_line(shared: &Shared, conn_id: u64, line: &str) {
     // Lone UTF-16 surrogates (omp cuts text by UTF-16 index) are repaired, not a dropped frame.
-    let msg: Value = match crate::lossy_json::from_str(line) {
+    let msg: Value = match tf_collab::lossy_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
             warn!(conn_id, "bridge: bad json: {e}");

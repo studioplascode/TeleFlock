@@ -16,7 +16,7 @@ const REVERT: Record<string, string> = { "cooldown-expiry": "back to the primary
 function PolicyLine({ ctx }: { ctx: RowContext }) {
   if (ctx.get("retry.modelFallback") === false) {
     return (
-      <div className="flex flex-wrap items-center gap-2 rounded-md bg-warn/8 px-3 py-2 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]">
+      <div className="flex flex-wrap items-center gap-2 rounded-md bg-warn/8 px-3 py-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]">
         <TriangleAlert className="size-3.5 shrink-0 text-warn" />
         <span className="min-w-0 flex-1 text-xs font-semibold text-warn">Fallback is off — chains are ignored</span>
         <Button size="sm" variant="secondary" onClick={() => ctx.save([{ key: "retry.modelFallback", value: true }])}>

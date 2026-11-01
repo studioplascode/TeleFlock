@@ -449,7 +449,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                     <button
                       type="button"
                       onClick={() => openDialog({ kind: "fanOut", hostId, cwd: repo?.path, prompt: agent.prompt.trim() || undefined })}
-                      className="group flex items-center gap-3 rounded-lg bg-white/[0.03] px-3.5 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-accent/[0.08]"
+                      className="group flex items-center gap-3 rounded-lg bg-ink/[0.03] px-3.5 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-accent/[0.08]"
                     >
                       <Split className="size-4 text-accent transition-transform duration-500 ease-spring group-hover:rotate-90" />
                       <span className="flex min-w-0 flex-1 flex-col">
@@ -571,7 +571,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
                                 transition={{ ...spring.smooth, delay: 0.12 + i * 0.05 }}
                                 className="flex min-w-0 items-center gap-2.5 text-xs text-ink-2"
                               >
-                                <span className="grid size-5 shrink-0 place-items-center rounded-full bg-white/6 font-mono text-[10px] font-bold text-mute shadow-hairline">{i + 1}</span>
+                                <span className="grid size-5 shrink-0 place-items-center rounded-full bg-ink/6 font-mono text-[10px] font-bold text-mute shadow-hairline">{i + 1}</span>
                                 <span className="truncate">{text}</span>
                               </motion.li>
                             ))}
@@ -623,7 +623,7 @@ function Summary({
     { icon: Cpu, k: "Agent", v: agent ? `${agent} · ${model}` : "none", step: 2, ai: agentAi },
   ];
   const tile = (r: (typeof rows)[number]) => (
-    <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-accent/12 text-accent shadow-[inset_0_0_0_1px_rgb(163_92_240/0.25)]">
+    <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-accent/12 text-accent shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_25%,transparent)]">
       <r.icon className="size-4" />
     </span>
   );
@@ -636,7 +636,7 @@ function Summary({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ ...spring.smooth, delay: i * 0.04 }}
-            className="flex items-center gap-3 rounded-md bg-white/4 px-3 py-2 shadow-hairline"
+            className="flex items-center gap-3 rounded-md bg-ink/4 px-3 py-2 shadow-hairline"
           >
             {tile(r)}
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -654,7 +654,7 @@ function Summary({
             transition={{ ...spring.smooth, delay: i * 0.04 }}
             title={r.v}
             aria-label={`${r.k}: ${r.v}. Edit`}
-            className="group flex items-center gap-3 rounded-md bg-white/4 px-3 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-white/7"
+            className="group flex items-center gap-3 rounded-md bg-ink/4 px-3 py-2.5 text-left shadow-hairline transition-colors focus-ring pressable hover:bg-ink/7"
           >
             {tile(r)}
             <span className="flex min-w-0 flex-1 flex-col">
@@ -792,7 +792,7 @@ function FailureCallout({ failure, home, branch, onTrust, onUseExisting, onNewNa
       transition={{ ...spring.smooth, x: { duration: 0.4 } }}
       className={cn(
         "flex gap-3 rounded-lg p-3.5",
-        tone === "warn" ? "bg-warn/8 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]" : "bg-error/10 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]",
+        tone === "warn" ? "bg-warn/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]" : "bg-error/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]",
       )}
     >
       <TriangleAlert className={cn("mt-0.5 size-4 shrink-0", tone === "warn" ? "text-warn" : "text-error")} />

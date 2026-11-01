@@ -160,6 +160,43 @@ impl SelectItem {
     }
 }
 
+/// Where a question of a multi-question ask stands (`ui-request.nav`). TeleFlock's bridge
+/// (≥ 2.2.0) adds it to the ask dialog's selects and "Other" editors; omp's collab mirroring has
+/// none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskNav {
+    /// 0-based position of the question.
+    #[serde(default)]
+    pub index: u32,
+    /// Questions in the ask.
+    #[serde(default)]
+    pub total: u32,
+    /// The `ui-response` value that goes back to the previous question (from the second on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<String>,
+    /// The answer the question already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<AskNavAnswer>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskNavAnswer {
+    /// Picked options, as the select's labels.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// The "Other" text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// A `nav` this build can't read is dropped, not the dialog carrying it.
+fn lenient_nav<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<AskNav>, D::Error> {
+    let raw = Option::<Value>::deserialize(d)?;
+    Ok(raw.and_then(|v| serde_json::from_value(v).map_err(|e| log::warn!("collab: ignoring an unreadable ask nav: {e}")).ok()))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UiRequestFrame {
@@ -178,12 +215,16 @@ pub enum UiRequestFrame {
         markable_count: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         help_text: Option<String>,
+        #[serde(default, deserialize_with = "lenient_nav", skip_serializing_if = "Option::is_none")]
+        nav: Option<AskNav>,
     },
     Editor {
         req_id: u64,
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefill: Option<String>,
+        #[serde(default, deserialize_with = "lenient_nav", skip_serializing_if = "Option::is_none")]
+        nav: Option<AskNav>,
     },
 }
 
@@ -196,6 +237,11 @@ impl UiRequestFrame {
     pub fn title(&self) -> &str {
         match self {
             Self::Select { title, .. } | Self::Editor { title, .. } => title,
+        }
+    }
+    pub fn nav(&self) -> Option<&AskNav> {
+        match self {
+            Self::Select { nav, .. } | Self::Editor { nav, .. } => nav.as_ref(),
         }
     }
 }
@@ -264,9 +310,11 @@ const KNOWN_TAGS: &[&str] = &[
 ];
 
 impl HostFrame {
-    /// Parse decrypted frame JSON. Fails only on invalid JSON / non-object payloads.
+    /// Parse decrypted frame JSON. Fails only on invalid JSON / non-object payloads. A lone UTF-16
+    /// surrogate escape (omp's collab host cuts a streamed emoji between two deltas) is repaired to
+    /// U+FFFD ([`crate::lossy_json`]) instead of dropping the frame.
     pub fn parse(json: &[u8]) -> Result<HostFrame, serde_json::Error> {
-        let value: Value = serde_json::from_slice(json)?;
+        let value: Value = crate::lossy_json::from_slice(json)?;
         Ok(Self::from_value(value))
     }
 
@@ -474,6 +522,24 @@ mod tests {
         assert!(HostFrame::parse(b"not json").is_err());
     }
 
+    /// TeleFlock's bridge (≥ 2.2.0) adds `nav` to the ask dialog's requests; one this build can't
+    /// read is dropped, never the dialog.
+    #[test]
+    fn ask_nav_parses_and_a_bad_one_is_dropped() {
+        let f = HostFrame::parse(
+            br#"{"t":"ui-request","request":{"reqId":5,"kind":"select","title":"Q2","options":["A","B"],
+                "nav":{"index":1,"total":3,"back":"\u0000back","answer":{"choices":["B"],"text":"mine"}}}}"#,
+        )
+        .unwrap();
+        let HostFrame::UiRequest { request } = f else { panic!("not a ui-request: {f:?}") };
+        let nav = request.nav().unwrap();
+        assert_eq!((nav.index, nav.total, nav.back.as_deref()), (1, 3, Some("\0back")));
+        assert_eq!(nav.answer, Some(AskNavAnswer { choices: vec!["B".into()], text: Some("mine".into()) }));
+        let f = HostFrame::parse(br#"{"t":"ui-request","request":{"reqId":6,"kind":"editor","title":"Custom answer: Q","nav":{"index":"one"}}}"#).unwrap();
+        let HostFrame::UiRequest { request } = f else { panic!("the dialog was dropped: {f:?}") };
+        assert_eq!((request.req_id(), request.nav()), (6, None));
+    }
+
     /// omp 18.12 restores a resumed session's subagents with file times (`mtimeMs`), which are
     /// fractional; the whole welcome used to fail and every join timed out.
     #[test]
@@ -526,5 +592,16 @@ mod tests {
             }
         }
         assert!(n > 1000, "parsed {n} host frames");
+    }
+
+    /// omp's collab host streams a reply whose emoji is cut between two deltas: the frame carries a
+    /// lone surrogate escape. Lab (omp 18.14.2, a German answer with 🚀 split across deltas): the
+    /// guest dropped such frames as undecodable ("unexpected end of hex escape", "lone leading
+    /// surrogate"); a dropped `message_end` or entry left the copy behind omp.
+    #[test]
+    fn a_frame_with_half_an_emoji_still_parses() {
+        let json = br#"{"t":"event","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Fertig \ud83d"}],"stopReason":"stop"}}}"#;
+        let HostFrame::Event { event } = HostFrame::parse(json).unwrap() else { panic!("not an event") };
+        assert_eq!(event["message"]["content"][0]["text"], "Fertig \u{fffd}");
     }
 }

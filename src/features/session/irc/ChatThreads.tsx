@@ -67,7 +67,7 @@ function ThreadCard({
   const name = thread.peer === "all" ? "Broadcasts" : (sub?.name ?? thread.peer);
   const last = thread.last;
   return (
-    <div className={cn("overflow-hidden rounded-[14px] transition-colors", open ? "bg-[rgb(10_10_16/0.45)] shadow-hairline" : "hover:bg-white/[0.03]")}>
+    <div className={cn("overflow-hidden rounded-[14px] transition-colors", open ? "bg-bg-deep/45 shadow-hairline" : "hover:bg-ink/[0.03]")}>
       <button type="button" onClick={onToggle} aria-expanded={open} className="focus-ring flex w-full min-w-0 items-center gap-2.5 px-2 py-1.5 text-left">
         <AgentGlyph name={thread.peer} size={30} status={sub ? SUB_STATUS[sub.status] : undefined} />
         <span className="min-w-0 flex-1">
@@ -85,7 +85,7 @@ function ThreadCard({
         <span className="flex shrink-0 flex-col items-end gap-1">
           <span className="text-[10.5px] font-semibold text-mute-2 tabular">{formatAge(now - last.at)}</span>
           {unread > 0 ? (
-            <span className="inline-grid h-[17px] min-w-[17px] place-items-center rounded-full bg-accent px-1.5 text-[10px] leading-none font-extrabold text-white tabular shadow-[0_0_12px_rgb(163_92_240/0.6)]" aria-label={`${unread} unread`}>
+            <span className="inline-grid h-[17px] min-w-[17px] place-items-center rounded-full bg-accent px-1.5 text-[10px] leading-none font-extrabold text-on-accent tabular shadow-[0_0_12px_color-mix(in_srgb,var(--color-accent)_60%,transparent)]" aria-label={`${unread} unread`}>
               {unread}
             </span>
           ) : (
@@ -114,7 +114,7 @@ function ThreadBody({ agentKey, thread, sub, onView }: { agentKey: string; threa
   return (
     <div className="flex flex-col gap-1.5 px-2 pt-0.5 pb-2">
       {thread.entries.length > shown.length && (
-        <button type="button" onClick={() => setAll(true)} className="focus-ring self-center rounded-full px-2 py-0.5 text-[11px] font-bold text-mute hover:bg-white/[0.05] hover:text-ink-2">
+        <button type="button" onClick={() => setAll(true)} className="focus-ring self-center rounded-full px-2 py-0.5 text-[11px] font-bold text-mute hover:bg-ink/[0.05] hover:text-ink-2">
           Show all {thread.entries.length}
         </button>
       )}
@@ -135,7 +135,7 @@ function ThreadBody({ agentKey, thread, sub, onView }: { agentKey: string; threa
           <button
             type="button"
             onClick={() => onView(sub.id)}
-            className="focus-ring pressable flex items-center justify-center gap-1.5 rounded-md bg-white/[0.05] py-1.5 text-[11.5px] font-bold text-ink-2 shadow-hairline hover:bg-white/[0.09]"
+            className="focus-ring pressable flex items-center justify-center gap-1.5 rounded-md bg-ink/[0.05] py-1.5 text-[11.5px] font-bold text-ink-2 shadow-hairline hover:bg-ink/[0.09]"
           >
             <ExternalLink className="size-3.5" /> Open {sub.name} · {SUB_LABEL[sub.status]}
           </button>

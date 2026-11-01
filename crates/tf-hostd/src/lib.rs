@@ -11,14 +11,17 @@ pub mod clients;
 pub mod daemon;
 pub mod feed;
 pub mod find;
+pub mod forward;
 pub mod herdr_health;
 pub mod limit_resume;
 pub mod inject;
 pub mod ipc;
 pub mod journal;
+/// Fault injection for labs (cargo feature `lab-faults`) and tests.
+#[cfg(any(test, feature = "lab-faults"))]
+pub mod lab;
 pub mod live_rows;
 pub mod logging;
-pub mod lossy_json;
 pub mod notes;
 pub mod notify;
 pub mod omp;
@@ -28,6 +31,7 @@ pub mod paths;
 pub mod recovery;
 pub mod restart;
 pub mod secure;
+pub mod settle;
 pub mod state;
 pub mod sync;
 /// Scripts written for tests that run them right away (`ETXTBSY`-proof); not part of the daemon.

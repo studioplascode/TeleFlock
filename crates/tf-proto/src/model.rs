@@ -551,6 +551,10 @@ wire_struct! {
         pub command: Option<String>,
         /// False when the dialog can only be answered in the terminal.
         pub answerable: bool,
+        /// Asks: what the agent wrote before asking ([`crate::session::UiRequest::context`]).
+        pub context: Option<String>,
+        /// Multi-question asks: this question's place, Back, and the answer it already has.
+        pub step: Option<crate::session::AskStep>,
     }
 }
 
@@ -690,6 +694,11 @@ wire_struct! {
         /// Ask tool: "Chat about this".
         #[serde(default)]
         pub chat: bool,
+        /// Ask tool: back to the previous question (only when the dialog's `step.canBack`), which
+        /// comes up again with the answer it had. Hosts < 0.8.0 ignore it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub back: bool,
     }
 }
 

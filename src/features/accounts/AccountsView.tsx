@@ -39,8 +39,8 @@ function Banner({ tone, icon, children, action }: { tone: "warn" | "info" | "acc
       className={cn(
         "flex items-center gap-3 rounded-lg px-4 py-2.5 text-xs font-semibold [&>svg]:size-4 [&>svg]:shrink-0",
         tone === "warn" && "bg-warn/10 text-warn",
-        tone === "info" && "bg-white/[0.03] text-mute shadow-[inset_0_0_0_1px_var(--color-line-2)]",
-        tone === "accent" && "bg-accent/8 text-ink-2 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]",
+        tone === "info" && "bg-ink/[0.03] text-mute shadow-[inset_0_0_0_1px_var(--color-line-2)]",
+        tone === "accent" && "bg-accent/8 text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]",
         mobile && "flex-wrap",
       )}
     >
@@ -56,9 +56,9 @@ function FirstAccount({ host, snapshot, onLink }: { host: string; snapshot: Acco
   const picks = pickerSections(snapshot.providers).popular.slice(0, 4);
   return (
     <Tile className="relative overflow-hidden px-6 py-10 max-md:px-4 max-md:py-8">
-      <div aria-hidden className="pointer-events-none absolute -top-24 left-1/2 h-48 w-[36rem] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,rgb(163_92_240/0.22),transparent)]" />
+      <div aria-hidden className="pointer-events-none absolute -top-24 left-1/2 h-48 w-[36rem] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,color-mix(in_srgb,var(--color-accent)_22%,transparent),transparent)]" />
       <div className="relative mx-auto flex max-w-xl flex-col items-center gap-4 text-center">
-        <div className="grid size-14 place-items-center rounded-lg bg-omp text-white shadow-glow-accent [&_svg]:size-6">
+        <div className="grid size-14 place-items-center rounded-lg bg-omp text-on-accent shadow-glow-accent [&_svg]:size-6">
           <KeyRound />
         </div>
         <div>
@@ -77,7 +77,7 @@ function FirstAccount({ host, snapshot, onLink }: { host: string; snapshot: Acco
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ ...spring.smooth, delay: 0.08 + i * 0.04 }}
                   onClick={() => onLink(e.provider.id)}
-                  className="flex flex-col items-center gap-2 rounded-lg bg-white/[0.035] px-2 py-3.5 shadow-[inset_0_0_0_1px_var(--color-line)] transition-[background-color,box-shadow] hover:bg-white/[0.07] hover:shadow-[inset_0_0_0_1px_var(--color-line-3)] focus-ring pressable"
+                  className="flex flex-col items-center gap-2 rounded-lg bg-ink/[0.035] px-2 py-3.5 shadow-[inset_0_0_0_1px_var(--color-line)] transition-[background-color,box-shadow] hover:bg-ink/[0.07] hover:shadow-[inset_0_0_0_1px_var(--color-line-3)] focus-ring pressable"
                   aria-label={`Link ${look.name}`}
                 >
                   <ProviderMark id={e.provider.id} ompName={e.provider.name} size={40} />

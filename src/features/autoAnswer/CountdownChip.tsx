@@ -19,7 +19,7 @@ export function CountdownChip({ agentKey, sunset = false, className }: { agentKe
           // block-level and only as wide as its text: it sits on a line of its own in the card's body
           "flex w-fit max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-bold whitespace-nowrap tabular",
           // the hero card: white on a dark tint, like its state pill
-          sunset ? "bg-[rgb(40_0_20/0.28)] text-white" : "bg-sun-1/12 text-sun-1 shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)]",
+          sunset ? "bg-[rgb(40_0_20/0.28)] text-white" : "bg-sun-1/12 text-sun-1 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-sun-1)_30%,transparent)]",
           className,
         )}
       >

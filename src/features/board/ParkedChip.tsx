@@ -17,7 +17,7 @@ export function ParkedChip({ agentKey, className }: { agentKey: string; classNam
   if (parked?.ended) return <EndedChip agentKey={agentKey} ended={parked.ended} ar={agent?.autoResume} className={className} />;
   return (
     <Tooltip content={resuming ? "Resuming the session in a new pane…" : "Pane closed when it was marked done · resumes when you need it"}>
-      <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full bg-white/6 px-1.5 py-px text-[9.5px] font-bold text-mute-2", className)}>
+      <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full bg-ink/6 px-1.5 py-px text-[9.5px] font-bold text-mute-2", className)}>
         <MoonStar className="size-2.5" aria-hidden />
         {resuming ? <Shimmer>resuming…</Shimmer> : "closed"}
       </span>

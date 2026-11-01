@@ -12,6 +12,7 @@ pub mod crypto;
 pub mod frame;
 pub mod guest;
 pub mod link;
+pub mod lossy_json;
 pub mod registry;
 pub mod relay;
 pub mod replica;

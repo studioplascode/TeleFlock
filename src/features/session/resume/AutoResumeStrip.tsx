@@ -44,7 +44,7 @@ function Strip({ agentKey, ar, ended, mobile }: { agentKey: string; ar: AutoResu
     <div
       role="status"
       data-testid="auto-resume"
-      className={cn(BASE, w.tone === "busy" ? "bg-white/5 text-ink-2" : "bg-warn/10 text-warn shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]", mobile && MOBILE)}
+      className={cn(BASE, w.tone === "busy" ? "bg-ink/5 text-ink-2" : "bg-warn/10 text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_25%,transparent)]", mobile && MOBILE)}
     >
       <Tooltip content={<Detail lines={w.detail} />}>
         <span tabIndex={0} className="focus-ring flex min-w-0 flex-[1_1_12rem] items-center gap-1.5 rounded-xs font-bold">
@@ -72,7 +72,7 @@ function EndedStrip({ hostId, ended, mobile }: { hostId: string; ended: AgentEnd
   const now = useNow(60_000);
   const w = endedWords(ended, now, { herdrDown: herdr !== undefined });
   return (
-    <div role="status" data-testid="auto-resume" className={cn(BASE, "bg-white/5 text-ink-2", mobile && MOBILE)}>
+    <div role="status" data-testid="auto-resume" className={cn(BASE, "bg-ink/5 text-ink-2", mobile && MOBILE)}>
       <Tooltip content={<Detail lines={w.detail} />}>
         <span tabIndex={0} className="focus-ring flex min-w-0 flex-1 items-center gap-1.5 rounded-xs font-bold">
           <PowerOff className="size-3.5 shrink-0" aria-hidden />

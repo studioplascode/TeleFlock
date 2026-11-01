@@ -10,7 +10,7 @@ export function Term({ id, children, className }: { id: GlossaryId; children?: R
   const fine = useFinePointer();
   const entry = GLOSSARY[id];
   const text = children ?? entry.term;
-  const trigger = cn("cursor-help underline decoration-white/30 decoration-dotted underline-offset-[3px] focus-ring rounded-[3px]", className);
+  const trigger = cn("cursor-help underline decoration-ink/30 decoration-dotted underline-offset-[3px] focus-ring rounded-[3px]", className);
   if (fine) {
     return (
       <Tooltip content={<span className="font-medium">{entry.text}</span>}>

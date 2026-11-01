@@ -97,6 +97,11 @@ export function starPicks(labels: readonly string[]): string {
   return labels.length ? labels.map((l) => `★ ${l}`).join(", ") : "★ the recommended option";
 }
 
+/** What a countdown sends: the ★ options, or the question's earlier answer (`earlier`: Back reopened it, or it came up again). */
+function answerText(cd: AutoAnswerCountdown): string {
+  return cd.earlier ? `your earlier answer (${cd.picks.join(", ")})` : starPicks(cd.picks);
+}
+
 /** counting: picks at its deadline · due: past it, or being delivered · waiting: stands while an app is connected · cancelled: waits for a person. */
 export type CountdownPhase = "counting" | "due" | "waiting" | "cancelled";
 
@@ -104,11 +109,11 @@ export interface CountdownView {
   phase: CountdownPhase;
   /** Time left (ms, ≥ 0): to the deadline while counting, where the clock stands while waiting or cancelled, 0 when due. */
   remainingMs: number;
-  /** The ★ options it picks. */
+  /** The ★ options it picks, or "your earlier answer (…)". */
   picks: string;
-  /** Ask card line: "auto-picks ★ Use SQLite in 12:40"; cancelled: "Won't auto-pick this question". */
+  /** Ask card line: "auto-picks ★ Use SQLite in 12:40" ("auto-sends your earlier answer (…) in 12:40"); cancelled: "Won't auto-pick this question". */
   text: string;
-  /** Card chip: "auto-picks in 12:40"; empty when cancelled (cards show nothing then). */
+  /** Card chip: "auto-picks in 12:40" ("sends your answer in 12:40"); empty when cancelled (cards show nothing then). */
   compact: string;
   /** Tooltip sentence. */
   detail: string;
@@ -118,10 +123,13 @@ export interface CountdownView {
 
 /** What a countdown shows at `now` (host epoch ms, the app's clock). */
 export function countdownState(cd: AutoAnswerCountdown, now: number): CountdownView {
-  const picks = starPicks(cd.picks);
+  const picks = answerText(cd);
+  // ★ is picked; an earlier answer is sent again.
+  const [verb, doing, chip] = cd.earlier ? ["sends", "sending", "sends your answer"] : ["picks", "picking", "auto-picks"];
   const standing = Math.max(0, cd.remainingMs ?? 0);
   if (cd.status === "cancelled") {
-    return { phase: "cancelled", remainingMs: standing, picks, text: "Won't auto-pick this question", compact: "", detail: `Decide for me won't pick ${picks}: this question waits for you.`, ticking: false };
+    const detail = `Decide for me won't ${cd.earlier ? "send" : "pick"} ${picks}: this question waits for you.`;
+    return { phase: "cancelled", remainingMs: standing, picks, text: "Won't auto-pick this question", compact: "", detail, ticking: false };
   }
   if (cd.status === "waitingForNoApp") {
     const t = formatCountdown(standing);
@@ -129,24 +137,24 @@ export function countdownState(cd: AutoAnswerCountdown, now: number): CountdownV
       phase: "waiting",
       remainingMs: standing,
       picks,
-      text: `auto-picks ${picks} when no app is connected · ${t} left`,
+      text: `auto-${verb} ${picks} when no app is connected · ${t} left`,
       compact: `when no app · ${t} left`,
-      detail: `Decide for me picks ${picks} after ${formatWait(standing / 1000)} with no app connected. Its clock stands while a TeleFlock app is connected to this host.`,
+      detail: `Decide for me ${verb} ${picks} after ${formatWait(standing / 1000)} with no app connected. Its clock stands while a TeleFlock app is connected to this host.`,
       ticking: false,
     };
   }
   const left = cd.status === "counting" ? (cd.deadline !== undefined ? cd.deadline - now : standing) : 0;
   if (left <= 0) {
-    return { phase: "due", remainingMs: 0, picks, text: `auto-picking ${picks}…`, compact: "auto-picking…", detail: `Nobody answered in time: decide for me is picking ${picks}.`, ticking: false };
+    return { phase: "due", remainingMs: 0, picks, text: `auto-${doing} ${picks}…`, compact: `auto-${doing}…`, detail: `Nobody answered in time: decide for me is ${doing} ${picks}.`, ticking: false };
   }
   const t = formatCountdown(left);
   return {
     phase: "counting",
     remainingMs: left,
     picks,
-    text: `auto-picks ${picks} in ${t}`,
-    compact: `auto-picks in ${t}`,
-    detail: `Decide for me picks ${picks} in ${formatWait(left / 1000)} unless you answer.`,
+    text: `auto-${verb} ${picks} in ${t}`,
+    compact: `${chip} in ${t}`,
+    detail: `Decide for me ${verb} ${picks} in ${formatWait(left / 1000)} unless you answer.`,
     ticking: cd.deadline !== undefined,
   };
 }

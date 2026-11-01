@@ -207,19 +207,19 @@ function tokenize(code: string, lang: string): Token[] {
   return out;
 }
 
-/** Tailwind classes per token kind (dark theme, omp-tinted). */
+/** Tailwind classes per token kind: the theme's `--syntax-*` colours. */
 export const TOKEN_CLASS: Record<TokenKind, string> = {
-  kw: "text-[#d8a6ff]",
-  str: "text-[#bef264]",
-  num: "text-[#fdba74]",
-  com: "text-mute-2 italic",
-  fn: "text-[#8ab4ff]",
-  type: "text-[#67e8f9]",
-  op: "text-[#f0a3d8]",
-  punc: "text-mute",
-  attr: "text-[#f9a8d4]",
-  var: "text-[#fde68a]",
-  tag: "text-[#f472b6]",
-  lit: "text-[#fdba74]",
+  kw: "text-(--syntax-keyword)",
+  str: "text-(--syntax-string)",
+  num: "text-(--syntax-number)",
+  com: "text-(--syntax-comment) italic",
+  fn: "text-(--syntax-function)",
+  type: "text-(--syntax-type)",
+  op: "text-(--syntax-operator)",
+  punc: "text-(--syntax-punctuation)",
+  attr: "text-(--syntax-attribute)",
+  var: "text-(--syntax-variable)",
+  tag: "text-(--syntax-tag)",
+  lit: "text-(--syntax-literal)",
   plain: "",
 };

@@ -52,9 +52,9 @@ pub fn from_slice<T: DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
 fn note(n: usize) {
     static REPAIRS: AtomicU32 = AtomicU32::new(0);
     if REPAIRS.fetch_add(1, Ordering::Relaxed) < LOGGED {
-        tracing::info!("repaired {n} lone UTF-16 surrogate(s) in JSON from omp (now U+FFFD)");
+        log::info!("repaired {n} lone UTF-16 surrogate(s) in JSON from omp (now U+FFFD)");
     } else {
-        tracing::debug!("repaired {n} lone UTF-16 surrogate(s) in JSON from omp (now U+FFFD)");
+        log::debug!("repaired {n} lone UTF-16 surrogate(s) in JSON from omp (now U+FFFD)");
     }
 }
 

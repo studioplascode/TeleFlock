@@ -33,7 +33,7 @@ export function EmptyTranscript({ agentKey }: { agentKey: string }) {
               drafts.set(composerDraftKey(agentKey), s);
               useSessionUi.getState().focusComposer(agentKey);
             }}
-            className="pressable focus-ring rounded-full bg-white/[0.05] px-3.5 py-2 text-[13px] font-semibold text-ink-2 shadow-hairline hover:bg-white/[0.09] hover:text-ink"
+            className="pressable focus-ring rounded-full bg-ink/[0.05] px-3.5 py-2 text-[13px] font-semibold text-ink-2 shadow-hairline hover:bg-ink/[0.09] hover:text-ink"
           >
             {s}
           </button>

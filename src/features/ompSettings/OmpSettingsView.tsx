@@ -46,7 +46,7 @@ function TabButton({ tab, active, onClick, compact }: { tab: SettingTab; active:
       className={cn(
         "flex shrink-0 items-center gap-2 rounded-md text-sm font-semibold transition-colors focus-ring",
         compact ? "h-8 px-3" : "h-9 w-full px-3 text-left",
-        active ? "bg-accent/16 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]" : "text-mute hover:bg-white/6 hover:text-ink",
+        active ? "bg-accent/16 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "text-mute hover:bg-ink/6 hover:text-ink",
       )}
     >
       <span className="min-w-0 flex-1 truncate">{tab.label}</span>

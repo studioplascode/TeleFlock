@@ -20,7 +20,7 @@ export function CopyFromHostButton({ hostId }: { hostId?: string }) {
         haptic("tick");
         openHostSync(hostId);
       }}
-      className="ml-auto flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-bold text-mute transition-colors hover:bg-white/6 hover:text-ink focus-ring"
+      className="ml-auto flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-bold text-mute transition-colors hover:bg-ink/6 hover:text-ink focus-ring"
     >
       <Copy className="size-3.5" />
       Copy from host…

@@ -45,7 +45,8 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   (30 s timeout, `term.open` 15 s). Errors are `tf_proto::ApiError` (`not_connected` is retryable).
 * `subscribe_with_replay` returns, atomically with the event stream: `Profiles`, `Settings`,
   `Tunnels`, then per host `HostStatus` + `HostSnapshot` (cached state with a non-online status
-  = stale). On `RecvError::Lagged`, call it again and resend the replay.
+  = stale). On `RecvError::Lagged`, call it again, resend the replay, and call `resend_sessions`
+  (each session the UI has open on a `sessionSync` mirror comes again as a `reset`).
 * Connection phases: `connecting → authenticating → (authRequired) → deploying → starting → online`;
   failures go to `reconnecting` (backoff 1, 2, 4 … 30 s + jitter, `attempt`, `nextRetryAt`; reset after
   60 s online) or `error` for permanent failures (unsupported arch, version mismatch, host key mismatch).
@@ -75,7 +76,7 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   has no answer or no session for yet is tried again after 1 s, doubling up to 30 s, while it stays
   open); open terminals get `Term{ev: closed}` when the link drops.
 * Mirror self-heal (`sessions::heal_due`, every 15 s): an open session whose copy here still shows a
-  running tool or a streaming reply 30 s after host state says the turn ended (card in review or
+  running tool or a streaming reply (after the last row that ended a run) 30 s after host state says the turn ended (card in review or
   done, hostd's own copy with no tool open and nothing streaming), and that heard nothing from hostd
   for 30 s, is re-opened with what it holds (`reset` to the UI, a warning in the log); the next one
   waits 60 s, doubling up to 15 min while it keeps finding the same.
@@ -97,6 +98,16 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   (`deploy::host_is_newer`; another device runs a newer app), nothing is uploaded and the app attaches
   to it as is (`Deployed.newer`). A protocol it doesn't speak fails with `version_mismatch` and an
   "update TeleFlock on this device" hint instead of a redeploy.
+
+## Forwarding (`src/forward.rs`)
+App methods `forward.list` / `forward.save` / `forward.remove` / `forward.stop` and `AppEvent::Forwards`
+(`tf_proto::forward`). Rules are saved in `data_dir/forwards.json`; `hosts.remove` drops the rules that name the
+host. Every from-host link that speaks `forward` gets the offers of its enabled rules when they change; each
+`fwd` stream a from-host opens is checked against the saved rule and the to-host's link, then relayed event by
+event (acks included, no payload buffered; a side past the 256 KiB window is cut off). Link drops, rule changes
+and `forward.stop` end the affected streams. Status: `disabled`, `waiting`, `unsupported`, `error`, `ready`.
+End to end against two real daemons: `cargo test -p tf-client --test forward` (builds `tf-hostd`, or set
+`TF_TEST_HOSTD`).
 
 ## Embedded artifacts
 `build.rs` embeds `$TF_HOSTD_DIST/<triple>/tf-hostd[.exe]` (default `<workspace>/target/hostd-dist`)

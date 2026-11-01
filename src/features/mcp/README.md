@@ -29,6 +29,15 @@ strip (`OmpAreaNav`), host card, palette, More, Settings (UxPolish).
   reading "Unchanged" and goes back as the mask unless something is typed; new env / header names
   that look like credentials start as secret. Masked URL query values and arguments stay in their
   text and are kept when sent back unchanged.
+- **Auth scheme of a header**: "Add bearer token", the templates and an edited server's
+  `Authorization` header (listed as `Bearer ••••••••`, or with a visible value) all show the scheme
+  (`Bearer`, `Basic`, `Token`) as a fixed start of the field with the credential after it
+  (`headerRow`). Typing keeps the scheme; typing or pasting `Bearer xyz` / `Basic xyz` there sets
+  that scheme and keeps `xyz` (`typeValue`); the × on the scheme drops it, so the value goes as typed
+  (`dropScheme`; a hidden credential has to be typed again). Untouched, a stored secret goes back as
+  the scheme and the mask. A hidden credential stays only under the scheme it was listed with (any
+  case): another scheme or other spacing empties the field ("Unchanged" goes), and hostd refuses a
+  mask under a scheme the credential was not saved with. A scheme without a credential is not sent.
 - **Checks**: the first read starts one (`check.running`, rows "Checking…"); the page long-polls
   `mcp.list { waitMs: 20000 }` until it ends. "Check again" = `refresh: true` (earlier results stay
   visible while it runs). After a failed check the check line reads "Check failed 1m ago · last good

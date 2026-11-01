@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, PROTOCOL_VERSION};
 
 use crate::daemon::Daemon;
@@ -54,13 +54,15 @@ pub struct Features {
     pub session_sync: bool,
     /// Presence reports and routed notifications ([`crate::notify`]).
     pub presence: bool,
+    /// Host-to-host forwarding offers and streams ([`crate::forward`]).
+    pub forward: bool,
 }
 
 impl Features {
     /// The features of `requested` (`hello`'s `client.features`) this hostd speaks.
     pub fn negotiate(requested: Option<&[String]>) -> Features {
         let has = |f: &str| requested.is_some_and(|r| r.iter().any(|x| x == f));
-        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE) }
+        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE), forward: has(FEATURE_FORWARD) }
     }
 
     /// `welcome.features`: the accepted ones (none for a client that asked for none, which then
@@ -76,6 +78,9 @@ impl Features {
         }
         if self.presence {
             out.push(FEATURE_PRESENCE.to_string());
+        }
+        if self.forward {
+            out.push(FEATURE_FORWARD.to_string());
         }
         Some(out)
     }
@@ -371,6 +376,9 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
             }
             ClientMsg::Presence { presence } => ctx.notify.presence_changed(&client, presence),
             ClientMsg::NotifyRead { ids } => ctx.notify.notify_read(&client, ids),
+            ClientMsg::FwdOffer { offers } if features.forward => daemon.forward.offer(&client, offers),
+            ClientMsg::Fwd { sid, ev } if features.forward => daemon.forward.fwd(&client, sid, ev),
+            ClientMsg::FwdOffer { .. } | ClientMsg::Fwd { .. } => {}
             ClientMsg::Hello { .. } => {
                 client.send(ServerMsg::Error { error: ApiError::new("invalid_params", "duplicate hello") });
             }
@@ -386,6 +394,7 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     })
     .await;
     client.close();
+    daemon.forward.client_gone(&client_id);
     let _ = writer.await;
     ctx.state.detach_client(&client_id);
     ctx.notify.client_detached(&client_id);
@@ -488,6 +497,11 @@ async fn read_or_silence<T>(read: impl Future<Output = T>) -> Option<T> {
 
 /// Reads one `\n`-terminated line (without the terminator). `Ok(false)` on EOF.
 pub async fn read_line<R: AsyncBufRead + Unpin + ?Sized>(reader: &mut R, out: &mut String) -> std::io::Result<bool> {
+    read_line_max(reader, out, MAX_LINE).await
+}
+
+/// [`read_line`] with a longest line of its own: longer ones are an error.
+pub async fn read_line_max<R: AsyncBufRead + Unpin + ?Sized>(reader: &mut R, out: &mut String, max: usize) -> std::io::Result<bool> {
     let mut raw = Vec::new();
     loop {
         let buf = reader.fill_buf().await?;
@@ -505,7 +519,7 @@ pub async fn read_line<R: AsyncBufRead + Unpin + ?Sized>(reader: &mut R, out: &m
         let n = buf.len();
         raw.extend_from_slice(buf);
         reader.consume(n);
-        if raw.len() > MAX_LINE {
+        if raw.len() > max {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long"));
         }
     }
@@ -568,10 +582,10 @@ mod tests {
         // An old client asks for nothing and gets the welcome it always got.
         assert_eq!(Features::negotiate(None), Features::default());
         assert_eq!(Features::default().welcome(None), None);
-        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "fromTheFuture".into()];
+        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "fromTheFuture".into()];
         let f = Features::negotiate(Some(&all));
-        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true });
-        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into()]));
+        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true, forward: true });
+        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into()]));
         let unknown = vec!["fromTheFuture".to_string()];
         let f = Features::negotiate(Some(&unknown));
         assert_eq!((f, f.welcome(Some(&unknown))), (Features::default(), Some(vec![])));

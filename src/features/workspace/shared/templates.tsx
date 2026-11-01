@@ -115,14 +115,14 @@ export function TemplatePicker({ hostId, draft, onApply, className }: TemplatePi
                   title={t.description ?? templateSummary(t)}
                   className={cn(
                     "relative flex h-11 max-w-56 flex-col items-start justify-center rounded-md px-3 pr-7 text-left transition-colors focus-ring pressable",
-                    on ? "text-ink" : "bg-white/4 text-ink-2 shadow-hairline hover:bg-white/7",
+                    on ? "text-ink" : "bg-ink/4 text-ink-2 shadow-hairline hover:bg-ink/7",
                   )}
                 >
                   {on && (
                     <motion.span
                       layoutId="tpl-active"
                       transition={spring.snappy}
-                      className="absolute inset-0 rounded-md bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]"
+                      className="absolute inset-0 rounded-md bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]"
                       aria-hidden
                     />
                   )}

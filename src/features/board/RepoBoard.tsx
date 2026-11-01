@@ -50,7 +50,7 @@ function RepoColumn({ repo, filter, selectedKey }: { repo: string; filter: RepoF
   // room under the last card for the floating selection bar (same as the status lanes)
   const selecting = useBoard((s) => s.picked.length > 0);
   return (
-    <section aria-label={`Repo ${repo}`} className="flex min-h-0 max-w-[440px] min-w-[280px] flex-[1_0_300px] flex-col rounded-tile bg-white/[0.018] shadow-hairline">
+    <section aria-label={`Repo ${repo}`} className="flex min-h-0 max-w-[440px] min-w-[280px] flex-[1_0_300px] flex-col rounded-tile bg-ink/[0.018] shadow-hairline">
       <header className="flex items-center gap-2 px-4 pt-3.5 pb-2.5">
         <AgentGlyph name={repo} size={18} />
         <h3 className="min-w-0 truncate font-display text-sm font-bold text-ink">{repo}</h3>

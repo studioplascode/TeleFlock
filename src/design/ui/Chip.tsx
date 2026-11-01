@@ -20,8 +20,8 @@ export function Chip({ tone = "neutral", solid = false, icon, className, childre
       data-status={isStatus ? tone : undefined}
       className={cn(
         "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-bold whitespace-nowrap [&_svg]:size-3",
-        tone === "neutral" && "bg-white/6 text-[#d6d6e0] shadow-hairline",
-        tone === "accent" && (solid ? "bg-omp text-white shadow-glow-accent" : "bg-accent/14 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]"),
+        tone === "neutral" && "bg-ink/6 text-ink-2 shadow-hairline",
+        tone === "accent" && (solid ? "bg-omp text-on-accent shadow-glow-accent" : "bg-accent/14 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]"),
         isStatus && (solid ? "st-bg st-glow" : "st-soft st-ring"),
         className,
       )}
@@ -46,9 +46,9 @@ export function Badge({ tone = "neutral", className, children, ...rest }: BadgeP
       data-status={isStatus ? tone : undefined}
       className={cn(
         "inline-flex h-[19px] shrink-0 items-center rounded-full px-2 text-[9.5px] font-extrabold tracking-[0.09em] uppercase whitespace-nowrap",
-        tone === "neutral" && "bg-white/8 text-mute",
+        tone === "neutral" && "bg-ink/8 text-mute",
         tone === "accent" && "bg-accent/18 text-accent-ink",
-        isStatus && (loud ? "st-bg shadow-[0_4px_12px_-2px_rgb(var(--st-rgb)/0.6)]" : "st-soft"),
+        isStatus && (loud ? "st-bg shadow-[0_4px_12px_-2px_color-mix(in_srgb,var(--st-solid)_60%,transparent)]" : "st-soft"),
         className,
       )}
       {...rest}
@@ -64,7 +64,7 @@ export function CountBadge({ count, className }: { count: number; className?: st
   return (
     <span
       className={cn(
-        "inline-grid h-[18px] min-w-[18px] place-items-center rounded-full bg-sun px-1.5 text-[10.5px] leading-none font-extrabold text-white tabular",
+        "inline-grid h-[18px] min-w-[18px] place-items-center rounded-full bg-sun px-1.5 text-[10.5px] leading-none font-extrabold text-on-sun tabular",
         className,
       )}
       aria-label={`${count} pending`}
@@ -111,7 +111,7 @@ export function StatusPill({ status, activity, children, size = "md", className 
         className,
       )}
     >
-      <StatusOrb status={status} activity={activity} size={size === "sm" ? 6 : 7} label={null} className={loud ? "[--st-grad:#fff] [--st-rgb:255_255_255]" : undefined} />
+      <StatusOrb status={status} activity={activity} size={size === "sm" ? 6 : 7} label={null} className={loud ? "[--st-grad:var(--st-ink)] [--st-solid:var(--st-ink)]" : undefined} />
       {children ?? STATUS[status].label}
     </span>
   );

@@ -17,7 +17,7 @@ export function MovedChip({ agentKey, moved, className }: { agentKey: string; mo
   const target = useMovedTarget(moved);
   if (resuming) {
     return (
-      <span className={cn(base, "bg-white/6 text-mute-2", className)}>
+      <span className={cn(base, "bg-ink/6 text-mute-2", className)}>
         <Shimmer>resuming…</Shimmer>
       </span>
     );
@@ -59,12 +59,12 @@ export function MovedChip({ agentKey, moved, className }: { agentKey: string; mo
             e.stopPropagation();
             open();
           }}
-          className={cn(base, "bg-white/6 text-mute-2 transition-colors hover:bg-white/10 hover:text-ink focus-ring", className)}
+          className={cn(base, "bg-ink/6 text-mute-2 transition-colors hover:bg-ink/10 hover:text-ink focus-ring", className)}
         >
           {inner}
         </button>
       ) : (
-        <span className={cn(base, "bg-white/6 text-mute-2", className)}>{inner}</span>
+        <span className={cn(base, "bg-ink/6 text-mute-2", className)}>{inner}</span>
       )}
     </Tooltip>
   );

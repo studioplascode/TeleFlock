@@ -542,6 +542,33 @@ wire_struct! {
         pub plan: Option<PlanReview>,
         /// The tool call this dialog belongs to (ask tool / approval), when known.
         pub call_id: Option<String>,
+        /// Ask dialogs (hosts ≥ 0.8.0): what the agent wrote before asking, as Markdown: the text
+        /// of the assistant message that carries the ask call, else its latest text since the
+        /// last prompt; never thinking. At most about 4 KB: a longer text keeps its end, cut at a
+        /// paragraph and led by `…`. Empty when the agent wrote nothing; absent for other dialogs
+        /// and from older hosts.
+        pub context: Option<String>,
+        /// Multi-question asks (bridge ≥ 2.2.0): this question's place, Back, and the answer it
+        /// already has. Absent for single questions, older bridges and collab-only sessions.
+        pub step: Option<AskStep>,
+    }
+}
+
+wire_struct! {
+    /// One question of a multi-question ask: where it stands and what it was answered before.
+    pub struct AskStep {
+        /// 0-based position of the question.
+        pub index: u32,
+        /// Questions in the ask.
+        pub total: u32,
+        /// `Answer.back` reopens the previous question.
+        pub can_back: bool,
+        /// The answer it already has (Back brought it up again): option ids to show picked …
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<String>>", optional)]
+        pub choices: Vec<String>,
+        /// … and the "Other" text.
+        pub text: Option<String>,
     }
 }
 

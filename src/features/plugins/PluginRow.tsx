@@ -73,12 +73,12 @@ export const PluginRow = memo(function PluginRow({ plugin: p, enabled, busy, exp
   );
 
   return (
-    <Tile ref={tile} data-plugin-row={key} variant="flat" className={cn("bg-white/[0.022] px-3.5 py-3 transition-colors hover:bg-white/[0.035] md:px-4", (!enabled || market?.shadowed) && "bg-white/[0.012]")}>
+    <Tile ref={tile} data-plugin-row={key} variant="flat" className={cn("bg-ink/[0.022] px-3.5 py-3 transition-colors hover:bg-ink/[0.035] md:px-4", (!enabled || market?.shadowed) && "bg-ink/[0.012]")}>
       {flash ? (
         <span
           key={flash}
           aria-hidden
-          className="tf-keep pointer-events-none absolute inset-0 animate-[tf-flash_1.6s_ease-out_0.3s_both] rounded-tile bg-accent/[0.05] shadow-[inset_0_0_0_1.5px_rgb(163_92_240/0.7),0_0_28px_-6px_rgb(163_92_240/0.5)]"
+          className="tf-keep pointer-events-none absolute inset-0 animate-[tf-flash_1.6s_ease-out_0.3s_both] rounded-tile bg-accent/[0.05] shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-accent)_70%,transparent),0_0_28px_-6px_color-mix(in_srgb,var(--color-accent)_50%,transparent)]"
         />
       ) : null}
       <div className="flex items-center gap-3">

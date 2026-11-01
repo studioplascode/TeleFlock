@@ -168,7 +168,7 @@ function CheckLine({ row, index }: { row: CheckRow; index: number }) {
           "grid size-5.5 shrink-0 place-items-center rounded-full",
           row.ok === true && "bg-done/18 text-done",
           row.ok === false && "bg-warn/16 text-warn",
-          row.ok === null && "bg-white/6 text-mute-2",
+          row.ok === null && "bg-ink/6 text-mute-2",
         )}
       >
         {row.ok === true ? <Check className="size-3" strokeWidth={3} /> : row.ok === false ? <X className="size-3" strokeWidth={3} /> : <span className="size-1 rounded-full bg-current" />}
@@ -202,7 +202,7 @@ function IssueRow({
   const install = consent?.kind === "install";
   const [open, setOpen] = useState(false);
   return (
-    <motion.li layout transition={spring.smooth} className={cn("rounded-lg p-3 transition-colors", selected ? "bg-accent/10 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.03] shadow-hairline")}>
+    <motion.li layout transition={spring.smooth} className={cn("rounded-lg p-3 transition-colors", selected ? "bg-accent/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "bg-ink/[0.03] shadow-hairline")}>
       <div className="flex items-start gap-3">
         <AlertTriangle className={cn("mt-0.5 size-4 shrink-0", issue.severity === "error" ? "text-error" : issue.severity === "warn" ? "text-warn" : "text-mute")} />
         <div className="min-w-0 flex-1">
@@ -234,7 +234,7 @@ function IssueRow({
             </p>
           )}
           {failure && !running && (
-            <div className="mt-1.5 rounded-md bg-error/8 p-2 text-xs text-[#ffb1c1]" role="alert">
+            <div className="mt-1.5 rounded-md bg-error/8 p-2 text-xs text-error-ink" role="alert">
               <span className="font-bold">Last attempt failed: </span>
               <Ticks text={failure.error.message} />
               {failure.error.hint && (
@@ -420,7 +420,7 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
       </ul>
       {loading && !status && <Skeleton className="h-16 rounded-lg" />}
       {error && (
-        <div className="flex items-center gap-3 rounded-md bg-error/8 p-2.5 text-sm text-[#ffb1c1]">
+        <div className="flex items-center gap-3 rounded-md bg-error/8 p-2.5 text-sm text-error-ink">
           <span className="min-w-0 flex-1">Couldn't read the setup status: {error}</span>
           <Button size="sm" variant="secondary" onClick={load}>
             Retry
@@ -466,9 +466,9 @@ export function SetupChecklist({ hostId }: { hostId: string }) {
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
-                className="flex cursor-pointer items-start gap-2.5 overflow-hidden rounded-md bg-warn/8 p-2.5 text-xs text-ink-2 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]"
+                className="flex cursor-pointer items-start gap-2.5 overflow-hidden rounded-md bg-warn/8 p-2.5 text-xs text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]"
               >
-                <input type="checkbox" className="mt-0.5 size-4 accent-[#a35cf0]" checked={consented} onChange={(e) => setConsented(e.target.checked)} />
+                <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={consented} onChange={(e) => setConsented(e.target.checked)} />
                 <span className="flex flex-col gap-1">
                   {consentKinds.has("global") && (
                     <span>

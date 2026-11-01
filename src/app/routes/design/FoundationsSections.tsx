@@ -1,16 +1,7 @@
 import { AgentGlyph, LogoMark, STATUS, STATUSES, StatusOrb, Tile, Wordmark, cn, z } from "@/design";
 import { Demo, Section } from "./Showcase";
 
-const SURFACES = [
-  ["bg", "#0b0b10"],
-  ["bg-deep", "#07070b"],
-  ["chrome", "#0d0d13"],
-  ["tile-1", "#15151d"],
-  ["tile-2", "#1b1b25"],
-  ["tile-3", "#232330"],
-  ["tile-4", "#2c2c3b"],
-  ["tile-5", "#383849"],
-] as const;
+const SURFACES = ["bg", "bg-deep", "chrome", "tile-1", "tile-2", "tile-3", "tile-4", "tile-5"] as const;
 
 const INKS = [
   ["ink", "text-ink"],
@@ -20,12 +11,12 @@ const INKS = [
 ] as const;
 
 const BRAND = [
-  ["accent", "bg-accent", "#a35cf0 · primary, selection, focus"],
-  ["accent-hi", "bg-accent-hi", "#b97cf6"],
-  ["accent-lo", "bg-accent-lo", "#7d3fd0"],
-  ["omp", "bg-omp", "#f053d0 → #a15eef → #7fa2e7"],
-  ["sun", "bg-sun", "#ff7a18 → #ff3d77 · needs you"],
-  ["run", "bg-run live-gradient", "#a35cf0 → #4f8bff · running (animated)"],
+  ["accent", "bg-accent", "--color-accent · primary, selection, focus"],
+  ["accent-hi", "bg-accent-hi", "--color-accent-hi"],
+  ["accent-lo", "bg-accent-lo", "--color-accent-lo"],
+  ["omp", "bg-omp", "--tf-grad-omp: omp pink → purple → blue"],
+  ["sun", "bg-sun", "--tf-grad-sun · needs you"],
+  ["run", "bg-run live-gradient", "--tf-grad-run · running (animated)"],
 ] as const;
 
 const TYPE = [
@@ -97,14 +88,14 @@ export function BrandSection() {
 
 export function ColorSection() {
   return (
-    <Section id="color" kicker="02 · Color" title="Surfaces, ink, brand & status" description="Dark only. Every status exposes --st-1/--st-2/--st-solid/--st-rgb/--st-grad/--st-glow under data-status, plus st-* utilities.">
+    <Section id="color" kicker="02 · Color" title="Surfaces, ink, brand & status" description="Shown in the current theme (Settings → Appearance). Every status exposes --st-1/--st-2/--st-solid/--st-ink/--st-grad/--st-glow under data-status, plus st-* utilities.">
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-          {SURFACES.map(([name, hex]) => (
+          {SURFACES.map((name) => (
             <div key={name} className="flex flex-col gap-1.5">
-              <div className="h-14 rounded-md shadow-[inset_0_0_0_1px_var(--color-line-2)]" style={{ background: hex }} />
+              <div className="h-14 rounded-md shadow-[inset_0_0_0_1px_var(--color-line-2)]" style={{ background: `var(--color-${name})` }} />
               <span className="font-mono text-2xs text-mute">{name}</span>
-              <span className="font-mono text-[10px] text-mute-2">{hex}</span>
+              <span className="font-mono text-[10px] text-mute-2">--color-{name}</span>
             </div>
           ))}
         </div>
@@ -127,9 +118,7 @@ export function ColorSection() {
                 <StatusOrb status={s} size={8} label={null} />
                 <span className="text-sm font-bold st-text">{STATUS[s].label}</span>
               </div>
-              <span className="font-mono text-[10px] text-mute-2">
-                {STATUS[s].c1} → {STATUS[s].c2}
-              </span>
+              <span className="font-mono text-[10px] text-mute-2">--st-1 → --st-2</span>
             </div>
           ))}
         </div>

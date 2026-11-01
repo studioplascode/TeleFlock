@@ -25,13 +25,13 @@ export function copyText(text: string, what = "Command"): void {
 /** A shell command in mono with a copy button beside it (prerequisites and fixes). */
 export function CopyCommand({ command, className }: { command: string; className?: string }) {
   return (
-    <span className={cn("inline-flex max-w-full min-w-0 items-center gap-0.5 rounded-xs bg-black/30 py-0.5 pr-0.5 pl-1.5 align-middle", className)}>
+    <span className={cn("inline-flex max-w-full min-w-0 items-center gap-0.5 rounded-xs bg-bg-deep/30 py-0.5 pr-0.5 pl-1.5 align-middle", className)}>
       <code className="min-w-0 truncate font-mono text-2xs text-ink-2" title={command}>
         {command}
       </code>
       <button
         type="button"
-        className="grid size-5 shrink-0 place-items-center rounded-xs text-mute pressable focus-ring hover:bg-white/10 hover:text-ink"
+        className="grid size-5 shrink-0 place-items-center rounded-xs text-mute pressable focus-ring hover:bg-ink/10 hover:text-ink"
         aria-label={`Copy ${command}`}
         title="Copy"
         onClick={(e) => {

@@ -55,7 +55,7 @@ function StatusPill({ agentKey }: { agentKey: string }) {
       className="pressable focus-ring block h-8 min-w-0 overflow-hidden rounded-full text-left text-[11px] leading-8 font-bold whitespace-normal text-ink-2 tabular"
     >
       {/* py: Manrope's 15px content area at 11px + 2 × 8.5px = the 32px row */}
-      <span className="box-decoration-clone rounded-full bg-white/[0.05] px-2.5 py-[8.5px] shadow-hairline">
+      <span className="box-decoration-clone rounded-full bg-ink/[0.05] px-2.5 py-[8.5px] shadow-hairline">
         <span data-status={ctx && ctx.pct >= 85 ? "error" : ctx && ctx.pct >= 65 ? "needs-you" : undefined} className={cn("whitespace-nowrap", ctx && ctx.pct >= 65 && "st-text")}>
           ctx {ctx ? `${Math.round(ctx.pct)}%` : "—"}
         </span>
@@ -555,7 +555,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
             initial={{ opacity: 0, y: 8, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.snappy }}
             exit={{ opacity: 0, y: 4, transition: { duration: 0.12 } }}
-            className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,#22222e,#181820)] shadow-[var(--shadow-d3),inset_0_0_0_1px_rgb(255_255_255/0.09)]"
+            className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] shadow-[var(--shadow-d3),inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_9%,transparent)]"
             role="listbox"
             aria-label={popup.kind === "slash" ? "Commands" : popup.kind === "sub" ? `/${popup.cmd.name} arguments` : "Files"}
           >
@@ -595,7 +595,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                         <span
                           className={cn(
                             "shrink-0 rounded-full px-1.5 text-[9.5px] font-bold tracking-wider whitespace-nowrap uppercase",
-                            c.mode === "terminal" || c.mode === "report" ? "bg-accent/14 text-accent-hi" : "bg-white/6 text-mute-2",
+                            c.mode === "terminal" || c.mode === "report" ? "bg-accent/14 text-accent-hi" : "bg-ink/6 text-mute-2",
                           )}
                         >
                           {badge}
@@ -689,7 +689,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   data-pending={q.pending || undefined}
                   className={cn(
                     "focus-ring flex max-w-[300px] items-center gap-1.5 rounded-full py-1 pr-2.5 pl-1 text-[11.5px] font-semibold shadow-hairline",
-                    q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-white/5 text-ink-2",
+                    q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-ink/5 text-ink-2",
                     q.sending && "opacity-70",
                     canDequeue && i === popIdx && "shadow-[inset_0_0_0_1px_var(--color-accent)]",
                   )}
@@ -697,7 +697,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                   <span
                     className={cn(
                       "flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-extrabold tracking-wider uppercase",
-                      q.kind === "steer" ? "bg-accent/25 text-accent-hi" : "bg-white/8 text-mute",
+                      q.kind === "steer" ? "bg-accent/25 text-accent-hi" : "bg-ink/8 text-mute",
                     )}
                   >
                     {q.kind === "steer" ? <CornerDownRight className="size-2.5" /> : <ListPlus className="size-2.5" />}
@@ -842,7 +842,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-[10px] font-extrabold tracking-wider uppercase transition-colors duration-200",
-                          followMode ? "bg-white/8 text-ink-2" : "bg-accent/18 text-accent-hi",
+                          followMode ? "bg-ink/8 text-ink-2" : "bg-accent/18 text-accent-hi",
                         )}
                       >
                         {followMode ? "follow-up · after this turn" : "steer · lands mid-turn"}

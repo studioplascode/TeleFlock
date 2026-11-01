@@ -73,7 +73,7 @@ export function ParkedGate({ agentKey, children }: { agentKey: string; children:
     <>
       <div
         role="status"
-        className={cn("mx-auto flex w-full items-center gap-3 rounded-tile bg-white/[0.035] shadow-hairline", mobile ? "mt-6 px-3 py-2" : "px-4 py-2.5")}
+        className={cn("mx-auto flex w-full items-center gap-3 rounded-tile bg-ink/[0.035] shadow-hairline", mobile ? "mt-6 px-3 py-2" : "px-4 py-2.5")}
         style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
       >
         {resuming ? <Spinner size={16} label="Resuming" /> : <MoonStar className="size-4 shrink-0 text-mute" aria-hidden />}

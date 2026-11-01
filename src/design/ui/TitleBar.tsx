@@ -13,7 +13,7 @@ export interface TitleBarProps {
 }
 
 const ctrl =
-  "grid h-full w-[46px] place-items-center text-[#cfcfd8] transition-colors duration-100 hover:bg-white/7 focus-visible:bg-white/10 focus-visible:outline-none";
+  "grid h-full w-[46px] place-items-center text-ink-2/94 transition-colors duration-100 hover:bg-ink/7 focus-visible:bg-ink/10 focus-visible:outline-none";
 
 /**
  * Custom desktop title bar (the main window is undecorated). The whole bar is a Tauri drag region
@@ -56,7 +56,7 @@ export function TitleBar({ subtitle, actions, className }: TitleBarProps) {
     <header
       data-tauri-drag-region
       className={cn(
-        "relative z-titlebar flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-[rgb(10_10_15/0.6)] pl-3.5 select-none",
+        "relative z-titlebar flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-chrome/60 pl-3.5 select-none",
         // Clear the traffic lights (x 14 + 3 buttons ≈ 68 px).
         trafficLights && "pl-20",
         className,
@@ -80,7 +80,7 @@ export function TitleBar({ subtitle, actions, className }: TitleBarProps) {
           <button
             id="tf-max"
             type="button"
-            className={cn(ctrl, "[&.is-hovered]:bg-white/7")}
+            className={cn(ctrl, "[&.is-hovered]:bg-ink/7")}
             aria-label={maximized ? "Restore" : "Maximize"}
             title={maximized ? "Restore" : "Maximize"}
             onClick={() => void getCurrentWindow().toggleMaximize()}

@@ -11,15 +11,18 @@ export function SessionView(props: { hostId: string; agentId: string }): JSX.Ele
 export function SessionPane(props: { agentKey: string; compact?: boolean; header?: boolean; composer?: boolean; bloom?: boolean }): JSX.Element; // transcript + ask + composer
 // compact: split view / wall tile (tight padding, no global hotkeys); composer={false}: no composer (wall tiles other
 // than the active one); bloom={false}: no blurred sunset layer behind the ask card (nine wall tiles skip it).
-export function AskCard(props: { agentKey: string; request: UiRequest; compact?: boolean; onAnswered?(): void }): JSX.Element;
+export function AskCard(props: { agentKey: string; request: UiRequest; compact?: boolean; hotkeys?: boolean; onAnswered?(): void }): JSX.Element;
+// What the agent wrote before asking (ask card, Inbox, HUD, board cards): Markdown folded to `lines` with Show more / Show
+// less when longer; `sunset` re-maps the text tokens to the sunset's own text colour. Helpers (tested): ask/askContext.ts.
+export function AgentSaid(props: { text: string; variant: "ask" | "panel" | "card" | "phone"; sunset?: boolean; lines?: number; className?: string }): JSX.Element;
 export function Markdown(props: { text: string; streaming?: boolean; className?: string }): JSX.Element;
 ```
 
 Keyboard (session owns): `Esc` stop turn (when the composer is empty / not in a popup), `Enter` send (steer while
 the agent works), `Shift+Enter` newline, `Alt+Enter` queue follow-up (while it works), `1–9` answer the sticky ask
-card, `/` slash palette, `@` file mention. Phone: the ⋯ menu is a bottom sheet (its Terminal item opens the full
-terminal view); a "Next waiting" chip docks above the composer while other agents need you. `F5` / `Alt+R` resume a
-failed or stopped turn (below).
+card, `←` its previous question (multi-question asks), `/` slash palette, `@` file mention. Phone: the ⋯ menu is a
+bottom sheet (its Terminal item opens the full terminal view); a "Next waiting" chip docks above the composer while
+other agents need you. `F5` / `Alt+R` resume a failed or stopped turn (below).
 
 Large pastes (`composer/usePasteAttach.ts`, `composer/PasteChips.tsx`, `composer/pasteThreshold.ts`; model
 `@/core/pastes`, store `@/core/draftPastes`; architecture §6.5): a paste of more than 10 lines or 1000 characters
@@ -103,6 +106,24 @@ Use SQLite in 12:40" (seconds clock) or "… when no app is connected · 25:00 l
 question" with Restart (the policy's whole wait); no buttons while it picks. It goes once you answer. Its buttons
 take no keys (1–9 and Enter still answer the card); on phones they are 32 px tall and wrap under the text. The
 session menu's "Decide for me…" (omp agents, hosts with decide for me) opens `features/autoAnswer/DecideDialog`.
+
+What the agent said, and Back (`ask/AskCard.tsx`, `ask/AgentSaid.tsx`, `ask/askContext.ts`): above the question the card
+shows what the agent wrote before asking, under "Agent said": `UiRequest.context` (asks, hosts ≥ 0.8.0) as Markdown,
+four lines (three on phones) with a fade and Show more / Show less only when it runs longer (measured). Trailing
+paragraphs that only repeat the question are dropped (`withoutQuestion`: Markdown markers, case and spacing ignored; a
+paragraph ending with the question keeps what leads up to it: its sentences always, a lead-in of three words or fewer
+after them, such as "So," or "My question:", not), so the question never shows twice; `context: ""` shows
+nothing. Without the field (older hosts) an ask reads it from the rows the session holds (`contextFromRows`): the text
+rows of the message carrying the ask call (`callId`, same `at`), else the latest text since the last prompt (a
+non-synthetic user row) with the rest of its message; never thinking; a longer text keeps its last ~4 KB, led by `…`
+(`clipContext`, cut as hosts cut it: from a paragraph start, else a line start, reopening a code block's fence). A
+multi-question ask (`UiRequest.step`, bridge ≥ 2.2.0) reads "Question 2 of 3" in the card's pill and, from the second
+question on, offers ← Back (button; `←` with the card's keys, not while typing nor from a dialog or menu over the
+session, like `1–9`) → `agent.answer {back:true}`. The card then locks ("Back ·
+waiting for omp") until the previous question arrives as a new request, and so a new card, with its earlier answer:
+a multi-select's `step.choices` ticked, a single-select's option lit with Enter / Send answer sending it again (a tap
+on any option answers as before), else `step.text` in the open Other field. Without `step` (single questions, older
+hosts) there is no progress and no Back. Tests: `bun test src/features/session/ask src/core/demo/demo.test.ts`.
 
 ## Find in transcript (architecture §3.27)
 

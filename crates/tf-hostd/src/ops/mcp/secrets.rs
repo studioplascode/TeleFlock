@@ -73,12 +73,14 @@ pub fn is_secret(name: &str, value: &str) -> bool {
     !value.is_empty() && value != MASK && !is_reference(value) && (secret_name(name) || has_url_password(value))
 }
 
-fn mask_value(name: &str, value: &str) -> (String, bool) {
-    if is_secret(name, value) { (MASK.to_string(), true) } else { (value.to_string(), secret_name(name)) }
+fn mask_value(name: &str, value: &str, keep_scheme: bool) -> (String, bool) {
+    if !is_secret(name, value) {
+        return (value.to_string(), secret_name(name));
+    }
+    (if keep_scheme { masked_token(value) } else { MASK.to_string() }, true)
 }
 
-/// `env` / `headers` object → key/value list, secrets masked.
-pub fn mask_kv(map: &Obj) -> Vec<McpKeyValue> {
+fn mask_pairs(map: &Obj, headers: bool) -> Vec<McpKeyValue> {
     map.0
         .iter()
         .map(|(k, v)| {
@@ -86,14 +88,51 @@ pub fn mask_kv(map: &Obj) -> Vec<McpKeyValue> {
                 J::Str(s) => s.clone(),
                 other => json::compact(other),
             };
-            let (value, secret) = mask_value(k, &raw);
+            let (value, secret) = mask_value(k, &raw, headers && has_scheme(k));
             McpKeyValue { key: k.clone(), value, secret }
         })
         .collect()
 }
 
+/// `env` object → key/value list, secrets masked.
+pub fn mask_kv(map: &Obj) -> Vec<McpKeyValue> {
+    mask_pairs(map, false)
+}
+
+/// `headers` object → key/value list, secrets masked. The auth scheme of `Authorization` stays
+/// readable (`Bearer ••••••••`): the editor shows it as the fixed start of the field, as for a new token.
+pub fn mask_headers(map: &Obj) -> Vec<McpKeyValue> {
+    mask_pairs(map, true)
+}
+
+/// Headers whose value is `<scheme> <credential>`.
+fn has_scheme(header: &str) -> bool {
+    header.eq_ignore_ascii_case("authorization") || header.eq_ignore_ascii_case("proxy-authorization")
+}
+
+/// Length of the auth scheme (`Bearer `, `Basic `, `Token `, any case) a value starts with; 0 without one.
+fn scheme_len(value: &str) -> usize {
+    ["Bearer ", "Basic ", "Token "].iter().find(|s| value.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s))).map_or(0, |s| s.len())
+}
+
+/// The scheme (with its space) of `Bearer ••••••••` / `Basic ••••••••` / `Token ••••••••`.
+fn scheme_mask(value: &str) -> Option<&str> {
+    let scheme = &value[..scheme_len(value)];
+    (!scheme.is_empty() && &value[scheme.len()..] == MASK).then_some(scheme)
+}
+
+/// Whether a draft value stands for a stored secret: the mask, or the mask behind an auth scheme.
+pub fn hides_secret(value: &str) -> bool {
+    value == MASK || scheme_mask(value).is_some()
+}
+
 /// A draft's key/value list → the object to store. A [`MASK`] value keeps the stored value of
-/// that key. `headers` keys are case-insensitive (one per name).
+/// that key; in headers so does `Bearer ••••••••` (any [`scheme_mask`]) when the stored value has
+/// that scheme (any case). Another scheme over it (`Basic ••••••••` over `Bearer abc`: a bearer
+/// token is no Basic credential) or over a value saved without one, and a header value with the
+/// mask anywhere else (`Bearer  ••••••••`, typed into the text) unless it is the stored value
+/// itself, are refused: the mask is never stored as text. `headers` keys are case-insensitive
+/// (one per name).
 pub fn unmask_kv(draft: &[McpKeyValue], stored: Option<&Obj>, what: &str, case_insensitive: bool) -> Result<Obj, ApiError> {
     let mut out = Obj::default();
     for kv in draft {
@@ -110,17 +149,36 @@ pub fn unmask_kv(draft: &[McpKeyValue], stored: Option<&Obj>, what: &str, case_i
         if out.keys().any(|k| if case_insensitive { k.eq_ignore_ascii_case(key) } else { k == key }) {
             return Err(ApiError::new("invalid_params", format!("{what}: `{key}` is set twice")));
         }
-        let value = if kv.value == MASK {
-            match stored.and_then(|s| s.0.iter().find(|(k, _)| k == key)).map(|(_, v)| v) {
+        let hidden = if kv.value == MASK {
+            Some("")
+        } else if what == "headers" {
+            scheme_mask(&kv.value)
+        } else {
+            None
+        };
+        let saved = stored.and_then(|s| s.0.iter().find(|(k, _)| k == key)).map(|(_, v)| v);
+        let again = |hint: &str| ApiError::new("invalid_params", format!("{what}: enter the value of `{key}` again")).with_hint(hint);
+        let value = if let Some(scheme) = hidden {
+            let kept = match saved {
                 Some(J::Str(s)) => s.clone(),
                 Some(other) => json::compact(other),
-                None => {
-                    return Err(ApiError::new("invalid_params", format!("{what}: enter the value of `{key}` again")).with_hint("Its saved value is hidden and belongs to another name."));
+                None => return Err(again("Its saved value is hidden and belongs to another name.")),
+            };
+            if scheme.is_empty() {
+                kept
+            } else {
+                let had = scheme_len(&kept);
+                if !kept[..had].eq_ignore_ascii_case(scheme) {
+                    return Err(again("Its saved value is hidden and was saved with another scheme."));
                 }
+                format!("{scheme}{}", &kept[had..])
             }
         } else {
             if what == "headers" && kv.value.contains(['\r', '\n']) {
                 return Err(ApiError::new("invalid_params", format!("headers: `{key}` has a line break in its value")));
+            }
+            if what == "headers" && kv.value.contains(MASK) && !matches!(saved, Some(J::Str(s)) if *s == kv.value) {
+                return Err(again("Its saved value is hidden."));
             }
             kv.value.clone()
         };
@@ -292,12 +350,10 @@ fn is_url(arg: &str) -> bool {
 
 /// A token value with its scheme kept readable: `Bearer sk-…` → `Bearer MASK`, else `MASK`.
 fn masked_token(value: &str) -> String {
-    for scheme in ["Bearer ", "Basic ", "Token "] {
-        if value.get(..scheme.len()).is_some_and(|p| p.eq_ignore_ascii_case(scheme)) && value.len() > scheme.len() {
-            return format!("{}{MASK}", &value[..scheme.len()]);
-        }
+    match scheme_len(value) {
+        n if n > 0 && value.len() > n => format!("{}{MASK}", &value[..n]),
+        _ => MASK.to_string(),
     }
-    MASK.to_string()
 }
 
 /// The secret parts of a plain argument masked (`None`: nothing to mask): the password and secret
@@ -488,6 +544,71 @@ mod tests {
         assert!(unmask_kv(&dup, None, "headers", true).unwrap_err().message.contains("twice"));
         assert!(unmask_kv(&[kv("X-A", "a\r\nX-Evil: 1")], None, "headers", true).is_err());
         assert!(unmask_kv(&[kv("", "")], None, "headers", true).unwrap().is_empty(), "empty rows are dropped");
+    }
+
+    #[test]
+    fn header_schemes_stay_readable_and_round_trip() {
+        let stored = Obj(vec![
+            ("Authorization".into(), J::str("bearer sk-live-1")),
+            ("Proxy-Authorization".into(), J::str("Basic dXNlcjpwdw==")),
+            ("X-Api-Key".into(), J::str("Bearer k-2")),
+            ("X-Plain".into(), J::str("Bearer visible")),
+        ]);
+        let listed = mask_headers(&stored);
+        let shown: Vec<_> = listed.iter().map(|k| (k.key.as_str(), k.value.as_str())).collect();
+        assert_eq!(
+            shown,
+            [("Authorization", format!("bearer {MASK}")), ("Proxy-Authorization", format!("Basic {MASK}")), ("X-Api-Key", MASK.to_string()), ("X-Plain", "Bearer visible".to_string())]
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect::<Vec<_>>(),
+            "only the authorization headers show their scheme; the env listing masks whole"
+        );
+        assert!(!format!("{listed:?}").contains("sk-live"));
+        assert_eq!(mask_kv(&Obj(vec![("Authorization".into(), J::str("Bearer sk-live-1"))]))[0].value, MASK);
+        // Unchanged, the list restores the stored values verbatim.
+        assert_eq!(unmask_kv(&listed, Some(&stored), "headers", true).unwrap(), stored);
+        // A typed token replaces; the hidden credential's own scheme in another case keeps it (in
+        // the draft's case); a raw value or the plain mask works as before.
+        let mut edited = listed.clone();
+        edited[0].value = "Bearer sk-new".into();
+        edited[1].value = format!("BASIC {MASK}");
+        edited[2].value = MASK.into();
+        let back = unmask_kv(&edited, Some(&stored), "headers", true).unwrap();
+        assert_eq!((back.str("Authorization"), back.str("Proxy-Authorization"), back.str("X-Api-Key")), (Some("Bearer sk-new"), Some("BASIC dXNlcjpwdw=="), Some("Bearer k-2")));
+        // The plain mask keeps the whole stored value, scheme included.
+        let plain = vec![kv("Authorization", MASK)];
+        assert_eq!(unmask_kv(&plain, Some(&stored), "headers", true).unwrap().str("Authorization"), Some("bearer sk-live-1"));
+        // A scheme mask with nothing stored is refused.
+        assert_eq!(unmask_kv(&[kv("Authorization", &format!("Bearer {MASK}"))], None, "headers", true).unwrap_err().code, "invalid_params");
+        // Only headers read the scheme form: in env it is a literal value.
+        assert_eq!(unmask_kv(&[kv("A_KEY", &format!("Bearer {MASK}"))], Some(&Obj(vec![("A_KEY".into(), J::str("x"))])), "env", false).unwrap().str("A_KEY"), Some(&*format!("Bearer {MASK}")));
+        // References stay visible (scheme included).
+        let reference = Obj(vec![("Authorization".into(), J::str("Bearer ${TOKEN}"))]);
+        assert_eq!(mask_headers(&reference)[0].value, "Bearer ${TOKEN}");
+        assert!(hides_secret(MASK) && hides_secret(&format!("Basic {MASK}")) && !hides_secret("Bearer x") && !hides_secret(&format!("Other {MASK}")));
+    }
+
+    #[test]
+    fn a_hidden_credential_stays_only_under_the_scheme_it_was_saved_with() {
+        let refused = |value: &str, stored: &Obj| unmask_kv(&[kv("Authorization", value)], Some(stored), "headers", true).unwrap_err();
+        let bearer = Obj(vec![("Authorization".into(), J::str("Bearer abc"))]);
+        // A bearer token is no Basic credential (base64 of user:password) and no `Token` one either.
+        for other in ["Basic", "Token"] {
+            let e = refused(&format!("{other} {MASK}"), &bearer);
+            assert_eq!((e.code.as_str(), e.message.as_str()), ("invalid_params", "headers: enter the value of `Authorization` again"), "{other}");
+            assert!(e.hint.as_deref().is_some_and(|h| h.contains("scheme")), "{e:?}");
+        }
+        // A credential saved without a scheme doesn't get one put in front of it unseen.
+        assert_eq!(refused(&format!("Bearer {MASK}"), &Obj(vec![("Authorization".into(), J::str("abc123"))])).code, "invalid_params");
+        // A mask that stands for no stored value is never written as text: other spacing, or the
+        // mask inside a typed value.
+        for stray in [format!("Bearer  {MASK}"), format!("Bearer\t{MASK}"), format!("Bearer {MASK}x"), format!("x{MASK}")] {
+            assert_eq!(refused(&stray, &bearer).code, "invalid_params", "{stray:?}");
+        }
+        // ...unless it is the stored text itself, sent back as listed.
+        let odd = Obj(vec![("X-Note".into(), J::str(format!("a{MASK}b")))]);
+        assert_eq!(unmask_kv(&mask_headers(&odd), Some(&odd), "headers", true).unwrap(), odd);
     }
 
     #[test]

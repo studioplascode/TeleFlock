@@ -1,7 +1,8 @@
-import type { AppEvent, DiagReport, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
+import type { AppEvent, DiagReport, ForwardSaveParams, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
 import { type DemoClock, realClock } from "./clock";
 import { DEMO_GROUP } from "./dispatchAuto";
+import { DemoForwards } from "./forward";
 import { DemoHost, type HostVariant } from "./host";
 import { NotifySync } from "./notifySync";
 import { DEMO_VERSION } from "./version";
@@ -90,6 +91,8 @@ export class DemoEngine {
   private readonly secretFlags = new Map<string, SecretStatus>();
   private readonly seed: number;
   private disposed = false;
+  /** Host-to-host forwarding (`forward.*`): rules over the hosts above, with fake streams. */
+  private readonly forwards: DemoForwards;
   /** The core's notification sync (needs-you resolution, read sync), applied to everything emitted. */
   private readonly notes = new NotifySync((e) => this.emit(e));
 
@@ -97,8 +100,14 @@ export class DemoEngine {
     this.clock = opts.clock ?? realClock;
     this.seed = opts.seed ?? 0x7e1ef10c;
     this.settings = loadSettings();
+    this.forwards = new DemoForwards({
+      clock: this.clock,
+      emit: (e) => this.emit(e),
+      hosts: () => this.profiles.map((p) => ({ id: p.id, name: p.name, online: this.hosts.get(p.id)?.status.phase === "online" })),
+    });
     if (opts.mode === "backend" && !opts.empty) {
       for (const p of DEMO_PROFILES) this.addHost(p, p.id === "studio-pc" ? "studio" : "forge", opts.autoStart !== false);
+      this.forwards.seed();
     }
   }
 
@@ -111,6 +120,7 @@ export class DemoEngine {
     if (this.disposed) return;
     for (const l of this.listeners) l(e);
     this.notes.observe(e);
+    if (e.type === "hostStatus") this.forwards.hostsChanged();
   }
 
   private addHost(profile: HostProfile, variant: HostVariant, start: boolean): DemoHost {
@@ -156,6 +166,7 @@ export class DemoEngine {
   }
 
   dispose(): void {
+    this.forwards.dispose();
     for (const h of this.hosts.values()) h.dispose();
     this.hosts.clear();
     this.disposed = true;
@@ -214,6 +225,7 @@ export class DemoEngine {
         this.detachHost(id);
         this.profiles = this.profiles.filter((x) => x.id !== id);
         this.secretFlags.delete(id);
+        this.forwards.hostsChanged();
         this.emit({ type: "profiles", profiles: this.profiles });
         return {};
       }
@@ -271,6 +283,14 @@ export class DemoEngine {
       }
       case "tunnel.list":
         return { tunnels: this.tunnels };
+      case "forward.list":
+        return this.forwards.list();
+      case "forward.save":
+        return this.forwards.save((p as unknown as ForwardSaveParams).rule);
+      case "forward.remove":
+        return this.forwards.remove(String(p.id ?? ""));
+      case "forward.stop":
+        return this.forwards.stop(String(p.streamId ?? ""));
       default:
         throw apiError("unknown_method", `Unknown app method ${method}`);
     }

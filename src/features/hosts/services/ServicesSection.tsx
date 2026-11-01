@@ -162,7 +162,7 @@ function ServiceRow({ hostId, scope, service: s, onChanged }: { hostId: string; 
             </div>
           ) : (
             <>
-              <pre className="max-h-56 overflow-auto rounded-sm bg-[rgb(6_6_10/0.6)] px-2 py-1.5 font-mono text-[10.5px] leading-snug whitespace-pre-wrap text-ink-2" aria-label={`${s.name} log`}>
+              <pre className="max-h-56 overflow-auto rounded-sm bg-bg-deep/60 px-2 py-1.5 font-mono text-[10.5px] leading-snug whitespace-pre-wrap text-ink-2" aria-label={`${s.name} log`}>
                 {logs.text || "(empty)"}
               </pre>
               <button type="button" className="mt-1 text-2xs font-bold text-mute hover:text-ink focus-ring" onClick={() => void readLogs()}>

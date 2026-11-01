@@ -459,7 +459,7 @@ mod tests {
             title: "fix-auth · Allow tool: bash?".into(),
             body: "rm -rf build".into(),
             request_id: Some("r1".into()),
-            actions: vec![NotifyAction { id: "Allow".into(), label: "Allow".into(), answer: Some(Answer { choices: vec!["Allow".into()], text: None, cancel: false, chat: false }) }],
+            actions: vec![NotifyAction { id: "Allow".into(), label: "Allow".into(), answer: Some(Answer { choices: vec!["Allow".into()], text: None, cancel: false, chat: false, back: false }) }],
         }
     }
 

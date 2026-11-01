@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@/design/styles/index.css";
-import { applyInitialMotionAttribute, DesignProvider } from "@/design";
+import { applyInitialMotionAttribute, DesignProvider, startTheme } from "@/design";
 import { CaptureWindow } from "@/features/capture/CaptureWindow";
 
 /*
@@ -11,6 +11,8 @@ import { CaptureWindow } from "@/features/capture/CaptureWindow";
  */
 
 applyInitialMotionAttribute();
+// The main window's theme, read from storage (never written here); follows its changes live.
+startTheme({ owner: false });
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root missing from capture.html");

@@ -79,9 +79,9 @@ const TONE: Record<ViewType, string> = {
   web: "bg-review/12 text-review",
   image: "bg-omp-pink/15 text-omp-pink",
   ask: "bg-sun-1/15 text-sun-1",
-  markdown: "bg-white/8 text-ink-2",
+  markdown: "bg-ink/8 text-ink-2",
   irc: "bg-omp-pink/15 text-omp-pink",
-  generic: "bg-white/6 text-mute",
+  generic: "bg-ink/6 text-mute",
 };
 
 /** Views that start expanded (the rest open on click). */
@@ -254,7 +254,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
         type="button"
         onClick={() => setOpen(true)}
         aria-expanded={false}
-        className="focus-ring flex w-full min-w-0 items-center gap-2.5 rounded-[16px] bg-[rgb(10_10_16/0.5)] px-3 py-1.5 text-left shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)] hover:bg-white/[0.025] max-md:gap-2 max-md:px-2.5"
+        className="focus-ring flex w-full min-w-0 items-center gap-2.5 rounded-[16px] bg-bg-deep/50 px-3 py-1.5 text-left shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-sun-1)_30%,transparent)] hover:bg-ink/[0.025] max-md:gap-2 max-md:px-2.5"
       >
         <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px]", TONE.ask)}>
           <Icon className="size-3" />
@@ -271,9 +271,9 @@ export function ToolCard({ item }: { item: ToolItem }) {
     <div
       data-status={live ? "running" : failed ? "error" : undefined}
       className={cn(
-        "relative overflow-hidden rounded-[16px] bg-[rgb(10_10_16/0.5)] shadow-[inset_0_0_0_1px_var(--color-line)] transition-shadow duration-500",
-        live && "shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35),0_0_24px_-10px_rgb(163_92_240/0.6)]",
-        failed && "shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]",
+        "relative overflow-hidden rounded-[16px] bg-bg-deep/50 shadow-[inset_0_0_0_1px_var(--color-line)] transition-shadow duration-500",
+        live && "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent),0_0_24px_-10px_color-mix(in_srgb,var(--color-accent)_60%,transparent)]",
+        failed && "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_30%,transparent)]",
       )}
     >
       {live && <span className="tf-loop live-gradient absolute inset-x-0 top-0 h-[2px]" aria-hidden />}
@@ -283,8 +283,8 @@ export function ToolCard({ item }: { item: ToolItem }) {
           className={cn(
             "tf-keep pointer-events-none absolute inset-0 rounded-[16px] animate-[tf-flash_1.1s_ease-out_forwards]",
             failed
-              ? "bg-error/[0.07] shadow-[inset_0_0_0_1.5px_rgb(255_77_94/0.75),inset_0_0_32px_-8px_rgb(255_77_94/0.5)]"
-              : "bg-done/[0.05] shadow-[inset_0_0_0_1.5px_rgb(52_211_153/0.6),inset_0_0_32px_-8px_rgb(52_211_153/0.4)]",
+              ? "bg-error/[0.07] shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-error)_75%,transparent),inset_0_0_32px_-8px_color-mix(in_srgb,var(--color-error)_50%,transparent)]"
+              : "bg-done/[0.05] shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,color-mix(in_srgb,var(--color-done-2)_77%,var(--color-review-2))_60%,transparent),inset_0_0_32px_-8px_color-mix(in_srgb,color-mix(in_srgb,var(--color-done-2)_77%,var(--color-review-2))_40%,transparent)]",
           )}
         />
       )}
@@ -292,13 +292,13 @@ export function ToolCard({ item }: { item: ToolItem }) {
         type="button"
         onClick={() => hasBody && setOpen(!open)}
         aria-expanded={hasBody ? open : undefined}
-        className={cn("focus-ring flex w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left max-md:gap-2 max-md:px-2.5 max-md:py-1.5", hasBody ? "hover:bg-white/[0.025]" : "cursor-default")}
+        className={cn("focus-ring flex w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left max-md:gap-2 max-md:px-2.5 max-md:py-1.5", hasBody ? "hover:bg-ink/[0.025]" : "cursor-default")}
       >
         <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px] transition-colors duration-500", live ? "st-soft" : failed ? "bg-error/14 text-error" : TONE[kind])}>
           <Icon className="size-3" />
         </span>
         <span data-find-skip className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
-        <span className="min-w-0 truncate font-mono text-[11.5px] text-[#e2e2ea]" title={typeof item.title === "string" ? item.title : undefined}>
+        <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-2" title={typeof item.title === "string" ? item.title : undefined}>
           {live && type === "generic" ? <Shimmer>{item.title}</Shimmer> : headTitle(item)}
         </span>
         <StatusMeta item={item} extra={summary(item)} settled={settled} />
@@ -308,7 +308,7 @@ export function ToolCard({ item }: { item: ToolItem }) {
       {open && hasBody && (
         <div className="border-t border-line">
           <ToolBody item={item} />
-          {item.error && <div className="border-t border-error/20 bg-error/[0.06] px-3 py-2 font-mono text-[11.5px] whitespace-pre-wrap text-[#ff9aab]">{item.error}</div>}
+          {item.error && <div className="border-t border-error/20 bg-error/[0.06] px-3 py-2 font-mono text-[11.5px] whitespace-pre-wrap text-error-ink">{item.error}</div>}
           {item.truncated && <div data-find-skip className="border-t border-line px-3 py-1 text-2xs font-semibold text-mute-2">Output truncated by omp</div>}
         </div>
       )}
@@ -435,7 +435,7 @@ function ToolBody({ item }: { item: ToolItem }) {
               return (
                 <li key={i}>
                   {link ? (
-                    <a {...link} className="group/src focus-ring pressable flex items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-white/[0.04]">
+                    <a {...link} className="group/src focus-ring pressable flex items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-ink/[0.04]">
                       {body}
                     </a>
                   ) : (
@@ -458,7 +458,7 @@ function ToolBody({ item }: { item: ToolItem }) {
               // The sunset card under the transcript carries the options; don't repeat them here.
               <div key={i} className="flex flex-wrap items-center gap-2">
                 {q.question !== item.title && <span className="min-w-0 text-[13px] font-bold text-ink">{q.question}</span>}
-                <span data-find-skip className="inline-flex items-center gap-1.5 rounded-full bg-sun-1/12 px-2.5 py-1 text-[11.5px] font-bold text-sun-1 shadow-[inset_0_0_0_1px_rgb(255_122_24/0.3)]">
+                <span data-find-skip className="inline-flex items-center gap-1.5 rounded-full bg-sun-1/12 px-2.5 py-1 text-[11.5px] font-bold text-sun-1 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-sun-1)_30%,transparent)]">
                   <ArrowDown className="tf-loop size-3 animate-bounce" />
                   Answer in the card below · {q.options.length} option{q.options.length === 1 ? "" : "s"}
                 </span>
@@ -474,7 +474,7 @@ function ToolBody({ item }: { item: ToolItem }) {
                         key={o}
                         className={cn(
                           "rounded-full px-2.5 py-1 text-xs font-semibold",
-                          chosen ? "bg-sun text-white shadow-glow-sun" : "bg-white/5 text-mute shadow-hairline",
+                          chosen ? "bg-sun text-on-sun shadow-glow-sun" : "bg-ink/5 text-mute shadow-hairline",
                         )}
                       >
                         {chosen && "✓ "}
@@ -484,7 +484,7 @@ function ToolBody({ item }: { item: ToolItem }) {
                   })}
                 </div>
                 {q.answer != null && !q.options.some((o) => q.answer === o || q.answer?.split(/\s*,\s*/).includes(o)) && (
-                  <div className="mt-1.5 rounded-md bg-white/[0.04] px-2.5 py-1.5 text-xs text-ink-2 shadow-hairline">
+                  <div className="mt-1.5 rounded-md bg-ink/[0.04] px-2.5 py-1.5 text-xs text-ink-2 shadow-hairline">
                     <span data-find-skip className="kicker mr-2">answer</span>
                     {q.answer}
                   </div>

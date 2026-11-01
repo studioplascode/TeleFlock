@@ -11,7 +11,7 @@ const STATUS_CLASS: Record<Job["status"], string> = {
   running: "bg-accent/14 text-accent-ink",
   completed: "bg-done/14 text-done",
   failed: "bg-error/14 text-error",
-  cancelled: "bg-white/8 text-mute",
+  cancelled: "bg-ink/8 text-mute",
 };
 
 /**
@@ -119,7 +119,7 @@ function JobRow({ job, hostId, agentId, open, onToggle, onView }: { job: Job; ho
   const glance = glanceText(job.widget?.glance);
   const title = jobTitle(job);
   return (
-    <li className="rounded-lg bg-[rgb(10_10_16/0.45)] px-2.5 py-2 shadow-hairline" data-job={job.id}>
+    <li className="rounded-lg bg-bg-deep/45 px-2.5 py-2 shadow-hairline" data-job={job.id}>
       <div className="flex min-w-0 items-center gap-2">
         <button type="button" onClick={onToggle} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} output of ${title}`} className="focus-ring grid size-5 shrink-0 place-items-center rounded-sm text-mute hover:text-ink">
           <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
@@ -139,7 +139,7 @@ function JobRow({ job, hostId, agentId, open, onToggle, onView }: { job: Job; ho
             type="button"
             disabled={busy}
             onClick={() => void kill()}
-            className={cn("focus-ring flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-[10.5px] font-bold", armed ? "bg-error text-white" : "text-mute hover:bg-error/15 hover:text-error")}
+            className={cn("focus-ring flex h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-[10.5px] font-bold", armed ? "bg-error text-on-error" : "text-mute hover:bg-error/15 hover:text-error")}
             aria-label={armed ? `Confirm: kill ${title}` : `Kill ${title}`}
           >
             <Octagon className="size-3" aria-hidden /> {armed ? "Kill?" : "Kill"}
@@ -148,14 +148,14 @@ function JobRow({ job, hostId, agentId, open, onToggle, onView }: { job: Job; ho
       </div>
       {(glance || job.ownerName || job.widget?.stage) && (
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 pl-7 text-[10.5px] text-mute">
-          {glance && <span className="rounded-full bg-white/6 px-1.5 font-mono font-bold text-ink-2">{glance}</span>}
+          {glance && <span className="rounded-full bg-ink/6 px-1.5 font-mono font-bold text-ink-2">{glance}</span>}
           {job.widget?.glance?.trend && <span className={job.widget.glance.trendTone === "error" ? "text-error" : job.widget.glance.trendTone === "success" ? "text-done" : undefined}>{job.widget.glance.trend}</span>}
           {job.ownerName && <span>by {job.ownerName}</span>}
           {job.widget?.stage && <span className="min-w-0 truncate">{job.widget.stage}</span>}
         </div>
       )}
       {job.widget?.progress != null && (
-        <div className="mt-1.5 ml-7 h-1 overflow-hidden rounded-full bg-white/8" role="progressbar" aria-valuenow={Math.round(job.widget.progress * 100)} aria-label={job.widget.progressText ?? "Progress"}>
+        <div className="mt-1.5 ml-7 h-1 overflow-hidden rounded-full bg-ink/8" role="progressbar" aria-valuenow={Math.round(job.widget.progress * 100)} aria-label={job.widget.progressText ?? "Progress"}>
           <span className="block h-full rounded-full bg-accent tf-glide-width" style={{ width: `${Math.round(job.widget.progress * 100)}%` }} />
         </div>
       )}

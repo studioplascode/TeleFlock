@@ -297,7 +297,7 @@ function SignInSection({
                       onClick={() => set({ keyPath: k })}
                       className={cn(
                         "h-6 rounded-full px-2.5 font-mono text-2xs font-bold pressable focus-ring",
-                        on ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.05] text-mute hover:text-ink",
+                        on ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "bg-ink/[0.05] text-mute hover:text-ink",
                       )}
                     >
                       {k}
@@ -578,7 +578,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
         )}
       </AnimatePresence>
 
-      <label className="flex items-center justify-between gap-3 rounded-md bg-white/[0.03] px-3 py-2.5 shadow-hairline">
+      <label className="flex items-center justify-between gap-3 rounded-md bg-ink/[0.03] px-3 py-2.5 shadow-hairline">
         <span>
           <span className="block text-sm font-bold text-ink">Connect automatically</span>
           <span className="block text-xs text-mute">On app start and whenever the network comes back.</span>
@@ -612,7 +612,7 @@ function EditorBody({ initial, onDone, mobile }: { initial: HostProfile; onDone:
       <div
         className={cn(
           "flex flex-wrap items-center gap-2 border-t border-line pt-4",
-          mobile ? "sticky bottom-0 z-raised -mx-4 -mb-3 bg-[#17171f] px-4 pt-2.5 pb-3 shadow-[0_-12px_24px_-12px_rgb(0_0_0/0.6)]" : "sticky bottom-0 z-raised bg-[#17171f]",
+          mobile ? "sticky bottom-0 z-raised -mx-4 -mb-3 bg-sheet-2 px-4 pt-2.5 pb-3 shadow-[0_-12px_24px_-12px_rgb(0_0_0/0.6)]" : "sticky bottom-0 z-raised bg-sheet-2",
         )}
       >
         {editing && (
@@ -652,7 +652,7 @@ function GroupField({ value, onChange }: { value: string; onChange(v: string): v
                   onClick={() => onChange(g.toLowerCase() === current ? "" : g)}
                   className={cn(
                     "h-6 rounded-full px-2.5 text-2xs font-bold pressable focus-ring",
-                    g.toLowerCase() === current ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.05] text-mute hover:text-ink",
+                    g.toLowerCase() === current ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "bg-ink/[0.05] text-mute hover:text-ink",
                   )}
                 >
                   {g}

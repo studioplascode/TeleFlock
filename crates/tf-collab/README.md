@@ -84,7 +84,7 @@ pub enum IdentityError { Unreachable(String), Foreign(String) }
 // ── registry ───────────────────────────────────────────────────────────
 pub struct HostEntry { pub instance_id: String, pub generation: u64, pub pid: u32, pub session_id: Option<String>,
     pub session_name: Option<String>, pub cwd: Option<String>, pub model: Option<ModelId>, pub started_at: Option<i64>,
-    pub participants: u32, pub relay_connected: bool, pub input_required: bool, pub busy: bool, pub access: String }
+    pub participants: u32, pub relay_connected: bool, pub input_required: bool, pub busy: Option<bool>, pub access: String }
 pub enum Access { Control, View }
 pub struct LinkInfo { pub instance_id: String, pub generation: u64, pub url: String, pub link: CollabLink }
 pub struct Registry;
@@ -139,10 +139,14 @@ impl Replica {
     pub fn ui(&self) -> Option<&UiRequest>;
     pub fn needs(&self) -> Option<NeedsYou>;                         // Ask / Approval / Input for the pending request; ask options
         // are ★ `recommended` from the ask call's `questions[].recommended` (omp's dialog only preselects it) or omp's
-        // " (Recommended)" label mark (label shown without it, id = omp's exact label); tf-hostd's decide for me picks them
+        // " (Recommended)" label mark (label shown without it, id = omp's exact label); tf-hostd's decide for me picks them.
+        // Both carry an ask's `context` (what the agent wrote before asking, `replica/ask_context.rs`) and, for the
+        // questions of a multi-question ask from TeleFlock's bridge ≥ 2.2.0, its `nav` as `step` (place, Back, the answer it has)
+        // An ask is one wait: each of its dialogs (every question, Back, "Other") has the `since` of its first one
     pub fn answer(&mut self, request_id: &str, answer: &Answer) -> Result<Vec<UiReply>, ApiError>;
         // exact labels (invalid_params otherwise); text → "Other (type your own)" + auto-answered editor;
-        // chat → "Chat about this"; multi-select → checkbox toggle loop + "Next →"; cancel → None
+        // chat → "Chat about this"; multi-select → checkbox toggle loop (from the ticks it has) + "Next →", with
+        // text: toggles, then "Other"; back → the request's `nav.back`; cancel → None
     pub fn usage(&self) -> Option<CostInfo>;
     pub fn is_streaming(&self) -> bool;  pub fn turn_started_at(&self) -> Option<Millis>;
     pub fn read_only(&self) -> bool;     pub fn ended(&self) -> bool;

@@ -147,7 +147,7 @@ export function FileTree({ files, active, collapsed, viewed, onSelect, comfortab
                 tabIndex={-1}
                 data-dir={d.path}
                 onClick={() => toggleDir(d.path)}
-                className={cn("flex w-full items-center gap-1.5 rounded-sm pr-2 text-left text-mute transition-colors focus-ring hover:bg-white/5 hover:text-ink", row)}
+                className={cn("flex w-full items-center gap-1.5 rounded-sm pr-2 text-left text-mute transition-colors focus-ring hover:bg-ink/5 hover:text-ink", row)}
                 style={{ paddingLeft: 6 + depth * indent }}
               >
                 <ChevronRight className={cn("size-3 shrink-0 transition-transform duration-300 ease-spring", open && "rotate-90")} />
@@ -175,14 +175,14 @@ export function FileTree({ files, active, collapsed, viewed, onSelect, comfortab
                 tabIndex={-1}
                 onClick={() => onSelect(f.path)}
                 title={f.path}
-                className={cn("group relative flex w-full items-center gap-2 rounded-sm pr-2 text-left focus-ring", row, on ? "text-ink" : "text-ink-2 hover:bg-white/5")}
+                className={cn("group relative flex w-full items-center gap-2 rounded-sm pr-2 text-left focus-ring", row, on ? "text-ink" : "text-ink-2 hover:bg-ink/5")}
                 style={{ paddingLeft: 6 + depth * indent + 4 }}
               >
                 {on && (
                   <motion.span
                     layoutId="ft-active"
                     transition={spring.snappy}
-                    className="absolute inset-0 rounded-sm bg-accent/16 shadow-[inset_2px_0_0_var(--color-accent),inset_0_0_0_1px_rgb(163_92_240/0.4)]"
+                    className="absolute inset-0 rounded-sm bg-accent/16 shadow-[inset_2px_0_0_var(--color-accent),inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]"
                     aria-hidden
                   />
                 )}
@@ -234,7 +234,7 @@ export function FileTree({ files, active, collapsed, viewed, onSelect, comfortab
           leading={<Search />}
           trailing={
             q ? (
-              <button type="button" onClick={() => setQ("")} aria-label="Clear filter" className="grid size-5 place-items-center rounded-full text-mute hover:bg-white/10 hover:text-ink [&_svg]:size-3">
+              <button type="button" onClick={() => setQ("")} aria-label="Clear filter" className="grid size-5 place-items-center rounded-full text-mute hover:bg-ink/10 hover:text-ink [&_svg]:size-3">
                 <X />
               </button>
             ) : undefined

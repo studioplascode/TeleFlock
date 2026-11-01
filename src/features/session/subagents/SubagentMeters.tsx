@@ -43,7 +43,7 @@ export function ContextMeter({ ctx, size = "sm", className }: { ctx: ContextUsag
     <Tooltip content={<span className="block max-w-64">{contextHint(ctx)}</span>}>
       <span className={cn("inline-flex shrink-0 items-center gap-1 whitespace-nowrap", className)} aria-label={contextHint(ctx)}>
         {known && (
-          <span className={cn("overflow-hidden rounded-full bg-white/8", size === "md" ? "h-1 w-8" : "h-[3px] w-5")} aria-hidden>
+          <span className={cn("overflow-hidden rounded-full bg-ink/8", size === "md" ? "h-1 w-8" : "h-[3px] w-5")} aria-hidden>
             <span className={cn("block h-full rounded-full transition-[width] duration-700", hot ? "bg-warn" : "bg-run")} style={{ width: `${Math.max(2, Math.min(100, ctx.pct))}%` }} />
           </span>
         )}

@@ -48,9 +48,9 @@ export function FlockSky({ className }: FlockSkyProps) {
       <svg width="0" height="0" className="absolute">
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#f053d0" />
-            <stop offset="0.5" stopColor="#a15eef" />
-            <stop offset="1" stopColor="#7fa2e7" />
+            <stop offset="0" style={{ stopColor: "var(--color-omp-pink)" }} />
+            <stop offset="0.5" style={{ stopColor: "var(--color-omp-purple)" }} />
+            <stop offset="1" style={{ stopColor: "var(--color-omp-blue)" }} />
           </linearGradient>
         </defs>
       </svg>

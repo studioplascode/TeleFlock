@@ -196,13 +196,19 @@ fn stars(labels: &[String]) -> String {
     labels.iter().map(|l| format!("★ {l}")).collect::<Vec<_>>().join(", ")
 }
 
+/// What decide for me sends: `★ A, ★ B`, or the question's earlier answer ("your earlier answer (A)").
+fn answer_text(labels: &[String], earlier: bool) -> String {
+    if earlier { format!("your earlier answer ({})", labels.join(", ")) } else { stars(labels) }
+}
+
 /// What a needs-you notification adds about the question's countdown.
 pub fn needs_note(agent: &Agent, now: Millis) -> Option<String> {
     let cd = agent.auto_answer.as_ref()?.countdown.as_ref()?;
-    let picks = stars(&cd.picks);
+    let picks = answer_text(&cd.picks, cd.earlier);
+    let verb = if cd.earlier { "sends" } else { "picks" };
     match cd.status {
-        AutoAnswerStatus::Counting => Some(format!("Decide for me picks {picks} in {} unless you answer.", wait_text(cd.deadline? - now))),
-        AutoAnswerStatus::WaitingForNoApp => Some(format!("Decide for me picks {picks} after {} with no app connected.", wait_text(cd.remaining_ms?))),
+        AutoAnswerStatus::Counting => Some(format!("Decide for me {verb} {picks} in {} unless you answer.", wait_text(cd.deadline? - now))),
+        AutoAnswerStatus::WaitingForNoApp => Some(format!("Decide for me {verb} {picks} after {} with no app connected.", wait_text(cd.remaining_ms?))),
         _ => None,
     }
 }
@@ -288,12 +294,13 @@ async fn fire(ctx: Arc<Ctx>, f: Fire) {
     ctx.auto_answer.core().fired(&f, outcome, now);
     changed(&ctx);
     let name = ctx.state.agent(&f.agent_id).map(|a| a.name).unwrap_or_else(|| f.agent_id.clone());
-    let picks = stars(&f.labels);
+    let picks = answer_text(&f.labels, f.earlier);
     match (outcome, error) {
         (Outcome::Answered, _) => {
-            info!(session = %ctx.herdr_session, agent = %f.agent_id, request = %f.request_id, picks = ?f.picks, "decide for me: answered");
+            info!(session = %ctx.herdr_session, agent = %f.agent_id, request = %f.request_id, picks = ?f.picks, earlier = f.earlier, "decide for me: answered");
             let detail = format!("{} · nobody answered within {}", clip(&f.question, 200), wait_text(f.waited_ms));
-            ctx.state.record_activity(&f.agent_id, ActivityKind::Answered, format!("Auto-answered {picks}"), Some(detail));
+            let what = if f.earlier { format!("Auto-sent {picks}") } else { format!("Auto-answered {picks}") };
+            ctx.state.record_activity(&f.agent_id, ActivityKind::Answered, what, Some(detail));
             ctx.state.broadcast_notification(Notification {
                 id: new_id("n"),
                 at: now,
@@ -344,7 +351,7 @@ async fn deliver(ctx: &Ctx, f: &Fire) -> Result<(), ApiError> {
     if !ctx.auto_answer.core().permitted(f, now_ms(), apps) {
         return Err(ApiError::new(HOLD, "decide for me may not answer now"));
     }
-    s.answer(&f.request_id, &Answer { choices: f.picks.clone(), text: None, cancel: false, chat: false }).await
+    s.answer(&f.request_id, &Answer { choices: f.picks.clone(), text: f.text.clone(), cancel: false, chat: false, back: false }).await
 }
 
 // ───────────────────────────── daemon start ─────────────────────────────
@@ -386,6 +393,14 @@ pub fn start(daemon: &Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log, notifications and needs-you notes say what is sent: ★, or the earlier answer.
+    #[test]
+    fn answer_texts() {
+        let labels = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(answer_text(&labels(&["A", "B"]), false), "★ A, ★ B");
+        assert_eq!(answer_text(&labels(&["Postgres", "MySQL 8"]), true), "your earlier answer (Postgres, MySQL 8)");
+    }
 
     #[test]
     fn wait_texts() {

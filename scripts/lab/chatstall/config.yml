@@ -1,0 +1,25 @@
+# ChatStall lab omp settings (isolated agent dir; setup.sh copies this in): every role on the mock,
+# no approvals, no setup wizard, no update checks.
+modelRoles:
+  default: chatstall/lab-1
+  smol: chatstall/lab-1
+  slow: chatstall/lab-1
+  vision: chatstall/lab-1
+  plan: chatstall/lab-1
+  commit: chatstall/lab-1
+  tiny: chatstall/lab-1
+  memory: chatstall/lab-1
+  task: chatstall/lab-1
+  advisor: chatstall/lab-1
+  widget: chatstall/lab-1
+  judge: chatstall/lab-1
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

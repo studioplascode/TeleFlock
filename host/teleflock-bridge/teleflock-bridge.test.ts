@@ -526,6 +526,142 @@ describe("ask dialog (guest flow, as omp offers it to collab guests)", () => {
 		second.hub.answer(1, "Chat about this");
 		expect(await chat).toEqual({ kind: "chat" });
 	});
+
+	// 2.2.0: Back between the questions of a multi-question ask (omp's TUI: ←).
+	const BACK = "\u0000back";
+	const OTHER = "Other (type your own)";
+	const three = [
+		{ id: "store", question: "Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }] },
+		{ id: "features", question: "Which features?", options: [{ label: "Auth" }, { label: "Search" }, { label: "Billing" }], multi: true },
+		{ id: "deploy", question: "Where?", options: [{ label: "Fly" }, { label: "Render" }] },
+	];
+
+	test("every question of a multi-question ask carries nav; Back reopens the previous one with its answer", async () => {
+		const { hub, requests } = hubWithFrames();
+		const p = runGuestAsk(hub, three, new AbortController().signal);
+		const last = () => requests().at(-1)!;
+		await tick();
+		expect(last()).toMatchObject({ reqId: 1, title: "Which store?", initialIndex: 0, nav: { index: 0, total: 3 } });
+		expect(last().nav).toEqual({ index: 0, total: 3 });
+		hub.answer(1, "Postgres");
+		await tick();
+		expect(last()).toMatchObject({ reqId: 2, selectionMarker: "checkbox", checkedIndices: [], nav: { index: 1, total: 3, back: BACK } });
+		hub.answer(2, "Search");
+		await tick();
+		expect(last()).toMatchObject({ reqId: 3, checkedIndices: [1], nav: { index: 1, back: BACK, answer: { choices: ["Search"] } } });
+		// Back: the first question again, on its answer; it has no Back of its own.
+		hub.answer(3, BACK);
+		await tick();
+		expect(last()).toMatchObject({ reqId: 4, title: "Which store?", initialIndex: 1, nav: { index: 0, total: 3, answer: { choices: ["Postgres"] } } });
+		expect(last().nav).not.toHaveProperty("back");
+		hub.answer(4, "SQLite");
+		await tick();
+		// The multi-select kept its ticks.
+		expect(last()).toMatchObject({ reqId: 5, checkedIndices: [1], nav: { index: 1, answer: { choices: ["Search"] } } });
+		hub.answer(5, "Auth");
+		await tick();
+		hub.answer(6, "Next →");
+		await tick();
+		expect(last()).toMatchObject({ reqId: 7, title: "Where?", nav: { index: 2, total: 3, back: BACK } });
+		// The Other editor goes back too.
+		hub.answer(7, OTHER);
+		await tick();
+		expect(last()).toEqual({ kind: "editor", title: "Custom answer: Where?", nav: { index: 2, total: 3, back: BACK }, reqId: 8 });
+		hub.answer(8, BACK);
+		await tick();
+		expect(last()).toMatchObject({ reqId: 9, checkedIndices: [0, 1], nav: { index: 1, answer: { choices: ["Auth", "Search"] } } });
+		hub.answer(9, "Next →");
+		await tick();
+		expect(last()).toMatchObject({ reqId: 10, title: "Where?", initialIndex: 0 });
+		expect(last().nav).toEqual({ index: 2, total: 3, back: BACK });
+		hub.answer(10, OTHER);
+		await tick();
+		hub.answer(11, "Fly.io in fra");
+		expect(await p).toEqual({
+			kind: "submit",
+			results: [
+				{ id: "store", question: "Which store?", options: ["SQLite", "Postgres"], multi: false, selectedOptions: ["SQLite"], customInput: undefined },
+				{ id: "features", question: "Which features?", options: ["Auth", "Search", "Billing"], multi: true, selectedOptions: ["Auth", "Search"], customInput: undefined },
+				{ id: "deploy", question: "Where?", options: ["Fly", "Render"], multi: false, selectedOptions: [], customInput: "Fly.io in fra" },
+			],
+		});
+	});
+
+	test("a typed answer comes back prefilled: on the Other row of a single choice, in the editor", async () => {
+		const { hub, requests } = hubWithFrames();
+		const two = [three[0]!, three[2]!];
+		const p = runGuestAsk(hub, two, new AbortController().signal);
+		const last = () => requests().at(-1)!;
+		await tick();
+		hub.answer(1, OTHER);
+		await tick();
+		hub.answer(2, "MySQL");
+		await tick();
+		hub.answer(3, BACK);
+		await tick();
+		expect(last()).toMatchObject({ reqId: 4, initialIndex: 2, nav: { index: 0, answer: { choices: [], text: "MySQL" } } });
+		hub.answer(4, OTHER);
+		await tick();
+		expect(last()).toMatchObject({ kind: "editor", reqId: 5, prefill: "MySQL" });
+		hub.answer(5, "MySQL 8");
+		await tick();
+		hub.answer(6, "Render");
+		const results = ((await p) as { results: Array<Json> }).results;
+		expect(results[0]).toMatchObject({ selectedOptions: [], customInput: "MySQL 8" });
+		expect(results[1]).toMatchObject({ selectedOptions: ["Render"] });
+	});
+
+	test("a multi-select reopens with its ticks and its typed text for the editor; new ticks alone drop the text", async () => {
+		const { hub, requests } = hubWithFrames();
+		const two = [three[1]!, three[2]!];
+		const p = runGuestAsk(hub, two, new AbortController().signal);
+		const last = () => requests().at(-1)!;
+		await tick();
+		hub.answer(1, "Billing");
+		await tick();
+		hub.answer(2, OTHER);
+		await tick();
+		hub.answer(3, "SSO");
+		await tick();
+		hub.answer(4, BACK);
+		await tick();
+		expect(last()).toMatchObject({
+			reqId: 5,
+			checkedIndices: [2],
+			options: ["Auth", "Search", "Billing", OTHER, "Next →", "Chat about this"],
+			nav: { index: 0, answer: { choices: ["Billing"], text: "SSO" } },
+		});
+		hub.answer(5, OTHER);
+		await tick();
+		expect(last()).toMatchObject({ kind: "editor", reqId: 6, prefill: "SSO" });
+		hub.answer(6, undefined); // cancel: back to the checkboxes
+		await tick();
+		hub.answer(7, "Next →");
+		await tick();
+		hub.answer(8, "Fly");
+		const results = ((await p) as { results: Array<Json> }).results;
+		expect(results[0]).toMatchObject({ selectedOptions: ["Billing"], customInput: undefined });
+	});
+
+	test("no nav on a single question, no Back on the first; Back's value is no option label", async () => {
+		const { hub, requests } = hubWithFrames();
+		const tricky = [{ id: "t", question: "Q", options: [{ label: BACK }, { label: "Plain" }] }];
+		const p = runGuestAsk(hub, tricky, new AbortController().signal);
+		await tick();
+		expect(requests()[0]).not.toHaveProperty("nav");
+		expect((requests()[0]!.options as unknown[]).slice(0, 2)).toEqual([`${BACK} (2)`, "Plain"]);
+		hub.answer(1, `${BACK} (2)`);
+		expect(((await p) as { results: Array<Json> }).results[0]!.selectedOptions).toEqual([BACK]);
+
+		const second = hubWithFrames();
+		const two = runGuestAsk(second.hub, [three[0]!, three[2]!], new AbortController().signal);
+		await tick();
+		second.hub.answer(1, BACK); // the first question cannot go back: an unknown label, as before
+		await tick();
+		expect(second.requests().at(-1)).toMatchObject({ reqId: 2, title: "Where?" });
+		second.hub.answer(2, "Fly");
+		expect(((await two) as { results: Array<Json> }).results[0]!.selectedOptions).toEqual([]);
+	});
 });
 
 describe("dialog wrappers on omp's UI context", () => {
@@ -852,7 +988,7 @@ describe("extension against a fake hostd", () => {
 		const hostd = await startHostd();
 		const omp = await bridged(hostd);
 		const hello = hostd.lines.find(l => l.t === "hello")!;
-		expect(hello.bridgeVersion).toBe("2.1.0");
+		expect(hello.bridgeVersion).toBe("2.2.0");
 		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true });
 
 		const res = await request(hostd, "liveSubscribe");

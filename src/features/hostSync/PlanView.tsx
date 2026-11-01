@@ -61,7 +61,7 @@ function SectionBlock({
         <input
           type="checkbox"
           aria-label={`Choose every ${section.title} difference`}
-          className="size-4 shrink-0 accent-[#a35cf0]"
+          className="size-4 shrink-0 accent-accent"
           checked={state === "all"}
           ref={(el) => {
             if (el) el.indeterminate = state === "some";
@@ -130,9 +130,9 @@ function PlanRow({
   const place = placeText(item);
   const identity = item.section === "signIns" ? signInText(item.from ?? item.to) : null;
   return (
-    <li className={cn("rounded-lg px-3 py-2.5 transition-colors", chosen ? "bg-accent/10 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.03] shadow-hairline")}>
+    <li className={cn("rounded-lg px-3 py-2.5 transition-colors", chosen ? "bg-accent/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "bg-ink/[0.03] shadow-hairline")}>
       <div className="flex items-start gap-3">
-        <input id={id} type="checkbox" className="mt-0.5 size-4 shrink-0 accent-[#a35cf0]" checked={chosen} disabled={!canChoose} onChange={(e) => onToggle(e.target.checked)} />
+        <input id={id} type="checkbox" className="mt-0.5 size-4 shrink-0 accent-accent" checked={chosen} disabled={!canChoose} onChange={(e) => onToggle(e.target.checked)} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <label htmlFor={id} className={cn("min-w-0 text-sm font-bold break-words", canChoose ? "cursor-pointer text-ink" : "text-ink-2")}>
@@ -165,7 +165,7 @@ function PlanRow({
             </ul>
           )}
           {needed !== undefined && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 rounded-md bg-warn/8 px-2.5 py-1.5 text-xs text-ink-2 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]">
+            <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 rounded-md bg-warn/8 px-2.5 py-1.5 text-xs text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]">
               <KeyRound className="size-3.5 shrink-0 text-warn" aria-hidden />
               <span className="min-w-0 flex-1">Without its secrets, its masked values stay empty on {target}.</span>
               {needed && (
@@ -176,7 +176,7 @@ function PlanRow({
             </div>
           )}
           {result && !result.ok && (
-            <p className="mt-1.5 flex items-start gap-1.5 text-xs text-[#ffb1c1]">
+            <p className="mt-1.5 flex items-start gap-1.5 text-xs text-error-ink">
               <CircleX className="mt-px size-3.5 shrink-0" aria-hidden />
               <span>
                 <span className="font-bold">The last copy failed: </span>

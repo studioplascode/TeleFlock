@@ -27,10 +27,14 @@ export function BoardView(): JSX.Element;
 export function FlockHome(): JSX.Element;
 // src/features/inbox/InboxView.tsx — #/inbox (desktop + mobile): "Needs you" (today's needs cards, oldest first) then "Updates"
 // (unread notifications via notify/NotificationCenter `useUpdates`/`UpdatesList`, 20 then "N more in Activity →").
+// Each needs card (and the HUD) shows "Agent said" (`NeedsContext.tsx` `LastAssistantText`): the host's `needs.context`
+// when it sends one (asks, hosts ≥ 0.8.0; "" shows nothing; the session stays closed), else the end of the last
+// assistant message from the transcript (session held open while shown); Markdown, the question itself left out.
 export function InboxView(): JSX.Element;
 // src/features/inbox/AnswerNextHud.tsx — global overlay, mount once. Renders while useUi().answerNextOpen.
 // Starts at useUi().selectedKey when that agent needs you, else the oldest inbox item. Tab/J/K, Enter, Esc here;
-// 1…N (Other = N+1) come from its QuickAnswer (`hotkeys`). Footer link "All in Inbox · Ctrl 2". Ctrl+J toggling is the shell's keymap.
+// 1…N (Other = N+1) and ← (previous question of a multi-question ask; footer hint while it applies) come from its
+// QuickAnswer (`hotkeys`). Footer link "All in Inbox · Ctrl 2". Ctrl+J toggling is the shell's keymap.
 export function AnswerNextHud(): JSX.Element | null;
 // src/features/activity/ActivityView.tsx — #/activity
 export function ActivityView(): JSX.Element;
@@ -50,7 +54,11 @@ export function UsageView(): JSX.Element;
 // src/features/board/QuickAnswer.tsx — inline answer controls for a NeedsYou (agent.answer), drawn with the shared option
 // model in src/features/inbox/AnswerParts.tsx (also used by session AskCard): number badges, "★ recommended" outline,
 // descriptions inside the buttons, "+N more" → HUD past `max`, "Answer…" → HUD for input requests on cards,
-// textarea + Skip on `full` surfaces (Inbox, HUD).
+// textarea + Skip on `full` surfaces (Inbox, HUD). A multi-question ask (`needs.step`, bridge ≥ 2.2.0): "Question 2 of 3"
+// and ← Back above the options (← key with `hotkeys`, or `numbered` while focus is in the controls) → `{back:true}`,
+// "Back to the previous question…" until it arrives as a new request; a question Back brought up again shows its earlier
+// answer (multi: `step.choices` ticked; single: that option lit, any tap answers; else `step.text` in Other). Picks and
+// the open Other field are kept per request, so a card that outlives its question starts the next one clean.
 export function QuickAnswer(props: { agentKey: string; appearance?: "card" | "hero" | "big"; max?: number; full?: boolean; numbered?: boolean; hotkeys?: boolean; mobile?: boolean; chat?: boolean; onAnswered?(): void; className?: string }): JSX.Element | null;
 
 // src/features/board/agentActions.ts — shared agent actions (board, phone, review, palette)
@@ -175,6 +183,13 @@ stands while an app is connected) or "auto-picking…"; the tooltip names the �
 nothing here (the ask card in the session has Cancel, +10 min, +1 h and Restart). Static styles. The ⋯ / right-click
 menu of an omp agent on a host with decide for me has "Decide for me…" (`features/autoAnswer/DecideDialog`: its own
 policy, `agent.setAutoAnswer`).
+
+**Agent said on Needs-you cards** (desktop `AgentCard` and the phone needs card; asks on hosts ≥ 0.8.0): above the
+question, what the agent wrote before asking (`needs.context` less the paragraphs that only repeat the question,
+`withoutQuestion`), as Markdown in `features/session/ask/AgentSaid` with a left rule: two lines with a fade and "Show
+more" / "Show less" only when it runs longer (measured), on the sunset hero card in its white. The toggle and links keep
+their clicks, presses and keys, so they never open the agent, start a drag or a long-press. Cards hold no transcript:
+without the field (older hosts, approvals, plan reviews) they show nothing. Expanded state resets per request.
 
 ## Board keyboard (desktop, only while the board is mounted and focus is not in a text field)
 `J`/`K` (or arrows) move selection (`useUi().select`), `H`/`L` jump lanes, `Enter` open session, `A` answer (opens the

@@ -108,12 +108,12 @@ export function StorageSection({ q, hostName, home }: { q: StorageQuery; hostNam
                 <label className={cn("flex items-start gap-3 px-3 py-2.5", f.todo ? "cursor-pointer" : "opacity-70")}>
                   <input
                     type="checkbox"
-                    className="mt-0.5 size-4 accent-[#a35cf0]"
+                    className="mt-0.5 size-4 accent-accent"
                     checked={on}
                     disabled={!f.todo || busy}
                     onChange={(e) => setPicked({ [key]: e.target.checked ? [...chosen, c] : chosen.filter((x) => x !== c) })}
                   />
-                  <span className="grid size-6 shrink-0 place-items-center rounded-sm bg-white/6 text-mute [&_svg]:size-3.5">{META[c].icon}</span>
+                  <span className="grid size-6 shrink-0 place-items-center rounded-sm bg-ink/6 text-mute [&_svg]:size-3.5">{META[c].icon}</span>
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span className="text-sm font-semibold text-ink">{META[c].label}</span>
                     <span className="text-2xs text-mute-2">{META[c].about}</span>

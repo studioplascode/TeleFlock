@@ -54,7 +54,7 @@ function CatalogCard({ plugin: p, installed, cwd, projectName, busy, onInstall }
   // Installed for every project already: a project install would only shadow it.
   const done = installed.includes("user") || (installed.includes("project") && !!cwd);
   return (
-    <li className="flex min-w-0 flex-col gap-2 rounded-lg bg-white/[0.03] p-3 shadow-hairline">
+    <li className="flex min-w-0 flex-col gap-2 rounded-lg bg-ink/[0.03] p-3 shadow-hairline">
       <div className="flex min-w-0 items-start gap-3">
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-center gap-2">
@@ -94,7 +94,7 @@ function MarketplaceRow({ m, busy, onRefresh, onRemove }: { m: Marketplace; busy
   const now = useNow(60_000);
   const at = isoMs(m.updatedAt);
   return (
-    <li className="flex min-w-0 items-center gap-3 rounded-lg bg-white/[0.022] px-3.5 py-2.5 shadow-hairline">
+    <li className="flex min-w-0 items-center gap-3 rounded-lg bg-ink/[0.022] px-3.5 py-2.5 shadow-hairline">
       <Glyph>
         <Store />
       </Glyph>
@@ -200,7 +200,7 @@ function AddMarketplace({ q, marketplaces, cwd }: { q: PluginsQuery; marketplace
               }}
               className={cn(
                 "inline-flex h-7 items-center gap-1 rounded-full px-3 font-mono text-2xs font-semibold shadow-hairline pressable focus-ring",
-                added ? "bg-done/10 text-done" : "bg-white/6 text-ink-2 hover:bg-white/10 hover:text-ink",
+                added ? "bg-done/10 text-done" : "bg-ink/6 text-ink-2 hover:bg-ink/10 hover:text-ink",
               )}
             >
               {added && <Check className="size-3" />}
@@ -299,7 +299,7 @@ export function Catalog({
           icon={<Store />}
           title="No marketplaces yet"
           description="A marketplace is a catalog of Claude Code–format plugins (commands, agents, hooks, skills, MCP servers) in a git repository or at a URL. Add one to browse it here."
-          className="rounded-tile bg-white/[0.018] shadow-hairline"
+          className="rounded-tile bg-ink/[0.018] shadow-hairline"
         />
       ) : (
         <section aria-label="Marketplace plugins" className="flex flex-col gap-3">

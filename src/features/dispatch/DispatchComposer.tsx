@@ -233,7 +233,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
               title="Plan mode: the agent proposes a plan before editing"
               className={cn(
                 "inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-2xs font-bold pressable focus-ring [&_svg]:size-3.5",
-                options.plan ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "text-mute hover:bg-white/6 hover:text-ink",
+                options.plan ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "text-mute hover:bg-ink/6 hover:text-ink",
               )}
             >
               <ClipboardList />
@@ -289,12 +289,12 @@ function OptionsPopover({ hostId, options, onChange, mobile }: { hostId?: string
   }, [catalog, options.model]);
   const thinkingOptions: SelectOption[] = [{ value: DEFAULT, label: "Default" }, ...LEVELS.map((l) => ({ value: l, label: l }))];
 
-  const row = "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-left text-sm font-semibold text-ink-2 hover:bg-white/7 hover:text-ink focus-ring";
+  const row = "flex w-full items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-left text-sm font-semibold text-ink-2 hover:bg-ink/7 hover:text-ink focus-ring";
   return (
     <Popover>
       <PopoverTrigger
         className={cn(
-          "inline-flex h-7 min-w-0 shrink items-center gap-1.5 rounded-full px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink data-[state=open]:bg-white/8 data-[state=open]:text-ink [&_svg]:size-3.5 [&_svg]:shrink-0",
+          "inline-flex h-7 min-w-0 shrink items-center gap-1.5 rounded-full px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-ink/6 hover:text-ink data-[state=open]:bg-ink/8 data-[state=open]:text-ink [&_svg]:size-3.5 [&_svg]:shrink-0",
           mobile ? "max-w-[46vw]" : "max-w-[260px]",
         )}
         aria-label="Agent options"
@@ -378,7 +378,7 @@ function DispatchAgentOptions({ hostId, options, onChange, mobile }: { hostId?: 
         title={summary ? `${what}: ${summary}` : what}
         className={cn(
           "inline-flex h-7 min-w-0 shrink items-center gap-1 rounded-full px-2.5 text-2xs font-bold pressable focus-ring disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0",
-          summary ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "text-mute hover:bg-white/6 hover:text-ink",
+          summary ? "bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "text-mute hover:bg-ink/6 hover:text-ink",
           mobile ? "max-w-[30vw]" : "max-w-[220px]",
         )}
       >

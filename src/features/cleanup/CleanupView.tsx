@@ -31,7 +31,7 @@ function DiskTile({ hostId }: { hostId: string }) {
       <div className="font-display text-lg font-bold tabular">
         {formatBytes(free)} <span className="text-xs font-semibold text-mute">free of {formatBytes(total)}</span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-white/8">
+      <div className="h-1.5 overflow-hidden rounded-full bg-ink/8">
         <div className={cn("h-full rounded-full", level === "ok" ? "bg-done" : "st-bg")} style={{ width: `${used}%` }} />
       </div>
       {level !== "ok" && <p className="text-2xs font-semibold st-text">{level === "critical" ? "Almost full: builds and agents start failing." : "Running low."}</p>}
@@ -293,7 +293,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
           )}
         </div>
         {report.ghError && (
-          <Tile data-status="needs-you" className="flex items-start gap-3 p-4 text-xs text-ink-2 shadow-[inset_0_0_0_1px_rgb(var(--st-rgb)/0.35)] max-md:p-3.5">
+          <Tile data-status="needs-you" className="flex items-start gap-3 p-4 text-xs text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--st-solid)_35%,transparent)] max-md:p-3.5">
             <Sparkles className="mt-0.5 size-4 shrink-0 st-text" aria-hidden />
             <span>
               <b className="text-ink">No pull requests from gh on {hostName}:</b> {report.ghError}. Merged and closed worktrees can't be told apart until gh is signed in

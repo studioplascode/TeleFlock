@@ -19,6 +19,12 @@ deadline?: number,
  */
 remainingMs?: number, 
 /**
- * Labels of the options that will be picked (the ★ recommended ones).
+ * Labels of the options that will be picked (the ★ recommended ones), or with `earlier`
+ * how the question's earlier answer reads (its options' labels, its typed text).
  */
-picks: Array<string>, };
+picks: Array<string>, 
+/**
+ * The question already has the user's answer (`NeedsYou.step`: Back reopened it, or it
+ * came up again): that answer is sent, not ★ (hosts ≥ 0.8.0).
+ */
+earlier?: boolean, };

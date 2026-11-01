@@ -76,8 +76,14 @@ wire_struct! {
         pub deadline: Option<Millis>,
         /// What is left of the wait (ms) while it stands still (`waitingForNoApp`, `cancelled`).
         pub remaining_ms: Option<i64>,
-        /// Labels of the options that will be picked (the ★ recommended ones).
+        /// Labels of the options that will be picked (the ★ recommended ones), or with `earlier`
+        /// how the question's earlier answer reads (its options' labels, its typed text).
         pub picks: Vec<String>,
+        /// The question already has the user's answer (`NeedsYou.step`: Back reopened it, or it
+        /// came up again): that answer is sent, not ★ (hosts ≥ 0.8.0).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub earlier: bool,
     }
 }
 

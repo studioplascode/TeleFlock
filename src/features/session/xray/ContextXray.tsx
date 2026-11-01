@@ -143,11 +143,11 @@ function Fallback({ agentKey, error, onTerminal }: { agentKey: string; error: No
   return (
     <div className="flex flex-col gap-3">
       {ctx && (
-        <div className="rounded-lg bg-white/[0.04] px-3 py-2.5 shadow-hairline">
+        <div className="rounded-lg bg-ink/[0.04] px-3 py-2.5 shadow-hairline">
           <div className="font-display text-xl font-bold tabular">
             {int.format(ctx.tokens)} <span className="text-sm font-semibold text-mute">of {int.format(ctx.window)} tokens · {Math.round(ctx.pct)}%</span>
           </div>
-          <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/8">
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-ink/8">
             <span className="block h-full rounded-full bg-accent" style={{ width: `${Math.min(100, ctx.pct)}%` }} />
           </div>
         </div>
@@ -189,7 +189,7 @@ function XrayBody({ x, loading, onRefresh, onJump }: { x: Xray; loading: boolean
         </div>
       </div>
       <div className="relative">
-        <div className="flex h-3 w-full overflow-hidden rounded-full bg-white/6" role="img" aria-label={`Context: ${int.format(x.used)} of ${int.format(x.window)} tokens used`}>
+        <div className="flex h-3 w-full overflow-hidden rounded-full bg-ink/6" role="img" aria-label={`Context: ${int.format(x.used)} of ${int.format(x.window)} tokens used`}>
           {segments.map((s) => (
             <span
               key={s.id}
@@ -243,20 +243,20 @@ function CategoryRow({ c, window, open, onToggle, onJump }: { c: XrayCategory; w
         disabled={!more}
         aria-expanded={more ? open : undefined}
         onClick={onToggle}
-        className="focus-ring flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[13px] enabled:hover:bg-white/[0.04] disabled:cursor-default"
+        className="focus-ring flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[13px] enabled:hover:bg-ink/[0.04] disabled:cursor-default"
       >
-        <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: XRAY_COLOR[c.id] ?? "#8b8b9e" }} />
+        <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: XRAY_COLOR[c.id] ?? "color-mix(in srgb, var(--color-mute) 65%, var(--color-mute-2))" }} />
         <span className="min-w-0 flex-1 truncate font-semibold text-ink-2">{c.label}</span>
         <span className="font-mono text-[12px] text-ink tabular">{c.tokens === undefined ? "—" : int.format(c.tokens)}</span>
         <span className="w-14 text-right font-mono text-[11.5px] text-mute-2 tabular">{c.tokens === undefined ? "" : sharePct(c.tokens, window)}</span>
         <span className="w-3.5 text-mute-2 [&_svg]:size-3.5">{more && (open ? <ChevronDown /> : <ChevronRight />)}</span>
       </button>
       {open && (
-        <div className="mb-2 ml-5 flex flex-col gap-1 border-l border-white/8 pl-3">
+        <div className="mb-2 ml-5 flex flex-col gap-1 border-l border-ink/8 pl-3">
           {c.children.length > 0 && (
             <div className="flex flex-wrap gap-1.5 py-1 text-[11.5px] text-mute">
               {c.children.map((k) => (
-                <span key={k.label} className="rounded-full bg-white/6 px-2 py-0.5 font-semibold">
+                <span key={k.label} className="rounded-full bg-ink/6 px-2 py-0.5 font-semibold">
                   {k.label} <span className="font-mono tabular">{k.tokens === undefined ? "—" : int.format(k.tokens)}</span>
                   <span className="text-mute-2"> · {k.entries}×</span>
                 </span>
@@ -275,7 +275,7 @@ function CategoryRow({ c, window, open, onToggle, onJump }: { c: XrayCategory; w
 
 function EntryRow(p: { label: string; info?: string; tokens: number; preview: string; callId?: string; onJump: (callId: string) => void }) {
   return (
-    <div className="rounded-md bg-white/[0.03] px-2.5 py-1.5">
+    <div className="rounded-md bg-ink/[0.03] px-2.5 py-1.5">
       <div className="flex items-baseline gap-2 text-[12px]">
         <span className="min-w-0 flex-1 truncate font-semibold text-ink-2" title={p.info}>
           {p.label}

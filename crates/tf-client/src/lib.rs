@@ -6,6 +6,7 @@ mod conn;
 mod deploy;
 mod diag;
 mod engine;
+mod forward;
 mod link;
 mod platform;
 mod presence;

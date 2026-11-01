@@ -88,12 +88,12 @@ async fn websocket_protocol() {
     // Replay first.
     let types: Vec<String> = {
         let mut v = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             v.push(next_json(&mut ws).await["event"]["type"].as_str().unwrap().to_string());
         }
         v
     };
-    assert_eq!(types, ["profiles", "settings", "tunnels"]);
+    assert_eq!(types, ["profiles", "settings", "tunnels", "forwards"]);
 
     ws.send(Message::Text(json!({"id": 1, "method": "app.info"}).to_string().into())).await.unwrap();
     let r = next_json(&mut ws).await;

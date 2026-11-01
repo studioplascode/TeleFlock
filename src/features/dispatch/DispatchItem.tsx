@@ -198,7 +198,7 @@ function Uploading({ videos }: { videos: readonly DispatchVideo[] }) {
       <Shimmer className="text-xs font-semibold">
         {live.length > 1 ? `Uploading ${live.length} videos` : "Uploading the video"} · {pct}%
       </Shimmer>
-      <span className="relative ml-auto h-1.5 w-20 overflow-hidden rounded-full bg-white/10" aria-hidden>
+      <span className="relative ml-auto h-1.5 w-20 overflow-hidden rounded-full bg-ink/10" aria-hidden>
         <span className="absolute inset-y-0 left-0 bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
       </span>
     </div>
@@ -247,12 +247,12 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
           "relative min-w-0 flex-1 rounded-[18px] rounded-tl-[8px] transition-[background-color,box-shadow] duration-500",
           ctx.mobile ? "p-2.5" : "p-3",
           bad
-            ? "bg-error/8 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)]"
+            ? "bg-error/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)]"
             : shown.k === "unconfirmed"
-              ? "bg-warn/8 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]"
+              ? "bg-warn/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]"
               : live?.column === "needs"
-                ? "st-border-grad bg-white/[0.035]"
-                : "bg-white/[0.035] shadow-hairline",
+                ? "st-border-grad bg-ink/[0.035]"
+                : "bg-ink/[0.035] shadow-hairline",
           shown.k === "gone" && "opacity-75",
         )}
       >
@@ -271,7 +271,7 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
             {live?.column === "running" ? (
               <Elapsed since={live.omp?.turnStartedAt ?? live.stateSince} />
             ) : live?.column === "needs" && live.needs ? (
-              <span className="text-[#ffb08a]">
+              <span className="text-sun-ink">
                 waiting <Elapsed since={live.needs.since} />
               </span>
             ) : live ? (
@@ -327,9 +327,9 @@ function Badge({ shown, entry, status, online, mobile }: { shown: Shown; entry: 
 }
 
 const action = "inline-flex h-7 items-center gap-1.5 rounded-sm px-2.5 text-2xs font-bold pressable focus-ring [&_svg]:size-3.5 disabled:pointer-events-none disabled:opacity-45";
-const primary = `${action} bg-accent text-white shadow-glow-accent hover:bg-accent-hi`;
+const primary = `${action} bg-accent text-on-accent shadow-glow-accent hover:bg-accent-hi`;
 const secondary = `${action} bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5`;
-const ghost = `${action} text-mute hover:bg-white/6 hover:text-ink`;
+const ghost = `${action} text-mute hover:bg-ink/6 hover:text-ink`;
 
 function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: Shown; entry: DispatchEntry; agentKey?: string; parkedKey?: string; ctx: ThreadContext; online: boolean }) {
   const agent = shown.k === "live" ? shown.agent : undefined;
@@ -487,7 +487,7 @@ function Progress({ step }: { step: Step }) {
       <Shimmer className="text-xs font-semibold">{STEP_LABEL[step]}…</Shimmer>
       <span className="ml-auto flex gap-1" aria-hidden>
         {SEGMENTS.map((s, i) => (
-          <span key={s.step} title={s.label} className="relative h-1.5 w-6 overflow-hidden rounded-full bg-white/10">
+          <span key={s.step} title={s.label} className="relative h-1.5 w-6 overflow-hidden rounded-full bg-ink/10">
             {i < at && <span className="absolute inset-0 bg-accent" />}
             {i === at && <span className="tf-loop absolute inset-0 animate-pulse bg-omp" />}
           </span>

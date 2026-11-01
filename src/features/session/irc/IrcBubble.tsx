@@ -31,7 +31,7 @@ export function usePeerSub(agentKey: string, peer: string): Subagent | undefined
 export function peerTint(peer: string, strength = 1): CSSProperties {
   const t = agentGlyphTheme(peer);
   return {
-    backgroundImage: `linear-gradient(135deg, color-mix(in oklab, ${t.from} ${Math.round(15 * strength)}%, rgb(18 18 26 / 0.72)), color-mix(in oklab, ${t.to} ${Math.round(9 * strength)}%, rgb(18 18 26 / 0.72)))`,
+    backgroundImage: `linear-gradient(135deg, color-mix(in oklab, ${t.from} ${Math.round(15 * strength)}%, color-mix(in srgb, var(--color-tile-1) 72%, transparent)), color-mix(in oklab, ${t.to} ${Math.round(9 * strength)}%, color-mix(in srgb, var(--color-tile-1) 72%, transparent)))`,
     boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${t.from} ${Math.round(34 * strength)}%, transparent), var(--shadow-d1)`,
   };
 }
@@ -86,7 +86,7 @@ function Tags({ message, viaWait }: { message: IrcMessage; viaWait: boolean }) {
     <>
       {tags.map(({ icon: Icon, label, tip }) => (
         <Tooltip key={label} content={tip}>
-          <span className="flex items-center gap-1 rounded-full bg-white/6 px-1.5 py-px text-[10px] font-bold tracking-wide text-ink-2 uppercase">
+          <span className="flex items-center gap-1 rounded-full bg-ink/6 px-1.5 py-px text-[10px] font-bold tracking-wide text-ink-2 uppercase">
             <Icon className="size-2.5" />
             {label}
           </span>

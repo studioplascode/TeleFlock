@@ -131,7 +131,7 @@ html[data-active="false"] .sun-pulse::after {
 html[data-motion="full"][data-active="true"] .tf-spark-path { transition: d 0.6s cubic-bezier(0.16, 1, 0.3, 1); }
 html[data-motion="full"][data-active="true"] .tf-glide-width { transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
 html[data-motion="full"][data-active="true"] .tf-glide-grow { transition: flex-grow 0.8s cubic-bezier(0.16, 1, 0.3, 1); }
-html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--st-rgb) / 0.8)); }
+html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px color-mix(in srgb, var(--st-solid) 80%, transparent)); }
 
 @layer components {
 /* ---------- StatusOrb ---------- */
@@ -150,7 +150,7 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
   height: 100%;
   border-radius: 50%;
   background: var(--st-grad);
-  box-shadow: 0 0 calc(var(--orb-size, 10px) * 0.9) rgb(var(--st-rgb) / 0.7);
+  box-shadow: 0 0 calc(var(--orb-size, 10px) * 0.9) color-mix(in srgb, var(--st-solid) 70%, transparent);
   transition: box-shadow 0.4s, background 0.4s;
 }
 .tf-orb__halo,
@@ -161,11 +161,11 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
   pointer-events: none;
 }
 .tf-orb__halo {
-  background: radial-gradient(circle, rgb(var(--st-rgb) / 0.7) 0%, rgb(var(--st-rgb) / 0) 70%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--st-solid) 70%, transparent) 0%, transparent 70%);
   animation: tf-breathe var(--tf-breath, 2.4s) var(--ease-in-out-sine) infinite;
 }
 .tf-orb__ping {
-  box-shadow: 0 0 0 1.5px rgb(var(--st-rgb) / 0.9);
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--st-solid) 90%, transparent);
   animation: tf-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
 }
 .tf-orb[data-status="running"] .tf-orb__core {
@@ -173,7 +173,7 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
   animation: tf-spin 2.6s linear infinite;
 }
 .tf-orb[data-status="idle"] .tf-orb__core { box-shadow: none; opacity: 0.75; }
-.tf-orb[data-status="done"] .tf-orb__core { box-shadow: 0 0 calc(var(--orb-size, 10px) * 0.6) rgb(var(--st-rgb) / 0.45); }
+.tf-orb[data-status="done"] .tf-orb__core { box-shadow: 0 0 calc(var(--orb-size, 10px) * 0.6) color-mix(in srgb, var(--st-solid) 45%, transparent); }
 
 /* ---------- ProgressRing ---------- */
 .tf-ring {
@@ -194,7 +194,7 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
   position: absolute;
   inset: -3px;
   border-radius: 50%;
-  background: conic-gradient(from 0deg, transparent 0 68%, rgb(var(--st-rgb) / 0.55) 92%, transparent 100%);
+  background: conic-gradient(from 0deg, transparent 0 68%, color-mix(in srgb, var(--st-solid) 55%, transparent) 92%, transparent 100%);
   -webkit-mask: radial-gradient(circle, transparent 57%, #000 60%, #000 69%, transparent 72%);
   mask: radial-gradient(circle, transparent 57%, #000 60%, #000 69%, transparent 72%);
   animation: tf-spin 2.2s linear infinite;
@@ -241,7 +241,7 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
   animation: tf-spin var(--gb-speed, 3.6s) linear infinite;
 }
 .tf-glow-border__bloom::before {
-  background: conic-gradient(from 0deg, rgb(var(--st-rgb) / 0.9), transparent 30%, transparent 55%, rgb(var(--st-rgb) / 0.8) 80%, rgb(var(--st-rgb) / 0.9));
+  background: conic-gradient(from 0deg, color-mix(in srgb, var(--st-solid) 90%, transparent), transparent 30%, transparent 55%, color-mix(in srgb, var(--st-solid) 80%, transparent) 80%, color-mix(in srgb, var(--st-solid) 90%, transparent));
 }
 
 /* ---------- TiltCard ---------- */
@@ -295,7 +295,7 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
   margin: calc(var(--dot, 5px) / -2) 0 0 calc(var(--dot, 5px) / -2);
   border-radius: 50%;
   background: var(--st-grad);
-  box-shadow: 0 0 6px rgb(var(--st-rgb) / 0.9);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--st-solid) 90%, transparent);
 }
 .tf-swarm__arm { transition: transform 0.6s var(--ease-spring); }
 
@@ -303,20 +303,20 @@ html[data-motion="full"] .tf-ring__arc { filter: drop-shadow(0 0 3px rgb(var(--s
 .tf-skeleton {
   position: relative;
   overflow: hidden;
-  background: rgb(255 255 255 / 0.05);
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
 }
 .tf-skeleton::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.07) 45%, rgb(163 92 240 / 0.08) 55%, transparent);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--color-ink) 7%, transparent) 45%, color-mix(in srgb, var(--color-accent) 8%, transparent) 55%, transparent);
   transform: translateX(-100%);
   animation: tf-shimmer 1.6s ease-in-out infinite;
 }
 
 /* ---------- StreamText ---------- */
 .tf-shimmer-text {
-  background-image: linear-gradient(90deg, var(--shim-base, var(--color-mute)) 0%, var(--shim-base, var(--color-mute)) 35%, var(--shim-hi, #ffffff) 50%, var(--shim-base, var(--color-mute)) 65%, var(--shim-base, var(--color-mute)) 100%);
+  background-image: linear-gradient(90deg, var(--shim-base, var(--color-mute)) 0%, var(--shim-base, var(--color-mute)) 35%, var(--shim-hi, var(--color-ink)) 50%, var(--shim-base, var(--color-mute)) 65%, var(--shim-base, var(--color-mute)) 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -333,7 +333,7 @@ html[data-motion="reduced"] .tf-shimmer-text { color: var(--shim-base, var(--col
   vertical-align: -0.17em;
   border-radius: 2px;
   background: linear-gradient(180deg, var(--color-accent-hi), var(--color-accent));
-  box-shadow: 0 0 10px rgb(163 92 240 / 0.8);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--color-accent) 80%, transparent);
   animation: tf-caret 1s steps(1) infinite;
 }
 
@@ -404,7 +404,7 @@ html[data-motion="full"] .tf-ambient__blob[data-on="true"] { animation-play-stat
     inset: 0;
     z-index: -1;
     border-radius: inherit;
-    box-shadow: 0 22px 64px -10px rgb(255 61 119 / 0.85), 0 6px 28px -6px rgb(255 122 24 / 0.6);
+    box-shadow: 0 22px 64px -10px color-mix(in srgb, var(--color-sun-2) 85%, transparent), 0 6px 28px -6px color-mix(in srgb, var(--color-sun-1) 60%, transparent);
     animation: tf-sun-pulse 3.2s ease-in-out infinite;
     pointer-events: none;
   }

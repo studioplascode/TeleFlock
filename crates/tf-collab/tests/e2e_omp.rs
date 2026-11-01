@@ -228,7 +228,7 @@ async fn e2e_against_real_omp() {
     let req = s.replica.ui().cloned().expect("ask ui-request");
     eprintln!("[ask] {:?} options={:?} allowOther={} allowChat={} callId={:?}", req.title, req.options.iter().map(|o| &o.label).collect::<Vec<_>>(), req.allow_other, req.allow_chat, req.call_id);
     let blue = req.options.iter().find(|o| o.label.eq_ignore_ascii_case("blue")).expect("Blue option").label.clone();
-    let replies = s.replica.answer(&req.id, &Answer { choices: vec![blue.clone()], text: None, cancel: false, chat: false }).unwrap();
+    let replies = s.replica.answer(&req.id, &Answer { choices: vec![blue.clone()], text: None, cancel: false, chat: false, back: false }).unwrap();
     for r in replies {
         s.guest.ui_response(r.req_id, r.value).unwrap();
     }

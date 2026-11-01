@@ -8,9 +8,9 @@
 //! broadcast channel that each state store consumes.
 //!
 //! Link lifecycle (architecture §3.4): a bridge that announces `caps.live` serves its session and
-//! no room of it is joined; when it goes away the replica stays (`connecting`, `bridgeLost`) and a
-//! published room takes over only if the bridge is not back within [`BRIDGE_RETURN`]. Rooms of
-//! sessions without such a bridge are joined; a failed join is retried with backoff (2 s doubling
+//! no room of it is joined; when it goes away (or its live feed does not start) the replica stays
+//! (`connecting`, `bridgeLost`), omp's session file serves it, and no room of that omp process is
+//! joined for [`BRIDGE_MEMORY`]. Rooms of sessions without such a bridge are joined; a failed join is retried with backoff (2 s doubling
 //! to 60 s) for as long as the room is published, with join timeouts that grow after each timeout
 //! ([`JoinTimeouts::escalated`]) and a room reset once joins keep timing out
 //! ([`RESET_AFTER_TIMEOUTS`]). Only failures retrying cannot fix show as `error` /
@@ -77,16 +77,21 @@ const ROOM_WAIT: Duration = Duration::from_secs(300);
 /// can block for over a minute while it serializes a large session on a slow machine; a dead
 /// loopback peer closes its socket, so silence never needs a short timeout here.
 const RELAY_IDLE: Duration = Duration::from_secs(180);
-/// A session whose bridge (≥ 2.0) went away keeps its replica and waits this long for it to come
-/// back (an extension reload, a hostd restart) before a published collab room takes over.
+/// A session whose bridge (≥ 2.0) went away keeps its replica and waits at least this long for it
+/// to come back (an extension reload, a hostd restart) before it is dropped for an omp that exited.
 pub const BRIDGE_RETURN: Duration = Duration::from_secs(10);
 /// A room is joined only once it was listed this long, unless the bridge of its omp process is
 /// known to lack the data plane: bridges reconnect within 5 s of a hostd restart, and a room
 /// whose session the bridge serves must not be joined (a join makes omp serialize the session).
 const JOIN_GRACE: Duration = Duration::from_secs(8);
 /// A session whose bridge is gone, with no room to fall back to, is dropped once its omp process
-/// is gone (Linux), or after this long elsewhere.
+/// is gone (Unix), or after this long.
 pub(crate) const DETACHED_FORGET: Duration = Duration::from_secs(600);
+/// No collab room of an omp process whose TeleFlock bridge (≥ 2.0) was connected within this long
+/// is joined: a join makes omp serialize the whole session, which an omp that leaves its bridge
+/// unanswered can least afford (and it can feed what starved the bridge). omp's session file serves
+/// such a session meanwhile ([`crate::settle`]); after this long without a bridge its room may.
+pub(crate) const BRIDGE_MEMORY: Duration = DETACHED_FORGET;
 /// For this long after tf-hostd started, an omp session with neither a room nor a bridge reads
 /// as starting, not unshared: bridges reconnect within ~5 s of a restart (a global copy serves
 /// omp processes TeleFlock did not start), and the panes' processes are read in the meantime.
@@ -159,13 +164,21 @@ pub(crate) struct SessionState {
     pub(crate) link_via: Option<LinkVia>,
     /// The bridge feed or collab guest feeding the replica.
     pub(crate) transport: Transport,
-    /// The bridge that served the session went away at this time (collab may take over after
-    /// [`BRIDGE_RETURN`]); `bye`: omp said it was shutting down.
+    /// The bridge that served the session went away, or its live feed did not start, at this time
+    /// (the session file serves it meanwhile; collab only after [`BRIDGE_MEMORY`]); `bye`: omp said
+    /// it was shutting down.
     pub(crate) bridge_lost: Option<(Instant, bool)>,
+    /// No collab room serves the session (its guest ended, or hostd never managed to join its
+    /// room) since this time: omp's session file keeps the copy current meanwhile (the settle
+    /// watchdog follows it, [`crate::settle`]), and a join of the room takes the session back.
+    pub(crate) room_lost: Option<Instant>,
     /// The bridge feed driver running for the session: `(connection, token)` ([`crate::feed`]).
     pub(crate) driver: Option<(u64, u64)>,
-    /// The stall watchdog's state for the bridge feed ([`crate::feed::Stall`]).
-    pub(crate) stall: crate::feed::Stall,
+    /// That driver's task, so the settle watchdog can start a stuck one over.
+    pub(crate) driver_task: Option<tokio::task::AbortHandle>,
+    /// What the settle watchdog asked of the live source, and the source's last resync
+    /// ([`crate::settle::Asked`]).
+    pub(crate) settle: crate::settle::Asked,
     /// omp's session file, as the bridge named it (subagent transcripts live next to it).
     pub(crate) session_file: Option<std::path::PathBuf>,
     /// The row notes persisted for the session ([`crate::notes`]) were handed to the replica.
@@ -202,8 +215,10 @@ impl SessionState {
             link_via: None,
             transport: Transport::Detached,
             bridge_lost: None,
+            room_lost: None,
             driver: None,
-            stall: crate::feed::Stall::default(),
+            driver_task: None,
+            settle: crate::settle::Asked::default(),
             session_file: None,
             notes_loaded: false,
             pending: Vec::new(),
@@ -920,6 +935,9 @@ async fn verify_room_relay(own: Option<(RelayIdentity, SocketAddr)>, port: u16, 
 #[derive(Default)]
 struct Registryish {
     rows: Vec<HostEntry>,
+    /// omp processes (pid) a TeleFlock bridge ≥ 2.0 served, and when it last did (within
+    /// [`BRIDGE_MEMORY`]): their rooms are never joined.
+    bridged: HashMap<u32, Instant>,
     /// (instance, generation) shared on another relay.
     foreign: HashSet<(String, u64)>,
     joining: HashSet<String>,
@@ -1077,6 +1095,9 @@ pub(crate) struct Inner {
     pub(crate) cancel: CancellationToken,
     /// The companion-extension server: bridges ≥ 2.0 serve their sessions ([`crate::feed`]).
     pub(crate) bridge: BridgeHandle,
+    /// omp's sessions dir, where the settle watchdog looks up the file of a session no bridge
+    /// names ([`crate::settle`]; tests point it at their own).
+    pub(crate) sessions_root: Mutex<std::path::PathBuf>,
 }
 
 impl Inner {
@@ -1104,6 +1125,12 @@ impl Inner {
 
     pub(crate) fn repoll(&self) {
         self.repoll.notify_one();
+    }
+
+    /// omp process `pid` had a TeleFlock bridge (≥ 2.0) until now: none of its rooms is joined for
+    /// [`BRIDGE_MEMORY`].
+    pub(crate) fn saw_bridge(&self, pid: u32) {
+        self.reg.lock().unwrap_or_else(|p| p.into_inner()).bridged.insert(pid, Instant::now());
     }
 }
 
@@ -1139,6 +1166,7 @@ impl OmpHandle {
             persist,
             cancel,
             bridge,
+            sessions_root: Mutex::new(crate::ops::host::omp_agent_dir().join("sessions")),
         });
         let me = Self { inner };
         me.try_start_relay().await;
@@ -1212,6 +1240,12 @@ impl OmpHandle {
     /// Polls the registry now (after `agent.connect`, agent start, rotations).
     pub fn repoll(&self) {
         self.inner.repoll.notify_one();
+    }
+
+    /// Tests: where the settle watchdog looks up session files no bridge names.
+    #[cfg(test)]
+    pub(crate) fn set_sessions_root(&self, root: std::path::PathBuf) {
+        *self.inner.sessions_root.lock().unwrap_or_else(|p| p.into_inner()) = root;
     }
 
     /// `agent.connect` on a session that is still connecting: subscribe its bridge feed again, or
@@ -1395,8 +1429,8 @@ fn startup_over(reg: &mut Registryish, now: Instant) -> bool {
 }
 
 /// What feeds the sessions, for a registry poll: the collab rooms joined (instance, generation),
-/// and the sessions the bridge serves, brings up or may get back within [`BRIDGE_RETURN`] (their
-/// rooms are never joined). The map's lock is let go before any session's is taken: a session held
+/// and the sessions the bridge serves, brings up or had within [`BRIDGE_MEMORY`] (their rooms are
+/// never joined). The map's lock is let go before any session's is taken: a session held
 /// for long (a resync rebuilding its replica from a large file) must not hold up the map's
 /// writers (a bridge's hello, a session's end), nor the readers std's `RwLock` queues behind a
 /// waiting writer (every op, the boards).
@@ -1413,7 +1447,8 @@ fn session_feeds(sessions: &RwLock<HashMap<String, Arc<OmpSession>>>) -> (HashSe
                 held.insert(s.session_id.clone());
             }
             Transport::Detached => {
-                if st.bridge_lost.is_none_or(|(at, _)| at.elapsed() < BRIDGE_RETURN) {
+                // A session its room left (served from its file meanwhile) waits for a join.
+                if st.room_lost.is_none() && st.bridge_lost.is_none_or(|(at, _)| at.elapsed() < BRIDGE_MEMORY) {
                     held.insert(s.session_id.clone());
                 }
             }
@@ -1436,12 +1471,18 @@ async fn poll_once(inner: &Arc<Inner>) {
     };
     // What the sessions are fed by, read before the registry lock (sessions lock first).
     let (joined, held) = session_feeds(&inner.sessions);
+    // omp processes a TeleFlock bridge ≥ 2.0 serves now.
+    let bridged: Vec<u32> = inner.bridge.sessions().into_iter().filter(|b| b.caps.data_plane()).map(|b| b.pid).collect();
     let mut to_join = Vec::new();
     let changed;
     {
         let mut reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         changed = !same_rows(&reg.rows, &rows) | startup_over(&mut reg, now);
+        for pid in bridged {
+            reg.bridged.insert(pid, now);
+        }
+        reg.bridged.retain(|_, at| now.duration_since(*at) < BRIDGE_MEMORY);
         for row in &rows {
             if let Some(f) = reg.failures.get_mut(&row.instance_id).filter(|f| f.generation == row.generation) {
                 f.seen_at = now;
@@ -1457,12 +1498,14 @@ async fn poll_once(inner: &Arc<Inner>) {
             if joined.contains(&key) || reg.foreign.contains(&key) || reg.joining.contains(&row.instance_id) {
                 continue;
             }
-            // A bridge ≥ 2.0 serves this omp process: its room stays unjoined (omp only mirrors
-            // into a room while a guest is in it).
+            // A bridge ≥ 2.0 serves this omp process, or did within BRIDGE_MEMORY: its room stays
+            // unjoined (omp only mirrors into a room while a guest is in it, and a join makes it
+            // serialize the whole session); its session file serves the session meanwhile.
             let pid_bridge = inner.bridge.by_pid(row.pid);
             if held.contains(sid)
                 || pid_bridge.as_ref().is_some_and(|b| b.caps.data_plane())
                 || inner.bridge.by_session(sid).is_some_and(|b| b.caps.data_plane())
+                || reg.bridged.contains_key(&row.pid)
             {
                 continue;
             }
@@ -1491,12 +1534,14 @@ async fn poll_once(inner: &Arc<Inner>) {
         let inner = inner.clone();
         tokio::spawn(async move {
             let (instance, generation) = (row.instance_id.clone(), row.generation);
+            let (session_id, pid) = (row.session_id.clone(), row.pid);
             let timeouts = {
                 let reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
                 reg.failures.get(&instance).filter(|f| f.generation == generation).map_or(0, |f| f.timeouts)
             };
             let res = join(&inner, row, JoinTimeouts::escalated(timeouts)).await;
             let mut reset = None;
+            let mut failed = None;
             {
                 let mut reg = inner.reg.lock().unwrap_or_else(|p| p.into_inner());
                 reg.joining.remove(&instance);
@@ -1515,15 +1560,58 @@ async fn poll_once(inner: &Arc<Inner>) {
                         }
                         let retry_in = f.retry_at.saturating_duration_since(now);
                         warn!(instance, attempt = f.streak, ?retry_in, "join failed: {}", e.msg);
+                        failed = Some(f.link());
                     }
                 }
             }
             if let Some(room) = reset {
                 reset_room(&inner, &room).await;
             }
+            if let (Some(link), Some(sid)) = (failed, session_id) {
+                serve_from_file(&inner, &sid, pid, link).await;
+            }
             let _ = inner.updates.send(OmpUpdate::Registry);
         });
     }
+}
+
+/// A room hostd could not join: until a join works, its session is served from omp's session file
+/// (found by the session id under omp's sessions dir; nothing live, no controls), so it shows a
+/// transcript at all, its link saying why it is not live. The join that works takes the session
+/// over ([`join`]); a session already served this way only takes the latest failure.
+async fn serve_from_file(inner: &Arc<Inner>, session_id: &str, pid: u32, link: LinkStatus) {
+    if let Some(s) = inner.session(session_id) {
+        let changed = {
+            let mut st = s.lock();
+            matches!(st.transport, Transport::Detached) && st.room_lost.is_some() && st.set_link(link)
+        };
+        if changed {
+            let _ = inner.updates.send(OmpUpdate::Changed { session_id: session_id.to_owned() });
+        }
+        return;
+    }
+    let root = inner.sessions_root.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let id = session_id.to_owned();
+    if tokio::task::spawn_blocking(move || crate::artifacts::find_session_file(&root, &id)).await.ok().flatten().is_none() {
+        return;
+    }
+    let session = Arc::new(OmpSession::new(session_id, pid, &inner.persist, inner.bridge.clone()));
+    {
+        let mut st = session.lock();
+        st.room_lost = Some(Instant::now());
+        st.set_link(link);
+    }
+    {
+        let mut map = inner.sessions.write().unwrap_or_else(|p| p.into_inner());
+        // A join or a bridge got there first.
+        if map.contains_key(session_id) {
+            return;
+        }
+        map.insert(session_id.to_owned(), session.clone());
+    }
+    info!(session = %session_id, pid, "omp's collab room could not be joined; showing the session from its file meanwhile");
+    spawn_session_loops(inner, &session);
+    let _ = inner.updates.send(OmpUpdate::Registry);
 }
 
 /// Resets a room whose host stopped answering joins ([`Relay::reset_room`]).
@@ -1569,15 +1657,17 @@ async fn join(inner: &Arc<Inner>, row: HostEntry, timeouts: JoinTimeouts) -> Res
         match st.transport {
             Transport::Detached => {
                 st.transport = Transport::Collab(room);
-                st.set_link(LinkStatus::connecting(
-                    LinkReason::Joining,
-                    Some(LinkVia::Collab),
-                    "TeleFlock's bridge in omp is gone; showing the session through omp's collab room instead",
-                ));
+                let why = if st.bridge_lost.is_some() {
+                    "TeleFlock's bridge in omp is gone; showing the session through omp's collab room instead"
+                } else {
+                    "joining omp's collab room again"
+                };
+                st.room_lost = None;
+                st.set_link(LinkStatus::connecting(LinkReason::Joining, Some(LinkVia::Collab), why));
                 s.set_data_plane(&mut st, None);
                 drop(st);
                 s.set_pid(row.pid);
-                info!(session = %session_id, instance = %row.instance_id, generation = link.generation, "collab room takes over from the bridge");
+                info!(session = %session_id, instance = %row.instance_id, generation = link.generation, "collab room takes the session over");
                 tokio::spawn(pump(Arc::downgrade(inner), s, rx, token));
                 let _ = inner.updates.send(OmpUpdate::Registry);
                 return Ok(());
@@ -1598,9 +1688,23 @@ async fn join(inner: &Arc<Inner>, row: HostEntry, timeouts: JoinTimeouts) -> Res
         st.transport = Transport::Collab(room);
         st.set_link(joining);
     }
-    let old = inner.sessions.write().unwrap_or_else(|p| p.into_inner()).insert(session_id.clone(), session.clone());
+    let (old, same_omp) = {
+        let mut map = inner.sessions.write().unwrap_or_else(|p| p.into_inner());
+        let old = map.insert(session_id.clone(), session.clone());
+        let same_omp: Vec<Arc<OmpSession>> = map.values().filter(|s| s.session_id != session_id && s.pid() == row.pid).cloned().collect();
+        (old, same_omp)
+    };
     if let Some(old) = old {
         old.end("session moved to a new room");
+    }
+    // The same omp went on in another session (`/new`, `/resume`): a session its room had left and
+    // that only its file served is over. Read with the map's lock let go: a session held for long
+    // (a rebuild from a large file) must not hold up the map's other users.
+    for s in same_omp {
+        let left = s.lock().room_lost.is_some();
+        if left {
+            inner.forget(&s, "omp switched to another session");
+        }
     }
     info!(session = %session_id, instance = %row.instance_id, generation = link.generation, pid = row.pid, "joined omp session");
     tokio::spawn(pump(Arc::downgrade(inner), session.clone(), rx, token));
@@ -1609,10 +1713,11 @@ async fn join(inner: &Arc<Inner>, row: HostEntry, timeouts: JoinTimeouts) -> Res
 }
 
 /// The loops every session runs for its lifetime, whatever feeds it: the collab journal reader
-/// (idle while a bridge serves it) and the artifacts tail.
+/// (idle while a bridge serves it), the artifacts tail and the settle watchdog.
 pub(crate) fn spawn_session_loops(inner: &Arc<Inner>, session: &Arc<OmpSession>) {
     tokio::spawn(journal_loop(Arc::downgrade(inner), session.clone()));
     tokio::spawn(artifact_loop(Arc::downgrade(inner), session.clone()));
+    tokio::spawn(crate::settle::watch(Arc::downgrade(inner), session.clone()));
 }
 
 /// Keeps the image originals the replica linked across restarts (see [`crate::originals`]).
@@ -1733,7 +1838,22 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
     let sid = session.session_id.clone();
     // Reconnects in a row whose welcome/snapshot timed out (a resync resets it).
     let mut timeouts = 0u32;
+    // Labs (`lab-faults`) and tests: frames are dropped from a matching one until the next
+    // snapshot, as from a room that went silent until it was asked for everything again.
+    #[cfg(any(test, feature = "lab-faults"))]
+    let mut frozen = false;
     while let Some(ev) = rx.recv().await {
+        #[cfg(any(test, feature = "lab-faults"))]
+        match &ev {
+            GuestEvent::Snapshot(_) => frozen = false,
+            GuestEvent::Frame(frame) if frozen || crate::lab::freezes(frame) => {
+                if !std::mem::replace(&mut frozen, true) {
+                    warn!(session = %sid, "lab: the collab room goes silent here");
+                }
+                continue;
+            }
+            _ => {}
+        }
         let Some(inner) = weak.upgrade() else { return };
         let now = now_ms();
         // Why the guest ended, and how the rejoin is paced (`None`: rotation or close, at once).
@@ -1760,6 +1880,8 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
                     };
                     st.set_link(status);
                     timeouts = 0;
+                    // Everything omp has, again: whatever the settle watchdog asked for is done.
+                    st.settle.resynced();
                 }
                 GuestEvent::Reconnecting { code, reason, timed_out, .. } => {
                     st.set_link(reconnect_status(*code, reason, *timed_out));
@@ -1786,11 +1908,19 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
                         EndReason::Closed => (LinkStatus::connecting(LinkReason::Joining, via, "left the collab room"), "left the collab room".into(), None),
                     };
                     st.set_link(status);
+                    // The room is gone, not the session (that is `bye`): it stays, replica and
+                    // subscribers, its file serving it ([`crate::settle`]) until a join takes it back.
+                    if pace.is_some() {
+                        st.transport = Transport::Detached;
+                        st.room_lost = Some(Instant::now());
+                    }
                     ended = Some((msg, pace));
                 }
                 GuestEvent::Frame(_) => {}
             }
-            let update = st.replica.apply(&ev, now);
+            // A room that left the session ends nothing for its subscribers.
+            let kept = matches!(st.transport, Transport::Detached) && st.room_lost.is_some();
+            let update = if kept { tf_collab::Update::default() } else { st.replica.apply(&ev, now) };
             let usage = session.absorb(&mut st, &update);
             (update, usage, room)
         };
@@ -1805,7 +1935,11 @@ async fn pump(weak: Weak<Inner>, session: Arc<OmpSession>, mut rx: tokio::sync::
         if let Some((reason, pace)) = ended {
             info!(session = %sid, "guest ended: {reason}");
             let (instance, generation, room_id) = room;
-            inner.forget(&session, &reason);
+            if pace.is_none() {
+                inner.forget(&session, &reason);
+            } else {
+                let _ = inner.updates.send(OmpUpdate::Registry);
+            }
             if let Some(kind) = pace {
                 // Rejoin through the registry after a backoff: a room that ends right after every
                 // join must not spin.

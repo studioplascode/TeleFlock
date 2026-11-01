@@ -1,7 +1,7 @@
 import { ArrowUp, ChevronRight, MoreVertical, PanelBottomOpen } from "lucide-react";
 import { AnimatePresence, animate, motion, useDragControls, useMotionValue, useTransform, type PanInfo } from "motion/react";
 import { type RefObject, useEffect, useRef, useState } from "react";
-import { agentKey as makeKey, navigate, parseAgentKey, useAgent, useColumnKeys, useInbox } from "@/core";
+import { agentKey as makeKey, navigate, parseAgentKey, useAgent, useColumnKeys, useHosts, useInbox } from "@/core";
 import { AgentGlyph, BottomSheet, cn, IconButton, Skeleton, spring, StatusOrb, StatusPill, useActivity, useCalmMotion, useIdleReady } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { haptic } from "@/features/shell/haptics";
@@ -9,6 +9,7 @@ import { useFirstUse } from "@/features/shell/hints";
 import { agentStateWord, NEEDS_WORD } from "@/features/shell/vocab";
 import { RecapLine } from "@/features/board/RecapLine";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { HostBadge, HostName, useMultiHost } from "@/features/hosts/HostBadge";
 import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { agentStatus, useBeat } from "../api";
 import { ActionsMenu, FastToggle, GoalChip, ModelThinkingChip, PlanToggle } from "../header/Controls";
@@ -35,6 +36,11 @@ function usePagerKeys(current: string): string[] {
   for (const k of [...needs, ...running]) if (!keys.includes(k)) keys.push(k);
   if (!keys.includes(current)) keys.unshift(current);
   return keys;
+}
+
+/** The host's name while there are several hosts (a lone host is the whole app), else "". */
+function useHostLabel(hostId: string): string {
+  return useHosts((s) => (s.profiles.length > 1 ? (s.profiles.find((p) => p.id === hostId)?.name ?? hostId) : ""));
 }
 
 function openKey(k: string) {
@@ -75,7 +81,7 @@ function SwipeHint({ doneRef }: { doneRef: RefObject<(() => void) | null> }) {
   });
   if (!show) return null;
   return (
-    <span className="flex items-center gap-1 rounded-full bg-[rgb(12_12_18/0.72)] px-2 py-0.5 text-2xs font-semibold text-mute shadow-hairline">
+    <span className="flex items-center gap-1 rounded-full bg-chrome/72 px-2 py-0.5 text-2xs font-semibold text-mute shadow-hairline">
       swipe for next agent
       <motion.span className="grid" animate={calm ? undefined : { x: [0, 5, 0] }} transition={{ duration: 0.9, repeat: 3, ease: "easeInOut" }}>
         <ChevronRight className="size-3" />
@@ -98,7 +104,7 @@ function PagerDots({ keys, current, inline = false, onList, hintDone }: { keys: 
     // Floating: the hint sits beside the dots (one row), so neither reaches the first message below.
     <div className={cn("pointer-events-none flex items-center", inline ? "shrink-0 flex-col pb-1.5" : "absolute inset-x-0 top-0 z-raised justify-center gap-1.5")}>
       <div
-        className={cn("pointer-events-auto mt-0.5 flex items-center rounded-full px-1 select-none", !inline && "bg-[rgb(12_12_18/0.72)] shadow-hairline backdrop-blur-md")}
+        className={cn("pointer-events-auto mt-0.5 flex items-center rounded-full px-1 select-none", !inline && "bg-chrome/72 shadow-hairline backdrop-blur-md")}
         role="tablist"
         aria-label="Agents (hold for the list)"
         onPointerDown={() => {
@@ -139,7 +145,7 @@ function Dot({ k, on }: { k: string; on: boolean }) {
     <button type="button" role="tab" aria-selected={on} aria-label={agent?.name ?? k} onClick={() => openKey(k)} className="grid h-6 min-w-6 place-items-center px-0.5 focus-ring">
       <span
         data-status={status}
-        className={cn("h-1.5 rounded-full transition-all duration-300", on ? "w-5 st-fill" : "w-1.5 bg-white/20", !on && status === "needs-you" && "st-fill opacity-70")}
+        className={cn("h-1.5 rounded-full transition-all duration-300", on ? "w-5 st-fill" : "w-1.5 bg-ink/20", !on && status === "needs-you" && "st-fill opacity-70")}
       />
     </button>
   );
@@ -149,8 +155,10 @@ function Dot({ k, on }: { k: string; on: boolean }) {
 function PagerRow({ k, current, onPick }: { k: string; current: boolean; onPick: () => void }) {
   const agent = useAgent(k);
   const herdr = useHerdrDown(agent?.hostId ?? "");
+  const host = useHostLabel(agent?.hostId ?? "");
   if (!agent) return null;
   const status = herdr ? herdrOrbStatus(herdr) : agentStatus(agent);
+  const what = agent.title || [agent.repo, agent.branch].filter(Boolean).join(" · ");
   return (
     <button
       type="button"
@@ -158,13 +166,17 @@ function PagerRow({ k, current, onPick }: { k: string; current: boolean; onPick:
       aria-current={current || undefined}
       className={cn(
         "flex min-h-14 w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left pressable focus-ring",
-        current ? "bg-accent/12 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.035]",
+        current ? "bg-accent/12 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "bg-ink/[0.035]",
       )}
     >
       <AgentGlyph name={agent.name} size={32} status={status} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-md font-bold text-ink">{agent.name}</span>
-        <span className="block truncate text-xs text-mute">{agent.title || [agent.repo, agent.branch].filter(Boolean).join(" · ")}</span>
+        <span className="block truncate text-xs text-mute">
+          {host && <HostName name={host} />}
+          {host && what && " · "}
+          {what}
+        </span>
       </span>
       <StatusPill status={status} size="sm">
         {herdr ? herdrAgentWord(herdr) : agentStateWord(agent)}
@@ -181,6 +193,7 @@ function NextWaiting({ current, onGo }: { current: string; onGo: (k: string) => 
   const others = useInbox().filter((k) => k !== current);
   const first = others[0];
   const agent = useAgent(first ?? "");
+  const host = useHostLabel(agent?.hostId ?? "");
   return (
     <AnimatePresence initial={false}>
       {first && agent && (
@@ -196,10 +209,14 @@ function NextWaiting({ current, onGo }: { current: string; onGo: (k: string) => 
           className="pressable focus-ring mx-auto flex min-h-11 w-full shrink-0 items-center gap-2 rounded-full st-soft st-ring px-4 text-left text-[13px] font-bold"
         >
           <ArrowUp className="size-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">
-            Next: {agent.name}
-            {agent.needs && <span className="font-semibold opacity-85"> · {NEEDS_WORD[agent.needs.kind]}</span>}
-            {others.length > 1 && <span className="font-semibold opacity-70"> · {others.length - 1} more</span>}
+          <span className="flex min-w-0 flex-1">
+            <span className="min-w-0 truncate">
+              Next: {agent.name}
+              {agent.needs && <span className="font-semibold opacity-85"> · {NEEDS_WORD[agent.needs.kind]}</span>}
+              {others.length > 1 && <span className="font-semibold opacity-70"> · {others.length - 1} more</span>}
+            </span>
+            {/* The host last, in the room that is left: a long name never hides what is asked or how many wait. */}
+            {host && <span className="min-w-0 flex-1 truncate font-semibold opacity-70">{`\u00a0· ${host}`}</span>}
           </span>
           <ChevronRight className="size-4 shrink-0" />
         </motion.button>
@@ -274,6 +291,8 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
   const omp = agent?.omp != null && agent.omp.link === "live";
   // Non-omp agents open straight onto a terminal: its first row would sit under floating dots.
   const terminal = agent != null && agent.omp == null;
+  const multiHost = useMultiHost();
+  const where = agent ? [agent.repo, agent.branch].filter(Boolean).join(" · ") || agent.title : undefined;
   return (
     <div className="flex h-full min-h-0 flex-col" data-status={status} data-session-root={key}>
       <MobileHeader
@@ -286,7 +305,17 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
             </span>
           </span>
         }
-        subtitle={agent ? [agent.repo, agent.branch].filter(Boolean).join(" · ") || agent.title : undefined}
+        subtitle={
+          agent && multiHost ? (
+            // The host chip keeps a floor of its own width; the repo and branch take the rest.
+            <span className="flex min-w-0 items-center gap-1.5">
+              <HostBadge hostId={hostId} className="max-w-[45%]" />
+              {where && <span className="min-w-0 truncate">{where}</span>}
+            </span>
+          ) : (
+            where
+          )
+        }
         actions={
           omp ? (
             <>

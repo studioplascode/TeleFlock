@@ -66,7 +66,7 @@ function SourceHeader({ source, onChange }: { source: Source; onChange(): void }
   const homepage = t?.homepage ?? e?.homepage;
   const link = linkProps(homepage);
   return (
-    <div className="flex items-center gap-3 rounded-lg bg-white/[0.03] p-3 shadow-hairline">
+    <div className="flex items-center gap-3 rounded-lg bg-ink/[0.03] p-3 shadow-hairline">
       {t ? <LetterMark mark={t.mark} color={t.color} ink={t.ink} /> : <LetterMark mark={title.slice(0, 2)} color="#7c6cf8" />}
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-2">

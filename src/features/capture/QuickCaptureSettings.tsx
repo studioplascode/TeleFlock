@@ -126,7 +126,7 @@ export function QuickCaptureSettings({ index }: { index: number }) {
             type="button"
             onKeyDown={onRecordKey}
             onBlur={() => setRecording(false)}
-            className="focus-ring rounded-md bg-accent/14 px-3 py-1.5 text-xs font-bold text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)]"
+            className="focus-ring rounded-md bg-accent/14 px-3 py-1.5 text-xs font-bold text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_45%,transparent)]"
           >
             Press the new shortcut… (Esc cancels)
           </button>

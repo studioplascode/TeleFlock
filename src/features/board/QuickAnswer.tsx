@@ -1,4 +1,4 @@
-import { MessageCircle, PenLine, Send } from "lucide-react";
+import { ArrowLeft, MessageCircle, PenLine, Send } from "lucide-react";
 import { motion, useIsPresent } from "motion/react";
 import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { answerDraftKey, openSession, useAgent, useCore, useDraft } from "@/core";
@@ -14,7 +14,7 @@ export type QuickAnswerAppearance = "card" | "hero" | "big";
 const CHIP: Record<QuickAnswerAppearance, { base: string; action: string; neutral: string }> = {
   card: {
     base: "min-h-7 rounded-sm px-2.5 text-2xs font-bold",
-    action: "bg-sun text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.3),0_6px_16px_-6px_rgb(255_61_119/0.7)] hover:brightness-110",
+    action: "bg-sun text-on-sun shadow-[inset_0_1px_0_rgb(255_255_255/0.3),0_6px_16px_-6px_color-mix(in_srgb,var(--color-sun-2)_70%,transparent)] hover:brightness-110",
     neutral: "bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5",
   },
   hero: {
@@ -24,7 +24,7 @@ const CHIP: Record<QuickAnswerAppearance, { base: string; action: string; neutra
   },
   big: {
     base: "min-h-11 rounded-lg px-3.5 py-2.5 text-sm font-bold text-left",
-    action: "bg-sun text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-sun)]",
+    action: "bg-sun text-on-sun shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-sun)]",
     neutral: "bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] active:bg-tile-5",
   },
 };
@@ -34,7 +34,8 @@ const CHIP: Record<QuickAnswerAppearance, { base: string; action: string; neutra
  * drawn with the shared option model (`features/inbox/AnswerParts`): options with their
  * descriptions, multi-select, "Other…" free text, "Chat about this", Confirm / Cancel for bare
  * confirms, a textarea for input requests on roomy surfaces ("Answer…" → HUD on cards), or the
- * terminal when the dialog isn't answerable in-app.
+ * terminal when the dialog isn't answerable in-app. A multi-question ask shows "Question 2 of 3" and
+ * Back (`needs.step`); a question Back brought up again shows the answer it had.
  */
 export function QuickAnswer({
   agentKey,
@@ -67,12 +68,19 @@ export function QuickAnswer({
   const needs = useAgent(agentKey)?.needs;
   const requestId = needs?.requestId ?? "";
   const live = !!needs?.answerable && requestId !== "";
-  const [sent, setSent] = useState<{ requestId: string; label: string } | null>(null);
+  const step = needs?.step;
+  const canBack = !!step?.canBack;
+  // The answer this question already has (Back brought it up again): its options show picked, else
+  // its typed text fills Other.
+  const earlier = step?.choices?.filter((id) => needs?.options.some((o) => o.id === id)) ?? [];
+  const [sent, setSent] = useState<{ requestId: string; label: string; back?: boolean } | null>(null);
   const [pending, setPending] = useState<string | null>(null);
-  // null = untouched: the "Other…" field shows on its own when a typed answer is waiting
-  const [otherOpen, setOtherOpen] = useState<boolean | null>(null);
-  const [otherText, setOtherText, clearOther] = useDraft(answerDraftKey(agentKey, requestId, "other"));
-  const [picked, setPicked] = useState<string[]>([]);
+  // Per request (cards outlive their questions); null = untouched: the "Other…" field shows on its own when a typed answer is waiting
+  const [otherState, setOtherState] = useState<{ requestId: string; open: boolean } | null>(null);
+  const otherOpen = otherState?.requestId === requestId ? otherState.open : null;
+  const [otherText, setOtherText, clearOther] = useDraft(answerDraftKey(agentKey, requestId, "other"), earlier.length === 0 ? (step?.text ?? "") : "");
+  const [pickState, setPickState] = useState<{ requestId: string; ids: string[] } | null>(null);
+  const picked = pickState?.requestId === requestId ? pickState.ids : needs?.multi ? earlier : [];
   const otherRef = useRef<HTMLInputElement>(null);
   // a HUD card sliding out keeps its props; only the one on screen takes number keys
   const present = useIsPresent();
@@ -94,10 +102,10 @@ export function QuickAnswer({
     setPending(label);
     try {
       await answerAgent(agentKey, requestId, { choices: [], cancel: false, chat: false, ...answer });
-      setSent({ requestId, label });
+      setSent({ requestId, label, back: answer.back });
       clearOther();
       clearText();
-      onAnswered?.();
+      if (!answer.back) onAnswered?.();
     } catch {
       // answerAgent already toasted the error; keep the controls so the user can retry.
     } finally {
@@ -106,18 +114,25 @@ export function QuickAnswer({
   };
   // On a multi-select, a typed answer replaces the ticks (the host takes text only without choices).
   const showOther = !!needs?.allowOther && (otherOpen ?? otherText !== "");
+  // A single-select's earlier answer shows picked (a tap on any option answers, that one included).
+  const chosen = !needs?.multi && !showOther ? earlier[0] : undefined;
   const onOption = (o: NeedsOption) => {
     if (!needs?.multi) void send(o.label, optionAnswer(o.id));
-    else if (!showOther) setPicked((p) => (p.includes(o.id) ? p.filter((x) => x !== o.id) : [...p, o.id]));
+    else if (!showOther) setPickState({ requestId, ids: picked.includes(o.id) ? picked.filter((x) => x !== o.id) : [...picked, o.id] });
   };
   const openOther = () => {
-    setOtherOpen(true);
-    setPicked([]);
+    setOtherState({ requestId, open: true });
+    setPickState({ requestId, ids: [] });
     window.setTimeout(() => otherRef.current?.focus(), 0);
   };
-  /** 1…N picks an option, N+1 opens Other. */
+  /** 1…N picks an option, N+1 opens Other, ← goes back (Back ends this request; the previous question arrives as a new one). */
   const pickByKey = (key: string): boolean => {
-    if (!live || busy || answered || !/^[1-9]$/.test(key)) return false;
+    if (!live || busy || answered) return false;
+    if (key === "ArrowLeft" && canBack) {
+      void send("Back", { back: true });
+      return true;
+    }
+    if (!/^[1-9]$/.test(key)) return false;
     const i = Number(key) - 1;
     const o = options[i];
     if (o) onOption(o);
@@ -160,10 +175,18 @@ export function QuickAnswer({
   }
 
   if (answered) {
+    if (sent.back) {
+      return (
+        <div className={cn("flex items-center gap-2 text-xs font-bold", appearance === "hero" ? "text-white" : "text-mute", className)}>
+          <Spinner size={12} label="Going back" />
+          Back to the previous question…
+        </div>
+      );
+    }
     return (
       <motion.div {...popIn} className={cn("flex items-center gap-2 text-xs font-bold", appearance === "hero" ? "text-white" : "text-ink", className)}>
         <motion.span
-          className="grid size-5 place-items-center rounded-full bg-done text-[#1a2e05]"
+          className="grid size-5 place-items-center rounded-full bg-done text-on-done"
           initial={{ scale: 0, rotate: -90 }}
           animate={{ scale: 1, rotate: 0 }}
           transition={spring.bouncy}
@@ -214,6 +237,25 @@ export function QuickAnswer({
 
   return (
     <div className={cn("flex flex-col gap-1.5", className)} onClick={stop} onPointerDown={stop} onKeyDown={onRootKey}>
+      {step && (
+        <div className={cn("flex flex-wrap items-center gap-x-2 gap-y-1 font-bold", rowed ? "text-xs" : "text-2xs")}>
+          <span className="text-mute tabular">
+            Question {step.index + 1} of {step.total}
+          </span>
+          {canBack && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void send("Back", { back: true })}
+              title={hotkeys || numbered ? "Previous question (←)" : "Previous question"}
+              className={cn(chip.base, chip.neutral, "pressable focus-ring inline-flex items-center gap-1.5 disabled:opacity-50", appearance === "big" && "min-h-9 py-1.5")}
+            >
+              {pending === "Back" ? <Spinner size={12} label="Going back" /> : <ArrowLeft className="size-3.5" aria-hidden />}
+              Back
+            </button>
+          )}
+        </div>
+      )}
       {textarea ? (
         <div className="flex flex-col gap-1.5">
           <textarea
@@ -272,7 +314,7 @@ export function QuickAnswer({
                 option={o}
                 number={numbered && i < 9 ? i + 1 : undefined}
                 multi={needs.multi}
-                on={needs.multi && picked.includes(o.id)}
+                on={needs.multi ? picked.includes(o.id) : o.id === chosen}
                 pending={pending === o.label}
                 describe={describe}
                 disabled={busy || (needs.multi && showOther)}
@@ -324,7 +366,7 @@ export function QuickAnswer({
                   onChange={(e) => setOtherText(e.target.value)}
                   onKeyDown={(e) => {
                     e.stopPropagation();
-                    if (e.key === "Escape") setOtherOpen(false);
+                    if (e.key === "Escape") setOtherState({ requestId, open: false });
                   }}
                   placeholder={needs.multi ? "Your own answer (replaces the ticks)…" : "Type your own answer…"}
                   aria-label="Your answer"

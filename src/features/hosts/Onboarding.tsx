@@ -72,7 +72,7 @@ export function Onboarding() {
             <motion.li
               key={f.text}
               variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0, transition: spring.smooth } }}
-              className="flex items-center gap-2 rounded-full bg-white/5 px-3 py-1.5 text-xs font-semibold text-ink-2 shadow-hairline"
+              className="flex items-center gap-2 rounded-full bg-ink/5 px-3 py-1.5 text-xs font-semibold text-ink-2 shadow-hairline"
             >
               <StatusOrb status={f.status} size={7} label={null} />
               {f.text}
@@ -89,13 +89,13 @@ export function Onboarding() {
                   haptic("select");
                   openDialog({ kind: "hostEditor" });
                 }}
-                className="group flex h-full w-full flex-col items-start gap-3 rounded-tile p-6 text-left text-white pressable focus-ring max-md:gap-2 max-md:p-4 [background:radial-gradient(110%_120%_at_100%_0%,rgb(240_83_208/0.9)_0%,transparent_60%),linear-gradient(135deg,#a15eef,#7fa2e7)] shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-accent)]"
+                className="group flex h-full w-full flex-col items-start gap-3 rounded-tile p-6 text-left text-on-accent pressable focus-ring max-md:gap-2 max-md:p-4 [background:radial-gradient(110%_120%_at_100%_0%,color-mix(in_srgb,var(--color-omp-pink)_90%,transparent)_0%,transparent_60%),linear-gradient(135deg,var(--color-omp-purple),var(--color-omp-blue))] shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-accent)]"
               >
-                <span className="grid size-11 place-items-center rounded-lg bg-white/20 [&_svg]:size-5">
+                <span className="grid size-11 place-items-center rounded-lg bg-on-accent/20 [&_svg]:size-5">
                   <Network />
                 </span>
                 <span className="font-display text-2xl font-bold">Add your herdr host</span>
-                <span className="text-sm text-white/85">Over Tailscale SSH, no keys to copy. On desktop also this computer, or a WSL distro on Windows.</span>
+                <span className="text-sm text-on-accent/85">Over Tailscale SSH, no keys to copy. On desktop also this computer, or a WSL distro on Windows.</span>
                 <span className="mt-auto inline-flex items-center gap-1.5 pt-2 text-sm font-extrabold">
                   Set it up <ArrowRight className="size-4 transition-transform group-hover:translate-x-1" />
                 </span>

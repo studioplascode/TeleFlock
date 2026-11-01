@@ -3,17 +3,30 @@ import { motion } from "motion/react";
 import { CaseSensitive, ChevronDown, ChevronUp, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useDraft } from "@/core";
-import { IconButton, cn, spring, tween } from "@/design";
+import { IconButton, cn, over, parseColor, readThemeColor, spring, tween, useThemeVersion, withAlpha } from "@/design";
 
-/** Search highlight colours (the addon wants #RRGGBB). */
-const DECORATIONS = {
-  matchBackground: "#3b2a55",
-  matchBorder: "#7d3fd0",
-  matchOverviewRuler: "#a35cf0",
-  activeMatchBackground: "#a35cf0",
-  activeMatchBorder: "#f053d0",
-  activeMatchColorOverviewRuler: "#f053d0",
-};
+/** `rgba()` → `#rrggbb` over `under` (the addon wants #RRGGBB). */
+function hex(color: string, under = "#07070b"): string {
+  const base = parseColor(under) ?? { r: 7, g: 7, b: 11, a: 1 };
+  const c = over(parseColor(color) ?? base, base);
+  return `#${[c.r, c.g, c.b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Search highlight colours from the current theme (`_version`: re-read per theme version): accent matches, the omp pink for the active one. */
+function searchDecorations(_version: number) {
+  const bg = readThemeColor("--term-bg", "#07070b");
+  const accent = readThemeColor("--color-accent", "#a35cf0");
+  const pink = readThemeColor("--color-omp-pink", "#f053d0");
+  const mark = hex(accent, bg);
+  return {
+    matchBackground: hex(withAlpha(accent, 0.35), bg),
+    matchBorder: hex(readThemeColor("--color-accent-lo", "#7d3fd0"), bg),
+    matchOverviewRuler: mark,
+    activeMatchBackground: mark,
+    activeMatchBorder: hex(pink, bg),
+    activeMatchColorOverviewRuler: hex(pink, bg),
+  };
+}
 
 export interface SearchBarProps {
   search: SearchAddon;
@@ -44,7 +57,8 @@ export function SearchBar({ search, frameTick, onClose, draftKey }: SearchBarPro
     };
   }, [search]);
 
-  const opts = { caseSensitive, decorations: DECORATIONS };
+  const themeVersion = useThemeVersion();
+  const opts = { caseSensitive, decorations: searchDecorations(themeVersion) };
   const find = (dir: "next" | "prev", incremental = false) => {
     if (!query) {
       search.clearDecorations();
@@ -73,7 +87,7 @@ export function SearchBar({ search, frameTick, onClose, draftKey }: SearchBarPro
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -6, scale: 0.98, transition: tween.fast }}
       transition={spring.snappy}
-      className="absolute top-2 right-3 z-raised flex items-center gap-1 rounded-md bg-[linear-gradient(180deg,rgb(34_34_46/0.97),rgb(25_25_33/0.97))] p-1 pl-2.5 shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] backdrop-blur-xl"
+      className="absolute top-2 right-3 z-raised flex items-center gap-1 rounded-md bg-[linear-gradient(180deg,color-mix(in_srgb,var(--color-pop-1)_97%,transparent),color-mix(in_srgb,var(--color-pop-2)_97%,transparent))] p-1 pl-2.5 shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] backdrop-blur-xl"
       // Keep clicks here from bubbling to the pane, which focuses the terminal on click.
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
@@ -101,7 +115,7 @@ export function SearchBar({ search, frameTick, onClose, draftKey }: SearchBarPro
       />
       <span
         aria-live="polite"
-        className={cn("min-w-14 text-right font-mono text-2xs font-bold tabular-nums", query && result.count === 0 ? "text-[#ff8aa5]" : "text-mute")}
+        className={cn("min-w-14 text-right font-mono text-2xs font-bold tabular-nums", query && result.count === 0 ? "text-error-ink" : "text-mute")}
       >
         {label}
       </span>

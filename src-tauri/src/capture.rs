@@ -272,6 +272,8 @@ pub fn show<R: Runtime>(app: &AppHandle<R>) {
             .build();
         match built {
             Ok(w) => {
+                #[cfg(target_os = "linux")]
+                crate::edit_keys::install(&w);
                 place(&app, &w);
                 let _ = w.show();
                 let _ = w.set_focus();

@@ -199,6 +199,7 @@ function useEntries(): Entry[] {
     { id: "usage", keys: ["cost", "tokens", "spend", "limits", "subscription"] },
     { id: "wrapped", keys: ["wrapped", "week", "weekly", "digest", "recap", "summary", "share", "stats", "image"] },
     { id: "hosts", keys: ["machines", "connections"] },
+    { id: "forward", keys: ["forwarding", "forward", "tf-forward", "relay", "shell", "ssh", "agent-browser", "browser", "cdp", "port", "tunnel", "tools", "another host", "headed"] },
     { id: "settings", keys: ["preferences", "options"] },
     { id: "automations", keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
     { id: "omp", keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },

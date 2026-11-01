@@ -1122,6 +1122,10 @@ const URL_ARG = /^[a-z][a-z0-9+.-]*:\/\//i;
 /** hostd's `is_reference`: `${VAR}` (after an optional scheme word) or `!command` holds no secret itself. */
 const REFERENCE = /^\s*(!|((bearer|basic|token) )?\$\{[A-Za-z_]\w*\}\s*$)/i;
 
+const AUTH_HEADER = /^(proxy-)?authorization$/i;
+const SCHEME = /^(bearer|basic|token) /i;
+const SCHEME_MASK = new RegExp(`^((?:bearer|basic|token) )${DEMO_SECRET_MASK}$`, "i");
+
 /** `Bearer sk-…` → `Bearer ••••••••` (the scheme stays readable), else the mask. */
 function maskedToken(v: string): string {
   const m = /^(bearer |basic |token )\S/i.exec(v);
@@ -1194,7 +1198,12 @@ function maskUrl(url: string | undefined): string | undefined {
 /** The definition as listed: credentials replaced by the mask. */
 function maskDraft(d: McpServerDraft): McpServerDraft {
   const kv = (x: McpKeyValue): McpKeyValue => (secretName(x.key) && x.value !== "" ? { key: x.key, value: DEMO_SECRET_MASK, secret: true } : { key: x.key, value: x.value, secret: false });
-  const out: McpServerDraft = { ...structuredClone(d), args: maskArgs(d.args), env: d.env.map(kv), headers: d.headers.map(kv), url: maskUrl(d.url) };
+  // An authorization header keeps its scheme readable (`Bearer ••••••••`), as hostd's `mask_headers` does.
+  const header = (x: McpKeyValue): McpKeyValue => {
+    const m = kv(x);
+    return m.value === DEMO_SECRET_MASK && AUTH_HEADER.test(x.key) ? { ...m, value: maskedToken(x.value) } : m;
+  };
+  const out: McpServerDraft = { ...structuredClone(d), args: maskArgs(d.args), env: d.env.map(kv), headers: d.headers.map(header), url: maskUrl(d.url) };
   if (d.oauth) out.oauth = { ...d.oauth, clientSecret: d.oauth.clientSecret ? DEMO_SECRET_MASK : undefined };
   if (out.url === undefined) delete out.url;
   return out;
@@ -1209,10 +1218,19 @@ function unmaskDraft(d: McpServerDraft, old: McpServerDraft | undefined): McpSer
   const out = structuredClone(d);
   const kvs = (list: McpKeyValue[], prev: McpKeyValue[] | undefined, what: string, fold: boolean) =>
     list.map((x) => {
-      if (x.value !== DEMO_SECRET_MASK) return x;
+      // In headers `Bearer ••••••••` keeps the stored credential when it was saved with that scheme.
+      const scheme = fold ? SCHEME_MASK.exec(x.value)?.[1] : undefined;
       const hit = prev?.find((y) => (fold ? y.key.toLowerCase() === x.key.toLowerCase() : y.key === x.key));
+      if (x.value !== DEMO_SECRET_MASK && scheme === undefined) {
+        // A mask that stands for no stored value (`Bearer  ••••••••`, typed into a value) is never stored as text.
+        if (fold && x.value.includes(DEMO_SECRET_MASK) && hit?.value !== x.value) masked(`${what}: enter the value of \`${x.key}\` again`, "Its saved value is hidden.");
+        return x;
+      }
       if (!hit) masked(`${what}: enter the value of \`${x.key}\` again`);
-      return { ...x, value: hit.value };
+      if (scheme === undefined) return { ...x, value: hit.value };
+      const had = SCHEME.exec(hit.value)?.[0] ?? "";
+      if (had.toLowerCase() !== scheme.toLowerCase()) masked(`${what}: enter the value of \`${x.key}\` again`, "Its saved value is hidden and was saved with another scheme.");
+      return { ...x, value: `${scheme}${hit.value.slice(had.length)}` };
     });
   out.env = kvs(out.env, old?.env, "env", false);
   out.headers = kvs(out.headers, old?.headers, "headers", true);

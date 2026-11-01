@@ -125,7 +125,7 @@ function HitCard({ hit, list, cwd, projectName, busy, onInstall }: { hit: SkillS
   const now = useNow(60_000);
   const installed = hitInstalled(hit, list);
   return (
-    <li className="flex min-w-0 flex-col gap-2 rounded-lg bg-white/[0.03] p-3 shadow-hairline">
+    <li className="flex min-w-0 flex-col gap-2 rounded-lg bg-ink/[0.03] p-3 shadow-hairline">
       <div className="flex min-w-0 items-start gap-3">
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 items-center gap-2">
@@ -148,7 +148,7 @@ function HitCard({ hit, list, cwd, projectName, busy, onInstall }: { hit: SkillS
         {hit.weeklyDownloads > 0 && <span className="tabular">{formatCompact(hit.weeklyDownloads)}/week</span>}
         <span title={new Date(hit.updatedAt).toLocaleString()}>updated {formatAge(now - hit.updatedAt)}</span>
         {hit.keywords.slice(0, 4).map((k) => (
-          <span key={k} className="rounded-full bg-white/[0.05] px-1.5 py-px">
+          <span key={k} className="rounded-full bg-ink/[0.05] px-1.5 py-px">
             {k}
           </span>
         ))}
@@ -240,7 +240,7 @@ export function SkillSearch({
                 key={w}
                 type="button"
                 onClick={() => s.setText(w)}
-                className="h-7 rounded-full bg-white/6 px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-white/10 hover:text-ink"
+                className="h-7 rounded-full bg-ink/6 px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-ink/10 hover:text-ink"
               >
                 {w}
               </button>
@@ -262,7 +262,7 @@ export function SkillSearch({
           ))}
         </div>
       ) : s.hits.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 rounded-lg bg-white/[0.018] px-4 py-6 text-center shadow-hairline">
+        <div className="flex flex-col items-center gap-2 rounded-lg bg-ink/[0.018] px-4 py-6 text-center shadow-hairline">
           <p className="text-sm font-bold text-ink">Nothing on {host} matches “{s.query}”</p>
           <p className="max-w-md text-xs text-mute">
             The registry is young and still small. Skills also come with marketplace plugins, and any folder with a SKILL.md in ~/.omp/agent/skills (or a project's .omp/skills) is one.

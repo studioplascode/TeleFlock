@@ -344,6 +344,9 @@ pub enum AppEvent {
     /// dismissed in the OS.
     NotifyDone { host_id: String, ids: Vec<String>, resolved: bool },
     Tunnels { tunnels: Vec<TunnelInfo> },
+    /// Forwarding rules, their status and active streams (`forward.list` returns the same): after
+    /// every change; byte counters at most every ~2 s.
+    Forwards { forwards: crate::forward::ForwardList },
     Settings { settings: Settings },
     /// Activated a notification action outside the app UI (Android notification button,
     /// Windows toast). The frontend navigates to the agent.

@@ -55,7 +55,7 @@ function Step({ n, done, active, last, title, children }: { n: number; done?: bo
         <span
           className={cn(
             "grid size-7 shrink-0 place-items-center rounded-full text-xs font-extrabold transition-colors",
-            done ? "bg-done/18 text-done" : active ? "bg-accent/20 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.5)]" : "bg-white/6 text-mute",
+            done ? "bg-done/18 text-done" : active ? "bg-accent/20 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_50%,transparent)]" : "bg-ink/6 text-mute",
           )}
           aria-hidden
         >
@@ -89,7 +89,7 @@ function Callout({ tone, icon, children }: { tone: "warn" | "error" | "info"; ic
         "flex items-start gap-2.5 rounded-lg px-3 py-2.5 text-xs font-semibold [&>svg]:mt-0.5 [&>svg]:size-3.5 [&>svg]:shrink-0",
         tone === "warn" && "bg-warn/10 text-warn",
         tone === "error" && "bg-error/10 text-error",
-        tone === "info" && "bg-white/[0.04] text-mute shadow-[inset_0_0_0_1px_var(--color-line-2)]",
+        tone === "info" && "bg-ink/[0.04] text-mute shadow-[inset_0_0_0_1px_var(--color-line-2)]",
       )}
     >
       {icon}
@@ -115,7 +115,7 @@ function TunnelChip({ tunnel, host }: { tunnel: RemoteAuthTunnel; host: string }
       className={cn(
         "inline-flex max-w-full items-center gap-1.5 self-start rounded-full px-2.5 py-1 font-mono text-[11px] font-semibold",
         tone === "ok" && "bg-done/10 text-done",
-        tone === "busy" && "bg-white/6 text-mute",
+        tone === "busy" && "bg-ink/6 text-mute",
         tone === "bad" && "bg-warn/10 text-warn",
       )}
       title={tunnel.state === "open" ? "The provider sends your browser back to this address; TeleFlock forwards it to the host's sign-in." : undefined}
@@ -314,7 +314,7 @@ function Running({ auth, name, host }: { auth: RemoteAuth; name: string; host: s
           </ol>
           {auth.opened && <Progress text={message || "Waiting for you to finish in the browser…"} />}
           {auth.paste === "fallback" && (
-            <div className="rounded-lg bg-white/[0.025] px-3 py-2.5 shadow-[inset_0_0_0_1px_var(--color-line)]">
+            <div className="rounded-lg bg-ink/[0.025] px-3 py-2.5 shadow-[inset_0_0_0_1px_var(--color-line)]">
               <button
                 type="button"
                 className="flex w-full items-center gap-2 rounded-xs text-left text-xs font-bold text-ink-2 focus-ring"
@@ -391,7 +391,7 @@ function Running({ auth, name, host }: { auth: RemoteAuth; name: string; host: s
           <ol className="flex flex-col">
             <Step n={1} active title="Your one-time code">
               <div className="flex items-center gap-2">
-                <code className="rounded-lg bg-[rgb(10_10_16/0.7)] px-4 py-2.5 font-mono text-2xl font-bold tracking-[0.18em] text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] select-all max-md:text-xl">
+                <code className="rounded-lg bg-well-2 px-4 py-2.5 font-mono text-2xl font-bold tracking-[0.18em] text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] select-all max-md:text-xl">
                   {code}
                 </code>
                 <CopyButton copy={auth.copyCode} label="Copy code" variant="secondary" size="md" />
@@ -461,7 +461,7 @@ function Final({ auth, name, icon, host, onClose, doneLabel, doneDetail }: { aut
   if (stage === "done") {
     return (
       <div className="flex flex-col items-center gap-3 py-4 text-center">
-        <motion.div {...popIn} className="relative grid size-16 place-items-center rounded-full bg-done/14 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.35),0_0_40px_-8px_rgb(163_230_53/0.55)]">
+        <motion.div {...popIn} className="relative grid size-16 place-items-center rounded-full bg-done/14 text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_35%,transparent),0_0_40px_-8px_color-mix(in_srgb,var(--color-done)_55%,transparent)]">
           <Check className="size-8" strokeWidth={2.6} />
           {icon && <span className="absolute -right-1 -bottom-1">{icon}</span>}
         </motion.div>

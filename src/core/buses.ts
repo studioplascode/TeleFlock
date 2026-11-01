@@ -1,12 +1,17 @@
 import type { Pulse, TermEvent } from "@/core/gen";
+import { failureReporter } from "./failures";
 import { agentKey } from "./keys";
+
+const pulseFailed = failureReporter("pulse listener");
+const termFailed = failureReporter("terminal listener");
 
 export type PulseListener = (p: Pulse, at: number) => void;
 export type PulseAllListener = (key: string, p: Pulse, at: number) => void;
 
 /**
  * Liveness ticks per agent, delivered imperatively (no React state): drive heartbeats and
- * orbs from refs. Keys are agent keys (`agentKey(hostId, agentId)`).
+ * orbs from refs. Keys are agent keys (`agentKey(hostId, agentId)`). A subscriber that throws
+ * is reported and skipped; the others still get the pulse.
  */
 class PulseBus {
   private readonly byKey = new Map<string, Set<PulseListener>>();
@@ -35,8 +40,22 @@ class PulseBus {
     for (const p of pulses) {
       const key = agentKey(hostId, p.agentId);
       const set = this.byKey.get(key);
-      if (set) for (const cb of set) cb(p, at);
-      for (const cb of this.all) cb(key, p, at);
+      if (set) {
+        for (const cb of set) {
+          try {
+            cb(p, at);
+          } catch (err) {
+            pulseFailed(err);
+          }
+        }
+      }
+      for (const cb of this.all) {
+        try {
+          cb(key, p, at);
+        } catch (err) {
+          pulseFailed(err);
+        }
+      }
     }
   }
 }
@@ -54,7 +73,8 @@ const TERM_BUFFER_TTL = 15_000;
 /**
  * Terminal output per open terminal. Events for terminals nobody listens to yet are buffered
  * (from the last full frame on; ≤ 256 events, 15 s) and replayed to the first subscriber, so a
- * `term.open` caller never misses the initial full frame.
+ * `term.open` caller never misses the initial full frame. A subscriber that throws is reported
+ * and skipped; the others (and the rest of a replay) still get every event.
  */
 class TermBus {
   private readonly subs = new Map<string, Set<TermListener>>();
@@ -71,7 +91,13 @@ class TermBus {
     const buf = this.buffers.get(id);
     if (buf) {
       this.buffers.delete(id);
-      for (const ev of buf.events) cb(ev);
+      for (const ev of buf.events) {
+        try {
+          cb(ev);
+        } catch (err) {
+          termFailed(err);
+        }
+      }
     }
     return () => {
       set.delete(cb);
@@ -83,7 +109,13 @@ class TermBus {
     const id = `${hostId}\u0000${termId}`;
     const set = this.subs.get(id);
     if (set && set.size > 0) {
-      for (const cb of set) cb(ev);
+      for (const cb of set) {
+        try {
+          cb(ev);
+        } catch (err) {
+          termFailed(err);
+        }
+      }
       return;
     }
     const now = Date.now();

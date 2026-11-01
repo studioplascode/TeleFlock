@@ -61,7 +61,7 @@ export function CommandItem({ className, icon, shortcut, children, ...rest }: Co
   return (
     <Cmdk.Item
       className={cn(
-        "flex h-11 cursor-pointer items-center gap-3 rounded-md px-2.5 text-sm font-semibold text-ink-2 select-none data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-40 data-[selected=true]:bg-accent/14 data-[selected=true]:text-ink data-[selected=true]:shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)] [&_svg]:size-4 [&_svg]:text-mute data-[selected=true]:[&_svg]:text-accent-hi",
+        "flex h-11 cursor-pointer items-center gap-3 rounded-md px-2.5 text-sm font-semibold text-ink-2 select-none data-[disabled=true]:cursor-not-allowed data-[disabled=true]:opacity-40 data-[selected=true]:bg-accent/14 data-[selected=true]:text-ink data-[selected=true]:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)] [&_svg]:size-4 [&_svg]:text-mute data-[selected=true]:[&_svg]:text-accent-hi",
         className,
       )}
       {...rest}
@@ -90,7 +90,7 @@ export function CommandDialog({ open, onOpenChange, title = "Command palette", c
       <RadixDialog.Portal>
         <RadixDialog.Overlay className={overlayClass} />
         <RadixDialog.Content
-          className="tf-pop fixed top-[14dvh] left-1/2 z-modal w-[min(640px,calc(100vw-24px))] -translate-x-1/2 overflow-hidden rounded-tile bg-[linear-gradient(180deg,#22222e,#18181f)] shadow-[var(--shadow-d3),0_0_0_1px_rgb(255_255_255/0.09),0_0_80px_-20px_rgb(163_92_240/0.45)] outline-none"
+          className="tf-pop fixed top-[14dvh] left-1/2 z-modal w-[min(640px,calc(100vw-24px))] -translate-x-1/2 overflow-hidden rounded-tile bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] shadow-[var(--shadow-d3),0_0_0_1px_color-mix(in_srgb,var(--color-ink)_9%,transparent),0_0_80px_-20px_color-mix(in_srgb,var(--color-accent)_45%,transparent)] outline-none"
         >
           <RadixDialog.Title className="sr-only">{title}</RadixDialog.Title>
           <RadixDialog.Description className="sr-only">Type a command or search</RadixDialog.Description>

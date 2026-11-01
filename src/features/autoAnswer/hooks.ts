@@ -13,7 +13,7 @@ export function useCountdown(agentKey: string): { countdown: AutoAnswerCountdown
     (s) => currentCountdown(s.agents[agentKey]),
     (a, b) =>
       a === b ||
-      (!!a && !!b && a.requestId === b.requestId && a.status === b.status && a.deadline === b.deadline && a.remainingMs === b.remainingMs && a.picks.join("\n") === b.picks.join("\n")),
+      (!!a && !!b && a.requestId === b.requestId && a.status === b.status && a.deadline === b.deadline && a.remainingMs === b.remainingMs && a.earlier === b.earlier && a.picks.join("\n") === b.picks.join("\n")),
   );
   const now = useNow(cd?.status === "counting" && cd.deadline !== undefined ? 1000 : null);
   return cd ? { countdown: cd, view: countdownState(cd, now) } : null;

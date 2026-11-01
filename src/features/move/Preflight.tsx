@@ -33,7 +33,7 @@ export function TargetPicker({ hosts, value, onChange }: { hosts: TargetHost[]; 
             onClick={() => onChange(h.id)}
             className={cn(
               "flex min-w-0 items-center gap-2 rounded-md px-3 py-2 text-sm font-bold transition-colors focus-ring pressable",
-              on ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]" : "well hover:bg-white/6",
+              on ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "well hover:bg-ink/6",
             )}
           >
             <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: hostAccent(h.color) }} aria-hidden />
@@ -69,7 +69,7 @@ function Issues({ issues }: { issues: MoveIssue[] }) {
           <li
             key={`${i.code}:${n}`}
             data-level={i.level}
-            className={cn("flex gap-2.5 rounded-lg p-3 text-xs", blocker ? "bg-error/10 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]" : "bg-warn/10 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]")}
+            className={cn("flex gap-2.5 rounded-lg p-3 text-xs", blocker ? "bg-error/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]" : "bg-warn/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]")}
           >
             <TriangleAlert className={cn("mt-px size-4 shrink-0", blocker ? "text-error" : "text-warn")} aria-hidden />
             <div className="min-w-0">
@@ -105,7 +105,7 @@ function RepoChoice({ pre, source, probe, home, hostId }: { pre: Preflight; sour
       onClick={onPick}
       className={cn(
         "flex w-full items-start gap-2.5 rounded-md px-3 py-2 text-left transition-colors focus-ring pressable disabled:cursor-not-allowed disabled:opacity-50",
-        on ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]" : "hover:bg-white/6",
+        on ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "hover:bg-ink/6",
       )}
     >
       <FolderGit2 className="mt-0.5 size-4 shrink-0 text-mute" aria-hidden />
@@ -163,7 +163,7 @@ export function PreflightView({ pre, dstHostId, dstLabel, srcLabel }: { pre: Pre
   const choice: MoveChoice = pre.choice;
   return (
     <div className="flex flex-col gap-4">
-      <div className="divide-y divide-white/6 rounded-lg well px-3.5">
+      <div className="divide-y divide-ink/6 rounded-lg well px-3.5">
         <Fact icon={<Bot />} label="Agent">
           {source.parked ? "Parked: its pane is closed already." : "Running on " + srcLabel + ". Its pane closes when the move starts."}
           {source.model && <span className="block text-xs text-mute">{source.model}{source.thinking ? ` · ${source.thinking}` : ""}</span>}

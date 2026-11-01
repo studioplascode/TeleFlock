@@ -26,6 +26,8 @@ import { hostAccent } from "@/features/hosts/kinds";
 import { ShipStepper } from "@/features/review/ShipPanel";
 import { ACTIONS, type AgentStateId, agentStateId, agentStateWord, stateTime } from "@/features/shell/vocab";
 import { archiveWithUndo, canReview, deleteWorktree, openAgent, openTerminal, promptAgent, stopAgent, useMuted } from "./agentActions";
+import { AgentSaid } from "@/features/session/ask/AgentSaid";
+import { withoutQuestion } from "@/features/session/ask/askContext";
 import { resumeNow } from "@/features/session/resume/actions";
 import { ticketActions } from "@/features/session/resume/words";
 import { CardContextMenu, CardMenuButton } from "./CardMenu";
@@ -85,7 +87,7 @@ function ArrivalBurst({ lane }: { lane: Column }) {
   return (
     <span data-status={BURST_STATUS[lane]} aria-hidden className="pointer-events-none absolute inset-0 z-raised">
       <motion.span
-        className="absolute inset-0 rounded-xl shadow-[0_0_0_2px_var(--st-solid),0_0_30px_4px_rgb(var(--st-rgb)/0.6)]"
+        className="absolute inset-0 rounded-xl shadow-[0_0_0_2px_var(--st-solid),0_0_30px_4px_color-mix(in_srgb,var(--st-solid)_60%,transparent)]"
         initial={{ opacity: 1, scale: 0.96 }}
         animate={{ opacity: 0, scale: 1.08 }}
         transition={{ duration: 1.1, ease: "easeOut" }}
@@ -128,7 +130,7 @@ export function HostTag({ hostId, className }: { hostId: string; className?: str
   const profile = useHosts((s) => s.profiles.find((p) => p.id === hostId));
   const name = profile?.name ?? hostId;
   return (
-    <span className={cn("inline-flex max-w-full min-w-0 shrink-0 items-center gap-1 rounded-xs bg-white/6 py-px pr-1.5 pl-1 text-2xs font-bold text-ink-2", className)} title={`Host ${name}`}>
+    <span className={cn("inline-flex max-w-full min-w-0 shrink-0 items-center gap-1 rounded-xs bg-ink/6 py-px pr-1.5 pl-1 text-2xs font-bold text-ink-2", className)} title={`Host ${name}`}>
       <span className="h-2.5 w-1 shrink-0 rounded-full" style={{ background: hostAccent(profile?.color) }} aria-hidden />
       <span className="truncate">{name}</span>
     </span>
@@ -138,7 +140,7 @@ export function HostTag({ hostId, className }: { hostId: string; className?: str
 const PILL: Record<AgentStateId, string> = {
   needs: "st-bg",
   running: "st-soft",
-  fresh: "bg-white/6 text-mute",
+  fresh: "bg-ink/6 text-mute",
   review: "st-soft",
   done: "st-soft",
 };
@@ -175,7 +177,7 @@ function DeleteWorktreeButton({ agentKey, andDone }: { agentKey: string; andDone
     <Tooltip content={`${shippedWords(pr)}: delete the checkout folder${andDone ? " and mark it done" : ""} (asks first); the branch stays`}>
       <button
         type="button"
-        className="inline-flex h-7 items-center gap-1 rounded-sm bg-error/12 px-2.5 text-2xs font-bold text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)] pressable focus-ring hover:bg-error hover:text-white"
+        className="inline-flex h-7 items-center gap-1 rounded-sm bg-error/12 px-2.5 text-2xs font-bold text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)] pressable focus-ring hover:bg-error hover:text-on-error"
         onClick={() => void deleteWorktree(agentKey)}
       >
         <Trash2 className="size-3 shrink-0" aria-hidden />
@@ -213,7 +215,7 @@ function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; ag
           <Tooltip content={ticket.resumeHint}>
             <button
               type="button"
-              className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
+              className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-on-accent shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
               onClick={() => void resumeNow(agentKey)}
             >
               {ticket.resume}
@@ -241,7 +243,7 @@ function ReviewBody({ agent, agentKey }: { agent: Agent & { hostId: string }; ag
             {ACTIONS.markDone.label}
           </button>
         </Tooltip>
-        <button type="button" className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink" onClick={() => openAgent(agentKey)}>
+        <button type="button" className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-ink/6 hover:text-ink" onClick={() => openAgent(agentKey)}>
           Open
         </button>
         <DeleteWorktreeButton agentKey={agentKey} andDone />
@@ -309,9 +311,13 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   let body: ReactNode = null;
   if (lane === "needs" && agent.needs) {
     const n = agent.needs;
+    const question = n.question || n.title;
+    // what the agent wrote before asking (asks, hosts ≥ 0.8.0), two lines until opened
+    const said = n.context ? withoutQuestion(n.context, question) : "";
     body = (
       <>
-        <p className="mt-2 text-sm leading-snug font-bold wrap-break-word text-ink">“{n.question || n.title}”</p>
+        {said && <AgentSaid key={n.requestId} text={said} variant="card" sunset={isHero} className="mt-2" />}
+        <p className="mt-2 text-sm leading-snug font-bold wrap-break-word text-ink">“{question}”</p>
         {n.detail && <p className="mt-1 line-clamp-2 text-xs text-mute">{n.detail}</p>}
         {n.command && !n.question.includes(n.command) && (
           <pre className="mt-2 max-h-20 overflow-hidden rounded-sm well px-2.5 py-1.5 font-mono text-2xs whitespace-pre-wrap text-ink-2">{n.command}</pre>
@@ -327,7 +333,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={stop} onPointerDown={stop}>
           <button
             type="button"
-            className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
+            className="h-7 rounded-sm bg-accent px-2.5 text-2xs font-extrabold text-on-accent shadow-glow-accent pressable focus-ring hover:bg-accent-hi"
             onClick={() => promptAgent(agentKey)}
           >
             Prompt…
@@ -335,7 +341,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           <Tooltip content={ACTIONS.terminal.description} shortcut={ACTIONS.terminal.shortcut}>
             <button
               type="button"
-              className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-white/6 hover:text-ink"
+              className="h-7 rounded-sm px-2.5 text-2xs font-bold text-mute pressable focus-ring hover:bg-ink/6 hover:text-ink"
               onClick={() => openTerminal(agentKey, false)}
             >
               {ACTIONS.terminal.label}
@@ -416,7 +422,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
         lane === "needs" && "st-border-grad",
         isHero && "card-sunset sun-pulse",
         stale && "opacity-70 grayscale-[0.65]",
-        quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]",
+        quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]",
         floating && "shadow-[var(--shadow-d3)]",
       )}
     >
@@ -426,13 +432,13 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
           data-status={status}
           className={cn(
             "min-w-0 truncate rounded-full px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase",
-            isHero ? "bg-[rgb(40_0_20/0.28)] text-white" : herdr ? "bg-white/6 text-mute" : PILL[state],
+            isHero ? "bg-[rgb(40_0_20/0.28)] text-white" : herdr ? "bg-ink/6 text-mute" : PILL[state],
           )}
         >
           {herdr ? herdrAgentWord(herdr) : agentStateWord({ ...agent, column: lane })}
           {lane === "running" && agent.live.tool && !stale && <span className="normal-case tracking-normal"> · {agent.live.tool.name}</span>}
         </span>
-        <StateTime agent={agent} state={state} stale={hostStale} herdr={herdr} className={cn("ml-auto shrink-0 text-2xs font-bold tabular", lane === "needs" && !isHero ? "text-[#ffb08a]" : "text-mute")} />
+        <StateTime agent={agent} state={state} stale={hostStale} herdr={herdr} className={cn("ml-auto shrink-0 text-2xs font-bold tabular", lane === "needs" && !isHero ? "text-sun-ink" : "text-mute")} />
       </div>
 
       {/* (2) identity + (3) title */}
@@ -458,7 +464,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             >
               {agent.name}
             </span>
-            {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-white/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
+            {agent.kind !== "omp" && <span className="shrink-0 rounded-xs bg-ink/6 px-1 text-[9.5px] font-bold text-mute uppercase">{agent.kind}</span>}
             {muted && (
               <span role="img" aria-label="Notifications muted" title="Notifications muted" className="shrink-0 text-mute-2">
                 <BellOff className="size-3" aria-hidden />
@@ -487,7 +493,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
       {/* hover actions: quick tools for running cards, the ⋯ menu everywhere */}
       {!floating && (
         <div
-          className="absolute top-2 right-2 flex gap-0.5 rounded-md bg-[rgb(27_27_37/0.94)] p-0.5 opacity-0 shadow-[var(--shadow-d2),inset_0_0_0_1px_rgb(255_255_255/0.07)] transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100 has-[[data-state=open]]:opacity-100"
+          className="absolute top-2 right-2 flex gap-0.5 rounded-md bg-glass/94 p-0.5 opacity-0 shadow-[var(--shadow-d2),inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_7%,transparent)] transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100 has-[[data-state=open]]:opacity-100"
           onClick={stop}
           onPointerDown={stop}
         >
@@ -529,7 +535,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             animate={{ scale: 1, rotate: 0 }}
             exit={{ scale: 0 }}
             transition={spring.bouncy}
-            className="absolute -top-1.5 -left-1.5 z-raised grid size-5 place-items-center rounded-full bg-accent text-white shadow-glow-accent"
+            className="absolute -top-1.5 -left-1.5 z-raised grid size-5 place-items-center rounded-full bg-accent text-on-accent shadow-glow-accent"
           >
             <svg viewBox="0 0 12 12" className="size-3">
               <path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />

@@ -3,6 +3,7 @@ import type { Agent } from "@/core/gen";
 import { parseAgentKey, useAgent, useCore, useSession, useUi } from "@/core";
 import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { HostBadge } from "@/features/hosts/HostBadge";
 import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { Term } from "@/features/shell/Term";
 import { openTerminal } from "@/features/board/agentActions";
@@ -83,13 +84,15 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
             )}
           </div>
           <div className="flex min-w-0 items-center gap-2 font-mono text-[11px] text-mute">
+            {/* Up to 9rem, shrinking with the title beside it (neither goes under a floor); the repo and pane give way first. */}
+            <HostBadge hostId={hostId} className="max-w-[9rem] min-w-[3.5rem] shrink @max-[7rem]/id:hidden" />
             {agent.title && agent.title !== agent.name && (
-              <span title={agent.title} className="min-w-0 truncate font-sans text-xs font-semibold text-ink-2">
+              <span title={agent.title} className="min-w-[3rem] truncate font-sans text-xs font-semibold text-ink-2">
                 {agent.title}
               </span>
             )}
             {(agent.repo || agent.branch) && (
-              <span title={[agent.repo, agent.branch].filter(Boolean).join(" · ")} className="flex min-w-[80px] shrink-[3] items-center gap-1 truncate">
+              <span title={[agent.repo, agent.branch].filter(Boolean).join(" · ")} className="flex min-w-[3rem] shrink-[3] items-center gap-1 truncate">
                 <GitBranch className="size-3" />
                 {agent.repo}
                 {agent.repo && agent.branch && " · "}
@@ -97,7 +100,7 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
               </span>
             )}
             {agent.paneId && (
-              <Term id="pane" className="shrink-0 text-mute-2">
+              <Term id="pane" className="hidden shrink-0 text-mute-2 @min-[17rem]/id:block">
                 pane {agent.paneId}
               </Term>
             )}

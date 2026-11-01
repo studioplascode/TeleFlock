@@ -41,7 +41,7 @@ const TILE_MIME = "application/x-teleflock-wall-tile";
 function TileTerminal({ agentKey }: { agentKey: string }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   return (
-    <div className="relative m-2 min-h-0 flex-1 overflow-hidden rounded-[20px] bg-bg-deep shadow-[inset_0_0_0_1px_rgb(255_255_255/0.06)]">
+    <div className="relative m-2 min-h-0 flex-1 overflow-hidden rounded-[20px] bg-bg-deep shadow-hairline">
       <Suspense fallback={<div className="grid h-full place-items-center"><Spinner size={18} /></div>}>
         <TerminalPane hostId={hostId} target={{ kind: "agent", agentId }} mode="observe" compact className="absolute inset-0" />
       </Suspense>
@@ -142,7 +142,7 @@ function TileHeader({ index, agentKey, pinned, size, onReply }: { index: number;
           {agent.name}
         </button>
       </AgentPicker>
-      <span data-status={status} className={cn("shrink-0 rounded-full px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase", state === "needs" ? "st-bg" : state === "fresh" ? "bg-white/6 text-mute" : "st-soft")}>
+      <span data-status={status} className={cn("shrink-0 rounded-full px-2 py-0.5 font-display text-[9.5px] font-bold tracking-[0.12em] uppercase", state === "needs" ? "st-bg" : state === "fresh" ? "bg-ink/6 text-mute" : "st-soft")}>
         {agentStateWord(agent)}
         {state === "running" && agent.live.tool && !stale && <span className="normal-case tracking-normal"> · {agent.live.tool.name}</span>}
       </span>
@@ -249,9 +249,9 @@ export function WallTile({ index, agentKey, size, active, onActivate }: WallTile
       }}
       className={cn(
         "glass relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-tile shadow-[inset_0_0_0_1px_var(--color-line)]",
-        status === "needs" && "shadow-[inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.55)]",
-        active && "shadow-[inset_0_0_0_1.5px_rgb(163_92_240/0.7)]",
-        dropping && "shadow-[inset_0_0_0_2px_rgb(163_92_240/0.95)]",
+        status === "needs" && "shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--st-solid)_55%,transparent)]",
+        active && "shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-accent)_70%,transparent)]",
+        dropping && "shadow-[inset_0_0_0_2px_color-mix(in_srgb,var(--color-accent)_95%,transparent)]",
       )}
     >
       {agentKey ? (

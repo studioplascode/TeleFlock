@@ -23,12 +23,12 @@ export function Spinner({ size = 16, className, label = "Loading" }: SpinnerProp
     >
       <defs>
         <linearGradient id={id} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#f053d0" />
-          <stop offset="0.5" stopColor="#a15eef" />
-          <stop offset="1" stopColor="#7fa2e7" stopOpacity="0.2" />
+          <stop offset="0" style={{ stopColor: "var(--color-omp-pink)" }} />
+          <stop offset="0.5" style={{ stopColor: "var(--color-omp-purple)" }} />
+          <stop offset="1" style={{ stopColor: "var(--color-omp-blue)" }} stopOpacity="0.2" />
         </linearGradient>
       </defs>
-      <circle cx="12" cy="12" r="9.5" fill="none" stroke="rgb(255 255 255 / 0.1)" strokeWidth="2.5" />
+      <circle cx="12" cy="12" r="9.5" fill="none" style={{ stroke: "color-mix(in srgb, var(--color-ink) 10%, transparent)" }} strokeWidth="2.5" />
       <path d="M12 2.5a9.5 9.5 0 0 1 9.5 9.5" fill="none" stroke={`url(#${id})`} strokeWidth="2.5" strokeLinecap="round" />
     </svg>
   );

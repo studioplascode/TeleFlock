@@ -470,7 +470,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                           animate={{ opacity: 1, y: 0, scale: 1 }}
                           exit={{ opacity: 0, scale: 0.96 }}
                           transition={spring.smooth}
-                          className={cn("rounded-lg bg-white/[0.035] p-3 shadow-hairline", err && "shadow-[inset_0_0_0_1px_rgb(255_77_94/0.45)]")}
+                          className={cn("rounded-lg bg-ink/[0.035] p-3 shadow-hairline", err && "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_45%,transparent)]")}
                         >
                           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 md:grid-cols-[150px_minmax(0,1fr)_auto]">
                             <Input
@@ -541,7 +541,7 @@ function FanOut({ open, initialHostId, initialCwd, initialPrompt, onClose }: { o
                   <LaunchRow key={r.key} row={r} index={i} name={`${launchedSlug}-${r.key}`} home={home} />
                 ))}
                 {failed.some((r) => r.error?.untrusted) && (
-                  <div className="flex flex-wrap items-center gap-3 rounded-lg bg-warn/8 p-3 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]">
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg bg-warn/8 p-3 text-xs shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]">
                     <ShieldAlert className="size-4 text-warn" />
                     <span className="min-w-0 flex-1">
                       git refuses this repository (“dubious ownership”). Trusting it passes <code className="font-mono">-c safe.directory</code> to herdr's git commands only.
@@ -585,14 +585,14 @@ function LaunchRow({ row, index, name, home }: { row: Row; index: number; name: 
       transition={{ ...spring.smooth, delay: index * 0.06 }}
       className={cn(
         "relative overflow-hidden rounded-lg p-3 transition-[background-color,box-shadow] duration-500",
-        failed ? "bg-error/8 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]" : row.phase === "running" ? "bg-done/8 shadow-[inset_0_0_0_1px_rgb(163_230_53/0.35)]" : "bg-white/[0.035] shadow-hairline",
+        failed ? "bg-error/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]" : row.phase === "running" ? "bg-done/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_35%,transparent)]" : "bg-ink/[0.035] shadow-hairline",
       )}
     >
       <div className="flex items-center gap-3">
         <span
           className={cn(
             "relative grid size-8 shrink-0 place-items-center rounded-full text-xs font-extrabold",
-            failed ? "bg-error/20 text-error" : row.phase === "running" ? "bg-done/20 text-done" : live ? "bg-omp text-white shadow-glow-accent" : "bg-tile-3 text-mute",
+            failed ? "bg-error/20 text-error" : row.phase === "running" ? "bg-done/20 text-done" : live ? "bg-omp text-on-accent shadow-glow-accent" : "bg-tile-3 text-mute",
           )}
         >
           {failed ? <X className="size-4" /> : row.phase === "running" ? <Check className="size-4" strokeWidth={3} /> : index + 1}
@@ -613,11 +613,11 @@ function LaunchRow({ row, index, name, home }: { row: Row; index: number; name: 
         <span className="hidden gap-1 sm:flex" aria-hidden>
           {PHASES.slice(1).map((p) => {
             const reached = !failed && (meta?.at ?? 0) >= p.at;
-            return <span key={p.phase} title={p.label} className={cn("h-1.5 w-6 rounded-full transition-colors duration-500", reached ? (p.phase === "running" ? "bg-done" : "bg-accent") : "bg-white/10")} />;
+            return <span key={p.phase} title={p.label} className={cn("h-1.5 w-6 rounded-full transition-colors duration-500", reached ? (p.phase === "running" ? "bg-done" : "bg-accent") : "bg-ink/10")} />;
           })}
         </span>
       </div>
-      <div className="absolute inset-x-0 bottom-0 h-0.5 bg-white/5">
+      <div className="absolute inset-x-0 bottom-0 h-0.5 bg-ink/5">
         <motion.div
           className={cn("h-full", failed ? "bg-error" : row.phase === "running" ? "bg-done" : "bg-omp")}
           initial={{ width: "0%" }}

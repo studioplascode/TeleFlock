@@ -32,7 +32,7 @@ function Pane({ id, title, label, aside, children, className }: { id: InspectorT
 }
 
 /** Tile chrome inside the Session pane. */
-const TILE = "rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline";
+const TILE = "rounded-lg bg-bg-deep/45 px-3 py-2.5 shadow-hairline";
 
 /** Rolling tok/s history: one sample per second of the latest value, 60 s (only while mounted; the clock pauses while the window is inactive). */
 function useTpsHistory(value: number | undefined): number[] {
@@ -188,7 +188,7 @@ export function FilesPanel({ agentKey }: { agentKey: string }) {
             type="button"
             onClick={review}
             title={f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
-            className="focus-ring pressable flex items-center gap-2 rounded-[10px] px-1.5 py-1 text-left hover:bg-white/[0.04]"
+            className="focus-ring pressable flex items-center gap-2 rounded-[10px] px-1.5 py-1 text-left hover:bg-ink/[0.04]"
           >
             <FileCode2 className={cn("size-3.5 shrink-0", f.status === "added" || f.status === "untracked" ? "text-add" : f.status === "deleted" ? "text-del" : "text-mute-2")} />
             <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-2">
@@ -199,7 +199,7 @@ export function FilesPanel({ agentKey }: { agentKey: string }) {
           </button>
         ))}
       </div>
-      <button type="button" onClick={review} className="pressable focus-ring mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-white/[0.05] py-2 text-xs font-bold text-ink-2 shadow-hairline hover:bg-white/[0.09]">
+      <button type="button" onClick={review} className="pressable focus-ring mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-ink/[0.05] py-2 text-xs font-bold text-ink-2 shadow-hairline hover:bg-ink/[0.09]">
         <GitMerge className="size-3.5" /> {ACTIONS.review.label}
       </button>
     </Pane>
@@ -294,7 +294,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
               <div
                 key={node.id}
                 data-leaf={leaf}
-                className={cn("group/node absolute inset-x-0 isolate flex items-center gap-2 rounded-[10px] pr-1 hover:bg-white/[0.04]", leaf && "bg-accent/10")}
+                className={cn("group/node absolute inset-x-0 isolate flex items-center gap-2 rounded-[10px] pr-1 hover:bg-ink/[0.04]", leaf && "bg-accent/10")}
                 style={{ top: (first + i) * rowPx, height: rowPx, paddingLeft: 6 + depth * 14 }}
               >
                 {Array.from({ length: depth }, (_, d) => (
@@ -303,7 +303,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
                 <span
                   className={cn(
                     "relative z-raised size-2 shrink-0 rounded-full",
-                    leaf ? "bg-sun shadow-[0_0_0_3px_rgb(255_61_119/0.25)]" : node.onPath ? "bg-ink-2" : depth > 0 ? "bg-review" : "bg-mute-2",
+                    leaf ? "bg-sun shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-sun-2)_25%,transparent)]" : node.onPath ? "bg-ink-2" : depth > 0 ? "bg-review" : "bg-mute-2",
                   )}
                 />
                 <span className={cn("min-w-0 flex-1 truncate text-[11.5px]", node.onPath ? "font-semibold text-ink-2" : "text-mute", node.kind === "user" && "font-bold")}>
@@ -311,7 +311,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
                   {node.label.replace(/\*\*|__|`/g, "")}
                 </span>
                 {node.children > 1 && <span className="shrink-0 font-mono text-[10px] text-review">⑂{node.children}</span>}
-                <span className="absolute inset-y-0 right-1 z-raised flex items-center gap-0.5 rounded-[8px] bg-[rgb(24_24_32/0.96)] pl-1 opacity-0 transition-opacity group-focus-within/node:opacity-100 group-hover/node:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:shrink-0 [@media(pointer:coarse)]:bg-transparent [@media(pointer:coarse)]:opacity-100">
+                <span className="absolute inset-y-0 right-1 z-raised flex items-center gap-0.5 rounded-[8px] bg-pop-2/96 pl-1 opacity-0 transition-opacity group-focus-within/node:opacity-100 group-hover/node:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:shrink-0 [@media(pointer:coarse)]:bg-transparent [@media(pointer:coarse)]:opacity-100">
                   {canTree && !leaf && (
                     <IconButton label="Go to this point" size="sm" className="size-6" disabled={busy} onClick={() => void run(hostCall(hostId, "agent.navigate", { agentId, entryId: node.id }, { success: "Moved in tree" }))}>
                       <Navigation />
@@ -473,9 +473,9 @@ function BtwConversation({ row, hostId, agentId, canFollowUp }: { row: BtwRow; h
     if (res.ok) setReply(null);
   };
   return (
-    <div className="rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2 shadow-hairline" data-btw={row.id}>
+    <div className="rounded-lg bg-bg-deep/45 px-3 py-2 shadow-hairline" data-btw={row.id}>
       {row.turns.map((t, i) => (
-        <div key={i} className={cn(i > 0 && "mt-2 border-t border-white/6 pt-2")}>
+        <div key={i} className={cn(i > 0 && "mt-2 border-t border-ink/6 pt-2")}>
           <div className="text-xs font-bold text-ink">
             {i > 0 && <span className="text-mute">↳ </span>}
             {t.question ?? "…"}
@@ -556,7 +556,7 @@ export function Inspector({ agentKey, className }: { agentKey: string; className
     const el = ref.current?.querySelector<HTMLElement>(`[data-panel="${tab}"]`);
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    el.animate([{ boxShadow: "0 0 0 2px rgb(163 92 240 / 0.7), 0 0 30px rgb(163 92 240 / 0.4)" }, { boxShadow: "0 0 0 0 transparent" }], { duration: 1100, easing: "ease-out" });
+    el.animate([{ boxShadow: "0 0 0 2px color-mix(in srgb, var(--color-accent) 70%, transparent), 0 0 30px color-mix(in srgb, var(--color-accent) 40%, transparent)" }, { boxShadow: "0 0 0 0 transparent" }], { duration: 1100, easing: "ease-out" });
     el.querySelector<HTMLInputElement>("input")?.focus();
   }, [tab, ready]);
   return (
@@ -629,7 +629,7 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
               {t.icon}
               <span className="max-w-full truncate">{t.label}</span>
               {t.value === "chat" && unread > 0 && (
-                <span className="absolute top-1 right-1.5 size-2 rounded-full bg-accent shadow-[0_0_6px_rgb(163_92_240/0.9)]" aria-label={`${unread} unread`} />
+                <span className="absolute top-1 right-1.5 size-2 rounded-full bg-accent shadow-[0_0_6px_color-mix(in_srgb,var(--color-accent)_90%,transparent)]" aria-label={`${unread} unread`} />
               )}
             </button>
           );

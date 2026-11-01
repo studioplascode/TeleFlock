@@ -17,7 +17,7 @@ export function StepRail({ steps, current, reachable, onJump }: StepRailProps) {
   const reach = steps.length > 1 ? Math.max(current, reachable) / (steps.length - 1) : 0;
   return (
     <nav aria-label="Steps" className="relative md:pt-1.5">
-      <div className="absolute top-[13px] right-[calc(100%/var(--n)/2)] left-[calc(100%/var(--n)/2)] h-0.5 rounded-full bg-white/8 md:top-[19px]" style={{ "--n": steps.length } as CSSProperties}>
+      <div className="absolute top-[13px] right-[calc(100%/var(--n)/2)] left-[calc(100%/var(--n)/2)] h-0.5 rounded-full bg-ink/8 md:top-[19px]" style={{ "--n": steps.length } as CSSProperties}>
         {/* how far you could jump right now: a faint lead ahead of the solid progress */}
         <motion.div className="absolute inset-y-0 left-0 rounded-full bg-accent/30" initial={false} animate={{ width: `${reach * 100}%` }} transition={spring.smooth} />
         <motion.div className="relative h-full rounded-full bg-omp shadow-glow-accent" initial={false} animate={{ width: `${frac * 100}%` }} transition={spring.smooth} />
@@ -41,16 +41,16 @@ export function StepRail({ steps, current, reachable, onJump }: StepRailProps) {
                 <motion.span
                   className={cn(
                     "relative grid size-7 place-items-center rounded-full text-xs font-extrabold transition-colors duration-300",
-                    on && "bg-omp text-white shadow-glow-accent",
-                    done && "bg-accent/25 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.6)]",
-                    !on && !done && can && "bg-tile-3 text-ink-2 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)] group-hover:text-ink",
+                    on && "bg-omp text-on-accent shadow-glow-accent",
+                    done && "bg-accent/25 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_60%,transparent)]",
+                    !on && !done && can && "bg-tile-3 text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)] group-hover:text-ink",
                     !on && !done && !can && "bg-tile-3 text-mute-2 shadow-hairline",
                   )}
                   animate={{ scale: on ? 1.08 : 1 }}
                   transition={spring.bouncy}
                 >
                   {done ? <Check className="size-3.5" strokeWidth={3} /> : i + 1}
-                  {on && <span className="tf-loop absolute -inset-1 animate-ping-soft rounded-full shadow-[0_0_0_2px_rgb(163_92_240/0.5)]" aria-hidden />}
+                  {on && <span className="tf-loop absolute -inset-1 animate-ping-soft rounded-full shadow-[0_0_0_2px_color-mix(in_srgb,var(--color-accent)_50%,transparent)]" aria-hidden />}
                 </motion.span>
                 <span className={cn("text-2xs font-bold transition-colors", on ? "text-ink" : done || can ? "text-ink-2 group-hover:text-ink" : "text-mute-2")}>{label}</span>
               </button>

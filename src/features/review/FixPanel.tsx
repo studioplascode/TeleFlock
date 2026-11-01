@@ -22,10 +22,10 @@ import {
 type Tone = "work" | "ok" | "warn" | "error";
 
 const TONE: Record<Tone, string> = {
-  work: "bg-accent/[0.08] shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]",
-  ok: "bg-done/10 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.25)]",
-  warn: "bg-warn/10 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]",
-  error: "bg-error/10 text-[#ffb1c1] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]",
+  work: "bg-accent/[0.08] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]",
+  ok: "bg-done/10 text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_25%,transparent)]",
+  warn: "bg-warn/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]",
+  error: "bg-error/10 text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_30%,transparent)]",
 };
 
 /** What a phase says, and in which tone. */

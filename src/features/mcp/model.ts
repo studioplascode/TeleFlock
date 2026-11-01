@@ -575,11 +575,53 @@ export function nextRowId(): number {
   return rowSeq;
 }
 
+/** Headers that carry `<scheme> <credential>` (hostd keeps their scheme readable when it hides the credential). */
+export function isAuthHeader(key: string): boolean {
+  const k = key.trim().toLowerCase();
+  return k === "authorization" || k === "proxy-authorization";
+}
+
+/** `Bearer xyz` → the scheme with its space(s) and the rest; null without a scheme and a credential after it. */
+export function splitScheme(value: string): { prefix: string; rest: string } | null {
+  const m = /^(?:bearer|basic|token)\s+(?=\S)/i.exec(value);
+  return m ? { prefix: m[0], rest: value.slice(m[0].length) } : null;
+}
+
 export function kvRow(kv?: Partial<McpKeyValue> & { prefix?: string }): KvRow {
   const value = kv?.value ?? "";
   const stored = value === SECRET_MASK;
   const key = kv?.key ?? "";
   return { id: nextRowId(), key, value: stored ? "" : value, secret: stored || !!kv?.secret || looksSecret(key), stored, prefix: kv?.prefix };
+}
+
+/**
+ * A listed header as a row. An authorization value (`Bearer ••••••••` when hidden, else the value)
+ * loads like a new "bearer token" row: the scheme is the fixed start, the field holds the credential.
+ */
+export function headerRow(kv: McpKeyValue): KvRow {
+  const s = isAuthHeader(kv.key) ? splitScheme(kv.value) : null;
+  return s ? kvRow({ ...kv, value: s.rest, prefix: s.prefix }) : kvRow(kv);
+}
+
+/**
+ * What typing `text` in a row's value field changes. In a row with a scheme, a typed or pasted
+ * `Bearer xyz` (or `Basic xyz`) sets that scheme and keeps `xyz` as the credential: never `Bearer Bearer xyz`.
+ * A hidden credential belongs to the scheme it was listed with, in any case (a bearer token is no
+ * Basic credential, and hostd keeps it under that scheme only): under another scheme or other
+ * spacing it is no longer kept, and has to be typed.
+ */
+export function typeValue(r: Pick<KvRow, "prefix">, text: string): Partial<KvRow> {
+  const s = r.prefix ? splitScheme(text) : null;
+  if (!s) return { value: text };
+  return s.prefix.toLowerCase() === r.prefix?.toLowerCase() ? { prefix: s.prefix, value: s.rest } : { prefix: s.prefix, value: s.rest, stored: false };
+}
+
+/**
+ * The row without its scheme: the value is sent as typed. A hidden credential can't be carried
+ * over (its scheme is part of what hostd stores), so it has to be typed again.
+ */
+export function dropScheme(r: Pick<KvRow, "prefix" | "value">): Partial<KvRow> {
+  return { prefix: undefined, value: r.value === "" ? "" : `${r.prefix ?? ""}${r.value}`, stored: false };
 }
 
 export function emptyForm(scope: McpScope): McpForm {
@@ -610,7 +652,7 @@ export function formFromDraft(d: McpServerDraft, name: string, scope: McpScope):
     cwd: d.cwd ?? "",
     env: d.env.map((kv) => kvRow(kv)),
     url: d.url ?? "",
-    headers: d.headers.map((kv) => kvRow(kv)),
+    headers: d.headers.map(headerRow),
     timeoutMs: d.timeoutMs === undefined ? "" : String(d.timeoutMs),
     oauth: {
       clientId: o?.clientId ?? "",
@@ -650,7 +692,9 @@ export function applyTemplateInput(f: McpForm, input: McpTemplateInput, value: s
   const key = "header" in t ? t.header : t.env;
   const rows = f[field];
   const i = rows.findIndex((r) => r.key.toLowerCase() === key.toLowerCase());
-  const row: KvRow = { ...(rows[i] ?? kvRow({ key })), key, value, prefix: "header" in t ? t.prefix : undefined, secret: input.secret ?? looksSecret(key), stored: false };
+  const prefix = "header" in t ? t.prefix : undefined;
+  const typed = prefix ? typeValue({ prefix }, value) : { value };
+  const row: KvRow = { ...(rows[i] ?? kvRow({ key })), key, prefix, ...typed, secret: input.secret ?? looksSecret(key), stored: false };
   return { ...f, [field]: i >= 0 ? rows.map((r, j) => (j === i ? row : r)) : [...rows, row] };
 }
 
@@ -663,8 +707,10 @@ export function applyRegistryInputs(f: McpForm, inputs: readonly McpRegistryInpu
 
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
+/** The row's value as sent: the mask for an untouched stored secret (behind its scheme), nothing for a scheme with no credential. */
 function kvValue(r: KvRow): string {
-  return r.stored && r.value === "" ? SECRET_MASK : `${r.prefix ?? ""}${r.value}`;
+  if (r.stored && r.value === "") return `${r.prefix ?? ""}${SECRET_MASK}`;
+  return r.value === "" ? "" : `${r.prefix ?? ""}${r.value}`;
 }
 
 export type FormErrors = Partial<Record<FieldKey, string>>;

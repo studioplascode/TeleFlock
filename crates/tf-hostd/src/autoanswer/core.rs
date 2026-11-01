@@ -57,9 +57,14 @@ pub struct OwnPolicy {
 pub struct Countdown {
     pub request_id: String,
     pub question: String,
-    /// Exact option ids the answer sends (collab labels) and how the options read.
+    /// Exact option ids the answer sends (collab labels) and how the answer reads (with `text`).
     pub picks: Vec<String>,
     pub labels: Vec<String>,
+    /// The typed ("Other") text the answer sends: an earlier answer's.
+    pub text: Option<String>,
+    /// The answer is the one the question already had (`NeedsYou.step`: Back reopened it, or it
+    /// came up again), not ★.
+    pub earlier: bool,
     /// When the countdown started.
     pub since: Millis,
     /// Added by postponing (negative when a cancelled countdown was started again with less time
@@ -83,18 +88,24 @@ pub struct Countdown {
     pub in_flight: bool,
 }
 
-/// A question that qualifies: an answerable omp `ask` with a ★ recommended option.
+/// A question that qualifies (an answerable omp `ask` with a ★ recommended option) and its answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Question {
     pub request_id: String,
     pub question: String,
     pub ids: Vec<String>,
     pub labels: Vec<String>,
+    /// The typed text the answer sends (an earlier "Other" answer).
+    pub text: Option<String>,
+    /// The answer is the one the question already had, not ★.
+    pub earlier: bool,
 }
 
 /// The question of `agent` decide-for-me may answer: an answerable `ask` (never approvals, plan
 /// reviews, confirmations, free-text input or terminal-only prompts) with a ★ recommended option.
 /// A single choice picks the first recommended option, a multi-select every recommended one.
+/// A question that already has the user's answer (`NeedsYou.step`: Back reopened it, or it came up
+/// again) gets that answer instead: its options and its typed text.
 pub fn qualifying(agent: &Agent) -> Option<Question> {
     if agent.kind != "omp" || agent.parked.is_some() {
         return None;
@@ -108,21 +119,40 @@ pub fn qualifying(agent: &Agent) -> Option<Question> {
     if rec.is_empty() {
         return None;
     }
+    if let Some(step) = &n.step {
+        let text = step.text.clone().filter(|t| !t.trim().is_empty());
+        if !step.choices.is_empty() || text.is_some() {
+            let label = |id: &String| n.options.iter().find(|o| &o.id == id).map_or_else(|| id.clone(), |o| o.label.clone());
+            return Some(Question {
+                request_id,
+                question: n.question.clone(),
+                ids: step.choices.clone(),
+                labels: step.choices.iter().map(label).chain(text.clone()).collect(),
+                text,
+                earlier: true,
+            });
+        }
+    }
     Some(Question {
         request_id,
         question: n.question.clone(),
         ids: rec.iter().map(|o| o.id.clone()).collect(),
         labels: rec.iter().map(|o| o.label.clone()).collect(),
+        text: None,
+        earlier: false,
     })
 }
 
-/// A countdown that fell due: answer `request_id` of `agent_id` with `picks`.
+/// A countdown that fell due: answer `request_id` of `agent_id` with `picks` (and `text`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fire {
     pub agent_id: String,
     pub request_id: String,
     pub picks: Vec<String>,
     pub labels: Vec<String>,
+    pub text: Option<String>,
+    /// The question's earlier answer, not ★.
+    pub earlier: bool,
     pub question: String,
     pub source: AutoAnswerSource,
     /// The wait that ran out (the policy's plus postponements).
@@ -272,7 +302,17 @@ impl Core {
                     let changed = set_running(e, run, now) || stood;
                     self.touch(adopted || changed);
                 } else {
-                    let mut e = Countdown { request_id: q.request_id, question: q.question, picks: q.ids, labels: q.labels, since: now, seen_at: now, ..Default::default() };
+                    let mut e = Countdown {
+                        request_id: q.request_id,
+                        question: q.question,
+                        picks: q.ids,
+                        labels: q.labels,
+                        text: q.text,
+                        earlier: q.earlier,
+                        since: now,
+                        seen_at: now,
+                        ..Default::default()
+                    };
                     let run = runs(&e, p, apps);
                     set_running(&mut e, run, now);
                     self.data.pending.insert(agent.id.clone(), e);
@@ -371,6 +411,8 @@ impl Core {
                 request_id: e.request_id.clone(),
                 picks: e.picks.clone(),
                 labels: e.labels.clone(),
+                text: e.text.clone(),
+                earlier: e.earlier,
                 question: e.question.clone(),
                 source,
                 waited_ms: budget(e, &p),
@@ -548,7 +590,7 @@ fn view(e: &Countdown, p: &AutoAnswer) -> AutoAnswerCountdown {
     } else {
         (AutoAnswerStatus::WaitingForNoApp, None, Some(left.max(0)))
     };
-    AutoAnswerCountdown { request_id: e.request_id.clone(), status, deadline, remaining_ms, picks: e.labels.clone() }
+    AutoAnswerCountdown { request_id: e.request_id.clone(), status, deadline, remaining_ms, picks: e.labels.clone(), earlier: e.earlier }
 }
 
 #[cfg(test)]
@@ -556,6 +598,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tf_proto::model::{NeedsOption, NeedsYou, OptionTone};
+    use tf_proto::session::AskStep;
 
     const MIN: Millis = 60_000;
     /// Past the start grace.
@@ -585,6 +628,8 @@ mod tests {
             allow_chat: true,
             command: None,
             answerable: true,
+            context: None,
+            step: None,
         }
     }
 
@@ -680,6 +725,32 @@ mod tests {
         assert_eq!((q.ids, q.labels), (vec!["B (Recommended)".to_string()], vec!["B".to_string()]));
         let multi = needs(NeedsKind::Ask, "1", vec![opt("A", true), opt("B", false), opt("C", true)], true);
         assert_eq!(qualifying(&live("a", Some(multi))).unwrap().labels, ["A", "C"]);
+    }
+
+    /// A question that already has the user's answer (Back reopened it, or it came up again) gets
+    /// that answer, not ★: picks, or the typed text. One without (a first visit) gets ★. Before,
+    /// ★ replaced the user's own answer.
+    #[test]
+    fn a_question_with_an_earlier_answer_gets_that_answer() {
+        let with = |req: &str, choices: &[&str], text: Option<&str>| {
+            let mut n = ask(req);
+            n.step = Some(AskStep { index: 1, total: 3, can_back: true, choices: choices.iter().map(|c| c.to_string()).collect(), text: text.map(str::to_owned) });
+            live("a1", Some(n))
+        };
+        let mut c = core_with(policy(20, false));
+        let cd = countdown(&mut c, &with("7", &["Use Postgres"], None), T0, false);
+        assert_eq!((cd.picks.as_slice(), cd.earlier), (&["Use Postgres".to_string()][..], true));
+        let fire = c.due(T0 + 20 * MIN).remove(0);
+        assert_eq!((fire.picks.as_slice(), fire.text.as_deref(), fire.earlier), (&["Use Postgres".to_string()][..], None, true));
+        let mut c = core_with(policy(20, false));
+        let cd = countdown(&mut c, &with("8", &[], Some("MySQL 8")), T0, false);
+        assert_eq!((cd.picks.as_slice(), cd.earlier), (&["MySQL 8".to_string()][..], true));
+        let fire = c.due(T0 + 20 * MIN).remove(0);
+        assert_eq!((fire.picks.is_empty(), fire.text.as_deref()), (true, Some("MySQL 8")));
+        let mut c = core_with(policy(20, false));
+        let cd = countdown(&mut c, &with("9", &[], None), T0, false);
+        assert_eq!((cd.picks.as_slice(), cd.earlier), (&["Use SQLite".to_string()][..], false));
+        assert_eq!(c.due(T0 + 20 * MIN).remove(0).picks, ["Use SQLite (Recommended)"]);
     }
 
     #[test]

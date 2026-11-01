@@ -257,7 +257,7 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
               initial={{ opacity: 0, y: -6 }}
               animate={{ opacity: 1, y: 0, x: [0, -6, 5, -3, 0] }}
               transition={{ ...spring.smooth, x: { duration: 0.4 } }}
-              className="flex gap-3 rounded-lg bg-error/10 p-3 text-xs shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]"
+              className="flex gap-3 rounded-lg bg-error/10 p-3 text-xs shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]"
             >
               <TriangleAlert className="size-4 shrink-0 text-error" />
               <div className="min-w-0">

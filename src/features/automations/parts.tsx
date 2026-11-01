@@ -34,7 +34,7 @@ export function SchedulerBanner({ scheduler, className }: { scheduler: Automatio
   return (
     <Tile
       data-status={ok ? "done" : "needs-you"}
-      className={cn("flex items-start gap-3 p-4 max-md:p-3.5", ok ? "shadow-[inset_0_0_0_1px_rgb(var(--st-rgb)/0.22)]" : "shadow-[inset_0_0_0_1px_rgb(var(--st-rgb)/0.35)]", className)}
+      className={cn("flex items-start gap-3 p-4 max-md:p-3.5", ok ? "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--st-solid)_22%,transparent)]" : "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--st-solid)_35%,transparent)]", className)}
     >
       <span className="grid size-9 shrink-0 place-items-center rounded-md st-soft max-md:size-8 [&_svg]:size-4">{ok ? <CircleCheck /> : <CircleAlert />}</span>
       <div className="flex min-w-0 flex-1 flex-col gap-1">

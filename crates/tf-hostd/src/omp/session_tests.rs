@@ -10,7 +10,7 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tf_collab::{CollabLink, HostFrame, RoomKey};
 use tf_proto::model::Answer;
-use tf_proto::session::{ToolStatus, TranscriptItem};
+use tf_proto::session::{AskStep, ToolStatus, TranscriptItem};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -73,6 +73,27 @@ struct FakeRoom {
 
 impl FakeRoom {
     async fn open(link: &CollabLink, session_id: &str) -> FakeRoom {
+        FakeRoom::open_with(link, session_id, vec![room_entry()], Vec::new()).await
+    }
+
+    /// A room whose join snapshot carries `entries`, followed by the frames `then`.
+    async fn open_with(link: &CollabLink, session_id: &str, entries: Vec<Value>, then: Vec<Value>) -> FakeRoom {
+        FakeRoom::open_answering(link, session_id, entries, then, usize::MAX).await
+    }
+
+    /// A room serving omp's session file `file` as omp does: its entries in the join snapshot, its
+    /// bytes on `fetch-transcript`.
+    async fn open_serving(link: &CollabLink, session_id: &str, file: &Path) -> FakeRoom {
+        FakeRoom::open_scripted(link, session_id, file_entries(file), Vec::new(), usize::MAX, Some(file.to_path_buf())).await
+    }
+
+    /// [`FakeRoom::open_with`] answering only the first `hellos` hellos: then it goes silent (it
+    /// still reports what it gets).
+    async fn open_answering(link: &CollabLink, session_id: &str, entries: Vec<Value>, then: Vec<Value>, hellos: usize) -> FakeRoom {
+        FakeRoom::open_scripted(link, session_id, entries, then, hellos, None).await
+    }
+
+    async fn open_scripted(link: &CollabLink, session_id: &str, entries: Vec<Value>, then: Vec<Value>, hellos: usize, transcript: Option<PathBuf>) -> FakeRoom {
         let (ws, _) = tokio_tungstenite::connect_async(format!("{}?role=host", link.ws_url)).await.unwrap();
         // The relay registers the room just after the upgrade: wait for it (a guest racing the
         // registration gets 4004).
@@ -81,6 +102,7 @@ impl FakeRoom {
         let (tx, saw) = mpsc::unbounded_channel();
         let sid = session_id.to_owned();
         tokio::spawn(async move {
+            let mut hellos = hellos;
             let (mut out, mut inbox) = ws.split();
             while let Some(Ok(msg)) = inbox.next().await {
                 let data = match msg {
@@ -102,19 +124,36 @@ impl FakeRoom {
                 let frame: Value = serde_json::from_slice(&plain).unwrap();
                 let seal = |v: Value| Message::binary(key.seal(peer, &serde_json::to_vec(&v).unwrap()));
                 match frame["t"].as_str() {
-                    Some("hello") => {
+                    Some("hello") if hellos > 0 => {
+                        hellos -= 1;
                         let welcome = json!({ "t": "welcome", "proto": tf_collab::COLLAB_PROTO,
                             "header": { "type": "session", "version": 3, "id": sid, "timestamp": "2026-10-28T10:00:00.000Z", "cwd": "/w" },
                             "state": { "isStreaming": false, "queuedMessageCount": 0, "cwd": "/w", "participants": [] },
-                            "agents": [{ "id": "Main", "displayName": "main", "kind": "main", "status": "running" }], "entryCount": 1 });
-                        let chunk = json!({ "t": "snapshot-chunk", "final": true, "entries": [room_entry()] });
+                            "agents": [{ "id": "Main", "displayName": "main", "kind": "main", "status": "running" }], "entryCount": entries.len() });
+                        let chunk = json!({ "t": "snapshot-chunk", "final": true, "entries": entries });
                         if out.send(seal(welcome)).await.is_err() || out.send(seal(chunk)).await.is_err() {
                             break;
                         }
+                        for f in &then {
+                            if out.send(seal(f.clone())).await.is_err() {
+                                break;
+                            }
+                        }
                     }
                     Some("fetch-transcript") => {
-                        let text = if frame["fromByte"] == 0 { format!("{}\n", room_entry()) } else { String::new() };
-                        let size = frame["fromByte"].as_u64().unwrap_or_default().max(text.len() as u64);
+                        let from = frame["fromByte"].as_u64().unwrap_or_default();
+                        let text = match &transcript {
+                            // The complete lines from `from` on, as omp's host reads its file.
+                            Some(file) => {
+                                let bytes = std::fs::read(file).unwrap();
+                                let rest = &bytes[(from as usize).min(bytes.len())..];
+                                let end = rest.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+                                String::from_utf8_lossy(&rest[..end]).into_owned()
+                            }
+                            None if from == 0 => format!("{}\n", room_entry()),
+                            None => String::new(),
+                        };
+                        let size = if transcript.is_some() { from + text.len() as u64 } else { from.max(text.len() as u64) };
                         let reply = json!({ "t": "transcript", "reqId": frame["reqId"], "text": text, "newSize": size });
                         if out.send(seal(reply)).await.is_err() {
                             break;
@@ -395,7 +434,7 @@ async fn controls_take_the_path_that_serves_the_session() {
     // A pending dialog (either path delivers one the same way).
     let ask = json!({ "t": "ui-request", "request": { "kind": "select", "title": "Pick a color", "options": ["Red", "Blue"], "reqId": 7 } });
     s.lock().replica.apply(&GuestEvent::Frame(HostFrame::from_value(ask)), now_ms());
-    let blue = Answer { choices: vec!["Blue".into()], text: None, cancel: false, chat: false };
+    let blue = Answer { choices: vec!["Blue".into()], text: None, cancel: false, chat: false, back: false };
 
     // Nothing serves it: every control fails, retryably, with the link's own reason.
     let why = "TeleFlock's bridge in omp disconnected; waiting for it to reconnect";
@@ -604,45 +643,53 @@ async fn poll_now(lab: &Lab, ops: &Mutex<Vec<String>>) {
 }
 
 #[tokio::test] // current-thread: its clock can be paused
-async fn a_lost_bridge_hands_its_session_to_the_room_after_ten_seconds_and_takes_it_back() {
+async fn a_bridge_that_stops_answering_leaves_its_room_unjoined_and_the_file_serves_its_session() {
+    // A session with a bridge never falls back to its collab room: a join makes omp serialize the
+    // whole session, and an omp that leaves its bridge unanswered is busy already. While the bridge
+    // does not answer, then is closed and stays away, omp's session file serves the session; the
+    // bridge coming back takes it over. Before, ten seconds without the bridge handed the session to
+    // the room, and a feed that did not start left the copy where it was.
     let lab = Lab::start().await;
-    let (mut room, ops, file, ext, s) = served_with_a_room(&lab, "TfFallbackTestRoom0001").await;
+    let (mut room, ops, file, mut ext, s) = served_with_a_room(&lab, "TfStarvedTestRoom00001").await;
     let app = client("app");
     s.subscribe(&app, "agent-1", 100, None);
-    assert_eq!((count(&ops, "link"), room.joins()), (0, 0), "a room of a bridge-served session is never joined");
-
-    // The bridge goes away: the replica and its subscribers stay, waiting for it.
-    let before = rows(&s);
-    drop(ext);
-    let waiting = (LinkState::Connecting, Some(LinkReason::BridgeLost), Some(LinkVia::Bridge));
-    until("the bridge is lost", || link_of(&s) == waiting).await;
-    assert!(s.link_status().error.unwrap().contains("waiting for it to reconnect"));
+    let user_at = |id: &str, ms: u64, text: &str| {
+        json!({ "type": "message", "id": id, "parentId": null, "timestamp": "2026-10-28T10:00:03.000Z",
+                "message": { "role": "user", "content": text, "timestamp": ms } })
+    };
+    // The feed starts over (a settle ask here) and the bridge answers nothing from now on.
+    s.lock().settle.ask = Some("starts over".into());
+    s.feed_kick.notify_one();
+    assert_eq!(ext.recv_req().await["op"], "liveSubscribe");
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(9)).await;
-    poll_now(&lab, &ops).await;
-    assert_eq!((count(&ops, "link"), room.joins()), (0, 0), "joined before the bridge had 10 s to come back");
-    assert_eq!(link_of(&s), waiting);
-    assert_eq!(rows(&s), before);
-
-    // Ten seconds without it: the published room takes over the same session.
-    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::advance(Duration::from_secs(11)).await;
     tokio::time::resume();
-    lab.omp.repoll();
-    until("the room serves the session", || link_of(&s) == (LinkState::Live, Some(LinkReason::FallbackCollab), Some(LinkVia::Collab))).await;
-    assert!(Arc::ptr_eq(&s, &lab.session("s1").unwrap()), "the same session (replica, subscribers) goes on");
-    assert_eq!(room.joins(), 1);
-    assert!(rows(&s).iter().any(|i| matches!(i, TranscriptItem::User(u) if u.text == "shown through the room")));
-
-    // The bridge comes back: it takes the session back and the guest leaves the room.
-    let _ext = bridge_serves(&lab, "s1", &file, 1).await;
-    until("the bridge serves it again", || link_of(&s) == (LinkState::Live, None, Some(LinkVia::Bridge))).await;
-    until("the guest leaves the room", || room.leaves() == 1).await;
-    assert!(rows(&s).iter().any(|i| matches!(i, TranscriptItem::User(u) if u.text == "kept while the bridge is away")));
-    let links = count(&ops, "link");
+    // Its subscription timed out: the file serves the session.
+    until("the file serves the session", || s.lock().bridge_lost.is_some() && link_of(&s).0 == LinkState::Connecting).await;
+    append_entries(&file, &[user_at("e2", 1_793_000_004_000, "written while the bridge starved")]);
+    until("rows come from the file", || has_user_row(&s, "written while the bridge starved")).await;
+    // The next one too: hostd closes the connection, and the bridge stays away for a while.
+    tokio::time::pause();
+    let closed = async { while let Ok(Some(_)) = ext.lines.next_line().await {} };
+    tokio::time::timeout(Duration::from_secs(60), closed).await.expect("the starved bridge's connection is closed");
+    until("the bridge is lost", || link_of(&s).1 == Some(LinkReason::BridgeLost)).await;
+    tokio::time::advance(BRIDGE_RETURN + Duration::from_secs(5)).await;
     poll_now(&lab, &ops).await;
-    assert_eq!((count(&ops, "link"), room.joins()), (links, 1), "the room is not joined again");
-    assert!(Arc::ptr_eq(&s, &lab.session("s1").unwrap()));
-    assert!(!sent_kinds(&app).contains(&"ended".to_string()), "subscribers stayed through both hand-overs");
+    tokio::time::resume();
+    append_entries(&file, &[user_at("e3", 1_793_000_005_000, "written while the bridge was away")]);
+    until("rows still come from the file", || has_user_row(&s, "written while the bridge was away")).await;
+    poll_now(&lab, &ops).await;
+    assert_eq!((count(&ops, "link"), room.joins()), (0, 0), "the room of an omp with a bridge was joined");
+
+    // The bridge is back: it takes the same session over, its rows unchanged.
+    let followed = row_ids(&s);
+    let _ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves it again", || link_of(&s) == LIVE).await;
+    assert!(Arc::ptr_eq(&s, &lab.session("s1").unwrap()), "the same session went on");
+    assert_eq!(row_ids(&s), followed, "no row lost or doubled");
+    assert!(has_user_row(&s, "kept while the bridge is away") && has_user_row(&s, "written while the bridge starved"));
+    assert_eq!((count(&ops, "link"), room.joins()), (0, 0));
+    assert!(!sent_kinds(&app).contains(&"ended".to_string()), "subscribers stayed through it all");
     lab.stop().await;
 }
 
@@ -1031,7 +1078,7 @@ async fn a_lost_bridge_without_a_room_reads_the_same_on_every_poll() {
     tokio::time::pause();
     tokio::time::sleep(BRIDGE_RETURN + Duration::from_secs(2)).await;
     let link = s.link_status();
-    assert!(link.error.as_deref().is_some_and(|e| e.contains("no collab room to fall back to")), "{link:?}");
+    assert!(link.error.as_deref().is_some_and(|e| e.contains("from its file until it reconnects")), "{link:?}");
     let mut updates = lab.omp.subscribe();
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert_eq!(s.link_status(), link);
@@ -1069,5 +1116,410 @@ async fn a_turn_omp_ended_without_the_feed_saying_so_is_reloaded() {
     ext.ok(&req, json!({})).await;
     until("the resync settles the turn", || !s.is_streaming() && !statuses(&s).contains(&ToolStatus::Running)).await;
     assert_eq!(link_of(&s), (LinkState::Live, None, Some(LinkVia::Bridge)));
+    lab.stop().await;
+}
+
+// ───────────────────────────── an ask's explanation and Back ─────────────────────────────
+
+const EXPLANATION: &str = "**SQLite** keeps it in one file; Postgres needs a server.\n\nBoth work with Drizzle.";
+
+/// A turn that asks two questions: the prompt, then one assistant message with the explanation
+/// and the ask call (thinking first, which never counts).
+fn ask_turn() -> Vec<Value> {
+    let questions = json!([
+        { "id": "store", "question": "Which store?", "options": [{ "label": "SQLite" }, { "label": "Postgres" }] },
+        { "id": "orm", "question": "Which ORM?", "options": [{ "label": "none" }, { "label": "Drizzle" }] },
+    ]);
+    vec![
+        json!({ "type": "message", "id": "u1", "parentId": null, "timestamp": "2026-10-28T10:00:01.000Z",
+            "message": { "role": "user", "content": "pick a store", "timestamp": 1_793_000_001_000_u64 } }),
+        json!({ "type": "message", "id": "m1", "parentId": "u1", "timestamp": "2026-10-28T10:00:02.000Z",
+            "message": { "role": "assistant", "stopReason": "toolUse", "timestamp": 1_793_000_002_000_u64, "content": [
+                { "type": "thinking", "thinking": "which store fits" },
+                { "type": "text", "text": EXPLANATION },
+                { "type": "toolCall", "id": "call_ask1", "name": "ask", "arguments": { "questions": questions } },
+            ] } }),
+    ]
+}
+
+fn select(req_id: u64, title: &str, options: [&str; 2], nav: Option<Value>) -> Value {
+    let mut request = json!({ "kind": "select", "title": title, "options": [options[0], options[1], "Other (type your own)", "Chat about this"],
+        "initialIndex": 0, "selectionMarker": "radio", "markableCount": 2, "reqId": req_id });
+    if let Some(nav) = nav {
+        request["nav"] = nav;
+    }
+    json!({ "t": "ui-request", "request": request })
+}
+
+fn back() -> Answer {
+    Answer { choices: vec![], text: None, cancel: false, chat: false, back: true }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_asks_explanation_and_back_through_the_bridge() {
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "pick a store");
+    let mut ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == (LinkState::Live, None, Some(LinkVia::Bridge)))).await;
+    let s = lab.session("s1").unwrap();
+    ext.send(json!({ "t": "live", "seq": 2, "f": { "t": "event", "event": { "type": "message_end", "message": ask_turn()[1]["message"] } } })).await;
+    // The bridge's ask flow on its second question, which was answered "Drizzle" before (Back).
+    let nav = json!({ "index": 1, "total": 2, "back": "\u{0}back", "answer": { "choices": ["Drizzle"] } });
+    ext.send(json!({ "t": "live", "seq": 3, "f": select(9, "Which ORM?", ["none", "Drizzle"], Some(nav)) })).await;
+    until("the ask", || s.ui().is_some()).await;
+    let ui = s.ui().unwrap();
+    assert_eq!(ui.call_id.as_deref(), Some("call_ask1"));
+    assert_eq!(ui.context.as_deref(), Some(EXPLANATION));
+    assert_eq!(ui.step, Some(AskStep { index: 1, total: 2, can_back: true, choices: vec!["Drizzle".into()], text: None }));
+    let needs = s.lock().replica.needs().unwrap();
+    assert_eq!((needs.context.as_deref(), needs.step.as_ref()), (Some(EXPLANATION), ui.step.as_ref()), "the board has them too");
+
+    // Back is answered with the bridge's own value.
+    let (req, r) = via_bridge(&mut ext, json!({}), {
+        let s = s.clone();
+        async move { s.answer("9", &back()).await }
+    })
+    .await;
+    r.unwrap();
+    assert_eq!((&req["op"], &req["params"]), (&json!("uiResponse"), &json!({ "reqId": 9, "value": "\u{0}back" })));
+    lab.stop().await;
+}
+
+#[tokio::test] // current-thread: its clock can be paused
+async fn an_asks_explanation_through_omps_room_without_back() {
+    // omp's own collab mirroring: the join snapshot carries the turn, the dialog follows it, with
+    // no nav (omp's guests cannot go back).
+    let lab = Lab::start().await;
+    let (link, url) = room_link(lab.port, "TfAskContextRoom000001");
+    let mut room = FakeRoom::open_with(&link, "s1", ask_turn(), vec![select(3, "Which store?", ["SQLite", "Postgres"], None)]).await;
+    let ops = publish_room(&lab.registry_dir(), "i1", std::process::id(), "s1", url);
+    poll_now(&lab, &ops).await;
+    // No bridge says hello for the process: the room is joined after the grace.
+    tokio::time::pause();
+    tokio::time::advance(JOIN_GRACE + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    lab.omp.repoll();
+    until("the room serves the ask", || lab.session("s1").is_some_and(|s| link_of(&s).2 == Some(LinkVia::Collab) && s.ui().is_some())).await;
+    let s = lab.session("s1").unwrap();
+    let ui = s.ui().unwrap();
+    assert_eq!(ui.context.as_deref(), Some(EXPLANATION));
+    assert_eq!(s.lock().replica.needs().unwrap().context.as_deref(), Some(EXPLANATION));
+    assert_eq!(ui.step, None);
+    assert_eq!(s.answer("3", &back()).await.unwrap_err().code, "invalid_params");
+    s.answer("3", &Answer { choices: vec!["Postgres".into()], back: false, ..back() }).await.unwrap();
+    let r = room.next_frame("ui-response").await;
+    assert_eq!((&r["reqId"], &r["value"]), (&json!(3), &json!("Postgres")));
+    lab.stop().await;
+}
+
+// ───────────────────────────── the settle watchdog ─────────────────────────────
+
+/// The turn of the reported freeze, as omp writes it to its session file once it ran on: the
+/// first message (a redacted thought, two `grep` calls), their results, the final answer.
+fn grep_turn() -> Vec<Value> {
+    let call = |id: &str, pattern: &str| json!({ "type": "toolCall", "id": id, "name": "grep", "arguments": { "pattern": pattern } });
+    let result = |id: &str, call: &str| json!({ "type": "message", "id": id, "parentId": "m1", "timestamp": "2026-10-28T10:00:04.000Z",
+        "message": { "role": "toolResult", "toolCallId": call, "toolName": "grep", "content": [{ "type": "text", "text": "3 matches" }],
+                     "isError": false, "timestamp": 1_793_000_004_000_u64 } });
+    vec![
+        json!({ "type": "message", "id": "m1", "parentId": "e1", "timestamp": "2026-10-28T10:00:03.000Z",
+            "message": { "role": "assistant", "stopReason": "toolUse", "timestamp": 1_793_000_003_000_u64, "content": [
+                { "type": "redactedThinking", "data": "x" }, call("g1", "case \\w+ = "), call("g2", "grep") ] } }),
+        result("r1", "g1"),
+        result("r2", "g2"),
+        json!({ "type": "message", "id": "m2", "parentId": "r2", "timestamp": "2026-10-28T10:00:05.000Z",
+            "message": { "role": "assistant", "stopReason": "stop", "timestamp": 1_793_000_005_000_u64,
+                         "content": [{ "type": "text", "text": "Fertig: die Übersicht als Tabelle." }] } }),
+    ]
+}
+
+/// The first message streaming its two tool calls, as a live `message_update`; `marker` rides in
+/// its text (where a lab freeze is armed).
+fn streaming_calls(marker: &str) -> Value {
+    json!({ "t": "event", "event": { "type": "message_update", "assistantMessageEvent": { "type": "toolcall_delta" },
+        "message": { "role": "assistant", "timestamp": 1_793_000_003_000_u64, "content": [
+            { "type": "redactedThinking", "data": "x" },
+            { "type": "toolCall", "id": "g1", "name": "grep", "arguments": { "pattern": format!("case {marker}") } },
+            { "type": "toolCall", "id": "g2", "name": "grep", "arguments": { "pattern": "gr" } } ] } } })
+}
+
+fn append_entries(file: &Path, entries: &[Value]) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+    for e in entries {
+        writeln!(f, "{e}").unwrap();
+    }
+}
+
+fn final_answer_shown(s: &OmpSession) -> bool {
+    rows(s).iter().any(|i| matches!(i, TranscriptItem::Assistant(a) if a.text.contains("Tabelle") && !a.streaming))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_feed_driver_stuck_mid_turn_is_started_over_and_the_copy_reloaded_from_the_file() {
+    // The reported freeze: the first message streams its tool calls, then nothing more reaches the
+    // copy (here its feed driver hangs where no ask reaches it) while omp writes the rest of the
+    // turn and ends it. The watchdog sees the file ahead of the copy, starts the driver over and
+    // rebuilds the copy from the file. Before, the stall watchdog's ask was never taken: the copy
+    // (and every app showing it) stayed on the two queued calls for good.
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "grep it");
+    let mut ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+    let app = client("app");
+    s.subscribe(&app, "agent-1", 100, None);
+    ext.send(json!({ "t": "live", "seq": 2, "f": { "t": "event", "event": { "type": "agent_start" } } })).await;
+    ext.send(json!({ "t": "live", "seq": 3, "f": streaming_calls("") })).await;
+    until("the calls are queued", || statuses(&s) == [ToolStatus::Pending, ToolStatus::Pending]).await;
+    crate::lab::arm("stuck-driver-7f3a");
+    ext.send(json!({ "t": "live", "seq": 4, "f": streaming_calls("stuck-driver-7f3a") })).await;
+    // omp goes on: the turn lands in its file and its control state says idle.
+    append_entries(&file, &grep_turn());
+    ext.state_titled("s1", "t").await;
+    let req = ext.recv_req().await;
+    assert_eq!(req["op"], "liveSubscribe", "a new driver subscribes");
+    // Before the bridge answers, the copy shows the turn as omp wrote it.
+    until("the copy is reloaded from the file", || final_answer_shown(&s)).await;
+    assert_eq!(statuses(&s), [ToolStatus::Ok, ToolStatus::Ok]);
+    assert!(!s.is_streaming());
+    assert!(sent_kinds(&app).contains(&"reset".to_string()), "subscribers got the repaired rows");
+    ext.send(idle_resync("s1", &file, 5, last_entry(&file).as_deref(), &[])).await;
+    ext.ok(&req, json!({})).await;
+    until("the new driver serves it", || link_of(&s) == LIVE && s.lock().settle.ask.is_none()).await;
+    assert!(final_answer_shown(&s));
+    lab.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stuck_feed_driver_whose_bridge_left_hands_the_session_to_the_file() {
+    // The feed driver hangs where no ask reaches it, then omp's bridge goes (omp exited, or its
+    // extension went away for good): the driver never sees it, and its restart finds no bridge to
+    // subscribe to. The session must say its bridge is lost (the file serves it meanwhile, and it
+    // is dropped once omp is gone). Before, it stayed `live` through a bridge that was gone, with
+    // no driver, and was never dropped.
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "grep it");
+    let mut ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+    ext.send(json!({ "t": "live", "seq": 2, "f": { "t": "event", "event": { "type": "agent_start" } } })).await;
+    ext.send(json!({ "t": "live", "seq": 3, "f": streaming_calls("") })).await;
+    until("the calls are queued", || statuses(&s) == [ToolStatus::Pending, ToolStatus::Pending]).await;
+    crate::lab::arm("bridge-left-5d1e");
+    ext.send(json!({ "t": "live", "seq": 4, "f": streaming_calls("bridge-left-5d1e") })).await;
+    // The frame is on its way to the driver ahead of the connection's end.
+    drop(ext);
+    append_entries(&file, &grep_turn());
+    until("the session says its bridge is lost", || link_of(&s) == (LinkState::Connecting, Some(LinkReason::BridgeLost), Some(LinkVia::Bridge))).await;
+    until("the file serves it", || final_answer_shown(&s)).await;
+    assert_eq!(statuses(&s), [ToolStatus::Ok, ToolStatus::Ok]);
+    lab.stop().await;
+}
+
+/// A turn whose first attempt failed after streaming a tool call (the provider gave out mid-reply)
+/// and whose retry answered, as omp writes it: the file keeps the attempt, no result for its call.
+fn retried_call_turn() -> Vec<Value> {
+    vec![
+        json!({ "type": "message", "id": "f1", "parentId": "e1", "timestamp": "2026-10-28T10:00:02.000Z",
+            "message": { "role": "assistant", "stopReason": "error", "errorMessage": "529 Overloaded", "timestamp": 1_793_000_002_000_u64,
+                         "content": [{ "type": "thinking", "thinking": "deploying" },
+                                     { "type": "toolCall", "id": "c1", "name": "bash", "arguments": { "command": "./deploy" } }] } }),
+        json!({ "type": "message", "id": "m1", "parentId": "f1", "timestamp": "2026-10-28T10:00:05.000Z",
+            "message": { "role": "assistant", "stopReason": "stop", "timestamp": 1_793_000_005_000_u64,
+                         "content": [{ "type": "text", "text": "Deployed." }] } }),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_no_run_finished_does_not_get_its_session_repaired_for_good() {
+    // A copy rebuilt from omp's file (any resync: a bridge reconnect, a tf-hostd update) shows the
+    // failed attempt's call queued for good while omp is idle: the file has no result for it, so no
+    // repair can settle it. Before, the settle watchdog took it for a copy stuck mid-turn: a fresh
+    // resync after 30 s, a rebuild from the whole file 15 s later, and again every 2 to 15 minutes,
+    // each a reset for every app, for as long as the call was among the newest 64 rows.
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "deploy it");
+    append_entries(&file, &retried_call_turn());
+    let mut ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+    assert!(statuses(&s).contains(&ToolStatus::Pending), "the rebuilt copy shows the call queued: {:?}", statuses(&s));
+    assert!(rows(&s).iter().any(|i| matches!(i, TranscriptItem::Assistant(a) if a.text == "Deployed.")));
+    // Well past the stale wait and the source's grace (300 ms + 400 ms in tests).
+    let asked = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let req = ext.recv_req().await;
+            if req["op"] == "liveSubscribe" {
+                return req;
+            }
+        }
+    })
+    .await;
+    assert!(asked.is_err(), "the settle watchdog repaired a copy omp agrees with: {asked:?}");
+    assert_eq!(link_of(&s), LIVE);
+    lab.stop().await;
+}
+
+#[tokio::test] // current-thread: its clock can be paused
+async fn a_bridge_that_stops_answering_is_closed_so_it_dials_again() {
+    // A bridge whose socket is open but answers nothing (its writer stuck): two subscriptions in a
+    // row time out, and hostd closes the connection; the extension then redials. Before, hostd
+    // asked it again every 2-30 s forever.
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "hi");
+    let mut ext = FakeExt::connect(&lab.bridge).await;
+    ext.send(hello("s1", &file)).await;
+    tokio::time::pause();
+    let closed = async { while let Ok(Some(_)) = ext.lines.next_line().await {} };
+    tokio::time::timeout(Duration::from_secs(60), closed).await.expect("hostd keeps the silent bridge's connection open");
+    tokio::time::resume();
+    lab.stop().await;
+}
+
+#[tokio::test] // current-thread: its clock can be paused (the join grace)
+async fn a_silent_collab_room_is_asked_again_and_the_copy_reloaded_from_the_file() {
+    // A session served through omp's collab room (no bridge with a data plane: an old global
+    // bridge copy, a hand-started omp). The room goes silent mid-turn and does not answer a new
+    // hello either, while omp writes the turn to its file. The copy is rebuilt from the file. Before,
+    // nothing watched collab-served copies.
+    let lab = Lab::start().await;
+    let sessions = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(sessions.path().join("-w")).unwrap();
+    let file = session_file(&sessions.path().join("-w"), "s1", "grep it");
+    lab.omp.set_sessions_root(sessions.path().to_path_buf());
+    let first = json!({ "type": "message", "id": "e1", "parentId": null, "timestamp": "2026-10-28T10:00:02.000Z",
+        "message": { "role": "user", "content": "grep it", "timestamp": 1_793_000_002_000_u64 } });
+    crate::lab::arm("silent-room-41c2");
+    let then = vec![json!({ "t": "event", "event": { "type": "agent_start" } }), streaming_calls(""), streaming_calls("silent-room-41c2")];
+    let (link, url) = room_link(lab.port, "TfSilentRoomTestRoom01");
+    let mut room = FakeRoom::open_answering(&link, "s1", vec![first], then, 1).await;
+    let ops = publish_room(&lab.registry_dir(), "i1", std::process::id(), "s1", url);
+    poll_now(&lab, &ops).await;
+    // No bridge says hello for the process: the room is joined after the grace.
+    tokio::time::pause();
+    tokio::time::advance(JOIN_GRACE + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    lab.omp.repoll();
+    until("the room serves the queued calls", || {
+        lab.session("s1").is_some_and(|s| link_of(&s).2 == Some(LinkVia::Collab) && statuses(&s) == [ToolStatus::Pending, ToolStatus::Pending])
+    })
+    .await;
+    let s = lab.session("s1").unwrap();
+    append_entries(&file, &grep_turn());
+    until("the copy is reloaded from the file", || final_answer_shown(&s)).await;
+    assert_eq!(statuses(&s), [ToolStatus::Ok, ToolStatus::Ok]);
+    let hellos = room.take().iter().filter(|h| matches!(h, HostSaw::Frame(_, f) if f["t"] == "hello")).count() + 1;
+    assert!(hellos >= 2, "the room was asked for everything again ({hellos} hellos)");
+    lab.stop().await;
+}
+
+// ───────────────────────────── the session file serves what no room does ─────────────────────────────
+
+/// A sessions dir of the test's own with `s1`'s file (the user's first message), set as where the
+/// settle watchdog looks session files up.
+fn sessions_dir(lab: &Lab) -> (tempfile::TempDir, PathBuf) {
+    let sessions = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(sessions.path().join("-w")).unwrap();
+    let file = session_file(&sessions.path().join("-w"), "s1", "grep it");
+    lab.omp.set_sessions_root(sessions.path().to_path_buf());
+    (sessions, file)
+}
+
+/// The entries of `file` (title slot and header left out).
+fn file_entries(file: &Path) -> Vec<Value> {
+    std::fs::read_to_string(file).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).filter(|v| !matches!(v["type"].as_str(), Some("title" | "session"))).collect()
+}
+
+fn row_ids(s: &OmpSession) -> Vec<String> {
+    rows(s).iter().map(|i| i.id().to_owned()).collect()
+}
+
+#[tokio::test] // current-thread: its clock can be paused (the join grace)
+async fn a_room_that_went_away_leaves_the_file_serving_its_session_until_the_room_is_back() {
+    // omp's collab room serves the session; then the room goes (omp closed it, the relay reset it)
+    // and the guest keeps reconnecting. Meanwhile omp goes on and writes its turn: the copy follows
+    // the session file, row by row, without a reset. When the room is back, the guest's snapshot
+    // takes over: the same rows, none twice. Before, the copy stayed where the room left it until
+    // the room came back (or, with repairs, a full rebuild every 60 s to 15 min).
+    let lab = Lab::start().await;
+    let (_sessions, file) = sessions_dir(&lab);
+    let (link, url) = room_link(lab.port, "TfFollowTestRoom000001");
+    let _room = FakeRoom::open_serving(&link, "s1", &file).await;
+    let ops = publish_room(&lab.registry_dir(), "i1", std::process::id(), "s1", url);
+    poll_now(&lab, &ops).await;
+    tokio::time::pause();
+    tokio::time::advance(JOIN_GRACE + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    lab.omp.repoll();
+    until("the room serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == (LinkState::Live, None, Some(LinkVia::Collab)))).await;
+    let s = lab.session("s1").unwrap();
+    let app = client("app");
+    s.subscribe(&app, "agent-1", 100, None);
+    sent_kinds(&app);
+
+    // The guest read omp's journal (the session file) as far as it goes.
+    let len = std::fs::metadata(&file).unwrap().len();
+    until("the journal is read", || s.lock().replica.journal_offset() == len).await;
+    // The room goes: the guest reconnects, and the file serves the session.
+    reset_room(&lab.omp.inner, "TfFollowTestRoom000001").await;
+    until("the guest reconnects", || link_of(&s).0 == LinkState::Connecting).await;
+    append_entries(&file, &grep_turn());
+    until("the copy follows the file", || final_answer_shown(&s)).await;
+    assert_eq!(statuses(&s), [ToolStatus::Ok, ToolStatus::Ok]);
+    // Subscribers get the rows with the next flush (every 50 ms).
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let kinds = sent_kinds(&app);
+    assert!(kinds.contains(&"upsert".to_string()), "{kinds:?}");
+    assert!(!kinds.iter().any(|k| k == "reset" || k == "ended"), "followed row by row: {kinds:?}");
+    let followed = row_ids(&s);
+
+    // The room is back with the session as omp has it: the guest takes over, rows unchanged.
+    let _back = FakeRoom::open_serving(&link, "s1", &file).await;
+    until("the room serves it again", || link_of(&s) == (LinkState::Live, None, Some(LinkVia::Collab))).await;
+    assert!(Arc::ptr_eq(&s, &lab.session("s1").unwrap()), "the same session went on");
+    assert_eq!(row_ids(&s), followed, "no row lost or doubled");
+    assert!(!sent_kinds(&app).contains(&"ended".to_string()));
+    lab.stop().await;
+}
+
+#[tokio::test] // current-thread: its clock can be paused (the join grace)
+async fn a_room_hostd_cannot_join_shows_its_session_from_the_file_until_a_join_works() {
+    // omp publishes a room that cannot be joined (here: nobody hosts it on the relay). Before, the
+    // agent had no transcript at all while joins kept failing; now its session file serves it,
+    // the link saying why it is not live, and the join that works takes the session over.
+    let lab = Lab::start().await;
+    let (_sessions, file) = sessions_dir(&lab);
+    append_entries(&file, &grep_turn()[..1]);
+    let (link, url) = room_link(lab.port, "TfUnjoinableTestRoom01");
+    let ops = publish_room(&lab.registry_dir(), "i1", std::process::id(), "s1", url);
+    poll_now(&lab, &ops).await;
+    tokio::time::pause();
+    tokio::time::advance(JOIN_GRACE + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    lab.omp.repoll();
+    until("the file serves the session", || lab.session("s1").is_some_and(|s| statuses(&s).len() == 2)).await;
+    let s = lab.session("s1").unwrap();
+    assert_eq!(link_of(&s), (LinkState::Connecting, Some(LinkReason::JoinFailed), Some(LinkVia::Collab)));
+    let app = client("app");
+    s.subscribe(&app, "agent-1", 100, None);
+    sent_kinds(&app);
+    append_entries(&file, &grep_turn()[1..]);
+    until("the copy follows the file", || final_answer_shown(&s)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let kinds = sent_kinds(&app);
+    assert!(kinds.contains(&"upsert".to_string()) && !kinds.iter().any(|k| k == "reset" || k == "ended"), "followed row by row: {kinds:?}");
+    let followed = row_ids(&s);
+
+    // The room can be joined now: the next attempt takes the session over.
+    let _room = FakeRoom::open_serving(&link, "s1", &file).await;
+    until("the room serves it", || link_of(&s) == (LinkState::Live, None, Some(LinkVia::Collab))).await;
+    assert!(Arc::ptr_eq(&s, &lab.session("s1").unwrap()), "the session served from its file goes on");
+    assert_eq!(row_ids(&s), followed, "no row lost or doubled");
     lab.stop().await;
 }

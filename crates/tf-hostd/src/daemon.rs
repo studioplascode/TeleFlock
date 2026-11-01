@@ -33,6 +33,8 @@ pub struct Daemon {
     pub tools: crate::ops::tools::Tools,
     /// Presence, notification routing and push channels (`<home>/notify.json`, `crate::notify`).
     pub notify: crate::notify::Notifier,
+    /// Host-to-host forwarding: offers, `tf-forward`'s endpoint, shims, ports, streams (§3.30).
+    pub forward: crate::forward::Forwarder,
     pub shutdown: CancellationToken,
     pub started_at: i64,
     /// Identity of the binary this daemon runs (`attach --replace` compares it).
@@ -248,7 +250,8 @@ pub fn run(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
         }
     };
     let bound = crate::ipc::Bound::bind(&paths).with_context(|| format!("bind {}", paths.endpoint()))?;
-    let env = crate::userenv::prepare();
+    // The daemon's own git, gh, omp and installers never run a forwarded tool's shim.
+    let env = crate::userenv::prepare(&paths.home.join("forward").join("bin"));
     crate::logging::init_file(&paths.log).with_context(|| format!("open {}", paths.log.display()))?;
     info!(version = %crate::version_line(), pid = std::process::id(), home = %paths.home.display(), relay_port, "daemon starting");
     env.log();
@@ -294,6 +297,7 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     // omp's stats index for `host.usage`: synced on demand; warmed every 30 min on the real daemon.
     crate::ops::usage::start(&paths, persist.clone(), shutdown.child_token());
     let notify = crate::notify::Notifier::load(&paths.home, shutdown.child_token());
+    let forward = crate::forward::Forwarder::start(&paths, shutdown.child_token());
     let mut listener = Listener::start(bound, &paths).with_context(|| format!("bind {}", paths.endpoint()))?;
     info!(endpoint = %paths.endpoint(), "listening");
 
@@ -305,6 +309,7 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
         persist: persist.clone(),
         tools,
         notify,
+        forward,
         shutdown: shutdown.clone(),
         started_at: now_ms(),
         exe_id: exe_identity(),
@@ -356,6 +361,7 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     // workers' detached tails.
     crate::restart::flush_ledger(&daemon.paths.home, Duration::from_secs(3)).await;
     daemon.omp.shutdown().await;
+    daemon.forward.shutdown().await;
     daemon.persist.save_now();
     Ok(0)
 }

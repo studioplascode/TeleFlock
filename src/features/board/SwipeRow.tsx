@@ -140,7 +140,7 @@ export function SwipeRow({
           } else if (open) setOpen(null);
           else onOpen();
         }}
-        className={cn("relative cursor-pointer rounded-xl", picked && "shadow-[0_0_0_2px_var(--color-accent),0_0_24px_-4px_rgb(163_92_240/0.6)]")}
+        className={cn("relative cursor-pointer rounded-xl", picked && "shadow-[0_0_0_2px_var(--color-accent),0_0_24px_-4px_color-mix(in_srgb,var(--color-accent)_60%,transparent)]")}
       >
         {children}
         <AnimatePresence>
@@ -153,7 +153,7 @@ export function SwipeRow({
               transition={spring.bouncy}
               className={cn(
                 "absolute -top-1.5 -left-1.5 z-raised grid size-6 place-items-center rounded-full",
-                picked ? "bg-accent text-white shadow-glow-accent" : "bg-tile-5/80 shadow-[inset_0_0_0_1.5px_var(--color-line-3)]",
+                picked ? "bg-accent text-on-accent shadow-glow-accent" : "bg-tile-5/80 shadow-[inset_0_0_0_1.5px_var(--color-line-3)]",
               )}
             >
               {picked && (

@@ -6,6 +6,7 @@ import type {
   AgentTemplate,
   Column,
   ConnStatus,
+  ForwardList,
   HostProfile,
   HostState,
   Settings,
@@ -554,4 +555,9 @@ useSettings.getState = () => settingsView(coreStore.getState());
 
 export function useTunnels(): TunnelInfo[] {
   return useCore((s) => s.tunnels);
+}
+
+/** Forwarding rules, their status and active streams (`forward.list`, kept live by `AppEvent::Forwards`); null until known. */
+export function useForwards(): ForwardList | null {
+  return useCore((s) => s.forwards);
 }

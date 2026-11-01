@@ -181,6 +181,9 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[], now 
       case "tunnels":
         draft().tunnels = e.tunnels;
         break;
+      case "forwards":
+        draft().forwards = e.forwards;
+        break;
       case "openAgent":
         effects.push({ kind: "openAgent", hostId: e.hostId, agentId: e.agentId });
         break;

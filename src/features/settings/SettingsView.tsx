@@ -1,22 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, Server, Sparkles, SquareTerminal } from "lucide-react";
+import { Bell, BellRing, Bot, Info, Keyboard, Lightbulb, MonitorSmartphone, RotateCcw, Server, SquareTerminal } from "lucide-react";
 import { useEffect, useState } from "react";
-import {
-  Button,
-  cn,
-  isAndroid,
-  isTauri,
-  Kbd,
-  PageHeader,
-  SegmentedControl,
-  Select,
-  Switch,
-  toast,
-  useIsMobile,
-  useMotionPreference,
-} from "@/design";
+import { Button, cn, isAndroid, isTauri, Kbd, PageHeader, Select, Switch, toast, useIsMobile } from "@/design";
 import { core, navigate, usePrefs, useSettings, useUi } from "@/core";
-import type { MotionPref, Settings, ThinkingLevel } from "@/core/gen";
+import type { Settings, ThinkingLevel } from "@/core/gen";
 import { useAppInfo } from "@/features/hosts/appInfo";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
@@ -28,15 +15,13 @@ import { OMP_PAGES, VIEWS } from "@/features/shell/vocab";
 import { QuickCaptureSettings } from "@/features/capture/QuickCaptureSettings";
 import { HostAlerts } from "@/features/notify/HostAlerts";
 import { AutoAnswerSettings } from "@/features/autoAnswer/HostDefaults";
+import { Appearance } from "./Appearance";
 import { MutedAgents } from "./MutedAgents";
 import { AutoResumeSettings } from "./AutoResume";
-import { CommitInput, MOTION_COPY, Row, Section, THINKING, useModels } from "./parts";
+import { CommitInput, Row, Section, THINKING, useModels } from "./parts";
 import { PresenceRows } from "./PresenceRows";
 import { Templates } from "./Templates";
 import { Updates } from "./Updates";
-
-/** Calm (the default, stored as `system`) first, then Lively, then Reduced. */
-const MOTION_ORDER: readonly MotionPref[] = ["system", "full", "reduced"];
 
 type PermState = "granted" | "denied" | "prompt" | "prompt-with-rationale";
 
@@ -119,11 +104,10 @@ function AndroidRows() {
   );
 }
 
-/** Every Settings field, saved through `settings.set`; the motion preference applies live. */
+/** Every Settings field, saved through `settings.set`; the theme (per device) and motion level apply live. */
 export function SettingsView() {
   const settings = useSettings();
   const { openDialog } = useUi();
-  const setMotion = useMotionPreference((s) => s.setPreference);
   const mobile = useIsMobile();
   const info = useAppInfo();
   const models = useModels();
@@ -150,33 +134,8 @@ export function SettingsView() {
     <div className="flex min-h-full flex-col">
       {mobile && <MobileHeader title="Settings" back />}
       <div className={cn("mx-auto grid w-full max-w-[880px] grid-cols-[minmax(0,1fr)] content-start", mobile ? "gap-3 px-3 pt-1 pb-6" : "gap-4 px-8 pt-7 pb-12")}>
-        {!mobile && <PageHeader kicker="Preferences" title="Settings" description="How TeleFlock moves, notifies and starts new agents on this device." className="mb-2" />}
-        <Section index={0} icon={<Sparkles />} title="Motion" description="How much TeleFlock moves. Meaning never depends on motion: every state is also colour and text.">
-          <Row
-            label="Animation"
-            wide
-            description={
-              <ul className="mt-1 flex flex-col gap-0.5">
-                {MOTION_ORDER.map((m) => (
-                  <li key={m} className={cn(settings.motion === m && "text-ink-2")}>
-                    <b className="font-bold">{MOTION_COPY[m].label}</b> · {MOTION_COPY[m].description}
-                  </li>
-                ))}
-              </ul>
-            }
-          >
-            <SegmentedControl<MotionPref>
-              value={settings.motion}
-              onValueChange={(motion) => {
-                setMotion(motion);
-                update({ motion });
-              }}
-              options={MOTION_ORDER.map((m) => ({ value: m, label: MOTION_COPY[m].label }))}
-              aria-label="Animation"
-              fill={mobile}
-            />
-          </Row>
-        </Section>
+        {!mobile && <PageHeader kicker="Preferences" title="Settings" description="How TeleFlock looks, moves, notifies and starts new agents on this device." className="mb-2" />}
+        <Appearance index={0} />
 
         <Section index={1} icon={<Lightbulb />} title="Help and AI" description="How much TeleFlock explains, and whether omp names things for you.">
           <Row label="Hints" description="One-line captions beside controls the first few times you see them. Each retires on its own.">
@@ -320,6 +279,14 @@ export function SettingsView() {
           })}
         </Section>
 
+        <Section index={3} icon={<VIEWS.forward.icon />} title={VIEWS.forward.label} description="Let the agents and shells on one host use another host: run commands there, call its tools, reach its ports. Saved on this device.">
+          <Row label="Forwards between hosts" description="Rules, what is using them now, and the commands to give an agent.">
+            <Button size="sm" variant="secondary" icon={<VIEWS.forward.icon />} onClick={() => navigate({ name: "forward" })}>
+              Open
+            </Button>
+          </Row>
+        </Section>
+
         <AutoResumeSettings index={3} />
 
         <AutoAnswerSettings index={3} />
@@ -333,7 +300,7 @@ export function SettingsView() {
               step={1}
               value={settings.terminalFontSize}
               onChange={(e) => update({ terminalFontSize: Number(e.target.value) })}
-              className="w-40 accent-[#a35cf0]"
+              className="w-40 accent-accent"
               aria-label="Terminal font size"
             />
             <span className="w-10 text-right font-mono text-sm tabular text-ink-2">{settings.terminalFontSize}px</span>

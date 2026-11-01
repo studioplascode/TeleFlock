@@ -1,9 +1,11 @@
 import type {
   Agent,
   Answer,
+  AskStep,
   Capabilities,
   ChangedFile,
   HistoryPage,
+  NeedsOption,
   NeedsYou,
   NotifyKind,
   PulseKind,
@@ -24,6 +26,7 @@ import type {
   GoalInfo,
   ModelRef,
 } from "@/core/gen";
+import { apiError } from "../errors";
 import { fileDiff } from "./codegen";
 import { MODELS, type AgentDef } from "./data";
 import type { Rng } from "./rng";
@@ -56,8 +59,12 @@ type Active =
 interface PendingUi {
   request: UiRequest;
   spec: UiSpec;
-  then: (a: Answer) => Step[];
+  then: Extract<Step, { t: "ui" }>["then"];
   toolItemId?: string;
+  /** What the agent wrote before asking (asks), the same for every question of the ask. */
+  context?: string;
+  /** A multi-question ask (`spec.questions`): the open question and the answers given before it. */
+  ask?: { index: number; answers: Answer[] };
 }
 
 const CHARS_PER_SEC = 160; // ≈ 40 tok/s
@@ -557,12 +564,12 @@ export class AgentSim {
     this.host.agentChanged(a.id);
   }
 
-  private openUi(spec: UiSpec, then: (a: Answer) => Step[], at: number, live: boolean): void {
-    const reqId = `ui-${this.agent.id}-${(++this.seq).toString(36)}`;
+  private openUi(spec: UiSpec, then: PendingUi["then"], at: number, live: boolean): void {
     let toolItemId: string | undefined;
     if (spec.tool) {
       toolItemId = this.id();
       const t = spec.tool;
+      const questions = spec.questions?.map((q) => ({ question: q.message, options: q.options.map((o) => o.label) })) ?? [{ question: spec.message ?? spec.title, options: spec.options.map((o) => o.label) }];
       const item: ToolItem & { kind: "tool" } = {
         kind: "tool",
         id: toolItemId,
@@ -574,60 +581,119 @@ export class AgentSim {
         args: t.args,
         status: spec.needs === "approval" ? "pending" : "running",
         truncated: false,
-        view: t.tool === "ask" ? { type: "ask", questions: [{ question: spec.message ?? spec.title, options: spec.options.map((o) => o.label) }] } : undefined,
+        view: t.tool === "ask" ? { type: "ask", questions } : undefined,
       };
       this.put(item, live);
     }
+    // As tf-hostd fills an ask's `context`: the agent's latest text this turn (its own message here).
+    const asks = spec.needs === "ask" || (!spec.needs && (spec.kind === "select" || spec.kind === "multiSelect"));
+    const context = asks ? this.latestText() : undefined;
+    this.raise({ spec, then, toolItemId, context, ask: spec.questions ? { index: 0, answers: [] } : undefined }, at, live, true);
+  }
+
+  /** The agent's latest assistant text since the last prompt; never thinking. */
+  private latestText(): string {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const it = this.items[i];
+      if (it?.kind === "user" && !it.synthetic) break;
+      if (it?.kind === "assistant" && it.text.trim()) return it.text.trim();
+    }
+    return "";
+  }
+
+  /**
+   * Opens `p`'s dialog as a new request: a multi-question ask's current question, with its place, Back
+   * and the answer it already has (`step`). `first`: the ask itself (notified, logged, Needs-you since
+   * now); its later questions keep that `since`, so the agent keeps its place in the oldest-first Inbox.
+   */
+  private raise(p: Omit<PendingUi, "request">, at: number, live: boolean, first: boolean): void {
+    const { spec, ask } = p;
+    const q = ask ? spec.questions?.[ask.index] : undefined;
+    const kind = q?.kind ?? spec.kind;
+    const message = q ? q.message : spec.message;
+    const options = q?.options ?? spec.options;
+    const allowOther = (q ? q.allowOther : spec.allowOther) ?? false;
+    const had = ask?.answers[ask.index];
+    const step: AskStep | undefined =
+      ask && spec.questions
+        ? { index: ask.index, total: spec.questions.length, canBack: ask.index > 0, ...(had?.choices.length ? { choices: had.choices } : {}), ...(had?.text ? { text: had.text } : {}) }
+        : undefined;
+    const reqId = `ui-${this.agent.id}-${(++this.seq).toString(36)}`;
     const request: UiRequest = {
       id: reqId,
-      kind: spec.kind,
+      kind,
       title: spec.title,
-      message: spec.message,
-      options: spec.options,
-      allowOther: spec.allowOther ?? false,
+      message,
+      options,
+      allowOther,
       allowChat: spec.allowChat ?? false,
       initial: spec.initial,
       plan: spec.plan,
-      callId: toolItemId ? `call_${toolItemId}` : undefined,
+      callId: p.toolItemId ? `call_${p.toolItemId}` : undefined,
+      context: p.context,
+      step,
     };
-    this.pending = { request, spec, then, toolItemId };
+    this.pending = { ...p, request };
     const needs: NeedsYou = {
-      kind: spec.needs ?? (spec.kind === "planReview" ? "planReview" : spec.kind === "confirm" ? "confirm" : spec.kind === "editor" || spec.kind === "input" ? "input" : "ask"),
+      kind: spec.needs ?? (kind === "planReview" ? "planReview" : kind === "confirm" ? "confirm" : kind === "editor" || kind === "input" ? "input" : "ask"),
       requestId: reqId,
-      since: at,
+      since: first ? at : (this.agent.needs?.since ?? at),
       title: spec.title,
-      question: spec.message ?? spec.title,
+      question: message ?? spec.title,
       detail: spec.plan?.content.split("\n")[0],
-      options: spec.options,
-      multi: spec.kind === "multiSelect",
-      allowOther: spec.allowOther ?? false,
+      options,
+      multi: kind === "multiSelect",
+      allowOther,
       allowChat: spec.allowChat ?? false,
       command: spec.command,
       answerable: true,
+      context: p.context,
+      step,
     };
     const a = this.agent;
     a.state = "blocked";
-    a.stateSince = at;
+    if (first) a.stateSince = at;
     a.column = "needs";
     a.needs = needs;
-    a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined, line: spec.message?.split("\n")[0] ?? spec.title };
-    if (live) {
-      this.host.session(a.id, { k: "ui", request });
-      this.host.pulse(a.id, "state", 1);
-      this.host.agentChanged(a.id);
-      this.host.metaChanged(a.id);
+    a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined, line: message?.split("\n")[0] ?? spec.title };
+    if (!live) return;
+    this.host.session(a.id, { k: "ui", request });
+    if (first) this.host.pulse(a.id, "state", 1);
+    this.host.agentChanged(a.id);
+    this.host.metaChanged(a.id);
+    if (first) {
       this.host.notify(a.id, "needs", `${a.name} needs you`, needs.question, request);
       this.host.activity(a.id, "asked", `${a.name} asked: ${needs.title}`, needs.question);
-      this.termLine(`\r\n\x1b[38;5;208m◆ ${needs.title}\x1b[0m ${needs.question.split("\n")[0]}\r\n`);
     }
+    this.termLine(`\r\n\x1b[38;5;208m◆ ${needs.title}${step ? ` ${step.index + 1}/${step.total}` : ""}\x1b[0m ${needs.question.split("\n")[0]}\r\n`);
   }
 
-  /** Resolves the pending dialog. Returns false if `requestId` doesn't match. `logged: false`: the caller records the activity (decide for me). */
+  /**
+   * Resolves the pending dialog. Returns false if `requestId` doesn't match. `logged: false`: the caller records the activity (decide for me).
+   * A multi-question ask moves to its next question (or back to the previous one: `answer.back`, only where `step.canBack`, else
+   * `invalid_params` as tf-hostd answers) as a new request; its tool row completes with every answer after the last one.
+   */
   answer(requestId: string, answer: Answer, author?: string, logged = true): boolean {
     const p = this.pending;
     if (!p || p.request.id !== requestId) return false;
     const now = this.host.now();
+    const questions = p.spec.questions;
+    if (answer.back) {
+      if (!p.ask || !p.request.step?.canBack) throw apiError("invalid_params", "This question has no previous question to go back to");
+      this.host.session(this.agent.id, { k: "ui", request: null });
+      this.raise({ ...p, ask: { index: p.ask.index - 1, answers: p.ask.answers } }, now, true, false);
+      return true;
+    }
+    if (p.ask && questions && !answer.cancel && !answer.chat && p.ask.index < questions.length - 1) {
+      const answers = [...p.ask.answers];
+      answers[p.ask.index] = answer;
+      this.host.session(this.agent.id, { k: "ui", request: null });
+      if (logged) this.host.activity(this.agent.id, "answered", `${author ?? "You"} answered ${this.agent.name}`, answerText(p.request.options, answer));
+      this.raise({ ...p, ask: { index: p.ask.index + 1, answers } }, now, true, false);
+      return true;
+    }
     this.pending = null;
+    const all = p.ask ? [...p.ask.answers.slice(0, p.ask.index), answer] : [answer];
     const approval = p.spec.needs === "approval";
     const allowed = approval && !answer.cancel && answer.choices.some((c) => c.startsWith("Allow"));
     if (p.toolItemId) {
@@ -642,12 +708,13 @@ export class AgentSim {
             this.put({ ...item, status: "denied", durationMs: now - item.at });
           }
         } else {
-          const ans = answer.cancel ? "(dismissed)" : answer.chat ? "(chat about this)" : (answer.text ?? answer.choices.join(", "));
+          // One entry per question; questions a cancel or chat never reached stay unanswered.
+          const asked = questions ?? [{ message: p.request.message ?? p.request.title, options: p.request.options }];
           this.put({
             ...item,
             status: answer.cancel ? "aborted" : "ok",
             durationMs: now - item.at,
-            view: { type: "ask", questions: [{ question: p.request.message ?? p.request.title, options: p.request.options.map((o) => o.label), answer: ans }] },
+            view: { type: "ask", questions: asked.map((q, i) => ({ question: q.message, options: q.options.map((o) => o.label), answer: all[i] && answerText(q.options, all[i]) })) },
           });
         }
       }
@@ -657,7 +724,7 @@ export class AgentSim {
     const detail = answer.text ?? (answer.choices.join(", ") || (answer.chat ? "Chat about this" : answer.cancel ? "Skipped" : ""));
     if (logged) this.host.activity(this.agent.id, kind, `${author ?? "You"} ${kind} ${this.agent.name}`, detail);
     if (answer.chat) this.put({ kind: "user", id: this.id(), at: now, text: "Let's chat about this first.", images: [], author, steering: false, synthetic: false });
-    this.queue = [...p.then(answer), ...this.queue];
+    this.queue = [...p.then(answer, all), ...this.queue];
     this.cur = null;
     this.setState("working");
     this.host.metaChanged(this.agent.id);
@@ -1174,6 +1241,13 @@ export class AgentSim {
     const lines = out.join("\n").split("\n").slice(-(rows - 3));
     return lines.join("\r\n");
   }
+}
+
+/** How an answer reads in the ask tool row and Activity: the picked labels, the typed text, or what ended the ask. */
+function answerText(options: readonly NeedsOption[], a: Answer): string {
+  if (a.cancel) return "(dismissed)";
+  if (a.chat) return "(chat about this)";
+  return a.text ?? a.choices.map((id) => options.find((o) => o.id === id)?.label ?? id).join(", ");
 }
 
 /** Mean of the running subagents' completion estimates, as tf-hostd summarises them for the board. */

@@ -67,7 +67,7 @@ export function LinkAccountNudge({ hostId, variant = "row", order = 0, className
   const go = () => navigate({ name: "accounts", hostId, link: t.provider ?? "" });
   if (variant === "card")
     return (
-      <div data-nudge="accounts" className={cn("flex items-start gap-3 rounded-lg bg-accent/8 px-3.5 py-3 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.32)]", mobile && "flex-col", className)}>
+      <div data-nudge="accounts" className={cn("flex items-start gap-3 rounded-lg bg-accent/8 px-3.5 py-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_32%,transparent)]", mobile && "flex-col", className)}>
         <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/18 text-accent-hi">
           <KeyRound className="size-4" />
         </span>

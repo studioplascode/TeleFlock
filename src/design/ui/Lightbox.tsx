@@ -36,7 +36,8 @@ const DOUBLE_TAP_PX = 32;
 /** Desktop breathing room around the fitted image for the side arrows and toolbars. */
 const DESKTOP_PAD = 72;
 
-const glass = "bg-[rgb(24_24_34/0.72)] text-ink shadow-[inset_0_0_0_1px_rgb(255_255_255/0.1)] backdrop-blur-xl hover:bg-[rgb(44_44_60/0.85)] hover:text-ink";
+/** The viewer is dark in every theme (photos read best on near-black), so its controls use literal light ink (the default theme's ink and ink-2). */
+const glass = "bg-[rgb(24_24_34/0.72)] text-[#f5f5f7] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.1)] backdrop-blur-xl hover:bg-[rgb(44_44_60/0.85)] hover:text-[#f5f5f7]";
 
 /**
  * Full-screen image viewer: fit to screen, wheel / pinch / double-click zoom around the pointer,
@@ -403,11 +404,11 @@ function Frame({ image, index, count, go, close }: FrameProps) {
 
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center gap-3 bg-[linear-gradient(rgb(0_0_0/0.45),transparent)] px-4 pt-[max(12px,env(safe-area-inset-top))] pb-6 max-md:px-3">
         {count > 1 && (
-          <span className="shrink-0 rounded-full bg-[rgb(24_24_34/0.72)] px-3 py-1 text-xs font-bold text-ink-2 tabular shadow-[inset_0_0_0_1px_rgb(255_255_255/0.1)] backdrop-blur-xl" aria-live="polite">
+          <span className="shrink-0 rounded-full bg-[rgb(24_24_34/0.72)] px-3 py-1 text-xs font-bold text-[#dcdce4] tabular shadow-[inset_0_0_0_1px_rgb(255_255_255/0.1)] backdrop-blur-xl" aria-live="polite">
             {index + 1} / {count}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink-2">{image.alt}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[#dcdce4]">{image.alt}</span>
         <RadixDialog.Close asChild>
           <IconButton label="Close" size={btnSize} className={cn("pointer-events-auto rounded-full", glass)}>
             <X />
@@ -440,7 +441,7 @@ function Frame({ image, index, count, go, close }: FrameProps) {
           <IconButton label="Zoom out" size={btnSize} className="rounded-full" disabled={view.scale <= limits.min + 1e-6} onClick={() => zoomStep(1 / ZOOM_STEP)}>
             <ZoomOut />
           </IconButton>
-          <span className="min-w-[52px] text-center text-xs font-bold text-ink-2 tabular" aria-live="polite">
+          <span className="min-w-[52px] text-center text-xs font-bold text-[#dcdce4] tabular" aria-live="polite">
             {Math.round(view.scale * 100)}%
           </span>
           <IconButton label="Zoom in" size={btnSize} className="rounded-full" disabled={view.scale >= limits.max - 1e-6} onClick={() => zoomStep(ZOOM_STEP)}>

@@ -21,7 +21,7 @@ function problem(e: ApiError): { title: string; detail?: string; hint?: string }
 function Problem({ error, onRetry }: { error: ApiError; onRetry?: () => void }) {
   const p = problem(error);
   return (
-    <div className="flex items-start gap-2.5 rounded-md bg-error/8 px-3 py-2.5 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)]">
+    <div className="flex items-start gap-2.5 rounded-md bg-error/8 px-3 py-2.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)]">
       <CircleAlert className="mt-0.5 size-4 shrink-0 text-error" />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs">
         <span className="font-semibold text-ink">{p.title}</span>

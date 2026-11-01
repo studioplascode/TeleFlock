@@ -15,8 +15,8 @@ export function WorkingPanel({ label, detail, since }: { label: string; detail?:
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 py-8 text-center" role="status" aria-live="polite">
       <div className="relative grid size-24 place-items-center">
-        <span className="tf-loop absolute inset-0 animate-spin rounded-full [background:conic-gradient(from_0deg,transparent_0%,#f053d0_30%,#a15eef_55%,#7fa2e7_75%,transparent_100%)] [mask:radial-gradient(farthest-side,transparent_calc(100%-3px),#000_calc(100%-2px))] [animation-duration:1.4s]" />
-        <span className="tf-loop absolute inset-3 animate-spin rounded-full [background:conic-gradient(from_180deg,transparent,rgb(163_92_240/0.6),transparent_60%)] [mask:radial-gradient(farthest-side,transparent_calc(100%-2px),#000_calc(100%-1px))] [animation-direction:reverse] [animation-duration:2.2s]" />
+        <span className="tf-loop absolute inset-0 animate-spin rounded-full [background:conic-gradient(from_0deg,transparent_0%,var(--color-omp-pink)_30%,var(--color-omp-purple)_55%,var(--color-omp-blue)_75%,transparent_100%)] [mask:radial-gradient(farthest-side,transparent_calc(100%-3px),#000_calc(100%-2px))] [animation-duration:1.4s]" />
+        <span className="tf-loop absolute inset-3 animate-spin rounded-full [background:conic-gradient(from_180deg,transparent,color-mix(in_srgb,var(--color-accent)_60%,transparent),transparent_60%)] [mask:radial-gradient(farthest-side,transparent_calc(100%-2px),#000_calc(100%-1px))] [animation-direction:reverse] [animation-duration:2.2s]" />
         <span className="tf-loop size-3 animate-breathe rounded-full bg-omp shadow-glow-accent" />
       </div>
       <div className="flex flex-col gap-1">
@@ -71,7 +71,7 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
     <div className="flex flex-1 flex-col items-center justify-center gap-4 py-6 text-center" role="status" aria-live="polite">
       <div className="relative grid size-28 place-items-center">
         <motion.span
-          className="absolute -inset-10 rounded-full bg-[radial-gradient(closest-side,rgb(163_92_240/0.45),rgb(240_83_208/0.12)_55%,transparent)]"
+          className="absolute -inset-10 rounded-full bg-[radial-gradient(closest-side,color-mix(in_srgb,var(--color-accent)_45%,transparent),color-mix(in_srgb,var(--color-omp-pink)_12%,transparent)_55%,transparent)]"
           initial={{ scale: 0.2, opacity: 0 }}
           animate={{ scale: [0.2, 1.15, 1], opacity: [0, 1, 0.55] }}
           transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1] }}
@@ -80,7 +80,7 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
         {[0, 1, 2].map((i) => (
           <motion.span
             key={i}
-            className="absolute inset-0 rounded-full shadow-[inset_0_0_0_2px_rgb(163_92_240/0.8)]"
+            className="absolute inset-0 rounded-full shadow-[inset_0_0_0_2px_color-mix(in_srgb,var(--color-accent)_80%,transparent)]"
             initial={{ scale: 0.4, opacity: 0.9 }}
             animate={{ scale: 1.6 + i * 0.25, opacity: 0 }}
             transition={{ ...tween.slow, duration: 1.1, delay: 0.08 * i }}
@@ -106,7 +106,7 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
           animate={{ scale: 1, opacity: 1 }}
           transition={spring.bouncy}
         >
-          <svg viewBox="0 0 24 24" className="size-10 text-white" fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <svg viewBox="0 0 24 24" className="size-10 text-on-accent" fill="none" stroke="currentColor" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <motion.path d="M5 12.5l4.5 4.5L19 7.5" initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 0.45, delay: 0.25, ease: "easeOut" }} />
           </svg>
         </motion.div>
@@ -117,7 +117,7 @@ export function LaunchSuccess({ hostId, started, title, subtitle, onClose }: Lau
       </motion.div>
       {!late || agentId ? (
         <div className="flex w-56 flex-col items-center gap-2">
-          <div className="h-1 w-full overflow-hidden rounded-full bg-white/8">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-ink/8">
             <motion.div
               className="h-full rounded-full bg-omp"
               initial={{ width: "0%" }}

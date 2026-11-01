@@ -154,7 +154,7 @@ mod tests {
         let act = |id: &str, label: &str, cancel: bool| NotifyAction {
             id: id.into(),
             label: label.into(),
-            answer: Some(Answer { choices: vec![], text: None, cancel, chat: false }),
+            answer: Some(Answer { choices: vec![], text: None, cancel, chat: false, back: false }),
         };
         let n = notification(vec![act("a", "Allow", false), act("d", "Deny", true), act("x", "No thanks", false), act("y", "Extra", false)]);
         let p = present(Some(&h), &n, NotifyStyle { sound: true, silent: false, reply: true });

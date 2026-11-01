@@ -36,7 +36,8 @@ function AnswerBurst() {
 
 /**
  * Ctrl+J "answer next" overlay: cycles blocked agents oldest-first with their context.
- * 1…N answer (Other is N+1) · Tab/J/K move · Enter opens the session · Esc closes.
+ * 1…N answer (Other is N+1) · ← previous question of a multi-question ask · Tab/J/K move · Enter opens
+ * the session · Esc closes.
  */
 export function AnswerNextHud() {
   const open = useUi((s) => s.answerNextOpen);
@@ -200,6 +201,11 @@ export function AnswerNextHud() {
                       </>
                     )}{" "}
                     answer
+                  </span>
+                )}
+                {needs?.answerable && needs.step?.canBack && (
+                  <span>
+                    <Kbd>←</Kbd> previous question
                   </span>
                 )}
                 <span>

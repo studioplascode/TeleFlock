@@ -40,7 +40,7 @@ export function Ticks({ text, className }: { text: string; className?: string })
     <>
       {splitTicks(text).map((part, i) =>
         part.code ? (
-          <code key={i} className={cn("rounded-xs bg-white/6 px-1 font-mono text-2xs break-words text-ink-2", className)}>
+          <code key={i} className={cn("rounded-xs bg-ink/6 px-1 font-mono text-2xs break-words text-ink-2", className)}>
             {part.text}
           </code>
         ) : (

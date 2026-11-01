@@ -392,7 +392,7 @@ export function DispatchView() {
   if (mobile) {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <header className="flex min-h-12 min-w-0 shrink-0 items-center gap-1.5 bg-[rgb(11_11_16/0.72)] px-3 py-1.5 backdrop-blur-xl">
+        <header className="flex min-h-12 min-w-0 shrink-0 items-center gap-1.5 bg-chrome/72 px-3 py-1.5 backdrop-blur-xl">
           {pickers}
           <span className="shrink-0">{menu}</span>
         </header>
@@ -411,7 +411,7 @@ export function DispatchView() {
     <div className="relative flex h-full min-h-0 flex-col items-center gap-3 p-4 pt-3">
       <header className="flex w-full max-w-[920px] min-w-0 flex-wrap items-center gap-2">
         <span className="mr-1 flex min-w-0 shrink-0 items-center gap-2">
-          <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]">
+          <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]">
             <Send className="size-4" />
           </span>
           <span className="flex min-w-0 flex-col">

@@ -146,7 +146,7 @@ function Stepper({ phase, message }: { phase: ConnPhase; message?: string }) {
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center gap-1.5" role="progressbar" aria-valuemin={0} aria-valuemax={PATH.length - 1} aria-valuenow={at} aria-valuetext={PHASE_LABEL[phase]}>
         {PATH.slice(0, -1).map((p, i) => (
-          <span key={p} className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-white/8">
+          <span key={p} className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-ink/8">
             <motion.span
               className={cn("absolute inset-0 origin-left rounded-full bg-run", i === at && "tf-loop animate-pulse")}
               initial={false}
@@ -171,7 +171,7 @@ function AuthRequired({ hostId, url }: { hostId: string; url?: string }) {
       initial={{ opacity: 0, scale: 0.97 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={spring.bouncy}
-      className="sun-pulse relative overflow-hidden rounded-xl p-4 text-white [background:radial-gradient(120%_130%_at_100%_0%,rgb(255_61_119/0.95)_0%,transparent_60%),radial-gradient(90%_120%_at_0%_100%,#ff7a18_0%,transparent_70%),linear-gradient(135deg,#ff7a18,#ff3d77)]"
+      className="sun-pulse relative overflow-hidden rounded-xl p-4 text-on-sun [background:radial-gradient(120%_130%_at_100%_0%,color-mix(in_srgb,var(--color-sun-2)_95%,transparent)_0%,transparent_60%),radial-gradient(90%_120%_at_0%_100%,var(--color-sun-1)_0%,transparent_70%),linear-gradient(135deg,var(--color-sun-1),var(--color-sun-2))]"
       role="alert"
     >
       <div className="flex items-start gap-3">
@@ -180,7 +180,7 @@ function AuthRequired({ hostId, url }: { hostId: string; url?: string }) {
         </span>
         <div className="min-w-0 flex-1">
           <h4 className="font-display text-lg font-bold">Sign in to continue</h4>
-          <p className="mt-0.5 text-sm text-white/85">Your tailnet asks you to confirm SSH logins for this host (Tailscale check mode). Open the browser, approve, and TeleFlock continues.</p>
+          <p className="mt-0.5 text-sm text-on-sun/85">Your tailnet asks you to confirm SSH logins for this host (Tailscale check mode). Open the browser, approve, and TeleFlock continues.</p>
         </div>
       </div>
       {url && (
@@ -190,7 +190,7 @@ function AuthRequired({ hostId, url }: { hostId: string; url?: string }) {
           </code>
           <button
             type="button"
-            className="grid size-7 place-items-center rounded-sm text-white/80 pressable focus-ring hover:bg-white/15 hover:text-white"
+            className="grid size-7 place-items-center rounded-sm text-on-sun/80 pressable focus-ring hover:bg-white/15 hover:text-on-sun"
             aria-label="Copy sign-in link"
             title="Copy link"
             onClick={() => {
@@ -214,10 +214,10 @@ function AuthRequired({ hostId, url }: { hostId: string; url?: string }) {
         >
           Open browser
         </Button>
-        <Button size="sm" variant="ghost" className="text-white/90 hover:bg-white/15 hover:text-white" icon={<RefreshCw />} onClick={() => connect(hostId)}>
+        <Button size="sm" variant="ghost" className="text-on-sun/90 hover:bg-white/15 hover:text-on-sun" icon={<RefreshCw />} onClick={() => connect(hostId)}>
           I've approved it
         </Button>
-        <span className="ml-auto flex items-center gap-1.5 text-xs text-white/80">
+        <span className="ml-auto flex items-center gap-1.5 text-xs text-on-sun/80">
           <span className="size-1.5 animate-pulse rounded-full bg-white tf-loop" />
           Waiting for approval
         </span>
@@ -255,7 +255,7 @@ function HostKey({ hostId, info }: { hostId: string; info?: HostKeyInfo }) {
       initial={{ opacity: 0, scale: 0.97 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={spring.bouncy}
-      className="rounded-xl bg-warn/8 p-4 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]"
+      className="rounded-xl bg-warn/8 p-4 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]"
       role="alert"
       aria-label="Verify the host key"
     >
@@ -272,7 +272,7 @@ function HostKey({ hostId, info }: { hostId: string; info?: HostKeyInfo }) {
         </div>
       </div>
       {info && fp ? (
-        <dl className="mt-3 grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1.5 rounded-md bg-black/25 px-3 py-2.5 text-xs">
+        <dl className="mt-3 grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1.5 rounded-md bg-bg-deep/25 px-3 py-2.5 text-xs">
           <dt className="text-mute-2">Address</dt>
           <dd className="min-w-0 truncate font-mono text-ink-2" title={info.address}>
             {info.address}
@@ -289,7 +289,7 @@ function HostKey({ hostId, info }: { hostId: string; info?: HostKeyInfo }) {
             </code>
             <button
               type="button"
-              className="grid size-6 shrink-0 place-items-center rounded-sm text-mute pressable focus-ring hover:bg-white/10 hover:text-ink"
+              className="grid size-6 shrink-0 place-items-center rounded-sm text-mute pressable focus-ring hover:bg-ink/10 hover:text-ink"
               aria-label="Copy fingerprint"
               title="Copy fingerprint"
               onClick={() => {
@@ -353,7 +353,7 @@ function Reconnecting({ hostId, status }: { hostId: string; status: ConnStatus }
         </Button>
       </div>
       {next && (
-        <div className="h-1 overflow-hidden rounded-full bg-white/8">
+        <div className="h-1 overflow-hidden rounded-full bg-ink/8">
           <motion.div className="h-full origin-left rounded-full bg-run" animate={{ scaleX: left / total }} transition={{ type: "tween", duration: 0.25, ease: "linear" }} />
         </div>
       )}
@@ -374,13 +374,13 @@ function Failed({ hostId, status }: { hostId: string; status: ConnStatus }) {
     );
   };
   return (
-    <div className="rounded-lg bg-error/8 p-3 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]" role="alert">
+    <div className="rounded-lg bg-error/8 p-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_30%,transparent)]" role="alert">
       <div className="flex items-start gap-2.5">
         <ServerCrash className="mt-0.5 size-4 shrink-0 text-error" />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-bold break-words text-[#ffb1c1]">{err?.message ?? status.message ?? "The connection failed."}</div>
+          <div className="text-sm font-bold break-words text-error-ink">{err?.message ?? status.message ?? "The connection failed."}</div>
           {hint && <p className="mt-1 text-xs text-mute">{hint}</p>}
-          {err?.code && <code className="mt-1.5 inline-block rounded-xs bg-black/30 px-1.5 py-0.5 font-mono text-2xs text-mute-2">{err.code}</code>}
+          {err?.code && <code className="mt-1.5 inline-block rounded-xs bg-bg-deep/30 px-1.5 py-0.5 font-mono text-2xs text-mute-2">{err.code}</code>}
         </div>
       </div>
       <div className="mt-2.5 flex justify-end gap-2">
@@ -399,7 +399,7 @@ function Offline({ hostId, status }: { hostId: string; status: ConnStatus }) {
   const now = useNow(30_000);
   return (
     <div className="flex items-center gap-2.5">
-      <span className="grid size-8 place-items-center rounded-md bg-white/6 text-mute">
+      <span className="grid size-8 place-items-center rounded-md bg-ink/6 text-mute">
         {status.phase === "offline" ? <WifiOff className="size-4" /> : <Plug className="size-4" />}
       </span>
       <div className="min-w-0 flex-1 text-sm">

@@ -448,17 +448,17 @@ export function SettingRow({ s, ctx, showPlace }: { s: OmpSetting; ctx: RowConte
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <div className={cn("omp-head min-w-0 flex-1 basis-64", kind === "switch" ? "max-md:basis-0" : "max-md:basis-full")}>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            {modified && <span className="size-1.5 shrink-0 rounded-full bg-accent-hi shadow-[0_0_8px_rgb(163_92_240/0.8)]" title="Changed from omp's default" />}
+            {modified && <span className="size-1.5 shrink-0 rounded-full bg-accent-hi shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_80%,transparent)]" title="Changed from omp's default" />}
             <span className="text-sm font-bold text-ink">{s.label ?? s.id}</span>
             {showPlace && <span className="text-2xs font-semibold text-mute-2">{showPlace}</span>}
             {cond && (
-              <span className={cn("rounded-full px-1.5 py-px text-2xs font-semibold", cond.holds === false ? "bg-white/6 text-mute-2" : "bg-white/8 text-mute")} title={`omp's own panel shows this only when it applies (${s.condition})`}>
+              <span className={cn("rounded-full px-1.5 py-px text-2xs font-semibold", cond.holds === false ? "bg-ink/6 text-mute-2" : "bg-ink/8 text-mute")} title={`omp's own panel shows this only when it applies (${s.condition})`}>
                 {cond.hint}
               </span>
             )}
             {s.env && (
               <Tooltip content={`$${s.env} in omp's environment on the host takes precedence over this setting (or fills it in while unset).`}>
-                <span className="rounded-full bg-white/6 px-1.5 py-px font-mono text-2xs text-mute">${s.env}</span>
+                <span className="rounded-full bg-ink/6 px-1.5 py-px font-mono text-2xs text-mute">${s.env}</span>
               </Tooltip>
             )}
           </div>

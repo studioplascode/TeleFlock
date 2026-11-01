@@ -256,6 +256,15 @@ impl LinkSink for Sink {
             ServerMsg::Notify { notification, alert } => inner.on_notify(&rt, notification, alert),
             ServerMsg::NotifyAlert { id } => inner.on_notify_alert(&rt, &id),
             ServerMsg::NotifyDone { ids, .. } => inner.on_remote_read(&rt, &ids),
+            ServerMsg::FwdOffered { states } => crate::forward::on_offered(&inner, &host_id, states),
+            ServerMsg::Fwd { sid, ev } => {
+                // Only from the link this sink serves (a stale one is closing).
+                let Some(link) = rt.link() else { return };
+                let served = self.link_id.load(Ordering::SeqCst);
+                if served == 0 || served == link.id {
+                    crate::forward::on_fwd(&inner, &host_id, &link, sid, ev);
+                }
+            }
             _ => {}
         }
     }
@@ -617,6 +626,8 @@ async fn connect_and_serve(
     // A host ≥ 0.7.0 routes notifications to the device in use: tell it what this one is doing.
     eng.presence_link_up(&link);
     tokio::spawn(sessions::reopen(session_host(eng, rt), link.clone()));
+    // Forwarding: offers to this host as a from-host, and its rules' status.
+    crate::forward::link_up(eng, &rt.id, &link);
 
     let reason = tokio::select! {
         r = link.closed() => r,

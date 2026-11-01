@@ -32,6 +32,7 @@ function tabFor(r: Route): Tab {
     // everything reached from More keeps More lit (the omp area's pages, automations, …)
     case "more":
     case "hosts":
+    case "forward":
     case "settings":
     case "usage":
     case "wrapped":
@@ -97,7 +98,7 @@ function BottomNav() {
 
   return (
     <nav
-      className="relative z-sticky shrink-0 border-t border-line bg-[rgb(12_12_18/0.86)] px-1 pt-1 pb-[max(4px,env(safe-area-inset-bottom))]"
+      className="relative z-sticky shrink-0 border-t border-line bg-chrome/86 px-1 pt-1 pb-[max(4px,env(safe-area-inset-bottom))]"
       aria-label="Primary"
     >
       <ul className="grid grid-cols-5">
@@ -122,7 +123,7 @@ function BottomNav() {
                     <motion.span
                       layoutId="tf-tab-pill"
                       transition={spring.snappy}
-                      className="absolute inset-0 rounded-full bg-accent/18 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4),0_0_18px_-4px_rgb(163_92_240/0.7)]"
+                      className="absolute inset-0 rounded-full bg-accent/18 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent),0_0_18px_-4px_color-mix(in_srgb,var(--color-accent)_70%,transparent)]"
                       aria-hidden
                     />
                   )}
@@ -136,7 +137,7 @@ function BottomNav() {
                       animate={{ scale: 1 }}
                       transition={spring.bouncy}
                       aria-hidden
-                      className="absolute -top-1 right-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-sun px-1 text-[9.5px] leading-none font-extrabold text-white shadow-[0_0_0_2px_rgb(12_12_18)] sun-pulse"
+                      className="absolute -top-1 right-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-sun px-1 text-[9.5px] leading-none font-extrabold text-on-sun shadow-[0_0_0_2px_var(--color-chrome)] sun-pulse"
                     >
                       {badge > 99 ? "99+" : badge}
                     </motion.span>
@@ -145,7 +146,7 @@ function BottomNav() {
                     <span
                       aria-hidden
                       className={cn(
-                        "absolute top-0 size-2 rounded-full shadow-[0_0_0_2px_rgb(12_12_18)]",
+                        "absolute top-0 size-2 rounded-full shadow-[0_0_0_2px_var(--color-chrome)]",
                         // beside a count the dot moves to the other corner so both stay readable
                         badge > 0 ? "left-1" : "right-2.5",
                         tab === "inbox" ? "bg-accent-hi" : "bg-sun-2 shadow-glow-sun",

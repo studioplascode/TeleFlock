@@ -14,7 +14,7 @@ const MENU_PREVIEW_LINES = 6;
  */
 export function PasteChips({ paste, mobile = false, className }: { paste: PasteAttach; mobile?: boolean; className?: string }) {
   if (!paste.pastes.length && !paste.missing.length) return null;
-  const btn = cn("pressable focus-ring grid shrink-0 place-items-center rounded-full text-mute hover:bg-white/8 hover:text-ink", mobile ? "size-8" : "size-6");
+  const btn = cn("pressable focus-ring grid shrink-0 place-items-center rounded-full text-mute hover:bg-ink/8 hover:text-ink", mobile ? "size-8" : "size-6");
   return (
     <div className={cn("flex flex-wrap gap-1.5", className)} aria-label={paste.pastes.length === 1 ? "1 pasted text" : `${paste.pastes.length} pasted texts`}>
       {paste.pastes.map((p) => {
@@ -32,7 +32,7 @@ export function PasteChips({ paste, mobile = false, className }: { paste: PasteA
             className={cn(
               "relative flex max-w-[300px] min-w-0 items-center gap-1 overflow-hidden rounded-[12px] py-1 pr-1 pl-1 shadow-hairline",
               mobile ? "h-11" : "h-10",
-              open ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)]" : "bg-tile-4",
+              open ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_45%,transparent)]" : "bg-tile-4",
             )}
           >
             <button
@@ -64,7 +64,7 @@ export function PasteChips({ paste, mobile = false, className }: { paste: PasteA
           key={`missing-${n}`}
           role="group"
           aria-label={`Paste ${n} is no longer on this device`}
-          className={cn("flex max-w-[300px] min-w-0 items-center gap-2 rounded-[12px] bg-error/10 py-1 pr-1 pl-2.5 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)]", mobile ? "h-11" : "h-10")}
+          className={cn("flex max-w-[300px] min-w-0 items-center gap-2 rounded-[12px] bg-error/10 py-1 pr-1 pl-2.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)]", mobile ? "h-11" : "h-10")}
         >
           <TriangleAlert className="size-4 shrink-0 text-error" aria-hidden />
           <span className="flex min-w-0 flex-col leading-tight">
@@ -93,7 +93,7 @@ export function PasteMenu({ paste, mobile = false }: { paste: PasteAttach; mobil
     <motion.div
       initial={{ opacity: 0, y: 8, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1, transition: spring.snappy }}
-      className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,#22222e,#181820)] shadow-[var(--shadow-d3),inset_0_0_0_1px_rgb(255_255_255/0.09)]"
+      className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] shadow-[var(--shadow-d3),inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_9%,transparent)]"
       onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.stopPropagation();
@@ -113,7 +113,7 @@ export function PasteMenu({ paste, mobile = false }: { paste: PasteAttach; mobil
           </span>
         )}
       </div>
-      <pre className="max-h-[7.5lh] overflow-hidden border-b border-line bg-black/20 px-3 py-2 font-mono text-[11px] leading-[1.25] whitespace-pre text-ink-2 [mask-image:linear-gradient(180deg,#000_70%,transparent)]">
+      <pre className="max-h-[7.5lh] overflow-hidden border-b border-line bg-bg-deep/20 px-3 py-2 font-mono text-[11px] leading-[1.25] whitespace-pre text-ink-2 [mask-image:linear-gradient(180deg,#000_70%,transparent)]">
         {lines.join("\n")}
       </pre>
       <div role="listbox" aria-label={menu.auto ? `Pasted ${lineCount(p.text)} lines` : `Paste ${p.n}`} className="p-1">

@@ -66,6 +66,7 @@ export {
   useSettings,
   useSuccessor,
   useTunnels,
+  useForwards,
   useWorkspaces,
 } from "./hooks";
 export type { AgentFilter, HostsView, NotificationsView, SessionView, SettingsView } from "./hooks";

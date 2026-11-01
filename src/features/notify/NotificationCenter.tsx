@@ -89,8 +89,8 @@ function Item({ n, index, onOpen }: { n: HostNotification; index: number; onOpen
       transition={{ ...spring.smooth, delay: Math.min(index, 8) * 0.03 }}
       className={cn(
         "group/item relative rounded-lg p-3 transition-colors",
-        unread ? "bg-accent/8" : "hover:bg-white/[0.03]",
-        n.kind === "needs" && unread && !n.resolved && "bg-sun-2/8 shadow-[inset_0_0_0_1px_rgb(255_61_119/0.25)]",
+        unread ? "bg-accent/8" : "hover:bg-ink/[0.03]",
+        n.kind === "needs" && unread && !n.resolved && "bg-sun-2/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-sun-2)_25%,transparent)]",
         n.resolved && "opacity-70",
       )}
     >
@@ -250,7 +250,7 @@ export function NotificationList({ onNavigate, className, title = true, keep }: 
         className="mt-2 flex items-center gap-2 rounded-md border-t border-line px-1 pt-2.5 text-left text-xs font-bold text-ink-2 hover:text-ink focus-ring"
       >
         Open {VIEWS.inbox.label}
-        {waiting > 0 && <span className="font-semibold text-[#ffb08a]">· {waiting} waiting</span>}
+        {waiting > 0 && <span className="font-semibold text-sun-ink">· {waiting} waiting</span>}
         <span className="ml-auto font-semibold text-mute-2">{VIEWS.inbox.shortcut}</span>
       </button>
     </div>
@@ -293,7 +293,7 @@ export function NotificationBell() {
             {count > 0 && (
               <span
                 aria-hidden
-                className="pointer-events-none absolute -top-0.5 -right-0.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-white/85 px-1 text-[10.5px] leading-none font-extrabold text-chrome shadow-[0_0_0_3px_var(--color-chrome)]"
+                className="pointer-events-none absolute -top-0.5 -right-0.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-ink/89 px-1 text-[10.5px] leading-none font-extrabold text-chrome shadow-[0_0_0_3px_var(--color-chrome)]"
               >
                 {count > 99 ? "99+" : count}
               </span>

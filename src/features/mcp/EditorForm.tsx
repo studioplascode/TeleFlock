@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import type { McpRegistryEntry, McpRegistryInput } from "@/core/gen";
 import { Button, cn, Field, IconButton, Input, SegmentedControl, Select, Switch } from "@/design";
 import { tildify } from "@/features/workspace/shared/paths";
-import { type FormErrors, hasAdvanced, joinArgs, type KvRow, kvRow, looksSecret, type McpForm, nameAdvice, NAME_MAX, splitArgs } from "./model";
+import { dropScheme, type FormErrors, hasAdvanced, joinArgs, type KvRow, kvRow, looksSecret, type McpForm, nameAdvice, NAME_MAX, splitArgs, typeValue } from "./model";
 import type { McpTemplateInput } from "./templates";
 
 /** A password field with a show / hide toggle. A stored secret reads "Unchanged" until something is typed. */
@@ -35,6 +35,20 @@ function SecretInput({ value, onChange, stored, placeholder, label, leading, inv
 function KeyValueRows({ rows, kind, onChange, error, extraAction }: { rows: KvRow[]; kind: "env" | "headers"; onChange(rows: KvRow[]): void; error?: string; extraAction?: ReactNode }) {
   const noun = kind === "env" ? "variable" : "header";
   const set = (id: number, p: Partial<KvRow>) => onChange(rows.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  // The auth scheme in front of the value (`Bearer`); a click drops it, to send the value as typed.
+  const schemeChip = (r: KvRow) =>
+    r.prefix ? (
+      <button
+        type="button"
+        onClick={() => set(r.id, dropScheme(r))}
+        title={`Remove “${r.prefix.trim()}”: send the value as typed`}
+        aria-label={`Remove ${r.prefix.trim()} from ${r.key || noun}`}
+        className="flex shrink-0 items-center gap-0.5 rounded font-mono text-2xs text-mute hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        {r.prefix.trim()}
+        <X className="size-3" />
+      </button>
+    ) : undefined;
   return (
     <div className="flex flex-col gap-2">
       {rows.map((r) => (
@@ -55,14 +69,23 @@ function KeyValueRows({ rows, kind, onChange, error, extraAction }: { rows: KvRo
           {r.secret ? (
             <SecretInput
               value={r.value}
-              onChange={(value) => set(r.id, { value })}
+              onChange={(text) => set(r.id, typeValue(r, text))}
               stored={r.stored}
               label={`${r.key || noun} value`}
               placeholder={r.prefix ? "token" : "value"}
-              leading={r.prefix ? <span className="shrink-0 font-mono text-2xs text-mute">{r.prefix.trim()}</span> : undefined}
+              leading={schemeChip(r)}
             />
           ) : (
-            <Input value={r.value} onChange={(e) => set(r.id, { value: e.target.value })} placeholder="value" aria-label={`${r.key || noun} value`} spellCheck={false} autoCapitalize="off" className="font-mono text-xs" />
+            <Input
+              value={r.value}
+              onChange={(e) => set(r.id, typeValue(r, e.target.value))}
+              placeholder={r.prefix ? "token" : "value"}
+              aria-label={`${r.key || noun} value`}
+              spellCheck={false}
+              autoCapitalize="off"
+              leading={schemeChip(r)}
+              className="font-mono text-xs"
+            />
           )}
           <div className="flex items-center">
             <IconButton

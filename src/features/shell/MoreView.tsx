@@ -12,7 +12,7 @@ import { connSummary, PHASE_STATUS, phaseBusy } from "./status";
 import { VIEWS } from "./vocab";
 
 /** The pages More lists, in order. Label, icon and description come from `VIEWS`, like every other entry point. */
-const PAGES = ["usage", "wrapped", "activity", "automations", "ambient", "omp", "mcp", "plugins", "accounts", "cleanup", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
+const PAGES = ["usage", "wrapped", "activity", "automations", "ambient", "omp", "mcp", "plugins", "accounts", "cleanup", "forward", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
 
 function LinkRow({ id }: { id: (typeof PAGES)[number] }) {
   const { icon: Icon, label, description } = VIEWS[id];
@@ -23,7 +23,7 @@ function LinkRow({ id }: { id: (typeof PAGES)[number] }) {
         haptic("tick");
         navigate({ name: id } as Route);
       }}
-      className="flex min-h-12 w-full items-center gap-3 px-3.5 py-2 text-left pressable focus-ring active:bg-white/4"
+      className="flex min-h-12 w-full items-center gap-3 px-3.5 py-2 text-left pressable focus-ring active:bg-ink/4"
     >
       <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/14 text-accent-hi">
         <Icon className="size-4" />
@@ -96,7 +96,7 @@ export function MoreView() {
                         </span>
                       </span>
                       {s?.error && phase !== "online" ? (
-                        <span className="block truncate text-2xs text-[#ff9fb2]">{s.error.message}</span>
+                        <span className="block truncate text-2xs text-error-ink">{s.error.message}</span>
                       ) : (
                         <span className="block truncate font-mono text-2xs text-mute-2">{profileAddress(p)}</span>
                       )}

@@ -93,7 +93,7 @@ describe("demo mcp", () => {
     const token = { key: "Authorization", value: "Bearer github_pat_11ABCDEFG0123456789", secret: true };
     const saved = await r.call<McpChanged>("mcp.save", { scope: "user", name: "gh", server: { transport: "http", url: "https://api.githubcopilot.com/mcp/", headers: [token] } });
     const listed = byName(saved.list, "gh");
-    expect(listed.server.headers[0]?.value).toBe(MASK);
+    expect(listed.server.headers[0]?.value).toBe(`Bearer ${MASK}`);
     await r.call<McpChanged>("mcp.save", { scope: "user", name: "gh", previousName: "gh", server: { ...listed.server, timeoutMs: 45_000 } });
     const test = await r.call<McpTestResult>("mcp.test", { name: "gh", scope: "user" }, 3000);
     expect(test.status).toBe("connected");
@@ -114,6 +114,30 @@ describe("demo mcp", () => {
     expect(shown.slice(5)).toEqual([JSON.stringify({ braveApiKey: MASK }), `--api-key=${MASK}`, "--token", MASK]);
     await r.call("mcp.save", { scope: "user", name: "brave", previousName: "brave", server: byName(brave.list, "brave").server });
     expect((await r.call<McpTestResult>("mcp.test", { name: "brave", scope: "user" }, 3000)).status).toBe("connected");
+  });
+
+  test("an authorization header is listed with its scheme readable; the mask behind a scheme keeps the credential", async () => {
+    const r = rig();
+    const gh = (value: string) => ({ transport: "http", url: "https://api.githubcopilot.com/mcp/", headers: [{ key: "Authorization", value, secret: true }] });
+    const save = (value: string, previousName?: string) => r.call<McpChanged>("mcp.save", { scope: "user", name: "gh", previousName, server: gh(value) });
+    const status = async () => (await r.call<McpTestResult>("mcp.test", { name: "gh", scope: "user" }, 3000)).status;
+    const saved = await save("Bearer github_pat_11ABCDEFG0123456789");
+    expect(byName(saved.list, "gh").server.headers[0]?.value).toBe(`Bearer ${MASK}`);
+    expect(JSON.stringify(saved.list)).not.toContain("github_pat_");
+    // Saved back as listed: the stored token stays, so the check still connects.
+    await save(`Bearer ${MASK}`, "gh");
+    expect(await status()).toBe("connected");
+    // Another scheme over the hidden token, or a mask that stands for nothing, is refused: the
+    // credential has to be typed again, and the saved one stays.
+    for (const value of [`Basic ${MASK}`, `Bearer  ${MASK}`, `Bearer ${MASK}x`]) {
+      await expect(save(value, "gh")).rejects.toMatchObject({ code: "invalid_params", message: "headers: enter the value of `Authorization` again" });
+    }
+    expect(await status()).toBe("connected");
+    await save("Bearer github_pat_22ABCDEFG0123456789", "gh");
+    expect(await status()).toBe("connected");
+    // A raw credential is listed as the mask alone.
+    const raw = await save("github_pat_33ABCDEFG0123456789", "gh");
+    expect(byName(raw.list, "gh").server.headers[0]?.value).toBe(MASK);
   });
 
   test("add, duplicate, rename and remove follow omp's file rules", async () => {

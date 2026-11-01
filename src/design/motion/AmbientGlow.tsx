@@ -14,6 +14,7 @@ export function moodFor(counts: { needsYou: number; running: number; error?: num
 
 interface Blob {
   moods: readonly AmbientMood[];
+  /** A theme colour variable. */
   color: string;
   style: CSSProperties;
   drift: "a" | "b" | "c";
@@ -23,16 +24,16 @@ interface Blob {
 
 const BLOBS: readonly Blob[] = [
   // omp purple, top right — the resting glow
-  { moods: ["calm", "running", "attention", "error"], color: "163 92 240", style: { right: "-28vmax", top: "-38vmax" }, drift: "a", seconds: 34, opacity: 0.16 },
+  { moods: ["calm", "running", "attention", "error"], color: "--color-accent", style: { right: "-28vmax", top: "-38vmax" }, drift: "a", seconds: 34, opacity: 0.16 },
   // blue, bottom left — joins while agents run
-  { moods: ["running"], color: "79 139 255", style: { left: "-30vmax", bottom: "-42vmax" }, drift: "b", seconds: 41, opacity: 0.16 },
+  { moods: ["running"], color: "--color-run-2", style: { left: "-30vmax", bottom: "-42vmax" }, drift: "b", seconds: 41, opacity: 0.16 },
   // omp pink accent
-  { moods: ["running", "calm"], color: "240 83 208", style: { left: "18vw", top: "-46vmax" }, drift: "c", seconds: 47, opacity: 0.07 },
+  { moods: ["running", "calm"], color: "--color-omp-pink", style: { left: "18vw", top: "-46vmax" }, drift: "c", seconds: 47, opacity: 0.07 },
   // sunset: something needs you
-  { moods: ["attention"], color: "255 61 119", style: { left: "-22vmax", bottom: "-36vmax" }, drift: "b", seconds: 23, opacity: 0.26 },
-  { moods: ["attention"], color: "255 122 24", style: { left: "20vw", bottom: "-52vmax" }, drift: "c", seconds: 29, opacity: 0.16 },
+  { moods: ["attention"], color: "--color-sun-2", style: { left: "-22vmax", bottom: "-36vmax" }, drift: "b", seconds: 23, opacity: 0.26 },
+  { moods: ["attention"], color: "--color-sun-1", style: { left: "20vw", bottom: "-52vmax" }, drift: "c", seconds: 29, opacity: 0.16 },
   // error
-  { moods: ["error"], color: "255 77 94", style: { right: "-26vmax", bottom: "-44vmax" }, drift: "a", seconds: 31, opacity: 0.18 },
+  { moods: ["error"], color: "--color-error", style: { right: "-26vmax", bottom: "-44vmax" }, drift: "a", seconds: 31, opacity: 0.18 },
 ];
 
 export interface AmbientGlowProps {
@@ -62,7 +63,7 @@ export function AmbientGlow({ mood, intensity = 1, className }: AmbientGlowProps
               {
                 ...b.style,
                 "--blob-o": b.opacity * intensity,
-                background: `radial-gradient(circle at center, rgb(${b.color} / 1) 0%, rgb(${b.color} / 0.35) 32%, rgb(${b.color} / 0) 68%)`,
+                background: `radial-gradient(circle at center, var(${b.color}) 0%, color-mix(in srgb, var(${b.color}) 35%, transparent) 32%, transparent 68%)`,
                 "--blob-drift": `tf-drift-${b.drift} ${b.seconds}s ease-in-out infinite`,
               } as CSSProperties
             }

@@ -13,12 +13,12 @@ const base =
 
 const variants: Record<ButtonVariant, string> = {
   primary:
-    "bg-omp text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.28),var(--shadow-glow-accent)] hover:brightness-110 active:brightness-95",
+    "bg-omp text-on-accent shadow-[inset_0_1px_0_rgb(255_255_255/0.28),var(--shadow-glow-accent)] hover:brightness-110 active:brightness-95",
   secondary: "bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5",
-  ghost: "text-mute hover:bg-white/6 hover:text-ink",
+  ghost: "text-mute hover:bg-ink/6 hover:text-ink",
   danger:
-    "bg-error/12 text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)] hover:bg-error hover:text-white disabled:hover:bg-error/12 disabled:hover:text-[#ff8aa5]",
-  sunset: "bg-sun text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-sun)] hover:brightness-110",
+    "bg-error/12 text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)] hover:bg-error hover:text-on-error disabled:hover:bg-error/12 disabled:hover:text-error-ink",
+  sunset: "bg-sun text-on-sun shadow-[inset_0_1px_0_rgb(255_255_255/0.3),var(--shadow-glow-sun)] hover:brightness-110",
 };
 
 const sizes: Record<ButtonSize, string> = {
@@ -100,7 +100,7 @@ export function IconButton({ label, variant = "ghost", size = "md", badge, class
     >
       {children}
       {badge !== undefined && badge !== null && (
-        <span className="pointer-events-none absolute -top-0.5 -right-0.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-sun px-1 text-[10.5px] leading-none font-extrabold text-white shadow-[0_0_0_3px_var(--color-chrome),0_4px_14px_rgb(255_61_119/0.6)]">
+        <span className="pointer-events-none absolute -top-0.5 -right-0.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-sun px-1 text-[10.5px] leading-none font-extrabold text-on-sun shadow-[0_0_0_3px_var(--color-chrome),0_4px_14px_color-mix(in_srgb,var(--color-sun-2)_60%,transparent)]">
           {badge}
         </span>
       )}

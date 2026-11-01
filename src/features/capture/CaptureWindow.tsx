@@ -289,7 +289,7 @@ export function CaptureWindow() {
       onDrop={onDrop}
     >
       <header data-tauri-drag-region className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3 select-none">
-        <span data-tauri-drag-region className="grid size-6 shrink-0 place-items-center rounded-md bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]">
+        <span data-tauri-drag-region className="grid size-6 shrink-0 place-items-center rounded-md bg-accent/18 text-accent-hi shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]">
           <Zap className="size-3.5" />
         </span>
         <span data-tauri-drag-region className="font-display text-sm font-bold tracking-[-0.01em]">
@@ -375,7 +375,7 @@ function TargetPicker({
         <button
           type="button"
           title={target.blocked ?? `Enter dispatches to ${target.repoName} on ${target.where}`}
-          className={cn("pressable focus-ring flex max-w-[60%] min-w-0 items-center gap-1.5 rounded-full bg-white/[0.05] px-2.5 py-1 text-xs font-semibold shadow-hairline hover:bg-white/[0.09]", target.blocked ? "text-warn" : "text-ink-2")}
+          className={cn("pressable focus-ring flex max-w-[60%] min-w-0 items-center gap-1.5 rounded-full bg-ink/[0.05] px-2.5 py-1 text-xs font-semibold shadow-hairline hover:bg-ink/[0.09]", target.blocked ? "text-warn" : "text-ink-2")}
         >
           <Send className="size-3 shrink-0" />
           <span className="truncate">{target.repoName}</span>
@@ -479,7 +479,7 @@ function QuestionPane({
   }
   const total = snapshot.needs;
   return (
-    <section data-status="needs-you" className="flex flex-col gap-2 border-t border-line bg-white/[0.02] px-3 py-2.5" aria-label="Next question">
+    <section data-status="needs-you" className="flex flex-col gap-2 border-t border-line bg-ink/[0.02] px-3 py-2.5" aria-label="Next question">
       <div className="flex min-w-0 items-center gap-2 text-2xs font-bold">
         <span className="size-2 shrink-0 rounded-full st-fill" aria-hidden />
         <span className="st-text uppercase tracking-[0.06em]">{question.word}</span>
@@ -501,7 +501,7 @@ function QuestionPane({
               onClick={() => onAnswer(question, o)}
               className={cn(
                 "pressable focus-ring flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold shadow-hairline disabled:opacity-50",
-                o.tone === "danger" ? "bg-error/12 text-error hover:bg-error/20" : o.tone === "primary" || o.recommended ? "bg-accent/18 text-accent-ink hover:bg-accent/28" : "bg-white/[0.05] text-ink-2 hover:bg-white/[0.09]",
+                o.tone === "danger" ? "bg-error/12 text-error hover:bg-error/20" : o.tone === "primary" || o.recommended ? "bg-accent/18 text-accent-ink hover:bg-accent/28" : "bg-ink/[0.05] text-ink-2 hover:bg-ink/[0.09]",
               )}
             >
               <Kbd className="h-4 min-w-4 px-1">{i + 1}</Kbd>

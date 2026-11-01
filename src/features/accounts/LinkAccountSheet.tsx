@@ -40,7 +40,7 @@ function PopularTile({ entry, linked, onPick, index }: { entry: PickerEntry; lin
       animate={{ opacity: 1, y: 0 }}
       transition={{ ...spring.smooth, delay: index * 0.025 }}
       onClick={() => onPick(p.id)}
-      className="group relative flex min-w-0 items-center gap-3 rounded-lg bg-white/[0.03] p-3 text-left shadow-[inset_0_0_0_1px_var(--color-line)] transition-[background-color,box-shadow] hover:bg-white/[0.06] hover:shadow-[inset_0_0_0_1px_var(--color-line-3)] focus-ring pressable"
+      className="group relative flex min-w-0 items-center gap-3 rounded-lg bg-ink/[0.03] p-3 text-left shadow-[inset_0_0_0_1px_var(--color-line)] transition-[background-color,box-shadow] hover:bg-ink/[0.06] hover:shadow-[inset_0_0_0_1px_var(--color-line-3)] focus-ring pressable"
       aria-label={`Link ${look.name}`}
     >
       <ProviderMark id={p.id} ompName={p.name} size={38} />
@@ -63,7 +63,7 @@ function ProviderRow({ entry, linked, onPick }: { entry: PickerEntry; linked: nu
   const detail = providerDetail(p);
   return (
     <li>
-      <button type="button" onClick={() => onPick(p.id)} className="flex w-full min-w-0 items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-white/[0.05] focus-ring max-md:py-2.5">
+      <button type="button" onClick={() => onPick(p.id)} className="flex w-full min-w-0 items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-ink/[0.05] focus-ring max-md:py-2.5">
         <ProviderMark id={p.id} ompName={p.name} size={28} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-bold text-ink">{look.name}</span>

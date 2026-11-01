@@ -66,7 +66,7 @@ function Choice({ on, disabled, onClick, children }: { on: boolean; disabled: bo
       onClick={onClick}
       className={cn(
         "h-8 rounded-md px-2.5 text-xs font-bold whitespace-nowrap transition-colors pressable focus-ring disabled:opacity-45",
-        on ? "bg-accent/16 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]" : "text-ink-2 well hover:bg-white/6",
+        on ? "bg-accent/16 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "text-ink-2 well hover:bg-ink/6",
       )}
     >
       {children}

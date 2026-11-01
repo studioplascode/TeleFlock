@@ -84,7 +84,7 @@ pub fn to_draft(entry: &Obj) -> (McpServerDraft, Vec<String>) {
         cwd: non_empty(entry.str("cwd")),
         env: entry.obj("env").map(secrets::mask_kv).unwrap_or_default(),
         url: entry.str("url").map(secrets::mask_url),
-        headers: entry.obj("headers").map(secrets::mask_kv).unwrap_or_default(),
+        headers: entry.obj("headers").map(secrets::mask_headers).unwrap_or_default(),
         timeout_ms: whole_number(entry.get("timeout")),
         oauth: entry.obj("oauth").map(oauth_shown).filter(|o| *o != NO_OAUTH),
     };

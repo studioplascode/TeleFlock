@@ -6,10 +6,10 @@ import { cn } from "../lib/cn";
 
 // Scrolls instead of running off a short window (Radix exposes the space left on the chosen side).
 const contentCls =
-  "tf-pop z-popover min-w-52 overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg bg-[linear-gradient(180deg,#22222e,#191921)] p-1.5 text-sm shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] outline-none";
+  "tf-pop z-popover min-w-52 overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] p-1.5 text-sm shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] outline-none";
 const itemCls =
-  "relative flex h-9 cursor-pointer items-center gap-2.5 rounded-sm px-2.5 font-semibold text-ink-2 outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-white/7 data-[highlighted]:text-ink [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-mute data-[highlighted]:[&_svg]:text-ink";
-const dangerCls = "text-[#ff8aa5] data-[highlighted]:bg-error/15 data-[highlighted]:text-[#ffb1c1] [&_svg]:text-[#ff8aa5]";
+  "relative flex h-9 cursor-pointer items-center gap-2.5 rounded-sm px-2.5 font-semibold text-ink-2 outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-ink/7 data-[highlighted]:text-ink [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-mute data-[highlighted]:[&_svg]:text-ink";
+const dangerCls = "text-error-ink data-[highlighted]:bg-error/15 data-[highlighted]:text-error-ink [&_svg]:text-error-ink";
 const labelCls = "px-2.5 pt-2 pb-1 kicker";
 const sepCls = "mx-1 my-1.5 h-px bg-line-2";
 

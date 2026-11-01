@@ -5,6 +5,8 @@ import { formatAge } from "../lib/format";
 import { useInView, useMinWidth } from "../lib/hooks";
 import { useWindowActive } from "../lib/windowActive";
 import { STATUS, type Status } from "../tokens";
+import { resolveColor, useThemeVersion } from "../theme/apply";
+import { withAlpha } from "../theme/color";
 import { useMotionLevel } from "./MotionProvider";
 
 export interface HeartbeatProps {
@@ -103,7 +105,8 @@ export function Heartbeat({
   const still = level !== "full" || !active || !inView;
   const smooth = level === "full";
   const decayMs = smooth ? flatAfterMs : Math.min(flatAfterMs, STILL_FLAT_MS);
-  const meta = STATUS[status];
+  // the trace's colours come from the theme (re-read when it changes)
+  const themeVersion = useThemeVersion();
 
   // Size + draw loop.
   useEffect(() => {
@@ -117,6 +120,13 @@ export function Heartbeat({
     let dpr = 1;
     let unsub: (() => void) | null = null;
     let flatTimer = 0;
+    const css = getComputedStyle(wrap);
+    // Resolved to rgba: a theme may write its status colours as oklch(), hsl() or names, which
+    // `withAlpha` would leave opaque (the trace wouldn't fade in, the head glow would be a square).
+    const c1 = resolveColor(css.getPropertyValue("--st-1").trim(), "#9b6cf7");
+    const c2 = resolveColor(css.getPropertyValue("--st-2").trim(), c1);
+    const solid = resolveColor(css.getPropertyValue("--st-solid").trim(), c1);
+    const head = resolveColor(css.getPropertyValue("--color-ink").trim(), "#fff");
 
     const ensureTrace = (n: number) => {
       const prev = traceRef.current;
@@ -148,9 +158,9 @@ export function Heartbeat({
       const step = PX_PER_SAMPLE * dpr;
       const shift = smooth ? (t.acc / SAMPLE_MS) * step : 0;
       const grad = ctx.createLinearGradient(0, 0, w, 0);
-      grad.addColorStop(0, `rgb(${meta.rgb} / 0)`);
-      grad.addColorStop(0.35, `${meta.c1}88`);
-      grad.addColorStop(1, meta.c2);
+      grad.addColorStop(0, withAlpha(solid, 0));
+      grad.addColorStop(0.35, withAlpha(c1, 0.53));
+      grad.addColorStop(1, c2);
 
       ctx.beginPath();
       for (let i = 0; i < n; i++) {
@@ -177,11 +187,11 @@ export function Heartbeat({
       const hx = (n - 1) * step - shift;
       const hy = mid - last * amp;
       const glow = ctx.createRadialGradient(hx, hy, 0, hx, hy, 7 * dpr);
-      glow.addColorStop(0, `${meta.c2}cc`);
-      glow.addColorStop(1, `${meta.c2}00`);
+      glow.addColorStop(0, withAlpha(c2, 0.8));
+      glow.addColorStop(1, withAlpha(c2, 0));
       ctx.fillStyle = glow;
       ctx.fillRect(hx - 8 * dpr, hy - 8 * dpr, 16 * dpr, 16 * dpr);
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = head;
       ctx.beginPath();
       ctx.arc(hx, hy, 1.6 * dpr, 0, Math.PI * 2);
       ctx.fill();
@@ -247,7 +257,7 @@ export function Heartbeat({
       clearTimeout(flatTimer);
       wakeRef.current = () => {};
     };
-  }, [still, smooth, decayMs, height, meta, wide]);
+  }, [still, smooth, decayMs, height, status, themeVersion, wide]);
 
   // Inject a spike per event.
   useEffect(() => {

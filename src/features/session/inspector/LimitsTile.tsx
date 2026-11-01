@@ -72,7 +72,7 @@ export function Meter({ term, reading, fill, status, detail, label }: { term: Re
         <span className="truncate">{term}</span>
         <span className="shrink-0 font-display text-[15px] font-bold tracking-[-0.02em] whitespace-nowrap text-ink tabular">{reading}</span>
       </div>
-      <div className="relative mt-1 h-1.5 overflow-hidden rounded-full bg-white/8" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill)} aria-label={label}>
+      <div className="relative mt-1 h-1.5 overflow-hidden rounded-full bg-ink/8" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill)} aria-label={label}>
         <span
           className={cn("absolute inset-y-0 left-0 rounded-full transition-[width] duration-700 ease-out", status ? "st-fill" : "bg-ink-2/60")}
           style={{ width: `${Math.max(0, Math.min(100, fill))}%` }}

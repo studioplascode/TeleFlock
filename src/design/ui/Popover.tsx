@@ -14,7 +14,7 @@ export function PopoverContent({ className, sideOffset = 8, collisionPadding = 1
         sideOffset={sideOffset}
         collisionPadding={collisionPadding}
         className={cn(
-          "tf-pop z-popover max-h-[var(--radix-popover-content-available-height)] min-w-56 overflow-auto rounded-lg bg-[linear-gradient(180deg,#22222e,#191921)] p-3 text-sm shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] outline-none",
+          "tf-pop z-popover max-h-[var(--radix-popover-content-available-height)] min-w-56 overflow-auto rounded-lg bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] p-3 text-sm shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] outline-none",
           className,
         )}
         {...rest}

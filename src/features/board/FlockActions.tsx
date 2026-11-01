@@ -33,10 +33,10 @@ function SheetRow({ icon, label, hint, trailing, selected, onClick }: { icon: Re
       aria-current={selected || undefined}
       className={cn(
         "flex min-h-13 w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left pressable focus-ring",
-        selected ? "bg-accent/12 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "bg-white/[0.035]",
+        selected ? "bg-accent/12 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "bg-ink/[0.035]",
       )}
     >
-      <span className="grid size-8 shrink-0 place-items-center rounded-md bg-white/[0.06] text-accent-hi [&_svg]:size-4.5">{icon}</span>
+      <span className="grid size-8 shrink-0 place-items-center rounded-md bg-ink/[0.06] text-accent-hi [&_svg]:size-4.5">{icon}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-md font-bold text-ink">{label}</span>
         {/* hints are one-line descriptions; two lines on a narrow phone rather than cut off */}
@@ -106,7 +106,7 @@ export function FlockFab() {
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={calm ? { opacity: 0 } : { opacity: 0, scale: 0.6, y: 24 }}
           transition={calm ? { duration: 0.12 } : spring.bouncy}
-          className="fixed right-3.5 bottom-[calc(66px+env(safe-area-inset-bottom))] z-sticky grid size-13 place-items-center rounded-[18px] bg-accent text-white shadow-[0_14px_34px_-8px_rgb(163_92_240/0.7),inset_0_1px_0_rgb(255_255_255/0.25)] pressable focus-ring in-data-[kb=open]:hidden [&_svg]:size-6"
+          className="fixed right-3.5 bottom-[calc(66px+env(safe-area-inset-bottom))] z-sticky grid size-13 place-items-center rounded-[18px] bg-accent text-on-accent shadow-[0_14px_34px_-8px_color-mix(in_srgb,var(--color-accent)_70%,transparent),inset_0_1px_0_rgb(255_255_255/0.25)] pressable focus-ring in-data-[kb=open]:hidden [&_svg]:size-6"
         >
           <Plus strokeWidth={2.4} />
         </motion.button>
@@ -201,16 +201,16 @@ export function HostChip() {
       className={cn(
         // relative: touch-hit's 48 px target must hug the chip, not cover the header beside it
         "relative flex min-h-9 shrink-0 items-center gap-1.5 rounded-full glass px-3 py-1.5 text-xs font-bold text-ink pressable focus-ring touch-hit",
-        down && (bad ? "shadow-[inset_0_0_0_1px_rgb(255_77_94/0.45)]" : "shadow-[inset_0_0_0_1px_rgb(251_191_36/0.4)]"),
+        down && (bad ? "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_45%,transparent)]" : "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_40%,transparent)]"),
       )}
     >
       {all && health.degraded ? (
-        <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-warn shadow-[0_0_6px_rgb(251_191_36/0.7)]" />
+        <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-warn shadow-[0_0_6px_color-mix(in_srgb,var(--color-warn)_70%,transparent)]" />
       ) : (
         <StatusOrb status={orb} size={7} label={null} />
       )}
       {all ? "All hosts" : name}
-      <span className={cn("tabular", !down ? "text-mute" : bad ? "text-[#ff9fb2]" : "text-warn")}>{detail}</span>
+      <span className={cn("tabular", !down ? "text-mute" : bad ? "text-error-ink" : "text-warn")}>{detail}</span>
       {multi && <ChevronDown className="size-3.5 text-mute" aria-hidden />}
     </button>
   );

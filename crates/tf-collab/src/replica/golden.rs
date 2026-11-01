@@ -381,6 +381,9 @@ fn s05_ask_ui_response() {
     assert_eq!(asked.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Red", "Blue"]);
     assert!(asked.allow_other && asked.allow_chat);
     assert!(asked.call_id.as_deref().unwrap().starts_with("call_89b1f30f"));
+    // The model asked straight away: the ask's explanation is empty (nothing from earlier turns),
+    // and omp's own mirroring offers no Back.
+    assert_eq!((asked.context.as_deref(), &asked.step), (Some(""), &None));
     assert!(r.signals().iter().any(|s| matches!(s, Signal::Asked { request_id } if request_id == "2")));
     assert!(r.signals().iter().any(|s| matches!(s, Signal::UiSettled { request_id } if request_id == "2")));
     assert!(r.replica.ui().is_none(), "settled by ui-request-end");
@@ -395,7 +398,7 @@ fn s05_ask_ui_response() {
     let needs = r.replica.needs().unwrap();
     assert_eq!(needs.kind, NeedsKind::Ask);
     assert!(needs.allow_other && needs.allow_chat && !needs.multi);
-    let ans = Answer { choices: vec!["Blue".into()], text: None, cancel: false, chat: false };
+    let ans = Answer { choices: vec!["Blue".into()], text: None, cancel: false, chat: false, back: false };
     assert_eq!(r.replica.answer("2", &ans).unwrap(), vec![super::UiReply { req_id: 2, value: Some("Blue".into()) }]);
     let wrong = Answer { choices: vec!["blue".into()], ..ans };
     assert_eq!(r.replica.answer("2", &wrong).unwrap_err().code, "invalid_params");
@@ -820,7 +823,7 @@ fn s16_tool_approval() {
     let n = r.replica.needs().unwrap();
     assert_eq!(n.kind, NeedsKind::Approval);
     assert_eq!(n.command.as_deref(), Some("echo approved-run"));
-    let ans = Answer { choices: vec!["Approve".into()], text: None, cancel: false, chat: false };
+    let ans = Answer { choices: vec!["Approve".into()], text: None, cancel: false, chat: false, back: false };
     assert_eq!(r.replica.answer("1", &ans).unwrap()[0].value.as_deref(), Some("Approve"));
 }
 

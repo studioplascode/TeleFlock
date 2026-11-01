@@ -1,4 +1,5 @@
 import { apiError, toApiError } from "../errors";
+import { failureReporter } from "../failures";
 import type { ApiError, AppEvent } from "@/core/gen";
 import type { CoreTransport } from "./types";
 
@@ -57,10 +58,14 @@ const PLUGIN_METHODS: Record<string, true> = {
 };
 const PLUGIN_TIMEOUT = 305_000;
 
+const listenerFailed = failureReporter("core event listener (ws)");
+const linkListenerFailed = failureReporter("link listener (ws)");
+
 /**
  * WebSocket transport to `tf-devserver` `/ws`. Reconnects with backoff (0.5 s → 8 s); requests
  * issued while disconnected wait for the next connection, and in-flight requests reject with
- * `not_connected` (retryable) when the socket drops.
+ * `not_connected` (retryable) when the socket drops. Each event and link listener call is
+ * isolated: one that throws is reported, the other listeners (and the reconnect) still run.
  */
 export function createWsTransport(opts: WsTransportOptions): CoreTransport {
   const listeners = new Set<(e: AppEvent) => void>();
@@ -85,6 +90,16 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
     else outbox.push(frame);
   };
 
+  const tellLink = (up: boolean) => {
+    for (const l of linkListeners) {
+      try {
+        l(up);
+      } catch (err) {
+        linkListenerFailed(err);
+      }
+    }
+  };
+
   const connect = () => {
     if (closed) return;
     const sock = new WebSocket(url);
@@ -93,7 +108,7 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
       attempt = 0;
       everOpened = true;
       for (const f of outbox.splice(0)) sock.send(f);
-      for (const l of linkListeners) l(true);
+      tellLink(true);
     };
     sock.onmessage = (msg) => {
       let frame: ServerFrame;
@@ -104,7 +119,13 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
         return;
       }
       if ("event" in frame) {
-        for (const l of listeners) l(frame.event);
+        for (const l of listeners) {
+          try {
+            l(frame.event);
+          } catch (err) {
+            listenerFailed(err);
+          }
+        }
         return;
       }
       const p = pending.get(frame.id);
@@ -123,7 +144,7 @@ export function createWsTransport(opts: WsTransportOptions): CoreTransport {
         p.reject(apiError("not_connected", "Lost connection to the TeleFlock devserver", { retryable: true }));
         pending.delete(id);
       }
-      for (const l of linkListeners) l(false);
+      tellLink(false);
       if (!everOpened && attempt === 0) opts.onFirstFailure?.();
       if (closed) return;
       const delay = Math.min(8000, 500 * 2 ** attempt) * (0.85 + Math.random() * 0.3);

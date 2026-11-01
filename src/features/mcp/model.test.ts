@@ -5,6 +5,7 @@ import {
   applyTemplateInput,
   definedIn,
   draftFromForm,
+  dropScheme,
   emptyForm,
   endpointKey,
   endpointKind,
@@ -13,6 +14,7 @@ import {
   findSame,
   formEndpoint,
   formFromDraft,
+  headerRow,
   joinArgs,
   kvRow,
   lastGoodCheck,
@@ -28,6 +30,7 @@ import {
   shadowedBy,
   shareList,
   splitArgs,
+  typeValue,
   summarize,
   uniqueName,
   withConfigArg,
@@ -144,6 +147,94 @@ describe("editor form ⇄ draft", () => {
     expect(draftFromForm(form).draft).toEqual(stored);
     const typed = { ...form, headers: form.headers.map((h, i) => (i === 0 ? { ...h, value: "Bearer new" } : h)) };
     expect(draftFromForm(typed).draft?.headers[0]?.value).toBe("Bearer new");
+  });
+
+  describe("authorization headers, added or edited", () => {
+    const listed = (value: string, extra: Partial<McpServerDraft> = {}): McpServerDraft => ({ transport: "http", url: "https://mcp.example.com/mcp", args: [], env: [], headers: [{ key: "Authorization", value, secret: true }], ...extra });
+    const edit = (value: string, change: (r: ReturnType<typeof kvRow>) => Partial<ReturnType<typeof kvRow>>) => {
+      const f = formFromDraft(listed(value), "docs", "user");
+      return { ...f, headers: f.headers.map((h) => ({ ...h, ...change(h) })) };
+    };
+    const sent = (f: ReturnType<typeof formFromDraft>) => draftFromForm(f).draft?.headers[0]?.value;
+    const added = () => {
+      const f = { ...emptyForm("user"), name: "x", transport: "http" as const, url: "https://x.dev/mcp" };
+      return { ...f, headers: [kvRow({ key: "Authorization", secret: true, prefix: "Bearer " })] };
+    };
+    const type = (f: ReturnType<typeof formFromDraft>, text: string) => ({ ...f, headers: f.headers.map((h) => ({ ...h, ...typeValue(h, text) })) });
+
+    test("a listed scheme loads as the fixed start, as a new bearer token row has it", () => {
+      expect(formFromDraft(listed(`Bearer ${SECRET_MASK}`), "x", "user").headers[0]).toMatchObject({ key: "Authorization", prefix: "Bearer ", value: "", stored: true });
+      expect(formFromDraft(listed(`basic ${SECRET_MASK}`), "x", "user").headers[0]).toMatchObject({ prefix: "basic ", stored: true });
+      expect(formFromDraft(listed("Token ${API_TOKEN}"), "x", "user").headers[0]).toMatchObject({ prefix: "Token ", value: "${API_TOKEN}", stored: false });
+      expect(headerRow({ key: "proxy-authorization", value: `Bearer ${SECRET_MASK}`, secret: true })).toMatchObject({ prefix: "Bearer ", stored: true });
+      // A raw credential, other headers and other words have no scheme to split.
+      expect(formFromDraft(listed(SECRET_MASK), "x", "user").headers[0]).toMatchObject({ prefix: undefined, stored: true });
+      expect(headerRow({ key: "X-Api-Key", value: `Bearer ${SECRET_MASK}`, secret: true })).toMatchObject({ prefix: undefined, value: `Bearer ${SECRET_MASK}` });
+      expect(headerRow({ key: "Authorization", value: "Digest abc", secret: true })).toMatchObject({ prefix: undefined, value: "Digest abc" });
+    });
+
+    test("add and edit save the same: the scheme is kept in front of a typed token", () => {
+      const fresh = type(added(), "sk-new");
+      const edited = type(formFromDraft(listed(`Bearer ${SECRET_MASK}`), "docs", "user"), "sk-new");
+      expect(sent(fresh)).toBe("Bearer sk-new");
+      expect(sent(edited)).toBe("Bearer sk-new");
+      expect(sent(type(formFromDraft(listed(`basic ${SECRET_MASK}`), "docs", "user"), "dXNlcjpwdw=="))).toBe("basic dXNlcjpwdw==");
+    });
+
+    test("a stored secret left untouched travels as its scheme and the mask", () => {
+      const f = formFromDraft(listed(`Bearer ${SECRET_MASK}`), "docs", "user");
+      expect(draftFromForm(f).draft).toEqual(listed(`Bearer ${SECRET_MASK}`));
+      // Cleared again after typing: untouched.
+      expect(sent(type(type(f, "abc"), ""))).toBe(`Bearer ${SECRET_MASK}`);
+    });
+
+    test("a pasted scheme is the scheme, not part of the token", () => {
+      for (const f of [added(), formFromDraft(listed(`Bearer ${SECRET_MASK}`), "docs", "user")]) {
+        expect(sent(type(f, "Bearer xyz"))).toBe("Bearer xyz");
+        expect(sent(type(f, "bearer   xyz"))).toBe("bearer   xyz");
+        expect(sent(type(f, "Basic xyz"))).toBe("Basic xyz");
+        expect(sent(type(f, "Bearerxyz"))).toBe("Bearer Bearerxyz");
+      }
+      // Nothing is split where no scheme is fixed.
+      expect(typeValue({}, "Bearer xyz")).toEqual({ value: "Bearer xyz" });
+    });
+
+    test("another scheme over a hidden credential asks for the credential again", () => {
+      const f = formFromDraft(listed(`Bearer ${SECRET_MASK}`), "docs", "user");
+      // Typed (or pasted) and cleared again: the field is empty, not "Unchanged", and no mask goes
+      // out under a scheme the credential was not saved with (nor under other spacing, which hostd
+      // could only store as text).
+      for (const text of ["Basic x", "Token x", "Bearer  x", "Bearer\tx"]) {
+        const cleared = type(type(f, text), "");
+        expect(cleared.headers[0]).toMatchObject({ prefix: text.slice(0, -1), stored: false });
+        expect(sent(cleared)).toBe("");
+      }
+      // Its own scheme keeps it, in any case (auth schemes are case-insensitive; so is hostd).
+      expect(sent(type(type(f, "Bearer x"), ""))).toBe(`Bearer ${SECRET_MASK}`);
+      expect(sent(type(type(f, "bearer x"), ""))).toBe(`bearer ${SECRET_MASK}`);
+    });
+
+    test("the scheme can be dropped: the value goes as typed, a hidden credential is typed again", () => {
+      const stored = edit(`Bearer ${SECRET_MASK}`, (r) => dropScheme(r));
+      expect(stored.headers[0]).toMatchObject({ prefix: undefined, value: "", stored: false });
+      expect(sent(type(stored, "raw-token"))).toBe("raw-token");
+      expect(sent(type(stored, "Bearer typed"))).toBe("Bearer typed");
+      const typed = type(added(), "sk-1");
+      expect(sent({ ...typed, headers: typed.headers.map((h) => ({ ...h, ...dropScheme(h) })) })).toBe("Bearer sk-1");
+      expect(sent(edit("Token ${T}", (r) => dropScheme(r)))).toBe("Token ${T}");
+    });
+
+    test("a scheme with no credential is not sent alone", () => {
+      expect(sent(added())).toBe("");
+    });
+
+    test("a template's token pasted with its scheme is not doubled", () => {
+      const gh = MCP_TEMPLATES.find((t) => t.id === "github");
+      const input = gh?.inputs?.[0];
+      if (!gh || !input) throw new Error("github template");
+      const form = formFromDraft(gh.server, gh.name, "user");
+      expect(draftFromForm(applyTemplateInput(form, input, "Bearer github_pat_1", undefined)).draft?.headers[0]?.value).toBe("Bearer github_pat_1");
+    });
   });
 
   test("only the chosen transport's fields go out; empty rows are dropped", () => {

@@ -157,4 +157,16 @@ describe("countdownState", () => {
     expect(countdownState(cd({ picks: ["A", "B"], deadline: NOW + 61_000 }), NOW).text).toBe("auto-picks ★ A, ★ B in 1:01");
     expect(starPicks([])).toBe("★ the recommended option");
   });
+  test("a question with an earlier answer: decide for me sends that answer, not ★", () => {
+    const earlier = (patch: Partial<AutoAnswerCountdown>) => cd({ picks: ["Postgres"], earlier: true, ...patch });
+    const v = countdownState(earlier({ deadline: NOW + 760_000 }), NOW);
+    expect(v.text).toBe("auto-sends your earlier answer (Postgres) in 12:40");
+    expect(v.compact).toBe("sends your answer in 12:40");
+    expect(v.detail).toBe("Decide for me sends your earlier answer (Postgres) in 13 min unless you answer.");
+    expect(countdownState(earlier({ deadline: NOW }), NOW).text).toBe("auto-sending your earlier answer (Postgres)…");
+    expect(countdownState(earlier({ status: "waitingForNoApp", remainingMs: 760_000 }), NOW).text).toBe(
+      "auto-sends your earlier answer (Postgres) when no app is connected · 12:40 left",
+    );
+    expect(countdownState(earlier({ status: "cancelled", remainingMs: 0 }), NOW).detail).toBe("Decide for me won't send your earlier answer (Postgres): this question waits for you.");
+  });
 });

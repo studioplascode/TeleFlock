@@ -371,7 +371,7 @@ function OfflineNote({ hostId, name, why, onLeave }: { hostId: string; name: str
   const st = useHosts((h) => h.status[hostId]);
   const action = connAction(st, hostId);
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md bg-white/[0.04] px-3 py-2 text-xs text-ink-2 shadow-hairline">
+    <div className="flex flex-wrap items-center gap-2 rounded-md bg-ink/[0.04] px-3 py-2 text-xs text-ink-2 shadow-hairline">
       <Info className="size-3.5 shrink-0 text-mute" aria-hidden />
       <span className="min-w-0 flex-1">
         <span className="font-semibold text-ink">
@@ -433,7 +433,7 @@ function Intro({ hasOthers, onAddHost, hint }: { hasOthers: boolean; onAddHost()
         {WHAT_COPIES.map(({ section, text }) => {
           const Icon = SECTION_ICON[section];
           return (
-            <li key={section} className="flex items-start gap-3 rounded-lg bg-white/[0.03] p-3 shadow-hairline">
+            <li key={section} className="flex items-start gap-3 rounded-lg bg-ink/[0.03] p-3 shadow-hairline">
               <Icon className="mt-0.5 size-4 shrink-0 text-mute" aria-hidden />
               <div className="min-w-0">
                 <p className="text-sm font-bold text-ink">{SECTION_TITLE[section]}</p>
@@ -530,7 +530,7 @@ function ConfirmSecrets({ plan, selected, source, target }: { plan: SyncPlan; se
   const replaced = secrets.filter((i) => i.change === "unknown").length;
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex gap-3 rounded-lg bg-accent/8 p-3.5 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]">
+      <div className="flex gap-3 rounded-lg bg-accent/8 p-3.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]">
         <ShieldCheck className="mt-0.5 size-5 shrink-0 text-accent-hi" aria-hidden />
         <div className="flex min-w-0 flex-col gap-1.5 text-sm">
           <h3 className="font-bold text-ink">
@@ -546,7 +546,7 @@ function ConfirmSecrets({ plan, selected, source, target }: { plan: SyncPlan; se
         {secrets.map((i) => {
           const place = placeText(i);
           return (
-            <li key={i.id} className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-white/[0.03] px-3 py-2 shadow-hairline">
+            <li key={i.id} className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-ink/[0.03] px-3 py-2 shadow-hairline">
               <Lock className="size-3.5 shrink-0 text-mute" aria-hidden />
               <span className="min-w-0 text-sm font-semibold text-ink">{i.label}</span>
               <span className="text-2xs text-mute-2">{place ? `${SECTION_TITLE[i.section]} · ${place}` : SECTION_TITLE[i.section]}</span>
@@ -563,7 +563,7 @@ function ConfirmSecrets({ plan, selected, source, target }: { plan: SyncPlan; se
         </p>
       )}
       {oauth > 0 && (
-        <p className="flex items-start gap-2 rounded-md bg-warn/8 p-2.5 text-xs text-ink-2 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]">
+        <p className="flex items-start gap-2 rounded-md bg-warn/8 p-2.5 text-xs text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]">
           <TriangleAlert className="mt-px size-3.5 shrink-0 text-warn" aria-hidden />
           <span>
             Some providers rotate refresh tokens: once {target} refreshes {oauth === 1 ? "this sign-in" : "these sign-ins"}, {source} may be signed out of{" "}
@@ -589,7 +589,7 @@ function Applying({ phase, secrets, source, target }: { phase: ApplyPhase; secre
               <Spinner size={16} label="Working" />
             ) : (
               <span className="grid size-4 shrink-0 place-items-center" aria-hidden>
-                <span className="size-1.5 rounded-full bg-white/25" />
+                <span className="size-1.5 rounded-full bg-ink/25" />
               </span>
             )}
             {stepText(s, source, target)}
@@ -617,7 +617,7 @@ function Result({ applied, before, source, target, onReview }: { applied: SyncAp
         {applied.results.map((r) => {
           const item = byId.get(r.id);
           return (
-            <li key={r.id} className="flex items-start gap-2.5 rounded-md bg-white/[0.03] px-3 py-2 shadow-hairline">
+            <li key={r.id} className="flex items-start gap-2.5 rounded-md bg-ink/[0.03] px-3 py-2 shadow-hairline">
               {r.ok ? <Check className="mt-0.5 size-4 shrink-0 text-done" aria-label="Copied" /> : <X className="mt-0.5 size-4 shrink-0 text-error" aria-label="Failed" />}
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-baseline gap-x-2">
@@ -625,7 +625,7 @@ function Result({ applied, before, source, target, onReview }: { applied: SyncAp
                   {item && <span className="text-2xs text-mute-2">{SECTION_TITLE[item.section]}</span>}
                 </div>
                 {r.error && (
-                  <p className="text-xs text-[#ffb1c1]">
+                  <p className="text-xs text-error-ink">
                     <Ticks text={r.error} />
                   </p>
                 )}
@@ -646,13 +646,13 @@ function Result({ applied, before, source, target, onReview }: { applied: SyncAp
             {reload}
           </p>
           {applied.mcpReload.errors.map((e) => (
-            <p key={e} className="pl-[22px] text-[#ffb1c1]">
+            <p key={e} className="pl-[22px] text-error-ink">
               <Ticks text={e} />
             </p>
           ))}
         </div>
       )}
-      <div className="flex flex-wrap items-center gap-3 rounded-lg bg-white/[0.03] p-3 shadow-hairline">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg bg-ink/[0.03] p-3 shadow-hairline">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-ink">{left.differences ? `Now: ${countsLine(left)}` : `${target} now matches ${source}`}</p>
           <p className="text-xs text-mute">

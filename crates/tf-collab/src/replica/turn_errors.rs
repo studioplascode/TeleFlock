@@ -347,6 +347,26 @@ fn retried_attempts_stay_hidden_live_and_rebuilt() {
     assert!(rows_with_errors(&fresh.rows()).is_empty());
 }
 
+/// An attempt that failed after streaming a tool call, then a retry that answered: omp's file keeps
+/// the attempt and no result for its call, so a rebuilt copy shows the call queued for good. That
+/// is no work in flight (nothing will ever finish it): tf-hostd's settle watchdog repairs copies
+/// that show work while omp is idle, and could never settle this one. A turn under way is at work.
+#[test]
+fn a_call_no_run_finished_is_no_work_in_flight() {
+    let call = json!({ "type": "toolCall", "id": "c1", "name": "bash", "arguments": { "command": "./deploy" } });
+    let attempt = failed(T0 + 2, json!([{ "type": "thinking", "thinking": "Deploying." }, call]));
+    let answer = assistant(T0 + 3, json!([{ "type": "text", "text": "Deployed." }]), "stop", json!({}));
+    let fresh = rebuilt(&[user(T0 + 1, "deploy it"), attempt, answer], None);
+    assert!(fresh.rows().iter().any(|i| matches!(i, TranscriptItem::Tool(t) if t.status == ToolStatus::Pending)), "the rebuild keeps the call queued");
+    assert!(!fresh.r.at_work(), "a call no run finished is no work");
+    let mut live = Live::new();
+    live.apply(snapshot(Vec::new()));
+    live.event(json!({ "type": "agent_start" }));
+    assert!(live.r.at_work(), "a turn under way");
+    live.event(json!({ "type": "agent_end" }));
+    assert!(!live.r.at_work());
+}
+
 #[test]
 fn xdev_mount_notices_stay_out_of_the_chat() {
     let mut live = Live::new();

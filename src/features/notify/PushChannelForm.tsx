@@ -197,7 +197,7 @@ export function PushChannelForm({ hostId, initial, onSaved }: { hostId: string; 
                 onClick={() => setKinds((k) => toggleChoice(k, c, !on))}
                 className={cn(
                   "h-8 rounded-full px-3 text-xs font-bold transition-colors touch-hit focus-ring",
-                  on ? "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.5)]" : "bg-white/6 text-mute shadow-hairline hover:text-ink",
+                  on ? "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_50%,transparent)]" : "bg-ink/6 text-mute shadow-hairline hover:text-ink",
                 )}
               >
                 {c.label}
@@ -207,7 +207,7 @@ export function PushChannelForm({ hostId, initial, onSaved }: { hostId: string; 
         </div>
       </div>
 
-      <label className="flex items-center justify-between gap-3 rounded-md bg-white/[0.03] px-3 py-2.5 shadow-hairline">
+      <label className="flex items-center justify-between gap-3 rounded-md bg-ink/[0.03] px-3 py-2.5 shadow-hairline">
         <span>
           <span className="block text-sm font-bold text-ink">Hide details</span>
           <span className="block text-xs text-mute">Only the agent's name and what happened leave the host: no prompt, file or command text.</span>

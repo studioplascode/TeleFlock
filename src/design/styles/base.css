@@ -72,8 +72,8 @@
     font-family: var(--font-mono);
   }
   ::selection {
-    background: rgb(163 92 240 / 0.45);
-    color: #fff;
+    background: color-mix(in srgb, var(--color-accent) 45%, transparent);
+    color: var(--color-ink);
   }
   :focus-visible {
     outline: 2px solid var(--color-accent);
@@ -82,15 +82,15 @@
   /* thin, quiet scrollbars (Windows WebView2 renders the classic fat ones otherwise) */
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgb(255 255 255 / 0.14) transparent;
+    scrollbar-color: color-mix(in srgb, var(--color-ink) 14%, transparent) transparent;
   }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background: rgb(255 255 255 / 0.12);
+    background: color-mix(in srgb, var(--color-ink) 12%, transparent);
     border-radius: 999px;
     border: 3px solid transparent;
     background-clip: padding-box;
   }
-  ::-webkit-scrollbar-thumb:hover { background-color: rgb(255 255 255 / 0.22); }
+  ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--color-ink) 22%, transparent); }
 }

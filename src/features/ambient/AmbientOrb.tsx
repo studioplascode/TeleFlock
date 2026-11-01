@@ -95,9 +95,9 @@ export function AmbientOrb({ agentKey, size }: AmbientOrbProps) {
             key={`glow-${nudging ? nudge : 0}`}
             aria-hidden
             className="tf-loop pointer-events-none absolute -inset-[48%] animate-breathe rounded-full"
-            style={{ background: "radial-gradient(circle, rgb(var(--st-rgb) / 0.5) 0%, rgb(255 122 24 / 0.16) 42%, transparent 68%)", "--tf-breath": "2.4s" } as CSSProperties}
+            style={{ background: "radial-gradient(circle, color-mix(in srgb, var(--st-solid) 50%, transparent) 0%, color-mix(in srgb, var(--color-sun-1) 16%, transparent) 42%, transparent 68%)", "--tf-breath": "2.4s" } as CSSProperties}
           />
-          <span key={`ping-${nudging ? nudge : 0}`} aria-hidden className="tf-loop pointer-events-none absolute inset-0 animate-ping-soft rounded-full shadow-[0_0_0_2px_rgb(var(--st-rgb)/0.9)]" />
+          <span key={`ping-${nudging ? nudge : 0}`} aria-hidden className="tf-loop pointer-events-none absolute inset-0 animate-ping-soft rounded-full shadow-[0_0_0_2px_color-mix(in_srgb,var(--st-solid)_90%,transparent)]" />
         </>
       )}
       {tool && (
@@ -110,15 +110,15 @@ export function AmbientOrb({ agentKey, size }: AmbientOrbProps) {
           }}
         />
       )}
-      {quiet && <span aria-hidden className="pointer-events-none absolute -inset-[9%] rounded-full shadow-[0_0_0_2px_rgb(251_191_36/0.75)]" />}
+      {quiet && <span aria-hidden className="pointer-events-none absolute -inset-[9%] rounded-full shadow-[0_0_0_2px_color-mix(in_srgb,var(--color-warn)_75%,transparent)]" />}
       <span
         aria-hidden
         className={cn("absolute inset-0 rounded-full", dim && "opacity-55", stale && "grayscale")}
         style={{
-          background: "radial-gradient(circle at 34% 28%, rgb(255 255 255 / 0.5), rgb(255 255 255 / 0) 34%), radial-gradient(circle at 50% 55%, var(--st-1) 0%, var(--st-2) 74%, rgb(var(--st-rgb) / 0.6) 100%)",
+          background: "radial-gradient(circle at 34% 28%, rgb(255 255 255 / 0.5), rgb(255 255 255 / 0) 34%), radial-gradient(circle at 50% 55%, var(--st-1) 0%, var(--st-2) 74%, color-mix(in srgb, var(--st-solid) 60%, transparent) 100%)",
           boxShadow: dim
             ? `inset 0 ${-size * 0.06}px ${size * 0.18}px rgb(0 0 0 / 0.35)`
-            : `0 0 ${size * 0.42}px rgb(var(--st-rgb) / ${needs ? 0.6 : 0.38}), inset 0 ${-size * 0.06}px ${size * 0.18}px rgb(0 0 0 / 0.35)`,
+            : `0 0 ${size * 0.42}px color-mix(in srgb, var(--st-solid) ${needs ? 60 : 38}%, transparent), inset 0 ${-size * 0.06}px ${size * 0.18}px rgb(0 0 0 / 0.35)`,
         }}
       />
       {/* Lively only: a sheen turns while it works, a slow deep pulse while it waits on the model */}
@@ -133,7 +133,7 @@ export function AmbientOrb({ agentKey, size }: AmbientOrbProps) {
         <span
           key={`burst-${burst}`}
           aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-full opacity-0 shadow-[0_0_0_3px_rgb(var(--st-rgb)/0.9),0_0_24px_rgb(var(--st-rgb)/0.7)] animate-[tf-ping_1.3s_cubic-bezier(0,0,0.2,1)_1_both]"
+          className="pointer-events-none absolute inset-0 rounded-full opacity-0 shadow-[0_0_0_3px_color-mix(in_srgb,var(--st-solid)_90%,transparent),0_0_24px_color-mix(in_srgb,var(--st-solid)_70%,transparent)] animate-[tf-ping_1.3s_cubic-bezier(0,0,0.2,1)_1_both]"
         />
       )}
     </span>

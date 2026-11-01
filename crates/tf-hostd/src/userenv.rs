@@ -263,9 +263,11 @@ impl Prepared {
     }
 }
 
-/// Sets PATH for this process and every child it starts (module docs). Call it while this is the
-/// only thread (`daemon::run`, before the logger and the runtime).
-pub fn prepare() -> Prepared {
+/// Sets PATH for this process and every child it starts (module docs), without `skip` (the
+/// forwarded tools' shims, which a profile may put on PATH: the daemon's own spawns run the real
+/// programs). Call it while this is the only thread (`daemon::run`, before the logger and the
+/// runtime).
+pub fn prepare(skip: &Path) -> Prepared {
     let started = Instant::now();
     let inherited_raw = std::env::var_os("PATH").unwrap_or_default();
     let inherited: Vec<PathBuf> = std::env::split_paths(&inherited_raw).collect();
@@ -281,7 +283,11 @@ pub fn prepare() -> Prepared {
         };
         let extra: Vec<PathBuf> =
             well_known_dirs(&home).into_iter().enumerate().filter(|(i, d)| *i < ALWAYS_ON_PATH || d.is_dir()).map(|(_, d)| d).collect();
-        let merged = merge_path(&interactive, &inherited, &extra);
+        let skip = std::fs::canonicalize(skip).unwrap_or_else(|_| skip.to_path_buf());
+        let merged: Vec<PathBuf> = merge_path(&interactive, &inherited, &extra)
+            .into_iter()
+            .filter(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()) != skip)
+            .collect();
         let added = merged.iter().filter(|d| !inherited.contains(d)).count();
         match std::env::join_paths(&merged) {
             Ok(path) => {
@@ -302,6 +308,7 @@ pub fn prepare() -> Prepared {
     }
     #[cfg(not(unix))]
     {
+        let _ = skip;
         Prepared { source: "inherited PATH".into(), entries: inherited.len(), bytes: inherited_raw.len(), added: 0, took: started.elapsed() }
     }
 }

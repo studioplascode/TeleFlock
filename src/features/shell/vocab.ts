@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Blocks, BrushCleaning, Clock3, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Orbit, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
+import { Activity, BarChart3, Blocks, BrushCleaning, Cable, Clock3, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Orbit, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
 import type { Agent, Column, NeedsKind } from "@/core/gen";
 import { formatAge, formatElapsed } from "@/design";
 
@@ -184,6 +184,7 @@ export const VIEWS = {
   usage: { label: "Usage", shortcut: "Ctrl 4", description: "Spend, tokens and subscription limits", icon: BarChart3 },
   wrapped: { label: "Flock Wrapped", description: "Your flock's week on one card, to share as an image", icon: PartyPopper },
   hosts: { label: "Hosts", shortcut: "Ctrl 5", description: "Connections, health and setup", icon: Server },
+  forward: { label: "Forwarding", description: "Let one host's agents and shells use another host: run commands there, call its tools, reach its ports", icon: Cable },
   settings: { label: "Settings", shortcut: "Ctrl 6", description: "Notifications, motion, hints and AI naming", icon: Settings2 },
   dispatch: { label: "Dispatch", shortcut: "D", description: "Send tasks to a repository like messages", icon: Send },
   automations: { label: "Automations", shortcut: "Ctrl 7", description: "Agents a host starts on a schedule", icon: Clock3 },

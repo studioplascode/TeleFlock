@@ -72,7 +72,7 @@ export function PrefillBanner({ target, repo, mobile }: { target: string | undef
 
 function Banner({ icon, mobile, children }: { icon: ReactNode; mobile: boolean; children: ReactNode }) {
   return (
-    <div className={cn("mb-1.5 flex items-center gap-2 rounded-md bg-accent/10 px-2.5 py-1.5 text-xs font-semibold text-ink-2 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.28)] [&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-accent-hi", mobile && "text-[13px]")}>
+    <div className={cn("mb-1.5 flex items-center gap-2 rounded-md bg-accent/10 px-2.5 py-1.5 text-xs font-semibold text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_28%,transparent)] [&>svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-accent-hi", mobile && "text-[13px]")}>
       {icon}
       {children}
     </div>

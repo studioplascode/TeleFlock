@@ -16,9 +16,10 @@
 //! were written for the one it replaced and are dropped. Restarts in a row (each subscription
 //! between them ending within [`RESTART_SETTLED`]) pause before subscribing again: not after the
 //! first, then [`RESTART_PAUSE`], doubling. So omp does not rebuild resyncs, nor hostd re-read a
-//! large file, in a loop. When the bridge goes away the replica stays (`connecting`,
-//! `bridgeLost`); [`crate::omp`]'s poller lets a published collab room take over after
-//! [`crate::omp::BRIDGE_RETURN`], and the bridge takes the session back as soon as it returns.
+//! large file, in a loop. When the bridge goes away, or its live feed does not start, the replica
+//! stays (`connecting`) and omp's session file serves the session ([`crate::settle`]); its collab
+//! room is not joined for [`crate::omp::BRIDGE_MEMORY`] (a join makes a busy omp serialize the
+//! whole session), and the bridge takes the session back as soon as a subscription works.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -43,8 +44,9 @@ use crate::util::now_ms;
 const TAIL_EVERY: Duration = Duration::from_millis(250);
 /// A subscription whose `resync` does not arrive in this long is started over.
 const RESYNC_WAIT: Duration = Duration::from_secs(30);
-/// After this many failed subscriptions in a row a published collab room may take over.
-const SUBSCRIBE_GIVE_UP: u32 = 3;
+/// After this many `liveSubscribe`s in a row the bridge did not answer at all, its connection is
+/// closed: the extension redials, and a fresh connection says `hello` again.
+const SUBSCRIBE_UNANSWERED: u32 = 2;
 /// The second feed restart in a row waits this long before it subscribes again, each further one
 /// twice as long, up to [`RESTART_PAUSE_MAX`]; the first one subscribes at once.
 pub(crate) const RESTART_PAUSE: Duration = Duration::from_millis(250);
@@ -55,34 +57,10 @@ const RESTART_SETTLED: Duration = Duration::from_secs(10);
 const TRANSCRIPT_MAX: u64 = 64 * 1024 * 1024;
 /// How deep nested subagent transcripts are searched for (`<Id>/<Id>.<Child>.jsonl`, …).
 const TRANSCRIPT_DEPTH: usize = 6;
-/// The replica and omp disagree on whether a turn runs (omp's own word is the bridge's control
-/// state, `idle`, which reaches hostd on a channel of its own) for this long: the live feed missed
-/// something, and a fresh resync settles it ([`check_stall`]).
-const STALL_AFTER: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
-/// A forced resync waits this long after the previous one, twice as long for each further one in
-/// a row, up to [`STALL_BACKOFF_MAX`]; quiet that long, the next run starts over.
-const STALL_BACKOFF: Duration = if cfg!(test) { Duration::from_millis(500) } else { Duration::from_secs(60) };
-const STALL_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
-/// One session's stall watchdog ([`check_stall`]), kept in its session state.
-#[derive(Debug, Default)]
-pub(crate) struct Stall {
-    /// Since when the replica and omp disagree on whether a turn runs.
-    since: Option<Instant>,
-    /// Resyncs forced in a row, and when the last one was asked for.
-    forced: u32,
-    last: Option<Instant>,
-    /// A forced resync the driver has yet to start, and why ([`run`]).
-    ask: Option<String>,
-}
-
-/// Session entry types omp's collab host replicates as transcript entries (`collab/host.ts`
-/// `WIRE_SESSION_ENTRY_TYPES`); the others only feed the journal (goal, plan mode, side spend).
+/// Session entry types omp's collab host replicates as transcript entries ([`journal::is_wire_type`]).
 fn is_wire_entry(entry: &Value) -> bool {
-    matches!(
-        entry.get("type").and_then(Value::as_str),
-        Some("message" | "custom_message" | "compaction" | "branch_summary" | "model_change" | "thinking_level_change")
-    )
+    entry.get("type").and_then(Value::as_str).is_some_and(journal::is_wire_type)
 }
 
 fn event_type(frame: &HostFrame) -> Option<&str> {
@@ -169,7 +147,6 @@ impl Feeder {
     /// then the transcript as a snapshot (the welcome built from the file header and the resync's
     /// `state` and `agents`), then the resync's in-flight frames. Later frames continue from it.
     pub(crate) fn resync(&mut self, replica: &mut Replica, resync: Resync, read: FullRead, origin: &Origin, now: Millis) -> Update {
-        let FullRead { header, title, entries, tail, .. } = read;
         let (mut unwritten, mut frames) = (Vec::new(), Vec::with_capacity(resync.frames.len()));
         for f in resync.frames {
             match f {
@@ -177,52 +154,75 @@ impl Feeder {
                 other => frames.push(other),
             }
         }
-        // Entries ride along only while omp has not written the file yet.
-        let entries = if header.is_none() && entries.is_empty() { unwritten } else { entries };
-        replica.reset_journal();
-        let mut out = replica.apply_journal_entries(&entries, tail.offset());
-        let mut state = frames
-            .iter()
-            .find_map(|f| match f {
-                HostFrame::State { state } => Some(state.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| HostState { cwd: origin.cwd.clone(), ..HostState::default() });
-        // The `state` frame is debounced; `streaming` is the session's own flag at resync time.
-        state.is_streaming = resync.streaming;
-        let agents = frames
-            .iter()
-            .find_map(|f| match f {
-                HostFrame::Agents { agents } => Some(agents.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        // Before omp wrote the file, its header as omp will write it: the session's start is in the
-        // file's name (now only for a file named otherwise), so `startedAt` is the same whether the
-        // session was built live or rebuilt from the file after a restart.
-        let mut header: SessionHeader = header.and_then(|h| serde_json::from_value(h).ok()).unwrap_or_else(|| SessionHeader {
-            id: origin.session_id.clone(),
-            timestamp: journal::header_timestamp(tail.path(), &origin.session_id)
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-            cwd: origin.cwd.clone(),
-            title: None,
-            extra: serde_json::Map::new(),
-        });
-        if header.title.is_none() {
-            header.title = title;
-        }
-        let wire: Vec<Value> = entries.into_iter().filter(is_wire_entry).collect();
-        let welcome = Welcome { proto: COLLAB_PROTO, header, state, agents, entry_count: wire.len() as u64, read_only: false };
-        let resyncing = replica.header().is_some();
-        merge(&mut out, replica.apply(&GuestEvent::Snapshot(Snapshot { welcome, entries: wire, resync: resyncing }), now));
-        for f in frames {
-            merge(&mut out, replica.apply(&GuestEvent::Frame(f), now));
-        }
+        let (out, tail) = load(replica, read, unwritten, frames, resync.streaming, origin, now);
         self.tail = Some(tail);
         self.last_seq = Some(resync.seq);
         out
     }
+}
 
+/// Rebuilds `replica` from the whole session file (`read`) as omp wrote it, keeping what omp last
+/// said of the rest (its state, with `streaming` for whether a turn runs, and its agents); nothing
+/// in flight. Returns the update and the tail that continues after what was read. The settle
+/// watchdog's ([`crate::settle`]): the last resort when the live source does not settle a copy that
+/// missed something, and the start of a file follow.
+pub(crate) fn rebuild(replica: &mut Replica, read: FullRead, origin: &Origin, streaming: bool, now: Millis) -> (Update, JournalTail) {
+    let state = HostState { is_streaming: streaming, ..replica.state().clone() };
+    let frames = vec![HostFrame::State { state }, HostFrame::Agents { agents: replica.agents() }];
+    load(replica, read, Vec::new(), frames, streaming, origin, now)
+}
+
+/// The session file (`read`; the `unwritten` entries while omp has not written it) applied to
+/// `replica` as a snapshot: the journal first, then the transcript (the welcome built from the file
+/// header and the `state` and `agents` among `frames`, `streaming` saying whether a turn runs), then
+/// `frames`. Returns the update and the tail that continues after what was read.
+fn load(replica: &mut Replica, read: FullRead, unwritten: Vec<Value>, frames: Vec<HostFrame>, streaming: bool, origin: &Origin, now: Millis) -> (Update, JournalTail) {
+    let FullRead { header, title, entries, tail, .. } = read;
+    // Entries ride along only while omp has not written the file yet.
+    let entries = if header.is_none() && entries.is_empty() { unwritten } else { entries };
+    replica.reset_journal();
+    let mut out = replica.apply_journal_entries(&entries, tail.offset());
+    let mut state = frames
+        .iter()
+        .find_map(|f| match f {
+            HostFrame::State { state } => Some(state.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| HostState { cwd: origin.cwd.clone(), ..HostState::default() });
+    // The `state` frame is debounced; `streaming` is the session's own flag at resync time.
+    state.is_streaming = streaming;
+    let agents = frames
+        .iter()
+        .find_map(|f| match f {
+            HostFrame::Agents { agents } => Some(agents.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    // Before omp wrote the file, its header as omp will write it: the session's start is in the
+    // file's name (now only for a file named otherwise), so `startedAt` is the same whether the
+    // session was built live or rebuilt from the file after a restart.
+    let mut header: SessionHeader = header.and_then(|h| serde_json::from_value(h).ok()).unwrap_or_else(|| SessionHeader {
+        id: origin.session_id.clone(),
+        timestamp: journal::header_timestamp(tail.path(), &origin.session_id)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        cwd: origin.cwd.clone(),
+        title: None,
+        extra: serde_json::Map::new(),
+    });
+    if header.title.is_none() {
+        header.title = title;
+    }
+    let wire: Vec<Value> = entries.into_iter().filter(is_wire_entry).collect();
+    let welcome = Welcome { proto: COLLAB_PROTO, header, state, agents, entry_count: wire.len() as u64, read_only: false };
+    let resyncing = replica.header().is_some();
+    merge(&mut out, replica.apply(&GuestEvent::Snapshot(Snapshot { welcome, entries: wire, resync: resyncing }), now));
+    for f in frames {
+        merge(&mut out, replica.apply(&GuestEvent::Frame(f), now));
+    }
+    (out, tail)
+}
+
+impl Feeder {
     /// Live frame `seq` has to wait for a read of the file's tail ([`Self::apply_read`] first):
     /// it is the next frame and it can start something, so what omp wrote before it goes first.
     pub(crate) fn reads_before(&self, seq: u64, frame: &HostFrame) -> bool {
@@ -276,17 +276,23 @@ impl Feeder {
     pub(crate) fn apply_read(&mut self, replica: &mut Replica, read: Poll, now: Millis) -> Result<Update, Restart> {
         match read {
             Poll::Idle => Ok(Update::default()),
-            Poll::Appended { entries, offset } => {
-                let mut out = replica.apply_journal_entries(&entries, offset);
-                for entry in entries.into_iter().filter(is_wire_entry) {
-                    merge(&mut out, replica.apply(&GuestEvent::Frame(HostFrame::Entry { entry }), now));
-                }
-                Ok(out)
-            }
+            Poll::Appended { entries, offset } => Ok(apply_appended(replica, entries, offset, now)),
             Poll::Rewritten => Err(Restart::Rewritten),
             Poll::Missing => Err(Restart::Missing),
         }
     }
+}
+
+/// Entries omp appended to the session file (ending at byte `offset`), applied as the file has
+/// them: the journal (goal, plan mode, side spend) and the transcript entries, as a collab room
+/// replicates them. Entries the copy has already are settled again, never duplicated (rows are
+/// keyed by what omp keys them by). Also the settle watchdog's file follow ([`crate::settle`]).
+pub(crate) fn apply_appended(replica: &mut Replica, entries: Vec<Value>, offset: u64, now: Millis) -> Update {
+    let mut out = replica.apply_journal_entries(&entries, offset);
+    for entry in entries.into_iter().filter(is_wire_entry) {
+        merge(&mut out, replica.apply(&GuestEvent::Frame(HostFrame::Entry { entry }), now));
+    }
+    out
 }
 
 /// Reads the session file's tail on the blocking pool (a `stat`, plus what omp appended), never
@@ -372,18 +378,53 @@ pub(crate) fn attach(inner: &Arc<Inner>, b: &BridgeSession) {
         if matches!(st.transport, Transport::Detached) {
             st.set_link(syncing());
         }
+        // Under the lock, so a restart ([`restart_driver`]) never finds the slot without its task.
+        let task = tokio::spawn(supervise(Arc::downgrade(inner), session.clone(), b.conn, token));
+        st.driver_task = Some(task.abort_handle());
     }
-    tokio::spawn(supervise(Arc::downgrade(inner), session, b.conn, token));
     let _ = inner.updates.send(OmpUpdate::Registry);
+}
+
+/// Starts `session`'s feed over with a new driver: the one it has stopped taking the settle
+/// watchdog's asks ([`crate::settle`]), stuck somewhere no kick reaches. The task is aborted (the
+/// replica and subscribers stay) and a fresh driver subscribes again. When the bridge is gone, the
+/// session loses it here ([`lost`]): the aborted driver was what would have said so, and nothing
+/// else would (the session stayed `live`, fed by nothing and never dropped). Returns whether a new
+/// driver started.
+pub(crate) fn restart_driver(inner: &Arc<Inner>, session: &Arc<OmpSession>) -> bool {
+    let token = {
+        let mut st = session.lock();
+        if let Some(task) = st.driver_task.take() {
+            task.abort();
+        }
+        let driver = st.driver.take().map(|(_, token)| token);
+        // [`lost`] matches the transport against the driver that last served it.
+        match st.transport {
+            Transport::Bridge { token, .. } => Some(token),
+            _ => driver,
+        }
+    };
+    match inner.bridge.by_session(&session.session_id).filter(|b| b.caps.data_plane()) {
+        Some(b) => {
+            attach(inner, &b);
+            true
+        }
+        None => {
+            if let Some(token) = token {
+                lost(inner, session, token, false);
+            }
+            false
+        }
+    }
 }
 
 fn syncing() -> LinkStatus {
     LinkStatus::connecting(LinkReason::Syncing, Some(LinkVia::Bridge), "TeleFlock's bridge in omp is connected; loading the session")
 }
 
-/// Runs every registry poll: bridges whose session has no driver get one (a lagged event),
-/// bridge-served sessions whose live feed missed something get a fresh resync ([`check_stall`]),
-/// and sessions whose bridge did not come back are said so, then dropped once omp is gone.
+/// Runs every registry poll: bridges whose session has no driver get one (a lagged event), and
+/// sessions whose bridge did not come back are said so, then dropped once omp is gone. (A live
+/// feed that missed something is the settle watchdog's, [`crate::settle`].)
 pub(crate) fn reconcile(inner: &Arc<Inner>) {
     for b in inner.bridge.sessions() {
         if b.caps.data_plane() && inner.session(&b.session_id).is_none_or(|s| s.lock().driver.is_none_or(|(conn, _)| conn != b.conn)) {
@@ -391,9 +432,26 @@ pub(crate) fn reconcile(inner: &Arc<Inner>) {
         }
     }
     let sessions: Vec<Arc<OmpSession>> = inner.sessions.read().unwrap_or_else(|p| p.into_inner()).values().cloned().collect();
-    let now = Instant::now();
     for s in sessions {
-        check_stall(inner, &s, now);
+        // A session its room left, served from its file: until a join takes it back, or omp is gone
+        // (where hostd cannot tell, as long as a lost bridge is waited for).
+        let room_lost = {
+            let st = s.lock();
+            match st.transport {
+                Transport::Detached if st.bridge_lost.is_none() => st.room_lost,
+                _ => None,
+            }
+        };
+        if let Some(since) = room_lost {
+            if !process_alive(s.pid()) {
+                info!(session = %s.session_id, "omp is gone; dropping the session its room had left");
+                inner.forget(&s, "omp exited");
+            } else if !PROCESS_CHECKS && since.elapsed() >= omp_detached_forget() {
+                info!(session = %s.session_id, "omp's collab room did not come back; dropping the session");
+                inner.forget(&s, "omp's collab room did not come back");
+            }
+            continue;
+        }
         let Some((lost_at, bye)) = ({
             let st = s.lock();
             match st.transport {
@@ -407,76 +465,50 @@ pub(crate) fn reconcile(inner: &Arc<Inner>) {
         if waited < BRIDGE_RETURN {
             continue;
         }
-        let room = inner.room_of(&s.session_id).is_some_and(|r| r.relay_connected && r.access == "control");
-        if room {
-            // The poller joins it (the session is not held any more).
+        // Connected, but its live feed does not start: its driver retries, the file serves it.
+        if inner.bridge.by_session(&s.session_id).is_some() {
             continue;
         }
-        if bye || !process_alive(s.pid()) || waited >= omp_detached_forget() {
+        if bye || !process_alive(s.pid()) {
+            info!(session = %s.session_id, bye, "omp is gone; dropping the session its bridge served");
+            inner.forget(&s, "omp exited");
+            continue;
+        }
+        if waited >= omp::BRIDGE_MEMORY {
+            // No bridge for that long: a published room may serve the session now (the poller
+            // joins it).
+            if inner.room_of(&s.session_id).is_some_and(|r| r.relay_connected && r.access == "control") {
+                continue;
+            }
             info!(session = %s.session_id, "bridge did not come back and omp has no collab room; dropping the session");
-            inner.forget(&s, if bye { "omp exited" } else { "omp's TeleFlock bridge did not come back" });
-            continue;
-        }
-        // The same words on every poll: `linkSince` tells how long it has been (a counter here
-        // would send every client a board patch per poll).
-        let changed = s.lock().set_link(LinkStatus::connecting(
-            LinkReason::BridgeLost,
-            Some(LinkVia::Bridge),
-            "TeleFlock's bridge in omp disconnected and omp has no collab room to fall back to; waiting for the bridge to reconnect",
-        ));
-        if changed {
-            let _ = inner.updates.send(OmpUpdate::Changed { session_id: s.session_id.clone() });
+            inner.forget(&s, "omp's TeleFlock bridge did not come back");
         }
     }
-}
-
-/// The stall watchdog, on every registry poll: a bridge-served session whose replica says a turn
-/// runs while omp says it is idle, or the other way round, for [`STALL_AFTER`] has a live feed
-/// that missed something (frames hostd could not read, a bug anywhere between omp's events and
-/// the replica). Its driver starts over with a fresh resync, which rebuilds the replica from the
-/// session file and omp's in-flight state. omp's word is the bridge's control state (`idle`, from
-/// `ctx.isIdle()`), which reaches hostd on its own channel; the replica's is its turn (`agent_start`
-/// … `agent_end`) and the live feed's last `state` frame (both from omp's `isStreaming`, so they
-/// agree within a second or two on a healthy feed). Paced by [`STALL_BACKOFF`], doubling while it
-/// keeps happening.
-fn check_stall(inner: &Inner, s: &OmpSession, now: Instant) {
-    let Some(b) = inner.bridge.by_session(&s.session_id) else { return };
-    let omp_busy = !b.state.idle;
-    let mut st = s.lock();
-    let served = matches!(st.transport, Transport::Bridge { .. }) && st.driver.is_some_and(|(conn, _)| conn == b.conn);
-    let replica_busy = st.replica.is_streaming() || st.replica.state().is_streaming;
-    let stall = &mut st.stall;
-    if !served || replica_busy == omp_busy {
-        stall.since = None;
-        if stall.last.is_some_and(|t| now.duration_since(t) >= STALL_BACKOFF_MAX) {
-            stall.forced = 0;
-        }
-        return;
-    }
-    let since = *stall.since.get_or_insert(now);
-    let pause = STALL_BACKOFF.saturating_mul(1 << stall.forced.min(10)).min(STALL_BACKOFF_MAX);
-    if now.duration_since(since) < STALL_AFTER || stall.ask.is_some() || stall.last.is_some_and(|t| now.duration_since(t) < pause) {
-        return;
-    }
-    let why = if replica_busy { "omp's turn ended but the live feed never said so" } else { "omp is working but the live feed never said so" };
-    let secs = now.duration_since(since).as_secs();
-    stall.forced += 1;
-    stall.last = Some(now);
-    stall.since = None;
-    stall.ask = Some(format!("{why} ({secs} s)"));
-    let forced = stall.forced;
-    drop(st);
-    warn!(session = %s.session_id, forced, "{why} for {secs} s; reloading the session from omp");
-    s.feed_kick.notify_one();
 }
 
 fn omp_detached_forget() -> Duration {
     omp::DETACHED_FORGET
 }
 
-/// omp process `pid` still runs. Linux reads `/proc`; elsewhere it is assumed to.
+/// [`process_alive`] can tell that a process is gone on this platform.
+const PROCESS_CHECKS: bool = cfg!(unix);
+
+/// omp process `pid` still runs (`false` only when it certainly does not). Unix asks the kernel
+/// (`kill(pid, 0)`; a process of another user runs too), macOS included: before, only Linux could
+/// tell (it read `/proc`), and a session whose room left it outlived its omp there for good.
+/// Elsewhere it is assumed to.
 fn process_alive(pid: u32) -> bool {
-    if cfg!(target_os = "linux") && pid != 0 { Path::new(&format!("/proc/{pid}")).exists() } else { true }
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else { return true };
+        // SAFETY: signal 0 only checks that the process exists.
+        pid == 0 || unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 /// The driver still owns the session (no newer connection's driver replaced it).
@@ -540,6 +572,8 @@ async fn drive(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u6
     let sid = session.session_id.clone();
     let mut feeder = Feeder::default();
     let mut failures = 0u32;
+    // `liveSubscribe`s in a row the bridge left unanswered.
+    let mut unanswered = 0u32;
     // Restarts in a row; each one pauses longer before the next subscription ([`restart_pause`]).
     // A subscription that lasted RESTART_SETTLED ends the run.
     let mut restarts = 0u32;
@@ -555,12 +589,24 @@ async fn drive(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u6
         let feed = match inner.bridge.live_subscribe(&sid).await {
             Ok(feed) => {
                 failures = 0;
+                unanswered = 0;
                 feed
             }
             Err(BridgeError::NotConnected { .. } | BridgeError::Disconnected { .. }) => return lost(&inner, &session, token, false),
             Err(e) => {
                 failures += 1;
                 warn!(session = %sid, attempt = failures, "bridge live feed did not start: {e}");
+                if matches!(e, BridgeError::Timeout { .. }) {
+                    unanswered += 1;
+                    if unanswered >= SUBSCRIBE_UNANSWERED {
+                        // Its socket is open but nothing comes back (its writer stuck behind a frame,
+                        // omp's event loop wedged): a new connection is a new writer, and the hello
+                        // that follows brings the session back with a fresh resync.
+                        warn!(session = %sid, conn, "omp's TeleFlock bridge stopped answering; closing its connection so it reconnects");
+                        inner.bridge.close_conn(conn);
+                        return lost(&inner, &session, token, false);
+                    }
+                }
                 {
                     let mut st = session.lock();
                     if !matches!(st.transport, Transport::Collab(_)) {
@@ -569,9 +615,9 @@ async fn drive(weak: Weak<Inner>, session: Arc<OmpSession>, conn: u64, token: u6
                             Some(LinkVia::Bridge),
                             format!("TeleFlock's bridge did not start its live feed ({e}); retrying"),
                         ));
-                    }
-                    if failures >= SUBSCRIBE_GIVE_UP && matches!(st.transport, Transport::Detached) {
-                        // Let a published collab room serve it meanwhile.
+                        // Nothing live feeds it: the session file does until a subscription works.
+                        // Its collab room is never joined meanwhile ([`omp::BRIDGE_MEMORY`]).
+                        st.transport = Transport::Detached;
                         st.bridge_lost.get_or_insert((Instant::now(), false));
                     }
                 }
@@ -662,8 +708,8 @@ async fn run(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, mut feed
                 if session.is_closed() {
                     return End::Stop;
                 }
-                // The stall watchdog wants a fresh resync ([`check_stall`]).
-                if let Some(why) = session.lock().stall.ask.take() {
+                // The settle watchdog wants a fresh resync ([`crate::settle`]).
+                if let Some(why) = session.lock().settle.ask.take() {
                     return End::Restart(why);
                 }
                 // Asked for while the session loaded (the kick waited out the resync): this
@@ -711,6 +757,13 @@ async fn run(weak: &Weak<Inner>, session: &Arc<OmpSession>, token: u64, mut feed
                         return End::Restart("no resync arrived".into());
                     }
                     continue;
+                }
+                // Labs (`lab-faults`) and tests: this feed stops here for good, as a driver stuck
+                // in an await nothing interrupts would; only the settle watchdog's restart gets past it.
+                #[cfg(any(test, feature = "lab-faults"))]
+                if crate::lab::freezes(&frame) {
+                    warn!(session = %session.session_id, seq, "lab: the bridge feed freezes here");
+                    std::future::pending::<()>().await;
                 }
                 // Entries omp wrote before this frame go first: read the tail now that it is here.
                 let read = if feeder.reads_before(seq, &frame) {
@@ -805,9 +858,9 @@ async fn apply_resync(inner: &Arc<Inner>, session: &Arc<OmpSession>, token: u64,
         let update = feeder.resync(&mut st.replica, resync, read, &origin, now);
         let old = std::mem::replace(&mut st.transport, Transport::Bridge { token, caps });
         st.bridge_lost = None;
-        // A resync settles whatever the stall watchdog saw ([`check_stall`]).
-        st.stall.ask = None;
-        st.stall.since = None;
+        st.room_lost = None;
+        // A resync is everything omp has again: whatever the settle watchdog asked for is done.
+        st.settle.resynced();
         st.session_file = path;
         st.set_link(LinkStatus::live(LinkVia::Bridge));
         session.set_data_plane(&mut st, Some(caps));
@@ -828,7 +881,8 @@ async fn apply_resync(inner: &Arc<Inner>, session: &Arc<OmpSession>, token: u64,
 }
 
 /// The bridge of a session went away (its connection closed, or it was taken over): the
-/// replica stays, the link says why, and a collab room may take over after `BRIDGE_RETURN`.
+/// replica stays, the link says why, and the session file serves it until the bridge is back (its
+/// collab room is not joined for [`omp::BRIDGE_MEMORY`]).
 fn lost(inner: &Inner, session: &Arc<OmpSession>, token: u64, bye: bool) {
     {
         let mut st = session.lock();
@@ -847,12 +901,13 @@ fn lost(inner: &Inner, session: &Arc<OmpSession>, token: u64, bye: bool) {
             let why = if bye {
                 "omp is shutting down (its TeleFlock bridge said goodbye)"
             } else {
-                "TeleFlock's bridge in omp disconnected; waiting for it to reconnect"
+                "TeleFlock's bridge in omp disconnected; showing the session from its file until it reconnects"
             };
             st.set_link(LinkStatus::connecting(LinkReason::BridgeLost, Some(LinkVia::Bridge), why));
             session.set_data_plane(&mut st, None);
         }
     }
+    inner.saw_bridge(session.pid());
     info!(session = %session.session_id, bye, "bridge feed ended");
     let _ = inner.updates.send(OmpUpdate::Changed { session_id: session.session_id.clone() });
     let _ = inner.updates.send(OmpUpdate::Registry);
@@ -1017,6 +1072,19 @@ mod tests {
     use tf_proto::session::{SessionEvent, SessionMeta, SubagentStatus, ToolStatus, TranscriptItem};
 
     const SESSION_FILE: &str = fixture::SESSION_1;
+
+    /// What drops a session whose omp is gone (its bridge or its room left it): the same answer on
+    /// every Unix, where it used to be Linux's alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_exited_reads_as_gone() {
+        assert!(process_alive(std::process::id()));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!process_alive(pid), "pid {pid} exited");
+        assert!(process_alive(0), "no pid: nothing to tell");
+    }
 
     /// Every line the real extension (bridge 2.0.0 in omp 18.13.2) wrote to a probing hostd.
     fn lines() -> Vec<Value> {

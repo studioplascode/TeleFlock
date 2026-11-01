@@ -77,7 +77,7 @@ export function FallbackChainsEditor({ rows, onChange, models, customRoles = [],
   return (
     <div className="flex min-w-0 flex-col gap-2.5">
       {hostEntries.length > 0 && (
-        <div className="flex flex-col gap-1.5 rounded-md bg-white/[0.03] px-3 py-2.5 shadow-hairline">
+        <div className="flex flex-col gap-1.5 rounded-md bg-ink/[0.03] px-3 py-2.5 shadow-hairline">
           <span className="kicker">The host's chains</span>
           <ul className="flex flex-col gap-1">
             {hostEntries.map(([key, entries]) => {
@@ -166,7 +166,7 @@ function ChainCard({ row, index, check, models, roles, providers, taken, hidesHo
   };
   const setEntries = (entries: string[]) => onChange({ entries });
   return (
-    <div className={cn("flex min-w-0 flex-col gap-2 rounded-lg bg-white/[0.035] p-3 shadow-hairline max-md:p-2.5", bad && "shadow-[inset_0_0_0_1px_rgb(255_77_94/0.45)]")}>
+    <div className={cn("flex min-w-0 flex-col gap-2 rounded-lg bg-ink/[0.035] p-3 shadow-hairline max-md:p-2.5", bad && "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_45%,transparent)]")}>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Select
           aria-label={`Chain ${n} key type`}

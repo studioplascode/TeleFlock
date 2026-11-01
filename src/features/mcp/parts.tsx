@@ -6,11 +6,11 @@ import { copyText } from "@/features/hosts/CopyCommand";
 import { definedIn, filterTools, plural, quoteArg, STATUS_META, type StatusTone, statusLabel } from "./model";
 
 const TONE: Record<StatusTone, string> = {
-  ok: "bg-done/12 text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.3)]",
-  warn: "bg-warn/12 text-warn shadow-[inset_0_0_0_1px_rgb(251_191_36/0.34)]",
-  error: "bg-error/14 text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]",
-  busy: "bg-accent/12 text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]",
-  muted: "bg-white/6 text-mute",
+  ok: "bg-done/12 text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_30%,transparent)]",
+  warn: "bg-warn/12 text-warn shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_34%,transparent)]",
+  error: "bg-error/14 text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]",
+  busy: "bg-accent/12 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]",
+  muted: "bg-ink/6 text-mute",
 };
 
 const DOT: Partial<Record<McpStatus, string>> = { connected: "bg-done", needsAuth: "bg-warn", failed: "bg-error" };
@@ -19,7 +19,7 @@ const DOT: Partial<Record<McpStatus, string>> = { connected: "bg-done", needsAut
 export function TransportGlyph({ transport, className }: { transport: McpTransport; className?: string }) {
   return (
     <span
-      className={cn("grid size-9 shrink-0 place-items-center rounded-md bg-white/[0.045] text-mute shadow-hairline [&_svg]:size-4", className)}
+      className={cn("grid size-9 shrink-0 place-items-center rounded-md bg-ink/[0.045] text-mute shadow-hairline [&_svg]:size-4", className)}
       title={transport === "stdio" ? "Runs on the host (stdio)" : transport === "sse" ? "Remote server (legacy SSE)" : "Remote server (HTTP)"}
     >
       {transport === "stdio" ? <TerminalSquare /> : <Globe />}
@@ -55,7 +55,7 @@ export function Banner({ tone, title, children, action, className }: { tone: "wa
       role="status"
       className={cn(
         "flex items-start gap-3 rounded-lg px-3.5 py-3",
-        tone === "warn" ? "bg-warn/[0.07] shadow-[inset_0_0_0_1px_rgb(251_191_36/0.24)]" : "bg-error/[0.07] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.28)]",
+        tone === "warn" ? "bg-warn/[0.07] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_24%,transparent)]" : "bg-error/[0.07] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_28%,transparent)]",
         className,
       )}
     >
@@ -76,7 +76,7 @@ export function Banner({ tone, title, children, action, className }: { tone: "wa
 export function SameServerNote({ server: s, what, onOpen }: { server: McpServer; what: "URL" | "package" | "command"; onOpen(): void }) {
   const loaded = s.enabled && !s.shadowed;
   return (
-    <div role="status" className="flex items-center gap-2.5 rounded-md bg-warn/[0.07] py-1.5 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.24)]">
+    <div role="status" className="flex items-center gap-2.5 rounded-md bg-warn/[0.07] py-1.5 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_24%,transparent)]">
       <CircleAlert className="size-3.5 shrink-0 text-warn" />
       <p className="min-w-0 flex-1 py-1 text-xs text-ink-2">
         <span className="font-bold text-warn">
@@ -112,8 +112,8 @@ export function OutdatedHost({ onRetry, what = "MCP servers" }: { onRetry(): voi
 /** Monospace error text with a copy button. */
 export function ErrorText({ text, className }: { text: string; className?: string }) {
   return (
-    <div className={cn("flex items-start gap-2 rounded-md bg-error/[0.07] py-2 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.22)]", className)}>
-      <code className="min-w-0 flex-1 py-0.5 font-mono text-2xs leading-relaxed break-words whitespace-pre-wrap text-[#ffb1c1] select-text">{text}</code>
+    <div className={cn("flex items-start gap-2 rounded-md bg-error/[0.07] py-2 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_22%,transparent)]", className)}>
+      <code className="min-w-0 flex-1 py-0.5 font-mono text-2xs leading-relaxed break-words whitespace-pre-wrap text-error-ink select-text">{text}</code>
       <IconButton size="sm" label="Copy the error" onClick={() => copyText(text, "Error")}>
         <Copy />
       </IconButton>
@@ -287,7 +287,7 @@ export function TestOutcome({
   const secs = `${(result.ms / 1000).toFixed(result.ms < 10_000 ? 1 : 0)} s`;
   if (result.status === "connected") {
     return (
-      <div className={cn("flex flex-col gap-2 rounded-md bg-done/[0.06] px-3 py-2.5 shadow-[inset_0_0_0_1px_rgb(163_230_53/0.2)]", className)} aria-live="polite">
+      <div className={cn("flex flex-col gap-2 rounded-md bg-done/[0.06] px-3 py-2.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_20%,transparent)]", className)} aria-live="polite">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-done">
           <Check className="size-3.5" />
           Connected in {secs} · {plural(result.tools.length, "tool")}
@@ -301,7 +301,7 @@ export function TestOutcome({
         {!compact && result.tools.length > 0 && (
           <p className="flex flex-wrap gap-1">
             {result.tools.slice(0, 16).map((t) => (
-              <code key={t.name} className="rounded-xs bg-white/6 px-1.5 py-px font-mono text-2xs text-ink-2" title={t.description}>
+              <code key={t.name} className="rounded-xs bg-ink/6 px-1.5 py-px font-mono text-2xs text-ink-2" title={t.description}>
                 {t.name}
               </code>
             ))}
@@ -313,7 +313,7 @@ export function TestOutcome({
   }
   if (result.status === "needsAuth") {
     return (
-      <div className={cn("flex items-start gap-2.5 rounded-md bg-warn/[0.07] px-3 py-2.5 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.24)]", className)} aria-live="polite">
+      <div className={cn("flex items-start gap-2.5 rounded-md bg-warn/[0.07] px-3 py-2.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_24%,transparent)]", className)} aria-live="polite">
         <KeyRound className="mt-0.5 size-3.5 shrink-0 text-warn" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <p className="text-xs font-bold text-warn">
@@ -339,7 +339,7 @@ export function TestOutcome({
   }
   return (
     <div className={cn("flex flex-col gap-1.5", className)} aria-live="polite">
-      <p className="text-xs font-bold text-[#ff8aa5]">Couldn't connect ({secs})</p>
+      <p className="text-xs font-bold text-error-ink">Couldn't connect ({secs})</p>
       {!compact && result.error && <ErrorText text={result.error} />}
     </div>
   );

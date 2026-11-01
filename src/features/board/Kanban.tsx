@@ -141,10 +141,10 @@ function Lane({
       data-status={meta.status}
       aria-label={`${meta.title}, ${keys.length} agents`}
       className={cn(
-        "relative flex min-h-0 min-w-0 flex-col rounded-tile bg-white/[0.018] shadow-hairline transition-[box-shadow,background-color] duration-300",
-        accepting && "bg-[rgb(var(--st-rgb)/0.05)] shadow-[inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.35)]",
-        accepting && isOver && "bg-[rgb(var(--st-rgb)/0.1)] shadow-[inset_0_0_0_2px_rgb(var(--st-rgb)/0.7),0_0_40px_-10px_rgb(var(--st-rgb)/0.6)]",
-        refused && isOver && "shadow-[inset_0_0_0_1.5px_rgb(255_77_94/0.5)]",
+        "relative flex min-h-0 min-w-0 flex-col rounded-tile bg-ink/[0.018] shadow-hairline transition-[box-shadow,background-color] duration-300",
+        accepting && "bg-(--st-solid)/5 shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--st-solid)_35%,transparent)]",
+        accepting && isOver && "bg-(--st-solid)/10 shadow-[inset_0_0_0_2px_color-mix(in_srgb,var(--st-solid)_70%,transparent),0_0_40px_-10px_color-mix(in_srgb,var(--st-solid)_60%,transparent)]",
+        refused && isOver && "shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-error)_50%,transparent)]",
       )}
     >
       <header className="flex items-center gap-2 px-4 pt-3.5 pb-2.5">
@@ -155,16 +155,16 @@ function Lane({
             type="button"
             onClick={() => navigate({ name: "inbox" })}
             title="Open the Inbox"
-            className="group/needs -mx-1 flex shrink-0 items-center gap-2 rounded-sm px-1 focus-ring hover:bg-white/6"
+            className="group/needs -mx-1 flex shrink-0 items-center gap-2 rounded-sm px-1 focus-ring hover:bg-ink/6"
           >
             <h3 className="font-display text-sm font-bold text-ink">{meta.title}</h3>
-            {keys.length > 0 ? <CountBadge count={keys.length} /> : <NumberTicker value={0} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />}
+            {keys.length > 0 ? <CountBadge count={keys.length} /> : <NumberTicker value={0} className="rounded-full bg-ink/6 px-1.5 text-2xs font-bold text-mute" />}
             <ArrowRight className="size-3.5 text-mute transition-transform group-hover/needs:translate-x-0.5 group-hover/needs:text-ink" aria-hidden />
           </button>
         ) : (
           <>
             <h3 className="font-display text-sm font-bold text-ink">{meta.title}</h3>
-            <NumberTicker value={keys.length} className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute" />
+            <NumberTicker value={keys.length} className="rounded-full bg-ink/6 px-1.5 text-2xs font-bold text-mute" />
           </>
         )}
         <span className="ml-auto min-w-0 truncate text-2xs font-semibold text-mute-2" title={meta.legend}>
@@ -172,7 +172,7 @@ function Lane({
         </span>
       </header>
       {refused && isOver && (
-        <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mx-3 mb-2 rounded-md bg-error/10 px-3 py-2 text-2xs font-semibold text-[#ff9fb2]">
+        <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mx-3 mb-2 rounded-md bg-error/10 px-3 py-2 text-2xs font-semibold text-error-ink">
           {refused.title}
         </motion.p>
       )}
@@ -197,7 +197,7 @@ function Lane({
               transition={spring.snappy}
               className={cn(
                 "col-span-full grid shrink-0 place-items-center rounded-xl border-[1.5px] border-dashed text-2xs font-bold transition-colors",
-                isOver ? "border-[rgb(var(--st-rgb)/0.9)] bg-[rgb(var(--st-rgb)/0.12)] st-text" : "border-[rgb(var(--st-rgb)/0.35)] text-mute",
+                isOver ? "border-[color-mix(in_srgb,var(--st-solid)_90%,transparent)] bg-(--st-solid)/12 st-text" : "border-[color-mix(in_srgb,var(--st-solid)_35%,transparent)] text-mute",
               )}
             >
               {meta.column === "done" ? `Drop to ${ACTIONS.markDone.label.toLowerCase()}` : "Drop to reopen for review"}

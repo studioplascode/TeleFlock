@@ -1,7 +1,7 @@
 import { motion } from "motion/react";
 import { useId } from "react";
 import { cn } from "../lib/cn";
-import { STATUS, type Status } from "../tokens";
+import type { Status } from "../tokens";
 import { spring } from "./springs";
 
 export interface ProgressRingProps {
@@ -26,7 +26,6 @@ export interface ProgressRingProps {
  */
 export function ProgressRing({ done, total, status = "running", size = 40, stroke = 4, label, ariaLabel, className }: ProgressRingProps) {
   const gid = `tf-ring-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
-  const meta = STATUS[status];
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const frac = total > 0 ? Math.min(1, Math.max(0, done / total)) : 0;
@@ -46,11 +45,11 @@ export function ProgressRing({ done, total, status = "running", size = 40, strok
       <svg viewBox={`0 0 ${size} ${size}`} aria-hidden>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor={meta.c1} />
-            <stop offset="1" stopColor={meta.c2} />
+            <stop offset="0" style={{ stopColor: "var(--st-1)" }} />
+            <stop offset="1" style={{ stopColor: "var(--st-2)" }} />
           </linearGradient>
         </defs>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgb(255 255 255 / 0.08)" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" style={{ stroke: "color-mix(in srgb, var(--color-ink) 8%, transparent)" }} strokeWidth={stroke} />
         <motion.circle
           className="tf-ring__arc"
           cx={size / 2}

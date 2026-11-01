@@ -59,6 +59,19 @@ export interface UiSpec {
   command?: string;
   /** The tool call shown while waiting (ask tool / gated bash). */
   tool?: ToolSpec;
+  /**
+   * omp's ask with several questions: one dialog per question in turn (`UiRequest.step`, Back from
+   * the second on); this spec's own kind, message and options are unused. `then` runs after the last.
+   */
+  questions?: AskQuestionSpec[];
+}
+
+/** One question of a multi-question ask. */
+export interface AskQuestionSpec {
+  kind: "select" | "multiSelect";
+  message: string;
+  options: NeedsOption[];
+  allowOther?: boolean;
 }
 
 export type Step =
@@ -67,7 +80,8 @@ export type Step =
   | { t: "say"; text: string }
   | { t: "tool"; spec: ToolSpec }
   | { t: "todo"; task: string; status: "pending" | "inProgress" | "completed" | "abandoned" | "blocked" }
-  | { t: "ui"; ui: UiSpec; then: (a: Answer) => Step[] }
+  /** `all`: each question's answer, in order (one for a single question; a cancel or chat ends the ask early). */
+  | { t: "ui"; ui: UiSpec; then: (a: Answer, all: Answer[]) => Step[] }
   | { t: "notice"; level: "info" | "warn" | "error"; text: string; source?: string }
   /** A turn that failed without text: a provider error (`status`: HTTP) or a refusal. */
   | { t: "fail"; error: string; status?: number; refusal?: { kind: string; category?: string; explanation?: string } }

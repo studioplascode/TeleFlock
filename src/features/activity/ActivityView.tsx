@@ -122,8 +122,8 @@ function EventRow({ row, now, index }: { row: Row; now: number; index: number })
         type="button"
         onClick={() => agentId && navigate({ name: "agent", hostId, agentId })}
         className={cn(
-          "flex w-full items-start gap-3 rounded-lg p-2.5 text-left transition-colors hover:bg-white/4 focus-ring",
-          fresh && "bg-[rgb(var(--st-rgb)/0.06)]",
+          "flex w-full items-start gap-3 rounded-lg p-2.5 text-left transition-colors hover:bg-ink/4 focus-ring",
+          fresh && "bg-(--st-solid)/6",
         )}
         data-status={status}
       >
@@ -192,7 +192,7 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
               className={cn(
                 "card-surface group relative flex w-full flex-col overflow-hidden rounded-lg text-left pressable focus-ring lift",
                 mobile ? "h-[88px] p-3" : "h-[104px] p-3.5",
-                on && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_rgb(var(--st-rgb)/0.6),0_10px_30px_-12px_rgb(var(--st-rgb)/0.6)]",
+                on && "shadow-[var(--shadow-d1),inset_0_0_0_1.5px_color-mix(in_srgb,var(--st-solid)_60%,transparent),0_10px_30px_-12px_color-mix(in_srgb,var(--st-solid)_60%,transparent)]",
               )}
             >
               <span className="flex items-center gap-1.5 pr-14 text-2xs font-bold text-mute">
@@ -203,7 +203,7 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
               {t.group === "all" ? (
                 <Sparkline values={buckets} status="running" height={22} className="mt-auto" aria-label="Events per 5 minutes over the last hour" />
               ) : (
-                <span className="mt-auto h-1 overflow-hidden rounded-full bg-white/6">
+                <span className="mt-auto h-1 overflow-hidden rounded-full bg-ink/6">
                   <motion.span
                     className="block h-full rounded-full st-bg"
                     initial={{ width: 0 }}
@@ -217,7 +217,7 @@ function ActivityPulse({ events, now, group, onPick, mobile }: { events: HostAct
               <button
                 type="button"
                 onClick={() => t.link && navigate(t.link.route)}
-                className="absolute top-2 right-2 flex h-6 items-center gap-0.5 rounded-sm px-1.5 text-2xs font-bold text-mute transition-colors focus-ring hover:bg-white/8 hover:text-ink"
+                className="absolute top-2 right-2 flex h-6 items-center gap-0.5 rounded-sm px-1.5 text-2xs font-bold text-mute transition-colors focus-ring hover:bg-ink/8 hover:text-ink"
               >
                 {t.link.label}
                 <ChevronRight className="size-3" />

@@ -313,7 +313,9 @@ pub fn provider_wait(state: HerdrState, omp: Option<&OmpView>, bridge: Option<&B
 /// provider wait explains.
 fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWait>) -> Option<NeedsYou> {
     if let Some(mut n) = i.omp.and_then(|v| v.needs.clone()) {
-        n.since = i.needs_since;
+        // The replica dates an ask by its first question (each question is a request of its own,
+        // so a new `needs_key` and `needs_since` here).
+        n.since = n.since.min(i.needs_since);
         return Some(n);
     }
     if let Some(review) = i.bridge.and_then(|b| b.state.plan_review.as_ref()) {
@@ -333,6 +335,8 @@ fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWa
             allow_chat: false,
             command: None,
             answerable: false,
+            context: None,
+            step: None,
         });
     }
     None
@@ -377,6 +381,8 @@ pub fn plan_review_needs(review: &PlanReviewInfo, since: Millis) -> NeedsYou {
         allow_chat: false,
         command: None,
         answerable: true,
+        context: None,
+        step: None,
     }
 }
 
@@ -393,6 +399,8 @@ pub fn plan_review_ui(review: &PlanReviewInfo) -> UiRequest {
         initial: None,
         plan: Some(PlanReview { title: review.title.clone(), content: review.content.clone(), path: review.plan_path.clone() }),
         call_id: None,
+        context: None,
+        step: None,
     }
 }
 
@@ -535,7 +543,7 @@ pub fn needs_notification(agent: &Agent, at: Millis) -> Option<Notification> {
             .map(|o| NotifyAction {
                 id: o.id.clone(),
                 label: o.label.clone(),
-                answer: Some(Answer { choices: vec![o.id.clone()], text: None, cancel: false, chat: false }),
+                answer: Some(Answer { choices: vec![o.id.clone()], text: None, cancel: false, chat: false, back: false }),
             })
             .collect()
     } else {
@@ -823,6 +831,8 @@ mod tests {
             allow_chat: false,
             command: None,
             answerable: true,
+            context: None,
+            step: None,
         };
         OmpView {
             session_id: "s1".into(),
@@ -959,5 +969,22 @@ mod tests {
         let mut i = inputs(&a);
         i.omp = Some(&view);
         assert_eq!(build_agent(&i).column, Column::Review);
+    }
+
+    /// A dialog waits since the replica says (an ask's first question: every later question is a
+    /// new request, so a new `needs_key` here), and never since later than the board showed it.
+    #[test]
+    fn a_dialog_waits_since_the_earlier_of_its_ask_and_the_board() {
+        let mut a = herdr_agent(AgentStatus::Blocked);
+        a.agent = Some("omp".into());
+        let mut view = omp_view(tf_proto::model::LinkState::Live, true, false, false);
+        view.needs.as_mut().unwrap().since = 3;
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        assert_eq!(build_agent(&i).needs.map(|n| n.since), Some(3), "the ask's first question came at 3, this one at 7");
+        view.needs.as_mut().unwrap().since = 9;
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        assert_eq!(build_agent(&i).needs.map(|n| n.since), Some(7), "a replica rebuilt meanwhile keeps the wait the board showed");
     }
 }

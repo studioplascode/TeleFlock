@@ -3,11 +3,13 @@ import { createRoot } from "react-dom/client";
 import "@/design/styles/index.css";
 import { App } from "@/app/App";
 import { startCore, startDraftSweep } from "@/core";
-import { applyInitialMotionAttribute } from "@/design";
+import { applyInitialMotionAttribute, startTheme } from "@/design";
 import { resumeInterruptedNaming } from "@/features/dispatch/store";
 import { guardStrayFileDrops } from "@/features/shell/fileDrops";
 
 applyInitialMotionAttribute();
+// The theme's <style> lands after the app's styles before anything renders (no flash of the default).
+startTheme({ owner: true });
 startCore();
 startDraftSweep();
 // Dispatch entries a reload caught mid-"Naming…" go out without waiting for Dispatch to be opened.

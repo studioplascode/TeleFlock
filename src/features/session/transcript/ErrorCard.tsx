@@ -17,7 +17,7 @@ export function ErrorCard({ item }: { item: AssistantItem }) {
   const refusal = item.refusal;
   if (refusal) {
     return (
-      <div role="alert" className="mt-1.5 rounded-md bg-sun-2/[0.08] px-3 py-2 text-xs text-[#ffb4c6] shadow-[inset_0_0_0_1px_rgb(255_61_119/0.35)]">
+      <div role="alert" className="mt-1.5 rounded-md bg-sun-2/[0.08] px-3 py-2 text-xs text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-sun-2)_35%,transparent)]">
         <div className="flex items-center gap-2 font-bold">
           <ShieldAlert className="size-3.5 shrink-0" />
           <span>
@@ -38,7 +38,7 @@ export function ErrorCard({ item }: { item: AssistantItem }) {
     );
   }
   return (
-    <div role="alert" className="mt-1.5 flex items-start gap-2 rounded-md bg-error/10 px-3 py-2 text-xs text-[#ff9aab] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]">
+    <div role="alert" className="mt-1.5 flex items-start gap-2 rounded-md bg-error/10 px-3 py-2 text-xs text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_30%,transparent)]">
       <CircleAlert className="mt-px size-3.5 shrink-0" />
       <div className="min-w-0 flex-1">
         <div data-find-skip className="flex items-center gap-2 font-bold">

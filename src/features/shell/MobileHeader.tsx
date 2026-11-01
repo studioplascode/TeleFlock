@@ -27,7 +27,7 @@ export function MobileHeader({ title, subtitle, back = false, actions, className
   return (
     <header
       className={cn(
-        "sticky top-0 z-sticky flex min-h-12 items-center gap-1 bg-[rgb(11_11_16/0.9)] px-2.5 py-1 [mask-image:linear-gradient(#000_85%,transparent)]",
+        "sticky top-0 z-sticky flex min-h-12 items-center gap-1 bg-chrome/90 px-2.5 py-1 [mask-image:linear-gradient(#000_85%,transparent)]",
         className,
       )}
     >
@@ -43,7 +43,8 @@ export function MobileHeader({ title, subtitle, back = false, actions, className
         transition={spring.smooth}
       >
         <h1 className={cn("truncate font-display leading-tight font-bold tracking-[-0.02em]", back ? "text-lg" : "text-xl")}>{title}</h1>
-        {subtitle && <div className="truncate text-2xs leading-tight text-mute">{subtitle}</div>}
+        {/* Padding it out (and pulling it back) gives a chip in the subtitle a full tap target inside the clip. */}
+        {subtitle && <div className="-my-1.5 truncate py-1.5 text-2xs leading-tight text-mute">{subtitle}</div>}
       </motion.div>
       {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
     </header>

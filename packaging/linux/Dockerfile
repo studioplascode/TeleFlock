@@ -6,9 +6,13 @@
 FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+# ibus-gtk3 / fcitx5-frontend-gtk3: the AppImage's GTK plugin bundles the build system's GTK
+# input-method modules and points GTK_IM_MODULE_FILE at that list only, so without them IBus and
+# Fcitx commits (voice input, CJK) never reach the AppImage on X11.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
       build-essential pkg-config curl wget file patchelf ca-certificates unzip git xdg-utils \
+      ibus-gtk3 fcitx5-frontend-gtk3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Same Rust and Bun as the release box (build-linux.sh passes the host's versions).

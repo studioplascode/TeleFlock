@@ -77,7 +77,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
     const action = connAction(host.status, hostId);
     return (
       <>
-        <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]">
+        <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_25%,transparent)]">
           <Spinner size={14} label={`${host.name} ${PHASE_TEXT[phase]}`} />
           <p className="min-w-0 flex-1 text-mute">
             <b className="text-ink">
@@ -132,7 +132,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
     if (session.itemIds.length > 0 && session.status !== "error" && session.status !== "ended")
       return (
         <>
-          <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]">
+          <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-warn/8 px-4 py-2 text-xs shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_25%,transparent)]">
             <Spinner size={14} label="Reconnecting" />
             <p className="min-w-0 flex-1 text-mute">
               <b className="text-ink">{w.title}</b> {waited >= 2000 && <span className="tabular">· {waitWords(waited)}</span>}
@@ -272,7 +272,7 @@ export function LinkGate({ agentKey, onRetry, children }: { agentKey: string; on
   if (reason === "fallbackCollab")
     return (
       <>
-        <p role="status" className="shrink-0 truncate rounded-lg bg-white/[0.03] px-4 py-1.5 text-2xs font-semibold text-mute shadow-hairline" title={cause}>
+        <p role="status" className="shrink-0 truncate rounded-lg bg-ink/[0.03] px-4 py-1.5 text-2xs font-semibold text-mute shadow-hairline" title={cause}>
           Live through omp's collab room: the TeleFlock bridge lost its connection{cause ? ` (${cause})` : ""}.
         </p>
         {children}

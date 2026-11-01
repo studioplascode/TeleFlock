@@ -191,7 +191,7 @@ function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH):
             </thead>
             <tbody>
               {b.rows.map((r, i) => (
-                <tr key={i} className="odd:bg-white/[0.015]">
+                <tr key={i} className="odd:bg-ink/[0.015]">
                   {b.head.map((_, j) => (
                     <td key={j} style={{ textAlign: b.align[j] }} className="border-b border-line px-3 py-1.5 align-top max-md:px-2 max-md:py-1">
                       <Inlines nodes={parseInline(r[j] ?? "")} />
@@ -228,7 +228,7 @@ export function Inlines({ nodes }: { nodes: Inline[] }) {
           }
           case "code":
             return (
-              <code key={i} className="rounded-[6px] bg-white/[0.07] px-[5px] py-[1px] font-mono text-[0.88em] text-[#e9dcff] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.06)]">
+              <code key={i} className="rounded-[6px] bg-ink/[0.07] px-[5px] py-[1px] font-mono text-[0.88em] text-accent-ink shadow-[inset_0_0_0_1px_var(--color-line)]">
                 {n.v}
               </code>
             );
@@ -282,7 +282,7 @@ export function CodeBlock({ code, lang, open = false, tail, className, maxHeight
     });
   };
   return (
-    <div className={cn("group/code relative my-2.5 overflow-hidden rounded-md bg-bg-deep/80 shadow-[inset_0_0_0_1px_rgb(255_255_255/0.07)]", className)}>
+    <div className={cn("group/code relative my-2.5 overflow-hidden rounded-md bg-bg-deep/80 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_7%,transparent)]", className)}>
       <div data-find-skip className="flex h-7 items-center gap-2 border-b border-line px-3 text-2xs text-mute-2 max-md:h-6 max-md:px-2.5">
         <span className="font-mono font-semibold tracking-wide">{lang || "text"}</span>
         {open && <span className="tf-shimmer-text tf-loop font-semibold">writing…</span>}

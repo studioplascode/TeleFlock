@@ -5,6 +5,7 @@ import { cn, IconButton, Spinner, spring, StatusOrb, Tooltip } from "@/design";
 import { agentKey, navigate, parseAgentKey, type SplitState, useAgent, useHosts, useRoute, useUi } from "@/core";
 import { isBare } from "@/app/routes";
 import type { TermTarget } from "@/core/gen";
+import { HostBadge, useMultiHost } from "@/features/hosts/HostBadge";
 import { COLUMN_STATUS } from "./status";
 
 const TerminalPane = lazy(() => import("@/features/terminal/TerminalPane").then((m) => ({ default: m.TerminalPane })));
@@ -24,7 +25,10 @@ function SplitHeader({ split }: { split: SplitState }) {
   const key = split.kind === "session" ? split.key : split.agentId ? agentKey(split.hostId, split.agentId) : "";
   const agent = useAgent(key);
   const hostName = useHosts((h) => (split.kind === "terminal" ? (h.profiles.find((p) => p.id === split.hostId)?.name ?? split.hostId) : ""));
-  const title = split.kind === "session" ? (agent?.name ?? "Session") : agent ? `${agent.name} · terminal` : `Terminal · ${hostName}`;
+  const multiHost = useMultiHost();
+  const hostId = split.kind === "session" ? parseAgentKey(split.key).hostId : split.hostId;
+  // With several hosts the chip names the host (and opens its details), so the title doesn't.
+  const title = split.kind === "session" ? (agent?.name ?? "Session") : agent ? `${agent.name} · terminal` : multiHost ? "Terminal" : `Terminal · ${hostName}`;
   const expand = () => {
     setSplit(null);
     if (split.kind === "session") {
@@ -36,6 +40,7 @@ function SplitHeader({ split }: { split: SplitState }) {
     <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
       {split.kind === "terminal" ? <SquareTerminal className="size-4 text-mute" /> : agent && <StatusOrb status={COLUMN_STATUS[agent.column]} size={8} label={null} />}
       <span className="min-w-0 flex-1 truncate text-sm font-bold text-ink-2">{title}</span>
+      <HostBadge hostId={hostId} className="max-w-[40%]" />
       <Tooltip content="Open full view">
         <IconButton label="Open full view" size="sm" onClick={expand}>
           <Maximize2 />
@@ -124,8 +129,8 @@ export function SplitFrame({ children }: { children: ReactNode }) {
             >
               <span
                 className={cn(
-                  "absolute inset-y-3 left-1/2 w-px -translate-x-1/2 rounded-full bg-line-2 transition-all duration-200 group-hover:w-[3px] group-hover:bg-accent group-hover:shadow-[0_0_12px_rgb(163_92_240/0.8)] group-focus-visible:w-[3px] group-focus-visible:bg-accent",
-                  dragging && "w-[3px] bg-accent shadow-[0_0_14px_rgb(163_92_240/0.9)]",
+                  "absolute inset-y-3 left-1/2 w-px -translate-x-1/2 rounded-full bg-line-2 transition-all duration-200 group-hover:w-[3px] group-hover:bg-accent group-hover:shadow-[0_0_12px_color-mix(in_srgb,var(--color-accent)_80%,transparent)] group-focus-visible:w-[3px] group-focus-visible:bg-accent",
+                  dragging && "w-[3px] bg-accent shadow-[0_0_14px_color-mix(in_srgb,var(--color-accent)_90%,transparent)]",
                 )}
               />
             </div>

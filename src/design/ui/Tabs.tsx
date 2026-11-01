@@ -83,7 +83,7 @@ export function TabsTrigger({ value, className, children, badge, ...rest }: Tabs
           className={
             pill
               ? "absolute inset-0 rounded-sm bg-tile-4 shadow-d1"
-              : "absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-omp shadow-[0_0_12px_rgb(163_92_240/0.9)]"
+              : "absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-omp shadow-[0_0_12px_color-mix(in_srgb,var(--color-accent)_90%,transparent)]"
           }
         />
       )}

@@ -1,9 +1,14 @@
 /*
- * TeleFlock design tokens — Bento x omp purple, dark only.
- * Everything here becomes a Tailwind v4 utility (bg-tile-2, text-display, rounded-tile, shadow-d2, ease-spring…).
- * The TS mirror lives in src/design/tokens.ts; keep the two in sync.
+ * TeleFlock design tokens — Bento x omp purple. This file is the default theme: a theme
+ * (src/design/theme) overrides the colour, shadow, terminal and syntax variables on :root and
+ * nothing else (docs/architecture.md §6.7 lists every variable a theme may set).
+ * Everything in @theme becomes a Tailwind v4 utility (bg-tile-2, text-display, rounded-tile, shadow-d2, ease-spring…).
+ * Canvas, SVG and xterm read the variables at runtime (src/design/theme/read.ts); tokens.ts keeps
+ * only what CSS can't express (status labels, z-layers, radii, the phone breakpoint).
  */
-@theme {
+/* `static`: every colour and shadow is emitted, used by a utility or not, so themes, the theme
+   editor's templates and runtime readers see all of them. */
+@theme static {
   /* ---------- color: surfaces & ink ---------- */
   --color-*: initial;
   --color-transparent: transparent;
@@ -20,7 +25,17 @@
   --color-tile-4: #2c2c3b;       /* pressed / selected control */
   --color-tile-5: #383849;       /* hover on tile-4 */
   --color-well: rgb(10 10 16 / 0.55); /* inset fields inside tiles */
+  --color-well-2: rgb(10 10 16 / 0.7); /* hovered field */
+  --color-glass: rgb(27 27 37);  /* translucent panels (glass utilities, at 72 %) */
+  --color-pop-1: #22222e;        /* menus, popovers, selects, command palette: top */
+  --color-pop-2: #191921;        /* … and bottom */
+  --color-sheet-1: #1f1f2b;      /* dialogs and bottom sheets: top */
+  --color-sheet-2: #17171f;      /* … and bottom */
+  --color-float: rgb(38 36 50);  /* tooltips and toasts (at 94–98 %) */
+  --color-scrim: rgb(8 8 12);    /* behind dialogs and sheets (at 55–60 %) */
 
+  /* Neutral washes (hover, selection, chip fills) are `bg-ink/N`: a wash of the text colour, so
+     they lighten on dark themes and darken on light ones. `white` stays white (knobs, text on fills). */
   --color-ink: #f5f5f7;          /* primary text */
   --color-ink-2: #dcdce4;        /* body copy on tiles */
   --color-mute: #9a9aad;         /* secondary text */
@@ -34,26 +49,61 @@
   --color-accent-hi: #b97cf6;
   --color-accent-lo: #7d3fd0;
   --color-accent-ink: #e9dcff;   /* text on accent-tinted surfaces */
-  --color-omp-pink: #f053d0;
+  --color-on-accent: #ffffff;    /* text on accent fills and the omp gradient */
+  --color-omp-pink: #f053d0;     /* the omp gradient: pink → purple → blue */
   --color-omp-purple: #a15eef;
   --color-omp-blue: #7fa2e7;
 
-  /* ---------- color: status ---------- */
+  /* ---------- color: status ----------
+   * -1/-2: gradient stops of the status fill; on-*: text on that fill; *-ink: text on a soft tint
+   * of it (the plain colour serves where no -ink exists). */
   --color-run-1: #a35cf0;
   --color-run-2: #4f8bff;
-  --color-sun-1: #ff7a18;
+  --color-run-solid: #9b6cf7;    /* running as one colour (dots, text) */
+  --color-on-run: #ffffff;
+  --color-sun-1: #ff7a18;        /* needs you: the sunset */
   --color-sun-2: #ff3d77;
+  --color-on-sun: #ffffff;
+  --color-sun-ink: #ffb08a;
   --color-review: #22d3ee;
+  --color-review-2: #0ea5e9;
+  --color-on-review: #04262c;
   --color-done: #a3e635;
+  --color-done-2: #4ade80;
+  --color-on-done: #1a2e05;
   --color-idle: #8a94a6;
+  --color-idle-1: #94a3b8;
+  --color-idle-2: #64748b;
+  --color-on-idle: #0b0b10;
   --color-error: #ff4d5e;
+  --color-error-2: #e11d48;
+  --color-on-error: #ffffff;
+  --color-error-ink: #ff8aa5;
   --color-warn: #fbbf24;
+  --color-warn-ink: #fde68a;
 
   /* diff / code accents */
   --color-add: #a3e635;
   --color-del: #ff6b8b;
   --color-tool: #b9c2ff;
 
+  /* ---------- elevation (layered depth from the Bento draft) ---------- */
+  --shadow-*: initial;
+  --shadow-none: 0 0 #0000;
+  --shadow-d1: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 18px -6px rgb(0 0 0 / 0.5);
+  --shadow-d2: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 2px 4px rgb(0 0 0 / 0.35), 0 14px 30px -8px rgb(0 0 0 / 0.55), 0 34px 64px -24px rgb(0 0 0 / 0.6);
+  --shadow-d3: inset 0 1px 0 rgb(255 255 255 / 0.09), 0 4px 10px rgb(0 0 0 / 0.35), 0 26px 50px -10px rgb(0 0 0 / 0.65), 0 70px 120px -30px rgb(0 0 0 / 0.75);
+  --shadow-key: inset 0 -2px 0 rgb(0 0 0 / 0.35), inset 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-hairline: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-glow-accent: 0 10px 28px -8px rgb(163 92 240 / 0.75), 0 2px 10px -4px rgb(240 83 208 / 0.4);
+  --shadow-glow-sun: 0 18px 50px -12px rgb(255 61 119 / 0.6), 0 6px 24px -8px rgb(255 122 24 / 0.45);
+  --shadow-glow-run: 0 10px 28px -8px rgb(124 108 248 / 0.75);
+  --shadow-glow-review: 0 8px 22px -8px rgb(34 211 238 / 0.6);
+  --shadow-glow-done: 0 8px 22px -8px rgb(163 230 53 / 0.5);
+  --shadow-glow-error: 0 10px 26px -8px rgb(255 77 94 / 0.6);
+}
+
+@theme {
   /* ---------- type ---------- */
   --font-*: initial;
   --font-display: "Sora Variable", "Segoe UI", system-ui, sans-serif;
@@ -90,21 +140,6 @@
   --radius-sheet: 34px;  /* bottom sheets, modals */
   --radius-full: 9999px;
 
-  /* ---------- elevation (layered depth from the Bento draft) ---------- */
-  --shadow-*: initial;
-  --shadow-none: 0 0 #0000;
-  --shadow-d1: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 18px -6px rgb(0 0 0 / 0.5);
-  --shadow-d2: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 2px 4px rgb(0 0 0 / 0.35), 0 14px 30px -8px rgb(0 0 0 / 0.55), 0 34px 64px -24px rgb(0 0 0 / 0.6);
-  --shadow-d3: inset 0 1px 0 rgb(255 255 255 / 0.09), 0 4px 10px rgb(0 0 0 / 0.35), 0 26px 50px -10px rgb(0 0 0 / 0.65), 0 70px 120px -30px rgb(0 0 0 / 0.75);
-  --shadow-key: inset 0 -2px 0 rgb(0 0 0 / 0.35), inset 0 0 0 1px rgb(255 255 255 / 0.06);
-  --shadow-hairline: inset 0 0 0 1px rgb(255 255 255 / 0.06);
-  --shadow-glow-accent: 0 10px 28px -8px rgb(163 92 240 / 0.75), 0 2px 10px -4px rgb(240 83 208 / 0.4);
-  --shadow-glow-sun: 0 18px 50px -12px rgb(255 61 119 / 0.6), 0 6px 24px -8px rgb(255 122 24 / 0.45);
-  --shadow-glow-run: 0 10px 28px -8px rgb(124 108 248 / 0.75);
-  --shadow-glow-review: 0 8px 22px -8px rgb(34 211 238 / 0.6);
-  --shadow-glow-done: 0 8px 22px -8px rgb(163 230 53 / 0.5);
-  --shadow-glow-error: 0 10px 26px -8px rgb(255 77 94 / 0.6);
-
   /* ---------- motion ---------- */
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -134,11 +169,58 @@
   --z-popover: 70;
   --z-toast: 80;
   --z-tooltip: 90;
-
+}
+/*
+ * Theme variables outside Tailwind's colours: gradients, background texture, the terminal palette
+ * and syntax colours. Derived ones follow the colours above (a theme that only changes
+ * --color-bg-deep also changes the terminal). Declared on .tf-theme-scope too, so a theme scoped to
+ * a preview (the Appearance picker, the theme editor) derives them from its own colours.
+ */
+:root,
+.tf-theme-scope {
   --tf-noise: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .045 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-  --tf-grad-omp: linear-gradient(135deg, #f053d0 0%, #a15eef 50%, #7fa2e7 100%);
-  --tf-grad-sun: linear-gradient(135deg, #ff7a18 0%, #ff3d77 100%);
-  --tf-grad-run: linear-gradient(135deg, #a35cf0 0%, #4f8bff 100%);
+  --tf-grad-omp: linear-gradient(135deg, var(--color-omp-pink) 0%, var(--color-omp-purple) 50%, var(--color-omp-blue) 100%);
+  --tf-grad-sun: linear-gradient(135deg, var(--color-sun-1) 0%, var(--color-sun-2) 100%);
+  --tf-grad-run: linear-gradient(135deg, var(--color-run-1) 0%, var(--color-run-2) 100%);
+
+  /* Terminal: xterm panes and ANSI output in tool cards. Every normal/bright colour clears 4.5:1 on
+     --term-bg except black, which programs use as a background shade. */
+  --term-bg: var(--color-bg-deep);
+  --term-fg: var(--color-ink-2);
+  --term-cursor: var(--color-accent-hi);
+  --term-cursor-ink: var(--color-bg-deep);
+  --term-selection: rgb(163 92 240 / 0.38);
+  --term-black: #1b1b25;
+  --term-red: #ff5c7a;
+  --term-green: #a3e635;
+  --term-yellow: var(--color-warn);
+  --term-blue: #6f9cff;
+  --term-magenta: var(--color-accent-hi);
+  --term-cyan: var(--color-review);
+  --term-white: var(--color-ink-2);
+  --term-bright-black: #80809a; /* ~5.2:1 on bg-deep (mute-2 is ~4:1), so dim/comment text stays readable */
+  --term-bright-red: #ff8aa5;
+  --term-bright-green: #c4f06b;
+  --term-bright-yellow: #fde68a;
+  --term-bright-blue: var(--color-omp-blue);
+  --term-bright-magenta: var(--color-omp-pink);
+  --term-bright-cyan: #67e8f9;
+  --term-bright-white: var(--color-ink);
+
+  /* Syntax: code blocks, tool-card diffs and file previews, the review diff viewer. */
+  --syntax-keyword: #d8a6ff;
+  --syntax-string: #bef264;
+  --syntax-number: #fdba74;
+  --syntax-comment: var(--color-mute-2);
+  --syntax-function: #8ab4ff;
+  --syntax-type: #67e8f9;
+  --syntax-operator: #f0a3d8;
+  --syntax-punctuation: var(--color-mute);
+  --syntax-property: #f6a6d8;
+  --syntax-attribute: #f9a8d4;
+  --syntax-variable: #fde68a;
+  --syntax-tag: #f472b6;
+  --syntax-literal: #fdba74;
 }
 }
 
@@ -156,64 +238,61 @@
 
 /*
  * Status vars. Put data-status="running|needs-you|review|done|idle|error" on any element and
- * every descendant can use --st-1/--st-2 (gradient stops), --st-solid, --st-rgb (for alpha),
- * --st-grad and --st-glow — or the st-* utilities below.
+ * every descendant can use --st-1/--st-2 (gradient stops), --st-solid, --st-ink (text on the fill),
+ * --st-grad and --st-glow — or the st-* utilities below. They follow the status colours, so a theme
+ * sets those (--color-run-1 …) and never these. For alpha: `bg-(--st-solid)/12` in a class,
+ * color-mix(in srgb, var(--st-solid) 12%, transparent) in CSS.
  */
 /* In @layer base so utilities (e.g. an arbitrary [--st-grad:…] class) can override per element. */
 @layer base {
 :root,
+.tf-theme-scope,
 [data-status="idle"] {
-  --st-1: #94a3b8;
-  --st-2: #64748b;
-  --st-solid: #8a94a6;
-  --st-rgb: 138 148 166;
-  --st-ink: #0b0b10;
-  --st-grad: linear-gradient(135deg, #94a3b8, #64748b);
-  --st-glow: 0 6px 18px -8px rgb(100 116 139 / 0.5);
+  --st-1: var(--color-idle-1);
+  --st-2: var(--color-idle-2);
+  --st-solid: var(--color-idle);
+  --st-ink: var(--color-on-idle);
+  --st-grad: linear-gradient(135deg, var(--st-1), var(--st-2));
+  --st-glow: 0 6px 18px -8px color-mix(in srgb, var(--color-idle-2) 50%, transparent);
 }
 [data-status="running"] {
-  --st-1: #a35cf0;
-  --st-2: #4f8bff;
-  --st-solid: #9b6cf7;
-  --st-rgb: 155 108 247;
-  --st-ink: #ffffff;
+  --st-1: var(--color-run-1);
+  --st-2: var(--color-run-2);
+  --st-solid: var(--color-run-solid);
+  --st-ink: var(--color-on-run);
   --st-grad: var(--tf-grad-run);
   --st-glow: var(--shadow-glow-run);
 }
 [data-status="needs-you"] {
-  --st-1: #ff7a18;
-  --st-2: #ff3d77;
-  --st-solid: #ff3d77;
-  --st-rgb: 255 61 119;
-  --st-ink: #ffffff;
+  --st-1: var(--color-sun-1);
+  --st-2: var(--color-sun-2);
+  --st-solid: var(--color-sun-2);
+  --st-ink: var(--color-on-sun);
   --st-grad: var(--tf-grad-sun);
   --st-glow: var(--shadow-glow-sun);
 }
 [data-status="review"] {
-  --st-1: #22d3ee;
-  --st-2: #0ea5e9;
-  --st-solid: #22d3ee;
-  --st-rgb: 34 211 238;
-  --st-ink: #04262c;
-  --st-grad: linear-gradient(135deg, #22d3ee, #0ea5e9);
+  --st-1: var(--color-review);
+  --st-2: var(--color-review-2);
+  --st-solid: var(--color-review);
+  --st-ink: var(--color-on-review);
+  --st-grad: linear-gradient(135deg, var(--st-1), var(--st-2));
   --st-glow: var(--shadow-glow-review);
 }
 [data-status="done"] {
-  --st-1: #a3e635;
-  --st-2: #4ade80;
-  --st-solid: #a3e635;
-  --st-rgb: 163 230 53;
-  --st-ink: #1a2e05;
-  --st-grad: linear-gradient(135deg, #a3e635, #4ade80);
+  --st-1: var(--color-done);
+  --st-2: var(--color-done-2);
+  --st-solid: var(--color-done);
+  --st-ink: var(--color-on-done);
+  --st-grad: linear-gradient(135deg, var(--st-1), var(--st-2));
   --st-glow: var(--shadow-glow-done);
 }
 [data-status="error"] {
-  --st-1: #ff4d5e;
-  --st-2: #e11d48;
-  --st-solid: #ff4d5e;
-  --st-rgb: 255 77 94;
-  --st-ink: #ffffff;
-  --st-grad: linear-gradient(135deg, #ff4d5e, #e11d48);
+  --st-1: var(--color-error);
+  --st-2: var(--color-error-2);
+  --st-solid: var(--color-error);
+  --st-ink: var(--color-on-error);
+  --st-grad: linear-gradient(135deg, var(--st-1), var(--st-2));
   --st-glow: var(--shadow-glow-error);
 }
 }
@@ -221,13 +300,13 @@
 @utility st-bg { background-image: var(--st-grad); color: var(--st-ink); }
 @utility st-text { color: var(--st-solid); }
 @utility st-fill { background-color: var(--st-solid); }
-@utility st-soft { background-color: rgb(var(--st-rgb) / 0.14); color: var(--st-solid); }
-@utility st-ring { box-shadow: inset 0 0 0 1px rgb(var(--st-rgb) / 0.4); }
+@utility st-soft { background-color: color-mix(in srgb, var(--st-solid) 14%, transparent); color: var(--st-solid); }
+@utility st-ring { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--st-solid) 40%, transparent); }
 @utility st-glow { box-shadow: var(--st-glow); }
 @utility st-border-grad {
   border: 1.5px solid transparent;
   background:
-    linear-gradient(180deg, #25202b, #1f1a24) padding-box,
+    linear-gradient(180deg, color-mix(in srgb, var(--color-error-ink) 4%, var(--color-tile-2)), color-mix(in srgb, var(--color-error-ink) 4%, var(--color-tile-1))) padding-box,
     var(--st-grad) border-box;
 }
 @utility text-st-grad {
@@ -264,23 +343,36 @@
 }
 /*
  * Needs-you hero card (top card of the Needs-you lane): the sunset surface on a regular card, with the
- * text/line tokens re-mapped so everything inside stays legible. `!important` because it must beat
- * `card-surface` / `st-border-grad` backgrounds whatever order Tailwind emits utilities in.
+ * text/line tokens re-mapped to --color-on-sun so everything inside stays legible. `!important`
+ * because it must beat `card-surface` / `st-border-grad` backgrounds whatever order Tailwind emits utilities in.
  */
 @utility card-sunset {
-  --color-ink: #ffffff;
-  --color-ink-2: rgb(255 255 255 / 0.94);
-  --color-mute: rgb(255 255 255 / 0.84);
-  --color-mute-2: rgb(255 255 255 / 0.72);
-  --color-line: rgb(255 255 255 / 0.2);
-  --color-line-2: rgb(255 255 255 / 0.28);
+  --color-ink: var(--color-on-sun);
+  --color-ink-2: color-mix(in srgb, var(--color-on-sun) 94%, transparent);
+  --color-mute: color-mix(in srgb, var(--color-on-sun) 84%, transparent);
+  --color-mute-2: color-mix(in srgb, var(--color-on-sun) 72%, transparent);
+  --color-line: color-mix(in srgb, var(--color-on-sun) 20%, transparent);
+  --color-line-2: color-mix(in srgb, var(--color-on-sun) 28%, transparent);
   --color-well: rgb(40 0 20 / 0.3);
-  color: #ffffff;
+  color: var(--color-on-sun);
   border: 0 !important;
   background:
-    radial-gradient(120% 130% at 100% 0%, rgb(255 61 119 / 0.95) 0%, transparent 60%),
-    radial-gradient(90% 120% at 0% 100%, #ff7a18 0%, transparent 70%),
-    linear-gradient(135deg, #ff7a18, #ff3d77) !important;
+    radial-gradient(120% 130% at 100% 0%, color-mix(in srgb, var(--color-sun-2) 95%, transparent) 0%, transparent 60%),
+    radial-gradient(90% 120% at 0% 100%, var(--color-sun-1) 0%, transparent 70%),
+    linear-gradient(135deg, var(--color-sun-1), var(--color-sun-2)) !important;
+}
+/* Brand hero tile in the omp gradient: text and line tokens re-mapped to --color-on-accent. */
+@utility card-omp {
+  --color-ink: var(--color-on-accent);
+  --color-ink-2: color-mix(in srgb, var(--color-on-accent) 94%, transparent);
+  --color-mute: color-mix(in srgb, var(--color-on-accent) 82%, transparent);
+  --color-mute-2: color-mix(in srgb, var(--color-on-accent) 70%, transparent);
+  --color-line: color-mix(in srgb, var(--color-on-accent) 20%, transparent);
+  --color-line-2: color-mix(in srgb, var(--color-on-accent) 28%, transparent);
+  color: var(--color-on-accent);
+  background:
+    radial-gradient(110% 120% at 100% 0%, color-mix(in srgb, var(--color-omp-pink) 90%, transparent) 0%, transparent 60%),
+    linear-gradient(135deg, var(--color-omp-purple), var(--color-omp-blue));
 }
 /*
  * Translucent panel (sidebar-, session-, inspector-sized surfaces). No backdrop-filter: these sit on
@@ -289,14 +381,14 @@
  * iGPUs and WebKitGTK at fractional scale. Small overlays floating over sharp content use glass-blur.
  */
 @utility glass {
-  background: rgb(27 27 37 / 0.72);
-  box-shadow: var(--shadow-d2), inset 0 0 0 1px rgb(255 255 255 / 0.07);
+  background: color-mix(in srgb, var(--color-glass) 72%, transparent);
+  box-shadow: var(--shadow-d2), inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 7%, transparent);
 }
 @utility glass-blur {
-  background: rgb(27 27 37 / 0.72);
+  background: color-mix(in srgb, var(--color-glass) 72%, transparent);
   backdrop-filter: blur(24px) saturate(150%);
   -webkit-backdrop-filter: blur(24px) saturate(150%);
-  box-shadow: var(--shadow-d2), inset 0 0 0 1px rgb(255 255 255 / 0.07);
+  box-shadow: var(--shadow-d2), inset 0 0 0 1px color-mix(in srgb, var(--color-ink) 7%, transparent);
 }
 @utility well {
   background: var(--color-well);
@@ -326,7 +418,7 @@
 @utility focus-ring {
   outline: none;
   &:focus-visible {
-    box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent), 0 0 18px 2px rgb(163 92 240 / 0.45);
+    box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent), 0 0 18px 2px color-mix(in srgb, var(--color-accent) 45%, transparent);
   }
 }
 

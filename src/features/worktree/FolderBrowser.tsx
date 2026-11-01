@@ -299,7 +299,7 @@ export function FolderBrowser({ hostId, mode, value, onSelect, onConfirm, initia
                   <button
                     type="button"
                     onClick={() => go(c.path, -1)}
-                    className="flex items-center gap-1 rounded-xs px-1.5 py-0.5 font-mono text-xs text-mute transition-colors focus-ring hover:bg-white/8 hover:text-ink"
+                    className="flex items-center gap-1 rounded-xs px-1.5 py-0.5 font-mono text-xs text-mute transition-colors focus-ring hover:bg-ink/8 hover:text-ink"
                   >
                     {c.label}
                   </button>
@@ -354,7 +354,7 @@ export function FolderBrowser({ hostId, mode, value, onSelect, onConfirm, initia
               aria-pressed={value === cwd}
               className={cn(
                 "flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left transition-colors focus-ring pressable",
-                value === cwd ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]" : "bg-white/4 hover:bg-white/7",
+                value === cwd ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "bg-ink/4 hover:bg-ink/7",
               )}
             >
               <FolderGit2 className="size-4 text-accent" />
@@ -486,7 +486,7 @@ function ListProblem({ title, detail, actions }: { title: string; detail?: strin
       transition={spring.smooth}
       className="flex flex-col items-center gap-2 px-4 py-10 text-center"
     >
-      <span className="grid size-11 place-items-center rounded-md bg-warn/12 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]">
+      <span className="grid size-11 place-items-center rounded-md bg-warn/12 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]">
         <TriangleAlert className="size-5 text-warn" />
       </span>
       <p className="max-w-full truncate text-sm font-semibold">{title}</p>
@@ -534,7 +534,7 @@ function FolderRow({ id, index, row, active, selected, mode, homePath, onHover, 
           transition={spring.snappy}
           className={cn(
             "absolute inset-0 rounded-md",
-            selected ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55),0_0_22px_-8px_rgb(163_92_240/0.8)]" : "bg-white/6",
+            selected ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent),0_0_22px_-8px_color-mix(in_srgb,var(--color-accent)_80%,transparent)]" : "bg-ink/6",
           )}
           aria-hidden
         />
@@ -581,7 +581,7 @@ function FolderRow({ id, index, row, active, selected, mode, homePath, onHover, 
               e.stopPropagation();
               onOpen();
             }}
-            className="grid size-6 place-items-center rounded-xs text-mute-2 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-white/8 hover:text-ink [@media(hover:none)]:opacity-100"
+            className="grid size-6 place-items-center rounded-xs text-mute-2 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-ink/8 hover:text-ink [@media(hover:none)]:opacity-100"
           >
             <ChevronRight className="size-3.5" />
           </button>

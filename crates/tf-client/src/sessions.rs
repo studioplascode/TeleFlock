@@ -148,15 +148,22 @@ fn split(mut meta: SessionMeta) -> (SessionMeta, Option<Arc<TreeInfo>>) {
 }
 
 impl Data {
-    /// The newest rows show a turn at work: a running tool, a reply or thinking still streaming.
+    /// The newest rows show a turn at work: a running tool, a reply or thinking still streaming,
+    /// after the last row that ended a run (`stopReason` stop, length, aborted or error). What a run
+    /// left in flight before it ended never finishes: the call of an attempt that failed mid-reply
+    /// and was retried has no result in omp's file, so a copy rebuilt from it keeps it queued.
     fn busy(&self) -> bool {
         use tf_proto::session::ToolStatus;
-        self.rows.iter().rev().take(BUSY_ROWS).any(|r| match &r.item {
-            TranscriptItem::Tool(t) => matches!(t.status, ToolStatus::Running | ToolStatus::Pending),
-            TranscriptItem::Assistant(a) => a.streaming,
-            TranscriptItem::Thinking(t) => t.streaming,
-            _ => false,
-        })
+        for r in self.rows.iter().rev().take(BUSY_ROWS) {
+            match &r.item {
+                TranscriptItem::Tool(t) if matches!(t.status, ToolStatus::Running | ToolStatus::Pending) => return true,
+                TranscriptItem::Assistant(a) if a.streaming => return true,
+                TranscriptItem::Thinking(t) if t.streaming => return true,
+                TranscriptItem::Assistant(a) if matches!(a.stop_reason.as_deref(), Some("stop" | "length" | "aborted" | "error")) => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// What a `session.open` sends when nothing is cached.
@@ -1008,6 +1015,22 @@ pub fn heal_due(host: &Arc<dyn SessionHost>) {
         };
         if heal {
             tokio::spawn(repair(host.clone(), link.id, m, false));
+        }
+    }
+}
+
+/// Every mirror the UI has open on a `sessionSync` subscription, emitted again as a `reset` of its
+/// window ([`crate::Engine::resend_sessions`]: a UI subscriber lost events). Emitted under the
+/// mirror's lock, like every event of it, so it is in order with them. A plain subscription is left
+/// alone: its events go straight to the UI, so the rows its mirror holds are older than the UI's.
+pub fn resend(host: &Arc<dyn SessionHost>) {
+    for m in host.sessions().all() {
+        let st = m.lock();
+        if !st.wanted || !matches!(st.sub, Sub::Live { seq: Some(_), .. }) {
+            continue;
+        }
+        if let Some(d) = &st.data {
+            host.emit(&m.agent_id, SessionEvent::Reset { snapshot: d.window(&m.agent_id, st.limit.max(1)) });
         }
     }
 }
@@ -2087,7 +2110,7 @@ pub(crate) mod tests {
         // First open: nothing cached, the whole window.
         let host = test_host(dir.path());
         let (link, _) = connect(&host, &side, true, true, "c1").await;
-        assert_eq!(link.features, crate::link::Features { zstd: true, session_sync: true, presence: true });
+        assert_eq!(link.features, crate::link::Features { zstd: true, session_sync: true, presence: true, forward: true });
         let dyn_host: Arc<dyn SessionHost> = host.clone();
         let before = link.totals();
         let first = open_now(&dyn_host, &link, &open_params(200)).await.unwrap();
@@ -2709,6 +2732,106 @@ pub(crate) mod tests {
         assert_eq!(opens(), before + 1);
     }
 
+    /// A call a run left queued before it ended (omp retried the attempt that streamed it: its file
+    /// has no result for it, so hostd's rebuilt copy keeps it queued for good) is no turn at work:
+    /// a re-open only brings the same rows back. Before, the copy was re-opened (a `reset` for the
+    /// UI) after 30 s, then every 1 to 15 minutes, as long as the call was among its newest 64 rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_a_finished_run_left_queued_is_never_healed() {
+        let dir = tempfile::tempdir().unwrap();
+        let queued = match tool("t-attempt", "") {
+            TranscriptItem::Tool(t) => TranscriptItem::Tool(ToolItem { status: ToolStatus::Pending, output: None, ..t }),
+            _ => unreachable!(),
+        };
+        let answer = match assistant("a-retry", "Deployed.") {
+            TranscriptItem::Assistant(a) => TranscriptItem::Assistant(AssistantItem { streaming: false, stop_reason: Some("stop".into()), ..a }),
+            _ => unreachable!(),
+        };
+        let side: Side = Arc::new(Mutex::new(HostSide::new(vec![user("u1", "deploy it"), queued, answer], meta("short"))));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let _ui = ui_open(&host, &link, &side, 200).await;
+        host.hint.lock().unwrap().finished = true;
+        let before = side.lock().unwrap().open_requests;
+        heal_due(&dyn_host);
+        tokio::time::sleep(HEAL_AFTER * 2).await;
+        heal_due(&dyn_host);
+        tokio::time::sleep(RETRY_FIRST * 4).await;
+        assert_eq!(side.lock().unwrap().open_requests, before, "re-opened a copy that agrees with host state");
+        // A turn after it that shows a call running is at work.
+        let running = match tool("t-next", "") {
+            TranscriptItem::Tool(t) => TranscriptItem::Tool(ToolItem { status: ToolStatus::Running, output: None, ..t }),
+            _ => unreachable!(),
+        };
+        side.lock().unwrap().change(SessionEvent::Upsert { item: user("u2", "again"), h: None });
+        side.lock().unwrap().change(SessionEvent::Upsert { item: running, h: None });
+        let stuck = || host.sessions.get("a").unwrap().lock().data.as_ref().is_some_and(Data::busy);
+        until("the copy shows the next call", stuck).await;
+    }
+
+    /// A UI subscriber that lagged (its event stream overflowed while a busy terminal shared it)
+    /// lost session events the mirror applied: `resend` hands it the mirror's window again as a
+    /// `reset`. Before, only host state was replayed, and the transcript stayed where the lag hit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ui_that_lost_events_gets_its_open_sessions_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, _) = connect(&host, &side, true, true, "c1").await;
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        let resets = ui.resets;
+        side.lock().unwrap().change(SessionEvent::Upsert { item: tool("t-late", "done"), h: None });
+        // The mirror applies it; the UI never sees it.
+        let held = || host.sessions.get("a").unwrap().lock().data.as_ref().is_some_and(|d| d.rows.iter().any(|r| r.item.id() == "t-late"));
+        for _ in 0..500 {
+            if held() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(held(), "the mirror has the new row");
+        host.ui.lock().unwrap().clear();
+        ui.drain(&host);
+        assert!(!ui.rows.iter().any(|r| r.id() == "t-late"), "the UI lost it");
+        resend(&dyn_host);
+        converge(&mut ui, &host, &side).await;
+        assert_eq!(ui.resets, resets + 1, "one reset brought it");
+        // A session the UI does not have open is not sent.
+        closed(&dyn_host, "a");
+        resend(&dyn_host);
+        assert!(host.ui.lock().unwrap().iter().all(|ev| !matches!(ev, SessionEvent::Reset { .. })));
+    }
+
+    /// A mirror on a plain subscription (its re-opens kept failing; a parked agent's transcript)
+    /// passes hostd's events straight to the UI: the rows it holds are older than what the UI shows.
+    /// A lag must not hand the UI those. Before, `resend` sent them as a `reset`: the UI lost every
+    /// row since the mirror went plain, and the events that followed could not bring them back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lag_never_hands_the_ui_what_a_plain_mirror_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let side: Side = Arc::new(Mutex::new(long_session()));
+        let host = test_host(dir.path());
+        let dyn_host: Arc<dyn SessionHost> = host.clone();
+        let (link, ch) = connect(&host, &side, true, true, "c1").await;
+        let mut ui = ui_open(&host, &link, &side, 200).await;
+        // Too many re-opens: the next one (after this gap) is a plain subscription.
+        host.sessions.get("a").unwrap().lock().plain = true;
+        side.lock().unwrap().mutate(&SessionEvent::Upsert { item: user("u-lost", "while it re-opened"), h: None });
+        gap(&ch);
+        until("the mirror re-opens plainly", || matches!(host.sessions.get("a").unwrap().lock().sub, Sub::Live { seq: None, .. })).await;
+        side.lock().unwrap().change(SessionEvent::Upsert { item: tool("t-plain", "done"), h: None });
+        converge(&mut ui, &host, &side).await;
+        assert!(ui.rows.iter().any(|r| r.id() == "u-lost") && ui.rows.iter().any(|r| r.id() == "t-plain"));
+        let resets = ui.resets;
+        resend(&dyn_host);
+        ui.drain(&host);
+        assert!(ui.rows.iter().any(|r| r.id() == "u-lost") && ui.rows.iter().any(|r| r.id() == "t-plain"), "the UI lost rows to a stale reset");
+        assert_eq!(ui.resets, resets);
+        converge(&mut ui, &host, &side).await;
+    }
+
     /// Runs the self-heal every few ms until agent `a`'s mirror made `n` re-opens in a row (5 s at
     /// most); when it made the n-th.
     async fn heal_until(host: &Arc<TestHost>, n: u32) -> Instant {
@@ -3078,7 +3201,7 @@ pub(crate) mod tests {
         let dh: Arc<dyn SessionHost> = host.clone();
         let (new, new_child) = lab_attach(true, Arc::new(TestSink(host.clone()))).await;
         *host.link.lock().unwrap() = Some(new.clone());
-        assert_eq!(new.features, crate::link::Features { zstd: true, session_sync: true, presence: true });
+        assert_eq!(new.features, crate::link::Features { zstd: true, session_sync: true, presence: true, forward: true });
         let (_, after_open, after_open_plain) = received(&new, open_now(&dh, &new, &typed)).await;
         closed(&dh, &agent);
         new.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await.unwrap();

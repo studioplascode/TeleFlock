@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { ANSI_VARS } from "@/design";
 import { lruMemo } from "./lru";
 
 /**
@@ -23,11 +24,8 @@ export interface AnsiSegment {
   style: AnsiStyle;
 }
 
-/** Dark-theme tuned base palette (normal 0-7, bright 8-15). */
-const BASE: readonly string[] = [
-  "#3b3b4f", "#ff6b8b", "#a3e635", "#fbbf24", "#7fa2e7", "#c084fc", "#22d3ee", "#dcdce4",
-  "#6e6e82", "#ff8aa5", "#bef264", "#fde68a", "#a5c0f5", "#d8b4fe", "#67e8f9", "#ffffff",
-];
+/** The terminal's 16 colours (normal 0-7, bright 8-15) as `var(--term-…)`, so output follows the theme. */
+const BASE = ANSI_VARS;
 
 function color256(n: number): string | undefined {
   if (n < 0 || n > 255) return undefined;
@@ -154,8 +152,8 @@ export function stripAnsi(input: string): string {
 
 export function ansiCss(style: AnsiStyle): CSSProperties | undefined {
   if (!style.fg && !style.bg && !style.bold && !style.dim && !style.italic && !style.underline && !style.inverse && !style.strike) return undefined;
-  const fg = style.inverse ? (style.bg ?? "#0b0b10") : style.fg;
-  const bg = style.inverse ? (style.fg ?? "#dcdce4") : style.bg;
+  const fg = style.inverse ? (style.bg ?? "var(--term-bg)") : style.fg;
+  const bg = style.inverse ? (style.fg ?? "var(--term-fg)") : style.bg;
   const deco = [style.underline && "underline", style.strike && "line-through"].filter(Boolean).join(" ");
   return {
     color: fg,

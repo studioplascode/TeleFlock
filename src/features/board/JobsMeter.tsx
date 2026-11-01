@@ -24,7 +24,7 @@ export function WaitingForJobs({ jobs, className }: { jobs: JobsSummary; classNa
     <p className={cn("flex min-w-0 items-center gap-2 text-xs text-ink-2", className)} role="status">
       <Hourglass className="size-3.5 shrink-0 text-accent-hi" aria-hidden />
       <span className="min-w-0 truncate">{waitingText(jobs)}</span>
-      {glance && <span className="shrink-0 rounded-full bg-white/6 px-1.5 font-mono text-2xs font-bold text-ink-2">{glance}</span>}
+      {glance && <span className="shrink-0 rounded-full bg-ink/6 px-1.5 font-mono text-2xs font-bold text-ink-2">{glance}</span>}
     </p>
   );
 }

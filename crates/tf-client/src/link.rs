@@ -14,8 +14,8 @@ use std::time::Duration;
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
 use serde_json::Value;
-use tf_proto::host::{FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
-use tf_proto::{ApiError, ClientMsg, HostState, Millis, Presence, ServerMsg, StatePatch};
+use tf_proto::host::{FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::{ApiError, ClientMsg, FwdEv, FwdOffer, HostState, Millis, Presence, ServerMsg, StatePatch};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadBuf};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -53,7 +53,7 @@ pub trait LinkSink: Send + Sync + 'static {
     /// Full state (initial snapshot or a resync after a revision gap).
     fn snapshot(&self, rev: u64, state: HostState);
     fn patch(&self, rev: u64, ops: Vec<StatePatch>);
-    /// `Pulse`, `Session`, `Term`, `Notify`, `NotifyAlert`, `NotifyDone`.
+    /// `Pulse`, `Session`, `Term`, `Notify`, `NotifyAlert`, `NotifyDone`, `FwdOffered`, `Fwd`.
     fn push(&self, msg: ServerMsg);
     fn latency(&self, ms: u32);
 }
@@ -89,7 +89,7 @@ const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 
 /// Wire features this client asks hostd for in `hello` (`tf_proto::host`, point 7).
 pub fn requested_features() -> Vec<String> {
-    vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string(), FEATURE_PRESENCE.to_string()]
+    vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string(), FEATURE_PRESENCE.to_string(), FEATURE_FORWARD.to_string()]
 }
 
 /// What hostd accepted (`welcome.features`; older daemons send none).
@@ -99,12 +99,14 @@ pub struct Features {
     pub session_sync: bool,
     /// Presence reports and routed notifications (hosts ≥ 0.7.0).
     pub presence: bool,
+    /// Host-to-host forwarding offers and streams (hosts ≥ 0.8.0, `crate::forward`).
+    pub forward: bool,
 }
 
 impl Features {
     fn accepted(features: Option<&[String]>) -> Features {
         let has = |f: &str| features.is_some_and(|all| all.iter().any(|x| x == f));
-        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE) }
+        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE), forward: has(FEATURE_FORWARD) }
     }
 }
 
@@ -538,6 +540,16 @@ impl Link {
         self.send(&ClientMsg::NotifyRead { ids })
     }
 
+    /// The rules this app relays for this host as their from-host (`forward` feature).
+    pub fn fwd_offer(&self, offers: Vec<FwdOffer>) -> Result<(), ApiError> {
+        self.send(&ClientMsg::FwdOffer { offers })
+    }
+
+    /// An event of forwarding stream `sid` (`forward` feature).
+    pub fn fwd(&self, sid: u64, ev: FwdEv) -> Result<(), ApiError> {
+        self.send(&ClientMsg::Fwd { sid, ev })
+    }
+
     /// Graceful goodbye before closing.
     pub fn bye(&self) {
         let _ = self.send(&ClientMsg::Bye);
@@ -565,7 +577,9 @@ impl Link {
             | ServerMsg::Term { .. }
             | ServerMsg::Notify { .. }
             | ServerMsg::NotifyAlert { .. }
-            | ServerMsg::NotifyDone { .. }) => sink.push(m),
+            | ServerMsg::NotifyDone { .. }
+            | ServerMsg::FwdOffered { .. }
+            | ServerMsg::Fwd { .. }) => sink.push(m),
             ServerMsg::Snapshot { rev, state } => sink.snapshot(rev, state),
             ServerMsg::Patch { rev, ops } => sink.patch(rev, ops),
             ServerMsg::Error { error } => self.close(&error.to_string()),

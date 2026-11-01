@@ -65,7 +65,7 @@ function DeviceRow({ device }: { device: DevicePresence }) {
   const p = device.presence;
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2">
-      <span className="grid size-8 shrink-0 place-items-center rounded-md bg-white/6 text-ink-2 shadow-hairline [&_svg]:size-4">
+      <span className="grid size-8 shrink-0 place-items-center rounded-md bg-ink/6 text-ink-2 shadow-hairline [&_svg]:size-4">
         <Icon />
       </span>
       <div className="min-w-0 flex-1 basis-40">

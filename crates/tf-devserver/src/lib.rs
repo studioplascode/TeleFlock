@@ -339,9 +339,12 @@ async fn client(socket: WebSocket, conn: Conn, keepalive: Keepalive) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("ws client lagged by {n} events; resending state");
+                        log::warn!("ws client lagged by {n} events; resending state and open sessions");
                         let (replay, rx) = writer_engine.subscribe_with_replay();
                         events = rx;
+                        // The replay is host state only: open transcripts lost events too; their
+                        // resets reach `events`, in order with their other events.
+                        writer_engine.resend_sessions();
                         for ev in &replay {
                             if sink.send(event_frame(ev)).await.is_err() {
                                 return;

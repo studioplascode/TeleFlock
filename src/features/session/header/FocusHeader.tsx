@@ -2,6 +2,7 @@ import { Minimize2 } from "lucide-react";
 import { useAgent, useUi } from "@/core";
 import { AgentGlyph, Badge, Heartbeat, IconButton, Kbd, StatusOrb, useActivity } from "@/design";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
+import { HostBadge } from "@/features/hosts/HostBadge";
 import { herdrOrbStatus } from "@/features/hosts/herdrHealth";
 import { agentStatus, useBeat } from "../api";
 import { StateWord } from "./SessionHeader";
@@ -19,9 +20,10 @@ export function FocusHeader({ agentKey }: { agentKey: string }) {
       <span data-morph="glyph" data-morph-key={agent.key}>
         <AgentGlyph name={agent.name} size={30} status={status} />
       </span>
-      <h2 data-morph="name" data-morph-key={agent.key} className="truncate font-display text-lg font-bold tracking-[-0.02em] text-ink">
+      <h2 data-morph="name" data-morph-key={agent.key} className="min-w-[5rem] truncate font-display text-lg font-bold tracking-[-0.02em] text-ink">
         {agent.name}
       </h2>
+      <HostBadge hostId={agent.hostId} className="max-w-[10rem] max-sm:hidden" />
       <StatusOrb status={status} activity={tier} size={8} />
       {agent.needs && !herdr && (
         <Badge tone="needs-you">

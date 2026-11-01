@@ -79,7 +79,7 @@ function Health({ hostId }: { hostId: string }) {
           {gb(health.diskFree)}
           <span className="text-xs text-mute"> GB free</span>
         </div>
-        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/8">
+        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-ink/8">
           <motion.div className="h-full rounded-full bg-done" initial={{ width: 0 }} animate={{ width: `${diskPct}%` }} transition={spring.gentle} />
         </div>
         <div className="mt-1 font-mono text-2xs text-mute-2" title="Load average over the last minute, against the number of CPU cores">
@@ -318,9 +318,16 @@ export function HostsView() {
     return () => window.removeEventListener("hashchange", take);
   }, []);
   const add = (
-    <Button variant="primary" size={mobile ? "sm" : "md"} icon={<Plus />} onClick={() => openDialog({ kind: "hostEditor" })}>
-      Add host
-    </Button>
+    <>
+      {profiles.length > 1 && !mobile && (
+        <Button variant="secondary" icon={<VIEWS.forward.icon />} title={VIEWS.forward.description} onClick={() => navigate({ name: "forward" })}>
+          {VIEWS.forward.label}
+        </Button>
+      )}
+      <Button variant="primary" size={mobile ? "sm" : "md"} icon={<Plus />} onClick={() => openDialog({ kind: "hostEditor" })}>
+        Add host
+      </Button>
+    </>
   );
   const online = profiles.filter((p) => status[p.id]?.phase === "online").length;
   return (

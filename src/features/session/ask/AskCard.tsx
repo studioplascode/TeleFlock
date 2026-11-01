@@ -1,7 +1,7 @@
-import { Check, MessageCircle, PenLine, Send, SquareTerminal } from "lucide-react";
+import { ArrowLeft, Check, MessageCircle, PenLine, Send, SquareTerminal } from "lucide-react";
 import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
-import { answerDraftKey, drafts, parseAgentKey, useAgent, useDraft } from "@/core";
+import { answerDraftKey, drafts, parseAgentKey, useAgent, useCore, useDraft } from "@/core";
 import type { Answer, NeedsKind, NeedsOption, UiRequest } from "@/core/gen";
 import { cn, Elapsed, Spinner } from "@/design";
 import { AskCountdown } from "@/features/autoAnswer/AskCountdown";
@@ -12,6 +12,8 @@ import { haptic } from "@/features/shell/haptics";
 import { NEEDS_WORD } from "@/features/shell/vocab";
 import { hostCall, usePending } from "../api";
 import { Markdown } from "../markdown/Markdown";
+import { AgentSaid } from "./AgentSaid";
+import { contextFromRows, withoutQuestion } from "./askContext";
 
 export interface AskCardProps {
   agentKey: string;
@@ -25,18 +27,23 @@ export interface AskCardProps {
 
 /**
  * The sunset ask / approval / plan-review card. Single-select answers in one tap (or key 1–9);
- * multi-select toggles then sends; "Other…" takes free text; editors get a textarea.
+ * multi-select toggles then sends; "Other…" takes free text; editors get a textarea. Above the
+ * question, what the agent wrote before asking; a multi-question ask shows its progress and Back.
  */
 export function AskCard({ agentKey, request, compact = false, hotkeys = false, onAnswered }: AskCardProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const needs = agent?.needs;
-  const [picked, setPicked] = useState<string[]>([]);
+  const step = request.step;
+  // The answer this question already has (Back brought it up again): its options show picked, else
+  // its typed text fills Other.
+  const earlier = step?.choices?.filter((id) => request.options.some((o) => o.id === id)) ?? [];
+  const [picked, setPicked] = useState<string[]>(() => (request.kind === "multiSelect" ? earlier : []));
   // Free-text answers persist per request (shared with the board and the answer HUD); the Other
   // field shows while open or holding a draft.
   const otherKey = answerDraftKey(agentKey, request.id, "other");
   const textKey = answerDraftKey(agentKey, request.id, "text");
-  const [otherText, setOtherText] = useDraft(otherKey);
+  const [otherText, setOtherText] = useDraft(otherKey, earlier.length === 0 ? (step?.text ?? "") : "");
   const [otherOpen, setOtherOpen] = useState(false);
   const other = otherOpen || otherText !== "" ? otherText : null;
   // On a multi-select a typed answer replaces the ticks: the host takes text only without choices.
@@ -47,6 +54,9 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   };
   const [text, setText] = useDraft(textKey, request.initial ?? "");
   const [sent, setSent] = useState<string | null>(null);
+  const [wentBack, setWentBack] = useState(false);
+  const [backing, setBacking] = useState(false);
+  const done = sent !== null || wentBack;
   const [choosing, setChoosing] = useState<string | null>(null);
   const [busy, run] = usePending();
   const otherRef = useRef<HTMLInputElement>(null);
@@ -54,18 +64,37 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   const editor = request.kind === "editor" || request.kind === "input";
   const options: readonly NeedsOption[] = request.options.length > 0 || editor ? request.options : CONFIRM_OPTIONS;
   const kindKey: NeedsKind = request.kind === "planReview" ? "planReview" : (needs?.kind ?? (request.kind === "confirm" ? "confirm" : editor ? "input" : "ask"));
+  const canBack = !!step?.canBack;
+  // A single-select's earlier answer shows picked; Enter / Send answer sends it again.
+  const chosen = !multi && !editor && other == null ? options.find((o) => o.id === earlier[0]) : undefined;
+  // What the agent wrote before asking: the host's (asks, hosts ≥ 0.8.0), else read from the rows held here.
+  const fromRows = useCore((s) => {
+    const se = request.context === undefined && kindKey === "ask" ? s.sessions[agentKey] : undefined;
+    return se ? contextFromRows(se.itemIds, se.items, request.callId) : "";
+  });
 
+  // Back ends this request; the previous question comes as a new one (a new card).
   const answer = async (a: Partial<Answer>, label: string) => {
-    if (busy || sent) return;
+    if (busy || done) return;
     const full: Answer = { choices: [], cancel: false, chat: false, ...a };
-    const res = await run(hostCall(hostId, "agent.answer", { agentId, requestId: request.id, answer: full }, { failure: "Answer not delivered" }));
+    const res = await run(hostCall(hostId, "agent.answer", { agentId, requestId: request.id, answer: full }, { failure: a.back ? "Couldn't go back" : "Answer not delivered" }));
     if (res.ok) {
       haptic("success");
       drafts.clear(otherKey);
       drafts.clear(textKey);
-      setSent(label);
-      onAnswered?.();
+      if (a.back) setWentBack(true);
+      else {
+        setSent(label);
+        onAnswered?.();
+      }
     } else haptic("warning");
+  };
+
+  const goBack = async () => {
+    if (!canBack || busy || done) return;
+    setBacking(true);
+    await answer({ back: true }, "Back");
+    setBacking(false);
   };
 
   const choose = (o: NeedsOption) => {
@@ -83,17 +112,26 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
     if (editor) return answer({ text }, "Submitted");
     if (other != null && other.trim()) return answer(otherAnswer(other), other.trim());
     if (multi && picked.length > 0) return answer({ choices: picked }, `${picked.length} selected`);
+    if (chosen) return choose(chosen);
   };
 
-  const canSubmit = editor ? true : (other != null && other.trim() !== "") || (multi && picked.length > 0);
+  const canSubmit = editor ? true : (other != null && other.trim() !== "") || (multi && picked.length > 0) || chosen !== undefined;
 
-  // 1–9 pick, Enter sends (multi/other), Esc in Other closes it.
+  // 1–9 pick, Enter sends (multi/other/an earlier pick), ← back, Esc in Other closes it.
   useEffect(() => {
     if (!hotkeys) return;
     const onKey = (e: KeyboardEvent) => {
       // Digits pass through from an empty composer so the card answers without leaving the keyboard.
       const fromEmptyComposer = e.target instanceof HTMLTextAreaElement && e.target.hasAttribute("data-composer") && e.target.value === "";
-      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || (isTyping(e.target) && !fromEmptyComposer)) return;
+      // A dialog or menu over the session keeps its keys: the Answer-next HUD showing another agent
+      // must not answer this card, nor take it back.
+      const overlaid = e.target instanceof Element && e.target.closest("[role='dialog'],[role='alertdialog'],[role='menu'],[role='listbox']") !== null;
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || overlaid || (isTyping(e.target) && !fromEmptyComposer)) return;
+      if (e.key === "ArrowLeft" && !e.shiftKey && canBack) {
+        e.preventDefault();
+        void goBack();
+        return;
+      }
       if (fromEmptyComposer && e.key === "Enter") {
         e.preventDefault();
         if (canSubmit && !editor) void submit();
@@ -122,6 +160,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
   // omp often titles dialogs generically ("Question", "Continue?") and puts the real question in
   // the message; an approval's command shows once, in its code block.
   const { headline, body } = askText({ title: request.title, message: request.message, command: needs?.command, approval: kindKey === "approval" });
+  const said = withoutQuestion(request.context ?? fromRows, headline);
   return (
     <motion.section
       // Re-renders with its agent (5 Hz while streaming elsewhere): measure only when the card's shape changes.
@@ -130,10 +169,10 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       aria-label={request.title}
       data-status="needs-you"
       className={cn(
-        "relative isolate overflow-hidden text-white",
+        "relative isolate overflow-hidden text-on-sun",
         compact ? "rounded-[24px] px-3.5 pt-3 pb-3.5" : "rounded-tile px-5 pt-4 pb-5",
-        "[background:radial-gradient(90%_140%_at_100%_0%,rgb(255_61_119)_0%,transparent_65%),linear-gradient(125deg,#ff7a18,#ff3d77)]",
-        "shadow-[0_30px_70px_-18px_rgb(255_61_119/0.75),0_10px_30px_-10px_rgb(255_122_24/0.6),inset_0_1px_0_rgb(255_255_255/0.35)]",
+        "[background:radial-gradient(90%_140%_at_100%_0%,var(--color-sun-2)_0%,transparent_65%),linear-gradient(125deg,var(--color-sun-1),var(--color-sun-2))]",
+        "shadow-[0_30px_70px_-18px_color-mix(in_srgb,var(--color-sun-2)_75%,transparent),0_10px_30px_-10px_color-mix(in_srgb,var(--color-sun-1)_60%,transparent),inset_0_1px_0_rgb(255_255_255/0.35)]",
       )}
     >
       <span className="pointer-events-none absolute -bottom-[120px] -left-[60px] -z-10 size-[300px] rounded-full border-[44px] border-white/[0.07]" aria-hidden />
@@ -145,13 +184,31 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
             <span className="tf-loop absolute inset-0 animate-ping-soft rounded-full bg-white" />
             <span className="relative size-2 rounded-full bg-white" />
           </span>
-          {NEEDS_WORD[kindKey]}
+          {step ? (
+            <span className="tabular">
+              Question {step.index + 1} of {step.total}
+            </span>
+          ) : (
+            NEEDS_WORD[kindKey]
+          )}
           {needs?.since != null && (
             <span className="font-semibold opacity-80">
               · <Elapsed since={needs.since} />
             </span>
           )}
         </span>
+        {canBack && (
+          <button
+            type="button"
+            onClick={() => void goBack()}
+            disabled={busy || done}
+            title={hotkeys ? "Previous question (←)" : "Previous question"}
+            className="pressable focus-ring inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11.5px] font-extrabold hover:bg-[rgb(45_0_22/0.22)] disabled:opacity-60"
+          >
+            {backing ? <Spinner size={12} label="Going back" /> : <ArrowLeft className="size-3.5" aria-hidden />}
+            Back
+          </button>
+        )}
         {!editor && !compact && (
           <span className="ml-auto text-[11.5px] font-bold opacity-85">
             {multi ? "Pick any" : "Pick one"} · <span className="font-mono">1–{Math.min(n, 9)}</span>
@@ -161,7 +218,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
           <button
             type="button"
             onClick={() => void submit()}
-            disabled={busy || !!sent || !canSubmit}
+            disabled={busy || done || !canSubmit}
             className={cn("pressable focus-ring flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-extrabold text-[#d21a5a] disabled:opacity-60", compact && "ml-auto")}
           >
             {editor ? "Submit" : "Send answer"}
@@ -170,8 +227,9 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
         )}
       </div>
 
+      {said && <AgentSaid text={said} variant="ask" lines={compact ? 3 : 4} className={compact ? "mt-2.5" : "mt-3"} />}
       <h3 className={cn("relative mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "mt-2 text-lg leading-[1.2]" : "mt-2.5 text-[25px] leading-[1.15] short:text-[21px]")}>{headline}</h3>
-      {body && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-white/90">{body}</div>}
+      {body && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-on-sun/90">{body}</div>}
       {needs?.command && (
         <div className={cn("relative overflow-hidden rounded-md bg-[rgb(30_4_18/0.42)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]", compact ? "my-2" : "my-2.5")}>
           <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-1 text-[10px] font-extrabold tracking-[0.08em] uppercase opacity-75">
@@ -185,7 +243,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       )}
 
       {request.plan && (
-        <div className="relative my-3 max-h-[min(44vh,420px)] overflow-y-auto rounded-[18px] bg-[#16121c]/90 px-4 py-3 text-ink shadow-[0_12px_30px_-12px_rgb(60_0_30/0.6)]">
+        <div className="relative my-3 max-h-[min(44vh,420px)] overflow-y-auto rounded-[18px] bg-tile-1/90 px-4 py-3 text-ink shadow-[0_12px_30px_-12px_rgb(60_0_30/0.6)]">
           {(request.plan.title || request.plan.path) && (
             <div className="mb-2 flex items-center gap-2 border-b border-line pb-2">
               <span className="font-display text-md font-bold">{request.plan.title ?? "Plan"}</span>
@@ -208,7 +266,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
           }}
           rows={compact ? 4 : 6}
           aria-label="Your answer"
-          className="relative mt-2 w-full resize-y rounded-[16px] bg-black/20 px-3 py-2.5 font-mono text-[12.5px] text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.25)] outline-none placeholder:text-white/60 focus:shadow-[inset_0_0_0_2px_rgb(255_255_255/0.7)]"
+          className="relative mt-2 w-full resize-y rounded-[16px] bg-black/20 px-3 py-2.5 font-mono text-[12.5px] text-on-sun shadow-[inset_0_0_0_1px_rgb(255_255_255/0.25)] outline-none placeholder:text-on-sun/60 focus:shadow-[inset_0_0_0_2px_rgb(255_255_255/0.7)]"
           placeholder="Type your answer…"
         />
       )}
@@ -222,10 +280,10 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
               option={o}
               number={!compact && i < 9 ? i + 1 : undefined}
               multi={multi}
-              on={picked.includes(o.id) || sent === o.label}
+              on={picked.includes(o.id) || sent === o.label || (!done && chosen?.id === o.id)}
               pending={busy && choosing === o.id}
               describe="full"
-              disabled={busy || (!!sent && sent !== o.label) || (multi && other != null)}
+              disabled={busy || (done && sent !== o.label) || (multi && other != null)}
               enter={i}
               onClick={() => void choose(o)}
             />
@@ -238,7 +296,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
                 number={!compact && options.length < 9 ? options.length + 1 : undefined}
                 icon={compact ? <PenLine /> : undefined}
                 describe="full"
-                disabled={busy || !!sent}
+                disabled={busy || done}
                 enter={options.length}
                 onClick={() => {
                   setOther("");
@@ -275,21 +333,21 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
         <button
           type="button"
           onClick={() => void submit()}
-          disabled={busy || !!sent || !canSubmit}
+          disabled={busy || done || !canSubmit}
           className="pressable focus-ring relative mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-white text-sm font-extrabold text-[#d21a5a] shadow-[0_12px_26px_-8px_rgb(80_0_30/0.55)] disabled:opacity-60"
         >
           {busy ? <Spinner size={14} label="Sending" /> : <Send className="size-4" />}
           {editor ? "Submit" : multi && picked.length > 0 ? `Send ${picked.length} selected` : "Send answer"}
         </button>
       )}
-      {!sent && <AskCountdown agentKey={agentKey} requestId={request.id} compact={compact} />}
+      {!done && <AskCountdown agentKey={agentKey} requestId={request.id} compact={compact} />}
 
       {(request.allowChat || request.kind !== "planReview") && (
         <div className={cn("relative flex flex-wrap items-center gap-2 text-xs font-bold", compact ? "mt-2" : "mt-3")}>
           {request.allowChat && (
             <button
               type="button"
-              disabled={busy || !!sent}
+              disabled={busy || done}
               onClick={() => void answer({ chat: true }, "Chat")}
               className="pressable focus-ring flex items-center gap-1.5 rounded-full bg-black/20 px-3 py-1.5 hover:bg-black/30"
             >
@@ -298,11 +356,11 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
             </button>
           )}
           {request.kind !== "planReview" && (request.options.length > 0 || editor) ? (
-            <SkipButton sunset className="ml-auto" disabled={busy || !!sent} onClick={() => void answer({ cancel: true }, "Skipped")} />
+            <SkipButton sunset className="ml-auto" disabled={busy || done} onClick={() => void answer({ cancel: true }, "Skipped")} />
           ) : null}
-          {sent && (
+          {done && (
             <motion.span initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} className="flex items-center gap-1 rounded-full bg-white/25 px-2.5 py-1">
-              <Check className="size-3.5" /> Sent · waiting for omp
+              {wentBack ? <ArrowLeft className="size-3.5" /> : <Check className="size-3.5" />} {wentBack ? "Back" : "Sent"} · waiting for omp
             </motion.span>
           )}
         </div>

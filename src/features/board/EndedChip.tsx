@@ -21,7 +21,7 @@ export function EndedChip({ agentKey, ended, ar, className }: { agentKey: string
   const now = useNow(ar ? ticketTickMs(ar) : 60_000);
   if (resuming) {
     return (
-      <span className={cn(base, "bg-white/6 text-mute-2", className)}>
+      <span className={cn(base, "bg-ink/6 text-mute-2", className)}>
         <Shimmer>resuming…</Shimmer>
       </span>
     );
@@ -43,7 +43,7 @@ export function EndedChip({ agentKey, ended, ar, className }: { agentKey: string
         </span>
       }
     >
-      <span data-testid="ended-chip" className={cn(base, w && w.tone !== "busy" ? "bg-warn/12 text-warn" : "bg-white/6 text-mute-2", className)}>
+      <span data-testid="ended-chip" className={cn(base, w && w.tone !== "busy" ? "bg-warn/12 text-warn" : "bg-ink/6 text-mute-2", className)}>
         <Icon className="size-2.5" aria-hidden />
         {ar ? badgeText(ar, now, { ended }) : e.chip}
       </span>

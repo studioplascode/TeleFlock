@@ -174,7 +174,7 @@ export function BranchStep({ branches, loading, error, draft, onChange, filterKe
                         onChange({ name: p });
                         nameRef.current?.focus();
                       }}
-                      className="rounded-xs bg-white/5 px-2 py-0.5 font-mono text-2xs font-semibold text-mute shadow-hairline transition-colors focus-ring pressable hover:bg-accent/14 hover:text-accent-ink"
+                      className="rounded-xs bg-ink/5 px-2 py-0.5 font-mono text-2xs font-semibold text-mute shadow-hairline transition-colors focus-ring pressable hover:bg-accent/14 hover:text-accent-ink"
                     >
                       {p}
                     </button>
@@ -329,7 +329,7 @@ export function BranchStep({ branches, loading, error, draft, onChange, filterKe
           {draft.customPath ? (
             <Input value={draft.path} onChange={(e) => onChange({ path: e.target.value })} leading={<FolderTree />} className="font-mono text-xs" spellCheck={false} aria-label="Checkout path" />
           ) : (
-            <div className="flex h-10 items-center gap-2 overflow-hidden rounded-md bg-white/3 px-3 shadow-hairline" aria-live="polite">
+            <div className="flex h-10 items-center gap-2 overflow-hidden rounded-md bg-ink/3 px-3 shadow-hairline" aria-live="polite">
               <FolderTree className="size-4 shrink-0 text-mute-2" />
               <PathPreview path={tildify(defaultPath, home)} branch={branch} />
             </div>
@@ -357,7 +357,7 @@ function Notice({ tone, icon, children }: { tone: "warn" | "accent"; icon: React
       <div
         className={cn(
           "flex flex-wrap items-center gap-2 rounded-md px-3 py-2 text-xs text-ink-2",
-          tone === "warn" ? "bg-warn/10 shadow-[inset_0_0_0_1px_rgb(251_191_36/0.3)]" : "bg-accent/10 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]",
+          tone === "warn" ? "bg-warn/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]" : "bg-accent/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]",
         )}
       >
         {icon}
@@ -419,7 +419,7 @@ function BranchRows({ rows, active, selected, defaultBranch, home, onHover, onPi
                 <motion.span
                   layoutId={isSel ? undefined : "br-active"}
                   transition={spring.snappy}
-                  className={cn("absolute inset-0 rounded-md", isSel ? "bg-accent/16 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.55)]" : "bg-white/6")}
+                  className={cn("absolute inset-0 rounded-md", isSel ? "bg-accent/16 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" : "bg-ink/6")}
                   aria-hidden
                 />
               )}

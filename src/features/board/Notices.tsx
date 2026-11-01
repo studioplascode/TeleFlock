@@ -36,7 +36,7 @@ function StaleHost({ hostId, order }: { hostId: string; order: number }) {
     return (
       <NoticeLine icon={orb} action={act} className="bg-warn/8">
         <b className="text-ink">{name}</b> <span className={cn(phaseBusy(st.phase) && "tf-shimmer-text")}>{connWords(st, now)}</span>
-        {st.error && <span className="text-[#ff9fb2]"> · {st.error.message}</span>}
+        {st.error && <span className="text-error-ink"> · {st.error.message}</span>}
       </NoticeLine>
     );
   return (
@@ -52,7 +52,7 @@ function StaleHost({ hostId, order }: { hostId: string; order: number }) {
           showing its snapshot{st.lastOnlineAt ? ` from ${formatAge(now - st.lastOnlineAt)}` : ""} · cards are read-only until it reconnects
         </span>
         {st.error && (
-          <span className="max-w-full min-w-0 truncate text-[#ff9fb2]" title={st.error.message}>
+          <span className="max-w-full min-w-0 truncate text-error-ink" title={st.error.message}>
             {st.error.message}
           </span>
         )}

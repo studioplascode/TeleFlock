@@ -27,7 +27,7 @@ function TodoMark({ status }: { status: TodoStatus }) {
     case "inProgress":
       return (
         <span className="relative grid size-[15px] shrink-0 place-items-center" aria-label="in progress">
-          <span className="tf-loop absolute inset-0 animate-spin-slow rounded-full [background:conic-gradient(var(--color-accent)_0_40%,rgb(255_255_255/0.1)_0)] shadow-[0_0_10px_rgb(163_92_240/0.55)]" />
+          <span className="tf-loop absolute inset-0 animate-spin-slow rounded-full [background:conic-gradient(var(--color-accent)_0_40%,color-mix(in_srgb,var(--color-ink)_10%,transparent)_0)] shadow-[0_0_10px_color-mix(in_srgb,var(--color-accent)_55%,transparent)]" />
           <span className="absolute inset-[3px] rounded-full bg-tile-1" />
         </span>
       );
@@ -35,7 +35,7 @@ function TodoMark({ status }: { status: TodoStatus }) {
       return <OctagonAlert className="size-[15px] shrink-0 text-sun-1" aria-label="blocked" />;
     case "abandoned":
       return (
-        <span className="grid size-[15px] shrink-0 place-items-center rounded-full bg-white/5 text-mute-2">
+        <span className="grid size-[15px] shrink-0 place-items-center rounded-full bg-ink/5 text-mute-2">
           <Minus className="size-2.5" />
         </span>
       );
@@ -66,9 +66,9 @@ export function TodoPhases({ phases, className }: { phases: readonly TodoPhase[]
                   className={cn(
                     "flex items-start gap-2 text-[12.5px] leading-[1.35]",
                     t.status === "completed" && "text-mute",
-                    t.status === "inProgress" && "font-bold text-[#e9dcff]",
+                    t.status === "inProgress" && "font-bold text-accent-ink",
                     t.status === "abandoned" && "text-mute-2 line-through",
-                    t.status === "blocked" && "text-[#ffc29a]",
+                    t.status === "blocked" && "text-[color-mix(in_srgb,var(--color-error-ink)_42%,var(--color-warn-ink))]",
                     t.status === "pending" && "text-ink-2",
                   )}
                 >

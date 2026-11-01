@@ -38,7 +38,7 @@ export function SpendTile({ cost }: { cost?: CostInfo }) {
   const split = cost?.split;
   const total = cost?.usd ?? 0;
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg bg-[rgb(10_10_16/0.45)] px-3 py-2.5 shadow-hairline" aria-label="Spend">
+    <div className="flex flex-col gap-1.5 rounded-lg bg-bg-deep/45 px-3 py-2.5 shadow-hairline" aria-label="Spend">
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-[10.5px] font-bold text-mute">Spend</span>
         <span className="font-display text-xl font-bold tracking-[-0.03em] text-ink tabular">{cost ? <NumberTicker value={cost.usd} format={formatUsd} /> : "—"}</span>
@@ -50,7 +50,7 @@ export function SpendTile({ cost }: { cost?: CostInfo }) {
             <div key={s.key} data-spender={s.key} className="grid grid-cols-[auto_6.5rem_1fr_auto] items-center gap-x-2 text-[11.5px]">
               <span className={cn("size-2 rounded-full", s.dot)} />
               <span className="truncate font-semibold text-ink-2">{s.term}</span>
-              <span className="relative h-1 overflow-hidden rounded-full bg-white/6">
+              <span className="relative h-1 overflow-hidden rounded-full bg-ink/6">
                 <span className={cn("absolute inset-y-0 left-0 rounded-full transition-[width] duration-700 ease-out", s.dot)} style={{ width: `${total > 0 ? (100 * usd) / total : 0}%` }} />
               </span>
               <span className="text-right font-bold text-ink tabular">{formatUsd(usd)}</span>

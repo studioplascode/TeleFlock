@@ -180,7 +180,7 @@ function StageNode({ index, stage, blocked, size = 28 }: { index: number; stage:
       className={cn(
         "relative z-raised grid shrink-0 place-items-center rounded-full transition-[background-color,color,box-shadow] duration-500 [&_svg]:size-3.5",
         done && "bg-[color-mix(in_oklab,var(--color-done)_22%,var(--color-tile-2))] text-done",
-        current && !blocked && "bg-omp text-white shadow-glow-accent",
+        current && !blocked && "bg-omp text-on-accent shadow-glow-accent",
         current && blocked && "bg-[color-mix(in_oklab,var(--color-warn)_18%,var(--color-tile-2))] text-warn",
         index > stage && "bg-tile-3 text-mute-2",
       )}
@@ -191,7 +191,7 @@ function StageNode({ index, stage, blocked, size = 28 }: { index: number; stage:
           {done ? <Check strokeWidth={3} /> : <s.icon />}
         </motion.span>
       </AnimatePresence>
-      {current && !blocked && <span className="tf-loop absolute -inset-1 animate-ping-soft rounded-full shadow-[0_0_0_2px_rgb(163_92_240/0.45)]" aria-hidden />}
+      {current && !blocked && <span className="tf-loop absolute -inset-1 animate-ping-soft rounded-full shadow-[0_0_0_2px_color-mix(in_srgb,var(--color-accent)_45%,transparent)]" aria-hidden />}
     </span>
   );
 }
@@ -210,7 +210,7 @@ export function ShipStepper({ stage, blocked, dots = false }: { stage: number; b
             aria-label={`${s.label}: ${done ? "done" : i === stage ? (blocked ? "blocked" : "next") : "to do"}`}
           >
             {i > 0 && (
-              <span className={cn("absolute right-1/2 h-0.5 w-full -translate-y-1/2 overflow-hidden rounded-full bg-white/8", dots ? "top-[11px]" : "top-[14px]")} aria-hidden>
+              <span className={cn("absolute right-1/2 h-0.5 w-full -translate-y-1/2 overflow-hidden rounded-full bg-ink/8", dots ? "top-[11px]" : "top-[14px]")} aria-hidden>
                 <motion.span className="block h-full bg-done/70" initial={false} animate={{ width: i <= stage ? "100%" : "0%" }} transition={spring.gentle} />
               </span>
             )}
@@ -239,7 +239,7 @@ export function ShipStrip({ state, onOpen }: { state: ShipState; onOpen: (stage:
         return (
           <li key={s.label} className="flex min-w-0 items-center" aria-current={i === state.stage ? "step" : undefined}>
             {i > 0 && (
-              <span className="mx-1 h-0.5 w-4 shrink overflow-hidden rounded-full bg-white/8 @3xl:w-7" aria-hidden>
+              <span className="mx-1 h-0.5 w-4 shrink overflow-hidden rounded-full bg-ink/8 @3xl:w-7" aria-hidden>
                 <motion.span className="block h-full bg-done/70" initial={false} animate={{ width: i <= state.stage ? "100%" : "0%" }} transition={spring.gentle} />
               </span>
             )}
@@ -248,7 +248,7 @@ export function ShipStrip({ state, onOpen }: { state: ShipState; onOpen: (stage:
               onClick={() => onOpen(i)}
               title={`Open the ship panel at ${s.label}`}
               aria-label={`${s.label}: ${done ? "done" : current ? (blocked ? "blocked" : "next") : "to do"}. Open the ship panel there`}
-              className="flex items-center gap-1.5 rounded-full py-0.5 pr-2 pl-0.5 transition-colors focus-ring hover:bg-white/[0.06]"
+              className="flex items-center gap-1.5 rounded-full py-0.5 pr-2 pl-0.5 transition-colors focus-ring hover:bg-ink/[0.06]"
             >
               <StageNode index={i} stage={state.stage} blocked={blocked} size={22} />
               <span className={cn("text-2xs font-semibold whitespace-nowrap transition-colors duration-500", done ? "text-done/80" : current ? (blocked ? "text-warn" : "font-bold text-ink") : "text-mute-2")}>{s.label}</span>
@@ -268,11 +268,11 @@ function Section({ icon, title, meta, active, done, stage, children }: { icon: R
       data-ship-stage={stage}
       className={cn(
         "scroll-my-3 rounded-lg p-3.5 transition-[background-color,box-shadow] duration-500",
-        active ? "bg-accent/[0.07] shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4),0_0_30px_-12px_rgb(163_92_240/0.6)]" : "bg-white/[0.03] shadow-hairline",
+        active ? "bg-accent/[0.07] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent),0_0_30px_-12px_color-mix(in_srgb,var(--color-accent)_60%,transparent)]" : "bg-ink/[0.03] shadow-hairline",
       )}
     >
       <header className="flex min-w-0 items-center gap-2">
-        <span className={cn("grid size-6 shrink-0 place-items-center rounded-sm [&_svg]:size-3.5", done ? "bg-done/15 text-done" : active ? "bg-omp text-white" : "bg-tile-3 text-mute")}>
+        <span className={cn("grid size-6 shrink-0 place-items-center rounded-sm [&_svg]:size-3.5", done ? "bg-done/15 text-done" : active ? "bg-omp text-on-accent" : "bg-tile-3 text-mute")}>
           <AnimatePresence initial={false} mode="popLayout">
             <motion.span key={done ? "done" : "todo"} className="grid place-items-center" initial={{ scale: 0.3, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.3, opacity: 0 }} transition={spring.bouncy}>
               {done ? <Check strokeWidth={3} /> : icon}
@@ -488,7 +488,7 @@ function AgentWriter({ hostId, agentId, afterId, onDone, onCancel }: { hostId: s
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="absolute inset-0 flex flex-col justify-between overflow-hidden rounded-md bg-bg-deep/92 p-3 shadow-[inset_0_0_0_1.5px_rgb(163_92_240/0.6)] backdrop-blur-sm"
+      className="absolute inset-0 flex flex-col justify-between overflow-hidden rounded-md bg-bg-deep/92 p-3 shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-accent)_60%,transparent)] backdrop-blur-sm"
       role="status"
       aria-live="polite"
     >
@@ -543,7 +543,7 @@ function PushCard({ hostId, cwd, status, unpushed, dirty, onPushed, active }: { 
       meta={status.upstream ? `${status.ahead} ahead${status.behind ? ` · ${status.behind} behind` : ""} of ${status.upstream}` : "no upstream yet"}
     >
       <div className="flex flex-col gap-2">
-        {err && <pre className="max-h-32 overflow-auto rounded-sm bg-error/10 p-2 font-mono text-2xs whitespace-pre-wrap text-[#ffb1c1]">{err}</pre>}
+        {err && <pre className="max-h-32 overflow-auto rounded-sm bg-error/10 p-2 font-mono text-2xs whitespace-pre-wrap text-error-ink">{err}</pre>}
         <div className="flex items-center gap-2">
           <span className="flex-1 text-xs text-mute">{dirty ? "Uncommitted changes stay local." : status.upstream ? "" : "Sets the upstream on first push."}</span>
           <Button size="sm" variant={active ? "primary" : "secondary"} icon={<ArrowUpFromLine />} onClick={() => void push()} loading={busy}>
@@ -668,10 +668,10 @@ function ChecksBar({ checks }: { checks: NonNullable<PrInfo["checks"]> }) {
   const seg = (n: number) => `${(n / total) * 100}%`;
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex h-2 overflow-hidden rounded-full bg-white/8" role="img" aria-label={`${checks.passed} passed, ${checks.failed} failed, ${checks.pending} pending`}>
+      <div className="flex h-2 overflow-hidden rounded-full bg-ink/8" role="img" aria-label={`${checks.passed} passed, ${checks.failed} failed, ${checks.pending} pending`}>
         <motion.span className="h-full bg-done" initial={false} animate={{ width: seg(checks.passed) }} transition={spring.smooth} />
         <motion.span className="h-full bg-error" initial={false} animate={{ width: seg(checks.failed) }} transition={spring.smooth} />
-        <motion.span className="tf-loop h-full animate-shimmer bg-[linear-gradient(90deg,#fbbf24,#fde68a,#fbbf24)] bg-[length:200%_100%]" initial={false} animate={{ width: seg(checks.pending) }} transition={spring.smooth} />
+        <motion.span className="tf-loop h-full animate-shimmer bg-[linear-gradient(90deg,var(--color-warn),var(--color-warn-ink),var(--color-warn))] bg-[length:200%_100%]" initial={false} animate={{ width: seg(checks.pending) }} transition={spring.smooth} />
       </div>
       <div className="flex gap-3 text-2xs font-bold tabular">
         <span className="text-done">{checks.passed} passed</span>
@@ -830,7 +830,7 @@ function DoneCard({ hostId, workspace, agents, merged }: { hostId: string; works
       initial={{ opacity: 0, scale: 0.94, y: 10 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       transition={spring.bouncy}
-      className="relative scroll-my-3 overflow-hidden rounded-lg p-4 text-white shadow-glow-done [background:radial-gradient(120%_140%_at_100%_0%,rgb(163_230_53/0.35),transparent_60%),linear-gradient(135deg,#1f3a12,#14261a)]"
+      className="relative scroll-my-3 overflow-hidden rounded-lg p-4 text-ink shadow-glow-done [background:radial-gradient(120%_140%_at_100%_0%,color-mix(in_srgb,var(--color-done)_35%,transparent),transparent_60%),linear-gradient(135deg,color-mix(in_oklab,var(--color-done)_20%,var(--color-tile-2)),color-mix(in_oklab,var(--color-done-2)_12%,var(--color-tile-1)))]"
     >
       {Array.from({ length: 14 }, (_, i) => (
         <motion.span
@@ -844,7 +844,7 @@ function DoneCard({ hostId, workspace, agents, merged }: { hostId: string; works
         />
       ))}
       <p className="font-display text-lg font-bold">Shipped 🎉</p>
-      <p className="mt-0.5 mb-3 text-xs text-white/75">The PR is merged. {live.length > 0 ? "Mark it done?" : "All done here."}</p>
+      <p className="mt-0.5 mb-3 text-xs text-ink/75">The PR is merged. {live.length > 0 ? "Mark it done?" : "All done here."}</p>
       {actions}
     </motion.section>
   );

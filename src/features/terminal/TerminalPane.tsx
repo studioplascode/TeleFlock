@@ -19,6 +19,7 @@ import {
   StatusOrb,
   type Status,
   cn,
+  onThemeChange,
   spring,
   toast,
   useActivity,
@@ -32,6 +33,7 @@ import { herdrDown } from "@/features/hosts/herdrHealth";
 import { haptic } from "@/features/shell/haptics";
 import { PHASE_LABEL } from "@/features/shell/status";
 import { localhostUrlRanges } from "./frames";
+import { ImeCommits } from "./imeCommit";
 import { pastePathsInput, pastedMedia, pasteTextInput, pathsText, readClipboard } from "./mediaPaste";
 import { ExtraKeys, type ExtraKey, type ModLatch, type ModState } from "./ExtraKeys";
 import { applyMods, encodeKey } from "./keys";
@@ -223,7 +225,7 @@ export function TerminalPane({
       fontFamily: TERM_FONT_FAMILY,
       fontSize: fontSizeRef.current,
       lineHeight: 1.12,
-      theme: termTheme,
+      theme: termTheme(),
       cursorBlink: interactive,
       cursorStyle: "bar",
       cursorInactiveStyle: "outline",
@@ -295,6 +297,16 @@ export function TerminalPane({
     // A fresh xterm per attachment (target / mode / host): retargeting a live instance with
     // `reset()` left the WebGL renderer drawing nothing for the new pane.
   }, [interactive, compact, hostId, targetKey, mode]);
+
+  // A theme change repaints the palette in place.
+  useEffect(
+    () =>
+      onThemeChange(() => {
+        const term = termRef.current;
+        if (term) term.options.theme = termTheme();
+      }),
+    [],
+  );
 
   /* ---------- renderer: WebGL unless the user opted out (board tiles stay on DOM: browsers cap live WebGL contexts) ---------- */
   useEffect(() => {
@@ -671,6 +683,39 @@ export function TerminalPane({
     wrap.addEventListener("paste", onPaste, true);
     return () => wrap.removeEventListener("paste", onPaste, true);
   }, [inst, interactive, sendMedia, sendText]);
+  // An input-method commit WebKitGTK inserts with no compositionstart (imeCommit.ts): sent from
+  // here once, the textarea put back as it was, so xterm neither repeats stale text nor sends it twice.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    const term = termRef.current;
+    if (!inst || !wrap || !term || !interactive) return;
+    const commits = new ImeCommits();
+    const field = (e: Event) => (e.target instanceof HTMLTextAreaElement && term.element?.contains(e.target) ? e.target : null);
+    const onStart = (e: CompositionEvent) => {
+      if (field(e)) commits.start();
+    };
+    const onBeforeInput = (e: InputEvent) => {
+      const ta = field(e);
+      if (ta) commits.beforeInput(e.inputType, ta.value);
+    };
+    const onEnd = (e: CompositionEvent) => {
+      const ta = field(e);
+      const lone = ta ? commits.end(e.data) : null;
+      if (!ta || !lone) return;
+      // Before xterm's own handler (capture phase on an ancestor): it would send the stale text.
+      e.stopPropagation();
+      ta.value = lone.before;
+      if (lone.text) term.input(lone.text, true);
+    };
+    wrap.addEventListener("compositionstart", onStart, true);
+    wrap.addEventListener("beforeinput", onBeforeInput, true);
+    wrap.addEventListener("compositionend", onEnd, true);
+    return () => {
+      wrap.removeEventListener("compositionstart", onStart, true);
+      wrap.removeEventListener("beforeinput", onBeforeInput, true);
+      wrap.removeEventListener("compositionend", onEnd, true);
+    };
+  }, [inst, interactive]);
   // Another attachment (pane, mode, host) or unmount: drop what was on its way to this one.
   useEffect(() => () => uploads.cancel(), [uploads, inst]);
 
@@ -927,7 +972,7 @@ export function TerminalPane({
   }, [chip.label]);
   const chipOpen = !live || peek;
 
-  const frameStyle = useMemo<CSSProperties>(() => ({ backgroundColor: termTheme.background }), []);
+  const frameStyle = useMemo<CSSProperties>(() => ({ backgroundColor: "var(--term-bg)" }), []);
 
   const body = (
     <div

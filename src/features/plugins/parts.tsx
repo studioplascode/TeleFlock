@@ -27,14 +27,14 @@ export function GroupHeader({ title, detail, count, action }: { title: string; d
 
 /** The icon tile at the start of a row. */
 export function Glyph({ children, dim, className }: { children: ReactNode; dim?: boolean; className?: string }) {
-  return <span className={cn("grid size-9 shrink-0 place-items-center rounded-md bg-white/[0.045] text-mute shadow-hairline [&_svg]:size-4", dim && "opacity-60", className)}>{children}</span>;
+  return <span className={cn("grid size-9 shrink-0 place-items-center rounded-md bg-ink/[0.045] text-mute shadow-hairline [&_svg]:size-4", dim && "opacity-60", className)}>{children}</span>;
 }
 
 const TAG_TONE = {
-  neutral: "bg-white/6 text-mute",
+  neutral: "bg-ink/6 text-mute",
   project: "bg-review/12 text-review",
   warn: "bg-warn/12 text-warn",
-  error: "bg-error/14 text-[#ff8aa5]",
+  error: "bg-error/14 text-error-ink",
   accent: "bg-accent/14 text-accent-ink",
 } as const;
 
@@ -52,7 +52,7 @@ export function UpdateBadge({ to, title }: { to: string; title?: string }) {
   return (
     <span
       title={title ?? `${to} is available`}
-      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-accent/14 px-2 text-[11px] font-bold whitespace-nowrap text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.3)]"
+      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-accent/14 px-2 text-[11px] font-bold whitespace-nowrap text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_30%,transparent)]"
     >
       <ArrowUpCircle className="size-3" aria-hidden />
       {to}
@@ -71,7 +71,7 @@ export function ProvidesChips({ provides, className }: { provides: readonly stri
   return (
     <span className={cn("flex min-w-0 flex-wrap gap-1", className)}>
       {provides.map((p) => (
-        <span key={p} className="rounded-full bg-white/[0.05] px-1.5 py-px text-[10px] font-semibold text-mute shadow-hairline">
+        <span key={p} className="rounded-full bg-ink/[0.05] px-1.5 py-px text-[10px] font-semibold text-mute shadow-hairline">
           {PROVIDES[p] ?? p}
         </span>
       ))}

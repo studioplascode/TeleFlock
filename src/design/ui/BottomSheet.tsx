@@ -87,7 +87,7 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
               >
                 {/* Separate layer: an `opacity` MotionValue in `style` would fight the fade above. The blur
                     stays on the fading parent: WebView drops a child's backdrop-filter while the parent fades. */}
-                <motion.div className="absolute inset-0 bg-[rgb(8_8_12/0.6)]" style={{ opacity: scrim }} />
+                <motion.div className="absolute inset-0 bg-scrim/60" style={{ opacity: scrim }} />
               </motion.div>
             </RadixDialog.Overlay>
             <RadixDialog.Content
@@ -101,7 +101,7 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
             >
               <motion.div
                 className={cn(
-                  "fixed inset-x-0 bottom-[var(--kb-inset,0px)] z-modal mx-auto flex w-full max-w-[640px] flex-col rounded-t-sheet bg-[linear-gradient(180deg,#21212d,#16161e)] shadow-[0_-24px_60px_rgb(0_0_0/0.65),inset_0_1px_0_rgb(255_255_255/0.09)] outline-none",
+                  "fixed inset-x-0 bottom-[var(--kb-inset,0px)] z-modal mx-auto flex w-full max-w-[640px] flex-col rounded-t-sheet bg-[linear-gradient(180deg,var(--color-sheet-1),var(--color-sheet-2))] shadow-[0_-24px_60px_rgb(0_0_0/0.65),inset_0_1px_0_rgb(255_255_255/0.09)] outline-none",
                   className,
                 )}
                 style={{ y, maxHeight: `calc(${maxHeight} - var(--kb-inset, 0px))` }}
@@ -120,7 +120,7 @@ export function BottomSheet({ open, onOpenChange, title, description, footer, ch
                   className="shrink-0 cursor-grab touch-none px-4 pt-2 pb-2.5 active:cursor-grabbing"
                   onPointerDown={(e) => controls.start(e)}
                 >
-                  <div className="mx-auto mb-2.5 h-1 w-10 rounded-full bg-white/25" aria-hidden />
+                  <div className="mx-auto mb-2.5 h-1 w-10 rounded-full bg-ink/25" aria-hidden />
                   <RadixDialog.Title className="font-display text-xl font-bold tracking-[-0.025em]">{title}</RadixDialog.Title>
                   {description ? (
                     <RadixDialog.Description className="mt-0.5 text-xs text-mute">{description}</RadixDialog.Description>

@@ -9,7 +9,7 @@ export const DialogTrigger = RadixDialog.Trigger;
 export const DialogClose = RadixDialog.Close;
 
 /** Blurred scrim used by Dialog, BottomSheet and the command palette. */
-export const overlayClass = "tf-fade fixed inset-0 z-overlay bg-[rgb(8_8_12/0.55)] backdrop-blur-md";
+export const overlayClass = "tf-fade fixed inset-0 z-overlay bg-scrim/55 backdrop-blur-md";
 
 export interface DialogContentProps extends Omit<RadixDialog.DialogContentProps, "title"> {
   title: ReactNode;
@@ -35,7 +35,7 @@ export function DialogContent({ title, description, icon, footer, hideClose, wid
       <RadixDialog.Overlay className={overlayClass} />
       <RadixDialog.Content
         className={cn(
-          "tf-dialog fixed top-1/2 left-1/2 z-modal flex max-h-[calc(100dvh-48px)] w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-sheet bg-[linear-gradient(180deg,#1f1f2b,#17171f)] p-6 shadow-[var(--shadow-d3),0_0_0_1px_rgb(255_255_255/0.08)] outline-none",
+          "tf-dialog fixed top-1/2 left-1/2 z-modal flex max-h-[calc(100dvh-48px)] w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-sheet bg-[linear-gradient(180deg,var(--color-sheet-1),var(--color-sheet-2))] p-6 shadow-[var(--shadow-d3),0_0_0_1px_color-mix(in_srgb,var(--color-ink)_8%,transparent)] outline-none",
           className,
         )}
         style={{ maxWidth: width, ...style }}
@@ -52,7 +52,7 @@ export function DialogContent({ title, description, icon, footer, hideClose, wid
       >
         <div className="flex items-start gap-3.5">
           {icon && (
-            <div className="grid size-[42px] shrink-0 place-items-center rounded-md bg-omp text-white shadow-glow-accent [&_svg]:size-5">{icon}</div>
+            <div className="grid size-[42px] shrink-0 place-items-center rounded-md bg-omp text-on-accent shadow-glow-accent [&_svg]:size-5">{icon}</div>
           )}
           <div className="min-w-0 flex-1">
             <RadixDialog.Title className="font-display text-2xl font-bold">{title}</RadixDialog.Title>

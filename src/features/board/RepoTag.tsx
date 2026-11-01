@@ -55,7 +55,7 @@ export function RepoTag({ hostId, repo, branch, cwd, sunset = false, className }
               ? "bg-[rgb(40_0_20/0.28)] text-white"
               : accent
                 ? "bg-[color-mix(in_oklab,var(--repo)_14%,transparent)] text-[var(--repo)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--repo)_30%,transparent)]"
-                : "bg-white/6 text-ink-2",
+                : "bg-ink/6 text-ink-2",
           )}
         >
           <Icon className={cn("size-3 shrink-0", !accent && !sunset && "text-mute")} aria-hidden />

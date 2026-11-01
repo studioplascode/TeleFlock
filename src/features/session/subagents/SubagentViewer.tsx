@@ -24,6 +24,7 @@ import {
   tween,
   useIsMobile,
 } from "@/design";
+import { HostBadge } from "@/features/hosts/HostBadge";
 import { errorText, hostCall, usePending } from "../api";
 import { SessionCtx } from "../context";
 import { IrcSelfCtx } from "../irc/IrcBubble";
@@ -83,7 +84,7 @@ export function SubagentViewer({ agentKey }: { agentKey: string }) {
           <RadixDialog.Portal forceMount>
             <RadixDialog.Overlay asChild forceMount>
               <motion.div
-                className="fixed inset-0 z-overlay bg-[rgb(8_8_12/0.55)] backdrop-blur-[3px]"
+                className="fixed inset-0 z-overlay bg-scrim/55 backdrop-blur-[3px]"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -122,8 +123,8 @@ export function SubagentViewer({ agentKey }: { agentKey: string }) {
                 className={cn(
                   "fixed z-modal flex flex-col overflow-hidden outline-none",
                   mobile
-                    ? "inset-x-0 top-0 bottom-[var(--kb-inset,0px)] bg-[linear-gradient(180deg,#1d1d28,#141419)] pt-[env(safe-area-inset-top)]"
-                    : "inset-y-3 right-3 w-[min(calc(100vw-24px),max(760px,60vw),1280px)] rounded-[28px] bg-[linear-gradient(180deg,#1f1f2b,#16161e)] shadow-[var(--shadow-d3),0_0_0_1px_rgb(255_255_255/0.08)]",
+                    ? "inset-x-0 top-0 bottom-[var(--kb-inset,0px)] bg-[linear-gradient(180deg,var(--color-sheet-1),var(--color-sheet-2))] pt-[env(safe-area-inset-top)]"
+                    : "inset-y-3 right-3 w-[min(calc(100vw-24px),max(760px,60vw),1280px)] rounded-[28px] bg-[linear-gradient(180deg,var(--color-sheet-1),var(--color-sheet-2))] shadow-[var(--shadow-d3),0_0_0_1px_color-mix(in_srgb,var(--color-ink)_8%,transparent)]",
                 )}
                 initial={mobile ? { y: "100%" } : { x: "calc(100% + 24px)" }}
                 animate={mobile ? { y: 0 } : { x: 0 }}
@@ -176,7 +177,7 @@ function SubagentPanel({ agentKey, sub, mobile, position, onPrev, onNext }: Pane
 
   return (
     <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
-      <Header sub={sub} mobile={mobile} position={position} onPrev={onPrev} onNext={onNext} acting={acting} blocked={blocked} onAct={(a) => void act(a)} extra={<SubagentRetry agentKey={agentKey} sub={sub} blocked={blocked} onDone={refresh} />} />
+      <Header hostId={hostId} sub={sub} mobile={mobile} position={position} onPrev={onPrev} onNext={onNext} acting={acting} blocked={blocked} onAct={(a) => void act(a)} extra={<SubagentRetry agentKey={agentKey} sub={sub} blocked={blocked} onDone={refresh} />} />
       <div className="relative flex min-h-0 flex-1 flex-col">
         {error && snap && (
           <div role="status" className="absolute inset-x-0 top-2 z-raised mx-auto flex w-fit items-center gap-2 rounded-full glass-blur px-3 py-1.5 text-2xs font-semibold text-warn shadow-d2">
@@ -220,6 +221,8 @@ function SubagentPanel({ agentKey, sub, mobile, position, onPrev, onNext }: Pane
 // ------------------------------------------------------------------ header
 
 interface HeaderProps {
+  /** The parent agent's host. */
+  hostId: string;
   sub: Subagent;
   mobile: boolean;
   position: PanelProps["position"];
@@ -232,7 +235,7 @@ interface HeaderProps {
   extra?: ReactNode;
 }
 
-function Header({ sub, mobile, position, onPrev, onNext, acting, blocked, onAct, extra }: HeaderProps) {
+function Header({ hostId, sub, mobile, position, onPrev, onNext, acting, blocked, onAct, extra }: HeaderProps) {
   const running = sub.status === "running";
   const status = SUB_STATUS[sub.status];
   const activity = running ? "busy" : "silent";
@@ -305,7 +308,8 @@ function Header({ sub, mobile, position, onPrev, onNext, acting, blocked, onAct,
       <RadixDialog.Description className="sr-only">Transcript and controls of the subagent {sub.name}</RadixDialog.Description>
       {sub.description && <Description key={sub.description} text={sub.description} />}
       <div className={cn("flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-mute", mobile ? "mt-2" : "mt-3")}>
-        {sub.model && <span className="max-w-full truncate rounded-full bg-white/[0.05] px-2 py-0.5 font-mono text-[11px] text-ink-2 shadow-hairline">{sub.model}</span>}
+        <HostBadge hostId={hostId} className="max-w-[14rem]" />
+        {sub.model && <span className="max-w-full truncate rounded-full bg-ink/[0.05] px-2 py-0.5 font-mono text-[11px] text-ink-2 shadow-hairline">{sub.model}</span>}
         {stats.map((s) => (
           <span key={s.key} className="whitespace-nowrap">
             <b className="font-bold text-ink-2 tabular">{s.value}</b> {s.label}

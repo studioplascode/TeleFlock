@@ -30,6 +30,7 @@
 //! where they were. Live-only: info notices, retry streaks and progress a tool reports after its
 //! result (async `task` calls of omp < 18.13, whose late updates refresh the row's view).
 
+mod ask_context;
 mod failure;
 mod irc;
 mod live_rows;
@@ -66,6 +67,8 @@ pub const RESET_LIMIT: usize = 300;
 /// Cap for a tool row's `output` (the tail is kept).
 pub const OUTPUT_CAP: usize = 256 * 1024;
 const TPS_WINDOW_MS: i64 = 3000;
+/// Session entries the replica remembers by id ([`Replica::knows_entry`]): the newest this many.
+const ENTRY_MEMORY: usize = 256;
 /// `customType` of omp's hidden companion to a TUI-pasted image (`details: {index, path}`, sharing
 /// the user row's timestamp): `path` is the file as pasted, before omp downscaled it.
 const IMAGE_ATTACHMENT: &str = "image-attachment";
@@ -369,6 +372,9 @@ pub struct Replica {
     /// How the last run ended when it failed (omp's error text), until the next run starts.
     tail_error: Option<String>,
     counted: HashSet<String>,
+    /// Ids of the newest session entries applied ([`ENTRY_MEMORY`] of them, oldest first): tf-hostd
+    /// compares them with omp's session file ([`Replica::knows_entry`]).
+    recent_entries: VecDeque<String>,
     /// The main agent's assistant turns (`None` until the first usage record).
     main_spend: Option<Spend>,
     /// Completed `task` results (`details.usage`): the floor of the subagent spend.
@@ -447,6 +453,7 @@ impl Replica {
             retry_wait: None,
             tail_error: None,
             counted: HashSet::new(),
+            recent_entries: VecDeque::new(),
             main_spend: None,
             task_spend: Spend::default(),
             outcomes: BTreeMap::new(),
@@ -637,6 +644,28 @@ impl Replica {
 
     pub fn is_streaming(&self) -> bool {
         self.running
+    }
+
+    /// Whether the copy shows work in flight: a turn running (its own, or omp's state says so). A
+    /// copy that missed the end of a turn still has it running after omp went idle. Rows alone never
+    /// count: a turn's end settles every row it left in flight (streaming rows end, open calls
+    /// fail), so a row in flight outside a turn is one no run will finish, such as the call of an
+    /// attempt that failed mid-reply and was retried, which a copy rebuilt from omp's file keeps
+    /// queued for good (no repair could settle it).
+    pub fn at_work(&self) -> bool {
+        self.running || self.state.is_streaming
+    }
+
+    /// The session entry `id` (omp's `id` of a `message`, `custom_message`, `compaction`, … entry)
+    /// is among the newest ones this replica applied.
+    pub fn knows_entry(&self, id: &str) -> bool {
+        self.recent_entries.iter().rev().any(|e| e == id)
+    }
+
+    /// The agent roster as omp last sent it (its main agent and subagents), for a snapshot rebuilt
+    /// without omp's own `agents` frame.
+    pub fn agents(&self) -> Vec<AgentSnapshot> {
+        self.subs.values().filter_map(|s| s.snapshot.clone()).collect()
     }
 
     pub fn read_only(&self) -> bool {
@@ -995,8 +1024,8 @@ impl Replica {
                 out.pulse(PulseKind::Event, 1);
             }
             HostFrame::UiRequest { request } => {
-                let (call_id, recommended) = self.call_for_request(request);
-                self.ui.request(request, call_id, recommended, self.now);
+                let call = self.call_for_request(request);
+                self.ui.request(request, &call, self.now);
             }
             HostFrame::UiRequestEnd { req_id } => self.ui.end(*req_id),
             HostFrame::Bye { reason } => self.end(reason.clone(), out),
@@ -1834,10 +1863,11 @@ impl Replica {
         self.tool_finish(&call_id, &name, &result, b(msg, "isError"), ended_at, effects, out);
     }
 
-    /// Which tool call a ui-request belongs to (ask tool / approval) and, for an ask question, the
-    /// index of its ★ recommended option: the call's `questions[].recommended`, which omp's ask
-    /// dialog only shows as the initially selected row (`initialIndex`, also 0 without one).
-    fn call_for_request(&self, req: &UiRequestFrame) -> (Option<String>, Option<usize>) {
+    /// Which tool call a ui-request belongs to (ask tool / approval); for an ask question, the index
+    /// of its ★ recommended option: the call's `questions[].recommended`, which omp's ask dialog
+    /// only shows as the initially selected row (`initialIndex`, also 0 without one); and what the
+    /// agent wrote before asking.
+    fn call_for_request(&self, req: &UiRequestFrame) -> ui::RequestCall {
         let title = req.title();
         if let Some(rest) = title.strip_prefix("Allow tool: ") {
             let tool = first_line(rest);
@@ -1848,7 +1878,7 @@ impl Replica {
                 .find(|(c, a)| a.name == tool || self.tools.get(c).is_some_and(|t| t.name == tool))
                 .map(|(c, _)| c.clone())
                 .or_else(|| self.open_tool_named(tool));
-            return (call, None);
+            return ui::RequestCall { call_id: call, ..ui::RequestCall::default() };
         }
         let q = title.strip_prefix("Custom answer: ").unwrap_or(title);
         self.order
@@ -1859,11 +1889,12 @@ impl Replica {
                 Some(TranscriptItem::Tool(t)) if t.tool == "ask" && matches!(t.status, ToolStatus::Pending | ToolStatus::Running) => {
                     let question = arr(&t.args, "questions").iter().find(|qq| s(qq, "question") == Some(q))?;
                     let recommended = question.get("recommended").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
-                    Some((Some(t.call_id.clone()), recommended))
+                    let context = ask_context::ask_context(&self.order, &self.items, &t.id);
+                    Some(ui::RequestCall { call_id: Some(t.call_id.clone()), recommended, context: Some(context) })
                 }
                 _ => None,
             })
-            .unwrap_or((None, None))
+            .unwrap_or_default()
     }
 
     fn open_tool_named(&self, tool: &str) -> Option<String> {
@@ -1880,6 +1911,12 @@ impl Replica {
     fn entry(&mut self, entry: &Value, out: &mut Update) {
         let entry_id = s(entry, "id").unwrap_or("").to_owned();
         let at = ts(entry).unwrap_or(self.now);
+        if !entry_id.is_empty() && !self.knows_entry(&entry_id) {
+            if self.recent_entries.len() >= ENTRY_MEMORY {
+                self.recent_entries.pop_front();
+            }
+            self.recent_entries.push_back(entry_id.clone());
+        }
         match s(entry, "type").unwrap_or("") {
             "message" => {
                 let Some(msg) = entry.get("message") else { return };

@@ -52,8 +52,13 @@ import type {
  *           through omp's retry), so hostd repeats nothing unsafe to run twice.
  *         - (no flag; a fix) every frame is well-formed JSON: half surrogate pairs go out as U+FFFD,
  *           and a resync too large even clipped is still a resync (hostd repairs 2.0.0's lines).
+ *  2.2.0: (no flag) the ask dialog's guest flow goes back between questions like omp's TUI (←): each
+ *         question of a multi-question ask carries `nav` (place, the `back` value, the answer it
+ *         already has), and an earlier question reopens with its answer preselected.
+ *         (no flag) `<home>/forward/bin` goes first on the omp process's PATH (`preferForwardedTools`),
+ *         so agents call tools forwarded from another host by name.
  */
-const BRIDGE_VERSION = "2.1.0";
+const BRIDGE_VERSION = "2.2.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -144,6 +149,19 @@ const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z
  */
 function hostdHome(): string {
 	return deployedHome() ?? (process.env.TF_HOSTD_HOME || path.join(os.homedir(), ".teleflock"));
+}
+
+/**
+ * Forwarded tools first: `<home>/forward/bin` (tf-hostd's tool shims and `tf-forward`, architecture
+ * §3.30) goes to the front of this omp process's PATH, so the agent's commands reach a tool another
+ * host forwards by its plain name. Idempotent across bridge copies; the directory may appear later
+ * (the shims follow what TeleFlock apps relay).
+ */
+function preferForwardedTools(home: string): void {
+	const dir = path.join(home, "forward", "bin");
+	const sep = process.platform === "win32" ? ";" : ":";
+	const rest = (process.env.PATH ?? "").split(sep).filter(p => p && path.resolve(p) !== path.resolve(dir));
+	process.env.PATH = [dir, ...rest].join(sep);
 }
 
 /**
@@ -1144,6 +1162,11 @@ export class LiveTracker {
 // collab `ui-request` (select or editor) and answers with the collab `ui-response` value.
 
 type WireSelectItem = string | { label: string; description?: string };
+/** 2.2.0: where a question of a multi-question ask stands (TeleFlock's addition to omp's collab
+ *  `ui-request`): its 0-based `index` of `total`, the `ui-response` value that goes `back` to the
+ *  previous question (from the second on), and the `answer` it already has (option labels as shown,
+ *  the "Other" text). */
+export type AskNav = { index: number; total: number; back?: string; answer?: { choices: string[]; text?: string } };
 export type DialogDraft =
 	| {
 			kind: "select";
@@ -1154,8 +1177,9 @@ export type DialogDraft =
 			checkedIndices?: number[];
 			markableCount?: number;
 			helpText?: string;
+			nav?: AskNav;
 	  }
-	| { kind: "editor"; title: string; prefill?: string };
+	| { kind: "editor"; title: string; prefill?: string; nav?: AskNav };
 export type DialogRequest = DialogDraft & { reqId: number };
 /** `answered` carries hostd's value (`undefined` is an explicit cancel); `unavailable` means no answer
  *  will come (the dialog was settled locally, aborted, or this bridge stood down). */
@@ -1256,10 +1280,14 @@ export async function raceDialog<T>(
 
 // The ask tool's dialog, offered to hostd as omp offers it to collab guests: one select per
 // question (radio, or a checkbox loop toggling one label per round), "Other" followed by a
-// "Custom answer:" editor, "Chat about this" ending the ask as chat.
+// "Custom answer:" editor, "Chat about this" ending the ask as chat. 2.2.0: the questions of a
+// multi-question ask carry `nav`, and answering its `back` value goes back a question, which
+// reopens with its answer, as omp's TUI goes back with ← (`tools/ask.ts`).
 const ASK_OTHER = "Other (type your own)";
 const ASK_CHAT = "Chat about this";
 const ASK_NEXT = "Next →";
+/** `nav.back`: no option shows it (the sentinels are reserved labels) and nobody types it. */
+const ASK_BACK = "\u0000back";
 const CUSTOM_ANSWER = "Custom answer: ";
 
 export interface AskQuestion {
@@ -1332,15 +1360,19 @@ async function requestString(hub: DialogHub, draft: DialogDraft, signal: AbortSi
 	return typeof result.value === "string" ? { kind: "answered", value: result.value } : { kind: "cancelled" };
 }
 
-async function guestAskQuestion(
-	hub: DialogHub,
-	question: AskQuestion,
-	signal: AbortSignal,
-): Promise<AskResultItem | "chat" | "unavailable" | undefined> {
-	const selected = new Set<string>();
-	let customInput: string | undefined;
+/** A question's place in a multi-question ask, and the answer it had when Back reopens it. */
+interface AskPlace {
+	index: number;
+	total: number;
+	earlier?: AskResultItem;
+}
+
+/** A question's answer, or `back` with what it had so far (kept for when it comes up again). */
+type GuestAnswer = AskResultItem | { back: AskResultItem } | "chat" | "unavailable" | undefined;
+
+async function guestAskQuestion(hub: DialogHub, question: AskQuestion, signal: AbortSignal, place?: AskPlace): Promise<GuestAnswer> {
 	const labels = question.options.map(o => o.label);
-	const shown = displayLabels(labels, [ASK_OTHER, ASK_CHAT, ASK_NEXT]);
+	const shown = displayLabels(labels, [ASK_OTHER, ASK_CHAT, ASK_NEXT, ASK_BACK]);
 	const original = new Map<string, string>();
 	shown.forEach((label, i) => original.set(label, labels[i]!));
 	const resolveLabel = (value: string): string => original.get(value) ?? value;
@@ -1350,6 +1382,36 @@ async function guestAskQuestion(
 	const base: WireSelectItem[] = question.options.map((o, i) =>
 		o.description?.trim() ? { label: shown[i]!, description: sanitizeCR(o.description.trim()) } : shown[i]!,
 	);
+	const earlier = place?.earlier;
+	// A question Back reopens starts from its answer, as in omp's TUI. A multi-select's earlier
+	// "Other" text only prefills its editor: submitting new ticks alone drops it.
+	const selected = new Set<string>(earlier?.selectedOptions ?? []);
+	let customInput = question.multi ? undefined : earlier?.customInput;
+	const typed = (): string | undefined => customInput ?? earlier?.customInput;
+	const canBack = place !== undefined && place.index > 0;
+	const nav = (): { nav?: AskNav } => {
+		if (!place) return {};
+		const choices = shown.filter((_, i) => selected.has(labels[i]!));
+		const text = typed();
+		const answer = choices.length > 0 || text !== undefined ? { answer: { choices, ...(text !== undefined ? { text } : {}) } } : {};
+		return { nav: { index: place.index, total: place.total, ...(canBack ? { back: ASK_BACK } : {}), ...answer } };
+	};
+	const isBack = (value: string): boolean => canBack && value === ASK_BACK;
+	const result = (): AskResultItem => ({
+		id: question.id,
+		question: question.question,
+		options: labels,
+		multi: question.multi ?? false,
+		selectedOptions: labels.filter(label => selected.has(label)),
+		customInput,
+	});
+	const back = (): GuestAnswer => ({ back: { ...result(), customInput: typed() } });
+	/** The "Custom answer:" editor, prefilled with the text the question had. */
+	const other = async (): Promise<GuestString | { kind: "back" }> => {
+		const text = typed();
+		const input = await requestString(hub, { kind: "editor", title: customTitle, ...(text !== undefined ? { prefill: text } : {}), ...nav() }, signal);
+		return input.kind === "answered" && isBack(input.value) ? { kind: "back" } : input;
+	};
 	if (question.multi) {
 		for (;;) {
 			const checkedIndices = labels.map((label, i) => (selected.has(label) ? i : -1)).filter(i => i >= 0);
@@ -1367,16 +1429,19 @@ async function guestAskQuestion(
 					checkedIndices,
 					markableCount: question.options.length,
 					helpText: askHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
+					...nav(),
 				},
 				signal,
 			);
 			if (choice.kind === "unavailable") return "unavailable";
 			if (choice.kind === "cancelled") return undefined;
+			if (isBack(choice.value)) return back();
 			if (choice.value === ASK_CHAT) return "chat";
 			if (choice.value === ASK_NEXT) break;
 			if (choice.value === ASK_OTHER) {
-				const input = await requestString(hub, { kind: "editor", title: customTitle }, signal);
+				const input = await other();
 				if (input.kind === "unavailable") return "unavailable";
+				if (input.kind === "back") return back();
 				if (input.kind === "cancelled") continue;
 				customInput = input.value;
 				break;
@@ -1387,7 +1452,10 @@ async function guestAskQuestion(
 		}
 	} else {
 		const recommended = typeof question.recommended === "number" && Number.isInteger(question.recommended) ? question.recommended : 0;
-		const initialIndex = Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
+		// The earlier answer's row ("Other" for a typed one), else the recommendation.
+		const answered = labels.findIndex(label => selected.has(label));
+		const initialIndex =
+			answered >= 0 ? answered : customInput !== undefined ? base.length : Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
 		for (;;) {
 			const choice = await requestString(
 				hub,
@@ -1399,43 +1467,52 @@ async function guestAskQuestion(
 					selectionMarker: "radio",
 					markableCount: question.options.length,
 					helpText: askHelpText("select"),
+					...nav(),
 				},
 				signal,
 			);
 			if (choice.kind === "unavailable") return "unavailable";
 			if (choice.kind === "cancelled") return undefined;
+			if (isBack(choice.value)) return back();
 			if (choice.value === ASK_CHAT) return "chat";
 			if (choice.value === ASK_OTHER) {
-				const input = await requestString(hub, { kind: "editor", title: customTitle }, signal);
+				const input = await other();
 				if (input.kind === "unavailable") return "unavailable";
+				if (input.kind === "back") return back();
 				if (input.kind === "cancelled") continue;
+				selected.clear();
 				customInput = input.value;
 			} else {
+				selected.clear();
 				selected.add(resolveLabel(choice.value));
+				customInput = undefined;
 			}
 			break;
 		}
 	}
-	return {
-		id: question.id,
-		question: question.question,
-		options: labels,
-		multi: question.multi ?? false,
-		selectedOptions: labels.filter(label => selected.has(label)),
-		customInput,
-	};
+	return result();
 }
 
-/** The guest side of omp's ask dialog, question by question; `unavailable` when no answer came. */
+/** The guest side of omp's ask dialog, question by question; `unavailable` when no answer came.
+ *  Like omp's TUI, a question keeps its answer while the guest goes back and forth, and Back
+ *  reopens the previous one with what it had. */
 export async function runGuestAsk(hub: DialogHub, questions: AskQuestion[], signal: AbortSignal): Promise<AskResult | "unavailable" | undefined> {
-	const results: AskResultItem[] = [];
-	for (const question of questions) {
-		const result = await guestAskQuestion(hub, question, signal);
+	const answers: Array<AskResultItem | undefined> = [];
+	let index = 0;
+	while (index < questions.length) {
+		const place = questions.length > 1 ? { index, total: questions.length, earlier: answers[index] } : undefined;
+		const result = await guestAskQuestion(hub, questions[index]!, signal, place);
 		if (result === "unavailable" || result === undefined) return result;
 		if (result === "chat") return { kind: "chat" };
-		results.push(result);
+		if ("back" in result) {
+			answers[index] = result.back;
+			index = Math.max(0, index - 1);
+			continue;
+		}
+		answers[index] = result;
+		index += 1;
 	}
-	return { kind: "submit", results };
+	return { kind: "submit", results: answers as AskResultItem[] };
 }
 
 /** omp's ask dialog (`local`) against the guest flow above (omp's `showAskDialog`). */
@@ -3120,6 +3197,7 @@ export default async function teleflockBridge(pi: ExtensionAPI) {
 
 function bridge(pi: ExtensionAPI) {
 	const home = hostdHome();
+	preferForwardedTools(home);
 	const endpoint = bridgeEndpoint(home);
 	const secretPath = bridgeSecretPath(home);
 	const bridgeLog = (msg: string) => {

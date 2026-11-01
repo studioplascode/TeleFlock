@@ -3,10 +3,12 @@ import { pulseBus, termBus } from "./buses";
 import type { DemoClock } from "./demo/clock";
 import { DemoEngine } from "./demo/engine";
 import { toApiError } from "./errors";
+import { failureReporter } from "./failures";
 import { agentKey, parseAgentKey } from "./keys";
 import { navigate } from "./nav";
+import { SessionHealer } from "./sessionHeal";
 import { FrameBatcher } from "./store/batcher";
-import { reduceEvents } from "./store/reduce";
+import { reduceSafely } from "./store/reduceSafely";
 import type { CoreEvent, Effect } from "./store/state";
 import { coreStore } from "./store/store";
 import { createDemoTransport } from "./transport/demo";
@@ -76,10 +78,31 @@ let realTunnels: TunnelInfo[] = [];
 let demoTunnels: TunnelInfo[] = [];
 const rawListeners = new Set<(e: AppEvent) => void>();
 
+const rawListenerFailed = failureReporter("onAppEvent listener");
+const storeSubscriberFailed = failureReporter("store subscriber");
+const effectFailed = failureReporter("effect");
+
+/**
+ * One store update per frame. A bad event costs only itself (`reduceSafely`); a throwing store
+ * subscriber or effect is reported, and the frame's other effects still run.
+ */
 const batcher = new FrameBatcher<CoreEvent>((events) => {
-  const { state, effects } = reduceEvents(coreStore.getState(), events);
-  if (state !== coreStore.getState()) coreStore.setState(state, true);
-  for (const fx of effects) runEffect(fx);
+  const { state, effects } = reduceSafely(coreStore.getState(), events);
+  if (state !== coreStore.getState()) {
+    try {
+      coreStore.setState(state, true);
+    } catch (err) {
+      // zustand stores the state before it notifies: only the subscribers after the throwing one missed this update.
+      storeSubscriberFailed(err);
+    }
+  }
+  for (const fx of effects) {
+    try {
+      runEffect(fx);
+    } catch (err) {
+      effectFailed(err, fx.kind);
+    }
+  }
 });
 
 function ensureDemo(mode: "backend" | "embedded" = "embedded"): DemoEngine {
@@ -126,7 +149,18 @@ function ingest(e: AppEvent, source: "transport" | "demo"): void {
     demoTunnels = e.tunnels;
     e = { type: "tunnels", tunnels: [...realTunnels, ...demoTunnels] };
   }
-  for (const l of rawListeners) l(e);
+  if (e.type === "session") {
+    const key = agentKey(e.hostId, e.agentId);
+    if (sessionRefs.has(key)) sessionHeardAt.set(key, Date.now());
+  }
+  // Each listener on its own: one that throws costs neither the others nor the event itself.
+  for (const l of rawListeners) {
+    try {
+      l(e);
+    } catch (err) {
+      rawListenerFailed(err);
+    }
+  }
   if (e.type === "pulse") pulseBus.emit(e.hostId, e.at, e.pulses);
   else if (e.type === "term") termBus.emit(e.hostId, e.termId, e.ev);
   else batcher.push(e);
@@ -269,8 +303,18 @@ const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 /** The latest `session.open` per session: only its answer counts (an older one can fail late, closed meanwhile). */
 const sessionLoads = new Map<string, symbol>();
 const SESSION_LINGER_MS = 8000;
+/** When the last `session` event of each open session arrived (`ingest`): the self-heal waits for quiet. */
+const sessionHeardAt = new Map<string, number>();
+/** Re-opens open transcripts left disagreeing with host state (`sessionHeal.ts`); a timer only while a session is open. */
+const healer = new SessionHealer({
+  refs: sessionRefs,
+  heardAt: sessionHeardAt,
+  state: () => coreStore.getState(),
+  reopen: (key) => void loadSession(key, { keepOnError: true }),
+});
 
-async function loadSession(key: string): Promise<void> {
+/** `session.open` → reset. A failed open shows its error, unless `keepOnError` (a self-heal): the transcript stays as it was. */
+async function loadSession(key: string, opts: { keepOnError?: boolean } = {}): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
   const load = Symbol(key);
   sessionLoads.set(key, load);
@@ -281,6 +325,10 @@ async function loadSession(key: string): Promise<void> {
     pushInternal({ type: "session", hostId, agentId, ev: { k: "reset", snapshot } });
   } catch (err) {
     if (!sessionRefs.has(key) || sessionLoads.get(key) !== load) return;
+    if (opts.keepOnError) {
+      console.warn(`[core] re-opening ${key} failed; its transcript stays as it was`, err);
+      return;
+    }
     pushInternal({ type: "$sessionError", hostId, agentId, error: toApiError(err).toJSON() });
   } finally {
     if (sessionLoads.get(key) === load) sessionLoads.delete(key);
@@ -294,6 +342,7 @@ export function openSession(key: string): () => void {
   releaseTimers.delete(key);
   const n = sessionRefs.get(key) ?? 0;
   sessionRefs.set(key, n + 1);
+  healer.sync();
   if (n === 0 && coreStore.getState().sessions[key]?.status !== "live") void loadSession(key);
   let released = false;
   return () => {
@@ -305,12 +354,14 @@ export function openSession(key: string): () => void {
       return;
     }
     sessionRefs.set(key, 0);
+    healer.sync();
     releaseTimers.set(
       key,
       setTimeout(() => {
         releaseTimers.delete(key);
         if ((sessionRefs.get(key) ?? 0) > 0) return;
         sessionRefs.delete(key);
+        sessionHeardAt.delete(key);
         const { hostId, agentId } = parseAgentKey(key);
         pushInternal({ type: "$sessionDrop", hostId, agentId });
         core.host(hostId).call("session.close", { agentId }).catch(() => {});
@@ -325,6 +376,8 @@ export function closeSession(key: string): void {
   clearTimeout(releaseTimers.get(key));
   releaseTimers.delete(key);
   sessionRefs.delete(key);
+  sessionHeardAt.delete(key);
+  healer.sync();
   pushInternal({ type: "$sessionDrop", hostId, agentId });
   core.host(hostId).call("session.close", { agentId }).catch(() => {});
 }
@@ -389,6 +442,7 @@ async function bootstrap(t: CoreTransport): Promise<void> {
       realTunnels = r.tunnels;
       pushInternal({ type: "tunnels", tunnels: t.kind === "demo" ? realTunnels : [...realTunnels, ...demoTunnels] });
     }),
+    appCall("forward.list", {}).then((forwards) => pushInternal({ type: "forwards", forwards })),
   ];
   const results = await Promise.allSettled(tasks);
   for (const r of results) if (r.status === "rejected") console.warn("[core] bootstrap call failed", r.reason);
@@ -467,8 +521,14 @@ export function flushCoreEvents(): void {
   batcher.flushNow();
 }
 
+/** Test seam: one transcript self-heal check at `now` (the runtime runs one every 5 s while a session is open); returns the keys it re-opened. */
+export function checkSessionHeal(now?: number): string[] {
+  return healer.check(now);
+}
+
 // Dev only: a hot-reloaded core must not leave the previous demo engine ticking.
 import.meta.hot?.dispose(() => {
+  healer.stop();
   demo?.dispose();
   transport?.close?.();
 });

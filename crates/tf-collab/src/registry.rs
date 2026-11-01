@@ -79,8 +79,10 @@ pub struct HostEntry {
     pub relay_connected: bool,
     #[serde(default)]
     pub input_required: bool,
+    /// omp's `isStreaming`: its turn runs (tool execution included). `None` from an omp older than
+    /// the field: unknown, never idle.
     #[serde(default)]
-    pub busy: bool,
+    pub busy: Option<bool>,
     /// `control` | `view`.
     #[serde(default)]
     pub access: String,
@@ -673,7 +675,7 @@ mod tests {
         .unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
         let hosts: Vec<HostEntry> = serde_json::from_value(v["hosts"].clone()).unwrap();
-        assert!(hosts[0].input_required && hosts[0].busy);
+        assert!(hosts[0].input_required && hosts[0].busy == Some(true));
         assert_eq!(hosts[0].model.as_ref().unwrap().id, "gpt-6-luna");
     }
 }

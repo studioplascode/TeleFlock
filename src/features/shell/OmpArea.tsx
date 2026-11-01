@@ -32,7 +32,7 @@ export function OmpAreaNav({ current, hostId, className }: { current: OmpAreaPag
             }}
             className={cn(
               "flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-bold transition-colors focus-ring",
-              active ? "bg-accent/16 text-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]" : "text-mute hover:bg-white/6 hover:text-ink",
+              active ? "bg-accent/16 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "text-mute hover:bg-ink/6 hover:text-ink",
             )}
           >
             <Icon className="size-3.5" />

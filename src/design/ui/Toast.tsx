@@ -149,7 +149,7 @@ export function Toaster() {
               className={cn(
                 "relative inline-flex items-center font-extrabold pressable touch-hit focus-ring",
                 mobile ? "h-9 max-w-[42%] shrink-0 truncate rounded-md px-3.5 text-[13px]" : "mt-2.5 h-8 rounded-sm px-3 text-xs",
-                loud ? "bg-sun text-white" : "bg-tile-4 text-ink hover:bg-tile-5",
+                loud ? "bg-sun text-on-sun" : "bg-tile-4 text-ink hover:bg-tile-5",
               )}
             >
               <span className="truncate">{t.action.label}</span>
@@ -168,14 +168,14 @@ export function Toaster() {
             className={cn(
               "tf-toast pointer-events-auto relative flex w-full gap-3 rounded-xl shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)]",
               // Phones: opaque instead of a backdrop blur (cheaper to composite over a live screen).
-              mobile ? "items-center bg-[rgb(36_31_44/0.98)] py-2.5 pr-2.5 pl-3.5" : "items-start bg-[rgb(38_33_46/0.94)] p-3.5 pr-10 backdrop-blur-xl",
-              loud && "shadow-[var(--shadow-d3),0_0_0_1px_rgb(255_61_119/0.4),0_16px_40px_-10px_rgb(255_61_119/0.5)]",
+              mobile ? "items-center bg-float/98 py-2.5 pr-2.5 pl-3.5" : "items-start bg-float/94 p-3.5 pr-10 backdrop-blur-xl",
+              loud && "shadow-[var(--shadow-d3),0_0_0_1px_color-mix(in_srgb,var(--color-sun-2)_40%,transparent),0_16px_40px_-10px_color-mix(in_srgb,var(--color-sun-2)_50%,transparent)]",
             )}
           >
             {t.status && <StatusOrb status={t.status} size={9} className={mobile ? undefined : "mt-1.5"} label={null} />}
             {waiting > 0 && (
               <span
-                className="absolute -top-2 left-3 rounded-full bg-tile-5 px-1.5 py-px text-[10px] leading-none font-extrabold text-ink shadow-[0_0_0_1.5px_rgb(36_31_44)] tabular"
+                className="absolute -top-2 left-3 rounded-full bg-tile-5 px-1.5 py-px text-[10px] leading-none font-extrabold text-ink shadow-[0_0_0_1.5px_var(--color-float)] tabular"
                 aria-label={`${waiting} more`}
               >
                 +{waiting}
@@ -191,7 +191,7 @@ export function Toaster() {
               <RadixToast.Close
                 aria-label="Dismiss"
                 className={cn(
-                  "grid place-items-center rounded-xs text-mute-2 hover:bg-white/8 hover:text-ink touch-hit focus-ring",
+                  "grid place-items-center rounded-xs text-mute-2 hover:bg-ink/8 hover:text-ink touch-hit focus-ring",
                   mobile ? "relative size-8 shrink-0" : "absolute top-2.5 right-2.5 size-6",
                 )}
               >

@@ -92,6 +92,11 @@ Everything is also re-exported from `src/features/terminal/index.ts`.
 - Mobile extra keys: Esc/Ctrl/Alt pinned, the rest scrolls with edge fades; Ctrl/Alt tap = next key, double-tap or
   long-press = lock (haptic tick/select/heavy). Dimmed while detached. The row ends with Paste and an image button
   (picker for `image/*` and `video/*`, several at once) that pastes the picked files' host paths (below).
+- Input-method commits on Linux (`imeCommit.ts`): WebKitGTK inserts text an input method commits without a
+  preedit (an IBus/Fcitx engine such as a voice-input one, an emoji spelled for a synthetic keystroke) with a
+  `compositionend` but no `compositionstart`, and xterm then sent the commit followed by its textarea's stale
+  contents. Such a commit is taken in the capture phase: sent once through `term.input`, the textarea put back as
+  it was. Compositions that start as usual stay with xterm.
 - Images and videos reach the pane as their **host paths**, the way a native terminal pastes a dropped file
   (control mode only; any pane). Sources: a paste whose clipboard has image/video files or a bitmap and no text
   (Ctrl+V and the webview's own paste are caught in the capture phase before xterm's listener; the context menu's and

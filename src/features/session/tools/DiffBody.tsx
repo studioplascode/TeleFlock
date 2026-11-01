@@ -135,13 +135,13 @@ export function FileDiffView({ file, defaultOpen = true, findRow }: { file: File
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="focus-ring flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/[0.03]"
+        className="focus-ring flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-ink/[0.03]"
       >
         <Icon className="size-3.5 shrink-0 text-mute" />
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-2" title={file.path}>
           {file.path}
         </span>
-        {file.status !== "modified" && <span data-find-skip className="rounded-full bg-white/6 px-1.5 text-[9.5px] font-bold tracking-wider text-mute uppercase">{file.status}</span>}
+        {file.status !== "modified" && <span data-find-skip className="rounded-full bg-ink/6 px-1.5 text-[9.5px] font-bold tracking-wider text-mute uppercase">{file.status}</span>}
         <DiffStatText added={file.added} removed={file.removed} />
         <ChevronDown className={cn("size-3.5 shrink-0 text-mute-2 transition-transform", !open && "-rotate-90")} />
       </button>
@@ -198,7 +198,7 @@ export function FileDiffView({ file, defaultOpen = true, findRow }: { file: File
               onClick={() => setAll((a) => !a)}
               className={cn(
                 "focus-ring relative flex w-full items-center justify-center gap-1.5 py-1.5 font-sans text-2xs font-bold text-accent-hi hover:text-ink",
-                !all && "-mt-7 bg-gradient-to-b from-transparent via-[rgb(10_10_16/0.85)] to-[rgb(10_10_16/0.95)] pt-6",
+                !all && "-mt-7 bg-gradient-to-b from-transparent via-bg-deep/85 to-bg-deep/95 pt-6",
               )}
             >
               <ChevronDown className={cn("size-3 transition-transform", all && "rotate-180")} />

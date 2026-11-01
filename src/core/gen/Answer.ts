@@ -16,4 +16,9 @@ cancel: boolean,
 /**
  * Ask tool: "Chat about this".
  */
-chat: boolean, };
+chat: boolean, 
+/**
+ * Ask tool: back to the previous question (only when the dialog's `step.canBack`), which
+ * comes up again with the answer it had. Hosts < 0.8.0 ignore it.
+ */
+back?: boolean, };

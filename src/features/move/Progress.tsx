@@ -20,7 +20,7 @@ function StepIcon({ state }: { state: MoveStepView["state"] }): ReactNode {
     case "skipped":
       return <Minus className="size-3.5 text-mute-2" aria-label="Skipped" />;
     default:
-      return <span className="size-1.5 rounded-full bg-white/20" role="img" aria-label="Waiting" />;
+      return <span className="size-1.5 rounded-full bg-ink/20" role="img" aria-label="Waiting" />;
   }
 }
 
@@ -28,7 +28,7 @@ function CopyBar({ sent, total }: { sent: number; total: number }) {
   const pct = total > 0 ? Math.min(100, (sent / total) * 100) : 0;
   return (
     <div className="mt-1.5 flex items-center gap-2.5">
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/8" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={sent}>
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink/8" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={sent}>
         <div className="h-full rounded-full bg-omp transition-[width] duration-300" style={{ width: `${pct}%` }} />
       </div>
       <span className="shrink-0 font-mono text-2xs text-mute tabular-nums">
@@ -56,7 +56,7 @@ export function StepList({ progress }: { progress: MoveProgress | null }) {
             <StepIcon state={s.state} />
           </span>
           <div className="min-w-0 flex-1">
-            <p className={cn("text-sm font-bold", s.state === "pending" || s.state === "skipped" ? "text-mute" : s.state === "undone" ? "text-mute line-through decoration-white/20" : s.state === "failed" ? "text-error" : "text-ink")}>{s.label}</p>
+            <p className={cn("text-sm font-bold", s.state === "pending" || s.state === "skipped" ? "text-mute" : s.state === "undone" ? "text-mute line-through decoration-ink/20" : s.state === "failed" ? "text-error" : "text-ink")}>{s.label}</p>
             {s.detail && <p className="text-xs text-mute [overflow-wrap:anywhere]">{s.detail}</p>}
             {s.side === "copy" && (s.state === "running" || progress.total > 0) && <CopyBar sent={progress.sent} total={progress.total} />}
           </div>
@@ -102,7 +102,7 @@ export function Running({ entry }: { entry: MoveEntry }) {
 function Notes({ notes }: { notes: string[] }) {
   if (notes.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-1.5 rounded-lg bg-warn/10 p-3 text-xs shadow-[inset_0_0_0_1px_rgb(251_191_36/0.35)]">
+    <ul className="flex flex-col gap-1.5 rounded-lg bg-warn/10 p-3 text-xs shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)]">
       {notes.map((n) => (
         <li key={n} className="flex gap-2">
           <TriangleAlert className="mt-px size-3.5 shrink-0 text-warn" aria-hidden />
@@ -153,7 +153,7 @@ export function Result({ entry }: { entry: MoveEntry }) {
   const who = blame(f, entry);
   return (
     <div className="flex flex-col gap-3">
-      <div role="alert" className="flex gap-3 rounded-lg bg-error/10 p-3.5 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.4)]">
+      <div role="alert" className="flex gap-3 rounded-lg bg-error/10 p-3.5 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_40%,transparent)]">
         <TriangleAlert className="mt-0.5 size-4 shrink-0 text-error" aria-hidden />
         <div className="min-w-0 flex-1 text-xs">
           <p className="text-sm font-bold">{f.cancelled ? "Move cancelled" : `Couldn't move ${entry.name}`}</p>

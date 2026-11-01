@@ -26,14 +26,14 @@ export function SubagentList({ agentKey, subs }: { agentKey: string; subs: reado
             aria-expanded={open}
             aria-controls={panelId}
             onClick={() => useSessionUi.getState().setCompletedSubsOpen(agentKey, !open)}
-            className={cn("focus-ring pressable flex w-full min-w-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-left hover:bg-white/[0.04]", g.active.length > 0 && "mt-0.5")}
+            className={cn("focus-ring pressable flex w-full min-w-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-left hover:bg-ink/[0.04]", g.active.length > 0 && "mt-0.5")}
           >
             <ChevronRight className={cn("size-3.5 shrink-0 text-mute transition-transform", open && "rotate-90")} aria-hidden />
             <b className="shrink-0 text-[12.5px] font-extrabold text-ink">{g.completed.length} completed</b>
             <span className="min-w-0 truncate text-2xs font-bold text-mute tabular">{completedSummary(g)}</span>
           </button>
           {open && (
-            <div id={panelId} className="flex flex-col gap-1 border-l border-white/[0.06] pl-2">
+            <div id={panelId} className="flex flex-col gap-1 border-l border-ink/[0.06] pl-2">
               {g.completed.map(card)}
             </div>
           )}

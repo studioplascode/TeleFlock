@@ -74,7 +74,7 @@ export function WorktreeRow({
           <GitBranch className="size-3.5 shrink-0 text-mute" aria-hidden />
           <span className="min-w-0 truncate font-mono text-sm font-bold text-ink">{w.branch ?? `detached at ${w.head ?? "?"}`}</span>
           {w.workspaceId && (
-            <span className="shrink-0 rounded-full bg-white/6 px-1.5 text-2xs font-semibold text-mute" title="Open as a herdr workspace">
+            <span className="shrink-0 rounded-full bg-ink/6 px-1.5 text-2xs font-semibold text-mute" title="Open as a herdr workspace">
               open
             </span>
           )}

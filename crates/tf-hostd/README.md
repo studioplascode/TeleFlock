@@ -196,6 +196,12 @@ interactive and the first prompt/plan mode 90 s for the collab link.
   `<home>/herdr-config.toml` (`HERDR_CONFIG_PATH`: the user's config with `resume_agents_on_restore = false`).
   `subscribe` / `current` for agent recovery, `down_error` for requests, `HostInfo.herdrHealth` for apps.
 
+## Forwarding (`src/forward/`, architecture §3.30)
+- `Forwarder` (`Daemon::forward`, `Clone`): `offer(client, offers)` (`fwdOffer`; newest offer per name wins), `fwd(client, sid, ev)` (`fwd` events: even sids are streams this host opened, odd ones streams an app opened here), `client_gone(id)` (its offers go, its streams end, what ran for it is killed). `clients.rs` negotiates the `forward` feature and routes the messages only for clients that speak it.
+- `tf-hostd forward …` (`forward/cli.rs`) is what `<home>/bin/tf-forward` and `<home>/forward/bin/tf-forward` run (written at daemon start, `forward/shims.rs`, with the tool shims): `tf-forward <name> [-t|-T] [--cwd DIR] [--] [command…]`, `tf-forward --list`; exit status = the remote command's, 255 with one stderr line when it could not run.
+- The endpoint (`forward/endpoint.rs`): `<home>/run/forward/cli.sock`, 0600 in a 0700 dir (Windows: `\\.\pipe\teleflock-forward-<user>[-<hash>]`, user-only DACL like `ipc.rs`).
+- To-host: `forward/exec.rs` (`$SHELL -c`, `$SHELL -l`, tools by argv; a pseudo-terminal from `forward/pty.rs` when asked on Unix, else pipes; process group killed on an early close), flow control in `forward/flow.rs`.
+
 ## Tests
 `cargo test -p tf-hostd` (unit + `tests/attach.rs` lifecycle through the real binary, no herdr needed).
 Lab e2e: `examples/e2e.rs` (see its header); decide for me: `examples/e2e_autoanswer.rs` (real omp in a lab; its mock model and omp settings in `src/autoanswer/testdata/`).

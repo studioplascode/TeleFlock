@@ -33,7 +33,7 @@ export function Select({ options, placeholder = "Select…", className, id, ...r
         id={id}
         aria-label={rest["aria-label"]}
         className={cn(
-          "well inline-flex h-10 min-w-40 items-center justify-between gap-2 rounded-md px-3 text-sm font-semibold text-ink transition-shadow focus-ring hover:bg-[rgb(10_10_16/0.7)] disabled:opacity-45 data-[placeholder]:text-mute-2 data-[state=open]:shadow-[inset_0_0_0_1.5px_var(--color-accent)] [&>span]:truncate",
+          "well inline-flex h-10 min-w-40 items-center justify-between gap-2 rounded-md px-3 text-sm font-semibold text-ink transition-shadow focus-ring hover:bg-well-2 disabled:opacity-45 data-[placeholder]:text-mute-2 data-[state=open]:shadow-[inset_0_0_0_1.5px_var(--color-accent)] [&>span]:truncate",
           className,
         )}
       >
@@ -47,7 +47,7 @@ export function Select({ options, placeholder = "Select…", className, id, ...r
           position="popper"
           sideOffset={6}
           collisionPadding={12}
-          className="tf-pop z-popover max-h-[min(360px,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg bg-[linear-gradient(180deg,#22222e,#191921)] shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)]"
+          className="tf-pop z-popover max-h-[min(360px,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)]"
         >
           <RadixSelect.Viewport className="p-1.5">
             {options.map((o) => (
@@ -55,7 +55,7 @@ export function Select({ options, placeholder = "Select…", className, id, ...r
                 key={o.value}
                 value={o.value}
                 disabled={o.disabled}
-                className="relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-sm py-1.5 pr-8 pl-2.5 text-sm font-semibold text-ink-2 outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-white/7 data-[highlighted]:text-ink data-[state=checked]:text-ink [&_svg]:size-4"
+                className="relative flex min-h-9 cursor-pointer items-center gap-2.5 rounded-sm py-1.5 pr-8 pl-2.5 text-sm font-semibold text-ink-2 outline-none select-none data-[disabled]:opacity-40 data-[highlighted]:bg-ink/7 data-[highlighted]:text-ink data-[state=checked]:text-ink [&_svg]:size-4"
               >
                 {o.icon}
                 <span className="flex min-w-0 flex-col">

@@ -56,6 +56,7 @@ import { usePaletteCommands, type PaletteCommand } from "@/features/palette/regi
 import { PreviewButton } from "@/features/preview/PreviewButton";
 import { PreviewList } from "@/features/preview/PreviewList";
 import { usePreviewStore } from "@/features/preview/store";
+import { HostBadge, useMultiHost } from "@/features/hosts/HostBadge";
 import { ParkedNotice } from "@/features/session/ParkedGate";
 import { haptic } from "@/features/shell/haptics";
 import { MobileHeader } from "@/features/shell/MobileHeader";
@@ -142,6 +143,7 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   const agent = useAgent(agentKey(hostId, agentId ?? ""));
   const conn = useHosts((h) => h.status[hostId]);
   const hostName = useHosts((h) => h.profiles.find((p) => p.id === hostId)?.name ?? hostId);
+  const multiHost = useMultiHost();
   const fontSize = useSettings((s) => s.terminalFontSize);
 
   // Selection follows the route props; local switches (tabs, new shell) override until they change.
@@ -388,7 +390,7 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
         { value: "control", label: isMobile ? "Type" : <span className="@max-[860px]:sr-only">Control</span>, icon: <Keyboard /> },
         { value: "observe", label: isMobile ? "Watch" : <span className="@max-[860px]:sr-only">Observe</span>, icon: <Eye /> },
       ]}
-      className={cn(mode === "observe" && "shadow-[inset_0_0_0_1px_rgb(34_211_238/0.35)]")}
+      className={cn(mode === "observe" && "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-review)_35%,transparent)]")}
     />
   );
 
@@ -412,7 +414,7 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
   );
 
   // State line along the pane edge (mobile): purple driving, cyan watching, sunset needs a decision.
-  const edge = live ? (mode === "observe" ? "bg-[linear-gradient(90deg,#22d3ee,#0ea5e9)]" : "bg-run") : needsTakeover ? "bg-sun" : failed ? "bg-error" : "bg-transparent";
+  const edge = live ? (mode === "observe" ? "bg-[linear-gradient(90deg,var(--color-review),var(--color-review-2))]" : "bg-run") : needsTakeover ? "bg-sun" : failed ? "bg-error" : "bg-transparent";
 
   if (isMobile) {
     return (
@@ -425,7 +427,20 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
               <span className="truncate">{paneLabel}</span>
             </span>
           }
-          subtitle={online ? (workspace?.label ?? hostName) : <ReconnectingLabel phase={conn?.phase} />}
+          subtitle={
+            online ? (
+              multiHost ? (
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <HostBadge hostId={hostId} className="max-w-[45%]" />
+                  {workspace?.label && <span className="min-w-0 truncate">{workspace.label}</span>}
+                </span>
+              ) : (
+                (workspace?.label ?? hostName)
+              )
+            ) : (
+              <ReconnectingLabel phase={conn?.phase} />
+            )
+          }
           actions={
             <>
               {modeToggle}
@@ -476,7 +491,8 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-display text-xl font-bold text-ink">{paneLabel}</h1>
           <div className="flex min-w-0 items-center gap-2 text-xs text-mute">
-            <span className="truncate">{workspace?.label ?? hostName}</span>
+            {multiHost ? <HostBadge hostId={hostId} className="max-w-[14rem]" /> : null}
+            {(!multiHost || workspace?.label) && <span className="truncate">{workspace?.label ?? hostName}</span>}
             {workspace?.repo && (
               <span className="truncate text-mute-2 @max-[640px]:hidden">
                 {[workspace.repo.name !== workspace.label ? workspace.repo.name : null, workspace.worktree?.branch ?? workspace.repo.branch].filter(Boolean).join(" · ")}
@@ -543,10 +559,10 @@ function TerminalScreen({ hostId, paneId, agentId, shell }: TerminalViewProps & 
             className={cn(
               "pointer-events-none absolute inset-0 z-raised rounded-[22px] transition-shadow duration-500",
               needsTakeover
-                ? "shadow-[inset_0_0_0_1.5px_rgb(255_61_119/0.6),inset_0_0_40px_-12px_rgb(255_61_119/0.45)]"
+                ? "shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-sun-2)_60%,transparent),inset_0_0_40px_-12px_color-mix(in_srgb,var(--color-sun-2)_45%,transparent)]"
                 : failed
-                  ? "shadow-[inset_0_0_0_1.5px_rgb(255_77_94/0.55)]"
-                  : "shadow-[inset_0_0_0_1px_rgb(255_255_255/0.06)]",
+                  ? "shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-error)_55%,transparent)]"
+                  : "shadow-hairline",
             )}
           />
         </div>
@@ -593,7 +609,7 @@ function PreviewsMenu({ mobile = false }: { mobile?: boolean }) {
       <span className="relative grid place-items-center">
         {opening ? <Spinner size={14} /> : <Globe />}
         {live > 0 && (
-          <span className="absolute -top-1.5 -right-2 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-done px-0.5 font-mono text-[9px] leading-none font-extrabold text-[#1a2e05]">
+          <span className="absolute -top-1.5 -right-2 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-done px-0.5 font-mono text-[9px] leading-none font-extrabold text-on-done">
             {live}
           </span>
         )}
@@ -752,7 +768,7 @@ function PaneTab({
           className={cn(
             "relative inline-flex shrink-0 items-center gap-2 rounded-sm px-3 text-xs font-bold whitespace-nowrap transition-colors focus-ring",
             compact ? "h-9 max-w-44" : "h-8 max-w-56",
-            active ? "text-ink" : "text-mute hover:bg-white/5 hover:text-ink",
+            active ? "text-ink" : "text-mute hover:bg-ink/5 hover:text-ink",
           )}
         >
           {active && <motion.span layoutId={`term-tab-${hostId}`} transition={spring.snappy} aria-hidden className="absolute inset-0 rounded-sm bg-tile-4 shadow-d1" />}
@@ -784,7 +800,7 @@ function SendKeysBar({ onSend, disabled }: { onSend(bytes: string): void; disabl
           onClick={() => onSend(k.bytes)}
           className={cn(
             "inline-flex h-8 min-w-9 items-center justify-center gap-1 rounded-sm bg-tile-3 px-2.5 font-mono text-xs font-bold text-ink-2 shadow-key transition-colors focus-ring hover:bg-tile-4 hover:text-ink disabled:opacity-40 [&_svg]:size-3.5",
-            k.id === "ctrl-c" && "text-[#ff8aa5]",
+            k.id === "ctrl-c" && "text-error-ink",
           )}
         >
           {k.label}

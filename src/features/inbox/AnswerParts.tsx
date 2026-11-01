@@ -36,13 +36,13 @@ interface SkinStyle {
 
 const DARK = {
   idle: "bg-tile-4 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)] hover:bg-tile-5",
-  primary: "shadow-[inset_0_0_0_1px_rgb(255_255_255/0.34)]",
-  danger: "text-[#ff8aa5] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.42)] hover:bg-error/15",
-  recommended: "shadow-[inset_0_0_0_1.5px_rgb(255_122_24/0.9)]",
-  rec: "text-[#ffb08a]",
-  on: "bg-accent text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.25)] hover:bg-accent",
+  primary: "shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_34%,transparent)]",
+  danger: "text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_42%,transparent)] hover:bg-error/15",
+  recommended: "shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-sun-1)_90%,transparent)]",
+  rec: "text-sun-ink",
+  on: "bg-accent text-on-accent shadow-[inset_0_0_0_1px_rgb(255_255_255/0.25)] hover:bg-accent",
   badge: "bg-tile-2 text-mute shadow-key",
-  badgeOn: "bg-white/25 text-white",
+  badgeOn: "bg-on-accent/25 text-on-accent",
 };
 
 const SUNSET = {
@@ -50,7 +50,7 @@ const SUNSET = {
   recommended: "shadow-[inset_0_0_0_2px_rgb(255_255_255/0.88)]",
   rec: "text-white",
   badge: "bg-white/15 text-white",
-  badgeOn: "bg-sun text-white",
+  badgeOn: "bg-sun text-on-sun",
 };
 
 const SKIN: Record<OptionSkin, SkinStyle> = {
@@ -195,7 +195,7 @@ export function SkipButton({ onClick, disabled, sunset = false, className }: { o
       onClick={onClick}
       className={cn(
         "pressable focus-ring inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-bold disabled:opacity-50",
-        sunset ? "text-white/85 hover:bg-black/20 hover:text-white" : "text-mute hover:bg-white/5 hover:text-ink",
+        sunset ? "text-white/85 hover:bg-black/20 hover:text-white" : "text-mute hover:bg-ink/5 hover:text-ink",
         className,
       )}
     >

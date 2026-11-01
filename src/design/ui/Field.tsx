@@ -2,7 +2,7 @@ import { type InputHTMLAttributes, type ReactNode, type Ref, type TextareaHTMLAt
 import { cn } from "../lib/cn";
 
 const fieldBox =
-  "well rounded-md text-sm text-ink transition-[box-shadow,background-color] duration-200 placeholder:text-mute-2 hover:bg-[rgb(10_10_16/0.7)] focus-within:shadow-[inset_0_0_0_1.5px_var(--color-accent),0_0_0_4px_rgb(163_92_240/0.18)] has-[:disabled]:opacity-50 aria-[invalid=true]:shadow-[inset_0_0_0_1.5px_var(--color-error)]";
+  "well rounded-md text-sm text-ink transition-[box-shadow,background-color] duration-200 placeholder:text-mute-2 hover:bg-well-2 focus-within:shadow-[inset_0_0_0_1.5px_var(--color-accent),0_0_0_4px_color-mix(in_srgb,var(--color-accent)_18%,transparent)] has-[:disabled]:opacity-50 aria-[invalid=true]:shadow-[inset_0_0_0_1.5px_var(--color-error)]";
 
 export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   /** Icon or text before the value (e.g. a search icon). */

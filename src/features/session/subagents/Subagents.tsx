@@ -18,7 +18,7 @@ export function SubagentCard({ sub, onOpen, dense = false }: { sub: Subagent; on
       data-status={SUB_STATUS[sub.status]}
       className={cn(
         "group/sub focus-ring pressable relative flex w-full min-w-0 items-start gap-2.5 overflow-hidden rounded-lg text-left",
-        dense ? "px-2 py-1.5 hover:bg-white/[0.04]" : "bg-white/[0.025] px-3 py-2 shadow-hairline hover:bg-white/[0.05] max-md:px-2.5 max-md:py-1.5",
+        dense ? "px-2 py-1.5 hover:bg-ink/[0.04]" : "bg-ink/[0.025] px-3 py-2 shadow-hairline hover:bg-ink/[0.05] max-md:px-2.5 max-md:py-1.5",
       )}
     >
       {running && <span className="tf-loop live-gradient absolute inset-x-0 top-0 h-[1.5px] opacity-80" aria-hidden />}

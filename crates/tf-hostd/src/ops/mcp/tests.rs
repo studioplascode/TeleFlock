@@ -219,7 +219,7 @@ async fn checks_run_once_then_only_for_changed_servers() {
     assert_eq!(by(&done, "gh").status, McpStatus::NeedsAuth);
     let linear = by(&done, "linear");
     assert_eq!((linear.origin, linear.status, linear.source_label.as_deref()), (McpOrigin::Imported, McpStatus::Disabled, Some("Claude Code")));
-    assert_eq!(linear.server.headers[0].value, secrets::MASK);
+    assert_eq!(linear.server.headers[0].value, format!("Bearer {}", secrets::MASK), "the scheme stays readable, the token never shows");
     assert!(!serde_json::to_string(&done).unwrap().contains("lin_secret"), "other tools' secrets are masked too");
     assert_eq!(requests(&log).len(), 1);
 

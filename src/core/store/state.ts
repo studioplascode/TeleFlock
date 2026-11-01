@@ -5,6 +5,7 @@ import type {
   ApiError,
   AppEvent,
   ConnStatus,
+  ForwardList,
   HistoryPage,
   HostProfile,
   HostState,
@@ -82,6 +83,8 @@ export interface CoreState {
   activity: Record<string, ActivityEntry>;
   settings: Settings | null;
   tunnels: TunnelInfo[];
+  /** Host-to-host forwarding rules, their status and active streams; null until the first `forward.list` answers (or on a core without forwarding). */
+  forwards: ForwardList | null;
   /**
    * Parked agents resumed under a new id: old key → new key (follow with `resolveSuccessor`).
    * Views showing the old key redirect to the new one.
@@ -140,6 +143,7 @@ export function initialCoreState(backend: Backend): CoreState {
     activity: {},
     settings: null,
     tunnels: [],
+    forwards: null,
     successors: {},
     departed: [],
   };

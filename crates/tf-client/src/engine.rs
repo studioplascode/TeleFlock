@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::conn::{self, ConnCmd, HostRt, HostView, Tracked};
 use crate::deploy::{Artifacts, HOSTD_VERSION};
+use crate::forward::{self, Forwards};
 use crate::link::{Link, timeout_for};
 use crate::platform::{BadgeState, NotifyStyle, Platform};
 use crate::presence;
@@ -118,6 +119,8 @@ pub(crate) struct Inner {
     presence: Mutex<PresenceInputs>,
     /// One presence refresh at a time, in the order read ([`presence::Refresh`]).
     presence_turns: presence::Refresh,
+    /// Host-to-host forwarding: saved rules, offers, relayed streams (`forward.rs`).
+    pub forwards: Forwards,
 }
 
 /// Inputs and output of this device's presence ([`presence`]).
@@ -214,8 +217,12 @@ impl Inner {
         self.profiles.lock().unwrap().iter().find(|p| p.id == id).cloned()
     }
 
-    fn host(&self, id: &str) -> Option<Arc<HostRt>> {
+    pub(crate) fn host(&self, id: &str) -> Option<Arc<HostRt>> {
         self.hosts.lock().unwrap().get(id).cloned()
+    }
+
+    pub(crate) fn profiles(&self) -> Vec<HostProfile> {
+        self.profiles.lock().unwrap().clone()
     }
 
     pub fn settings(&self) -> Settings {
@@ -810,6 +817,7 @@ impl Engine {
         let artifacts = Artifacts { hostd_override: cfg.hostd_bins_override.clone() };
         let secrets = SecretStore::new(&cfg.data_dir);
         let session_cache = SessionCache::new(&cfg.data_dir, &cfg.platform_name);
+        let forwards = Forwards::load(&cfg.data_dir).await;
         let inner = Arc::new(Inner {
             cfg,
             platform,
@@ -830,8 +838,10 @@ impl Engine {
             session_cache,
             presence: Mutex::new(PresenceInputs::default()),
             presence_turns: presence::Refresh::default(),
+            forwards,
         });
         let engine = Engine { inner: inner.clone() };
+        forward::start(&inner);
 
         for p in &profiles {
             let cached = match read_json::<CacheRecord>(&inner.cache_path(&p.id)).await {
@@ -923,6 +933,7 @@ impl Engine {
             AppEvent::Profiles { profiles: profiles.clone() },
             AppEvent::Settings { settings: i.settings() },
             AppEvent::Tunnels { tunnels: i.tunnels.list() },
+            AppEvent::Forwards { forwards: forward::list(i) },
         ];
         for p in profiles {
             let Some(rt) = i.host(&p.id) else { continue };
@@ -979,6 +990,19 @@ impl Engine {
                     let _ = rt.cmd.send(ConnCmd::Connect);
                 }
             }
+        }
+    }
+
+    /// Every session a UI has open, sent again as a `reset` of what its mirror holds: for a UI
+    /// subscriber that lagged ([`Engine::subscribe_with_replay`] after `RecvError::Lagged`), whose
+    /// replay carries host state but not the session events it lost (a transcript stayed frozen on
+    /// a turn's first tool calls while the board went on). Each reset goes out under its mirror's
+    /// lock, so it lands in order with that session's other events; other subscribers apply the
+    /// same rows again.
+    pub fn resend_sessions(&self) {
+        let hosts: Vec<Arc<HostRt>> = self.inner.hosts.lock().unwrap().values().cloned().collect();
+        for rt in hosts {
+            sessions::resend(&session_host(&self.inner, &rt));
         }
     }
 
@@ -1212,7 +1236,7 @@ impl Engine {
                     "agent.answer",
                     serde_json::json!({
                         "agentId": n.agent_id, "requestId": req,
-                        "answer": Answer { choices: vec![], text: Some(text), cancel: false, chat: false },
+                        "answer": Answer { choices: vec![], text: Some(text), cancel: false, chat: false, back: false },
                     }),
                 ),
                 _ => (
@@ -1329,6 +1353,7 @@ impl Engine {
                     return Err(e);
                 }
                 i.emit_profiles();
+                forward::profiles_changed(i);
                 match previous {
                     None => {
                         let rt = self.spawn_host(&p.id, None);
@@ -1381,6 +1406,7 @@ impl Engine {
                 }
                 let _ = tokio::fs::remove_file(i.cache_path(&r.host_id)).await;
                 i.session_cache.remove_host(&r.host_id).await;
+                forward::host_removed(i, &r.host_id).await;
                 if i.tunnels.close_host(&r.host_id) {
                     i.emit_tunnels();
                 }
@@ -1469,6 +1495,10 @@ impl Engine {
                 to_value(&Empty {})
             }
             AppMethod::TunnelList(_) => to_value(&TunnelListResult { tunnels: i.tunnels.list() }),
+            AppMethod::ForwardListReq(_) => to_value(&forward::list(i)),
+            AppMethod::ForwardSave(p) => to_value(&forward::save(i, p.rule).await?),
+            AppMethod::ForwardRemove(p) => to_value(&forward::remove(i, &p.id).await?),
+            AppMethod::ForwardStop(p) => to_value(&forward::stop(i, &p.stream_id)?),
         }
     }
 }
@@ -1733,10 +1763,11 @@ mod tests {
         let (replay, _rx3) = engine2.subscribe_with_replay();
         let kinds: Vec<String> =
             replay.iter().map(|e| serde_json::to_value(e).unwrap()["type"].as_str().unwrap().to_string()).collect();
-        assert_eq!(kinds, ["profiles", "settings", "tunnels", "hostStatus", "hostSnapshot"]);
+        assert_eq!(kinds, ["profiles", "settings", "tunnels", "forwards", "hostStatus", "hostSnapshot"]);
         assert!(matches!(&replay[1], AppEvent::Settings { settings } if settings.quiet_start.as_deref() == Some("22:00")));
-        assert!(matches!(&replay[3], AppEvent::HostStatus { status, .. } if status.phase == ConnPhase::Idle));
-        assert!(matches!(&replay[4], AppEvent::HostSnapshot { rev: 42, state, .. } if state.agents.len() == 1));
+        assert!(matches!(&replay[3], AppEvent::Forwards { forwards } if forwards.rules.is_empty()));
+        assert!(matches!(&replay[4], AppEvent::HostStatus { status, .. } if status.phase == ConnPhase::Idle));
+        assert!(matches!(&replay[5], AppEvent::HostSnapshot { rev: 42, state, .. } if state.agents.len() == 1));
 
         engine2.call(None, "hosts.remove", serde_json::json!({"hostId": id})).await.unwrap();
         assert!(!dir.path().join("cache").join(format!("{id}.json")).exists());
@@ -1802,6 +1833,8 @@ mod tests {
             allow_chat: false,
             command: None,
             answerable: true,
+            context: None,
+            step: None,
         });
         st.agents.push(a);
         st.agents.push(agent("a2", tf_proto::Column::Running));
@@ -2004,12 +2037,14 @@ mod tests {
             allow_chat: false,
             command: None,
             answerable: true,
+            context: None,
+            step: None,
         });
         a
     }
 
     fn note(id: &str, kind: NotifyKind, agent: &str, request: Option<&str>) -> Notification {
-        let yes = Answer { choices: vec!["yes".into()], text: None, cancel: false, chat: false };
+        let yes = Answer { choices: vec!["yes".into()], text: None, cancel: false, chat: false, back: false };
         Notification {
             id: id.into(),
             at: 1,

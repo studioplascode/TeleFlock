@@ -54,7 +54,7 @@ function CheckLine({ running, count, finishedAt, failed, lastGood, ompVersion }:
   if (failed) {
     return (
       <span className="truncate text-2xs font-semibold text-mute-2">
-        <span className="text-[#ff8aa5]">Check failed{finishedAt !== undefined && ` ${formatAge(now - finishedAt)}`}</span>
+        <span className="text-error-ink">Check failed{finishedAt !== undefined && ` ${formatAge(now - finishedAt)}`}</span>
         {lastGood !== undefined && ` · last good one ${formatAge(now - lastGood)}`}
         {version}
       </span>
@@ -323,7 +323,7 @@ export function McpView({ hostId: routeHost }: { hostId?: string }) {
           <section aria-label="omp's servers" className="flex flex-col gap-2">
             <GroupHeader title="omp" count={groups.omp.length} detail={!mobile && tildify(cwd && data.projectPath ? `${data.projectPath} · ${data.userPath}` : data.userPath, home)} />
             {groups.omp.length === 0 ? (
-              <EmptyState compact icon={<Blocks />} title="None of omp's own yet" description={intro} action={addButtons} className="rounded-tile bg-white/[0.018] shadow-hairline" />
+              <EmptyState compact icon={<Blocks />} title="None of omp's own yet" description={intro} action={addButtons} className="rounded-tile bg-ink/[0.018] shadow-hairline" />
             ) : (
               groups.omp.map(row)
             )}

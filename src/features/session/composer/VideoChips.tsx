@@ -42,7 +42,7 @@ export function VideoChips({ videos, onRemove, onRetry, mobile = false, classNam
             className={cn(
               "relative flex max-w-[260px] min-w-0 items-center gap-2 overflow-hidden rounded-[12px] py-1.5 pr-1 pl-2.5 shadow-hairline",
               mobile ? "h-11" : "h-10",
-              failed ? "bg-error/10 shadow-[inset_0_0_0_1px_rgb(255_77_94/0.35)]" : "bg-tile-4",
+              failed ? "bg-error/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)]" : "bg-tile-4",
             )}
           >
             <Film className={cn("size-4 shrink-0", failed ? "text-error" : "text-accent-hi")} aria-hidden />
@@ -55,18 +55,18 @@ export function VideoChips({ videos, onRemove, onRetry, mobile = false, classNam
             </span>
             <span className="ml-auto flex shrink-0 items-center">
               {failed && onRetry && (
-                <button type="button" aria-label={`Retry uploading ${v.name}`} title={v.error} onClick={() => onRetry(v.id)} className={cn("pressable focus-ring grid place-items-center rounded-full text-ink-2 hover:bg-white/8 hover:text-ink", mobile ? "size-8" : "size-6")}>
+                <button type="button" aria-label={`Retry uploading ${v.name}`} title={v.error} onClick={() => onRetry(v.id)} className={cn("pressable focus-ring grid place-items-center rounded-full text-ink-2 hover:bg-ink/8 hover:text-ink", mobile ? "size-8" : "size-6")}>
                   <RotateCcw className="size-3.5" />
                 </button>
               )}
               {onRemove && (
-                <button type="button" aria-label={`Remove video ${v.name}`} onClick={() => onRemove(v.id)} className={cn("pressable focus-ring grid place-items-center rounded-full text-mute hover:bg-white/8 hover:text-ink", mobile ? "size-8" : "size-6")}>
+                <button type="button" aria-label={`Remove video ${v.name}`} onClick={() => onRemove(v.id)} className={cn("pressable focus-ring grid place-items-center rounded-full text-mute hover:bg-ink/8 hover:text-ink", mobile ? "size-8" : "size-6")}>
                   <X className="size-3.5" />
                 </button>
               )}
             </span>
             {(v.phase === "uploading" || v.phase === "queued") && (
-              <span className="absolute inset-x-0 bottom-0 h-[3px] bg-white/8" aria-hidden>
+              <span className="absolute inset-x-0 bottom-0 h-[3px] bg-ink/8" aria-hidden>
                 <span className="block h-full bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
               </span>
             )}

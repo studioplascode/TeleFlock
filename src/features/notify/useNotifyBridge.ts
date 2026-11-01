@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { createElement, Fragment, type ReactNode, useEffect, useRef } from "react";
 import { dismissToast, toast, useIsMobile } from "@/design";
-import { agentKey, core, getRoute, isMuted, markAgentNotificationsRead, navigate, onAgentMoved, onAgentsPruned, onAppEvent, parseAgentKey, type PrunedGone, useRoute, useSettings, useUi } from "@/core";
+import { agentKey, core, getRoute, isMuted, markAgentNotificationsRead, navigate, onAgentMoved, onAgentsPruned, onAppEvent, parseAgentKey, type PrunedGone, useHosts, useRoute, useSettings, useUi } from "@/core";
 import { pruneAgents } from "@/features/dispatch/store";
+import { HostName } from "@/features/hosts/HostBadge";
 import { haptic } from "@/features/shell/haptics";
 import { useLastTerminal } from "@/features/terminal/lastTerminal";
 import { inQuietHours, playChime } from "./chime";
@@ -149,9 +150,15 @@ export function useNotifyBridge(): void {
         // In a phone session the "Next waiting" chip above the composer carries other agents' asks;
         // a banner on top would only stack over it (the haptic and chime above still fire).
         if (n.kind === "needs" && mobile.current && route.name === "agent") return;
+        // Several hosts: the toast says which one the agent is on (the OS toast and the bell list do).
+        // A phone toast is one row: there the name is capped, so a long one never hides the body.
+        const { profiles } = useHosts.getState();
+        const where = profiles.length > 1 ? profiles.find((p) => p.id === n.hostId)?.name : undefined;
+        let description: ReactNode = [where, n.body].filter(Boolean).join(" · ");
+        if (where && n.body && mobile.current) description = createElement(Fragment, null, createElement(HostName, { name: where }), ` · ${n.body}`);
         const id = toast({
           title: n.title,
-          description: n.body,
+          description,
           status: KIND_STATUS[n.kind],
           duration: n.kind === "needs" ? NEEDS_TOAST_MS : undefined,
           action:

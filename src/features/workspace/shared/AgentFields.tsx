@@ -233,10 +233,10 @@ export function AgentFields({ hostId, draft, onChange, derivedName, suggestedNam
       <label
         className={cn(
           "flex cursor-pointer items-center gap-3 rounded-lg px-3.5 py-3 transition-[background-color,box-shadow] duration-300",
-          draft.start ? "bg-accent/12 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.4)]" : "well",
+          draft.start ? "bg-accent/12 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]" : "well",
         )}
       >
-        <span className={cn("grid size-9 place-items-center rounded-md transition-colors", draft.start ? "bg-omp text-white shadow-glow-accent" : "bg-tile-4 text-mute")}>
+        <span className={cn("grid size-9 place-items-center rounded-md transition-colors", draft.start ? "bg-omp text-on-accent shadow-glow-accent" : "bg-tile-4 text-mute")}>
           <Cpu className="size-4" />
         </span>
         <span className="flex min-w-0 flex-1 flex-col">

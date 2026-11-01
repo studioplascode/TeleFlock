@@ -17,7 +17,7 @@ function Row({ orb, title, detail, trailing, onClick }: { orb: ReactNode; title:
         haptic("select");
         onClick();
       }}
-      className="flex min-h-13 w-full items-center gap-3 px-3.5 py-1.5 text-left pressable focus-ring active:bg-white/4"
+      className="flex min-h-13 w-full items-center gap-3 px-3.5 py-1.5 text-left pressable focus-ring active:bg-ink/4"
     >
       <span className="grid size-5 shrink-0 place-items-center">{orb}</span>
       <span className="min-w-0 flex-1">

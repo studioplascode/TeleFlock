@@ -63,7 +63,7 @@ function TemplateForm({ initial, draftKey, onSave }: { initial: AgentTemplate; d
           )}
         </Field>
       </div>
-      <label className="flex items-center justify-between gap-3 rounded-md bg-white/[0.03] px-3 py-2.5 shadow-hairline">
+      <label className="flex items-center justify-between gap-3 rounded-md bg-ink/[0.03] px-3 py-2.5 shadow-hairline">
         <span>
           <span className="block text-sm font-bold text-ink">Start in plan mode</span>
           <span className="block text-xs text-mute">The agent proposes a plan before touching files.</span>
@@ -73,7 +73,7 @@ function TemplateForm({ initial, draftKey, onSave }: { initial: AgentTemplate; d
       <Field label="Prompt" hint="optional" description="Sent as the first message. Leave empty for a pure model preset.">
         {(id) => <Textarea id={id} value={t.prompt} onChange={(e) => set({ prompt: e.target.value })} placeholder="Read the README, then…" maxHeight={220} />}
       </Field>
-      <div className="flex justify-end gap-2 border-t border-line pt-4 md:sticky md:bottom-0 md:z-raised md:bg-[#17171f]">
+      <div className="flex justify-end gap-2 border-t border-line pt-4 md:sticky md:bottom-0 md:z-raised md:bg-sheet-2">
         <Button variant="ghost" onClick={closeSheet}>
           Cancel
         </Button>

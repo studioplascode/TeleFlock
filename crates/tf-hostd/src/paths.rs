@@ -24,6 +24,10 @@ pub struct Paths {
     pub bridge_secret: PathBuf,
     /// Single-instance lock `<home>/run/hostd.lock` (holds the pid).
     pub lock: PathBuf,
+    /// `tf-forward`'s endpoint `<home>/run/forward/cli.sock` (unix; 0600 in a 0700 dir, §3.30).
+    pub forward_sock: PathBuf,
+    /// `tf-forward`'s named pipe `\\.\pipe\teleflock-forward-<user>[-<hash>]` (windows).
+    pub forward_pipe: String,
     /// Persistent state `<home>/state.json`.
     pub state_file: PathBuf,
     /// Log `<home>/hostd.log`.
@@ -76,8 +80,10 @@ impl Paths {
             bridge_sock: run.join("bridge.sock"),
             bridge_secret: run.join("bridge.secret"),
             lock: run.join("hostd.lock"),
+            forward_sock: run.join("forward").join("cli.sock"),
             pipe: format!(r"\\.\pipe\teleflock-hostd-{user}{suffix}"),
             bridge_pipe: format!(r"\\.\pipe\teleflock-bridge-{user}{suffix}"),
+            forward_pipe: format!(r"\\.\pipe\teleflock-forward-{user}{suffix}"),
             state_file: home.join("state.json"),
             log: home.join("hostd.log"),
             ext: home.join("ext").join("teleflock-bridge.ts"),
@@ -109,6 +115,11 @@ impl Paths {
     /// Display form of the client endpoint (socket path or pipe name).
     pub fn endpoint(&self) -> String {
         if cfg!(windows) { self.pipe.clone() } else { self.sock.display().to_string() }
+    }
+
+    /// Display form of `tf-forward`'s endpoint.
+    pub fn forward_endpoint(&self) -> String {
+        if cfg!(windows) { self.forward_pipe.clone() } else { self.forward_sock.display().to_string() }
     }
 
     /// Stem of this instance's systemd keepalive units: `teleflock-hostd-<hash of home>`

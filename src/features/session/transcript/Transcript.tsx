@@ -298,7 +298,7 @@ export function TranscriptLog({
       if (now < 0) return;
       virtualizer.scrollToIndex(now, { align: "center" });
       const el = scrollRef.current?.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(focus.itemId)}"]`);
-      el?.animate([{ backgroundColor: "rgb(163 92 240 / 0.16)", borderRadius: "18px" }, { backgroundColor: "transparent", borderRadius: "18px" }], { duration: 1400, easing: "ease-out" });
+      el?.animate([{ backgroundColor: "color-mix(in srgb, var(--color-accent) 16%, transparent)", borderRadius: "18px" }, { backgroundColor: "transparent", borderRadius: "18px" }], { duration: 1400, easing: "ease-out" });
     }, 220);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new focus request jumps

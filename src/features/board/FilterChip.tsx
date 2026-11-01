@@ -16,7 +16,7 @@ export function FilterChip({ className }: { className?: string }) {
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.85 }}
           transition={spring.snappy}
-          className={cn("inline-flex max-w-full items-center gap-1.5 rounded-full bg-accent/14 py-1 pr-1 pl-3 text-xs font-bold text-accent-ink shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]", className)}
+          className={cn("inline-flex max-w-full items-center gap-1.5 rounded-full bg-accent/14 py-1 pr-1 pl-3 text-xs font-bold text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]", className)}
         >
           <span className="text-mute">Filtered:</span>
           <span className="min-w-0 truncate">{q}</span>

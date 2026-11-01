@@ -25,6 +25,7 @@ const OmpSettingsView = lazy(() => import("@/features/ompSettings/OmpSettingsVie
 const McpView = lazy(() => import("@/features/mcp/McpView").then((m) => ({ default: m.McpView })));
 const PluginsView = lazy(() => import("@/features/plugins/PluginsView").then((m) => ({ default: m.PluginsView })));
 const AccountsView = lazy(() => import("@/features/accounts/AccountsView").then((m) => ({ default: m.AccountsView })));
+const ForwardView = lazy(() => import("@/features/forward/ForwardView").then((m) => ({ default: m.ForwardView })));
 const CleanupView = lazy(() => import("@/features/cleanup/CleanupView").then((m) => ({ default: m.CleanupView })));
 const WallView = lazy(() => import("@/features/wall/WallView").then((m) => ({ default: m.WallView })));
 const AmbientView = lazy(() => import("@/features/ambient/AmbientView").then((m) => ({ default: m.AmbientView })));
@@ -94,6 +95,8 @@ export function RouteView({ route, mobile }: { route: Route; mobile: boolean }) 
       return <AccountsView hostId={route.hostId} link={route.link} />;
     case "cleanup":
       return <CleanupView hostId={route.hostId} />;
+    case "forward":
+      return <ForwardView />;
     case "wall":
       return <WallView />;
     case "ambient":

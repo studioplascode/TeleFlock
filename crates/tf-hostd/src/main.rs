@@ -40,9 +40,30 @@ enum Cmd {
     /// Start the daemon detached unless it is running, then exit (the automations keepalive
     /// timer runs this).
     Ensure,
+    /// Run a command, a login shell or a tool on another host through a TeleFlock app
+    /// (`tf-forward <name> [-t|-T] [--cwd DIR] [--] [command…]`, `tf-forward --list`).
+    #[command(disable_help_flag = true)]
+    Forward {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() {
+    // `forward` takes its arguments as they are (ssh-like: options of the remote command pass
+    // through), so it is dispatched before clap sees them.
+    let mut argv = std::env::args_os();
+    if argv.nth(1).is_some_and(|a| a == "forward") {
+        let args: Vec<String> = argv
+            .enumerate()
+            .map(|(i, a)| a.into_string().map_err(|_| i + 1))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|n| {
+                eprintln!("tf-forward: argument {n} is not UTF-8");
+                std::process::exit(255)
+            });
+        tf_hostd::forward::cli::main(args);
+    }
     let cli = Cli::parse();
     if cli.version {
         println!("{}", tf_hostd::version_line());
@@ -57,6 +78,7 @@ fn main() {
         }
         Some(Cmd::Stop { force }) => tf_hostd::attach::stop(paths, force),
         Some(Cmd::Ensure) => tf_hostd::attach::ensure(paths, cli.relay_port),
+        Some(Cmd::Forward { args }) => tf_hostd::forward::cli::main(args),
         None => {
             eprintln!("tf-hostd: missing command (daemon | attach | ensure | stop | --version)");
             Ok(2)

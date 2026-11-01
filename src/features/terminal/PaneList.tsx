@@ -160,7 +160,7 @@ function PaneRow({
       data-pane-id={pane.id}
       className={cn(
         "flex w-full items-center gap-2.5 rounded-md py-1.5 pr-2 pl-2.5 text-left transition-colors focus-ring",
-        active ? "bg-accent/14 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]" : "hover:bg-white/5",
+        active ? "bg-accent/14 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "hover:bg-ink/5",
       )}
     >
       <span className="grid size-4 shrink-0 place-items-center">

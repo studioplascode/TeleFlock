@@ -11,7 +11,8 @@ import { opt, read, say, type Step, think, todo } from "./scripts";
  * with a ★ recommended option, cancel and postpone, and the pick at the deadline ("Auto-answered ★ …"
  * in Activity, an info notification "<agent> · decided for you"). An app is always connected to an
  * online demo host, so a policy that counts only with no app connected stands (`waitingForNoApp`).
- * Seeded on forge: push's ★ ntfy question 12:40 from its pick, and flags' question waiting for no app.
+ * Seeded on forge: push's ★ ntfy question 12:40 from its pick, and flags' first question (of three: its
+ * ask has Back) waiting for no app.
  */
 
 const MIN_SECS = 60;
@@ -48,9 +49,13 @@ export interface AutoAnswerHost {
 interface Countdown {
   requestId: string;
   question: string;
-  /** Option ids the answer sends, and how they read. */
+  /** Option ids the answer sends, and how the answer reads (with `text`). */
   picks: string[];
   labels: string[];
+  /** The typed text the answer sends (an earlier "Other" answer). */
+  text?: string;
+  /** The answer is the one the question already had (Back reopened it), not ★. */
+  earlier: boolean;
   /** Added by postponing (ms; negative when a cancelled one restarted with less than the policy's wait). */
   extraMs: number;
   /** Time counted before the running stretch. */
@@ -67,16 +72,27 @@ interface Question {
   question: string;
   picks: string[];
   labels: string[];
+  text?: string;
+  earlier: boolean;
 }
 
-/** The question decide for me may answer: an answerable omp ask with a ★ (a multi-select picks every ★). */
+/**
+ * The question decide for me may answer: an answerable omp ask with a ★ (a multi-select picks every ★). A question
+ * that already has the user's answer (`step`: Back reopened it) gets that answer instead, as tf-hostd does.
+ */
 function qualifying(sim: AgentSim): Question | null {
   const a = sim.agent;
   const n = a.needs;
   if (a.kind !== "omp" || a.parked || !n || n.kind !== "ask" || !n.answerable || !n.requestId) return null;
   const rec = n.options.filter((o) => o.recommended).slice(0, n.multi ? undefined : 1);
   if (!rec.length) return null;
-  return { requestId: n.requestId, question: n.question, picks: rec.map((o) => o.id), labels: rec.map((o) => o.label) };
+  const choices = n.step?.choices ?? [];
+  const text = n.step?.text?.trim() ? n.step.text : undefined;
+  if (choices.length > 0 || text !== undefined) {
+    const labels = [...choices.map((id) => n.options.find((o) => o.id === id)?.label ?? id), ...(text !== undefined ? [text] : [])];
+    return { requestId: n.requestId, question: n.question, picks: choices, labels, text, earlier: true };
+  }
+  return { requestId: n.requestId, question: n.question, picks: rec.map((o) => o.id), labels: rec.map((o) => o.label), earlier: false };
 }
 
 /** `20 min`, `1 h 30 min`, `45 s` (tf-hostd's `wait_text`). */
@@ -90,6 +106,8 @@ function waitText(ms: number): string {
 }
 
 const stars = (labels: readonly string[]) => labels.map((l) => `★ ${l}`).join(", ");
+/** What decide for me sends: the ★ options, or the question's earlier answer. */
+const answerText = (q: { labels: readonly string[]; earlier: boolean }) => (q.earlier ? `your earlier answer (${q.labels.join(", ")})` : stars(q.labels));
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** A policy as tf-hostd validates it (`AutoAnswer::validate`): `invalid_params` otherwise. */
@@ -121,32 +139,77 @@ const FLAGS: AgentDef = {
   files: [],
 };
 
+/** What flags wrote before asking: long enough that the ask card folds it ("Show more"). */
+const FLAGS_CONTEXT = `Config loads once at startup from \`gateway.yaml\`, and \`SIGHUP\` reloads it without dropping connections (\`internal/config/load.go\`). The router already reads per-tenant settings through \`cfg.Tenant(id)\`, so a flag check can sit right next to the rate-limit lookup with no new plumbing.
+
+Three things decide how this rollout behaves:
+
+- **Where flags live** decides who can flip them and whether a change needs a deploy.
+- **Which tenants go first** sets the blast radius if the new auth path misbehaves.
+- **How fast it widens** decides how long both auth paths run side by side.
+
+I'll ask them one at a time; you can go back and change an answer before I start.`;
+
 const FLAGS_STEPS: Step[] = [
   { t: "user", text: "Add feature flags to the gateway so we can roll the new auth path out to beta tenants first." },
   think("Flags need a store the gateway reads at startup and on reload. Check how config loads today before picking one.", 2600),
   read("internal/config/load.go", 96),
   read("internal/http/router.go", 120),
-  say("Config loads once at startup from `gateway.yaml`, with a SIGHUP reload. Before wiring flags in I need one decision."),
+  say(FLAGS_CONTEXT),
   {
     t: "ui",
     ui: {
       kind: "select",
       needs: "ask",
       title: "Question",
-      message: "Where should the gateway read its feature flags from?",
-      options: [
-        opt("Config file in the repo", { recommended: true, tone: "primary", description: "Reviewed in pull requests and reloaded on SIGHUP. No new service to run." }),
-        opt("Unleash", { description: "Self-hosted UI and gradual rollouts, one more container to run." }),
-        opt("LaunchDarkly", { description: "Hosted with the richest targeting, priced per seat." }),
-      ],
-      allowOther: true,
+      options: [],
       allowChat: true,
-      tool: { tool: "ask", title: "Where should the gateway read its feature flags from?", args: {}, ms: 0 },
+      tool: { tool: "ask", title: "Flag store, beta tenants and rollout pace", args: {}, ms: 0 },
+      // omp's ask with three questions: one at a time, Back from the second on
+      questions: [
+        {
+          kind: "select",
+          message: "Where should the gateway read its feature flags from?",
+          options: [
+            opt("Config file in the repo", { recommended: true, tone: "primary", description: "Reviewed in pull requests and reloaded on SIGHUP. No new service to run." }),
+            opt("Unleash", { description: "Self-hosted UI and gradual rollouts, one more container to run." }),
+            opt("LaunchDarkly", { description: "Hosted with the richest targeting, priced per seat." }),
+          ],
+          allowOther: true,
+        },
+        {
+          kind: "multiSelect",
+          message: "Which beta tenants get the new auth path first?",
+          options: [
+            opt("Acme (internal)", { recommended: true, tone: "primary", description: "Our own staging tenant: real traffic, no customers." }),
+            opt("Globex", { recommended: true, description: "About 2 % of requests, signed up for the beta program." }),
+            opt("Initech", { description: "The heaviest API user: the best load test and the biggest blast radius." }),
+            opt("Umbrella (EU)", { description: "Exercises the EU region's separate session store." }),
+          ],
+          allowOther: true,
+        },
+        {
+          kind: "select",
+          message: "How fast should the rollout widen after them?",
+          options: [
+            opt("I flip each step by hand", { recommended: true, tone: "primary", description: "Nothing widens until you say so." }),
+            opt("10 % more tenants a day", { description: "Automatic; pauses on an error-rate alarm." }),
+            opt("Everyone after a clean week", { description: "One step once the beta has run 7 days without an incident." }),
+          ],
+          allowOther: true,
+        },
+      ],
     },
-    then: (a: Answer) => {
-      const choice = a.text ?? a.choices[0] ?? "Config file in the repo";
-      if (a.cancel) return [say("Leaving the flag store open for now; the rest of the rollout plan doesn't depend on it yet.")];
-      return [say(`Going with **${choice}**.`), todo("Flag store", "completed"), todo("Beta tenant list", "inProgress"), say("Flags are wired; the beta tenant list is next.")];
+    then: (a: Answer, all: Answer[]) => {
+      if (a.cancel) return [say("Leaving the rollout plan open for now; the flag plumbing doesn't depend on it yet.")];
+      if (a.chat) return [say("Happy to talk it through first. Which matters most to you: who can flip a flag, how many tenants see the new path, or how long both paths run?")];
+      const [store, tenants, pace] = all.map((x) => x.text ?? x.choices.join(" and "));
+      return [
+        say(`Going with **${store}** for the flags and starting with **${tenants}**. Rollout pace: **${pace}**.`),
+        todo("Flag store", "completed"),
+        todo("Beta tenant list", "inProgress"),
+        say("Flags are wired; the beta tenant list is next."),
+      ];
     },
   },
 ];
@@ -218,7 +281,8 @@ export class DemoAutoAnswer {
     const q = qualifying(sim);
     if (!p?.enabled || !q) return null;
     const wait = waitText(p.afterSecs * 1000);
-    return p.onlyWhenNoApp && this.host.apps() ? `Decide for me picks ${stars(q.labels)} after ${wait} with no app connected.` : `Decide for me picks ${stars(q.labels)} in ${wait} unless you answer.`;
+    const verb = q.earlier ? "sends" : "picks";
+    return p.onlyWhenNoApp && this.host.apps() ? `Decide for me ${verb} ${answerText(q)} after ${wait} with no app connected.` : `Decide for me ${verb} ${answerText(q)} in ${wait} unless you answer.`;
   }
 
   /** A launch spec's `autoAnswer` (checked before the launch). */
@@ -360,19 +424,19 @@ export class DemoAutoAnswer {
   /** Stable while nothing changes: a running clock shows its deadline, a standing one what is left. */
   private view(e: Countdown, p: AutoAnswer): AutoAnswerCountdown {
     const left = this.left(e, p);
-    const base = { requestId: e.requestId, picks: [...e.labels] };
+    const base = { requestId: e.requestId, picks: [...e.labels], ...(e.earlier ? { earlier: true } : {}) };
     if (e.cancelled) return { ...base, status: "cancelled", remainingMs: Math.max(0, left) };
     if (e.runningSince !== undefined) return { ...base, status: "counting", deadline: e.runningSince + left };
     return { ...base, status: "waitingForNoApp", remainingMs: Math.max(0, left) };
   }
 
-  /** The wait ran out: answer with the ★ option(s), like tf-hostd. */
+  /** The wait ran out: answer with the ★ option(s), or the question's earlier answer, like tf-hostd. */
   private fire(sim: AgentSim, e: Countdown, p: AutoAnswer): void {
     const id = sim.agent.id;
     this.pending.delete(id);
-    if (!sim.answer(e.requestId, { choices: e.picks, cancel: false, chat: false }, "Decide for me", false)) return;
-    const picks = stars(e.labels);
-    this.host.activity(id, "answered", `Auto-answered ${picks}`, `${clip(e.question, 200)} · nobody answered within ${waitText(p.afterSecs * 1000 + e.extraMs)}`);
+    if (!sim.answer(e.requestId, { choices: e.picks, text: e.text, cancel: false, chat: false }, "Decide for me", false)) return;
+    const picks = answerText(e);
+    this.host.activity(id, "answered", `${e.earlier ? "Auto-sent" : "Auto-answered"} ${picks}`, `${clip(e.question, 200)} · nobody answered within ${waitText(p.afterSecs * 1000 + e.extraMs)}`);
     this.host.notify(id, "info", `${sim.agent.name} · decided for you`, clip(`${picks} — ${e.question}`, 240));
   }
 }

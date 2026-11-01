@@ -21,7 +21,7 @@ export function EdgeSwipeBack({ enabled: wanted }: { enabled: boolean }) {
   const x = useTransform(dx, [0, TRIGGER, 200], [-44, 10, 22]);
   const scale = useTransform(dx, [0, TRIGGER], [0.4, 1]);
   const opacity = useTransform(dx, [0, 20, TRIGGER], [0, 0.7, 1]);
-  const glow = useTransform(dx, [TRIGGER - 1, TRIGGER], ["0 0 0 0 rgb(163 92 240 / 0)", "0 0 28px 4px rgb(163 92 240 / 0.7)"]);
+  const glow = useTransform(dx, [TRIGGER - 1, TRIGGER], ["0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent)", "0 0 28px 4px color-mix(in srgb, var(--color-accent) 70%, transparent)"]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -78,7 +78,7 @@ export function EdgeSwipeBack({ enabled: wanted }: { enabled: boolean }) {
   return (
     <motion.div
       aria-hidden
-      className="pointer-events-none fixed top-0 left-0 z-drag grid size-11 -translate-y-1/2 place-items-center rounded-full bg-omp text-white"
+      className="pointer-events-none fixed top-0 left-0 z-drag grid size-11 -translate-y-1/2 place-items-center rounded-full bg-omp text-on-accent"
       style={{ x, y, scale, opacity, boxShadow: glow }}
     >
       <ChevronLeft className="size-5" />

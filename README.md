@@ -59,7 +59,7 @@ Leave a flock working and come back to finished work, not to a wall of stopped a
 
 ### Easy to start, nothing hidden
 
-New to omp and herdr? The board's **First steps** checklist walks you through the demo flock (answer a question, approve a command, steer an agent, review, dispatch, the palette) and retires itself. Dotted terms such as *pane*, *steer*, *follow-up*, *worktree* or *compact* explain themselves on hover or tap, and every launcher and palette action says what it does. Motion is calm by default: only changes and what needs you move, briefly, then the screen holds still; nothing animates while the window is in the background, and Settings → Motion → Lively brings back the full show.
+New to omp and herdr? The board's **First steps** checklist walks you through the demo flock (answer a question, approve a command, steer an agent, review, dispatch, the palette) and retires itself. Dotted terms such as *pane*, *steer*, *follow-up*, *worktree* or *compact* explain themselves on hover or tap, and every launcher and palette action says what it does. Motion is calm by default: only changes and what needs you move, briefly, then the screen holds still; nothing animates while the window is in the background, and Settings → Appearance → Animation → Lively brings back the full show.
 
 ### AI naming with omp's tiny model
 
@@ -91,7 +91,7 @@ The **Accounts** page shows the subscriptions and API keys omp signs in with on 
 
 ### A native session for every agent
 
-A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. When the agent asks, its question becomes a card you answer with a click or `1`–`9`, with each option's trade-off written inside its button. `Enter` sends, or steers the running turn, and `Alt+Enter` queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, images and videos. Large pastes become a compact attachment, and from omp's threshold on you choose, as in omp, between an attachment block, a file the agent reads on demand, or inline text. Whatever you type stays put: drafts, pasted images and attachments survive switching agents and restarts until you send them.
+A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, bash with ANSI colours, search, todos, subagents, web, images) and thinking blocks. When the agent asks, its question becomes a card you answer with a click or `1`–`9`, with each option's trade-off written inside its button. The card starts with what the agent wrote just before asking, so you read the why without scrolling back (on the phone, in the Inbox and on board cards too), and a set of questions shows "Question 2 of 3" with **Back** (or `←`) to change an earlier answer, as in omp. `Enter` sends, or steers the running turn, and `Alt+Enter` queues a follow-up, with an editable queue, a `/` palette covering omp's commands and your own, `@` file search, images and videos. Large pastes become a compact attachment, and from omp's threshold on you choose, as in omp, between an attachment block, a file the agent reads on demand, or inline text. Whatever you type stays put: drafts, pasted images and attachments survive switching agents and restarts until you send them. Dictation tools type and paste into every text field, Whisper-based ones on Linux included. With more than one host, the session header shows which host the agent runs on.
 
 - **Find** (`Ctrl+F`) searches the whole transcript, tool output included, and Past sessions searches the text of every session on the host.
 - **Errors say what happened.** A failed request shows its message and status, a provider refusal shows its category and explanation (for example a cyber safety refusal) with what to do next, and omp's warnings (extension notices, fallbacks, configuration problems) appear in the transcript where they happened.
@@ -99,7 +99,7 @@ A real GUI for the omp transcript: streaming markdown, rich tool cards (diffs, b
 
 | Ask cards | Approvals |
 |---|---|
-| <img src="docs/assets/readme/session-ask.webp" alt="Session with an ask card offering four answers"> | <img src="docs/assets/readme/session-approval.webp" alt="Session with an approval card for a bash command"> |
+| <img src="docs/assets/readme/session-ask.webp" alt="Session with an ask card: what the agent said before asking, question 2 of 3 with Back, five answers"> | <img src="docs/assets/readme/session-approval.webp" alt="Session with an approval card for a bash command"> |
 
 **Attached natively, even to big swarms.** TeleFlock follows each omp session through the TeleFlock bridge, an extension running inside omp that streams the session's live events and takes questions, approvals and controls over a private local socket, while `tf-hostd` reads the history straight from omp's session file. A session running dozens of subagents stays live, and a restarted host daemon picks every session up again with the same rows. Sessions are also cached on your devices: reopening one, reconnecting or restarting the app fetches only the rows that changed, over a zstd-compressed link.
 
@@ -144,6 +144,14 @@ A diff viewer (unified or split) for any worktree. From there you commit (✨ le
 - **Clean up.** A page per host lists every worktree with its pull request state, age, size and changes, removes merged and stale ones in bulk with the usual safety checks (a worktree with changes needs force, a locked one is refused, branches are kept), and runs omp's storage cleanup without touching sessions. The board warns when a host runs low on disk.
 - **Tools stay current.** Every host keeps omp and herdr up to date by itself, and Host setup offers one-tap fixes for whatever is missing.
 
+### Forwarding: let one host use another
+
+An agent on your remote dev box can use your own computer: run a command there, open a shell, call a tool such as `agent-browser` by its plain name so the browser opens headed on your screen, or reach a port there such as a browser's DevTools. Save a **forward** on the Forwarding page: the host whose agents and shells use it, the host they use, and what it offers (a shell and commands, tools by name, port pairs). On the first host, `tf-forward laptop -- <command>` runs a command on the other one with its output and exit status, `tf-forward laptop` opens an interactive shell, and forwarded tools run by name in every agent TeleFlock starts. The page shows the exact commands to copy and a ready-made instruction for an agent.
+
+The hosts never reach each other: the TeleFlock app connected to both relays, so a forward works while that device runs and is connected to both hosts (a server and your laptop, or a WSL distro and its Windows machine). A forward is off until you save it and is kept on the device that relays it, and the page lists everything using it right now, with **Stop**. Everything on the first host, its agents included, can then run commands as you on the other one; the editor says so before you save.
+
+<img src="docs/assets/readme/forwarding.webp" alt="Forwarding page: two forwards between two hosts with their status, a port warning, and three connections in use with Stop" width="100%">
+
 ### A real terminal when you need it
 
 xterm.js attached to any herdr pane, in **Fira Code** with **Nerd Font** icons. Beside it, **Running panes** lists every pane on the host, shells and agents, with the program running in each (`vim`, `bun run dev`, `htop`); opening one attaches to the existing pane instead of starting a new shell. It supports control or observe mode with take-over, search, tabs, `localhost` preview tunnels, and an extra-keys row on phones. Paste or drop an image or a video and it is uploaded to the host and its path pasted, so omp in the pane attaches it as it would in a local terminal.
@@ -153,6 +161,12 @@ xterm.js attached to any herdr pane, in **Fira Code** with **Nerd Font** icons. 
 ### Wall and ambient mode
 
 **Wall** fills a big monitor with a 2×2 or 3×3 grid of live transcripts that fills itself with whoever needs you or is working, and you can answer from any tile. **Ambient mode** turns an old tablet or a second screen into one orb per agent: needs-you glows, an optional chime marks changes, and a tap answers.
+
+### Themes
+
+Settings → Appearance has seven themes: TeleFlock (the default), **Daylight** (light), **High contrast**, **Nord**, **Dracula**, **Catppuccin Mocha** and **Gruvbox**; the terminal palette and code highlighting follow the theme, and each device keeps its own. Write your own in CSS: start from any theme with every variable listed, edit it with a live preview, and import or export `.css` files. A new custom theme sticks only once you press **Keep**, and if one ever leaves TeleFlock unreadable, `Ctrl+Alt+Shift+T` brings back the default.
+
+<img src="docs/assets/readme/themes.webp" alt="Settings, Appearance in the Daylight theme: seven themes, New theme, Import, Reset and Animation" width="100%">
 
 ### In your pocket
 
@@ -256,10 +270,11 @@ flowchart LR
 
 - omp keeps running as its normal TUI inside herdr, so herdr's state tracking and the real terminal keep working.
 - The app's Rust core uploads and starts a small host daemon, `tf-hostd`, over SSH (or locally), and speaks one protocol to it whatever the transport. All your devices share that daemon; when they run different app versions, the host keeps the newest `tf-hostd`.
-- `tf-hostd` follows each omp session through the TeleFlock bridge, an omp extension that streams the session's live events (messages, tools, subagents at any depth, questions and approvals) over a private local socket and carries every control back, while the history comes straight from omp's session file. Sessions started without the bridge fall back to a private collab guest on a loopback relay.
+- `tf-hostd` follows each omp session through the TeleFlock bridge, an omp extension that streams the session's live events (messages, tools, subagents at any depth, questions and approvals) over a private local socket and carries every control back, while the history comes straight from omp's session file. Sessions started without the bridge fall back to a private collab guest on a loopback relay, and while neither delivers (a room that ended or can't be joined) the transcript keeps following omp's session file. A watchdog on the host compares each transcript with omp's session file and repairs one that fell behind.
 - `tf-hostd` is also the host's caretaker, with or without an app connected: it watches herdr and restarts it, brings agents back after crashes and reboots, resumes agents after usage limits, answers questions you delegated, runs automations, keeps omp and herdr up to date and sends push notifications. On Linux with systemd it and the herdr servers it starts run in scopes of their own, so the SSH login that started them can end without taking the agents down.
 - Each device keeps the sessions it opened in a compressed cache; reopening, reconnecting or restarting sends what the device holds, and the host answers with only the missing or changed rows.
 - herdr is driven through its local API; git and `gh` run on the host for review and shipping. AI naming runs one short `omp` call on the host with the `tiny` role.
+- Hosts never talk to each other. Moving an agent, copying settings from one host to another and forwarding go through the app connected to both; a forward's bytes travel host → app → host over the same links, with flow control per stream.
 - The UI is React, rendered by the system webview through Tauri 2. Desktop and Android share all of it.
 
 Details: [`docs/architecture.md`](docs/architecture.md) · spec: [`docs/spec.md`](docs/spec.md) · bridge protocol: [`docs/bridge-protocol.md`](docs/bridge-protocol.md) · feature coverage: [`docs/coverage.md`](docs/coverage.md).

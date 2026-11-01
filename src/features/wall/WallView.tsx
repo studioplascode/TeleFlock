@@ -45,7 +45,7 @@ function WallToolbar() {
       <h1 className="mr-2 shrink-0 font-display text-xl font-bold text-ink">{VIEWS.wall.label}</h1>
       <SegmentedControl<string> size="sm" value={String(size)} onValueChange={(v) => useWall.getState().setSize(Number(v) as WallSize)} options={SIZES} aria-label="Grid" className="shrink-0" />
       <Tooltip content="Unpinned tiles show who needs you, then who is running, then what is ready for review">
-        <label className="flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md px-2 text-xs font-bold text-ink-2 hover:bg-white/4">
+        <label className="flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md px-2 text-xs font-bold text-ink-2 hover:bg-ink/4">
           <Switch checked={auto} onCheckedChange={(on) => useWall.getState().setAuto(on)} label="Fill tiles automatically" />
           Auto-fill
         </label>

@@ -99,7 +99,7 @@ export function SessionList({ rows, active, selected, needle, groupBy, home, now
                   <motion.span
                     layoutId={isSel ? undefined : "ps-active"}
                     transition={spring.snappy}
-                    className={cn("absolute inset-0.5 rounded-md", isSel ? "bg-accent/14 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.5),0_0_22px_-10px_rgb(163_92_240/0.9)]" : "bg-white/5")}
+                    className={cn("absolute inset-0.5 rounded-md", isSel ? "bg-accent/14 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_50%,transparent),0_0_22px_-10px_color-mix(in_srgb,var(--color-accent)_90%,transparent)]" : "bg-ink/5")}
                     aria-hidden
                   />
                 )}
@@ -110,7 +110,7 @@ export function SessionList({ rows, active, selected, needle, groupBy, home, now
                   <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="truncate text-sm font-bold">{s.title ? <Highlight text={s.title} needle={needle} /> : <span className="font-semibold text-mute italic">Untitled session</span>}</span>
                     <span className="flex min-w-0 items-center gap-1.5 text-2xs text-mute-2">
-                      {groupBy === "date" && <span className="shrink-0 rounded-xs bg-white/6 px-1.5 py-px font-semibold text-ink-2">{r.repo}</span>}
+                      {groupBy === "date" && <span className="shrink-0 rounded-xs bg-ink/6 px-1.5 py-px font-semibold text-ink-2">{r.repo}</span>}
                       <span className="truncate font-mono">{s.cwd ? <Highlight text={tildify(s.cwd, home)} needle={needle} /> : s.file}</span>
                       {s.messages !== undefined && <span className="shrink-0 tabular">· {s.messages} msgs</span>}
                     </span>
@@ -138,9 +138,9 @@ export function SessionList({ rows, active, selected, needle, groupBy, home, now
                     onClick={() => onSnippet(s, sn)}
                     className="relative mr-1 mb-0.5 ml-11 cursor-pointer select-none"
                   >
-                    {active === stop && <span className="absolute inset-0 rounded-md bg-white/6 shadow-[inset_0_0_0_1px_rgb(163_92_240/0.45)]" aria-hidden />}
+                    {active === stop && <span className="absolute inset-0 rounded-md bg-ink/6 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_45%,transparent)]" aria-hidden />}
                     <div className="relative flex items-start gap-2 px-2 py-1.5">
-                      <span className="mt-px w-[68px] shrink-0 truncate rounded-xs bg-white/6 px-1.5 py-px text-center text-2xs font-semibold text-ink-2">{snippetLabel(sn)}</span>
+                      <span className="mt-px w-[68px] shrink-0 truncate rounded-xs bg-ink/6 px-1.5 py-px text-center text-2xs font-semibold text-ink-2">{snippetLabel(sn)}</span>
                       <span className="line-clamp-2 min-w-0 text-xs break-words text-mute">
                         {sn.before}
                         <mark className="rounded-[3px] bg-accent/30 text-ink">{sn.hit}</mark>

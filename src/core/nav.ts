@@ -13,6 +13,8 @@ export type Route =
   /** The week's digest of every host in view, shared as an image. */
   | { name: "wrapped" }
   | { name: "hosts" }
+  /** Host-to-host forwarding: rules that let one host's agents and shells use another host (a device-level page, no host in the route). */
+  | { name: "forward" }
   | { name: "settings" }
   | { name: "more" }
   | { name: "design" }
@@ -45,6 +47,7 @@ const SIMPLE: Record<string, Route> = {
   usage: { name: "usage" },
   wrapped: { name: "wrapped" },
   hosts: { name: "hosts" },
+  forward: { name: "forward" },
   settings: { name: "settings" },
   more: { name: "more" },
   design: { name: "design" },

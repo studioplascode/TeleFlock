@@ -210,9 +210,9 @@ export function PaneOverlay({ phase, compact, mode, offline, conn, herdr, hostId
 
 const TONE = {
   neutral: "shadow-[var(--shadow-d3),inset_0_0_0_1px_var(--color-line-2)] [&_.ov-icon]:text-accent-hi",
-  warn: "shadow-[var(--shadow-d3),inset_0_0_0_1px_rgb(251_191_36/0.35)] [&_.ov-icon]:text-warn",
-  sun: "shadow-[var(--shadow-d3),var(--shadow-glow-sun),inset_0_0_0_1px_rgb(255_61_119/0.45)] [&_.ov-icon]:text-sun-2",
-  error: "shadow-[var(--shadow-d3),var(--shadow-glow-error),inset_0_0_0_1px_rgb(255_77_94/0.45)] [&_.ov-icon]:text-error",
+  warn: "shadow-[var(--shadow-d3),inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_35%,transparent)] [&_.ov-icon]:text-warn",
+  sun: "shadow-[var(--shadow-d3),var(--shadow-glow-sun),inset_0_0_0_1px_color-mix(in_srgb,var(--color-sun-2)_45%,transparent)] [&_.ov-icon]:text-sun-2",
+  error: "shadow-[var(--shadow-d3),var(--shadow-glow-error),inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_45%,transparent)] [&_.ov-icon]:text-error",
 } as const;
 
 function Banner({
@@ -236,11 +236,11 @@ function Banner({
       exit={{ opacity: 0, y: -8, scale: 0.98, transition: tween.fast }}
       transition={spring.bouncy}
       className={cn(
-        "absolute inset-x-3 top-10 z-raised mx-auto flex max-w-xl flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-[linear-gradient(180deg,rgb(34_34_46/0.96),rgb(25_25_33/0.96))] p-3 pr-3.5 backdrop-blur-xl",
+        "absolute inset-x-3 top-10 z-raised mx-auto flex max-w-xl flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-[linear-gradient(180deg,color-mix(in_srgb,var(--color-pop-1)_96%,transparent),color-mix(in_srgb,var(--color-pop-2)_96%,transparent))] p-3 pr-3.5 backdrop-blur-xl",
         TONE[tone],
       )}
     >
-      <span className="ov-icon grid size-8 shrink-0 place-items-center rounded-md bg-white/6 [&_svg]:size-4">{icon}</span>
+      <span className="ov-icon grid size-8 shrink-0 place-items-center rounded-md bg-ink/6 [&_svg]:size-4">{icon}</span>
       {/* min width keeps the copy readable: on narrow panes the actions wrap to their own row */}
       <div className="min-w-48 flex-1">
         <div className="text-sm font-extrabold text-ink">{title}</div>

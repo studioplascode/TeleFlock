@@ -7,7 +7,7 @@ import type { ContextXray, SessionMeta, TranscriptItem, XrayEntry } from "@/core
 
 /** One color per omp category (stable across sessions), plus the buffer and free space. */
 export const XRAY_COLOR: Record<string, string> = {
-  "system-prompt": "#a35cf0",
+  "system-prompt": "var(--color-accent)",
   skills: "#d29bff",
   "built-in-tools": "#5b8def",
   "custom-tools": "#4cc9f0",
@@ -17,7 +17,7 @@ export const XRAY_COLOR: Record<string, string> = {
   "tool-calls": "#ffd166",
   "tool-output": "#ef476f",
   buffer: "#f59e0b",
-  free: "rgb(255 255 255 / 0.08)",
+  free: "color-mix(in srgb, var(--color-ink) 8%, transparent)",
 };
 
 /** Share of the window as omp's overview prints it: one decimal, `<0.1%` for slivers, `—` without a window. */
@@ -38,7 +38,7 @@ export interface XraySegment {
 export function xraySegments(x: ContextXray): XraySegment[] {
   const segments: XraySegment[] = x.categories
     .filter((c) => (c.tokens ?? 0) > 0)
-    .map((c) => ({ id: c.id, label: c.label, tokens: c.tokens ?? 0, color: XRAY_COLOR[c.id] ?? "#8b8b9e" }));
+    .map((c) => ({ id: c.id, label: c.label, tokens: c.tokens ?? 0, color: XRAY_COLOR[c.id] ?? "color-mix(in srgb, var(--color-mute) 65%, var(--color-mute-2))" }));
   segments.push({ id: "free", label: "Free space", tokens: x.free, color: XRAY_COLOR.free as string });
   if (x.buffer > 0) segments.push({ id: "buffer", label: "Auto-compact buffer", tokens: x.buffer, color: XRAY_COLOR.buffer as string });
   return segments;

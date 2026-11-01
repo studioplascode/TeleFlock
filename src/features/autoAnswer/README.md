@@ -20,7 +20,9 @@ When a question has a ★ recommended option and nobody answers in time, tf-host
 
 States a countdown shows: counting "auto-picks ★ Use SQLite in 12:40" · due "auto-picking ★ Use SQLite…" ·
 waiting "auto-picks ★ Use SQLite when no app is connected · 12:40 left" · cancelled "Won't auto-pick
-this question" (ask card only; cards show nothing).
+this question" (ask card only; cards show nothing). A question that already has the user's answer (Back reopened
+it; `countdown.earlier`) gets that answer, not ★: "auto-sends your earlier answer (Postgres) in 12:40", chip "sends your
+answer in 12:40".
 
 Launches: `AutoAnswerSection` sits after the model roles in the Agent options of New agent and New
 worktree (`workspace/shared/AgentFields.tsx`), each Fan out variant, the automation editor and

@@ -76,10 +76,10 @@ export const ItemRow = memo(function ItemRow({
 });
 
 const RAIL_DOT: Record<ToolItem["status"], string> = {
-  pending: "bg-accent shadow-[0_0_8px_rgb(163_92_240/0.9)] tf-loop animate-breathe [--tf-breath:1.4s]",
-  running: "bg-accent shadow-[0_0_8px_rgb(163_92_240/0.9)] tf-loop animate-breathe [--tf-breath:1.4s]",
+  pending: "bg-accent shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_90%,transparent)] tf-loop animate-breathe [--tf-breath:1.4s]",
+  running: "bg-accent shadow-[0_0_8px_color-mix(in_srgb,var(--color-accent)_90%,transparent)] tf-loop animate-breathe [--tf-breath:1.4s]",
   ok: "bg-mute-2/70",
-  error: "bg-error shadow-[0_0_8px_rgb(255_77_94/0.7)]",
+  error: "bg-error shadow-[0_0_8px_color-mix(in_srgb,var(--color-error)_70%,transparent)]",
   denied: "bg-sun-2",
   aborted: "bg-mute-2/40",
 };
@@ -152,14 +152,14 @@ function UserRow({ item }: { item: UserItem }) {
             steer
           </span>
         )}
-        {author ? <span className="rounded-full bg-white/6 px-2 py-0.5 text-[10.5px] text-ink-2 shadow-hairline">{author}</span> : <span>You</span>}
+        {author ? <span className="rounded-full bg-ink/6 px-2 py-0.5 text-[10.5px] text-ink-2 shadow-hairline">{author}</span> : <span>You</span>}
         <span className="font-semibold tabular">{clock(item.at)}</span>
       </div>
       <div
         className={cn(
           "max-w-[min(720px,88%)] rounded-[20px] rounded-tr-[8px] px-4 py-2.5 text-[13.5px] leading-[1.55] whitespace-pre-wrap text-ink [overflow-wrap:anywhere] max-md:max-w-[92%] max-md:rounded-[18px] max-md:rounded-tr-[6px] max-md:px-3.5 max-md:py-2",
           item.steering
-            ? "bg-[linear-gradient(135deg,rgb(163_92_240/0.24),rgb(79_139_255/0.16))] shadow-[inset_0_0_0_1px_rgb(163_92_240/0.35)]"
+            ? "bg-[linear-gradient(135deg,color-mix(in_srgb,var(--color-accent)_24%,transparent),color-mix(in_srgb,var(--color-run-2)_16%,transparent))] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]"
             : "bg-tile-4 shadow-[inset_0_1px_0_rgb(255_255_255/0.06),var(--shadow-d1)]",
         )}
       >
@@ -211,7 +211,7 @@ function SyntheticTurn({ item }: { item: UserItem }) {
       type="button"
       onClick={() => setOpen((o) => !o)}
       aria-expanded={open}
-      className="focus-ring max-w-[min(720px,88%)] rounded-lg bg-white/[0.025] px-3 py-1.5 text-left text-xs text-mute shadow-hairline hover:bg-white/[0.04]"
+      className="focus-ring max-w-[min(720px,88%)] rounded-lg bg-ink/[0.025] px-3 py-1.5 text-left text-xs text-mute shadow-hairline hover:bg-ink/[0.04]"
     >
       <span data-find-skip className="flex items-center gap-1.5 font-semibold">
         <Repeat2 className="size-3" />
@@ -229,13 +229,13 @@ function AssistantRow({ item }: { item: AssistantItem }) {
     <div className="flex gap-2.5 pt-1 max-md:pt-0">
       <span
         className={cn(
-          "grid size-7 shrink-0 place-items-center rounded-[10px] bg-run shadow-[0_4px_14px_-4px_rgb(91_103_246/0.7)]",
+          "grid size-7 shrink-0 place-items-center rounded-[10px] bg-run shadow-[0_4px_14px_-4px_color-mix(in_srgb,color-mix(in_srgb,var(--color-accent-lo)_43%,var(--color-run-2))_70%,transparent)]",
           item.streaming && "tf-loop animate-breathe [--tf-breath:1.4s]",
           "max-md:hidden",
         )}
         aria-hidden
       >
-        <LogoMark size={16} mono className="text-white" title="omp" />
+        <LogoMark size={16} mono className="text-on-run" title="omp" />
       </span>
       <div className="min-w-0 flex-1">
         <div data-find-skip className="mb-0.5 flex items-center gap-2 text-[11.5px] font-extrabold text-ink">
@@ -277,7 +277,7 @@ function ThinkingRow({ item }: { item: ThinkingItem }) {
         disabled={item.redacted && !live}
         className={cn(
           "focus-ring pressable inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-semibold shadow-hairline",
-          live ? "bg-accent/10 text-accent-ink" : "bg-white/[0.04] text-mute hover:text-ink",
+          live ? "bg-accent/10 text-accent-ink" : "bg-ink/[0.04] text-mute hover:text-ink",
         )}
       >
         {live ? <Brain className="tf-loop size-3 animate-breathe [--tf-breath:1.2s]" /> : <Sparkles className="size-3" />}
@@ -308,9 +308,9 @@ function ThinkingRow({ item }: { item: ThinkingItem }) {
 }
 
 const NOTICE_TONE: Record<NoticeItem["level"], { icon: typeof Info; cls: string }> = {
-  info: { icon: Info, cls: "bg-white/[0.03] text-mute" },
-  warn: { icon: AlertTriangle, cls: "bg-warn/[0.08] text-[#fde68a] shadow-[inset_0_0_0_1px_rgb(251_191_36/0.25)]" },
-  error: { icon: CircleAlert, cls: "bg-error/[0.08] text-[#ff9aab] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)]" },
+  info: { icon: Info, cls: "bg-ink/[0.03] text-mute" },
+  warn: { icon: AlertTriangle, cls: "bg-warn/[0.08] text-warn-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_25%,transparent)]" },
+  error: { icon: CircleAlert, cls: "bg-error/[0.08] text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_30%,transparent)]" },
 };
 
 /** omp's "Retrying (n/m) in Xs" notice with a live countdown while that retry is the one omp waits for. */
@@ -341,14 +341,14 @@ function CompactionRow({ item }: { item: CompactionItem }) {
     <div className="py-1">
       <button type="button" data-find-skip onClick={() => setOpen((o) => !o)} aria-expanded={open} className="focus-ring group/cmp flex w-full items-center gap-3 rounded-md text-left">
         <span className="h-px flex-1 bg-gradient-to-r from-transparent to-review/40" />
-        <span className="flex items-center gap-1.5 rounded-full bg-review/10 px-3 py-1 text-[11px] font-bold text-review shadow-[inset_0_0_0_1px_rgb(34_211_238/0.3)]">
+        <span className="flex items-center gap-1.5 rounded-full bg-review/10 px-3 py-1 text-[11px] font-bold text-review shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-review)_30%,transparent)]">
           <Layers className="size-3" />
           Compacted{item.tokensBefore != null && ` · ${formatCompact(item.tokensBefore)} tokens`}
           <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
         </span>
         <span className="h-px flex-1 bg-gradient-to-l from-transparent to-review/40" />
       </button>
-      {open && <Markdown text={item.summary} className="mx-auto mt-2 max-w-[760px] rounded-lg bg-white/[0.025] px-4 py-3 text-[12.5px] shadow-hairline" />}
+      {open && <Markdown text={item.summary} className="mx-auto mt-2 max-w-[760px] rounded-lg bg-ink/[0.025] px-4 py-3 text-[12.5px] shadow-hairline" />}
     </div>
   );
 }

@@ -28,7 +28,7 @@ function Kicker({ icon, children }: { icon: ReactNode; children: ReactNode }) {
 /** A proportional bar (no animation: values jump, calm by default). */
 function Meter({ value, max, color, className }: { value: number; max: number; color?: string; className?: string }) {
   return (
-    <div className={cn("h-1.5 overflow-hidden rounded-full bg-white/6", className)}>
+    <div className={cn("h-1.5 overflow-hidden rounded-full bg-ink/6", className)}>
       <div className="h-full rounded-full bg-accent" style={{ width: `${max > 0 ? Math.max(2, (value / max) * 100) : 0}%`, ...(color ? { background: color } : {}) }} />
     </div>
   );
@@ -60,7 +60,7 @@ export function Highlights({ m, className }: { m: MergedUsage; className?: strin
 
 /** Current and longest streak, plus a Monday-first activity calendar. */
 export function StreakTile({ s, cells, className }: { s: Streaks; cells: HeatCell[][]; className?: string }) {
-  const tone = ["bg-white/[0.05]", "bg-accent/25", "bg-accent/45", "bg-accent/70", "bg-accent"];
+  const tone = ["bg-ink/[0.05]", "bg-accent/25", "bg-accent/45", "bg-accent/70", "bg-accent"];
   return (
     <Tile className={cn("flex flex-col gap-3 p-5 max-md:p-4", className)}>
       <Kicker icon={<Flame />}>Streak</Kicker>
@@ -230,7 +230,7 @@ export function HoursTile({ profile, className }: { profile: number[]; className
       </div>
       <div className="flex h-24 items-end gap-[3px]" role="img" aria-label={`Requests by hour of day, busiest ${peak}:00`}>
         {profile.map((n, h) => (
-          <div key={h} title={`${String(h).padStart(2, "0")}:00 · ${formatInt(n)} requests`} className={cn("flex-1 rounded-t-[3px]", h === peak && total > 0 ? "bg-accent" : "bg-white/12")} style={{ height: `${Math.max(3, (n / max) * 100)}%` }} />
+          <div key={h} title={`${String(h).padStart(2, "0")}:00 · ${formatInt(n)} requests`} className={cn("flex-1 rounded-t-[3px]", h === peak && total > 0 ? "bg-accent" : "bg-ink/12")} style={{ height: `${Math.max(3, (n / max) * 100)}%` }} />
         ))}
       </div>
       <div className="flex justify-between font-mono text-[9.5px] text-mute-2">
@@ -282,7 +282,7 @@ export function RecordsTile({ m, bestDay, cal, className }: { m: MergedUsage; be
       {rows.length === 0 && <p className="text-sm text-mute">Records appear once there is activity in this range.</p>}
       <ul className="grid grid-cols-2 gap-3">
         {rows.map((r) => (
-          <li key={r.label} className="flex min-w-0 flex-col gap-0.5 rounded-lg bg-white/[0.03] p-3 shadow-hairline">
+          <li key={r.label} className="flex min-w-0 flex-col gap-0.5 rounded-lg bg-ink/[0.03] p-3 shadow-hairline">
             <span className="flex items-center gap-1.5 text-[10.5px] font-extrabold tracking-[0.06em] text-mute uppercase [&_svg]:size-3">{r.icon}{r.label}</span>
             <span className="font-display text-lg font-bold text-ink tabular">{r.value}</span>
             <span className="truncate text-[10.5px] font-semibold text-mute-2" title={r.sub}>{r.sub}</span>

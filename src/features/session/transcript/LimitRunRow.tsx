@@ -30,7 +30,7 @@ export function LimitRunRow({ agentKey, run }: { agentKey: string; run: LimitRun
         data-find-skip
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="focus-ring flex w-full min-w-0 items-start gap-2 rounded-md bg-error/10 px-3 py-2 text-left text-xs text-[#ff9aab] shadow-[inset_0_0_0_1px_rgb(255_77_94/0.3)] hover:bg-error/15"
+        className="focus-ring flex w-full min-w-0 items-start gap-2 rounded-md bg-error/10 px-3 py-2 text-left text-xs text-error-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_30%,transparent)] hover:bg-error/15"
       >
         <CircleAlert className="mt-px size-3.5 shrink-0" />
         <span className="min-w-0 flex-1">

@@ -31,7 +31,7 @@ export function ScrollArea({ className, viewportClassName, viewportRef, fade = f
           orientation={o}
           className="z-raised flex touch-none p-0.5 transition-colors select-none data-[orientation=horizontal]:h-2 data-[orientation=horizontal]:flex-col data-[orientation=vertical]:w-2"
         >
-          <RadixScroll.Thumb className="relative flex-1 rounded-full bg-white/14 transition-colors hover:bg-white/28" />
+          <RadixScroll.Thumb className="relative flex-1 rounded-full bg-ink/14 transition-colors hover:bg-ink/28" />
         </RadixScroll.Scrollbar>
       ))}
       <RadixScroll.Corner />

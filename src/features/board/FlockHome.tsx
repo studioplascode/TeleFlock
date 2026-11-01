@@ -8,6 +8,8 @@ import { herdrAgentWord, herdrCardTime, herdrOrbStatus } from "@/features/hosts/
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
 import { CountdownChip } from "@/features/autoAnswer/CountdownChip";
 import { askText } from "@/features/inbox/askText";
+import { AgentSaid } from "@/features/session/ask/AgentSaid";
+import { withoutQuestion } from "@/features/session/ask/askContext";
 import { resumeNow } from "@/features/session/resume/actions";
 import { ticketActions } from "@/features/session/resume/words";
 import { ACTIONS, isFresh, LANE_TITLE, NEEDS_WORD, STATE_WORD, stateTime } from "@/features/shell/vocab";
@@ -89,11 +91,11 @@ const ICON = {
 /** Swipe-left accelerators; every one also has a visible twin (row buttons or the ⋯ menu). */
 function swipeActions(key: string, column: Column): SwipeAction[] {
   const out: SwipeAction[] = [];
-  if (column === "needs") out.push({ id: "answer", label: ACTIONS.answer.label, icon: ICON.answer, tone: "bg-sun text-white", run: () => openAnswerHud(key) });
+  if (column === "needs") out.push({ id: "answer", label: ACTIONS.answer.label, icon: ICON.answer, tone: "bg-sun text-on-sun", run: () => openAnswerHud(key) });
   out.push({ id: "terminal", label: ACTIONS.terminal.label, icon: ICON.terminal, tone: "bg-tile-5 text-ink", run: () => openTerminal(key, true) });
-  if (column === "running") out.push({ id: "stop", label: ACTIONS.stopTurn.label, icon: ICON.stop, tone: "bg-error text-white", run: () => void stopAgent(key) });
-  if (column === "review") out.push({ id: "markDone", label: ACTIONS.markDone.label, icon: ICON.markDone, tone: "bg-done text-[#1a2e05]", run: () => void archiveWithUndo([key]) });
-  if (column === "done") out.push({ id: "reopen", label: ACTIONS.reopen.label, icon: ICON.reopen, tone: "bg-review text-[#04262c]", run: () => void setArchived(key, false).catch(() => {}) });
+  if (column === "running") out.push({ id: "stop", label: ACTIONS.stopTurn.label, icon: ICON.stop, tone: "bg-error text-on-error", run: () => void stopAgent(key) });
+  if (column === "review") out.push({ id: "markDone", label: ACTIONS.markDone.label, icon: ICON.markDone, tone: "bg-done text-on-done", run: () => void archiveWithUndo([key]) });
+  if (column === "done") out.push({ id: "reopen", label: ACTIONS.reopen.label, icon: ICON.reopen, tone: "bg-review text-on-review", run: () => void setArchived(key, false).catch(() => {}) });
   return out;
 }
 
@@ -158,7 +160,7 @@ function Widgets() {
               <Heartbeat beat={beat} lastEventAt={lastAt} status="running" height={16} showAge={false} className="min-w-0 flex-1" />
               {quiet > 0 && (
                 <span className="flex shrink-0 items-center gap-1 text-2xs font-extrabold whitespace-nowrap text-warn" title="No events for over 90 s while working: possibly stuck">
-                  <span className="size-1.5 rounded-full bg-warn shadow-[0_0_6px_rgb(251_191_36/0.7)]" aria-hidden />
+                  <span className="size-1.5 rounded-full bg-warn shadow-[0_0_6px_color-mix(in_srgb,var(--color-warn)_70%,transparent)]" aria-hidden />
                   {quiet} quiet
                 </span>
               )}
@@ -193,6 +195,8 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
   const n = agent.needs;
   // each fact once: generic titles and an approval's command lines give way (same rule as Inbox, HUD, session)
   const { headline, body } = askText({ title: n.title, message: n.question, command: n.command, approval: n.kind === "approval" });
+  // what the agent wrote before asking (asks, hosts ≥ 0.8.0), two lines until opened
+  const said = n.context ? withoutQuestion(n.context, headline) : "";
   return (
     <SwipeRow id={agentKey} actions={swipeActions(agentKey, "needs")} onOpen={() => openAgent(agentKey)}>
       <div data-status="needs-you" data-morph="surface" data-morph-key={agentKey} className={cn("card-surface st-border-grad rounded-xl p-3.5 pt-2.5", stale && "opacity-70 grayscale-[0.6]")}>
@@ -202,7 +206,7 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
           </span>
           {muted && <BellOff className="size-3.5 shrink-0 text-mute-2" aria-label="Notifications muted" />}
           <AutoResumeBadge agentKey={agentKey} />
-          <span className="ml-auto shrink-0 text-xs font-bold whitespace-nowrap text-[#ffb08a]">
+          <span className="ml-auto shrink-0 text-xs font-bold whitespace-nowrap text-sun-ink">
             waiting <Elapsed since={n.since} />
           </span>
           <span className="-mr-1.5 shrink-0">
@@ -210,6 +214,7 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
           </span>
         </div>
         <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="mt-1 flex" />
+        {said && <AgentSaid key={n.requestId} text={said} variant="phone" className="mt-2" />}
         <p className="mt-1.5 font-display text-lg leading-snug font-bold text-ink">{headline}</p>
         {body && <p className="mt-1 line-clamp-3 text-sm whitespace-pre-line text-mute">{body}</p>}
         {n.command && <pre className="mt-2 overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs text-ink-2">{n.command}</pre>}
@@ -269,7 +274,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
   const todos = agent.omp?.todos;
   return (
     <SwipeRow id={agentKey} actions={swipeActions(agentKey, column)} onOpen={() => openAgent(agentKey)}>
-      <div data-status={status} data-morph="surface" data-morph-key={agentKey} className={cn("card-surface flex gap-2.5 rounded-xl py-2.5 pr-1.5 pl-3", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_rgb(251_191_36/0.3)]")}>
+      <div data-status={status} data-morph="surface" data-morph-key={agentKey} className={cn("card-surface flex gap-2.5 rounded-xl py-2.5 pr-1.5 pl-3", stale && "opacity-70 grayscale-[0.6]", quiet && "shadow-[var(--shadow-d1),inset_0_0_0_1px_color-mix(in_srgb,var(--color-warn)_30%,transparent)]")}>
         <span className="pt-0.5">
           {todos && todos.total > 0 ? (
             <ProgressRing done={todos.done} total={todos.total} status={quiet ? "idle" : status} size={36} stroke={3.5} />
@@ -332,10 +337,10 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
             )}
             {fresh && (
               <div className="mt-1.5 flex items-center gap-2">
-                <span className="rounded-full bg-white/6 px-2 py-px text-[10px] font-bold text-mute uppercase">{STATE_WORD.fresh}</span>
+                <span className="rounded-full bg-ink/6 px-2 py-px text-[10px] font-bold text-mute uppercase">{STATE_WORD.fresh}</span>
                 <button
                   type="button"
-                  className="ml-auto min-h-9 rounded-sm bg-accent px-3 py-1 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring"
+                  className="ml-auto min-h-9 rounded-sm bg-accent px-3 py-1 text-2xs font-extrabold text-on-accent shadow-glow-accent pressable focus-ring"
                   {...stopRow}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -362,7 +367,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
                   {ticket && (
                     <button
                       type="button"
-                      className="min-h-9 rounded-sm bg-accent px-3 py-1 text-2xs font-extrabold text-white shadow-glow-accent pressable focus-ring"
+                      className="min-h-9 rounded-sm bg-accent px-3 py-1 text-2xs font-extrabold text-on-accent shadow-glow-accent pressable focus-ring"
                       title={ticket.resumeHint}
                       onClick={() => void resumeNow(agentKey)}
                     >
@@ -404,7 +409,7 @@ function Section({ column, count, children, action, id }: { column: Column; coun
       <header className="flex items-center gap-2 px-1">
         <StatusOrb status={LANE_BY_COLUMN[column].status} size={7} label={null} />
         <h2 className="font-display text-md font-bold text-ink">{LANE_TITLE[column]}</h2>
-        <span className="rounded-full bg-white/6 px-1.5 text-2xs font-bold text-mute tabular">{count}</span>
+        <span className="rounded-full bg-ink/6 px-1.5 text-2xs font-bold text-mute tabular">{count}</span>
         <span className="ml-auto">{action}</span>
       </header>
       {children}

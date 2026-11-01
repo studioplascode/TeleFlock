@@ -24,7 +24,13 @@
 //!      marks each `notify` with `alert` (post it to the system now, or only list it), sends
 //!      `notifyAlert` when an unseen one escalates to this device and `notifyDone` when another
 //!      device read one (`crate::notify`). Clients without it get every `notify` as before.
+//!    * [`FEATURE_FORWARD`]: host-to-host forwarding (`crate::forward`). The client sends
+//!      `fwdOffer` (the rules it relays for this host as their from-host) after the welcome and on
+//!      every change; hostd answers each with `fwdOffered`. `fwd` messages carry the streams in
+//!      both directions. Without it neither side sends any of them (the app shows the rules as
+//!      `unsupported`).
 
+use crate::forward::{FwdEv, FwdOffer, FwdOfferState};
 use crate::model::{HostState, Notification, Pulse, StatePatch};
 use crate::notify::Presence;
 use crate::session::SessionEvent;
@@ -37,6 +43,8 @@ pub const FEATURE_ZSTD: &str = "zstd";
 pub const FEATURE_SESSION_SYNC: &str = "sessionSync";
 /// Wire feature: device presence and notification routing (`crate::notify`).
 pub const FEATURE_PRESENCE: &str = "presence";
+/// Wire feature: host-to-host forwarding offers and streams (`crate::forward`).
+pub const FEATURE_FORWARD: &str = "forward";
 
 wire_struct! {
     pub struct ClientInfo {
@@ -48,7 +56,7 @@ wire_struct! {
         /// Device display name (shown as the author of prompts sent from it).
         pub device: String,
         /// Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`],
-        /// [`FEATURE_PRESENCE`]).
+        /// [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`]).
         pub features: Option<Vec<String>>,
     }
 }
@@ -79,6 +87,11 @@ pub enum ClientMsg {
     /// dismissed the system notification, read the list): tf-hostd stops their escalation and
     /// retracts them on the other devices.
     NotifyRead { ids: Vec<String> },
+    /// ([`FEATURE_FORWARD`]) The rules this client relays for this host as their from-host; replaces
+    /// the previous list (empty: none).
+    FwdOffer { offers: Vec<FwdOffer> },
+    /// ([`FEATURE_FORWARD`]) An event of forwarding stream `sid`.
+    Fwd { sid: u64, ev: FwdEv },
     Bye,
 }
 
@@ -133,6 +146,10 @@ pub enum ServerMsg {
         by: Option<String>,
     },
     Pong { ts: Millis },
+    /// ([`FEATURE_FORWARD`]) What became of the client's last `fwdOffer`, per name.
+    FwdOffered { states: Vec<FwdOfferState> },
+    /// ([`FEATURE_FORWARD`]) An event of forwarding stream `sid`.
+    Fwd { sid: u64, ev: FwdEv },
     /// Fatal protocol error; the daemon closes the connection after sending it.
     Error { error: ApiError },
 }

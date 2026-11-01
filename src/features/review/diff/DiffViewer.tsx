@@ -209,7 +209,7 @@ export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, o
       )}
       <div
         ref={scrollRef}
-        className="size-full overflow-auto overscroll-contain font-mono text-[12px] leading-[20px] outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-inset [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb:hover]:bg-white/30"
+        className="size-full overflow-auto overscroll-contain font-mono text-[12px] leading-[20px] outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-inset [&::-webkit-scrollbar-thumb]:bg-ink/20 [&::-webkit-scrollbar-thumb:hover]:bg-ink/30"
         role="region"
         aria-label="Diff"
         tabIndex={0}
@@ -280,7 +280,7 @@ const RowView = memo(function RowView({ row, layout, wrap, compact }: { row: Exc
 
 function HunkHeader({ hunk, hidden, path, compact }: { hunk: Hunk; hidden: number; path: string; compact: boolean }) {
   return (
-    <div className="flex h-[32px] items-center bg-[linear-gradient(90deg,rgb(163_92_240/0.11),rgb(163_92_240/0.04)_60%,transparent)] shadow-[inset_0_1px_0_rgb(163_92_240/0.14),inset_0_-1px_0_rgb(163_92_240/0.1)]">
+    <div className="flex h-[32px] items-center bg-[linear-gradient(90deg,color-mix(in_srgb,var(--color-accent)_11%,transparent),color-mix(in_srgb,var(--color-accent)_4%,transparent)_60%,transparent)] shadow-[inset_0_1px_0_color-mix(in_srgb,var(--color-accent)_14%,transparent),inset_0_-1px_0_color-mix(in_srgb,var(--color-accent)_10%,transparent)]">
       <span className="sticky left-0 flex min-w-0 items-center gap-2.5 px-2.5" style={{ width: "var(--vw)" }}>
         <span className="shrink-0 rounded-[5px] bg-accent/14 px-1.5 text-[11px] leading-[18px] font-semibold text-accent-ink/90 tabular" title={hunk.header.replace(/ @@.*$/, " @@")}>
           {hunk.oldStart === 0 && hunk.oldLines === 0 ? (
@@ -345,7 +345,7 @@ function FileHeader({
           onClick={() => onToggle(file.path)}
           aria-expanded={!collapsed}
           aria-label={`${collapsed ? "Expand" : "Collapse"} ${file.path}`}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-2 pl-2.5 text-left focus-ring hover:bg-white/[0.04]"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pr-2 pl-2.5 text-left focus-ring hover:bg-ink/[0.04]"
         >
           <ChevronRight className={cn("size-3.5 shrink-0 text-mute transition-transform duration-300 ease-spring", !collapsed && "rotate-90")} />
           <FileStatusIcon status={file.status} />
@@ -371,7 +371,7 @@ function FileHeader({
             onClick={() => onToggleViewed(file.path)}
             className={cn(
               "mr-1 flex h-7 shrink-0 items-center gap-1.5 rounded-sm px-2 text-2xs font-bold transition-colors focus-ring",
-              viewed ? "bg-done/12 text-done hover:bg-done/18" : "text-mute hover:bg-white/6 hover:text-ink",
+              viewed ? "bg-done/12 text-done hover:bg-done/18" : "text-mute hover:bg-ink/6 hover:text-ink",
             )}
           >
             <span
@@ -422,8 +422,8 @@ const GUTTER: Record<DiffLine["kind"], string> = {
 };
 const SIGN: Record<DiffLine["kind"], string> = { add: "+", del: "−", ctx: "", note: "" };
 const MARK_CLASS: Record<"add" | "del", string> = {
-  add: "rounded-[3px] bg-add/[0.22] shadow-[inset_0_-1.5px_0_rgb(163_230_53/0.6)]",
-  del: "rounded-[3px] bg-del/[0.24] shadow-[inset_0_-1.5px_0_rgb(255_107_139/0.65)]",
+  add: "rounded-[3px] bg-add/[0.22] shadow-[inset_0_-1.5px_0_color-mix(in_srgb,var(--color-add)_60%,transparent)]",
+  del: "rounded-[3px] bg-del/[0.24] shadow-[inset_0_-1.5px_0_color-mix(in_srgb,var(--color-del)_65%,transparent)]",
 };
 
 /** Syntax-highlighted text, split further at word-diff `marks`. */
@@ -497,7 +497,7 @@ function SplitSide({ line, kind, path, marks, wrap }: { line?: DiffLine; kind: "
   const k = line ? (line.kind === "ctx" ? "ctx" : kind) : "ctx";
   if (!line) {
     // Nothing on this side: a quiet hatch keeps both columns aligned without reading as content.
-    return <div className="min-h-5 w-1/2 min-w-0 bg-[repeating-linear-gradient(135deg,transparent_0_5px,rgb(255_255_255/0.035)_5px_6px)]" aria-hidden />;
+    return <div className="min-h-5 w-1/2 min-w-0 bg-[repeating-linear-gradient(135deg,transparent_0_5px,color-mix(in_srgb,var(--color-ink)_3.5%,transparent)_5px_6px)]" aria-hidden />;
   }
   return (
     <div className={cn("flex min-h-5 w-1/2 min-w-0", LINE_BG[k])}>

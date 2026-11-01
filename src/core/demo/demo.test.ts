@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AppEvent, Column, SessionSnapshot, TermEvent } from "../gen";
+import type { Answer, AppEvent, Column, SessionSnapshot, TermEvent } from "../gen";
 import { agentKey } from "../keys";
 import { reduceEvents } from "../store/reduce";
 import { type CoreEvent, type CoreState, initialCoreState } from "../store/state";
@@ -495,5 +495,92 @@ describe("demo: omp waits out a provider rate limit", () => {
     expect(q?.live.lastEventAt).toBeLessThan(r.clock.now() - 90_000);
     r.clock.advance(300_000);
     expect(r.state.agents[agentKey("forge", "quota")]?.omp?.retry).toBeUndefined();
+  });
+});
+
+describe("demo: what the agent wrote before asking, and Back between questions", () => {
+  const answer = (choices: string[], extra: { text?: string; back?: boolean } = {}): Answer => ({ choices, cancel: false, chat: false, ...extra });
+
+  test("asks carry the agent's latest text this turn as context; approvals carry none", () => {
+    const r = rig();
+    r.clock.advance(2000);
+    expect(r.state.agents[agentKey("forge", "push")]?.needs?.context).toBe(
+      "The watcher is in and tested (34/34). Delivery is the open decision. Both options work; they trade setup effort against independence from Google.",
+    );
+    expect(r.state.agents[agentKey("forge", "push")]?.needs?.step).toBeUndefined();
+    expect(r.state.agents[agentKey("forge", "limits")]?.needs?.context).toBeUndefined();
+  });
+
+  test("decide for me sends the earlier answer of a question Back reopened, not ★", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const key = agentKey("forge", "flags");
+    const needs = () => r.state.agents[key]?.needs;
+    const countdown = () => r.state.agents[key]?.autoAnswer?.countdown;
+    const reply = (requestId: string | undefined, a: Answer) => r.call("forge", "agent.answer", { agentId: "flags", requestId, answer: a });
+    expect(countdown()).toMatchObject({ requestId: needs()?.requestId, picks: ["Config file in the repo"] });
+    expect(countdown()?.earlier).toBeUndefined();
+    await reply(needs()?.requestId, answer(["Unleash"]));
+    await reply(needs()?.requestId, answer([], { back: true }));
+    r.clock.advance(1000);
+    expect(countdown()).toMatchObject({ requestId: needs()?.requestId, picks: ["Unleash"], earlier: true });
+  });
+
+  test("a three-question ask: one request per question, Back reopens the previous one with its answer, the ask row gets every answer", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const key = agentKey("forge", "flags");
+    const needs = () => r.state.agents[key]?.needs;
+    const reply = (requestId: string | undefined, a: Answer) => r.call("forge", "agent.answer", { agentId: "flags", requestId, answer: a });
+
+    const q1 = needs();
+    expect(q1?.step).toEqual({ index: 0, total: 3, canBack: false });
+    expect(q1?.context).toContain("Three things decide how this rollout behaves");
+    const open = await r.call<SessionSnapshot>("forge", "session.open", { agentId: "flags" });
+    const row = open.items.find((i) => i.kind === "tool" && i.tool === "ask");
+    expect(open.ui).toMatchObject({ id: q1?.requestId, context: q1?.context, step: q1?.step, callId: row?.kind === "tool" ? row.callId : "?" });
+    // the first question has nothing to go back to
+    await expect(reply(q1?.requestId, answer([], { back: true }))).rejects.toMatchObject({ code: "invalid_params" });
+
+    await reply(q1?.requestId, answer(["Unleash"]));
+    const q2 = needs();
+    expect(r.state.agents[key]?.column).toBe("needs");
+    expect(q2).toMatchObject({ multi: true, question: "Which beta tenants get the new auth path first?", step: { index: 1, total: 3, canBack: true }, context: q1?.context });
+    expect(q2?.requestId).not.toBe(q1?.requestId);
+
+    // Back: the first question again, under a new id, with the answer it had
+    await reply(q2?.requestId, answer([], { back: true }));
+    const q1b = needs();
+    expect(q1b?.requestId).not.toBe(q1?.requestId);
+    expect(q1b).toMatchObject({ question: q1?.question, step: { index: 0, total: 3, canBack: false, choices: ["Unleash"] } });
+    await expect(reply(q2?.requestId, answer(["Globex"]))).rejects.toMatchObject({ code: "not_found" });
+
+    await reply(q1b?.requestId, answer(["Config file in the repo"]));
+    const q2b = needs();
+    expect(q2b?.step).toEqual({ index: 1, total: 3, canBack: true });
+    await reply(q2b?.requestId, answer([], { text: "Acme only" }));
+    const q3 = needs();
+    expect(q3?.step).toEqual({ index: 2, total: 3, canBack: true });
+    // Back from the last question: the second one with its typed answer
+    await reply(q3?.requestId, answer([], { back: true }));
+    expect(needs()?.step).toEqual({ index: 1, total: 3, canBack: true, text: "Acme only" });
+    await reply(needs()?.requestId, answer(["Acme (internal)", "Globex"]));
+    expect(needs()?.step).toEqual({ index: 2, total: 3, canBack: true });
+    await reply(needs()?.requestId, answer(["I flip each step by hand"]));
+    r.clock.advance(300);
+
+    expect(r.state.agents[key]?.column).toBe("running");
+    const done = await r.call<SessionSnapshot>("forge", "session.open", { agentId: "flags" });
+    const ask = done.items.find((i) => i.kind === "tool" && i.tool === "ask");
+    expect(ask).toMatchObject({ status: "ok" });
+    expect(ask?.kind === "tool" ? ask.view : undefined).toMatchObject({
+      type: "ask",
+      questions: [
+        { question: "Where should the gateway read its feature flags from?", answer: "Config file in the repo" },
+        { question: "Which beta tenants get the new auth path first?", answer: "Acme (internal), Globex" },
+        { question: "How fast should the rollout widen after them?", answer: "I flip each step by hand" },
+      ],
+    });
+    expect(done.ui).toBeUndefined();
   });
 });

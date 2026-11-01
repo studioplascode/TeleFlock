@@ -150,10 +150,13 @@ impl Core {
                     }
                 }
                 if let Some(n) = lagged {
-                    log::warn!("webview lagged {n} events; resending state");
+                    log::warn!("webview lagged {n} events; resending state and open sessions");
                     let (replay, fresh) = self.engine.subscribe_with_replay();
                     rx = fresh;
                     batch.extend(replay);
+                    // The replay is host state only: the transcripts the webview has open lost
+                    // events too. Their resets reach `fresh`, in order with their other events.
+                    self.engine.resend_sessions();
                 }
                 ok = channel.send(batch).is_ok();
             }

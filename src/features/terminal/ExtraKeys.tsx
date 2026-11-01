@@ -163,8 +163,8 @@ export function ExtraKeys({ mods, onKey, onSetMod, onPaste, onPickMedia, classNa
         className={cn(
           keyCls,
           "min-w-12 text-[11.5px] tracking-wide",
-          state === 1 && "bg-accent/22 text-accent-ink shadow-[inset_0_0_0_1.5px_rgb(163_92_240/0.75),0_0_18px_-4px_rgb(163_92_240/0.9)] active:bg-accent/30",
-          state === 2 && "bg-omp text-white shadow-glow-accent active:bg-omp",
+          state === 1 && "bg-accent/22 text-accent-ink shadow-[inset_0_0_0_1.5px_color-mix(in_srgb,var(--color-accent)_75%,transparent),0_0_18px_-4px_color-mix(in_srgb,var(--color-accent)_90%,transparent)] active:bg-accent/30",
+          state === 2 && "bg-omp text-on-accent shadow-glow-accent active:bg-omp",
         )}
         onPointerDown={() => {
           modHold.current.locked = false;

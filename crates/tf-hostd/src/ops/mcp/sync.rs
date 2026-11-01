@@ -59,7 +59,11 @@ impl UserMcp {
                 .into_iter()
                 .filter(|n| !n.shadowed)
                 .map(|n| {
-                    let (server, extra) = model::to_draft(&n.entry);
+                    let (mut server, extra) = model::to_draft(&n.entry);
+                    // Between hosts a hidden header value is the plain mask: hosts that predate the readable scheme take it as is.
+                    for kv in server.headers.iter_mut().filter(|kv| secrets::hides_secret(&kv.value)) {
+                        kv.value = MASK.to_string();
+                    }
                     SyncMcpServer { secrets: has_masks(&server), signed_in: model::has_oauth_block(&n.entry), name: n.name, server, enabled: n.enabled, extra }
                 })
                 .collect();
@@ -200,7 +204,7 @@ fn strip_masks(s: &str) -> String {
 
 /// Whether a listed definition hides secrets ([`MASK`] anywhere `to_draft` puts one).
 pub(crate) fn has_masks(d: &McpServerDraft) -> bool {
-    d.env.iter().chain(&d.headers).any(|kv| kv.value == MASK)
+    d.env.iter().chain(&d.headers).any(|kv| secrets::hides_secret(&kv.value))
         || d.args.iter().any(|a| has_mask(a))
         || d.url.as_deref().is_some_and(has_mask)
         || d.oauth.as_ref().is_some_and(|o| o.client_secret.as_deref() == Some(MASK))
@@ -213,7 +217,7 @@ fn strip_unfillable(draft: &McpServerDraft, stored: Option<&Obj>) -> (McpServerD
     let mut emptied = Vec::new();
     for (list, what, field) in [(&mut d.env, "env", "env"), (&mut d.headers, "header", "headers")] {
         let have = stored.and_then(|s| s.obj(field));
-        for kv in list.iter_mut().filter(|kv| kv.value == MASK) {
+        for kv in list.iter_mut().filter(|kv| secrets::hides_secret(&kv.value)) {
             if !have.is_some_and(|h| h.contains(kv.key.trim())) {
                 kv.value.clear();
                 emptied.push(format!("{what} {}", kv.key.trim()));

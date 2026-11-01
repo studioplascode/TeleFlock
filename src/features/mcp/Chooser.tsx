@@ -32,7 +32,7 @@ function AddedOpen({ server, onOpen }: { server: McpServer; onOpen(s: McpServer)
       onClick={() => onOpen(server)}
       title={`Already set up as “${server.name}” in ${definedIn(server)}`}
       aria-label={`Added as “${server.name}”: open it`}
-      className="absolute top-2.5 right-2.5 inline-flex h-6 items-center gap-1 rounded-full bg-done/12 pr-2.5 pl-2 text-[11px] font-bold whitespace-nowrap text-done shadow-[inset_0_0_0_1px_rgb(163_230_53/0.25)] pressable touch-hit focus-ring hover:bg-done/20"
+      className="absolute top-2.5 right-2.5 inline-flex h-6 items-center gap-1 rounded-full bg-done/12 pr-2.5 pl-2 text-[11px] font-bold whitespace-nowrap text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_25%,transparent)] pressable touch-hit focus-ring hover:bg-done/20"
     >
       <Check className="size-3" />
       Added
@@ -55,7 +55,7 @@ export function TemplateGrid({ servers, onPick, onOpen }: { servers: readonly Mc
             <button
               type="button"
               onClick={() => onPick(t)}
-              className="group flex min-w-0 flex-1 items-center gap-3 rounded-lg bg-white/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-white/[0.06]"
+              className="group flex min-w-0 flex-1 items-center gap-3 rounded-lg bg-ink/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-ink/[0.06]"
             >
               <LetterMark mark={t.mark} color={t.color} ink={t.ink} />
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -188,7 +188,7 @@ export function RegistrySearch({
                 key={w}
                 type="button"
                 onClick={() => s.setText(w)}
-                className="h-7 rounded-full bg-white/6 px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-white/10 hover:text-ink"
+                className="h-7 rounded-full bg-ink/6 px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-ink/10 hover:text-ink"
               >
                 {w}
               </button>
@@ -221,7 +221,7 @@ export function RegistrySearch({
                 <button
                   type="button"
                   onClick={() => onPick(e)}
-                  className="flex min-w-0 flex-1 flex-col gap-2 rounded-lg bg-white/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-white/[0.06]"
+                  className="flex min-w-0 flex-1 flex-col gap-2 rounded-lg bg-ink/[0.03] p-3 text-left shadow-hairline transition-colors pressable focus-ring hover:bg-ink/[0.06]"
                 >
                   <span className={cn("flex min-w-0 items-center gap-3", added && "pr-[6.75rem]")}>
                     <LetterMark mark={m.mark} color={m.color} className="size-9 text-xs" />

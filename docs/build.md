@@ -507,7 +507,10 @@ name `tele-flock`, depends `libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindic
 (bundles WebKitGTK; `NO_STRIP=true` because linuxdeploy's strip fails on `.relr.dyn`), and the Arch
 package from `packaging/arch/PKGBUILD` (`teleflock-bin`, repackages the `.deb`, so it is also a
 valid AUR `-bin` PKGBUILD; dependencies are namcap-clean except `libayatana-appindicator`, which the
-tray `dlopen`s).
+tray `dlopen`s). The AppImage's GTK plugin copies the build system's GTK input-method modules and
+points `GTK_IM_MODULE_FILE` at its own list, so the builder installs `ibus-gtk3` and
+`fcitx5-frontend-gtk3` (since 0.8.0): without them IBus and Fcitx commits (voice input, CJK) never
+reach the AppImage on X11. The `.deb` and Arch package use the system's modules.
 
 Observed on this box, 2026-10-21 `[observed]`, version 0.1.0:
 

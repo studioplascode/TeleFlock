@@ -49,7 +49,7 @@ function WindowRow({ w, pace, index }: { w: LimitWindow; pace: WindowPace; index
       </div>
       <Tooltip content={pace.used != null ? `${formatPct(pace.used)} used${projected > used ? ` · striped: projected ${formatPct(projected)} by the reset` : ""}` : "No amount reported"}>
         <div
-          className="relative h-2 overflow-hidden rounded-full bg-white/6"
+          className="relative h-2 overflow-hidden rounded-full bg-ink/6"
           role="progressbar"
           aria-label={`${name}${tier ? `, ${tier}` : ""} used`}
           aria-valuemin={0}
