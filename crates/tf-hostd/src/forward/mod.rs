@@ -8,13 +8,16 @@
 //!   even ids. The caller's end ([`relay_cli`]) passes events through, acks included: the caller
 //!   and the to-host do the flow control.
 //! * **To-host.** Streams an app opens (odd ids) run here ([`exec`]): a command through the user's
-//!   shell, a login shell, a tool, or a TCP connection to 127.0.0.1:<port>. The app only opens
-//!   what a rule on that device allows; hostd trusts its clients (they can open terminals anyway).
+//!   shell, a login shell, a tool, or a TCP connection to 127.0.0.1:<port>; on Linux programs get
+//!   the user's current graphical session (`desktop`). The app only opens what a rule on that
+//!   device allows; hostd trusts its clients (they can open terminals anyway).
 //!
 //! Every stream ends with its link: a dropped app ends the callers' streams with a reason and kills
 //! the process group of what ran for it here.
 
 pub mod cli;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod endpoint;
 mod exec;
 mod flow;

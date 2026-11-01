@@ -5,10 +5,12 @@
 //! (the caller went away, the app disconnected, `forward.stop`) kills everything the program
 //! started, also what it left running after it exited.
 //!
-//! The program runs with the daemon's environment (the user's PATH, `userenv.rs`) in the user's
-//! home unless the caller named a directory. Unix: commands are `$SHELL -c <line>`, the shell is
-//! `$SHELL -l`, each in a session of its own (`setsid`; with a terminal, the terminal is its
-//! controlling one), and an early close sends the group SIGHUP, then SIGKILL once it had a second.
+//! The program runs with the daemon's environment (the user's PATH, `userenv.rs`), on Linux with
+//! the variables of the user's current graphical session instead of the daemon's (`desktop.rs`),
+//! in the user's home unless the caller named a directory. Unix: commands are `$SHELL -c
+//! <line>`, the shell is `$SHELL -l`, each in a session of its own (`setsid`; with a terminal,
+//! the terminal is its controlling one), and an early close sends the group SIGHUP, then SIGKILL
+//! once it had a second.
 //! Windows: `cmd.exe /d /s /c <line>` and an interactive `cmd.exe`, always with pipes (no
 //! terminal), tools found on PATH with PATHEXT, each in a job object of its own that an early
 //! close ends (`taskkill /T` of its tree when Windows refused the job).
@@ -58,7 +60,10 @@ pub(crate) async fn run(open: FwdEv, mut s: Stream, cancel: CancellationToken, s
         return connect(port.unwrap_or(0), s, &cancel).await;
     }
     match command_for(kind, command, argv, cwd, shims) {
-        Ok(cmd) => process(cmd, pty, &mut s, cancel).await,
+        Ok(mut prepared) => {
+            in_session(&mut prepared.cmd).await;
+            process(prepared, pty, &mut s, cancel).await
+        }
         Err(why) => {
             (s.send)(FwdEv::Close { error: Some(why) });
         }
@@ -101,6 +106,17 @@ fn command_for(kind: ForwardKind, command: Option<String>, argv: Option<Vec<Stri
     };
     cmd.current_dir(dir);
     Ok(Prepared { cmd, what })
+}
+
+/// Puts a program in the user's current graphical session (Linux: `desktop.rs`); elsewhere it
+/// keeps the daemon's environment.
+async fn in_session(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "linux")]
+    if let Some(session) = super::desktop::current().await {
+        session.apply(cmd);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cmd;
 }
 
 /// Whether a working directory can be looked at without asking another computer: on Windows a
