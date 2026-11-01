@@ -24,6 +24,11 @@
         "section": "devel",
         "depends": ["libayatana-appindicator3-1"],
         "desktopTemplate": "linux/teleflock.desktop"
+      },
+      "appimage": {
+        "files": {
+          "usr/lib/libayatana-appindicator3.so.1": "/usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1"
+        }
       }
     }
   }

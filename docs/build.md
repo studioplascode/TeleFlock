@@ -510,7 +510,12 @@ valid AUR `-bin` PKGBUILD; dependencies are namcap-clean except `libayatana-appi
 tray `dlopen`s). The AppImage's GTK plugin copies the build system's GTK input-method modules and
 points `GTK_IM_MODULE_FILE` at its own list, so the builder installs `ibus-gtk3` and
 `fcitx5-frontend-gtk3` (since 0.8.0): without them IBus and Fcitx commits (voice input, CJK) never
-reach the AppImage on X11. The `.deb` and Arch package use the system's modules.
+reach the AppImage on X11. The `.deb` and Arch package use the system's modules. The AppImage also
+carries the tray library (`bundle.linux.appimage.files` in `src-tauri/tauri.linux.conf.json`:
+`libayatana-appindicator3.so.1`, whose ido/indicator/dbusmenu dependencies linuxdeploy adds): the
+tray `dlopen`s it at start, and a system copy built against a newer GLib than the bundled one
+(Debian 13's needs `g_once_init_leave_pointer`, GLib 2.80) failed to load, which
+`libappindicator-sys` turns into a panic, so AppImages up to 0.7.0 exited at start there.
 
 Observed on this box, 2026-10-21 `[observed]`, version 0.1.0:
 
