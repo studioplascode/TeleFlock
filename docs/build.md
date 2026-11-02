@@ -598,6 +598,22 @@ itself (also when run by hand), and written after a successful build only if `HE
 and a clean tree is still clean: a build that read the tree while it changed may hold either
 version, so a release then stops and a dry run warns.
 
+Measured on 15 cores (`[observed]`, 0.9.0, 2026-11-02, nothing else building): a full
+`release.sh --dry-run` took **12m37s**: frontend 0m47s and tf-hostd 4m35s side by side, then
+Windows 6m30s, Android (arm64) 5m19s and Linux 8m01s side by side (Linux includes the Arch package
+and its fresh-container check). The 0.8.1 release, built one platform after another with four
+Android ABIs and the three tf-hostd triples in a row, took ≈ 39 min. A second run right after
+reused all three platforms: **2 s** (verification only). Packages: APK 43.6 MB (0.8.1, four ABIs:
+149.3 MB), Windows installer 42.5 MB, `.deb` 52.6 MB, AppImage 128.8 MB (0.8.1: 32.4 / 35.4 /
+113.3 MB; 0.9.0 adds the speech engine, linked statically, and the TeleFlock Browser).
+
+Release profile (`Cargo.toml`: `lto = true`, `codegen-units = 1`), measured the same day on
+tf-hostd `x86_64-unknown-linux-musl`, rebuilding after a change in tf-hostd only: full LTO
+93–94 s, 21.75 MB; thin LTO with 16 codegen units 22–23 s, 26.94 MB (+24 %). The profile stays
+full LTO: the daemon ships zstd-compressed inside every app package and is uploaded to every
+host, and the tf-hostd step is about a third of a full release; thin LTO would save about a
+minute per triple.
+
 `scripts/release.sh` options: `--rebuild`, `--skip-build` (build nothing, use `dist-release/`),
 `--skip-windows` / `--skip-android` / `--skip-linux` (don't build those), `--notes-file FILE`
 (default: GitHub's generated notes; the file's text also goes into `latest.json`), `--prerelease`,
