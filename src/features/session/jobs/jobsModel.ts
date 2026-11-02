@@ -57,3 +57,24 @@ export function inspectIds(expanded: ReadonlySet<string>, view: JobsView | undef
   const first = view?.jobs.find((j) => j.status === "running");
   return first ? [first.id] : [];
 }
+
+/**
+ * The Jobs panel lists background commands only: a `task` job is a subagent, which the Subagents
+ * panel already shows (at any nesting depth, with its own status and Kill). A command a subagent
+ * started stays, labelled "by <subagent>". `waiting` is untouched: omp also waits on subagents.
+ */
+export function withoutSubagents(view: JobsView): JobsView {
+  return view.jobs.some((j) => j.kind === "task") ? { ...view, jobs: view.jobs.filter((j) => j.kind !== "task") } : view;
+}
+
+/**
+ * The card summary as the Jobs panel counts it: `running` and the glance cover commands only. The
+ * wire summary also counts subagents (hostd's restart check relies on that), so the panel
+ * recounts from its view; before the first read the wire summary stands.
+ */
+export function commandSummary(summary: JobsSummary, view: JobsView | undefined): JobsSummary {
+  if (!view) return summary;
+  const running = view.jobs.filter((j) => j.status === "running");
+  const glanceIsCommand = summary.glanceJob !== undefined && running.some((j) => j.label === summary.glanceJob);
+  return { ...summary, running: running.length, recent: view.jobs.length - running.length, ...(glanceIsCommand ? {} : { glance: undefined, glanceJob: undefined }) };
+}

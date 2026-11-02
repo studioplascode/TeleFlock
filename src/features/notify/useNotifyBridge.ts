@@ -7,6 +7,7 @@ import { haptic } from "@/features/shell/haptics";
 import { useLastTerminal } from "@/features/terminal/lastTerminal";
 import { inQuietHours, playChime } from "./chime";
 import { KIND_STATUS, runAnswer } from "./NotificationCenter";
+import { openHostPage, openNotification } from "./openNotification";
 
 /** Needs-you toasts linger longer than the 5s default, but not forever: the inbox and bell keep them. */
 const NEEDS_TOAST_MS = 12_000;
@@ -69,7 +70,9 @@ function followMoved(from: string, to: string): void {
  *   surface) → its toast disappears (needs-you toasts only once resolved); the store marks the list
  *   item read / resolved;
  * - viewing an agent's session (app in front) marks its notifications read everywhere;
- * - `openAgent` (tray, OS notification click, deep link) → navigate to the agent.
+ * - `openAgent` (tray, OS notification click, deep link) → navigate to the agent;
+ * - `openPage` (an OS notification that names a host's page) → `openHostPage`: a "decided for
+ *   you" one lands on its decision in the Inbox (`notificationId`).
  */
 export function useNotifyBridge(): void {
   const setAnswerNext = useUi((s) => s.setAnswerNext);
@@ -111,6 +114,10 @@ export function useNotifyBridge(): void {
           navigate({ name: "agent", hostId: e.hostId, agentId: e.agentId });
           return;
         }
+        if (e.type === "openPage") {
+          openHostPage(e.hostId, e.page, e.notificationId);
+          return;
+        }
         if (e.type === "notifyDone") {
           for (const id of e.ids) {
             const open = openToasts.get(`${e.hostId}/${id}`);
@@ -127,7 +134,7 @@ export function useNotifyBridge(): void {
         if (e.alert === false) return;
         const n = { ...e.notification, hostId: e.hostId };
         const key = agentKey(n.hostId, n.agentId);
-        const open = () => navigate({ name: "agent", hostId: n.hostId, agentId: n.agentId });
+        const open = () => openNotification(n);
         const first = n.actions.find((a) => a.answer);
         for (const [id, t] of openToasts) {
           if (t.agent !== key) continue;
@@ -151,7 +158,7 @@ export function useNotifyBridge(): void {
         // a banner on top would only stack over it (the haptic and chime above still fire).
         if (n.kind === "needs" && mobile.current && route.name === "agent") return;
         // Several hosts: the toast says which one the agent is on (the OS toast and the bell list do).
-        // A phone toast is one row: there the name is capped, so a long one never hides the body.
+        // A phone toast's text has two lines at most: there the name is capped, so a long one never hides the body.
         const { profiles } = useHosts.getState();
         const where = profiles.length > 1 ? profiles.find((p) => p.id === n.hostId)?.name : undefined;
         let description: ReactNode = [where, n.body].filter(Boolean).join(" · ");

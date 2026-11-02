@@ -27,6 +27,7 @@ import type {
   SessionRoleModels,
   SetupIssue,
   SetupStatus,
+  Started,
   StatePatch,
   Tab,
   TranscriptItem,
@@ -48,12 +49,15 @@ import { DemoAuthFlows } from "./auth";
 import { DemoGithub } from "./github";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
+import { demoDoc } from "./docs";
 import { DemoOmpSettings } from "./ompSettings";
 import { type AgentOmp, agentOmpOf, selectorParts } from "./roleModels";
 import { DemoMcp } from "./mcp";
 import { DemoPlugins } from "./plugins";
 import { demoHostSync } from "./hostSync";
 import { DemoCleanup } from "./cleanup";
+import { DemoIdleShells } from "./idleShells";
+import { CHATS, chatLabel, chatSeed, chatTargetRefused, DemoChats } from "./chats";
 import { DemoNotify } from "./notify";
 import { demoFirstPrompt } from "./dispatchAuto";
 import {
@@ -90,6 +94,10 @@ import { historyFor, longHistory } from "./seeds";
 import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
 import { DemoParking } from "./parking";
 import { DemoResume } from "./resume";
+import { DemoRefusal } from "./refusal";
+import { DemoBrowserAgents } from "./browserAgents";
+import { DemoAgentChat } from "./agentChat";
+import { seedOmpPrompts } from "./ompPrompts";
 import { AUTO_ANSWER_OFF, AUTO_ANSWER_ON, DemoAutoAnswer } from "./autoAnswer";
 import { DemoSearch } from "./search";
 import { DemoTerm } from "./term";
@@ -122,6 +130,8 @@ export interface HostEnv {
   longTranscript?: number;
   /** Is a same-port tunnel to `port` of this host open (sign-in callbacks)? */
   tunnelOpen?(hostId: string, port: number): boolean;
+  /** The host read these notifications on every device (tf-hostd's `notifyDone`; the core reports them read). */
+  notificationsRead?(hostId: string, ids: string[]): void;
 }
 
 const OTHER_DEVICE = "Pixel 9";
@@ -252,6 +262,7 @@ export class DemoHost implements SimHost {
       return { path: m.path, repoRoot: primary?.path ?? m.repo?.root ?? m.path };
     },
     openPane: (agentId, place) => {
+      if (place.chat) return this.chatTab(place.cwd, agentId, chatLabel(place.cwd));
       const kept = place.workspaceId ? this.wss.get(place.workspaceId) : undefined;
       const m = kept ?? this.addWorkspace(place.repo, place.branch, place.worktree, this.wss.size, undefined, false, place.cwd);
       // a worktree reopened in a new workspace takes its pull request back
@@ -307,7 +318,28 @@ export class DemoHost implements SimHost {
     changed: (id) => this.agentChanged(id),
     metaChanged: (id) => this.metaChanged(id),
   });
-  /** Decide for me (`./autoAnswer`): forge's default is on after 20 min, studio-pc's off; countdowns and picks at the deadline. */
+  /** Each session's agent chat log (`./agentChat`, `session.agentChat`); studio-pc plays a tf-hostd before 0.9.0. */
+  private readonly agentChat = new DemoAgentChat({ supported: () => this.variant === "forge", now: () => this.now() });
+  /** Refusal fallback (`./refusal`): the host's rules, and `authbug`, refused by Opus, that Retry with takes over; studio-pc plays a tf-hostd before 0.9.0. */
+  private readonly refusals = new DemoRefusal({
+    now: () => this.now(),
+    supported: () => this.variant === "forge",
+    ompSim: (id) => this.ompSim(id),
+    seedSim: (def, wsId) => this.addAgent(def, wsId, this.addPane(wsId, null)),
+    changed: (id) => this.agentChanged(id),
+    metaChanged: (id) => this.metaChanged(id),
+    activity: (id, title, detail) => this.activity(id, "modelChanged", title, detail),
+  });
+  /** The TeleFlock Browser (`./browserAgents`): agents attached to a device's browser and their requests; the demo's app core (`./browser`) drives it. studio-pc plays a tf-hostd before 0.9.0. */
+  readonly browser = new DemoBrowserAgents({
+    supported: () => this.variant === "forge",
+    now: () => this.now(),
+    sims: this.sims,
+    seedSim: (def, wsId) => this.addAgent(def, wsId, this.addPane(wsId, null)),
+    changed: (id) => this.agentChanged(id),
+    activity: (id, kind, title, detail) => this.activity(id, kind, title, detail),
+  });
+  /** Decide for me (`./autoAnswer`): forge's default is on after 20 min, studio-pc's off; countdowns and picks at the deadline, decisions to review. */
   private readonly decide = new DemoAutoAnswer({
     now: () => this.now(),
     initial: () => (this.variant === "forge" ? AUTO_ANSWER_ON : AUTO_ANSWER_OFF),
@@ -321,9 +353,20 @@ export class DemoHost implements SimHost {
       this.rev += 1;
       this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
     },
+    setDecisions: (decisions) => {
+      const info: HostInfo = { ...this.info, decisions };
+      if (decisions.length === 0) delete info.decisions;
+      this.info = info;
+      if (!this.online) return;
+      this.rev += 1;
+      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
+    },
+    sessions: () => this.pastSessions(undefined, 1000),
     changed: (id) => this.agentChanged(id),
     activity: (id, kind, title, detail) => this.activity(id, kind, title, detail),
-    notify: (id, kind, title, body) => this.notify(id, kind, title, body),
+    noteId: () => `n-${this.id}-${this.nextNotif++}`,
+    notify: (id, kind, title, body, o) => this.notify(id, kind, title, body, undefined, o?.actions, o?.id),
+    notificationsRead: (ids) => this.env.notificationsRead?.(this.id, ids),
   });
   /** tf-hostd's automations (`./automations`); studio-pc plays a host whose tf-hostd predates them. */
   private automations?: DemoAutomations;
@@ -351,6 +394,26 @@ export class DemoHost implements SimHost {
   private notifyRouting?: DemoNotify;
   /** The Cleanup page (`cleanup.*`, `./cleanup`); studio-pc plays a host whose tf-hostd predates it. */
   private cleanup?: DemoCleanup;
+  /** Idle shells (`HostInfo.idleShells`, `cleanup.idleShells*`, `./idleShells`); studio-pc plays a tf-hostd before 0.9.0. */
+  private readonly idleShells = new DemoIdleShells({
+    supported: () => this.variant === "forge",
+    now: () => this.now(),
+    after: (ms, fn) => this.env.clock.after(ms, fn),
+    state: () => this.hostState(),
+    viewed: (paneId) => [...this.terms.values()].some((t) => t.paneId === paneId && !t.isClosed),
+    closePane: (paneId) => this.dispatch("pane.close", { paneId }),
+    publish: (idleShells) => {
+      this.info = { ...this.info, idleShells };
+      if (!this.online) return;
+      this.rev += 1;
+      this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
+    },
+    activity: (workspace, title, detail) => this.activity("", "shellClosed", title, detail, workspace),
+    // Like tf-hostd's: opening it (or Review) opens the host's Cleanup page at its idle shells.
+    notify: (title, body) => this.notify("", "info", title, body, undefined, [{ id: "open:idleShells", label: "Review" }]),
+  });
+  /** Chat tasks (`chat.*`, `./chats`): forge's daemon starts them; studio-pc plays one before them. */
+  private readonly chats?: DemoChats;
 
   constructor(
     private readonly env: HostEnv,
@@ -428,6 +491,8 @@ export class DemoHost implements SimHost {
       this.rev += 1;
       this.env.emit({ type: "hostPatch", hostId: this.id, rev: this.rev, ops: [{ op: "info", info: { ...this.info, setup: this.setup } }] });
     });
+    this.chats =
+      variant === "forge" ? new DemoChats({ now: () => this.now(), sims: this.sims, forget: (sim) => this.forgetChat(sim) }, env.seed ^ hash(`${profile.id}:chats`)) : undefined;
     this.info = {
       hostname,
       os: "linux",
@@ -444,6 +509,7 @@ export class DemoHost implements SimHost {
       tools: this.tools.status(),
       herdrHealth: this.herdr.status(),
       autoAnswer: this.decide.hostDefault(),
+      ...(this.chats ? { chats: CHATS } : {}),
     };
     // studio-pc's disk is nearly full: once it is online the board warns (low-disk notice → Cleanup).
     const disk = variant === "forge" ? { diskFree: 412e9, diskTotal: 1000e9 } : { diskFree: 6.4e9, diskTotal: 512e9 };
@@ -451,6 +517,8 @@ export class DemoHost implements SimHost {
     this.usageTotals = { costUsd: 0, tokens: 0, input: 0, output: 0 };
     this.status = { phase: "idle", since: now, attempt: 0 };
     this.build();
+    const idleShells = this.idleShells.status();
+    if (idleShells) this.info = { ...this.info, idleShells };
   }
 
   now(): number {
@@ -462,7 +530,11 @@ export class DemoHost implements SimHost {
   private build(): void {
     const now = this.now();
     const wsDefs: WorkspaceDef[] = this.variant === "forge" ? WORKSPACES : [{ id: "w1", repo: "teleflock", branch: "main", worktree: false, order: 0 }];
-    for (const d of wsDefs) this.addWorkspace(d.repo, d.branch, d.worktree, d.order, d.id, d.shellPane, d.cwd);
+    for (const d of wsDefs) {
+      const m = this.addWorkspace(d.repo, d.branch, d.worktree, d.order, d.id, d.shellPane, d.cwd, d.label);
+      // No agent runs here: drop the agent's pane; seedDemoShells puts the workspace's shell in.
+      if (d.shellOnly) for (const tab of m.ws.tabs) tab.panes = [];
+    }
     seedDemoShells(this.variant, this.wss.values());
     const defs = this.variant === "forge" ? AGENTS : STUDIO_AGENTS;
     for (const def of defs) {
@@ -500,9 +572,13 @@ export class DemoHost implements SimHost {
       if (gobump) gobump.ahead = 0;
       this.seedActivity(defs);
       this.usageTotals = { costUsd: 18.42, tokens: 2_310_000, input: 2_080_000, output: 230_000 };
+      // before parking, which parks the done chat
+      if (this.chats) this.seedChats(this.chats);
       this.parking.seed();
       this.resumes.seed();
+      this.refusals.seed();
       this.decide.seed();
+      seedOmpPrompts({ now: () => this.now(), seedSim: (def, wsId) => this.addAgent(def, wsId, this.addPane(wsId, null)) });
     } else {
       this.usageTotals = { costUsd: 1.31, tokens: 160_000, input: 140_000, output: 20_000 };
       this.sims.get("render")?.resume(renderTurn());
@@ -554,6 +630,7 @@ export class DemoHost implements SimHost {
     const pane = paneId ?? (m.ws.tabs[0]?.panes[0]?.id as string);
     const sim = new AgentSim(this, def, pane, pane.split(":")[0] + ":t1", { id: wsId, cwd: m.path, repo: m.repo?.name, branch: m.ws.repo?.branch });
     this.sims.set(def.id, sim);
+    sim.chatInfo = () => this.agentChat.info(sim);
     for (const tab of m.ws.tabs) for (const p of tab.panes) if (p.id === pane) p.agentId = def.id;
     this.dirtyWs.add(wsId);
     this.agentChanged(def.id);
@@ -615,27 +692,29 @@ export class DemoHost implements SimHost {
     else this.pulses.set(agentId, { kind: rank[kind] > rank[cur.kind] ? kind : cur.kind, n: cur.n + n });
   }
 
-  notify(agentId: string, kind: NotifyKind, title: string, body: string, ui?: UiRequest): void {
+  notify(agentId: string, kind: NotifyKind, title: string, body: string, ui?: UiRequest, actions?: Notification["actions"], id?: string): void {
     if (!this.online) return;
     const asking = kind === "needs" ? this.sims.get(agentId) : undefined;
     const note = asking ? this.decide.needsNote(asking) : null;
     const notification: Notification = {
-      id: `n-${this.id}-${this.nextNotif++}`,
+      id: id ?? `n-${this.id}-${this.nextNotif++}`,
       at: this.now(),
       kind,
       agentId,
       title,
       body: note ? `${body}\n${note}` : body,
       requestId: ui?.id,
-      actions: ui
-        ? ui.options.slice(0, 3).map((o) => ({ id: o.id, label: o.label, answer: { choices: [o.id], cancel: false, chat: false } }))
-        : [{ id: "open", label: "Open" }],
+      actions:
+        actions ??
+        (ui
+          ? ui.options.slice(0, 3).map((o) => ({ id: o.id, label: o.label, answer: { choices: [o.id], cancel: false, chat: false } }))
+          : [{ id: "open", label: "Open" }]),
     };
     this.env.emit({ type: "notify", hostId: this.id, notification });
   }
 
-  activity(agentId: string, kind: ActivityKind, title: string, detail?: string): void {
-    const name = this.sims.get(agentId)?.agent.name ?? agentId;
+  activity(agentId: string, kind: ActivityKind, title: string, detail?: string, agentName?: string): void {
+    const name = agentName ?? this.sims.get(agentId)?.agent.name ?? agentId;
     this.activityLog.unshift({ id: `act-${this.nextAct++}`, at: this.now(), agentId, agentName: name, kind, title, detail });
     if (this.activityLog.length > 600) this.activityLog.length = 600;
   }
@@ -867,6 +946,7 @@ export class DemoHost implements SimHost {
     this.tickN++;
     for (const sim of this.sims.values()) sim.tick(TICK);
     this.decide.tick();
+    this.idleShells.tick();
     if (this.variant === "forge" && this.tickN % 5 === 0) this.jobsSim().tick();
     const now = this.now();
     // Pulses every tick (≤ 10 Hz).
@@ -879,6 +959,11 @@ export class DemoHost implements SimHost {
     if (this.tickN % 2 === 0) this.flushPatch();
     // Session meta at 2.5 Hz.
     if (this.tickN % 4 === 0) {
+      // The agent chat moves without a meta change of its own (tf-hostd announces every new revision).
+      for (const id of this.subscribed) {
+        const sim = this.sims.get(id);
+        if (sim && this.agentChat.moved(sim)) this.dirtyMeta.add(id);
+      }
       for (const id of this.dirtyMeta) {
         const sim = this.sims.get(id);
         if (sim && this.subscribed.has(id)) this.session(id, { k: "meta", meta: sim.meta() });
@@ -974,9 +1059,9 @@ export class DemoHost implements SimHost {
     const needs = sims.filter((s) => s.agent.state === "blocked" && !this.decide.holds(s));
     if (needs.length) this.noNeedsSince = now;
     if (running.length < 2) {
-      // an agent whose pull request is merged is finished: it keeps showing "Delete worktree"
+      // an agent whose pull request is merged is finished: it keeps showing "Delete worktree"; a chat is the user's own conversation
       const idle = sims
-        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000 && this.prs.get(s.agent.workspaceId)?.state !== "MERGED" && !this.resumes.holds(s))
+        .filter((s) => (s.agent.state === "done" || s.agent.state === "idle") && !s.agent.chat && s.caps.prompt && s.agent.turns > 0 && now - s.agent.stateSince > 20_000 && this.prs.get(s.agent.workspaceId)?.state !== "MERGED" && !this.resumes.holds(s))
         .sort((a, b) => Number(a.agent.archived) - Number(b.agent.archived) || a.agent.stateSince - b.agent.stateSince)[0];
       if (idle) idle.startTurn(DIRECTOR_PROMPTS[this.promptIdx++ % DIRECTOR_PROMPTS.length] as string, { author: OTHER_DEVICE });
     }
@@ -1021,6 +1106,7 @@ export class DemoHost implements SimHost {
     }
     const p = (params ?? {}) as Record<string, unknown>;
     if (method === "ai.complete") return this.aiComplete(p);
+    if (method === "ai.prewarm") return { ready: true };
     const out = this.dispatch(method, p);
     // Small, realistic latency so spinners show briefly (creating a worktree takes a moment).
     const latency = method === "worktree.create" ? 350 : method.startsWith("git.") || method.startsWith("gh.") ? 180 : 40;
@@ -1028,12 +1114,12 @@ export class DemoHost implements SimHost {
     return out;
   }
 
-  /** `ai.complete`: deterministic answers after 600–1400 ms (`./ai`). */
+  /** `ai.complete`: deterministic answers after 600–1400 ms (`./ai`; a `ramble` by its role's speed). */
   private async aiComplete(p: Record<string, unknown>): Promise<AiCompleteResult> {
     const task = this.str(p, "task");
     const prompt = this.str(p, "prompt");
     this.str(p, "system");
-    const ms = demoAiLatency(prompt);
+    const ms = demoAiLatency(prompt, task, typeof p.role === "string" ? p.role : undefined);
     await new Promise<void>((resolve) => this.env.clock.after(ms, resolve));
     return { ...demoAiComplete(task, prompt), ms };
   }
@@ -1058,18 +1144,30 @@ export class DemoHost implements SimHost {
   }
 
   private dispatch(method: string, p: Record<string, unknown>): unknown {
+    // before parking: a parked or ended chat is deleted like a live one
+    if (method.startsWith("chat.")) {
+      if (!this.chats) throw apiError("unknown_method", `unknown method \`${method}\``);
+      return this.chats.call(method, p);
+    }
     const parked = this.parking.call(method, p);
     if (parked !== undefined) return parked;
     const resumed = this.resumes.call(method, p);
     if (resumed !== undefined) return resumed;
+    const refused = this.refusals.call(method, p);
+    if (refused !== undefined) return refused;
     const decided = this.decide.call(method, p);
     if (decided !== undefined) return decided;
     const searched = this.searches.call(method, p);
     if (searched !== undefined) return searched;
     if (method.startsWith("automation.")) return (this.automations ??= new DemoAutomations({ supported: this.variant === "forge", now: () => this.now(), herdrSession: this.info.herdrSession, call: (m, q) => this.dispatch(m, q) })).call(method, p);
     if (method.startsWith("upload.")) return (this.uploads ??= new DemoUploads(this.env.clock, HOME)).call(method, p);
-    if (method === "session.artifacts" || method === "session.artifact" || method === "session.writeLocal" || method === "session.context") return demoInsight(method, p, this.sim(p.agentId).agent, this.now(), HOME);
+    if (method === "session.artifacts" || method === "session.artifact" || method === "session.writeLocal" || method === "session.context") {
+      const sim = this.sim(p.agentId);
+      return demoInsight(method, p, sim.agent, this.now(), HOME, sim.items);
+    }
+    if (method === "session.agentChat") return this.agentChat.page(this.ompSim(p.agentId), p);
     if (method.startsWith("jobs.") || method.startsWith("services.")) return this.jobsSim().call(method, p);
+    if (method.startsWith("cleanup.idleShells")) return this.idleShells.call(method, p);
     if (method.startsWith("cleanup."))
       return (this.cleanup ??= new DemoCleanup({ supported: this.variant === "forge", clock: this.env.clock, state: () => this.hostState(), call: (m, q) => this.dispatch(m, q) })).call(method, p);
     if (method.startsWith("auth.")) return this.auth.call(method, p);
@@ -1233,7 +1331,7 @@ export class DemoHost implements SimHost {
         this.env.clock.after(1600, () => {
           if (!sim.agent.omp) return;
           sim.agent.omp = { ...sim.agent.omp, link: "live", bridge: true, linkReason: undefined, linkVia: "collab", linkSince: this.env.clock.now() };
-          sim.caps = { ...sim.caps, prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true, retry: true, subagentRetry: true };
+          sim.caps = { ...sim.caps, prompt: true, steer: true, followUp: true, abort: true, answer: true, model: true, thinking: true, fast: true, plan: true, goal: true, compact: true, rename: true, fork: true, branch: true, tree: true, btw: true, export: true, handoff: true, subagents: true, bridge: true, retry: true, subagentRetry: true, refusalRetry: true };
           this.agentChanged(sim.agent.id);
         });
         return {};
@@ -1442,12 +1540,32 @@ export class DemoHost implements SimHost {
       const file = this.repoFiles(sim.agent.id).files[0] ?? "src";
       all = [
         {
-          id: `btw-${this.rng.hex(6)}`,
+          // omp's ids are stable across reloads, so are these (dismissals are keyed by them).
+          id: `btw-${sim.agent.id}-terminal`,
           sessionId,
           at,
           turns: [{ question: "Which file does this change start from?", answer: `\`${file}\`: everything else in the diff follows from it.`, status: "complete", at }],
         },
       ];
+      // The kanban session has a long side-question history (the card can collapse and dismiss them).
+      if (sim.agent.id === "kanban") {
+        const asked = [
+          ["How does dnd-kit pick the drop lane?", "It measures every droppable's rect and chooses the closest centre (`closestCenter`); `Lane.tsx` registers one droppable per lane."],
+          ["Is the persisted order versioned?", "Yes: `persist.ts` writes `{ version: 2, lanes }` and migrates version 1 on load."],
+          ["What does J/K move over?", "Cards in DOM order within the focused lane; `Shift` carries the card one lane instead of moving focus."],
+          ["Why is `columns.test.ts` slow?", "It mounts the whole board for each case; a shared render per file would cut it from 4 s to under 1 s."],
+          ["Can a card be in two lanes?", "No. A card's lane is derived from its agent state, so dropping it only requests a state change."],
+          ["Which animation library is used for the flight?", "None: a WAAPI `animate()` on the card's FLIP delta, 220 ms, skipped under reduced motion."],
+          ["Does keyboard move announce to screen readers?", "Yes, through the `aria-live` region in `BoardView.tsx`: \"Moved <title> to <lane>\"."],
+          ["Where is the lane order stored?", "`localStorage` key `tf.board.lanes.<host>`, one entry per host."],
+        ];
+        asked.forEach(([question, answer], i) => {
+          const t = this.now() - (5 + i) * 3_600_000;
+          const turns = [{ question: question as string, answer: answer as string, status: "complete" as BtwStatus, at: t }];
+          if (i % 3 === 0) turns.push({ question: "And in the tests?", answer: "`columns.test.ts` covers it with a fake host: two cases, one per lane.", status: "complete" as BtwStatus, at: t + 60_000 });
+          all!.unshift({ id: `btw-kanban-${i}`, sessionId, at: t, turns });
+        });
+      }
       this.btws.set(sim.agent.id, all);
     }
     return all.filter((b) => b.sessionId === sessionId);
@@ -1603,8 +1721,10 @@ export class DemoHost implements SimHost {
         this.metaChanged(sim.agent.id);
       });
     } else {
-      sim.subagents[i] = { ...sub, line: `↳ ${String(p.message ?? "")}` };
-      this.subSteers.set(id, [...(this.subSteers.get(id) ?? []), { at: this.now(), text: String(p.message ?? "") }]);
+      const text = String(p.message ?? "");
+      sim.subagents[i] = { ...sub, line: `↳ ${text}` };
+      this.subSteers.set(id, [...(this.subSteers.get(id) ?? []), { at: this.now(), text }]);
+      this.agentChat.userSent(sim, sub.name, text, p.broadcast === true);
     }
     sim.refreshDerived();
     this.agentChanged(sim.agent.id);
@@ -1655,8 +1775,10 @@ export class DemoHost implements SimHost {
       if (e.message.direction === "out") {
         items.push({ kind: "irc", id, at: e.at, message: { ...e.message, direction: "in", peer: "Main", fromParent: true, receipts: [] } });
       } else {
-        const view = { type: "irc" as const, direction: "out" as const, peer: "Main", text, broadcast: false, wakeRelay: false, fromParent: false, receipts: [{ to: "Main", outcome: "injected" }] };
-        items.push({ kind: "tool", id, at: e.at, callId: id, tool: "write", title: "agent://Main", args: { path: "agent://Main", content: text }, status: "ok", durationMs: 40, output: "Delivered to Main.", truncated: false, view });
+        // Its broadcast reached Main as one of its legs: it sent it to everyone.
+        const to = e.message.broadcast ? "all" : "Main";
+        const view = { type: "irc" as const, direction: "out" as const, peer: to, text, broadcast: e.message.broadcast, wakeRelay: false, fromParent: false, receipts: [{ to: "Main", outcome: "injected" }] };
+        items.push({ kind: "tool", id, at: e.at, callId: id, tool: "write", title: `agent://${to}`, args: { path: `agent://${to}`, content: text }, status: "ok", durationMs: 40, output: e.message.broadcast ? "Delivered to every live agent." : "Delivered to Main.", truncated: false, view });
       }
     }
     if (!running) items.push({ kind: "assistant", id: `${subagentId}-a`, at: Math.max(sub.endedAt ?? now, t0 + 2600 + calls * 2500), text: `Result: ${sub.line ?? "done"}.`, streaming: false });
@@ -1690,9 +1812,7 @@ export class DemoHost implements SimHost {
   private newAgentFromSpec(spec: Record<string, unknown>, wsId: string, pane: string, fallbackName: string, own?: AgentOmp): AgentSim {
     const autoAnswer = this.decide.checkSpec(spec);
     const kind = typeof spec.kind === "string" ? spec.kind : "omp";
-    const requested = typeof spec.name === "string" && spec.name ? spec.name : undefined;
-    if (requested && !/^[a-z][a-z0-9_-]{0,31}$/.test(requested)) throw apiError("invalid_params", "Agent names are lowercase letters, digits, - and _ (max 32), starting with a letter");
-    if (requested && [...this.sims.values()].some((s) => s.agent.name === requested)) throw apiError("herdr_error", `agent name '${requested}' is already taken`);
+    const requested = this.requestedName(spec);
     const name = requested ?? this.uniqueName(fallbackName);
     // A `default` role of the agent's own is its main model; `model` / `thinking` aren't passed then.
     const main = own?.roles.default ? selectorParts(own.roles.default) : undefined;
@@ -1788,14 +1908,98 @@ export class DemoHost implements SimHost {
       pane = paneId;
     } else if (target.kind === "cwd") {
       const cwd = this.resolve(this.str(target, "cwd"));
+      // a chat folder opens as a new tab of the Chats workspace (made again, empty, when it went)
+      if (this.chats?.isFolder(cwd)) return this.startChat(spec, own, cwd);
       if (!this.isDir(cwd)) throw apiError("not_found", `${cwd} does not exist`);
       const repo = repoForPath(cwd);
       const m = this.addWorkspace(repo?.name, repo ? "main" : undefined, false, this.wss.size, undefined, false, cwd, typeof target.label === "string" ? target.label : undefined);
       wsId = m.ws.id;
       pane = m.ws.tabs[0]?.panes[0]?.id as string;
-    } else throw apiError("invalid_params", "target.kind must be workspace, pane or cwd");
+    } else if (target.kind === "chat") return this.startChat(spec, own);
+    else throw apiError("invalid_params", "target.kind must be workspace, pane, cwd or chat");
     const sim = this.newAgentFromSpec(spec, wsId, pane, (this.wss.get(wsId)?.ws.label ?? "agent").split(/[·/]/).pop() ?? "agent", own);
     return { agentId: sim.agent.id, paneId: pane, workspaceId: wsId };
+  }
+
+  /** The launch spec's agent name, checked as herdr checks it; none: the host picks one. */
+  private requestedName(spec: Record<string, unknown>): string | undefined {
+    const requested = typeof spec.name === "string" && spec.name ? spec.name : undefined;
+    if (requested && !/^[a-z][a-z0-9_-]{0,31}$/.test(requested)) throw apiError("invalid_params", "Agent names are lowercase letters, digits, - and _ (max 32), starting with a letter");
+    if (requested && [...this.sims.values()].some((s) => s.agent.name === requested)) throw apiError("herdr_error", `agent name '${requested}' is already taken`);
+    return requested;
+  }
+
+  /**
+   * A chat (`./chats`): `agent.start` with the chat target, or with a chat folder as `cwd`. The spec is checked like
+   * every start before anything is made; the agent runs in a new tab of the Chats workspace, labelled with its name, in
+   * its own folder (new and empty, named after it; a chat folder given that went is made again, empty), with no repository.
+   */
+  private startChat(spec: Record<string, unknown>, own: AgentOmp, folder?: string): Started {
+    if (!this.chats) throw chatTargetRefused();
+    this.decide.checkSpec(spec);
+    const name = this.chatName(spec, folder);
+    // Agent ids are names here, and a deleted chat's id stays in `HostInfo.pruned` (clients drop what they keep for it): never reuse one.
+    let id = name;
+    for (let i = 2; this.sims.has(id) || this.info.pruned?.some((p) => p.agentId === id); i++) id = `${name.slice(0, 28)}-${i}`;
+    if (folder) this.chats.ensure(folder);
+    const dir = folder ?? this.chats.create(name);
+    const at = this.chatTab(dir, id, name);
+    const sim = this.newAgentFromSpec({ ...spec, name: id }, at.workspaceId, at.paneId, id, own);
+    Object.assign(sim.agent, { name, chat: true, cwd: dir, tabId: at.tabId, title: sim.agent.title === id ? name : sim.agent.title });
+    return { agentId: sim.agent.id, paneId: at.paneId, workspaceId: at.workspaceId };
+  }
+
+  /**
+   * A chat's herdr name, as tf-hostd picks it: in a chat folder given as `cwd`, the name asked for (herdr refuses one in
+   * use), else one made from the folder; a new chat keeps the name asked for while it is a valid name no agent has, else
+   * gets one made from it, else from its prompt (`chatSeed`).
+   */
+  private chatName(spec: Record<string, unknown>, folder: string | undefined): string {
+    if (folder) return this.requestedName(spec) ?? this.uniqueName(folder.slice(CHATS.length + 1));
+    const asked = typeof spec.name === "string" && spec.name ? spec.name : undefined;
+    if (asked && /^[a-z][a-z0-9_-]{0,31}$/.test(asked) && !this.sims.has(asked) && ![...this.sims.values()].some((s) => s.agent.name === asked)) return asked;
+    return this.uniqueName(asked ?? chatSeed(typeof spec.prompt === "string" ? spec.prompt : undefined));
+  }
+
+  /** A new tab `label` of the host's one Chats workspace (made for the first chat, gone with its last tab) whose pane runs `agentId` in `folder`. */
+  private chatTab(folder: string, agentId: string, label: string): Omit<Started, "agentId"> & { tabId: string } {
+    const m = [...this.wss.values()].find((x) => x.path === CHATS);
+    if (!m) {
+      const made = this.addWorkspace(undefined, undefined, false, this.wss.size, undefined, false, CHATS, "Chats");
+      const tab = made.ws.tabs[0] as Tab;
+      tab.label = label;
+      for (const pane of tab.panes) Object.assign(pane, { cwd: folder, agentId });
+      return { workspaceId: made.ws.id, tabId: tab.id, paneId: tab.panes[0]?.id as string };
+    }
+    // numbered from the pane counter: a closed chat's tab id is never handed out again
+    const n = this.nextPane++ + 10;
+    const paneId = `${m.ws.id}:p${n}`;
+    m.ws.tabs.push({ id: `${m.ws.id}:t${n}`, label, panes: [{ id: paneId, terminalId: `term-${paneId.replace(":", "-")}`, title: "omp", cwd: folder, focused: true, agentId }] });
+    this.dirtyWs.add(m.ws.id);
+    return { workspaceId: m.ws.id, tabId: `${m.ws.id}:t${n}`, paneId };
+  }
+
+  /** `chat.delete` (`./chats`): the chat's pane closes (its tab; the Chats workspace with the last one), and its card and what the host keeps for it go. */
+  private forgetChat(sim: AgentSim): void {
+    const { id, name, workspaceId, paneId, cwd } = sim.agent;
+    this.parking.forget(sim);
+    const m = this.wss.get(workspaceId);
+    if (m && paneId) this.closePaneIn(m, paneId);
+    this.decide.forget(id);
+    this.agentOmp.delete(id);
+    this.btws.delete(id);
+    this.activity(id, "stopped", `${name} deleted`, cwd);
+  }
+
+  /** forge's chats (`./chats`), in the Chats workspace: `lisbon` in Review and `postcodes`, which parking parks at seed. */
+  private seedChats(chats: DemoChats): void {
+    const now = this.now();
+    for (const { def, folder, steps } of chats.seed()) {
+      const at = this.chatTab(folder, def.id, def.id);
+      const sim = this.addAgent(def, at.workspaceId, at.paneId);
+      Object.assign(sim.agent, { chat: true, cwd: folder, tabId: at.tabId });
+      sim.seed(steps, now - def.age * 1000, now - def.since * 1000);
+    }
   }
 
   private removeAgent(id: string): void {
@@ -2025,6 +2229,7 @@ export class DemoHost implements SimHost {
     };
     for (const d of ["code/dotfiles", "code/sandbox", "notes", ".config/herdr", ".omp/agent/sessions", ".teleflock/bin", "Downloads"]) addPath(`${HOME}/${d}`, true);
     for (const f of ["notes/ideas.md", "notes/todo.md", "code/dotfiles/.zshrc", "code/dotfiles/install.sh", "code/sandbox/scratch.ts", ".config/herdr/config.toml", ".zshrc", ".gitconfig"]) addPath(`${HOME}/${f}`, false);
+    for (const c of this.chats?.paths() ?? []) addPath(c.path, c.dir);
     for (const r of REPOS) {
       addPath(r.root, true);
       for (const f of r.files) addPath(`${r.root}/${f}`, false);
@@ -2092,11 +2297,16 @@ export class DemoHost implements SimHost {
 
   private fsRead(path: string): unknown {
     const abs = this.resolve(path);
+    // The Markdown documents the demo's diffs change: the working-tree version.
+    const doc = demoDoc(abs.slice(abs.indexOf("/docs/") + 1))?.after;
+    if (doc !== undefined && abs.includes("/docs/")) return { path: abs, size: doc.length, text: doc, truncated: false };
     const tree = this.tree();
     const parent = abs.slice(0, abs.lastIndexOf("/")) || "/";
     const name = abs.split("/").pop() ?? "";
     if (tree.has(abs)) throw apiError("invalid_params", `${abs} is a directory`);
     if (!tree.get(parent)?.has(name)) throw apiError("not_found", `No such file: ${abs}`);
+    const chatText = this.chats?.read(abs);
+    if (chatText !== undefined) return { path: abs, size: chatText.length, text: chatText, truncated: false };
     if (name.endsWith(".png")) return { path: abs, size: 48_211, base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", mime: "image/png", truncated: false };
     const text = name === "README.md" ? `# ${repoForPath(abs)?.name ?? "project"}\n\n${fileBody(abs, 30)}` : fileBody(abs, 80);
     return { path: abs, size: text.length, text, truncated: false };
@@ -2350,7 +2560,7 @@ export class DemoHost implements SimHost {
       const repo = REPOS[i % REPOS.length] as RepoDef;
       return { file: `${HOME}/.omp/agent/sessions/${repo.name}-${i}.jsonl`, id: `01JOLD${i}${rng.hex(6).toUpperCase()}`, title, cwd: repo.root, updatedAt: now - (i + 1) * rng.int(3, 20) * 3600_000, messages: rng.int(8, 240), live: false };
     });
-    return [...live, ...old].filter((s) => !cwd || s.cwd?.startsWith(this.resolve(cwd))).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+    return [...live, ...old, ...(this.chats?.sessions() ?? [])].filter((s) => !cwd || s.cwd?.startsWith(this.resolve(cwd))).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
   }
 
   private resume(p: Record<string, unknown>): unknown {

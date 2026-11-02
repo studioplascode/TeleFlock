@@ -10,10 +10,27 @@ name: linux
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    tags: ['v*']
+  # Releases are built on the release box (scripts/release.sh), so pushes and tags build nothing
+  # here. Pull requests build when they change what the Linux packages are built from.
   pull_request:
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!**/*.md'
+      - '!.research/**'
+      - '!drafts/**'
+      - '!site/**'
+      - '!LICENSE'
+      - '!packaging/**'
+      - '!scripts/**'
+      - 'scripts/build-hostd.sh'
+      - '!.github/**'
+      - '.github/workflows/linux.yml'
+      - '.github/workflows/hostd.yml'
+      - '!src-tauri/gen/android/**'
+      - '!src-tauri/plugins/teleflock-android/**'
+      - '!src-tauri/windows/**'
+      - '!src-tauri/tauri.macos.conf.json'
 
 concurrency:
   group: linux-${{ github.ref }}
@@ -53,7 +70,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential \
-            pkg-config curl wget file patchelf xdg-utils ibus-gtk3 fcitx5-frontend-gtk3
+            pkg-config curl wget file patchelf xdg-utils ibus-gtk3 fcitx5-frontend-gtk3 libasound2-dev
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -66,6 +83,19 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: '. -> target'
+
+      - name: Cache the speech engine's archives (crates/tf-dictation/build.rs)
+        # The sha256-pinned sherpa-onnx archive and VAD model, not what they unpack to: build.rs
+        # checks an archive's sha256 before it extracts it, but trusts an extracted directory.
+        # Keyed by build.rs, where the sherpa-onnx version and every sha256 are pinned. After
+        # rust-cache: post steps run in reverse, so this saves before rust-cache's cleanup deletes
+        # the files in target/ that cargo didn't make.
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            target/native-cache/*.tar.bz2
+            target/native-cache/*-silero_vad.onnx
+          key: sherpa-onnx-x86_64-unknown-linux-gnu-${{ hashFiles('crates/tf-dictation/build.rs') }}
 
       - name: Install frontend deps
         run: bun install --frozen-lockfile

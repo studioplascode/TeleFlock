@@ -177,12 +177,26 @@ wire_struct! {
         /// This herdr session's server: up or down, TeleFlock restarting it, loading a newer
         /// installed herdr (§3.29). Absent from older daemons, so apps hide the herdr controls.
         pub herdr_health: Option<crate::herdr::HerdrHealth>,
+        /// Where chat tasks get their folders (`<hostd home>/chats`, §3.31): present on daemons
+        /// that start chats (`StartTarget::Chat`, `chat.*`), so apps offer chats only then.
+        pub chats: Option<String>,
+        /// Idle shells and the host's settings for them (§3.17, `cleanup.idleShells*`). Absent
+        /// from older daemons, so apps hide the controls for them.
+        pub idle_shells: Option<crate::cleanup::IdleShells>,
         /// Agents removed because their omp session file was deleted (omp's cleanup or by hand),
-        /// newest first, last 30 days (≤ 200). Clients drop what they keep about them (dispatch
-        /// entries, notifications, drafts). Carried in `HostInfo` so older apps ignore it.
+        /// or deleted chats (`chat.delete`), newest first, last 30 days (≤ 200). Clients drop what
+        /// they keep about them (dispatch entries, notifications, drafts). Carried in `HostInfo`
+        /// so older apps ignore it.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[ts(as = "Option<Vec<PrunedAgent>>", optional)]
         pub pruned: Vec<PrunedAgent>,
+        /// Questions decide for me answered that nobody reviewed yet (§3.23 "Review"), oldest
+        /// first; `host.autoAnswerReview` marks them reviewed for every device. Absent from older
+        /// daemons (and while there are none), so apps show no "Decided for you" for them.
+        /// Carried in `HostInfo` so older apps ignore it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<crate::autoanswer::AutoDecision>>", optional)]
+        pub decisions: Vec<crate::autoanswer::AutoDecision>,
     }
 }
 
@@ -555,6 +569,15 @@ wire_struct! {
         pub context: Option<String>,
         /// Multi-question asks: this question's place, Back, and the answer it already has.
         pub step: Option<crate::session::AskStep>,
+        /// The agent asks to use the user's TeleFlock Browser (`use_user_browser`, hosts ≥ 0.9.0):
+        /// `kind` is `confirm` (apps before 0.9.0 know no other kind for it) with the options
+        /// `session` ("Allow for this session"), `turn` ("Allow once") and `deny`, and `question` is
+        /// the agent's reason. Answer it with `browser.answer` on a device with the browser (the app
+        /// core routes an `agent.answer` of it there itself); hostd takes only a deny through
+        /// `agent.answer`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub browser: bool,
     }
 }
 
@@ -597,6 +620,15 @@ wire_struct! {
         /// Decide for me (§3.23): the agent's policy, while one applies, and the countdown on its
         /// pending question.
         pub auto_answer: Option<crate::autoanswer::AgentAutoAnswer>,
+        /// A chat task (§3.31): it runs in a folder TeleFlock made for it under `HostInfo.chats`,
+        /// outside any repository, so it has no repo, branch or worktree and is never offered
+        /// review or shipping. Absent (false) from hosts before chat tasks.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub chat: bool,
+        /// The TeleFlock Browser (§3.33, hosts ≥ 0.9.0): the agent's pending request to use the
+        /// user's browser, and whose browser it drives now.
+        pub browser: Option<crate::browser::AgentBrowser>,
     }
 }
 
@@ -704,10 +736,39 @@ wire_struct! {
 
 wire_struct! {
     pub struct NotifyAction {
+        /// Without an `answer`, `open:<page>` (`HostPage::action_id`) opens that page of the host,
+        /// on this button and on the notification itself (apps and hosts ≥ 0.9.0); any other id
+        /// opens the agent.
         pub id: String,
         pub label: String,
         /// When set, choosing this action answers the pending request directly.
         pub answer: Option<Answer>,
+    }
+}
+
+wire_enum! {
+    /// A host's page a notification opens instead of an agent (`AppEvent::OpenPage`).
+    pub enum HostPage {
+        /// The Cleanup page's Idle shells section.
+        IdleShells,
+        /// The Inbox's "Decided for you" (`HostInfo.decisions`), at the decision of the opened
+        /// notification (`AutoDecision.notificationId`; apps and hosts ≥ 0.9.0).
+        Decisions,
+    }
+}
+
+impl HostPage {
+    /// The id of the notification action (without an answer) that opens the page.
+    pub fn action_id(self) -> &'static str {
+        match self {
+            HostPage::IdleShells => "open:idleShells",
+            HostPage::Decisions => "open:decisions",
+        }
+    }
+
+    /// The page a notification opens: its first action without an answer that names one.
+    pub fn of(n: &Notification) -> Option<HostPage> {
+        n.actions.iter().filter(|a| a.answer.is_none()).find_map(|a| [HostPage::IdleShells, HostPage::Decisions].into_iter().find(|p| p.action_id() == a.id))
     }
 }
 
@@ -727,7 +788,9 @@ wire_struct! {
 wire_enum! {
     pub enum ActivityKind {
         Started, Prompted, Finished, Asked, Answered, Approved, Denied, Error, ToolError,
-        Archived, Unarchived, Stopped, Committed, Compacted, ModelChanged
+        Archived, Unarchived, Stopped, Committed, Compacted, ModelChanged,
+        /// An idle shell closed (§3.17): no agent; `agentName` is its workspace's label.
+        ShellClosed
     }
 }
 

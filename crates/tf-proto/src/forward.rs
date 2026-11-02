@@ -87,7 +87,10 @@ wire_struct! {
 }
 
 wire_enum! {
-    pub enum ForwardKind { Command, Shell, Tool, Port }
+    /// `browser`: a DevTools connection of an agent attached to the TeleFlock Browser
+    /// (`crate::browser`); tf-hostd opens it towards the attaching app (`name`: the agent id,
+    /// `port`: the port tf-hostd listens on), which connects it to its browser.
+    pub enum ForwardKind { Command, Shell, Tool, Port, Browser }
 }
 
 wire_struct! {

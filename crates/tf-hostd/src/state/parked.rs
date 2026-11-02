@@ -151,6 +151,10 @@ pub fn parked_agent(r: &ParkedRecord) -> Agent {
         auto_resume: None,
         // The state store's rebuild fills it (an agent's own policy carries over to its resume).
         auto_answer: None,
+        // The state store's rebuild sets it for a record in a chat folder (`crate::chats::mark_agents`).
+        chat: false,
+        // A parked agent runs no omp: no browser request or attachment.
+        browser: None,
     }
 }
 
@@ -245,13 +249,18 @@ pub fn close_scope(a: &Agent, workspaces: &[Workspace]) -> CloseScope {
     if !exclusive {
         return pane();
     }
-    let groups_worktrees = ws.worktree.is_none()
-        && workspaces.iter().any(|o| o.id != ws.id && o.worktree.as_ref().and_then(|w| w.primary_workspace_id.as_deref()) == Some(ws.id.as_str()));
-    if groups_worktrees {
+    if leads_worktree_group(ws, workspaces) {
         CloseScope::PaneKeepWorkspace { pane_id: a.pane_id.clone(), workspace_id: ws.id.clone() }
     } else {
         CloseScope::Workspace(ws.id.clone())
     }
+}
+
+/// `ws` is a primary checkout that linked worktree workspaces are grouped under: herdr closes
+/// them with it, so closing its last pane would take the group down.
+pub fn leads_worktree_group(ws: &Workspace, workspaces: &[Workspace]) -> bool {
+    ws.worktree.is_none()
+        && workspaces.iter().any(|o| o.id != ws.id && o.worktree.as_ref().and_then(|w| w.primary_workspace_id.as_deref()) == Some(ws.id.as_str()))
 }
 
 /// Adds a prune entry (newest first) and applies the cap and age limit.
@@ -518,6 +527,18 @@ impl StateHandle {
     /// Forgets an agent whose omp session file was deleted and lists it in `HostInfo.pruned`.
     pub fn prune(&self, agent_id: &str, session_id: Option<&str>) {
         info!(session = %self.inner.session, agent = agent_id, "pruned: session file deleted");
+        self.drop_agent(agent_id, session_id);
+    }
+
+    /// Forgets a deleted chat (`chat.delete`, §3.31) as [`prune`](Self::prune) forgets an agent:
+    /// card, archive marks, counters and activity go, and `HostInfo.pruned` lists it. Its omp
+    /// session file is not touched.
+    pub fn forget_chat(&self, agent_id: &str, session_id: Option<&str>) {
+        info!(session = %self.inner.session, agent = agent_id, "chat deleted: forgotten");
+        self.drop_agent(agent_id, session_id);
+    }
+
+    fn drop_agent(&self, agent_id: &str, session_id: Option<&str>) {
         let now = now_ms();
         self.inner.persist.session(&self.inner.session, |s| {
             forget(s, agent_id, session_id);
@@ -605,21 +626,37 @@ pub fn verify_close(
 /// Re-checks right before closing that the agent is still archived and, with `undo`, that the
 /// *Mark done* was not undone meanwhile. `Ok(false)`: nothing was closed.
 pub async fn close_agent(ctx: &Ctx, a: &Agent, undo: Option<&CancellationToken>) -> Result<bool, tf_herdr::HerdrError> {
-    let board = close_scope(a, &ctx.state.snapshot().workspaces);
+    // herdr cannot say (unreachable): nothing is closed.
     let pane = ctx.herdr.pane_get(&a.pane_id).await.ok();
+    close_pane(ctx, a, pane, || {
+        let undone = undo.is_some_and(CancellationToken::is_cancelled) || ctx.state.archived_at(&a.id).is_none();
+        if undone {
+            info!(agent = %a.id, "done agent un-archived meanwhile; keeping its pane");
+        }
+        undone
+    })
+    .await
+}
+
+/// Closes an agent's pane per [`close_scope`] (its workspace when it is alone there), verified
+/// against herdr ([`verify_close`]): *Mark done* ([`close_agent`]) and deleting a chat
+/// (`ops::chat`). `pane`: herdr's `pane.get` of the agent's pane, just now (`None`: gone). `keep`
+/// is asked right before closing; true keeps the pane. `Ok(false)`: nothing was closed (also when
+/// the pane is gone or another agent's now).
+pub async fn close_pane(ctx: &Ctx, a: &Agent, pane: Option<tf_herdr::PaneInfo>, keep: impl FnOnce() -> bool) -> Result<bool, tf_herdr::HerdrError> {
+    let board = close_scope(a, &ctx.state.snapshot().workspaces);
     let ws = match &board {
         CloseScope::Workspace(w) | CloseScope::PaneKeepWorkspace { workspace_id: w, .. } => ctx.herdr.workspace_get(w).await.ok(),
         CloseScope::Pane(_) => None,
     };
     let Some(scope) = verify_close(board.clone(), &a.id, pane.as_ref(), ws.as_ref()) else {
-        info!(agent = %a.id, pane = %a.pane_id, "done agent's pane is gone or reused; closing nothing");
+        info!(agent = %a.id, pane = %a.pane_id, "agent's pane is gone or reused; closing nothing");
         return Ok(false);
     };
-    if undo.is_some_and(CancellationToken::is_cancelled) || ctx.state.archived_at(&a.id).is_none() {
-        info!(agent = %a.id, "done agent un-archived meanwhile; keeping its pane");
+    if keep() {
         return Ok(false);
     }
-    info!(agent = %a.id, ?board, ?scope, "closing done agent");
+    info!(agent = %a.id, ?board, ?scope, "closing agent's pane");
     match scope {
         CloseScope::Workspace(ws) => ctx.herdr.workspace_close(&ws, false).await?,
         CloseScope::Pane(p) => ctx.herdr.pane_close(&p).await?,

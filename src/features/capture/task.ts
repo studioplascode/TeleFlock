@@ -1,7 +1,10 @@
+import type { VideoSource } from "@/core/draftVideos";
+
 /*
  * A task that comes in from outside the app's own composers: Android's share sheet (a screenshot,
- * a URL, a GitHub issue, text from any app) and the desktop Quick capture box. `prefill.ts` is the
- * one entry point that puts it in Dispatch (or, on request, in an agent's composer).
+ * a URL, a GitHub issue, text from any app), the desktop Quick capture box and a TeleFlock Browser
+ * recording. `prefill.ts` is the one entry point that puts it in Dispatch (or, on request, in an
+ * agent's composer).
  */
 
 /** An image as prompts carry it: base64 without the `data:` prefix. */
@@ -12,7 +15,18 @@ export interface TaskImage {
   name?: string;
 }
 
-export type TaskSource = "share" | "capture";
+export type TaskSource = "share" | "capture" | "recording";
+
+/** A video the task brings that uploads itself once the task goes out (a browser recording: `attachVideoSource`). */
+export interface TaskVideo {
+  name: string;
+  size: number;
+  mime: string;
+  kind?: "recording";
+  /** `<kind>:<id>` (`DraftVideo.source`). */
+  source: string;
+  video: VideoSource;
+}
 
 export interface PrefilledTask {
   text: string;
@@ -20,6 +34,7 @@ export interface PrefilledTask {
   source: TaskSource;
   /** The repository it is about (`github.com/owner/repo`), from a shared issue or pull request link. */
   repo?: string;
+  videos?: TaskVideo[];
 }
 
 export interface GithubRef {

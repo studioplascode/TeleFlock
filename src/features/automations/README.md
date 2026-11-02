@@ -44,10 +44,12 @@ export function describeCron(expr: string): string | null;
 - The list refreshes after every mutation, every 30 s while the page is visible, when it becomes
   visible, and ~2.5 s after the soonest next run (so the new last run shows up). A host whose
   tf-hostd predates automations isn't polled; it is asked again when it reconnects.
-- Scheduler banner from `AutomationList.scheduler`: systemd timer active (runs without an app,
-  survives reboots), systemd without persistence (its `note`, with a copyable
-  `loginctl enable-linger <user>` when the note names it), or daemon-only (its `note`). Shows the
-  host's time zone.
+- Scheduler banner from `AutomationList.scheduler`: the host's OS mechanism active (a systemd timer
+  on Linux: runs without an app, survives reboots; a launchd agent on macOS or a Task Scheduler
+  task on Windows: starts after you log in, so after a reboot schedules wait until then), systemd
+  without persistence (its `note`, with a copyable `loginctl enable-linger <user>` when the note
+  names it), a launchd or Task Scheduler failure (its `note`), or daemon-only (its `note`). Shows
+  the host's time zone.
 - Card: name, worktree / in-place chip, description (`describeCron`, `Automation` has none) and the
   raw cron, folder, model; next run (relative, absolute on hover; "Paused" while disabled); last
   run chip (started / failed / skipped, error on hover) that opens the agent while it is still on

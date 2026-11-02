@@ -16,4 +16,11 @@ completionPct?: number,
 /**
  * The subagent's own context-window usage (omp's TUI: `· 2.4%/272K`).
  */
-context?: ContextUsage, toolCount?: number, parentId?: string, };
+context?: ContextUsage, toolCount?: number, 
+/**
+ * The subagent this one runs under (omp's agent registry `parentId`; without a roster
+ * entry omp's naming, `A.B.C` under `A.B`); absent for the main agent's own subagents.
+ * Hosts before 0.9.0 sent `Main` for those, and the spawning tool call's id until omp's
+ * roster listed the subagent.
+ */
+parentId?: string, };

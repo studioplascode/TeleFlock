@@ -1,6 +1,6 @@
 ## Default Permission
 
-Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images and items shared to TeleFlock.
+Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images, items shared to TeleFlock and the preview window for tunnels.
 
 #### This default permission set includes the following:
 
@@ -17,6 +17,7 @@ Webview access to haptics, the notification permission flow, battery-optimisatio
 - `allow-cancel-dictation`
 - `allow-share-image`
 - `allow-take-shares`
+- `allow-open-preview`
 
 ## Permission Table
 
@@ -179,6 +180,32 @@ Enables the open_app_settings command without any pre-configured scope.
 <td>
 
 Denies the open_app_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:allow-open-preview`
+
+</td>
+<td>
+
+Enables the open_preview command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`teleflock-android:deny-open-preview`
+
+</td>
+<td>
+
+Denies the open_preview command without any pre-configured scope.
 
 </td>
 </tr>

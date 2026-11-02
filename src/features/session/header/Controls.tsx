@@ -10,8 +10,10 @@ import {
   Download,
   Focus,
   GitFork,
+  Globe,
   Layers,
   ListChecks,
+  MessagesSquare,
   MoreHorizontal,
   Pencil,
   PlugZap,
@@ -24,16 +26,21 @@ import {
   SquareTerminal,
   Target,
   Timer,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
 import { Slot } from "@radix-ui/react-slot";
 import { type ButtonHTMLAttributes, type ReactNode, useState } from "react";
 import { draftKey, parseAgentKey, useAgent, useDraft, useSession, useUi } from "@/core";
+import { isChat } from "@/core/chats";
 import type { ModelInfo, SessionMeta, ThinkingLevel } from "@/core/gen";
 import { openTerminal } from "@/features/board/agentActions";
+import { useRenameAgain } from "@/features/board/renameAgain";
+import { useBrowserLendItem } from "@/features/browser/agentMenu";
 import { openDecideDialog } from "@/features/autoAnswer/DecideDialog";
 import { useCanDecide } from "@/features/autoAnswer/hooks";
+import { deleteChatAgent } from "@/features/chats/actions";
 import { useCanMove } from "@/features/move/hosts";
 import { openMoveDialog } from "@/features/move/store";
 import { fuzzyScore } from "@/features/palette/fuzzy";
@@ -76,6 +83,8 @@ import { THINKING_LEVELS } from "../composer/slash";
 import { useSessionUi } from "../state";
 import { useModels, useSessionRoles } from "./useModels";
 import { openFind } from "../find/store";
+import { openBoard } from "../irc/boardUi";
+import { useHasAgentChat } from "../irc/store";
 
 const chipBase =
   "pressable focus-ring inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-bold whitespace-nowrap shadow-[inset_0_0_0_1px_var(--color-line-2)] disabled:opacity-45 max-md:gap-1 max-md:px-2";
@@ -535,11 +544,16 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
   const mute = useMute(agentKey);
   const canMove = useCanMove(agentKey);
   const canDecide = useCanDecide(agentKey);
+  const renameAgain = useRenameAgain(agentKey);
+  const browser = useBrowserLendItem(agent);
   const mobile = useIsMobile();
+  const hasChat = useHasAgentChat(agentKey);
   const [sheet, setSheet] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const open = (d: SessionDialog) => useSessionUi.getState().openDialog(agentKey, d);
   const working = agent?.column === "running";
+  // a chat: no Move (it has no checkout to carry); Delete chat ends it
+  const chat = isChat(agent);
 
   const groups: MenuGroup[] = [];
   if (agent?.omp?.link === "notShared")
@@ -573,6 +587,9 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
         run: () => void hostCall(hostId, "agent.fork", { agentId, placement: "pane" }, { success: "Forked into a new pane" }),
       },
       { key: "rename", icon: <Pencil />, def: ACTIONS.rename, run: () => open("rename") },
+      ...(renameAgain.available
+        ? [{ key: "renameAgain", icon: <Sparkles />, def: renameAgain.busy ? { ...ACTIONS.renameAgain, label: "Naming…" } : ACTIONS.renameAgain, disabled: renameAgain.busy, run: renameAgain.run }]
+        : []),
       {
         key: "exportHtml",
         icon: <Download />,
@@ -581,7 +598,7 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
         run: () => void hostCall(hostId, "agent.export", { agentId }).then((r) => r.ok && toast({ title: "Session exported", description: r.value.path, status: "done" })),
       },
       { key: "newSession", icon: <SquarePlus />, def: ACTIONS.newSession, run: () => open("newSession") },
-      { key: "move", icon: <ArrowRightLeft />, def: ACTIONS.moveHost, disabled: !canMove, run: () => openMoveDialog(agentKey) },
+      ...(chat ? [] : [{ key: "move", icon: <ArrowRightLeft />, def: ACTIONS.moveHost, disabled: !canMove, run: () => openMoveDialog(agentKey) }]),
       ...(canDecide ? [{ key: "decide", icon: <Timer />, def: ACTIONS.decideForMe, run: () => openDecideDialog(agentKey) }] : []),
     ],
   });
@@ -589,6 +606,8 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
     { key: "find", icon: <Search />, def: { label: "Find in transcript", shortcut: mobile ? undefined : "Ctrl F", description: "Messages, thinking and tool output, earlier ones included" }, run: () => openFind(agentKey) },
     { key: "mute", icon: mute.muted ? <Bell /> : <BellOff />, def: mute.muted ? ACTIONS.unmute : ACTIONS.mute, run: () => void mute.toggle() },
   ];
+  // Sessions with subagents (or their messages): the agent tree's chat, beside the session (phones: full screen).
+  if (hasChat) view.push({ key: "agentChat", icon: <MessagesSquare />, def: { label: "Message board", description: "Every message the session's agents send each other" }, run: () => openBoard(agentKey, mobile) });
   if (mobile) view.push({ key: "terminal", icon: <SquareTerminal />, def: ACTIONS.terminal, run: () => openTerminal(agentKey, true) });
   else
     view.push(
@@ -600,6 +619,7 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
         run: () => (agent?.parked ? openTerminal(agentKey, false) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId })),
       },
     );
+  if (browser) view.push({ key: "browser", icon: <Globe />, def: { label: browser.label, description: browser.description }, run: browser.run });
   groups.push({ items: view });
   groups.push({
     items: [
@@ -617,6 +637,7 @@ export function ActionsMenu({ agentKey, trigger }: { agentKey: string; trigger?:
     items: [
       { key: "exitOmp", icon: <Power />, def: ACTIONS.exitOmp, run: () => void hostCall(hostId, "agent.stop", { agentId, mode: "exit" }, { success: "omp exited" }) },
       { key: "closePane", icon: <X />, def: ACTIONS.closePane, danger: true, run: () => setConfirmClose(true) },
+      ...(chat ? [{ key: "deleteChat", icon: <Trash2 />, def: ACTIONS.deleteChat, danger: true, run: () => void deleteChatAgent(agentKey) }] : []),
     ],
   });
 

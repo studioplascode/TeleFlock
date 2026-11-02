@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ArtifactKind, PresentKind } from "./gen";
 
 export type UiDialog =
   | { kind: "newWorktree"; hostId?: string; cwd?: string }
@@ -11,7 +12,14 @@ export type UiDialog =
 
 export type SplitState =
   | { kind: "terminal"; hostId: string; paneId?: string; agentId?: string }
-  | { kind: "session"; key: string };
+  | { kind: "session"; key: string }
+  /** A document of a session (`key`): a file of its artifacts (`file` = its root), or `review`, the
+   *  plan under review. `as`/`title`/`language`: what the agent said when it presented it. */
+  | { kind: "artifact"; key: string; file: ArtifactKind | "review"; name: string; as?: PresentKind; title?: string; language?: string }
+  /** This device's TeleFlock Browser, opened beside the session `key` (it offers "Let <agent> use my browser"). */
+  | { kind: "browser"; key?: string }
+  /** The message board of session `key`: the agent chat of its whole agent tree. */
+  | { kind: "agentChat"; key: string };
 
 export interface UiState {
   dialog: UiDialog | null;

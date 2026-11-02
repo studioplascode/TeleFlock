@@ -1,15 +1,22 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { isVideoFile, mediaFiles, videoFiles } from "./clipboardImages";
+import { flushAll } from "./draftFlush";
 import {
   attachVideos,
+  attachVideoSource,
   detachDraftVideos,
   getDraftVideos,
+  hydrateDraftVideos,
   MAX_DRAFT_VIDEOS,
+  registerVideoSource,
   releaseVideos,
   removeDraftVideo,
   retryVideos,
+  setDraftVideoBackend,
   setVideoTransport,
+  type StoredVideos,
   uploadDraftVideos,
+  type VideoSource,
   type VideoTransport,
   videoRefLine,
   whenUploaded,
@@ -167,5 +174,135 @@ describe("draft videos", () => {
     await expect(whenUploaded(ids)).resolves.toHaveLength(1);
     releaseVideos(ids);
     ctl.started.length = 0;
+  });
+});
+
+describe("draft videos across a restart", () => {
+  /** Stored videos per draft key; records every write. */
+  function store(seed: Record<string, StoredVideos> = {}) {
+    const records = new Map(Object.entries(seed));
+    const prev = setDraftVideoBackend({
+      read: async (key) => records.get(key),
+      write: (key, value) => void (value ? records.set(key, value) : records.delete(key)),
+    });
+    return { records, restore: () => setDraftVideoBackend(prev) };
+  }
+
+  test("an uploaded video is stored with its host path, so its chip comes back", async () => {
+    const s = store();
+    try {
+      const key = "kept";
+      attachVideos(key, "restart-host", [mp4("talk.mp4")]);
+      await tick();
+      ctl.started.find((u) => u.name === "talk.mp4")?.finish();
+      await tick();
+      await flushAll();
+      expect(s.records.get(key)?.videos.map((v) => [v.name, v.path])).toEqual([["talk.mp4", "/home/me/.teleflock/uploads/2026-10-27/talk.mp4"]]);
+      // Sent: off the draft, and off the stored draft.
+      const ids = getDraftVideos(key).map((v) => v.id);
+      detachDraftVideos(key, ids);
+      releaseVideos(ids);
+      await flushAll();
+      expect(s.records.has(key)).toBe(false);
+    } finally {
+      s.restore();
+      ctl.started.length = 0;
+    }
+  });
+
+  test("after a restart an uploaded video is back as it was, one cut off mid-upload as failed", async () => {
+    const path = "/home/me/.teleflock/uploads/2026-11-01/demo.mp4";
+    const s = store({
+      restarted: {
+        videos: [
+          { id: "v-up", name: "demo.mp4", size: 16, mime: "video/mp4", hostId: "forge", path, uploadId: "up_demo" },
+          { id: "v-cut", name: "cut.mp4", size: 16, mime: "video/mp4", hostId: "forge" },
+        ],
+        at: Date.now(),
+      },
+    });
+    try {
+      await hydrateDraftVideos("restarted");
+      expect(getDraftVideos("restarted").map((v) => [v.name, v.phase, v.path ?? null])).toEqual([
+        ["demo.mp4", "done", path],
+        ["cut.mp4", "failed", null],
+      ]);
+      expect(await whenUploaded(["v-up"])).toEqual([{ name: "demo.mp4", size: 16, path }]);
+      // Its file is gone with the old page: a retry asks for it again instead of uploading.
+      retryVideos(["v-cut"]);
+      expect(getDraftVideos("restarted")[1]).toMatchObject({ phase: "failed", error: "The file can't be read any more; attach it again" });
+      // Never sent: removing the uploaded one drops its file on the host.
+      removeDraftVideo("restarted", "v-up");
+      expect(ctl.cancelled).toEqual([["forge", "up_demo"]]);
+    } finally {
+      s.restore();
+      for (const v of getDraftVideos("restarted")) removeDraftVideo("restarted", v.id);
+      ctl.cancelled.length = 0;
+    }
+  });
+});
+
+describe("videos from a source (browser recordings)", () => {
+  /** A source whose upload the test finishes; records the hosts it was asked for. */
+  function source(ref: string) {
+    const calls: { hostId: string; opts: UploadOptions; finish(): void }[] = [];
+    const src: VideoSource = {
+      upload: (hostId, opts) =>
+        // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+        new Promise((resolve) => {
+          calls.push({ hostId, opts, finish: () => resolve({ path: "/h/up/rec-timeline.md", size: 900, sha256: "", uploadId: "up_md", ref, extra: ["up_mov", "up_shot"] }) });
+        }),
+    };
+    return { src, calls };
+  }
+  const entry = { name: "Cart breaks", size: 800, mime: "video/quicktime", kind: "recording" as const, source: "recording:rec_1" };
+
+  test("waits for the send, uploads itself to the host the prompt goes to, and the prompt carries its own block", async () => {
+    const { src, calls } = source('Attached recording "Cart breaks" (1:42, made in the TeleFlock Browser): …\n- Timeline: /h/up/rec-timeline.md');
+    expect(attachVideoSource("src-draft", null, entry, src)).toEqual({ added: 1 });
+    expect(attachVideoSource("src-draft", null, entry, src)).toEqual({ added: 0 });
+    const [v] = getDraftVideos("src-draft");
+    if (!v) throw new Error("not attached");
+    await tick();
+    expect(v.phase).toBe("pending");
+    expect(calls).toHaveLength(0);
+    uploadDraftVideos([v.id], "rec-host");
+    await tick();
+    expect(calls.map((c) => c.hostId)).toEqual(["rec-host"]);
+    calls[0]?.finish();
+    const refs = await whenUploaded([v.id]);
+    expect(getDraftVideos("src-draft")[0]).toMatchObject({ phase: "done", size: 900, kind: "recording" });
+    expect(withVideoRefs("Fix the cart.", [{ name: "a.mp4", size: 1, path: "/a.mp4" }, ...refs])).toBe('Fix the cart.\n\nAttached video "a.mp4" (1 B): /a.mp4 (read it to see it)\n\nAttached recording "Cart breaks" (1:42, made in the TeleFlock Browser): …\n- Timeline: /h/up/rec-timeline.md');
+    // Never sent: removing it drops every file it uploaded.
+    removeDraftVideo("src-draft", v.id);
+    expect(ctl.cancelled).toEqual([
+      ["rec-host", "up_md"],
+      ["rec-host", "up_mov"],
+      ["rec-host", "up_shot"],
+    ]);
+    ctl.cancelled.length = 0;
+  });
+
+  test("after a restart a stored source comes back waiting for its host while its kind can read it again; otherwise failed", async () => {
+    const records = new Map<string, StoredVideos>([["src-restart", { videos: [{ id: "v-rec", name: "Cart breaks", size: 800, mime: "video/quicktime", hostId: null, kind: "recording", source: "recording:rec_9" }, { id: "v-other", name: "x", size: 1, mime: "", hostId: null, source: "gone:1" }], at: Date.now() }]]);
+    const prev = setDraftVideoBackend({ read: async (key) => records.get(key), write: (key, value) => void (value ? records.set(key, value) : records.delete(key)) });
+    const asked: string[] = [];
+    const off = registerVideoSource("recording", (id) => {
+      asked.push(id);
+      return source("block").src;
+    });
+    try {
+      await hydrateDraftVideos("src-restart");
+      expect(asked).toEqual(["rec_9"]);
+      expect(getDraftVideos("src-restart").map((v) => [v.id, v.phase])).toEqual([
+        ["v-rec", "pending"],
+        ["v-other", "failed"],
+      ]);
+    } finally {
+      off();
+      setDraftVideoBackend(prev);
+      for (const v of getDraftVideos("src-restart")) removeDraftVideo("src-restart", v.id);
+      ctl.cancelled.length = 0;
+    }
   });
 });

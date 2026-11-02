@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
 use serde_json::Value;
-use tf_proto::host::{FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::host::{FEATURE_BROWSER, FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, ClientMsg, FwdEv, FwdOffer, HostState, Millis, Presence, ServerMsg, StatePatch};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadBuf};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -92,6 +92,15 @@ pub fn requested_features() -> Vec<String> {
     vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string(), FEATURE_PRESENCE.to_string(), FEATURE_FORWARD.to_string()]
 }
 
+/// [`requested_features`], plus `browser` from an app core that has the TeleFlock Browser.
+pub fn hello_features(browser: bool) -> Vec<String> {
+    let mut f = requested_features();
+    if browser {
+        f.push(FEATURE_BROWSER.to_string());
+    }
+    f
+}
+
 /// What hostd accepted (`welcome.features`; older daemons send none).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Features {
@@ -101,12 +110,20 @@ pub struct Features {
     pub presence: bool,
     /// Host-to-host forwarding offers and streams (hosts ≥ 0.8.0, `crate::forward`).
     pub forward: bool,
+    /// Agents may attach to this app's TeleFlock Browser (hosts ≥ 0.9.0, `crate::browser`).
+    pub browser: bool,
 }
 
 impl Features {
     fn accepted(features: Option<&[String]>) -> Features {
         let has = |f: &str| features.is_some_and(|all| all.iter().any(|x| x == f));
-        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE), forward: has(FEATURE_FORWARD) }
+        Features {
+            zstd: has(FEATURE_ZSTD),
+            session_sync: has(FEATURE_SESSION_SYNC),
+            presence: has(FEATURE_PRESENCE),
+            forward: has(FEATURE_FORWARD),
+            browser: has(FEATURE_BROWSER),
+        }
     }
 }
 
@@ -579,7 +596,8 @@ impl Link {
             | ServerMsg::NotifyAlert { .. }
             | ServerMsg::NotifyDone { .. }
             | ServerMsg::FwdOffered { .. }
-            | ServerMsg::Fwd { .. }) => sink.push(m),
+            | ServerMsg::Fwd { .. }
+            | ServerMsg::BrowserDetached { .. }) => sink.push(m),
             ServerMsg::Snapshot { rev, state } => sink.snapshot(rev, state),
             ServerMsg::Patch { rev, ops } => sink.patch(rev, ops),
             ServerMsg::Error { error } => self.close(&error.to_string()),

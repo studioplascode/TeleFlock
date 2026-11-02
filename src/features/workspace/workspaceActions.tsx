@@ -351,11 +351,21 @@ export interface WorkspaceActionsMenuProps {
   /** `dropdown` (click, default) or `context` (right-click / long-press). */
   mode?: "dropdown" | "context";
   home?: string;
+  /**
+   * Context mode only: items shown first (a folded sidebar row's own pane actions), then the workspace's under
+   * its label. `leadingPanes` are the panes those items already cover: their open/close entries are dropped below.
+   */
+  leading?: ReactNode;
+  leadingPanes?: readonly string[];
 }
 
 /** Ready-made menu of `workspaceActions` for the sidebar tree and board. */
-export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "dropdown", home }: WorkspaceActionsMenuProps) {
-  const actions = workspaceActions(hostId, workspace);
+export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "dropdown", home, leading, leadingPanes }: WorkspaceActionsMenuProps) {
+  const covered = mode === "context" ? leadingPanes : undefined;
+  const actions = workspaceActions(hostId, workspace).filter((a) => {
+    const pane = a.id.startsWith("openPane:") ? a.id.slice(9) : a.id.startsWith("closePane:") ? a.id.slice(10) : undefined;
+    return pane === undefined || !covered?.includes(pane);
+  });
   const groups = (["create", "manage", "tabs", "danger"] as const).map((g) => actions.filter((a) => a.group === g)).filter((g) => g.length > 0);
   // Per-tab actions get the tab label as a heading before their first item.
   const heading = (g: WorkspaceAction[], i: number) => (g[i]?.section && g[i]?.section !== g[i - 1]?.section ? g[i]?.section : undefined);
@@ -364,6 +374,13 @@ export function WorkspaceActionsMenu({ hostId, workspace, children, mode = "drop
       <ContextMenu>
         <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
         <ContextMenuContent className="max-h-[min(560px,var(--radix-context-menu-content-available-height))] overflow-y-auto">
+          {leading && (
+            <>
+              {leading}
+              <ContextMenuSeparator />
+              <ContextMenuLabel className="truncate">Worktree · {workspace.label}</ContextMenuLabel>
+            </>
+          )}
           {groups.map((g, i) => (
             <div key={g[0]?.group}>
               {i > 0 && <ContextMenuSeparator />}

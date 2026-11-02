@@ -1,0 +1,9 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "security": {
+      "csp": { "frame-src": "blob:" },
+      "devCsp": { "frame-src": "blob:" }
+    }
+  }
+}

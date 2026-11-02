@@ -1,20 +1,21 @@
 import { useEffect } from "react";
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
+import { onFlush } from "./draftFlush";
 import type { DraftSetter } from "./drafts";
 
 /*
  * Per-draft-key values too large for localStorage (a draft's images, its pasted texts): kept in
  * memory and written through to IndexedDB. IndexedDB missing or failing (private modes, old
  * WebViews) degrades to memory only. Each kind has its own database, so adding a kind never
- * upgrades another's.
+ * upgrades another's. Every kind answers `flushAll` (`./draftFlush`) once its writes are done.
  */
 
 /** Where a kind of draft value persists. */
 export interface SlotBackend<S> {
   read(key: string): Promise<S | undefined>;
-  /** `null` deletes the key. */
-  write(key: string, value: S | null): void;
+  /** `null` deletes the key. Resolves once stored (or failed: never rejects). */
+  write(key: string, value: S | null): Promise<void> | void;
   /** Every stored key (absent: storage can't list, memory only). */
   keys?(): Promise<string[]>;
 }
@@ -71,7 +72,9 @@ export function indexedDbSlots<S extends Stamped>(db: string, store: string, lim
   };
   return {
     read: (key) => request<S | undefined>("readonly", (s) => s.get(key) as IDBRequest<S | undefined>),
-    write: (key, value) => void (value ? request("readwrite", (s) => s.put(value, key)) : request("readwrite", (s) => s.delete(key))),
+    write: async (key, value) => {
+      await (value ? request("readwrite", (s) => s.put(value, key)) : request("readwrite", (s) => s.delete(key)));
+    },
     keys: async () => ((await request("readonly", (s) => s.getAllKeys())) ?? []).filter((k): k is string => typeof k === "string"),
   };
 }
@@ -127,6 +130,8 @@ export interface DraftSlots<T, S> {
   update(key: string, update: (cur: T) => T): void;
   /** Keys holding a value, in memory or stored (to find the drafts of a gone agent). */
   keys(): Promise<string[]>;
+  /** Resolves once every edit so far is stored: the reads in progress, then every write started. */
+  flush(): Promise<void>;
   /** Swaps the storage (tests); returns the previous one. */
   setBackend(next: SlotBackend<S>): SlotBackend<S>;
   readonly api: StoreApi<SlotState<T>>;
@@ -151,8 +156,15 @@ export function draftSlots<T, S>(opts: {
   const api = createStore<SlotState<T>>()(() => ({ values: {}, loaded: {} }));
   /** Keys being read: the edits made meanwhile (replayed on top of the stored value) and the read. */
   const pending = new Map<string, { updates: ((cur: T) => T)[]; done: Promise<void> }>();
+  /** Writes the backend hasn't finished. */
+  const writes = new Set<Promise<void>>();
   const get = (key: string): T => api.getState().values[key] ?? opts.empty;
-  const persist = (key: string, v: T) => backend.write(key, opts.isEmpty(v) ? null : opts.encode(v));
+  const persist = (key: string, v: T) => {
+    const write = Promise.resolve(backend.write(key, opts.isEmpty(v) ? null : opts.encode(v)));
+    const done = () => writes.delete(write);
+    writes.add(write);
+    write.then(done, done);
+  };
 
   const hydrate = (key: string): Promise<void> => {
     const running = pending.get(key);
@@ -173,7 +185,7 @@ export function draftSlots<T, S>(opts: {
     return done;
   };
 
-  return {
+  const slots: DraftSlots<T, S> = {
     api,
     empty: opts.empty,
     hydrate,
@@ -195,12 +207,18 @@ export function draftSlots<T, S>(opts: {
         .map(([k]) => k);
       return [...new Set([...inMemory, ...stored])];
     },
+    async flush() {
+      await Promise.allSettled([...pending.values()].map((p) => p.done));
+      await Promise.allSettled([...writes]);
+    },
     setBackend(next) {
       const prev = backend;
       backend = next;
       return prev;
     },
   };
+  onFlush(() => slots.flush());
+  return slots;
 }
 
 /** A draft's value: `[value, setValue, clear]`, hydrated from storage on first use. */

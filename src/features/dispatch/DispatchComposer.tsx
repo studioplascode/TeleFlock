@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Paperclip, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Mic, MicOff, Paperclip, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
 import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
@@ -15,12 +15,13 @@ import { AutoAnswerSection } from "@/features/autoAnswer/PolicyEditor";
 import { useModelCatalog } from "@/features/workspace/shared/AgentFields";
 import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
 import { templateSummary } from "@/features/workspace/shared/templates";
+import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { PasteChips, PasteMenu } from "@/features/session/composer/PasteChips";
 import { usePasteAttach } from "@/features/session/composer/usePasteAttach";
 import { VideoChips } from "@/features/session/composer/VideoChips";
 import { MAX_TASK_IMAGES } from "./images";
 import { type DispatchOptions, suggestDispatchName } from "./store";
-import { prefetchKey } from "./thread";
+import { prefetchKey, rambleAbout } from "./thread";
 
 const DEFAULT = "default";
 const LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
@@ -76,6 +77,10 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   latest.current = expanded;
   useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus(), text: () => latest.current }), []);
   const disabled = !!disabledReason;
+  // Dictation, tidied into a task by a model on the target host when Rambler is on (Settings → Dictation).
+  const about = rambleAbout(repo);
+  const ramble = useRamblerDictation({ ...(hostId ? { hostId } : {}), ...(about ? { about } : {}), text, setText, field: ta, mobile });
+  const dictation = ramble.dictation;
   const canSend = !disabled && (!!text.trim() || images.length > 0 || videos.length > 0);
 
   // Name the task ahead of the send (same call as the send's, cached by ai.ts): after a pause of
@@ -183,9 +188,10 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
       )}
       <VideoChips videos={videos} onRemove={(id) => removeDraftVideo(draftKey, id)} onRetry={(id) => retryVideos([id])} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 ? "pt-0" : "pt-1")} />
       <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 || videos.length > 0 ? "pt-0" : "pt-1")} />
+      {ramble.panel}
       <Textarea
         ref={ta}
-        value={text}
+        value={dictation.listening && dictation.interim ? `${text}${text && !text.endsWith(" ") ? " " : ""}${dictation.interim}` : text}
         onChange={(e) => paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true)}
         onSelect={(e) => paste.onSelect(e.currentTarget)}
         onCopy={(e) => paste.onCopy(e)}
@@ -223,6 +229,18 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
             >
               <Paperclip />
             </IconButton>
+            {dictation.supported && (
+              <IconButton
+                label={dictation.listening ? "Stop dictation" : "Dictate"}
+                size={mobile ? "md" : "sm"}
+                variant={dictation.listening ? "sunset" : "ghost"}
+                onClick={dictation.toggle}
+                disabled={disabled}
+                className={cn(dictation.listening && "tf-loop animate-breathe [--tf-breath:1.1s]")}
+              >
+                {dictation.listening ? <MicOff /> : <Mic />}
+              </IconButton>
+            )}
             <OptionsPopover hostId={hostId} options={options} onChange={onOptionsChange} mobile={mobile} />
             <DispatchAgentOptions hostId={hostId} options={options} onChange={onOptionsChange} mobile={mobile} />
             <button

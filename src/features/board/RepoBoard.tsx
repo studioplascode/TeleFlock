@@ -1,9 +1,14 @@
-import { useColumnKeys } from "@/core";
+import { MessagesSquare } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
+import { selectAgentKeys, useCore } from "@/core";
+import { isChat } from "@/core/chats";
 import { AgentGlyph, CardFlight, EmptyState, FlightGroup, StatusOrb, cn } from "@/design";
 import { AgentCard } from "./AgentCard";
 import { useBoard } from "./boardStore";
 import { onCardClick } from "./Kanban";
 import { LANES } from "./lanes";
+
+type Lane = (typeof LANES)[number];
 
 function RepoCard({ agentKey, lane, selected }: { agentKey: string; lane: (typeof LANES)[number]["column"]; selected: boolean }) {
   const picked = useBoard((s) => s.picked.includes(agentKey));
@@ -29,8 +34,21 @@ interface RepoFilter {
   q: string;
 }
 
-function RepoLaneSection({ repo, filter, column, selectedKey }: { repo: string; filter: RepoFilter; column: (typeof LANES)[number]; selectedKey: string | null }) {
-  const keys = useColumnKeys(column.column, { hostId: filter.hostId, repo, q: filter.q || undefined });
+/** Whether a chat is on the board in view (the title-bar host filter): Repo grouping then gets one Chats column. */
+export function useChatsInView(hostFilter: string): boolean {
+  return useCore((s) => Object.values(s.agents).some((a) => isChat(a) && (hostFilter === "all" || a.hostId === hostFilter)));
+}
+
+/** One lane of a column: the repository's agents, or with `repo` null the chats (they have no repository). */
+function RepoLaneSection({ repo, filter, column, selectedKey }: { repo: string | null; filter: RepoFilter; column: Lane; selectedKey: string | null }) {
+  const q = filter.q || undefined;
+  const keys = useCore(
+    useShallow((s) =>
+      repo === null
+        ? selectAgentKeys(s, { column: column.column, hostId: filter.hostId, q }).filter((k) => isChat(s.agents[k]))
+        : selectAgentKeys(s, { column: column.column, hostId: filter.hostId, repo, q }),
+    ),
+  );
   if (keys.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
@@ -46,14 +64,14 @@ function RepoLaneSection({ repo, filter, column, selectedKey }: { repo: string; 
   );
 }
 
-function RepoColumn({ repo, filter, selectedKey }: { repo: string; filter: RepoFilter; selectedKey: string | null }) {
+function RepoColumn({ repo, filter, selectedKey }: { repo: string | null; filter: RepoFilter; selectedKey: string | null }) {
   // room under the last card for the floating selection bar (same as the status lanes)
   const selecting = useBoard((s) => s.picked.length > 0);
   return (
-    <section aria-label={`Repo ${repo}`} className="flex min-h-0 max-w-[440px] min-w-[280px] flex-[1_0_300px] flex-col rounded-tile bg-ink/[0.018] shadow-hairline">
+    <section aria-label={repo === null ? "Chats" : `Repo ${repo}`} className="flex min-h-0 max-w-[440px] min-w-[280px] flex-[1_0_300px] flex-col rounded-tile bg-ink/[0.018] shadow-hairline">
       <header className="flex items-center gap-2 px-4 pt-3.5 pb-2.5">
-        <AgentGlyph name={repo} size={18} />
-        <h3 className="min-w-0 truncate font-display text-sm font-bold text-ink">{repo}</h3>
+        {repo === null ? <MessagesSquare className="size-[18px] shrink-0 text-mute" aria-hidden /> : <AgentGlyph name={repo} size={18} />}
+        <h3 className="min-w-0 truncate font-display text-sm font-bold text-ink">{repo ?? "Chats"}</h3>
       </header>
       <div
         className={cn(
@@ -69,9 +87,12 @@ function RepoColumn({ repo, filter, selectedKey }: { repo: string; filter: RepoF
   );
 }
 
-/** Group-by-repo: one column per repository, status sections inside (archive via card actions). `arrangement`: see FlightGroup. */
-export function RepoBoard({ repos, filter, selectedKey, arrangement }: { repos: string[]; filter: RepoFilter; selectedKey: string | null; arrangement: string }) {
-  if (repos.length === 0) return <EmptyState title="No repositories yet" description="Agents running inside a git repository are grouped here." className="flex-1" />;
+/**
+ * Group-by-repo: one column per repository, status sections inside (archive via card actions); chats (no
+ * repository) share one Chats column after them. `arrangement`: see FlightGroup.
+ */
+export function RepoBoard({ repos, chats = false, filter, selectedKey, arrangement }: { repos: string[]; chats?: boolean; filter: RepoFilter; selectedKey: string | null; arrangement: string }) {
+  if (repos.length === 0 && !chats) return <EmptyState title="No repositories yet" description="Agents running inside a git repository are grouped here." className="flex-1" />;
   return (
     <FlightGroup id="board-repos" arrangement={arrangement}>
       {/* Bleeds into the board padding like the status lanes, so scrolled columns reach the window edge. */}
@@ -79,6 +100,7 @@ export function RepoBoard({ repos, filter, selectedKey, arrangement }: { repos: 
         {repos.map((r) => (
           <RepoColumn key={r} repo={r} filter={filter} selectedKey={selectedKey} />
         ))}
+        {chats && <RepoColumn repo={null} filter={filter} selectedKey={selectedKey} />}
       </div>
     </FlightGroup>
   );

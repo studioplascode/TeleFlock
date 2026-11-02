@@ -1,12 +1,12 @@
 import { ChevronLeft, ChevronRight, Copy, Download, PartyPopper, RefreshCw, Share2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useHostIds, useHosts } from "@/core";
-import { Button, EmptyState, IconButton, PageHeader, Skeleton, Tile, cn, toast, useIsMobile } from "@/design";
+import { Button, EmptyState, IconButton, PageHeader, saveBlob, Skeleton, Tile, cn, toast, useIsMobile } from "@/design";
 import { reportError } from "@/features/board/agentActions";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { buildCard, fileName, mergeReports, weekOf, type Week, type WrappedCard } from "./model";
 import { loadPosterFonts, paintPoster, POSTER_H, POSTER_W, posterPng } from "./paint";
-import { canCopyImages, canShareFiles, copyPng, inAndroidApp, savePng, sharePng } from "./share";
+import { canCopyImages, canShareFiles, copyPng, inAndroidApp, sharePng } from "./share";
 import { useWrapped } from "./useWrapped";
 
 /** Weeks back the arrows reach. */
@@ -87,7 +87,7 @@ function Actions({ card, week, className }: { card: WrappedCard; week: Week; cla
     posterPng(card)
       .then(
         (png) => {
-          savePng(png, name);
+          saveBlob(png, name);
           toast({ title: `Saved ${name}`, description: "In your downloads.", status: "done" });
         },
         (e: unknown) => reportError("Couldn't make the image", e instanceof Error ? e.message : e),

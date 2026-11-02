@@ -1,8 +1,9 @@
 import { create } from "zustand";
 import { core, drafts, parseAgentKey, toApiError } from "@/core";
-import type { ArtifactContent, ArtifactFile, PlanReview, SessionArtifacts } from "@/core/gen";
+import type { ArtifactFile, PlanReview, SessionArtifacts } from "@/core/gen";
 import { toast } from "@/design";
 import { composerDraftKey, useSessionUi } from "../state";
+import { isPresentedAsset, presentedName } from "./kinds";
 
 /**
  * A session's artifacts (`session.artifacts`, architecture §3.20): the `local://` files, subagent
@@ -10,10 +11,11 @@ import { composerDraftKey, useSessionUi } from "../state";
  * review. One list per agent key, shared by the inspector rail, the mobile tab and the viewer.
  */
 
-export type ArtifactSection = "review" | "plans" | "notes" | "outputs" | "handoffs";
+export type ArtifactSection = "review" | "presented" | "plans" | "notes" | "outputs" | "handoffs";
 
 export const SECTION_LABEL: Record<ArtifactSection, string> = {
   review: "Under review",
+  presented: "Presented",
   plans: "Plans",
   notes: "Reports & notes",
   outputs: "Subagent outputs",
@@ -29,6 +31,8 @@ export interface ArtifactRow {
   file?: ArtifactFile;
   /** The pending plan review (its plan text comes with it). */
   review?: PlanReview;
+  /** Presented documents: how many versions (the row is the newest). */
+  versions?: number;
 }
 
 /** omp's plan files: `<slug>-plan.md` (plan mode) and its `PLAN.md` alias. */
@@ -43,19 +47,36 @@ export interface ArtifactGroup {
   rows: ArtifactRow[];
 }
 
-/** Rows by section (pending review first), each newest first; empty sections left out. */
+/**
+ * Rows by section (pending review first), each newest first; empty sections left out. A document
+ * the agent presented is one row (its newest version); the files it references are not listed.
+ */
 export function artifactRows(files: readonly ArtifactFile[], review: PlanReview | undefined): ArtifactGroup[] {
-  const sections: Record<ArtifactSection, ArtifactRow[]> = { review: [], plans: [], notes: [], outputs: [], handoffs: [] };
+  const sections: Record<ArtifactSection, ArtifactRow[]> = { review: [], presented: [], plans: [], notes: [], outputs: [], handoffs: [] };
   const reviewed = review?.path ? files.find((f) => f.url === review.path) : undefined;
   if (review) {
     const name = review.path ? basename(review.path) : "";
     sections.review.push({ key: "review", section: "review", title: review.title || reviewed?.title || name || "Plan", ref: review.path ?? "plan under review", review, file: reviewed });
   }
+  const presented = new Map<string, ArtifactRow & { version: number }>();
   for (const f of files) {
     if (f === reviewed) continue;
+    if (f.kind === "local") {
+      if (isPresentedAsset(f.name)) continue;
+      const p = presentedName(f.name);
+      if (p) {
+        const seen = presented.get(p.slug);
+        const versions = (seen?.versions ?? 0) + 1;
+        if (!seen || p.version > seen.version) presented.set(p.slug, { key: `presented:${p.slug}`, section: "presented", title: f.title || p.slug.replace(/-/g, " "), ref: f.url ?? f.name, file: f, versions, version: p.version });
+        else seen.versions = versions;
+        continue;
+      }
+    }
     const section: ArtifactSection = f.kind === "agent" ? "outputs" : f.kind === "handoff" ? "handoffs" : isPlan(f) ? "plans" : "notes";
     sections[section].push({ key: `${f.kind}:${f.name}`, section, title: f.title || basename(f.name), ref: f.url ?? f.name, file: f });
   }
+  // Newest first, like the listing.
+  sections.presented = [...presented.values()].sort((a, b) => (b.file?.mtime ?? 0) - (a.file?.mtime ?? 0)).map(({ version: _, ...row }) => row);
   return (Object.keys(sections) as ArtifactSection[]).filter((s) => sections[s].length > 0).map((section) => ({ section, rows: sections[section] }));
 }
 
@@ -103,23 +124,6 @@ export async function refreshArtifacts(key: string, force = false): Promise<void
     const err = toApiError(e);
     put(key, { ...cur, at: Date.now(), loading: false, error: { code: err.code, message: err.message, hint: err.hint } });
   }
-}
-
-// ── contents ──
-
-const contents = new Map<string, ArtifactContent>();
-const MAX_CONTENTS = 40;
-
-/** One artifact's text, cached per modification time. */
-export async function readArtifact(key: string, file: Pick<ArtifactFile, "kind" | "name" | "mtime">): Promise<ArtifactContent> {
-  const id = `${key}|${file.kind}|${file.name}|${file.mtime}`;
-  const hit = contents.get(id);
-  if (hit) return hit;
-  const { hostId, agentId } = parseAgentKey(key);
-  const content = await core.host(hostId).call("session.artifact", { agentId, kind: file.kind, name: file.name });
-  contents.set(id, content);
-  if (contents.size > MAX_CONTENTS) contents.delete(contents.keys().next().value as string);
-  return content;
 }
 
 export async function copyText(text: string, what: string): Promise<void> {

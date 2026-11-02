@@ -53,6 +53,14 @@ describe("estimateRowHeight", () => {
     expect(estimateRowHeight(text, true)).toBeGreaterThan(estimateRowHeight(said("word ".repeat(120)), false));
   });
 
+  test("a Mermaid or SVG fence is a picture of fixed height, not a code block of its lines", () => {
+    const body = lines(40);
+    const asCode = estimateRowHeight(said("```ts\n" + body + "\n```"), false);
+    const asDiagram = estimateRowHeight(said("```mermaid\n" + body + "\n```"), false);
+    expect(asDiagram).toBeLessThan(asCode);
+    expect(estimateRowHeight(said("```mermaid\n" + body + "\n```"), false)).toBe(estimateRowHeight(said("```svg\n" + body + "\n```"), false));
+  });
+
   test("an edited item is estimated again (cache follows the item object)", () => {
     const first = said("one line");
     const grown = { ...first, text: lines(30) } as TranscriptItem;

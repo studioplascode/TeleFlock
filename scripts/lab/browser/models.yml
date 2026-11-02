@@ -1,0 +1,14 @@
+# Browser lab (copy into the lab's omp agent dir): one keyless provider served by mock.ts (next to this file) on 127.0.0.1:18783.
+providers:
+  mock:
+    baseUrl: http://127.0.0.1:18783/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: lab-1
+        name: Browser Lab Mock
+        reasoning: false
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 32768
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

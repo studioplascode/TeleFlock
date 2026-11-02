@@ -37,8 +37,8 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Start the daemon detached unless it is running, then exit (the automations keepalive
-    /// timer runs this).
+    /// Start the daemon detached unless it is running, then exit (the boot service runs this:
+    /// a systemd timer, a launchd agent or a Task Scheduler task).
     Ensure,
     /// Run a command, a login shell or a tool on another host through a TeleFlock app
     /// (`tf-forward <name> [-t|-T] [--cwd DIR] [--] [command…]`, `tf-forward --list`).

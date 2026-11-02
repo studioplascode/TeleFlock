@@ -6,31 +6,42 @@ import { CopyCommand } from "@/features/hosts/CopyCommand";
 import { RUN_STATUS, TRIGGER_LABEL, formatWhen } from "./format";
 
 /**
- * What keeps this host's automations running: systemd timer active, lingering missing, timer
- * failed, or daemon-only. `systemd` without `persistent` and without a note means nothing is
- * enabled yet, so hostd has not installed the timer (it does on the first enabled automation).
+ * The OS mechanism behind `AutomationScheduler.kind` (`daemon` has none): what it is called and what it does. A login item cannot
+ * start anything before the user logs in, so after a reboot schedules wait until then.
+ */
+const MECHANISMS: Record<string, { noun: string; does: string }> = {
+  systemd: { noun: "systemd timer", does: "keeps tf-hostd running across reboots and crashes, so every schedule fires on time." },
+  launchd: { noun: "launchd agent", does: "starts tf-hostd when you log in and every 10 minutes after, so every schedule fires on time while you're logged in. After a reboot they wait until you log in." },
+  taskScheduler: { noun: "Task Scheduler task", does: "starts tf-hostd when you log in and every 10 minutes after, so every schedule fires on time while you're logged in. After a reboot they wait until you log in." },
+};
+
+/**
+ * What keeps this host's automations running: its systemd timer, launchd agent or Task Scheduler task active, lingering missing, it
+ * failed, or daemon-only. A mechanism without `persistent` and without a note means nothing is enabled yet, so hostd has not
+ * installed it (it does on the first enabled automation).
  */
 export function SchedulerBanner({ scheduler, className }: { scheduler: AutomationScheduler; className?: string }) {
-  const systemd = scheduler.kind === "systemd";
-  const idle = systemd && !scheduler.persistent && !scheduler.note;
-  const ok = systemd && (scheduler.persistent || idle);
+  const mechanism: { noun: string; does: string } | undefined = MECHANISMS[scheduler.kind];
+  const idle = mechanism !== undefined && !scheduler.persistent && !scheduler.note;
+  const ok = mechanism !== undefined && (scheduler.persistent || idle);
   const command = scheduler.note?.match(/loginctl enable-linger(?: [\w.@-]+)?/)?.[0];
   const title = ok
     ? "Runs even when no app is connected"
     : command
       ? "Stops when you log out of this host"
-      : systemd
-        ? "The systemd timer is not active"
+      : mechanism
+        ? `The ${mechanism.noun} is not active`
         : "Runs only while tf-hostd is running";
-  const body = idle
-    ? "When you enable an automation, a systemd timer keeps tf-hostd running across reboots and crashes, so every schedule fires on time."
-    : ok
-      ? "A systemd timer keeps tf-hostd running across reboots and crashes, so every schedule fires on time."
-      : command
-        ? "Without lingering, your user's services end with your last login session and don't start at boot."
-        : systemd
-          ? "Schedules fire while tf-hostd runs; after a reboot they wait until an app connects."
-          : "tf-hostd starts when a TeleFlock app connects; schedules that come due while it's down are missed (or caught up, if the automation asks).";
+  const body =
+    mechanism && idle
+      ? `When you enable an automation, a ${mechanism.noun} ${mechanism.does}`
+      : mechanism && ok
+        ? `A ${mechanism.noun} ${mechanism.does}`
+        : command
+          ? "Without lingering, your user's services end with your last login session and don't start at boot."
+          : mechanism
+            ? "Schedules fire while tf-hostd runs; after a reboot they wait until an app connects."
+            : "tf-hostd starts when a TeleFlock app connects; schedules that come due while it's down are missed (or caught up, if the automation asks).";
   return (
     <Tile
       data-status={ok ? "done" : "needs-you"}

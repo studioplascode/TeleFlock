@@ -1,7 +1,10 @@
+import { useEffect } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { isVideoFile } from "./clipboardImages";
 import { core } from "./client";
+import { setDraftWorkBusy, trackDraftWork } from "./draftFlush";
+import { draftSlots, indexedDbSlots, type SlotBackend } from "./draftSlots";
 import { apiError, toApiError } from "./errors";
 import { formatBytes, MAX_UPLOAD_BYTES, type UploadedFile, type UploadOptions, uploadFile } from "./upload";
 
@@ -10,13 +13,18 @@ import { formatBytes, MAX_UPLOAD_BYTES, type UploadedFile, type UploadOptions, u
  * (`upload.ts`) as soon as the host is known, shows as a chip with its progress, and reaches the
  * agent as one reference line per video in the prompt (`withVideoRefs`): the agent reads the file
  * from that host path with its own tools (omp's read shows a video as a preview grid, or one frame
- * with `:<frame>` / `:<time>`). Images stay inline (`clipboardImages.ts`).
+ * with `:<frame>` / `:<time>`). Images stay inline (`clipboardImages.ts`). A TeleFlock Browser
+ * recording attaches as a video with a source (`attachVideoSource`): it uploads its files itself
+ * (video, timeline, screenshots) once its host is known and writes its own reference block.
  *
- * Kept in memory per draft key: an upload can't outlive the page (the browser reads the file only
- * while the page that picked it is open), but switching agents or views keeps it going. One upload
- * runs at a time per host; the others wait their turn. Removing a chip drops its upload on the host,
- * finished or not (its prompt never went out); a sent video's file stays (the host prunes uploads
- * after 30 days).
+ * Kept in memory per draft key, and what a restart can keep is written through to IndexedDB
+ * `tf.draftVideos`/`videos` (`StoredVideos`): an uploaded video comes back as it was (its file is on
+ * the host), one cut off mid-upload comes back failed (the browser reads a picked file only while
+ * the page that picked it lives). Switching agents or views keeps an upload going. One upload runs
+ * at a time per host; the others wait their turn. While any runs, the desktop app's updater holds
+ * an automatic restart (`setDraftWorkBusy`). Removing a chip drops its upload on the host, finished
+ * or not (its prompt never went out); a sent video's file stays (the host prunes uploads after 30
+ * days).
  */
 
 /**
@@ -40,6 +48,14 @@ export interface DraftVideo {
   /** The host's id of the finished upload (to drop it again). */
   uploadId?: string;
   error?: string;
+  /** What it is when not a plain video file (a browser recording: its chip says so). */
+  kind?: "recording";
+  /** Where its bytes come from when not a picked file (`VideoSource`): `<kind>:<id>`, kept across a restart. */
+  source?: string;
+  /** Its own prompt text once uploaded (a recording names its timeline, video and screenshots). */
+  ref?: string;
+  /** More uploads on the host that go with it (dropped with it). */
+  extra?: string[];
 }
 
 /** What the prompt says about a video. */
@@ -47,6 +63,16 @@ export interface VideoRef {
   name: string;
   size: number;
   path: string;
+  /** The whole reference text, when the video made its own (`DraftVideo.ref`). */
+  ref?: string;
+}
+
+/**
+ * A draft video whose bytes are not a picked file but something the app keeps (a browser
+ * recording): it uploads itself, possibly as several files, and says what the prompt carries.
+ */
+export interface VideoSource {
+  upload(hostId: string, opts: UploadOptions): Promise<UploadedFile & { ref?: string; extra?: string[] }>;
 }
 
 /** Videos per prompt at most. */
@@ -60,7 +86,10 @@ interface VideosState {
 
 const useVideoStore = create<VideosState>()(() => ({ videos: {}, drafts: {} }));
 const files = new Map<string, File>();
+const sources = new Map<string, VideoSource>();
 const aborts = new Map<string, AbortController>();
+/** Source kind → how a stored source comes back after a restart (`registerVideoSource`). */
+const resolvers = new Map<string, (id: string) => VideoSource | null>();
 /** The last upload queued per host: the next one starts after it. */
 const queues = new Map<string, Promise<void>>();
 let seq = 0;
@@ -95,26 +124,118 @@ function pick(s: VideosState, ids: readonly string[] | undefined): DraftVideo[] 
   return ids?.length ? ids.map((id) => s.videos[id]).filter((v): v is DraftVideo => !!v) : NONE;
 }
 
+/** A draft's video as stored: no file (a restart loses it, unless a `source` brings it back), the host path once uploaded. */
+export type StoredVideo = Pick<DraftVideo, "id" | "name" | "size" | "mime" | "hostId" | "path" | "uploadId" | "kind" | "source" | "ref" | "extra">;
+
+/** What is stored per draft key. */
+export interface StoredVideos {
+  videos: StoredVideo[];
+  at: number;
+}
+
+export type DraftVideoBackend = SlotBackend<StoredVideos>;
+
+const stored = draftSlots<StoredVideo[], StoredVideos>({
+  backend: indexedDbSlots<StoredVideos>("tf.draftVideos", "videos", { maxStored: 40, maxAgeMs: 30 * 86_400_000 }),
+  empty: [],
+  isEmpty: (v) => v.length === 0,
+  // Malformed entries (another format) are dropped.
+  decode: (s) =>
+    Array.isArray(s?.videos)
+      ? s.videos.filter(
+          (v) =>
+            typeof v?.id === "string" &&
+            typeof v.name === "string" &&
+            typeof v.size === "number" &&
+            (v.path === undefined || typeof v.path === "string") &&
+            (v.source === undefined || typeof v.source === "string") &&
+            (v.ref === undefined || typeof v.ref === "string") &&
+            (v.extra === undefined || (Array.isArray(v.extra) && v.extra.every((x) => typeof x === "string"))),
+        )
+      : [],
+  encode: (videos) => ({ videos, at: Date.now() }),
+});
+
+/** Swaps the storage (tests); returns the previous one. */
+export function setDraftVideoBackend(next: DraftVideoBackend): DraftVideoBackend {
+  return stored.setBackend(next);
+}
+
+/** Draft keys whose stored videos are back in the store. */
+const restored = new Set<string>();
+
+/**
+ * Brings draft `key`'s stored videos back (once per key; resolves when they are in): an uploaded
+ * one as it was, one a restart cut off as failed, unless its source can be read again (a
+ * recording still on this device): that one waits for its host again. Videos the page holds
+ * already are left alone.
+ */
+export async function hydrateDraftVideos(key: string): Promise<void> {
+  await stored.hydrate(key);
+  if (restored.has(key)) return;
+  restored.add(key);
+  const s = useVideoStore.getState();
+  const back = stored.get(key).filter((v) => !s.videos[v.id]);
+  if (!back.length) return;
+  const videos = back.map((v): DraftVideo => {
+    if (v.path) return { ...v, phase: "done", sent: v.size };
+    const [kind = "", sourceId = ""] = v.source?.split(/:(.*)/s) ?? [];
+    const source = v.source ? resolvers.get(kind)?.(sourceId) : null;
+    if (!source) return { ...v, phase: "failed", sent: 0, error: "TeleFlock restarted before it was uploaded; attach it again" };
+    sources.set(v.id, source);
+    return { ...v, phase: "pending", sent: 0 };
+  });
+  useVideoStore.setState((st) => ({
+    videos: { ...st.videos, ...Object.fromEntries(videos.map((v) => [v.id, v])) },
+    drafts: { ...st.drafts, [key]: [...(st.drafts[key] ?? []), ...videos.map((v) => v.id)] },
+  }));
+  for (const v of videos) if (v.phase === "pending" && v.hostId) start(v.id);
+}
+
+/** What is stored of draft `key`'s videos changes only with the list and the uploads finishing. */
+function storedSignature(s: VideosState, key: string): string {
+  return pick(s, s.drafts[key])
+    .map((v) => `${v.id}\u0000${v.path ?? ""}`)
+    .join("\u0001");
+}
+
+useVideoStore.subscribe((s, prev) => {
+  for (const key of new Set([...Object.keys(s.drafts), ...Object.keys(prev.drafts)])) {
+    if (storedSignature(s, key) === storedSignature(prev, key)) continue;
+    // Stored videos come back first: the list written must not drop them unseen.
+    const write = hydrateDraftVideos(key).then(() => {
+      const now = useVideoStore.getState();
+      stored.update(key, () => pick(now, now.drafts[key]).map(({ id, name, size, mime, hostId, path, uploadId, kind, source, ref, extra }) => ({ id, name, size, mime, hostId, path, uploadId, kind, source, ref, extra })));
+    });
+    void trackDraftWork(write);
+  }
+  const uploading = (v: VideosState) => Object.values(v.videos).some((x) => x.phase === "queued" || x.phase === "uploading");
+  if (uploading(s) !== uploading(prev)) setDraftWorkBusy("videos", uploading(s));
+});
+
 /** Queue `id`'s upload to its host, from the start. */
 function start(id: string): void {
   const v = useVideoStore.getState().videos[id];
   const file = files.get(id);
+  const source = sources.get(id);
   if (!v?.hostId) return;
-  if (!file) {
+  if (!file && !source) {
     patch(id, { phase: "failed", error: "The file can't be read any more; attach it again" });
     return;
   }
   aborts.get(id)?.abort();
   const ctrl = new AbortController();
   aborts.set(id, ctrl);
-  patch(id, { phase: "queued", sent: 0, path: undefined, uploadId: undefined, error: undefined });
+  patch(id, { phase: "queued", sent: 0, path: undefined, uploadId: undefined, error: undefined, ref: undefined, extra: undefined });
   const hostId = v.hostId;
   const run = async () => {
     if (ctrl.signal.aborted) return;
     patch(id, { phase: "uploading" });
     try {
-      const done = await transport.upload(hostId, file, { signal: ctrl.signal, mime: v.mime, onProgress: (sent) => ctrl.signal.aborted || patch(id, { sent }) });
-      if (!ctrl.signal.aborted) patch(id, { phase: "done", sent: done.size, path: done.path, uploadId: done.uploadId });
+      const opts: UploadOptions = { signal: ctrl.signal, mime: v.mime, onProgress: (sent) => ctrl.signal.aborted || patch(id, { sent }) };
+      // A source drops what it uploaded itself when aborted; a file's upload is dropped by uploadFile.
+      const done: UploadedFile & { ref?: string; extra?: string[] } = source ? await source.upload(hostId, opts) : await transport.upload(hostId, file as File, opts);
+      if (!ctrl.signal.aborted) patch(id, { phase: "done", sent: done.size, size: done.size, path: done.path, uploadId: done.uploadId, ...(done.ref ? { ref: done.ref } : {}), ...(done.extra ? { extra: done.extra } : {}) });
     } catch (e) {
       if (ctrl.signal.aborted) return;
       const err = toApiError(e);
@@ -128,17 +249,18 @@ function start(id: string): void {
   void next.then(() => queues.get(hostId) === next && queues.delete(hostId));
 }
 
-/** Stop `id`'s upload and drop it on the host (partial or finished). */
+/** Stop `id`'s upload and drop it on the host (partial or finished, with the uploads that go with it). */
 function dropOnHost(id: string): void {
   const ctrl = aborts.get(id);
   if (ctrl) {
-    // uploadFile drops it on the host once its request in flight is answered.
+    // uploadFile (or the source) drops it on the host once its request in flight is answered.
     ctrl.abort();
     aborts.delete(id);
     return;
   }
   const v = useVideoStore.getState().videos[id];
-  if (v?.hostId && v.uploadId) void transport.cancel(v.hostId, v.uploadId).catch(() => undefined);
+  if (!v?.hostId) return;
+  for (const uploadId of [v.uploadId, ...(v.extra ?? [])]) if (uploadId) void transport.cancel(v.hostId, uploadId).catch(() => undefined);
 }
 
 /**
@@ -181,6 +303,32 @@ export function attachVideos(key: string, hostId: string | null, incoming: reado
   return skipped ? { added: added.length, skipped } : { added: added.length };
 }
 
+/**
+ * Attach a video whose bytes come from `source` (a browser recording) to draft `key`. It uploads
+ * when `hostId` is known (null: once the prompt goes out, through `uploadDraftVideos`), and comes
+ * back after a restart while the source can be read again (`registerVideoSource` for its kind).
+ * The same source twice is left out.
+ */
+export function attachVideoSource(key: string, hostId: string | null, entry: { name: string; size: number; mime: string; kind?: "recording"; source: string }, source: VideoSource): { added: number; skipped?: string } {
+  const s = useVideoStore.getState();
+  const current = pick(s, s.drafts[key]);
+  if (current.some((v) => v.source === entry.source)) return { added: 0 };
+  if (current.length >= MAX_DRAFT_VIDEOS) return { added: 0, skipped: `A prompt takes at most ${MAX_DRAFT_VIDEOS} videos.` };
+  const v: DraftVideo = { id: `v${Date.now().toString(36)}-${(seq++).toString(36)}`, name: entry.name, size: entry.size, mime: entry.mime, hostId, phase: "pending", sent: 0, source: entry.source, ...(entry.kind ? { kind: entry.kind } : {}) };
+  sources.set(v.id, source);
+  useVideoStore.setState((st) => ({ videos: { ...st.videos, [v.id]: v }, drafts: { ...st.drafts, [key]: [...(st.drafts[key] ?? []), v.id] } }));
+  if (hostId) start(v.id);
+  return { added: 1 };
+}
+
+/** How stored videos of source kind `kind` (`<kind>:<id>`) are read again after a restart; null when gone. */
+export function registerVideoSource(kind: string, resolve: (id: string) => VideoSource | null): () => void {
+  resolvers.set(kind, resolve);
+  return () => {
+    if (resolvers.get(kind) === resolve) resolvers.delete(kind);
+  };
+}
+
 export function getDraftVideos(key: string): DraftVideo[] {
   const s = useVideoStore.getState();
   return pick(s, s.drafts[key]);
@@ -191,8 +339,11 @@ export function getVideo(id: string): DraftVideo | undefined {
   return useVideoStore.getState().videos[id];
 }
 
-/** A draft's videos, live. */
+/** A draft's videos, live; the stored ones are brought back on first use. */
 export function useDraftVideos(key: string): DraftVideo[] {
+  useEffect(() => {
+    void hydrateDraftVideos(key);
+  }, [key]);
   return useVideoStore(useShallow((s) => pick(s, s.drafts[key])));
 }
 
@@ -230,10 +381,25 @@ export function detachDraftVideos(key: string, ids: readonly string[]): void {
   });
 }
 
+/** Move videos of draft `from` to draft `to` (a prefilled task handed to an agent); one on another host uploads again when `to` sends. */
+export function moveDraftVideos(from: string, to: string, ids: readonly string[]): void {
+  useVideoStore.setState((s) => {
+    const cur = s.drafts[from] ?? [];
+    const moving = cur.filter((id) => ids.includes(id));
+    if (!moving.length) return s;
+    const left = cur.filter((id) => !moving.includes(id));
+    const drafts = { ...s.drafts, [to]: [...(s.drafts[to] ?? []).filter((id) => !moving.includes(id)), ...moving] };
+    if (left.length) drafts[from] = left;
+    else delete drafts[from];
+    return { drafts };
+  });
+}
+
 /** Forget videos whose prompt went out (their files stay on the host). */
 export function releaseVideos(ids: readonly string[]): void {
   for (const id of ids) {
     files.delete(id);
+    sources.delete(id);
     aborts.delete(id);
   }
   useVideoStore.setState((s) => {
@@ -265,7 +431,7 @@ export function whenUploaded(ids: readonly string[]): Promise<VideoRef[]> {
     const failed = list.find((v) => v.phase === "failed");
     if (failed) return { failed };
     if (!list.every((v) => v.phase === "done")) return null;
-    return { refs: list.map((v) => ({ name: v.name, size: v.size, path: v.path ?? "" })) };
+    return { refs: list.map((v) => ({ name: v.name, size: v.size, path: v.path ?? "", ...(v.ref ? { ref: v.ref } : {}) })) };
   };
   // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
   return new Promise((resolve, reject) => {
@@ -285,16 +451,17 @@ export function whenUploaded(ids: readonly string[]): Promise<VideoRef[]> {
 }
 
 /**
- * One prompt line per video: where it is on the host, so the agent reads it with its tools.
+ * One prompt line per video: where it is on the host, so the agent reads it with its tools; a
+ * video that made its own reference text (a recording) says that instead.
  * `Attached video "clip.mp4" (12.3 MB): /home/me/.teleflock/uploads/2026-10-27/clip.mp4 (read it to see it)`
  */
 export function videoRefLine(v: VideoRef): string {
-  return `Attached video "${v.name}" (${formatBytes(v.size)}): ${v.path} (read it to see it)`;
+  return v.ref ?? `Attached video "${v.name}" (${formatBytes(v.size)}): ${v.path} (read it to see it)`;
 }
 
-/** `text` with a reference line per video after it (just the lines when there is no text). */
+/** `text` with a reference line per video after it (just the lines when there is no text); a block of several lines (a recording) stands apart. */
 export function withVideoRefs(text: string, refs: readonly VideoRef[]): string {
   if (!refs.length) return text;
-  const lines = refs.map(videoRefLine).join("\n");
+  const lines = refs.map(videoRefLine).join(refs.some((r) => r.ref?.includes("\n")) ? "\n\n" : "\n");
   return text.trim() ? `${text}\n\n${lines}` : lines;
 }

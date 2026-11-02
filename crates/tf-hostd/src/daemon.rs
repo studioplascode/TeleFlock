@@ -100,7 +100,7 @@ impl Daemon {
             .map_err(|e| ApiError::new("internal", format!("creating the herdr session context failed: {e}")).retryable())?
     }
 
-    async fn all_ctxs(&self) -> Vec<Arc<Ctx>> {
+    pub(crate) async fn all_ctxs(&self) -> Vec<Arc<Ctx>> {
         self.ctxs.all().await
     }
 }
@@ -322,6 +322,8 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     crate::recovery::start(&daemon);
     // Limit stops reported by 2.1.0 bridges, their `context` guard (§3.22).
     crate::limit_resume::start(&daemon);
+    // Refusal fallback: a refused turn goes on on another model with no app connected (§3.22).
+    crate::refusal::start(&daemon);
     // Decide for me answers with no app connected: watch the sessions that have it on.
     crate::autoanswer::start(&daemon);
     // Push channels deliver with no app connected: watch the sessions this host knows (§3.21).

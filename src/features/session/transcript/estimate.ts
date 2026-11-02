@@ -20,11 +20,13 @@ interface Metrics {
   /** Fixed parts of a user / assistant row around its text. */
   userChrome: number;
   assistantChrome: number;
+  /** A drawn Mermaid / SVG figure (header, padding and a typical diagram). */
+  figure: number;
 }
 
-const WIDE: Metrics = { toolHead: 38, codeLine: 19.2, userChars: 88, textChars: 96, userChrome: 48, assistantChrome: 26 };
+const WIDE: Metrics = { toolHead: 38, codeLine: 19.2, userChars: 88, textChars: 96, userChrome: 48, assistantChrome: 26, figure: 300 };
 /** Phones: tighter cards, narrower text, no avatar column. */
-const DENSE: Metrics = { toolHead: 34, codeLine: 17.8, userChars: 46, textChars: 52, userChrome: 36, assistantChrome: 22 };
+const DENSE: Metrics = { toolHead: 34, codeLine: 17.8, userChars: 46, textChars: 52, userChrome: 36, assistantChrome: 22, figure: 240 };
 
 const TEXT_LINE = 21.5;
 /** Output panes (bash, ANSI) and diffs stop growing here (AnsiText maxHeight, DiffBody COLLAPSED_LINES). */
@@ -51,6 +53,7 @@ export function wrappedLines(text: string, perLine: number): number {
 function markdownHeight(text: string, m: Metrics): number {
   let h = 0;
   let code = false;
+  let figure = false;
   let start = 0;
   while (start <= text.length) {
     let end = text.indexOf("\n", start);
@@ -58,10 +61,13 @@ function markdownHeight(text: string, m: Metrics): number {
     const line = text.slice(start, end);
     start = end + 1;
     if (line.startsWith("```")) {
-      // fence: the block's chrome (padding, header) once per open/close pair
-      h += code ? 0 : 34;
+      // fence: the block's chrome (padding, header) once per open/close pair; a Mermaid or SVG fence draws as a picture
+      if (!code) {
+        figure = /^```\s*(?:mermaid|mmd|svg)\s*$/i.test(line);
+        h += figure ? m.figure : 34;
+      }
       code = !code;
-    } else if (code) h += m.codeLine;
+    } else if (code) h += figure ? 0 : m.codeLine;
     else if (line.trim() === "") h += 8;
     else if (line.startsWith("|")) h += /^\|[\s:|-]+\|?$/.test(line) ? 0 : 33;
     else if (line.startsWith("#")) h += 30;

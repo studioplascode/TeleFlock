@@ -1,6 +1,8 @@
 import type { Subagent } from "@/core/gen";
 import { fileDiff } from "./codegen";
 import type { AgentDef } from "./data";
+import { migrationNotesSteps, q3ReportSteps } from "./presented";
+import { richContentSteps } from "./richContent";
 import { bash, edit, grep, QUOTA_ERROR, read, say, type Step, think, todo } from "./scripts";
 
 const G = "\x1b[32m";
@@ -154,8 +156,10 @@ export function historyFor(def: AgentDef): Step[] {
       break;
     case "docs":
       steps.push(
-        { t: "tool", spec: { tool: "write", title: "docs/architecture.md", args: {}, ms: 900, files: [{ path: "docs/architecture.md", added: 214, removed: 0, status: "added" }] } },
-        say("README and architecture overview are merged in #139."),
+        ...richContentSteps(),
+        ...migrationNotesSteps(),
+        say("README, the architecture overview and the migration notes are merged in #139."),
+        ...q3ReportSteps(),
       );
       break;
     case "flaky":

@@ -8,7 +8,9 @@ card's Disk tile ("Clean up ›") and ⋯ menu, and the board's low-disk notice.
 ## Files
 
 ```ts
-// CleanupView.tsx — route screen (desktop + phone): disk tile, the two bulk tiles, repos with their rows, omp storage
+// CleanupView.tsx — route screen (desktop + phone): disk tile, the two bulk tiles, agent groups (or repos) with their rows, omp storage
+// AgentSection.tsx — one main agent's worktrees: header (state, count, size, used, Open, Delete N), paged rows
+// groups.ts — groupByOwner / ownerLabel / OWNER_STATE (classify.test.ts)
 export function CleanupView(props: { hostId?: string }): JSX.Element;
 // WorktreeRow.tsx — one worktree: kind chip, branch, path, last agent, PR, created/used, changes, size, Delete / Forget
 // StorageSection.tsx — omp storage: sessions kept (measured only), Check (dry run), per-category picks, Apply, last apply
@@ -46,9 +48,23 @@ the host's tf-hostd predates the page ("Update TeleFlock on <host>").
   time without force or trust and toast what went and what didn't. Worktrees open in herdr close their
   workspace (an idle agent there closes with it; its omp session stays in Past sessions). Both are disabled
   while a scan runs.
+- **By agent** (default; hosts ≥ 0.9.0 send `owners`, older ones list by repository only): one collapsible group per
+  main agent (`groups.ts` `groupByOwner`, `AgentSection.tsx`): its name and title as the board shows it, its state
+  (the card's status pill, or "No card" for a session whose card is gone), worktree count, size, last use, its
+  repositories and kinds, Open (the card) or Past sessions (its folder), and "Delete N" for its merged, closed and
+  stale worktrees (`bulkSetIn(…, "cleanable")`, the same holds and confirm as the tiles). A subagent's worktree sits
+  under its top-level agent and names the subagents ("via subagent PR1494"); rows carry a repository chip when
+  several repositories are listed; "No agent" comes last. Groups agents without a card first, then ended, done and
+  live ones; open while the page lists ≤ 24 worktrees, collapsed beyond (each open group shows 20 rows, then
+  "Show more"). "By repository" (`store.ts` `groupBy`) keeps the old list, rows naming their agent and its state.
 - **Report**: a scan runs on the host in the background; the page asks with `waitMs` (1.5 s first, then 15 s
   while `scanning`), so sizes and pull requests fill in; Rescan (`refresh`) asks for everything again; the
   page asks again every 2 min while visible. Rows sort removable kinds first, longest idle first.
+- **Chats** (`ChatCleanup`, features/chats, between the repositories and omp storage): the host's chat folders
+  (`chat.list`, without the chats of its other herdr sessions) with their card's state, size, age and what keeps
+  them; Delete goes through the chat's own confirm (`chat.delete` dry run first); a folder no card uses that holds
+  someone's files has no Delete. A host whose daemon predates chats gets one line about updating it; the section
+  is gone while no host has chats.
 - **omp storage**: Check runs `omp gc` as a dry run (nothing changes) of blobs, WAL and compression and
   measures the session store (shown as kept). Apply runs only the ticked categories that have something to
   do, after a confirm naming them. Sessions are never archived or deleted here (omp's own `gc.archive` and

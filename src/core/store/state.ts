@@ -4,6 +4,7 @@ import type {
   Agent,
   ApiError,
   AppEvent,
+  BrowserStatus,
   ConnStatus,
   ForwardList,
   HistoryPage,
@@ -85,6 +86,8 @@ export interface CoreState {
   tunnels: TunnelInfo[];
   /** Host-to-host forwarding rules, their status and active streams; null until the first `forward.list` answers (or on a core without forwarding). */
   forwards: ForwardList | null;
+  /** This device's TeleFlock Browser (`browser.status`, kept live by `AppEvent::Browser`); null until known (or on a core without it). */
+  browser: BrowserStatus | null;
   /**
    * Parked agents resumed under a new id: old key → new key (follow with `resolveSuccessor`).
    * Views showing the old key redirect to the new one.
@@ -144,6 +147,7 @@ export function initialCoreState(backend: Backend): CoreState {
     settings: null,
     tunnels: [],
     forwards: null,
+    browser: null,
     successors: {},
     departed: [],
   };

@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import type { AutoAnswer, HostState, WorktreeCreateParams } from "@/core/gen";
+import { CHAT_REPO, CHATS_NEED_UPDATE } from "@/core/chats";
+import type { Agent, AutoAnswer, HostState, WorktreeCreateParams } from "@/core/gen";
+import type * as StoreModule from "./store";
 import type { DispatchEntry } from "./store";
+import { baseSlug, uniqueSlug } from "./thread";
 
 // The store persists to localStorage, which bun doesn't provide: an in-memory stand-in.
 const mem: Record<string, string> = {};
@@ -183,5 +186,144 @@ describe("decide for me", () => {
       core.host = realHost;
       coreStore.setState({ hosts });
     }
+  });
+});
+
+describe("chats", () => {
+  const options = { templateId: null, model: "default", thinking: "default" as const, plan: false };
+  type Call = { method: string; params: unknown };
+
+  /** Resolves once `done()` holds, checked as sends and retries settle (other tests' sends settle too). */
+  const until = (onSettled: (cb: () => void) => () => unknown, done: () => boolean) =>
+    // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+    new Promise<void>((resolve) => {
+      if (done()) {
+        resolve();
+        return;
+      }
+      const off = onSettled(() => {
+        if (!done()) return;
+        off();
+        resolve();
+      });
+    });
+
+  test("a chat is one agent.start with the chat target: no branch, base or worktree, a name free on its host", async () => {
+    // Dynamic, as above: these load the store, which hydrates from localStorage at module load.
+    const { core } = await import("@/core");
+    const { dispatchTask, isInFlight, onDispatchSettled, threadKey, useDispatch } = await import("./store");
+    const calls: Call[] = [];
+    const realHost = core.host;
+    core.host = (hostId) => ({
+      call: (method, params) => {
+        if (hostId === "hc") calls.push({ method, params });
+        return Promise.resolve({ agentId: `chat-${calls.length}`, paneId: `wc:p${calls.length}`, workspaceId: "wc" } as never);
+      },
+    });
+    try {
+      const prompt = "Which hiking boots should I buy for the Alps?";
+      const slug = baseSlug(prompt);
+      // `slug` is a live agent's name on the host; the second chat finds the first one's name taken too.
+      const second = uniqueSlug(slug, new Set([slug]));
+      const third = uniqueSlug(slug, new Set([slug, second]));
+      const a = dispatchTask({ hostId: "hc", repo: CHAT_REPO, prompt, options: { ...options, plan: true }, taken: [slug], suggest: null });
+      const b = dispatchTask({ hostId: "hc", repo: CHAT_REPO, prompt, options, taken: [slug], suggest: null });
+      expect([a.name, b.name]).toEqual([second, third]);
+      expect(a).toMatchObject({ chat: true, branch: "", hostId: "hc" });
+      expect([a.repo, a.base, a.baseLabel]).toEqual([undefined, undefined, undefined]);
+      await until(onDispatchSettled, () => !isInFlight(a.id) && !isInFlight(b.id));
+      expect(calls.map((c) => c.method)).toEqual(["agent.start", "agent.start"]);
+      expect(calls[0]?.params).toMatchObject({ target: { kind: "chat" }, spec: { kind: "omp", name: second, plan: true, prompt } });
+      const thread = useDispatch.getState().threads[threadKey("hc", CHAT_REPO)] ?? [];
+      expect(thread.map((e) => [e.phase, e.agentId, e.paneId, e.workspaceId])).toEqual([
+        ["started", "chat-1", "wc:p1", "wc"],
+        ["started", "chat-2", "wc:p2", "wc"],
+      ]);
+    } finally {
+      core.host = realHost;
+    }
+  });
+
+  test("a daemon from before chats fails the chat with the update words", async () => {
+    const { apiError, core } = await import("@/core");
+    const { dispatchTask, isInFlight, onDispatchSettled, threadKey, useDispatch } = await import("./store");
+    const realHost = core.host;
+    core.host = () => ({ call: () => Promise.reject(apiError("invalid_params", "agent.start: unknown variant `chat`, expected one of `workspace`, `pane`, `cwd`")) });
+    try {
+      const e = dispatchTask({ hostId: "hold", repo: CHAT_REPO, prompt: "What's a good book about bridges?", options, taken: [], suggest: null });
+      await until(onDispatchSettled, () => !isInFlight(e.id));
+      const failed = useDispatch.getState().threads[threadKey("hold", CHAT_REPO)]?.find((x) => x.id === e.id);
+      expect(failed).toMatchObject({ phase: "failed", error: { title: CHATS_NEED_UPDATE.title, hint: CHATS_NEED_UPDATE.hint } });
+    } finally {
+      core.host = realHost;
+    }
+  });
+
+  test("a retry links the chat's own agent, else starts the chat again, never in a worktree", async () => {
+    const { apiError, core } = await import("@/core");
+    const { dispatchTask, isInFlight, onDispatchSettled, retryDispatch, threadKey, useDispatch } = await import("./store");
+    const key = threadKey("hr", CHAT_REPO);
+    const entryOf = (id: string) => useDispatch.getState().threads[key]?.find((x) => x.id === id);
+    const calls: Call[] = [];
+    let answer: () => Promise<unknown> = () => Promise.reject(apiError("internal", "herdr is restarting"));
+    const realHost = core.host;
+    core.host = (hostId) => ({
+      call: (method, params) => {
+        if (hostId === "hr") calls.push({ method, params });
+        return answer() as Promise<never>;
+      },
+    });
+    const send = async (prompt: string) => {
+      const e = dispatchTask({ hostId: "hr", repo: CHAT_REPO, prompt, options, taken: [], suggest: null });
+      await until(onDispatchSettled, () => !isInFlight(e.id));
+      return e;
+    };
+    const retry = async (id: string, agents: Agent[]) => {
+      calls.length = 0;
+      await retryDispatch({ key, id, taken: agents.map((a) => a.name), host: { agents, workspaces: [] } });
+      await until(onDispatchSettled, () => !isInFlight(id));
+    };
+    try {
+      // Failed; meanwhile a worktree agent took its name: not the chat's, so it starts again under a free one.
+      const failed = await send("Draft a polite reply to my landlord");
+      expect(entryOf(failed.id)?.phase).toBe("failed");
+      answer = () => Promise.resolve({ agentId: "chat-new", paneId: "wc:p7", workspaceId: "wc" });
+      await retry(failed.id, [{ id: "wt9", name: failed.name, kind: "omp", paneId: "w2:p1", workspaceId: "w2", column: "running" } as Agent]);
+      const fresh = uniqueSlug(failed.name, new Set([failed.name]));
+      expect(calls).toMatchObject([{ method: "agent.start", params: { target: { kind: "chat" }, spec: { name: fresh } } }]);
+      expect(entryOf(failed.id)).toMatchObject({ phase: "started", name: fresh, agentId: "chat-new" });
+
+      // Failed, but its chat agent is there after all: linked, nothing started.
+      answer = () => Promise.reject(apiError("internal", "herdr is restarting"));
+      const there = await send("Plan meals for next week");
+      await retry(there.id, [{ id: "chat-7", name: there.name, kind: "omp", paneId: "wc:p8", workspaceId: "wc", column: "running", chat: true } as Agent]);
+      expect(calls).toEqual([]);
+      expect(entryOf(there.id)).toMatchObject({ phase: "started", agentId: "chat-7", paneId: "wc:p8" });
+
+      // Unconfirmed (the answer got lost) and not on the board: started again under its own name.
+      answer = () => Promise.reject(apiError("timeout", "agent.start timed out"));
+      const lost = await send("Explain how tides work");
+      expect(entryOf(lost.id)?.phase).toBe("unknown");
+      answer = () => Promise.resolve({ agentId: "chat-9", paneId: "wc:p9", workspaceId: "wc" });
+      await retry(lost.id, []);
+      expect(calls).toMatchObject([{ method: "agent.start", params: { target: { kind: "chat" }, spec: { name: lost.name } } }]);
+      expect(entryOf(lost.id)).toMatchObject({ phase: "started", name: lost.name, agentId: "chat-9" });
+    } finally {
+      core.host = realHost;
+    }
+  });
+
+  test("the chat choice and chat entries survive a reload; a focus request doesn't", async () => {
+    const { threadKey, useDispatch } = await import("./store");
+    const key = threadKey("hp", CHAT_REPO);
+    useDispatch.getState().select("hp", CHAT_REPO);
+    useDispatch.getState().add(key, { id: "chat-saved", prompt: "hi", createdAt: Date.now(), branch: "", name: "hi", options, phase: "started", hostId: "hp", chat: true, agentId: "a1" });
+    useDispatch.getState().focusComposer();
+    // A distinct specifier loads the module afresh, as a reload does.
+    const reload = "./store?chat-reload";
+    const s = ((await import(reload)) as typeof StoreModule).useDispatch.getState();
+    expect([s.lastHost, s.lastRepo.hp]).toEqual(["hp", CHAT_REPO]);
+    expect(s.threads[key]?.map((e) => [e.id, e.chat, e.branch])).toEqual([["chat-saved", true, ""]]);
+    expect(s.composerFocus).toBe(0);
   });
 });

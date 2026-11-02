@@ -1,7 +1,7 @@
 import * as RadixDialog from "@radix-ui/react-dialog";
 import { ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CornerDownRight, Lock, MessageSquareDashed, RefreshCw, RotateCcw, Skull, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { core, draftKey, drafts, parseAgentKey, useAgent, useDraft, useSession } from "@/core";
 import type { Subagent } from "@/core/gen";
 import {
@@ -33,7 +33,8 @@ import { ircThreadKey, isRailTool, ItemRow } from "../transcript/rows";
 import { TRANSCRIPT_MAX_WIDTH, TranscriptLog } from "../transcript/Transcript";
 import { SubagentMeters } from "./SubagentMeters";
 import { mergeSnapshot, type Snapshot } from "./snapshot";
-import { SUB_LABEL, SUB_STATUS } from "./Subagents";
+import { groupSubagents, type SubagentNode, treeOrder } from "./grouping";
+import { RollupText, SUB_LABEL, SUB_STATUS } from "./Subagents";
 import { SubagentRetry } from "../resume/SubagentRetry";
 
 /** How often a running subagent's transcript is re-fetched while the viewer is open and visible. */
@@ -43,7 +44,9 @@ const SENT_MS = 2600;
 
 /**
  * A subagent's live transcript, stats and controls: a full-height drawer on the right on desktop,
- * a full-screen sheet on phones. `[` / `]` step through the parent's subagents, Esc closes.
+ * a full-screen sheet on phones. `[` / `]` step through the session's subagents in the Subagents
+ * panel's tree order (each one's own subagents right after it), Esc closes. A nested subagent's
+ * header names the subagents it runs under, each a button that opens it.
  *
  * Mount once per session (SessionPane does); open it with `useSessionUi().openSubagent(key, id)`
  * from anywhere (task cards, IRC bubbles, the inspector), so it outlives the virtualised row that
@@ -57,12 +60,15 @@ export function SubagentViewer({ agentKey }: { agentKey: string }) {
   const all = meta?.subagents ?? [];
   // The parent's full list when it knows this subagent; else the opener's (e.g. a task card in an old transcript).
   const subs = openId != null && !all.some((s) => s.id === openId) && open?.subs ? open.subs : all;
-  const index = openId == null ? -1 : subs.findIndex((s) => s.id === openId);
-  const sub = subs[index];
+  // Only while a subagent is open: the viewer stays mounted with the session.
+  const tree = openId == null ? undefined : groupSubagents(subs);
+  const order = tree ? treeOrder(tree) : [];
+  const index = openId == null ? -1 : order.findIndex((s) => s.id === openId);
+  const sub = order[index];
   const panel = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLElement | null>(null);
-  const prev = subs[index - 1];
-  const next = subs[index + 1];
+  const prev = order[index - 1];
+  const next = order[index + 1];
   const show = (id: string) => useSessionUi.getState().openSubagent(agentKey, id);
 
   // Leaving the session closes its viewer (coming back doesn't reopen it).
@@ -136,9 +142,11 @@ export function SubagentViewer({ agentKey }: { agentKey: string }) {
                   agentKey={agentKey}
                   sub={sub}
                   mobile={mobile}
-                  position={subs.length > 1 ? { index, count: subs.length } : null}
+                  node={tree?.nodes.get(sub.id)}
+                  position={order.length > 1 ? { index, count: order.length } : null}
                   onPrev={prev ? () => show(prev.id) : undefined}
                   onNext={next ? () => show(next.id) : undefined}
+                  onShow={show}
                 />
               </motion.div>
             </RadixDialog.Content>
@@ -152,13 +160,17 @@ export function SubagentViewer({ agentKey }: { agentKey: string }) {
 interface PanelProps {
   agentKey: string;
   sub: Subagent;
+  /** Where it sits in the session's subagent tree. */
+  node?: SubagentNode;
   mobile: boolean;
   position: { index: number; count: number } | null;
   onPrev?: () => void;
   onNext?: () => void;
+  /** Open another subagent of the session. */
+  onShow: (id: string) => void;
 }
 
-function SubagentPanel({ agentKey, sub, mobile, position, onPrev, onNext }: PanelProps) {
+function SubagentPanel({ agentKey, sub, node, mobile, position, onPrev, onNext, onShow }: PanelProps) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const running = sub.status === "running";
@@ -177,7 +189,20 @@ function SubagentPanel({ agentKey, sub, mobile, position, onPrev, onNext }: Pane
 
   return (
     <SessionCtx.Provider value={{ hostId, agentId, key: agentKey }}>
-      <Header hostId={hostId} sub={sub} mobile={mobile} position={position} onPrev={onPrev} onNext={onNext} acting={acting} blocked={blocked} onAct={(a) => void act(a)} extra={<SubagentRetry agentKey={agentKey} sub={sub} blocked={blocked} onDone={refresh} />} />
+      <Header
+        hostId={hostId}
+        sub={sub}
+        node={node}
+        mobile={mobile}
+        position={position}
+        onPrev={onPrev}
+        onNext={onNext}
+        onShow={onShow}
+        acting={acting}
+        blocked={blocked}
+        onAct={(a) => void act(a)}
+        extra={<SubagentRetry agentKey={agentKey} sub={sub} blocked={blocked} onDone={refresh} />}
+      />
       <div className="relative flex min-h-0 flex-1 flex-col">
         {error && snap && (
           <div role="status" className="absolute inset-x-0 top-2 z-raised mx-auto flex w-fit items-center gap-2 rounded-full glass-blur px-3 py-1.5 text-2xs font-semibold text-warn shadow-d2">
@@ -224,10 +249,12 @@ interface HeaderProps {
   /** The parent agent's host. */
   hostId: string;
   sub: Subagent;
+  node?: SubagentNode;
   mobile: boolean;
   position: PanelProps["position"];
   onPrev?: () => void;
   onNext?: () => void;
+  onShow: (id: string) => void;
   acting: boolean;
   blocked: string | null;
   onAct: (action: "kill" | "revive") => void;
@@ -235,7 +262,7 @@ interface HeaderProps {
   extra?: ReactNode;
 }
 
-function Header({ hostId, sub, mobile, position, onPrev, onNext, acting, blocked, onAct, extra }: HeaderProps) {
+function Header({ hostId, sub, node, mobile, position, onPrev, onNext, onShow, acting, blocked, onAct, extra }: HeaderProps) {
   const running = sub.status === "running";
   const status = SUB_STATUS[sub.status];
   const activity = running ? "busy" : "silent";
@@ -305,6 +332,7 @@ function Header({ hostId, sub, mobile, position, onPrev, onNext, acting, blocked
           )}
         </span>
       </div>
+      {node && <Lineage node={node} onShow={onShow} />}
       <RadixDialog.Description className="sr-only">Transcript and controls of the subagent {sub.name}</RadixDialog.Description>
       {sub.description && <Description key={sub.description} text={sub.description} />}
       <div className={cn("flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-mute", mobile ? "mt-2" : "mt-3")}>
@@ -324,6 +352,38 @@ function Header({ hostId, sub, mobile, position, onPrev, onNext, acting, blocked
         )}
       </div>
     </header>
+  );
+}
+
+/**
+ * Where the subagent sits in the session's tree: the subagents it runs under, outermost first (each
+ * opens that one), and the roll-up of its own, which opens the first of them.
+ */
+function Lineage({ node, onShow }: { node: SubagentNode; onShow: (id: string) => void }) {
+  const ancestors: SubagentNode[] = [];
+  for (let p = node.parent; p; p = p.parent) ancestors.push(p);
+  ancestors.reverse();
+  const first = node.children[0];
+  if (ancestors.length === 0 && !node.orphanOf && !first) return null;
+  const link = "focus-ring min-w-0 truncate rounded px-0.5 font-semibold text-ink-2 hover:text-ink hover:underline";
+  return (
+    <nav aria-label="Subagent tree" className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 text-xs text-mute">
+      {ancestors.length > 0 && <span className="shrink-0">under</span>}
+      {ancestors.map((a, i) => (
+        <Fragment key={a.sub.id}>
+          {i > 0 && <ChevronRight className="size-3 shrink-0 text-mute-2" aria-hidden />}
+          <button type="button" onClick={() => onShow(a.sub.id)} title={`Open ${a.sub.name}`} className={cn(link, "max-w-[12rem]")}>
+            {a.label}
+          </button>
+        </Fragment>
+      ))}
+      {node.orphanOf && <span className="min-w-0 truncate">from {node.orphanOf}</span>}
+      {first && (
+        <button type="button" onClick={() => onShow(first.sub.id)} title={`Open ${first.sub.name}`} className={cn(link, "font-bold", (ancestors.length > 0 || node.orphanOf) && "ml-2")}>
+          <RollupText tally={node.below} />
+        </button>
+      )}
+    </nav>
   );
 }
 

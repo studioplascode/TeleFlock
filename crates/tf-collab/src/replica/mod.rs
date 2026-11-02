@@ -54,8 +54,9 @@ use tf_proto::{
 
 use crate::frame::{AgentSnapshot, HostFrame, SessionHeader, SessionState, UiRequestFrame};
 use crate::guest::{EndReason, GuestEvent, Snapshot};
-use util::{arr, b, clip, content_images, content_text, f, first_line, non_empty, s, shown_sha256, ts, u};
+use util::{arr, b, clip, content_images, content_text, f, first_line, is_session_internal, non_empty, s, shown_sha256, ts, u};
 
+pub use irc::{may_hold_irc, IrcFileScan, IrcRecord, IRC_USER};
 pub use live_rows::{LiveRow, MAX_LIVE_ROWS};
 pub use spend::{ArtifactCall, ArtifactKind, ArtifactLedger, Spend};
 pub use ui::UiReply;
@@ -250,7 +251,6 @@ struct SubState {
     progress: Option<Value>,
     lifecycle: Option<String>,
     description: Option<String>,
-    parent_tool: Option<String>,
     /// Transcript file named by omp's lifecycle frames (`sessionFile`).
     session_file: Option<String>,
 }
@@ -1646,6 +1646,7 @@ impl Replica {
                     truncated: false,
                     view: None,
                     error: None,
+                    artifact: None,
                 };
                 self.upsert(TranscriptItem::Tool(item), out);
             }
@@ -1684,6 +1685,7 @@ impl Replica {
                     truncated: false,
                     view: None,
                     error: None,
+                    artifact: None,
                 }
             }
         }
@@ -1778,6 +1780,7 @@ impl Replica {
         t.truncated = trunc;
         t.view = tools::view(&name, &t.args, Some(result), Some(is_error));
         t.error = is_error.then(|| clip(first_line(&text), 300)).filter(|e| !e.is_empty());
+        t.artifact = if is_error { None } else { tools::presented(&name, details) };
         // From omp's own records, so a rebuild finds the same: the tool's wall time (bash), else
         // from the call's start (its message ended) to its result. Until that result lands, what
         // the live events measured.
@@ -1810,7 +1813,7 @@ impl Replica {
         self.upsert(TranscriptItem::Tool(t), out);
     }
 
-    /// Folds a diff view into `SessionMeta.files` (paths relative to the session cwd).
+    /// Folds a diff view into `SessionMeta.files` (paths relative to the session cwd; omp-internal paths such as `local://` are left out).
     fn record_file_edits(&mut self, call_id: &str, view: Option<&tf_proto::ToolView>) {
         let Some(tf_proto::ToolView::Diff(d)) = view else { return };
         // `meta.cwd` is only refreshed after a snapshot replay, so read the source directly.
@@ -1818,6 +1821,8 @@ impl Replica {
         let files: Vec<ChangedFile> = d
             .files
             .iter()
+            // omp's own files (`local://…`) are artifacts, not changes to the repository.
+            .filter(|f| !is_session_internal(&f.path))
             .map(|f| ChangedFile {
                 path: cwd.as_deref().and_then(|c| f.path.strip_prefix(c)).unwrap_or(&f.path).to_owned(),
                 added: f.added,
@@ -2143,7 +2148,6 @@ impl Replica {
                 }
                 sub.progress = Some(progress.clone());
                 sub.description = non_empty(data, "assignment").or_else(|| non_empty(progress, "description")).map(str::to_owned);
-                sub.parent_tool = s(data, "parentToolCallId").map(str::to_owned);
             }
             "task:subagent:lifecycle" => {
                 let Some(id) = s(data, "id") else { return };
@@ -2156,7 +2160,6 @@ impl Replica {
                 if sub.description.is_none() {
                     sub.description = non_empty(data, "description").map(str::to_owned);
                 }
-                sub.parent_tool = s(data, "parentToolCallId").map(str::to_owned).or(sub.parent_tool.take());
                 if let Some(file) = non_empty(data, "sessionFile") {
                     sub.session_file = Some(file.to_owned());
                 }
@@ -2166,10 +2169,11 @@ impl Replica {
     }
 
     fn subagents(&self) -> Vec<Subagent> {
+        let main = self.main_agent_id();
         self.subs
             .iter()
             .filter(|(_, s)| s.snapshot.as_ref().is_none_or(|a| a.kind != "main"))
-            .map(|(id, st)| subagent_view(id, st, self.outcome_of(id), self.interrupted.contains(id)))
+            .map(|(id, st)| subagent_view(id, st, self.outcome_of(id), self.interrupted.contains(id), main))
             .collect()
     }
 
@@ -2232,6 +2236,7 @@ impl Replica {
             bridge: false,
             retry: w,
             subagent_retry: false,
+            refusal_retry: false,
         };
         // omp idle with nothing queued: what we listed was delivered, aborted or dropped.
         if self.ended || (!self.running && !st.is_streaming && st.queued_message_count == 0) {
@@ -2409,7 +2414,7 @@ fn last_sentence(text: &str) -> Option<String> {
     Some(if n > 80 { format!("…{}", frag.chars().skip(n - 79).collect::<String>()) } else { frag.to_owned() })
 }
 
-fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, interrupted: bool) -> Subagent {
+fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, interrupted: bool, main: Option<&str>) -> Subagent {
     let p = st.progress.as_ref();
     let snap = st.snapshot.as_ref();
     let status = subagents::status(st, outcome.map(|o| o.status), interrupted);
@@ -2449,7 +2454,7 @@ fn subagent_view(id: &str, st: &SubState, outcome: Option<subagents::Outcome>, i
         completion_pct: p.and_then(|p| tools::completion_pct(p, status)),
         context: p.and_then(tools::subagent_context),
         tool_count: p.and_then(|p| u(p, "toolCount")).map(|n| n as u32),
-        parent_id: snap.and_then(|a| a.parent_id.clone()).or_else(|| st.parent_tool.clone()),
+        parent_id: subagents::parent(id, st, main),
     }
 }
 
@@ -2520,8 +2525,10 @@ fn empty_meta() -> SessionMeta {
             bridge: false,
             retry: false,
             subagent_retry: false,
+            refusal_retry: false,
         },
         started_at: None,
+        agent_chat: None,
     }
 }
 

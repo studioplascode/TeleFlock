@@ -194,11 +194,6 @@ impl FakeRoom {
         self.take();
         self.log.iter().filter(|s| matches!(s, HostSaw::Joined(_))).count()
     }
-
-    fn leaves(&mut self) -> usize {
-        self.take();
-        self.log.iter().filter(|s| matches!(s, HostSaw::Left(_))).count()
-    }
 }
 
 /// The one entry the room's snapshot carries.

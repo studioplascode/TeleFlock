@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { aiTesting, suggestBranch } from "@/core/ai";
+import { CHAT_REPO } from "@/core/chats";
 import type { Agent, Workspace } from "@/core/gen";
 import { usePrefs } from "@/core/prefs";
 import type { DispatchEntry } from "./store";
-import { baseSlug, cleanSuggestion, nameDispatch, prefetchKey, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
+import { baseSlug, cleanSuggestion, nameDispatch, prefetchKey, rambleAbout, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
 /** The 0.4.1 task Dispatch named `need-inspect-repository`, as typed (one line, inline points)… */
 const FAILING_INLINE =
@@ -191,6 +192,32 @@ describe("resolveAgent", () => {
     const agents = [agent({ id: "api", name: "fix-ci", paneId: "w7:p1", workspaceId: "w7" })];
     expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", phase: "creating" }), agents, scope)).toBeUndefined();
     expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", agentId: "api" }), agents, scope)).toBeUndefined();
+  });
+
+  test("a chat entry links its chat agent, never a same-named worktree agent, and the other way round", () => {
+    const worktreeAgent = agent({ id: "wt", name: "fix-ci", paneId: "w4:p1", workspaceId: "w4" });
+    const chatAgent = agent({ id: "ch", name: "fix-ci", paneId: "wc:p2", workspaceId: "wc", cwd: "/home/a/.teleflock/chats/fix-ci-k3x9qa", chat: true });
+    const chat = (p: Partial<DispatchEntry>) => entry({ name: "fix-ci", branch: "", chat: true, ...p });
+    // A chat has no worktree: its agent is the chat agent by id, by pane, else by name.
+    expect(resolveAgent(chat({ agentId: "ch", paneId: "wc:p2", workspaceId: "wc" }), [chatAgent], scope)?.id).toBe("ch");
+    expect(resolveAgent(chat({ paneId: "wc:p2" }), [chatAgent], scope)?.id).toBe("ch");
+    expect(resolveAgent(chat({ phase: "unknown" }), [chatAgent], scope)?.id).toBe("ch");
+    // An agent of that name in a worktree is somebody else's.
+    expect(resolveAgent(chat({ phase: "creating" }), [worktreeAgent], scope)).toBeUndefined();
+    expect(resolveAgent(chat({ agentId: "wt" }), [worktreeAgent], scope)).toBeUndefined();
+    // A worktree entry never takes a chat agent, not even one sitting in its own checkout.
+    const inCheckout = { ...chatAgent, workspaceId: "w4", cwd: "/wt/dispatch/fix-ci" };
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", phase: "creating" }), [inCheckout], scope)).toBeUndefined();
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", agentId: "ch" }), [inCheckout], scope)).toBeUndefined();
+  });
+});
+
+describe("rambleAbout", () => {
+  test("Rambler hears the repository's name; a chat has no repository to name", () => {
+    expect(rambleAbout("/home/u/src/teleflock/")).toBe("Repository: teleflock");
+    expect(rambleAbout("github.com/acme/api")).toBe("Repository: api");
+    expect(rambleAbout(CHAT_REPO)).toBeUndefined();
+    expect(rambleAbout(null)).toBeUndefined();
   });
 });
 

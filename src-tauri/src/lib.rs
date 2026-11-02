@@ -5,7 +5,13 @@
 #[cfg(desktop)]
 mod badge;
 mod core;
+#[cfg(test)]
+mod csp;
 mod deeplink;
+mod docs;
+mod drafts;
+#[cfg(desktop)]
+mod frames;
 mod platform;
 mod present;
 #[cfg(windows)]
@@ -70,7 +76,7 @@ fn handle_link(app: &AppHandle<Wry>, url: &tauri::Url) {
     }
     reveal(app);
     match link {
-        Link::Agent { host_id, notification_id: Some(n), .. } => core.notification_action(host_id, n, None, None),
+        Link::Agent { host_id, notification_id: Some(n), .. } | Link::Notification { host_id, notification_id: n } => core.notification_action(host_id, n, None, None),
         Link::Agent { host_id, agent_id, notification_id: None } => core.ui_intent(AppEvent::OpenAgent { host_id, agent_id }),
         Link::AnswerNext => core.ui_intent(AppEvent::AnswerNext),
         Link::Open | Link::Capture => {}
@@ -120,6 +126,13 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     let (engine, initial) = tauri::async_runtime::block_on(Engine::start(cfg, platform.clone()));
+    // A dev build's webview loads the UI from the dev server: the TeleFlock Browser's DevTools
+    // take its WebSockets too (release builds: the app's own origins only).
+    if cfg!(debug_assertions)
+        && let Some(url) = app.config().build.dev_url.as_ref()
+    {
+        engine.allow_browser_origins([url.origin().ascii_serialization()]);
+    }
     let core = Core::new(engine, initial);
     app.manage(Arc::clone(&core));
     app.manage(Arc::clone(&platform));
@@ -173,10 +186,12 @@ fn setup(app: &mut App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
         watch_motion(Arc::clone(&core), tray);
         capture::install(&handle, Arc::clone(&core));
     }
-    // Linux: paste / delete keys a virtual keyboard sends that GTK 3 can't bind (edit_keys.rs).
+    // Linux: paste / delete keys a virtual keyboard sends that GTK 3 can't bind (edit_keys.rs);
+    // no WebRTC and no preconnects for presented pages (frames.rs).
     #[cfg(target_os = "linux")]
     if let Some(main) = app.get_webview_window("main") {
         edit_keys::install(&main);
+        frames::harden(&main);
     }
 
     // Deep links: cold start (argv on desktop, launch intent on Android) and warm.
@@ -361,7 +376,9 @@ pub fn run() {
         builder = builder
             .plugin(tauri_plugin_snap_layout::init().button_id("tf-max").build())
             // Endpoints are set per check (src/update); pubkey + install mode come from tauri.conf.json.
-            .plugin(tauri_plugin_updater::Builder::new().build());
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            // WebRTC out of every sandboxed frame, those a presented page makes included (frames.rs).
+            .plugin(frames::plugin());
     }
     #[cfg(target_os = "android")]
     {
@@ -373,6 +390,12 @@ pub fn run() {
         core::core_call,
         core::core_term_input,
         core::core_events,
+        drafts::drafts_listen,
+        drafts::drafts_flushed,
+        drafts::drafts_busy,
+        docs::doc_stage,
+        docs::doc_release,
+        docs::doc_open,
         capture::capture_status,
         capture::capture_open,
         capture::capture_hide,
@@ -381,13 +404,34 @@ pub fn run() {
         capture::capture_show_main,
     ]);
     #[cfg(mobile)]
-    let builder = builder.invoke_handler(tauri::generate_handler![core::core_call, core::core_term_input, core::core_events]);
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        core::core_call,
+        core::core_term_input,
+        core::core_events,
+        drafts::drafts_listen,
+        drafts::drafts_flushed,
+        drafts::drafts_busy,
+        docs::doc_stage,
+        docs::doc_release,
+        docs::doc_open,
+    ]);
     let app = builder
+        // Which pages save their drafts when asked (before an update ends the process, Quit) and
+        // which hold work a restart would lose.
+        .manage(drafts::Drafts::default())
+        // Agent-presented HTML documents, framed from `tfdoc` URLs (docs.rs).
+        .manage(docs::Docs::default())
+        .register_asynchronous_uri_scheme_protocol(docs::SCHEME, docs::serve)
         .on_page_load(|webview, payload| {
+            if payload.event() != PageLoadEvent::Started {
+                return;
+            }
+            if let Some(drafts) = webview.try_state::<drafts::Drafts>() {
+                drafts.page_loading(webview.label());
+            }
             // Only the main page owns the engine's page state (terminals, sessions); the Quick
             // capture page never opens any.
-            if payload.event() == PageLoadEvent::Started
-                && webview.label() == "main"
+            if webview.label() == "main"
                 && let Some(core) = webview.try_state::<CoreState>()
             {
                 core.page_reset();

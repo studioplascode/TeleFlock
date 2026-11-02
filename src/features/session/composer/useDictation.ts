@@ -1,6 +1,9 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
+import { core, toApiError } from "@/core";
 import { isAndroid, isTauri } from "@/design";
+import { DeviceSession } from "@/features/dictation/deviceSession";
+import { chosenModel, newSessionId, onDictationSession, openDictationSettings, startDictation, useDictationModels } from "@/features/dictation/store";
 import { errorMessage } from "@/features/shell/errors";
 
 export interface Dictation {
@@ -10,7 +13,7 @@ export interface Dictation {
   /** Words recognised so far that may still change. */
   interim: string;
   error: string | null;
-  /** Set while Android blocks the microphone for good: opens the app's system settings. */
+  /** Set while the error can be fixed in settings (Android blocks the microphone for good: the app's system settings; no speech model: Settings → Dictation): opens them. */
   openSettings: (() => void) | null;
   toggle(): void;
 }
@@ -42,15 +45,22 @@ function recognitionCtor(): RecognitionCtor | undefined {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition;
 }
 
-function useWebDictation(onFinal: (text: string) => void): Dictation {
+/** The page has the Web Speech API (the system speech recognition of browsers and some app windows). */
+export function hasWebSpeech(): boolean {
+  return typeof window !== "undefined" && recognitionCtor() !== undefined;
+}
+
+function useWebDictation(onFinal: (text: string) => void, onEnd?: () => void): Dictation {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
   const rec = useRef<Recognition | null>(null);
   const finalRef = useRef(onFinal);
+  const endRef = useRef(onEnd);
   const Ctor = typeof window === "undefined" ? undefined : recognitionCtor();
   useEffect(() => {
     finalRef.current = onFinal;
+    endRef.current = onEnd;
   });
   useEffect(() => () => rec.current?.stop(), []);
 
@@ -79,6 +89,7 @@ function useWebDictation(onFinal: (text: string) => void): Dictation {
       setListening(false);
       setInterim("");
       rec.current = null;
+      endRef.current?.();
     };
     rec.current = r;
     setError(null);
@@ -123,7 +134,7 @@ function checkRecognizer(): Promise<boolean> {
   return recognizerCheck;
 }
 
-function useAndroidDictation(onFinal: (text: string) => void): Dictation {
+function useAndroidDictation(onFinal: (text: string) => void, onEnd?: () => void): Dictation {
   const [supported, setSupported] = useState(recognizer === true);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
@@ -134,8 +145,10 @@ function useAndroidDictation(onFinal: (text: string) => void): Dictation {
   const starting = useRef(false);
   const mounted = useRef(false);
   const finalRef = useRef(onFinal);
+  const endRef = useRef(onEnd);
   useEffect(() => {
     finalRef.current = onFinal;
+    endRef.current = onEnd;
   });
   useEffect(() => {
     mounted.current = true;
@@ -169,6 +182,7 @@ function useAndroidDictation(onFinal: (text: string) => void): Dictation {
           session.current = null;
           setListening(false);
           setInterim("");
+          endRef.current?.();
       }
     };
     session.current = ch;
@@ -224,8 +238,97 @@ function useAndroidDictation(onFinal: (text: string) => void): Dictation {
   return { supported, listening, interim, error, openSettings: blocked ? openSettings : null, toggle };
 }
 
+// ── The app core's on-device engine (desktop app, lab devservers; Settings → Dictation) ───────
+
+function useDeviceDictation(onFinal: (text: string) => void, onEnd?: () => void): Dictation & { active: boolean } {
+  const active = useDictationModels((s) => chosenModel(s.state) !== null);
+  const [listening, setListening] = useState(false);
+  const [interim, setInterim] = useState("");
+  const [error, setError] = useState<{ message: string; settings: boolean } | null>(null);
+  /** The running session; events of older ones are ignored. */
+  const session = useRef<DeviceSession | null>(null);
+  const finalRef = useRef(onFinal);
+  const endRef = useRef(onEnd);
+  useEffect(() => {
+    finalRef.current = onFinal;
+    endRef.current = onEnd;
+  });
+  useEffect(() => {
+    startDictation();
+    return () => {
+      session.current?.cancel();
+      session.current = null;
+    };
+  }, []);
+
+  const toggle = () => {
+    if (session.current) {
+      session.current.stop();
+      return;
+    }
+    const locale = typeof navigator === "undefined" ? "" : navigator.language;
+    const s: DeviceSession = new DeviceSession(
+      { call: (method, params) => core.app(method, params), listen: onDictationSession, id: newSessionId(), ...(locale ? { locale } : {}) },
+      {
+        partial: (text) => {
+          if (session.current === s) setInterim(text);
+        },
+        final: (text) => {
+          if (session.current !== s) return;
+          setInterim("");
+          finalRef.current(text);
+        },
+        error: (message) => {
+          if (session.current === s) setError({ message, settings: false });
+        },
+        end: () => {
+          if (session.current !== s) return;
+          session.current = null;
+          setListening(false);
+          setInterim("");
+          endRef.current?.();
+        },
+      },
+    );
+    session.current = s;
+    setError(null);
+    setListening(true);
+    s.start().catch((e: unknown) => {
+      if (session.current !== s) return;
+      session.current = null;
+      setListening(false);
+      const err = toApiError(e);
+      setError({ message: [err.message, err.hint].filter(Boolean).join(". "), settings: err.code === "no_model" });
+    });
+  };
+
+  const openSettings = () => {
+    setError(null);
+    openDictationSettings();
+  };
+
+  return { supported: active, listening, interim, error: error?.message ?? null, openSettings: error?.settings ? openSettings : null, toggle, active };
+}
+
+const usePlatformDictation: (onFinal: (text: string) => void, onEnd?: () => void) => Dictation = isTauri() && isAndroid ? useAndroidDictation : useWebDictation;
+
 /**
- * Voice dictation; final phrases are passed to `onFinal`. The Android app uses the system speech
- * recognizer (its WebView has no working Web Speech API); everything else the Web Speech API.
+ * The engine the mic uses now: the app core's when a speech model is chosen (`device.active`), else the platform's;
+ * a session in progress keeps its engine until it ends, whatever changed in Settings meanwhile.
  */
-export const useDictation: (onFinal: (text: string) => void) => Dictation = isTauri() && isAndroid ? useAndroidDictation : useWebDictation;
+export function engineInUse<D extends Dictation>(device: D & { active: boolean }, platform: D): D {
+  if (device.listening || (device.active && !platform.listening)) return device;
+  return platform;
+}
+
+/**
+ * Voice dictation; final phrases are passed to `onFinal`, in order, once each. `onEnd` is called once per
+ * listening session, after its last `onFinal`, whenever the session ends (stopped, error, engine gone):
+ * Rambler (`@/features/dictation`) rewrites the whole utterance stream then. With a speech model installed and
+ * chosen in Settings → Dictation, the app core's on-device engine listens (desktop app); otherwise the Android
+ * app uses the system speech recognizer (its WebView has no working Web Speech API), everything else the Web
+ * Speech API.
+ */
+export function useDictation(onFinal: (text: string) => void, onEnd?: () => void): Dictation {
+  return engineInUse(useDeviceDictation(onFinal, onEnd), usePlatformDictation(onFinal, onEnd));
+}

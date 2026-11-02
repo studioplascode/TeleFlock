@@ -9,7 +9,8 @@
 #      updater (tf_updater_sign → <package>.sig, minisign, bound to the version)
 #   4. the Arch package: packaging/arch/PKGBUILD stamped with this version and the .deb's
 #      checksum, built with makepkg in an archlinux:base-devel container, then installed with
-#      pacman in a fresh container to prove its dependencies resolve every shared library
+#      pacman in a fresh container to prove its dependencies resolve every shared library (that
+#      container's up-to-date Arch system + namcap is prepared during step 3)
 # Output: dist-release/TeleFlock_<version>_amd64.{deb,AppImage} (+ .sig, .sha256),
 #         dist-release/teleflock-bin-<pkgver>-<pkgrel>-x86_64.pkg.tar.zst (+ .sha256),
 #         dist-release/aur/{PKGBUILD,.SRCINFO} (the AUR `teleflock-bin` package for this release)
@@ -36,6 +37,9 @@ command -v docker >/dev/null || die "docker is required (packaging/linux/Dockerf
 # Fail before the long build: without the key the updater .sig files can't be made.
 . "$ROOT/scripts/updater-key.sh"
 tf_updater_key_check
+# From here on dist-release/'s Linux packages are being replaced: scripts/release.sh's stamp of
+# what they were built from no longer holds (docs/build.md §11.2).
+rm -f "$OUT/.built-linux"
 
 [ -d node_modules ] || { log "bun install"; bun install --frozen-lockfile; }
 if [ "${SKIP_FRONTEND:-0}" != 1 ]; then
@@ -58,6 +62,36 @@ BUILDER="teleflock-linux-builder:rust-$RUST_VERSION-bun-$BUN_VERSION"
 log "builder image $BUILDER"
 docker build -q --build-arg "RUST_VERSION=$RUST_VERSION" --build-arg "BUN_VERSION=$BUN_VERSION" \
   -t "$BUILDER" packaging/linux >/dev/null
+
+# The Arch check (below) installs the package into an up-to-date Arch system with namcap. Getting
+# that system (pacman -Syu + namcap: minutes) runs while the app builds and is kept as a throwaway
+# image; the check starts a fresh container from it.
+if [ "${SKIP_ARCH:-0}" != 1 ]; then
+  VERIFIER="teleflock-arch-verifier-$$"
+  VERIFIER_LOG="$(mktemp)"
+  # On every exit: stops the preparation if it still runs (the build failed first), removes its
+  # container, image and log. With set -e off, a step with nothing to remove can't skip the rest
+  # or replace the script's exit status.
+  remove_verifier() {
+    local rc=$? pid
+    set +e
+    # Only while bash lists it as running (the script's only background job): the pid of a job
+    # that ended may be another process's by now.
+    for pid in $(jobs -rp); do kill "$pid"; wait "$pid"; done 2>/dev/null
+    docker rm -f "$VERIFIER" >/dev/null 2>&1
+    docker rmi -f "$VERIFIER" >/dev/null 2>&1
+    rm -f "$VERIFIER_LOG"
+    exit "$rc"
+  }
+  trap remove_verifier EXIT
+  (
+    set -e
+    docker pull -q "$ARCH_IMAGE"
+    docker run --name "$VERIFIER" "$ARCH_IMAGE" pacman -Syu --noconfirm --needed namcap
+    docker commit "$VERIFIER" "$VERIFIER"
+  ) > "$VERIFIER_LOG" 2>&1 &
+  VERIFIER_PID=$!
+fi
 
 log "app + .deb + AppImage (Ubuntu 22.04 container)"
 # Stale bundles of other versions would otherwise linger next to the new ones.
@@ -108,7 +142,7 @@ sed -e "s/^_version=.*/_version=$VERSION/" \
 grep -q "$DEB_SHA" "$WORK/build/PKGBUILD" && grep -q "$LICENSE_SHA" "$WORK/build/PKGBUILD" ||
   die "stamping packaging/arch/PKGBUILD failed (checksum lines changed?)"
 
-docker pull -q "$ARCH_IMAGE" >/dev/null
+wait "$VERIFIER_PID" || die "preparing the Arch system failed: $(tail -n 20 "$VERIFIER_LOG")"
 # makepkg refuses to run as root: build as an unprivileged user that owns the build dir.
 docker run --rm -v "$WORK/build:/build" "$ARCH_IMAGE" bash -euo pipefail -c '
   useradd -m builder
@@ -120,8 +154,7 @@ PKG="$(cd "$WORK/build" && ls -1 teleflock-bin-*-x86_64.pkg.tar.zst | head -n1)"
 [ -n "$PKG" ] || die "makepkg produced no package"
 
 log "verifying $PKG in a fresh container (pacman -U, ldd, namcap)"
-docker run --rm -v "$WORK/build:/build:ro" "$ARCH_IMAGE" bash -euo pipefail -c '
-  pacman -Syu --noconfirm --needed namcap >/dev/null
+docker run --rm -v "$WORK/build:/build:ro" "$VERIFIER" bash -euo pipefail -c '
   pacman -U --noconfirm "/build/'"$PKG"'" >/dev/null
   missing="$(ldd /usr/bin/teleflock | grep "not found" || true)"
   [ -z "$missing" ] || { echo "unresolved libraries:"; echo "$missing"; exit 1; }

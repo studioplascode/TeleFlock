@@ -15,4 +15,9 @@ retry: boolean,
 /**
  * `agent.retry` works for its subagents (bridge ≥ 2.1.0 with omp's task internals).
  */
-subagentRetry: boolean, };
+subagentRetry: boolean, 
+/**
+ * `agent.refusalRetry` works ("Retry with <model>" after a provider refusal) and the host's
+ * refusal fallback rules apply to this session: TeleFlock's bridge ≥ 2.3.0 serves it.
+ */
+refusalRetry: boolean, };

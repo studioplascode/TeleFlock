@@ -1,0 +1,29 @@
+# Rambler lab (copy into the lab's omp agent dir): one keyless provider served by mock.ts (next to this file) on 127.0.0.1:18781.
+# Three models of different speed stand in for omp's tiny / smol / default roles.
+providers:
+  mock:
+    baseUrl: http://127.0.0.1:18781/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: lab-tiny
+        name: Rambler Lab Tiny
+        reasoning: false
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: lab-smol
+        name: Rambler Lab Smol
+        reasoning: false
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: lab-big
+        name: Rambler Lab Default
+        reasoning: false
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

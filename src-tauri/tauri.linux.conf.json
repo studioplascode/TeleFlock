@@ -22,7 +22,7 @@
     "linux": {
       "deb": {
         "section": "devel",
-        "depends": ["libayatana-appindicator3-1"],
+        "depends": ["libayatana-appindicator3-1", "libasound2", "libstdc++6"],
         "desktopTemplate": "linux/teleflock.desktop"
       },
       "appimage": {

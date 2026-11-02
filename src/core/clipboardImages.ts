@@ -1,3 +1,4 @@
+import { trackDraftWork } from "./draftFlush";
 import { type DraftImage, MAX_DRAFT_IMAGES, updateDraftImages } from "./draftImages";
 
 /*
@@ -159,16 +160,20 @@ export function fitImages(current: readonly DraftImage[], incoming: readonly Dra
 /**
  * Read `files` (scaled down when very large) and add them to draft `key`'s images within the
  * caps, checked against the images attached by the time they are read (pastes can overlap).
- * Returns how many were added and why others were left out.
+ * Returns how many were added and why others were left out. A flush (`flushAll`: the app about
+ * to restart) waits for the reading.
  */
-export async function attachImages(key: string, files: readonly File[]): Promise<{ added: number; skipped?: string }> {
-  const loaded = await readImages(files);
-  const out: { added: number; skipped?: string } = { added: 0 };
-  updateDraftImages(key, (cur) => {
-    const fit = fitImages(cur, loaded);
-    out.added = fit.images.length - cur.length;
-    out.skipped = fit.skipped;
-    return fit.images;
-  });
-  return out;
+export function attachImages(key: string, files: readonly File[]): Promise<{ added: number; skipped?: string }> {
+  return trackDraftWork(
+    readImages(files).then((loaded) => {
+      const out: { added: number; skipped?: string } = { added: 0 };
+      updateDraftImages(key, (cur) => {
+        const fit = fitImages(cur, loaded);
+        out.added = fit.images.length - cur.length;
+        out.skipped = fit.skipped;
+        return fit.images;
+      });
+      return out;
+    }),
+  );
 }

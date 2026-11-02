@@ -159,6 +159,7 @@ mod tests {
             truncated: false,
             view: None,
             error: None,
+            artifact: None,
         })
     }
 

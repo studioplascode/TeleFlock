@@ -139,6 +139,21 @@ describe("Quick capture's picture", () => {
     expect(s.questions[4]?.options.map((o) => o.label)).toEqual(["Confirm", "Cancel"]);
     expect(s.questions[0]).toMatchObject({ word: "Question", where: "H1 · app", requestId: "r-h1::one" });
   });
+
+  test("a chat goes to a host that starts chats, as Dispatch says", () => {
+    const chatty = (s: HostState) => ({ ...s, info: { ...s.info, chats: "/home/a/.teleflock/chats" } }) as HostState;
+    const ok = world({ states: { ...states, h1: chatty(states.h1 as HostState) }, lastRepo: { h1: "chat:" } });
+    expect(ok.target).toEqual({ target: "h1", repo: "chat:", repoName: "No folder · chat", where: "H1" });
+    // A daemon from before chats: the update words, not "has No folder · chat".
+    expect(world({ lastRepo: { h1: "chat:" } }).target?.blocked).toBe("This host can't start chats yet");
+    // A group: one member starts chats but it is offline.
+    const grouped = [profile("h1", "lab"), profile("h2", "lab")];
+    const group = world({ profiles: grouped, states: { h1: states.h1 as HostState, h2: chatty(states.h2 as HostState) }, lastHost: "auto:lab", lastRepo: { "auto:lab": "chat:" } });
+    expect(group.target?.blocked).toBe("No host of lab that starts chats is online");
+    // A chat agent's question names it a chat, not its folder.
+    const asking = { ...needs("h1::trip", {}), repo: undefined, cwd: "/home/a/.teleflock/chats/trip-abc123", chat: true } as unknown as AgentView;
+    expect(world({ inbox: [asking] }).questions[0]?.where).toBe("H1 · Chat");
+  });
 });
 
 describe("the system-wide shortcut", () => {

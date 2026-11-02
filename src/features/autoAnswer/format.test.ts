@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { AutoAnswerCountdown } from "@/core/gen";
+import type { AutoAnswerCountdown, NeedsKind } from "@/core/gen";
 import {
+  canDecideFor,
   clampPolicy,
   countdownState,
   currentCountdown,
@@ -168,5 +169,25 @@ describe("countdownState", () => {
       "auto-sends your earlier answer (Postgres) when no app is connected · 12:40 left",
     );
     expect(countdownState(earlier({ status: "cancelled", remainingMs: 0 }), NOW).detail).toBe("Decide for me won't send your earlier answer (Postgres): this question waits for you.");
+  });
+});
+
+describe("canDecideFor", () => {
+  const info = { autoAnswer: { enabled: false, afterSecs: 600, onlyWhenNoApp: false } };
+  const agent = (kind: "omp" | "shell", needs?: NeedsKind) => ({ kind, ...(needs ? { needs: { kind: needs } as never } : {}) });
+
+  test("offered to an omp agent on a capable host, with no request or an ask", () => {
+    expect(canDecideFor(agent("omp"), info)).toBe(true);
+    expect(canDecideFor(agent("omp", "ask"), info)).toBe(true);
+  });
+
+  test("not while an approval, confirm, blocked wait or any other request is pending", () => {
+    for (const kind of ["approval", "confirm", "blocked", "planReview", "input", "error"] as const) expect(canDecideFor(agent("omp", kind), info)).toBe(false);
+  });
+
+  test("not for other agents or hosts without decide for me", () => {
+    expect(canDecideFor(agent("shell"), info)).toBe(false);
+    expect(canDecideFor(agent("omp"), {})).toBe(false);
+    expect(canDecideFor(undefined, info)).toBe(false);
   });
 });

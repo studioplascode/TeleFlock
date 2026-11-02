@@ -1,11 +1,13 @@
-import { ArrowLeft, MessageCircle, PenLine, Send } from "lucide-react";
+import { ArrowLeft, MessageCircle, Mic, MicOff, PenLine, Send } from "lucide-react";
 import { motion, useIsPresent } from "motion/react";
 import { type FormEvent, type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
-import { answerDraftKey, openSession, useAgent, useCore, useDraft } from "@/core";
+import { answerDraftKey, openSession, parseAgentKey, useAgent, useCore, useDraft } from "@/core";
 import type { Answer, NeedsOption } from "@/core/gen";
 import { AnimatePresence, Kbd, Spinner, cn, popIn, spring } from "@/design";
+import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { type OptionSkin, OptionTile, SkipButton, isTyping } from "@/features/inbox/AnswerParts";
-import { needsOptions, optionAnswer, otherAnswer } from "@/features/inbox/answers";
+import { needsOptions, optionAnswer, otherAnswer, skipOffered } from "@/features/inbox/answers";
+import { useHostsBrowser } from "@/features/browser/RequestCard";
 import { answerAgent, openAgent, openAnswerHud, openTerminal } from "./agentActions";
 
 export type QuickAnswerAppearance = "card" | "hero" | "big";
@@ -82,6 +84,17 @@ export function QuickAnswer({
   const [pickState, setPickState] = useState<{ requestId: string; ids: string[] } | null>(null);
   const picked = pickState?.requestId === requestId ? pickState.ids : needs?.multi ? earlier : [];
   const otherRef = useRef<HTMLInputElement>(null);
+  // Dictation into "Other…", tidied by Rambler when it is on (Settings → Dictation).
+  const ramble = useRamblerDictation({
+    hostId: parseAgentKey(agentKey).hostId,
+    ...(needs?.title ? { about: `Agent question: ${needs.title}` } : {}),
+    text: otherText,
+    setText: setOtherText,
+    field: otherRef,
+    mobile,
+    ...(appearance === "hero" ? { tone: "sun" as const } : {}),
+  });
+  const dictation = ramble.dictation;
   // a HUD card sliding out keeps its props; only the one on screen takes number keys
   const present = useIsPresent();
   const editor = !!needs && needs.kind === "input" && needs.options.length === 0;
@@ -93,7 +106,9 @@ export function QuickAnswer({
     if (textarea) return openSession(agentKey);
   }, [textarea, agentKey]);
 
-  const options: readonly NeedsOption[] = needs ? needsOptions(needs) : [];
+  // An agent's request for the user's browser: Deny only where this device can't allow it.
+  const hostsBrowser = useHostsBrowser();
+  const options: readonly NeedsOption[] = needs ? needsOptions(needs, hostsBrowser) : [];
   const busy = pending !== null;
   const answered = sent !== null && sent.requestId === requestId;
 
@@ -114,6 +129,17 @@ export function QuickAnswer({
   };
   // On a multi-select, a typed answer replaces the ticks (the host takes text only without choices).
   const showOther = !!needs?.allowOther && (otherOpen ?? otherText !== "");
+  // Closing "Other…" (Esc, an answer, the question going) takes the mic's only stop button with it: listening stops
+  // too (once), and what was said lands in the field's draft, as typed text stays there.
+  const otherShown = showOther && live && !answered && !editor;
+  const stopAsked = useRef(false);
+  useEffect(() => {
+    if (!dictation.listening) stopAsked.current = false;
+    else if (!otherShown && !stopAsked.current) {
+      stopAsked.current = true;
+      dictation.toggle();
+    }
+  }, [otherShown, dictation]);
   // A single-select's earlier answer shows picked (a tap on any option answers, that one included).
   const chosen = !needs?.multi && !showOther ? earlier[0] : undefined;
   const onOption = (o: NeedsOption) => {
@@ -211,8 +237,8 @@ export function QuickAnswer({
   const offerChat = chat && needs.allowChat;
   // Roomy and phone layouts give Other / Chat their own row (half width each); cards keep chips.
   const rowed = full || appearance === "big";
-  // omp refuses to dismiss a plan review remotely; Skip is offered only where it can work.
-  const skip = full && needs.kind !== "planReview" && (needs.options.length > 0 || editor);
+  // Skip cancels, which omp reads as Deny / No: approvals and confirms have those as options, and omp refuses to dismiss a plan review remotely.
+  const skip = full && skipOffered(needs.kind) && (needs.options.length > 0 || editor);
 
   const submitOther = (e: FormEvent) => {
     e.preventDefault();
@@ -282,7 +308,7 @@ export function QuickAnswer({
                 <Kbd>Ctrl</Kbd> <Kbd>Enter</Kbd>
               </span>
             )}
-            <SkipButton className="ml-auto" disabled={busy} onClick={() => void send("Skipped", { cancel: true })} />
+            {skip && <SkipButton className="ml-auto" disabled={busy} onClick={() => void send("Skipped", { cancel: true })} />}
           </div>
         </div>
       ) : editor ? (
@@ -357,12 +383,13 @@ export function QuickAnswer({
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
                 transition={spring.snappy}
-                className="flex gap-1.5 overflow-hidden"
+                className="flex flex-wrap gap-1.5 overflow-hidden"
               >
+                {ramble.panel && <div className="basis-full">{ramble.panel}</div>}
                 <input
                   ref={otherRef}
                   autoFocus={otherOpen === true}
-                  value={otherText}
+                  value={dictation.listening && dictation.interim ? `${otherText}${otherText && !otherText.endsWith(" ") ? " " : ""}${dictation.interim}` : otherText}
                   onChange={(e) => setOtherText(e.target.value)}
                   onKeyDown={(e) => {
                     e.stopPropagation();
@@ -376,6 +403,16 @@ export function QuickAnswer({
                     appearance === "big" ? "min-h-11 text-sm" : "h-8",
                   )}
                 />
+                {dictation.supported && (
+                  <button
+                    type="button"
+                    aria-label={dictation.listening ? "Stop dictation" : "Dictate"}
+                    onClick={dictation.toggle}
+                    className={cn(chip.base, chip.neutral, "pressable focus-ring grid shrink-0 place-items-center px-2", dictation.listening && "tf-loop animate-breathe [--tf-breath:1.1s]")}
+                  >
+                    {dictation.listening ? <MicOff className="size-3.5" /> : <Mic className="size-3.5" />}
+                  </button>
+                )}
                 <button type="submit" disabled={busy || !otherText.trim()} className={cn(chip.base, chip.action, "pressable focus-ring disabled:opacity-50")}>
                   {busy ? <Spinner size={12} /> : "Send"}
                 </button>

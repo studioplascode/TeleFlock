@@ -10,21 +10,6 @@ import { isAndroid, isTauri } from "@/design";
 /** The Android app: no downloads, its share sheet instead. */
 export const inAndroidApp = isTauri() && isAndroid;
 
-/** Saves `blob` as `name` through a download. */
-export function savePng(blob: Blob, name: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.rel = "noopener";
-  a.style.display = "none";
-  document.body.append(a);
-  a.click();
-  a.remove();
-  // Revoking at once can cancel a download that has not started reading yet.
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
-
 /** The clipboard takes images here. */
 export function canCopyImages(): boolean {
   return typeof ClipboardItem !== "undefined" && typeof navigator.clipboard?.write === "function";

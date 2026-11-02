@@ -16,9 +16,10 @@ export const noticeRise = { initial: { opacity: 0, y: -8 }, animate: { opacity: 
  * Notice kinds, most urgent first (the rows are drawn in this order too): a host that isn't online (its
  * cards are a read-only snapshot), a host whose herdr server isn't up (its agents and terminals ended or
  * can't be seen), a host whose omp has no account (nothing runs there), a host low on disk space (builds
- * and agents start failing), a setup gap (agents or their states hidden), the demo.
+ * and agents start failing), a setup gap (agents or their states hidden), idle shells the host leaves open
+ * (nothing breaks while they stay), the demo.
  */
-const KINDS = ["stale", "herdr", "accounts", "disk", "setup", "demo"] as const;
+const KINDS = ["stale", "herdr", "accounts", "disk", "setup", "shells", "demo"] as const;
 export type NoticeKind = (typeof KINDS)[number];
 
 /** Sort key of a notice: its kind's urgency, then its host's place in the host list. */

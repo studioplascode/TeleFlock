@@ -140,6 +140,9 @@ export class DemoForwards {
         return rule.tools.includes(s.label.split(" ")[0] ?? "");
       case "port":
         return rule.ports.some((p) => s.label.startsWith(`127.0.0.1:${p.listen} `));
+      // Browser connections never run through a rule (tf-client forward.rs).
+      case "browser":
+        return false;
     }
   }
 

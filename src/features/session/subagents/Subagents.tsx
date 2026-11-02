@@ -1,14 +1,18 @@
+import type { ReactNode } from "react";
 import type { Subagent, SubagentStatus } from "@/core/gen";
 import { cn, Elapsed, formatElapsed, formatUsd, Shimmer, type Status, StatusOrb } from "@/design";
 import { SubagentMeters } from "./SubagentMeters";
-import { outcomeOf } from "./grouping";
+import { outcomeOf, rollupParts, type SubagentTally } from "./grouping";
 
 /** `parked` (omp's idle park, only from older hostds and caches) is a finished agent: green like done, not its own colour. */
 export const SUB_STATUS: Record<SubagentStatus, Status> = { running: "running", done: "done", failed: "error", aborted: "idle", parked: "done" };
 export const SUB_LABEL: Record<SubagentStatus, string> = { running: "Running", done: "Done", failed: "Failed", aborted: "Stopped", parked: "Done" };
 
-/** One subagent: orb, name, live line, completion estimate + context, timer. Click opens its transcript + controls. */
-export function SubagentCard({ sub, onOpen, dense = false }: { sub: Subagent; onOpen?: () => void; dense?: boolean }) {
+/**
+ * One subagent: orb, name, live line, completion estimate + context, timer. Click opens its transcript + controls.
+ * `label`: the name shown in its parent's branch (the full name stays its tooltip); `note`: a hint after the name.
+ */
+export function SubagentCard({ sub, onOpen, dense = false, label, note }: { sub: Subagent; onOpen?: () => void; dense?: boolean; label?: string; note?: ReactNode }) {
   const running = sub.status === "running";
   const outcome = outcomeOf(sub.status);
   return (
@@ -25,7 +29,10 @@ export function SubagentCard({ sub, onOpen, dense = false }: { sub: Subagent; on
       <StatusOrb status={SUB_STATUS[sub.status]} activity={running ? "busy" : "silent"} size={8} className="mt-[5px]" label={SUB_LABEL[sub.status]} />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-2">
-          <b className="max-w-full shrink-0 truncate text-[12.5px] font-extrabold text-ink">{sub.name}</b>
+          <b className="max-w-full shrink-0 truncate text-[12.5px] font-extrabold text-ink" title={label !== undefined && label !== sub.name ? sub.name : undefined}>
+            {label ?? sub.name}
+          </b>
+          {note && <span className="min-w-0 truncate text-2xs font-semibold text-mute">{note}</span>}
           {!dense && sub.description && <span className="min-w-0 truncate text-xs text-mute">{sub.description}</span>}
         </span>
         {sub.line && (
@@ -48,5 +55,19 @@ export function SubagentCard({ sub, onOpen, dense = false }: { sub: Subagent; on
         )}
       </span>
     </button>
+  );
+}
+
+/** A branch's roll-up line, "3 subagents · 2 running · 1 failed", the counts that need a look tinted. */
+export function RollupText({ tally, className }: { tally: SubagentTally; className?: string }) {
+  return (
+    <span className={cn("tabular", className)}>
+      {rollupParts(tally).map((p, i) => (
+        <span key={p.text} className={p.tone === "running" ? "text-accent-hi" : p.tone === "failed" ? "text-error" : undefined}>
+          {i > 0 && " · "}
+          {p.text}
+        </span>
+      ))}
+    </span>
   );
 }

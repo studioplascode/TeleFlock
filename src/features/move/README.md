@@ -7,7 +7,8 @@ which resumes it there. Hosts never talk to each other: the app relays (`src/cor
 ## Entry points
 
 - Card menu (`board/CardMenu.tsx`) and the session header's actions menu (`session/header/Controls.tsx`):
-  "Move to host…" (`ACTIONS.moveHost`) for omp agents once a second host is connected (`useCanMove`).
+  "Move to host…" (`ACTIONS.moveHost`) for omp agents once a second host is connected (`useCanMove`); never for
+  a chat (`Agent.chat`: its folder is one its own host made, and the session menu leaves the item out).
 - `openMoveDialog(agentKey)` (`store.ts`) opens the dialog from anywhere. `MoveDialog` is mounted once in
   `app/App.tsx`.
 - Parked cards: `ParkedChip` shows `MovedChip` when `agent.parked.moved` is set (see below), and

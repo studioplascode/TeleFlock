@@ -24,6 +24,7 @@ use crate::forward::{self, Forwards};
 use crate::link::{Link, timeout_for};
 use crate::platform::{BadgeState, NotifyStyle, Platform};
 use crate::presence;
+use crate::recording::{self, Recordings};
 use crate::secrets::{self, SecretStore};
 use crate::settings::{default_settings, in_quiet_hours, is_muted, local_minutes_now, validate, wants};
 use crate::session_cache::SessionCache;
@@ -121,6 +122,12 @@ pub(crate) struct Inner {
     presence_turns: presence::Refresh,
     /// Host-to-host forwarding: saved rules, offers, relayed streams (`forward.rs`).
     pub forwards: Forwards,
+    /// Session recordings of this device (`recording/`).
+    pub recordings: Arc<Recordings>,
+    /// The TeleFlock Browser of this device (`browser/`).
+    pub browser: crate::browser::Browser,
+    /// On-device dictation: speech models and recognition sessions (`dictation/`).
+    pub dictation: crate::dictation::Dictation,
 }
 
 /// Inputs and output of this device's presence ([`presence`]).
@@ -341,10 +348,13 @@ impl Inner {
         }
         self.refresh_badge();
         self.sync_needs(rt);
+        crate::browser::host_changed(self, &rt.id);
     }
 
     /// Applies a state patch and derives needs-you resolution.
     pub fn apply_patch(&self, rt: &HostRt, rev: u64, ops: Vec<StatePatch>) {
+        // A health sample alone (one every few seconds while connected) is not worth a write.
+        let more_than_health = ops.iter().any(|op| !matches!(op, StatePatch::Health { .. }));
         {
             let _g = self.emit_lock.lock().unwrap();
             let mut v = rt.view.lock().unwrap();
@@ -352,19 +362,23 @@ impl Inner {
                 apply_patches(s, ops.clone());
                 *r = rev;
             }
-            // A health sample alone (one every few seconds while connected) is not worth a write.
-            v.dirty |= ops.iter().any(|op| !matches!(op, StatePatch::Health { .. }));
+            v.dirty |= more_than_health;
             self.send(AppEvent::HostPatch { host_id: rt.id.clone(), rev, ops });
         }
         self.refresh_badge();
         self.sync_needs(rt);
+        if more_than_health {
+            crate::browser::host_changed(self, &rt.id);
+        }
     }
 
     /// Notification policy: always forward to the UI; reach the OS per settings, per-agent
     /// mute and quiet hours. A host that routes by presence says whether this device alerts
     /// (`alert: false`: another device is in use; it may escalate here later, `notifyAlert`); a
     /// device that does not share its presence alerts for everything, like older apps.
-    pub fn on_notify(&self, rt: &HostRt, n: Notification, alert: Option<bool>) {
+    pub fn on_notify(&self, rt: &HostRt, mut n: Notification, alert: Option<bool>) {
+        // A browser request on a core without the browser: Deny only, in the OS and in the app.
+        crate::browser::notification_for_device(self, &rt.id, &mut n);
         let alert = alert.filter(|_| presence::sharing(&self.settings()));
         self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n.clone(), alert });
         // tf-hostd publishes the state carrying the request before notifying about it.
@@ -650,6 +664,15 @@ fn request_state(s: &HostState, n: &Notification) -> Request {
     }
 }
 
+/// What opening a notification shows: the host's page it names (`HostPage::of`, with the
+/// notification's id so the page can show what it is about), else its agent.
+fn open_event(host_id: &str, n: &Notification) -> AppEvent {
+    match tf_proto::HostPage::of(n) {
+        Some(page) => AppEvent::OpenPage { host_id: host_id.to_string(), page, notification_id: Some(n.id.clone()) },
+        None => AppEvent::OpenAgent { host_id: host_id.to_string(), agent_id: n.agent_id.clone() },
+    }
+}
+
 /// Whether the request `n` asks about is still pending (`None` while the state is not live).
 fn request_pending(rt: &HostRt, n: &Notification) -> Option<bool> {
     let v = rt.view.lock().unwrap();
@@ -818,6 +841,9 @@ impl Engine {
         let secrets = SecretStore::new(&cfg.data_dir);
         let session_cache = SessionCache::new(&cfg.data_dir, &cfg.platform_name);
         let forwards = Forwards::load(&cfg.data_dir).await;
+        let recordings = Recordings::load(&cfg.data_dir).await;
+        let browser = crate::browser::Browser::load(&cfg).await;
+        let dictation = crate::dictation::Dictation::new(&cfg);
         let inner = Arc::new(Inner {
             cfg,
             platform,
@@ -839,9 +865,15 @@ impl Engine {
             presence: Mutex::new(PresenceInputs::default()),
             presence_turns: presence::Refresh::default(),
             forwards,
+            recordings,
+            browser,
+            dictation,
         });
         let engine = Engine { inner: inner.clone() };
         forward::start(&inner);
+        recording::start(&inner);
+        crate::browser::start(&inner);
+        crate::dictation::start(&inner);
 
         for p in &profiles {
             let cached = match read_json::<CacheRecord>(&inner.cache_path(&p.id)).await {
@@ -934,7 +966,9 @@ impl Engine {
             AppEvent::Settings { settings: i.settings() },
             AppEvent::Tunnels { tunnels: i.tunnels.list() },
             AppEvent::Forwards { forwards: forward::list(i) },
+            AppEvent::Browser { status: crate::browser::status(i) },
         ];
+        out.extend(i.dictation.replay());
         for p in profiles {
             let Some(rt) = i.host(&p.id) else { continue };
             let v = rt.view.lock().unwrap();
@@ -1013,6 +1047,7 @@ impl Engine {
     /// Multi-client embedders (the devserver) track ownership per client instead.
     pub fn page_closed(&self) {
         self.inner.page_epoch.fetch_add(1, Ordering::SeqCst);
+        self.inner.dictation.page_closed();
         let hosts: Vec<Arc<HostRt>> = self.inner.hosts.lock().unwrap().values().cloned().collect();
         for rt in hosts {
             let terms: Vec<String> = rt.view.lock().unwrap().terms.drain().collect();
@@ -1037,8 +1072,11 @@ impl Engine {
         }
     }
 
-    /// Stops all host connections and flushes caches.
+    /// Stops all host connections and flushes caches, then stops the TeleFlock Browser. A
+    /// recording that is recording stops its microphone and is finished at the next start.
     pub async fn shutdown(&self) {
+        self.inner.dictation.shutdown();
+        self.inner.recordings.shutdown().await;
         let tasks: Vec<JoinHandle<()>> = {
             for rt in self.inner.hosts.lock().unwrap().values() {
                 let _ = rt.cmd.send(ConnCmd::Shutdown);
@@ -1048,6 +1086,13 @@ impl Engine {
         for t in tasks {
             let _ = tokio::time::timeout(Duration::from_secs(5), t).await;
         }
+        crate::browser::shutdown(&self.inner).await;
+    }
+
+    /// Web origins whose pages may open the TeleFlock Browser's DevTools besides the app's own
+    /// (the devserver's page, a dev build's webview); used from the browser's next start.
+    pub fn allow_browser_origins(&self, origins: impl IntoIterator<Item = String>) {
+        crate::browser::allow_origins(&self.inner, origins);
     }
 
     /// Calls an app method (`host_id` ignored) or forwards a host method to `host_id`.
@@ -1065,6 +1110,12 @@ impl Engine {
     async fn host_call(&self, host_id: &str, method: &str, params: Value) -> Result<Value, ApiError> {
         let rt = self.inner.host(host_id).ok_or_else(|| not_found_host(host_id))?;
         let req = HostMethod::parse(method, params.clone())?;
+        // An answer to an agent's request for the browser is this device's to give.
+        if let HostMethod::AgentAnswer(p) = &req
+            && let Some(r) = crate::browser::route_answer(&self.inner, host_id, p).await
+        {
+            return r;
+        }
         let host = session_host(&self.inner, &rt);
         if let HostMethod::SessionOpen(p) = &req {
             return self.session_open(host_id, &rt, &host, p).await;
@@ -1185,7 +1236,7 @@ impl Engine {
         let n = rt.find_notification(notification_id).ok_or_else(unknown)?.n;
         let open = || {
             self.inner.mark_read(&rt, |x| x.id == n.id);
-            self.emit(AppEvent::OpenAgent { host_id: host_id.to_string(), agent_id: n.agent_id.clone() });
+            self.emit(open_event(host_id, &n));
         };
 
         let reply = reply.filter(|t| !t.trim().is_empty());
@@ -1309,6 +1360,17 @@ impl Engine {
                 // The Tauri shell answers these before they reach the engine (src-tauri/src/update).
                 Err(ApiError::new("unsupported", "self-update is only available in the installed app"))
             }
+            m @ (AppMethod::DictationModels(_)
+            | AppMethod::DictationInstall(_)
+            | AppMethod::DictationCancelInstall(_)
+            | AppMethod::DictationRemove(_)
+            | AppMethod::DictationSelect(_)
+            | AppMethod::DictationSetLanguage(_)
+            | AppMethod::DictationMicrophonesReq(_)
+            | AppMethod::DictationSetMicrophone(_)
+            | AppMethod::DictationStart(_)
+            | AppMethod::DictationStop(_)
+            | AppMethod::DictationCancel(_)) => i.dictation.call(m).await,
             AppMethod::HostsList(_) => {
                 let profiles = i.profiles.lock().unwrap().clone();
                 let statuses = profiles
@@ -1499,6 +1561,36 @@ impl Engine {
             AppMethod::ForwardSave(p) => to_value(&forward::save(i, p.rule).await?),
             AppMethod::ForwardRemove(p) => to_value(&forward::remove(i, &p.id).await?),
             AppMethod::ForwardStop(p) => to_value(&forward::stop(i, &p.stream_id)?),
+            m @ (AppMethod::BrowserStatusReq(_)
+            | AppMethod::BrowserStart(_)
+            | AppMethod::BrowserStop(_)
+            | AppMethod::BrowserAttach(_)
+            | AppMethod::BrowserDetach(_)
+            | AppMethod::BrowserAnswer(_)
+            | AppMethod::BrowserConfigReq(_)
+            | AppMethod::BrowserConfigSet(_)
+            | AppMethod::BrowserInstallEngine(_)
+            | AppMethod::BrowserClearData(_)
+            | AppMethod::BrowserStageFile(_)
+            | AppMethod::BrowserRevealDownload(_)
+            | AppMethod::BrowserRevealProfile(_)
+            | AppMethod::BrowserTakeOver(_)
+            | AppMethod::BrowserHandBack(_)
+            | AppMethod::BrowserLendTab(_)) => crate::browser::call(i, m).await,
+            m @ (AppMethod::RecordingStart(_)
+            | AppMethod::RecordingAppend(_)
+            | AppMethod::RecordingPause(_)
+            | AppMethod::RecordingResume(_)
+            | AppMethod::RecordingStop(_)
+            | AppMethod::RecordingListReq(_)
+            | AppMethod::RecordingGet(_)
+            | AppMethod::RecordingFrameReq(_)
+            | AppMethod::RecordingRead(_)
+            | AppMethod::RecordingUpdate(_)
+            | AppMethod::RecordingRender(_)
+            | AppMethod::RecordingRelease(_)
+            | AppMethod::RecordingTranscribe(_)
+            | AppMethod::RecordingDelete(_)) => i.recordings.call(m).await,
         }
     }
 }
@@ -1569,6 +1661,31 @@ mod tests {
             relay_port: None,
             group: None,
         }
+    }
+
+    /// Opening a notification shows the host page its `open:<page>` action names (the idle-shells
+    /// summary), else its agent; an answer action never names a page.
+    #[test]
+    fn open_routes_to_the_named_page() {
+        let action = |id: &str, answer: Option<Answer>| tf_proto::NotifyAction { id: id.into(), label: "x".into(), answer };
+        let n = |agent: &str, actions: Vec<tf_proto::NotifyAction>| Notification {
+            id: "n1".into(),
+            at: 0,
+            kind: NotifyKind::Info,
+            agent_id: agent.into(),
+            title: "Closed 4 idle shells".into(),
+            body: String::new(),
+            request_id: None,
+            actions,
+        };
+        let shells = n("", vec![action("open:idleShells", None)]);
+        assert_eq!(open_event("lab", &shells), AppEvent::OpenPage { host_id: "lab".into(), page: tf_proto::HostPage::IdleShells, notification_id: Some("n1".into()) });
+        // A decision decide for me made: the Inbox, at that decision.
+        let decided = n("a1", vec![action("open:decisions", None)]);
+        assert_eq!(open_event("lab", &decided), AppEvent::OpenPage { host_id: "lab".into(), page: tf_proto::HostPage::Decisions, notification_id: Some("n1".into()) });
+        assert_eq!(open_event("lab", &n("a1", vec![])), AppEvent::OpenAgent { host_id: "lab".into(), agent_id: "a1".into() });
+        let answer = Answer { choices: vec!["y".into()], text: None, cancel: false, chat: false, back: false };
+        assert_eq!(open_event("lab", &n("a1", vec![action("open:idleShells", Some(answer)), action("open:other", None)])), AppEvent::OpenAgent { host_id: "lab".into(), agent_id: "a1".into() });
     }
 
     #[test]
@@ -1763,11 +1880,18 @@ mod tests {
         let (replay, _rx3) = engine2.subscribe_with_replay();
         let kinds: Vec<String> =
             replay.iter().map(|e| serde_json::to_value(e).unwrap()["type"].as_str().unwrap().to_string()).collect();
-        assert_eq!(kinds, ["profiles", "settings", "tunnels", "forwards", "hostStatus", "hostSnapshot"]);
+        // On-device dictation (feature `voice`, on in the desktop app and in workspace builds) adds its state.
+        let mut want = vec!["profiles", "settings", "tunnels", "forwards", "browser"];
+        if cfg!(feature = "voice") {
+            want.push("dictation");
+        }
+        want.extend(["hostStatus", "hostSnapshot"]);
+        assert_eq!(kinds, want);
         assert!(matches!(&replay[1], AppEvent::Settings { settings } if settings.quiet_start.as_deref() == Some("22:00")));
         assert!(matches!(&replay[3], AppEvent::Forwards { forwards } if forwards.rules.is_empty()));
-        assert!(matches!(&replay[4], AppEvent::HostStatus { status, .. } if status.phase == ConnPhase::Idle));
-        assert!(matches!(&replay[5], AppEvent::HostSnapshot { rev: 42, state, .. } if state.agents.len() == 1));
+        let n = replay.len();
+        assert!(matches!(&replay[n - 2], AppEvent::HostStatus { status, .. } if status.phase == ConnPhase::Idle));
+        assert!(matches!(&replay[n - 1], AppEvent::HostSnapshot { rev: 42, state, .. } if state.agents.len() == 1));
 
         engine2.call(None, "hosts.remove", serde_json::json!({"hostId": id})).await.unwrap();
         assert!(!dir.path().join("cache").join(format!("{id}.json")).exists());
@@ -1835,6 +1959,7 @@ mod tests {
             answerable: true,
             context: None,
             step: None,
+            browser: false,
         });
         st.agents.push(a);
         st.agents.push(agent("a2", tf_proto::Column::Running));
@@ -2039,6 +2164,7 @@ mod tests {
             answerable: true,
             context: None,
             step: None,
+            browser: false,
         });
         a
     }

@@ -195,11 +195,15 @@ export function badgeText(ar: AutoResume, now: number, o: TicketOptions = {}): s
   }
 }
 
-/** Why a retry found nothing to run, from what the board knows of the agent. */
-export function nothingReason(agent: { column: string; needs?: unknown } | undefined): string {
+/**
+ * Why a retry found nothing to run, from what the board knows of the agent. `refused`: its last turn ended on a provider
+ * refusal, which omp cannot retry (the turn is gone from its context).
+ */
+export function nothingReason(agent: { column: string; needs?: unknown } | undefined, refused = false): string {
   if (!agent) return "The agent isn't on this host anymore.";
   if (agent.column === "running") return "It's working right now.";
   if (agent.needs) return "It's waiting for your answer.";
+  if (refused) return "It ended on a provider refusal, which omp can't retry. Switch to another model to continue it.";
   return "Its last turn neither failed nor was stopped.";
 }
 

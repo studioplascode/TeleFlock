@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
-import { useColumnKeys, useCore, useHosts, useUi } from "@/core";
+import { type AgentView, useColumnKeys, useCore, useHosts, useUi } from "@/core";
+import { isChat } from "@/core/chats";
 import { cn, useMediaQuery, useMinWidth } from "@/design";
 import { WhileAwayToast } from "@/features/activity/WhileAwayToast";
 import { BentoStrip, FirstStepsTile, HostsTile, LiveTerminalTile, StatsTile } from "./BentoRow";
@@ -8,7 +9,7 @@ import { useBoard } from "./boardStore";
 import { useFirstStepsView } from "./firstSteps";
 import { Kanban, type LaneKeys, applyMoves, arrangementOf } from "./Kanban";
 import { LANES } from "./lanes";
-import { RepoBoard } from "./RepoBoard";
+import { RepoBoard, useChatsInView } from "./RepoBoard";
 import { BoardNotices } from "./Notices";
 import { useBoardKeys } from "./useBoardKeys";
 import { useBoardCommands } from "./useBoardCommands";
@@ -16,24 +17,22 @@ import { SelectionBar } from "./SelectionBar";
 
 const COLUMN_RANK = { needs: 0, running: 1, review: 2, done: 3 } as const;
 
-/** Keyboard order for group-by-repo: repos alphabetically, then needs → running → review → done. */
-function useRepoOrder(repos: string[], hostId: string, q: string): string[][] {
+/** Keyboard order for group-by-repo: repos alphabetically, then the chats (`chats`), each needs → running → review → done. */
+function useRepoOrder(repos: string[], chats: boolean, hostId: string, q: string): string[][] {
   const joined = useCore((s) => {
     const needle = q.trim().toLowerCase();
-    return repos
-      .map((r) =>
-        Object.values(s.agents)
-          .filter(
-            (a) =>
-              a.repo === r &&
-              (hostId === "all" || a.hostId === hostId) &&
-              (!needle || `${a.name} ${a.title} ${a.branch ?? ""}`.toLowerCase().includes(needle)),
-          )
-          .sort((a, b) => COLUMN_RANK[a.column] - COLUMN_RANK[b.column])
-          .map((a) => a.key)
-          .join(" "),
-      )
-      .join("\n");
+    const group = (pick: (a: AgentView) => boolean) =>
+      Object.values(s.agents)
+        .filter(
+          (a) =>
+            pick(a) &&
+            (hostId === "all" || a.hostId === hostId) &&
+            (!needle || `${a.name} ${a.title} ${a.branch ?? ""}`.toLowerCase().includes(needle)),
+        )
+        .sort((a, b) => COLUMN_RANK[a.column] - COLUMN_RANK[b.column])
+        .map((a) => a.key)
+        .join(" ");
+    return [...repos.map((r) => group((a) => a.repo === r)), ...(chats ? [group(isChat)] : [])].join("\n");
   });
   return useMemo(() => (joined ? joined.split("\n").map((g) => (g ? g.split(" ") : [])) : []), [joined]);
 }
@@ -65,7 +64,9 @@ export function BoardView() {
 
   const repos = useRepoNames(hostId);
   const shownRepos = repo ? repos.filter((r) => r === repo) : repos;
-  const repoOrder = useRepoOrder(shownRepos, hostId, q);
+  // chats have no repository: Repo grouping shows them in one Chats column (none while a repo is picked)
+  const chats = useChatsInView(hostId) && !repo;
+  const repoOrder = useRepoOrder(shownRepos, chats, hostId, q);
   const statusOrder = useMemo(() => LANES.map((l) => view[l.column]), [view]);
   const groups = groupBy === "repo" ? repoOrder : statusOrder;
   useBoardKeys(groups, searchRef);
@@ -101,7 +102,7 @@ export function BoardView() {
         </div>
       )}
       {groupBy === "repo" ? (
-        <RepoBoard repos={shownRepos} filter={{ hostId, q }} selectedKey={selectedKey} arrangement={arrangementOf(view)} />
+        <RepoBoard repos={shownRepos} chats={chats} filter={{ hostId, q }} selectedKey={selectedKey} arrangement={arrangementOf(view)} />
       ) : (
         <Kanban lanes={lanes} selectedKey={selectedKey} />
       )}

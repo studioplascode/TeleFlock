@@ -16,6 +16,7 @@ arch=('x86_64')
 url='https://github.com/studioplascode/TeleFlock'
 license=('MIT')
 depends=(
+  'alsa-lib'
   'cairo'
   'dbus'
   'gdk-pixbuf2'
@@ -26,6 +27,7 @@ depends=(
   'libayatana-appindicator'
   'libgcc'
   'libsoup3'
+  'libstdc++'
   'webkit2gtk-4.1'
 )
 provides=('teleflock')

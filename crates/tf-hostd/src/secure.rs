@@ -64,7 +64,7 @@ fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
 }
 
 #[cfg(windows)]
-pub use win::{create_pipe_server, verify_pipe_server, PrivateSd};
+pub use win::{create_pipe_server, current_user_sid_string, verify_pipe_server, PrivateSd};
 
 #[cfg(windows)]
 mod win {
@@ -177,6 +177,11 @@ mod win {
     fn current_user_sid() -> io::Result<Vec<u8>> {
         // SAFETY: the pseudo-handle needs no closing.
         token_user_sid(unsafe { GetCurrentProcess() })
+    }
+
+    /// The current user's SID as `S-1-5-21-…` (what a Task Scheduler task names its user by).
+    pub fn current_user_sid_string() -> io::Result<String> {
+        sid_string(&current_user_sid()?)
     }
 
     /// The `TokenUser` SID of `process`, copied out as bytes.

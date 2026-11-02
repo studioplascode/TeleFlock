@@ -7,6 +7,7 @@ import { AgentGlyph, Button, EmptyState, NumberTicker, PageHeader, SegmentedCont
 import { HostTag } from "@/features/board/AgentCard";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { STATE_WORD, VIEWS } from "@/features/shell/vocab";
+import { isTimelineNotice, noticeName } from "./timeline";
 
 type Group = "all" | "finished" | "needs" | "problems" | "git" | "lifecycle";
 
@@ -26,6 +27,7 @@ const KIND_GROUP: Record<ActivityKind, Group> = {
   stopped: "lifecycle",
   compacted: "lifecycle",
   modelChanged: "lifecycle",
+  shellClosed: "lifecycle",
 };
 
 const KIND_STATUS: Record<ActivityKind, Status> = {
@@ -44,6 +46,7 @@ const KIND_STATUS: Record<ActivityKind, Status> = {
   stopped: "idle",
   compacted: "idle",
   modelChanged: "idle",
+  shellClosed: "idle",
 };
 
 const KIND_LABEL: Record<ActivityKind, string> = {
@@ -62,6 +65,7 @@ const KIND_LABEL: Record<ActivityKind, string> = {
   stopped: "Turn stopped",
   compacted: "Compacted",
   modelChanged: "Model changed",
+  shellClosed: "Closed",
 };
 
 const NOTIFY_STATUS: Record<NotifyKind, Status> = { needs: "needs-you", finished: "review", error: "error", quiet: "idle", info: "idle" };
@@ -76,10 +80,11 @@ const GROUPS = [
   { value: "lifecycle", label: "Lifecycle" },
 ] as const;
 
-/** Timeline rows: host activity, plus live notifications that have no activity twin (quiet, info). */
+/** Timeline rows: host activity, plus live notifications it has no entry for (`isTimelineNotice`). */
 type Row =
   | { type: "event"; id: string; at: number; ev: HostActivityEvent }
-  | { type: "notice"; id: string; at: number; n: HostNotification };
+  /** `named`: what the host's activity last called the notice's agent (for one that left the board). */
+  | { type: "notice"; id: string; at: number; n: HostNotification; named?: string };
 
 function dayLabel(at: number, now: number): string {
   const d = new Date(at);
@@ -100,7 +105,9 @@ function EventRow({ row, now, index }: { row: Row; now: number; index: number })
   const isEvent = row.type === "event";
   const hostId = isEvent ? row.ev.hostId : row.n.hostId;
   const agentId = isEvent ? row.ev.agentId : row.n.agentId;
-  const name = isEvent ? row.ev.agentName : row.n.agentId;
+  const onBoard = useCore((s) => (isEvent || !agentId ? undefined : s.hosts[hostId]?.state.agents.find((a) => a.id === agentId)?.name));
+  // A host's own notice (idle shells it closed, a test) belongs to no agent: TeleFlock on that host sent it.
+  const name = isEvent ? row.ev.agentName : noticeName(row.n, onBoard ?? row.named);
   const status = isEvent ? KIND_STATUS[row.ev.kind] : NOTIFY_STATUS[row.n.kind];
   const label = isEvent ? KIND_LABEL[row.ev.kind] : row.n.kind === "quiet" ? "Quiet" : "Notice";
   const title = isEvent ? row.ev.title : row.n.title;
@@ -250,10 +257,14 @@ export function ActivityView() {
 
   const rows: Row[] = [];
   for (const ev of events) if (group === "all" || KIND_GROUP[ev.kind] === group) rows.push({ type: "event", id: `${ev.hostId}:${ev.id}`, at: ev.at, ev });
-  if (group === "all" || group === "problems")
+  if (group === "all" || group === "problems") {
+    // newest first: the first entry of an agent has the name it had last
+    const named = new Map<string, string>();
+    for (const ev of events) if (!named.has(`${ev.hostId}:${ev.agentId}`)) named.set(`${ev.hostId}:${ev.agentId}`, ev.agentName);
     for (const n of notes)
-      if ((n.kind === "quiet" || n.kind === "info") && (!hostId || n.hostId === hostId) && (group === "all" || n.kind === "quiet"))
-        rows.push({ type: "notice", id: `n:${n.hostId}:${n.id}`, at: n.at, n });
+      if (isTimelineNotice(n) && (!hostId || n.hostId === hostId) && (group === "all" || n.kind === "quiet"))
+        rows.push({ type: "notice", id: `n:${n.hostId}:${n.id}`, at: n.at, n, named: named.get(`${n.hostId}:${n.agentId}`) });
+  }
   rows.sort((a, b) => b.at - a.at);
 
   const days: { label: string; rows: Row[] }[] = [];

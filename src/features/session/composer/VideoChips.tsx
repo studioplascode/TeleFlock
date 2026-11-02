@@ -1,4 +1,4 @@
-import { Check, Film, RotateCcw, X } from "lucide-react";
+import { Check, Film, MonitorPlay, RotateCcw, X } from "lucide-react";
 import { motion } from "motion/react";
 import type { DraftVideo } from "@/core/draftVideos";
 import { formatBytes } from "@/core/upload";
@@ -37,7 +37,7 @@ export function VideoChips({ videos, onRemove, onRetry, mobile = false, classNam
             initial={{ scale: 0.85, opacity: 0 }}
             animate={{ scale: 1, opacity: 1, transition: spring.bouncy }}
             role="group"
-            aria-label={`Video ${v.name}, ${formatBytes(v.size)}, ${stateText(v)}`}
+            aria-label={`${v.kind === "recording" ? "Recording" : "Video"} ${v.name}, ${formatBytes(v.size)}, ${stateText(v)}`}
             title={failed ? v.error : v.path ?? v.name}
             className={cn(
               "relative flex max-w-[260px] min-w-0 items-center gap-2 overflow-hidden rounded-[12px] py-1.5 pr-1 pl-2.5 shadow-hairline",
@@ -45,7 +45,11 @@ export function VideoChips({ videos, onRemove, onRetry, mobile = false, classNam
               failed ? "bg-error/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_35%,transparent)]" : "bg-tile-4",
             )}
           >
-            <Film className={cn("size-4 shrink-0", failed ? "text-error" : "text-accent-hi")} aria-hidden />
+            {v.kind === "recording" ? (
+              <MonitorPlay className={cn("size-4 shrink-0", failed ? "text-error" : "text-accent-hi")} aria-hidden />
+            ) : (
+              <Film className={cn("size-4 shrink-0", failed ? "text-error" : "text-accent-hi")} aria-hidden />
+            )}
             <span className="flex min-w-0 flex-col leading-tight">
               <span className="truncate text-[12px] font-bold text-ink">{v.name}</span>
               <span className={cn("flex items-center gap-1 truncate text-[10.5px] font-semibold tabular", failed ? "text-error" : "text-mute")}>

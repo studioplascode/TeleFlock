@@ -1,7 +1,10 @@
 import { useEffect, useRef } from "react";
 import { type CoreState, core, navigate, useCore, useUi } from "@/core";
 import type { ConnStatus } from "@/core/gen";
-import { formatAge, formatUsd, toast } from "@/design";
+import { formatAge, toast } from "@/design";
+import { decidedSince } from "@/features/autoAnswer/review";
+import { openHostPage } from "@/features/notify/openNotification";
+import { awayDigest } from "./awayDigest";
 
 /** Gaps shorter than this are network blips, not "being away". */
 const MIN_AWAY_MS = 45_000;
@@ -21,7 +24,8 @@ const MARKS: Record<string, HostMark> = {};
 
 /**
  * "While you were away" digest (spec §5 Activity): when a host comes back online after a real
- * gap, toast what finished, what needs you now and what it cost in between. Renders nothing.
+ * gap, toast what finished, what needs you now, the questions decide for me answered for you in
+ * between (still unreviewed) and what it cost. Renders nothing.
  */
 export function WhileAwayToast(): null {
   const statuses = useCore((s) => s.status);
@@ -78,20 +82,19 @@ async function digest(hostId: string, since: number, costBefore: number | null, 
   if (!entry) return;
   const needsNow = entry.state.agents.filter((a) => a.column === "needs").length;
   const spent = costBefore !== null ? Math.max(0, entry.state.usage.costUsd - costBefore) : null;
-  if (finished === 0 && needsNow === 0 && asked === 0 && (spent === null || spent < 0.005)) return;
-  const parts = [
-    `finished ${finished}`,
-    `needs you ${needsNow}`,
-    ...(spent !== null ? [`spent ${formatUsd(spent)}`] : []),
-  ];
+  const decided = decidedSince(entry.state.info.decisions, since);
+  const d = awayDigest({ finished, asked, needsNow, decided, spent });
+  if (!d) return;
   toast({
     title: `While you were away · ${entry.state.info.hostname}`,
-    description: `${parts.join(" · ")} — over the last ${formatAge(Date.now() - since).replace(/ ago$/, "")}.`,
-    status: needsNow > 0 ? "needs-you" : finished > 0 ? "review" : "running",
+    description: `${d.parts.join(" · ")} — over the last ${formatAge(Date.now() - since).replace(/ ago$/, "")}.`,
+    status: d.status,
     duration: 14_000,
     action:
-      needsNow > 0
+      d.action === "answer"
         ? { label: "Answer next", onClick: () => useUi.getState().setAnswerNext(true) }
-        : { label: "Activity", onClick: () => navigate({ name: "activity" }) },
+        : d.action === "review"
+          ? { label: "Review", onClick: () => openHostPage(hostId, "decisions") }
+          : { label: "Activity", onClick: () => navigate({ name: "activity" }) },
   });
 }

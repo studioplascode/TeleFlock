@@ -2,12 +2,14 @@ import { ArrowUp, ChevronRight, MoreVertical, PanelBottomOpen } from "lucide-rea
 import { AnimatePresence, animate, motion, useDragControls, useMotionValue, useTransform, type PanInfo } from "motion/react";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { agentKey as makeKey, navigate, parseAgentKey, useAgent, useColumnKeys, useHosts, useInbox } from "@/core";
+import { isChat } from "@/core/chats";
 import { AgentGlyph, BottomSheet, cn, IconButton, Skeleton, spring, StatusOrb, StatusPill, useActivity, useCalmMotion, useIdleReady } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { haptic } from "@/features/shell/haptics";
 import { useFirstUse } from "@/features/shell/hints";
 import { agentStateWord, NEEDS_WORD } from "@/features/shell/vocab";
 import { RecapLine } from "@/features/board/RecapLine";
+import { ChatTag } from "@/features/chats/ChatTag";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
 import { HostBadge, HostName, useMultiHost } from "@/features/hosts/HostBadge";
 import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
@@ -81,7 +83,7 @@ function SwipeHint({ doneRef }: { doneRef: RefObject<(() => void) | null> }) {
   });
   if (!show) return null;
   return (
-    <span className="flex items-center gap-1 rounded-full bg-chrome/72 px-2 py-0.5 text-2xs font-semibold text-mute shadow-hairline">
+    <span className="flex items-center gap-1 rounded-full bg-chrome/72 px-2 py-0.5 text-2xs font-semibold whitespace-nowrap text-mute shadow-hairline">
       swipe for next agent
       <motion.span className="grid" animate={calm ? undefined : { x: [0, 5, 0] }} transition={{ duration: 0.9, repeat: 3, ease: "easeInOut" }}>
         <ChevronRight className="size-3" />
@@ -101,8 +103,9 @@ function PagerDots({ keys, current, inline = false, onList, hintDone }: { keys: 
   if (keys.length < 2) return null;
   const cancel = () => window.clearTimeout(timer.current);
   return (
-    // Floating: the hint sits beside the dots (one row), so neither reaches the first message below.
-    <div className={cn("pointer-events-none flex items-center", inline ? "shrink-0 flex-col pb-1.5" : "absolute inset-x-0 top-0 z-raised justify-center gap-1.5")}>
+    // Floating: the hint sits beside the dots (one row) while they leave it room; else (12 dots on a narrow phone) it
+    // wraps whole onto a row of its own under them, over the top of the first message, never inside its pill.
+    <div className={cn("pointer-events-none flex items-center", inline ? "shrink-0 flex-col pb-1.5" : "absolute inset-x-0 top-0 z-raised flex-wrap justify-center gap-x-1.5 gap-y-1")}>
       <div
         className={cn("pointer-events-auto mt-0.5 flex items-center rounded-full px-1 select-none", !inline && "bg-chrome/72 shadow-hairline backdrop-blur-md")}
         role="tablist"
@@ -292,7 +295,9 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
   // Non-omp agents open straight onto a terminal: its first row would sit under floating dots.
   const terminal = agent != null && agent.omp == null;
   const multiHost = useMultiHost();
-  const where = agent ? [agent.repo, agent.branch].filter(Boolean).join(" · ") || agent.title : undefined;
+  // a chat has no repo or branch: the Chat tag, then its title
+  const chat = isChat(agent);
+  const where = agent ? (chat ? agent.title : [agent.repo, agent.branch].filter(Boolean).join(" · ") || agent.title) : undefined;
   return (
     <div className="flex h-full min-h-0 flex-col" data-status={status} data-session-root={key}>
       <MobileHeader
@@ -306,10 +311,11 @@ export function MobileSession({ hostId, agentId }: { hostId: string; agentId: st
           </span>
         }
         subtitle={
-          agent && multiHost ? (
-            // The host chip keeps a floor of its own width; the repo and branch take the rest.
+          agent && (multiHost || chat) ? (
+            // The host chip keeps a floor of its own width; the repo and branch (or the chat's title) take the rest.
             <span className="flex min-w-0 items-center gap-1.5">
-              <HostBadge hostId={hostId} className="max-w-[45%]" />
+              {multiHost && <HostBadge hostId={hostId} className="max-w-[45%]" />}
+              {chat && <ChatTag hostId={hostId} folder={agent.cwd} />}
               {where && <span className="min-w-0 truncate">{where}</span>}
             </span>
           ) : (

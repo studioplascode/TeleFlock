@@ -110,6 +110,20 @@ describe("job lists", () => {
 		expect(JSON.stringify(jobsSummary({ running: [], recent: [] }, [], false))).toBe(JOBS_NONE);
 	});
 
+	test("summary: subagents (task jobs, any depth) are not background jobs; commands they started are", () => {
+		const list = {
+			running: [job("0-Build", { type: "task", label: "baseline" }), job("bg_1", { label: "bun test", ownerId: "0-Build" }), job("0-Build.0-Nested", { type: "task", ownerId: "0-Build" })],
+			recent: [job("0-Old", { type: "task", status: "completed" }), job("bg_0", { status: "completed" })],
+			rootId: "Main",
+		};
+		// the freshest live widget belongs to a subagent: it is no glance for the commands
+		const summary = jobsSummary(list, [{ id: "0-Build", view: testsWidget(99) }, { id: "bg_1", view: testsWidget(9) }], true);
+		expect(summary).toMatchObject({ running: 1, recent: 1, waiting: true, glanceJob: "bun test" });
+		const subagentsOnly = jobsSummary({ running: [job("0-Build", { type: "task" })], recent: [], rootId: "Main" }, [{ id: "0-Build", view: testsWidget(5) }], true);
+		expect(subagentsOnly).toEqual({ running: 0, recent: 0, waiting: true });
+		expect(JSON.stringify(jobsSummary({ running: [job("0-Build", { type: "task" })], recent: [], rootId: "Main" }, [], false))).toBe(JOBS_NONE);
+	});
+
 	test("wire rows: owners below the root, task agents, cancellable only while running, inspection", () => {
 		const name = (id: string) => ({ "0-Explore": "Explore" })[id];
 		const sub = jobWire(job("bg_7", { ownerId: "0-Explore", command: "sleep 600" }), { rootId: "Main", name, cancellable: true, inspection: { pids: [41], output: "tick\n", cwd: "/w", exitCode: undefined, artifactId: "a1" } });
@@ -349,7 +363,8 @@ describe("jobs against a fake hostd", () => {
 		jobs.pending = true;
 		await tick();
 		await tick(); // unchanged: no second event
-		expect(jobEvents(hostd)).toEqual([{ running: 3, recent: 0, waiting: true, glance: { text: "140/190", label: "tests", trend: "▲ 12", trendTone: "success" }, glanceJob: "bun test" }]);
+		// the subagent (0-Explore) is not a background job: only the two commands count
+		expect(jobEvents(hostd)).toEqual([{ running: 2, recent: 0, waiting: true, glance: { text: "140/190", label: "tests", trend: "▲ 12", trendTone: "success" }, glanceJob: "bun test" }]);
 
 		// Streaming again: not waiting.
 		session.isStreaming = true;
@@ -378,7 +393,8 @@ describe("jobs against a fake hostd", () => {
 		expect((await hostd.request("jobCancel", { id: "bg_2" })).ok).toBe(true);
 		expect(jobs.cancels).toEqual([["Main", "bg_1"], ["0-Explore", "bg_2"]]);
 		// Cancelling sent the change at once.
-		expect(jobEvents(hostd).at(-1)).toMatchObject({ running: 1, recent: 2 });
+		// (the subagent still runs, but is no background job)
+		expect(jobEvents(hostd).at(-1)).toMatchObject({ running: 0, recent: 2 });
 
 		// Settled or unknown jobs: not_found; bad params: invalid_params.
 		expect(await hostd.request("jobCancel", { id: "bg_1" })).toMatchObject({ ok: false, error: { code: "not_found" } });

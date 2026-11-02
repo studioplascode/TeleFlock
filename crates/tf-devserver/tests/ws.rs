@@ -85,18 +85,23 @@ async fn websocket_protocol() {
     let (addr, _data) = start(None).await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token={TOKEN}")).await.unwrap();
 
-    // Replay first.
-    let types: Vec<String> = {
-        let mut v = Vec::new();
-        for _ in 0..4 {
-            v.push(next_json(&mut ws).await["event"]["type"].as_str().unwrap().to_string());
-        }
-        v
-    };
-    assert_eq!(types, ["profiles", "settings", "tunnels", "forwards"]);
-
+    // Replay first: every event comes before the reply to the first request. The app core's
+    // on-device dictation (tf-client feature `voice`, on when the workspace builds the desktop app
+    // too) adds its state after the browser's.
     ws.send(Message::Text(json!({"id": 1, "method": "app.info"}).to_string().into())).await.unwrap();
-    let r = next_json(&mut ws).await;
+    let mut types = Vec::new();
+    let r = loop {
+        let m = next_json(&mut ws).await;
+        match m["event"]["type"].as_str() {
+            Some(t) => types.push(t.to_string()),
+            None => break m,
+        }
+    };
+    let mut want = vec!["profiles", "settings", "tunnels", "forwards", "browser"];
+    if types.len() > want.len() {
+        want.push("dictation");
+    }
+    assert_eq!(types, want);
     assert_eq!(r["id"], 1);
     assert_eq!(r["result"]["platform"], "linux");
     assert_eq!(r["result"]["capabilities"]["notifications"], false);

@@ -1,20 +1,31 @@
-import { Check, Copy } from "lucide-react";
-import { memo, type ReactNode, useContext, useState } from "react";
+import { createContext, memo, type ReactNode, useContext, useState } from "react";
 import { linkProps } from "@/core";
 import { Caret, cn } from "@/design";
 import { PreviewButton } from "@/features/preview";
 import { SessionCtx } from "../context";
-import { highlight, languageFor, TOKEN_CLASS } from "../lib/highlight";
 import { lruMemo } from "../lib/lru";
+import { CodeBlock } from "./CodeBlock";
+import { DisplayMath, InlineImage, InlineMath, MermaidFigure, SvgFigure } from "./Figures";
 import { type Block, type Inline, localhostPort, parseBlocks, parseInline } from "./parse";
 
 const parseBlocksCached = lruMemo(300, parseBlocks);
+
+/** `data:` image sources the renderer will show: nothing else is fetched on the author's say-so. */
+const SHOWN_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|avif|svg\+xml)[;,]/i;
+
+/** How `![alt](src)` sources become shown ones (see `MarkdownProps.imageSrc`). */
+const ImageSrcCtx = createContext<((src: string) => string | undefined) | undefined>(undefined);
 
 export interface MarkdownProps {
   text: string;
   /** Shows the glowing caret at the end of the last block. */
   streaming?: boolean;
   className?: string;
+  /**
+   * Maps an image's markdown source (a relative path, say) to what is shown, or undefined to show
+   * its alt text. Only `data:image/*` results are shown; without this, only such sources are.
+   */
+  imageSrc?: (src: string) => string | undefined;
 }
 
 /** How long a streamed chunk keeps its own fade-in span before it settles into plain text. */
@@ -96,17 +107,19 @@ function markFresh(nodes: Inline[], chunks: FreshChunk[]): Inline[] {
  * their source, so while streaming only the last (growing) block re-renders; its newest chunks
  * fade in from omp purple behind the caret.
  */
-export function Markdown({ text, streaming = false, className }: MarkdownProps) {
+export function Markdown({ text, streaming = false, className, imageSrc }: MarkdownProps) {
   const blocks = parseBlocksCached(text);
   const fresh = useFreshChunks(text, streaming);
   return (
-    <div className={cn("tf-md min-w-0 text-[13.5px] leading-[1.62] text-ink-2 max-md:leading-[1.55]", className)}>
-      {blocks.map((b, i) => {
-        const last = streaming && i === blocks.length - 1;
-        return <BlockView key={i} block={b} src={b.src} tail={last ? <Caret /> : null} fresh={last ? fresh : NO_FRESH} />;
-      })}
-      {streaming && blocks.length === 0 && <Caret />}
-    </div>
+    <ImageSrcCtx value={imageSrc}>
+      <div className={cn("tf-md min-w-0 text-[13.5px] leading-[1.62] text-ink-2 max-md:leading-[1.55]", className)}>
+        {blocks.map((b, i) => {
+          const last = streaming && i === blocks.length - 1;
+          return <BlockView key={i} block={b} src={b.src} tail={last ? <Caret /> : null} fresh={last ? fresh : NO_FRESH} />;
+        })}
+        {streaming && blocks.length === 0 && <Caret />}
+      </div>
+    </ImageSrcCtx>
   );
 }
 
@@ -115,7 +128,7 @@ const BlockView = memo(
     return renderBlock(block, tail, fresh);
   },
   (a, b) =>
-    a.src === b.src && a.tail === b.tail && a.fresh === b.fresh && a.block.t === b.block.t && (a.block.t !== "code" || b.block.t !== "code" || a.block.open === b.block.open),
+    a.src === b.src && a.tail === b.tail && a.fresh === b.fresh && a.block.t === b.block.t && (!("open" in a.block) || !("open" in b.block) || a.block.open === b.block.open),
 );
 
 function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH): ReactNode {
@@ -138,8 +151,18 @@ function renderBlock(b: Block, tail: ReactNode, fresh: FreshChunk[] = NO_FRESH):
     }
     case "hr":
       return <hr className="my-4 border-0 border-t border-line-2 max-md:my-3" />;
-    case "code":
+    case "code": {
+      const lang = b.lang?.toLowerCase();
+      // A fence is drawn once it is closed, never per streamed token.
+      if (!b.open && b.code.trim()) {
+        if (lang === "mermaid" || lang === "mmd") return <MermaidFigure code={b.code} />;
+        if (lang === "svg") return <SvgFigure code={b.code} />;
+        if (lang === "math") return <DisplayMath tex={b.code} />;
+      }
       return <CodeBlock code={b.code} lang={b.lang} open={b.open} tail={tail} />;
+    }
+    case "math":
+      return b.open ? <CodeBlock code={b.tex} lang="math" open tail={tail} /> : <DisplayMath tex={b.tex} />;
     case "quote":
       return (
         <blockquote className="my-2 border-l-2 border-accent/50 pl-3 text-mute max-md:my-1.5 max-md:pl-2.5">
@@ -266,59 +289,18 @@ export function Inlines({ nodes }: { nodes: Inline[] }) {
           }
           case "br":
             return <br key={i} />;
+          case "math":
+            return n.display ? <DisplayMath key={i} tex={n.tex} /> : <InlineMath key={i} tex={n.tex} />;
+          case "image":
+            return <MarkdownImage key={i} alt={n.alt} src={n.src} />;
         }
       })}
     </>
   );
 }
 
-export function CodeBlock({ code, lang, open = false, tail, className, maxHeight }: { code: string; lang?: string; open?: boolean; tail?: ReactNode; className?: string; maxHeight?: number }) {
-  const key = languageFor(lang);
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    void navigator.clipboard?.writeText(code).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1400);
-    });
-  };
-  return (
-    <div className={cn("group/code relative my-2.5 overflow-hidden rounded-md bg-bg-deep/80 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_7%,transparent)]", className)}>
-      <div data-find-skip className="flex h-7 items-center gap-2 border-b border-line px-3 text-2xs text-mute-2 max-md:h-6 max-md:px-2.5">
-        <span className="font-mono font-semibold tracking-wide">{lang || "text"}</span>
-        {open && <span className="tf-shimmer-text tf-loop font-semibold">writing…</span>}
-        <button
-          type="button"
-          onClick={copy}
-          className="pressable focus-ring ml-auto flex items-center gap-1 rounded-xs px-1.5 py-0.5 text-mute opacity-0 transition-opacity group-hover/code:opacity-100 hover:text-ink focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-100"
-          aria-label="Copy code"
-        >
-          {copied ? <Check className="size-3 text-done" /> : <Copy className="size-3" />}
-          {copied ? "Copied" : "Copy"}
-        </button>
-      </div>
-      <pre className="overflow-x-auto px-3 py-2.5 font-mono text-[12px] leading-[1.6] text-ink-2 max-md:px-2.5 max-md:py-2 max-md:text-[11.5px] max-md:leading-[1.55]" style={maxHeight ? { maxHeight, overflowY: "auto" } : undefined}>
-        <code>
-          <Highlighted code={code} lang={key} />
-          {tail}
-        </code>
-      </pre>
-    </div>
-  );
-}
-
-export function Highlighted({ code, lang }: { code: string; lang?: string }) {
-  const tokens = highlight(code, lang);
-  return (
-    <>
-      {tokens.map((t, i) =>
-        t.kind === "plain" ? (
-          t.text
-        ) : (
-          <span key={i} className={TOKEN_CLASS[t.kind]}>
-            {t.text}
-          </span>
-        ),
-      )}
-    </>
-  );
+function MarkdownImage({ alt, src }: { alt: string; src: string }) {
+  const resolve = useContext(ImageSrcCtx);
+  const shown = resolve ? resolve(src) : src;
+  return shown && SHOWN_IMAGE.test(shown) ? <InlineImage src={shown} alt={alt} /> : alt;
 }

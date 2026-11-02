@@ -75,7 +75,7 @@ fn read(path: &Path) -> FileData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autoanswer::core::{Countdown, OwnPolicy};
+    use crate::autoanswer::core::{sample_decision, Countdown, Decided, OwnPolicy};
     use tf_proto::autoanswer::AutoAnswer;
 
     #[test]
@@ -113,5 +113,22 @@ mod tests {
         assert_eq!(load(&path, "default"), SessionData::default());
         assert!(!path.exists());
         assert!(std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("auto-answer.json.bad-")));
+    }
+
+    /// Review items are saved with their review (atomically, with the rest of the session's
+    /// data); a file written before there were any loads without them.
+    #[test]
+    fn review_items_round_trip_with_their_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        std::fs::write(&path, br#"{"version":1,"sessions":{"default":{"default":{"enabled":true,"afterSecs":600,"onlyWhenNoApp":false}}}}"#).unwrap();
+        assert!(load(&path, "default").decisions.is_empty());
+        let mut d = SessionData::default();
+        d.decisions.push(Decided { decision: sample_decision("d1", 5), reviewed_at: None, reviewed_by: None });
+        d.decisions.push(Decided { decision: sample_decision("d2", 6), reviewed_at: Some(9), reviewed_by: Some("Desk".into()) });
+        save(&path, "work", &d).unwrap();
+        assert_eq!(load(&path, "work"), d);
+        // A session holding nothing but review items stays in the file: they wait for the user.
+        assert_eq!(sessions(&path).keys().collect::<Vec<_>>(), ["default", "work"]);
     }
 }

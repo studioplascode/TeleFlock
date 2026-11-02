@@ -27,7 +27,7 @@ import {
   useMediaQuery,
 } from "@/design";
 import { PreviewSheet } from "@/features/preview/PreviewButton";
-import { openExternal, openTunnel } from "@/features/preview/store";
+import { openTunnel, showPreview } from "@/features/preview/store";
 import { useHerdrHealth, useHostName } from "@/features/hosts/HerdrControls";
 import { herdrDown } from "@/features/hosts/herdrHealth";
 import { haptic } from "@/features/shell/haptics";
@@ -365,9 +365,7 @@ export function TerminalPane({
     const openPreview = async (port: number) => {
       haptic("select");
       const tunnel = await openTunnel(hostId, port);
-      if (!tunnel) return;
-      if (mobileRef.current) setPreviewTunnel(tunnel);
-      else openExternal(tunnel);
+      if (tunnel) showPreview(tunnel, mobileRef.current, setPreviewTunnel);
     };
     const sub = term.registerLinkProvider({
       provideLinks(y, callback) {

@@ -333,7 +333,7 @@ function NewAgentBody({ open, initialHostId, initialWorkspaceId, onClose }: { op
 
                 <AnimatePresence initial={false}>
                   {startAgent && hostId && (
-                    <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="overflow-hidden">
+                    <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth} className="overflow-clip">
                       <AgentFields hostId={hostId} draft={agent} onChange={patchAgent} derivedName={derived} suggestedName={auto.ai ? auto.name : null} takenNames={takenNames} />
                     </motion.div>
                   )}

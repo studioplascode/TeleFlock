@@ -1,3 +1,4 @@
+import { isChat, isChatRepo } from "@/core/chats";
 import type { Agent, BranchList, HostState, Workspace } from "@/core/gen";
 import { basename } from "@/features/workspace/shared/paths";
 import { slugFromPrompt, slugify } from "@/features/workspace/shared/slug";
@@ -5,6 +6,9 @@ import type { DispatchEntry } from "./store";
 
 /** Dispatch branches are `dispatch/<name>`; the agent and its workspace are called `<name>`. */
 export const BRANCH_PREFIX = "dispatch/";
+
+/** The repo chip's choice for chats (`CHAT_REPO`): each message starts an omp agent in a folder of its own, no repository. */
+export const CHAT_CHOICE = "No folder · chat";
 
 /** herdr agent names start with a letter; prompts without usable words fall back to `task`. */
 export function baseSlug(prompt: string): string {
@@ -78,6 +82,12 @@ const PREFETCH_MIN_WORDS = 3;
 export function prefetchKey(draft: string): string | null {
   const t = draft.trim();
   return t.split(/\s+/).filter((w) => /[a-z0-9]/i.test(w)).length >= PREFETCH_MIN_WORDS ? t : null;
+}
+
+/** What Rambler is told a dictated task is about: the thread's repository by name; nothing for a chat, which has none. */
+export function rambleAbout(repo: string | null | undefined): string | undefined {
+  if (!repo || isChatRepo(repo)) return undefined;
+  return `Repository: ${repo.split("/").filter(Boolean).pop() ?? repo}`;
 }
 
 /** The newest `maxEntries` entries across all threads, prompts clipped to `maxPrompt` characters (persisted copy). */
@@ -173,10 +183,12 @@ function inEntryWorktree(a: Agent, e: DispatchEntry, scope: AgentScope): boolean
  * The live agent behind an entry, always inside the entry's own worktree (agent names are unique
  * per host but get reused across repos; pane and workspace ids get reused after herdr restarts and
  * demo reloads): the id herdr reported, else its pane (the id can arrive later), else — for
- * entries whose answer never arrived (reload, timeout) — the agent with the entry's name.
+ * entries whose answer never arrived (reload, timeout) — the agent with the entry's name. A chat
+ * entry (`chat`) has no worktree: it links chat agents only (`Agent.chat`), and a worktree entry
+ * never links one.
  */
 export function resolveAgent(e: DispatchEntry, agents: readonly Agent[], scope: AgentScope): Agent | undefined {
-  const mine = (a: Agent) => inEntryWorktree(a, e, scope);
+  const mine = e.chat ? isChat : (a: Agent) => !isChat(a) && inEntryWorktree(a, e, scope);
   if (e.agentId) {
     const byId = agents.find((a) => a.id === e.agentId && mine(a));
     if (byId) return byId;

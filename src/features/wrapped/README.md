@@ -24,7 +24,7 @@ export function buildCard(f: WrappedFacts, week: Week, hosts: number): WrappedCa
 // paint.ts — the 1080×1350 poster on a canvas, and its PNG
 export function paintPoster(ctx: CanvasRenderingContext2D, card: WrappedCard): void;
 export function posterPng(card: WrappedCard): Promise<Blob>;
-// share.ts — savePng (download), copyPng (ClipboardItem), sharePng (share sheet) and their feature checks
+// share.ts — copyPng (ClipboardItem), sharePng (share sheet) and their feature checks
 
 // src/core/demo/wrapped.ts — the demo hosts' week (wrapped.test.ts there)
 ```

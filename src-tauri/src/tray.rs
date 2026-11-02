@@ -104,7 +104,8 @@ impl<R: Runtime> Tray<R> {
                 }
                 MENU_CAPTURE => crate::capture::show(app),
                 MENU_OPEN => show_main(app),
-                MENU_QUIT => app.exit(0),
+                // The pages save their unsent drafts first (the AppImage installs a waiting update then).
+                MENU_QUIT => crate::drafts::quit(app),
                 _ => {}
             })
             .on_tray_icon_event(|tray, e| {

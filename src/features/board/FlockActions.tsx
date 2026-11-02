@@ -1,9 +1,10 @@
-import { Bot, Check, ChevronDown, FolderGit2, FolderOpen, GitBranchPlus, GitFork, History, Plus, Send, Server } from "lucide-react";
+import { Bot, Check, ChevronDown, FolderGit2, FolderOpen, GitBranchPlus, GitFork, History, MessagesSquare, Plus, Send, Server } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
 import { navigate, useCore, useHostIds, useHosts, useUi } from "@/core";
 import type { ConnPhase, ConnStatus } from "@/core/gen";
 import { cn, formatAge, spring, StatusOrb, useCalmMotion } from "@/design";
+import { openChat } from "@/features/dispatch/openChat";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { haptic } from "@/features/shell/haptics";
 import { closeSheet, openSheet } from "@/features/shell/sheets";
@@ -71,6 +72,16 @@ function CreateActions() {
           haptic("select");
           closeSheet();
           navigate({ name: "dispatch" });
+        }}
+      />
+      <SheetRow
+        icon={<MessagesSquare />}
+        label={ACTIONS.newChat.label}
+        hint={ACTIONS.newChat.description}
+        onClick={() => {
+          haptic("select");
+          closeSheet();
+          openChat();
         }}
       />
       {row("newWorktree", <GitBranchPlus />, (hostId) => openDialog({ kind: "newWorktree", hostId }))}

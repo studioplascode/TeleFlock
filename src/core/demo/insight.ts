@@ -1,17 +1,22 @@
 import { apiError } from "../errors";
-import type { Agent, ArtifactContent, ArtifactFile, ArtifactKind, ContextXray, LocalWritten, SessionArtifacts, XrayCategory, XrayEntry } from "../gen";
+import type { Agent, ArtifactContent, ArtifactFile, ArtifactKind, ContextXray, LocalWritten, SessionArtifacts, TranscriptItem, XrayCategory, XrayEntry } from "../gen";
+import { presentedFiles } from "./presented";
+import { base64Bytes } from "./rng";
 
 /**
  * Demo host: a session's artifacts (`session.artifacts`, `session.artifact`), pasted texts saved
  * into it (`session.writeLocal`, kept in memory per agent) and its context X-ray
- * (`session.context`), derived from the demo agent.
+ * (`session.context`), derived from the demo agent and its transcript (the snapshots its `present`
+ * calls wrote, ./presented).
  */
 
 interface Fixture {
   kind: ArtifactKind;
   name: string;
-  ageMin: number;
-  text: string;
+  /** Last modified. */
+  mtime: number;
+  /** UTF-8 text, or the bytes of a binary file (an image a presented document shows). */
+  body: string | Uint8Array;
 }
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "task";
@@ -21,44 +26,92 @@ const saved = new Map<string, { name: string; text: string; at: number }[]>();
 /** hostd's cap (`ops/artifact_files.rs` MAX_LOCAL_WRITE). */
 const MAX_LOCAL_WRITE = 4 << 20;
 
-function fixtures(agent: Agent): Fixture[] {
+function fixtures(agent: Agent, now: number, items: readonly TranscriptItem[]): Fixture[] {
   const topic = agent.title || agent.name;
   const plan = `${slug(topic)}-plan.md`;
+  const ago = (min: number) => now - min * 60_000;
   const out: Fixture[] = [
     {
       kind: "local",
       name: plan,
-      ageMin: 42,
-      text: `# Plan: ${topic}\n\n## Context\nThe current behaviour is covered by the existing tests; nothing on the board depends on the old shape.\n\n## Steps\n1. Read the module and its callers.\n2. Change the data shape in one place.\n3. Update the callers and their tests.\n4. Run \`bun test\` and the typecheck.\n\n## Risks\n- Cached state written by older builds.\n- A caller outside the repo (none found).\n`,
+      mtime: ago(42),
+      body: `# Plan: ${topic}\n\n## Context\nThe current behaviour is covered by the existing tests; nothing on the board depends on the old shape.\n\n## Steps\n1. Read the module and its callers.\n2. Change the data shape in one place.\n3. Update the callers and their tests.\n4. Run \`bun test\` and the typecheck.\n\n## Risks\n- Cached state written by older builds.\n- A caller outside the repo (none found).\n`,
     },
     {
       kind: "local",
       name: "reports/findings.md",
-      ageMin: 18,
-      text: `# Findings\n\n| Area | Status |\n|---|---|\n| Parser | ✅ covered |\n| Cache | ⚠️ stale entries survive a restart |\n| UI | ✅ |\n\nThe cache keeps entries written by builds before 0.6, which still parse but carry no version.\n`,
+      mtime: ago(18),
+      body: `# Findings\n\n| Area | Status |\n|---|---|\n| Parser | ✅ covered |\n| Cache | ⚠️ stale entries survive a restart |\n| UI | ✅ |\n\nThe cache keeps entries written by builds before 0.6, which still parse but carry no version.\n`,
     },
-    { kind: "local", name: "scratch/notes.txt", ageMin: 9, text: "todo: re-run the flaky suite with --rerun-each 20\nlast failure: test/cache.test.ts:88 (timeout)\n" },
+    { kind: "local", name: "scratch/notes.txt", mtime: ago(9), body: "todo: re-run the flaky suite with --rerun-each 20\nlast failure: test/cache.test.ts:88 (timeout)\n" },
     {
       kind: "agent",
       name: "0-Explore.md",
-      ageMin: 25,
-      text: `## Explore: where is the cache written?\n\n- \`src/core/cache.ts:41\` writes it on every flush.\n- \`src/core/cache.ts:97\` reads it at start; no version check.\n- Nothing else touches the file.\n`,
+      mtime: ago(25),
+      body: `## Explore: where is the cache written?\n\n- \`src/core/cache.ts:41\` writes it on every flush.\n- \`src/core/cache.ts:97\` reads it at start; no version check.\n- Nothing else touches the file.\n`,
     },
-    { kind: "agent", name: "0-Explore/0-Explore.1-Grep.md", ageMin: 26, text: "3 hits for `cacheVersion` (all in tests).\n" },
+    { kind: "agent", name: "0-Explore/0-Explore.1-Grep.md", mtime: ago(26), body: "3 hits for `cacheVersion` (all in tests).\n" },
   ];
   if (agent.turns > 3)
-    out.push({ kind: "handoff", name: "handoff-2026-10-29T07-12-44-210Z.md", ageMin: 70, text: `# Handoff\n\nWorking on: ${topic}.\n\nDone: plan approved, parser updated.\nNext: migrate the cache, then the UI.\n` });
+    out.push({ kind: "handoff", name: "handoff-2026-10-29T07-12-44-210Z.md", mtime: ago(70), body: `# Handoff\n\nWorking on: ${topic}.\n\nDone: plan approved, parser updated.\nNext: migrate the cache, then the UI.\n` });
+  // What it presented: each finished `present` call's snapshot and the files copied with it, written as the call ended.
+  for (const item of items) {
+    if (item.kind !== "tool" || !item.artifact) continue;
+    const mtime = item.at + (item.durationMs ?? 0);
+    for (const f of presentedFiles(item.artifact.name)) out.push({ kind: "local", name: f.name, mtime, body: f.body });
+  }
   return out;
 }
 
 const urlOf = (f: Fixture) => (f.kind === "local" ? `local://${f.name}` : f.kind === "agent" ? `agent://${f.name.slice(f.name.lastIndexOf("/") + 1, -3)}` : undefined);
 
-function files(agent: Agent, now: number): ArtifactFile[] {
-  const pasted = (saved.get(agent.id) ?? []).map((s): ArtifactFile => ({ kind: "local", name: s.name, url: `local://${s.name}`, size: new TextEncoder().encode(s.text).length, mtime: s.at }));
-  return fixtures(agent)
-    .map((f): ArtifactFile => ({ kind: f.kind, name: f.name, url: urlOf(f), size: new TextEncoder().encode(f.text).length, mtime: now - f.ageMin * 60_000, title: /^#{1,3} (.+)$/m.exec(f.text)?.[1] }))
+const utf8 = new TextEncoder();
+const bytesOf = (f: Fixture): Uint8Array => (typeof f.body === "string" ? utf8.encode(f.body) : f.body);
+
+/** hostd's `TITLE_BYTES`: how much of a file its title is looked for in. */
+const TITLE_BYTES = 4096;
+/** hostd's `SNIFF_BYTES`: how much of a file decides whether it is text. */
+const SNIFF_BYTES = 8192;
+/** omp's `BINARY_FILE_EXTENSIONS`: never text (hostd `ops/artifact_files.rs`). */
+const BINARY_NAME = /\.(?:7z|avi|bmp|bz2|db|doc|docx|gif|gz|ico|jpeg|jpg|m4v|mkv|mov|mp4|pdf|png|ppt|pptx|rar|sqlite|tgz|webm|webp|wmv|xls|xlsx|xz|zip)$/i;
+
+/** As hostd lists it: an `.html` page's `<title>`, a `.md` file's first heading (`#`–`###`, outside code fences). */
+function titleOf(f: Fixture): string | undefined {
+  const html = /\.html?$/.test(f.name);
+  if (!html && !f.name.endsWith(".md")) return undefined;
+  const head = new TextDecoder().decode(bytesOf(f).subarray(0, TITLE_BYTES));
+  if (html) return /<title[^>]*>([\s\S]*?)<\/title/i.exec(head)?.[1]?.trim().split(/\s+/).join(" ") || undefined;
+  let fenced = false;
+  for (const line of head.split("\n")) {
+    const t = line.trimStart();
+    if (t.startsWith("```") || t.startsWith("~~~")) fenced = !fenced;
+    else if (!fenced) {
+      const title = /^#{1,3} (.*)$/.exec(t)?.[1]?.trim().replace(/#+$/, "").trim();
+      if (title) return title;
+    }
+  }
+  return undefined;
+}
+
+/** As hostd decides it: a known binary type, or NUL bytes or invalid UTF-8 in the first 8 KiB. */
+function isBinary(name: string, bytes: Uint8Array): boolean {
+  const head = bytes.subarray(0, SNIFF_BYTES);
+  if (BINARY_NAME.test(name) || head.includes(0)) return true;
+  try {
+    // `stream`: a character the sample cuts in half is not an error
+    new TextDecoder("utf-8", { fatal: true }).decode(head, { stream: true });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function files(agent: Agent, now: number, items: readonly TranscriptItem[]): ArtifactFile[] {
+  const pasted = (saved.get(agent.id) ?? []).map((s): ArtifactFile => ({ kind: "local", name: s.name, url: `local://${s.name}`, size: utf8.encode(s.text).length, mtime: s.at }));
+  return fixtures(agent, now, items)
+    .map((f): ArtifactFile => ({ kind: f.kind, name: f.name, url: urlOf(f), size: bytesOf(f).length, mtime: f.mtime, title: titleOf(f) }))
     .concat(pasted)
-    .sort((a, b) => b.mtime - a.mtime);
+    .sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /** omp's overview split: largest remainder of `total` by `weights`. */
@@ -107,11 +160,11 @@ function xray(agent: Agent, now: number): ContextXray {
   return { source: "omp", model: agent.omp?.model?.label ?? agent.omp?.model?.id, window, used, buffer, free: Math.max(0, window - used - buffer), threshold, categories, images: agent.turns % 2 === 0 ? 2 : 0, dropImages: true, at: now };
 }
 
-/** `session.artifacts` / `session.artifact` / `session.writeLocal` / `session.context` for a demo agent. */
-export function demoInsight(method: string, p: Record<string, unknown>, agent: Agent, now: number, home: string): unknown {
+/** `session.artifacts` / `session.artifact` / `session.writeLocal` / `session.context` for a demo agent; `items`: its transcript. */
+export function demoInsight(method: string, p: Record<string, unknown>, agent: Agent, now: number, home: string, items: readonly TranscriptItem[] = []): unknown {
   if (agent.kind !== "omp") throw apiError("unsupported", `${agent.name} is a ${agent.kind} agent; only omp sessions have artifacts`);
   const dir = `${home}/.omp/agent/sessions/-demo/2026-10-29T07-00-00-000Z_${agent.id}`;
-  if (method === "session.artifacts") return { dir, localRoot: `${dir}/local`, files: files(agent, now), truncated: false } satisfies SessionArtifacts;
+  if (method === "session.artifacts") return { dir, localRoot: `${dir}/local`, files: files(agent, now, items), truncated: false } satisfies SessionArtifacts;
   if (method === "session.writeLocal") {
     // As tf-hostd: the next `paste-<n>.md` past every one there, owner-only, 4 MiB at most.
     const text = typeof p.text === "string" ? p.text : "";
@@ -126,15 +179,14 @@ export function demoInsight(method: string, p: Record<string, unknown>, agent: A
   }
   if (method === "session.artifact") {
     const pasted = p.kind === "local" ? saved.get(agent.id)?.find((s) => s.name === p.name) : undefined;
-    if (pasted) {
-      const size = new TextEncoder().encode(pasted.text).length;
-      return { kind: "local", name: pasted.name, url: `local://${pasted.name}`, path: `${dir}/local/${pasted.name}`, size, mtime: pasted.at, text: pasted.text, truncated: false, binary: false } satisfies ArtifactContent;
-    }
-    const f = fixtures(agent).find((x) => x.kind === p.kind && x.name === p.name);
+    const f: Fixture | undefined = pasted ? { kind: "local", name: pasted.name, mtime: pasted.at, body: pasted.text } : fixtures(agent, now, items).find((x) => x.kind === p.kind && x.name === p.name);
     if (!f) throw apiError("not_found", `${String(p.name)} does not exist`);
-    const size = new TextEncoder().encode(f.text).length;
     const path = f.kind === "local" ? `${dir}/local/${f.name}` : `${dir}/${f.name}`;
-    return { kind: f.kind, name: f.name, url: urlOf(f), path, size, mtime: now - f.ageMin * 60_000, text: f.text, truncated: false, binary: false } satisfies ArtifactContent;
+    const bytes = bytesOf(f);
+    const binary = isBinary(f.name, bytes);
+    // As tf-hostd: a `base64` read answers any file's bytes as `data`; a text read a text file's text, a binary file's nothing.
+    const read = p.base64 === true ? { data: base64Bytes(bytes) } : binary ? {} : { text: typeof f.body === "string" ? f.body : new TextDecoder().decode(bytes) };
+    return { kind: f.kind, name: f.name, url: urlOf(f), path, size: bytes.length, mtime: f.mtime, ...read, truncated: false, binary } satisfies ArtifactContent;
   }
   if (agent.parked) throw apiError("parked", `${agent.name} is done and its pane is closed`, { hint: "Resume it first" });
   return xray(agent, now);

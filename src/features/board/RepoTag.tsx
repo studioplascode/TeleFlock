@@ -2,6 +2,7 @@ import { FolderGit2, FolderOpen } from "lucide-react";
 import type { CSSProperties } from "react";
 import { useCore } from "@/core";
 import { agentGlyphTheme, cn } from "@/design";
+import { ChatTag } from "@/features/chats/ChatTag";
 import { basename, tildify } from "@/features/workspace/shared/paths";
 
 /**
@@ -26,6 +27,8 @@ export interface RepoTagProps {
   repo?: string;
   branch?: string;
   cwd?: string;
+  /** A chat task (`Agent.chat`): the "Chat" chip instead of a repo or folder (it has neither a repo nor a branch). */
+  chat?: boolean;
   /** On the sunset hero card: white on a dark tint, like the card's state pill. */
   sunset?: boolean;
   className?: string;
@@ -34,10 +37,16 @@ export interface RepoTagProps {
 /**
  * Where an agent works, the same on every agent surface: a chip with the repo icon and name in the repo's
  * accent (a neutral folder chip when the agent isn't in a git repo), then the branch as secondary text.
- * The branch gives way first when the line runs out of room.
+ * The branch gives way first when the line runs out of room. A chat gets the "Chat" chip (`ChatTag`).
  */
-export function RepoTag({ hostId, repo, branch, cwd, sunset = false, className }: RepoTagProps) {
+export function RepoTag({ hostId, repo, branch, cwd, chat = false, sunset = false, className }: RepoTagProps) {
   const home = useCore((s) => (repo ? undefined : s.hosts[hostId]?.state.info.home));
+  if (chat)
+    return (
+      <span className={cn("inline-flex max-w-full min-w-0 items-center", className)}>
+        <ChatTag hostId={hostId} folder={cwd} sunset={sunset} />
+      </span>
+    );
   const name = checkoutName({ repo, cwd }, home);
   if (!name && !branch) return null;
   const accent = name?.repo && !sunset ? repoAccent(name.name) : undefined;

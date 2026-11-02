@@ -1,17 +1,19 @@
 import { create } from "zustand";
-import { core, getAgentViews, parseAgentKey, toApiError } from "@/core";
+import { core, getAgentViews, parseAgentKey, toApiError, useHosts } from "@/core";
 import type { AutoAnswer } from "@/core/gen";
 import { toast } from "@/design";
 import { clampPolicy, policySummary } from "./format";
+import { type AnswerChoice, changeAnswerMessage, decisionKey, type HostDecision } from "./review";
 
 /*
  * Decide for me's calls (architecture §3.23): cancel or postpone one question's countdown, set a
- * running agent's own policy, set a host's default. Failures become error toasts with the host's
- * words; what changed shows on the agent itself (`Agent.autoAnswer`), so successes stay quiet
- * except for the policy changes made in a dialog.
+ * running agent's own policy, set a host's default, mark its decisions reviewed or change one.
+ * Failures become error toasts with the host's words; what changed shows on the agent itself
+ * (`Agent.autoAnswer`) or leaves the Inbox, so successes stay quiet except for the policy changes
+ * made in a dialog and a changed answer.
  */
 
-/** Calls in flight, by agent key (or `host:<hostId>`): spinners, and no double sends. */
+/** Calls in flight, by agent key (`host:<hostId>`, `decision:<hostId>/<id>`): spinners, and no double sends. */
 const usePending = create<{ keys: Record<string, true> }>(() => ({ keys: {} }));
 
 function setPending(key: string, on: boolean): void {
@@ -104,4 +106,76 @@ export async function setHostAutoAnswer(hostId: string, policy: AutoAnswer): Pro
       return undefined;
     }
   });
+}
+
+/** Decisions marked reviewed here (`decisionKey`): hidden at once, before the host's state drops them. */
+export const useReviewedHere = create<{ keys: Record<string, true> }>(() => ({ keys: {} }));
+
+const pendingKey = (d: Pick<HostDecision, "hostId" | "id">) => `decision:${decisionKey(d)}`;
+
+/** Looks good, Change answer or Mark all reviewed is on its way for this decision. */
+export function useDecisionPending(d: Pick<HostDecision, "hostId" | "id">): boolean {
+  return usePending((s) => s.keys[pendingKey(d)] === true);
+}
+
+/** `host.autoAnswerReview {ids}` (never `all`: only what the user saw), then hides them here. */
+async function markReviewed(hostId: string, list: readonly HostDecision[]): Promise<void> {
+  await core.host(hostId).call("host.autoAnswerReview", { ids: list.map((d) => d.id) });
+  useReviewedHere.setState((s) => ({ keys: { ...s.keys, ...Object.fromEntries(list.map((d) => [decisionKey(d), true as const])) } }));
+}
+
+/**
+ * Marks decisions reviewed for every device of their hosts' sessions: one call per host with the
+ * ids shown (ids reviewed elsewhere meanwhile are skipped by the host). Decisions with a call on
+ * its way are left out. True when every host took them.
+ */
+export async function reviewDecisions(list: readonly HostDecision[]): Promise<boolean> {
+  const byHost = new Map<string, HostDecision[]>();
+  for (const d of list) {
+    if (usePending.getState().keys[pendingKey(d)]) continue;
+    byHost.set(d.hostId, [...(byHost.get(d.hostId) ?? []), d]);
+  }
+  const done = await Promise.all(
+    [...byHost].map(async ([hostId, ds]) => {
+      for (const d of ds) setPending(pendingKey(d), true);
+      try {
+        await markReviewed(hostId, ds);
+        return true;
+      } catch (e) {
+        const host = useHosts.getState().profiles.find((p) => p.id === hostId)?.name ?? hostId;
+        return failed(ds.length === 1 ? `Couldn't mark ${ds[0]?.agentName}'s decision reviewed` : `Couldn't mark ${ds.length} decisions on ${host} reviewed`, e);
+      } finally {
+        for (const d of ds) setPending(pendingKey(d), false);
+      }
+    }),
+  );
+  return done.every(Boolean);
+}
+
+/**
+ * Changes an answer decide for me sent: the question is gone, so the agent gets a message
+ * (`agent.prompt`, `changeAnswerMessage`), then the decision is marked reviewed. `agent` is the
+ * one on the board now (it may run under a newer id than the decision's).
+ */
+export async function changeDecisionAnswer(d: HostDecision, agent: { id: string; name: string }, choice: AnswerChoice): Promise<boolean> {
+  const text = changeAnswerMessage(d, choice);
+  const key = pendingKey(d);
+  if (!text || usePending.getState().keys[key]) return false;
+  setPending(key, true);
+  try {
+    try {
+      await core.host(d.hostId).call("agent.prompt", { agentId: agent.id, text, images: [], delivery: "auto" });
+    } catch (e) {
+      return failed(`Couldn't tell ${agent.name}`, e);
+    }
+    toast({ title: `Told ${agent.name}`, description: text, status: "done", duration: 4000 });
+    try {
+      await markReviewed(d.hostId, [d]);
+    } catch (e) {
+      failed(`Told ${agent.name}, but couldn't mark the decision reviewed`, e);
+    }
+    return true;
+  } finally {
+    setPending(key, false);
+  }
 }

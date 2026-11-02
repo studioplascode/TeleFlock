@@ -4,4 +4,4 @@ import type { Split } from "./Split";
 /**
  * Where to start an agent.
  */
-export type StartTarget = { "kind": "workspace", workspaceId: string, split: Split | null, } | { "kind": "pane", paneId: string, } | { "kind": "cwd", cwd: string, label: string | null, };
+export type StartTarget = { "kind": "workspace", workspaceId: string, split: Split | null, } | { "kind": "pane", paneId: string, } | { "kind": "cwd", cwd: string, label: string | null, } | { "kind": "chat", };

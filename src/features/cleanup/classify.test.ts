@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { CleanupReport, CleanupWorktree } from "@/core/gen";
+import type { CleanupOwner, CleanupOwnerState, CleanupReport, CleanupWorktree } from "@/core/gen";
 import { bulkSet, classify, sortForPage, totals } from "./classify";
 import { CRITICAL_BYTES, diskLevel, showDiskNotice, SNOOZE_MS } from "./disk";
+import { type AgentGroup, groupByOwner, ownerLabel } from "./groups";
 
 const DAY = 86_400_000;
 const NOW = 1_800_000_000_000;
@@ -128,5 +129,45 @@ describe("low disk", () => {
     expect(showDiskNotice("low", snooze, NOW + 1000)).toBe(false);
     expect(showDiskNotice("critical", snooze, NOW + 1000)).toBe(true);
     expect(showDiskNotice("low", snooze, NOW + SNOOZE_MS)).toBe(true);
+  });
+});
+
+describe("agent groups", () => {
+  const owner = (key: string, state: CleanupOwnerState, name?: string): CleanupOwner => ({ key, state, name, title: `${key} task` });
+  const report: CleanupReport = {
+    scanning: false,
+    scannedAt: NOW,
+    owners: [owner("/s/live.jsonl", "live", "kanban"), owner("/s/gone.jsonl", "gone")],
+    repos: [
+      {
+        root: "/r/app",
+        name: "app",
+        worktrees: [
+          wt("/w/k1", { owner: { key: "/s/live.jsonl", subagents: [] }, size: 10 }),
+          wt("/w/g-merged", { owner: { key: "/s/gone.jsonl", subagents: ["Fix"] }, pr: pr("MERGED"), size: 100 }),
+          wt("/w/g-dirty", { owner: { key: "/s/gone.jsonl", subagents: ["Fix"] }, pr: pr("CLOSED"), dirty: 2, size: 5 }),
+          wt("/w/nobody", { activeAt: NOW - 30 * DAY, size: 1 }),
+        ],
+      },
+      { root: "/r/lib", name: "lib", worktrees: [wt("/w/g-stale", { owner: { key: "/s/gone.jsonl", subagents: [] }, activeAt: NOW - 40 * DAY, size: 7 })] },
+    ],
+  };
+
+  test("worktrees go under their main agent, subagent worktrees included; unattributed ones last", () => {
+    const groups = groupByOwner(report, NOW, 14);
+    expect(groups.map((g) => g.key)).toEqual(["/s/gone.jsonl", "/s/live.jsonl", null]);
+    const gone = groups[0] as AgentGroup;
+    expect(gone.items.map((p) => p.worktree.path)).toEqual(["/w/g-merged", "/w/g-dirty", "/w/g-stale"]);
+    expect(gone.repos).toEqual(["app", "lib"]);
+    expect(gone.bytes).toBe(112);
+    expect(ownerLabel(gone.owner)).toBe("/s/gone.jsonl task");
+    expect(ownerLabel(groups[1]?.owner)).toBe("kanban");
+  });
+
+  test("a group's Delete takes its merged, closed and stale worktrees with the bulk safety", () => {
+    const [gone, , nobody] = groupByOwner(report, NOW, 14) as [AgentGroup, AgentGroup, AgentGroup];
+    expect(gone.cleanable.items.map((w) => w.path)).toEqual(["/w/g-merged", "/w/g-stale"]);
+    expect(gone.cleanable.held.map((h) => [h.worktree.path, h.hold])).toEqual([["/w/g-dirty", "dirty"]]);
+    expect(nobody.cleanable.items.map((w) => w.path)).toEqual(["/w/nobody"]);
   });
 });

@@ -57,8 +57,30 @@ import type {
  *         already has), and an earlier question reopens with its answer preselected.
  *         (no flag) `<home>/forward/bin` goes first on the omp process's PATH (`preferForwardedTools`),
  *         so agents call tools forwarded from another host by name.
+ *  2.3.0: (no flag) the `jobs` event counts background commands only: `task` jobs (subagents) leave
+ *         `running`, `recent` and the glance; `waiting` still covers them.
+ *         (no flag) the `present` tool: the agent shows the user a document (HTML report, Markdown,
+ *         SVG, image, code, CSV, JSON, text) as a versioned snapshot in the session's `local://`
+ *         root (`presented/<slug>-v<n>.<ext>`, referenced files in `….files/`); TeleFlock shows it as
+ *         an artifact (docs/bridge-protocol.md "Presented artifacts").
+ *         - `refusals`: `turn_error` also for a provider refusal omp ended the turn on (omp drops a
+ *           refused turn from the context before extensions hear `agent_end`), with the refusal, the
+ *           model's name and when the turn began; `retryRefused` switches the main session or a
+ *           subagent to another model and goes on with the refused turn (refusal fallback).
+ *         - `ompDialogs`: omp's own dialogs (the `cfg://` settings approvals, the report_tool_issue
+ *           consent, the coding-plan reserve and startup worktree questions, the confirmations of
+ *           commands TeleFlock submits) race the TUI against hostd like the UI context's dialogs.
+ *         - `userWaits`: omp's waits for the user (`AgentSession.waitForUser`) are counted; one no
+ *           offered dialog covers goes out as `state.userWait` with what the TUI shows.
+ *         - `browser`: the TeleFlock Browser. `browserOverride` points omp's `browser.cdpUrl` at the
+ *           DevTools endpoint hostd serves on loopback (a runtime override, omp's relay off meanwhile;
+ *           a `turn` one ends with the turn: `browser_released`); the `use_user_browser` tool asks the
+ *           user (`browser_request` / `browser_request_end`, answered by `browserAnswer`).
+ *         - `agentChat`: omp's IRC bus is tapped (one wrapper per process around `IrcBus.send`): every
+ *           agent-to-agent message of the session's tree goes out as `irc` events, one per delivery
+ *           leg when it starts and again with omp's receipt when it settled (the agent chat log).
  */
-const BRIDGE_VERSION = "2.2.0";
+const BRIDGE_VERSION = "2.3.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -69,6 +91,8 @@ const SUBMIT_SETTLE_MS = 15_000;
 const ATTACH_COMMAND = "teleflock-control";
 const LEGACY_ATTACH_COMMAND = "teleflock-attach";
 const STATUS_KEY = "teleflock";
+/** A status key nothing ever shows (2.3.0): writing `undefined` under it finds omp's ExtensionUiController. */
+const PROBE_STATUS_KEY = "teleflock-probe";
 const MAX_LINE = 64 * 1024 * 1024;
 /** hostd must send its auth frame within this window after the socket opens. */
 const AUTH_TIMEOUT_MS = 5_000;
@@ -266,8 +290,27 @@ interface BridgeSlot {
 	 *  equal versions the first claimant stays. A copy that takes over calls the previous owner's
 	 *  `stop()` (close the socket, stop the timers, clear the status line). 2.0.0 owners add `relay`:
 	 *  copies loaded in subagent sessions hand it the task-bus frames only their session sees. 2.1.0
-	 *  owners add `report`: those copies hand it their session's failed turns (`turn_error`). */
-	owners: Record<string, { version: string; stop(): void; relay?(frame: RelayedBus): void; report?(turn: ReportedTurn): void }>;
+	 *  owners add `report`: those copies hand it their session's failed turns (`turn_error`). 2.3.0
+	 *  owners add `linked`: whether hostd is connected (the `present` tool's result text says so),
+	 *  `askBrowser`: a `use_user_browser` call in any session asks the user through the owner (with
+	 *  the asking session), `browserTurnEnded`: a subagent's copy says its session's turn ended (an
+	 *  "Allow once" it asked for ends with it), `ompDialog`: the process's wrappers on omp's
+	 *  ExtensionUiController hand it each dialog (installOmpDialogWrappers), and `irc`: the
+	 *  process's IRC tap (installIrcTap) hands it every leg omp's IRC bus sends. */
+	owners: Record<
+		string,
+		{
+			version: string;
+			stop(): void;
+			relay?(frame: RelayedBus): void;
+			report?(turn: ReportedTurn): void;
+			linked?(): boolean;
+			askBrowser?(reason: string, signal?: AbortSignal, asker?: BrowserAsker): Promise<BrowserOutcome>;
+			browserTurnEnded?(session: string, idle?: Promise<unknown>): void;
+			ompDialog?(name: OmpDialogMethod, original: AnyFn, self: unknown, args: unknown[]): unknown;
+			irc?(leg: IrcLeg): void;
+		}
+	>;
 	/** The session command context, stored by whichever copy's /teleflock-control handler omp ran. */
 	cmdCtx?: ExtensionCommandContext;
 	/** Called (and removed) by that handler right after it stored `cmdCtx`. */
@@ -281,6 +324,23 @@ interface BridgeSlot {
 	/** One per live copy (2.1.0): registers that copy's `context` guard with omp. Run when hostd turns
 	 *  auto-resume on, so a process with it off pays none of omp's per-request message clone. */
 	armGuards?: Array<() => void>;
+	/** omp's open waits for the user (2.3.0): counted by the one wrapper around `waitForUser` on omp's
+	 *  AgentSession prototype (installUserWaitCounter), whichever copy installed it; `listeners` run
+	 *  on every change. */
+	userWaits?: UserWaits;
+	/** > 0 while a copy starts the local side of a dialog it offered to hostd (2.3.0): omp's dialog
+	 *  methods that dialog calls pass straight through, in every copy (one dialog, one offer). */
+	offering?: number;
+	/** When someone last typed in omp's TUI (2.3.0; epoch ms), from one input listener per TUI. */
+	typedAt?: number;
+	/** The TUIs that listener is on (2.3.0). */
+	typingTuis?: WeakSet<object>;
+	/** omp's live ExtensionUiController (2.3.0): `setHookStatus` ran through the process's wrapper
+	 *  on it (installOmpDialogWrappers). */
+	ompController?: object;
+	/** omp's IRC bus tap (2.3.0, `caps.agentChat`): the one wrapper around `IrcBus.send` reports to
+	 *  these listeners, whichever copy installed it. */
+	ircTap?: IrcTap;
 }
 
 function bridgeSlot(): BridgeSlot {
@@ -489,6 +549,9 @@ interface CtlState {
 	queue: { steering: string[]; followUp: string[] };
 	planReview?: ReviewInfo;
 	attached: boolean;
+	/** 2.3.0 (`caps.userWaits`): omp waits for the user and no dialog offered to hostd covers it; `text`
+	 *  is what the TUI shows in the composer's place (dialogText). */
+	userWait?: { since: number; text?: string };
 }
 
 interface ReviewInfo {
@@ -1709,11 +1772,46 @@ const numberField = (o: Json | undefined, key: string): number | undefined => {
 	return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 };
 
+/** omp's collab `select` request for a selector's title, options and dialog options. */
+function selectDraft(title: string, options: readonly unknown[], opts: Json | undefined): DialogDraft {
+	const marker = opts?.selectionMarker;
+	const checked = opts?.checkedIndices;
+	return {
+		kind: "select",
+		title,
+		options: wireSelectOptions(options),
+		initialIndex: numberField(opts, "initialIndex"),
+		selectionMarker: marker === "radio" || marker === "checkbox" ? marker : undefined,
+		checkedIndices: Array.isArray(checked) ? checked.filter((n): n is number => typeof n === "number") : undefined,
+		markableCount: numberField(opts, "markableCount"),
+		helpText: typeof opts?.helpText === "string" ? opts.helpText : undefined,
+	};
+}
+
+/** Runs `fn`, the local side of a dialog this process offered to hostd, with the omp dialog methods
+ *  it calls passing straight through: one dialog, one offer (the UI context's `select` reaches
+ *  `showCollabAwareSelector`, which reaches `showHookSelector`, synchronously). The count lives in
+ *  the process slot, so every copy's wrappers honour it. */
+function localSide<T>(fn: () => T): T {
+	const slot = bridgeSlot();
+	slot.offering = (slot.offering ?? 0) + 1;
+	try {
+		return fn();
+	} finally {
+		slot.offering = Math.max(0, (slot.offering ?? 1) - 1);
+	}
+}
+
+/** Dialog options that keep a dialog in the TUI, wherever it is opened from: a `secret` input
+ *  (hostd would show it in the clear and carry the answer), a selector with `disabledIndices`
+ *  (hostd could pick a row omp disabled). */
+const keepsLocal = (opts: Json | undefined): boolean => opts?.secret === true || (Array.isArray(opts?.disabledIndices) && opts.disabledIndices.length > 0);
+
 /**
  * One wrapped dialog call: hostd's draft for `name` and the race (omp's collab mirroring for
  * select / editor / approve / ask, the same select / editor mapping for confirm and input, which
- * omp keeps local). `undefined` when the arguments are not what omp passes: the caller runs the
- * original alone.
+ * omp keeps local). `undefined` when the arguments are not what omp passes, or the dialog stays in
+ * the TUI ({@link keepsLocal}): the caller runs the original alone.
  */
 export function raceMember(
 	hub: DialogHub,
@@ -1728,12 +1826,13 @@ export function raceMember(
 		return isObj(arg) ? arg : undefined;
 	};
 	/** The original with `signal` in the options argument at `i` (the race's local side). */
-	const local = (i: number) => (signal: AbortSignal) => {
-		const patched = [...args];
-		while (patched.length < i) patched.push(undefined);
-		patched[i] = { ...optsAt(i), signal };
-		return original.apply(self, patched);
-	};
+	const local = (i: number) => (signal: AbortSignal) =>
+		localSide(() => {
+			const patched = [...args];
+			while (patched.length < i) patched.push(undefined);
+			patched[i] = { ...optsAt(i), signal };
+			return original.apply(self, patched);
+		});
 	const signalAt = (i: number): AbortSignal | undefined => {
 		const s = optsAt(i)?.signal;
 		return s instanceof AbortSignal ? s : undefined;
@@ -1742,21 +1841,8 @@ export function raceMember(
 	switch (name) {
 		case "select": {
 			const [title, options] = args;
-			if (typeof title !== "string" || !Array.isArray(options)) return undefined;
-			const opts = optsAt(2);
-			const marker = opts?.selectionMarker;
-			const checked = opts?.checkedIndices;
-			const draft: DialogDraft = {
-				kind: "select",
-				title,
-				options: wireSelectOptions(options),
-				initialIndex: numberField(opts, "initialIndex"),
-				selectionMarker: marker === "radio" || marker === "checkbox" ? marker : undefined,
-				checkedIndices: Array.isArray(checked) ? checked.filter((n): n is number => typeof n === "number") : undefined,
-				markableCount: numberField(opts, "markableCount"),
-				helpText: typeof opts?.helpText === "string" ? opts.helpText : undefined,
-			};
-			return raceDialog(hub, draft, signalAt(2), local(2), same);
+			if (typeof title !== "string" || !Array.isArray(options) || keepsLocal(optsAt(2))) return undefined;
+			return raceDialog(hub, selectDraft(title, options, optsAt(2)), signalAt(2), local(2), same);
 		}
 		case "editor": {
 			const [title, prefill] = args;
@@ -1766,7 +1852,7 @@ export function raceMember(
 		}
 		case "input": {
 			const [title] = args;
-			if (typeof title !== "string") return undefined;
+			if (typeof title !== "string" || keepsLocal(optsAt(2))) return undefined;
 			return raceDialog(hub, { kind: "editor", title }, signalAt(2), local(2), same);
 		}
 		case "confirm": {
@@ -1788,6 +1874,449 @@ export function raceMember(
 			return raceAsk(hub, questions, signalAt(1), local(1));
 		}
 	}
+}
+
+// ─── 2.3.0: omp's own dialogs and waits (`caps.ompDialogs`, `caps.userWaits`) ──────────────────
+// omp opens some dialogs itself, past the UI context the wrappers above cover: the `cfg://`
+// settings approvals ("Always for this session" / "Allow once" / "Deny") and the report_tool_issue
+// consent (interactive-mode `#promptCfgChange` / `#promptAutoQaConsent` call
+// `ExtensionUiController.showCollabAwareSelector` directly, which races collab guests only), the
+// coding-plan reserve question, the startup worktree question and the confirmations of commands
+// (`showHookConfirm` → `showHookSelector`, `showHookInput`, `showHookEditor`). The bridge wraps those
+// methods on omp's `ExtensionUiController.prototype` and offers their dialogs through the hub with
+// the drafts above: collab-aware ones always (omp shows them to its collab guests as well), the
+// others while omp waits for the user (`AgentSession.waitForUser` brackets every agent prompt), while
+// a command TeleFlock submitted runs, or once nobody typed in the TUI for TUI_QUIET_MS, so a dialog
+// the operator opens from the TUI stays there. Secret inputs and selectors with disabled rows stay
+// local. A wait no offered dialog covers goes to hostd as `state.userWait`, with what the TUI shows
+// in the composer's place: the agent reads Needs you, with an Open terminal action.
+
+/** omp's `ExtensionUiController` methods whose dialogs the bridge offers (omp ≥ 18.12). */
+export const OMP_DIALOG_METHODS = ["showCollabAwareSelector", "showCollabAwareEditor", "showHookSelector", "showHookInput", "showHookEditor"] as const;
+export type OmpDialogMethod = (typeof OMP_DIALOG_METHODS)[number];
+/** After this long without a keystroke in the TUI, a dialog that opens is none the operator opened there. */
+export const TUI_QUIET_MS = 15_000;
+/** A wait no offered dialog covered for this long goes to hostd (`state.userWait`): asks and approvals
+ *  offer their dialog at once, a chain of dialogs leaves short gaps. */
+export const USER_WAIT_GRACE_MS = 1_500;
+
+/** When the bridge offers one of omp's hook dialogs (collab-aware ones it always offers). */
+export interface OmpDialogPolicy {
+	/** omp waits for the user: an `AgentSession.waitForUser` is open. */
+	waiting(): boolean;
+	/** A command TeleFlock submitted through the composer still runs. */
+	commanding(): boolean;
+	/** Nobody typed in the TUI for {@link TUI_QUIET_MS}. */
+	unattended(): boolean;
+}
+
+/**
+ * One call of omp's `ExtensionUiController` method `name`: the race against hostd (with the UI
+ * context's `select` / `editor` / `input` drafts), or `undefined` when the caller runs omp's dialog
+ * alone: the call is the local side of a dialog offered already, a hook dialog the policy keeps
+ * local, one that stays in the TUI anyway ({@link keepsLocal}), or arguments omp does not pass.
+ */
+export function raceOmpDialog(hub: DialogHub, name: OmpDialogMethod, original: AnyFn, self: unknown, args: unknown[], policy: OmpDialogPolicy): Promise<unknown> | undefined {
+	if ((bridgeSlot().offering ?? 0) > 0) return undefined;
+	const collabAware = name === "showCollabAwareSelector" || name === "showCollabAwareEditor";
+	if (!collabAware && !policy.waiting() && !policy.commanding() && !policy.unattended()) return undefined;
+	const [title, second] = args;
+	if (typeof title !== "string") return undefined;
+	const opts = isObj(args[2]) ? args[2] : undefined;
+	const signal = opts?.signal instanceof AbortSignal ? opts.signal : undefined;
+	// Every one of these methods takes its dialog options third.
+	const local = (localSignal: AbortSignal) =>
+		localSide(() => {
+			const patched = [...args];
+			while (patched.length < 2) patched.push(undefined);
+			patched[2] = { ...opts, signal: localSignal };
+			return original.apply(self, patched);
+		});
+	const same = (v: string | undefined) => v;
+	switch (name) {
+		case "showCollabAwareSelector":
+		case "showHookSelector":
+			if (!Array.isArray(second) || keepsLocal(opts)) return undefined;
+			return raceDialog(hub, selectDraft(title, second, opts), signal, local, same);
+		case "showCollabAwareEditor":
+		case "showHookEditor":
+			return raceDialog(hub, { kind: "editor", title, prefill: typeof second === "string" ? second : undefined }, signal, local, same);
+		case "showHookInput":
+			if (keepsLocal(opts)) return undefined;
+			return raceDialog(hub, { kind: "editor", title }, signal, local, same);
+	}
+}
+
+/** Marks the process's wrappers on omp's `ExtensionUiController.prototype` (the value: omp's method). */
+const OMP_DIALOG_WRAP = Symbol.for("teleflock.bridge.ompDialogs");
+
+/**
+ * Puts one wrapper per process in place of each {@link OMP_DIALOG_METHODS} method on omp's
+ * `ExtensionUiController.prototype`, whichever copy comes first; a copy that finds them uses them,
+ * so a reload stacks nothing and no wrapper holds a copy. A call goes to the bridging copies (the
+ * process slot's owners, `ompDialog`) and runs omp's dialog alone when none races it. A pass-through
+ * `setHookStatus` keeps the instance it runs on as the slot's `ompController`: the UI context's
+ * `setStatus` calls it, so one status write proves the wrappers sit in omp's call path (the subpath
+ * import gave the module omp runs) and yields the controller. Returns whether `showHookSelector`
+ * carries the wrapper.
+ */
+export function installOmpDialogWrappers(proto: object): boolean {
+	const wrap = (name: string, make: (original: AnyFn) => AnyFn): void => {
+		const desc = Object.getOwnPropertyDescriptor(proto, name);
+		const original: unknown = desc?.value;
+		if (typeof original !== "function" || OMP_DIALOG_WRAP in original) return;
+		const wrapper = make(original as AnyFn);
+		Object.defineProperty(wrapper, OMP_DIALOG_WRAP, { value: original });
+		try {
+			Object.defineProperty(proto, name, { value: wrapper, writable: true, configurable: true, enumerable: desc?.enumerable ?? false });
+		} catch {
+			// a frozen prototype: its dialogs stay local
+		}
+	};
+	for (const name of OMP_DIALOG_METHODS) {
+		wrap(
+			name,
+			original =>
+				function (this: unknown, ...args: unknown[]): unknown {
+					for (const owner of Object.values(bridgeSlot().owners)) {
+						let raced: unknown;
+						try {
+							raced = owner.ompDialog?.(name, original, this, args);
+						} catch {
+							// a copy's failure leaves the dialog to omp
+						}
+						if (raced !== undefined) return raced;
+					}
+					return original.apply(this, args);
+				},
+		);
+	}
+	wrap(
+		"setHookStatus",
+		original =>
+			function (this: unknown, ...args: unknown[]): unknown {
+				if (isObj(this)) bridgeSlot().ompController = this;
+				return original.apply(this, args);
+			},
+	);
+	const selector: unknown = Object.getOwnPropertyDescriptor(proto, "showHookSelector")?.value;
+	return typeof selector === "function" && OMP_DIALOG_WRAP in selector;
+}
+
+/** omp's open waits for the user (2.3.0, the process slot's `userWaits`). */
+export interface UserWaits {
+	count: number;
+	/** When the oldest open wait began (epoch ms). */
+	since: number;
+	/** The process slot's `typedAt` when the oldest open wait began (watchTyping). */
+	typedAtStart?: number;
+	listeners: Set<() => void>;
+}
+const USER_WAIT_WRAP = Symbol.for("teleflock.bridge.userWaitCounter");
+
+/** The process's {@link UserWaits}. */
+export function userWaits(): UserWaits {
+	const slot = bridgeSlot();
+	const w = slot.userWaits;
+	if (w && typeof w.count === "number" && w.listeners instanceof Set) return w;
+	slot.userWaits = { count: 0, since: 0, listeners: new Set() };
+	return slot.userWaits;
+}
+
+/**
+ * Counts omp's waits for the user (`AgentSession.waitForUser(dialog)`: agent prompts, tool approvals,
+ * extension dialogs, the cfg, consent, reserve and MCP sign-in prompts) with one wrapper per process
+ * around the method on `proto`, omp's AgentSession prototype (main and subagent sessions share it),
+ * whichever copy comes first. Same arguments, same promise; nothing else changes. Returns whether the
+ * count runs.
+ */
+export function installUserWaitCounter(proto: object, waits: () => UserWaits = userWaits): boolean {
+	const desc = Object.getOwnPropertyDescriptor(proto, "waitForUser");
+	const original: unknown = desc?.value;
+	if (typeof original !== "function") return false;
+	if (USER_WAIT_WRAP in original) return true;
+	const changed = (w: UserWaits): void => {
+		for (const listener of w.listeners) {
+			try {
+				listener();
+			} catch {
+				// a copy's listener
+			}
+		}
+	};
+	const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+		const w = waits();
+		if (w.count++ === 0) {
+			w.since = Date.now();
+			w.typedAtStart = bridgeSlot().typedAt;
+		}
+		let open = true;
+		const done = (): void => {
+			if (!open) return;
+			open = false;
+			w.count = Math.max(0, w.count - 1);
+			changed(w);
+		};
+		changed(w);
+		try {
+			const result: unknown = (original as AnyFn).apply(this, args);
+			if (result instanceof Promise) result.then(done, done);
+			else done();
+			return result;
+		} catch (err) {
+			done();
+			throw err;
+		}
+	};
+	Object.defineProperty(wrapper, USER_WAIT_WRAP, { value: original });
+	try {
+		Object.defineProperty(proto, "waitForUser", { value: wrapper, writable: true, configurable: true, enumerable: desc?.enumerable ?? false });
+	} catch {
+		return false;
+	}
+	return true;
+}
+
+/** Terminal reports a TUI reads like input although nobody typed them: cursor position, focus,
+ *  device, mode and window reports, OSC / DCS / APC replies. */
+const TERMINAL_REPORT = /\x1b\[\d+;\d+R|\x1b\[[IO]|\x1b\[[?>=][\d;]*\$?[a-zA-Z]|\x1b\[\d+(?:;\d+)*[nt]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P_^][\s\S]*?\x1b\\/g;
+
+/** Whether TUI input `data` holds something a person typed (a key, a paste, a click), not only terminal reports. */
+export function typedInput(data: string): boolean {
+	return data.replace(TERMINAL_REPORT, "").length > 0;
+}
+
+/** Notes every keystroke on omp's TUI in the process slot (`typedAt`): one listener per TUI, through
+ *  its public `addInputListener` (it never consumes input). Returns whether this TUI has it. */
+export function watchTyping(tui: unknown): boolean {
+	if (!isObj(tui) || typeof tui.addInputListener !== "function") return false;
+	const slot = bridgeSlot();
+	slot.typingTuis ??= new WeakSet();
+	if (slot.typingTuis.has(tui)) return true;
+	try {
+		(tui.addInputListener as (listener: (data: string) => undefined) => unknown).call(tui, (data: string) => {
+			try {
+				if (typeof data === "string" && typedInput(data)) slot.typedAt = Date.now();
+			} catch {
+				// never in omp's way
+			}
+			return undefined;
+		});
+	} catch {
+		return false;
+	}
+	slot.typingTuis.add(tui);
+	return true;
+}
+
+/** Box-drawing borders of omp's dialogs (rounded, square, heavy, double, ascii). */
+const BOX_ROW = /^[\s─━═╭╮╰╯┌┐└┘┏┓┗┛╔╗╚╝├┤┣┫╠╣┬┴│┃║+\-|]*$/;
+const BOX_SIDES = /^\s*[│┃║|]\s?|\s?[│┃║|]\s*$/g;
+
+/**
+ * What omp's TUI shows in the composer's place (`container`, its `editorContainer`; the composer
+ * `editor` left out): the open dialog's rows at `width`, ANSI and box borders stripped, at most 40
+ * rows / 4 000 characters: the first ones, or for an `overlay` (omp's console, whose program asks at
+ * the bottom) its first row and its last ones. `undefined` when nothing but the composer is there.
+ */
+export function dialogText(container: unknown, editor: unknown, width: number, overlay = false): string | undefined {
+	const kids: unknown[] = isObj(container) && Array.isArray(container.children) ? container.children : [];
+	const rows: string[] = [];
+	for (const kid of kids) {
+		if (kid === editor || !isObj(kid) || typeof kid.render !== "function") continue;
+		const lines: unknown = (kid.render as (w: number) => unknown).call(kid, width);
+		if (!Array.isArray(lines)) continue;
+		for (const line of lines) {
+			if (typeof line !== "string") continue;
+			const plain = line.replace(ANSI, "");
+			if (!BOX_ROW.test(plain)) rows.push(plain.replace(BOX_SIDES, "").trimEnd());
+		}
+	}
+	const kept = overlay && rows.length > 40 ? [rows[0]!, ...rows.slice(-39)] : rows.slice(0, 40);
+	const text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	if (!text) return undefined;
+	if (text.length <= 4_000) return text;
+	if (!overlay) return `${text.slice(0, 3_999)}…`;
+	const head = text.slice(0, Math.min(text.indexOf("\n") >>> 0, 400));
+	const tail = text.slice(-(3_998 - head.length));
+	return `${head}\n…${tail.slice(tail.indexOf("\n") + 1)}`;
+}
+
+/**
+ * What omp's TUI shows where the user answers now (`mode`: omp's interactive mode, the
+ * ExtensionUiController's `ctx`): the topmost visible overlay of its TUI (pi-tui's public
+ * `overlayStack`: the interactive console, a custom dialog shown as an overlay), else what replaced
+ * the composer in `editorContainer`, read as dialogText does. An overlay is rendered only at the
+ * width omp renders it at (pi-tui `#resolveOverlayLayout`: `options.width` in columns or a
+ * percentage of the terminal, else 80 columns, at least `minWidth`, within the side margins): the
+ * console resizes its PTY to the width it is rendered at. `undefined` when only the composer is there.
+ */
+export function shownText(mode: unknown): string | undefined {
+	if (!isObj(mode)) return undefined;
+	const tui = mode.ui;
+	const terminal = isObj(tui) ? tui.terminal : undefined;
+	const columns = isObj(terminal) && typeof terminal.columns === "number" ? terminal.columns : undefined;
+	const rows = isObj(terminal) && typeof terminal.rows === "number" ? terminal.rows : undefined;
+	if (isObj(tui) && Array.isArray(tui.overlayStack) && columns !== undefined && rows !== undefined) {
+		const stack: unknown[] = tui.overlayStack;
+		for (let i = stack.length - 1; i >= 0; i--) {
+			const entry = stack[i];
+			if (!isObj(entry) || entry.hidden === true || !isObj(entry.component)) continue;
+			const opts = isObj(entry.options) ? entry.options : {};
+			if (typeof opts.visible === "function" && !opts.visible(columns, rows)) continue;
+			const margin: Json = typeof opts.margin === "number" ? { left: opts.margin, right: opts.margin } : isObj(opts.margin) ? opts.margin : {};
+			const avail = Math.max(1, columns - Math.max(0, Number(margin.left) || 0) - Math.max(0, Number(margin.right) || 0));
+			const percent = typeof opts.width === "string" ? /^(\d+(?:\.\d+)?)%$/.exec(opts.width) : null;
+			let width = typeof opts.width === "number" ? opts.width : percent ? Math.floor((columns * Number.parseFloat(percent[1]!)) / 100) : Math.min(80, avail);
+			if (typeof opts.minWidth === "number") width = Math.max(width, opts.minWidth);
+			return dialogText({ children: [entry.component] }, undefined, Math.max(1, Math.min(width, avail)), true);
+		}
+	}
+	return dialogText(mode.editorContainer, mode.editor, Math.max(40, Math.min(columns ?? 100, 160)));
+}
+
+// ─── 2.3.0: the agent chat (`caps.agentChat`) ─────────────────────────────────────────────────
+// docs/bridge-protocol.md "Agent chat", architecture §3.34. omp's IRC bus (`irc/bus.ts` `IrcBus`) is
+// process-wide: every message between the agents of the session's tree goes through its `send`, one
+// call per recipient (a broadcast is one per peer, flagged `broadcast`; omp's wake relays and its
+// diagnostics follow-ups too). One wrapper per process around `send` reports each leg when it
+// starts and again when it settled, with omp's receipt; the owner copy sends them to hostd as `irc`
+// events. omp does not export the bus: its Agent Hub's dependencies hold it
+// (`modes/agent-hub-runtime` `createAgentHubRuntime().irc`, `IrcBus.global()`).
+
+/** One delivery leg of omp's IRC bus (`irc` event). */
+export interface IrcLeg {
+	/** Unique in the omp process. */
+	id: string;
+	from: string;
+	to: string;
+	body: string;
+	/** When the send started. */
+	ts: number;
+	/** omp's id of the message this one answers (wake relays). */
+	replyTo?: string;
+	broadcast?: boolean;
+	wakeRelay?: boolean;
+	progress?: boolean;
+	/** Once settled: omp's receipt (`injected`, `woken`, `revived`, `failed`). */
+	outcome?: string;
+	error?: string;
+}
+
+/** Leg ids of the process (the process slot's `ircTap`): `<tag>.<n>`, the tag made once per process. */
+export interface IrcTap {
+	tag: string;
+	seq: number;
+}
+const IRC_TAP_WRAP = Symbol.for("teleflock.bridge.ircTap");
+/** Longest message body an `irc` event carries (omp's wake relays carry a subagent's whole answer). */
+const IRC_BODY_MAX = 256 * 1024;
+
+/** The process's {@link IrcTap}. */
+export function ircTap(): IrcTap {
+	const slot = bridgeSlot();
+	const t = slot.ircTap;
+	if (t && typeof t.seq === "number" && typeof t.tag === "string") return t;
+	slot.ircTap = { tag: Date.now().toString(36), seq: 0 };
+	return slot.ircTap;
+}
+
+/** Hands a leg to the bridge copy of every hostd endpoint (`owners[…].irc`, 2.3.0 owners). */
+function legToOwners(leg: IrcLeg): void {
+	for (const owner of Object.values(bridgeSlot().owners)) {
+		try {
+			owner.irc?.({ ...leg });
+		} catch {
+			// a copy's handler
+		}
+	}
+}
+
+/** The leg an `IrcBus.send(msg)` call starts (`undefined` for anything else). */
+export function ircLegOf(msg: unknown, tap: IrcTap): IrcLeg | undefined {
+	const from = strField(msg, "from");
+	const to = strField(msg, "to");
+	if (!isObj(msg) || !from || !to || typeof msg.body !== "string") return undefined;
+	tap.seq += 1;
+	const body = msg.body.length > IRC_BODY_MAX ? `${msg.body.slice(0, IRC_BODY_MAX)}\n\n…` : msg.body;
+	const leg: IrcLeg = { id: `${tap.tag}.${tap.seq}`, from, to, body, ts: Date.now() };
+	const replyTo = strField(msg, "replyTo");
+	if (replyTo) leg.replyTo = replyTo;
+	if (msg.broadcast === true) leg.broadcast = true;
+	if (msg.wakeRelay === true) leg.wakeRelay = true;
+	if (msg.progress === true) leg.progress = true;
+	return leg;
+}
+
+/** `leg` with omp's receipt (a rejected send failed). */
+function settledLeg(leg: IrcLeg, receipt: unknown, rejected?: unknown): IrcLeg {
+	const outcome = strField(receipt, "outcome") ?? "failed";
+	const error = strField(receipt, "error") ?? (rejected === undefined ? undefined : rejected instanceof Error ? rejected.message : String(rejected));
+	return error ? { ...leg, outcome, error: error.slice(0, 2_000) } : { ...leg, outcome };
+}
+
+/**
+ * Reports every leg omp's IRC bus sends (`proto`: the bus's prototype, `IrcBus.prototype`) to
+ * `notify` (the owners of the process slot), when it starts and again when it settled: one wrapper
+ * per process, whichever copy comes first. Same arguments, same promise; a report can never change
+ * or fail a send. Returns whether the tap runs.
+ */
+export function installIrcTap(proto: object, notify: (leg: IrcLeg) => void = legToOwners): boolean {
+	const desc = Object.getOwnPropertyDescriptor(proto, "send");
+	const original: unknown = desc?.value;
+	if (typeof original !== "function") return false;
+	if (IRC_TAP_WRAP in original) return true;
+	const report = (leg: IrcLeg): void => {
+		try {
+			notify(leg);
+		} catch {
+			// never in omp's way
+		}
+	};
+	const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+		let leg: IrcLeg | undefined;
+		try {
+			leg = ircLegOf(args[0], ircTap());
+		} catch {
+			leg = undefined;
+		}
+		if (leg) report(leg);
+		const result: unknown = (original as AnyFn).apply(this, args);
+		if (leg && result instanceof Promise) {
+			const started = leg;
+			result.then(
+				(receipt: unknown) => report(settledLeg(started, receipt)),
+				(err: unknown) => report(settledLeg(started, undefined, err)),
+			);
+		}
+		return result;
+	};
+	Object.defineProperty(wrapper, IRC_TAP_WRAP, { value: original });
+	try {
+		Object.defineProperty(proto, "send", { value: wrapper, writable: true, configurable: true, enumerable: desc?.enumerable ?? false });
+	} catch {
+		return false;
+	}
+	return true;
+}
+
+/** 2.3.0 `agentChat`: finds omp's IRC bus (a root export of `createAgentHubRuntime` wins, else the
+ *  literal subpath import, which omp maps to its own loaded module) and taps it. */
+async function probeIrcTap(ns: Record<string, unknown>, load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<boolean> {
+	const own: unknown = ns.createAgentHubRuntime;
+	const create: unknown = typeof own === "function" ? own : (await load(import("@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime")))?.createAgentHubRuntime;
+	if (typeof create !== "function") return false;
+	let bus: unknown;
+	try {
+		// A stand-in activity index: the runtime would build omp's own otherwise, none of which is needed.
+		const runtime: unknown = (create as (options: Json) => unknown)({ activity: {} });
+		bus = isObj(runtime) ? runtime.irc : undefined;
+	} catch {
+		return false;
+	}
+	if (!isObj(bus) || typeof bus.send !== "function") return false;
+	const proto: unknown = Object.getPrototypeOf(bus);
+	return isObj(proto) && installIrcTap(proto);
 }
 
 // ─── protocol v2: omp internals ────────────────────────────────────────────────────────────────
@@ -1840,6 +2369,10 @@ interface Internals {
 	roles?: RoleSettings;
 	/** 2.1.0 `retry` / `resumeTree` / `turnError` / `limitGuard`: omp's error classifier and task internals. */
 	resume?: ResumeInternals;
+	/** 2.3.0 `browser`: omp's live Settings and its `browser.cdpUrl` / `browser.relay` handles. */
+	browser?: BrowserSettings;
+	/** 2.3.0 `agentChat`: omp's IRC bus is tapped (installIrcTap). */
+	ircTap?: boolean;
 }
 
 const isSession = (s: unknown): s is AgentSessionLike => !!s && typeof s === "object" && "subscribe" in s && typeof s.subscribe === "function";
@@ -1910,6 +2443,8 @@ export interface SettingHandle<T> {
 	get(scope: unknown): T;
 	override(scope: unknown, value: T): void;
 	clearOverride(scope: unknown): void;
+	/** Which layer the value comes from (`runtime`: an override; omp ≥ 18.13). */
+	provenance?(scope: unknown): string;
 }
 export interface RoleSettings {
 	store(): RoleStore;
@@ -2824,13 +3359,13 @@ export function retryableTail(s: RetrySession): Json | undefined {
 }
 
 /**
- * Makes the session's next `restoreInterruptedTurn()` omp's `retry()`. omp's follow-up turn
- * (`runSubagentFollowUpTurn({restore: true})`, the `--restore` path) goes on through
+ * Makes the session's next `restoreInterruptedTurn()` omp's `retry()` (or `goOn`). omp's follow-up
+ * turn (`runSubagentFollowUpTurn({restore: true})`, the `--restore` path) goes on through
  * `restoreInterruptedTurn()`, which ends in `retry()` for an interrupted turn but leaves a terminal
  * failure alone (`hasRestorableTurn`); for a failed turn, `retry()` is that same last step. One shot,
  * on this instance only; `disarm` restores it.
  */
-export function armRetry(session: RetrySession): { used(): boolean; disarm(): void } {
+export function armRetry(session: RetrySession, goOn: () => Promise<boolean> = () => session.retry()): { used(): boolean; disarm(): void } {
 	let used = false;
 	const own = Object.getOwnPropertyDescriptor(session, "restoreInterruptedTurn");
 	const disarm = (): void => {
@@ -2843,10 +3378,108 @@ export function armRetry(session: RetrySession): { used(): boolean; disarm(): vo
 		value: async (): Promise<boolean> => {
 			used = true;
 			disarm();
-			return session.retry();
+			return goOn();
 		},
 	});
 	return { used: () => used, disarm };
+}
+
+// ─── 2.3.0: refusal fallback (`caps.refusals`) ─────────────────────────────────────────────────
+// A provider refusal (Anthropic's safety classifiers) ends a turn as `stopReason: "error"` with
+// `stopDetails.type` `refusal` / `sensitive` (pi-agent-core `isProviderRefusalMessage`). omp ≥ 18.13
+// drops that message from the session's context when it settles the turn and never writes it
+// (agent-session.ts: `#prunedTerminalFailure`, reported by `getLastAssistantMessage()` until the next
+// run starts), so the 2.1.0 turn watch and omp's own `retry()` find no failed turn after one.
+
+/** omp's classifier refusal: an `error` stop with `stopDetails.type` `refusal` or `sensitive`. */
+export function isRefusal(m: unknown): m is Json {
+	return isObj(m) && m.role === "assistant" && m.stopReason === "error" && isObj(m.stopDetails) && (m.stopDetails.type === "refusal" || m.stopDetails.type === "sensitive");
+}
+
+/** A refusal's `stopDetails` as hostd shows it (no fallback credit), else `null`. */
+export function refusalInfo(m: unknown): Json | null {
+	if (!isRefusal(m)) return null;
+	const d = m.stopDetails as Json;
+	const text = (v: unknown, max: number): string | undefined => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined);
+	const category = text(d.category, 64);
+	const explanation = text(d.explanation, 500);
+	return { kind: d.type, ...(category ? { category } : {}), ...(explanation ? { explanation } : {}) };
+}
+
+/**
+ * The custom messages omp (18.15) starts a turn with: a background job's result (`async-result`)
+ * and a launched process's end (`launch-completion`), both delivered while idle; an IRC message
+ * that wakes the agent (`irc:incoming`); the next turn of goal mode (`goal-continuation`), of a
+ * `session_stop` hook (`session-stop-continuation`) and of autoresearch (`autoresearch-resume`).
+ * Not what omp adds within a turn (notes, nudges, reminders, the advisor's comments, synthetic
+ * `developer` prompts such as its continue), nor anything omp's or TeleFlock's continuations of a
+ * turn add (they add no message).
+ */
+const TURN_STARTERS = new Set(["async-result", "launch-completion", "irc:incoming", "goal-continuation", "session-stop-continuation", "autoresearch-resume"]);
+/** A user's prompt omp sends as a custom message with `attribution: "user"` (omp counts these as
+ *  user prompts): a skill command, a collab guest's prompt. */
+const USER_PROMPT_TYPES = new Set(["skill-prompt", "collab-prompt"]);
+
+/**
+ * When the turn that ends `messages` began: the time of the last message that started a turn, a
+ * `user` message or a custom message omp starts one with ({@link TURN_STARTERS}, a user's prompt).
+ * hostd's refusal fallback keys "one fallback per turn" on it: going on after a fallback adds no
+ * message, so the turn keeps its key; a turn something else started gets its own.
+ */
+export function turnStart(messages: readonly unknown[]): number | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (!isObj(m)) continue;
+		const type = typeof m.customType === "string" ? m.customType : "";
+		const starts = m.role === "user" || (m.role === "custom" && (TURN_STARTERS.has(type) || (m.attribution === "user" && USER_PROMPT_TYPES.has(type))));
+		if (starts) return typeof m.timestamp === "number" ? m.timestamp : undefined;
+	}
+	return undefined;
+}
+
+/** The AgentSession members refusal fallback uses beyond {@link RetrySession}. */
+export interface RefusalSession extends RetrySession {
+	getLastAssistantMessage?(): unknown;
+	/** omp's bare continuation of the context as it stands (public since omp 18.13 for `/tree` re-answers). */
+	resumeAfterAskReanswer?(): void;
+	/** omp's `.`/`c` continue (omp ≥ 18.14). */
+	resume?(): Promise<void>;
+	setModel?(model: unknown, role?: string): Promise<unknown>;
+	setThinkingLevel?(level: string | undefined, persist?: boolean): void;
+}
+
+/**
+ * The refusal `s`'s last turn ended on, if it did and nothing ran since: the failed tail (an omp
+ * that keeps the refused turn in its context), else the refusal omp dropped and still reports as
+ * the last assistant message (only until the next run starts).
+ */
+export function refusedTurn(s: RefusalSession): Json | undefined {
+	const tail = failedTail(s.agent?.state?.messages ?? []);
+	if (tail) return isRefusal(tail) ? tail : undefined;
+	const last = typeof s.getLastAssistantMessage === "function" ? s.getLastAssistantMessage() : undefined;
+	return isRefusal(last) ? last : undefined;
+}
+
+/** omp can go on with a turn it ended on a refusal it dropped ({@link continueRefused}). */
+export const canContinueRefused = (s: RefusalSession): boolean => typeof s.resumeAfterAskReanswer === "function" || typeof s.resume === "function";
+
+/**
+ * Goes on with the turn omp ended on a refusal, on the session's model now, without a new prompt:
+ * omp's `retry()` when the refused turn is still the failed tail; else omp's own continuation of the
+ * context the refusal left (the prompt or the tool results the refused reply answered: what omp's
+ * refusal fallback chain runs after its switch), else omp's continue (`.`/`c`). True: scheduled.
+ */
+export async function continueRefused(s: RefusalSession): Promise<boolean> {
+	if (failedTail(s.agent?.state?.messages ?? [])) return s.retry();
+	if (typeof s.resumeAfterAskReanswer === "function") {
+		s.resumeAfterAskReanswer();
+		return true;
+	}
+	if (typeof s.resume === "function") {
+		await s.resume();
+		return true;
+	}
+	return false;
 }
 
 /** What a resumed subagent run reports (omp's `SingleResult`, the fields the job reads). */
@@ -2873,6 +3506,15 @@ interface ResumeInternals {
 		jobError: new (message: string, structured?: unknown) => Error;
 		maxRuntimeMs(settings: unknown): number;
 	};
+}
+
+/** What resuming a subagent as a job of its parent uses (`retry {agentId}`, `retryRefused {agentId}`). */
+interface SubagentResumeKit {
+	reg: AgentRegistryLike;
+	lifecycle: { global(): LifecycleLike };
+	task: NonNullable<ResumeInternals["task"]>;
+	main: RetrySession;
+	jobs: ResumeJobs;
 }
 
 /** Probes {@link ResumeInternals}: omp's root exports first (they are the modules omp runs), then
@@ -3110,12 +3752,16 @@ export function latestLiveWidget(widgets: readonly { id: string; view?: unknown 
 	return latest;
 }
 
-/** The `jobs` event: counts, the wait, and the freshest live widget's glance. */
+/** The `jobs` event: counts of background commands (not subagents), the wait, and the freshest live widget's glance. */
 export function jobsSummary(list: JobsList, widgets: readonly { id: string; view?: unknown }[], waiting: boolean): JobsSummaryWire {
-	const latest = latestLiveWidget(widgets.filter(w => list.running.some(j => j.id === w.id)));
+	// Commands only: a `task` job is a subagent, which the card's subagent meter and the Subagents panel
+	// already show (`waiting` still covers them: omp resumes the turn when one reports back).
+	const commands = (jobs: readonly JobItem[]): JobItem[] => jobs.filter(j => j.type !== "task");
+	const running = commands(list.running);
+	const latest = latestLiveWidget(widgets.filter(w => running.some(j => j.id === w.id)));
 	const glance = latest ? jobGlance(latest.view) : undefined;
-	const label = latest ? plainLine(list.running.find(j => j.id === latest.id)?.label) : "";
-	return { running: list.running.length, recent: list.recent.length, waiting, ...(glance ? { glance, glanceJob: label || latest!.id } : {}) };
+	const label = latest ? plainLine(running.find(j => j.id === latest.id)?.label) : "";
+	return { running: running.length, recent: commands(list.recent).length, waiting, ...(glance ? { glance, glanceJob: label || latest!.id } : {}) };
 }
 
 /**
@@ -3180,6 +3826,1040 @@ export function jobWire(
 	return out;
 }
 
+// ─── present (2.3.0) ──────────────────────────────────────────────────────────────────────────
+// The `present` tool (docs/bridge-protocol.md "Presented artifacts"): a document the agent shows the
+// user, snapshotted into the calling session's `local://` root as `presented/<slug>-v<n>.<ext>`, the
+// files it references next to it copied into `presented/<slug>-v<n>.files/`. TeleFlock reads the
+// snapshot with hostd's `session.artifact` and types the call's row from `details`; nothing crosses
+// the socket for it, so the tool works the same whether or not hostd is connected.
+
+export type PresentKind = "html" | "markdown" | "svg" | "image" | "code" | "csv" | "json" | "text";
+export const PRESENT_KINDS: readonly PresentKind[] = ["html", "markdown", "svg", "image", "code", "csv", "json", "text"];
+export const PRESENT_DIR = "presented";
+/** Text documents: what hostd's `session.artifact` answers whole (4 MiB). */
+export const PRESENT_TEXT_MAX = 4 << 20;
+/** Images: what a base64 `session.artifact` read answers whole (8 MiB). */
+export const PRESENT_IMAGE_MAX = 8 << 20;
+/** Referenced files: each, all of them, and how many. */
+export const PRESENT_ASSET_MAX = 4 << 20;
+export const PRESENT_ASSETS_TOTAL = 16 << 20;
+export const PRESENT_ASSETS_COUNT = 64;
+const PRESENT_TITLE_MAX = 200;
+const PRESENT_SLUG_MAX = 48;
+/** Stylesheets followed through `@import`/`url()` below the document's own references. */
+const PRESENT_CSS_DEPTH = 2;
+/** Skipped references named in the result text, and listed in its `details`, at most. */
+const PRESENT_SKIPPED_SHOWN = 10;
+const PRESENT_SKIPPED_DETAILS = 50;
+const PRESENT_IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"]);
+/** Code file extensions → the language TeleFlock highlights them as. */
+const PRESENT_CODE: Record<string, string> = {
+	ts: "typescript", tsx: "tsx", mts: "typescript", cts: "typescript", js: "javascript", jsx: "jsx", mjs: "javascript", cjs: "javascript",
+	rs: "rust", py: "python", go: "go", rb: "ruby", java: "java", kt: "kotlin", kts: "kotlin", swift: "swift", scala: "scala", dart: "dart",
+	c: "c", h: "c", cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", cs: "csharp", zig: "zig", php: "php", lua: "lua", pl: "perl",
+	sh: "bash", bash: "bash", zsh: "bash", fish: "fish", ps1: "powershell", bat: "batch", cmd: "batch", sql: "sql",
+	yaml: "yaml", yml: "yaml", toml: "toml", ini: "ini", env: "ini", css: "css", scss: "scss", less: "less", xml: "xml",
+	vue: "vue", svelte: "svelte", ex: "elixir", exs: "elixir", erl: "erlang", hs: "haskell", ml: "ocaml", r: "r", jl: "julia",
+	diff: "diff", patch: "diff", proto: "protobuf", graphql: "graphql", gql: "graphql", tf: "hcl", hcl: "hcl", nix: "nix",
+	jsonl: "json", ndjson: "json", jsonc: "json", mk: "makefile", cmake: "cmake", gradle: "groovy", groovy: "groovy",
+};
+/** Language → the extension of an inline code snapshot. */
+const PRESENT_LANG_EXT: Record<string, string> = {
+	typescript: "ts", javascript: "js", rust: "rs", python: "py", go: "go", ruby: "rb", java: "java", kotlin: "kt", swift: "swift",
+	scala: "scala", dart: "dart", c: "c", cpp: "cpp", "c++": "cpp", csharp: "cs", "c#": "cs", zig: "zig", php: "php", lua: "lua",
+	bash: "sh", shell: "sh", sh: "sh", zsh: "sh", fish: "fish", powershell: "ps1", sql: "sql", yaml: "yaml", toml: "toml", ini: "ini",
+	css: "css", scss: "scss", less: "less", xml: "xml", html: "html", vue: "vue", svelte: "svelte", elixir: "ex", haskell: "hs",
+	ocaml: "ml", r: "r", julia: "jl", diff: "diff", protobuf: "proto", graphql: "graphql", hcl: "tf", nix: "nix", json: "json",
+	tsx: "tsx", jsx: "jsx", perl: "pl", erlang: "erl", groovy: "groovy",
+};
+
+/** `table[key]` when `key` is one of the table's own (an agent's `constructor` or `__proto__` is no
+ *  language and no extension: Object.prototype's members are none of the table's). */
+const ownEntry = (table: Record<string, string>, key: string): string | undefined => (Object.hasOwn(table, key) ? table[key] : undefined);
+
+/** A `present` call the agent has to fix: becomes the tool's error text. */
+export class PresentError extends Error {}
+
+export interface PresentInput {
+	title?: unknown;
+	path?: unknown;
+	content?: unknown;
+	kind?: unknown;
+	language?: unknown;
+}
+
+export interface PresentEnv {
+	/** The calling session's working directory (relative `path`s, inline content's references). */
+	cwd: string;
+	/** Its `local://` root. */
+	localRoot: string;
+	/** hostd is connected (only changes the result text). */
+	linked: boolean;
+}
+
+export interface PresentSkip {
+	ref: string;
+	reason: string;
+}
+
+/** The call's result `details`: what hostd types the transcript row from (tf-proto `PresentedArtifact`). */
+export interface PresentDetails {
+	title: string;
+	kind: PresentKind;
+	/** `presented/<slug>-v<n>.<ext>`, the `session.artifact` name (kind `local`). */
+	name: string;
+	url: string;
+	slug: string;
+	version: number;
+	size: number;
+	language?: string;
+	source?: string;
+	assets: number;
+	/** The references not included, the first {@link PRESENT_SKIPPED_DETAILS}. */
+	skipped?: PresentSkip[];
+	/** How many there were in all, when `skipped` lists only the first of them. */
+	skippedCount?: number;
+}
+
+/** A title as a file-name slug: lowercase ASCII letters, digits and single dashes (accents dropped),
+ *  at most 48; `artifact-<6 hex of its SHA-1>` when nothing is left (a title in another script). */
+export function presentSlug(title: string): string {
+	const ascii = title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+	let slug = ascii.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+	if (slug.length > PRESENT_SLUG_MAX) slug = slug.slice(0, PRESENT_SLUG_MAX).replace(/-+$/, "");
+	return slug || `artifact-${crypto.createHash("sha1").update(title).digest("hex").slice(0, 6)}`;
+}
+
+/** The kind a file extension (lowercase, no dot) presents as. */
+export function presentKindForExt(ext: string): PresentKind | undefined {
+	switch (ext) {
+		case "html":
+		case "htm":
+		case "xhtml":
+			return "html";
+		case "md":
+		case "markdown":
+		case "mdx":
+			return "markdown";
+		case "svg":
+			return "svg";
+		case "csv":
+		case "tsv":
+			return "csv";
+		case "json":
+			return "json";
+		case "txt":
+		case "text":
+		case "log":
+			return "text";
+	}
+	if (PRESENT_IMAGE_EXTS.has(ext)) return "image";
+	if (ownEntry(PRESENT_CODE, ext) !== undefined) return "code";
+	return undefined;
+}
+
+/** The kind of inline content passed without one: a page, a drawing, a JSON document, else Markdown. */
+export function sniffPresentKind(text: string): PresentKind {
+	const head = text.trimStart().slice(0, 512).toLowerCase();
+	if (head.startsWith("<!doctype html") || head.startsWith("<html")) return "html";
+	if (head.startsWith("<svg") || (head.startsWith("<?xml") && head.includes("<svg"))) return "svg";
+	if (head.startsWith("{") || head.startsWith("[")) {
+		try {
+			JSON.parse(text);
+			return "json";
+		} catch {
+			/* prose that starts with a bracket */
+		}
+	}
+	return "markdown";
+}
+
+/** The snapshot's extension. */
+export function presentExt(kind: PresentKind, sourceExt: string, language?: string): string {
+	switch (kind) {
+		case "html":
+			return "html";
+		case "markdown":
+			return "md";
+		case "svg":
+			return "svg";
+		case "image":
+			return sourceExt;
+		case "csv":
+			return sourceExt === "tsv" ? "tsv" : "csv";
+		case "json":
+			return "json";
+		case "text":
+			return "txt";
+		case "code":
+			return /^[a-z0-9]{1,10}$/.test(sourceExt) ? sourceExt : (language && ownEntry(PRESENT_LANG_EXT, language)) || "txt";
+	}
+}
+
+/** The version a new snapshot of `slug` takes: one past the highest in `names` (the `presented/`
+ *  dir's entries, any extension, a `.files` dir included). */
+export function nextPresentVersion(names: readonly string[], slug: string): number {
+	const re = new RegExp(`^${slug}-v(\\d+)\\.(?:[a-z0-9]{1,10}|files)$`);
+	let max = 0;
+	for (const name of names) {
+		const m = re.exec(name);
+		if (m) max = Math.max(max, Number(m[1]));
+	}
+	return max + 1;
+}
+
+/**
+ * A reference relative to a document (`img/chart.png?v=2`, `../x.css`) as a `/`-separated path
+ * inside the document's folder (`base`: the folder of the stylesheet it came from, relative to the
+ * document's), or undefined: other schemes, absolute paths, fragments, and paths leaving the folder.
+ * TeleFlock's viewer resolves references the same way (`assetKey` in `src/features/session/artifacts/sandbox.ts`).
+ */
+export function normalizeAssetRef(ref: string, base = ""): string | undefined {
+	let r = ref.trim();
+	if (!r || r.startsWith("#") || r.startsWith("/") || r.startsWith("\\") || /^[a-z][a-z0-9+.-]*:/i.test(r)) return undefined;
+	r = r.replace(/[?#][\s\S]*$/, "");
+	try {
+		r = decodeURIComponent(r);
+	} catch {
+		/* kept as written */
+	}
+	if (!r || r.includes("\\") || r.includes("\0")) return undefined;
+	const out = base ? base.split("/") : [];
+	for (const seg of r.split("/")) {
+		if (seg === "" || seg === ".") continue;
+		if (seg === "..") {
+			if (!out.length) return undefined;
+			out.pop();
+			continue;
+		}
+		out.push(seg);
+	}
+	return out.length ? out.join("/") : undefined;
+}
+
+const HTML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0" };
+
+/** The few character references an attribute value needs decoded to be a path. */
+export function decodeEntities(s: string): string {
+	if (!s.includes("&")) return s;
+	return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, e: string) => {
+		if (e[0] === "#") {
+			const code = e[1] === "x" || e[1] === "X" ? Number.parseInt(e.slice(2), 16) : Number.parseInt(e.slice(1), 10);
+			return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+		}
+		return ownEntry(HTML_ENTITIES, e.toLowerCase()) ?? whole;
+	});
+}
+
+// These run on omp's event loop, synchronously, over up to 4 MB an agent wrote: no part of a pattern
+// may run on past where its match must end, or every start of a match that cannot close rescans the
+// rest of the text (seconds to hours). A tag ends before the next `<` (outside quotes); an unquoted
+// `url()` has no `(` (CSS); a Markdown image's text has no `[`, its `<destination>` no `<`, `>` or
+// line break, its bare destination and `(title)` no parenthesis (CommonMark's balanced ones aside).
+const TAG_RE = /<([a-zA-Z][\w:-]*)((?:[^<>"']|"[^"]*"|'[^']*')*)>/g;
+const ATTR_RE = /([^\s=/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^()"'\s]+))\s*\)/gi;
+const CSS_IMPORT_RE = /@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+const MD_IMAGE_RE = /!\[[^[\]]*\]\(\s*(?:<([^<>\n]+)>|([^()\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?\s*\)/g;
+/** Elements whose `src` loads a file (iframes, objects and embeds never load in the viewer). */
+const SRC_TAGS = new Set(["img", "script", "source", "video", "audio", "track", "input"]);
+
+/** `text` without its blocks from `open` to the next `close` (comments); an unclosed one stays. One
+ *  pass: a lazy pattern for it rescans the rest of the text from every `open` that never closes. */
+function stripBlocks(text: string, open: string, close: string): string {
+	let out = "";
+	let from = 0;
+	for (let at = text.indexOf(open); at >= 0; at = text.indexOf(open, from)) {
+		const end = text.indexOf(close, at + open.length);
+		if (end < 0) break;
+		out += text.slice(from, at);
+		from = end + close.length;
+	}
+	return from === 0 ? text : out + text.slice(from);
+}
+
+/** A start tag's attributes: lowercase names, entity-decoded values. */
+export function tagAttrs(text: string): Map<string, string> {
+	const out = new Map<string, string>();
+	for (const m of text.matchAll(ATTR_RE)) {
+		const name = m[1]!.toLowerCase();
+		if (!out.has(name)) out.set(name, decodeEntities(m[2] ?? m[3] ?? m[4] ?? ""));
+	}
+	return out;
+}
+
+/** `url()` and `@import` references of a stylesheet (comments skipped). */
+export function cssAssetRefs(css: string): string[] {
+	const text = stripBlocks(css, "/*", "*/");
+	const refs: string[] = [];
+	for (const m of text.matchAll(CSS_URL_RE)) refs.push(m[1] ?? m[2] ?? m[3] ?? "");
+	for (const m of text.matchAll(CSS_IMPORT_RE)) refs.push(m[1] ?? m[2] ?? "");
+	return refs.filter(Boolean);
+}
+
+/**
+ * The files an HTML or SVG document loads: `src` of images, scripts, media and tracks, `srcset`,
+ * `poster`, stylesheet and icon `<link href>`, SVG `<image>`/`<use>`/`<feImage>` `href` (and
+ * `xlink:href`), `url()`s in `<style>` blocks and `style` attributes. Comments and script bodies are
+ * skipped; links (`<a href>`) are not loads.
+ */
+export function markupAssetRefs(markup: string): string[] {
+	const text = stripBlocks(markup, "<!--", "-->");
+	const lower = text.toLowerCase();
+	const refs: string[] = [];
+	const re = new RegExp(TAG_RE.source, "g");
+	for (let m = re.exec(text); m; m = re.exec(text)) {
+		const name = m[1]!.toLowerCase();
+		const attrs = tagAttrs(m[2] ?? "");
+		const style = attrs.get("style");
+		if (style) refs.push(...cssAssetRefs(style));
+		const src = attrs.get("src");
+		if (src && SRC_TAGS.has(name)) refs.push(src);
+		const srcset = attrs.get("srcset");
+		if (srcset && (name === "img" || name === "source")) {
+			for (const part of srcset.split(",")) {
+				const url = part.trim().split(/\s+/)[0];
+				if (url) refs.push(url);
+			}
+		}
+		const poster = attrs.get("poster");
+		if (poster && name === "video") refs.push(poster);
+		const href = attrs.get("href") ?? attrs.get("xlink:href");
+		if (href && name === "link" && /(?:^|\s)(?:stylesheet|icon)(?:\s|$)/i.test(attrs.get("rel") ?? "")) refs.push(href);
+		if (href && (name === "image" || name === "use" || name === "feimage")) refs.push(href);
+		const selfClosed = /\/\s*$/.test(m[2] ?? "");
+		if ((name === "script" || name === "style") && !selfClosed) {
+			const close = lower.indexOf(`</${name}`, re.lastIndex);
+			const end = close < 0 ? text.length : close;
+			if (name === "style") refs.push(...cssAssetRefs(text.slice(re.lastIndex, end)));
+			re.lastIndex = end;
+		}
+	}
+	return refs;
+}
+
+/** Image references of a Markdown document (`![alt](src)`, and HTML it embeds). */
+export function markdownAssetRefs(md: string): string[] {
+	const refs: string[] = [];
+	for (const m of md.matchAll(MD_IMAGE_RE)) refs.push((m[1] ?? m[2] ?? "").trim());
+	return [...refs.filter(Boolean), ...markupAssetRefs(md)];
+}
+
+/** Why a reference the document loads is not copied, when it is worth telling the agent. */
+function skipReason(ref: string): string | undefined {
+	const r = ref.trim();
+	if (/^(?:https?:)?\/\//i.test(r)) return "external URL: the viewer has no network access; inline it or save it next to the document";
+	if (r.startsWith("/") || /^[a-z]:[\\/]/i.test(r)) return "absolute path: use a path relative to the document";
+	if (/^[a-z][a-z0-9+.-]*:/i.test(r) || r.startsWith("#")) return undefined; // data:, blob:, fragments: nothing to copy
+	if (r.includes("..")) return "outside the document's folder";
+	return undefined;
+}
+
+const isInsideDir = (child: string, dir: string): boolean => {
+	const rel = path.relative(dir, child);
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+};
+
+/**
+ * Copies the files `text` (an HTML, SVG or Markdown document in `srcDir`) references into `destDir`
+ * at the same relative paths, stylesheets' own references included (two `@import` levels): only
+ * regular files whose real path stays inside `srcDir`, 4 MiB each, 16 MiB and 64 files together.
+ */
+export function copyPresentAssets(kind: PresentKind, text: string, srcDir: string, destDir: string): { copied: string[]; bytes: number; skipped: PresentSkip[] } {
+	const copied: string[] = [];
+	const skipped: PresentSkip[] = [];
+	let bytes = 0;
+	const queue: Array<{ key: string; ref: string; depth: number }> = [];
+	const seen = new Set<string>();
+	const named = new Set<string>();
+	const enqueue = (refs: readonly string[], base: string, depth: number): void => {
+		for (const ref of refs) {
+			const key = normalizeAssetRef(ref, base);
+			if (key === undefined) {
+				const reason = skipReason(ref);
+				if (reason && !named.has(ref)) {
+					named.add(ref);
+					skipped.push({ ref, reason });
+				}
+				continue;
+			}
+			if (seen.has(key)) continue;
+			seen.add(key);
+			queue.push({ key, ref, depth });
+		}
+	};
+	enqueue(kind === "markdown" ? markdownAssetRefs(text) : markupAssetRefs(text), "", 0);
+	if (!queue.length) return { copied, bytes, skipped };
+	let realDir: string;
+	try {
+		realDir = fs.realpathSync(srcDir);
+	} catch {
+		return { copied, bytes, skipped: [...skipped, ...queue.map(q => ({ ref: q.ref, reason: "not found" }))] };
+	}
+	for (const { key, ref, depth } of queue) {
+		const skip = (reason: string) => skipped.push({ ref, reason });
+		let real: string;
+		try {
+			real = fs.realpathSync(path.join(srcDir, ...key.split("/")));
+		} catch {
+			skip("not found");
+			continue;
+		}
+		if (!isInsideDir(real, realDir)) {
+			skip("outside the document's folder");
+			continue;
+		}
+		const st = fs.statSync(real, { throwIfNoEntry: false });
+		if (!st?.isFile()) {
+			skip("not a file");
+			continue;
+		}
+		if (copied.length >= PRESENT_ASSETS_COUNT) {
+			skip(`more than ${PRESENT_ASSETS_COUNT} referenced files`);
+			continue;
+		}
+		if (st.size > PRESENT_ASSET_MAX) {
+			skip(`${presentMb(st.size)}, over ${presentMb(PRESENT_ASSET_MAX)} per file`);
+			continue;
+		}
+		if (bytes + st.size > PRESENT_ASSETS_TOTAL) {
+			skip(`over ${presentMb(PRESENT_ASSETS_TOTAL)} for all referenced files`);
+			continue;
+		}
+		const data = fs.readFileSync(real);
+		const dest = path.join(destDir, ...key.split("/"));
+		try {
+			fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+			fs.writeFileSync(dest, data, { mode: 0o600, flag: "wx" });
+		} catch (err) {
+			skip(`not copied: ${err instanceof Error ? err.message : String(err)}`);
+			continue;
+		}
+		copied.push(key);
+		bytes += data.length;
+		if (key.toLowerCase().endsWith(".css") && depth < PRESENT_CSS_DEPTH) {
+			enqueue(cssAssetRefs(data.toString("utf8")), key.includes("/") ? key.slice(0, key.lastIndexOf("/")) : "", depth + 1);
+		}
+	}
+	return { copied, bytes, skipped };
+}
+
+const presentMb = (n: number): string => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1).replace(/\.0$/, "")} MB` : `${Math.ceil(n / 1024)} KB`);
+
+/** omp's `resolveLocalRoot` for the calling session: `ctx.localProtocolOptions` (a subagent's points
+ *  at its parent's root), else the session manager's artifacts dir; `local` inside it, or on Windows
+ *  from 180 UTF-16 units on `%TEMP%/omp-local/<session id>`. */
+export function presentLocalRoot(ctx: unknown, platform: NodeJS.Platform = process.platform): string {
+	const opts = isObj(ctx) ? ctx.localProtocolOptions : undefined;
+	const sm = isObj(ctx) ? ctx.sessionManager : undefined;
+	const own = (key: string): string | undefined => (isObj(opts) && typeof opts[key] === "function" ? methodString(opts, key) : methodString(sm, key));
+	const dir = own("getArtifactsDir");
+	const sid = own("getSessionId") ?? "session";
+	const safe = sid.replace(/[^a-zA-Z0-9_.-]/g, "_");
+	const short = path.join(os.tmpdir(), "omp-local", safe && safe !== "." && safe !== ".." ? safe : "session");
+	if (!dir) return short;
+	const candidate = path.resolve(dir, "local");
+	return platform === "win32" && candidate.length >= 180 ? short : candidate;
+}
+
+/** A `path` argument as a file: `local://<name>` in the session's root, `file://`, `~/…`, else
+ *  relative to the session's cwd. */
+function presentSourcePath(p: string, env: PresentEnv): string {
+	if (p.startsWith("local://")) {
+		const rel = normalizeAssetRef(p.slice("local://".length).replace(/^\/+/, ""));
+		if (!rel) throw new PresentError(`${p}: not a file in the session's local:// root`);
+		return path.join(env.localRoot, ...rel.split("/"));
+	}
+	if (p.startsWith("file://")) return fileURLToPath(p);
+	if (p === "~" || p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+	return path.resolve(env.cwd, p);
+}
+
+/** Creates `dir/<slug>-v<n>.<ext>` exclusively (0600) for the next free version and writes `bytes`. */
+function claimPresentVersion(dir: string, slug: string, ext: string, bytes: Uint8Array): number {
+	let version = nextPresentVersion(fs.readdirSync(dir), slug);
+	for (let tries = 0; tries < 1000; tries++, version++) {
+		let fd: number;
+		try {
+			fd = fs.openSync(path.join(dir, `${slug}-v${version}.${ext}`), "wx", 0o600);
+		} catch (err) {
+			if (isObj(err) && err.code === "EEXIST") continue;
+			throw err;
+		}
+		try {
+			fs.writeFileSync(fd, bytes);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return version;
+	}
+	throw new PresentError(`no free version left for "${slug}"`);
+}
+
+/**
+ * Runs one `present` call: checks the arguments, snapshots the document as the title's next version
+ * and copies the files it references. Throws {@link PresentError} with what the agent should fix.
+ */
+export function presentArtifact(input: PresentInput, env: PresentEnv): { text: string; details: PresentDetails } {
+	const title = typeof input.title === "string" ? input.title.replace(/\s+/g, " ").trim() : "";
+	if (!title) throw new PresentError("`title` is required: a short name for the document (presenting the same title again adds a version).");
+	if (title.length > PRESENT_TITLE_MAX) throw new PresentError(`\`title\` is ${title.length} characters; keep it under ${PRESENT_TITLE_MAX}.`);
+	const p = typeof input.path === "string" && input.path.trim() ? input.path.trim() : undefined;
+	const content = typeof input.content === "string" ? input.content : undefined;
+	if ((p === undefined) === (content === undefined)) throw new PresentError("Pass exactly one of `path` (a file to show) or `content` (the document's text).");
+	let kind: PresentKind | undefined;
+	if (input.kind !== undefined && input.kind !== null && input.kind !== "") {
+		if (!isPresentKind(input.kind)) throw new PresentError(`\`kind\` must be one of ${PRESENT_KINDS.join(", ")}.`);
+		kind = input.kind;
+	}
+	let language = typeof input.language === "string" && input.language.trim() ? input.language.trim().toLowerCase().slice(0, 40) : undefined;
+	let bytes: Buffer;
+	let sourceExt = "";
+	let srcDir: string;
+	if (p !== undefined) {
+		const file = presentSourcePath(p, env);
+		const st = fs.statSync(file, { throwIfNoEntry: false });
+		if (!st) throw new PresentError(`${p}: no such file.`);
+		if (!st.isFile()) throw new PresentError(`${p}: not a file.`);
+		sourceExt = path.extname(file).slice(1).toLowerCase();
+		kind ??= presentKindForExt(sourceExt) ?? "text";
+		const max = kind === "image" ? PRESENT_IMAGE_MAX : PRESENT_TEXT_MAX;
+		if (st.size > max) throw new PresentError(`${p} is ${presentMb(st.size)}; a presented ${kind === "image" ? "image" : "document"} can be at most ${presentMb(max)}.`);
+		if (kind === "image" && !PRESENT_IMAGE_EXTS.has(sourceExt)) throw new PresentError(`${p}: an image must be a ${[...PRESENT_IMAGE_EXTS].join(", ")} file.`);
+		bytes = fs.readFileSync(file);
+		srcDir = path.dirname(file);
+	} else {
+		const text = content ?? "";
+		if (!text.trim()) throw new PresentError("`content` is empty.");
+		if (Buffer.byteLength(text, "utf8") > PRESENT_TEXT_MAX) throw new PresentError(`\`content\` is over ${presentMb(PRESENT_TEXT_MAX)}; save it to a file instead or shorten it.`);
+		kind ??= sniffPresentKind(text);
+		if (kind === "image") throw new PresentError("An image needs `path`: inline `content` is text (present an SVG as kind svg).");
+		bytes = Buffer.from(text, "utf8");
+		srcDir = env.cwd;
+	}
+	let text: string | undefined;
+	if (kind !== "image") {
+		try {
+			text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		} catch {
+			throw new PresentError(`${p ?? "content"}: not UTF-8 text; present images with kind image, and other binary files can't be shown.`);
+		}
+		if (text.includes("\0")) throw new PresentError(`${p ?? "content"}: binary data (NUL bytes) can't be shown as ${kind}.`);
+	}
+	if (kind === "code") language ??= ownEntry(PRESENT_CODE, sourceExt);
+	const ext = presentExt(kind, sourceExt, language);
+	const slug = presentSlug(title);
+	const dir = path.join(env.localRoot, PRESENT_DIR);
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const version = claimPresentVersion(dir, slug, ext, bytes);
+	const name = `${PRESENT_DIR}/${slug}-v${version}.${ext}`;
+	const assets =
+		text !== undefined && (kind === "html" || kind === "markdown" || kind === "svg")
+			? copyPresentAssets(kind, text, srcDir, path.join(dir, `${slug}-v${version}.files`))
+			: { copied: [], bytes: 0, skipped: [] };
+	const url = `local://${name}`;
+	const details: PresentDetails = { title, kind, name, url, slug, version, size: bytes.length, assets: assets.copied.length };
+	if (kind === "code" && language) details.language = language;
+	if (p !== undefined) details.source = p;
+	if (assets.skipped.length) details.skipped = assets.skipped.slice(0, PRESENT_SKIPPED_DETAILS);
+	if (assets.skipped.length > PRESENT_SKIPPED_DETAILS) details.skippedCount = assets.skipped.length;
+	const lines = [`Presented "${title}" (${kind}, version ${version}) to the user: ${url}`];
+	if (assets.copied.length) lines.push(`Included ${assets.copied.length} referenced file${assets.copied.length === 1 ? "" : "s"} (${presentMb(assets.bytes)}).`);
+	if (assets.skipped.length) {
+		const shown = assets.skipped.slice(0, PRESENT_SKIPPED_SHOWN).map(s => `${s.ref} (${s.reason})`);
+		const more = assets.skipped.length - shown.length;
+		lines.push(`Not included: ${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`);
+	}
+	if (!env.linked) lines.push("TeleFlock is not connected to this session right now; the user sees it when they open the session in TeleFlock.");
+	return { text: lines.join("\n"), details };
+}
+
+const PRESENT_DESCRIPTION = [
+	"Show the user a document in TeleFlock, the app they follow this session in: it appears as a card in the chat and opens in a viewer beside it (full screen on a phone).",
+	"Use it for what the user should read or look at, not for your own notes: a report or summary you built (prefer one self-contained HTML page with inline CSS and JS, or Markdown), a rendered page, a chart, a diagram (SVG), a screenshot or image, a table (CSV), data (JSON), or a code listing.",
+	"Present a file (`path`: relative to the working directory, absolute, or local://<name>) or inline `content`. `kind` is inferred from the extension (or the content) when omitted.",
+	"Presenting again with the same `title` adds a new version the user can switch to, so revise a report by presenting it again under its title.",
+	"HTML runs sandboxed without network access: inline scripts and styles work, but external URLs (CDNs, web fonts, remote images, fetch) do not load. Images and stylesheets in the page's folder, referenced by relative paths, are included.",
+	"Limits: 4 MB per document, 8 MB per image. Present what is worth the user's attention, not every file you touch.",
+].join("\n");
+
+/** omp's handler context among a tool's `execute` arguments (its position changed across omp versions). */
+const isToolContext = (v: unknown): v is ExtensionContext => isObj(v) && "sessionManager" in v && typeof v.cwd === "string";
+
+const isPresentKind = (v: unknown): v is PresentKind => typeof v === "string" && (PRESENT_KINDS as readonly string[]).includes(v);
+
+/** `o[key]()` when that is a method answering a non-empty string. */
+function methodString(o: unknown, key: string): string | undefined {
+	if (!isObj(o)) return undefined;
+	const f = o[key];
+	if (typeof f !== "function") return undefined;
+	const v: unknown = f.call(o);
+	return typeof v === "string" && v ? v : undefined;
+}
+
+interface PresentSchema {
+	object(shape: Record<string, unknown>): unknown;
+	string(): PresentSchemaField;
+	enum(values: readonly string[]): PresentSchemaField;
+}
+interface PresentSchemaField {
+	optional(): PresentSchemaField;
+	describe(text: string): PresentSchemaField;
+}
+/** omp's `pi.zod` (the schema builder its extension API hands out). */
+const isPresentSchema = (v: unknown): v is PresentSchema =>
+	!!v && (typeof v === "object" || typeof v === "function") && typeof Reflect.get(v, "object") === "function" && typeof Reflect.get(v, "string") === "function" && typeof Reflect.get(v, "enum") === "function";
+
+/** Registers `present` with omp (needs the extension API's `zod`; false without it). */
+export function registerPresentTool(pi: ExtensionAPI, linked: () => boolean): boolean {
+	const api: unknown = pi;
+	const z = isObj(api) && isPresentSchema(api.zod) ? api.zod : undefined;
+	if (!z || typeof pi.registerTool !== "function") return false;
+	const parameters = z.object({
+		title: z.string().describe("Short title shown to the user. Presenting the same title again adds a new version."),
+		path: z.string().optional().describe("File to show: relative to the working directory, absolute, or local://<name>. Omit when passing content."),
+		content: z.string().optional().describe("The document itself, inline (HTML, Markdown, SVG, code, CSV, JSON or text). Omit when passing path."),
+		kind: z.enum(PRESENT_KINDS).optional().describe("html, markdown, svg, image, code, csv, json or text. Inferred from the file extension or the content when omitted."),
+		language: z.string().optional().describe("For kind code: the language to highlight (rust, python, …); inferred from the extension when omitted."),
+	});
+	const tool = {
+		name: "present",
+		label: "Present",
+		description: PRESENT_DESCRIPTION,
+		loadMode: "essential",
+		parameters,
+		async execute(...args: unknown[]) {
+			const params = (isObj(args[1]) ? args[1] : {}) as PresentInput;
+			const ctx = args.find(isToolContext);
+			const env: PresentEnv = { cwd: ctx?.cwd ?? process.cwd(), localRoot: presentLocalRoot(ctx), linked: linked() };
+			const out = presentArtifact(params, env);
+			return { content: [{ type: "text", text: out.text }], details: out.details };
+		},
+	};
+	// execute reads omp's arguments by shape, not by the position omp's typings give them.
+	const definition = tool as unknown as Parameters<ExtensionAPI["registerTool"]>[0];
+	pi.registerTool(definition);
+	return true;
+}
+
+// ─── 2.3.0: the TeleFlock Browser (`caps.browser`) ─────────────────────────────────────────────
+// docs/bridge-protocol.md "TeleFlock Browser", architecture §3.33. The user's own Chromium in the
+// TeleFlock app reaches an agent as a DevTools endpoint tf-hostd serves on this host's loopback.
+// `browserOverride` points omp's `browser.cdpUrl` at it as a runtime override (the settings layer
+// omp's own `--model` uses: no config file is written) and keeps omp's browser relay off meanwhile
+// (the relay wins over `browser.cdpUrl`, also through `PI_BROWSER_RELAY`); what it replaced comes
+// back when it ends. A `turn` override ("Allow once") ends with the turn of the session that asked
+// for it (the main session's when nobody did: an attach from the app), and hostd hears so
+// (`browser_released`). The `use_user_browser` tool asks the user through hostd (`browser_request`
+// … `browserAnswer`). One {@link BrowserLink} per owner copy holds both.
+
+/** omp's browser settings on its live `Settings` (`tools/browser/settings`, omp ≥ 18.13). */
+export interface BrowserSettings {
+	store(): unknown;
+	/** `browser.cdpUrl`. */
+	cdpUrl: SettingHandle<string | undefined>;
+	/** `browser.relay`. */
+	relay: SettingHandle<boolean>;
+	/** `browser.enabled`: omp's browser at all. */
+	enabled?: SettingHandle<boolean>;
+}
+
+/** What an override replaced: the session's own runtime overrides (`undefined`: none) and `PI_BROWSER_RELAY`. */
+export interface BrowserSaved {
+	cdpUrl?: string;
+	relay?: boolean;
+	relayEnv?: string;
+}
+
+export type BrowserScope = "session" | "turn";
+
+/** How a `use_user_browser` request ended (`browserAnswer`, or the bridge itself). */
+export interface BrowserVerdict {
+	allow: boolean;
+	scope?: BrowserScope;
+	/** Not allowed because nothing could answer or omp cannot use it (else the user said no). */
+	unavailable?: boolean;
+	/** In words, for the agent. */
+	message?: string;
+}
+
+/** What the tool reports: the verdict and whether omp drives the user's browser now. */
+export interface BrowserOutcome extends BrowserVerdict {
+	attached: boolean;
+	/** The override's URL while attached. */
+	cdpUrl?: string;
+	/** It was attached before the call: nobody was asked. */
+	already?: boolean;
+	/** A `turn` override allowed for another session's turn (the caller did not ask for it): it ends
+	 *  with that turn, not the caller's. */
+	othersTurn?: boolean;
+}
+
+/** The session a `use_user_browser` call runs in (the owner copy answers for every session). */
+export interface BrowserAsker {
+	/** The asking subagent's id; `undefined`: the main session. */
+	session?: string;
+	/** A note that session reads with its next prompt; `undefined`: the owner's own (`BrowserLinkDeps.tell`). */
+	tell?(text: string): void;
+}
+
+/** `http://127.0.0.1:<port>`: the only endpoint hostd serves an agent (loopback, never a name). */
+export function isLoopbackCdp(url: string): boolean {
+	const m = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/.exec(url);
+	const port = m ? Number(m[1]) : 0;
+	return port >= 1 && port <= 65535;
+}
+
+function browserScope(v: unknown): BrowserScope {
+	if (v === undefined || v === null || v === "session") return "session";
+	if (v === "turn") return "turn";
+	return fail("invalid_params", '"scope" must be "session" or "turn"');
+}
+
+/** A setting's runtime override (omp's provenance `runtime`), if the session has one. */
+function runtimeValue<T>(handle: SettingHandle<T>, store: unknown): T | undefined {
+	return handle.provenance?.(store) === "runtime" ? handle.get(store) : undefined;
+}
+
+/** Points omp's browser at `url` and turns its relay off. Returns what this replaced: `saved` (the
+ *  first override's) when given, so a second override still restores what the user had. */
+export function applyBrowserOverride(bs: BrowserSettings, url: string, env: Record<string, string | undefined>, saved?: BrowserSaved): BrowserSaved {
+	const store = bs.store();
+	const before = saved ?? { cdpUrl: runtimeValue(bs.cdpUrl, store), relay: runtimeValue(bs.relay, store), relayEnv: env.PI_BROWSER_RELAY };
+	bs.cdpUrl.override(store, url);
+	bs.relay.override(store, false);
+	// omp reads the variable on every open, above the setting.
+	if (env.PI_BROWSER_RELAY !== undefined) env.PI_BROWSER_RELAY = "0";
+	return before;
+}
+
+/** Puts back what {@link applyBrowserOverride} replaced. */
+export function clearBrowserOverride(bs: BrowserSettings, saved: BrowserSaved, env: Record<string, string | undefined>): void {
+	const store = bs.store();
+	if (saved.cdpUrl !== undefined) bs.cdpUrl.override(store, saved.cdpUrl);
+	else bs.cdpUrl.clearOverride(store);
+	if (saved.relay !== undefined) bs.relay.override(store, saved.relay);
+	else bs.relay.clearOverride(store);
+	if (saved.relayEnv === undefined) delete env.PI_BROWSER_RELAY;
+	else env.PI_BROWSER_RELAY = saved.relayEnv;
+}
+
+/** omp's live `Settings` and its browser setting handles: from omp's root exports when it has
+ *  them, else the literal subpath imports (checked against the root `Settings` export). */
+async function probeBrowserSettings(ns: Record<string, unknown>, load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<BrowserSettings | undefined> {
+	const exported = isHandle(ns.cfgBrowserCdpUrl) && isHandle(ns.cfgBrowserRelay) && ns.Settings !== undefined;
+	const [settingsMod, browserMod] = exported
+		? [ns, ns]
+		: await Promise.all([load(import("@oh-my-pi/pi-coding-agent/config/settings")), load(import("@oh-my-pi/pi-coding-agent/tools/browser/settings"))]);
+	const settings = settingsMod?.Settings;
+	// Another module instance would hold its own, uninitialised Settings.
+	if (!isObj(settings) && typeof settings !== "function") return undefined;
+	if (ns.Settings !== undefined && ns.Settings !== settings) return undefined;
+	const cdpUrl: unknown = browserMod?.cfgBrowserCdpUrl;
+	const relay: unknown = browserMod?.cfgBrowserRelay;
+	const enabled: unknown = browserMod?.cfgBrowserEnabled;
+	if (!isHandle<string | undefined>(cdpUrl) || !isHandle<boolean>(relay)) return undefined;
+	// `Settings.instance` throws until omp initialised it (always done before extensions load).
+	const store = (): unknown => {
+		const s: unknown = "instance" in settings ? settings.instance : undefined;
+		if (!isObj(s)) throw new BridgeError("unsupported", "omp's settings are not available in this omp");
+		return s;
+	};
+	try {
+		store();
+	} catch {
+		return undefined;
+	}
+	return { store, cdpUrl, relay, enabled: isHandle<boolean>(enabled) ? enabled : undefined };
+}
+
+export interface BrowserLinkDeps {
+	/** omp's browser settings, once the internals probe found them. */
+	settings(): BrowserSettings | undefined;
+	/** An event to hostd (dropped while it is not connected). */
+	emit(event: string, data: Json): void;
+	/** hostd is connected. */
+	linked(): boolean;
+	/** The process environment (`PI_BROWSER_RELAY`). */
+	env: Record<string, string | undefined>;
+	log(msg: string): void;
+	/** A note the model reads with its next prompt (omp's `sendMessage`, `deliverAs: "nextTurn"`). */
+	tell?(text: string): void;
+}
+
+/** The main session's key among the sessions a `turn` override lasts the turn of. */
+const MAIN_TURN = "";
+
+interface BrowserLease {
+	url: string;
+	scope: BrowserScope;
+	saved: BrowserSaved;
+	/** Bumped by every override: a turn end only ends the override it saw. */
+	gen: number;
+	/** A `turn` override lasts until the turns of these sessions ended ({@link MAIN_TURN}: the main
+	 *  session's): the callers of the request it answered. */
+	turns: Set<string>;
+	/** Who reads why once it ended (`undefined`: `BrowserLinkDeps.tell`): those sessions, and any
+	 *  that found it attached meanwhile. */
+	told: Map<string, ((text: string) => void) | undefined>;
+}
+
+interface BrowserAsk {
+	id: string;
+	reason: string;
+	at: number;
+	/** Tool calls waiting on it (a second call while one waits shares the request). */
+	waiters: number;
+	answer: PromiseWithResolvers<BrowserVerdict>;
+	/** The sessions those calls run in, each with its note (see {@link BrowserLease.told}). */
+	askers: Map<string, ((text: string) => void) | undefined>;
+}
+
+/**
+ * The owner copy's side of the TeleFlock Browser: the override (`browserOverride`) and the user's
+ * answer to a `use_user_browser` call (`browserAnswer`). hostd holds the attachment; whatever ends
+ * it there drops the override here (`browserOverride {cdpUrl: null}`, or hostd's connection going).
+ */
+export class BrowserLink {
+	#lease: BrowserLease | undefined;
+	#gen = 0;
+	#ask: BrowserAsk | undefined;
+	#seq = 0;
+
+	constructor(private readonly deps: BrowserLinkDeps) {}
+
+	/** The override in force: omp's browser is the user's TeleFlock Browser. */
+	get lease(): { url: string; scope: BrowserScope } | undefined {
+		const l = this.#lease;
+		return l && { url: l.url, scope: l.scope };
+	}
+
+	/** The pending request hostd shows the user. */
+	get pending(): { id: string; reason: string; at: number } | undefined {
+		const a = this.#ask;
+		return a && { id: a.id, reason: a.reason, at: a.at };
+	}
+
+	/** `browserOverride {cdpUrl, scope?}`: `cdpUrl` null drops it (hostd ended the attachment). A
+	 *  `turn` override lasts the turns of the pending request's callers (it answers that request);
+	 *  one that takes over from another app lasts the turns its predecessor did; one nobody asked
+	 *  for, the main session's. */
+	override(p: Params): Json {
+		const url = p.cdpUrl;
+		if (url === undefined || url === null) {
+			this.#release();
+			return {};
+		}
+		const bs = this.deps.settings() ?? fail("unsupported", "this omp lacks the browser settings the TeleFlock Browser needs");
+		if (typeof url !== "string" || !isLoopbackCdp(url)) fail("invalid_params", '"cdpUrl" must be http://127.0.0.1:<port>');
+		const scope = browserScope(p.scope);
+		const saved = applyBrowserOverride(bs, url as string, this.deps.env, this.#lease?.saved);
+		const before = this.#lease;
+		const turns = this.#ask ? new Set(this.#ask.askers.keys()) : before ? new Set(before.turns) : new Set([MAIN_TURN]);
+		const told = new Map(this.#ask?.askers ?? before?.told ?? [[MAIN_TURN, undefined]]);
+		this.#lease = { url: url as string, scope, saved, gen: ++this.#gen, turns, told };
+		this.deps.log(`browser: omp's browser.cdpUrl is ${url as string} (${scope})`);
+		return {};
+	}
+
+	/** `browserAnswer {id, allow, scope?, unavailable?, message?}`: ends the pending request. */
+	answer(p: Params): Json {
+		const id = str(p, "id", true);
+		const ask = this.#ask;
+		if (!ask || ask.id !== id) return fail("not_found", `no pending browser request ${id}`);
+		const allow = bool(p, "allow") ?? fail("invalid_params", 'missing "allow"');
+		const verdict: BrowserVerdict = { allow };
+		if (allow) verdict.scope = browserScope(p.scope);
+		else if (bool(p, "unavailable") === true) verdict.unavailable = true;
+		const message = str(p, "message")?.trim();
+		if (message) verdict.message = message.slice(0, 500);
+		this.#end(ask, verdict);
+		return {};
+	}
+
+	/** A `use_user_browser` call in the session of `asker` (the main session's without one): asks
+	 *  the user through hostd unless the answer is clear without. */
+	async ask(reason: string, signal?: AbortSignal, asker: BrowserAsker = {}): Promise<BrowserOutcome> {
+		const session = asker.session ?? MAIN_TURN;
+		const bs = this.deps.settings();
+		if (!bs) return this.#outcome(BrowserLink.unavailable("this omp cannot be pointed at the TeleFlock Browser (its browser settings are missing)"));
+		if (bs.enabled?.get(bs.store()) === false) return this.#outcome(BrowserLink.unavailable("omp's browser is turned off here (the browser.enabled setting)"));
+		const lease = this.#lease;
+		if (lease) {
+			const out: BrowserOutcome = { ...this.#outcome({ allow: true }), already: true };
+			if (lease.scope === "turn" && !lease.turns.has(session)) {
+				// Allowed once for another session's turn: it ends with that one, and this one learns why too.
+				out.othersTurn = true;
+				if (!lease.told.has(session)) lease.told.set(session, asker.tell);
+			}
+			return out;
+		}
+		if (!this.deps.linked()) return this.#outcome(BrowserLink.unavailable("TeleFlock is not connected to this omp session"));
+		if (signal?.aborted) throw abortError(signal);
+		let ask = this.#ask;
+		if (!ask) {
+			const at = Date.now();
+			ask = { id: `browser-${at.toString(36)}-${++this.#seq}`, reason, at, waiters: 0, answer: Promise.withResolvers<BrowserVerdict>(), askers: new Map() };
+			this.#ask = ask;
+			this.#announce(ask);
+		}
+		const asked = ask;
+		if (!asked.askers.has(session)) asked.askers.set(session, asker.tell);
+		asked.waiters++;
+		const aborted = Promise.withResolvers<never>();
+		const onAbort = (): void => aborted.reject(abortError(signal));
+		signal?.addEventListener("abort", onAbort, { once: true });
+		try {
+			return this.#outcome(await Promise.race([asked.answer.promise, aborted.promise]));
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
+			asked.waiters--;
+			// Every call waiting on it was cancelled: the user is no longer asked.
+			if (asked.waiters === 0 && this.#ask === asked) this.#end(asked, { allow: false, message: "the tool call was cancelled" });
+		}
+	}
+
+	/** The run of session `session` ended (`agent_end`; the main session's when omitted): a `turn`
+	 *  override that lasts its turn ends once omp settled it (`idle`: omp's `waitForIdle()`, which
+	 *  waits out its own retries) and the turns of the other sessions it lasts have ended too. */
+	turnEnded(idle?: Promise<unknown>, session: string = MAIN_TURN): void {
+		const lease = this.#lease;
+		if (lease?.scope !== "turn" || !lease.turns.has(session)) return;
+		const end = (): void => {
+			if (this.#lease?.gen !== lease.gen) return;
+			lease.turns.delete(session);
+			if (lease.turns.size === 0) this.#release("turnEnded");
+		};
+		if (idle) idle.then(end, end);
+		else end();
+	}
+
+	/** After every hello (a new connection or session): hostd learns the pending request again. */
+	hello(): void {
+		if (this.#ask) this.#announce(this.#ask);
+	}
+
+	/** hostd's connection went: it ended the attachment, so the override goes too. A pending request
+	 *  waits for the next connection. */
+	unlinked(): void {
+		this.#release();
+	}
+
+	/** This copy stops bridging (a newer copy took over, the session ends): everything ends. */
+	close(why: string): void {
+		this.#release();
+		const ask = this.#ask;
+		if (ask) this.#end(ask, BrowserLink.unavailable(why));
+	}
+
+	static unavailable(message: string): BrowserVerdict {
+		return { allow: false, unavailable: true, message };
+	}
+
+	#announce(ask: BrowserAsk): void {
+		this.deps.emit("browser_request", { id: ask.id, reason: ask.reason, at: ask.at });
+	}
+
+	#end(ask: BrowserAsk, verdict: BrowserVerdict): void {
+		if (this.#ask === ask) this.#ask = undefined;
+		this.deps.emit("browser_request_end", { id: ask.id });
+		ask.answer.resolve(verdict);
+	}
+
+	/** Puts omp's settings back; `reason`: the bridge ended it itself, and hostd hears why. */
+	#release(reason?: string): void {
+		const lease = this.#lease;
+		if (!lease) return;
+		this.#lease = undefined;
+		const bs = this.deps.settings();
+		try {
+			if (bs) clearBrowserOverride(bs, lease.saved, this.deps.env);
+		} catch (err) {
+			this.deps.log(`browser: restoring omp's browser settings: ${String(err)}`);
+		}
+		this.deps.log(`browser: omp's browser.cdpUrl is back${reason ? ` (${reason})` : ""}`);
+		if (reason) this.deps.emit("browser_released", { reason });
+		// Its tabs there fail from now on with errors that name no cause (Puppeteer's detached
+		// frames): each session it served learns why before it tries again.
+		if (reason === "turnEnded") for (const tell of lease.told.values()) (tell ?? this.deps.tell)?.(BROWSER_ONCE_ENDED);
+	}
+
+	#outcome(v: BrowserVerdict): BrowserOutcome {
+		const lease = this.#lease;
+		const out: BrowserOutcome = { ...v, attached: lease !== undefined };
+		if (lease) {
+			out.scope = lease.scope;
+			out.cdpUrl = lease.url;
+		}
+		return out;
+	}
+}
+
+function abortError(signal: AbortSignal | undefined): Error {
+	const why: unknown = signal?.reason;
+	return why instanceof Error ? why : new Error("Aborted");
+}
+
+/** The `use_user_browser` result: what the agent may do now, and the rules of a shared login. */
+export function browserToolText(o: BrowserOutcome): string {
+	if (o.attached) {
+		const how = o.scope !== "turn" ? "for this session, until they detach it" : o.othersTurn ? "until the turn it was allowed for ends (another agent's)" : "until this turn ends";
+		return [
+			o.already ? `You can already use the user's TeleFlock Browser (${how}).` : `The user allowed you to use their TeleFlock Browser ${how}.`,
+			"Use your browser tool now: in eval, `const tab = await browser.open({ name: \"…\", url: \"…\" })` and the tab helpers. Leave out `app`, which would pick another browser.",
+			"It is the user's own browser profile: their logins and cookies are shared with you, and sites take what you do as the user's doing. The user sees your tabs in TeleFlock and can take one over or detach you at any time.",
+			"Without asking the user first, do not sign out (that signs them out everywhere), switch accounts, change account or security settings, or make payments, purchases or other irreversible changes. Stay on what the user asked for.",
+		].join("\n");
+	}
+	if (o.allow) return "The user allowed it, but TeleFlock detached the browser again before you could use it. Ask again if you still need it.";
+	if (o.unavailable) {
+		return `The user's TeleFlock Browser is not available: ${o.message ?? "no TeleFlock app with a browser is connected"}. Go on without it, or tell the user what you need it for: they can let you use it from TeleFlock on their computer.`;
+	}
+	return "The user declined: you may not use their TeleFlock Browser. Go on without it (your own browser still works for public pages) or tell the user why you need it; do not ask again unless they ask you to.";
+}
+
+/** The note once an "Allow once" ended (`BrowserLinkDeps.tell`, `BrowserAsker.tell`): to each
+ *  session it served, the one whose turn it lasted and any that found it attached. */
+export const BROWSER_ONCE_ENDED =
+	"TeleFlock: the user's TeleFlock Browser was allowed for one turn only, and that turn has ended, so it is no longer connected to you: your tabs in it no longer respond to your browser tool. If you need it again, ask with use_user_browser.";
+
+const BROWSER_TOOL_DESCRIPTION = [
+	"Ask the user to let you use their TeleFlock Browser: their own browser in the TeleFlock app, where they are signed in to their accounts.",
+	"Use it only when the task needs their logins or their real browser session (a site or account you must be signed in to), and only for what they asked for; for public pages use your own browser.",
+	"Give a short, specific `reason`: the user sees it and answers Allow for this session, Allow once (until this turn ends) or Deny. Once allowed, your browser tool drives their browser.",
+].join("\n");
+
+/** Registers `use_user_browser` with omp (needs the extension API's `zod`; false without it). `ask`
+ *  gets the calling session's context, when omp passes it. */
+export function registerBrowserTool(pi: ExtensionAPI, ask: (reason: string, signal?: AbortSignal, ctx?: ExtensionContext) => Promise<BrowserOutcome>): boolean {
+	const api: unknown = pi;
+	const z = isObj(api) && isPresentSchema(api.zod) ? api.zod : undefined;
+	if (!z || typeof pi.registerTool !== "function") return false;
+	const parameters = z.object({
+		reason: z.string().describe("Why you need the user's browser, in one sentence the user reads (e.g. \"to download last month's invoices from your billing page\")."),
+	});
+	const tool = {
+		name: "use_user_browser",
+		label: "Use my browser",
+		description: BROWSER_TOOL_DESCRIPTION,
+		loadMode: "essential",
+		parameters,
+		async execute(...args: unknown[]) {
+			const params = isObj(args[1]) ? args[1] : {};
+			const reason = typeof params.reason === "string" ? params.reason.replace(/\s+/g, " ").trim().slice(0, 500) : "";
+			if (!reason) throw new Error("Give a `reason`: what you need the user's browser for. The user reads it.");
+			const signal = args.find((a): a is AbortSignal => a instanceof AbortSignal);
+			const out = await ask(reason, signal, args.find(isToolContext));
+			const details: Json = { allowed: out.attached, scope: out.attached ? out.scope : undefined, unavailable: out.unavailable === true || undefined };
+			return { content: [{ type: "text", text: browserToolText(out) }], details };
+		},
+	};
+	// execute reads omp's arguments by shape, not by the position omp's typings give them.
+	const definition = tool as unknown as Parameters<ExtensionAPI["registerTool"]>[0];
+	pi.registerTool(definition);
+	return true;
+}
+
 export default async function teleflockBridge(pi: ExtensionAPI) {
 	const schemaOut = process.env.TF_OMP_SCHEMA_OUT;
 	if (schemaOut) {
@@ -3210,7 +4890,17 @@ function bridge(pi: ExtensionAPI) {
 
 	let ctxRef: ExtensionContext | undefined; // latest main-session context
 	// This copy's entry in the process-wide slot (see "one bridge per omp process").
-	const me: BridgeSlot["owners"][string] = { version: BRIDGE_VERSION, stop: () => standDown(), relay: frame => onRelay(frame), report: turn => onReportedTurn(turn) };
+	const me: BridgeSlot["owners"][string] = {
+		version: BRIDGE_VERSION,
+		stop: () => standDown(),
+		relay: frame => onRelay(frame),
+		report: turn => onReportedTurn(turn),
+		linked: () => connected,
+		askBrowser: (reason, signal, asker) => browserLink.ask(reason, signal, asker),
+		browserTurnEnded: (session, idle) => browserLink.turnEnded(idle, session),
+		ompDialog: (name, original, self, args) => ompDialog(name, original, self, args),
+		irc: leg => onIrcLeg(leg),
+	};
 	let active = false; // between session_start and session_shutdown
 	let sock: net.Socket | undefined;
 	let connected = false;
@@ -3278,15 +4968,48 @@ function bridge(pi: ExtensionAPI) {
 	let dialogsReady = false;
 	/** Marks this binding's dialog wrappers (see installDialogWrappers). */
 	const dialogToken = {};
+	// 2.3.0: omp's own dialogs and waits (see "omp's own dialogs and waits").
+	/** omp's `ExtensionUiController.prototype`, once the internals probe found it. */
+	let ompUiProto: object | undefined;
+	/** UI contexts the controller probe ran on (one status write each). */
+	const probedUis = new WeakSet<object>();
+	let userWaitsReady = false;
+	/** Commands this copy submitted through the composer that still run (`submit`). */
+	let commandRuns = 0;
+	/** When something offered to hostd last stopped covering an open wait: a dialog's request ended,
+	 *  a plan review resolved (userWaitInfo counts the grace from then, or from the wait's start). */
+	let coverEndedAt = 0;
+	let waitSyncTimer: Timer | undefined;
 	const seenBus = new WeakSet<object>();
 	const internals: Internals = { interruptLabel: USER_INTERRUPT, approval: fallbackApproval };
+	/** A note this binding's session reads with its next prompt, without a turn of its own (omp's
+	 *  `sendMessage`, `deliverAs: "nextTurn"`): why the TeleFlock Browser is gone. */
+	const browserNote = (text: string): void => {
+		try {
+			pi.sendMessage({ customType: "teleflock-browser", content: text, display: false }, { deliverAs: "nextTurn" });
+		} catch (err) {
+			bridgeLog(`browser note: ${String(err)}`);
+		}
+	};
+	// 2.3.0 `browser` (see "the TeleFlock Browser").
+	const browserLink = new BrowserLink({
+		settings: () => internals.browser,
+		emit: (event, data) => emit(event, data),
+		linked: () => connected,
+		env: process.env,
+		log: msg => bridgeLog(msg),
+		tell: browserNote,
+	});
 	const hub = new DialogHub(
 		() => {
 			const slot = bridgeSlot();
 			slot.uiReqSeq = (slot.uiReqSeq ?? 0) + 1;
 			return slot.uiReqSeq;
 		},
-		frame => feedLive(frame),
+		frame => {
+			if (frame.t === "ui-request-end") coverEnded();
+			feedLive(frame);
+		},
 	);
 	/** Probes the omp internals the data plane uses (`hello.caps`). The agent registry comes from omp's
 	 *  root exports, synchronously; the rest are literal subpath imports, which omp's extension loader
@@ -3298,6 +5021,14 @@ function bridge(pi: ExtensionAPI) {
 			if (isObj(reg) && typeof reg.get === "function" && typeof reg.list === "function") internals.registry = reg as unknown as AgentRegistryLike;
 		}
 		const load = (mod: Promise<unknown>): Promise<Json | undefined> => settleWithin(mod, 3_000).then(m => (isObj(m) ? m : undefined));
+		// omp's own dialogs (2.3.0): wrapped as soon as the controller module resolves, ahead of the
+		// dialogs omp opens at startup (the worktree question).
+		const uiControllerReady = load(import("@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller")).then(mod => {
+			const cls: unknown = mod?.ExtensionUiController;
+			if (typeof cls !== "function" || !isObj(cls.prototype)) return;
+			ompUiProto = cls.prototype;
+			if (ctxRef) ensureDialogs(ctxRef);
+		});
 		const exported = hasGlobal(ns.AgentLifecycleManager);
 		const [lifecycleMod, registryMod, approvalMod, messagesMod] = await Promise.all([
 			exported ? undefined : load(import("@oh-my-pi/pi-coding-agent/registry/agent-lifecycle")),
@@ -3315,6 +5046,9 @@ function bridge(pi: ExtensionAPI) {
 		if (typeof messagesMod?.USER_INTERRUPT_LABEL === "string") internals.interruptLabel = messagesMod.USER_INTERRUPT_LABEL;
 		internals.roles = await probeRoleSettings(ns, load);
 		internals.resume = await probeResume(ns, load);
+		internals.browser = await probeBrowserSettings(ns, load);
+		internals.ircTap = await probeIrcTap(ns, load);
+		await uiControllerReady;
 	})().catch((err: unknown) => bridgeLog(`omp internals: ${String(err)}`));
 
 	// ─── wire ─────────────────────────────────────────────────────────────────────────────────
@@ -3371,6 +5105,12 @@ function bridge(pi: ExtensionAPI) {
 		const sid = helloSessionId ?? sessionId();
 		if (!sid) return;
 		send({ t: "event", event, sessionId: sid, data });
+	};
+
+	/** 2.3.0 `agentChat`: a leg omp's IRC bus started or settled (installIrcTap), to hostd while this
+	 *  copy is the process's bridge. */
+	const onIrcLeg = (leg: IrcLeg): void => {
+		if (ownsSlot()) emit("irc", leg);
 	};
 
 	const showStatus = (on: boolean): void => {
@@ -3469,6 +5209,7 @@ function bridge(pi: ExtensionAPI) {
 			queue: readQueue(),
 			planReview: pendingReview,
 			attached: bridgeSlot().cmdCtx !== undefined,
+			userWait: userWaitInfo(),
 		};
 	};
 
@@ -3504,7 +5245,11 @@ function bridge(pi: ExtensionAPI) {
 			// 2.1.0: `roleModels` needs omp's settings internals (`getRoleModels` / `setRoleModels`);
 			// `retry` / `resumeTree` / `turnError` / `limitGuard` (resumeCaps) omp's retry and task internals;
 			// `jobs` a job list (omp's public snapshot at least).
-			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true, roleModels: internals.roles !== undefined, ...resumeCaps(ctx), notices: true, context: true, jobs: jobsReady(ctx), restore: restoreReady(ctx), restoreSelect: restoreSelectReady(ctx) },
+			// 2.3.0: `ompDialogs` omp's own dialogs reach hostd (its ExtensionUiController answered the probe);
+			// `userWaits` omp's waits for the user are counted (`state.userWait`); `browser` omp's browser
+			// settings can point it at the TeleFlock Browser (`browserOverride`, `use_user_browser`);
+			// `agentChat` omp's IRC bus is tapped (`irc` events).
+			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true, roleModels: internals.roles !== undefined, ...resumeCaps(ctx), notices: true, context: true, jobs: jobsReady(ctx), restore: restoreReady(ctx), restoreSelect: restoreSelectReady(ctx), ompDialogs: ompUiProto !== undefined && bridgeSlot().ompController !== undefined, userWaits: userWaitsReady, browser: internals.browser !== undefined, agentChat: internals.ircTap === true },
 			state: readState(ctx),
 		};
 	};
@@ -3525,6 +5270,8 @@ function bridge(pi: ExtensionAPI) {
 			lastQueueJson = JSON.stringify(hello.state.queue);
 			lastJobsJson = JOBS_NONE; // the new session's jobs (or this connection's) go out on the next tick
 			send(hello);
+			// A pending `use_user_browser` request belonged to the previous connection or session.
+			browserLink.hello();
 		} catch (err) {
 			bridgeLog(`hello failed: ${String(err)}`);
 		}
@@ -3960,6 +5707,7 @@ function bridge(pi: ExtensionAPI) {
 					return original.apply(this, args);
 				},
 			);
+			ensureOmpDialogs(ui);
 		} catch (err) {
 			dialogsReady = false;
 			bridgeLog(`dialogs: ${String(err)}`);
@@ -3980,6 +5728,91 @@ function bridge(pi: ExtensionAPI) {
 			return original.apply(this, args);
 		};
 
+	/** omp's own dialogs (2.3.0): the process's wrappers on its ExtensionUiController, the controller
+	 *  probe (one status write per UI context, under a key nothing shows, until a write named the
+	 *  controller), the keystroke listener on its TUI and the count of its waits for the user. */
+	const ensureOmpDialogs = (ui: object): void => {
+		if (ompUiProto) {
+			installOmpDialogWrappers(ompUiProto);
+			const setStatus: unknown = (ui as Json).setStatus;
+			if (!bridgeSlot().ompController && !probedUis.has(ui) && typeof setStatus === "function") {
+				probedUis.add(ui);
+				setStatus.call(ui, PROBE_STATUS_KEY, undefined);
+			}
+			const controller = bridgeSlot().ompController;
+			if (isObj(controller) && isObj(controller.ctx)) watchTyping(controller.ctx.ui);
+		}
+		if (agentSession && !userWaitsReady) userWaitsReady = installUserWaitCounter(Object.getPrototypeOf(agentSession) as object);
+	};
+
+	/** When omp's hook dialogs are TeleFlock's to answer too (raceOmpDialog). */
+	const ompPolicy: OmpDialogPolicy = {
+		waiting: () => userWaits().count > 0,
+		commanding: () => commandRuns > 0,
+		unattended: () => {
+			const slot = bridgeSlot();
+			return slot.typingTuis !== undefined && Date.now() - (slot.typedAt ?? 0) >= TUI_QUIET_MS;
+		},
+	};
+
+	/** One of omp's ExtensionUiController dialogs, handed over by the process's wrappers (`ompDialog`):
+	 *  raced against hostd while this copy bridges and the policy offers it, else `undefined` (omp's alone). */
+	const ompDialog = (name: OmpDialogMethod, original: AnyFn, self: unknown, args: unknown[]): unknown => {
+		if (!ownsSlot()) return undefined;
+		try {
+			return raceOmpDialog(hub, name, original, self, args, ompPolicy);
+		} catch (err) {
+			bridgeLog(`omp dialog ${name}: ${String(err)}`);
+			return undefined;
+		}
+	};
+
+	/** What omp's TUI shows where the user answers now (shownText), when the controller is known. */
+	const openDialogText = (): string | undefined => {
+		const controller = bridgeSlot().ompController;
+		try {
+			return shownText(isObj(controller) ? controller.ctx : undefined);
+		} catch {
+			return undefined;
+		}
+	};
+
+	/**
+	 * `state.userWait`: omp waits for the user and no dialog offered to hostd covers it (none pending,
+	 * no plan review) for {@link USER_WAIT_GRACE_MS}, counted from when the wait began or, later, when
+	 * what covered it ended. A wait the operator opened from the TUI (typed just before it, the agent
+	 * idle, no command of TeleFlock's running) stays theirs.
+	 */
+	const userWaitInfo = (): CtlState["userWait"] => {
+		const w = bridgeSlot().userWaits;
+		if (!userWaitsReady || !w || w.count <= 0) return undefined;
+		const now = Date.now();
+		if (hub.size > 0 || pendingReview !== undefined) {
+			coverEndedAt = now;
+			return undefined;
+		}
+		if (now - Math.max(w.since, coverEndedAt) < USER_WAIT_GRACE_MS) return undefined;
+		const typedFirst = w.typedAtStart !== undefined && w.since - w.typedAtStart < TUI_QUIET_MS;
+		if (typedFirst && commandRuns === 0 && !isStreaming()) return undefined;
+		return { since: w.since, text: openDialogText() };
+	};
+
+	/** A wait began or ended: an end goes to hostd at once, a beginning once the grace shows whether a
+	 *  dialog covers it. */
+	const onUserWaitChange = (): void => {
+		if (!ownsSlot()) return;
+		clearTimeout(waitSyncTimer);
+		waitSyncTimer = setTimeout(safeSync, userWaits().count > 0 ? USER_WAIT_GRACE_MS + 100 : 0);
+		waitSyncTimer.unref?.();
+	};
+
+	/** What was offered to hostd stopped covering any wait (a dialog's request ended, a plan review
+	 *  resolved): an open wait goes to hostd once the grace from now shows nothing covers it again. */
+	const coverEnded = (): void => {
+		coverEndedAt = Date.now();
+		if (userWaits().count > 0) onUserWaitChange();
+	};
+
 	// ─── connection ───────────────────────────────────────────────────────────────────────────
 	const dropSocket = (): void => {
 		const s = sock;
@@ -3998,6 +5831,8 @@ function bridge(pi: ExtensionAPI) {
 		lastAgents = "";
 		// Private fallback side turns stream only to hostd; omp's own /btw keeps running.
 		for (const th of sideThreads.values()) th.ac?.abort(new Error("bridge disconnected"));
+		// hostd ended the agent's browser attachment with the connection (a pending request waits).
+		browserLink.unlinked();
 		if (s) {
 			try {
 				s.destroy();
@@ -4206,6 +6041,10 @@ function bridge(pi: ExtensionAPI) {
 			stopTicking(ctxRef);
 			detachLive();
 			dropSocket();
+			userWaits().listeners.delete(onUserWaitChange);
+			clearTimeout(waitSyncTimer);
+			// The new copy knows nothing of this copy's browser override or request.
+			browserLink.close("a newer TeleFlock bridge took over this omp; ask again");
 			// The new copy's hostd connection says it again; until then nothing resumes anything.
 			bridgeSlot().autoResume = undefined;
 			bridgeLog("a newer TeleFlock bridge took over");
@@ -4222,6 +6061,7 @@ function bridge(pi: ExtensionAPI) {
 		attachSession(ctx);
 		attachRegistry();
 		ensureDialogs(ctx);
+		userWaits().listeners.add(onUserWaitChange);
 		if (connected) safeSync();
 		else connect();
 	};
@@ -4406,13 +6246,22 @@ function bridge(pi: ExtensionAPI) {
 		ed.pendingImages = [];
 		if (Array.isArray(links)) ed.pendingImageLinks = [];
 		let run: Promise<unknown>;
+		// omp's dialogs opened while the command runs are TeleFlock's to answer (raceOmpDialog).
+		commandRuns++;
+		const ran = (): void => {
+			commandRuns--;
+		};
 		try {
 			run = Promise.resolve(ed.onSubmit(text));
+		} catch (err) {
+			ran();
+			throw err;
 		} finally {
 			// onSubmit reads the attachments synchronously; give them straight back.
 			if (ed.pendingImages.length === 0) ed.pendingImages = images;
 			if (Array.isArray(links) && (ed.pendingImageLinks?.length ?? 0) === 0) ed.pendingImageLinks = links;
 		}
+		run.then(ran, ran);
 		const restore = () => {
 			try {
 				const lostText = draft !== "" && ed.getText() === "";
@@ -5279,15 +7128,27 @@ function bridge(pi: ExtensionAPI) {
 		return isRetrySession(s) ? s : undefined;
 	};
 
-	/** `hello.caps` of the resume features. */
-	const resumeCaps = (ctx: ExtensionContext): { retry: boolean; resumeTree: boolean; turnError: boolean; limitGuard: boolean } => {
+	/** `hello.caps` of the resume features (2.3.0: `refusals`). */
+	const resumeCaps = (ctx: ExtensionContext): { retry: boolean; resumeTree: boolean; turnError: boolean; limitGuard: boolean; refusals: boolean } => {
 		const main = mainRetry(ctx);
 		return {
 			retry: main !== undefined,
 			resumeTree: main?.asyncJobManager !== undefined && internals.resume?.task !== undefined && internals.lifecycle !== undefined,
 			turnError: internals.registry !== undefined,
 			limitGuard: true,
+			refusals: internals.registry !== undefined && main !== undefined && canContinueRefused(main),
 		};
+	};
+
+	/** omp's name of model `provider`/`id` (its model registry), when it knows one. */
+	const modelName = (provider: unknown, id: unknown): string | null => {
+		if (typeof provider !== "string" || typeof id !== "string" || !ctxRef) return null;
+		try {
+			const name: unknown = ctxRef.models.resolve(`${provider}/${id}`)?.name;
+			return typeof name === "string" && name.trim() ? name.trim() : null;
+		} catch {
+			return null;
+		}
 	};
 
 	/** `turn_error` data for the failed `tail` of agent `agentId` (also the entries of `failedTails`). */
@@ -5312,6 +7173,10 @@ function bridge(pi: ExtensionAPI) {
 			message: text.slice(0, 500),
 			retryAt: hint === undefined ? null : at + hint,
 			at,
+			// 2.3.0 `refusals`
+			refusal: refusalInfo(tail),
+			modelName: modelName(provider, tail.model),
+			promptAt: turnStart(session?.agent?.state?.messages ?? []) ?? null,
 		};
 	};
 
@@ -5337,20 +7202,23 @@ function bridge(pi: ExtensionAPI) {
 
 	/**
 	 * A turn of `agentId` ended (`agent_end`) on an error: once omp settled it (`waitForIdle` also
-	 * waits out omp's auto-retry saga), a failed tail no retry is pending for is terminal and goes to
-	 * hostd as `turn_error`: the main session's directly, a subagent's through the owner copy.
+	 * waits out omp's auto-retry saga and its fallback chain walk), a failed tail no retry is pending
+	 * for is terminal and goes to hostd as `turn_error`: the main session's directly, a subagent's
+	 * through the owner copy. 2.3.0: so does a refusal omp dropped from the context ({@link refusedTurn}).
 	 */
 	const watchTurn = (agentId: string, main: boolean): void => {
 		if (watchedTurns.has(agentId)) return;
 		const session = main ? (agentSession ?? (ctxRef ? findSession(ctxRef) : undefined)) : internals.registry?.get(agentId)?.session;
-		if (!isRetrySession(session) || failedTail(session.agent?.state?.messages ?? [])?.stopReason !== "error") return;
+		if (!isRetrySession(session)) return;
+		const ended = (): Json | undefined => failedTail(session.agent?.state?.messages ?? []) ?? refusedTurn(session as RefusalSession);
+		if (ended()?.stopReason !== "error") return;
 		watchedTurns.add(agentId);
 		void (async () => {
 			try {
 				await session.waitForIdle?.();
 				// A retry (omp's own, or a new turn) runs: its own end decides.
 				if (session.isStreaming || session.isRetrying) return;
-				const tail = failedTail(session.agent?.state?.messages ?? []);
+				const tail = ended();
 				if (tail?.stopReason !== "error") return;
 				const turn: ReportedTurn = { data: turnInfo(agentId, main, tail, session, internals.registry?.get(agentId)), message: tail };
 				if (main) sendTurnError(turn);
@@ -5364,18 +7232,26 @@ function bridge(pi: ExtensionAPI) {
 	};
 
 	/**
-	 * One follow-up turn of subagent `id` that resumes its failed turn through omp's `retry()`
-	 * ({@link armRetry}). When omp parked and revived the session in between, the run never reached
-	 * the retry (it found the terminal failure and stopped): it runs once more on the live session.
+	 * One follow-up turn of subagent `id` that resumes its failed turn through omp's `retry()`, or
+	 * `goOn` ({@link armRetry}). When omp parked and revived the session in between, the run never
+	 * reached it (it found the terminal failure and stopped): it runs once more on the live session.
 	 */
-	const driveRetry = async (id: string, name: string, init: Json, file: string | undefined, signal: AbortSignal, main: RetrySession): Promise<FollowUpResult> => {
+	const driveRetry = async (
+		id: string,
+		name: string,
+		init: Json,
+		file: string | undefined,
+		signal: AbortSignal,
+		main: RetrySession,
+		goOn?: (s: RefusalSession) => Promise<boolean>,
+	): Promise<FollowUpResult> => {
 		const task = internals.resume?.task;
 		const lifecycle = internals.lifecycle;
 		if (!task || !lifecycle) throw new Error("omp's task internals are gone");
 		for (let attempt = 0; ; attempt++) {
 			const live = await lifecycle.global().ensureLive(id);
 			if (!isRetrySession(live)) throw new Error(`agent ${id} cannot be retried`);
-			const armed = armRetry(live);
+			const armed = armRetry(live, goOn ? () => goOn(live) : undefined);
 			try {
 				const result = await restoreRun(task, id, name, init, file, signal, main);
 				if (armed.used() || attempt > 0 || signal.aborted) return result;
@@ -5385,14 +7261,8 @@ function bridge(pi: ExtensionAPI) {
 		}
 	};
 
-	/**
-	 * Resumes subagent `id` from its failed or stopped last turn the way `omp --restore` resumes one
-	 * (task/restore.ts): a background job of its parent runs omp's follow-up turn ({@link driveRetry})
-	 * and hands the result to the parent as the `async-result` of a job with the subagent's id, unless
-	 * omp's own wake monitor already did ({@link quietIfDelivered}).
-	 * False: it runs, or its last turn neither failed nor was stopped.
-	 */
-	const retrySubagent = async (ctx: ExtensionContext, id: string): Promise<boolean> => {
+	/** omp's internals a subagent resume needs, else `unsupported`. */
+	const subagentResume = (ctx: ExtensionContext): SubagentResumeKit => {
 		const reg = internals.registry;
 		const lifecycle = internals.lifecycle;
 		const task = internals.resume?.task;
@@ -5401,14 +7271,23 @@ function bridge(pi: ExtensionAPI) {
 		if (!reg || !lifecycle || !task || !main || !jobs) {
 			return fail("unsupported", "this omp cannot resume subagents from TeleFlock (omp's task internals or background jobs are missing)");
 		}
-		const ref = reg.get(id) ?? fail("not_found", `no agent ${id}`);
-		if (ref.kind !== "sub") return fail("invalid_params", `agent ${id} is not a subagent`);
-		if (ref.status === "running") return false;
-		const live = await lifecycle.global().ensureLive(id);
-		if (!isRetrySession(live)) return fail("unsupported", `agent ${id} cannot be retried`);
-		if (live.isStreaming || !retryableTail(live)) return false;
-		const init = task.sessionInit(live.sessionManager?.getEntries?.() ?? []) ?? fail("unsupported", `agent ${id} has no session contract to resume from`);
-		if (init.isolated === true) return fail("unsupported", `agent ${id} ran isolated; its worktree is gone`);
+		return { reg, lifecycle, task, main, jobs };
+	};
+
+	/**
+	 * Registers the background job of subagent `ref`'s parent that runs its follow-up turn
+	 * ({@link driveRetry}, `goOn` as there) and hands the result to the parent as the `async-result`
+	 * of a job with the subagent's id, unless omp's own wake monitor already did ({@link quietIfDelivered}).
+	 */
+	const registerResume = (
+		ctx: ExtensionContext,
+		{ task, main, jobs }: SubagentResumeKit,
+		ref: AgentRefLike,
+		live: RetrySession,
+		init: Json,
+		goOn?: (s: RefusalSession) => Promise<boolean>,
+	): void => {
+		const id = ref.id;
 		const file = ref.sessionFile ?? live.sessionManager?.getSessionFile?.() ?? undefined;
 		const owner = ref.parentId ?? ctx.agent?.id;
 		jobs.register(
@@ -5416,12 +7295,30 @@ function bridge(pi: ExtensionAPI) {
 			id,
 			async ({ jobId, signal }) => {
 				const since = Date.now();
-				const result = await driveRetry(id, ref.displayName ?? id, init, file, signal, main);
+				const result = await driveRetry(id, ref.displayName ?? id, init, file, signal, main, goOn);
 				if (jobId) quietIfDelivered(jobs, jobId, id, owner, since);
 				return restoreJobResult(task, result);
 			},
 			{ id, agentId: id, ownerId: owner },
 		);
+	};
+
+	/**
+	 * Resumes subagent `id` from its failed or stopped last turn the way `omp --restore` resumes one
+	 * (task/restore.ts): a background job of its parent runs omp's follow-up turn ({@link registerResume}).
+	 * False: it runs, or its last turn neither failed nor was stopped.
+	 */
+	const retrySubagent = async (ctx: ExtensionContext, id: string): Promise<boolean> => {
+		const omp = subagentResume(ctx);
+		const ref = omp.reg.get(id) ?? fail("not_found", `no agent ${id}`);
+		if (ref.kind !== "sub") return fail("invalid_params", `agent ${id} is not a subagent`);
+		if (ref.status === "running") return false;
+		const live = await omp.lifecycle.global().ensureLive(id);
+		if (!isRetrySession(live)) return fail("unsupported", `agent ${id} cannot be retried`);
+		if (live.isStreaming || !retryableTail(live)) return false;
+		const init = omp.task.sessionInit(live.sessionManager?.getEntries?.() ?? []) ?? fail("unsupported", `agent ${id} has no session contract to resume from`);
+		if (init.isolated === true) return fail("unsupported", `agent ${id} ran isolated; its worktree is gone`);
+		registerResume(ctx, omp, ref, live, init);
 		return true;
 	};
 
@@ -5435,6 +7332,104 @@ function bridge(pi: ExtensionAPI) {
 		}
 		const main = mainRetry(ctx) ?? fail("unsupported", "this omp has no retry for its session");
 		return { started: await main.retry() };
+	};
+
+	/** The model and thinking level a session ran before `retryRefused` switched it. */
+	const choiceOf = (model: unknown, thinking: unknown): { model: string | null; name: string | null; thinking: string | null } => ({
+		model: isObj(model) && typeof model.provider === "string" && typeof model.id === "string" ? `${model.provider}/${model.id}` : null,
+		name: isObj(model) && typeof model.name === "string" && model.name ? model.name : null,
+		thinking: typeof thinking === "string" ? thinking : null,
+	});
+
+	/** Puts back the model (`before`) and thinking level a session ran before `retryRefused` switched
+	 *  it, when its turn could not go on; false when that failed as well (the switch stays). */
+	const switchBack = async (setModel: (model: unknown) => Promise<unknown>, setLevel: (level: string) => void, before: unknown, level: string | null): Promise<boolean> => {
+		try {
+			if (before === undefined || (await setModel(before)) === false) return false;
+			if (level) setLevel(level);
+			return true;
+		} catch (err) {
+			bridgeLog(`retryRefused: back to the model the turn ran: ${String(err)}`);
+			return false;
+		}
+	};
+
+	/**
+	 * `retryRefused` (2.3.0 `refusals`): the main session, or subagent `agentId` (its follow-up turn a
+	 * job of its parent, as `retry {agentId}` resumes one), whose last turn omp ended on a provider
+	 * refusal switches to `model` (`thinking`, else the level it ran) and goes on with that turn
+	 * ({@link continueRefused}); `notice` reaches the live feed as a warning once omp went on.
+	 * `started: false`: its last turn is not (or no longer) such a refusal, or it runs; with
+	 * `previous`, it switched but omp did not go on. A continuation that throws, or a job omp
+	 * refuses (its limit), puts back what the turn ran and fails the op; when that fails too, the
+	 * answer is `started: false` with `previous`.
+	 */
+	const retryRefusedOp = async (ctx: ExtensionContext, p: Params): Promise<Json> => {
+		const agentId = str(p, "agentId");
+		const spec = str(p, "model", true);
+		const thinking = str(p, "thinking");
+		if (thinking !== undefined && !Object.hasOwn(THINKING_LEVELS, thinking)) fail("invalid_params", `unknown thinking level ${thinking}`);
+		const notice = str(p, "notice")?.trim();
+		const model = ctx.models.resolve(spec) ?? fail("not_found", `unknown model ${spec}`);
+		const now = { model: `${model.provider}/${model.id}`, modelName: model.name || null };
+		const say = (): void => {
+			if (notice) sendNotice({ type: "notice", level: "warning", message: notice.slice(0, 500), source: "refusal" });
+		};
+		if (!agentId || agentId === ctx.agent?.id) {
+			const main = (mainRetry(ctx) as RefusalSession | undefined) ?? fail("unsupported", "this omp has no session to go on with");
+			if (main.isStreaming || main.isRetrying || !refusedTurn(main)) return { started: false };
+			if (!failedTail(main.agent?.state?.messages ?? []) && !canContinueRefused(main)) return fail("unsupported", "this omp cannot go on with a refused turn");
+			const before = ctx.model;
+			const previous = choiceOf(before, pi.getThinkingLevel());
+			if (!(await pi.setModel(model))) return fail("auth_required", `no credentials for ${now.model}`);
+			const level = thinking ?? previous.thinking;
+			if (level) pi.setThinkingLevel(level as ThinkingLevel);
+			let started: boolean;
+			try {
+				started = await continueRefused(main);
+			} catch (err) {
+				if (await switchBack(m => pi.setModel(m as typeof model), l => pi.setThinkingLevel(l as ThinkingLevel), before, previous.thinking)) throw err;
+				return { started: false, ...now, previous };
+			}
+			if (started) say();
+			return { started, ...now, previous };
+		}
+		await loadPersistedRoster(ctx);
+		const kit = subagentResume(ctx);
+		const ref = kit.reg.get(agentId) ?? fail("not_found", `no agent ${agentId}`);
+		if (ref.kind !== "sub") return fail("invalid_params", `agent ${agentId} is not a subagent`);
+		if (ref.status === "running") return { started: false };
+		const live = await kit.lifecycle.global().ensureLive(agentId);
+		if (!isRetrySession(live)) return fail("unsupported", `agent ${agentId} cannot be retried`);
+		const sub = live as RefusalSession;
+		const setModel = sub.setModel;
+		if (sub.isStreaming || sub.isRetrying || !refusedTurn(sub)) return { started: false };
+		if (typeof setModel !== "function" || (!failedTail(sub.agent?.state?.messages ?? []) && !canContinueRefused(sub))) {
+			return fail("unsupported", "this omp cannot switch a subagent to another model and go on");
+		}
+		const init = kit.task.sessionInit(sub.sessionManager?.getEntries?.() ?? []) ?? fail("unsupported", `agent ${agentId} has no session contract to resume from`);
+		if (init.isolated === true) return fail("unsupported", `agent ${agentId} ran isolated; its worktree is gone`);
+		const before = sub.model;
+		const previous = choiceOf(before, sub.thinkingLevel);
+		try {
+			await setModel.call(sub, model);
+		} catch (err) {
+			return fail("auth_required", err instanceof Error ? err.message : String(err));
+		}
+		const level = thinking ?? previous.thinking;
+		if (level) sub.setThinkingLevel?.(level);
+		// omp runs a job's function as it registers it, so the switch comes first.
+		try {
+			registerResume(ctx, kit, ref, sub, init, async s => {
+				const started = await continueRefused(s);
+				if (started) say();
+				return started;
+			});
+		} catch (err) {
+			if (await switchBack(m => setModel.call(sub, m), l => sub.setThinkingLevel?.(l), before, previous.thinking)) throw err;
+			return { started: false, ...now, previous };
+		}
+		return { started: true, ...now, previous };
 	};
 
 	/** `ids` without repeats, parents before their children (their depth in omp's registry). */
@@ -5541,7 +7536,7 @@ function bridge(pi: ExtensionAPI) {
 			case "setModel": {
 				const spec = str(p, "model", true);
 				const thinking = str(p, "thinking");
-				if (thinking !== undefined && !THINKING_LEVELS[thinking]) fail("invalid_params", `unknown thinking level ${thinking}`);
+				if (thinking !== undefined && !Object.hasOwn(THINKING_LEVELS, thinking)) fail("invalid_params", `unknown thinking level ${thinking}`);
 				const model = ctx.models.resolve(spec);
 				if (!model) fail("not_found", `unknown model ${spec}`);
 				if (!(await pi.setModel(model!))) fail("auth_required", `no credentials for ${model!.provider}/${model!.id}`);
@@ -5550,7 +7545,7 @@ function bridge(pi: ExtensionAPI) {
 			}
 			case "setThinking": {
 				const level = str(p, "level", true);
-				if (!THINKING_LEVELS[level]) fail("invalid_params", `unknown thinking level ${level}`);
+				if (!Object.hasOwn(THINKING_LEVELS, level)) fail("invalid_params", `unknown thinking level ${level}`);
 				pi.setThinkingLevel(level as ThinkingLevel);
 				return readState(ctx);
 			}
@@ -5584,7 +7579,7 @@ function bridge(pi: ExtensionAPI) {
 				for (let step = 0; step < 3 && readMode(ctx).mode !== target; step++) {
 					const before = readMode(ctx).mode;
 					const { settled } = await submit(ctx, "/plan");
-					if (!settled) fail("busy", "plan mode is waiting for a confirmation in the terminal");
+					if (!settled) fail("busy", "plan mode is waiting for your confirmation (\"Exit plan mode?\")");
 					if (readMode(ctx).mode === before) break; // refused (goal/vibe mode active, plan disabled)
 				}
 				const { mode } = readMode(ctx);
@@ -5802,6 +7797,8 @@ function bridge(pi: ExtensionAPI) {
 				return agentCmd(p);
 			case "retry":
 				return retryOp(ctx, p);
+			case "retryRefused":
+				return retryRefusedOp(ctx, p);
 			case "resumeTree":
 				return resumeTreeOp(ctx, p);
 			case "failedTails":
@@ -5810,6 +7807,10 @@ function bridge(pi: ExtensionAPI) {
 				return restorableOp(ctx);
 			case "restore":
 				return restoreOp(ctx, p);
+			case "browserOverride":
+				return browserLink.override(p);
+			case "browserAnswer":
+				return browserLink.answer(p);
 			case "setAutoResume": {
 				// Process-wide: the context guard of every copy and session reads it.
 				const on = bool(p, "on") ?? fail("invalid_params", 'missing "on"');
@@ -5821,6 +7822,28 @@ function bridge(pi: ExtensionAPI) {
 			default:
 				return fail("unknown_op", `unknown op ${op}`);
 		}
+	}
+
+	// 2.3.0 `present`: registered in every session (subagents too); the owner copy knows whether
+	// hostd is connected.
+	try {
+		registerPresentTool(pi, () => bridgeSlot().owners[endpoint]?.linked?.() === true);
+	} catch (err) {
+		bridgeLog(`present: ${String(err)}`);
+	}
+
+	// 2.3.0 `use_user_browser`: registered in every session (subagents too); the owner copy asks
+	// hostd, and its override covers the whole omp process. A subagent's "Allow once" lasts its own
+	// turn, and the note when it ends goes to it (this binding's session).
+	try {
+		registerBrowserTool(pi, (reason, signal, ctx) => {
+			const owner = bridgeSlot().owners[endpoint];
+			if (!owner?.askBrowser) return Promise.resolve({ ...BrowserLink.unavailable("TeleFlock is not connected to this omp session"), attached: false });
+			const agent = ctx?.agent;
+			return owner.askBrowser(reason, signal, agent?.kind === "sub" ? { session: agent.id, tell: browserNote } : undefined);
+		});
+	} catch (err) {
+		bridgeLog(`use_user_browser: ${String(err)}`);
 	}
 
 	// ─── omp wiring ───────────────────────────────────────────────────────────────────────────
@@ -5959,6 +7982,23 @@ function bridge(pi: ExtensionAPI) {
 		}
 	});
 
+	// 2.3.0 `browser`: an "Allow once" override ends with the turn of the session that asked for it,
+	// once omp settled that turn: the main session's here, a subagent's through its own binding,
+	// which tells the owner copy (`browserTurnEnded`).
+	pi.on("agent_end", (_event, ctx) => {
+		try {
+			const sub = ctx.agent?.kind === "sub" ? ctx.agent.id : undefined;
+			if (sub === undefined && (!adopt(ctx) || !ownsSlot())) return;
+			const session: unknown = sub === undefined ? (agentSession ?? findSession(ctx)) : findSession(ctx);
+			const wait = isObj(session) ? session.waitForIdle : undefined;
+			const idle = typeof wait === "function" ? Promise.resolve(wait.call(session)) : undefined;
+			if (sub === undefined) browserLink.turnEnded(idle);
+			else bridgeSlot().owners[endpoint]?.browserTurnEnded?.(sub, idle);
+		} catch (err) {
+			bridgeLog(`browser turn end: ${String(err)}`);
+		}
+	});
+
 	// 2.1.0 `limitGuard`: while hostd's auto-resume is on, provider limits leave what the model sees
 	// (guardContext), in every session the bridge is loaded in (main and subagents, every copy).
 	// It changes the request's copy only, and does nothing once it already changed (idempotent).
@@ -6016,7 +8056,10 @@ function bridge(pi: ExtensionAPI) {
 	pi.on("plan_review_resolved", (event, ctx) => {
 		try {
 			if (!adopt(ctx)) return;
-			if (pendingReview?.reviewId === event.reviewId) pendingReview = undefined;
+			if (pendingReview?.reviewId === event.reviewId) {
+				pendingReview = undefined;
+				coverEnded();
+			}
 			emit("plan_review_resolved", { reviewId: event.reviewId, choice: event.choice ?? null, by: event.by });
 			safeSync();
 		} catch (err) {
@@ -6037,6 +8080,9 @@ function bridge(pi: ExtensionAPI) {
 			const slot = bridgeSlot();
 			slot.cmdCtx = undefined;
 			if (slot.owners[endpoint] === me) delete slot.owners[endpoint];
+			userWaits().listeners.delete(onUserWaitChange);
+			clearTimeout(waitSyncTimer);
+			browserLink.close("the omp session ended");
 			writer?.stop();
 			send({ t: "bye", sessionId: helloSessionId ?? sessionId() ?? null });
 			writer?.flush(true);

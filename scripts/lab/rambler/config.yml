@@ -1,0 +1,15 @@
+# Rambler lab settings (isolated omp agent dir): tiny / smol / default on the mock's three models.
+modelRoles:
+  default: mock/lab-big
+  smol: mock/lab-smol
+  tiny: mock/lab-tiny
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

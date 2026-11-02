@@ -44,8 +44,11 @@ pub mod accounts;
 pub mod autoanswer;
 pub mod artifacts;
 pub mod autoresume;
+pub mod browser;
 pub mod app;
+pub mod chats;
 pub mod cleanup;
+pub mod dictation;
 pub mod find;
 pub mod forward;
 pub mod github;
@@ -59,6 +62,7 @@ pub mod model;
 pub mod moves;
 pub mod notify;
 pub mod plugins;
+pub mod recording;
 pub mod session;
 pub mod term;
 pub mod upload;
@@ -71,8 +75,11 @@ pub use accounts::*;
 pub use artifacts::*;
 pub use autoanswer::*;
 pub use autoresume::*;
+pub use browser::*;
 pub use app::*;
+pub use chats::*;
 pub use cleanup::*;
+pub use dictation::*;
 pub use find::*;
 pub use forward::*;
 pub use github::*;
@@ -86,6 +93,7 @@ pub use moves::*;
 pub use model::*;
 pub use notify::*;
 pub use plugins::*;
+pub use recording::*;
 pub use session::*;
 pub use term::*;
 pub use upload::*;
@@ -118,7 +126,8 @@ wire_struct! {
     /// (a Host setup install), `deploy_failed` (the host can't run TeleFlock's setup: its shell
     /// rejects the script, or a program it needs is missing; not retried), `port_in_use` /
     /// `port_unavailable` (`tunnel.open { localPort }`),
-    /// `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed), `internal`.
+    /// `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed),
+    /// `budget_exceeded` (`recording.start`: the recordings use their space), `internal`.
     pub struct ApiError {
         pub code: String,
         pub message: String,

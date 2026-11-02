@@ -2,13 +2,13 @@
 //!
 //! Shapes follow omp 18.12 (`tools/*.ts`): bash, edit (hashline/patch/replace modes), write,
 //! read (selector in `path`), grep, glob, find, todo, task, ask, web_search, eval (browser
-//! screenshots arrive as image blocks).
+//! screenshots arrive as image blocks); the TeleFlock bridge's `present` (≥ 2.3.0).
 
 use serde_json::Value;
 use tf_proto::{
-    AskQuestion, AskView, BashView, ContextUsage, DiffView, FileDiff, FileStatus, ImageView, ReadView, SearchHit, SearchView,
-    Subagent, SubagentStatus, TaskView, TodoPhase, TodoStatus, TodoTask, TodoView, ToolStatus, ToolView, WebSource,
-    WebView,
+    AskQuestion, AskView, BashView, ContextUsage, DiffView, FileDiff, FileStatus, ImageView, PresentKind, PresentedArtifact, ReadView,
+    SearchHit, SearchView, Subagent, SubagentStatus, TaskView, TodoPhase, TodoStatus, TodoTask, TodoView, ToolStatus, ToolView,
+    WebSource, WebView,
 };
 
 use super::util::{arr, b, clip, content_images, content_text, f, first_line, lang_of, non_empty, s, u};
@@ -91,6 +91,7 @@ pub(crate) fn title(name: &str, args: &Value) -> String {
             }
         }
         "ask" => arr(args, "questions").first().and_then(|q| non_empty(q, "question")).map(|q| clip(q, 120)),
+        "present" => non_empty(args, "title").map(|t| clip(first_line(t), 120)),
         "eval" => non_empty(args, "title").map(str::to_owned).or_else(|| non_empty(args, "code").map(|c| clip(first_line(c), 120))),
         _ => None,
     };
@@ -147,6 +148,56 @@ pub(crate) fn todo_phases(name: &str, details: Option<&Value>) -> Option<Vec<Tod
             })
             .collect(),
     )
+}
+
+/// The document a finished `present` call showed (the bridge's result `details`, bridge ≥ 2.3.0).
+/// Only a snapshot named the way the bridge names them (`presented/<slug>-v<version>.<ext>`, the
+/// slug and version matching the details) counts; anything else stays a generic tool row.
+pub(crate) fn presented(name: &str, details: Option<&Value>) -> Option<PresentedArtifact> {
+    if name != "present" {
+        return None;
+    }
+    let d = details.filter(|d| d.is_object())?;
+    let file = s(d, "name")?;
+    let (slug, version, _ext) = presented_name(file)?;
+    if Some(slug) != s(d, "slug") || Some(u64::from(version)) != u(d, "version") {
+        return None;
+    }
+    let kind = match s(d, "kind")? {
+        "html" => PresentKind::Html,
+        "markdown" => PresentKind::Markdown,
+        "svg" => PresentKind::Svg,
+        "image" => PresentKind::Image,
+        "code" => PresentKind::Code,
+        "csv" => PresentKind::Csv,
+        "json" => PresentKind::Json,
+        "text" => PresentKind::Text,
+        _ => return None,
+    };
+    Some(PresentedArtifact {
+        title: non_empty(d, "title").map(|t| clip(first_line(t), 200)).unwrap_or_else(|| slug.to_owned()),
+        kind,
+        url: format!("local://{file}"),
+        name: file.to_owned(),
+        slug: slug.to_owned(),
+        version,
+        size: u(d, "size").unwrap_or(0),
+        language: non_empty(d, "language").map(|l| clip(l, 40)),
+        source: non_empty(d, "source").map(|p| clip(p, 1024)),
+        assets: u(d, "assets").and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+    })
+}
+
+/// `presented/<slug>-v<version>.<ext>` → `(slug, version, ext)`: the slug lowercase ASCII letters,
+/// digits and dashes, the version 1 or more, the extension 1–10 lowercase letters or digits.
+fn presented_name(name: &str) -> Option<(&str, u32, &str)> {
+    let file = name.strip_prefix("presented/").filter(|f| !f.contains('/'))?;
+    let (stem, ext) = file.rsplit_once('.')?;
+    let (slug, n) = stem.rsplit_once("-v")?;
+    let slug_ok = !slug.is_empty() && slug.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    let ext_ok = (1..=10).contains(&ext.len()) && ext.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let version: u32 = n.parse().ok().filter(|v| *v >= 1 && n.bytes().all(|c| c.is_ascii_digit()))?;
+    (slug_ok && ext_ok).then_some((slug, version, ext))
 }
 
 /// Rich view for a tool. `result` is `{content, details}` (final or partial); `is_error` is
@@ -519,5 +570,34 @@ mod tests {
         assert_eq!(status("bash", "Tool call denied by user", None, true), ToolStatus::Denied);
         assert_eq!(status("bash", "exit 1", None, true), ToolStatus::Error);
         assert_eq!(status("bash", "ok", None, false), ToolStatus::Ok);
+    }
+
+    #[test]
+    fn presented_artifacts() {
+        let d = json!({ "title": "Q3 report\nsecond line", "kind": "html", "name": "presented/q3-report-v2.html", "url": "ignored",
+            "slug": "q3-report", "version": 2, "size": 4812, "source": "reports/q3.html", "assets": 3 });
+        let a = presented("present", Some(&d)).unwrap();
+        assert_eq!((a.title.as_str(), a.kind, a.slug.as_str(), a.version, a.size, a.assets), ("Q3 report", PresentKind::Html, "q3-report", 2, 4812, 3));
+        assert_eq!((a.name.as_str(), a.url.as_str()), ("presented/q3-report-v2.html", "local://presented/q3-report-v2.html"), "the url follows the name");
+        assert_eq!((a.source.as_deref(), a.language), (Some("reports/q3.html"), None));
+        // inline code: no source, a language; assets default to none
+        let code = json!({ "title": "fix", "kind": "code", "name": "presented/fix-v1.rs", "slug": "fix", "version": 1, "size": 9, "language": "rust" });
+        let c = presented("present", Some(&code)).unwrap();
+        assert_eq!((c.kind, c.language.as_deref(), c.source, c.assets), (PresentKind::Code, Some("rust"), None, 0));
+        // anything else stays a generic row
+        assert_eq!(presented("write", Some(&d)), None, "another tool");
+        assert_eq!(presented("present", None), None);
+        let with = |k: &str, v: serde_json::Value| {
+            let mut x = d.clone();
+            x[k] = v;
+            presented("present", Some(&x))
+        };
+        assert_eq!(with("kind", json!("pdf")), None, "unknown kind");
+        assert_eq!(with("version", json!(3)), None, "version differs from the name");
+        assert_eq!(with("slug", json!("other")), None, "slug differs from the name");
+        for name in ["q3-report-v2.html", "presented/../q3-report-v2.html", "presented/x/q3-report-v2.html", "presented/Q3-report-v2.html", "presented/q3-report-v0.html", "presented/q3-report-v2", "presented/q3-report-v2x.html"] {
+            assert_eq!(with("name", json!(name)), None, "{name}");
+        }
+        assert_eq!(title("present", &json!({ "title": "Q3 report", "path": "r.html" })), "Q3 report");
     }
 }

@@ -8,6 +8,7 @@ import { useQuiet } from "@/features/board/LiveBits";
 import { retryOf } from "@/features/board/retry";
 import { COLUMN_STATUS } from "@/features/shell/status";
 import { type AgentStateId, agentStateId, agentStateWord } from "@/features/shell/vocab";
+import { Ticks } from "@/features/shell/Ticks";
 import { ambientTime } from "./layout";
 
 /** The 20 s needs-you nudge (spec §4): the attention layers play again while it keeps waiting. */
@@ -167,7 +168,11 @@ export function AmbientOrb({ agentKey, size }: AmbientOrbProps) {
           {" · "}
           <OrbTime hostId={agent.hostId} state={quiet ? "quiet" : state} since={quiet ? agent.live.lastEventAt : since} stale={stale} />
         </span>
-        {detail && <span className="line-clamp-1 max-w-full text-2xs text-mute-2 group-hover:text-mute">{detail}</span>}
+        {detail && (
+          <span className="line-clamp-1 max-w-full text-2xs text-mute-2 group-hover:text-mute">
+            {state === "needs" ? <Ticks text={detail} className="text-[0.9em]" /> : detail}
+          </span>
+        )}
       </span>
     </button>
   );

@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Check, Ellipsis, EyeOff, GripVertical, Maximize2, Pin, PinOff, Plus, Reply, Replace, SquareTerminal, Square } from "lucide-react";
 import { type DragEvent, lazy, Suspense, useEffect, useState } from "react";
 import { parseAgentKey, useAgent, useCore, useHostStale, useHosts, useSuccessor } from "@/core";
+import { isChat } from "@/core/chats";
 import {
   cn,
   DropdownMenu,
@@ -148,7 +149,7 @@ function TileHeader({ index, agentKey, pinned, size, onReply }: { index: number;
       </span>
       <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
         {multiHost && <HostTag hostId={agent.hostId} />}
-        <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="min-w-0" />
+        <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} chat={isChat(agent)} className="min-w-0" />
       </span>
       <TileTime hostId={agent.hostId} state={state} since={since} stale={stale} />
       {pinned && (

@@ -1,34 +1,33 @@
-import { Bot, Cpu, FileCode2, FileText, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Reply, Send, Square, Workflow } from "lucide-react";
+import { ArrowUpRight, Bot, ChevronRight, Cpu, FileCode2, FileText, GitBranch, GitFork, GitMerge, Gauge, ListTodo, MessageCircleQuestion, MessagesSquare, Navigation, Reply, Send, Square, Workflow, X } from "lucide-react";
 import { JobsPanel } from "../jobs/JobsPanel";
 import { ArtifactsPanel, ArtifactsTab } from "../artifacts/ArtifactsPanel";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useCore, useDraft, useIrcEntries, useSession } from "@/core";
+import { type BtwEntry, type BtwTurnView, core, draftKey, drafts, navigate, parseAgentKey, useAgent, useBtw, useCore, useDraft, useSession } from "@/core";
+import { isChat } from "@/core/chats";
 import { SessionCtx } from "../context";
 import type { BtwThread, BtwTurn, TreeInfo, TreeNode } from "@/core/gen";
-import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Skeleton, Sparkline, Spinner, useIdleReady, useMediaQuery, useNow } from "@/design";
+import { Button, cn, EmptyState, formatCompact, IconButton, Input, Shimmer, Skeleton, Sparkline, Spinner, useIdleReady, useIsMobile, useMediaQuery, useNow } from "@/design";
 import { Term } from "@/features/shell/Term";
 import { ACTIONS } from "@/features/shell/vocab";
 import { errorText, hostCall, usePending } from "../api";
-import { ChatThreads, useIrcUnreadCount } from "../irc/ChatThreads";
+import { openBoard } from "../irc/boardUi";
+import { ChatSummary } from "../irc/ChatCard";
+import { CARD_POLL_MS, useAgentChat, useChatUnread } from "../irc/store";
 import { Markdown } from "../markdown/Markdown";
 import { type InspectorTab, useSessionUi } from "../state";
-import { groupSubagents } from "../subagents/grouping";
+import { tallySubagents } from "../subagents/grouping";
 import { SubagentList } from "../subagents/SubagentList";
 import { DiffStatText } from "../tools/DiffBody";
 import { TodoPhases, todoCounts } from "../tools/TodoList";
 import { SPENDERS, SpendTile } from "../spend";
-import { LimitsMeter, Meter } from "./LimitsTile";
+import { repoFiles } from "./changedFiles";
+import { type CardId, marksOf, sessionScope, useInspectorCards, visibleBtw } from "./cards";
+import { CollapsibleTile, InspectorCard } from "./InspectorCard";
+import { LimitsMeter, Meter, useSessionLimits } from "./LimitsTile";
+import { btwSummary, filesSummary, overviewSummary, subagentsSummary, todosSummary, treeSummary } from "./summaries";
 
-function Pane({ id, title, label, aside, children, className }: { id: InspectorTab; title: ReactNode; label?: string; aside?: ReactNode; children: ReactNode; className?: string }) {
-  return (
-    <section data-panel={id} className={cn("rounded-[22px] glass px-4 py-3.5 transition-shadow duration-500", className)} aria-label={label ?? (typeof title === "string" ? title : undefined)}>
-      <div className="mb-2.5 flex items-center justify-between gap-2">
-        <div className="kicker">{title}</div>
-        {aside && <span className="text-[11px] font-bold text-mute">{aside}</span>}
-      </div>
-      {children}
-    </section>
-  );
+function Pane({ id, ...rest }: { id: CardId; title: ReactNode; label?: string; aside?: ReactNode; summary?: ReactNode; children: ReactNode; className?: string }) {
+  return <InspectorCard id={id} {...rest} />;
 }
 
 /** Tile chrome inside the Session pane. */
@@ -57,8 +56,9 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
   const cost = meta?.cost ?? agent?.omp?.cost;
   const producing = tps != null && tps > 0;
   const peak = Math.max(0, ...hist);
+  const limitLeft = useSessionLimits(agentKey).tight?.pace.remaining;
   return (
-    <Pane id="overview" title="Session">
+    <Pane id="overview" title="Session" summary={overviewSummary({ ctxPct: ctx?.pct, limitLeft, usd: cost?.usd, tps })}>
       <div className="flex flex-col gap-2">
         {/* Can it keep going: context used and subscription left, as bars that say which way they count. */}
         <div className={cn(TILE, "flex flex-wrap gap-x-4 gap-y-2.5")} aria-label="Can it keep going">
@@ -89,14 +89,17 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
           <LimitsMeter agentKey={agentKey} tps={tps ?? undefined} />
         </div>
         <SpendTile cost={cost} />
-        <div className={cn(TILE, "pt-2 pb-1.5")} aria-label="Throughput">
-          <div className="flex items-baseline justify-between gap-2 text-[10.5px] font-bold text-mute">
-            <span>Throughput · 60s</span>
+        <CollapsibleTile
+          id="throughput"
+          title="Throughput · 60s"
+          className={cn(TILE, "pt-2 pb-1.5")}
+          aside={
             <span className="text-mute-2 tabular">
               {producing ? <span className="text-accent-hi">now {Math.round(tps)} tok/s</span> : meta?.tps != null ? `last turn ${Math.round(meta.tps)} tok/s` : "now 0"}
               {peak > 0 && ` · peak ${Math.round(peak)}`}
             </span>
-          </div>
+          }
+        >
           <div className="relative">
             <Sparkline values={hist.length > 1 ? hist : [0, 0]} height={34} live={producing} status={producing ? "running" : "idle"} />
             {!producing && peak === 0 && <span className="absolute inset-0 grid place-items-center text-[10.5px] font-semibold text-mute-2">idle · no tokens in the last minute</span>}
@@ -112,7 +115,7 @@ export function OverviewPanel({ agentKey }: { agentKey: string }) {
               ))}
             </div>
           )}
-        </div>
+        </CollapsibleTile>
       </div>
     </Pane>
   );
@@ -127,6 +130,7 @@ export function TodosPanel({ agentKey }: { agentKey: string }) {
     <Pane
       id="todos"
       title="Todos"
+      summary={todosSummary(todos)}
       aside={
         <span className="tabular">
           {c.done}/{c.total}
@@ -143,7 +147,9 @@ export function SubagentsPanel({ agentKey }: { agentKey: string }) {
   const { meta } = useSession(agentKey);
   const subs = meta?.subagents ?? [];
   if (subs.length === 0) return null;
-  const { running, failed } = groupSubagents(subs);
+  const { running, failed } = tallySubagents(subs);
+  // Folded, and open once nothing runs or failed: "3 done · 1 stopped" (a stopped one is no done one).
+  const summary = subagentsSummary(subs);
   return (
     <Pane
       id="agents"
@@ -153,6 +159,7 @@ export function SubagentsPanel({ agentKey }: { agentKey: string }) {
         </Term>
       }
       label="Subagents"
+      summary={summary}
       aside={
         running || failed ? (
           <>
@@ -161,47 +168,65 @@ export function SubagentsPanel({ agentKey }: { agentKey: string }) {
             {failed > 0 && <span className="text-error">{failed} failed</span>}
           </>
         ) : (
-          `${subs.length} done`
+          summary
         )
       }
     >
-      <SubagentList agentKey={agentKey} subs={subs} />
+      <SubagentList agentKey={agentKey} sessionId={meta?.sessionId} subs={subs} />
     </Pane>
   );
 }
 
+/** The files the session changed; each opens Review, as does the button under them. A chat's are only listed (it has no repository). */
 export function FilesPanel({ agentKey }: { agentKey: string }) {
   const { hostId } = parseAgentKey(agentKey);
   const agent = useAgent(agentKey);
   const { meta } = useSession(agentKey);
-  const files = meta?.files ?? [];
+  // The repository's files only: omp's own (`local://`) are under Artifacts.
+  const files = useMemo(() => repoFiles(meta?.files ?? []), [meta?.files]);
   if (files.length === 0) return null;
-  const added = files.reduce((s, f) => s + f.added, 0);
-  const removed = files.reduce((s, f) => s + f.removed, 0);
-  const review = () => agent && navigate({ name: "review", hostId, workspaceId: agent.workspaceId });
+  const { added, removed, count } = filesSummary(files);
+  const review = isChat(agent) ? undefined : () => agent && navigate({ name: "review", hostId, workspaceId: agent.workspaceId });
   return (
-    <Pane id="files" title="Changed files" aside={<DiffStatText added={added} removed={removed} />}>
+    <Pane
+      id="files"
+      title="Changed files"
+      aside={<DiffStatText added={added} removed={removed} />}
+      summary={
+        <span className="tabular">
+          {count} file{count === 1 ? "" : "s"} <DiffStatText added={added} removed={removed} />
+        </span>
+      }
+    >
       <div className="flex flex-col gap-0.5">
-        {files.map((f) => (
-          <button
-            key={f.path}
-            type="button"
-            onClick={review}
-            title={f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}
-            className="focus-ring pressable flex items-center gap-2 rounded-[10px] px-1.5 py-1 text-left hover:bg-ink/[0.04]"
-          >
-            <FileCode2 className={cn("size-3.5 shrink-0", f.status === "added" || f.status === "untracked" ? "text-add" : f.status === "deleted" ? "text-del" : "text-mute-2")} />
-            <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-2">
-              <span className="text-mute-2">{f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/") + 1) : ""}</span>
-              {f.path.slice(f.path.lastIndexOf("/") + 1)}
-            </span>
-            <DiffStatText added={f.added} removed={f.removed} />
-          </button>
-        ))}
+        {files.map((f) => {
+          const title = f.oldPath ? `${f.oldPath} → ${f.path}` : f.path;
+          const row = (
+            <>
+              <FileCode2 className={cn("size-3.5 shrink-0", f.status === "added" || f.status === "untracked" ? "text-add" : f.status === "deleted" ? "text-del" : "text-mute-2")} />
+              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-2">
+                <span className="text-mute-2">{f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/") + 1) : ""}</span>
+                {f.path.slice(f.path.lastIndexOf("/") + 1)}
+              </span>
+              <DiffStatText added={f.added} removed={f.removed} />
+            </>
+          );
+          return review ? (
+            <button key={f.path} type="button" onClick={review} title={title} className="focus-ring pressable flex items-center gap-2 rounded-[10px] px-1.5 py-1 text-left hover:bg-ink/[0.04]">
+              {row}
+            </button>
+          ) : (
+            <div key={f.path} title={title} className="flex items-center gap-2 rounded-[10px] px-1.5 py-1">
+              {row}
+            </div>
+          );
+        })}
       </div>
-      <button type="button" onClick={review} className="pressable focus-ring mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-ink/[0.05] py-2 text-xs font-bold text-ink-2 shadow-hairline hover:bg-ink/[0.09]">
-        <GitMerge className="size-3.5" /> {ACTIONS.review.label}
-      </button>
+      {review && (
+        <button type="button" onClick={review} className="pressable focus-ring mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-ink/[0.05] py-2 text-xs font-bold text-ink-2 shadow-hairline hover:bg-ink/[0.09]">
+          <GitMerge className="size-3.5" /> {ACTIONS.review.label}
+        </button>
+      )}
     </Pane>
   );
 }
@@ -283,7 +308,7 @@ export function TreePanel({ agentKey }: { agentKey: string }) {
   }, [tree?.leafId]);
   if (!canTree && !tree) return null;
   return (
-    <Pane id="tree" title="Session tree" aside={forks ? `${forks} branch${forks === 1 ? "" : "es"}` : undefined}>
+    <Pane id="tree" title="Session tree" aside={forks ? `${forks} branch${forks === 1 ? "" : "es"}` : undefined} summary={tree ? treeSummary(rows.length, forks) : undefined}>
       {!tree || rows.length === 0 ? (
         <EmptyState compact title="No tree yet" description="Branch or fork from any message once the session has turns." />
       ) : (
@@ -381,7 +406,8 @@ function btwRows(history: BtwThread[], live: Record<string, BtwEntry>): BtwRow[]
   return rows.reverse();
 }
 
-export function BtwPanel({ agentKey }: { agentKey: string }) {
+/** `always`: keep the card when every side question was dismissed (the phone's btw tab). */
+export function BtwPanel({ agentKey, always = false }: { agentKey: string; always?: boolean }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const live = useBtw(agentKey);
@@ -406,9 +432,23 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
       alive = false;
     };
   }, [hostId, agentId, enabled, sessionId]);
-  const rows = btwRows(history.sessionId === sessionId ? history.threads : [], live);
+  const all = btwRows(history.sessionId === sessionId ? history.threads : [], live);
+  // Dismissed side questions stay gone for this session on this device (also after a reload).
+  const scope = sessionScope(hostId, agentId, sessionId);
+  const marks = useInspectorCards((st) => marksOf(st.btw, scope));
+  const mark = useInspectorCards((st) => st.markBtw);
+  const requested = useSessionUi((st) => st.tab[agentKey] === "btw");
+  const rows = visibleBtw(all, marks);
   // omp answers one side question at a time.
-  const running = rows.some((r) => r.turns.some((t) => !t.done));
+  const running = all.some((r) => r.turns.some((t) => !t.done));
+  const settled = rows.filter((r) => r.turns.every((t) => t.done)).map((r) => r.id);
+  const collapsed = new Set(marks.collapsed);
+  const allCollapsed = settled.length > 0 && settled.every((id) => collapsed.has(id));
+  const dismiss = (ids: string[]) => {
+    mark(scope, "dismissed", ids, true);
+    // The card goes away with the last one: drop the request that scrolled to it.
+    if (ids.length === rows.length) useSessionUi.getState().clearTab(agentKey);
+  };
   const ask = async () => {
     const question = q.trim();
     if (!question) return;
@@ -419,6 +459,8 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
       drafts.set(key, cur.startsWith(q) ? cur.slice(q.length).trimStart() : cur);
     }
   };
+  // Everything dismissed: only the input would be left, so the card steps aside until /btw (or its tab) asks for it.
+  if (!always && rows.length === 0 && marks.dismissed.length > 0 && !requested) return null;
   return (
     <Pane
       id="btw"
@@ -431,6 +473,7 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
         </>
       }
       label="btw · side question"
+      summary={btwSummary(rows.length, running)}
       aside={<MessageCircleQuestion className="size-3.5" aria-label="Answered from the session's context without adding to it; also in omp's /btw" />}
     >
       <div className="flex flex-col gap-2.5">
@@ -452,8 +495,30 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
             </IconButton>
           }
         />
+        {rows.length > 1 && (
+          <div className="-my-1 flex items-center justify-between gap-2 text-[10.5px] font-bold text-mute">
+            <span className="tabular">{rows.length} side questions</span>
+            <span className="flex items-center gap-1">
+              <Button size="sm" variant="ghost" disabled={settled.length === 0} onClick={() => mark(scope, "collapsed", settled, !allCollapsed)}>
+                {allCollapsed ? "Expand all" : "Collapse all"}
+              </Button>
+              <Button size="sm" variant="ghost" icon={<X />} disabled={settled.length === 0} onClick={() => dismiss(settled)}>
+                Dismiss all
+              </Button>
+            </span>
+          </div>
+        )}
         {rows.map((row) => (
-          <BtwConversation key={row.id} row={row} hostId={hostId} agentId={agentId} canFollowUp={enabled && !running} />
+          <BtwConversation
+            key={row.id}
+            row={row}
+            hostId={hostId}
+            agentId={agentId}
+            canFollowUp={enabled && !running}
+            collapsed={collapsed.has(row.id)}
+            onCollapsed={(on) => mark(scope, "collapsed", [row.id], on)}
+            onDismiss={() => dismiss([row.id])}
+          />
         ))}
         {history.error && history.sessionId === sessionId && <div className="text-[11px] text-mute-2">Earlier side questions unavailable: {history.error}</div>}
       </div>
@@ -462,7 +527,23 @@ export function BtwPanel({ agentKey }: { agentKey: string }) {
 }
 
 /** One side conversation: its turns, then Cancel while answering or a follow-up box (omp's `f`). */
-function BtwConversation({ row, hostId, agentId, canFollowUp }: { row: BtwRow; hostId: string; agentId: string; canFollowUp: boolean }) {
+function BtwConversation({
+  row,
+  hostId,
+  agentId,
+  canFollowUp,
+  collapsed,
+  onCollapsed,
+  onDismiss,
+}: {
+  row: BtwRow;
+  hostId: string;
+  agentId: string;
+  canFollowUp: boolean;
+  collapsed: boolean;
+  onCollapsed(on: boolean): void;
+  onDismiss(): void;
+}) {
   const [reply, setReply] = useState<string | null>(null);
   const [busy, run] = usePending();
   const answering = row.turns.some((t) => !t.done);
@@ -472,9 +553,36 @@ function BtwConversation({ row, hostId, agentId, canFollowUp }: { row: BtwRow; h
     const res = await run(hostCall(hostId, "agent.btw", { agentId, question, btwId: row.id }, { failure: "Follow-up failed" }));
     if (res.ok) setReply(null);
   };
+  const first = row.turns[0]?.question ?? "…";
+  const name = `side question: ${first}`;
   return (
-    <div className="rounded-lg bg-bg-deep/45 px-3 py-2 shadow-hairline" data-btw={row.id}>
-      {row.turns.map((t, i) => (
+    <div className="rounded-lg bg-bg-deep/45 px-3 py-2 shadow-hairline" data-btw={row.id} data-collapsed={collapsed || undefined}>
+      <div className={cn("flex items-center gap-1", !collapsed && "mb-1.5")}>
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          aria-label={`${collapsed ? "Expand" : "Collapse"} ${name}`}
+          onClick={() => onCollapsed(!collapsed)}
+          className="focus-ring flex min-w-0 flex-1 items-center gap-1 rounded-sm text-left"
+        >
+          <ChevronRight className={cn("size-3.5 shrink-0 text-mute transition-transform", !collapsed && "rotate-90")} aria-hidden />
+          {collapsed ? (
+            <span className="min-w-0 flex-1 truncate text-xs font-bold text-ink">{first}</span>
+          ) : (
+            <span className="text-[10.5px] font-bold text-mute">
+              side question{row.turns.length > 1 ? ` · ${row.turns.length} turns` : ""}
+            </span>
+          )}
+          {collapsed && row.turns.length > 1 && <span className="shrink-0 text-[10.5px] font-bold text-mute tabular">{row.turns.length} turns</span>}
+          {answering && collapsed && <span className="shrink-0 text-[10.5px] font-bold text-accent-hi">answering…</span>}
+        </button>
+        {!answering && (
+          <IconButton label={`Dismiss ${name}`} size="sm" className="-my-1 -mr-1.5 size-6 [@media(pointer:coarse)]:size-9" onClick={onDismiss}>
+            <X />
+          </IconButton>
+        )}
+      </div>
+      {!collapsed && row.turns.map((t, i) => (
         <div key={i} className={cn(i > 0 && "mt-2 border-t border-ink/6 pt-2")}>
           <div className="text-xs font-bold text-ink">
             {i > 0 && <span className="text-mute">↳ </span>}
@@ -489,7 +597,7 @@ function BtwConversation({ row, hostId, agentId, canFollowUp }: { row: BtwRow; h
           </div>
         </div>
       ))}
-      {answering ? (
+      {collapsed ? null : answering ? (
         <div className="mt-1 flex justify-end">
           <Button size="sm" variant="ghost" icon={<Square />} loading={busy} onClick={() => void run(hostCall(hostId, "agent.btwCancel", { agentId, btwId: row.id }, { failure: "Cancel failed" }))}>
             Cancel
@@ -529,15 +637,27 @@ function BtwConversation({ row, hostId, agentId, canFollowUp }: { row: BtwRow; h
   );
 }
 
-/** Agent ↔ agent IRC of this session, grouped by peer (hidden until there is any). */
+/** The agent chat of the session's whole agent tree: the newest messages and the way into the message board (hidden until there is any). */
 export function ChatPanel({ agentKey }: { agentKey: string }) {
-  const entries = useIrcEntries(agentKey);
-  const unread = useIrcUnreadCount(agentKey);
-  if (entries.length === 0) return null;
-  const peers = new Set(entries.map((e) => e.message.peer)).size;
+  const chat = useAgentChat(agentKey, CARD_POLL_MS);
+  const unread = useChatUnread(agentKey, chat.messages);
+  const mobile = useIsMobile();
+  if (chat.messages.length === 0) return null;
+  const open = (messageId?: string) => openBoard(agentKey, mobile, messageId);
   return (
-    <Pane id="chat" title="Agent chat · IRC" aside={unread > 0 ? <span className="text-accent-hi">{unread} new</span> : `${peers} peer${peers === 1 ? "" : "s"}`}>
-      <ChatThreads agentKey={agentKey} />
+    <Pane
+      id="chat"
+      label="Agent chat"
+      title={
+        <button type="button" onClick={() => open()} title="Open the message board" className="focus-ring inline-flex items-center gap-1 rounded-[4px] uppercase hover:text-ink">
+          Agent chat
+          <ArrowUpRight className="size-3" aria-hidden />
+        </button>
+      }
+      aside={unread > 0 ? <span className="text-accent-hi">{unread} new</span> : undefined}
+      summary={unread > 0 ? <span className="text-accent-hi">{unread} new</span> : `${chat.messages.length} message${chat.messages.length === 1 ? "" : "s"}`}
+    >
+      <ChatSummary agentKey={agentKey} chat={chat} onOpen={open} />
     </Pane>
   );
 }
@@ -601,13 +721,14 @@ const TABS: { value: InspectorTab; label: string; icon: ReactNode }[] = [
 export function InspectorTabs({ agentKey }: { agentKey: string }) {
   const tab = useSessionUi((s) => s.tab[agentKey]) ?? "overview";
   const { meta } = useSession(agentKey);
-  const chats = useIrcEntries(agentKey).length;
-  const unread = useIrcUnreadCount(agentKey);
+  const chat = useAgentChat(agentKey);
+  const chats = chat.messages.length;
+  const unread = useChatUnread(agentKey, chat.messages);
   const empty =
     (tab === "todos" && !meta?.todos.length) ||
     (tab === "agents" && !meta?.subagents.length) ||
     (tab === "chat" && !chats) ||
-    (tab === "files" && !meta?.files.length);
+    (tab === "files" && !repoFiles(meta?.files ?? []).length);
   return (
     <SessionCtx.Provider value={{ ...parseAgentKey(agentKey), key: agentKey }}>
     <div className="flex flex-col gap-3 pb-2">
@@ -643,12 +764,12 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
       {tab === "chat" && <ChatPanel agentKey={agentKey} />}
       {tab === "files" && <FilesPanel agentKey={agentKey} />}
       {tab === "tree" && <TreePanel agentKey={agentKey} />}
-      {tab === "btw" && <BtwPanel agentKey={agentKey} />}
+      {tab === "btw" && <BtwPanel agentKey={agentKey} always />}
       {empty && (
         <EmptyState
           compact
           title={tab === "todos" ? "No todos" : tab === "agents" ? "No subagents" : tab === "chat" ? "No agent chat yet" : "No changed files"}
-          description={tab === "chat" ? "Messages this agent and its subagents send each other over omp IRC show up here." : undefined}
+          description={tab === "chat" ? "Messages the agents of this session send each other over omp IRC, at any depth of its agent tree, show up here." : undefined}
         />
       )}
     </div>

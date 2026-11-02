@@ -107,7 +107,11 @@ export async function removeOne(hostId: string, w: CleanupWorktree, home?: strin
   }
 }
 
-const BULK_TITLE: Record<BulkKind, string> = { shipped: "Delete merged and closed worktrees?", stale: "Prune stale worktrees?" };
+const BULK_TITLE: Record<BulkKind, string> = {
+  shipped: "Delete merged and closed worktrees?",
+  stale: "Prune stale worktrees?",
+  cleanable: "Delete merged, closed and stale worktrees?",
+};
 
 /** The confirm's list: exactly what goes, then what stays and why. */
 function BulkList({ set, home }: { set: BulkSet; home?: string }) {
@@ -139,15 +143,23 @@ export interface BulkOutcome {
 
 /**
  * A bulk action: confirm the exact list, then remove one at a time without force or trust (anything that
- * needs either is left for its own Delete). `onProgress` gets the count done. Null when cancelled.
+ * needs either is left for its own Delete). `onProgress` gets the count done; `title` replaces the
+ * confirm's (an agent group names its agent). Null when cancelled.
  */
-export async function removeMany(hostId: string, which: BulkKind, set: BulkSet, home: string | undefined, onProgress: (done: number) => void): Promise<BulkOutcome | null> {
+export async function removeMany(
+  hostId: string,
+  which: BulkKind,
+  set: BulkSet,
+  home: string | undefined,
+  onProgress: (done: number) => void,
+  title?: string,
+): Promise<BulkOutcome | null> {
   if (set.items.length === 0) return null;
   const n = set.items.length;
   const ok = await confirmAction({
-    title: BULK_TITLE[which],
+    title: title ?? BULK_TITLE[which],
     body: <BulkList set={set} home={home} />,
-    confirmLabel: `${which === "shipped" ? "Delete" : "Prune"} ${n} worktree${n === 1 ? "" : "s"}${set.bytes > 0 ? ` (${formatBytes(set.bytes)})` : ""}`,
+    confirmLabel: `${which === "stale" ? "Prune" : "Delete"} ${n} worktree${n === 1 ? "" : "s"}${set.bytes > 0 ? ` (${formatBytes(set.bytes)})` : ""}`,
     danger: true,
   });
   if (!ok) return null;
@@ -164,7 +176,7 @@ export async function removeMany(hostId: string, which: BulkKind, set: BulkSet, 
   }
   const freed = out.removed.reduce((sum, w) => sum + (w.size ?? 0), 0);
   toast({
-    title: `${which === "shipped" ? "Deleted" : "Pruned"} ${out.removed.length} worktree${out.removed.length === 1 ? "" : "s"}${freed > 0 ? `, ${formatBytes(freed)} freed` : ""}`,
+    title: `${which === "stale" ? "Pruned" : "Deleted"} ${out.removed.length} worktree${out.removed.length === 1 ? "" : "s"}${freed > 0 ? `, ${formatBytes(freed)} freed` : ""}`,
     description: out.failed.length ? `${out.failed.length} not removed: ${out.failed.map((f) => `${nameOf(f.worktree)} (${f.error})`).join("; ")}` : undefined,
     status: out.failed.length ? "error" : undefined,
     duration: out.failed.length ? 12_000 : 4000,

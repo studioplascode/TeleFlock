@@ -21,8 +21,10 @@ use crate::state::StateHandle;
 pub mod accounts;
 pub mod artifact_files;
 pub mod ai;
+pub mod ai_pool;
 pub mod agent;
 pub mod automation;
+pub mod chat;
 pub mod cleanup;
 pub mod fs;
 pub mod gh;
@@ -72,9 +74,15 @@ pub struct Ctx {
     pub auto_answer: crate::autoanswer::AutoAnswers,
     /// Shared across herdr sessions: presence, notification routing and push (`crate::notify`).
     pub notify: crate::notify::Notifier,
+    /// Where chat tasks get their folders (`<home>/chats`, `crate::chats`, §3.31), resolved once.
+    pub chats: crate::chats::ChatRoot,
+    /// Agents of this session attached to an app's TeleFlock Browser (`crate::browser`, §3.33).
+    pub browser: crate::browser::Browsers,
     /// Cancelled when the context closes (daemon shutdown).
     pub cancel: CancellationToken,
     me: Weak<Ctx>,
+    /// The daemon, which owns every session's context.
+    daemon: Weak<Daemon>,
 }
 
 impl Ctx {
@@ -94,10 +102,12 @@ impl Ctx {
         };
         let herdr = Arc::new(herdr);
         let cancel = daemon.shutdown.child_token();
+        let state = StateHandle::new(session, daemon.persist.clone(), daemon.omp.clone(), daemon.bridge.clone());
+        let browser = crate::browser::Browsers::new(daemon.forward.clone(), daemon.bridge.clone(), state.clone(), cancel.clone());
         let ctx = Arc::new_cyclic(|me| Ctx {
             herdr_session: session.to_string(),
             herdr: herdr.clone(),
-            state: StateHandle::new(session, daemon.persist.clone(), daemon.omp.clone(), daemon.bridge.clone()),
+            state,
             omp: daemon.omp.clone(),
             bridge: daemon.bridge.clone(),
             terms: term::TermRegistry::default(),
@@ -107,10 +117,14 @@ impl Ctx {
             tools: daemon.tools.clone(),
             auto_answer: crate::autoanswer::AutoAnswers::open(&daemon.paths, session),
             notify: daemon.notify.clone(),
+            chats: crate::chats::ChatRoot::new(&daemon.paths.chats),
+            browser,
             cancel,
             me: me.clone(),
+            daemon: Arc::downgrade(daemon),
         });
         ctx.state.route_notifications(ctx.notify.clone());
+        ctx.state.set_chats(ctx.chats.clone());
         // herdr's server health (§3.29): the worker is built, and starts the server when none runs
         // (with TeleFlock's herdr config, `herdr_health::managed`: TeleFlock, not herdr, relaunches
         // agents after a restart), through its own bookkeeping; it runs once the context is up.
@@ -124,12 +138,19 @@ impl Ctx {
         crate::restart::start_session(&ctx);
         crate::limit_resume::follow(&ctx);
         moves::start(&ctx);
+        // Idle shells: listed in `HostInfo.idleShells`, closed by themselves unless switched off.
+        cleanup::shells::start(&ctx);
         Ok(ctx)
     }
 
     /// Owning handle for background tasks spawned by handlers.
     pub fn arc(&self) -> Arc<Ctx> {
         self.me.upgrade().expect("Ctx is always owned by an Arc")
+    }
+
+    /// The daemon (the other herdr sessions' contexts, `state.json`); `None` once it is gone.
+    pub(crate) fn daemon(&self) -> Option<Arc<Daemon>> {
+        self.daemon.upgrade()
     }
 
     pub(crate) async fn close(&self) {
@@ -146,6 +167,7 @@ pub async fn dispatch(ctx: &Arc<Ctx>, req: HostMethod, client: &ClientHandle) ->
         "session" | "agent" => agent::handle(ctx, req, client).await,
         "workspace" | "tab" | "pane" => workspace::handle(ctx, req, client).await,
         "worktree" => worktree::handle(ctx, req, client).await,
+        "chat" => chat::handle(ctx, req).await,
         "fs" => fs::handle(ctx, req, client).await,
         "git" => git::handle(ctx, req, client).await,
         "gh" => gh::handle(ctx, req, client).await,

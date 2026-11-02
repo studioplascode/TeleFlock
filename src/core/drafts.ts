@@ -1,12 +1,15 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
+import { answerFlushRequests, onFlush } from "./draftFlush";
+import { mirroredItem } from "./mirrored";
 
 /*
  * Drafts: every user-typed text field in the app (composers, answers, dialog forms, filters)
  * keeps its value here, keyed by context, so it survives unmounts (switching agent or view),
- * reloads and restarts. Persisted to localStorage (debounced, pruned to a budget); an entry that
- * equals its field's default is deleted, so only real drafts are stored.
+ * reloads, restarts and kills. Persisted to localStorage with an IndexedDB copy (`./mirrored`;
+ * debounced, pruned to a budget) by the main page only (`startDrafts`); an entry that equals its
+ * field's default is deleted, so only real drafts are stored.
  */
 
 export interface DraftEntry {
@@ -70,56 +73,50 @@ type Persisted = DraftsState;
 const STORAGE_KEY = "tf.drafts";
 const WRITE_DELAY_MS = 300;
 
-let pending: { name: string; value: StorageValue<Persisted> } | null = null;
-let timer: number | undefined;
-let warnedQuota = false;
+/** localStorage `tf.drafts` and its IndexedDB copy, which a kill can't lose once written. */
+const mirror = mirroredItem(STORAGE_KEY);
 
-function write(name: string, value: StorageValue<Persisted>): void {
-  const now = Date.now();
-  for (const maxChars of [DRAFT_LIMITS.maxChars, DRAFT_LIMITS.maxChars / 8]) {
-    try {
-      localStorage.setItem(name, JSON.stringify({ ...value, state: { drafts: pruneDrafts(value.state.drafts, now, { ...DRAFT_LIMITS, maxChars }) } }));
-      return;
-    } catch {
-      // quota (or no localStorage): retry with a smaller budget, then give up
-    }
-  }
-  if (!warnedQuota && typeof localStorage !== "undefined") console.warn("drafts: couldn't save (storage full); drafts are kept in memory only");
-  warnedQuota = true;
+let pending: StorageValue<Persisted> | null = null;
+let timer: number | undefined;
+/** `startDrafts` made this page the writer and the IndexedDB copy has been read. */
+let writable = false;
+
+function serialize(value: StorageValue<Persisted>, maxChars: number): string {
+  return JSON.stringify({ ...value, state: { drafts: pruneDrafts(value.state.drafts, Date.now(), { ...DRAFT_LIMITS, maxChars }) } });
 }
 
-/** Write the pending drafts now (page hide / unload, tests). */
+/**
+ * Write the pending drafts now (after a pause in typing, page hide / unload, `flushAll`). Only in
+ * the page that writes the drafts, once it has read their IndexedDB copy (`startDrafts`).
+ */
 export function flushDrafts(): void {
   clearTimeout(timer);
   timer = undefined;
   const p = pending;
+  if (!writable || !p) return;
   pending = null;
-  if (p) write(p.name, p.value);
+  // localStorage is ~5 MB, shared with the app: a full one gets the smaller budget.
+  mirror.set(serialize(p, DRAFT_LIMITS.maxChars), () => serialize(p, DRAFT_LIMITS.maxChars / 8));
 }
 
 /**
- * localStorage that never throws into zustand. Writes are debounced (one serialization per pause
- * in typing, not per keystroke) and flushed when the page is hidden or unloaded.
+ * zustand's storage: never throws, writes debounced (one serialization per pause in typing, not
+ * per keystroke) and flushed when the page is hidden or unloaded.
  */
 const storage: PersistStorage<Persisted> = {
-  getItem: (name) => {
+  getItem: () => {
     try {
-      const raw = localStorage.getItem(name);
-      return raw ? (JSON.parse(raw) as StorageValue<Persisted>) : null;
+      return mirror.initial ? (JSON.parse(mirror.initial) as StorageValue<Persisted>) : null;
     } catch {
       return null;
     }
   },
-  setItem: (name, value) => {
-    pending = { name, value };
+  setItem: (_name, value) => {
+    pending = value;
     timer ??= setTimeout(flushDrafts, WRITE_DELAY_MS);
   },
-  removeItem: (name) => {
-    try {
-      localStorage.removeItem(name);
-    } catch {
-      // nothing to remove
-    }
+  removeItem: () => {
+    if (writable) mirror.set(null);
   },
 };
 
@@ -144,6 +141,55 @@ export const useDrafts = create<DraftsState>()(
     },
   }),
 );
+
+/** The drafts as localStorage had them at start (hydration is synchronous). */
+const hydrated = useDrafts.getState().drafts;
+
+/**
+ * The drafts once the IndexedDB copy (`stored`) turned out newer than localStorage's (a kill lost
+ * localStorage's last writes): the stored entries, except for keys changed in this page since the
+ * start (`boot` → `current`), which keep their current value or stay deleted.
+ */
+export function adoptStored(boot: Record<string, DraftEntry>, current: Record<string, DraftEntry>, stored: Record<string, DraftEntry>): Record<string, DraftEntry> {
+  const next: Record<string, DraftEntry> = {};
+  for (const [k, e] of Object.entries(stored)) if (current[k] === boot[k]) next[k] = e;
+  for (const [k, e] of Object.entries(current)) if (e !== boot[k]) next[k] = e;
+  return next;
+}
+
+let started = false;
+
+/**
+ * Makes this page the one that writes the drafts (the main page; Quick capture only reads them):
+ * reads the IndexedDB copy and takes it when it is newer than localStorage's, writes from then on,
+ * and answers the shell's flush requests (`./draftFlush`). Idempotent.
+ */
+export function startDrafts(): void {
+  if (started) return;
+  started = true;
+  void mirror.load().then((newer) => {
+    if (newer !== undefined) {
+      let stored: unknown;
+      try {
+        stored = newer === null ? {} : (JSON.parse(newer) as Partial<StorageValue<Partial<Persisted>>>).state?.drafts;
+      } catch {
+        stored = undefined;
+      }
+      if (stored && typeof stored === "object") {
+        useDrafts.setState({ drafts: adoptStored(hydrated, useDrafts.getState().drafts, pruneDrafts(stored as Record<string, DraftEntry>, Date.now())) });
+      }
+    }
+    writable = true;
+    flushDrafts();
+  });
+  onFlush(async () => {
+    // Writes wait for the IndexedDB copy to be read (bounded: `LOAD_WAIT_MS`).
+    await mirror.load();
+    flushDrafts();
+    await mirror.flushed();
+  });
+  answerFlushRequests();
+}
 
 // ---------------------------------------------------------------- imperative API
 

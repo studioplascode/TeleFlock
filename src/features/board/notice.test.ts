@@ -21,6 +21,9 @@ describe("notice tray", () => {
     // a host whose herdr is down comes right after an offline host, before everything about its setup
     expect(noticeRank("stale", 999)).toBeLessThan(noticeRank("herdr", 0));
     expect(noticeRank("herdr", 999)).toBeLessThan(noticeRank("accounts", 0));
+    // idle shells only offer housekeeping: after every problem with a host, before the demo
+    expect(noticeRank("setup", 999)).toBeLessThan(noticeRank("shells", 0));
+    expect(noticeRank("shells", 999)).toBeLessThan(noticeRank("demo", 0));
   });
 
   test("one notice has nothing more; none has no line", () => {

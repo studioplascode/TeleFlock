@@ -51,8 +51,11 @@ wire_struct! {
         pub agent_id: String,
         pub kind: ArtifactKind,
         pub name: String,
-        /// Text bytes to return (default 1 MiB, 4 MiB at most).
+        /// Bytes to return (default 1 MiB; text 4 MiB at most, `base64` 8 MiB).
         pub max_bytes: Option<u64>,
+        /// Answer the file's bytes as base64 `data` instead of `text`, binary files included
+        /// (images and the files a presented page references). Hosts before 0.9.0 ignore it.
+        pub base64: Option<bool>,
     }
 }
 
@@ -66,12 +69,48 @@ wire_struct! {
         pub path: String,
         pub size: u64,
         pub mtime: Millis,
-        /// The file as UTF-8 text (absent for binary files).
+        /// The file as UTF-8 text (absent for binary files and for `base64` reads).
         pub text: Option<String>,
-        /// `text` ends before the end of the file (`maxBytes`).
+        /// `base64` reads: the bytes read, base64-encoded (all of them unless `truncated`).
+        pub data: Option<String>,
+        /// `text` / `data` end before the end of the file (`maxBytes`).
         pub truncated: bool,
         /// Not text: a known binary type, NUL bytes or invalid UTF-8 in its first 8 KiB.
         pub binary: bool,
+    }
+}
+
+wire_enum! {
+    /// How the app shows a presented artifact (the `kind` the agent passed to `present`, or the one
+    /// the bridge inferred from the file's extension).
+    pub enum PresentKind { Html, Markdown, Svg, Image, Code, Csv, Json, Text }
+}
+
+wire_struct! {
+    /// A document the agent showed the user with the bridge's `present` tool (bridge ≥ 2.3.0,
+    /// architecture §3.32): an immutable snapshot in the session's `local://` root,
+    /// `presented/<slug>-v<version>.<ext>`, with the files a page or Markdown document references
+    /// relative to itself copied into `presented/<slug>-v<version>.files/`. Presenting the same title
+    /// again adds the next version.
+    pub struct PresentedArtifact {
+        pub title: String,
+        pub kind: PresentKind,
+        /// `presented/q3-report-v2.html`: the `session.artifact` name (kind `local`).
+        pub name: String,
+        /// `local://presented/q3-report-v2.html`
+        pub url: String,
+        /// Shared by every version of one artifact (its title in lowercase ASCII with dashes).
+        pub slug: String,
+        /// 1, 2, …
+        pub version: u32,
+        /// Bytes of the snapshot.
+        pub size: u64,
+        /// `code`: the language (`rust`, `python`, …).
+        pub language: Option<String>,
+        /// The file the agent presented, as it named it (absent for inline content).
+        pub source: Option<String>,
+        /// Files copied into `presented/<slug>-v<version>.files/`.
+        pub assets: u32,
     }
 }
 

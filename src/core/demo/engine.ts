@@ -1,10 +1,13 @@
 import type { AppEvent, DiagReport, ForwardSaveParams, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
+import { DemoBrowser } from "./browser";
 import { type DemoClock, realClock } from "./clock";
+import { DemoDictation } from "./dictation";
 import { DEMO_GROUP } from "./dispatchAuto";
 import { DemoForwards } from "./forward";
 import { DemoHost, type HostVariant } from "./host";
 import { NotifySync } from "./notifySync";
+import { DemoRecordings } from "./recordings";
 import { DEMO_VERSION } from "./version";
 
 export interface DemoEngineOptions {
@@ -95,6 +98,12 @@ export class DemoEngine {
   private readonly forwards: DemoForwards;
   /** The core's notification sync (needs-you resolution, read sync), applied to everything emitted. */
   private readonly notes = new NotifySync((e) => this.emit(e));
+  /** Browser session recordings (`recording.*`), in memory, one there from the start. */
+  private readonly recordings: DemoRecordings;
+  /** This device's TeleFlock Browser (`browser.*`, backend mode): the fake Chromium, agents attached to it, one asking. */
+  private readonly browser: DemoBrowser | null;
+  /** On-device dictation (`dictation.*`, backend mode): the speech model catalog, downloads, sessions hearing a canned ramble. */
+  private readonly dictation: DemoDictation | null;
 
   constructor(private readonly opts: DemoEngineOptions) {
     this.clock = opts.clock ?? realClock;
@@ -105,9 +114,15 @@ export class DemoEngine {
       emit: (e) => this.emit(e),
       hosts: () => this.profiles.map((p) => ({ id: p.id, name: p.name, online: this.hosts.get(p.id)?.status.phase === "online" })),
     });
+    this.recordings = new DemoRecordings({ clock: this.clock, emit: (e) => this.emit(e) });
+    this.browser = opts.mode === "backend" ? new DemoBrowser({ clock: this.clock, emit: (e) => this.emit(e), hosts: () => this.hosts.values(), device: () => this.settings.deviceName }) : null;
+    this.dictation =
+      opts.mode === "backend" ? new DemoDictation({ clock: this.clock, emit: (e) => this.emit(e), phone: typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent) }) : null;
     if (opts.mode === "backend" && !opts.empty) {
       for (const p of DEMO_PROFILES) this.addHost(p, p.id === "studio-pc" ? "studio" : "forge", opts.autoStart !== false);
       this.forwards.seed();
+      this.recordings.seed();
+      this.browser?.seed();
     }
   }
 
@@ -121,6 +136,7 @@ export class DemoEngine {
     for (const l of this.listeners) l(e);
     this.notes.observe(e);
     if (e.type === "hostStatus") this.forwards.hostsChanged();
+    if (e.type === "hostStatus" || e.type === "hostSnapshot" || e.type === "hostPatch") this.browser?.hostChanged(e.hostId);
   }
 
   private addHost(profile: HostProfile, variant: HostVariant, start: boolean): DemoHost {
@@ -131,6 +147,7 @@ export class DemoEngine {
         seed: this.seed,
         longTranscript: this.opts.longTranscript ?? 0,
         tunnelOpen: (hostId, port) => this.tunnels.some((t) => t.hostId === hostId && t.remotePort === port && t.localPort === port),
+        notificationsRead: (hostId, ids) => this.notes.remoteRead(hostId, ids),
       },
       profile,
       variant,
@@ -167,6 +184,8 @@ export class DemoEngine {
 
   dispose(): void {
     this.forwards.dispose();
+    this.browser?.dispose();
+    this.dictation?.dispose();
     for (const h of this.hosts.values()) h.dispose();
     this.hosts.clear();
     this.disposed = true;
@@ -179,7 +198,9 @@ export class DemoEngine {
   async callHost(hostId: string, method: string, params: unknown): Promise<unknown> {
     const host = this.hosts.get(hostId);
     if (!host) throw apiError("not_found", `Unknown host ${hostId}`);
-    return host.call(method, params);
+    // An answer to an agent's browser request belongs to this device's browser (the app core's `route_answer`).
+    const routed = method === "agent.answer" ? this.browser?.routeAnswer(hostId, (params ?? {}) as Record<string, unknown>) : undefined;
+    return routed ?? host.call(method, params);
   }
 
   async callApp(method: string, params: unknown): Promise<unknown> {
@@ -292,6 +313,9 @@ export class DemoEngine {
       case "forward.stop":
         return this.forwards.stop(String(p.streamId ?? ""));
       default:
+        if (method.startsWith("recording.")) return this.recordings.call(method, p);
+        if (method.startsWith("browser.") && this.browser) return this.browser.call(method, p);
+        if (method.startsWith("dictation.") && this.dictation) return this.dictation.call(method, p);
         throw apiError("unknown_method", `Unknown app method ${method}`);
     }
   }

@@ -2,16 +2,22 @@
 //!
 //! * `cleanup.worktrees`: every linked git worktree of the repositories TeleFlock knows on the host
 //!   (its herdr workspaces, agents on the board, parked agents, automations), with what deciding
-//!   whether to delete it takes: pull request, age, uncommitted changes, size, last agent.
+//!   whether to delete it takes: pull request, age, uncommitted changes, size, last real use, and
+//!   the main agent it belongs to (a subagent's worktree belongs to its top-level session).
 //! * `cleanup.remove`: removes one of them, after checking again that no agent works in it, it is
 //!   not locked and a detached HEAD holds no commit only it knows (`force` for those and for
 //!   uncommitted changes). The branch is always kept.
 //! * `cleanup.storage` / `cleanup.storageRun`: omp's own storage maintenance (`omp gc`), limited to
 //!   what is not a session: unreferenced blobs, database WAL files, filesystem compression of idle
 //!   session files. Sessions are never archived or deleted here.
+//! * Idle shells (`HostInfo.idleShells`, `cleanup.idleShellsSet`, `cleanup.idleShellsClose`):
+//!   herdr panes whose shell waits at its prompt with nothing running, in a workspace without an
+//!   agent, shown nowhere, with no input or output for a while. tf-hostd lists them and, unless
+//!   switched off, closes them by itself.
 
 use crate::Millis;
 use crate::model::HerdrState;
+use crate::ApiError;
 
 wire_struct! {
     /// `cleanup.worktrees`.
@@ -34,6 +40,12 @@ wire_struct! {
         pub repos: Vec<CleanupRepo>,
         /// Why no pull request can be looked up on this host (gh missing or signed out).
         pub gh_error: Option<String>,
+        /// The main agents its worktrees belong to (`CleanupWorktree.owner`), each once. Hosts
+        /// ≥ 0.9.0; absent from older ones.
+        pub owners: Option<Vec<CleanupOwner>>,
+        /// omp session files not read yet (a big sessions folder is read over several scans):
+        /// some worktrees may still lack their agent.
+        pub sessions_pending: Option<u32>,
     }
 }
 
@@ -77,8 +89,14 @@ wire_struct! {
         pub busy: bool,
         /// When `git worktree add` created it.
         pub created_at: Option<Millis>,
-        /// Latest sign of use: a commit, checkout or index write, an agent's activity in it.
+        /// Latest real use (hosts ≥ 0.9.0): an omp session or subagent working in it (its
+        /// transcript's entries), a commit or checkout made in it (its HEAD reflog's entries), a
+        /// change to its files (the newest of those git status lists), a live agent's activity.
+        /// Never what only reads it (scans) or rewrites git's files (`git gc` rewrites every
+        /// worktree's reflog). Older hosts: the newest of its admin dir's reflog, index and HEAD files.
         pub active_at: Option<Millis>,
+        /// What `active_at` is (hosts ≥ 0.9.0).
+        pub active_by: Option<WorktreeUse>,
         /// Bytes it takes on disk (allocated blocks, hard links once, one file system).
         pub size: Option<u64>,
         /// The size walk stopped at its budget: at least `size`.
@@ -91,6 +109,9 @@ wire_struct! {
         pub pr_error: Option<String>,
         /// The newest agent that ran in it: on the board, else omp's newest session there.
         pub last_agent: Option<CleanupAgent>,
+        /// The main agent it belongs to (hosts ≥ 0.9.0): one on the board in it, else the one whose
+        /// session ran there, else the first whose subagents worked there.
+        pub owner: Option<CleanupOwnerRef>,
         /// The automation whose run created it.
         pub automation: Option<String>,
     }
@@ -122,6 +143,68 @@ wire_struct! {
         pub parked: bool,
         /// Its last activity.
         pub at: Millis,
+    }
+}
+
+wire_enum! {
+    /// What a worktree's last use (`CleanupWorktree.activeAt`) was.
+    pub enum WorktreeUse {
+        /// An omp session or one of its subagents worked in it (its transcript), or a live agent did.
+        Agent,
+        /// A commit, checkout, merge or reset made in it (its HEAD reflog).
+        Git,
+        /// Its uncommitted changes (the newest of the files git status lists).
+        Files,
+    }
+}
+
+wire_enum! {
+    /// Where a worktree's main agent is now.
+    pub enum CleanupOwnerState {
+        /// On the board with its pane.
+        Live,
+        /// Marked done: its pane closed, its card in Done (resumable).
+        Parked,
+        /// Its omp ended without anyone closing it: its card waits in Review to come back.
+        Ended,
+        /// No card on the board: only its omp session file is left (Past sessions).
+        Gone,
+    }
+}
+
+wire_struct! {
+    /// A main (top-level) agent worktrees belong to: an omp session started by hand, by TeleFlock
+    /// or by an automation, never a subagent (a subagent's work counts for its session).
+    pub struct CleanupOwner {
+        /// Its top-level omp session file; `agent:<id>` for an agent on the board without one.
+        pub key: String,
+        pub state: CleanupOwnerState,
+        /// Its card on the board (live, parked or ended).
+        pub agent_id: Option<String>,
+        /// The card's name.
+        pub name: Option<String>,
+        /// The card's title, else omp's session title.
+        pub title: Option<String>,
+        /// herdr state of a live agent.
+        pub herdr: Option<HerdrState>,
+        /// omp session id.
+        pub session_id: Option<String>,
+        /// Its session's folder.
+        pub cwd: Option<String>,
+        /// Its last activity, its session's or any subagent's (anywhere).
+        pub at: Option<Millis>,
+    }
+}
+
+wire_struct! {
+    /// Which main agent a worktree belongs to.
+    pub struct CleanupOwnerRef {
+        /// `CleanupOwner.key`.
+        pub key: String,
+        /// Its subagents that worked in the worktree (transcript names, the latest first, at most
+        /// 6); empty when the agent itself works there.
+        #[serde(default)]
+        pub subagents: Vec<String>,
     }
 }
 
@@ -253,5 +336,146 @@ wire_struct! {
         pub skipped_live: u32,
         /// With apply: why the file system turned out not to compress.
         pub probe_failure: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// The host's idle shells (`HostInfo.idleShells`; absent from daemons before 0.9.0, so apps
+    /// hide the controls for them). An idle shell is a herdr pane whose own process is a shell
+    /// that holds the terminal's foreground (nothing runs in front of it) and has no background
+    /// jobs, in a workspace where no agent runs and no parked or ended card belongs, shown in no
+    /// TeleFlock terminal and no herdr window, with no input or output for `minutes`. tf-hostd
+    /// checks every minute (the first check 2 minutes after it started, once apps re-attached
+    /// their terminals) and, while `auto` is on, closes them by itself, whether or not an app is
+    /// connected; closing a workspace's last pane closes that workspace (herdr's own rule).
+    pub struct IdleShells {
+        /// Close idle shells automatically (default on).
+        pub auto: bool,
+        /// Minutes without input or output after which a shell counts as idle (default 1440).
+        pub minutes: u32,
+        /// The shells idle now, longest idle first.
+        pub shells: Vec<IdleShell>,
+        /// The newest automatic close since the daemon started.
+        pub last_closed: Option<IdleShellsClosed>,
+        /// Why `auto` is off although it may have been on: the settings file could not be read, so
+        /// the host fails closed (closes nothing by itself) until the settings are saved again.
+        pub notice: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One idle shell.
+    pub struct IdleShell {
+        /// herdr pane id (`w3:p1`).
+        pub pane_id: String,
+        /// The terminal the pane shows; `cleanup.idleShellsClose` closes the pane only while it
+        /// still shows this one.
+        pub terminal_id: String,
+        pub workspace_id: String,
+        /// The workspace's label.
+        pub workspace: String,
+        /// The shell's folder.
+        pub cwd: Option<String>,
+        /// The shell program (`bash`, `zsh`).
+        pub shell: String,
+        /// Its last input or output, moved past the time the host slept since (no idle time).
+        pub idle_since: Millis,
+        /// The last command tf-hostd saw running in it (since the daemon started), when known.
+        pub last_command: Option<String>,
+        /// It is its workspace's only pane: closing it closes the workspace.
+        pub closes_workspace: bool,
+    }
+}
+
+wire_struct! {
+    /// Shells tf-hostd closed by itself in one check.
+    pub struct IdleShellsClosed {
+        pub at: Millis,
+        pub count: u32,
+        /// The labels of their workspaces, each once.
+        pub workspaces: Vec<String>,
+    }
+}
+
+wire_struct! {
+    /// `cleanup.idleShellsSet`: the host's idle-shell settings (persisted by tf-hostd); an absent
+    /// field keeps its value.
+    pub struct IdleShellsSetParams {
+        pub auto: Option<bool>,
+        /// 1 to 43 200 (30 days).
+        pub minutes: Option<u32>,
+    }
+}
+
+wire_struct! {
+    /// `cleanup.idleShellsClose`: closes these shells, each checked again right before. One that
+    /// was used since, runs something, got an agent or a viewer, or whose pane shows another
+    /// terminal by now stays open (`kept`, with why).
+    pub struct IdleShellsCloseParams {
+        pub shells: Vec<IdleShellRef>,
+    }
+}
+
+wire_struct! {
+    pub struct IdleShellRef {
+        pub pane_id: String,
+        /// `IdleShell.terminalId`.
+        pub terminal_id: String,
+    }
+}
+
+wire_struct! {
+    pub struct IdleShellsCloseResult {
+        /// Pane ids closed.
+        pub closed: Vec<String>,
+        /// Shells left open, with why.
+        pub kept: Vec<IdleShellKept>,
+        /// The host's idle shells after the closes.
+        pub idle: IdleShells,
+    }
+}
+
+wire_struct! {
+    pub struct IdleShellKept {
+        pub pane_id: String,
+        pub error: ApiError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_older_hosts_report_parses_without_owners() {
+        let old = serde_json::json!({ "scanning": false, "repos": [{ "root": "/r", "name": "r", "worktrees": [{
+            "path": "/w", "missing": false, "orphanCommits": false, "agents": 0, "busy": false, "sizePartial": false, "activeAt": 5
+        }] }] });
+        let r: CleanupReport = serde_json::from_value(old).unwrap();
+        let w = &r.repos[0].worktrees[0];
+        assert!(r.owners.is_none() && r.sessions_pending.is_none());
+        assert!(w.owner.is_none() && w.active_by.is_none());
+        assert_eq!(w.active_at, Some(5));
+    }
+
+    #[test]
+    fn owners_go_out_camel_case() {
+        let owner = CleanupOwner {
+            key: "/s/-wt-a/x.jsonl".into(),
+            state: CleanupOwnerState::Gone,
+            agent_id: None,
+            name: None,
+            title: Some("Fix CI".into()),
+            herdr: None,
+            session_id: Some("x".into()),
+            cwd: Some("/wt/a".into()),
+            at: Some(9),
+        };
+        let v = serde_json::to_value(&owner).unwrap();
+        assert_eq!((v["state"].as_str(), v["sessionId"].as_str()), (Some("gone"), Some("x")));
+        assert!(v.get("agentId").is_none(), "None fields are omitted");
+        let r: CleanupOwnerRef = serde_json::from_value(serde_json::json!({ "key": "k" })).unwrap();
+        assert!(r.subagents.is_empty(), "subagents default to none");
+        assert_eq!(serde_json::to_value(WorktreeUse::Files).unwrap(), "files");
     }
 }

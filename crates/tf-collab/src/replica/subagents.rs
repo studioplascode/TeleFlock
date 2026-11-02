@@ -1,4 +1,5 @@
-//! What a subagent's status is, and how a replica learns how a finished one ended.
+//! What a subagent's status is, which subagent it runs under, and how a replica learns how a
+//! finished one ended.
 //!
 //! Three sources say something about a subagent, none complete on its own:
 //!
@@ -13,6 +14,11 @@
 //!   built from the file learns the same outcome.
 //!
 //! The roster's `parked` therefore says *finished*, never *how*: a known outcome wins over it.
+//!
+//! Which subagent one runs under ([`parent`]): the roster entry's `parentId` (omp's agent registry,
+//! at every depth: the agent whose session spawned it, for a persisted one its transcript's parent
+//! folder), else omp's naming, which nests a subagent's own ids under its id (`A.B.C` under `A.B`).
+//! The bus frames' `parentToolCallId` is the spawning tool call, never an agent.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -223,6 +229,13 @@ pub(super) fn status(st: &SubState, outcome: Option<SubagentStatus>, interrupted
     }
 }
 
+/// The subagent `id` runs under (`Subagent.parent_id`, see the module docs); `None` for one the
+/// main agent (`main`) started.
+pub(super) fn parent(id: &str, st: &SubState, main: Option<&str>) -> Option<String> {
+    let parent = st.snapshot.as_ref().and_then(|a| a.parent_id.as_deref()).or_else(|| id.rsplit_once('.').map(|(p, _)| p));
+    parent.filter(|p| !p.is_empty() && *p != id && Some(*p) != main).map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -269,6 +282,14 @@ mod tests {
 
     fn status_of(r: &Replica, id: &str) -> SubagentStatus {
         r.meta().subagents.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no subagent {id}: {:?}", r.meta().subagents)).status
+    }
+
+    fn parent_of(r: &Replica, id: &str) -> Option<String> {
+        r.meta().subagents.iter().find(|s| s.id == id).unwrap_or_else(|| panic!("no subagent {id}: {:?}", r.meta().subagents)).parent_id.clone()
+    }
+
+    fn nested(id: &str, parent: &str) -> Value {
+        json!({ "id": id, "displayName": id, "kind": "sub", "parentId": parent, "status": "running", "hasSessionFile": true, "createdAt": NOW, "lastActivity": NOW })
     }
 
     fn async_result(jobs: Value) -> Value {
@@ -513,5 +534,35 @@ mod tests {
             a
         });
         assert_eq!(status_of(&r, "HostTools"), Running, "revived");
+    }
+
+    /// omp's roster names every subagent's parent (its agent registry's `parentId`: the agent whose
+    /// session spawned it) at every depth; the main agent's own subagents have none.
+    #[test]
+    fn nested_subagents_name_their_parent_at_every_depth() {
+        let r = rebuilt(vec![main_agent(), nested("Lab", "Main"), nested("Lab.Ui", "Lab"), nested("Lab.Ui.Shots", "Lab.Ui"), nested("Docs", "Main")], vec![]);
+        assert_eq!(parent_of(&r, "Lab"), None);
+        assert_eq!(parent_of(&r, "Docs"), None);
+        assert_eq!(parent_of(&r, "Lab.Ui").as_deref(), Some("Lab"));
+        assert_eq!(parent_of(&r, "Lab.Ui.Shots").as_deref(), Some("Lab.Ui"));
+    }
+
+    /// The bridge relays the bus frames of subagents at every depth, before omp's debounced roster
+    /// lists them and after it dropped one: the parent then comes from omp's naming (`Lab.Ui.Shots`
+    /// under `Lab.Ui`), never from the frames' `parentToolCallId`, which is the spawning tool call.
+    #[test]
+    fn a_subagent_the_roster_does_not_list_runs_under_its_ids_prefix() {
+        let mut r = rebuilt(vec![main_agent(), agent("Lab", "running")], vec![]);
+        for (id, call) in [("Lab.Ui", "call_7f2a|fc_0b41"), ("Lab.Ui.Shots", "toolu_01Qx"), ("Solo", "toolu_02Rx")] {
+            frame(&mut r, json!({ "t": "bus", "channel": "task:subagent:lifecycle", "data": { "id": id, "agent": "task", "parentToolCallId": call, "status": "started", "index": 0 } }));
+            frame(&mut r, json!({ "t": "bus", "channel": "task:subagent:progress", "data": { "parentToolCallId": call, "progress": { "id": id, "status": "running" } } }));
+        }
+        assert_eq!(parent_of(&r, "Lab.Ui").as_deref(), Some("Lab"));
+        assert_eq!(parent_of(&r, "Lab.Ui.Shots").as_deref(), Some("Lab.Ui"));
+        assert_eq!(parent_of(&r, "Solo"), None, "no dot: the main agent's own");
+        roster(&mut r, vec![main_agent(), agent("Lab", "running"), nested("Lab.Ui", "Lab")]);
+        assert_eq!(parent_of(&r, "Lab.Ui").as_deref(), Some("Lab"));
+        roster(&mut r, vec![main_agent(), agent("Lab", "running")]);
+        assert_eq!(parent_of(&r, "Lab.Ui").as_deref(), Some("Lab"), "dropped from the roster, its frames kept");
     }
 }

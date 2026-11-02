@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tf_proto::session::{SessionMeta, TreeInfo};
 
 use crate::sessions::{Data, Row};
-use crate::util::write_private;
+use crate::util::{private_dir, write_private};
 
 /// Cache budget on Android.
 pub const BUDGET_MOBILE: u64 = 64 << 20;
@@ -124,18 +124,6 @@ fn decode(bytes: &[u8], app: &str) -> Option<(Data, usize)> {
 
 fn safe(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
-}
-
-/// Creates `dir` (and its parents) for this user only, and tightens it when it exists already.
-fn private_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)
 }
 
 #[derive(Default)]

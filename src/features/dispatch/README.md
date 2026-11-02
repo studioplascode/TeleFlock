@@ -1,8 +1,11 @@
 # features/dispatch (owner: Dispatch)
 
 Fire tasks at a repository like chat messages: every message creates a fresh worktree with an omp
-agent whose first prompt is the message. Route `#/dispatch` (`{ name: "dispatch" }`); desktop
-sidebar item next to Board, phone bottom-nav tab, palette view "Dispatch", global key `D`.
+agent whose first prompt is the message. Or pick "No folder · chat" and every message starts a chat
+instead: an omp agent in a folder its host makes for it, no repository (architecture §3.31). Route
+`#/dispatch` (`{ name: "dispatch" }`); desktop sidebar item next to Board, phone bottom-nav tab,
+palette view "Dispatch", global key `D`; "New chat" (palette action, phone create sheet) opens it
+on the chat choice (`openChat`).
 
 ## Public API
 
@@ -11,19 +14,19 @@ sidebar item next to Board, phone bottom-nav tab, palette view "Dispatch", globa
 export function DispatchView(): JSX.Element;
 
 // src/features/dispatch/store.ts — persisted threads (zustand persist, localStorage "tf.dispatch", v2)
-export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (target), lastRepo, bases, legacyBases, trusted, options, remotes, select, setBase, setOptions, trust, learnRemotes, add, patch, remove, clear }
-export function threadKey(target: string, repo: string): string;  // target = host id or "auto:<group>"; repo = root (host) or repo id (Auto)
+export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (target), lastRepo, bases, legacyBases, trusted, options, remotes, composerFocus, select, setBase, setOptions, trust, learnRemotes, add, patch, remove, clear, focusComposer, consumeComposerFocus }; composerFocus: a nonce asking the view to focus the task box (not persisted)
+export function threadKey(target: string, repo: string): string;  // target = host id or "auto:<group>"; repo = root (host), repo id (Auto) or CHAT_REPO (a chat thread, `@/core/chats`)
 export function entryHost(key, entry): string;                    // the host an entry went to (entry.hostId, else the thread's host)
 export function entryRepo(key, entry): string;                    // that host's checkout root (entry.repo, else the thread's repo)
-export function dispatchTask(args: { key?; hostId; repo; prompt; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text; resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase)
+export function dispatchTask(args: { key?; hostId; repo; prompt; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text; resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase); repo = CHAT_REPO: a chat (no branch, base or resolveBase; agent.start with the chat target)
 export function pendingByHost(threads, runningAgentIds, now): Record<string, number>; // dispatches on their way to each host (Auto's workload)
-export function suggestDispatchName(hostId, repo, prompt): Promise<string | null>; // the send's suggestBranch call (the composer prefetches through it)
+export function suggestDispatchName(hostId, repo, prompt): Promise<string | null>; // the send's suggestBranch call (the composer prefetches through it); a chat asks outside any folder (no cwd)
 export function resumeInterruptedNaming(): void; // every `naming` entry cut short by a reload (any thread) goes ahead under the fallback name once its host answers; runs after hydration, call at startup
-export function retryDispatch(args: { key; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // on the entry's own host; checks before re-creating
+export function retryDispatch(args: { key; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // on the entry's own host; checks before re-creating (a chat: links its chat agent, else starts it again)
 export function isInFlight(entryId: string): boolean;               // request queued / in flight in this tab
-export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create settles
-export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted (HostInfo.pruned), and their images
-export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live
+export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create (a chat: agent.start) settles
+export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted and of deleted chats (HostInfo.pruned), and their images
+export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed?; chat? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live; chat: a chat (branch "", no base / repo)
 export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean; roleModels?; fallbackChains?; autoAnswer? } // the agent's own omp roles / chains and decide-for-me policy; absent (options saved before them) = none / the host default
 
 // src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
@@ -45,23 +48,30 @@ export function localRepoIds(repo): string[];                      // the "local
 export function findGroupRepo(repos, id): GroupRepo | undefined;   // by id, else by one of those local ids (threads keep the id they started under)
 
 // src/features/dispatch/send.ts — one send outside any view (the composer and Quick capture both use it)
-export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure
+export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure; a chat (repo CHAT_REPO) only to a host whose daemon starts chats
 export function sendTask(world, req): { ok: true; hostId; entry } | { ok: false; title; description? }; // planSend + dispatchTask
 export function dispatchTarget(profiles, hostIds, lastHost): { target; group }; // last host or group, else the first host
 export function dispatchOptions(stored, settings): DispatchOptions;             // last used, else the Settings defaults
 export function dispatchDraftKey(target, repo): string;                         // the composer draft of a thread
-export function dispatchedRepos(threads); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo);
+export function dispatchedRepos(threads); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats
+export function chatHostsOf(states, ids): string[];                             // the hosts of ids whose daemon starts chats (HostInfo.chats)
+export function chatRefusal(world, target): { title; description? } | null;     // why target can't take a chat (daemon from before chats or not known yet; Auto: no host of the group starts chats), CHATS_NEED_UPDATE words
+
+// src/features/dispatch/openChat.ts — "New chat" (palette, phone create sheet)
+export function openChat(): void; // Dispatch on its current target (last host or group, else the first host) with "No folder · chat" picked and the task box focused
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)
 export const BRANCH_PREFIX = "dispatch/";
+export const CHAT_CHOICE = "No folder · chat";                      // the repo chip's chat choice (CHAT_REPO)
 export function baseSlug(prompt: string): string;                  // slugFromPrompt or "task": "Add offline caching to the client" → "offline-caching-client"; "Fix the following points and release 0.5.0 when you are done. - … - …" → "release-0-5-0-fixes"
 export function uniqueSlug(base: string, taken: ReadonlySet<string>): string; // -2, -3… vs names and dispatch/<name> branches; result ≤ 32 chars (herdr's agent-name limit)
 export function cleanSuggestion(s): string | null;                 // an AI slug as a dispatch name (≤ 28 chars, whole words), or null (unusable)
 export function nameDispatch(prompt, suggest?): Promise<{ slug; ai }>; // AI slug else prompt slug; the caller dedupes synchronously after the await
 export function prefetchKey(draft: string): string | null;         // trimmed draft once it has 3+ words
+export function rambleAbout(repo): string | undefined;             // Rambler's context for a dictated task: "Repository: <name>"; none for a chat (CHAT_REPO) or no repo
 export function threadBase(list, stored, legacy): { shown; param?; untouched }; // see Behaviour → Base
 export function recentRepos(state, dispatched): RecentRepo[];       // workspace repo roots (+ remoteUrl) + dispatched repos, most recent first
-export function resolveAgent(entry, agents, scope: { repo; workspaces }): Agent | undefined; // agentId → pane (same name) → name; always inside the entry's worktree
+export function resolveAgent(entry, agents, scope: { repo; workspaces }): Agent | undefined; // agentId → pane (same name) → name; always inside the entry's worktree; a chat entry: chat agents only (Agent.chat), and a worktree entry never takes one
 export function slimThreads(threads, maxEntries, maxPrompt): Record<string, DispatchEntry[]>; // persisted copy
 ```
 
@@ -80,6 +90,30 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   repository…". Under the composer: "New worktree" / "Fan out" open those dialogs prefilled with the
   host, repo (and the current draft for Fan out). The composer block is a `data-toast-anchor`: toasts
   (a persistent needs-you one too) sit above it, never over the task box or its send button.
+- Chats (`CHAT_REPO` from `@/core/chats`, architecture §3.31): the repo chip's first item, "No folder ·
+  chat" (also an empty-state button), is remembered as the target's last repo like any repo (thread
+  and draft keys use `CHAT_REPO`). It is disabled, with the reason under it, when the target can't
+  start chats (`chatRefusal`): a host whose daemon has no `HostInfo.chats` (`CHATS_NEED_UPDATE`
+  words, the update hint as tooltip) or that was never heard from ("offline"), a group none of
+  whose hosts start chats. Picked, the chip reads "No folder · chat", there is no base chip, no
+  trust and no New worktree / Fan out offers, and the hint, placeholder and empty thread say each
+  message starts an omp agent in a new folder of its own on the host (under `HostInfo.chats`), no
+  repository. Images, videos, large pastes, templates, plan and More agent options work as for a
+  repository. A send is `agent.start { target: { kind: "chat" }, spec }` with the same spec as a
+  worktree's agent; a single host must start chats (else the toast says so), Auto picks the least
+  busy online host of the group that starts chats (and takes images, with images), with the same
+  workload and quota terms and `placed` line. Naming is a task's (AI slug or the prompt's), deduped
+  against the host's live agents and dispatches; no branch list, no `dispatch/` branch, no base (the
+  host still keeps the name unique: `-2` when an agent has it by then; the card shows the agent's).
+  The entry (`chat: true`, `branch: ""`) shows a "Chat" chip (`features/chats/ChatTag`) where branch
+  and base go, "Naming the chat" / "Starting chat" steps, Open session / Terminal, never Review. It
+  links only a chat agent (`Agent.chat`) by id, pane or name, and a worktree entry never links one.
+  A daemon from before chats refusing the target (`chatsUnsupported`) fails the entry with the
+  update words. Retry links its chat agent if it is there, else starts the chat again, under the
+  same name unless another agent or dispatch holds it now. Deleting a chat
+  (`HostInfo.pruned`) drops its entries. "New chat" (palette action, phone create sheet) picks
+  the chat choice on Dispatch's current target and focuses the task box (`openChat`); "New task"
+  (`D`, sidebar) opens Dispatch as before.
 - Base: the host's default base, `BranchList.defaultBase` (`origin/<default>` when that
   remote-tracking branch exists), shown on the chip, in the composer hint and on each entry
   (`← origin/main`). Untouched, the send carries no `base`, so a 0.5 hostd fetches and forks from

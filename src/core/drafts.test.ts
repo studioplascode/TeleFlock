@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { flushAll } from "./draftFlush";
 import { type DraftImageBackend, getDraftImages, hydrateDraftImages, setDraftImageBackend, setDraftImages, type StoredDraft, updateDraftImages } from "./draftImages";
-import { type DraftEntry, draftKey, drafts, pruneDrafts, useDrafts } from "./drafts";
+import { adoptStored, type DraftEntry, draftKey, drafts, pruneDrafts, startDrafts, useDrafts } from "./drafts";
+import { type MirrorRecord, setMirrorBackend } from "./mirrored";
 import { answerDraftKey, staleAnswerDrafts } from "./draftSweep";
 import type { CoreState } from "./store/state";
 
@@ -135,6 +137,42 @@ describe("draft images edited while the stored ones load", () => {
       expect(store.writes.map(([k, v]) => [k, v?.images.map((i) => i.data)])).toEqual([["race-edit", ["old", "pasted"]]]);
     } finally {
       setDraftImageBackend(prev);
+    }
+  });
+});
+
+describe("the drafts' IndexedDB copy (a kill can lose localStorage's last writes)", () => {
+  const e = (v: string, at = 1): DraftEntry => ({ v, at });
+
+  test("the newer copy wins, except for what was typed or cleared in this page since the start", () => {
+    const boot = { kept: e("as at start"), edited: e("before"), cleared: e("sent since"), dropped: e("gone from the copy") };
+    const current = { kept: boot.kept, edited: e("typed since", 2), dropped: boot.dropped, added: e("new", 2) };
+    const stored = { kept: e("newer copy", 3), edited: e("copy", 3), cleared: e("copy", 3), extra: e("only in the copy", 3) };
+    expect(adoptStored(boot, current, stored)).toEqual({ kept: e("newer copy", 3), edited: e("typed since", 2), added: e("new", 2), extra: e("only in the copy", 3) });
+  });
+
+  test("a prompt typed right before the app was killed comes back, and a flush stores the next keystroke at once", async () => {
+    const key = draftKey("composer", "h1::agent-7");
+    const now = Date.now();
+    const beforeTheKill = { state: { drafts: { [key]: { v: "fix the flaky test and", at: now } } }, version: 1 };
+    const writes: MirrorRecord[] = [];
+    const prev = setMirrorBackend({
+      read: async (name) => (name === "tf.drafts" ? { rev: 5, at: now, value: JSON.stringify(beforeTheKill) } : undefined),
+      write: (name, value) => void (name === "tf.drafts" && value && writes.push(value)),
+    });
+    try {
+      startDrafts();
+      await flushAll();
+      expect(drafts.get(key)).toBe("fix the flaky test and");
+      // No 300 ms pause in typing: the update is about to restart the app.
+      drafts.set(key, "fix the flaky test and the race in it");
+      await flushAll();
+      const last = writes.at(-1);
+      expect(last?.rev).toBeGreaterThan(5);
+      expect((JSON.parse(last?.value ?? "{}") as typeof beforeTheKill).state.drafts[key]?.v).toBe("fix the flaky test and the race in it");
+    } finally {
+      setMirrorBackend(prev);
+      drafts.clear(key);
     }
   });
 });

@@ -1168,6 +1168,7 @@ fn offline_caps() -> Capabilities {
         bridge: false,
         retry: false,
         subagent_retry: false,
+        refusal_retry: false,
     }
 }
 
@@ -1436,6 +1437,7 @@ pub(crate) mod tests {
             truncated: false,
             view: None,
             error: None,
+            artifact: None,
         })
     }
 
@@ -1466,6 +1468,7 @@ pub(crate) mod tests {
             tree: None,
             caps,
             started_at: None,
+            agent_chat: None,
         }
     }
 
@@ -2110,7 +2113,7 @@ pub(crate) mod tests {
         // First open: nothing cached, the whole window.
         let host = test_host(dir.path());
         let (link, _) = connect(&host, &side, true, true, "c1").await;
-        assert_eq!(link.features, crate::link::Features { zstd: true, session_sync: true, presence: true, forward: true });
+        assert_eq!(link.features, crate::link::Features { zstd: true, session_sync: true, presence: true, forward: true, browser: false });
         let dyn_host: Arc<dyn SessionHost> = host.clone();
         let before = link.totals();
         let first = open_now(&dyn_host, &link, &open_params(200)).await.unwrap();
@@ -3201,7 +3204,7 @@ pub(crate) mod tests {
         let dh: Arc<dyn SessionHost> = host.clone();
         let (new, new_child) = lab_attach(true, Arc::new(TestSink(host.clone()))).await;
         *host.link.lock().unwrap() = Some(new.clone());
-        assert_eq!(new.features, crate::link::Features { zstd: true, session_sync: true, presence: true, forward: true });
+        assert_eq!(new.features, crate::link::Features { zstd: true, session_sync: true, presence: true, forward: true, browser: false });
         let (_, after_open, after_open_plain) = received(&new, open_now(&dh, &new, &typed)).await;
         closed(&dh, &agent);
         new.request("session.close", serde_json::json!({ "agentId": agent }), DEFAULT_TIMEOUT).await.unwrap();

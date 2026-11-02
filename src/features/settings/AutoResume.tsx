@@ -73,8 +73,9 @@ function HostRows({ hostId }: { hostId: string }) {
   const description = !online ? "Connect the host to change it." : old ? "Update TeleFlock on this host" : (error ?? (config === null ? "Checking…" : autoResumeDescription(config)));
   // A host from before the setting reports none: its boot service is not switchable from here.
   const bringBack = config?.bringBack;
-  // What this host can really do (`bootService`, from its scheduler's status): systemd with root or
-  // lingering only; macOS, Windows and Linux without systemd have no boot service to install.
+  // What this host can really do (`bootService`, from its scheduler's status): a systemd timer with
+  // root or lingering, a launchd agent (macOS) or a Task Scheduler task (Windows), for the real home;
+  // Linux without systemd and development homes have none to install.
   const bootAvailable = bootServiceAvailable(config);
   const bringBackText = !online
     ? "Connect the host to change it."

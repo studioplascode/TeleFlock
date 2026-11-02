@@ -26,7 +26,8 @@ export interface WorkspaceAction {
   run(): Promise<void>;                 // owns its confirms/toasts/errors; never rejects
 }
 export function workspaceActions(hostId: string, ws: Workspace): WorkspaceAction[];   // pure
-export function WorkspaceActionsMenu(props: { hostId: string; workspace: Workspace; children: ReactNode; mode?: "dropdown" | "context"; home?: string }): JSX.Element;
+export function WorkspaceActionsMenu(props: { hostId: string; workspace: Workspace; children: ReactNode; mode?: "dropdown" | "context"; home?: string; leading?: ReactNode; leadingPanes?: readonly string[] }): JSX.Element;
+// context mode: `leading` items first (the sidebar's folded one-pane row puts its pane's own actions there), then the workspace's under a "Worktree · label" heading; `leadingPanes` pane ids' openPane/closePane entries are dropped as already covered.
 export function openReview / newAgentIn / newWorktreeFrom / revealPastSessions / newShell / renameWorkspace / closeWorkspace / removeWorktree: (hostId: string, ws: Workspace) => Promise<void>;
 export function renameTab(hostId: string, tab: Tab): Promise<void>;
 export function closeTab(hostId: string, ws: Workspace, tab: Tab): Promise<void>;   // group-close refusal → toast with "Close workspace…"
@@ -62,7 +63,9 @@ export function ReviewView(props: { hostId: string; workspaceId: string }): JSX.
 // @/features/preview
 export function PreviewButton(props: { hostId: string; port: number; label?: string; size?: "sm" | "md"; className?: string }): JSX.Element;
 export function PreviewList(props: { className?: string }): JSX.Element;
-export function PreviewSheet(props: { tunnel: TunnelInfo | null; onClose(): void }): JSX.Element;   // mobile in-app preview
+export function PreviewSheet(props: { tunnel: TunnelInfo | null; onClose(): void }): JSX.Element;   // phone-sized layout's in-app preview (iframe)
+// Android app: its own window (plugin open_preview, no IPC); phone-sized layout: sets the sheet's tunnel; desktop: system browser.
+export function showPreview(tunnel: TunnelInfo, mobile: boolean, sheet: (t: TunnelInfo) => void): void;
 
 // @/features/worktree/FolderBrowser       remote folder picker (fs.home / fs.list, git badges, keyboard)
 export function FolderBrowser(props: { hostId: string; mode: "repo" | "folder"; value?: string; onSelect(p: FolderPick): void; onConfirm?(p: FolderPick): void; initialPath?: string; autoFocus?: boolean; className?: string }): JSX.Element;

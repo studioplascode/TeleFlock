@@ -252,7 +252,7 @@ export function AgentFields({ hostId, draft, onChange, derivedName, suggestedNam
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={spring.smooth}
-            className="overflow-hidden"
+            className="overflow-clip"
           >
             {body}
           </motion.div>

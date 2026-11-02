@@ -1,0 +1,26 @@
+# Refusal fallback lab omp settings (isolated agent dir; setup.sh copies this in): every role on
+# Sonnet (side calls such as session titles are answered), the agents under test start on Opus
+# explicitly. No approvals, no setup wizard, no update checks.
+modelRoles:
+  default: refusal-lab/lab-sonnet-5-5
+  smol: refusal-lab/lab-sonnet-5-5
+  slow: refusal-lab/lab-sonnet-5-5
+  vision: refusal-lab/lab-sonnet-5-5
+  plan: refusal-lab/lab-sonnet-5-5
+  commit: refusal-lab/lab-sonnet-5-5
+  tiny: refusal-lab/lab-sonnet-5-5
+  memory: refusal-lab/lab-sonnet-5-5
+  task: refusal-lab/lab-sonnet-5-5
+  advisor: refusal-lab/lab-sonnet-5-5
+  widget: refusal-lab/lab-sonnet-5-5
+  judge: refusal-lab/lab-sonnet-5-5
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

@@ -1,27 +1,35 @@
 //! `ai.complete`: one short completion from omp's `tiny` model role (naming, drafting).
 //!
-//! hostd runs `omp --mode json` without tools, extensions, skills, rules, LSP, session or title,
-//! writes the prompt to its stdin, reads the JSONL event stream and takes the final assistant text
-//! at `agent_end` (fallback: the assistant `message_end` when the stream ends first). The child is
-//! killed as soon as the answer is in (omp otherwise lingers several seconds). A failed `tiny`
-//! attempt is retried once with `smol` while time remains. At most [`MAX_CONCURRENT`] omp
-//! processes run per daemon; queue time counts against the caller's timeout.
+//! hostd runs omp without tools, extensions, skills, rules, LSP, session or title, in a fresh
+//! context per call. The normal path is an `omp --mode rpc` worker with the call's role and system
+//! prompt (`ai_pool.rs`). A worker is kept after a call only for a (role, system, cwd) that was
+//! prewarmed (`ai.prewarm`) or called before within 2 min, so a repeated or announced call finds omp
+//! started (its 1–2.5 s startup is not part of the call) and a one-off call leaves no process behind.
+//! Without a usable worker
+//! (omp too old for RPC, a worker that died, a rejected prompt, a prompt over 256 KiB) the call runs
+//! `omp --mode json` once: the prompt on stdin, the JSONL event stream read until `agent_end` (fallback:
+//! the assistant `message_end` when the stream ends first), the child killed as soon as the answer
+//! is in (omp otherwise lingers several seconds). Both paths take the final assistant text. A failed
+//! `tiny` attempt is retried once with `smol` while time remains. At most [`MAX_CONCURRENT`] calls run per
+//! daemon; queue time counts against the caller's timeout.
 //!
 //! Privacy: the prompt and system text go only to omp (and from there to the user's own model
 //! provider). They are never logged, stored or echoed in errors.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde_json::Value;
-use tf_proto::{AiCompleteParams, AiCompleteResult, ApiError, HostMethod};
+use tf_proto::{AiCompleteParams, AiCompleteResult, AiPrewarmParams, AiPrewarmResult, ApiError, HostMethod};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::clients::ClientHandle;
 use crate::ops::fs::home_dir;
+use crate::ops::ai_pool::{self, Failure, Key, Pool, Warmth};
 use crate::ops::host::omp_bin;
 use crate::ops::{to_value, Ctx};
 
@@ -41,11 +49,37 @@ const STDERR_CAP: usize = 16 * 1024;
 
 static PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT);
 
+/// The daemon's warm omp workers.
+static POOL: LazyLock<Pool> = LazyLock::new(|| Pool::new(Default::default()));
+
 pub async fn handle(_ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
         HostMethod::AiComplete(p) => to_value(complete(&p).await?),
+        HostMethod::AiPrewarm(p) => to_value(prewarm(&POOL, &p)?),
         other => Err(ApiError::new("unknown_method", format!("{} is not an ai method", other.name()))),
     }
+}
+
+/// omp's working directory: `cwd` when it is a directory, else home.
+fn cwd_of(cwd: Option<&str>) -> PathBuf {
+    cwd.map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(home_dir)
+}
+
+/// The worker key a call with these parameters uses.
+fn key_of(role: &str, system: &str, cwd: Option<&str>) -> Key {
+    Key { role: role.to_string(), system: one_line(system), cwd: cwd_of(cwd) }
+}
+
+/// `ai.prewarm`: starts the worker for these parameters (nothing is waited for).
+fn prewarm(pool: &Pool, p: &AiPrewarmParams) -> Result<AiPrewarmResult, ApiError> {
+    let role = p.role.as_deref().unwrap_or(DEFAULT_ROLE);
+    if !valid_role(role) {
+        return Err(ApiError::new("invalid_params", format!("ai.prewarm: invalid role `{role}`")));
+    }
+    let Some(bin) = omp_bin() else { return Err(unavailable("omp is not installed on this host")) };
+    let warmth = pool.ensure_warm(&bin, &key_of(role, &p.system, p.cwd.as_deref()));
+    tracing::debug!(task = %p.task.chars().take(32).collect::<String>(), role, ?warmth, "ai.prewarm");
+    Ok(AiPrewarmResult { ready: warmth == Warmth::Ready })
 }
 
 /// Runs one completion (see the module docs).
@@ -58,7 +92,7 @@ pub async fn complete(p: &AiCompleteParams) -> Result<AiCompleteResult, ApiError
     let limit = clamp_timeout(p.timeout_ms);
     let deadline = started + limit;
     let task: String = p.task.chars().take(32).collect();
-    let res = run(p, role, deadline, limit).await;
+    let res = run(&POOL, p, role, deadline, limit).await;
     let ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
     match res {
         Ok((answer, used_role)) => {
@@ -73,9 +107,9 @@ pub async fn complete(p: &AiCompleteParams) -> Result<AiCompleteResult, ApiError
 }
 
 /// Queue + attempts. Returns the answer and the role that produced it.
-async fn run<'a>(p: &AiCompleteParams, role: &'a str, deadline: Instant, limit: Duration) -> Result<(Answer, &'a str), ApiError> {
+async fn run<'a>(pool: &Pool, p: &AiCompleteParams, role: &'a str, deadline: Instant, limit: Duration) -> Result<(Answer, &'a str), ApiError> {
     let Some(bin) = omp_bin() else { return Err(unavailable("omp is not installed on this host")) };
-    let cwd = p.cwd.as_deref().map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(home_dir);
+    let cwd = cwd_of(p.cwd.as_deref());
     let _permit = match tokio::time::timeout_at(deadline, PERMITS.acquire()).await {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) => return Err(ApiError::new("internal", "ai semaphore closed")),
@@ -90,7 +124,7 @@ async fn run<'a>(p: &AiCompleteParams, role: &'a str, deadline: Instant, limit: 
             break;
         }
         tried += 1;
-        match attempt(&bin, r, &system, &p.prompt, &cwd, deadline).await {
+        match attempt(pool, &bin, r, &system, &p.prompt, &cwd, deadline).await {
             Ok(answer) => return Ok((answer, r)),
             Err(Attempt::Missing) => return Err(unavailable("omp is not installed on this host")),
             Err(Attempt::TimedOut) => return Err(timed_out(limit)),
@@ -147,7 +181,35 @@ enum Attempt {
     Failed(String),
 }
 
-async fn attempt(bin: &Path, role: &str, system: &str, prompt: &str, cwd: &Path, deadline: Instant) -> Result<Answer, Attempt> {
+/// One attempt with one role: a warm worker when there is a usable one, else a fresh `--mode json` omp.
+async fn attempt(pool: &Pool, bin: &Path, role: &str, system: &str, prompt: &str, cwd: &Path, deadline: Instant) -> Result<Answer, Attempt> {
+    if prompt.len() <= ai_pool::MAX_PROMPT_BYTES {
+        let key = Key { role: role.to_string(), system: system.to_string(), cwd: cwd.to_path_buf() };
+        let asked = match pool.acquire(bin, &key, deadline).await {
+            Ok(mut lease) => {
+                let res = lease.ask(prompt, deadline).await;
+                if res.is_ok() {
+                    lease.release();
+                }
+                res
+            }
+            Err(f) => Err(f),
+        };
+        match asked {
+            Ok(answer) => return Ok(answer),
+            Err(Failure::Missing) => return Err(Attempt::Missing),
+            Err(Failure::Unresolved) => return Err(Attempt::Unresolved),
+            Err(Failure::TimedOut) => return Err(Attempt::TimedOut),
+            Err(Failure::Model(msg)) => return Err(Attempt::Failed(tail(&msg))),
+            // No usable worker: a fresh omp runs the call and reports what is wrong.
+            Err(Failure::Broken) => tracing::debug!(role, "ai worker unusable; running a fresh omp"),
+        }
+    }
+    one_shot(bin, role, system, prompt, cwd, deadline).await
+}
+
+/// One fresh `omp --mode json` run, killed as soon as it answered.
+async fn one_shot(bin: &Path, role: &str, system: &str, prompt: &str, cwd: &Path, deadline: Instant) -> Result<Answer, Attempt> {
     let model = format!("@{role}");
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args([
@@ -247,7 +309,7 @@ async fn attempt(bin: &Path, role: &str, system: &str, prompt: &str, cwd: &Path,
 }
 
 /// omp's message for an unknown model / role: `Model "@<role>" not found`.
-fn unresolved_role(stderr: &str, role: &str) -> bool {
+pub(crate) fn unresolved_role(stderr: &str, role: &str) -> bool {
     stderr.contains(&format!("\"@{role}\" not found"))
 }
 
@@ -445,6 +507,104 @@ mod tests {
         let t = tail(&long);
         assert_eq!(t.chars().count(), ERR_TAIL);
         assert!(t.ends_with("x end"));
+    }
+
+    #[cfg(unix)]
+    mod pooled {
+        use super::*;
+        use crate::ops::ai_pool::{fake, Limits};
+
+        fn pool() -> Pool {
+            Pool::new(Limits { warm: 3, idle_ttl: Duration::from_secs(60), max_uses: 40 })
+        }
+
+        fn soon() -> Instant {
+            Instant::now() + Duration::from_secs(10)
+        }
+
+        #[tokio::test]
+        async fn a_repeated_call_is_served_by_a_kept_worker_and_answers_come_from_rpc_events() {
+            let td = tempfile::tempdir().unwrap();
+            let bin = fake::omp(td.path(), "", "");
+            let pool = pool();
+            let cwd = std::env::temp_dir();
+            let a = attempt(&pool, &bin, "tiny", "Rewrite", "first", &cwd, soon()).await.unwrap();
+            let b = attempt(&pool, &bin, "tiny", "Rewrite", "second", &cwd, soon()).await.unwrap();
+            let c = attempt(&pool, &bin, "tiny", "Rewrite", "third", &cwd, soon()).await.unwrap();
+            assert_eq!((a.text.as_str(), b.text.as_str(), c.text.as_str()), ("echo: first", "echo: second", "echo: third"));
+            assert_eq!(a.model.as_deref(), Some("mock/m"));
+            // The first call's worker ended with it; the second's stayed for the third.
+            assert_eq!(fake::spawns(td.path()).len(), 2);
+            // Another system prompt is another worker.
+            attempt(&pool, &bin, "tiny", "Name it", "fourth", &cwd, soon()).await.unwrap();
+            assert_eq!(fake::spawns(td.path()).len(), 3);
+        }
+
+        #[tokio::test]
+        async fn a_broken_worker_falls_back_to_a_fresh_json_run() {
+            let td = tempfile::tempdir().unwrap();
+            let bin = td.path().join("omp");
+            crate::test_exe::write_exe(
+                &bin,
+                format!(
+                    r#"#!/bin/sh
+echo "$2" >> {d}/modes
+if [ "$2" = rpc ]; then echo boom >&2; exit 1; fi
+cat > /dev/null
+printf '{{"type":"agent_end","messages":[{{"role":"assistant","content":[{{"type":"text","text":"json answer"}}]}}]}}\n'
+sleep 5
+"#,
+                    d = td.path().display()
+                ),
+            );
+            let pool = pool();
+            let cwd = std::env::temp_dir();
+            let started = std::time::Instant::now();
+            let a = attempt(&pool, &bin, "tiny", "Rewrite", "hi", &cwd, soon()).await.unwrap();
+            assert_eq!(a.text, "json answer");
+            assert!(started.elapsed() < Duration::from_secs(3), "killed once answered");
+            assert_eq!(std::fs::read_to_string(td.path().join("modes")).unwrap(), "rpc\njson\n");
+            // A prompt too long for omp's RPC frames never tries a worker.
+            std::fs::remove_file(td.path().join("modes")).unwrap();
+            let long = "x".repeat(ai_pool::MAX_PROMPT_BYTES + 1);
+            attempt(&pool, &bin, "tiny", "Rewrite", &long, &cwd, soon()).await.unwrap();
+            assert_eq!(std::fs::read_to_string(td.path().join("modes")).unwrap(), "json\n");
+        }
+
+        #[tokio::test]
+        async fn worker_failures_keep_their_meaning() {
+            let cwd = std::env::temp_dir();
+            let pool = pool();
+            // A role omp does not have is not retried as a fresh run.
+            let td = tempfile::tempdir().unwrap();
+            let bin = fake::omp(td.path(), r#"echo 'Model "@zzz" not found' >&2; exit 1"#, "");
+            assert!(matches!(attempt(&pool, &bin, "zzz", "Rewrite", "hi", &cwd, soon()).await, Err(Attempt::Unresolved)));
+            assert_eq!(fake::spawns(td.path()).len(), 1);
+            // omp's own words for a model that failed.
+            let td = tempfile::tempdir().unwrap();
+            let bin = fake::omp(
+                td.path(),
+                "",
+                r#"printf '{"type":"response","id":"%s","command":"prompt","success":true}\n{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"error","errorMessage":"429 rate limited"}]}\n' "$id"; continue"#,
+            );
+            assert!(matches!(attempt(&pool, &bin, "tiny", "Rewrite", "hi", &cwd, soon()).await, Err(Attempt::Failed(m)) if m == "429 rate limited"));
+            // Slower than the caller allows.
+            let td = tempfile::tempdir().unwrap();
+            std::fs::write(td.path().join("delay"), "5").unwrap();
+            let bin = fake::omp(td.path(), "", "");
+            let started = std::time::Instant::now();
+            assert!(matches!(attempt(&pool, &bin, "tiny", "Rewrite", "hi", &cwd, Instant::now() + Duration::from_millis(300)).await, Err(Attempt::TimedOut)));
+            assert!(started.elapsed() < Duration::from_secs(3));
+        }
+
+        #[test]
+        fn prewarm_and_calls_agree_on_the_worker() {
+            let a = key_of("tiny", "Line one\nLine two", None);
+            assert_eq!(a, key_of("tiny", "Line one\r\nLine two", None));
+            assert_ne!(a, key_of("smol", "Line one\nLine two", None));
+            assert_ne!(a, key_of("tiny", "Other", None));
+            assert_eq!(a.cwd, key_of("tiny", "x", Some("/does/not/exist")).cwd, "an unusable cwd means home, as in a call");
+        }
     }
 
     /// Calls the real omp on this machine: `cargo test -p tf-hostd ai -- --ignored --nocapture`.

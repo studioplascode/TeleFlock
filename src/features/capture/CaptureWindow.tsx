@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Check, ChevronDown, CornerDownLeft, ImagePlus, Send, Star, X, Zap } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
-import { fitImages, imageFiles, readImages } from "@/core/clipboardImages";
-import type { DraftImage } from "@/core/draftImages";
+import { attachImages, imageFiles } from "@/core/clipboardImages";
+import { setDraftImages, useDraftImages } from "@/core/draftImages";
+import { draftKey } from "@/core/drafts";
+import { mirroredItem } from "@/core/mirrored";
 import {
   Button,
   DropdownMenu,
@@ -19,6 +21,7 @@ import {
   isTauri,
 } from "@/design";
 import { ACTIONS } from "@/features/shell/vocab";
+import { Ticks } from "@/features/shell/Ticks";
 import { capturePort, type Port, requestId, type ToCapture, type ToMain } from "./link";
 import type { CaptureOption, CaptureQuestion, CaptureSnapshot, CaptureTarget } from "./snapshot";
 import { imagesLabel } from "./task";
@@ -31,8 +34,13 @@ import { imagesLabel } from "./task";
  * what it posts and asks it to act.
  */
 
-/** Typed text survives hiding the window and restarts (the main window never touches this key). */
-const TEXT_KEY = "tf.capture.text";
+/**
+ * Typed text survives hiding the window, restarts and kills (localStorage with an IndexedDB copy;
+ * the main window never touches it).
+ */
+const captureText = mirroredItem("tf.capture.text");
+/** Pasted screenshots: stored like a composer's (IndexedDB `tf.drafts`/`images`), under their own key. */
+const IMAGES_KEY = draftKey("capture");
 /** How long a sent task's confirmation shows before the window hides. */
 const SENT_HIDE_MS = 1100;
 /** A request the main window didn't answer by then failed. */
@@ -51,21 +59,9 @@ type Status =
   | { kind: "busy"; what: Action }
   | { kind: "done"; what?: Action; ok: boolean; title: string; detail?: string };
 
-function readText(): string {
-  try {
-    return localStorage.getItem(TEXT_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
+/** `""` deletes the stored text. */
 function writeText(text: string): void {
-  try {
-    if (text) localStorage.setItem(TEXT_KEY, text);
-    else localStorage.removeItem(TEXT_KEY);
-  } catch {
-    /* storage unavailable: memory only */
-  }
+  captureText.set(text || null);
 }
 
 /** The shell's window controls (no-ops in a browser tab). */
@@ -86,14 +82,8 @@ function hideWindow(port: CapturePort | null): void {
 export function CaptureWindow() {
   const [port] = useState(capturePort);
   const [snapshot, setSnapshot] = useState<CaptureSnapshot | null>(null);
-  const [text, setText] = useState(readText);
-  const [images, setImagesState] = useState<DraftImage[]>([]);
-  // What async handlers (a paste being decoded) add to: the images as of now, not of their render.
-  const imagesNow = useRef<DraftImage[]>([]);
-  const setImages = (next: DraftImage[]) => {
-    imagesNow.current = next;
-    setImagesState(next);
-  };
+  const [text, setText] = useState(() => captureText.initial ?? "");
+  const [images, setImages] = useDraftImages(IMAGES_KEY);
   const [pick, setPick] = useState<{ target: string; repo: string } | null>(null);
   const [qIndex, setQIndex] = useState(0);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
@@ -115,8 +105,7 @@ export function CaptureWindow() {
         if (msg.ok && what === "send") {
           setText("");
           writeText("");
-          imagesNow.current = [];
-          setImagesState([]);
+          setDraftImages(IMAGES_KEY, []);
         }
         setStatus({ kind: "done", what, ok: msg.ok, title: msg.title, ...(msg.detail ? { detail: msg.detail } : {}) });
         // Dispatch or the HUD is in front now.
@@ -124,6 +113,14 @@ export function CaptureWindow() {
       }
     });
   }, [port]);
+
+  // A kill (an update's installer) can cost localStorage its last writes: IndexedDB's newer copy
+  // then replaces the text shown at start, unless something was typed since.
+  useEffect(() => {
+    void captureText.load().then((newer) => {
+      if (newer !== undefined) setText(newer ?? "");
+    });
+  }, []);
 
   // ---- showing and hiding: hello / bye, focus in the box
   const onShown = useEffectEvent(() => {
@@ -190,10 +187,11 @@ export function CaptureWindow() {
   const question: CaptureQuestion | undefined = questions[Math.min(qIndex, questions.length - 1)];
   const busy = status.kind === "busy";
   const empty = !text.trim() && images.length === 0;
-  // The shell's updater counts a box in use as the user being at work: typed text, and what a
-  // restart would lose (pasted images, a request waiting for the main window).
-  const typing = text.trim() !== "";
-  const unsaved = images.length > 0 || busy;
+  // The shell's updater counts a box in use as the user being at work: one holding a task (text
+  // or images, which both survive a restart) while it shows, and a request waiting for the main
+  // window (a restart would lose it) even when put away.
+  const typing = !empty;
+  const unsaved = busy;
   useEffect(() => {
     void shell.draft(typing, unsaved);
   }, [typing, unsaved]);
@@ -226,9 +224,8 @@ export function CaptureWindow() {
 
   const addFiles = async (files: File[]) => {
     if (!files.length) return;
-    const fit = fitImages(imagesNow.current, await readImages(files));
-    setImages(fit.images);
-    if (fit.skipped) setStatus({ kind: "done", ok: false, title: "Some images were left out", detail: fit.skipped });
+    const { skipped } = await attachImages(IMAGES_KEY, files);
+    if (skipped) setStatus({ kind: "done", ok: false, title: "Some images were left out", detail: skipped });
   };
   const onPaste = (e: ClipboardEvent) => {
     const files = imageFiles(e.clipboardData);
@@ -329,7 +326,7 @@ export function CaptureWindow() {
                   type="button"
                   aria-label={`Remove image ${i + 1}`}
                   className="absolute top-0.5 right-0.5 grid size-5 place-items-center rounded-full bg-black/70 text-white hover:bg-black focus-ring"
-                  onClick={() => setImages(imagesNow.current.filter((x) => x !== img))}
+                  onClick={() => setImages((cur) => cur.filter((x) => x !== img))}
                 >
                   <X className="size-3" />
                 </button>
@@ -489,7 +486,9 @@ function QuestionPane({
           {index + 1} of {total}
         </span>
       </div>
-      <p className="line-clamp-3 text-[13px] leading-snug font-semibold text-ink">{question.question || question.title}</p>
+      <p className="line-clamp-3 text-[13px] leading-snug font-semibold text-ink">
+        <Ticks text={question.question || question.title} className="text-[0.88em]" />
+      </p>
       {question.command && <pre className="line-clamp-2 rounded-xs bg-well px-2 py-1 font-mono text-2xs whitespace-pre-wrap text-ink-2">{question.command}</pre>}
       {question.quick ? (
         <div className="flex flex-wrap gap-1.5">

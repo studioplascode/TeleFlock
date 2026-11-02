@@ -1,9 +1,11 @@
 //! Resuming omp agents without a new prompt (architecture §3.22): `agent.retry`, omp's F5, for an
 //! agent or one of its subagents; and auto-resume, which brings agents (and their subagents) back
 //! by themselves: after a provider usage limit once usage is available again, and after omp or the
-//! host went away mid-turn (`restart`, architecture §3.25).
+//! host went away mid-turn (`restart`, architecture §3.25). Refusal fallback (§3.22 "Refusal
+//! fallback") goes on the same way after a provider refused a turn, on another model.
 
 use crate::Millis;
+use crate::model::ThinkingLevel;
 
 wire_struct! {
     /// `agent.retry`: omp's F5 (`/retry`): retries the agent's failed or interrupted last turn
@@ -99,11 +101,12 @@ wire_struct! {
         /// anyone closing it: herdr stopped or crashed, the host restarted, omp crashed (default
         /// on). Off: both wait for Resume / Continue by hand.
         pub enabled: bool,
-        /// Bring agents back after a reboot: the host may install a boot-time service (systemd
-        /// timer) that starts tf-hostd while agents wait to come back (default on). Off: they
+        /// Bring agents back after a reboot: the host may install a boot-time service that starts
+        /// tf-hostd while agents wait to come back (default on): a systemd timer on Linux, a launchd
+        /// agent on macOS and a Task Scheduler task on Windows (see `BootService.kind`). Off: they
         /// come back only once tf-hostd runs again. Absent from older daemons.
         pub bring_back: Option<bool>,
-        /// Whether this host can start tf-hostd at boot (what "Bring agents back after a reboot"
+        /// Whether this host can start tf-hostd by itself (what "Bring agents back after a reboot"
         /// installs) and whether it does. Absent from older daemons.
         pub boot_service: Option<BootService>,
         /// Why the settings are off although nobody may have turned them off: the settings file
@@ -114,16 +117,20 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// The boot-time service of a host (`AutoResumeConfig.bootService`): a systemd timer that
-    /// starts tf-hostd at boot. systemd hosts only (root, or a user with lingering).
+    /// The boot service of a host (`AutoResumeConfig.bootService`) that starts tf-hostd by itself: a
+    /// systemd timer at boot (Linux with systemd: root, or a user with lingering), a launchd agent
+    /// (macOS) or a Task Scheduler task (Windows), both after the user logs in.
     pub struct BootService {
         /// A boot service can be installed on this host now.
         pub available: bool,
         /// It is installed and active.
         pub installed: bool,
-        /// Why it is not available (macOS, Windows, no systemd, no lingering, a development home),
-        /// or what is wrong with it.
+        /// Why it is not available (no systemd, no lingering, a development home, an unsupported
+        /// OS), what is wrong with it, or on macOS and Windows when it runs (after login).
         pub note: Option<String>,
+        /// What the host uses: `systemd`, `launchd` or `taskScheduler`. Absent from older daemons
+        /// (systemd only), and on hosts that have no mechanism at all.
+        pub kind: Option<String>,
     }
 }
 
@@ -166,5 +173,70 @@ wire_struct! {
         pub turn: EndedTurn,
         /// The tool call it was in, `<tool>: <short args>` (`bash: sleep 30; echo done >> c.out`).
         pub last_action: Option<String>,
+    }
+}
+
+wire_enum! {
+    /// What a refusal fallback does once the turn it continued has ended.
+    /// * `stay`: the agent keeps the fallback model for the rest of its session.
+    /// * `back`: it switches back to the refused model and thinking level once that turn ends
+    ///   (the main agent; a subagent finishes its run on the fallback model).
+    pub enum RefusalAfter { Stay, Back }
+}
+
+wire_struct! {
+    /// One refusal fallback rule (`host.refusalFallback`): when the provider refuses a turn of an
+    /// agent or a subagent on `from` for `category` and omp gave up on it (omp's own retry
+    /// fallback chains did not take it over), tf-hostd switches that session to `to` and goes on
+    /// with the turn. At most one fallback per turn: a refusal on `to` stops there.
+    pub struct RefusalRule {
+        /// The refusal category the provider names (`cyber`, …; case-insensitive); absent: every
+        /// refusal, safety-filter flags (`sensitive`) included.
+        pub category: Option<String>,
+        /// The refused model, `provider/id`: a `:thinking` suffix is ignored, a bare id matches
+        /// that id on every provider, `provider/*` and a trailing `*` match a family. Absent: any
+        /// model.
+        pub from: Option<String>,
+        /// The model to go on with, `provider/id`.
+        pub to: String,
+        /// The thinking level on `to`; absent: the refused turn's level is kept.
+        pub thinking: Option<ThinkingLevel>,
+        pub after: RefusalAfter,
+    }
+}
+
+wire_struct! {
+    /// The host's refusal fallback rules (`host.refusalFallback`, `host.refusalFallbackSet`).
+    /// Hosts before 0.9.0 answer `unknown_method`.
+    pub struct RefusalFallback {
+        /// In order: the first rule that matches a refusal decides. Empty: refusals stop the turn,
+        /// as omp leaves them.
+        pub rules: Vec<RefusalRule>,
+        /// Why there are no rules although some may have been saved: the settings file could not be
+        /// read, so the host fails closed (no fallback) until the rules are saved again.
+        pub notice: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// `host.refusalFallbackSet`: the complete rule list (at most 32).
+    pub struct RefusalFallbackSetParams {
+        pub rules: Vec<RefusalRule>,
+    }
+}
+
+wire_struct! {
+    /// `agent.refusalRetry`: "Retry with <model>": the last turn of the agent (or of one of its
+    /// subagents) ended on a provider refusal; that session switches to `model` and goes on with
+    /// the turn, once (no rule is saved). Needs TeleFlock's bridge 2.3.0 in the agent's omp
+    /// (`Capabilities.refusalRetry`); `unsupported` otherwise.
+    pub struct RefusalRetryParams {
+        pub agent_id: String,
+        /// One of the session's subagents (`Subagent.id`) instead of the agent.
+        pub subagent_id: Option<String>,
+        /// `provider/id`.
+        pub model: String,
+        /// Absent: the refused turn's level is kept.
+        pub thinking: Option<ThinkingLevel>,
     }
 }

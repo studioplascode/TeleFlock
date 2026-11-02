@@ -1,5 +1,7 @@
 import type { ChangedFile, Column, ModelInfo, ModelRef, RoleBinding, ThinkingLevel, TodoPhase } from "@/core/gen";
 
+import { docFile } from "./docs";
+
 export const HOME = "/home/demo";
 /** herdr's default linked-worktree directory. */
 export const WORKTREES = `${HOME}/.herdr/worktrees`;
@@ -129,11 +131,15 @@ export interface WorkspaceDef {
   branch?: string;
   /** Folder for non-repo workspaces. */
   cwd?: string;
+  /** herdr's label, when not the folder's name. */
+  label?: string;
   /** Linked worktree of the repo's primary workspace. */
   worktree: boolean;
   order: number;
   /** Extra shell pane next to the agent. */
   shellPane?: boolean;
+  /** No agent: only the shells `seedDemoShells` adds. */
+  shellOnly?: boolean;
 }
 
 export const WORKSPACES: WorkspaceDef[] = [
@@ -149,9 +155,14 @@ export const WORKSPACES: WorkspaceDef[] = [
   { id: "w13", repo: "api-gateway", branch: "chore/go-1.25", worktree: true, order: 6.5 },
   { id: "w3", repo: "marketing-site", branch: "main", worktree: false, order: 7 },
   { id: "w9", repo: "marketing-site", branch: "redesign/hero", worktree: true, order: 8 },
+  { id: "w14", repo: "marketing-site", branch: "chore/deps", worktree: true, order: 8.5, shellOnly: true },
   { id: "w10", repo: "infra", branch: "main", worktree: false, order: 9 },
   { id: "w11", repo: "infra", branch: "ci/bun-cache", worktree: true, order: 10 },
   { id: "w12", cwd: `${HOME}/scratch`, worktree: false, order: 11 },
+  // Shells nobody has used for a day or more, each its workspace's only pane (`./idleShells` seeds how long).
+  { id: "w15", cwd: `${HOME}/code/dotfiles`, worktree: false, order: 12, shellOnly: true },
+  { id: "w16", cwd: HOME, label: "~", worktree: false, order: 13, shellOnly: true },
+  { id: "w17", cwd: `${HOME}/notes`, worktree: false, order: 14, shellOnly: true },
 ];
 
 export interface AgentDef {
@@ -190,7 +201,7 @@ export const AGENTS: AgentDef[] = [
   {
     id: "kanban", kind: "omp", workspace: "w4", column: "running", model: "opus-5", thinking: "high", since: 724, age: 2400, ctxPct: 38, cost: 2.41,
     title: "Drag-and-drop kanban board with column persistence",
-    files: [f("src/features/board/BoardView.tsx", 188, 21), f("src/features/board/Lane.tsx", 96, 4, "added"), f("src/features/board/persist.ts", 54, 0, "added"), f("src/features/board/keyboard.ts", 41, 9), f("src/features/board/columns.test.ts", 33, 4)],
+    files: [f("src/features/board/BoardView.tsx", 188, 21), f("src/features/board/Lane.tsx", 96, 4, "added"), f("src/features/board/persist.ts", 54, 0, "added"), f("src/features/board/keyboard.ts", 41, 9), f("src/features/board/columns.test.ts", 33, 4), docFile("docs/board.md"), docFile("docs/keyboard-shortcuts.md"), docFile("docs/prototype-notes.md")],
     todos: [
       phase("Board", [["Lane layout + card component", "completed"], ["Drag between lanes with dnd-kit", "completed"], ["Persist column order per host", "completed"], ["Keyboard move (J/K + Shift)", "inProgress"]]),
       phase("Polish", [["Card flight animation", "pending"], ["a11y announcements", "pending"], ["Reduced-motion fallbacks", "pending"]]),
@@ -271,7 +282,7 @@ export const AGENTS: AgentDef[] = [
   {
     id: "docs", kind: "omp", workspace: "w1", column: "done", model: "sonnet-5", thinking: "low", since: 7200, age: 9000, ctxPct: 33, cost: 0.94,
     title: "README and architecture overview", line: "merged #139 · 2h ago",
-    recap: "README and the architecture overview are merged in #139. Nothing left to do; the docs site rebuilds on its own.",
+    recap: "README, the architecture overview and the migration notes are merged in #139. The Q3 revenue report is at version 2, with the regional breakdown; nothing else is open.",
     files: [],
   },
   {

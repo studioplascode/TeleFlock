@@ -10,6 +10,7 @@ import { useTranscriptFind } from "../find/hooks";
 import { type TranscriptFind, useFindPainter } from "../find/painter";
 import { FindScopeCtx } from "../find/reveal";
 import { useSessionUi } from "../state";
+import { arrivedSince, type ListMark } from "./arrivals";
 import { estimateRowHeight, initialScrollOffset } from "./estimate";
 import { EmptyTranscript } from "./FreshStart";
 import { LimitRunRow } from "./LimitRunRow";
@@ -101,7 +102,9 @@ export interface TranscriptLogProps extends TranscriptLayout {
   /** Row ids, oldest first. Pass the same array while the id list is unchanged. */
   ids: string[];
   /** The item of each id (same order), for size estimates before rows are measured. */
-  items: readonly (TranscriptItem | undefined)[];
+  items?: readonly (TranscriptItem | undefined)[];
+  /** Height of row `index` before it is measured, for lists of something else than transcript items (default: from `items`). */
+  estimateSize?: (index: number) => number;
   /** One row; `rail` = draw the gutter timeline. */
   renderRow: (id: string, prevId: string | undefined, nextId: string | undefined, rail: boolean) => ReactNode;
   /** First load in flight: a skeleton while there are no rows yet. */
@@ -120,6 +123,8 @@ export interface TranscriptLogProps extends TranscriptLayout {
   focus?: { itemId: string; nonce: number };
   /** A new non-zero value sticks to the bottom and scrolls there (e.g. after the user sent a message). */
   followSignal?: number;
+  /** Which rows the list shows (e.g. a filter): rows that come with another view are not counted as new. */
+  view?: string;
   /** Find in transcript: matches to highlight in the rendered rows, and the current one to bring into view. */
   find?: TranscriptFind;
 }
@@ -132,6 +137,7 @@ export interface TranscriptLogProps extends TranscriptLayout {
 export function TranscriptLog({
   ids,
   items,
+  estimateSize,
   renderRow,
   loading = false,
   empty,
@@ -142,6 +148,7 @@ export function TranscriptLog({
   ariaLabel = "Transcript",
   focus,
   followSignal = 0,
+  view,
   find,
   className,
   padX = 20,
@@ -157,9 +164,8 @@ export function TranscriptLog({
   const [unseen, setUnseen] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const anchor = useRef<{ id: string; delta: number } | null>(null);
-  // 0, not ids.length: a transcript mounting with rows already loaded lands at the bottom instantly.
-  const lastCount = useRef(0);
-  const lastId = useRef<string | undefined>(undefined);
+  // Count 0, not ids.length: a transcript mounting with rows already loaded lands at the bottom instantly.
+  const lastShown = useRef<ListMark>({ count: 0, lastId: undefined, view });
   const glideRaf = useRef(0);
   const settled = useIdleReady(400);
   const settledRef = useRef(settled);
@@ -167,7 +173,7 @@ export function TranscriptLog({
 
   // Stable while the rows are: a new getItemKey makes the virtualizer re-measure every row (O(n))
   // on each render, which scrolling a long transcript does dozens of times a second.
-  const estimate = useCallback((i: number) => estimateRowHeight(items[i], dense), [items, dense]);
+  const estimate = useCallback((i: number) => (estimateSize ? estimateSize(i) : estimateRowHeight(items?.[i], dense)), [items, dense, estimateSize]);
   const initialHeight = typeof window === "undefined" ? 800 : window.innerHeight;
   const itemKey = useCallback((i: number) => ids[i] ?? i, [ids]);
   const virtualizer = useVirtualizer({
@@ -251,12 +257,10 @@ export function TranscriptLog({
     };
   }, []);
 
-  // Rows appended / prepended.
+  // Rows appended / prepended, or another view (a filter) of the rows.
   useLayoutEffect(() => {
-    const prev = lastCount.current;
-    lastCount.current = ids.length;
-    const prevLast = lastId.current;
-    lastId.current = ids[ids.length - 1];
+    const prev = lastShown.current;
+    lastShown.current = { count: ids.length, lastId: ids[ids.length - 1], view };
     const a = anchor.current;
     if (a) {
       // Prepend: keep the previously first-visible row exactly where it was.
@@ -270,12 +274,12 @@ export function TranscriptLog({
     }
     if (stick.current) {
       // First paint of a session lands at the bottom instantly; later rows glide in.
-      if (prev === 0) toBottom();
+      if (prev.count === 0) toBottom();
       else glide();
-    } else if (ids.length > prev) {
-      // Only rows after the previous last one are new: older ones paged in (Find) are not.
-      const at = prevLast === undefined ? -1 : ids.lastIndexOf(prevLast);
-      const added = at < 0 ? ids.length - prev : ids.length - 1 - at;
+    } else if (view !== prev.view) {
+      setUnseen(0);
+    } else {
+      const added = arrivedSince(prev, ids, view);
       if (added > 0) setUnseen((n) => n + added);
     }
   }, [ids]);

@@ -10,11 +10,15 @@ export type ArtifactContent = { kind: ArtifactKind, name: string, url?: string,
  */
 path: string, size: number, mtime: number, 
 /**
- * The file as UTF-8 text (absent for binary files).
+ * The file as UTF-8 text (absent for binary files and for `base64` reads).
  */
 text?: string, 
 /**
- * `text` ends before the end of the file (`maxBytes`).
+ * `base64` reads: the bytes read, base64-encoded (all of them unless `truncated`).
+ */
+data?: string, 
+/**
+ * `text` / `data` end before the end of the file (`maxBytes`).
  */
 truncated: boolean, 
 /**

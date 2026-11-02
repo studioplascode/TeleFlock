@@ -30,4 +30,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.appcompat:appcompat:1.6.0")
     implementation(project(":tauri-android"))
+    // PreviewLinks (JVM unit tests: `./gradlew :tauri-plugin-teleflock-android:testDebugUnitTest`).
+    testImplementation("junit:junit:4.13.2")
 }

@@ -1,5 +1,6 @@
 import type { AutoResume, AutoResumeConfig, RetryResult } from "@/core/gen";
 import { apiError } from "../errors";
+import { lastRefusalRowId } from "../refusal";
 import { lastTurnRetryable } from "../retryable";
 import type { AgentSim } from "./agent";
 import type { AgentDef } from "./data";
@@ -191,7 +192,8 @@ export class DemoResume {
       return { started: true, via: "retry" };
     }
     if (sim.agent.autoResume) return this.resumeNow(sim);
-    if (sim.busy || !lastTurnRetryable(sim.items.length, (i) => sim.items[i])) return { started: false, via: "retry" };
+    // omp drops a refused turn from its context: its retry has nothing to run (Retry with another model does, `./refusal`)
+    if (sim.busy || !lastTurnRetryable(sim.items.length, (i) => sim.items[i]) || lastRefusalRowId(sim.items.length, (i) => sim.items[i]) !== undefined) return { started: false, via: "retry" };
     sim.retryTurn(rerun());
     return { started: true, via: "retry" };
   }

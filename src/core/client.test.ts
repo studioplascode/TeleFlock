@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { pulseBus, termBus } from "./buses";
-import { checkSessionHeal, closeSession, core, flushCoreEvents, onAppEvent, openSession, pushInternal, refreshHost, selectBackend, startCoreWith } from "./client";
+import { checkSessionHeal, closeSession, core, flushCoreEvents, onAppEvent, openSession, pushInternal, refreshHost, selectBackend, startCoreWith, watchActivity } from "./client";
 import { ManualClock } from "./demo/clock";
-import type { Agent, AppEvent, HostProfile, HostState, StatePatch, ToolStatus, TranscriptItem } from "./gen";
+import type { ActivityEvent, Agent, AppEvent, HostProfile, HostState, StatePatch, ToolStatus, TranscriptItem } from "./gen";
 import { isMuted, useSettings } from "./hooks";
 import { coreStore } from "./store/store";
 import { createTauriTransport } from "./transport/tauri";
@@ -25,6 +25,8 @@ function labState(agentIds: string[]): HostState {
 const calls: { hostId: string | null; method: string }[] = [];
 /** Answers for the next `session.open`s, first in first used (then the canned snapshot). */
 const openAnswers: Promise<unknown>[] = [];
+/** What the lab host's `host.activity` answers, newest first. */
+const activityLog: ActivityEvent[] = [];
 let emit: (e: AppEvent) => void = () => {};
 const fake: CoreTransport = {
   kind: "ws",
@@ -43,6 +45,8 @@ const fake: CoreTransport = {
         return openAnswers.shift() ?? { agentId: "a", meta: { fast: false, mode: "normal", todos: [], subagents: [], files: [], queue: { steering: [], followUp: [] }, caps: {} }, items: [{ kind: "user", id: "u1", at: 1, text: "hi", images: [], steering: false, synthetic: false }], hasMore: false };
       case "settings.set":
         return params;
+      case "host.activity":
+        return { events: [...activityLog], hasMore: false };
       default:
         return {};
     }
@@ -298,6 +302,22 @@ describe("client pipeline", () => {
     expect(checkSessionHeal(t0 + 120_000)).toEqual([]);
     expect(opens()).toBe(before + 1);
     closeSession(key);
+  });
+
+  test("an activity feed mounted again shows what its host logged while nobody watched", async () => {
+    activityLog.push({ id: "e1", at: 1, agentId: "a", agentName: "a", kind: "modelChanged", title: "Model → sonnet" });
+    let unwatch = watchActivity("lab", ["lab"]);
+    await settle();
+    flushCoreEvents();
+    expect(coreStore.getState().activity.lab?.events.map((e) => e.id)).toEqual(["e1"]);
+    unwatch();
+    // Logged while the Activity page is closed: no lane change or notification refreshes an unwatched feed.
+    activityLog.unshift({ id: "e2", at: 2, agentId: "a", agentName: "a", kind: "modelChanged", title: "Opus 5.5 refused (cyber); switched to Sonnet 5.5 and continued" });
+    unwatch = watchActivity("lab", ["lab"]);
+    await settle();
+    flushCoreEvents();
+    expect(coreStore.getState().activity.lab?.events.map((e) => e.id)).toEqual(["e2", "e1"]);
+    unwatch();
   });
 });
 

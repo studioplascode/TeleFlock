@@ -1,14 +1,16 @@
-import { BellOff, Focus, GitBranch, Square, SquareTerminal } from "lucide-react";
+import { BellOff, Focus, GitBranch, Globe, Square, SquareTerminal } from "lucide-react";
 import type { Agent } from "@/core/gen";
 import { parseAgentKey, useAgent, useCore, useSession, useUi } from "@/core";
-import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
+import { isChat } from "@/core/chats";
+import { AgentGlyph, Button, cn, Elapsed, formatUsd, Heartbeat, isAndroid, Kbd, NumberTicker, StatusPill, Swarm, Tooltip, useActivity, useNow } from "@/design";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
 import { HostBadge } from "@/features/hosts/HostBadge";
 import { herdrAgentWord, herdrOrbStatus } from "@/features/hosts/herdrHealth";
+import { ChatTag } from "@/features/chats/ChatTag";
 import { Term } from "@/features/shell/Term";
 import { openTerminal } from "@/features/board/agentActions";
 import { RecapLine } from "@/features/board/RecapLine";
-import { ACTIONS, agentStateWord, stateTime } from "@/features/shell/vocab";
+import { ACTIONS, agentStateWord, stateTime, VIEWS } from "@/features/shell/vocab";
 import { agentStatus, hostCall, useBeat, useMute } from "../api";
 import { AutoResumeStrip } from "../resume/AutoResumeStrip";
 import { RetryStrip } from "../resume/RetryStrip";
@@ -91,7 +93,9 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
                 {agent.title}
               </span>
             )}
-            {(agent.repo || agent.branch) && (
+            {/* a chat has no repo or branch: the Chat tag stands where they go */}
+            {isChat(agent) && <ChatTag hostId={hostId} folder={agent.cwd} />}
+            {!isChat(agent) && (agent.repo || agent.branch) && (
               <span title={[agent.repo, agent.branch].filter(Boolean).join(" · ")} className="flex min-w-[3rem] shrink-[3] items-center gap-1 truncate">
                 <GitBranch className="size-3" />
                 {agent.repo}
@@ -140,6 +144,13 @@ export function SessionHeader({ agentKey, compact = false, inspector = false }: 
             <span className={cn("hidden", !compact && "@min-[46rem]/hdr:inline")}>{ACTIONS.terminal.label}</span>
           </Button>
         </Tooltip>
+        {!isAndroid && (
+          <Tooltip content={agent.browser?.attached ? `${agent.name} can use your browser (${agent.browser.attached.device})` : ACTIONS.browserBeside.description}>
+            <Button size="sm" variant="ghost" icon={<Globe className={cn(agent.browser?.attached && "text-accent-hi")} />} onClick={() => useUi.getState().setSplit({ kind: "browser", key: agent.key })} aria-label={ACTIONS.browserBeside.label} className="shrink-0">
+              <span className={cn("hidden", !compact && "@min-[46rem]/hdr:inline")}>{VIEWS.browser.label}</span>
+            </Button>
+          </Tooltip>
+        )}
         {working && live && (
           <Tooltip content={ACTIONS.stopTurn.description} shortcut={ACTIONS.stopTurn.shortcut}>
             <Button

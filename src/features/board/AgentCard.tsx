@@ -2,6 +2,7 @@ import { BellOff, Brain, Sparkles, Trash2 } from "lucide-react";
 import { AnimatePresence, motion, useAnimate } from "motion/react";
 import { type ReactNode, useEffect, useState } from "react";
 import { navigate, useAgent, useCore, useHostStale, useHosts } from "@/core";
+import { isChat } from "@/core/chats";
 import type { Agent, Column, HerdrHealth } from "@/core/gen";
 import {
   AgentGlyph,
@@ -25,6 +26,7 @@ import { herdrAgentWord, herdrCardTime, herdrOrbStatus } from "@/features/hosts/
 import { hostAccent } from "@/features/hosts/kinds";
 import { ShipStepper } from "@/features/review/ShipPanel";
 import { ACTIONS, type AgentStateId, agentStateId, agentStateWord, stateTime } from "@/features/shell/vocab";
+import { Ticks } from "@/features/shell/Ticks";
 import { archiveWithUndo, canReview, deleteWorktree, openAgent, openTerminal, promptAgent, stopAgent, useMuted } from "./agentActions";
 import { AgentSaid } from "@/features/session/ask/AgentSaid";
 import { withoutQuestion } from "@/features/session/ask/askContext";
@@ -294,6 +296,9 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   // a fresh agent that never ran sits calmly (idle), not in review cyan; so does an ended one until it is back
   const status = herdr ? herdrOrbStatus(herdr) : fresh || (lane === "review" && agent.parked?.ended) ? "idle" : LANE_BY_COLUMN[lane].status;
   const omp = agent.omp;
+  // a chat has no repository: no diff, no folder of its own to point at (its card shows the Chat tag)
+  const chat = isChat(agent);
+  const diff = chat ? undefined : agent.diff;
   const todos = omp?.todos;
   const subs = omp?.subagents?.live ?? 0;
   const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
@@ -317,8 +322,14 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
     body = (
       <>
         {said && <AgentSaid key={n.requestId} text={said} variant="card" sunset={isHero} className="mt-2" />}
-        <p className="mt-2 text-sm leading-snug font-bold wrap-break-word text-ink">“{question}”</p>
-        {n.detail && <p className="mt-1 line-clamp-2 text-xs text-mute">{n.detail}</p>}
+        <p className="mt-2 text-sm leading-snug font-bold wrap-break-word text-ink">
+          “<Ticks text={question} className="text-[0.88em]" />”
+        </p>
+        {n.detail && (
+          <p className="mt-1 line-clamp-2 text-xs text-mute">
+            <Ticks text={n.detail} className="text-[0.9em]" />
+          </p>
+        )}
         {n.command && !n.question.includes(n.command) && (
           <pre className="mt-2 max-h-20 overflow-hidden rounded-sm well px-2.5 py-1.5 font-mono text-2xs whitespace-pre-wrap text-ink-2">{n.command}</pre>
         )}
@@ -329,7 +340,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   } else if (fresh) {
     body = (
       <>
-        <p className="mt-2 text-xs text-mute">Nothing to review yet: it's waiting for its first prompt{agent.repo || !agent.cwd ? "." : ` in ${agent.cwd}.`}</p>
+        <p className="mt-2 text-xs text-mute">Nothing to review yet: it's waiting for its first prompt{agent.repo || chat || !agent.cwd ? "." : ` in ${agent.cwd}.`}</p>
         <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={stop} onPointerDown={stop}>
           <button
             type="button"
@@ -384,13 +395,13 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
   const model = omp?.model;
   const thinking = omp?.thinking && omp.thinking !== "off" ? omp.thinking : undefined;
   const meters =
-    omp?.context || subPct != null || omp?.jobs?.running || agent.diff || omp?.link === "notShared" || model || thinking ? (
+    omp?.context || subPct != null || omp?.jobs?.running || diff || omp?.link === "notShared" || model || thinking ? (
       // fixed order; wraps onto a second line on narrow cards instead of hiding anything
       <div className="mt-2.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-line pt-2">
         {omp?.context && <ContextMeter pct={omp.context.pct} />}
         {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
         {omp?.jobs && <JobsMeter jobs={omp.jobs} />}
-        {agent.diff && <DiffStat {...agent.diff} muted={lane === "done"} />}
+        {diff && <DiffStat {...diff} muted={lane === "done"} />}
         <ConnectLinkButton agentKey={agentKey} />
         {model && (
           <Tooltip content="Model">
@@ -473,7 +484,7 @@ export function AgentCard({ agentKey, lane, selected = false, picked = false, fl
             {agent.parked && <ParkedChip agentKey={agentKey} />}
             <AutoResumeBadge agentKey={agentKey} />
             {multiHost && <HostTag hostId={agent.hostId} />}
-            <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} sunset={isHero} />
+            <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} chat={chat} sunset={isHero} />
           </div>
           <h4 className={cn("mt-0.5 font-sans leading-snug font-bold wrap-break-word text-ink", lane === "done" ? "line-clamp-1 text-xs" : "line-clamp-2 text-sm")}>
             {agent.title || (fresh ? "New session" : agent.name)}

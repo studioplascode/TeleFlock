@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { CostInfo } from "@/core/gen";
 import { cn, formatCompact, formatUsd, NumberTicker } from "@/design";
 import { Term } from "@/features/shell/Term";
+import { CollapsibleTile } from "./inspector/InspectorCard";
 
 /**
  * The three spenders of an omp session, as omp's status line bills them (`$main (+subagents) +
@@ -38,11 +39,12 @@ export function SpendTile({ cost }: { cost?: CostInfo }) {
   const split = cost?.split;
   const total = cost?.usd ?? 0;
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg bg-bg-deep/45 px-3 py-2.5 shadow-hairline" aria-label="Spend">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[10.5px] font-bold text-mute">Spend</span>
-        <span className="font-display text-xl font-bold tracking-[-0.03em] text-ink tabular">{cost ? <NumberTicker value={cost.usd} format={formatUsd} /> : "—"}</span>
-      </div>
+    <CollapsibleTile
+      id="spend"
+      title="Spend"
+      className="rounded-lg bg-bg-deep/45 px-3 py-2.5 shadow-hairline"
+      aside={<span className="font-display text-xl leading-none font-bold tracking-[-0.03em] text-ink tabular">{cost ? <NumberTicker value={cost.usd} format={formatUsd} /> : "—"}</span>}
+    >
       {split &&
         SPENDERS.map((s) => {
           const usd = split[s.key];
@@ -62,6 +64,6 @@ export function SpendTile({ cost }: { cost?: CostInfo }) {
           {formatCompact(cost.input)} in / {formatCompact(cost.output)} out
         </div>
       )}
-    </div>
+    </CollapsibleTile>
   );
 }

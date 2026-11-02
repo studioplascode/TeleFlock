@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Recordings record the microphone and transcribe it (tf-client `voice`, tf-dictation's capture
+# and speech engine). Labs build with `--features voice`.
+voice = ["tf-client/voice"]
+
 [dependencies]
 tf-client = { path = "../tf-client" }
 serde = { workspace = true }

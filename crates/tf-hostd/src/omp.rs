@@ -411,16 +411,35 @@ impl OmpSession {
         self.lock().replica.is_streaming()
     }
 
-    /// Replaces the bridge overlay (its `data_plane` stays the session's); subscribers get a
-    /// `meta` event when it changed.
+    /// Replaces the bridge overlay (its `data_plane` and `agent_chat` stay the session's);
+    /// subscribers get a `meta` event when it changed.
     pub fn set_overlay(self: &Arc<Self>, mut overlay: MetaOverlay) {
         let mut st = self.lock();
         overlay.data_plane = st.overlay.data_plane;
+        overlay.agent_chat = st.overlay.agent_chat.clone();
         if st.overlay == overlay {
             return;
         }
         st.overlay = overlay;
         emit_meta(self, &mut st);
+    }
+
+    /// What the session's agent chat log holds now (`SessionMeta::agent_chat`); subscribers get a
+    /// `meta` event when it changed.
+    pub fn set_agent_chat(self: &Arc<Self>, info: tf_proto::session::AgentChatInfo) {
+        let mut st = self.lock();
+        if st.overlay.agent_chat.as_ref() == Some(&info) {
+            return;
+        }
+        st.overlay.agent_chat = Some(info);
+        emit_meta(self, &mut st);
+    }
+
+    /// Where the session's agent chat log reads from: omp's session file, and the main agent's id.
+    pub fn chat_source(&self) -> (Option<std::path::PathBuf>, String) {
+        let st = self.lock();
+        let file = st.session_file.clone().or_else(|| st.replica.meta().session_file.as_ref().map(std::path::PathBuf::from));
+        (file, st.replica.main_agent_id().unwrap_or(crate::agent_chat::MAIN_AGENT).to_owned())
     }
 
     /// Claims a tree refresh for the raw omp leaf `leaf`; `false` when the cached or in-flight
@@ -705,6 +724,9 @@ pub struct MetaOverlay {
     /// The bridge's data-plane features while its live feed serves the session (`None`: a collab
     /// guest serves it, or nothing). Kept by the session itself, not by [`OmpSession::set_overlay`].
     pub data_plane: Option<BridgeCaps>,
+    /// What the session's agent chat log holds (`crate::agent_chat`). Kept by the session itself,
+    /// not by [`OmpSession::set_overlay`].
+    pub agent_chat: Option<tf_proto::session::AgentChatInfo>,
 }
 
 impl MetaOverlay {
@@ -733,6 +755,9 @@ impl MetaOverlay {
         }
         if let Some(g) = &self.goal {
             meta.goal = g.clone();
+        }
+        if let Some(v) = &self.agent_chat {
+            meta.agent_chat = Some(v.clone());
         }
     }
 

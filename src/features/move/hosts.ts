@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useAgent, useHosts } from "@/core";
+import { isChat } from "@/core/chats";
 import type { HostProfile, ParkedMove } from "@/core/gen";
 
 /** The hosts an agent of `srcHostId` can move to: the other connected ones. */
@@ -9,11 +10,15 @@ export function useMoveTargets(srcHostId: string): HostProfile[] {
   return useMemo(() => profiles.filter((p) => p.id !== srcHostId && status[p.id]?.phase === "online"), [profiles, status, srcHostId]);
 }
 
-/** Whether "Move to host…" is offered: an omp agent, a second connected host, no move running for it. */
+/**
+ * Whether "Move to host…" is offered: an omp agent, a second connected host, no move running for it. Never
+ * for a chat: a move continues the agent in a checkout or folder on the target, and a chat's folder is one
+ * its own host made for it.
+ */
 export function useCanMove(agentKey: string): boolean {
   const agent = useAgent(agentKey);
   const targets = useMoveTargets(agent?.hostId ?? "");
-  return !!agent && agent.kind === "omp" && targets.length > 0 && agent.parked?.moved?.state !== "moving";
+  return !!agent && agent.kind === "omp" && !isChat(agent) && targets.length > 0 && agent.parked?.moved?.state !== "moving";
 }
 
 /** The host a parked agent moved to: by the id the moving app recorded, else by the name. */

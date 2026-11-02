@@ -1,4 +1,5 @@
 import type { ChangedFile, FileDiff, FileStatus } from "@/core/gen";
+import { demoDocPatch } from "./docs";
 import { hash, Rng } from "./rng";
 
 /** Synthetic-but-plausible source lines per language, used to build realistic unified diffs. */
@@ -138,6 +139,8 @@ export function codeLine(path: string, rng: Rng): string {
  * Deterministic per (path, counts).
  */
 export function makePatch(path: string, added: number, removed: number, status: FileStatus = "modified", oldPath?: string): string {
+  const doc = demoDocPatch(path);
+  if (doc) return doc.patch;
   const rng = new Rng(hash(`${path}:${added}:${removed}`));
   const a = status === "added" || status === "untracked" ? "/dev/null" : `a/${oldPath ?? path}`;
   const b = status === "deleted" ? "/dev/null" : `b/${path}`;

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { type CoreState, core, toApiError, useCore, useHosts } from "@/core";
+import { isChat } from "@/core/chats";
 import type { ApiError, PrStatusResult } from "@/core/gen";
 import { useInView } from "@/design";
 import { useShipMemo } from "./shipMemo";
@@ -91,11 +92,12 @@ interface Target {
 
 /**
  * The agent's linked worktree as one primitive (a stable selector result), or null: its live workspace's,
- * else the checkout a parked agent's card remembers (Mark done closed its workspace; hosts ≥ 0.5.2).
+ * else the checkout a parked agent's card remembers (Mark done closed its workspace; hosts ≥ 0.5.2). A chat
+ * has none, so its card never asks gh.
  */
 function selectTarget(s: CoreState, agentKey: string): string | null {
   const a = s.agents[agentKey];
-  if (!a) return null;
+  if (!a || isChat(a)) return null;
   const ws = s.hosts[a.hostId]?.state.workspaces.find((w) => w.id === a.workspaceId);
   if (ws?.worktree) return [a.hostId, ws.id, ws.worktree.path, ws.worktree.branch ?? ws.repo?.branch ?? ""].join(SEP);
   const parked = a.parked?.worktree;

@@ -107,6 +107,8 @@ pub struct AgentInputs<'a> {
     /// herdr says `blocked` but the dialog is not visible yet (or herdr lags after an
     /// answer): keep the agent in Running instead of a terminal-only Needs.
     pub blocked_grace: bool,
+    /// Whose TeleFlock Browser the agent drives now (`crate::browser`, §3.33).
+    pub browser_lent: Option<&'a tf_proto::BrowserLent>,
 }
 
 pub fn is_omp(a: &AgentInfo) -> bool {
@@ -174,7 +176,17 @@ pub fn build_agent(i: &AgentInputs<'_>) -> Agent {
         auto_resume: None,
         // Filled by the state store from the session's decide-for-me state (`crate::autoanswer`).
         auto_answer: None,
+        // Set by the state store for an agent in a chat folder (`crate::chats::mark_agents`).
+        chat: false,
+        browser: agent_browser(i),
     }
+}
+
+/// The agent's pending `use_user_browser` request and the browser lent to it (§3.33).
+fn agent_browser(i: &AgentInputs<'_>) -> Option<tf_proto::AgentBrowser> {
+    let request = i.bridge.and_then(|b| b.browser_request.as_ref()).map(|r| tf_proto::BrowserAsk { id: r.id.clone(), reason: r.reason.clone(), at: r.at });
+    let attached = i.browser_lent.cloned();
+    (request.is_some() || attached.is_some()).then_some(tf_proto::AgentBrowser { request, attached })
 }
 
 fn max_opt(a: Option<Millis>, b: Option<Millis>) -> Option<Millis> {
@@ -298,7 +310,7 @@ pub enum ProviderWait {
 /// terminal-only prompt could be what herdr sees after a failed run), `blocked` stays what herdr says.
 pub fn provider_wait(state: HerdrState, omp: Option<&OmpView>, bridge: Option<&BridgeSession>) -> Option<ProviderWait> {
     let v = omp.filter(|v| v.link == tf_proto::model::LinkState::Live && v.needs.is_none())?;
-    if bridge.is_some_and(|b| b.state.plan_review.is_some()) {
+    if bridge.is_some_and(|b| b.state.plan_review.is_some() || b.state.user_wait.is_some()) {
         return None;
     }
     let mid_run = matches!(state, HerdrState::Idle | HerdrState::Done | HerdrState::Unknown) && v.turn_active;
@@ -309,8 +321,9 @@ pub fn provider_wait(state: HerdrState, omp: Option<&OmpView>, bridge: Option<&B
     (state == HerdrState::Blocked && v.tail_error.is_some() && dialogs_seen).then_some(ProviderWait::Failed)
 }
 
-/// Needs-you (§3.5): replica dialog, then bridge plan review, then herdr `blocked` that no
-/// provider wait explains.
+/// Needs-you (§3.5): replica dialog, then the agent's request to use the user's browser, then
+/// bridge plan review, then a wait for the user no dialog covers (the bridge's `userWait`), then
+/// herdr `blocked` that no provider wait explains.
 fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWait>) -> Option<NeedsYou> {
     if let Some(mut n) = i.omp.and_then(|v| v.needs.clone()) {
         // The replica dates an ask by its first question (each question is a request of its own,
@@ -318,8 +331,14 @@ fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWa
         n.since = n.since.min(i.needs_since);
         return Some(n);
     }
+    if let Some(req) = i.bridge.and_then(|b| b.browser_request.as_ref()) {
+        return Some(browser_needs(req, i.needs_since));
+    }
     if let Some(review) = i.bridge.and_then(|b| b.state.plan_review.as_ref()) {
         return Some(plan_review_needs(review, i.needs_since));
+    }
+    if let Some(wait) = i.bridge.and_then(|b| b.state.user_wait.as_ref()) {
+        return Some(user_wait_needs(wait, i.needs_since));
     }
     if state == HerdrState::Blocked && !i.blocked_grace && provider.is_none() {
         return Some(NeedsYou {
@@ -337,9 +356,39 @@ fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWa
             answerable: false,
             context: None,
             step: None,
+            browser: false,
         });
     }
     None
+}
+
+/// omp waits for the user and no dialog TeleFlock can show covers it (the bridge's
+/// `state.userWait`, §3.5): Needs you, answered in the terminal. The question is the first row omp's
+/// TUI shows in the composer's place (an open dialog's title), the detail the rows under it.
+pub fn user_wait_needs(wait: &crate::bridge::UserWaitInfo, since: Millis) -> NeedsYou {
+    let shown = wait.text.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    let (question, detail) = match shown.map(|t| t.split_once('\n').unwrap_or((t, ""))) {
+        Some((first, rest)) => (first.trim().to_owned(), Some(rest.trim().to_owned()).filter(|r| !r.is_empty())),
+        None => ("The agent waits for your answer in the terminal.".to_owned(), Some("Open the terminal to respond.".to_owned())),
+    };
+    NeedsYou {
+        kind: NeedsKind::Blocked,
+        request_id: None,
+        since: if wait.since > 0 { wait.since.min(since) } else { since },
+        title: "Waiting in the terminal".into(),
+        question,
+        detail,
+        options: vec![],
+        multi: false,
+        allow_other: false,
+        allow_chat: false,
+        command: None,
+        answerable: false,
+        // omp waits, not the agent asking: no "Agent said" (an empty context shows none).
+        context: Some(String::new()),
+        step: None,
+        browser: false,
+    }
 }
 
 pub fn plan_review_options(review: &PlanReviewInfo) -> Vec<NeedsOption> {
@@ -367,6 +416,40 @@ pub fn plan_review_options(review: &PlanReviewInfo) -> Vec<NeedsOption> {
         .collect()
 }
 
+/// The agent's `use_user_browser` request (§3.33) as a question: `confirm` with Allow for this
+/// session / Allow once / Deny ([`tf_proto::NeedsYou::browser`]). Nothing is recommended: decide
+/// for me never answers it.
+pub fn browser_needs(req: &crate::bridge::BrowserReq, since: Millis) -> NeedsYou {
+    let option = |id: &str, label: &str, description: &str, tone| NeedsOption {
+        id: id.into(),
+        label: label.into(),
+        description: Some(description.into()),
+        recommended: false,
+        tone,
+    };
+    NeedsYou {
+        kind: NeedsKind::Confirm,
+        request_id: Some(req.id.clone()),
+        since,
+        title: "Use your browser?".into(),
+        question: req.reason.clone(),
+        detail: Some("It asks to drive your TeleFlock Browser, where you are signed in as yourself. Allow it on the computer whose browser it should use.".into()),
+        options: vec![
+            option(crate::browser::CHOICE_SESSION, "Allow for this session", "Until you detach it", OptionTone::Primary),
+            option(crate::browser::CHOICE_TURN, "Allow once", "Until this turn ends", OptionTone::Neutral),
+            option(crate::browser::CHOICE_DENY, "Deny", "The agent is told you said no", OptionTone::Danger),
+        ],
+        multi: false,
+        allow_other: false,
+        allow_chat: false,
+        command: None,
+        answerable: true,
+        context: None,
+        step: None,
+        browser: true,
+    }
+}
+
 pub fn plan_review_needs(review: &PlanReviewInfo, since: Millis) -> NeedsYou {
     NeedsYou {
         kind: NeedsKind::PlanReview,
@@ -383,6 +466,7 @@ pub fn plan_review_needs(review: &PlanReviewInfo, since: Millis) -> NeedsYou {
         answerable: true,
         context: None,
         step: None,
+        browser: false,
     }
 }
 
@@ -439,6 +523,8 @@ pub fn capabilities(live: bool, bridge: bool, data_plane: Option<BridgeCaps>) ->
         // `/retry` through the bridge's composer or keystrokes when omp's own retry is missing.
         retry: true,
         subagent_retry: live && data_plane.is_some_and(|c| c.resume_tree),
+        // Refusal fallback (§3.22): `turn_error` for refusals and `retryRefused` (bridge 2.3.0).
+        refusal_retry: live && data_plane.is_some_and(|c| c.refusals),
     }
 }
 
@@ -532,13 +618,18 @@ pub fn workspace_cwd(w: &WorkspaceInfo, ws_tabs: &[&TabInfo], panes: &[PaneInfo]
 
 pub fn needs_notification(agent: &Agent, at: Millis) -> Option<Notification> {
     let n = agent.needs.as_ref()?;
-    let mut body = if n.question.is_empty() { n.title.clone() } else { clip(&n.question, 200) };
+    // Notifications are plain text: omp's `inline code` marks (the cfg approval's setting path) go.
+    let mut body = if n.question.is_empty() { n.title.clone() } else { clip(&n.question.replace('`', ""), 200) };
     if let Some(note) = crate::autoanswer::needs_note(agent, at) {
         body = format!("{body}\n{note}");
     }
+    // An approval's notification approves one call at most: its primary (once) choice and Deny,
+    // never a grant or "for this session" (§3.5); other questions offer their first three options.
+    let approval = n.kind == NeedsKind::Approval;
     let actions = if n.answerable && !n.multi {
         n.options
             .iter()
+            .filter(|o| !approval || o.recommended || o.tone == OptionTone::Danger)
             .take(3)
             .map(|o| NotifyAction {
                 id: o.id.clone(),
@@ -554,7 +645,7 @@ pub fn needs_notification(agent: &Agent, at: Millis) -> Option<Notification> {
         at,
         kind: NotifyKind::Needs,
         agent_id: agent.id.clone(),
-        title: format!("{} · {}", agent.name, n.title),
+        title: if n.browser { format!("{} wants to use your browser", agent.name) } else { format!("{} · {}", agent.name, n.title) },
         body,
         request_id: n.request_id.clone(),
         actions,
@@ -678,6 +769,7 @@ mod tests {
             turn_started_at: None,
             last_turn_ended_at: None,
             blocked_grace: false,
+            browser_lent: None,
         }
     }
 
@@ -748,6 +840,7 @@ mod tests {
             connected_at: 0,
             caps: Default::default(),
             jobs: None,
+            browser_request: None,
             conn: 0,
         }
     }
@@ -805,6 +898,9 @@ mod tests {
         assert_eq!(note.actions.len(), 3);
         assert_eq!(note.actions[0].answer.as_ref().unwrap().choices, vec!["o0".to_string()]);
         assert_eq!(note.request_id.as_deref(), Some("r1"));
+        // Plain text: omp's `inline code` marks go (the app renders them only in its cards).
+        agent.needs.as_mut().unwrap().question = "⚙️ Your agent wants to change `task.perCallModel` for this session.".into();
+        assert_eq!(needs_notification(&agent, 1).unwrap().body, "⚙️ Your agent wants to change task.perCallModel for this session.");
     }
 
     // ── herdr `blocked` that omp's provider retry explains (§3.5) ──
@@ -833,6 +929,7 @@ mod tests {
             answerable: true,
             context: None,
             step: None,
+            browser: false,
         };
         OmpView {
             session_id: "s1".into(),
@@ -986,5 +1083,77 @@ mod tests {
         let mut i = inputs(&a);
         i.omp = Some(&view);
         assert_eq!(build_agent(&i).needs.map(|n| n.since), Some(7), "a replica rebuilt meanwhile keeps the wait the board showed");
+    }
+
+    /// omp waits for the user with nothing TeleFlock can show (the bridge's `state.userWait`): the
+    /// agent is Needs you whatever herdr says (it reported `working` for omp's `cfg://` prompt), with
+    /// the text omp's TUI shows, answered in the terminal; a dialog the replica holds still wins.
+    #[test]
+    fn a_wait_for_the_user_is_needs_you_even_while_herdr_says_working() {
+        let wait = crate::bridge::UserWaitInfo {
+            since: 4,
+            text: Some("⚙️ Your agent wants to change `task.perCallModel` for this session.\noff → on\n→ Always for this session\n  Allow once\n  Deny".into()),
+        };
+        for status in [AgentStatus::Working, AgentStatus::Idle, AgentStatus::Blocked] {
+            let mut a = herdr_agent(status);
+            a.agent = Some("omp".into());
+            let view = omp_view(tf_proto::model::LinkState::Live, false, false, false);
+            let mut b = bridged(None);
+            b.caps.live = 1;
+            b.caps.user_waits = true;
+            b.state.user_wait = Some(wait.clone());
+            let mut i = inputs(&a);
+            i.omp = Some(&view);
+            i.bridge = Some(&b);
+            let agent = build_agent(&i);
+            assert_eq!(agent.column, Column::Needs, "herdr {status:?}");
+            let n = agent.needs.unwrap();
+            assert_eq!((n.kind, n.answerable, n.request_id.as_deref()), (NeedsKind::Blocked, false, None));
+            assert_eq!(n.question, "⚙️ Your agent wants to change `task.perCallModel` for this session.");
+            assert_eq!(n.detail.as_deref(), Some("off → on\n→ Always for this session\n  Allow once\n  Deny"));
+            assert_eq!(n.since, 4, "since the wait began");
+        }
+        // Nothing shown in the composer's place (an MCP sign-in): a generic question.
+        let n = user_wait_needs(&crate::bridge::UserWaitInfo { since: 0, text: None }, 9);
+        assert_eq!((n.question.as_str(), n.since), ("The agent waits for your answer in the terminal.", 9));
+        // omp waits, not the agent asking: an empty context, so no older assistant text as "Agent said".
+        assert_eq!(n.context.as_deref(), Some(""));
+        // A provider retry wait does not hide it either.
+        let mut a = herdr_agent(AgentStatus::Blocked);
+        a.agent = Some("omp".into());
+        let view = omp_view(tf_proto::model::LinkState::Live, false, true, false);
+        let mut b = bridged(None);
+        b.state.user_wait = Some(wait.clone());
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        i.bridge = Some(&b);
+        assert_eq!(build_agent(&i).needs.map(|n| n.kind), Some(NeedsKind::Blocked));
+        // The replica's dialog (the same prompt, offered) wins over the bare wait.
+        let view = omp_view(tf_proto::model::LinkState::Live, true, false, false);
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        i.bridge = Some(&b);
+        assert_eq!(build_agent(&i).needs.map(|n| n.kind), Some(NeedsKind::Ask));
+    }
+
+    /// A notification answers an approval for one call at most: its once choice and Deny, never a
+    /// grant or "for this session".
+    #[test]
+    fn an_approvals_notification_offers_once_and_deny_only() {
+        let mut a = herdr_agent(AgentStatus::Blocked);
+        a.agent = Some("omp".into());
+        let mut agent = build_agent(&inputs(&a));
+        let n = agent.needs.as_mut().unwrap();
+        n.kind = NeedsKind::Approval;
+        n.answerable = true;
+        n.request_id = Some("r1".into());
+        let opt = |id: &str, recommended: bool, tone| NeedsOption { id: id.into(), label: id.into(), description: None, recommended, tone };
+        n.options = vec![
+            opt("Always for this session", false, OptionTone::Neutral),
+            opt("Allow once", true, OptionTone::Primary),
+            opt("Deny", false, OptionTone::Danger),
+        ];
+        let note = needs_notification(&agent, 1).unwrap();
+        assert_eq!(note.actions.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["Allow once", "Deny"]);
     }
 }

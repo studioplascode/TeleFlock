@@ -1,4 +1,5 @@
 import type {
+  AgentChatInfo,
   Agent,
   Answer,
   AskStep,
@@ -27,10 +28,11 @@ import type {
   ModelRef,
 } from "@/core/gen";
 import { apiError } from "../errors";
+import { chatTurn } from "./chats";
 import { fileDiff } from "./codegen";
 import { MODELS, type AgentDef } from "./data";
 import type { Rng } from "./rng";
-import { replyTurn, type Step, subagentRow, type ToolSpec, type UiSpec } from "./scripts";
+import { replyTurn, type Step, subagentRow, type TaskSub, taskSubs, type ToolSpec, type UiSpec } from "./scripts";
 
 /** What an agent simulation needs from its host. */
 export interface SimHost {
@@ -52,7 +54,7 @@ export interface SimHost {
 type Active =
   | { k: "think"; itemId: string; start: number; ms: number; text: string; shown: number }
   | { k: "say"; itemId: string; text: string; shown: number; rate: number }
-  | { k: "tool"; itemId: string; start: number; spec: ToolSpec; outShown: number; output: string; subIds: string[]; irc: Map<string, string> }
+  | { k: "tool"; itemId: string; start: number; spec: ToolSpec; outShown: number; output: string; subs: TaskSub[]; irc: Map<string, string> }
   | { k: "retry"; until: number }
   | { k: "wait"; until: number };
 
@@ -116,6 +118,8 @@ export class AgentSim {
   /** Main-agent output this turn, and the last finished turn's average (`SessionMeta.tps`). */
   private turnOut = 0;
   private lastTurnTps: number | undefined;
+  /** `SessionMeta.agentChat`: the host's agent chat log of this session (set by the host; absent on a host before 0.9.0). */
+  chatInfo?: () => AgentChatInfo | undefined;
 
   constructor(
     private readonly host: SimHost,
@@ -227,6 +231,11 @@ export class AgentSim {
     };
   }
 
+  /**
+   * The session's meta as an event carries it: copies of the lists this sim goes on changing in place (todos' statuses,
+   * subagent rows, changed files), as the wire's JSON would be. The app keeps what an event carried and the React
+   * Compiler memoizes on those lists' identity, so a shared list left the inspector's cards as they were first sent.
+   */
   meta(): SessionMeta {
     const a = this.agent;
     return {
@@ -242,13 +251,15 @@ export class AgentSim {
       context: a.omp?.context,
       cost: a.omp?.cost,
       tps: this.lastTurnTps,
-      todos: this.todos,
-      subagents: this.subagents,
-      files: this.branchFiles(),
+      todos: structuredClone(this.todos),
+      subagents: [...this.subagents],
+      // Hosts before 0.9.0 also listed omp's own `local://` writes here; the inspector drops them.
+      files: this.agent.id === "kanban" ? [...this.branchFiles(), { path: "local://PLAN.md", added: 38, removed: 0, status: "added" }, { path: "local://reports/scan.md", added: 64, removed: 0, status: "added" }] : [...this.branchFiles()],
       queue: { steering: [...this.queueSteer], followUp: [...this.queueFollow] },
       tree: this.tree(),
       caps: this.caps,
       startedAt: a.startedAt,
+      agentChat: this.chatInfo?.(),
     };
   }
 
@@ -404,9 +415,11 @@ export class AgentSim {
         const spec = step.spec;
         const output = spec.output?.join("\n");
         if (spec.subagents) {
-          for (const sub of spec.subagents) {
-            const sid = `${this.agent.id}-sub-${(++this.seq).toString(36)}`;
-            this.subagents.push(subagentRow(sub, sid, at - sub.ms, at));
+          // The call's own subagents end with it; theirs start `after` into their parent's run.
+          for (const t of taskSubs(spec.subagents, () => `${this.agent.id}-sub-${(++this.seq).toString(36)}`)) {
+            let root = t;
+            while (root.parent) root = root.parent;
+            this.subagents.push(subagentRow(t, at - root.spec.ms + t.at, at));
           }
         }
         this.put(this.finishedTool(this.id(), at, spec, output ?? "", spec.error ? "error" : "ok", at), false);
@@ -465,13 +478,16 @@ export class AgentSim {
       this.host.activity(this.agent.id, "unarchived", `${this.agent.name} started working again`);
     }
     this.host.activity(this.agent.id, "prompted", `${this.agent.name} prompted${opts.author ? ` from ${opts.author}` : ""}`, text);
-    // Single-answer turns (commit messages) must not get director-injected dialogs or retitle the task.
-    this.noInject = /commit message/i.test(text);
-    if (!this.noInject && (this.agent.title === "" || this.agent.title === this.agent.name)) this.agent.title = text.slice(0, 80);
+    // Single-answer turns (commit messages) must not get director-injected dialogs or retitle the task; a chat gets no injected dialogs either.
+    const single = /commit message/i.test(text);
+    this.noInject = single || this.agent.chat === true;
+    if (!single && (this.agent.title === "" || this.agent.title === this.agent.name)) this.agent.title = text.slice(0, 80);
     const { repo, files } = this.host.repoFiles(this.agent.id);
     this.queue =
       opts.steps ??
-      replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan", title: this.agent.title, branch: this.agent.branch, changed: this.files });
+      (this.agent.chat
+        ? chatTurn(text, this.host.rng)
+        : replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan", title: this.agent.title, branch: this.agent.branch, changed: this.files }));
     this.cur = null;
     this.setState("working");
     // A new turn makes the idle recap out of date (the host stops sending it).
@@ -587,7 +603,7 @@ export class AgentSim {
     }
     // As tf-hostd fills an ask's `context`: the agent's latest text this turn (its own message here).
     const asks = spec.needs === "ask" || (!spec.needs && (spec.kind === "select" || spec.kind === "multiSelect"));
-    const context = asks ? this.latestText() : undefined;
+    const context = spec.context ?? (asks ? this.latestText() : undefined);
     this.raise({ spec, then, toolItemId, context, ask: spec.questions ? { index: 0, answers: [] } : undefined }, at, live, true);
   }
 
@@ -640,7 +656,7 @@ export class AgentSim {
       since: first ? at : (this.agent.needs?.since ?? at),
       title: spec.title,
       question: message ?? spec.title,
-      detail: spec.plan?.content.split("\n")[0],
+      detail: spec.detail ?? spec.plan?.content.split("\n")[0],
       options,
       multi: kind === "multiSelect",
       allowOther,
@@ -695,7 +711,7 @@ export class AgentSim {
     this.pending = null;
     const all = p.ask ? [...p.ask.answers.slice(0, p.ask.index), answer] : [answer];
     const approval = p.spec.needs === "approval";
-    const allowed = approval && !answer.cancel && answer.choices.some((c) => c.startsWith("Allow"));
+    const allowed = approval && !answer.cancel && answer.choices.some((c) => c.startsWith("Allow") || c.startsWith("Always"));
     if (p.toolItemId) {
       const item = this.byId.get(p.toolItemId);
       if (item?.kind === "tool") {
@@ -731,6 +747,52 @@ export class AgentSim {
     return true;
   }
 
+  /**
+   * `use_user_browser` (bridge tool): the agent asks to use the user's TeleFlock Browser and waits. hostd
+   * raises no dialog for it: the card carries the request (`Agent.browser.request`, `needs` with
+   * `browser`), and the app with the browser answers it (`browserAnswered`).
+   */
+  askBrowser(needs: NeedsYou & { requestId: string }, then: (allowed: boolean) => Step[], live = true): void {
+    const at = needs.since;
+    const toolItemId = this.id();
+    this.put({ kind: "tool", id: toolItemId, at, callId: `call_${toolItemId}`, tool: "use_user_browser", title: "Use my browser", intent: needs.question, args: { reason: needs.question }, status: "running", truncated: false }, live);
+    this.browserAsk = { id: needs.requestId, toolItemId, then };
+    const a = this.agent;
+    a.state = "blocked";
+    a.stateSince = at;
+    a.column = "needs";
+    a.needs = needs;
+    a.browser = { ...a.browser, request: { id: needs.requestId, reason: needs.question, at } };
+    a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined, line: needs.title };
+    if (!live) return;
+    this.host.pulse(a.id, "state", 1);
+    this.host.agentChanged(a.id);
+    this.host.metaChanged(a.id);
+    this.termLine(`\r\n\x1b[38;5;208m◆ ${needs.title}\x1b[0m ${needs.question}\r\n`);
+  }
+
+  /** The pending `use_user_browser` request's id. */
+  get browserRequest(): string | undefined {
+    return this.browserAsk?.id;
+  }
+
+  /** The user answered the browser request `id`: its tool row ends with `output` and the turn goes on. False: not pending here. */
+  browserAnswered(id: string, allowed: boolean, output: string): boolean {
+    const ask = this.browserAsk;
+    if (!ask || ask.id !== id) return false;
+    this.browserAsk = null;
+    const item = this.byId.get(ask.toolItemId);
+    if (item?.kind === "tool") this.put({ ...item, status: "ok", durationMs: this.host.now() - item.at, output });
+    this.agent.browser = this.agent.browser?.attached ? { attached: this.agent.browser.attached } : undefined;
+    this.queue = [...ask.then(allowed), ...this.queue];
+    this.cur = null;
+    this.setState("working");
+    this.host.metaChanged(this.agent.id);
+    return true;
+  }
+
+  private browserAsk: { id: string; toolItemId: string; then: (allowed: boolean) => Step[] } | null = null;
+
   abort(reason = "Interrupted by user"): void {
     if (!this.busy) return;
     const now = this.host.now();
@@ -750,6 +812,12 @@ export class AgentSim {
       }
       this.pending = null;
       this.host.session(this.agent.id, { k: "ui", request: null });
+    }
+    if (this.browserAsk) {
+      const item = this.byId.get(this.browserAsk.toolItemId);
+      if (item?.kind === "tool") this.put({ ...item, status: "aborted", durationMs: now - item.at });
+      this.browserAsk = null;
+      this.agent.browser = this.agent.browser?.attached ? { attached: this.agent.browser.attached } : undefined;
     }
     this.cur = null;
     this.queue = [];
@@ -878,16 +946,14 @@ export class AgentSim {
           truncated: false,
           view: spec.view?.type === "bash" ? { ...spec.view, output: "" } : spec.subagents ? { type: "task", agents: [] } : undefined,
         });
-        this.cur = { k: "tool", itemId, start: now, spec, outShown: 0, output: "", subIds: [], irc: new Map() };
+        const subs = spec.subagents ? taskSubs(spec.subagents, () => `${this.agent.id}-sub-${(++this.seq).toString(36)}`) : [];
+        this.cur = { k: "tool", itemId, start: now, spec, outShown: 0, output: "", subs, irc: new Map() };
         this.agent.live = { ...this.agent.live, line: spec.title };
         this.termLine(`\r\n\x1b[36m⏺ ${spec.tool}\x1b[0m ${spec.title}\r\n`);
         if (spec.silent) this.silentSince = now;
         if (spec.subagents) {
-          for (const sub of spec.subagents) {
-            const sid = `${this.agent.id}-sub-${(++this.seq).toString(36)}`;
-            (this.cur as Extract<Active, { k: "tool" }>).subIds.push(sid);
-            this.subagents.push(subagentRow(sub, sid, now, now));
-          }
+          // Nested ones appear once their parent spawns them (`advanceTool`).
+          for (const t of subs) if (t.at === 0) this.subagents.push(subagentRow(t, now, now));
           this.refreshDerived();
           this.host.metaChanged(this.agent.id);
         }
@@ -1014,25 +1080,32 @@ export class AgentSim {
     }
     if (spec.subagents) {
       // Each running subagent streams its own replies; their bill shows on their rows.
-      const running = this.subagents.filter((s) => c.subIds.includes(s.id) && s.status === "running").length;
+      const running = this.subagents.filter((s) => s.status === "running" && c.subs.some((t) => t.id === s.id)).length;
       if (running) this.tokens(Math.max(1, Math.round((running * this.host.rng.range(28, 46) * dt) / 1000)), "subagents");
       let changed = false;
-      spec.subagents.forEach((sub, i) => {
-        const sid = c.subIds[i] as string;
-        const idx = this.subagents.findIndex((s) => s.id === sid);
-        if (idx < 0) return;
+      for (const t of c.subs) {
+        if (elapsed < t.at) continue;
+        const row = subagentRow(t, c.start + t.at, now);
+        const idx = this.subagents.findIndex((s) => s.id === t.id);
+        if (idx < 0) {
+          // Its parent spawns it now, unless the parent no longer runs (killed).
+          if (t.parent && this.subagents.find((s) => s.id === t.parent?.id)?.status !== "running") continue;
+          this.subagents.push(row);
+          changed = true;
+          continue;
+        }
         const prev = this.subagents[idx] as Subagent;
-        if (prev.status !== "running") return;
-        const row = subagentRow(sub, sid, c.start, now);
+        if (prev.status !== "running") continue;
         if (row.line !== prev.line || row.status !== prev.status || row.completionPct !== prev.completionPct || Math.abs((row.context?.pct ?? 0) - (prev.context?.pct ?? 0)) >= 0.5) {
           this.subagents[idx] = row;
           changed = true;
-          if (row.status === "done") this.host.activity(this.agent.id, "finished", `${sub.name} (subagent of ${this.agent.name}) finished`, sub.description);
+          if (row.status === "done" && !t.parent) this.host.activity(this.agent.id, "finished", `${t.name} (subagent of ${this.agent.name}) finished`, t.spec.description);
         }
-      });
+      }
       if (changed) {
         const item = this.byId.get(c.itemId);
-        if (item?.kind === "tool") this.put({ ...item, view: { type: "task", agents: this.subagents.filter((s) => c.subIds.includes(s.id)) } });
+        // The call's card lists the subagents it started; theirs are in the Subagents panel.
+        if (item?.kind === "tool") this.put({ ...item, view: { type: "task", agents: this.subagents.filter((s) => c.subs.some((t) => !t.parent && t.id === s.id)) } });
         this.refreshDerived();
         this.host.metaChanged(this.agent.id);
       }
@@ -1093,8 +1166,8 @@ export class AgentSim {
           const id = this.id();
           sent.set(`${key}<`, id);
           const at = start + m.at;
-          this.put({ kind: "irc", id, at, message: { direction: "in", peer: sub.name, text: m.text, messageId: at.toString(16), broadcast: false, wakeRelay: m.relay ?? false, fromParent: false, receipts: [] } }, live);
-          if (live) this.termLine(`\r\n\x1b[35mIRC ← ${sub.name}\x1b[0m ${firstSentence(m.text)}\r\n`);
+          this.put({ kind: "irc", id, at, message: { direction: "in", peer: sub.name, text: m.text, messageId: at.toString(16), broadcast: m.broadcast ?? false, wakeRelay: m.relay ?? false, fromParent: false, receipts: [] } }, live);
+          if (live) this.termLine(`\r\n\x1b[35mIRC ← ${sub.name}${m.broadcast ? " (all)" : ""}\x1b[0m ${firstSentence(m.text)}\r\n`);
         }
         const r = m.reply;
         if (!r || elapsed < m.at + r.after) return;
@@ -1134,6 +1207,7 @@ export class AgentSim {
       truncated: false,
       view,
       error: spec.error,
+      artifact: spec.artifact,
     };
   }
 
@@ -1281,6 +1355,7 @@ function capsFor(live: boolean, readOnly: boolean): Capabilities {
     bridge: on,
     retry: on,
     subagentRetry: on,
+    refusalRetry: on,
   };
 }
 

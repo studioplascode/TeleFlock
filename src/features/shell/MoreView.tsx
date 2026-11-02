@@ -1,6 +1,6 @@
 import { ChevronRight, Plus, Search } from "lucide-react";
 import { motion } from "motion/react";
-import { Button, fadeRise, IconButton, spring, StatusOrb, Tile, useNow } from "@/design";
+import { Button, fadeRise, IconButton, isAndroid, spring, StatusOrb, Tile, useNow } from "@/design";
 import { navigate, type Route, useHosts, useUi } from "@/core";
 import { connWords } from "@/features/board/FlockActions";
 import { useAppInfo } from "@/features/hosts/appInfo";
@@ -12,7 +12,7 @@ import { connSummary, PHASE_STATUS, phaseBusy } from "./status";
 import { VIEWS } from "./vocab";
 
 /** The pages More lists, in order. Label, icon and description come from `VIEWS`, like every other entry point. */
-const PAGES = ["usage", "wrapped", "activity", "automations", "ambient", "omp", "mcp", "plugins", "accounts", "cleanup", "forward", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
+const PAGES = ["usage", "wrapped", "activity", "automations", "ambient", "browser", "omp", "mcp", "plugins", "accounts", "cleanup", "forward", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
 
 function LinkRow({ id }: { id: (typeof PAGES)[number] }) {
   const { icon: Icon, label, description } = VIEWS[id];
@@ -115,7 +115,8 @@ export function MoreView() {
 
         <motion.div {...fadeRise} transition={{ ...spring.smooth, delay: 0.05 }}>
           <Tile className="divide-y divide-line overflow-hidden">
-            {PAGES.map((id) => (
+            {/* The browser runs on a computer: a narrow desktop window lists it, Android doesn't. */}
+            {PAGES.filter((id) => id !== "browser" || !isAndroid).map((id) => (
               <LinkRow key={id} id={id} />
             ))}
           </Tile>

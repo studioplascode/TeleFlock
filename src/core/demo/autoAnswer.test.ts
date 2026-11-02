@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ActivityPage, AppEvent, AutoAnswer, Started } from "../gen";
+import type { ActivityPage, AppEvent, AutoAnswer, AutoAnswerReviewed, PastSession, Started } from "../gen";
 import { agentKey } from "../keys";
 import { reduceEvents } from "../store/reduce";
 import { type CoreEvent, type CoreState, initialCoreState } from "../store/state";
@@ -121,5 +121,63 @@ describe("demo decide for me", () => {
     expect(r.state.agents[key(started.agentId as string)]?.autoAnswer).toEqual({ source: "agent", policy });
     await expect(r.call("agent.start", { target: { kind: "workspace", workspaceId: "w1" }, spec: { kind: "omp", name: "nodecider", plan: false, autoAnswer: { enabled: true, afterSecs: 5, onlyWhenNoApp: false } } })).rejects.toMatchObject({ code: "invalid_params" });
     expect(r.state.agents[key("nodecider")]).toBeUndefined();
+  });
+
+  test("seeded decisions to review: oldest first, one of an agent that ended, with its past session", async () => {
+    const r = rig();
+    const ds = r.state.hosts.forge?.state.info.decisions ?? [];
+    expect(ds.map((d) => d.agentId)).toEqual(["relay", "hero", "pool"]);
+    expect(ds.map((d) => d.at)).toEqual([...ds.map((d) => d.at)].sort((a, b) => a - b));
+    expect(new Set(ds.map((d) => d.notificationId)).size).toBe(3);
+    // relay ended: no card; Open finds its past session in its folder
+    const [relay, hero, pool] = ds;
+    expect(r.state.agents[key("relay")]).toBeUndefined();
+    const listed = await r.call<{ sessions: PastSession[] }>("host.sessions", { cwd: relay?.cwd, limit: 200 });
+    expect(listed.sessions.find((s) => s.file === relay?.sessionFile)).toMatchObject({ live: false, title: "Spike: collab relay in Rust" });
+    // hero's question had its earlier answer sent (Back reopened it), typed text with it
+    expect(hero).toMatchObject({ earlier: true, multi: true, text: "not below 600 px wide", source: "agent" });
+    expect(hero?.options.filter((o) => o.picked).map((o) => o.label)).toEqual(["Landing page", "Docs home"]);
+    // pool's ★ pick, its session is the live agent's
+    expect(pool).toMatchObject({ earlier: false, source: "host", waitedMs: 20 * MIN, sessionFile: r.state.agents[key("pool")]?.omp?.sessionFile });
+    expect(pool?.options.filter((o) => o.picked && o.recommended)).toHaveLength(1);
+    expect(r.state.hosts["studio-pc"]?.state.info.decisions).toBeUndefined();
+  });
+
+  test("an answer sent becomes a decision its notification leads to; reviewing reads it everywhere, once", async () => {
+    const r = rig();
+    await r.call("host.autoAnswerSet", { enabled: true, afterSecs: 600, onlyWhenNoApp: false });
+    const deadline = r.state.agents[key("push")]?.autoAnswer?.countdown?.deadline ?? 0;
+    r.clock.advance(deadline - r.clock.now() + 300);
+    const decisions = () => r.state.hosts.forge?.state.info.decisions ?? [];
+    const d = decisions().at(-1);
+    expect(decisions()).toHaveLength(4);
+    expect(d).toMatchObject({ agentId: "push", agentName: "push", question: "How should notifications reach your phone?", earlier: false, multi: false, source: "host", waitedMs: 600_000 });
+    expect(d?.options.map((o) => [o.label, o.recommended, o.picked])).toEqual([
+      ["ntfy on your tailnet", true, true],
+      ["Firebase Cloud Messaging", false, false],
+      ["UnifiedPush", false, false],
+    ]);
+    // its notification carries the Review action, and goes out after the decision is in the state
+    const note = r.events.flatMap((e) => (e.type === "notify" && e.notification.id === d?.notificationId ? [e.notification] : []))[0];
+    expect(note).toMatchObject({ kind: "info", title: "push · decided for you", actions: [{ id: "open:decisions", label: "Review" }] });
+    const published = r.events.findIndex((e) => e.type === "hostPatch" && e.ops.some((op) => op.op === "info" && op.info.decisions?.some((x) => x.id === d?.id)));
+    const notified = r.events.findIndex((e) => e.type === "notify" && e.notification.id === d?.notificationId);
+    expect(published).toBeGreaterThanOrEqual(0);
+    expect(published).toBeLessThan(notified);
+
+    const id = d?.id as string;
+    const done = () => r.events.filter((e) => e.type === "notifyDone" && e.ids.includes(note?.id ?? ""));
+    expect(await r.call<AutoAnswerReviewed>("host.autoAnswerReview", { ids: [id] })).toEqual({ reviewed: [id] });
+    expect(decisions().map((x) => x.id)).not.toContain(id);
+    expect(done()).toEqual([{ type: "notifyDone", hostId: "forge", ids: [note?.id ?? ""], resolved: false }]);
+    expect(r.state.notifications.find((n) => n.hostId === "forge" && n.id === note?.id)?.read).toBe(true);
+    // again (another device got there first): nothing marked, nothing read twice
+    expect(await r.call<AutoAnswerReviewed>("host.autoAnswerReview", { ids: [id] })).toEqual({ reviewed: [] });
+    expect(done()).toHaveLength(1);
+
+    await expect(r.call("host.autoAnswerReview", {})).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(r.call("host.autoAnswerReview", { ids: "d-1" })).rejects.toMatchObject({ code: "invalid_params" });
+    expect((await r.call<AutoAnswerReviewed>("host.autoAnswerReview", { all: true })).reviewed).toHaveLength(3);
+    expect(r.state.hosts.forge?.state.info.decisions).toBeUndefined();
   });
 });

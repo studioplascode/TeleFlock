@@ -1,7 +1,8 @@
 import type { AgentView } from "@/core";
+import { isChat, isChatRepo } from "@/core/chats";
 import type { NeedsKind, OptionTone } from "@/core/gen";
 import { groupOf } from "@/features/dispatch/auto";
-import { autoRepoOf, type DispatchWorld, dispatchTarget, dispatchedRepos, hostName, repoNameOf, worldHostIds } from "@/features/dispatch/send";
+import { autoRepoOf, chatRefusal, type DispatchWorld, dispatchTarget, dispatchedRepos, hostName, repoNameOf, worldHostIds } from "@/features/dispatch/send";
 import { recentRepos } from "@/features/dispatch/thread";
 import { hostGroups } from "@/features/hosts/kinds";
 import { needsOptions } from "@/features/inbox/answers";
@@ -91,8 +92,14 @@ function blockedReason(w: DispatchWorld, target: string | undefined, repo: strin
   if (!repo) return "Pick a repository in Dispatch first";
   const online = (h: string) => w.status[h]?.phase === "online";
   const group = groupOf(target);
+  // A chat goes to a host whose daemon starts chats (Dispatch refuses the same way).
+  if (isChatRepo(repo)) {
+    const refused = chatRefusal(w, target);
+    if (refused) return refused.title;
+  }
   if (group) {
     const auto = autoRepoOf(w, group, repo);
+    if (isChatRepo(repo)) return auto?.candidates.some(online) ? null : `No host of ${group} that starts chats is online`;
     const name = auto?.name ?? basename(repo);
     if (!auto?.candidates.length) return `No host of ${group} has ${name} now`;
     return auto.candidates.some(online) ? null : `No host of ${group} with ${name} is online`;
@@ -108,7 +115,7 @@ function questionOf(w: DispatchWorld, a: AgentView): CaptureQuestion | null {
   const answerable = needs.answerable && requestId !== "";
   const quick = answerable && !needs.multi && options.length > 0;
   const why = !answerable ? "Answer it in the terminal" : needs.multi ? "Pick the answers in TeleFlock" : options.length === 0 ? "Type the answer in TeleFlock" : undefined;
-  const repo = a.repo ?? (a.cwd ? basename(a.cwd) : null);
+  const repo = isChat(a) ? "Chat" : (a.repo ?? (a.cwd ? basename(a.cwd) : null));
   return {
     agentKey: a.key,
     requestId,

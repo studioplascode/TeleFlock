@@ -1,9 +1,12 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Check, ChevronRight, FileWarning, FoldVertical, WrapText } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Code2, FileWarning, FoldVertical, WrapText } from "lucide-react";
 import { type CSSProperties, type ReactNode, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/design";
+import { Markdown } from "@/features/session/markdown/Markdown";
 import { FILE_STATUS, FileStatusIcon } from "../fileStatus";
 import { familyFor, TOKEN_CLASS, tokenize } from "./highlight";
+import type { MdMode } from "./mdMode";
+import { estimateChunkHeight, isMarkdownPath, type MdChunk, type RenderedDoc } from "./markdown";
 import { type DiffFile, type DiffLine, type Hunk, type Range, wordDiff } from "./parse";
 
 export type DiffLayout = "unified" | "split";
@@ -17,9 +20,26 @@ type Row =
   | { t: "line"; file: DiffFile; line: DiffLine; marks: Marks }
   | { t: "pair"; file: DiffFile; left?: DiffLine; right?: DiffLine; marksL: Marks; marksR: Marks }
   | { t: "empty"; file: DiffFile; msg: string }
+  /** Rendered view: a one-line note (loading, a reason it isn't rendered, what the marks mean). */
+  | { t: "mdnote"; file: DiffFile; msg: string }
+  /** Rendered view: a run of whole Markdown blocks, measured (heights vary). */
+  | { t: "md"; file: DiffFile; chunk: MdChunk }
   | { t: "gap"; file: DiffFile };
 
-const H = { file: 44, hunk: 32, line: 20, empty: 52, gap: 12 } as const;
+const H = { file: 44, hunk: 32, line: 20, empty: 52, mdnote: 32, gap: 12 } as const;
+
+/** The rows of a Markdown file in Rendered view. */
+function renderedRows(file: DiffFile, doc: RenderedDoc): Row[] {
+  if (doc.state === "loading") return [{ t: "mdnote", file, msg: "Reading the file…" }];
+  if (doc.state === "message") return [{ t: "mdnote", file, msg: doc.message }];
+  if (doc.chunks.length === 0) return [{ t: "mdnote", file, msg: file.status === "deleted" ? "Empty file" : "Empty document" }];
+  const changed = doc.chunks.filter((c) => c.changed).length;
+  const rows: Row[] = [];
+  if (file.status === "deleted") rows.push({ t: "mdnote", file, msg: "Showing the deleted version" });
+  else if (changed > 0) rows.push({ t: "mdnote", file, msg: `${changed} changed ${changed === 1 ? "section is" : "sections are"} marked · removed text only shows in Diff` });
+  for (const chunk of doc.chunks) rows.push({ t: "md", file, chunk });
+  return rows;
+}
 
 /** Group a hunk's lines into del/add runs so the i-th deletion pairs with the i-th addition. */
 function* runs(lines: DiffLine[]): Generator<{ ctx?: DiffLine; note?: DiffLine; dels?: DiffLine[]; adds?: DiffLine[] }> {
@@ -43,11 +63,14 @@ function* runs(lines: DiffLine[]): Generator<{ ctx?: DiffLine; note?: DiffLine; 
   }
 }
 
-function buildRows(files: DiffFile[], layout: DiffLayout, collapsed: ReadonlySet<string>): Row[] {
+function buildRows(files: DiffFile[], layout: DiffLayout, collapsed: ReadonlySet<string>, rendered?: ReadonlyMap<string, RenderedDoc>): Row[] {
   const rows: Row[] = [];
   for (const file of files) {
     rows.push({ t: "file", file });
-    if (!collapsed.has(file.path)) {
+    const doc = rendered?.get(file.path);
+    if (!collapsed.has(file.path) && doc) {
+      rows.push(...renderedRows(file, doc));
+    } else if (!collapsed.has(file.path)) {
       if (file.binary) rows.push({ t: "empty", file, msg: "Binary file — not shown" });
       else if (file.hunks.length === 0)
         rows.push({ t: "empty", file, msg: file.status === "renamed" ? "Renamed without changes" : file.status === "untracked" && file.added === 0 ? "Empty file" : "No textual changes in this diff" });
@@ -84,8 +107,17 @@ function buildRows(files: DiffFile[], layout: DiffLayout, collapsed: ReadonlySet
   return rows;
 }
 
+/** The Markdown files' `Diff | Rendered` switch and what Rendered shows (see `useRenderedDocs`). */
+export interface MarkdownView {
+  mode: MdMode;
+  onMode(mode: MdMode): void;
+  docs: ReadonlyMap<string, RenderedDoc>;
+}
+
 export interface DiffViewerProps {
   files: DiffFile[];
+  /** Offered on Markdown files' headers; Rendered replaces their hunks with the document. */
+  markdown?: MarkdownView;
   layout: DiffLayout;
   wrap: boolean;
   collapsed: ReadonlySet<string>;
@@ -118,12 +150,13 @@ function syncHScroll(el: HTMLElement, frame: HTMLElement | null) {
  * Virtualized diff: only on-screen rows render (and get highlighted), fixed row heights without wrap
  * (zero measurement), measured rows with wrap. File headers stay pinned while their hunks scroll.
  */
-export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, onToggleViewed, onWrap, scrollTo, onTopFile, compact = false, busy = false, className }: DiffViewerProps) {
+export function DiffViewer({ files, markdown, layout, wrap, collapsed, onToggle, viewed, onToggleViewed, onWrap, scrollTo, onTopFile, compact = false, busy = false, className }: DiffViewerProps) {
   // TanStack Virtual mutates one virtualizer instance per scroll; compiler memoization would freeze it.
   "use no memo";
   const frameRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const rows = useMemo(() => buildRows(files, layout, collapsed), [files, layout, collapsed]);
+  const rendered = markdown?.mode === "rendered" ? markdown.docs : undefined;
+  const rows = useMemo(() => buildRows(files, layout, collapsed, rendered), [files, layout, collapsed, rendered]);
   const fileRowIndex = useMemo(() => {
     const m = new Map<string, number>();
     rows.forEach((r, i) => r.t === "file" && m.set(r.file.path, i));
@@ -135,13 +168,17 @@ export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, o
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => H[rows[i]?.t === "pair" ? "line" : (rows[i]?.t ?? "line")],
+    estimateSize: (i) => {
+      const r = rows[i];
+      return r?.t === "md" ? estimateChunkHeight(r.chunk) : H[r?.t === "pair" ? "line" : (r?.t ?? "line")];
+    },
     overscan: 24,
     getItemKey: (i) => {
       const r = rows[i];
       if (!r) return i;
       if (r.t === "file" || r.t === "gap" || r.t === "empty") return `${r.t}:${r.file.path}`;
       if (r.t === "hunk") return `h:${r.file.path}:${r.hunk.header}:${r.hunk.oldStart}`;
+      if (r.t === "md") return `md:${r.file.path}:${r.chunk.line}`;
       return `${r.file.path}:${i}`;
     },
   });
@@ -200,7 +237,7 @@ export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, o
       {topFile && (
         <div className="pointer-events-none absolute inset-x-0 top-0 z-sticky" style={{ width: viewW || undefined }}>
           <div className="pointer-events-auto">
-            <FileHeader file={topFile} collapsed={collapsed.has(topFile.path)} onToggle={onToggle} viewed={viewed?.has(topFile.path)} onToggleViewed={onToggleViewed} compact={compact} pinned />
+            <FileHeader file={topFile} collapsed={collapsed.has(topFile.path)} onToggle={onToggle} viewed={viewed?.has(topFile.path)} onToggleViewed={onToggleViewed} compact={compact} markdown={markdown} pinned />
           </div>
         </div>
       )}
@@ -218,16 +255,17 @@ export function DiffViewer({ files, layout, wrap, collapsed, onToggle, viewed, o
           {items.map((vi) => {
             const row = rows[vi.index];
             if (!row) return null;
+            const measured = wrap || row.t === "md";
             return (
               <div
                 key={vi.key}
                 data-index={vi.index}
-                ref={wrap ? virtualizer.measureElement : undefined}
+                ref={measured ? virtualizer.measureElement : undefined}
                 className="absolute inset-x-0 top-0"
-                style={{ transform: `translateY(${vi.start}px)`, height: wrap ? undefined : vi.size }}
+                style={{ transform: `translateY(${vi.start}px)`, height: measured ? undefined : vi.size }}
               >
                 {row.t === "file" ? (
-                  <FileHeader file={row.file} collapsed={collapsed.has(row.file.path)} onToggle={onToggle} viewed={viewed?.has(row.file.path)} onToggleViewed={onToggleViewed} compact={compact} />
+                  <FileHeader file={row.file} collapsed={collapsed.has(row.file.path)} onToggle={onToggle} viewed={viewed?.has(row.file.path)} onToggleViewed={onToggleViewed} compact={compact} markdown={markdown} />
                 ) : (
                   <RowView row={row} layout={layout} wrap={wrap} compact={compact} />
                 )}
@@ -269,6 +307,15 @@ const RowView = memo(function RowView({ row, layout, wrap, compact }: { row: Exc
           {row.msg}
         </div>
       );
+    case "mdnote":
+      return (
+        <div className="sticky left-0 flex h-[32px] items-center gap-2 px-4 font-sans text-[11.5px] text-mute-2" style={{ width: "var(--vw)" }}>
+          <BookOpen className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">{row.msg}</span>
+        </div>
+      );
+    case "md":
+      return <RenderedChunk chunk={row.chunk} />;
     case "hunk":
       return <HunkHeader hunk={row.hunk} hidden={row.hidden} path={row.file.path} compact={compact} />;
     case "line":
@@ -277,6 +324,21 @@ const RowView = memo(function RowView({ row, layout, wrap, compact }: { row: Exc
       return layout === "split" ? <SplitLine row={row} wrap={wrap} /> : null;
   }
 });
+
+/** One run of Markdown blocks in the transcript's own renderer; a changed run carries the diff's green edge. */
+function RenderedChunk({ chunk }: { chunk: MdChunk }) {
+  return (
+    <div className="sticky left-0 font-sans" style={{ width: "var(--vw)" }}>
+      <div
+        data-changed={chunk.changed || undefined}
+        title={chunk.changed ? "Changed in this diff" : undefined}
+        className={cn("px-4 py-1 max-md:px-3", chunk.changed && "bg-add/[0.06] shadow-[inset_3px_0_0_var(--color-add)]")}
+      >
+        <Markdown text={chunk.text} className="text-[13.5px]" />
+      </div>
+    </div>
+  );
+}
 
 function HunkHeader({ hunk, hidden, path, compact }: { hunk: Hunk; hidden: number; path: string; compact: boolean }) {
   return (
@@ -323,9 +385,11 @@ function FileHeader({
   viewed,
   onToggleViewed,
   compact,
+  markdown,
   pinned,
 }: {
   file: DiffFile;
+  markdown?: MarkdownView;
   collapsed: boolean;
   onToggle: (p: string) => void;
   viewed?: boolean;
@@ -362,6 +426,7 @@ function FileHeader({
           {!compact && <span className={cn("hidden text-2xs font-bold lg:inline", meta.text)}>{meta.label}</span>}
           <DiffBar added={file.added} removed={file.removed} compact={compact} />
         </button>
+        {markdown && isMarkdownPath(file.path) && !file.binary && <MarkdownSwitch mode={markdown.mode} onMode={markdown.onMode} compact={compact} />}
         {onToggleViewed && (
           <button
             type="button"
@@ -387,6 +452,36 @@ function FileHeader({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** `Diff | Rendered` of a Markdown file's header (icons only on phones). */
+function MarkdownSwitch({ mode, onMode, compact }: { mode: MdMode; onMode: (m: MdMode) => void; compact: boolean }) {
+  const options: { value: MdMode; label: string; icon: ReactNode }[] = [
+    { value: "diff", label: "Diff", icon: <Code2 /> },
+    { value: "rendered", label: "Rendered", icon: <BookOpen /> },
+  ];
+  return (
+    <div role="radiogroup" aria-label="Markdown view" className="mr-1 flex h-7 shrink-0 items-center gap-px rounded-sm bg-bg-deep/60 p-0.5 shadow-[inset_0_0_0_1px_var(--color-line)]">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="radio"
+          aria-checked={mode === o.value}
+          aria-label={o.label}
+          title={o.label}
+          onClick={() => onMode(o.value)}
+          className={cn(
+            "flex h-6 items-center gap-1 rounded-[5px] px-1.5 text-2xs font-bold transition-colors focus-ring [&_svg]:size-3.5",
+            mode === o.value ? "bg-tile-4 text-ink shadow-[var(--shadow-d1)]" : "text-mute hover:text-ink",
+          )}
+        >
+          {o.icon}
+          {!compact && o.label}
+        </button>
+      ))}
     </div>
   );
 }

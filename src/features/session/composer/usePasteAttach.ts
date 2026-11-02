@@ -1,6 +1,6 @@
 import { type ClipboardEvent, type KeyboardEvent, type RefObject, useRef, useState } from "react";
 import { useStore } from "zustand";
-import { type DraftSetter, drafts, toApiError } from "@/core";
+import { type DraftSetter, drafts, toApiError, trackDraftWork } from "@/core";
 import { draftPastes, MAX_DRAFT_PASTES, useDraftPastes } from "@/core/draftPastes";
 import {
   addPaste,
@@ -282,7 +282,8 @@ export function usePasteAttach(o: PasteAttachOptions): PasteAttach {
         });
       };
       if (loaded) insert();
-      else void draftPastes.hydrate(draftKey).then(insert);
+      // A flush (the app about to restart) waits for it: the paste is in no draft before.
+      else void trackDraftWork(draftPastes.hydrate(draftKey).then(insert));
       return true;
     },
 

@@ -3,7 +3,9 @@
 //! not an app is connected. Set per agent (`AgentSpec.autoAnswer`, also per Dispatch message and
 //! per automation run), per running agent (`agent.setAutoAnswer`) and per host (the default,
 //! `host.autoAnswerSet`, published as `HostInfo.autoAnswer`). Only omp `ask` questions with a
-//! recommendation qualify: never approvals, plan reviews, confirmations or free-text input.
+//! recommendation qualify: never approvals, plan reviews, confirmations or free-text input. Every
+//! answer it sent stays a review item ([`AutoDecision`], `HostInfo.decisions`) until someone marks
+//! it reviewed on any device (`host.autoAnswerReview`).
 
 use crate::Millis;
 
@@ -124,5 +126,76 @@ wire_struct! {
         pub agent_id: String,
         pub request_id: String,
         pub secs: u32,
+    }
+}
+
+wire_struct! {
+    /// One option of a question decide for me answered ([`AutoDecision::options`]).
+    pub struct AutoDecisionOption {
+        pub label: String,
+        /// omp's ★ recommendation.
+        pub recommended: bool,
+        /// Sent (a multi-select may have sent several).
+        pub picked: bool,
+    }
+}
+
+wire_struct! {
+    /// A question decide for me answered, for the user to look at when they are back (§3.23
+    /// "Review"). tf-hostd keeps it per herdr session until someone marks it reviewed on any device
+    /// (`host.autoAnswerReview`); `HostInfo.decisions` lists the unreviewed ones (hosts ≥ 0.9.0).
+    pub struct AutoDecision {
+        pub id: String,
+        pub agent_id: String,
+        /// The agent's name when it was answered (kept after the agent ended).
+        pub agent_name: String,
+        /// `NeedsYou.requestId` of the question.
+        pub request_id: String,
+        /// `NeedsYou.title`: omp's short label for the question.
+        pub title: String,
+        pub question: String,
+        /// The question's options in their order, with what was sent.
+        pub options: Vec<AutoDecisionOption>,
+        /// A multi-select (several options could be picked).
+        pub multi: bool,
+        /// Typed ("Other") text that was sent: part of an earlier answer.
+        pub text: Option<String>,
+        /// The question's earlier answer was sent (Back reopened it, or it came up again), not ★.
+        pub earlier: bool,
+        /// When it was answered (host clock).
+        pub at: Millis,
+        /// How long the question waited for a person (the policy's wait plus postponements, ms).
+        pub waited_ms: i64,
+        /// Whose policy answered it: the agent's own, or the host default.
+        pub source: AutoAnswerSource,
+        /// The agent's omp session, to open it once the agent ended (Past sessions).
+        pub session_id: Option<String>,
+        pub session_file: Option<String>,
+        /// The agent's folder.
+        pub cwd: Option<String>,
+        /// The "decided for you" notification: retracted on every device once this is reviewed
+        /// (`notifyDone`); opening it leads here (`HostPage::Decisions`).
+        pub notification_id: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// `host.autoAnswerReview`: these decisions were looked at, for every device of the session
+    /// (their "decided for you" notifications are retracted everywhere). `all`: every unreviewed
+    /// one. Ids already reviewed, or no longer kept, are skipped.
+    pub struct AutoAnswerReviewParams {
+        #[serde(default)]
+        #[ts(as = "Option<Vec<String>>", optional)]
+        pub ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub all: bool,
+    }
+}
+
+wire_struct! {
+    /// What `host.autoAnswerReview` marked: the ids that were unreviewed until now.
+    pub struct AutoAnswerReviewed {
+        pub reviewed: Vec<String>,
     }
 }

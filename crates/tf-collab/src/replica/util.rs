@@ -210,6 +210,16 @@ pub(crate) fn lang_of(path: &str) -> Option<String> {
     Some(lang.to_owned())
 }
 
+/// A path omp keeps for itself, not a file of the repository: a URL-style internal path
+/// (`local://PLAN.md`, `artifact://3`, `agent://…`, `skill://…`) or what one resolves to, a file
+/// inside omp's session storage (`~/.omp/agent/sessions/<cwd>/<session>/local/…`, Windows:
+/// `%TEMP%/omp-local/…`). The Artifacts panel lists those; the changed-files list does not.
+pub(crate) fn is_session_internal(path: &str) -> bool {
+    let scheme = path.split_once("://").is_some_and(|(s, _)| !s.is_empty() && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
+    let slashed = path.replace('\\', "/");
+    scheme || slashed.contains("/.omp/agent/sessions/") || slashed.contains("/omp-local/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +239,15 @@ mod tests {
         assert_eq!(clip("  hello world ", 5), "hell…");
         assert_eq!(first_line("\n\n  a\nb"), "a");
         assert_eq!(floor_boundary("aé", 2), 1);
+    }
+
+    #[test]
+    fn session_internal_paths_are_told_from_repo_files() {
+        for p in ["local://PLAN.md", "local://reports/scan.md", "artifact://12", "agent://Pinger", "skill://x/SKILL.md", "/root/.omp/agent/sessions/-repo/2026_ab/local/PLAN.md", "C:\\Users\\a\\AppData\\Local\\Temp\\omp-local\\s1\\a.md"] {
+            assert!(is_session_internal(p), "{p}");
+        }
+        for p in ["src/main.rs", "/repo/docs/local/notes.md", "docs/local://x", "./local.md", "/repo/.omp/rules/a.md", "/home/u/.omp/agent/config.yml", "notes.txt"] {
+            assert!(!is_session_internal(p), "{p}");
+        }
     }
 }

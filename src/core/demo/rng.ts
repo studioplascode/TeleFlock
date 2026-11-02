@@ -47,12 +47,16 @@ export function hash(input: string): number {
   return h >>> 0;
 }
 
-/** UTF-8 → base64 (terminal frames). */
-export function base64Utf8(text: string): string {
-  const bytes = new TextEncoder().encode(text);
+/** Bytes → base64 (presented images, `session.artifact` base64 reads). */
+export function base64Bytes(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) {
     bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   }
   return btoa(bin);
+}
+
+/** UTF-8 → base64 (terminal frames). */
+export function base64Utf8(text: string): string {
+  return base64Bytes(new TextEncoder().encode(text));
 }

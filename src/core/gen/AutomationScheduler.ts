@@ -6,12 +6,13 @@
 export type AutomationScheduler = { 
 /**
  * `systemd`: a systemd timer brings tf-hostd back after reboots and crashes (Linux with
- * systemd: root, or lingering users); `daemon`: runs while tf-hostd runs (it starts when
- * a TeleFlock app connects).
+ * systemd: root, or lingering users); `launchd`: a launchd agent does (macOS), and
+ * `taskScheduler`: a Task Scheduler task does (Windows), both once the user has logged
+ * in; `daemon`: runs while tf-hostd runs (it starts when a TeleFlock app connects).
  */
 kind: string, 
 /**
- * The systemd timer is installed and active.
+ * The timer, agent or task is installed and active.
  */
 persistent: boolean, 
 /**

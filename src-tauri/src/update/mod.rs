@@ -26,14 +26,20 @@
 //!
 //! What an automatic check finds must not surprise the user (`apply`): on Windows and Linux it
 //! is downloaded in the background and verified, then waits as `UpdatePhase::Ready` ("Restart
-//! now") while the user is in front: the main window shown, not minimized and focused, or Quick
-//! capture in use (focused, text typed in it, or holding pasted images or a send in flight; they
-//! live in memory only). It installs and restarts by itself once the user has been away for an
-//! uninterrupted `apply::AWAY_GRACE`: any return (either window focused, capture opened or typed
-//! in) voids the pending timers, so alt-tabbing away, back and away again counts only the last
-//! absence. The AppImage also installs when the app quits (the quit is the user's own and nothing
-//! restarts). The `.deb` (`pkexec` password prompt) never installs unattended: it
-//! stays `ready` until the user clicks **Install**. A manual check or click installs at once.
+//! now") while the user is in front: the main window shown, not minimized and focused, Quick
+//! capture in use (focused, shown with a task in it, or a send in flight, which a restart would
+//! lose), or a page uploading a video (`crate::drafts`). It installs and restarts by itself once
+//! the user has been away for an uninterrupted `apply::AWAY_GRACE`: any return (either window
+//! focused, capture opened or typed in) voids the pending timers, so alt-tabbing away, back and
+//! away again counts only the last absence. The AppImage also installs when the app quits (the
+//! quit is the user's own and nothing restarts). The `.deb` (`pkexec` password prompt) never
+//! installs unattended: it stays `ready` until the user clicks **Install**. A manual check or
+//! click installs at once.
+//!
+//! Nothing the user typed or attached and hasn't sent is lost to an update: before the restart,
+//! the Windows installer (`apply::install_and_restart`), Quit (`crate::drafts::quit`, the
+//! AppImage's install) and the Android installer, the pages write out their drafts and the shell
+//! waits for their answer, 3 s at most (`crate::drafts`).
 //!
 //! The webview drives it through `core_call` app methods answered here instead of the engine
 //! (`app.updateStatus`, `app.updateCheck`, `app.updateInstall`); progress is pushed as
@@ -454,20 +460,28 @@ impl Updater {
         Ok(())
     }
 
-    /// Runs the plugin's install and restarts. Windows: starts the passive installer (it
-    /// relaunches TeleFlock) and exits the process. Linux: replaces the AppImage or runs
-    /// `pkexec dpkg -i` (which waits for the password prompt). Off the async workers: both block.
+    /// Runs the plugin's install and restarts (`apply::install_and_restart`: the pages write out
+    /// their unsent drafts first). Windows: starts the passive installer (it relaunches TeleFlock)
+    /// and exits the process. Linux: replaces the AppImage or runs `pkexec dpkg -i` (which waits
+    /// for the password prompt), then restarts through the regular exit path (RunEvent::Exit →
+    /// engine shutdown). The install runs off the async workers: both block.
     #[cfg(desktop)]
     async fn install_pending(self: &Arc<Self>, p: Pending) -> Result<(), String> {
-        tauri::async_runtime::spawn_blocking(move || p.update.install(p.bytes))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        // Not reached on Windows. Elsewhere the new version is on disk: restart into it through
-        // the regular exit path (RunEvent::Exit → engine shutdown).
-        log::info!("update: installed, restarting");
-        self.app.request_restart();
-        Ok(())
+        apply::install_and_restart(
+            cfg!(windows),
+            async || crate::drafts::flush(&self.app, "the update").await,
+            async move || {
+                tauri::async_runtime::spawn_blocking(move || p.update.install(p.bytes))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())
+            },
+            || {
+                log::info!("update: installed, restarting");
+                self.app.request_restart();
+            },
+        )
+        .await
     }
 
     /// Takes the waiting package and installs it in the background (`ready` → `installing`).
@@ -492,6 +506,7 @@ impl Updater {
 
     /// The user is in front of the app: the main window is shown, not minimized and focused (an
     /// unreadable window counts as in front), or Quick capture is in use (`apply::capture_in_front`).
+    /// Work a restart would lose counts too: a page with an upload in flight (`crate::drafts`).
     #[cfg(desktop)]
     fn in_front(&self) -> bool {
         use tauri::Manager;
@@ -503,7 +518,8 @@ impl Updater {
             )
         });
         let c = crate::capture::usage(&self.app);
-        main || apply::capture_in_front(c.visible, c.focused, c.typing, c.unsaved)
+        let busy = self.app.try_state::<crate::drafts::Drafts>().is_some_and(|d| d.busy());
+        main || busy || apply::capture_in_front(c.visible, c.focused, c.typing, c.unsaved)
     }
 
     /// After [`apply::AWAY_GRACE`] of uninterrupted absence (no return to the front, no later
@@ -562,7 +578,7 @@ impl Updater {
         let in_front = tauri_plugin_teleflock_android::in_foreground();
         self.lock().apk = Some(dest);
         if in_front {
-            return self.launch_apk(true);
+            return self.launch_apk(true).await;
         }
         // The installer can't start from the background (no activity, or not in front): keep the
         // verified APK and prompt on the next resume.
@@ -578,15 +594,17 @@ impl Updater {
     /// Hands the verified APK to the system installer. The plugin first checks the archive
     /// itself (same package, same signing certificates, higher versionCode) and deletes it when
     /// it doesn't match. Without the "install unknown apps" permission, opens its settings screen
-    /// (`open_settings`) and waits for [`Self::resumed`].
+    /// (`open_settings`) and waits for [`Self::resumed`]. The installer kills the app to replace
+    /// it, so the page writes out its unsent drafts first (`crate::drafts`).
     #[cfg(target_os = "android")]
-    fn launch_apk(&self, open_settings: bool) -> Result<(), String> {
+    async fn launch_apk(&self, open_settings: bool) -> Result<(), String> {
         use tauri_plugin_teleflock_android::{ApkInstall, TeleFlockAndroidExt};
         let path = {
             let mut s = self.lock();
             s.prompt_pending = false;
             s.apk.clone().ok_or("no downloaded update")?
         };
+        crate::drafts::flush(&self.app, "the update's installer").await;
         let r = self.app.teleflock_android().install_apk(&path.to_string_lossy(), open_settings).map_err(|e| {
             // A rejected APK is gone (deleted by the plugin); don't offer it again.
             self.lock().apk = None;
@@ -628,7 +646,7 @@ impl Updater {
         };
         let me = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = me.launch_apk(open_settings) {
+            if let Err(e) = me.launch_apk(open_settings).await {
                 me.fail(e);
             }
         });

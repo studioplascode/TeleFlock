@@ -69,9 +69,9 @@ pub struct Status {
 /// What the capture page says it holds ([`capture_draft`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Draft {
-    /// Text in the box (it survives a restart in the page's localStorage).
+    /// A task in the box: text or images (both survive a restart: localStorage and IndexedDB).
     typing: bool,
-    /// Pasted images or a request waiting for the main window: lost by a restart.
+    /// A request waiting for the main window: lost by a restart.
     unsaved: bool,
 }
 
@@ -349,9 +349,9 @@ pub fn capture_hide<R: Runtime>(app: AppHandle<R>) {
     hide(&app);
 }
 
-/// The page reports what it holds (`CaptureWindow.tsx`, on every change): text typed, and what a
-/// restart would lose (images, a send in flight). The updater counts that as the user being at
-/// work (`in_front`), so it neither restarts the app under them nor loses the images.
+/// The page reports what it holds (`CaptureWindow.tsx`, on every change): a task (text or
+/// images), and what a restart would lose (a send in flight). The updater counts that as the user
+/// being at work (`in_front`), so it doesn't restart the app under them.
 #[tauri::command]
 pub fn capture_draft<R: Runtime>(app: AppHandle<R>, typing: bool, unsaved: bool) {
     let Some(cap) = app.try_state::<Capture>() else { return };

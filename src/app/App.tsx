@@ -15,6 +15,8 @@ import { Onboarding } from "@/features/hosts/Onboarding";
 import { useNotifyBridge } from "@/features/notify/useNotifyBridge";
 import { usePresenceReporter } from "@/features/notify/usePresenceReporter";
 import { CommandPalette } from "@/features/palette/CommandPalette";
+import { ArtifactOverlay } from "@/features/session/artifacts/ArtifactOverlay";
+import { AgentChatOverlay } from "@/features/session/irc/boardUi";
 import { useOverlayBack } from "@/features/shell/backButton";
 import { DesktopShell } from "@/features/shell/DesktopShell";
 import { useGlobalShortcuts } from "@/features/shell/keyboard";
@@ -23,6 +25,7 @@ import { MobileShell } from "@/features/shell/MobileShell";
 import { SheetHost } from "@/features/shell/sheets";
 import { ShortcutsSheet } from "@/features/shell/ShortcutsSheet";
 import { useAutoUpdate } from "@/features/updates/updates";
+import { useWhatsNewCheck, WhatsNew } from "@/features/updates/WhatsNew";
 import { RouteView } from "./routes";
 
 /** Overlays mounted exactly once, above every layout. */
@@ -41,6 +44,9 @@ function GlobalOverlays() {
       <HostSyncDialog />
       <ShortcutsSheet />
       <SheetHost />
+      <WhatsNew />
+      <ArtifactOverlay />
+      <AgentChatOverlay />
     </>
   );
 }
@@ -77,6 +83,7 @@ function Frame() {
   useNotifyBridge();
   usePresenceReporter();
   useAutoUpdate();
+  useWhatsNewCheck();
   useGlobalPulseFeed();
   useGlobalShortcuts();
   useOverlayBack(mobile);

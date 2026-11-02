@@ -172,6 +172,7 @@ function follow(from: string, to: string): void {
   const ui = useUi.getState();
   const split = ui.split;
   if (split?.kind === "session" && split.key === from) ui.setSplit({ kind: "session", key: to });
+  else if (split?.kind === "artifact" && split.key === from) ui.setSplit({ ...split, key: to });
   else if (split?.kind === "terminal" && split.agentId && agentKey(split.hostId, split.agentId) === from) ui.setSplit({ kind: "terminal", hostId: next.hostId, agentId: next.agentId });
   if (ui.selectedKey === from) ui.select(to);
   markResuming(from, false);
@@ -214,7 +215,8 @@ function scanPruned(s: CoreState, prev: CoreState): void {
   if ((route.name === "agent" || (route.name === "terminal" && route.agentId)) && keys.has(agentKey(route.hostId, route.agentId ?? ""))) navigate({ name: "board" }, { replace: true });
   const ui = useUi.getState();
   const split = ui.split;
-  if (split && keys.has(split.kind === "session" ? split.key : agentKey(split.hostId, split.agentId ?? ""))) ui.setSplit(null);
+  const shown = split?.kind === "terminal" ? agentKey(split.hostId, split.agentId ?? "") : split?.kind === "session" || split?.kind === "artifact" ? split.key : undefined;
+  if (shown !== undefined && keys.has(shown)) ui.setSplit(null);
   if (ui.selectedKey && keys.has(ui.selectedKey)) ui.select(null);
   for (const l of prunedListeners) l(batch);
 }

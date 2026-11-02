@@ -1,0 +1,10 @@
+# IdleShells lab settings (isolated omp agent dir): omp starts without its setup wizard and sits
+# idle; nothing in the lab prompts it, so no model is configured or called.
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

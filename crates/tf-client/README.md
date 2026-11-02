@@ -25,7 +25,8 @@ impl Engine {                                 // Clone (Arc inside)
                                      action_id: Option<&str>, reply: Option<String>) -> Result<(), ApiError>;
     pub fn resume(&self, why: Resume);        // Focus (desktop) | Foreground | Network (Android)
     pub fn page_closed(&self);                // Tauri: webview reload/navigation → close the page's terminals + sessions
-    pub async fn shutdown(&self);
+    pub fn allow_browser_origins(&self, origins: impl IntoIterator<Item = String>); // devserver / dev webview pages
+    pub async fn shutdown(&self);             // hosts, then the TeleFlock Browser
 }
 
 pub trait Platform: Send + Sync + 'static {
@@ -109,13 +110,62 @@ and `forward.stop` end the affected streams. Status: `disabled`, `waiting`, `uns
 End to end against two real daemons: `cargo test -p tf-client --test forward` (builds `tf-hostd`, or set
 `TF_TEST_HOSTD`).
 
+## Recordings (`src/recording/`)
+App methods `recording.*` and `AppEvent::Recordings` (`tf_proto::recording`), one folder per recording in
+`data_dir/recordings/<id>/`. Appends write straight to `frames.bin` / `frames.idx` / `events.jsonl` / `shots/`;
+the microphone records `voice.wav` (feature `voice`: tf-dictation; without it voice and transcript are
+`unavailable`). `recording.stop` returns `processing`; in the background `mov.rs` writes `recording.mov`
+(QuickTime, Photo-JPEG at a constant 10 fps where unchanged slots share the previous frame's bytes, 16 kHz
+mono PCM), `frames.idx` is switched to point into it and `frames.bin` removed, the voice is transcribed (one
+at a time, reading `voice.wav` a piece at a time), then `ready`. Limits: one recording at a time (`busy`), 1 GiB
+or 60 min each, 2 GiB in all (`start` answers `budget_exceeded`); checked every second while it records, appends
+or not, and the core stops the recording at one itself (`append` answers `stop` with the reason). Each
+`recording.render` writes `bundle/<render>/` for its upload; `recording.release` removes it. A recording left
+recording or processing by a quit or crash is finished at the next start (renders left behind go); a
+transcription the app ended in twice is marked failed instead of run again. `src-tauri` turns `voice` on for
+desktops, `tf-devserver` has its own `voice` feature (labs).
+
+## TeleFlock Browser (`src/browser/`)
+App methods `browser.*` and `AppEvent::Browser` (`tf_proto::browser`; architecture §5.2). One Chromium per app
+core (desktops and tf-devserver; Android answers `unavailable`): the configured `enginePath`, else Chrome,
+Chromium, Edge or Brave found here, else the pinned Chrome for Testing `browser.installEngine` downloads into
+`data_dir/browser/engine` (size and SHA-256 checked). Profile `data_dir/browser/profile` (one app core per
+profile: `profile.lock`), headless or in its own window, DevTools on `127.0.0.1` open to the app's origins and
+those of `allow_browser_origins`; restarted after crashes (1, 2, 4, 8, 16 s), stopped by `browser.stop` and
+`shutdown`. Agents attach (`browser.attach`, an allowed `use_user_browser` request; at most `cap`, default 4,
+others wait) through their host's `agent.browserAttach`; their connections arrive as `fwd` streams of kind
+`browser` and are served by the DevTools proxy (`src/browser/proxy/`). Config in `data_dir/browser/config.json`.
+`cargo test -p tf-client browser` (with a real Chromium when one is found, `TF_TEST_CHROME` to pick one); lab
+`scripts/lab/browser/`.
+
+## Dictation (`src/dictation/`)
+App methods `dictation.*`, `AppEvent::Dictation` and `AppEvent::DictationSession` (`tf_proto::dictation`;
+architecture §5.2, §6.16) on tf-dictation, feature `voice` (`src-tauri` turns it on for desktops, `tf-devserver`
+has its own `voice` feature); without it every method answers `unsupported` (the Android app keeps its system
+speech recognizer). Models in `data_dir/dictation/` (`models/<id>/`; `dictation.json`: the chosen model, language
+and microphone). `dictation.install` downloads on a thread of its own (resumable, every file's SHA-256 checked,
+`AppEvent::Dictation` at most every 250 ms); the first model installed becomes the chosen one; removing the chosen
+one ends its sessions and hands over to another installed model, the one recommended for the device first.
+Sessions: `dictation.start {session, locale?}` (an id of 1–64 characters the page picks) → `listening`, `partial`,
+`final`, `error` and always `end` last, under that id; one at a time (a start stops the running one). A session is
+registered before the microphone opens, so a stop, a cancel, a page close (`Engine::page_closed`) or another start
+while it opens reaches it once it started. Start errors carry hints: no model (Settings → Dictation), a microphone
+the system refused (where to allow it on macOS and Windows). `cargo test -p tf-client --features voice --lib
+dictation::` (a fake engine and sparse model files); lab `scripts/lab/dictation/`.
+
 ## Embedded artifacts
 `build.rs` embeds `$TF_HOSTD_DIST/<triple>/tf-hostd[.exe]` (default `<workspace>/target/hostd-dist`)
 for each triple present (`x86_64|aarch64-unknown-linux-musl`, `…-linux-gnu`, `x86_64|aarch64-pc-windows-msvc`,
-`…-apple-darwin`), **zstd -19 compressed** (≈ 8.6 → 3.3 MB) with the SHA-256 and size of the raw binary
-computed at build time; deploy decompresses only when it actually uploads. Android builds skip the
-Windows triples. It also embeds `host/teleflock-bridge/teleflock-bridge.ts`. Missing ones fail at
-deploy time with an error naming the triple / file.
+`…-apple-darwin`), **zstd -19 compressed** (0.8.1 x86_64 musl: 20.5 → 7.3 MB) with the SHA-256 and size of
+the raw binary computed at build time; deploy decompresses only when it actually uploads. The compressed
+copy `scripts/build-hostd.sh` writes next to each binary (`tf-hostd[.exe].zst`) is embedded once it
+decompresses to exactly that binary; otherwise `build.rs` compresses it. Either way the bytes are embedded
+from `build.rs`'s own copy in `OUT_DIR` (kept while the binary is the same), never from the shared dist dir,
+which another `build-hostd.sh` run may rewrite before rustc reads it. It watches
+only the dist dir, not each triple's file: cargo reruns a build script on every build while one of its
+watched paths is missing. Android builds skip the Windows triples. It also embeds
+`host/teleflock-bridge/teleflock-bridge.ts`. Missing ones fail at deploy time with an error naming the
+triple / file.
 
 # tf-devserver
 `tf-devserver --bind 127.0.0.1:7420 --data-dir <dir> [--static dist] [--hostd-bin <path>] [--token <t>]

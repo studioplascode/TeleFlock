@@ -1,4 +1,4 @@
-import { Cable, Square, SquareTerminal, Terminal, Wrench, type LucideIcon } from "lucide-react";
+import { Cable, Globe, Square, SquareTerminal, Terminal, Wrench, type LucideIcon } from "lucide-react";
 import { slugify } from "@/core/forward";
 import { formatBytes } from "@/core/upload";
 import type { ForwardKind, ForwardRule, ForwardStream } from "@/core/gen";
@@ -11,6 +11,8 @@ const KINDS: Record<ForwardKind, { label: string; icon: LucideIcon }> = {
   shell: { label: "Shell", icon: SquareTerminal },
   tool: { label: "Tool", icon: Wrench },
   port: { label: "Port", icon: Cable },
+  // Browser connections are the TeleFlock Browser's (src/features/browser), never a rule's stream.
+  browser: { label: "Browser", icon: Globe },
 };
 
 /**

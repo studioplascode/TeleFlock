@@ -60,7 +60,7 @@ transcript rows keep identity, so selectors re-render only what changed.
 | `useSessionItem(key, itemId)` | one `TranscriptItem` (per-row subscription) |
 | `useBtw(key)` | `Record<btwId, { turns: ({ question?, text, done } \| undefined)[] }>`: live `/btw` conversations (asked here or in omp's TUI), deltas accumulated per turn; turns never seen live are holes (fill them from `agent.btwHistory`) |
 | `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read, resolved?}), unread, markRead(), clear() }`; `markRead`/`clear` and `markAgentNotificationsRead(hostId, agentId)` also call `app.notifyRead` so the core retracts OS notifications; `markNotificationRead(hostId, id)` marks one item read on this surface only (the wire has no per-item read); `notifyDone` events mark items read / resolved |
-| `useActivity(hostId?)` | `(ActivityEvent & {hostId})[]` newest first; loads `host.activity`, refreshes on lane changes/notifications while mounted. `loadOlderActivity(hostId)` pages |
+| `useActivity(hostId?)` | `(ActivityEvent & {hostId})[]` newest first; loads `host.activity` on every mount (`watchActivity`: an unwatched feed is not refreshed, so it may have missed entries), refreshes on lane changes/notifications while mounted. `loadOlderActivity(hostId)` pages |
 | `useAccountLimits(hostIds)` | `Record<hostId, { data?: AccountLimits, error?, loading, receivedAt? }>`; one shared `host.limits` poll per host (60 s) while anything is mounted; `refreshLimits(hostId)` forces one. Pure helpers in `limits.ts`: `projectWindow` (pace + `runsOut`/`resetsFirst`/`idle`/`exhausted`/`reset`/`unknown`), `tightestWindow`, `windowsForModel` (tier windows only for models naming the tier), `sessionLimits(data, sessionId, model, now)`, `describePace`, `formatSpan`, `formatPct` |
 | `useSettings(sel?)` / `.getState()` | `Settings & { update(patch), setMuted(key, muted), saveTemplate(t), removeTemplate(id), loaded }` (optimistic, rolls back on error; `mutedAgents`/`templates` always present) |
 | `isMuted(key)` / `useIsMuted(key)` | agent muted in `settings.mutedAgents` → suppress needs-you toasts, sounds, OS notifications |
@@ -99,9 +99,18 @@ const [images, setImages, clearImages] = useDraftImages(key);                   
 
 - A value equal to the field's default (`initial`, `""` by default) deletes the entry; clear form
   drafts only after a successful submit (cancel/close keeps them). Filters are never auto-cleared.
-- Text: zustand `persist` to localStorage `tf.drafts`, writes debounced (300 ms, flushed on page
-  hide/unload), never throws (quota → smaller budget → memory only). Persisted copies are pruned by
+- Text: zustand `persist` to localStorage `tf.drafts` with an IndexedDB copy (`mirrored.ts`
+  `mirroredItem`: each write stores both under the next revision, the newer wins at start, so a
+  kill that cost localStorage its last writes (Chromium commits it 1–5 s or minutes late) loses
+  nothing IndexedDB had). Writes debounced (300 ms, flushed on page hide/unload), only in the page
+  that called `startDrafts()` (the main page; Quick capture reads them), never throw (quota →
+  smaller budget in localStorage, the whole copy in IndexedDB). Persisted copies are pruned by
   `pruneDrafts` (`DRAFT_LIMITS`: 400 entries, 30 days, 1 M chars; newest first).
+- Flush (`draftFlush.ts`): `flushAll()` writes every draft store now and resolves once IndexedDB
+  has it, after up to 1.5 s for draft work in flight (`trackDraftWork`: `attachImages`, a paste
+  waiting for its stored list). `answerFlushRequests()` answers the desktop/Android shell, which
+  asks before an update restart, an installer or Quit (architecture §5.4);
+  `setDraftWorkBusy(what, on)` tells it about work a restart would lose (uploads in flight).
 - Images: `DraftImage { mime, data (base64), preview }`, ≤ `MAX_DRAFT_IMAGES` (8) per key, in memory
   and written through to IndexedDB `tf.drafts`/`images` (`{ images: {mime,data}[], at }`; preview is
   rebuilt). Hydrated on first `useDraftImages(key)`; IndexedDB missing or failing → memory only.
@@ -109,8 +118,10 @@ const [images, setImages, clearImages] = useDraftImages(key);                   
   them (an added image lands after them, a clear stays a clear); nothing is written before that.
   Edit with updaters (`setImages(cur => …)`, remove by identity), not lists built from a stale render.
   At open, entries older than 30 days and all but the newest 40 are swept.
-- Videos (`draftVideos.ts`, through `upload.ts`): memory only (the browser reads a picked file only
-  while that page lives; switching agents or views keeps the upload going). `attachVideos(key, hostId
+- Videos (`draftVideos.ts`, through `upload.ts`): in memory, with each draft's list written through
+  to IndexedDB `tf.draftVideos`/`videos` (`hydrateDraftVideos`, on first `useDraftVideos(key)`): an
+  uploaded video comes back as it was, one cut off mid-upload as failed ("attach it again": the
+  browser reads a picked file only while that page lives; switching agents or views keeps the upload going). `attachVideos(key, hostId
   | null, files)` (≤ 4 per prompt, ≤ 2 GiB each, video mime or extension) starts the upload at once
   when the host is known, one upload per host at a time; `uploadDraftVideos(ids, hostId)` starts
   waiting ones (Dispatch Auto), `whenUploaded(ids)` resolves with `{name, size, path}` once all are
@@ -167,12 +178,14 @@ timeout, error or junk output. Show AI-made values with a small ✨ and "Named b
 | `suggestBranch(hostId, task, opts?)` | kebab slug, 2–5 words, ≤ 40 chars, starts with a letter, no prefix |
 | `suggestAgentName(hostId, task, taken, opts?)` | kebab, 1–3 words, ≤ 24 chars, unique vs `taken` (`-2`, `-3`, …) |
 | `suggestTitle(hostId, text, opts?)` | ≤ 6 words, sentence case, no quotes / trailing period |
+| `suggestAgentRename(hostId, { name, title?, branch?, task?, reply?, tools?, line?, recap? }, taken, opts?)` | `AiOutcome<{ name, title }>` (each `null` when the model gave none): the one helper that says why it failed (`AiFailure`), and it skips the cache and the unavailable memo (a click, not a background suggestion); "Name it again" in `features/board/renameAgain.ts` |
 | `suggestCommitMessage(hostId, { files, patch?, hint? }, opts?)` | `{ subject (≤ 72 chars), body? }` |
 | `suggestPullRequest(hostId, { branch, base, commits, files, patch? }, opts?)` | `{ title (≤ 72 chars), body (markdown) }` |
 | `suggestTemplateName(hostId, { model?, thinking?, plan?, prompt? }, opts?)` | ≤ 4 words, sentence case |
+| `prewarmRamble(hostId, { role?, cwd? }?)` | fire and forget `ai.prewarm` with the Rambler system prompt: the host starts the omp worker the next `suggestRamble` call uses, when dictation starts; errors ignored, a host answering `unknown_method` is not asked again |
 | `useAiSuggestion(hostId, key, run, { debounceMs? = 900 })` | `{ value, loading }` for the current `key` (null = nothing to suggest); `loading` from the first keystroke until the debounced run settles; results for an older key are dropped |
 
-`opts`: `{ timeoutMs?, cwd? }` (host budget; defaults 12 s for names, 25 s for commit/PR drafts, capped
+`opts`: `{ timeoutMs?, cwd?, fresh? }` (`fresh`: a deliberate click: skip the cache and the unavailable memo; host budget; defaults 12 s for names, 25 s for commit/PR drafts, capped
 at 28 s to stay inside the app core's 30 s request timeout; the client gives up 5 s after it). Inputs are clipped (task text 2 000 chars, file list 4 000, patch
 12 000, 30 commits). Results are cached 10 min per host + task + input (memory only); identical
 in-flight calls share one request; `unknown_method` (older hostd) or `ai_unavailable` marks the host
@@ -217,12 +230,12 @@ Deterministic seed, time-based progression (`DemoClock`; `ManualClock` in tests)
 - **forge** (online): repos teleflock, api-gateway, marketing-site, infra. Agents (ids = names):
   `kanban`, `pool`, `ci` running · `push` (select ask) and `limits` (bash approval) need you ·
   `reconnect`, `hero` in review · `docs`, `flaky` (omp, `notShared` → `agent.connect`), `deps`
-  (caps read-only) done · `copy` (kind `claude`, herdr-only, flips working/done) · `scratch` (fresh: idle, `turns: 0`, title "", `~/scratch` not a repo; the director leaves it alone).
+  (caps read-only) done · `copy` (kind `claude`, herdr-only, flips working/done) · `scratch` (fresh: idle, `turns: 0`, title "", `~/scratch` not a repo; the director leaves it alone) · chats `lisbon` (review) and `postcodes` (done, parked) in the `Chats` workspace (below).
 - Streaming ≈ 40 tok/s with thinking, tools with live output/elapsed, diffs, todos, subagents
   (pool's task), cost/usage ticking, health jitter every 2 s, pulses at 10 Hz, patches at 5 Hz.
   `ci` goes quiet (> 90 s without events while working) shortly after start, and CI-themed
   follow-ups do it again.
-- A director keeps every lane alive: idle agents get prompted from “Pixel 9”, a new question
+- A director keeps every lane alive: idle agents (not chats) get prompted from “Pixel 9”, a new question
   arrives 40 s after the Needs-you lane empties (rotating planReview → editor → approval →
   select → confirm), unanswered questions get answered from “Pixel 9” after 4 min, review > 3
   archives the oldest.
@@ -257,3 +270,23 @@ Both demo hosts carry `HostInfo.herdrHealth`: forge runs herdr 0.9.5 with 0.9.6 
 To see the incident, type `herdr server stop` in a demo shell: down at once (cause `stopped`, the omp agents ended), started again
 after 12 s, or by Restart herdr. Once it runs again, the ended card `soak` (`demo/parking.ts`) gets its `restart` ticket and comes
 back by itself 5 s later, with hostd's note. `bun test src/core/demo/herdrHealth.test.ts src/core/demo/parking.test.ts`.
+
+## Chat tasks in the demo (`demo/chats.ts`)
+
+forge's daemon starts chats (`HostInfo.chats` = `/home/demo/.teleflock/chats`). studio-pc plays a daemon from before them: no
+`HostInfo.chats`, `agent.start` with the chat target fails as an old daemon parses it (`invalid_params`, "unknown variant
+`chat`"), `chat.*` answers `unknown_method`; `chatsUnsupported()` recognises both. `agent.start {target: {kind: "chat"}}`
+checks the spec like every start, then names the agent as tf-hostd does (`spec.name` while it is a valid herdr name no
+agent has, else one made from it; else the prompt's first words within 28 characters; else `chat`; an id never repeats a
+deleted chat's), makes the empty folder `<chats>/<name>-<6 [a-z0-9]>` and opens the agent in a new tab, labelled with its
+name, of the host's one `Chats` workspace (made for the first chat, closed with its last tab). A chat folder given as `cwd`
+opens there too, made again (empty) when it went. The agent has `chat: true` and no repo, branch or diff. Its prompts get
+conversational replies (a fetch of a link in the prompt, a web search for something current, else an answer; never an
+edit, a test or a commit), and the director neither prompts it nor injects questions. Mark done parks it like any agent;
+resuming reopens it in a new `Chats` tab at its folder. Seeds: `lisbon` in Review (its folder keeps `itinerary.md`),
+`postcodes` parked in Done (empty folder), and two folders whose cards are gone: `birthday-party-…` (only omp's
+`.omp/plans/…`) and `dinner-ideas-…` (keeps `recipes.md`). `chat.list` lists the folders newest first, with the card that
+uses each (a live one first) and what keeps it (`.omp/` never does). `chat.delete` takes an agent (live, parked or ended)
+or a chat folder (the agent using it goes too); `dryRun` changes nothing (`working`: a live agent mid-turn); otherwise the
+agent stops, its pane and card go, `HostInfo.pruned` lists it, its session stays in Past sessions, and the folder is
+removed unless something in it is kept or another live agent works there. `bun test src/core/demo/chats.test.ts`.

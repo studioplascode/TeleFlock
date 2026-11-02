@@ -50,7 +50,7 @@ export function PaneList({
         )}
       </div>
       {/* Radix lays the content out as a table (inline style), which defeats `truncate`: block it; never scroll sideways. */}
-      <ScrollArea className="min-h-0 flex-1" viewportClassName="px-1.5 pb-2 overflow-x-hidden! [&>div]:block!" fade>
+      <ScrollArea className="min-h-0 flex-1" viewportClassName="px-1.5 pb-2 overflow-x-hidden! [&>div]:block! [&_.touch-hit]:after:hidden" fade>
         {sorted.length === 0 ? (
           <p className="px-2 py-3 text-xs text-mute-2">No panes on this host yet.</p>
         ) : (

@@ -4,7 +4,8 @@
 //! working in the window.
 //!
 //! The decision ([`decide`]) is pure; `Updater` asks it after a download, whenever the main
-//! window leaves the front and on quit.
+//! window leaves the front and on quit. [`install_and_restart`] is the order applying runs in,
+//! with the pages' unsent drafts written out at the last moment the process surely still runs.
 
 // The desktop updater (Windows, Linux) is the only caller; Android and macOS compile it unused.
 #![cfg_attr(not(desktop), allow(dead_code))]
@@ -41,9 +42,9 @@ pub fn in_front(visible: bool, minimized: bool, focused: bool) -> bool {
     visible && !minimized && focused
 }
 
-/// Quick capture is what the user is working in: they are typing in it while it is shown, it has
-/// the focus, or it holds what a restart would lose (pasted images live in the page's memory only,
-/// and a request waiting for the main window's answer is in flight), even if it was put away.
+/// Quick capture is what the user is working in: it has the focus, it shows with a task in it
+/// (`typing`: text or images, both kept across restarts), or it holds what a restart would lose
+/// (`unsaved`: a request waiting for the main window's answer), even if it was put away.
 pub fn capture_in_front(visible: bool, focused: bool, typing: bool, unsaved: bool) -> bool {
     unsaved || (visible && (focused || typing))
 }
@@ -111,6 +112,27 @@ pub fn applies_on_quit(target: Target) -> bool {
     target == Target::AppImage
 }
 
+/// Installs a downloaded update and restarts into it. The pages write out their unsent drafts
+/// (`flush`, `crate::drafts`) at the last moment the process surely still runs: where the
+/// installer ends the process itself (Windows: it exits, and relaunches the app once done) right
+/// before it starts; elsewhere after the install (the `.deb`'s password prompt can take minutes,
+/// and the user may type meanwhile), right before the restart. A failed install restarts nothing.
+pub async fn install_and_restart(
+    installer_exits: bool,
+    flush: impl AsyncFnOnce(),
+    install: impl AsyncFnOnce() -> Result<(), String>,
+    restart: impl FnOnce(),
+) -> Result<(), String> {
+    if installer_exits {
+        flush().await;
+        return install().await;
+    }
+    install().await?;
+    flush().await;
+    restart();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,10 +186,10 @@ mod tests {
     fn quick_capture_counts_while_it_is_being_used() {
         // (visible, focused, typing, unsaved)
         assert!(capture_in_front(true, true, false, false), "focused, empty");
-        assert!(capture_in_front(true, false, true, false), "shown, text typed, focus elsewhere");
+        assert!(capture_in_front(true, false, true, false), "shown with a task in it, focus elsewhere");
         assert!(!capture_in_front(true, false, false, false), "shown but empty and unfocused");
-        assert!(!capture_in_front(false, false, true, false), "put away with only text: it is kept across restarts");
-        assert!(capture_in_front(false, false, false, true), "put away with pasted images: they live in memory only");
+        assert!(!capture_in_front(false, false, true, false), "put away with a task: its text and images are kept across restarts");
+        assert!(capture_in_front(false, false, false, true), "put away with a send waiting for the main window: a restart would lose it");
         assert!(capture_in_front(true, false, false, true), "a send waiting for the main window");
     }
 
@@ -286,5 +308,96 @@ mod tests {
             .0
         });
         assert!(!ok);
+    }
+
+    type Log = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+    fn push(log: &Log, step: &'static str) {
+        log.lock().unwrap().push(step);
+    }
+
+    /// The steps an install took, in order, with a page that saves its drafts at once.
+    fn steps(installer_exits: bool, install: Result<(), String>) -> (Result<(), String>, Vec<&'static str>) {
+        let log = Log::default();
+        let out = run(install_and_restart(
+            installer_exits,
+            async || push(&log, "drafts saved"),
+            async || {
+                push(&log, "install");
+                install
+            },
+            || push(&log, "restart"),
+        ));
+        let steps = log.lock().unwrap().clone();
+        (out, steps)
+    }
+
+    /// Windows' installer exits the process (it returns only on failure; here it returns), so the
+    /// drafts go first; elsewhere the install leaves the process running and the restart ends it.
+    #[test]
+    fn the_drafts_are_saved_before_whatever_ends_the_process() {
+        assert_eq!(steps(true, Ok(())), (Ok(()), vec!["drafts saved", "install"]));
+        assert_eq!(steps(false, Ok(())), (Ok(()), vec!["install", "drafts saved", "restart"]));
+    }
+
+    #[test]
+    fn a_failed_install_restarts_nothing() {
+        let refused = Err("pkexec: the password prompt was dismissed".to_owned());
+        assert_eq!(steps(false, refused.clone()), (refused, vec!["install"]));
+    }
+
+    /// With the shell's real request (`crate::drafts`): the restart waits until the page answered
+    /// that its drafts are stored, and for a page that never answers only until the timeout.
+    #[test]
+    fn the_restart_waits_for_the_page_to_save_its_drafts_but_not_forever() {
+        use crate::drafts::{Drafts, Flushed};
+        let page_answers_after = Duration::from_millis(40);
+        for answers in [true, false] {
+            // A page that answers is waited for well within a long timeout; a silent one for GRACE.
+            let timeout = if answers { Duration::from_secs(5) } else { GRACE };
+            let drafts = std::sync::Arc::new(Drafts::default());
+            drafts.listen("main");
+            let log = Log::default();
+            let started = std::time::Instant::now();
+            let out = run(install_and_restart(
+                false,
+                async || {
+                    let flushed = drafts
+                        .flush(
+                            ["main".to_owned()],
+                            |id| {
+                                let (drafts, log) = (std::sync::Arc::clone(&drafts), log.clone());
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(page_answers_after).await;
+                                    if answers {
+                                        push(&log, "page saved its drafts");
+                                        drafts.answered(id, "main");
+                                    }
+                                });
+                                Ok(())
+                            },
+                            timeout,
+                        )
+                        .await;
+                    let expected = if answers { Flushed::Saved { pages: 1 } } else { Flushed::TimedOut { missing: vec!["main".to_owned()] } };
+                    assert_eq!(flushed, expected);
+                },
+                async || {
+                    push(&log, "install");
+                    Ok(())
+                },
+                || push(&log, "restart"),
+            ));
+            assert_eq!(out, Ok(()));
+            let steps = log.lock().unwrap().clone();
+            if answers {
+                assert_eq!(steps, vec!["install", "page saved its drafts", "restart"]);
+                assert!(started.elapsed() < Duration::from_secs(1), "no waiting for the timeout once the page answered");
+            } else {
+                assert_eq!(steps, vec!["install", "restart"]);
+                assert!(started.elapsed() >= GRACE, "a silent page holds the restart up for the timeout");
+                assert!(started.elapsed() < GRACE * 4, "and no longer");
+            }
+        }
     }
 }

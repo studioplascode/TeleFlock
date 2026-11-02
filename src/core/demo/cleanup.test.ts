@@ -100,6 +100,19 @@ describe("demo cleanup", () => {
     expect(recheck.check?.wal?.walBytes).toBeGreaterThan(0);
   });
 
+  test("worktrees name their main agent: cards, sessions without one, and subagents' worktrees", async () => {
+    const r = rig();
+    const report = await r.scanned();
+    const owners = new Map((report.owners ?? []).map((o) => [o.key, o]));
+    const ownerOf = (path: string) => owners.get(at(report, path)?.owner?.key ?? "");
+    const sweep = all(report).filter((w) => ownerOf(w.path)?.title === "Security sweep across every service");
+    expect(new Set(sweep.map((w) => w.path.split("/").at(-2))).size).toBe(3);
+    expect(ownerOf(sweep[0]?.path ?? "")?.state).toBe("gone");
+    expect(sweep.flatMap((w) => w.owner?.subagents ?? [])).toContain("SweepSecrets.Verify");
+    expect(ownerOf(`${WORKTREES}/api-gateway/invoices-pdf`)?.agentId).toBe("invoices");
+    expect(ownerOf(`${WORKTREES}/teleflock/try-yjs`)).toBeUndefined();
+  });
+
   test("studio-pc's tf-hostd predates the page; its disk is nearly full", () => {
     const clock = new ManualClock();
     const engine = new DemoEngine({ mode: "backend", clock });

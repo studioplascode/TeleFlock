@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_BROWSER, FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, PROTOCOL_VERSION};
 
 use crate::daemon::Daemon;
@@ -56,13 +56,21 @@ pub struct Features {
     pub presence: bool,
     /// Host-to-host forwarding offers and streams ([`crate::forward`]).
     pub forward: bool,
+    /// The client lends agents its TeleFlock Browser ([`crate::browser`]).
+    pub browser: bool,
 }
 
 impl Features {
     /// The features of `requested` (`hello`'s `client.features`) this hostd speaks.
     pub fn negotiate(requested: Option<&[String]>) -> Features {
         let has = |f: &str| requested.is_some_and(|r| r.iter().any(|x| x == f));
-        Features { zstd: has(FEATURE_ZSTD), session_sync: has(FEATURE_SESSION_SYNC), presence: has(FEATURE_PRESENCE), forward: has(FEATURE_FORWARD) }
+        Features {
+            zstd: has(FEATURE_ZSTD),
+            session_sync: has(FEATURE_SESSION_SYNC),
+            presence: has(FEATURE_PRESENCE),
+            forward: has(FEATURE_FORWARD),
+            browser: has(FEATURE_BROWSER),
+        }
     }
 
     /// `welcome.features`: the accepted ones (none for a client that asked for none, which then
@@ -81,6 +89,9 @@ impl Features {
         }
         if self.forward {
             out.push(FEATURE_FORWARD.to_string());
+        }
+        if self.browser {
+            out.push(FEATURE_BROWSER.to_string());
         }
         Some(out)
     }
@@ -377,7 +388,9 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
             ClientMsg::Presence { presence } => ctx.notify.presence_changed(&client, presence),
             ClientMsg::NotifyRead { ids } => ctx.notify.notify_read(&client, ids),
             ClientMsg::FwdOffer { offers } if features.forward => daemon.forward.offer(&client, offers),
-            ClientMsg::Fwd { sid, ev } if features.forward => daemon.forward.fwd(&client, sid, ev),
+            // Browser streams (kind `browser`) run on the forwarding machinery, with or without
+            // the `forward` feature.
+            ClientMsg::Fwd { sid, ev } if features.forward || features.browser => daemon.forward.fwd(&client, sid, ev),
             ClientMsg::FwdOffer { .. } | ClientMsg::Fwd { .. } => {}
             ClientMsg::Hello { .. } => {
                 client.send(ServerMsg::Error { error: ApiError::new("invalid_params", "duplicate hello") });
@@ -395,6 +408,7 @@ pub async fn serve(daemon: Arc<Daemon>, read: BoxRead, mut write: BoxWrite) {
     .await;
     client.close();
     daemon.forward.client_gone(&client_id);
+    ctx.browser.client_gone(&client_id);
     let _ = writer.await;
     ctx.state.detach_client(&client_id);
     ctx.notify.client_detached(&client_id);
@@ -582,10 +596,10 @@ mod tests {
         // An old client asks for nothing and gets the welcome it always got.
         assert_eq!(Features::negotiate(None), Features::default());
         assert_eq!(Features::default().welcome(None), None);
-        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "fromTheFuture".into()];
+        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "browser".into(), "fromTheFuture".into()];
         let f = Features::negotiate(Some(&all));
-        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true, forward: true });
-        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into()]));
+        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true, forward: true, browser: true });
+        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "browser".into()]));
         let unknown = vec!["fromTheFuture".to_string()];
         let f = Features::negotiate(Some(&unknown));
         assert_eq!((f, f.welcome(Some(&unknown))), (Features::default(), Some(vec![])));

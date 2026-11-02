@@ -1,4 +1,5 @@
 import { type DraftImage, draftKey } from "@/core";
+import { CHATS_NEED_UPDATE, hostTakesChats, isChatRepo } from "@/core/chats";
 import type { BranchList, ConnStatus, HostProfile, HostState, Settings } from "@/core/gen";
 import { IMAGES_TOO_LARGE, imageChars, MAX_PROMPT_IMAGE_CHARS } from "@/core/clipboardImages";
 import { explainPick, type HostLoad, hostLoad, pickHost, type QuotaReading, rankHosts } from "@/core/workload";
@@ -6,12 +7,13 @@ import { hostGroups, versionBelow } from "@/features/hosts/kinds";
 import { basename } from "@/features/workspace/shared/paths";
 import { autoTarget, findGroupRepo, groupHosts, groupOf, groupRepos } from "./auto";
 import { type DispatchEntry, type DispatchOptions, dispatchTask, entryHost, entryRepo, pendingByHost, threadKey } from "./store";
-import { recentRepos, threadBase } from "./thread";
+import { CHAT_CHOICE, recentRepos, threadBase } from "./thread";
 
 /*
  * One Dispatch send, outside any view: where the task goes (a single host, or the least busy host
- * of an Auto group that has the repo), whether that host can take it, and the `dispatchTask` call.
- * The Dispatch composer and Quick capture (`features/capture`) both send through `sendTask`.
+ * of an Auto group that has the repo, or, for a chat (`CHAT_REPO`), that starts chats), whether that
+ * host can take it, and the `dispatchTask` call. The Dispatch composer and Quick capture
+ * (`features/capture`) both send through `sendTask`.
  */
 
 /** Image prompts need hostd 0.5 (older daemons ignore `agent.images`). */
@@ -63,11 +65,12 @@ export function dispatchTarget(profiles: readonly HostProfile[], hostIds: readon
   return { target: lastHost && hostIds.includes(lastHost) ? lastHost : hostIds[0], group: null };
 }
 
-/** When each host last got a dispatch to each of its repos: `{ [hostId]: { [root]: at } }`. */
+/** When each host last got a dispatch to each of its repos: `{ [hostId]: { [root]: at } }` (chats have none). */
 export function dispatchedRepos(threads: Readonly<Record<string, DispatchEntry[]>>): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
   for (const [k, list] of Object.entries(threads)) {
     for (const e of list) {
+      if (e.chat) continue;
       const per = (out[entryHost(k, e)] ??= {});
       const root = entryRepo(k, e);
       per[root] = Math.max(per[root] ?? 0, e.createdAt);
@@ -107,9 +110,36 @@ export function takesImages(w: Pick<DispatchWorld, "profiles" | "states">, hostI
   return w.profiles.find((p) => p.id === hostId)?.kind === "demo" || (!!version && !versionBelow(version, IMAGES_MIN_HOSTD));
 }
 
-/** An Auto target's repository as the group sees it: its hosts with a checkout of it, and its name. */
+/** The hosts of `ids` whose daemon starts chats (`HostInfo.chats`, as last known). */
+export function chatHostsOf(states: Readonly<Record<string, HostState>>, ids: readonly string[]): string[] {
+  return ids.filter((h) => hostTakesChats(states[h]?.info));
+}
+
+/**
+ * Why `target` can't take a chat (`CHAT_REPO`), or null: a host whose daemon predates chats, or
+ * whose daemon isn't known yet; a group none of whose hosts start chats (which of them are online
+ * is the pick's business).
+ */
+export function chatRefusal(w: Pick<DispatchWorld, "profiles" | "status" | "states">, target: string): { title: string; description?: string } | null {
+  const nameOf = (id: string) => hostName(w.profiles, id);
+  const group = groupOf(target);
+  if (group) {
+    const members = groupHosts(w.profiles, group).map((p) => p.id);
+    if (chatHostsOf(w.states, members).length) return null;
+    return { title: `No host of ${group} can start chats yet`, description: `Update TeleFlock's daemon on ${members.map(nameOf).join(", ") || "its hosts"} (Hosts → Update), then try again` };
+  }
+  const info = w.states[target]?.info;
+  if (!info) return { title: `${nameOf(target)} ${w.status[target]?.phase === "online" ? "is still connecting" : "is offline"}` };
+  return hostTakesChats(info) ? null : { title: CHATS_NEED_UPDATE.title, description: CHATS_NEED_UPDATE.hint };
+}
+
+/**
+ * An Auto target's repository as the group sees it: its hosts with a checkout of it, and its name.
+ * `CHAT_REPO`: the group's hosts that start chats (a chat has no checkout root).
+ */
 export function autoRepoOf(w: DispatchWorld, group: string, repo: string): { name: string; roots: Record<string, string>; candidates: string[] } | null {
   const members = groupHosts(w.profiles, group).map((p) => p.id);
+  if (isChatRepo(repo)) return { name: CHAT_CHOICE, roots: {}, candidates: chatHostsOf(w.states, members) };
   const done = dispatchedRepos(w.dispatch.threads);
   const pooled = groupRepos(
     members.map((h) => ({ hostId: h, recents: recentRepos(w.states[h], done[h] ?? {}) })),
@@ -128,8 +158,9 @@ export function dispatchOptions(stored: DispatchOptions | null, s: Pick<Settings
   return { templateId: null, model: s.defaultModel ?? "default", thinking: s.defaultThinking ?? "default", plan: s.defaultPlan };
 }
 
-/** A repository's name in a target (Auto: the group's name for it; a host: its recent repos' name, else the folder). */
+/** A repository's name in a target (Auto: the group's name for it; a host: its recent repos' name, else the folder; a chat: "No folder · chat"). */
 export function repoNameOf(w: DispatchWorld, target: string, repo: string): string {
+  if (isChatRepo(repo)) return CHAT_CHOICE;
   const group = groupOf(target);
   if (group) return autoRepoOf(w, group, repo)?.name ?? basename(repo);
   return recentRepos(w.states[target], {}).find((r) => r.root === repo)?.name ?? basename(repo);
@@ -138,7 +169,7 @@ export function repoNameOf(w: DispatchWorld, target: string, repo: string): stri
 export interface SendRequest {
   /** Host id or `auto:<group>`. */
   target: string;
-  /** Checkout root (a host) or repo id (Auto). */
+  /** Checkout root (a host) or repo id (Auto); `CHAT_REPO` for a chat. */
   repo: string;
   prompt: string;
   images: readonly DraftImage[];
@@ -162,12 +193,16 @@ export type SendPlan =
 /**
  * Where and how a task would be sent, or why it can't be (the text of the toast to show). Pure:
  * every input comes from `w`, so a send outside the Dispatch view decides exactly like the view.
+ * A chat goes to a host whose daemon starts chats: Auto picks among the group's online ones.
  */
 export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
   const { target, repo, images } = req;
   const key = threadKey(target, repo);
   const nameOf = (id: string) => hostName(w.profiles, id);
   if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) return { ok: false, title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.` };
+  const chat = isChatRepo(repo);
+  const refused = chat ? chatRefusal(w, target) : null;
+  if (refused) return { ok: false, ...refused };
   const group = groupOf(target);
   let to: string | undefined = group ? undefined : target;
   let root = repo;
@@ -178,11 +213,13 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
     if (!auto || !auto.candidates.length) {
       return { ok: false, title: `No host of ${group} has ${repoName}`, description: "Pick another repository, or a single host to browse for it." };
     }
+    // What the task needs of a host, in words.
+    const need = chat ? "that starts chats" : `with ${repoName}`;
     const able = images.length ? auto.candidates.filter((h) => takesImages(w, h)) : auto.candidates;
     if (!able.length) {
       return {
         ok: false,
-        title: `No host of ${group} with ${repoName} can take images yet`,
+        title: `No host of ${group} ${need} can take images yet`,
         description: `Images need TeleFlock host daemon ${IMAGES_MIN_HOSTD} or newer on ${auto.candidates.map(nameOf).join(", ")}: update one from Hosts, or send the task without images.`,
       };
     }
@@ -190,7 +227,8 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
     const ranked = rankHosts(loadsOf(able, w.states, w.status, w.dispatch.threads, w.quotas));
     const pick = pickHost(ranked);
     if (!pick) {
-      return { ok: false, title: `No host of ${group} with ${repoName}${able.length < auto.candidates.length ? " that takes images" : ""} is online`, description: able.map(nameOf).join(", ") };
+      const imagesToo = able.length < auto.candidates.length ? (chat ? " and takes images" : " that takes images") : "";
+      return { ok: false, title: `No host of ${group} ${need}${imagesToo} is online`, description: able.map(nameOf).join(", ") };
     }
     to = pick.hostId;
     root = auto.roots[pick.hostId] ?? repo;
@@ -205,11 +243,13 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
       description: `${version ? `Its TeleFlock host daemon (${version}) is older than ${IMAGES_MIN_HOSTD}` : `Its TeleFlock host daemon version isn't known yet (images need ${IMAGES_MIN_HOSTD} or newer)`}: update it from Hosts, or send the task without images.`,
     };
   }
+  const agents = (w.states[to]?.agents ?? []).map((a) => a.name);
+  // A chat has no branch list or base: its name is deduped against the host's agents (and dispatches).
+  if (chat) return { ok: true, hostId: to, args: { key, hostId: to, repo, prompt: req.prompt, images, videos: req.videos, placed, options: req.options, taken: agents } };
   const stored = w.dispatch.bases[key];
   const legacy = w.dispatch.legacyBases[key] === true;
   const list = group ? undefined : req.branches;
   const base = list ? threadBase(list, stored, legacy) : (req.baseHint ?? threadBase(undefined, stored, legacy));
-  const agents = (w.states[to]?.agents ?? []).map((a) => a.name);
   return {
     ok: true,
     hostId: to,
@@ -231,7 +271,7 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
   };
 }
 
-/** `planSend`, then the send itself: the entry joins the thread and its worktree is created in the background. */
+/** `planSend`, then the send itself: the entry joins the thread and its worktree (a chat: its agent) is created in the background. */
 export function sendTask(w: DispatchWorld, req: SendRequest): (SendPlan & { ok: false }) | { ok: true; hostId: string; entry: DispatchEntry } {
   const plan = planSend(w, req);
   if (!plan.ok) return plan;

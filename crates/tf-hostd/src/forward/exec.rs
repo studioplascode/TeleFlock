@@ -56,8 +56,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// (`<home>/forward/bin`), which a forwarded tool never resolves to.
 pub(crate) async fn run(open: FwdEv, mut s: Stream, cancel: CancellationToken, shims: &Path) {
     let FwdEv::Open { kind, command, argv, pty, cwd, port, .. } = open else { return };
-    if kind == ForwardKind::Port {
-        return connect(port.unwrap_or(0), s, &cancel).await;
+    match kind {
+        ForwardKind::Port => return connect(port.unwrap_or(0), s, &cancel).await,
+        // Browser connections run from a host to the app, never the other way.
+        ForwardKind::Browser => {
+            (s.send)(FwdEv::Close { error: Some("a browser connection does not run on a host".into()) });
+            return;
+        }
+        _ => {}
     }
     match command_for(kind, command, argv, cwd, shims) {
         Ok(mut prepared) => {
@@ -102,7 +108,7 @@ fn command_for(kind: ForwardKind, command: Option<String>, argv: Option<Vec<Stri
             c.args(&argv[1..]);
             (c, argv[0].clone())
         }
-        ForwardKind::Port => return Err("a port is not a command".into()),
+        ForwardKind::Port | ForwardKind::Browser => return Err("a port is not a command".into()),
     };
     cmd.current_dir(dir);
     Ok(Prepared { cmd, what })

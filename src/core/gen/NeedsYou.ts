@@ -38,4 +38,13 @@ context?: string,
 /**
  * Multi-question asks: this question's place, Back, and the answer it already has.
  */
-step?: AskStep, };
+step?: AskStep, 
+/**
+ * The agent asks to use the user's TeleFlock Browser (`use_user_browser`, hosts ≥ 0.9.0):
+ * `kind` is `confirm` (apps before 0.9.0 know no other kind for it) with the options
+ * `session` ("Allow for this session"), `turn` ("Allow once") and `deny`, and `question` is
+ * the agent's reason. Answer it with `browser.answer` on a device with the browser (the app
+ * core routes an `agent.answer` of it there itself); hostd takes only a deny through
+ * `agent.answer`.
+ */
+browser?: boolean, };

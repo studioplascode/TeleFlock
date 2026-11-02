@@ -3,6 +3,8 @@
 //! * `teleflock://agent/<hostId>/<agentId>`: open that agent.
 //! * `teleflock://agent/<hostId>/<agentId>?n=<notificationId>`: a notification body tap; routed
 //!   through `Engine::notification_action` (marks it handled and opens the agent).
+//! * `teleflock://notification/<hostId>/<notificationId>`: the body tap of a notification without
+//!   an agent that opens a host's page (the idle-shells summary); routed the same way.
 //! * `teleflock://answer-next`: open the Answer-next HUD.
 //! * `teleflock://capture`: open Quick capture (desktop; a desktop's own keyboard shortcut can run
 //!   `teleflock teleflock://capture` where apps can't register one, e.g. Wayland).
@@ -21,6 +23,7 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     Agent { host_id: String, agent_id: String, notification_id: Option<String> },
+    Notification { host_id: String, notification_id: String },
     AnswerNext,
     Capture,
     Open,
@@ -39,6 +42,10 @@ pub fn agent_url(host_id: &str, agent_id: &str, notification_id: Option<&str>) -
     url
 }
 
+pub fn notification_url(host_id: &str, notification_id: &str) -> String {
+    format!("{SCHEME}://notification/{}/{}", utf8_percent_encode(host_id, SEGMENT), utf8_percent_encode(notification_id, SEGMENT))
+}
+
 pub fn parse(url: &Url) -> Option<Link> {
     if !url.scheme().eq_ignore_ascii_case(SCHEME) {
         return None;
@@ -55,6 +62,12 @@ pub fn parse(url: &Url) -> Option<Link> {
                 .map(|(_, v)| v.into_owned())
                 .filter(|v| !v.is_empty());
             Some(Link::Agent { host_id, agent_id, notification_id })
+        }
+        "notification" => {
+            let mut segs = url.path_segments()?.filter(|s| !s.is_empty());
+            let host_id = decode(segs.next()?)?;
+            let notification_id = decode(segs.next()?)?;
+            Some(Link::Notification { host_id, notification_id })
         }
         "answer-next" => Some(Link::AnswerNext),
         "capture" => Some(Link::Capture),
@@ -85,6 +98,14 @@ mod tests {
                 notification_id: Some("n/42 x".into())
             }
         );
+    }
+
+    #[test]
+    fn notification_roundtrip() {
+        let u = notification_url("aron-dev", "n/7 x");
+        assert_eq!(u, "teleflock://notification/aron-dev/n%2F7%20x");
+        assert_eq!(parse(&Url::parse(&u).unwrap()), Some(Link::Notification { host_id: "aron-dev".into(), notification_id: "n/7 x".into() }));
+        assert_eq!(parse(&Url::parse("teleflock://notification/h").unwrap()), None);
     }
 
     #[test]

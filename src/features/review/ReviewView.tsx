@@ -10,6 +10,7 @@ import {
   Ellipsis,
   FileDiff,
   GitBranch,
+  MessagesSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -22,15 +23,19 @@ import {
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { draftKey, navigate, useHostState, useUi, useWorkspaces } from "@/core";
+import { isChat } from "@/core/chats";
 import type { Agent } from "@/core/gen";
 import { BottomSheet, Button, Chip, EmptyState, IconButton, SegmentedControl, Shimmer, Skeleton, StatusOrb, Tooltip, cn, spring, useIsMobile } from "@/design";
 import { rememberShip } from "@/features/board/shipMemo";
+import { inChatsDir } from "@/features/chats/model";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { tildify } from "../workspace/shared/paths";
 import { useHostQuery } from "../workspace/shared/useHostQuery";
 import { WorkspaceActionsMenu } from "../workspace/workspaceActions";
 import { FanOutSiblings } from "./FanOutSiblings";
-import { DiffBar, type DiffLayout, DiffViewer } from "./diff/DiffViewer";
+import { DiffBar, type DiffLayout, DiffViewer, type MarkdownView } from "./diff/DiffViewer";
+import { useMdMode } from "./diff/mdMode";
+import { useRenderedDocs } from "./diff/useRenderedDocs";
 import { type DiffFile, mergeFiles, parsePatch } from "./diff/parse";
 import { FileTree } from "./FileTree";
 import { SHIP_STAGES, ShipPanel, ShipStepper, ShipStrip, shipState, usePrStatus } from "./ShipPanel";
@@ -181,9 +186,11 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   const workspaces = useWorkspaces(hostId);
   const host = useHostState(hostId);
   const ws = workspaces.find((w) => w.id === workspaceId);
-  const cwd = ws ? (ws.worktree?.path ?? ws.cwd) : undefined;
-  const fileFilterKey = cwd ? draftKey("review.fileFilter", hostId, cwd) : undefined;
   const agents = useMemo(() => host?.agents.filter((a) => a.workspaceId === workspaceId) ?? [], [host?.agents, workspaceId]);
+  // a chat's workspace (its folder is one TeleFlock made, never a repository): no git calls, a short note instead
+  const chat = agents.some(isChat) || inChatsDir(ws?.cwd, host?.info.chats);
+  const cwd = ws && !chat ? (ws.worktree?.path ?? ws.cwd) : undefined;
+  const fileFilterKey = cwd ? draftKey("review.fileFilter", hostId, cwd) : undefined;
   const working = agents.filter((a) => a.column === "running");
 
   const status = useHostQuery(hostId, "git.status", cwd ? { cwd } : null);
@@ -201,6 +208,11 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   }, [turns, reload]);
 
   const files = useMemo(() => (diff.data ? mergeFiles(parsePatch(diff.data.patch), diff.data.files).sort(treeOrder) : []), [diff.data]);
+  // Markdown files: `Diff | Rendered`, one choice for all of them, kept on this device.
+  const mdMode = useMdMode((st) => st.mode);
+  const setMdMode = useMdMode((st) => st.setMode);
+  const docs = useRenderedDocs(hostId, status.data?.root ?? cwd, files, mdMode === "rendered");
+  const markdown = useMemo<MarkdownView>(() => ({ mode: mdMode, onMode: setMdMode, docs }), [mdMode, setMdMode, docs]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [seeded, setSeeded] = useState<typeof files | null>(null);
   if (files !== seeded) {
@@ -388,6 +400,22 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
       </div>
     );
   }
+  if (chat) {
+    return (
+      <div className="grid h-full place-items-center p-6">
+        <EmptyState
+          icon={<MessagesSquare />}
+          title="A chat has nothing to review"
+          description="It runs in a folder TeleFlock made for it, not in a git repository: there is no diff, branch or pull request to ship."
+          action={
+            <Button size="sm" onClick={() => navigate({ name: "board" })}>
+              Back to the board
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
 
   const branch = status.data?.branch ?? ws.worktree?.branch ?? ws.repo?.branch;
   const base = diff.data?.base ?? status.data?.base;
@@ -453,7 +481,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             }
           />
           <div className="min-h-0 flex-1 px-2">
-            <DiffViewer key={open.path} files={[open]} layout="unified" wrap={wrap} collapsed={collapsed} onToggle={toggle} onWrap={() => setWrap(true)} compact busy={refreshing} className="h-full" />
+            <DiffViewer key={open.path} files={[open]} markdown={markdown} layout="unified" wrap={wrap} collapsed={collapsed} onToggle={toggle} onWrap={() => setWrap(true)} compact busy={refreshing} className="h-full" />
           </div>
           <nav className="flex shrink-0 items-center gap-2 px-3 pt-1.5 pb-2" aria-label="File navigation">
             <IconButton label={prev ? `Previous: ${prev.path}` : "No previous file"} variant="secondary" disabled={!prev} onClick={() => prev && jump(prev.path)} className="size-10">
@@ -681,6 +709,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
           {diffArea ?? (
             <DiffViewer
               files={files}
+              markdown={markdown}
               layout={effectiveLayout}
               wrap={effectiveWrap}
               collapsed={collapsed}

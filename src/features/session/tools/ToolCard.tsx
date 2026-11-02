@@ -28,7 +28,8 @@ import { Chip, cn, Elapsed, formatElapsed, Lightbox, LightboxTrigger, Shimmer, s
 import { useHerdrFreeze } from "@/features/hosts/HerdrControls";
 import { languageFor } from "../lib/highlight";
 import { ImagePlaceholder, useImageSources } from "../lib/images";
-import { CodeBlock, Highlighted, Markdown } from "../markdown/Markdown";
+import { CodeBlock, Highlighted } from "../markdown/CodeBlock";
+import { Markdown } from "../markdown/Markdown";
 import { useSessionUi } from "../state";
 import { withRoster } from "../subagents/roster";
 import { SubagentCard } from "../subagents/Subagents";
@@ -37,6 +38,7 @@ import { AnsiText } from "./AnsiText";
 import { useOpenOnFind } from "../find/reveal";
 import { DiffStatText, FileDiffView } from "./DiffBody";
 import { TodoPhases, todoCounts } from "./TodoList";
+import { PresentedCard } from "../artifacts/PresentedCard";
 
 type ViewType = ToolView["type"] | "generic";
 
@@ -66,6 +68,7 @@ const TOOL_KIND: [RegExp, ViewType][] = [
   [/^todo/i, "todo"],
   [/^ask/i, "ask"],
   [/^(image|screenshot)/i, "image"],
+  [/^present$/i, "markdown"],
 ];
 
 /** Per-kind icon tint so a long run of tool cards scans by shape and colour, not by reading. */
@@ -225,8 +228,13 @@ function headTitle(item: ToolItem): ReactNode {
   return item.title;
 }
 
-/** Rich card for one tool call. Every `ToolView` has a renderer; anything else gets args/output. */
+/** One tool call: the document a `present` call showed as its card, else the call's own card. */
 export function ToolCard({ item }: { item: ToolItem }) {
+  return item.artifact ? <PresentedCard item={item} artifact={item.artifact} /> : <ToolCallCard item={item} />;
+}
+
+/** Rich card for one tool call. Every `ToolView` has a renderer; anything else gets args/output. */
+function ToolCallCard({ item }: { item: ToolItem }) {
   const type: ViewType = item.view?.type ?? "generic";
   // The rich view often lands only when the call finishes: pick the icon from the tool name meanwhile.
   const kind: ViewType = type !== "generic" ? type : (TOOL_KIND.find(([re]) => re.test(item.tool))?.[1] ?? "generic");

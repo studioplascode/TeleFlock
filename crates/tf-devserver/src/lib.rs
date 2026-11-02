@@ -8,7 +8,8 @@
 //!   Each connection first receives a replay of the current state as events.
 //! * Every tab shares the engine's single hostd client per host, so session subscriptions are
 //!   reference-counted across tabs ([`Subs`]): a tab closing a session (or going away) only
-//!   unsubscribes once no other tab has it open, and a tab's terminals close with it.
+//!   unsubscribes once no other tab has it open, and a tab's terminals and the dictation
+//!   sessions it started end with it.
 //!
 //! Access control lives in [`access`]: allow-listed `Host` on every route, and a per-launch token
 //! plus same-origin `Origin` on `/ws`. The served `index.html` carries the token as
@@ -101,6 +102,8 @@ struct Subs {
 struct ConnSubs {
     sessions: HashSet<SubKey>,
     terms: HashSet<SubKey>,
+    /// Dictation sessions it started (`dictation.start`; ended ones too, cancelling them is a no-op).
+    dictation: HashSet<String>,
     /// The tab is gone: anything opened from now on (in-flight requests) is released at once.
     closed: bool,
 }
@@ -167,12 +170,24 @@ impl Conn {
         }
     }
 
-    /// The tab went away: close its terminals and the sessions only it had open.
+    /// Records a dictation session this tab started; when the tab already went away, it ends.
+    fn dictating(&self, params: &Value) {
+        let Some(session) = params.get("session").and_then(Value::as_str) else { return };
+        let mut mine = self.mine.lock().unwrap();
+        if mine.closed {
+            drop(mine);
+            spawn_cancel_dictation(self.engine.clone(), session.to_string());
+        } else {
+            mine.dictation.insert(session.to_string());
+        }
+    }
+
+    /// The tab went away: close its terminals, the sessions only it had open and its dictation.
     fn release_all(&self) {
-        let (sessions, terms) = {
+        let (sessions, terms, dictation) = {
             let mut mine = self.mine.lock().unwrap();
             mine.closed = true;
-            (std::mem::take(&mut mine.sessions), std::mem::take(&mut mine.terms))
+            (std::mem::take(&mut mine.sessions), std::mem::take(&mut mine.terms), std::mem::take(&mut mine.dictation))
         };
         let mut calls: Vec<(String, &'static str, Value)> =
             terms.into_iter().map(|(h, t)| (h, "term.close", json!({ "termId": t }))).collect();
@@ -192,7 +207,18 @@ impl Conn {
         for (host, method, params) in calls {
             spawn_release(self.engine.clone(), host, method, params);
         }
+        for session in dictation {
+            spawn_cancel_dictation(self.engine.clone(), session);
+        }
     }
+}
+
+fn spawn_cancel_dictation(engine: Engine, session: String) {
+    tokio::spawn(async move {
+        if let Err(e) = engine.call(None, "dictation.cancel", json!({ "session": session })).await {
+            log::debug!("dictation.cancel on tab close: {}", e.message);
+        }
+    });
 }
 
 fn spawn_release(engine: Engine, host: String, method: &'static str, params: Value) {
@@ -431,8 +457,10 @@ fn handle_frame(conn: &Conn, out: &mpsc::UnboundedSender<String>, text: &str) {
     tokio::spawn(async move {
         let frame = match conn.engine.call(host.as_deref(), &method, params.clone()).await {
             Ok(result) => {
-                if let Some(h) = &host {
-                    conn.opened(&method, h, &params, &result);
+                match &host {
+                    Some(h) => conn.opened(&method, h, &params, &result),
+                    None if method == "dictation.start" => conn.dictating(&params),
+                    None => {}
                 }
                 json!({ "id": id, "result": result })
             }

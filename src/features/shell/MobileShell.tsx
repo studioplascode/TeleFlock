@@ -4,6 +4,8 @@ import { useEffect } from "react";
 import { cn, spring, toast } from "@/design";
 import { navigate, type Route, useHosts, useInbox, useNotifications, useRoute, useUi } from "@/core";
 import { isBare } from "@/app/routes";
+import { useDecisions } from "@/features/autoAnswer/hooks";
+import { inboxBadge } from "@/features/autoAnswer/review";
 import { terminalRouteKey, terminalTabTarget, useLastTerminal } from "@/features/terminal/lastTerminal";
 import { EdgeSwipeBack } from "./EdgeSwipeBack";
 import { haptic } from "./haptics";
@@ -73,6 +75,8 @@ function BottomNav() {
   const route = useRoute();
   const active = tabFor(route);
   const needs = useInbox().length;
+  const decided = useDecisions().length;
+  const inbox = inboxBadge(needs, decided);
   const unread = useNotifications((n) => n.unread) > 0;
   const { profiles, status } = useHosts();
   const hostIssue = profiles.some((p) => {
@@ -105,17 +109,20 @@ function BottomNav() {
         {MOBILE_TABS.map((tab) => {
           const { label, icon: Icon } = TAB_META[tab];
           const on = active === tab;
-          // One meaning per mark: Inbox's number is what needs you (its dot: unread updates); More's dot is a host problem.
-          const badge = tab === "inbox" ? needs : 0;
+          // One meaning per mark: Inbox's number is what needs you plus the decisions to review (sunset while
+          // something needs you, calm with only decisions; its dot: unread updates); More's dot is a host problem.
+          const badge = tab === "inbox" ? inbox.count : 0;
+          const calm = tab === "inbox" && inbox.calm;
           const dot = tab === "inbox" ? unread : tab === "more" && hostIssue;
           const dotLabel = tab === "inbox" ? "unread updates" : "a host needs attention";
+          const counts = tab === "inbox" ? [needs > 0 && `${needs} need you`, decided > 0 && `${decided} decided for you`] : [];
           return (
             <li key={tab}>
               <button
                 type="button"
                 onClick={() => go(tab)}
                 aria-current={on ? "page" : undefined}
-                aria-label={[label, badge > 0 && `${badge} need you`, dot && dotLabel].filter(Boolean).join(", ")}
+                aria-label={[label, ...counts, dot && dotLabel].filter(Boolean).join(", ")}
                 className="relative flex min-h-11 w-full min-w-0 flex-col items-center justify-center gap-0.5 rounded-md py-0.5 text-[10px] leading-3 font-bold focus-ring"
               >
                 <span className="relative grid h-7 w-12 place-items-center">
@@ -137,7 +144,10 @@ function BottomNav() {
                       animate={{ scale: 1 }}
                       transition={spring.bouncy}
                       aria-hidden
-                      className="absolute -top-1 right-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-sun px-1 text-[9.5px] leading-none font-extrabold text-on-sun shadow-[0_0_0_2px_var(--color-chrome)] sun-pulse"
+                      className={cn(
+                        "absolute -top-1 right-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[9.5px] leading-none font-extrabold shadow-[0_0_0_2px_var(--color-chrome)]",
+                        calm ? "bg-tile-5 text-ink" : "bg-sun text-on-sun sun-pulse",
+                      )}
                     >
                       {badge > 99 ? "99+" : badge}
                     </motion.span>

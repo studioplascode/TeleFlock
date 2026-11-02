@@ -4,7 +4,8 @@ import { core, parseAgentKey, toApiError, useAgent } from "@/core";
 import type { Job, JobsView } from "@/core/gen";
 import { cn, Elapsed, EmptyState, formatElapsed, Spinner, Tooltip, useWindowActive } from "@/design";
 import { hostCall, usePending } from "../api";
-import { glanceText, inspectIds, jobTitle, jobsPollMs, KIND_LABEL, keepExpanded, STATUS_WORD, summaryKey, waitingText } from "./jobsModel";
+import { InspectorCard } from "../inspector/InspectorCard";
+import { commandSummary, glanceText, inspectIds, jobTitle, jobsPollMs, KIND_LABEL, keepExpanded, STATUS_WORD, summaryKey, waitingText, withoutSubagents } from "./jobsModel";
 
 const KIND_ICON: Record<string, typeof Bot> = { bash: SquareTerminal, eval: Braces, task: Bot };
 const STATUS_CLASS: Record<Job["status"], string> = {
@@ -15,8 +16,8 @@ const STATUS_CLASS: Record<Job["status"], string> = {
 };
 
 /**
- * The agent's background jobs (bash/eval commands and subagent tasks of the session and its
- * subagents): status, run time, omp's widget glance, the output tail of expanded (or the first
+ * The agent's background jobs (bash/eval commands of the session and its subagents; the subagents
+ * themselves are the Subagents panel's): status, run time, omp's widget glance, the output tail of expanded (or the first
  * running) job, and Kill. Reads `jobs.list` every second while a job runs; the card summary
  * (`omp.jobs`) says when to look again otherwise. `always`: show the empty state (mobile tab).
  */
@@ -38,9 +39,10 @@ export function JobsPanel({ agentKey, always = false }: { agentKey: string; alwa
   const load = async () => {
     try {
       const v = await core.host(hostId).call("jobs.list", { agentId, inspect: inspectIds(expandedRef.current, viewRef.current) });
-      setView(v);
+      const shown = withoutSubagents(v);
+      setView(shown);
       setError(undefined);
-      setExpanded((e) => keepExpanded(e, v));
+      setExpanded((e) => keepExpanded(e, shown));
     } catch (e) {
       const err = toApiError(e);
       setError({ title: err.message, hint: err.hint });
@@ -58,17 +60,15 @@ export function JobsPanel({ agentKey, always = false }: { agentKey: string; alwa
     return () => clearInterval(t);
   }, [poll, hostId, agentId]);
 
-  if (!wanted || (!always && view !== undefined && view.jobs.length === 0 && !view.waiting)) return null;
-  const running = view?.jobs.filter((j) => j.status === "running").length ?? summary?.running ?? 0;
+  if (!wanted || (!always && view !== undefined && view.jobs.length === 0)) return null;
+  const counted = summary && commandSummary(summary, view);
+  const running = counted?.running ?? 0;
+  const count = running > 0 ? <span className="text-accent-hi">{running} running</span> : view ? `${view.jobs.length} recent` : null;
   return (
-    <section data-panel="jobs" aria-label="Background jobs" className="rounded-[22px] glass px-4 py-3.5">
-      <div className="mb-2.5 flex items-center justify-between gap-2">
-        <div className="kicker">Background jobs</div>
-        <span className="text-[11px] font-bold text-mute">{running > 0 ? <span className="text-accent-hi">{running} running</span> : view ? `${view.jobs.length} recent` : null}</span>
-      </div>
-      {summary?.waiting && (
+    <InspectorCard id="jobs" title="Background jobs" aside={count} summary={count}>
+      {counted?.waiting && (
         <p className="mb-2 flex items-center gap-2 rounded-md bg-accent/10 px-2.5 py-1.5 text-xs font-semibold text-accent-ink" role="status">
-          <Spinner size={12} /> {waitingText(summary)}: the agent resumes when a result arrives.
+          <Spinner size={12} /> {waitingText(counted)}: the agent resumes when a result arrives.
         </p>
       )}
       {error ? (
@@ -78,7 +78,7 @@ export function JobsPanel({ agentKey, always = false }: { agentKey: string; alwa
           <Spinner size={12} /> Reading jobs…
         </div>
       ) : view.jobs.length === 0 ? (
-        <EmptyState compact icon={<Cpu />} title="No background jobs" description="Commands and subagents the agent runs in the background show up here, with their output and a Kill button." />
+        <EmptyState compact icon={<Cpu />} title="No background jobs" description="Commands the agent runs in the background show up here, with their output and a Kill button. Subagents are under Agents." />
       ) : (
         <ul className="flex flex-col gap-1.5" aria-label="Jobs">
           {view.jobs.map((job) => (
@@ -89,12 +89,12 @@ export function JobsPanel({ agentKey, always = false }: { agentKey: string; alwa
               agentId={agentId}
               open={expanded.has(job.id) || (expanded.size === 0 && inspectIds(expanded, view)[0] === job.id)}
               onToggle={() => setExpanded((e) => (e.has(job.id) ? new Set([...e].filter((id) => id !== job.id)) : new Set([...e, job.id])))}
-              onView={setView}
+              onView={(v) => setView(withoutSubagents(v))}
             />
           ))}
         </ul>
       )}
-    </section>
+    </InspectorCard>
   );
 }
 

@@ -76,7 +76,10 @@ pub(crate) mod fixtures {
                 tools: None,
                 auto_answer: None,
                 herdr_health: None,
+                chats: None,
+                idle_shells: None,
                 pruned: Vec::new(),
+                decisions: Vec::new(),
             },
             health: None,
             workspaces: vec![],
@@ -118,6 +121,8 @@ pub(crate) mod fixtures {
             diff: None,
             auto_resume: None,
             auto_answer: None,
+            chat: false,
+            browser: None,
         }
     }
 }

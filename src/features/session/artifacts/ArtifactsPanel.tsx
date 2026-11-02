@@ -1,26 +1,15 @@
-import { AtSign, Bot, ClipboardList, Copy, FileText, FolderInput, RefreshCw, Send } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
-import { toApiError, useAgent, useSession } from "@/core";
-import type { ArtifactContent } from "@/core/gen";
-import { BottomSheet, Button, cn, Dialog, DialogContent, EmptyState, formatAge, IconButton, Skeleton, useIsMobile, useNow } from "@/design";
-import { Markdown } from "../markdown/Markdown";
-import {
-  type ArtifactGroup,
-  type ArtifactList,
-  type ArtifactRow,
-  type ArtifactSection,
-  artifactRows,
-  copyText,
-  formatBytes,
-  mentionArtifact,
-  readArtifact,
-  refreshArtifacts,
-  SECTION_LABEL,
-  useArtifactList,
-} from "./artifacts";
+import { Bot, ClipboardList, FileText, Presentation, RefreshCw, Send } from "lucide-react";
+import { type ReactNode, useEffect } from "react";
+import { useAgent, useSession } from "@/core";
+import { cn, EmptyState, formatAge, IconButton, Skeleton, useIsMobile, useNow } from "@/design";
+import { InspectorCard } from "../inspector/InspectorCard";
+import { type ArtifactGroup, type ArtifactList, type ArtifactRow, type ArtifactSection, artifactRows, formatBytes, refreshArtifacts, SECTION_LABEL, useArtifactList } from "./artifacts";
+import type { DocRef } from "./load";
+import { openDoc } from "./viewer";
 
 const ICON: Record<ArtifactSection, ReactNode> = {
   review: <ClipboardList />,
+  presented: <Presentation />,
   plans: <ClipboardList />,
   notes: <FileText />,
   outputs: <Bot />,
@@ -40,6 +29,12 @@ function useArtifacts(agentKey: string) {
     void refreshArtifacts(agentKey);
   }, [agentKey, turnEnded, subsSettled, reviewPath]);
   return { list, groups: artifactRows(list.data?.files ?? [], review) };
+}
+
+/** The document a row opens in the viewer (the same viewer the transcript's cards open). */
+function rowDoc(agentKey: string, r: ArtifactRow): DocRef {
+  if (r.review || !r.file) return { agentKey, kind: "review", name: "", title: r.title };
+  return { agentKey, kind: r.file.kind, name: r.file.name, title: r.title };
 }
 
 /** Desktop rail: hidden until the session has an artifact or a plan under review. */
@@ -62,25 +57,28 @@ export function ArtifactsTab({ agentKey }: { agentKey: string }) {
       />
     );
   if (!list.data) return <Skeleton className="h-28 rounded-[22px]" />;
-  return <EmptyState compact title="No artifacts yet" description="Plans, reports and handoffs the agent and its subagents write to local://, subagent outputs and saved handoffs show up here." />;
+  return <EmptyState compact title="No artifacts yet" description="Documents the agent presents, plans, reports and handoffs it and its subagents write to local://, subagent outputs and saved handoffs show up here." />;
 }
 
 function ArtifactsSection({ agentKey, list, groups }: { agentKey: string; list: ArtifactList; groups: ArtifactGroup[] }) {
-  const [open, setOpen] = useState<ArtifactRow | null>(null);
+  const mobile = useIsMobile();
   const now = useNow(60_000);
   const files = list.data?.files.length ?? 0;
   return (
-    <section data-panel="artifacts" aria-label="Artifacts" className="rounded-[22px] glass px-4 py-3.5 transition-shadow duration-500">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="kicker">Artifacts</div>
-        <span className="flex items-center gap-1 text-[11px] font-bold text-mute">
+    <InspectorCard
+      id="artifacts"
+      title="Artifacts"
+      aside={
+        <span className="flex items-center gap-1">
           {files} file{files === 1 ? "" : "s"}
           {list.data?.truncated && "+"}
           <IconButton label="List again" size="sm" className="-my-1 -mr-1.5" onClick={() => void refreshArtifacts(agentKey, true)}>
             <RefreshCw className={cn(list.loading && "opacity-40")} />
           </IconButton>
         </span>
-      </div>
+      }
+      summary={`${files} file${files === 1 ? "" : "s"}${list.data?.truncated ? "+" : ""}`}
+    >
       <div className="flex flex-col gap-2.5">
         {groups.map((g) => (
           <div key={g.section}>
@@ -90,7 +88,7 @@ function ArtifactsSection({ agentKey, list, groups }: { agentKey: string; list: 
                 <button
                   key={r.key}
                   type="button"
-                  onClick={() => setOpen(r)}
+                  onClick={() => openDoc(rowDoc(agentKey, r), mobile)}
                   title={r.ref}
                   className={cn(
                     "focus-ring pressable flex w-full items-center gap-2 rounded-[10px] px-1.5 py-1.5 text-left hover:bg-ink/[0.04] [&>svg]:size-3.5 [&>svg]:shrink-0",
@@ -103,7 +101,7 @@ function ArtifactsSection({ agentKey, list, groups }: { agentKey: string; list: 
                     <span className="block truncate font-mono text-[10.5px] text-mute-2">{r.ref}</span>
                   </span>
                   <span className="shrink-0 text-right text-[10.5px] leading-tight font-semibold text-mute-2 tabular">
-                    {r.file ? formatBytes(r.file.size) : "review"}
+                    {r.versions && r.versions > 1 ? `${r.versions} versions` : r.file ? formatBytes(r.file.size) : "review"}
                     {r.file && <span className="block">{formatAge(now - r.file.mtime)}</span>}
                   </span>
                 </button>
@@ -112,87 +110,6 @@ function ArtifactsSection({ agentKey, list, groups }: { agentKey: string; list: 
           </div>
         ))}
       </div>
-      {open && <ArtifactViewer agentKey={agentKey} row={open} onClose={() => setOpen(null)} />}
-    </section>
-  );
-}
-
-/** One artifact in full: rendered Markdown (else plain text), Copy, Copy path, Mention in the composer. */
-function ArtifactViewer({ agentKey, row, onClose }: { agentKey: string; row: ArtifactRow; onClose: () => void }) {
-  const mobile = useIsMobile();
-  const [state, setState] = useState<{ content?: ArtifactContent; error?: string }>({});
-  const file = row.file;
-  const review = row.review;
-  useEffect(() => {
-    if (review || !file) return;
-    let live = true;
-    readArtifact(agentKey, file).then(
-      (content) => live && setState({ content }),
-      (e: unknown) => live && setState({ error: toApiError(e).message }),
-    );
-    return () => {
-      live = false;
-    };
-  }, [agentKey, file, review]);
-  const text = review ? review.content : state.content?.text;
-  const path = state.content?.path;
-  const markdown = review !== undefined || /\.mdx?$/i.test(file?.name ?? "");
-  const mention = row.ref.includes("://") ? row.ref : undefined;
-  const description = [row.ref, file && formatBytes(file.size), state.content?.truncated && "showing the first 1 MB"].filter(Boolean).join(" · ");
-  const body = state.error ? (
-    <EmptyState compact title="Couldn't read it" description={state.error} />
-  ) : text == null ? (
-    state.content?.binary ? (
-      <EmptyState compact title="Not a text file" description={`${formatBytes(state.content.size)} · ${state.content.path}`} />
-    ) : (
-      <Skeleton className="h-40 rounded-lg" />
-    )
-  ) : markdown ? (
-    <div className="text-[13.5px] leading-relaxed">
-      <Markdown text={text} />
-    </div>
-  ) : (
-    <pre className="font-mono text-[12px] break-words whitespace-pre-wrap text-ink-2">{text}</pre>
-  );
-  const actions = (
-    <>
-      {text != null && (
-        <Button size="sm" icon={<Copy />} onClick={() => void copyText(text, row.title)}>
-          Copy
-        </Button>
-      )}
-      {path && (
-        <Button size="sm" variant="ghost" icon={<FolderInput />} onClick={() => void copyText(path, "the host path")}>
-          Copy path
-        </Button>
-      )}
-      {mention && (
-        <Button
-          size="sm"
-          variant="primary"
-          icon={<AtSign />}
-          title={`Add ${mention} to the composer`}
-          onClick={() => {
-            mentionArtifact(agentKey, mention);
-            onClose();
-          }}
-        >
-          Mention
-        </Button>
-      )}
-    </>
-  );
-  if (mobile)
-    return (
-      <BottomSheet open onOpenChange={(o) => !o && onClose()} title={row.title} description={description} maxHeight="92dvh" footer={<div className="flex flex-wrap justify-end gap-2">{actions}</div>}>
-        {body}
-      </BottomSheet>
-    );
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent title={row.title} description={description} width={860} footer={actions}>
-        {body}
-      </DialogContent>
-    </Dialog>
+    </InspectorCard>
   );
 }

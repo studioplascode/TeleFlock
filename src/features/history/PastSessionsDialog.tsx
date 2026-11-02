@@ -18,11 +18,14 @@ import { type PreviewTarget, SessionPreview } from "./SessionPreview";
 import { useSessionSearch } from "./useSessionSearch";
 
 /** Scope for the next open (the ui dialog payload only carries the host). */
-let pendingScope: { cwd?: string; workspaceId?: string } | null = null;
+let pendingScope: { cwd?: string; workspaceId?: string; file?: string } | null = null;
 
-/** Open Past sessions, optionally scoped to a workspace's folder (the sidebar's "Past sessions…"). */
-export function openPastSessions(opts: { hostId?: string; cwd?: string; workspaceId?: string } = {}) {
-  pendingScope = { cwd: opts.cwd, workspaceId: opts.workspaceId };
+/**
+ * Open Past sessions, optionally scoped to a workspace's folder (the sidebar's "Past sessions…"),
+ * and with `file` on that session's preview once the list has it (a decision of an agent that ended).
+ */
+export function openPastSessions(opts: { hostId?: string; cwd?: string; workspaceId?: string; file?: string } = {}) {
+  pendingScope = { cwd: opts.cwd, workspaceId: opts.workspaceId, file: opts.file };
   useUi.getState().openDialog({ kind: "pastSessions", hostId: opts.hostId });
 }
 
@@ -133,6 +136,20 @@ function PastSessionsBody({ open, initialHostId, onClose }: { open: boolean; ini
     setTarget(match?.id ?? NEW_AT_CWD);
     if (submit.phase === "failed") setSubmit({ phase: "idle" });
   };
+
+  // Opened for one session: select it and show its preview once the list has it (only once).
+  const wanted = useRef(scope?.file);
+  useEffect(() => {
+    const file = wanted.current;
+    if (!file || !sessions.data) return;
+    wanted.current = undefined;
+    const s = sessions.data.sessions.find((x) => x.file === file);
+    if (!s) return;
+    select(s);
+    setPreview({ session: s, query: "" });
+    // `select` is this render's; the list arriving is what matters
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions.data]);
 
   const resume = async (s: PastSession) => {
     if (!hostId) return;

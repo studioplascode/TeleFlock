@@ -1,7 +1,9 @@
 import { useCore } from "@/core";
 import type { AutoAnswer, AutoAnswerCountdown } from "@/core/gen";
 import { useNow } from "@/design";
-import { type CountdownView, countdownState, currentCountdown, samePolicy } from "./format";
+import { useReviewedHere } from "./actions";
+import { type CountdownView, canDecideFor, countdownState, currentCountdown, samePolicy } from "./format";
+import { collectDecisions, type HostDecision, sameDecisions } from "./review";
 
 /**
  * The countdown on the question an agent shows now, with its words (`countdownState`). Re-renders
@@ -24,10 +26,20 @@ export function useHostAutoAnswer(hostId: string | undefined): AutoAnswer | unde
   return useCore((s) => (hostId ? s.hosts[hostId]?.state.info.autoAnswer : undefined), samePolicy);
 }
 
-/** "Decide for me…" applies to this agent: an omp agent on a host with decide for me. */
+/** "Decide for me…" applies to this agent (`canDecideFor`): every menu that offers it reads this. */
 export function useCanDecide(agentKey: string): boolean {
   return useCore((s) => {
     const a = s.agents[agentKey];
-    return a?.kind === "omp" && !!s.hosts[a.hostId]?.state.info.autoAnswer;
+    return canDecideFor(a, a && s.hosts[a.hostId]?.state.info);
   });
+}
+
+/**
+ * The questions decide for me answered that nobody reviewed yet, on every host
+ * (`HostInfo.decisions`, hosts ≥ 0.9.0), oldest first, without those marked reviewed here.
+ * Re-renders only when the list changes.
+ */
+export function useDecisions(): HostDecision[] {
+  const hidden = useReviewedHere((s) => s.keys);
+  return useCore((s) => collectDecisions(s.hosts, s.profiles.map((p) => p.id), hidden), sameDecisions);
 }

@@ -49,6 +49,10 @@ wire_struct! {
         /// The subagent's own context-window usage (omp's TUI: `· 2.4%/272K`).
         pub context: Option<ContextUsage>,
         pub tool_count: Option<u32>,
+        /// The subagent this one runs under (omp's agent registry `parentId`; without a roster
+        /// entry omp's naming, `A.B.C` under `A.B`); absent for the main agent's own subagents.
+        /// Hosts before 0.9.0 sent `Main` for those, and the spawning tool call's id until omp's
+        /// roster listed the subagent.
         pub parent_id: Option<String>,
     }
 }
@@ -122,6 +126,10 @@ wire_struct! {
         /// `agent.retry` works for its subagents (bridge ≥ 2.1.0 with omp's task internals).
         #[serde(default)]
         pub subagent_retry: bool,
+        /// `agent.refusalRetry` works ("Retry with <model>" after a provider refusal) and the host's
+        /// refusal fallback rules apply to this session: TeleFlock's bridge ≥ 2.3.0 serves it.
+        #[serde(default)]
+        pub refusal_retry: bool,
     }
 }
 
@@ -146,6 +154,10 @@ wire_struct! {
         pub tree: Option<TreeInfo>,
         pub caps: Capabilities,
         pub started_at: Option<Millis>,
+        /// The session's agent chat log (hosts ≥ 0.9.0): every omp IRC message exchanged inside
+        /// its agent tree. Fetch the messages with `session.agentChat`; absent from older hosts
+        /// (the app then shows the IRC rows of the session's own transcript).
+        pub agent_chat: Option<AgentChatInfo>,
     }
 }
 
@@ -401,6 +413,71 @@ wire_struct! {
     }
 }
 
+wire_struct! {
+    /// What a session's agent chat log holds now (`SessionMeta::agent_chat`): enough to know when
+    /// to fetch (`session.agentChat`) and what.
+    pub struct AgentChatInfo {
+        /// Names this log's message ids and revisions: when it changes (tf-hostd restarted and
+        /// rebuilt the log), drop what was fetched before and fetch from scratch.
+        pub epoch: String,
+        /// Revision of the last change (a message added or updated).
+        pub rev: u64,
+        pub count: u32,
+        /// The session's bridge reports each message as it is sent (bridge ≥ 2.3.0,
+        /// `caps.agentChat`): `rev` moves by itself. Otherwise the log is read from the session's
+        /// transcript files on every `session.agentChat`, so fetch again while it is shown.
+        pub live: bool,
+    }
+}
+
+wire_struct! {
+    /// One message of a session's agent chat: an omp IRC message between two agents of the
+    /// session's tree (the main agent, subagents at any depth), a broadcast, or what the user sent
+    /// an agent from the message board.
+    pub struct AgentChatMessage {
+        /// Stable within the log's epoch.
+        pub id: String,
+        /// omp agent id of the sender (`Main`, subagent ids such as `Orchestrator.WorkerA`), or
+        /// `user`: the user, from TeleFlock.
+        pub from: String,
+        /// Recipients by agent id. A broadcast (`agent://all`) lists the agents it went to as far
+        /// as known.
+        pub to: Vec<String>,
+        pub broadcast: bool,
+        /// Markdown body.
+        pub text: String,
+        /// When it was sent.
+        pub at: Millis,
+        /// `id` (in this log) of the message this one answers, when that message is in the log.
+        pub reply_to: Option<String>,
+        /// omp relayed the recipient's turn output when its wake turn ended (not a hand-written send).
+        pub wake_relay: bool,
+        /// A progress note: the sender promises a reply later.
+        pub progress: bool,
+        /// Per recipient: `pending` (in flight), `injected` / `woken` / `revived` (omp's delivery
+        /// outcomes), `received` (the recipient's transcript has it), `failed` (with `error`).
+        pub receipts: Vec<IrcReceipt>,
+        /// Log revision of its last change (`session.agentChat {after}`).
+        pub rev: u64,
+    }
+}
+
+wire_struct! {
+    /// A page of a session's agent chat log (`session.agentChat`), oldest first.
+    pub struct AgentChatLog {
+        pub epoch: String,
+        pub rev: u64,
+        /// Everything changed after the asked revision, or the whole log (`reset`).
+        pub messages: Vec<AgentChatMessage>,
+        /// `messages` is the whole log: the asked `epoch` is gone (or none was asked).
+        pub reset: bool,
+        /// The log keeps the newest messages only; older ones were dropped.
+        pub truncated: bool,
+        /// See [`AgentChatInfo::live`].
+        pub live: bool,
+    }
+}
+
 /// Rich renderer hint for a tool item. Absent → generic args/output rendering.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -440,6 +517,9 @@ wire_struct! {
         pub truncated: bool,
         pub view: Option<ToolView>,
         pub error: Option<String>,
+        /// A finished `present` call (bridge ≥ 2.3.0): the document the agent showed the user.
+        /// Apps before 0.9.0 ignore it and show the call as a generic tool row.
+        pub artifact: Option<crate::artifacts::PresentedArtifact>,
     }
 }
 

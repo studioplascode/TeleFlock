@@ -6,6 +6,7 @@ import { persist } from "zustand/middleware";
 import { core, navigate, useCore, useHostIds, useHostStale, useHosts, useUi } from "@/core";
 import { Button, IconButton, StatusOrb, cn, formatAge, toast, useNow } from "@/design";
 import { LinkAccountNudge } from "@/features/accounts/LinkAccountNudge";
+import { IdleShellsNotice } from "@/features/cleanup/IdleShellsNotice";
 import { LowDiskNotice } from "@/features/cleanup/LowDiskNotice";
 import { connAction } from "@/features/hosts/ConnStatusCard";
 import { HerdrNotice } from "@/features/hosts/HerdrNotice";
@@ -192,8 +193,8 @@ function useShownHosts(): string[] {
 /**
  * Every notice for the hosts in view, most urgent first (`noticeRank`): hosts that aren't online (their
  * cards are cached, desaturated and read-only), hosts whose herdr server isn't up (agents ended or unseen),
- * hosts whose omp has no account to run agents with, setup gaps, then the demo. Dismissible ones stay hidden
- * per host (the Hosts view keeps showing them).
+ * hosts whose omp has no account to run agents with, setup gaps, idle shells a host leaves open, then the demo.
+ * Dismissible ones stay hidden per host (the Hosts view keeps showing them).
  */
 function NoticeRows() {
   const shown = useShownHosts();
@@ -213,6 +214,9 @@ function NoticeRows() {
       ))}
       {shown.map((id, i) => (
         <SetupGap key={`setup:${id}`} hostId={id} order={i} />
+      ))}
+      {shown.map((id, i) => (
+        <IdleShellsNotice key={`shells:${id}`} hostId={id} order={i} />
       ))}
       <DemoNotice key="demo" />
     </AnimatePresence>

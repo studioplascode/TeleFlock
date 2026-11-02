@@ -1,6 +1,7 @@
 # tf-hostd for every host the app deploys to (static musl x86_64/aarch64 via zig, Windows via
-# cargo-xwin). Called by windows.yml and android.yml: the app embeds these binaries at build time
-# (tf-client build.rs reads $TF_HOSTD_DIST/<triple>/tf-hostd[.exe]).
+# cargo-xwin, side by side: scripts/build-hostd.sh). Called by android.yml, linux.yml, windows.yml
+# and macos.yml: the app embeds these binaries at build time (tf-client build.rs reads
+# $TF_HOSTD_DIST/<triple>/tf-hostd[.exe] and the .zst build-hostd.sh writes next to it).
 name: hostd
 
 on:
@@ -21,10 +22,13 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           key: hostd
-          workspaces: '. -> target/hostd-build'
+          # build-hostd.sh's build dirs (cargo-zigbuild, cargo-xwin)
+          workspaces: |
+            . -> target/hostd-build
+            . -> target/hostd-build-xwin
 
-      - name: Cross tools (clang/lld for cargo-xwin)
-        run: sudo apt-get update && sudo apt-get install -y clang lld llvm file
+      - name: Cross tools (clang/lld for cargo-xwin, zstd for the embedded copies)
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm file zstd
 
       - name: Build tf-hostd (all triples)
         # Installs zig, cargo-zigbuild and cargo-xwin on demand.

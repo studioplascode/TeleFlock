@@ -175,8 +175,8 @@ export function pushInternal(e: CoreEvent): void {
 
 const resyncing = new Set<string>();
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
-/** Hosts whose activity feed is mounted somewhere (ref-counted by hooks). */
-export const activityWatchers = new Map<string, number>();
+/** Hosts whose activity feed is mounted somewhere (ref-counted by `watchActivity`). */
+const activityWatchers = new Map<string, number>();
 
 function runEffect(fx: Effect): void {
   switch (fx.kind) {
@@ -417,6 +417,21 @@ export async function loadActivity(hostId: string, older: boolean): Promise<void
   pushInternal({ type: "$activity", hostId, page, append: older || Boolean(cur) });
 }
 
+/**
+ * Mounts an activity feed (`watchKey`: a host id, or `*` for every host) and loads the newest page of each of
+ * `hostIds` now, merged into what the store has: lane changes and notifications refresh only watched feeds, so a
+ * feed mounted again may have missed what its hosts logged meanwhile. Returns the unmount.
+ */
+export function watchActivity(watchKey: string, hostIds: readonly string[]): () => void {
+  activityWatchers.set(watchKey, (activityWatchers.get(watchKey) ?? 0) + 1);
+  for (const id of hostIds) void loadActivity(id, false).catch(() => {});
+  return () => {
+    const n = (activityWatchers.get(watchKey) ?? 1) - 1;
+    if (n > 0) activityWatchers.set(watchKey, n);
+    else activityWatchers.delete(watchKey);
+  };
+}
+
 // ---------------------------------------------------------------- boot
 
 let started = false;
@@ -443,6 +458,7 @@ async function bootstrap(t: CoreTransport): Promise<void> {
       pushInternal({ type: "tunnels", tunnels: t.kind === "demo" ? realTunnels : [...realTunnels, ...demoTunnels] });
     }),
     appCall("forward.list", {}).then((forwards) => pushInternal({ type: "forwards", forwards })),
+    appCall("browser.status", {}).then((status) => pushInternal({ type: "browser", status })),
   ];
   const results = await Promise.allSettled(tasks);
   for (const r of results) if (r.status === "rejected") console.warn("[core] bootstrap call failed", r.reason);

@@ -87,17 +87,26 @@ const realEnv: UploadEnv = {
     }),
 };
 
+/** Bytes the page doesn't hold (a file the app core keeps, such as a browser recording), read on demand. */
+export interface UploadSource {
+  name: string;
+  size: number;
+  type?: string;
+  /** Bytes `[start, end)` as base64. */
+  readBase64(start: number, end: number): Promise<string>;
+}
+
 /**
  * Upload `file` to `hostId` (named `file.name`; the host sanitizes it and keeps it unique). Rejects
  * with a `CoreError`: `cancelled` (aborted), `unsupported` (the host's daemon predates uploads),
  * `invalid_params` (empty, over 2 GiB), or the host's / connection's error once retrying ends.
  */
-export function uploadFile(hostId: string, file: Blob & { name?: string }, opts: UploadOptions = {}): Promise<UploadedFile> {
+export function uploadFile(hostId: string, file: (Blob & { name?: string }) | UploadSource, opts: UploadOptions = {}): Promise<UploadedFile> {
   return uploadVia(core.host(hostId), file, opts);
 }
 
 /** `uploadFile` through any host client (tests pass a fake host). */
-export async function uploadVia(host: HostClient, file: Blob & { name?: string }, opts: UploadOptions = {}, env: UploadEnv = realEnv): Promise<UploadedFile> {
+export async function uploadVia(host: HostClient, file: (Blob & { name?: string }) | UploadSource, opts: UploadOptions = {}, env: UploadEnv = realEnv): Promise<UploadedFile> {
   const { signal, onProgress } = opts;
   const name = file.name ?? "";
   const size = file.size;
@@ -132,7 +141,7 @@ export async function uploadVia(host: HostClient, file: Blob & { name?: string }
           onProgress?.(sent, size);
         } else if (step === "chunk") {
           const len = Math.min(chunk, begun.maxChunk, size - sent);
-          const data = await readBase64(file, sent, sent + len);
+          const data = "readBase64" in file ? await file.readBase64(sent, sent + len) : await readBase64(file, sent, sent + len);
           if (signal?.aborted) continue;
           const t0 = env.now();
           sent = (await host.call("upload.chunk", { uploadId: begun.uploadId, offset: sent, data })).received;

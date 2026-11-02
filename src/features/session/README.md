@@ -15,7 +15,13 @@ export function AskCard(props: { agentKey: string; request: UiRequest; compact?:
 // What the agent wrote before asking (ask card, Inbox, HUD, board cards): Markdown folded to `lines` with Show more / Show
 // less when longer; `sunset` re-maps the text tokens to the sunset's own text colour. Helpers (tested): ask/askContext.ts.
 export function AgentSaid(props: { text: string; variant: "ask" | "panel" | "card" | "phone"; sunset?: boolean; lines?: number; className?: string }): JSX.Element;
-export function Markdown(props: { text: string; streaming?: boolean; className?: string }): JSX.Element;
+// Markdown renderer of the transcript, plan reviews, documents and tool cards. `imageSrc` maps a `![alt](src)` source to what is
+// shown (only `data:image/*` results are; without it only such sources are, everything else shows its alt text). Parsing
+// (markdown/parse.ts `parseBlocks` / `parseInline`) takes time linear in the text, however it is written; nesting past 16
+// block / 8 inline levels stays text.
+export function Markdown(props: { text: string; streaming?: boolean; className?: string; imageSrc?(src: string): string | undefined }): JSX.Element;
+// Figures (markdown/Figures.tsx): MermaidFigure({ code }), SvgFigure({ code }), InlineMath / DisplayMath({ tex }) for other surfaces.
+// svg.ts: prepareSvg / svgDataUrl / previewKind(path) (svg | mermaid | markdown); tools/preview.ts: previewOf(FileDiff).
 ```
 
 Keyboard (session owns): `Esc` stop turn (when the composer is empty / not in a popup), `Enter` send (steer while
@@ -23,6 +29,41 @@ the agent works), `Shift+Enter` newline, `Alt+Enter` queue follow-up (while it w
 card, `←` its previous question (multi-question asks), `/` slash palette, `@` file mention. Phone: the ⋯ menu is a
 bottom sheet (its Terminal item opens the full terminal view); a "Next waiting" chip docks above the composer while
 other agents need you. `F5` / `Alt+R` resume a failed or stopped turn (below).
+
+Chats (`Agent.chat`, features/chats): the desktop header and the phone top bar's subtitle show the "Chat" chip
+(`ChatTag`) where repo · branch go; the ⋯ menu (dropdown and phone sheet) leaves out Move to host… and adds
+"Delete chat…" under End session; the inspector's Changed files lists them without Review links.
+
+Inspector cards (`inspector/`; architecture §6.3): every card (Session, Todos, btw, Subagents, Background jobs,
+Artifacts, Changed files, Agent chat, Session tree on the desktop rail and the phone's tab bodies, and the Session
+card's Spend and Throughput tiles) is an `InspectorCard` / `CollapsibleTile`: a chevron button (`aria-expanded`) and a
+click on the title collapse it; the card's id (`cards.ts` `CardId`) is remembered on this device (`tf.inspector`,
+`useInspectorCards`; only collapsed ids are stored) and a collapsed card shows a one-line summary
+(`summaries.ts`: Session `ctx 41% · limit 58% left · $2.41`, Todos `3/7 · <task in progress>`, Subagents `2 running · 1 failed`, else `3 done · 1 stopped`,
+Changed files `9 files +531 −63`, tree, btw, jobs, artifacts) in place of its body, which unmounts (a collapsed tree
+does no layout; the transcript's width does not change). `setTab` (a `/btw` or `/todos` request, a phone tab pick)
+opens a collapsed card. Side questions: each row collapses (question + turn count stay; Follow up and Cancel hide) and
+can be dismissed (×; not while answering); the card has Collapse all / Dismiss all from two side questions on, and
+hides itself when every one is dismissed (a `/btw` or the phone's btw tab brings it back with its input). Both marks
+persist per session on this device in `tf.inspector` (`sessionScope`: host + omp session id, so a reopened pane keeps
+them; the newest 300 ids of the newest 40 sessions). Subagents (`subagents/SubagentList.tsx`, `subagents/grouping.ts`):
+a tree, each subagent's own subagents under it at any depth (`Subagent.parentId`, else the dotted id `A.B.C` → `A.B`;
+a subagent whose parent the roster lacks stays at the top level with "from <id>"; rows in a branch drop the parent's
+name, `Shots` under `Lab.Ui`). A parent with subagents gets a rail and a roll-up line ("3 subagents · 2 running · 1
+failed") that folds them; a branch is open while anything below it runs or failed, and what the user picks is kept
+per session in `tf.inspector` (`subs`, same caps). Each level: running, then failed (counting what is below), then
+finished, latest end first; branches that finished entirely go into the collapsed "N completed" group (open state
+per agent key while the app runs), the rest stay on top, a done parent of a failed grandchild included. The card's
+header and collapsed summary count every depth (`tallySubagents`). The viewer's `[` / `]` follow the tree order
+(`treeOrder`) and its header shows "under Lab › Ui" (each opens that parent) and the roll-up, which opens the first
+child. Changed files lists the repository's files only: `repoFiles` drops
+omp-internal paths (`local://…`, `artifact://…`, omp's session folder) that hosts before 0.9.0 still put in
+`SessionMeta.files`; tf-collab's replica no longer records them (architecture §3.20). Background jobs lists
+commands only (`withoutSubagents`: `task` jobs are subagents, shown under Subagents at any nesting depth; a command a
+subagent started stays, labelled "by <subagent>"); its count and the "Waiting for N background jobs" line count
+commands (`commandSummary`), and the bridge's `jobs` summary counts them the same way (the wait still covers
+subagents: omp resumes the turn when one reports back). Tests: `bun test src/features/session/inspector
+src/features/session/jobs src/features/session/subagents src/core/demo/subagents.test.ts`.
 
 Large pastes (`composer/usePasteAttach.ts`, `composer/PasteChips.tsx`, `composer/pasteThreshold.ts`; model
 `@/core/pastes`, store `@/core/draftPastes`; architecture §6.5): a paste of more than 10 lines or 1000 characters
@@ -45,10 +86,36 @@ host's `catalog.roles`), so `@smol` names the model picking it switches to; with
 
 Subagent viewer (`subagents/SubagentViewer`, one per session, mounted by `SessionPane`): open it with
 `useSessionUi.getState().openSubagent(agentKey, subagentId)` (inspector Subagents pane, task cards, IRC
-bubbles and threads); opening another subagent switches it. Right-side drawer on desktop, full-screen
+bubbles, a name's menu on the message board); opening another subagent switches it. Right-side drawer on desktop, full-screen
 sheet on phones. `[` / `]` previous / next subagent, `Esc` close, `Enter` steer/message, `Shift+Enter` newline.
 The viewer offers **Retry** for a failed or aborted subagent when the session has `caps.subagentRetry`
 (`resume/SubagentRetry`: `agent.retry {agentId, subagentId}`; omp revives it and its result reaches the parent).
+
+Agent chat and the message board (`irc/`; architecture §6.17, host side §3.34): every omp IRC message of the
+session's whole agent tree (Main, subagents at any depth, the user's own sends as "You"). `irc/store.ts` holds one copy
+per agent key: `session.agentChat` whole once, then `{epoch, after: rev}` whenever `SessionMeta.agentChat` names a newer
+revision or another epoch (`chat.ts` `mergeChatPage`: changed messages replace theirs by id, new ones join in time
+order, 2,000 kept); a log the host reads from files (`live: false`, older bridge) is fetched again every 3 s while
+the board shows (10 s for the card). Without the field (hosts before 0.9.0) the board shows the session's own IRC
+rows (`fromTranscript`) and says so. The inspector's Agent chat card shows the newest three messages, unread (a dot,
+"N new") and counts; its title, Open message board and each preview (at that message) open the board, and so do
+"Message board" in the session menu (the phone's ⋯ sheet too) and the palette's "Open agent message board", both for
+sessions with subagents or agent chat (`useHasAgentChat`) (`boardUi.tsx` `openBoard`): the split panel beside the
+session (`SplitState` kind `agentChat`, `SplitHeaderRow`, Full
+screen) on desktop, `FullscreenFrame` on phones and in focus mode (`AgentChatOverlay`, mounted once by the app). The
+board (`MessageBoard.tsx`, virtualised with `TranscriptLog`): one chronological channel, sender glyph and name
+(nested ones "under PoolBench › Sweep"), → recipients or everyone (a broadcast; who got it in the tooltip), time,
+the quote it answers (a click brings it into view), Markdown body (long ones clamped), progress notes lighter, the
+delivery line (sending / delivered / woke it / 5/6 delivered / not delivered: why), consecutive messages of the
+same sender to the same recipients folded; a "New" divider above what arrived since the board was last open on this
+device (it opens there when more than the last few rows are new) and Jump to latest. Filters: by agent (one: what it
+sent or got; two: only between them; also from a name's menu) and a literal, case-folded search over texts and names.
+Unread: `irc/seen.ts` (`tf.ircSeen` v1, the newest `at` read per session: host + omp session id once known, so a parked
+agent resumed under a new agent id keeps it, else the agent key, whose mark moves over; 200 sessions; the user's own
+never count).
+Composer: one subagent or All running subagents (`agent.subagent` chat; one request per running subagent with
+`broadcast: true`, which the log shows as one message), Enter sends; the main agent takes the session's composer.
+Tests: `bun test src/features/session/irc src/core/demo/agentChat.test.ts`.
 
 Resume (`resume/`, hosts ≥ 0.7.0), omp's F5: the header (desktop, and the phone top bar) shows **Resume** while the
 agent is idle (not running, nothing asked), `caps.retry` isn't false and its last loaded turn failed or was stopped
@@ -70,6 +137,14 @@ an ended card when it ended and what it was doing. An ended card without a ticke
 gets a status line instead, no buttons: "Ended at 13:58 (herdr stopped) · comes back when herdr runs again" (the
 clause while `useHerdrDown`). Minute clock (seconds only for a restart's countdown), no animation; on the phone the
 line wraps to two lines instead of truncating.
+
+Refusals (`transcript/RefusalActions.tsx`, `features/refusal`, architecture §3.22; sessions with `caps.refusalRetry`, bridge ≥ 2.3.0
+and tf-hostd ≥ 0.9.0): the refusal row that ended the session's last turn (`@/core/refusal` `lastRefusalRowId`; only the store's own
+row, not an older refusal, a preview or a subagent transcript) offers, while the agent is idle on a live link, **Retry with
+<model>** (`agent.refusalRetry`: the model of the host's rule for it, else Sonnet; the chevron picks another from the host's list)
+and **Always do this for <category> refusals on <model>** (a rule of the host, first in order, with an Undo toast, and this turn goes
+on now). The header's Resume gives way to it, since omp has nothing to retry after a refusal (F5 says so); an agent whose omp lacks
+the bridge says to Mark it done and Resume it. Tests: `bun test src/features/refusal src/core/refusal.test.ts`.
 
 Parked agents (`Agent.parked`: Mark done closed the pane): `LinkGate` hands over to `ParkedGate`. With the read-only
 snapshot `session.open` returns, the transcript shows under a "Done and closed" strip with Resume (not for an ended

@@ -1,5 +1,19 @@
 import { apiError } from "../errors";
-import type { Agent, CleanupAgent, CleanupReport, CleanupRepo, CleanupStorage, CleanupWorktree, GcCategory, GcRun, HostState, PrStatusResult, WorktreeList } from "../gen";
+import type {
+  Agent,
+  CleanupAgent,
+  CleanupOwner,
+  CleanupOwnerRef,
+  CleanupReport,
+  CleanupRepo,
+  CleanupStorage,
+  CleanupWorktree,
+  GcCategory,
+  GcRun,
+  HostState,
+  PrStatusResult,
+  WorktreeList,
+} from "../gen";
 import type { DemoClock } from "./clock";
 import { HOME, REPOS, WORKTREES, repoForPath } from "./data";
 
@@ -29,7 +43,7 @@ interface SeedPr {
   closedDaysAgo?: number;
 }
 
-/** A linked worktree only this module knows (no herdr workspace, no agent on the board). */
+/** A linked worktree only this module knows (no herdr workspace, no agent on the board in it). */
 interface Extra {
   path: string;
   branch?: string;
@@ -44,11 +58,26 @@ interface Extra {
   orphan?: boolean;
   session?: string;
   automation?: string;
+  /** The main agent it belongs to: a card's id, or a `GONE` session. */
+  owner?: string;
+  /** That agent's subagents that worked in it. */
+  subagents?: string[];
 }
 
+/** omp sessions whose worktrees outlived their card (`CleanupOwner.state` "gone"). */
+const GONE: Record<string, { title: string; cwd: string; daysAgo: number }> = {
+  wsv1: { title: "First try at WebSocket reconnect with jittered backoff", cwd: `${WORKTREES}/teleflock/ws-reconnect-v1`, daysAgo: 41 },
+  burst: { title: "Rate limiter: allow short bursts", cwd: `${WORKTREES}/api-gateway/fix-rate-limit`, daysAgo: 6 },
+  hero1: { title: "First hero section draft", cwd: `${WORKTREES}/marketing-site/hero-v1`, daysAgo: 71 },
+  sweep: { title: "Security sweep across every service", cwd: `${HOME}/code/api-gateway`, daysAgo: 9 },
+  nightly: { title: "Nightly dependency audit", cwd: `${HOME}/code/infra`, daysAgo: 24 },
+  typos: { title: "Fix docs typos", cwd: `${WORKTREES}/herdr-web/docs-typos`, daysAgo: 9 },
+};
+
 function seedExtras(): Extra[] {
+  const sub = (repo: string, name: string, x: Omit<Extra, "path" | "head" | "bytes">): Extra => ({ path: `${WORKTREES}/${repo}/${name}`, head: name.slice(0, 4).padEnd(7, "0"), bytes: sizeOf(name), ...x });
   return [
-    { path: `${WORKTREES}/teleflock/ws-reconnect-v1`, branch: "feat/ws-reconnect-v1", head: "41c2aa0", createdDaysAgo: 58, activeDaysAgo: 41, bytes: 1940 * MB, session: "First try at WebSocket reconnect with jittered backoff" },
+    { path: `${WORKTREES}/teleflock/ws-reconnect-v1`, branch: "feat/ws-reconnect-v1", head: "41c2aa0", createdDaysAgo: 58, activeDaysAgo: 41, bytes: 1940 * MB, session: "First try at WebSocket reconnect with jittered backoff", owner: "wsv1" },
     {
       path: `${WORKTREES}/api-gateway/fix-rate-limit`,
       branch: "fix/rate-limit-burst",
@@ -59,10 +88,11 @@ function seedExtras(): Extra[] {
       pr: { number: 77, title: "Allow bursts above the rate limit", state: "CLOSED", closedDaysAgo: 5 },
       dirty: 3,
       session: "Rate limiter: allow short bursts",
+      owner: "burst",
     },
     { path: `${WORKTREES}/teleflock/try-yjs`, branch: "spike/try-yjs", head: "77ab10d", createdDaysAgo: 33, activeDaysAgo: 33, bytes: 0, missing: true },
-    { path: `${WORKTREES}/marketing-site/hero-v1`, branch: "design/hero-v1", head: "e5f0019", createdDaysAgo: 96, activeDaysAgo: 71, bytes: 2380 * MB, locked: "on the external SSD", session: "First hero section draft" },
-    { path: `${WORKTREES}/teleflock/bisect-flaky`, head: "0b9d3f4", createdDaysAgo: 26, activeDaysAgo: 25, bytes: 1210 * MB, orphan: true, session: "Bisect the flaky reconnect test" },
+    { path: `${WORKTREES}/marketing-site/hero-v1`, branch: "design/hero-v1", head: "e5f0019", createdDaysAgo: 96, activeDaysAgo: 71, bytes: 2380 * MB, locked: "on the external SSD", session: "First hero section draft", owner: "hero1" },
+    { path: `${WORKTREES}/teleflock/bisect-flaky`, head: "0b9d3f4", createdDaysAgo: 26, activeDaysAgo: 25, bytes: 1210 * MB, orphan: true, session: "Bisect the flaky reconnect test", owner: "flaky", subagents: ["Bisect"] },
     {
       path: `${WORKTREES}/infra/automation-deps-audit-20261002-0300`,
       branch: "automation/nightly-dependency-audit-20261002-0300",
@@ -73,6 +103,7 @@ function seedExtras(): Extra[] {
       pr: { number: 212, title: "Bump lockfile: 14 patched advisories", state: "MERGED", closedDaysAgo: 24 },
       automation: "Nightly dependency audit",
       session: "Nightly dependency audit",
+      owner: "nightly",
     },
     {
       path: `${WORKTREES}/herdr-web/docs-typos`,
@@ -83,7 +114,16 @@ function seedExtras(): Extra[] {
       bytes: 96 * MB,
       pr: { number: 31, title: "Fix typos in the getting-started guide", state: "MERGED", closedDaysAgo: 8 },
       session: "Fix docs typos",
+      owner: "typos",
     },
+    // An orchestrator whose card is gone: its subagents worked in worktrees of three repositories.
+    sub("api-gateway", "sweep-authz", { branch: "sweep/authz", createdDaysAgo: 10, activeDaysAgo: 9, pr: { number: 88, title: "Check authorization on every admin route", state: "MERGED", closedDaysAgo: 3 }, owner: "sweep", subagents: ["SweepAuthz"] }),
+    sub("teleflock", "sweep-csp", { branch: "sweep/csp", createdDaysAgo: 18, activeDaysAgo: 16, owner: "sweep", subagents: ["SweepCsp"] }),
+    sub("infra", "sweep-secrets", { branch: "sweep/secrets", createdDaysAgo: 10, activeDaysAgo: 9, dirty: 2, pr: { number: 41, title: "Move secrets to the vault", state: "CLOSED", closedDaysAgo: 2 }, owner: "sweep", subagents: ["SweepSecrets", "SweepSecrets.Verify"] }),
+    // Subagent worktrees of cards on the board.
+    sub("api-gateway", "invoices-pdf", { branch: "invoices/pdf-renderer", createdDaysAgo: 5, activeDaysAgo: 4, pr: { number: 93, title: "Render invoices as PDF", state: "MERGED", closedDaysAgo: 1 }, owner: "invoices", subagents: ["PdfRenderer"] }),
+    sub("api-gateway", "invoices-tax", { branch: "invoices/tax-rules", createdDaysAgo: 5, activeDaysAgo: 1, pr: { number: 94, title: "Tax rules per country", state: "OPEN" }, owner: "invoices", subagents: ["TaxRules"] }),
+    sub("infra", "audit-iam", { branch: "audit/iam", createdDaysAgo: 30, activeDaysAgo: 22, owner: "audit", subagents: ["IamReview"] }),
   ];
 }
 
@@ -178,11 +218,27 @@ export class DemoCleanup {
     const state = this.env.state();
     const byRepo = new Map<string, CleanupWorktree[]>();
     const seen = new Set<string>();
+    const owners = new Map<string, CleanupOwner>();
     const add = (w: CleanupWorktree) => {
       const repo = repoForPath(w.path);
       if (!repo || seen.has(w.path)) return;
       seen.add(w.path);
       byRepo.set(repo.name, [...(byRepo.get(repo.name) ?? []), w]);
+    };
+    // hostd's `CleanupOwner`: a card on the board, else a session that outlived its card.
+    const own = (id: string | undefined, subagents: string[] = []): CleanupOwnerRef | undefined => {
+      const card = state.agents.find((a) => a.id === id);
+      const gone = id ? GONE[id] : undefined;
+      if (card) {
+        const key = card.omp?.sessionFile ?? `agent:${card.id}`;
+        const lifecycle = card.parked ? (card.parked.ended ? "ended" : "parked") : "live";
+        owners.set(key, { key, state: lifecycle, agentId: card.id, name: card.name, title: card.title || undefined, herdr: card.parked ? undefined : card.state, sessionId: card.omp?.sessionId, cwd: card.cwd, at: card.live.lastEventAt ?? card.stateSince });
+        return { key, subagents };
+      }
+      if (!gone || !id) return undefined;
+      const key = `${HOME}/.omp/agent/sessions/gone-${id}.jsonl`;
+      owners.set(key, { key, state: "gone", title: gone.title, sessionId: `gone-${id}`, cwd: gone.cwd, at: this.now - gone.daysAgo * DAY });
+      return { key, subagents };
     };
     for (const repo of REPOS) {
       let listed: WorktreeList;
@@ -191,20 +247,29 @@ export class DemoCleanup {
       } catch {
         continue;
       }
-      for (const e of listed.worktrees.filter((x) => !x.primary)) add(this.fromBoard(e.path, e.branch, e.head, e.workspaceId, e.dirty ?? 0, state, !scanning));
+      for (const e of listed.worktrees.filter((x) => !x.primary)) add(this.fromBoard(e.path, e.branch, e.head, e.workspaceId, e.dirty ?? 0, state, !scanning, own));
     }
     for (const a of state.agents) {
       const wt = a.parked?.worktree;
-      if (wt) add(this.fromBoard(wt.path, a.branch, undefined, undefined, 0, state, !scanning));
+      if (wt) add(this.fromBoard(wt.path, a.branch, undefined, undefined, 0, state, !scanning, own));
     }
-    for (const x of this.extras) add(this.fromExtra(x, !scanning));
+    for (const x of this.extras) add({ ...this.fromExtra(x, !scanning), owner: own(x.owner, x.subagents) });
     const repos: CleanupRepo[] = [...byRepo.entries()]
       .map(([name, worktrees]) => ({ root: REPOS.find((r) => r.name === name)?.root ?? `${HOME}/code/${name}`, name, worktrees: worktrees.sort((a, b) => a.path.localeCompare(b.path)) }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    return { scannedAt: this.scanned ? this.scanEndsAt : undefined, scanning, repos };
+    return { scannedAt: this.scanned ? this.scanEndsAt : undefined, scanning, repos, owners: [...owners.values()] };
   }
 
-  private fromBoard(path: string, branch: string | undefined, head: string | undefined, workspaceId: string | undefined, dirty: number, state: HostState, filled: boolean): CleanupWorktree {
+  private fromBoard(
+    path: string,
+    branch: string | undefined,
+    head: string | undefined,
+    workspaceId: string | undefined,
+    dirty: number,
+    state: HostState,
+    filled: boolean,
+    own: (id: string | undefined) => CleanupOwnerRef | undefined,
+  ): CleanupWorktree {
     const live = state.agents.filter((a) => !a.parked && workspaceId && a.workspaceId === workspaceId);
     const parked = state.agents.filter((a) => a.parked?.worktree?.path === path);
     const at = (a: Agent) => (a.parked ? a.parked.at : (a.live.lastEventAt ?? a.stateSince));
@@ -232,11 +297,13 @@ export class DemoCleanup {
       busy: live.some(busy),
       createdAt,
       activeAt: lastAgent ? Math.max(lastAgent.at, createdAt) : this.now - days * DAY,
+      activeBy: lastAgent ? "agent" : "git",
       size: filled ? sizeOf(path) : undefined,
       sizePartial: false,
       pr: filled && found ? { number: found.number, url: found.url, title: found.title, state: found.state, draft: found.draft, closedAt: found.state === "OPEN" ? undefined : this.now - 2 * DAY } : undefined,
       prCheckedAt: filled ? this.now : undefined,
       lastAgent,
+      owner: own(last?.id),
     };
   }
 
@@ -262,6 +329,7 @@ export class DemoCleanup {
       busy: false,
       createdAt: this.now - x.createdDaysAgo * DAY,
       activeAt: this.now - x.activeDaysAgo * DAY,
+      activeBy: x.subagents || x.session ? "agent" : "git",
       size: filled && !x.missing ? x.bytes : undefined,
       sizePartial: false,
       pr: filled ? pr : undefined,

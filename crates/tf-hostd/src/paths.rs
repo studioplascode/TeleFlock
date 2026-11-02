@@ -45,6 +45,9 @@ pub struct Paths {
     /// Moves to and from other hosts (`ops::moves`): `<home>/moves/<move id>/`, the source's packed
     /// parts and the target's undo journal.
     pub moves: PathBuf,
+    /// Chat tasks' folders `<home>/chats/<name>-<id>/` (`crate::chats`, §3.31): one per chat, made by
+    /// hostd, owner-only root.
+    pub chats: PathBuf,
     /// A home other than the default `~/.teleflock` (lab / dev instance). Derived from the path,
     /// not from whether `TF_HOSTD_HOME` is set: `attach` (run by the app without it) starts the
     /// daemon with `TF_HOSTD_HOME` = its home, and both must derive the same endpoints.
@@ -92,6 +95,7 @@ impl Paths {
             automations: home.join("automations.json"),
             uploads: home.join("uploads"),
             moves: home.join("moves"),
+            chats: home.join("chats"),
             custom,
             run,
             home,
@@ -122,10 +126,16 @@ impl Paths {
         if cfg!(windows) { self.forward_pipe.clone() } else { self.forward_sock.display().to_string() }
     }
 
+    /// Eight hex digits that tell this home from every other (FNV-1a of its path): the suffix of
+    /// its keepalive's names on every OS, so lab instances never touch the real daemon's.
+    pub fn home_hash(&self) -> String {
+        format!("{:08x}", fnv1a(self.home.to_string_lossy().as_bytes()))
+    }
+
     /// Stem of this instance's systemd keepalive units: `teleflock-hostd-<hash of home>`
     /// (one pair per home, so lab instances never touch the real daemon's units).
     pub fn unit_stem(&self) -> String {
-        format!("teleflock-hostd-{:08x}", fnv1a(self.home.to_string_lossy().as_bytes()))
+        format!("teleflock-hostd-{}", self.home_hash())
     }
 
     /// The user's real daemon home (`~/.teleflock`), as opposed to a lab / dev home.
@@ -428,6 +438,7 @@ mod tests {
         assert_eq!(p.sock, PathBuf::from("/tmp/x/run/hostd.sock"));
         assert_eq!(p.ext, PathBuf::from("/tmp/x/ext/teleflock-bridge.ts"));
         assert_eq!(p.uploads, PathBuf::from("/tmp/x/uploads"));
+        assert_eq!(p.chats, PathBuf::from("/tmp/x/chats"));
         assert!(p.pipe.starts_with(r"\\.\pipe\teleflock-hostd-"));
         assert_ne!(p.pipe, Paths::new(PathBuf::from("/tmp/y"), true).pipe);
     }

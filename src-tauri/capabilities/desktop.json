@@ -20,6 +20,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-request-user-attention",
     "core:window:allow-set-background-color",
+    "core:window:allow-set-fullscreen",
     "core:webview:allow-set-webview-background-color",
     "snap-layout:default"
   ]

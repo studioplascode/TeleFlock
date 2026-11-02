@@ -6,7 +6,7 @@ import type { TunnelInfo } from "@/core/gen";
 import { EmptyState, IconButton, Shimmer, Spinner, cn, fadeRise, formatAge, toast, useIsMobile, useNow } from "@/design";
 import { describeError } from "../workspace/shared/errors";
 import { PreviewSheet } from "./PreviewButton";
-import { type PendingTunnel, dismissPending, openExternal, openTunnel, usePreviewStore } from "./store";
+import { type PendingTunnel, dismissPending, openExternal, openTunnel, showPreview, usePreviewStore } from "./store";
 
 /**
  * Preview tunnels across hosts. Opening ones spin, failed ones explain and retry, live ones breathe
@@ -78,7 +78,7 @@ export function PreviewList({ className }: { className?: string }) {
                 <span className="text-done">live</span> · 127.0.0.1:{t.localPort} · {formatAge(now - t.openedAt)}
               </>
             }
-            onOpen={() => (mobile ? setSheet(t) : openExternal(t))}
+            onOpen={() => showPreview(t, mobile, setSheet)}
             openLabel={`Open preview of ${hostName(t.hostId)} port ${t.remotePort}`}
             actions={
               <>

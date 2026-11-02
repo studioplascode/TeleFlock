@@ -44,6 +44,27 @@ fn is_web_url(url: &str) -> bool {
     tauri::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
 
+/// Opens `target`, a URL or a file path, with the OS default app (`open_external` checks first
+/// that it is a web URL; `doc_open` passes a file it wrote). Android has its plugin instead.
+#[cfg(not(target_os = "android"))]
+pub fn open_default(target: &std::ffi::OsStr) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::{Win32::UI::Shell::ShellExecuteW, Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL, core::HSTRING, core::w};
+        let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL) };
+        // ShellExecute reports success with a value > 32.
+        if r.0 as isize <= 32 {
+            return Err(format!("ShellExecute failed ({})", r.0 as isize));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        std::process::Command::new(opener).arg(target).spawn().map(drop).map_err(|e| format!("{opener}: {e}"))
+    }
+}
+
 /// Android notification id of agent notifications; the tag tells them apart.
 #[cfg(target_os = "android")]
 const ANDROID_NOTIFY_ID: i32 = 1;
@@ -189,16 +210,6 @@ impl Platform for TauriPlatform {
         if !is_web_url(url) {
             return Err(ApiError::new("invalid_params", format!("refusing to open non-web URL {url}")));
         }
-        #[cfg(windows)]
-        {
-            use windows::{Win32::UI::Shell::ShellExecuteW, Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL, core::HSTRING, core::w};
-            let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
-            // ShellExecute reports success with a value > 32.
-            if r.0 as isize <= 32 {
-                return Err(ApiError::new("io_error", format!("ShellExecute failed ({})", r.0 as isize)));
-            }
-            Ok(())
-        }
         #[cfg(target_os = "android")]
         {
             use tauri_plugin_teleflock_android::TeleFlockAndroidExt;
@@ -207,14 +218,9 @@ impl Platform for TauriPlatform {
                 .open_url(url)
                 .map_err(|e| ApiError::new("io_error", e.to_string()))
         }
-        #[cfg(not(any(windows, target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         {
-            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-            std::process::Command::new(opener)
-                .arg(url)
-                .spawn()
-                .map(drop)
-                .map_err(|e| ApiError::new("io_error", format!("{opener}: {e}")))
+            open_default(url.as_ref()).map_err(|e| ApiError::new("io_error", e))
         }
     }
 

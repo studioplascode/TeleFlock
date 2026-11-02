@@ -1,4 +1,5 @@
 import { type AgentView, core, getAgentViews, getWorkspacesSnapshot, markResuming, navigate, parseAgentKey, resumeAgent, useSettings, useUi } from "@/core";
+import { isChat } from "@/core/chats";
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
 import { haptic } from "@/features/shell/haptics";
@@ -16,6 +17,11 @@ export function reportError(title: string, err: unknown): void {
   toast({ title, description, status: "error" });
 }
 
+/** What a toast calls an agent: its name on the board, not herdr's agent id (a terminal id, `term_65f3…`). */
+function agentLabel(key: string): string {
+  return getAgentViews().find((a) => a.key === key)?.name || parseAgentKey(key).agentId;
+}
+
 /** `agent.answer` for a pending request. Rejects (after toasting) on failure. */
 export async function answerAgent(key: string, requestId: string, answer: Answer): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
@@ -24,7 +30,7 @@ export async function answerAgent(key: string, requestId: string, answer: Answer
     haptic("success");
   } catch (err) {
     haptic("warning");
-    reportError(`Couldn't answer ${agentId}`, err);
+    reportError(`Couldn't answer ${agentLabel(key)}`, err);
     throw err;
   }
 }
@@ -46,7 +52,7 @@ export async function setArchived(key: string, archived: boolean): Promise<void>
   } catch (err) {
     if (parked) markResuming(key, false);
     haptic("warning");
-    reportError(archived ? `Couldn't mark ${agentId} done` : `Couldn't reopen ${agentId}`, err);
+    reportError(archived ? `Couldn't mark ${agentLabel(key)} done` : `Couldn't reopen ${agentLabel(key)}`, err);
     throw err;
   }
 }
@@ -64,7 +70,7 @@ export async function resumeParked(key: string): Promise<string | null> {
   } catch (err) {
     haptic("warning");
     if (isApiError(err) && err.code === "unknown_method") toast({ title: "This host can't resume closed agents", description: "Update TeleFlock on the host, or reopen it from Past sessions.", status: "error" });
-    else reportError(`Couldn't resume ${parseAgentKey(key).agentId}`, err);
+    else reportError(`Couldn't resume ${agentLabel(key)}`, err);
     return null;
   }
 }
@@ -77,7 +83,7 @@ export async function archiveWithUndo(keys: readonly string[]): Promise<string[]
   const results = await Promise.allSettled(keys.map((k) => setArchived(k, true)));
   const done = keys.filter((_, i) => results[i]?.status === "fulfilled");
   if (done.length === 0) return done;
-  const label = done.length === 1 ? parseAgentKey(done[0] ?? "").agentId : `${done.length} agents`;
+  const label = done.length === 1 ? agentLabel(done[0] ?? "") : `${done.length} agents`;
   toast({
     title: `Marked ${label} done`,
     status: "done",
@@ -88,9 +94,10 @@ export async function archiveWithUndo(keys: readonly string[]): Promise<string[]
 
 /**
  * The agent's linked worktree: its live workspace's, else, for a parked agent (Mark done closed the
- * workspace), the checkout its card remembers (hosts ≥ 0.5.2).
+ * workspace), the checkout its card remembers (hosts ≥ 0.5.2). A chat never has one.
  */
 export function agentWorktree(agent: AgentView): WorktreeTarget | null {
+  if (isChat(agent)) return null;
   const ws = getWorkspacesSnapshot().find((w) => w.hostId === agent.hostId && w.ws.id === agent.workspaceId)?.ws;
   if (ws?.worktree) return worktreeTargetOf(ws);
   const parked = agent.parked?.worktree;
@@ -157,9 +164,9 @@ export async function stopAgent(key: string): Promise<void> {
   const { hostId, agentId } = parseAgentKey(key);
   try {
     await core.host(hostId).call("agent.stop", { agentId, mode: "interrupt" });
-    toast({ title: `Stopping ${agentId}`, description: "Sent an interrupt to the current turn.", status: "idle" });
+    toast({ title: `Stopping ${agentLabel(key)}`, description: "Sent an interrupt to the current turn.", status: "idle" });
   } catch (err) {
-    reportError(`Couldn't stop ${agentId}`, err);
+    reportError(`Couldn't stop ${agentLabel(key)}`, err);
   }
 }
 
@@ -178,9 +185,9 @@ export function promptAgent(key: string): void {
   openAgent(key);
 }
 
-/** "Review diff" makes sense only in a git repo with something to look at. */
-export function canReview(agent: { repo?: string; diff?: { files: number }; turns: number }): boolean {
-  return !!agent.repo && ((agent.diff?.files ?? 0) > 0 || agent.turns > 0);
+/** "Review diff" makes sense only in a git repo with something to look at; never for a chat. */
+export function canReview(agent: { repo?: string; diff?: { files: number }; turns: number; chat?: boolean }): boolean {
+  return !isChat(agent) && !!agent.repo && ((agent.diff?.files ?? 0) > 0 || agent.turns > 0);
 }
 
 /**

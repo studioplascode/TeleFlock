@@ -262,9 +262,13 @@ impl LinkSink for Sink {
                 let Some(link) = rt.link() else { return };
                 let served = self.link_id.load(Ordering::SeqCst);
                 if served == 0 || served == link.id {
-                    crate::forward::on_fwd(&inner, &host_id, &link, sid, ev);
+                    // Agents' connections to this app's browser; the rest is relayed.
+                    if let Some(ev) = crate::browser::on_fwd(&inner, &host_id, &link, sid, ev) {
+                        crate::forward::on_fwd(&inner, &host_id, &link, sid, ev);
+                    }
                 }
             }
+            ServerMsg::BrowserDetached { agent_id, reason } => crate::browser::on_detached(&inner, &host_id, &agent_id, &reason),
             _ => {}
         }
     }
@@ -601,7 +605,7 @@ async fn connect_and_serve(
             version: eng.cfg.version.clone(),
             platform: eng.cfg.platform_name.clone(),
             device: eng.device_name(),
-            features: Some(crate::link::requested_features()),
+            features: Some(crate::link::hello_features(eng.browser.available())),
         },
         herdr_session: profile.herdr_session.clone(),
     };
@@ -628,6 +632,8 @@ async fn connect_and_serve(
     tokio::spawn(sessions::reopen(session_host(eng, rt), link.clone()));
     // Forwarding: offers to this host as a from-host, and its rules' status.
     crate::forward::link_up(eng, &rt.id, &link);
+    // The TeleFlock Browser: requests on its board, attachments made again.
+    crate::browser::link_up(eng, &rt.id, &link);
 
     let reason = tokio::select! {
         r = link.closed() => r,

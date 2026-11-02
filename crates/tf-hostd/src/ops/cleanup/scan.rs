@@ -8,31 +8,45 @@
 //!
 //! **One scan at a time per herdr session**, in the background: a request starts one when the last
 //! report is older than [`FRESH`] (or with `refresh`) and waits up to `waitMs` for it. First the
-//! git facts and the board are published (a status per worktree, the admin dir's times, a
+//! git facts, the board and the owners are published (a status per worktree, its last use, a
 //! detached HEAD's reachability), then sizes and pull requests fill in as they arrive; earlier
 //! values stay shown until replaced. Sizes are kept [`SIZE_TTL`], pull requests by state
 //! (`prs::ttl`); `refresh` asks again for all of them. gh missing or signed out stops pull
 //! request lookups host-wide for [`GH_DOWN_FOR`]; a repository without a GitHub remote is not
 //! asked again for [`NOT_GITHUB_FOR`].
 //!
-//! **Activity** (`activeAt`) is the newest of the worktree's reflog, index and HEAD file (its admin
-//! dir under `<common dir>/worktrees/<id>`: commits, checkouts, `git add`; hostd's own git calls
-//! take no optional locks, so its status runs never touch the index), and the last activity of the
-//! agents in it: on the board (live or parked), else omp's newest session whose folder is in it.
-//! **Created** is when `git worktree add` wrote the admin dir's `commondir`.
+//! **Last use** (`activeAt`, `activeBy`) is the newest real use, never a read: the last entry of an
+//! omp session or subagent transcript that worked in it (`sessions.rs`), the newest entry of its
+//! HEAD reflog (a commit, checkout, merge or reset made in it, at the time git wrote into the
+//! entry), the newest of the files `git status` lists as changed, and a live agent's last event.
+//! Never the admin dir's file times: `git gc` (also the automatic one after commits and fetches,
+//! and `git maintenance`) rewrites every worktree's reflog at once (`git reflog expire --all`), and
+//! any `git status` that takes optional locks rewrites the index; in a busy repository that made
+//! every worktree "used 53 minutes ago". (hostd's own git calls take no optional locks; gh only
+//! reads.) **Created** is when `git worktree add` wrote the admin dir's `commondir`.
+//!
+//! **Owner** (`owner`, the report's `owners`): the main agent a worktree belongs to. An agent on the
+//! board in it (working or needing you first, then live, then the latest) or the latest top-level
+//! session whose own folder is in it; else the main agent whose session or subagents worked in it
+//! first since it was created. omp keeps subagent transcripts in their session's artifacts dir, so
+//! a subagent's work counts for its top-level session; a main session on the board is named by its
+//! card.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tf_proto::{
-    Agent, AutomationList, CleanupAgent, CleanupPr, CleanupRepo, CleanupReport, CleanupScanParams,
-    CleanupWorktree, Column, HerdrState, Millis, Workspace,
+    Agent, AutomationList, CleanupAgent, CleanupOwner, CleanupOwnerRef, CleanupOwnerState, CleanupPr, CleanupRepo,
+    CleanupReport, CleanupScanParams, CleanupWorktree, Column, HerdrState, Millis, Workspace, WorktreeUse,
 };
 use tokio::sync::{Semaphore, watch};
 
 use super::prs::{self, Lookup};
+use super::sessions::{self, MainFacts, WorkedIn};
 use super::size::{self, Budget, DirSize};
 use crate::ops::host::{id_from_file_name, omp_agent_dir, read_head, session_titles};
 use crate::ops::worktree::same_path;
@@ -55,6 +69,17 @@ const STATUS_BUDGET: Duration = Duration::from_secs(5);
 const GIT_PARALLEL: usize = 6;
 const SIZE_PARALLEL: usize = 2;
 const PR_PARALLEL: usize = 3;
+/// Reading omp's session files per scan stops after this (the rest waits for the next scan).
+const SESSIONS_BUDGET: Duration = Duration::from_secs(15);
+/// Changed files whose times are looked at per worktree.
+const CHANGED_FILES: usize = 200;
+/// The tail of a reflog read for its newest entry.
+const REFLOG_TAIL: u64 = 8192;
+/// Work in a folder that ended this long before its worktree was created was in an earlier
+/// checkout at that path.
+const BEFORE_CREATED_MS: Millis = 60_000;
+/// Subagent names kept per worktree.
+const SUBAGENTS_SHOWN: usize = 6;
 
 struct PrMemo {
     at: Instant,
@@ -100,6 +125,8 @@ fn empty_report() -> CleanupReport {
         scanning: false,
         repos: Vec::new(),
         gh_error: None,
+        owners: None,
+        sessions_pending: None,
     }
 }
 
@@ -188,23 +215,39 @@ pub(crate) fn forget(session: &str, path: &Path) {
 async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
     let started = Instant::now();
     let board = ctx.state.snapshot();
-    let parked = ctx.state.parked_all();
+    // Chats (§3.31) are never repositories: git is not asked about their folders.
+    let parked: Vec<ParkedRecord> = ctx.state.parked_all().into_iter().filter(|r| r.cwd.as_deref().is_none_or(|c| !ctx.chats.holds(Path::new(c)))).collect();
     let autos = crate::automations::get().map(|a| a.list(&ctx.herdr_session));
     let roots = discover(&board.workspaces, &parked, autos.as_ref()).await;
-    let sessions_dir = omp_agent_dir().join("sessions");
-    let sessions =
-        tokio::task::spawn_blocking(move || newest_sessions(&sessions_dir, &session_titles()))
-            .await
-            .unwrap_or_default();
+    let mut listed = Vec::new();
+    for root in roots {
+        let records = list_linked(&root).await;
+        listed.push((root, records));
+    }
+    // omp's sessions are read on the blocking pool while git answers; the board's first.
+    let paths: Vec<PathBuf> = listed
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .flatten()
+        .map(|w| PathBuf::from(&w.path))
+        .collect();
+    let first: HashSet<PathBuf> = board
+        .agents
+        .iter()
+        .filter_map(|a| a.omp.as_ref()?.session_file.as_deref())
+        .map(PathBuf::from)
+        .collect();
+    let sessions = tokio::task::spawn_blocking(move || read_sessions(paths, first));
 
     let mut repos: Vec<CleanupRepo> = Vec::new();
+    let mut clues: HashMap<String, Clues> = HashMap::new();
     let git_slots = Arc::new(Semaphore::new(GIT_PARALLEL));
-    for root in roots {
+    for (root, records) in listed {
         let name = root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
-        let records = match list_linked(&root).await {
+        let records = match records {
             Ok(r) => r,
             Err(e) => {
                 repos.push(CleanupRepo {
@@ -222,23 +265,23 @@ async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
         }
         let common = common_dir(&root).await;
         let mut set = tokio::task::JoinSet::new();
-        for (i, rec) in records.into_iter().enumerate() {
+        for rec in records {
             let (root, common, slots) = (root.clone(), common.clone(), git_slots.clone());
             set.spawn(async move {
                 let _slot = slots.acquire_owned().await;
-                (i, git_facts(&root, common.as_deref(), rec).await)
+                git_facts(&root, common.as_deref(), rec).await
             });
         }
-        let mut worktrees: Vec<(usize, CleanupWorktree)> = Vec::new();
+        let mut worktrees: Vec<CleanupWorktree> = Vec::new();
         while let Some(r) = set.join_next().await {
-            if let Ok(w) = r {
+            if let Ok((w, c)) = r {
+                clues.insert(w.path.clone(), c);
                 worktrees.push(w);
             }
         }
-        let mut worktrees: Vec<CleanupWorktree> = worktrees.into_iter().map(|(_, w)| w).collect();
         for w in &mut worktrees {
-            add_board(w, &board.workspaces, &board.agents, autos.as_ref());
-            add_session(w, &sessions);
+            let board_ids = add_board(w, &board.workspaces, &board.agents, autos.as_ref());
+            clues.entry(w.path.clone()).or_default().board = board_ids;
         }
         worktrees.sort_by(|a, b| a.path.cmp(&b.path));
         repos.push(CleanupRepo {
@@ -255,20 +298,33 @@ async fn run(ctx: Arc<Ctx>, sc: Arc<Scanner>, refresh: bool) {
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.root.cmp(&b.root))
     });
+    let sessions = sessions.await.unwrap_or_default();
+    let extra = Extra {
+        owners: attribute(&mut repos, &clues, &sessions, &board.agents),
+        pending: sessions.pending,
+    };
 
     // Cached sizes and pull requests now; the due ones are asked below.
     let (size_jobs, pr_jobs) = {
         let g = sc.inner.lock().unwrap();
         plan(&g, &mut repos, refresh)
     };
-    publish(&sc, &repos, false);
-    fill(&sc, &mut repos, size_jobs, pr_jobs).await;
-    publish(&sc, &repos, true);
+    publish(&sc, &repos, &extra, false);
+    fill(&sc, &mut repos, &extra, size_jobs, pr_jobs).await;
+    publish(&sc, &repos, &extra, true);
     let count: usize = repos.iter().map(|r| r.worktrees.len()).sum();
-    tracing::info!(session = %ctx.herdr_session, repos = repos.len(), worktrees = count, ms = started.elapsed().as_millis() as u64, "cleanup scan");
+    tracing::info!(session = %ctx.herdr_session, repos = repos.len(), worktrees = count, owners = extra.owners.len(), sessions_pending = extra.pending, ms = started.elapsed().as_millis() as u64, "cleanup scan");
 }
 
-fn publish(sc: &Scanner, repos: &[CleanupRepo], done: bool) {
+/// What a report carries beside its repositories.
+#[derive(Debug, Default)]
+struct Extra {
+    owners: Vec<CleanupOwner>,
+    /// omp session files not read yet.
+    pending: usize,
+}
+
+fn publish(sc: &Scanner, repos: &[CleanupRepo], extra: &Extra, done: bool) {
     {
         let mut g = sc.inner.lock().unwrap();
         let gh_error = g
@@ -286,6 +342,8 @@ fn publish(sc: &Scanner, repos: &[CleanupRepo], done: bool) {
             scanning: !done,
             repos: repos.to_vec(),
             gh_error,
+            owners: Some(extra.owners.clone()),
+            sessions_pending: (extra.pending > 0).then(|| u32::try_from(extra.pending).unwrap_or(u32::MAX)),
         });
         if done {
             g.running = false;
@@ -384,6 +442,7 @@ enum Filled {
 async fn fill(
     sc: &Arc<Scanner>,
     repos: &mut [CleanupRepo],
+    extra: &Extra,
     sizes: Vec<(At, PathBuf)>,
     pr_jobs: Vec<PrJob>,
 ) {
@@ -450,7 +509,7 @@ async fn fill(
                 Filled::Pr(job, Lookup::Failed(e)) => remember(&mut g, repos, job, Err(e)),
             }
         }
-        publish(sc, repos, false);
+        publish(sc, repos, extra, false);
     }
 }
 
@@ -554,16 +613,23 @@ async fn common_dir(root: &Path) -> Option<PathBuf> {
 
 // ───────────────────────────── facts ─────────────────────────────
 
+/// What a scan learned about a worktree beyond its wire facts.
+#[derive(Debug, Default)]
+struct Clues {
+    /// When its HEAD last moved ([`head_moved_at`]).
+    git: Option<Millis>,
+    /// When its uncommitted changes were last touched ([`changed_at`]).
+    files: Option<Millis>,
+    /// Agents on the board in it (ids).
+    board: Vec<String>,
+}
+
 /// What git says about one linked worktree.
-async fn git_facts(
-    root: &Path,
-    common: Option<&Path>,
-    rec: git::WorktreeRecord,
-) -> CleanupWorktree {
+async fn git_facts(root: &Path, common: Option<&Path>, rec: git::WorktreeRecord) -> (CleanupWorktree, Clues) {
     let path = PathBuf::from(&rec.path);
     let missing = rec.prunable || !path.is_dir();
-    let (dirty, unpushed) = if missing {
-        (None, None)
+    let (dirty, unpushed, files) = if missing {
+        (None, None, None)
     } else {
         status(&path).await
     };
@@ -572,8 +638,7 @@ async fn git_facts(
         _ => false,
     };
     let admin = common.and_then(|c| admin_dir(&path, c));
-    let (created_at, git_active) = admin.as_deref().map(admin_times).unwrap_or_default();
-    CleanupWorktree {
+    let w = CleanupWorktree {
         head: rec.head.as_ref().map(|h| h.chars().take(7).collect()),
         branch: rec.branch,
         missing,
@@ -584,21 +649,30 @@ async fn git_facts(
         workspace_id: None,
         agents: 0,
         busy: false,
-        created_at,
-        active_at: git_active,
+        created_at: admin.as_deref().and_then(created_at),
+        active_at: None,
+        active_by: None,
         size: None,
         size_partial: false,
         pr: None,
         pr_checked_at: None,
         pr_error: None,
         last_agent: None,
+        owner: None,
         automation: None,
         path: rec.path,
-    }
+    };
+    let clues = Clues {
+        git: admin.as_deref().and_then(head_moved_at),
+        files,
+        board: Vec::new(),
+    };
+    (w, clues)
 }
 
-/// Changed files, and commits ahead of the upstream (when it has one).
-async fn status(path: &Path) -> (Option<u32>, Option<u32>) {
+/// Changed files, commits ahead of the upstream (when it has one), and when the changes were last
+/// touched.
+async fn status(path: &Path) -> (Option<u32>, Option<u32>, Option<Millis>) {
     let args = [
         "status",
         "--porcelain=v2",
@@ -613,10 +687,25 @@ async fn status(path: &Path) -> (Option<u32>, Option<u32>) {
             (
                 Some(st.entries.len() as u32),
                 st.upstream.is_some().then_some(st.ahead),
+                changed_at(path, &st.entries),
             )
         }
-        _ => (None, None),
+        _ => (None, None, None),
     }
+}
+
+/// When a worktree's uncommitted changes were last touched: the newest time among the files git
+/// lists (at most [`CHANGED_FILES`]; an untracked folder by its own time, a deleted file by its
+/// folder's). Never a walk of the tree.
+fn changed_at(root: &Path, entries: &[git::StatusEntry]) -> Option<Millis> {
+    entries
+        .iter()
+        .take(CHANGED_FILES)
+        .filter_map(|e| {
+            let p = root.join(e.path.trim_end_matches('/'));
+            lmtime_ms(&p).or_else(|| p.parent().and_then(lmtime_ms))
+        })
+        .max()
 }
 
 /// Whether a branch, tag or remote branch contains `commit` (`None`: git couldn't tell).
@@ -667,14 +756,45 @@ fn mtime_ms(p: &Path) -> Option<Millis> {
     Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as Millis)
 }
 
-/// `(created, last git activity)` from the admin dir's files.
-pub(crate) fn admin_times(admin: &Path) -> (Option<Millis>, Option<Millis>) {
-    let created = mtime_ms(&admin.join("commondir")).or_else(|| mtime_ms(admin));
-    let active = ["logs/HEAD", "index", "HEAD"]
-        .iter()
-        .filter_map(|f| mtime_ms(&admin.join(f)))
-        .max();
-    (created, active)
+/// [`mtime_ms`] of the link itself, not what it points at.
+fn lmtime_ms(p: &Path) -> Option<Millis> {
+    let t = std::fs::symlink_metadata(p).ok()?.modified().ok()?;
+    Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as Millis)
+}
+
+/// When `git worktree add` made the worktree: its admin dir's `commondir`, written once.
+pub(crate) fn created_at(admin: &Path) -> Option<Millis> {
+    mtime_ms(&admin.join("commondir")).or_else(|| mtime_ms(admin))
+}
+
+/// When the worktree's HEAD last moved (a commit, checkout, merge, rebase or reset made in it):
+/// the newest entry of its reflog, at the time git wrote into the entry; without one, when its
+/// HEAD file was written (a checkout). Never the reflog's own file time: `git gc` rewrites every
+/// worktree's reflog (`git reflog expire --all`), and with it every mtime.
+pub(crate) fn head_moved_at(admin: &Path) -> Option<Millis> {
+    reflog_at(&admin.join("logs").join("HEAD")).or_else(|| mtime_ms(&admin.join("HEAD")))
+}
+
+/// The newest entry time in the tail of a reflog.
+fn reflog_at(log: &Path) -> Option<Millis> {
+    let mut f = std::fs::File::open(log).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(REFLOG_TAIL))).ok()?;
+    let mut tail = Vec::new();
+    f.take(REFLOG_TAIL).read_to_end(&mut tail).ok()?;
+    tail.split(|b| *b == b'\n').filter_map(reflog_time).max()
+}
+
+/// A reflog entry's time: `<old> <new> <name> <<email>> <seconds> <±hhmm>\t<message>`.
+fn reflog_time(line: &[u8]) -> Option<Millis> {
+    let who = line.split(|b| *b == b'\t').next()?;
+    let who = std::str::from_utf8(who).ok()?;
+    let mut words = who.rsplit(' ');
+    let tz = words.next()?;
+    if tz.len() != 5 || !(tz.starts_with('+') || tz.starts_with('-')) {
+        return None;
+    }
+    words.next()?.parse::<Millis>().ok()?.checked_mul(1000)
 }
 
 /// `child` is `parent` or inside it (lexically, by components).
@@ -765,27 +885,28 @@ fn agent_at(a: &Agent) -> Millis {
     }
 }
 
+/// The board's facts about a worktree: the workspace showing it, its live agents, whether one is
+/// busy, the newest agent in it (`lastAgent`) and the automation that made it. Returns the ids of
+/// the board's agents in it.
 fn add_board(
     w: &mut CleanupWorktree,
     workspaces: &[Workspace],
     agents: &[Agent],
     autos: Option<&AutomationList>,
-) {
+) -> Vec<String> {
     let path = PathBuf::from(&w.path);
     let (ws, found) = agents_in(workspaces, agents, &path);
     w.workspace_id = ws;
     w.agents = found.iter().filter(|a| a.parked.is_none()).count() as u32;
     w.busy = found.iter().any(|a| a.parked.is_none() && is_busy(a));
     if let Some(a) = found.iter().max_by_key(|a| agent_at(a)) {
-        let at = agent_at(a);
-        w.active_at = Some(w.active_at.map_or(at, |t| t.max(at)));
         w.last_agent = Some(CleanupAgent {
             agent_id: Some(a.id.clone()),
             name: Some(a.name.clone()),
             title: Some(a.title.clone()).filter(|t| !t.is_empty()),
             state: a.parked.is_none().then_some(a.state),
             parked: a.parked.is_some(),
-            at,
+            at: agent_at(a),
         });
     }
     if let Some(list) = autos {
@@ -802,81 +923,262 @@ fn add_board(
             .and_then(|r| list.automations.iter().find(|a| a.id == r.automation_id))
             .map(|a| a.name.clone());
     }
+    found.iter().map(|a| a.id.clone()).collect()
 }
 
-/// omp's newest session in one session folder.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SeenSession {
-    pub cwd: PathBuf,
-    pub at: Millis,
-    pub title: Option<String>,
+// ───────────────────────────── owners ─────────────────────────────
+
+/// What omp's sessions say about the scanned worktrees.
+#[derive(Debug, Default)]
+struct SessionFacts {
+    /// Worktree path → the main agents that worked in it.
+    worked: HashMap<String, Vec<WorkedIn>>,
+    /// Main session file → what its transcripts say.
+    mains: HashMap<PathBuf, MainFacts>,
+    /// omp session id → its title (`history.db`).
+    titles: HashMap<String, String>,
+    /// Session files not read yet.
+    pending: usize,
 }
 
-/// The newest session of each of omp's session folders (`<sessions>/<encoded cwd>/*.jsonl`; one
-/// folder per working directory, so its newest file names the folder's cwd), titled from omp's
-/// `history.db` (`titles`: session id → title), else the file's own title. Blocking.
-pub(crate) fn newest_sessions(dir: &Path, titles: &HashMap<String, String>) -> Vec<SeenSession> {
-    let Ok(buckets) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut newest: Vec<(Millis, PathBuf)> = Vec::new();
-    for bucket in buckets.flatten() {
-        if !bucket.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let Ok(files) = std::fs::read_dir(bucket.path()) else {
-            continue;
-        };
-        let best = files
-            .flatten()
-            .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
-            .filter_map(|f| {
-                let m = f.metadata().ok().filter(|m| m.is_file())?;
-                let at = m
-                    .modified()
-                    .ok()?
-                    .duration_since(UNIX_EPOCH)
-                    .ok()?
-                    .as_millis() as Millis;
-                Some((at, f.path()))
-            })
-            .max_by_key(|(at, _)| *at);
-        newest.extend(best);
-    }
-    newest
-        .into_iter()
-        .filter_map(|(at, file)| {
-            let head = read_head(&file);
-            let cwd = PathBuf::from(head.cwd?);
-            let id = head.id.clone().or_else(|| id_from_file_name(&file));
-            let title = id.and_then(|id| titles.get(&id).cloned()).or(head.title);
-            Some(SeenSession { cwd, at, title })
-        })
-        .collect()
-}
-
-/// omp's newest session in the worktree, when no agent on the board was there since.
-fn add_session(w: &mut CleanupWorktree, sessions: &[SeenSession]) {
-    let path = Path::new(&w.path);
-    let Some(s) = sessions
-        .iter()
-        .filter(|s| inside(&s.cwd, path))
-        .max_by_key(|s| s.at)
-    else {
-        return;
-    };
-    w.active_at = Some(w.active_at.map_or(s.at, |t| t.max(s.at)));
-    if w.last_agent.as_ref().is_some_and(|a| a.at >= s.at) {
-        return;
-    }
-    w.last_agent = Some(CleanupAgent {
-        agent_id: None,
-        name: None,
-        title: s.title.clone(),
-        state: None,
-        parked: false,
-        at: s.at,
+/// Reads omp's sessions (blocking): who worked in each of `paths`, and when. `first` (the board's
+/// session files) are read before the others.
+fn read_sessions(paths: Vec<PathBuf>, first: HashSet<PathBuf>) -> SessionFacts {
+    let dir = omp_agent_dir().join("sessions");
+    let home = crate::paths::home_dir();
+    let (worked, mains, pending) = sessions::with_index(&dir, Some(&home), &first, SESSIONS_BUDGET, |ix| {
+        (ix.worked_in(&paths), ix.main_facts(), ix.pending)
     });
+    SessionFacts {
+        worked: paths.iter().map(|p| p.display().to_string()).zip(worked).collect(),
+        mains,
+        titles: session_titles(),
+        pending,
+    }
+}
+
+/// An owner key: the agent's omp session file, else its id.
+fn key_of(a: &Agent) -> String {
+    a.omp
+        .as_ref()
+        .and_then(|o| o.session_file.clone())
+        .unwrap_or_else(|| format!("agent:{}", a.id))
+}
+
+fn owner_state(a: &Agent) -> CleanupOwnerState {
+    match &a.parked {
+        None => CleanupOwnerState::Live,
+        Some(p) if p.ended.is_some() => CleanupOwnerState::Ended,
+        Some(_) => CleanupOwnerState::Parked,
+    }
+}
+
+/// The board's agents and omp's main sessions, by what owners are keyed with.
+struct Who<'a> {
+    by_id: HashMap<&'a str, &'a Agent>,
+    by_file: HashMap<&'a str, &'a Agent>,
+    by_session: HashMap<&'a str, &'a Agent>,
+    mains_by_id: HashMap<&'a str, &'a Path>,
+    s: &'a SessionFacts,
+}
+
+impl<'a> Who<'a> {
+    fn new(agents: &'a [Agent], s: &'a SessionFacts) -> Self {
+        let mut who = Who {
+            by_id: HashMap::new(),
+            by_file: HashMap::new(),
+            by_session: HashMap::new(),
+            mains_by_id: HashMap::new(),
+            s,
+        };
+        for a in agents {
+            who.by_id.insert(a.id.as_str(), a);
+            if let Some(o) = &a.omp {
+                if let Some(f) = &o.session_file {
+                    who.by_file.insert(f.as_str(), a);
+                }
+                if let Some(id) = &o.session_id {
+                    who.by_session.insert(id.as_str(), a);
+                }
+            }
+        }
+        for (main, f) in &s.mains {
+            if let Some(id) = &f.id {
+                who.mains_by_id.insert(id.as_str(), main.as_path());
+            }
+        }
+        who
+    }
+
+    /// The board's card of a main session: by its file, else by its omp session id.
+    fn card(&self, main: &Path) -> Option<&'a Agent> {
+        if let Some(a) = self.by_file.get(main.to_string_lossy().as_ref()) {
+            return Some(a);
+        }
+        let id = self
+            .s
+            .mains
+            .get(main)
+            .and_then(|f| f.id.clone())
+            .or_else(|| id_from_file_name(main))?;
+        self.by_session.get(id.as_str()).copied()
+    }
+
+    /// A main session's owner key: its card's, else the session file.
+    fn key(&self, main: &Path) -> String {
+        self.card(main)
+            .map(key_of)
+            .unwrap_or_else(|| main.display().to_string())
+    }
+
+    /// What omp's sessions say about a card's main session.
+    fn facts_of(&self, a: &Agent) -> Option<&'a MainFacts> {
+        let o = a.omp.as_ref()?;
+        o.session_file
+            .as_deref()
+            .and_then(|f| self.s.mains.get(Path::new(f)))
+            .or_else(|| self.s.mains.get(*self.mains_by_id.get(o.session_id.as_deref()?)?))
+    }
+
+    /// The report's entry for an owner key: its card, else what its session file says.
+    fn owner(&self, key: &str) -> CleanupOwner {
+        let card = self
+            .by_file
+            .get(key)
+            .or_else(|| self.by_id.get(key.strip_prefix("agent:")?))
+            .copied();
+        if let Some(a) = card {
+            return CleanupOwner {
+                key: key.to_string(),
+                state: owner_state(a),
+                agent_id: Some(a.id.clone()),
+                name: Some(a.name.clone()),
+                title: Some(a.title.clone()).filter(|t| !t.is_empty()),
+                herdr: a.parked.is_none().then_some(a.state),
+                session_id: a.omp.as_ref().and_then(|o| o.session_id.clone()),
+                cwd: a.cwd.clone(),
+                at: self.facts_of(a).and_then(|f| f.last_at).into_iter().chain(a.live.last_event_at).max(),
+            };
+        }
+        let main = Path::new(key);
+        let facts = self.s.mains.get(main);
+        let id = facts
+            .and_then(|f| f.id.clone())
+            .or_else(|| id_from_file_name(main));
+        let title = id
+            .as_ref()
+            .and_then(|id| self.s.titles.get(id).cloned())
+            .or_else(|| read_head(main).title);
+        CleanupOwner {
+            key: key.to_string(),
+            state: CleanupOwnerState::Gone,
+            agent_id: None,
+            name: None,
+            title,
+            herdr: None,
+            session_id: id,
+            cwd: facts.and_then(|f| f.cwd.as_ref()).map(|c| c.display().to_string()),
+            at: facts.and_then(|f| f.last_at),
+        }
+    }
+}
+
+/// Who a worktree belongs to, as `(owner key, its subagents that worked there)`: an agent on the
+/// board in it or a top-level session started there (one working or needing you first, then a
+/// live one, then the latest); else the main agent whose session or subagents worked there first.
+fn pick_owner(board: &[&Agent], worked: &[&WorkedIn], who: &Who) -> Option<(String, Vec<String>)> {
+    let rank = |a: &Agent| {
+        let live = a.parked.is_none();
+        u8::from(live) + u8::from(live && is_busy(a))
+    };
+    let mut best: Option<((u8, Millis), String)> = None;
+    let mut consider = |r: (u8, Millis), key: String| {
+        if best.as_ref().is_none_or(|(b, _)| r > *b) {
+            best = Some((r, key));
+        }
+    };
+    for a in board {
+        let at = who.facts_of(a).and_then(|f| f.last_at).unwrap_or_else(|| agent_at(a));
+        consider((rank(a), at), key_of(a));
+    }
+    for u in worked.iter().filter(|u| u.home) {
+        match who.card(&u.main) {
+            Some(a) => consider((rank(a), u.seen.last), key_of(a)),
+            None => consider((0, u.seen.last), u.main.display().to_string()),
+        }
+    }
+    if let Some((_, key)) = best {
+        return Some((key, Vec::new()));
+    }
+    let u = worked
+        .iter()
+        .min_by_key(|u| (u.seen.first, Reverse(u.seen.n)))?;
+    let subagents = u.subagents.iter().take(SUBAGENTS_SHOWN).map(|(n, _)| n.clone()).collect();
+    Some((who.key(&u.main), subagents))
+}
+
+/// `activeAt` / `activeBy`: the newest real use, never in the future.
+fn settle(w: &mut CleanupWorktree, c: &Clues, agent: Option<Millis>) {
+    let now = now_ms();
+    let newest = [
+        (c.files, WorktreeUse::Files),
+        (c.git, WorktreeUse::Git),
+        (agent, WorktreeUse::Agent),
+    ]
+    .into_iter()
+    .filter_map(|(t, by)| Some((t?.min(now), by)))
+    .max_by_key(|(t, _)| *t);
+    (w.active_at, w.active_by) = (newest.map(|n| n.0), newest.map(|n| n.1));
+}
+
+/// Picks each worktree's owner and settles its last use (sessions and subagents that worked in it
+/// since it was created, live agents in it, its reflog and changed files); the owners, each once.
+fn attribute(
+    repos: &mut [CleanupRepo],
+    clues: &HashMap<String, Clues>,
+    s: &SessionFacts,
+    agents: &[Agent],
+) -> Vec<CleanupOwner> {
+    let who = Who::new(agents, s);
+    let none = Clues::default();
+    let mut owners: HashMap<String, CleanupOwner> = HashMap::new();
+    for w in repos.iter_mut().flat_map(|r| r.worktrees.iter_mut()) {
+        let c = clues.get(&w.path).unwrap_or(&none);
+        let since = w.created_at.map(|t| t - BEFORE_CREATED_MS);
+        let worked: Vec<&WorkedIn> = s
+            .worked
+            .get(&w.path)
+            .into_iter()
+            .flatten()
+            .filter(|u| since.is_none_or(|t| u.seen.last >= t))
+            .collect();
+        let board: Vec<&Agent> = c.board.iter().filter_map(|id| who.by_id.get(id.as_str()).copied()).collect();
+        let agent = worked
+            .iter()
+            .map(|u| u.seen.last)
+            .chain(board.iter().filter(|a| a.parked.is_none()).filter_map(|a| a.live.last_event_at))
+            .max();
+        settle(w, c, agent);
+        let Some((key, subagents)) = pick_owner(&board, &worked, &who) else { continue };
+        let owner = owners.entry(key.clone()).or_insert_with(|| who.owner(&key));
+        // Older apps show `lastAgent`: the owner, at its last work here.
+        if w.last_agent.is_none()
+            && let Some(at) = agent.or(owner.at)
+        {
+            w.last_agent = Some(CleanupAgent {
+                agent_id: owner.agent_id.clone(),
+                name: owner.name.clone(),
+                title: owner.title.clone(),
+                state: owner.herdr,
+                parked: matches!(owner.state, CleanupOwnerState::Parked | CleanupOwnerState::Ended),
+                at,
+            });
+        }
+        w.owner = Some(CleanupOwnerRef { key, subagents });
+    }
+    let mut out: Vec<CleanupOwner> = owners.into_values().collect();
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
 }
 
 #[cfg(test)]
@@ -905,6 +1207,18 @@ mod tests {
         serde_json::from_value(v).unwrap()
     }
 
+    /// `agent` with an omp session (file and id), as the board shows omp agents.
+    fn with_session(mut a: Agent, file: &str, id: &str) -> Agent {
+        a.omp = Some(
+            serde_json::from_value(json!({
+                "sessionId": id, "sessionFile": file, "link": "notShared", "bridge": false, "fast": false,
+                "mode": "normal", "queue": { "steering": [], "followUp": [] }
+            }))
+            .unwrap(),
+        );
+        a
+    }
+
     fn workspace(id: &str, path: &str) -> Workspace {
         serde_json::from_value(json!({
             "id": id, "label": id, "cwd": path, "tabs": [], "rollup": "idle", "order": 0,
@@ -927,13 +1241,15 @@ mod tests {
             agents: 0,
             busy: false,
             created_at: None,
-            active_at: Some(10),
+            active_at: None,
+            active_by: None,
             size: None,
             size_partial: false,
             pr: None,
             pr_checked_at: None,
             pr_error: None,
             last_agent: None,
+            owner: None,
             automation: None,
         }
     }
@@ -964,20 +1280,21 @@ mod tests {
             ),
         ];
         let mut w = blank("/wt/feat");
-        add_board(&mut w, &wss, &agents, None);
+        let ids = add_board(&mut w, &wss, &agents, None);
         assert_eq!(w.workspace_id.as_deref(), Some("w4"));
         assert_eq!(
             (w.agents, w.busy),
             (2, true),
             "a working agent in a subfolder makes it busy; `feat-2` is another worktree"
         );
+        assert_eq!(ids, ["idle", "sub", "old"]);
         let last = w.last_agent.unwrap();
         assert_eq!(
             (last.name.as_deref(), last.parked, last.at),
             (Some("old"), true, 900),
             "the parked agent closed last"
         );
-        assert_eq!(w.active_at, Some(900));
+        assert_eq!(w.active_at, None, "closing a card is no use of the worktree");
 
         let mut idle = blank("/wt/feat-2");
         add_board(&mut idle, &wss, &agents[..1], None);
@@ -1026,74 +1343,203 @@ mod tests {
         assert!(agents_in(&wss, &agents, &sibling).1.is_empty(), "a sibling folder is not it");
     }
 
-    #[test]
-    fn newest_session_per_folder_names_the_last_agent() {
-        let td = tempfile::tempdir().unwrap();
-        let write = |bucket: &str, file: &str, cwd: &str, title: &str, age_s: u64| {
-            let dir = td.path().join(bucket);
-            std::fs::create_dir_all(&dir).unwrap();
-            let p = dir.join(file);
-            std::fs::write(
-                &p,
-                format!(
-                    "{}\n",
-                    json!({ "type": "session", "id": file, "cwd": cwd, "title": title })
-                ),
-            )
-            .unwrap();
-            let t = std::time::SystemTime::now() - Duration::from_secs(age_s);
-            std::fs::File::options()
-                .write(true)
-                .open(&p)
-                .unwrap()
-                .set_modified(t)
-                .unwrap();
-        };
-        write("-wt-feat", "a.jsonl", "/wt/feat", "older", 300);
-        write("-wt-feat", "b.jsonl", "/wt/feat", "newest", 100);
-        write(
-            "-wt-feat-sub",
-            "c.jsonl",
-            "/wt/feat/sub",
-            "in a subfolder",
-            200,
-        );
-        write("-other", "d.jsonl", "/other", "elsewhere", 10);
-        std::fs::write(td.path().join("stray.jsonl"), "{}").unwrap();
-        let titles: HashMap<String, String> =
-            [("c.jsonl".to_string(), "titled by history.db".to_string())].into();
-        let seen = newest_sessions(td.path(), &titles);
-        assert_eq!(seen.len(), 3);
-        assert!(
-            seen.iter()
-                .any(|s| s.title.as_deref() == Some("titled by history.db"))
-        );
-
-        let mut w = blank("/wt/feat");
-        add_session(&mut w, &seen);
-        let last = w.last_agent.clone().unwrap();
-        assert_eq!(
-            (last.title.as_deref(), last.agent_id),
-            (Some("newest"), None)
-        );
-        assert_eq!(w.active_at, Some(last.at));
-
-        // An agent on the board seen since wins.
-        let mut w = blank("/wt/feat");
-        w.last_agent = Some(CleanupAgent {
-            agent_id: Some("x".into()),
-            name: Some("x".into()),
-            title: None,
-            state: None,
-            parked: true,
-            at: now_ms(),
-        });
-        add_session(&mut w, &seen);
-        assert_eq!(w.last_agent.unwrap().agent_id.as_deref(), Some("x"));
+    fn seen(first: Millis, last: Millis, n: u32) -> sessions::Seen {
+        sessions::Seen { first, last, n }
     }
 
-    /// Created and last-active times come from the admin dir, also once the folder is gone;
-    /// a detached HEAD on a commit only it knows is flagged.
+    fn worked(main: &str, home: bool, s: sessions::Seen, subagents: &[(&str, Millis)]) -> WorkedIn {
+        WorkedIn {
+            main: PathBuf::from(main),
+            home,
+            seen: s,
+            subagents: subagents.iter().map(|(n, t)| (n.to_string(), *t)).collect(),
+        }
+    }
+
+    fn main_facts(id: &str, cwd: &str, last_at: Millis) -> MainFacts {
+        MainFacts {
+            id: Some(id.into()),
+            cwd: Some(PathBuf::from(cwd)),
+            last_at: Some(last_at),
+        }
+    }
+
+    /// The board's agent in a worktree, else the session started there, else the main agent whose
+    /// subagents worked there first; activity of any main agent since the worktree was created.
+    #[test]
+    fn owners_and_last_use_from_the_board_and_omp_sessions() {
+        let a_file = "/s/-wt-dispatch-a/2026-10-28T12-00-00-000Z_aaa.jsonl";
+        let c_file = "/s/-wt-c/2026-10-29T08-00-00-000Z_ccc.jsonl";
+        let g_file = "/s/-wt-gone/2026-10-20T08-00-00-000Z_ggg.jsonl";
+        let d_file = "/s/-wt-d/2026-09-01T08-00-00-000Z_ddd.jsonl";
+        let parked = json!({ "at": 400, "sessionFile": a_file, "worktree": { "path": "/wt/dispatch-a", "repoRoot": "/r" } });
+        // The board knows A's session by another path form (a symlinked home): its id still matches.
+        let agents = [
+            with_session(agent("A", "", "/wt/dispatch-a", "idle", "done", Some(parked)), "/home/u/.omp/s/A.jsonl", "aaa"),
+            with_session(agent("L", "w1", "/wt/live", "working", "running", None), "/s/-wt-live/2026-11-01T09-00-00-000Z_lll.jsonl", "lll"),
+        ];
+        let mut repo = CleanupRepo {
+            root: "/r".into(),
+            name: "r".into(),
+            error: None,
+            pr_error: None,
+            worktrees: ["/wt/dispatch-a", "/wt/p2/A1c", "/wt/p2/old", "/wt/live", "/wt/gone"].map(blank).to_vec(),
+        };
+        repo.worktrees[2].created_at = Some(500_000);
+        let clues: HashMap<String, Clues> = [
+            ("/wt/dispatch-a", Clues { git: Some(3_000), files: None, board: vec!["A".into()] }),
+            ("/wt/p2/A1c", Clues { git: Some(4_500), files: Some(4_800), board: vec![] }),
+            ("/wt/p2/old", Clues { git: Some(600_000), files: None, board: vec![] }),
+            ("/wt/live", Clues { git: None, files: None, board: vec!["L".into()] }),
+        ]
+        .into_iter()
+        .map(|(p, c)| (p.to_string(), c))
+        .collect();
+        let s = SessionFacts {
+            worked: [
+                ("/wt/dispatch-a", vec![worked(a_file, true, seen(1_000, 7_000, 1), &[]), worked(c_file, false, seen(8_000, 8_100, 2), &[("Fix", 8_100)])]),
+                ("/wt/p2/A1c", vec![worked(c_file, false, seen(6_000, 9_000, 9), &[("Late", 9_000)]), worked(a_file, false, seen(4_000, 5_000, 3), &[("A1C", 5_000)])]),
+                // Work that ended before the worktree was made was in an earlier checkout at that path.
+                ("/wt/p2/old", vec![worked(d_file, false, seen(500, 1_000, 40), &[("Old", 1_000)])]),
+                ("/wt/live", vec![worked(g_file, true, seen(90_000, 99_000, 1), &[])]),
+                ("/wt/gone", vec![worked(g_file, true, seen(2_000, 2_500, 1), &[])]),
+            ]
+            .into_iter()
+            .map(|(p, v)| (p.to_string(), v))
+            .collect(),
+            mains: [
+                (a_file, main_facts("aaa", "/wt/dispatch-a", 7_000)),
+                (c_file, main_facts("ccc", "/wt/c", 9_000)),
+                (g_file, main_facts("ggg", "/wt/gone", 99_000)),
+            ]
+            .into_iter()
+            .map(|(f, m)| (PathBuf::from(f), m))
+            .collect(),
+            titles: [("ggg".to_string(), "Spike: try Yjs".to_string())].into(),
+            pending: 0,
+        };
+        let owners = attribute(std::slice::from_mut(&mut repo), &clues, &s, &agents);
+        let by = |p: &str| repo.worktrees.iter().find(|w| w.path == p).unwrap().clone();
+        let key = |p: &str| by(p).owner.map(|o| o.key);
+
+        let home = by("/wt/dispatch-a");
+        assert_eq!(key("/wt/dispatch-a").as_deref(), Some("/home/u/.omp/s/A.jsonl"), "the card's key, matched by session id");
+        assert_eq!((home.active_at, home.active_by), (Some(8_100), Some(WorktreeUse::Agent)), "another agent's later work there counts as use");
+
+        let sub = by("/wt/p2/A1c");
+        assert_eq!(key("/wt/p2/A1c").as_deref(), Some("/home/u/.omp/s/A.jsonl"), "the main agent whose subagent worked there first");
+        assert_eq!(sub.owner.unwrap().subagents, ["A1C"]);
+        assert_eq!((sub.active_at, sub.active_by), (Some(9_000), Some(WorktreeUse::Agent)));
+        let last = sub.last_agent.unwrap();
+        assert_eq!((last.agent_id.as_deref(), last.parked), (Some("A"), true), "older apps see the owner");
+
+        let old = by("/wt/p2/old");
+        assert!(old.owner.is_none(), "an earlier checkout's agent does not own it");
+        assert_eq!((old.active_at, old.active_by), (Some(600_000), Some(WorktreeUse::Git)));
+
+        assert_eq!(key("/wt/live").as_deref(), Some("/s/-wt-live/2026-11-01T09-00-00-000Z_lll.jsonl"), "a live agent beats a later session started there");
+        assert_eq!(by("/wt/live").active_at, Some(99_000));
+        assert_eq!(key("/wt/gone").as_deref(), Some(g_file));
+
+        assert_eq!(owners.len(), 3);
+        let owner = |k: &str| owners.iter().find(|o| o.key == k).unwrap();
+        let a = owner("/home/u/.omp/s/A.jsonl");
+        assert_eq!((a.state, a.name.as_deref(), a.title.as_deref(), a.at), (CleanupOwnerState::Parked, Some("A"), Some("A task"), Some(7_000)));
+        let l = owner("/s/-wt-live/2026-11-01T09-00-00-000Z_lll.jsonl");
+        assert_eq!((l.state, l.herdr), (CleanupOwnerState::Live, Some(HerdrState::Working)));
+        let g = owner(g_file);
+        assert_eq!(
+            (g.state, g.title.as_deref(), g.session_id.as_deref(), g.cwd.as_deref(), g.at),
+            (CleanupOwnerState::Gone, Some("Spike: try Yjs"), Some("ggg"), Some("/wt/gone"), Some(99_000))
+        );
+    }
+
+    /// `git` with author and committer dates, as an agent's commit made then.
+    fn git_at(dir: &Path, args: &[&str], at: Millis) {
+        let date = format!("@{} +0000", at / 1000);
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn set_mtime(p: &Path, at: Millis) {
+        let t = UNIX_EPOCH + Duration::from_millis(at as u64);
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+    }
+
+    /// Regression: every worktree of a busy repository said "used 53 minutes ago". `git gc` (git runs
+    /// it by itself after commits and fetches) rewrites every worktree's reflog, and a `git status`
+    /// that takes optional locks rewrites the index: the admin dir's file times moved for all of them
+    /// at once. Last use comes from what the reflog's entries say instead, and neither git's
+    /// maintenance nor TeleFlock's own scans change it.
+    #[tokio::test]
+    async fn last_use_survives_git_gc_and_scans() {
+        let td = fixture();
+        let root = td.path();
+        let day = 86_400_000;
+        let now = now_ms() / 1000 * 1000;
+        let mut made = Vec::new();
+        for (n, ago) in [("a", 20), ("b", 40)] {
+            let path = root.parent().unwrap().join(format!("{}-{n}", root.file_name().unwrap().to_string_lossy()));
+            let at = now - ago * day;
+            git_at(root, &["worktree", "add", "-q", "-b", &format!("wt-{n}"), path.to_str().unwrap(), "main"], at - day);
+            std::fs::write(path.join("work.txt"), n).unwrap();
+            git_at(&path, &["add", "work.txt"], at);
+            git_at(&path, &["commit", "-q", "-m", "work"], at);
+            for f in ["a.txt", "work.txt"] {
+                set_mtime(&path.join(f), at);
+            }
+            made.push((path, at));
+        }
+        let common = common_dir(root).await.unwrap();
+        let last_use = |path: PathBuf| {
+            let common = common.clone();
+            async move {
+                let rec = list_linked(root).await.unwrap().into_iter().find(|r| same_path(Path::new(&r.path), &path)).unwrap();
+                let (mut w, clues) = git_facts(root, Some(&common), rec).await;
+                settle(&mut w, &clues, None);
+                (w.active_at, w.active_by)
+            }
+        };
+        for (path, at) in &made {
+            assert_eq!(last_use(path.clone()).await, (Some(*at), Some(WorktreeUse::Git)), "the commit made there");
+        }
+
+        // An agent commits anywhere in the repository and git's automatic maintenance runs; an
+        // editor's `git status` (with optional locks) refreshes a touched file's index entry.
+        sh(root, &["gc", "--quiet"]);
+        for (path, _) in &made {
+            set_mtime(&path.join("a.txt"), now);
+            let st = std::process::Command::new("git").args(["status", "--porcelain"]).current_dir(path).output().unwrap();
+            assert!(st.status.success() && st.stdout.is_empty(), "touched, not changed");
+        }
+        let (path, at) = &made[1];
+        let admin = admin_dir(path, &common).unwrap();
+        for f in ["logs/HEAD", "index"] {
+            assert!(mtime_ms(&admin.join(f)).unwrap() >= now - 60_000, "{f} was rewritten just now: its file time says nothing");
+        }
+        let index_before_scan = mtime_ms(&admin.join("index"));
+        assert_eq!(last_use(path.clone()).await, (Some(*at), Some(WorktreeUse::Git)), "still the commit's time after gc");
+        assert_eq!(last_use(made[0].0.clone()).await.0, Some(made[0].1));
+        assert_eq!(mtime_ms(&admin.join("index")), index_before_scan, "a scan writes nothing");
+
+        // A real change to its files is use, at the time the file was written.
+        std::fs::write(path.join("work.txt"), "changed").unwrap();
+        set_mtime(&path.join("work.txt"), at + 3 * day);
+        assert_eq!(last_use(path.clone()).await, (Some(at + 3 * day), Some(WorktreeUse::Files)));
+    }
+
+    /// Created and last-moved times come from the admin dir, also once the folder is gone; a
+    /// detached HEAD on a commit only it knows is flagged.
     #[tokio::test]
     async fn git_facts_of_linked_worktrees() {
         let td = fixture();
@@ -1164,11 +1610,11 @@ mod tests {
         let by = |p: &Path| {
             facts
                 .iter()
-                .find(|f| same_path(Path::new(&f.path), p))
+                .find(|(f, _)| same_path(Path::new(&f.path), p))
+                .map(|(f, c)| (f.clone(), c.git, c.files))
                 .unwrap()
-                .clone()
         };
-        let f = by(&feat);
+        let (f, moved, changed) = by(&feat);
         assert_eq!(
             (
                 f.branch.as_deref(),
@@ -1179,11 +1625,12 @@ mod tests {
             ),
             (Some("wt-feat"), Some(1), false, Some("usb disk"), false)
         );
-        assert!(f.created_at.is_some() && f.active_at.is_some());
-        let g = by(&gone);
+        assert!(f.created_at.is_some() && moved.is_some());
+        assert!(changed.is_some(), "an untracked file");
+        let (g, moved, _) = by(&gone);
         assert!(g.missing && g.dirty.is_none());
-        assert!(g.created_at.is_some(), "the admin dir outlives the folder");
-        let d = by(&det);
+        assert!(g.created_at.is_some() && moved.is_some(), "the admin dir outlives the folder");
+        let (d, _, _) = by(&det);
         assert!(
             d.branch.is_none() && !d.orphan_commits,
             "detached on main: main contains it"
@@ -1199,7 +1646,7 @@ mod tests {
             .into_iter()
             .find(|r| same_path(Path::new(&r.path), &det))
             .unwrap();
-        assert!(git_facts(root, Some(&common), rec).await.orphan_commits);
+        assert!(git_facts(root, Some(&common), rec).await.0.orphan_commits);
     }
 
     #[tokio::test]

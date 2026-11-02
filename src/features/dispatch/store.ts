@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import { aiNamingEnabled, apiError, core, type DraftImage, getAgentViews, getHostStates, suggestBranch, toApiError, useSettings } from "@/core";
+import { CHAT_TARGET, CHATS_NEED_UPDATE, chatsUnsupported, isChatRepo } from "@/core/chats";
 import type { Agent, AgentSpec, AutoAnswer, BranchList, Column, StartTarget, ThinkingLevel, Workspace } from "@/core/gen";
 import { discardVideos, getVideo, releaseVideos, retryVideos, uploadDraftVideos, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import { classifyHerdrError, describeError, type HerdrFailure } from "@/features/workspace/shared/errors";
@@ -11,10 +12,11 @@ import { BRANCH_PREFIX, type BranchSuggester, baseSlug, nameDispatch, resolveAge
 
 /*
  * Dispatch threads: every message fired at a repo becomes one `worktree.create` with an omp agent
- * spec. Entries persist per target + repo (localStorage, capped) so the thread survives reloads;
- * the live state of each agent always comes from host state, `last` keeps a summary for agents
- * that have since been closed. A target is a host, or a host group in Auto mode (`auto.ts`),
- * where each entry records the host it went to.
+ * spec; in a chat thread (`CHAT_REPO`, "No folder · chat") one `agent.start` with the chat target,
+ * whose folder the host makes. Entries persist per target + repo (localStorage, capped) so the
+ * thread survives reloads; the live state of each agent always comes from host state, `last` keeps
+ * a summary for agents that have since been closed. A target is a host, or a host group in Auto
+ * mode (`auto.ts`), where each entry records the host it went to.
  */
 
 /** Entries kept per thread (oldest dropped first). */
@@ -50,12 +52,12 @@ export interface DispatchOptions {
 /**
  * `naming` (omp's tiny model is naming the branch; skipped when AI naming is off) → `uploading`
  * (only with videos still on their way to the host) → `queued` → `creating` (worktree.create in
- * flight) → `started` (herdr answered; the agent's own progress comes from host state), `failed`
- * (herdr refused, or a video didn't upload), or `unknown` (the request timed out or the connection
- * dropped: the host may still be creating it, so the entry keeps looking for its agent). A
- * `queued`/`creating` entry that is no longer in flight was interrupted by a reload; a `naming` one
- * never reached the host and resumes under its fallback name; an `uploading` one fails (the page
- * that could read the video is gone).
+ * flight; a chat: agent.start) → `started` (herdr answered; the agent's own progress comes from
+ * host state), `failed` (herdr refused, or a video didn't upload), or `unknown` (the request timed
+ * out or the connection dropped: the host may still be creating it, so the entry keeps looking for
+ * its agent). A `queued`/`creating` entry that is no longer in flight was interrupted by a reload; a
+ * `naming` one never reached the host and resumes under its fallback name; an `uploading` one fails
+ * (the page that could read the video is gone).
  */
 export type DispatchPhase = "naming" | "uploading" | "queued" | "creating" | "started" | "failed" | "unknown";
 
@@ -67,6 +69,10 @@ export interface DispatchVideo {
   path?: string;
   /** The upload in this page (`@/core/draftVideos`) until it is done. */
   upload?: string;
+  /** Its own reference text once uploaded (a browser recording: timeline, video, screenshots). */
+  ref?: string;
+  /** A browser recording (its chip says so). */
+  kind?: "recording";
 }
 
 export interface DispatchError {
@@ -87,7 +93,7 @@ export interface DispatchEntry {
   id: string;
   prompt: string;
   createdAt: number;
-  /** `dispatch/<slug>` (while `naming`: the fallback, the prompt's slug). */
+  /** `dispatch/<slug>` (while `naming`: the fallback, the prompt's slug); empty for a chat. */
   branch: string;
   /** Agent name and workspace label (`<slug>`). */
   name: string;
@@ -115,10 +121,12 @@ export interface DispatchEntry {
   videos?: DispatchVideo[];
   /** The host it went to; absent (entries before 0.5) = the thread's host. */
   hostId?: string;
-  /** That host's checkout root of the repository; absent = the thread's repo. */
+  /** That host's checkout root of the repository; absent = the thread's repo (a chat has none). */
   repo?: string;
   /** Auto mode: why that host was picked ("least busy · 1 running · CPU 12%"). */
   placed?: string;
+  /** A chat (a `CHAT_REPO` thread): an omp agent in a folder its host makes for it; no repository, branch or base. */
+  chat?: boolean;
 }
 
 /** Persisted thread key: one thread per target (host id or `auto:<group>`) + repo (root, or Auto's repo id). */
@@ -151,6 +159,8 @@ interface DispatchState {
   options: DispatchOptions | null;
   /** Canonical remote per host + checkout root, learned from workspaces (Auto matches clones by it). */
   remotes: Record<string, string>;
+  /** Task box focus requests (a nonce, 0 = none; `openChat`), consumed by the Dispatch view. Not persisted. */
+  composerFocus: number;
   select(target: string, repo?: string | null): void;
   setBase(key: string, base: string | null): void;
   setOptions(options: DispatchOptions): void;
@@ -160,6 +170,8 @@ interface DispatchState {
   patch(key: string, id: string, patch: Partial<DispatchEntry>): void;
   remove(key: string, ids: readonly string[]): void;
   clear(key: string): void;
+  focusComposer(): void;
+  consumeComposerFocus(): void;
 }
 
 type Persisted = Pick<DispatchState, "threads" | "lastHost" | "lastRepo" | "bases" | "legacyBases" | "trusted" | "options" | "remotes">;
@@ -202,6 +214,7 @@ export const useDispatch = create<DispatchState>()(
       trusted: {},
       options: null,
       remotes: {},
+      composerFocus: 0,
       select: (target, repo) =>
         set((s) => {
           if (repo === undefined) return { lastHost: target };
@@ -245,6 +258,8 @@ export const useDispatch = create<DispatchState>()(
           delete threads[key];
           return { threads };
         }),
+      focusComposer: () => set((s) => ({ composerFocus: s.composerFocus + 1 })),
+      consumeComposerFocus: () => set((s) => (s.composerFocus ? { composerFocus: 0 } : s)),
     }),
     {
       name: "tf.dispatch",
@@ -335,7 +350,7 @@ async function specOf(e: DispatchEntry, hostId: string): Promise<AgentSpec> {
   const template = useSettings.getState().templates.find((t) => t.id === e.options.templateId);
   const videos = e.videos ?? [];
   if (videos.some((v) => !v.path)) throw apiError("videos_missing", "The task's videos didn't reach the host", { hint: "Retry uploads them again" });
-  const task = withVideoRefs(e.prompt.trim(), videos.map((v) => ({ name: v.name, size: v.size, path: v.path ?? "" })));
+  const task = withVideoRefs(e.prompt.trim(), videos.map((v) => ({ name: v.name, size: v.size, path: v.path ?? "", ...(v.ref ? { ref: v.ref } : {}) })));
   const images = e.images ? await loadEntryImages(e.id) : null;
   if (e.images && !images) {
     throw apiError("images_missing", "The task's images are no longer stored on this device", { hint: "Dismiss it and send the task again with its images" });
@@ -367,15 +382,21 @@ async function uploadedVideos(hostId: string, videos: readonly DispatchVideo[]):
   retryVideos(ids);
   await whenUploaded(ids);
   const out = videos.map((v): DispatchVideo => {
-    const path = v.path ?? (v.upload ? getVideo(v.upload)?.path : undefined);
-    return path ? { name: v.name, size: v.size, path } : v;
+    const up = v.upload ? getVideo(v.upload) : undefined;
+    const path = v.path ?? up?.path;
+    const ref = v.ref ?? up?.ref;
+    return path ? { name: v.name, size: up?.size ?? v.size, path, ...(ref ? { ref } : {}), ...(v.kind ? { kind: v.kind } : {}) } : v;
   });
   releaseVideos(ids);
   return out;
 }
 
-/** A failure → `failed`, or `unknown` when the host may have carried on regardless. */
+/**
+ * A failure → `failed`, or `unknown` when the host may have carried on regardless. A daemon older
+ * than chats refusing one (`chatsUnsupported`) says to update it.
+ */
 function failurePatch(err: unknown): Partial<DispatchEntry> {
+  if (chatsUnsupported(err)) return { phase: "failed", error: { ...CHATS_NEED_UPDATE, kind: "other" } };
   const uncertain = UNCERTAIN_CODES[toApiError(err).code] === true;
   return { phase: uncertain ? "unknown" : "failed", error: { ...describeError(err), kind: classifyHerdrError(err).kind } };
 }
@@ -407,6 +428,12 @@ async function run(key: string, id: string): Promise<void> {
     if (!e) return;
     store().patch(key, id, { phase: "creating" });
     const hostId = entryHost(key, e);
+    if (e.chat) {
+      // The host makes its folder, opens it in its workspace for chats and keeps its name unique there.
+      const started = await core.host(hostId).call("agent.start", { target: CHAT_TARGET, spec: await specOf(e, hostId) });
+      store().patch(key, id, { phase: "started", startedAt: Date.now(), agentId: started.agentId, paneId: started.paneId, workspaceId: started.workspaceId });
+      return;
+    }
     const repo = entryRepo(key, e);
     const created = await core.host(hostId).call("worktree.create", {
       cwd: repo,
@@ -433,7 +460,7 @@ async function run(key: string, id: string): Promise<void> {
   }
 }
 
-/** Called after every finished worktree.create (e.g. to refresh the branch list). */
+/** Called after every finished send (worktree.create, a chat's agent.start; e.g. to refresh the branch list). */
 export function onDispatchSettled(cb: () => void): () => void {
   subscribers.add(cb);
   return () => subscribers.delete(cb);
@@ -481,11 +508,12 @@ let seq = 0;
 export const NAMING_TIMEOUT_MS = 10_000;
 
 /**
- * The tiny model's branch slug for a task sent to `repo`. The composer prefetches through this
- * same call while the user types, so most sends find the answer in ai.ts's cache.
+ * The tiny model's branch slug for a task sent to `repo` (a chat, `CHAT_REPO`, is named outside any
+ * folder). The composer prefetches through this same call while the user types, so most sends find
+ * the answer in ai.ts's cache.
  */
 export function suggestDispatchName(hostId: string, repo: string, prompt: string): Promise<string | null> {
-  return suggestBranch(hostId, prompt, { timeoutMs: NAMING_TIMEOUT_MS, cwd: repo });
+  return suggestBranch(hostId, prompt, { timeoutMs: NAMING_TIMEOUT_MS, ...(isChatRepo(repo) ? {} : { cwd: repo }) });
 }
 
 /** What a task without text is named after. */
@@ -514,6 +542,8 @@ export interface BaseChoice {
  * the base is resolved there (`threadBase`); `base`/`baseLabel` then only stand in until it is.
  * With a namer (default: omp's tiny model when AI naming is on and there is text; `null` = none)
  * the entry first goes through `naming`, holding the prompt's slug as its fallback name meanwhile.
+ * `repo` = `CHAT_REPO`: a chat (`chat`), no branch, base or worktree: named the same way, then
+ * `agent.start` with the chat target (`resolveBase` doesn't apply).
  */
 export function dispatchTask(args: {
   key?: string;
@@ -532,11 +562,12 @@ export function dispatchTask(args: {
   suggest?: BranchSuggester | null;
 }): DispatchEntry {
   const key = args.key ?? threadKey(args.hostId, args.repo);
+  const chat = isChatRepo(args.repo);
   const s = useDispatch.getState();
   const taken = [...args.taken];
   const videos = (args.videos ?? []).flatMap((upload): DispatchVideo[] => {
     const v = getVideo(upload);
-    return v ? [{ name: v.name, size: v.size, ...(v.path && v.hostId === args.hostId ? { path: v.path } : { upload }) }] : [];
+    return v ? [{ name: v.name, size: v.size, ...(v.kind ? { kind: v.kind } : {}), ...(v.path && v.hostId === args.hostId ? { path: v.path, ...(v.ref ? { ref: v.ref } : {}) } : { upload }) }] : [];
   });
   const text = taskText({ prompt: args.prompt, videos });
   const name = uniqueSlug(baseSlug(text), reservedNames(args.hostId, taken));
@@ -551,14 +582,13 @@ export function dispatchTask(args: {
     id: `${Date.now().toString(36)}-${(seq++).toString(36)}`,
     prompt: args.prompt,
     createdAt: Date.now(),
-    branch: `${BRANCH_PREFIX}${name}`,
+    branch: chat ? "" : `${BRANCH_PREFIX}${name}`,
     name,
-    base: args.base,
-    ...(args.baseLabel ? { baseLabel: args.baseLabel } : {}),
+    ...(chat ? { chat: true } : { base: args.base, ...(args.baseLabel ? { baseLabel: args.baseLabel } : {}) }),
     options: args.options,
     phase: suggest ? "naming" : "queued",
     hostId: args.hostId,
-    repo: args.repo,
+    ...(chat ? {} : { repo: args.repo }),
     ...(images.length ? { images: images.length } : {}),
     ...(videos.length ? { videos } : {}),
     ...(args.placed ? { placed: args.placed } : {}),
@@ -571,7 +601,8 @@ export function dispatchTask(args: {
   releaseVideos((args.videos ?? []).filter((id) => !uploading.includes(id)));
   s.add(key, entry);
   s.setOptions(args.options);
-  void (suggest || args.resolveBase ? nameThenRun(key, entry.id, taken, suggest, args.resolveBase) : run(key, entry.id));
+  const resolveBase = chat ? undefined : args.resolveBase;
+  void (suggest || resolveBase ? nameThenRun(key, entry.id, taken, suggest, resolveBase) : run(key, entry.id));
   return entry;
 }
 
@@ -603,7 +634,7 @@ async function nameThenRun(key: string, id: string, taken: readonly string[], su
   // resume in the same tick, so each must see the name the previous one just took.
   const name = uniqueSlug(slug, reservedNames(hostId, [...taken, ...(list?.branches.map((b) => b.name) ?? [])], id));
   const base = resolveBase ? threadBase(list, resolveBase.stored, resolveBase.legacy) : undefined;
-  store().patch(key, id, { name, branch: `${BRANCH_PREFIX}${name}`, aiNamed: ai, ...(base ? { base: base.param, baseLabel: base.shown } : {}) });
+  store().patch(key, id, { name, ...(e.chat ? {} : { branch: `${BRANCH_PREFIX}${name}` }), aiNamed: ai, ...(base ? { base: base.param, baseLabel: base.shown } : {}) });
   void run(key, id);
 }
 
@@ -613,8 +644,8 @@ const RESUME_RETRY_MAX_MS = 60_000;
 
 /**
  * A `naming` entry whose answer was lost to a reload: nothing reached the host yet, so it goes
- * ahead under the prompt's slug once the host answers, deduped against its branches, its live
- * agents and the host's other dispatches (as `retryDispatch` does).
+ * ahead under the prompt's slug once the host answers, deduped against its branches (a chat: the
+ * agents in its state), its live agents and the host's other dispatches (as `retryDispatch` does).
  */
 async function resumeNaming(key: string, id: string): Promise<void> {
   const store = useDispatch.getState;
@@ -632,14 +663,16 @@ async function resumeNaming(key: string, id: string): Promise<void> {
     }
     const hostId = entryHost(key, first);
     try {
-      const branches = await core.host(hostId).call("git.branches", { cwd: entryRepo(key, first) });
+      const taken = first.chat
+        ? (await core.host(hostId).call("state.get", {})).agents.map((a) => a.name)
+        : (await core.host(hostId).call("git.branches", { cwd: entryRepo(key, first) })).branches.map((b) => b.name);
       const e = pending();
       if (!e) break;
       const live = getAgentViews()
         .filter((a) => a.hostId === hostId)
         .map((a) => a.name);
-      const name = uniqueSlug(baseSlug(taskText(e)), reservedNames(hostId, [...branches.branches.map((b) => b.name), ...live], id));
-      store().patch(key, id, { name, branch: `${BRANCH_PREFIX}${name}`, aiNamed: false });
+      const name = uniqueSlug(baseSlug(taskText(e)), reservedNames(hostId, [...taken, ...live], id));
+      store().patch(key, id, { name, ...(e.chat ? {} : { branch: `${BRANCH_PREFIX}${name}` }), aiNamed: false });
       void run(key, id);
       return;
     } catch {
@@ -702,6 +735,8 @@ const stripRef = (b: string | undefined) => b?.replace(/^refs\/heads\//, "");
  * 2. its worktree exists → start the agent there (if herdr says the name is taken, the agent is
  *    still starting: wait for it);
  * 3. otherwise create it again, under a fresh name if the old branch is left over.
+ * A chat has no worktree to find: unless its chat agent is there (1), it starts again, under its
+ * name while no other agent or dispatch holds it, else a fresh one.
  * `taken` and `host` describe the entry's host.
  */
 export async function retryDispatch(args: {
@@ -717,11 +752,19 @@ export async function retryDispatch(args: {
   if (!e || inflight.has(e.id)) return;
   const hostId = entryHost(key, e);
   const repo = entryRepo(key, e);
-  if (args.trust) store().trust(threadKey(hostId, repo));
+  if (args.trust && !e.chat) store().trust(threadKey(hostId, repo));
 
   const agent = resolveAgent({ ...e, phase: "started" }, args.host.agents, { repo, workspaces: args.host.workspaces });
   if (agent) {
     store().patch(key, e.id, { phase: "started", error: undefined, startedAt: e.startedAt ?? Date.now(), agentId: agent.id, paneId: agent.paneId, workspaceId: agent.workspaceId });
+    return;
+  }
+
+  if (e.chat) {
+    const reserved = reservedNames(hostId, args.taken, e.id);
+    const name = reserved.has(e.name) ? uniqueSlug(e.aiNamed ? e.name : baseSlug(taskText(e)), reserved) : e.name;
+    store().patch(key, e.id, { name, error: undefined, agentId: undefined, paneId: undefined, workspaceId: undefined, startedAt: undefined, last: undefined });
+    void run(key, e.id);
     return;
   }
 
@@ -761,9 +804,10 @@ export async function retryDispatch(args: {
 }
 
 /**
- * Agents whose omp session was deleted (`HostInfo.pruned`) vanish from Dispatch: every entry of
- * theirs on that host goes (in per-host and Auto threads alike), matched by agent id or omp
- * session (the id changes when a parked agent resumes), and so do the images sent with them.
+ * Agents whose omp session was deleted, and deleted chats (`HostInfo.pruned`), vanish from
+ * Dispatch: every entry of theirs on that host goes (in per-host and Auto threads alike), matched
+ * by agent id or omp session (the id changes when a parked agent resumes), and so do the images
+ * sent with them.
  */
 export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds: readonly string[] = []): void {
   const ids = new Set(agentIds);

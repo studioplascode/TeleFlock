@@ -5,6 +5,7 @@ import { Button } from "@/design";
 import { FallbackChainsEditor } from "@/features/agentRoles/FallbackChainsEditor";
 import { type ChainMap, type ChainRow, chainRecord, chainRows, cleanChains, validateChains } from "@/features/agentRoles/roles";
 import { useModels } from "@/features/session/header/useModels";
+import { RefusalFallbackLink } from "@/features/refusal/RefusalLink";
 import type { RowContext } from "./controls";
 import { BUILTIN_ROLES, deepEqual, MODEL_ROLES_KEY, roleRecord } from "./model";
 
@@ -84,6 +85,7 @@ export function FallbackChainsSetting({ s, ctx, onCommit, json }: FallbackChains
     <div className="flex min-w-0 flex-col gap-3">
       <p className="text-xs text-mute">Recovery after provider errors: once retries are spent, omp tries a chain's models in order. Chains don't pick the main model; Model roles do.</p>
       <PolicyLine ctx={ctx} />
+      <RefusalFallbackLink hostId={ctx.hostId} />
       {asJson ? (
         <>
           {json}

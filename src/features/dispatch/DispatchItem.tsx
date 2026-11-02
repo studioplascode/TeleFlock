@@ -11,7 +11,9 @@ import { AgentOrb, LiveLine, QuietChip, useQuiet } from "@/features/board/LiveBi
 import { RetryLine } from "@/features/board/RetryLine";
 import { retryOf } from "@/features/board/retry";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
+import { ChatTag } from "@/features/chats/ChatTag";
 import { ACTIONS, agentStateWord, isFresh } from "@/features/shell/vocab";
+import { Ticks } from "@/features/shell/Ticks";
 import { AiMark } from "@/features/workspace/shared/ai";
 import { tildify } from "@/features/workspace/shared/paths";
 import { VideoChips } from "@/features/session/composer/VideoChips";
@@ -44,11 +46,9 @@ const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeri
 type Step = "naming" | "uploading" | "queued" | "creating" | "starting";
 
 const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", uploading: "Uploading videos", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
-const SEGMENTS = [
-  { step: "creating", label: "Creating worktree" },
-  { step: "starting", label: "Starting agent" },
-  { step: "running", label: "Running" },
-] as const;
+/** A chat's steps: no branch or worktree; its host makes its folder and starts it. */
+const CHAT_STEP_LABEL: Record<Step, string> = { ...STEP_LABEL, naming: "Naming the chat", creating: "Starting chat" };
+const SEGMENTS = ["creating", "starting", "running"] as const;
 const STEP_INDEX: Record<Step, number> = { naming: -1, uploading: -1, queued: -1, creating: 0, starting: 1 };
 
 /** What the reply card shows, derived from the entry, whether its request is in flight, and host state. */
@@ -183,6 +183,7 @@ function EntryVideos({ videos, mobile }: { videos: readonly DispatchVideo[]; mob
         phase: v.path ? "done" : "failed",
         sent: v.path ? v.size : 0,
         ...(v.path ? { path: v.path } : { error: "Not uploaded" }),
+        ...(v.kind ? { kind: v.kind } : {}),
       },
   );
   return <VideoChips videos={shown} mobile={mobile} className="max-w-[min(720px,88%)] justify-end" />;
@@ -280,11 +281,17 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
           </span>
         </header>
         <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-2xs text-mute-2">
-          <GitBranch className="size-3 shrink-0" />
-          <span className="min-w-0 truncate" title={entry.path ? tildify(entry.path, ctx.homes[hostId]) : undefined}>
-            {entry.phase === "naming" ? "dispatch/…" : entry.branch}
-            {(entry.base ?? entry.baseLabel) && <span className="opacity-70"> ← {entry.base ?? entry.baseLabel}</span>}
-          </span>
+          {entry.chat ? (
+            <ChatTag hostId={hostId} folder={agent?.cwd} />
+          ) : (
+            <>
+              <GitBranch className="size-3 shrink-0" />
+              <span className="min-w-0 truncate" title={entry.path ? tildify(entry.path, ctx.homes[hostId]) : undefined}>
+                {entry.phase === "naming" ? "dispatch/…" : entry.branch}
+                {(entry.base ?? entry.baseLabel) && <span className="opacity-70"> ← {entry.base ?? entry.baseLabel}</span>}
+              </span>
+            </>
+          )}
           {summary && <span className="shrink-0 font-sans font-semibold max-sm:hidden">· sent with: {summary}</span>}
         </div>
         {ctx.auto && (
@@ -342,8 +349,9 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
           {shown.reason === "reload" ? "The app reloaded before herdr answered." : (entry.error?.title ?? "Lost contact with the host.")}
         </p>
         <p className="mt-0.5 text-2xs text-mute [overflow-wrap:anywhere]">
-          The host may still be creating the worktree and agent; this card picks the agent up as soon as it appears. Check & retry looks for them before creating
-          anything new.
+          {entry.chat
+            ? "The host may still be starting the chat; this card picks its agent up as soon as it appears. Check & retry looks for it before starting a new one."
+            : "The host may still be creating the worktree and agent; this card picks the agent up as soon as it appears. Check & retry looks for them before creating anything new."}
         </p>
         <Actions>
           <button type="button" className={primary} onClick={() => ctx.retry(entry.id, false)} disabled={!online}>
@@ -358,7 +366,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
   }
 
   if (shown.k === "failed") {
-    const untrusted = entry.error?.kind === "untrusted";
+    const untrusted = !entry.chat && entry.error?.kind === "untrusted";
     return (
       <>
         <p className="mt-2 text-xs font-semibold text-error [overflow-wrap:anywhere]">{entry.error?.title}</p>
@@ -382,7 +390,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
     );
   }
 
-  if (shown.k === "step") return shown.step === "uploading" ? <Uploading videos={entry.videos ?? []} /> : <Progress step={shown.step} />;
+  if (shown.k === "step") return shown.step === "uploading" ? <Uploading videos={entry.videos ?? []} /> : <Progress step={shown.step} chat={!!entry.chat} />;
 
   if (shown.k === "gone" && parkedKey && online) return <Parked parkedKey={parkedKey} />;
 
@@ -406,7 +414,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
       <button type="button" className={ghost} onClick={() => openTerminal(key, ctx.mobile)} title={ACTIONS.terminal.description}>
         <SquareTerminal /> {ACTIONS.terminal.label}
       </button>
-      {canReview(agent) && (
+      {canReview(agent) && !entry.chat && (
         <button
           type="button"
           className={ghost}
@@ -423,8 +431,14 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
     const n = agent.needs;
     return (
       <>
-        <p className="mt-2 text-sm leading-snug font-bold text-ink">“{n.question || n.title}”</p>
-        {n.detail && <p className="mt-1 line-clamp-3 text-xs text-mute">{n.detail}</p>}
+        <p className="mt-2 text-sm leading-snug font-bold text-ink">
+          “<Ticks text={n.question || n.title} className="text-[0.88em]" />”
+        </p>
+        {n.detail && (
+          <p className="mt-1 line-clamp-3 text-xs text-mute">
+            <Ticks text={n.detail} className="text-[0.9em]" />
+          </p>
+        )}
         {n.command && !n.question.includes(n.command) && (
           <pre className="mt-2 max-h-24 overflow-auto rounded-sm well px-2.5 py-1.5 font-mono text-2xs whitespace-pre-wrap text-ink-2">{n.command}</pre>
         )}
@@ -479,15 +493,16 @@ function Parked({ parkedKey }: { parkedKey: string }) {
   );
 }
 
-/** Queued → Creating worktree → Starting agent → Running, as three filling segments. */
-function Progress({ step }: { step: Step }) {
+/** Queued → Creating worktree (a chat: Starting chat) → Starting agent → Running, as three filling segments. */
+function Progress({ step, chat }: { step: Step; chat: boolean }) {
+  const labels = chat ? CHAT_STEP_LABEL : STEP_LABEL;
   const at = STEP_INDEX[step];
   return (
     <div className="mt-2 flex items-center gap-3" role="status">
-      <Shimmer className="text-xs font-semibold">{STEP_LABEL[step]}…</Shimmer>
+      <Shimmer className="text-xs font-semibold">{labels[step]}…</Shimmer>
       <span className="ml-auto flex gap-1" aria-hidden>
         {SEGMENTS.map((s, i) => (
-          <span key={s.step} title={s.label} className="relative h-1.5 w-6 overflow-hidden rounded-full bg-ink/10">
+          <span key={s} title={s === "running" ? "Running" : labels[s]} className="relative h-1.5 w-6 overflow-hidden rounded-full bg-ink/10">
             {i < at && <span className="absolute inset-0 bg-accent" />}
             {i === at && <span className="tf-loop absolute inset-0 animate-pulse bg-omp" />}
           </span>

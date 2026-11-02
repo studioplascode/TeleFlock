@@ -1,4 +1,4 @@
-import { type CustomTheme, inspectThemeCss, isAndroid, isTauri, MAX_THEME_LENGTH, presetById, themeFileName, themeTemplate, withThemeName } from "@/design";
+import { type CustomTheme, inspectThemeCss, isAndroid, isTauri, MAX_THEME_LENGTH, presetById, saveBlob, themeFileName, themeTemplate, withThemeName } from "@/design";
 import { themeDefaults } from "./ThemePreview";
 
 /** The Android app's WebView has no downloads: themes leave it through the clipboard. */
@@ -23,17 +23,7 @@ export function startingCss(baseId: string, name: string, custom: readonly Custo
 /** Saves the theme as `<name>.css` through a download (browsers; desktop webviews save to Downloads). */
 export function downloadTheme(name: string, css: string): string {
   const file = themeFileName(name);
-  const url = URL.createObjectURL(new Blob([css], { type: "text/css" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = file;
-  a.rel = "noopener";
-  a.style.display = "none";
-  document.body.append(a);
-  a.click();
-  a.remove();
-  // Revoking at once can cancel a download that has not started reading yet.
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  saveBlob(new Blob([css], { type: "text/css" }), file);
   return file;
 }
 

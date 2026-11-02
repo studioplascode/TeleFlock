@@ -136,6 +136,9 @@ describe("resume words", () => {
     expect(nothingReason({ column: "running" })).toBe("It's working right now.");
     expect(nothingReason({ column: "needs", needs: {} })).toBe("It's waiting for your answer.");
     expect(nothingReason({ column: "review" })).toBe("Its last turn neither failed nor was stopped.");
+    // a turn that ended on a refusal has nothing omp can retry; being busy or asked still comes first
+    expect(nothingReason({ column: "review" }, true)).toBe("It ended on a provider refusal, which omp can't retry. Switch to another model to continue it.");
+    expect(nothingReason({ column: "running" }, true)).toBe("It's working right now.");
     expect(isResumeKey({ ...keys, key: "F5", code: "F5" })).toBe(true);
     expect(isResumeKey({ ...keys, key: "F5", code: "F5", ctrlKey: true })).toBe(false);
     expect(isResumeKey({ ...keys, key: "r", code: "KeyR", altKey: true })).toBe(true);

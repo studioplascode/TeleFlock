@@ -8,8 +8,9 @@ import { historyFor } from "./seeds";
 /*
  * Demo of done agents' lifecycle (architecture §3, "Parked agents"): Mark done with `close` parks an
  * idle agent after a 10 s undo window (its pane leaves the workspace); `agent.resume`, unarchiving
- * or prompting brings it back under a new id with the same omp session; a parked agent whose
- * session file "gets deleted" is pruned (`HostInfo.pruned`).
+ * or prompting brings it back under a new id with the same omp session (a chat in a new tab of the
+ * Chats workspace, in its folder); a parked agent whose session file "gets deleted" is pruned
+ * (`HostInfo.pruned`), and so is a deleted chat, whatever state it was in (`./chats`).
  *
  * Ended cards (architecture §3.25: an agent's omp ended without anyone closing it) wait in Review with
  * `Parked.ended` and come back the way tf-hostd brings them back. soak ended when herdr stopped and
@@ -34,13 +35,15 @@ const HERDR_WAIT_MS = 15_000;
 /** Back in its new pane, it goes on this long after (its bridge connects, then hostd's plan runs). */
 const GO_ON_MS = 2_000;
 
-/** Where a parked agent ran, to reopen it there (or in a new workspace at its folder). */
+/** Where a parked agent ran, to reopen it there (or in a new workspace at its folder; a chat in a new tab of the Chats workspace). */
 export interface Place {
   workspaceId?: string;
   cwd: string;
   repo?: string;
   branch?: string;
   worktree: boolean;
+  /** A chat (`./chats`): `cwd` is its folder. */
+  chat?: boolean;
 }
 
 /** What parking needs from its DemoHost (closures over the host's private state). */
@@ -58,7 +61,7 @@ export interface ParkingHost {
    * stays known by path, since the workspace may close with the pane.
    */
   parkWorktree(workspaceId: string): { path: string; repoRoot: string } | undefined;
-  /** A pane for a resumed agent: in its workspace when that still exists, else in a new one at its folder. */
+  /** A pane for a resumed agent: in its workspace when that still exists, else in a new one at its folder; a chat's in a new tab of the Chats workspace. */
   openPane(agentId: string, place: Place): Omit<Started, "agentId"> & { tabId: string };
   /** Move an agent to a new id: the old id leaves and the new one arrives in the same patch. */
   rekey(sim: AgentSim, id: string): void;
@@ -149,8 +152,8 @@ const PARKED: ParkedSeed[] = [
   },
 ];
 
-/** Agents `data.ts` seeds live that start out parked (Mark done closed their pane): gobump's worktree PR is merged. */
-const PARK_SEEDED = ["gobump"];
+/** Agents seeded live (`data.ts`, `./chats`) that start out parked (Mark done closed their pane): gobump's worktree PR is merged; postcodes is a chat. */
+const PARK_SEEDED = ["gobump", "postcodes"];
 
 /** hostd's note to an agent that comes back mid-turn (`restart::decide`, exact text), whose last action may have run. */
 function note(e: AgentEnded): string {
@@ -277,7 +280,7 @@ export class DemoParking {
   private park(sim: AgentSim, at: number, live: boolean): void {
     const a = sim.agent;
     const { workspaceId, paneId } = a;
-    this.places.set(a.id, { workspaceId, cwd: a.cwd ?? "", repo: a.repo, branch: a.branch, worktree: (a.cwd ?? "").startsWith(`${WORKTREES}/`) });
+    this.places.set(a.id, { workspaceId, cwd: a.cwd ?? "", repo: a.repo, branch: a.branch, worktree: (a.cwd ?? "").startsWith(`${WORKTREES}/`), chat: a.chat });
     const worktree = this.host.parkWorktree(workspaceId);
     a.paneId = "";
     a.tabId = "";
@@ -405,7 +408,7 @@ export class DemoParking {
   private resume(sim: AgentSim, prompt?: string): Started {
     const a = sim.agent;
     const old = a.id;
-    const place = this.places.get(old) ?? { cwd: a.cwd ?? "", repo: a.repo, branch: a.branch, worktree: false };
+    const place = this.places.get(old) ?? { cwd: a.cwd ?? "", repo: a.repo, branch: a.branch, worktree: false, chat: a.chat };
     let id = `${a.name}-r${++this.resumes}`;
     while (this.host.sims.has(id)) id = `${a.name}-r${++this.resumes}`;
     const pane = this.host.openPane(id, place);
@@ -446,7 +449,26 @@ export class DemoParking {
     if (!sim?.agent.parked) return;
     this.host.remove(id);
     this.places.delete(id);
-    this.pruned = [{ agentId: id, sessionId: sim.agent.omp?.sessionId, at: this.host.now() }, ...this.pruned].slice(0, 200);
+    this.listPruned(sim);
+  }
+
+  /**
+   * A deleted chat (`chat.delete`, `./chats`), live, parked or ended: it goes like a pruned agent, and nothing
+   * brings it back (its undo window, place and ticket go too). The host closes its pane.
+   */
+  forget(sim: AgentSim): void {
+    const id = sim.agent.id;
+    this.closing.get(id)?.();
+    this.closing.delete(id);
+    this.places.delete(id);
+    // a waiting ticket's timer finds nothing to bring back
+    sim.agent.autoResume = undefined;
+    if (this.host.sims.get(id) === sim) this.host.remove(id);
+    this.listPruned(sim);
+  }
+
+  private listPruned(sim: AgentSim): void {
+    this.pruned = [{ agentId: sim.agent.id, sessionId: sim.agent.omp?.sessionId, at: this.host.now() }, ...this.pruned].slice(0, 200);
     this.host.setPruned(this.pruned);
   }
 }

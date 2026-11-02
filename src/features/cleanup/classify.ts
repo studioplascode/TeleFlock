@@ -67,7 +67,8 @@ export function classify(w: CleanupWorktree, now: number, staleDays: number): Ve
   return idle ? verdict("stale", { stale: true }) : verdict("active");
 }
 
-export type BulkKind = "shipped" | "stale";
+/** "Delete merged/closed", "Prune stale", and an agent group's "Delete merged, closed and stale". */
+export type BulkKind = "shipped" | "stale" | "cleanable";
 
 export interface BulkSet {
   /** What the action removes, in report order. */
@@ -78,22 +79,30 @@ export interface BulkSet {
   bytes: number;
 }
 
-/** The worktrees one bulk action takes. */
-export function bulkSet(report: CleanupReport | undefined, which: BulkKind, now: number, staleDays: number): BulkSet {
+function takes(which: BulkKind, kind: WorktreeKind): boolean {
+  if (which === "shipped") return kind === "merged" || kind === "closed";
+  if (which === "stale") return kind === "stale";
+  return kind === "merged" || kind === "closed" || kind === "stale";
+}
+
+/** The worktrees among `worktrees` one bulk action takes. */
+export function bulkSetIn(worktrees: Iterable<CleanupWorktree>, which: BulkKind, now: number, staleDays: number): BulkSet {
   const out: BulkSet = { items: [], held: [], bytes: 0 };
-  for (const repo of report?.repos ?? []) {
-    for (const w of repo.worktrees) {
-      const v = classify(w, now, staleDays);
-      const fits = which === "shipped" ? v.kind === "merged" || v.kind === "closed" : v.kind === "stale";
-      if (!fits) continue;
-      if (v.hold) out.held.push({ worktree: w, hold: v.hold });
-      else {
-        out.items.push(w);
-        out.bytes += w.size ?? 0;
-      }
+  for (const w of worktrees) {
+    const v = classify(w, now, staleDays);
+    if (!takes(which, v.kind)) continue;
+    if (v.hold) out.held.push({ worktree: w, hold: v.hold });
+    else {
+      out.items.push(w);
+      out.bytes += w.size ?? 0;
     }
   }
   return out;
+}
+
+/** The worktrees one bulk action takes in the whole report. */
+export function bulkSet(report: CleanupReport | undefined, which: BulkKind, now: number, staleDays: number): BulkSet {
+  return bulkSetIn((report?.repos ?? []).flatMap((r) => r.worktrees), which, now, staleDays);
 }
 
 export interface Totals {

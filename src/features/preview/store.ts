@@ -1,7 +1,8 @@
+import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { core } from "@/core";
 import type { TunnelInfo } from "@/core/gen";
-import { toast } from "@/design";
+import { isAndroid, isTauri, toast } from "@/design";
 import { describeError } from "../workspace/shared/errors";
 
 /** A tunnel that isn't open yet: being opened, or the last attempt failed. */
@@ -57,4 +58,38 @@ export async function openTunnel(hostId: string, port: number): Promise<TunnelIn
 /** Launch a live tunnel in the system browser (desktop). */
 export function openExternal(tunnel: TunnelInfo) {
   void core.app("app.openExternal", { url: tunnel.url }).catch(() => {});
+}
+
+/**
+ * The Android app shows previews in a window of their own (the plugin's `open_preview`, a WebView
+ * without Tauri's IPC), never in a frame of its page: there every frame gets the app's IPC, so a
+ * framed page could act as the app (architecture §8, "Framed content").
+ */
+export const previewWindows = (): boolean => isTauri() && isAndroid;
+
+function openPreviewWindow(tunnel: TunnelInfo) {
+  invoke("plugin:teleflock-android|open_preview", {
+    url: tunnel.url,
+    title: `Preview · :${tunnel.remotePort}`,
+    subtitle: `${tunnel.remoteHost}:${tunnel.remotePort} → 127.0.0.1:${tunnel.localPort}`,
+  }).catch((e: unknown) => toast({ title: "Couldn't open the preview", description: describeError(e).title, status: "error" }));
+}
+
+/**
+ * Where a live tunnel's page (`url`) shows. The Android app (`androidApp`) frames only documents it
+ * made itself (`blob:`, the demo host's previews); every other address goes to the preview window,
+ * on any layout (the plugin opens loopback pages only and refuses the rest). Elsewhere: the sheet
+ * (`PreviewSheet`) on a phone-sized layout, the system browser on a wide one.
+ */
+export function previewTarget(url: string, mobile: boolean, androidApp: boolean): "window" | "sheet" | "browser" {
+  if (androidApp && !url.startsWith("blob:")) return "window";
+  return mobile ? "sheet" : "browser";
+}
+
+/** Shows a live tunnel's page where {@link previewTarget} says; `sheet` opens the caller's `PreviewSheet`. */
+export function showPreview(tunnel: TunnelInfo, mobile: boolean, sheet: (t: TunnelInfo) => void): void {
+  const target = previewTarget(tunnel.url, mobile, previewWindows());
+  if (target === "window") openPreviewWindow(tunnel);
+  else if (target === "sheet") sheet(tunnel);
+  else openExternal(tunnel);
 }

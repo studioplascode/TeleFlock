@@ -2,6 +2,7 @@ import { BellOff } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ReactNode, useEffect } from "react";
 import { navigate, useAgent, useColumnKeys, useCore, useHostIds, useHosts, useHostStale, useHostStates, useUi } from "@/core";
+import { isChat } from "@/core/chats";
 import type { Column } from "@/core/gen";
 import { useHerdrDown } from "@/features/hosts/HerdrControls";
 import { herdrAgentWord, herdrCardTime, herdrOrbStatus } from "@/features/hosts/herdrHealth";
@@ -13,6 +14,7 @@ import { withoutQuestion } from "@/features/session/ask/askContext";
 import { resumeNow } from "@/features/session/resume/actions";
 import { ticketActions } from "@/features/session/resume/words";
 import { ACTIONS, isFresh, LANE_TITLE, NEEDS_WORD, STATE_WORD, stateTime } from "@/features/shell/vocab";
+import { Ticks } from "@/features/shell/Ticks";
 import {
   AgentGlyph,
   Button,
@@ -213,10 +215,21 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
             <CardMenuButton agentKey={agentKey} lane="needs" mobile />
           </span>
         </div>
-        <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="mt-1 flex" />
+        <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} chat={isChat(agent)} className="mt-1 flex" />
         {said && <AgentSaid key={n.requestId} text={said} variant="phone" className="mt-2" />}
-        <p className="mt-1.5 font-display text-lg leading-snug font-bold text-ink">{headline}</p>
-        {body && <p className="mt-1 line-clamp-3 text-sm whitespace-pre-line text-mute">{body}</p>}
+        <p className="mt-1.5 font-display text-lg leading-snug font-bold text-ink">
+          <Ticks text={headline} className="text-[0.8em]" />
+        </p>
+        {body && (
+          <p className="mt-1 line-clamp-3 text-sm whitespace-pre-line text-mute">
+            <Ticks text={body} className="text-[0.88em]" />
+          </p>
+        )}
+        {n.detail && (
+          <p className="mt-1 line-clamp-2 text-xs text-mute">
+            <Ticks text={n.detail} className="text-[0.9em]" />
+          </p>
+        )}
         {n.command && <pre className="mt-2 overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs text-ink-2">{n.command}</pre>}
         <CountdownChip agentKey={agentKey} className="mt-2.5" />
         <QuickAnswer agentKey={agentKey} appearance="big" mobile className="mt-3" />
@@ -228,7 +241,7 @@ function NeedsCard({ agentKey }: { agentKey: string }) {
 /**
  * Live facts under a row, same set as the desktop card footer: ctx · subagents · diff · not shared · model.
  * Fixed order, wrapping onto another line instead of running past the card; a narrow row drops the context
- * bar first (its % stays), and the model takes the rest of a line, truncated.
+ * bar first (its % stays), and the model takes the rest of a line, truncated. A chat has no diff.
  */
 function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }) {
   const agent = useAgent(agentKey);
@@ -237,13 +250,14 @@ function RowMeta({ agentKey, diff = true }: { agentKey: string; diff?: boolean }
   const subs = omp?.subagents?.live ?? 0;
   const subPct = subs > 0 ? omp?.subagents?.completionPct : undefined;
   const model = omp?.model ? `${omp.model.label ?? omp.model.id}${omp.thinking && omp.thinking !== "off" ? ` · ${omp.thinking}` : ""}` : null;
-  if (!omp?.context && subPct == null && !omp?.jobs?.running && !(diff && agent.diff) && omp?.link !== "notShared" && !model) return null;
+  const stat = diff && !isChat(agent) ? agent.diff : undefined;
+  if (!omp?.context && subPct == null && !omp?.jobs?.running && !stat && omp?.link !== "notShared" && !model) return null;
   return (
     <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 @container">
       {omp?.context && <ContextMeter pct={omp.context.pct} barClassName="@max-[300px]:hidden" />}
       {subPct != null && <SubagentsDone pct={subPct} live={subs} />}
       {omp?.jobs && <JobsMeter jobs={omp.jobs} />}
-      {diff && agent.diff && <DiffStat {...agent.diff} />}
+      {stat && <DiffStat {...stat} />}
       <span className="contents" {...stopRow}>
         <ConnectLinkButton agentKey={agentKey} />
       </span>
@@ -292,7 +306,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
             {agent.parked && <ParkedChip agentKey={agentKey} />}
             <AutoResumeBadge agentKey={agentKey} />
             {/* takes only the room the name, time and ⋯ leave: the branch gives way first, then the repo name (the chip keeps its icon) */}
-            <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} className="min-w-6 flex-[1_1_0]" />
+            <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} chat={isChat(agent)} className="min-w-6 flex-[1_1_0]" />
             <span className="ml-auto shrink-0 font-mono text-2xs text-mute tabular">
               {herdr ? (
                 herdrCardTime(herdr)
@@ -389,7 +403,7 @@ function AgentRow({ agentKey, column }: { agentKey: string; column: Column }) {
               </>
             )}
             {column === "done" && <RecapLine agent={agent} className="mt-0.5" />}
-            {column === "done" && agent.diff && (
+            {column === "done" && agent.diff && !isChat(agent) && (
               <div className="mt-0.5">
                 <DiffStat {...agent.diff} />
               </div>

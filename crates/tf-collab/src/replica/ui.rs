@@ -180,17 +180,27 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 answerable: true,
                 context: call.context.clone(),
                 step,
+                browser: false,
             };
             (req, needs)
         }
         UiRequestFrame::Select { title, options, help_text, .. } => {
+            if let Some(mapped) = cfg_approval(&id, title, options, call_id.clone(), now) {
+                return mapped;
+            }
             if let Some(rest) = title.strip_prefix(APPROVAL_PREFIX) {
                 let mut lines = rest.lines();
                 let tool = lines.next().unwrap_or("").trim().to_owned();
                 let detail_lines: Vec<&str> = lines.collect();
                 let detail = detail_lines.join("\n").trim().to_owned();
                 let command = detail_lines.iter().find_map(|l| l.trim().strip_prefix("Command: ")).map(str::to_owned);
-                let primary = options.iter().position(|o| o.label() == "Approve" || o.label() == "Approve Once").unwrap_or(0);
+                // The once choice (omp's `approvalOnceLabel`: "Approve Once" beside grants, else
+                // "Approve"), which omp's dialog highlights: a reflexive answer approves this call only.
+                let primary = options
+                    .iter()
+                    .position(|o| o.label() == "Approve Once")
+                    .or_else(|| options.iter().position(|o| o.label() == "Approve"))
+                    .unwrap_or(0);
                 let opts: Vec<NeedsOption> = options
                     .iter()
                     .enumerate()
@@ -237,6 +247,7 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                     answerable: true,
                     context: None,
                     step: None,
+                    browser: false,
                 };
                 return (req, needs);
             }
@@ -265,11 +276,17 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 })
                 .collect();
             let ask = allow_other || allow_chat || frame_has_marker(frame);
+            // omp's own selects (its confirmations, the report_tool_issue consent) title the dialog
+            // `<headline>\n<message>`: the first line is the question, the rest its detail.
+            let (question, detail) = match title.split_once('\n') {
+                Some((head, rest)) if !ask && !head.trim().is_empty() => (head.trim().to_owned(), Some(rest.trim().to_owned()).filter(|r| !r.is_empty())),
+                _ => (title.clone(), None),
+            };
             let req = UiRequest {
                 id: id.clone(),
                 kind: if multi { UiKind::MultiSelect } else { UiKind::Select },
-                title: title.clone(),
-                message: None,
+                title: if detail.is_some() { question.clone() } else { title.clone() },
+                message: detail.clone(),
                 options: opts.clone(),
                 allow_other,
                 allow_chat,
@@ -279,25 +296,113 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 context: call.context.clone(),
                 step: step.clone(),
             };
+            // A plain Yes / No select is a confirmation (omp's `showHookConfirm`, the bridge's
+            // `confirm`, the report_tool_issue consent): nothing in it is ★, decide for me never takes it.
+            let confirm = !ask && opts.len() == 2 && opts[0].id == "Yes" && opts[1].id == "No";
             let needs = NeedsYou {
-                kind: NeedsKind::Ask,
+                kind: if confirm { NeedsKind::Confirm } else { NeedsKind::Ask },
                 request_id: Some(id),
                 since: now,
-                title: if ask { "Question".into() } else { "Choose".into() },
-                question: title.clone(),
-                detail: help_text.as_ref().filter(|_| false).cloned(),
+                title: if ask { "Question".into() } else if confirm { "Confirm".into() } else { "Choose".into() },
+                question,
+                detail: detail.or_else(|| help_text.as_ref().filter(|_| false).cloned()),
                 options: opts,
                 multi,
                 allow_other,
                 allow_chat,
                 command: None,
                 answerable: true,
-                context: call.context.clone(),
+                // A confirmation is omp's (or an extension's), not the agent asking: no "Agent said"
+                // (the app would otherwise show the end of the last assistant message, maybe a turn old).
+                context: if confirm { Some(call.context.clone().unwrap_or_default()) } else { call.context.clone() },
                 step,
+                browser: false,
             };
             (req, needs)
         }
     }
+}
+
+/// omp's `cfg://` approval labels (interactive-mode `CFG_APPROVE_SESSION`, `CFG_APPROVE_ONCE`,
+/// `CFG_DENY`; omp 18.12 through 18.15).
+pub const CFG_APPROVE_SESSION: &str = "Always for this session";
+pub const CFG_APPROVE_ONCE: &str = "Allow once";
+pub const CFG_DENY: &str = "Deny";
+
+/// omp's `cfg://` settings approval (`#promptCfgChange`: ``⚙️ Your agent wants to change `<path>` for
+/// this session.`` or ``💾 Your agent wants to save `<path>` to your config.``, then `<previous> →
+/// <value>` and omp's warning) as an approval: "Allow once" primary and ★, as omp's dialog
+/// highlights it (decide for me answers no approval anyway), "Deny" danger. Its exact three
+/// choices, nothing else, make it one.
+fn cfg_approval(id: &str, title: &str, options: &[SelectItem], call_id: Option<String>, now: Millis) -> Option<(UiRequest, NeedsYou)> {
+    let labels: Vec<&str> = options.iter().map(SelectItem::label).collect();
+    if labels != [CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY] {
+        return None;
+    }
+    let (headline, change) = title.split_once('\n').unwrap_or((title, ""));
+    let headline = headline.trim();
+    let path = headline.split('`').nth(1).filter(|p| !p.is_empty() && headline.matches('`').count() >= 2);
+    let save = headline.contains(" to your config");
+    let opts: Vec<NeedsOption> = labels
+        .iter()
+        .map(|&label| NeedsOption {
+            id: label.to_owned(),
+            label: label.to_owned(),
+            description: Some(
+                match label {
+                    CFG_APPROVE_SESSION => "Every change the agent makes to this setting, until the session ends",
+                    CFG_APPROVE_ONCE => "This change only",
+                    _ => "The agent is told you said no",
+                }
+                .to_owned(),
+            ),
+            recommended: label == CFG_APPROVE_ONCE,
+            tone: match label {
+                CFG_APPROVE_ONCE => OptionTone::Primary,
+                CFG_DENY => OptionTone::Danger,
+                _ => OptionTone::Neutral,
+            },
+        })
+        .collect();
+    let detail = Some(change.trim().to_owned()).filter(|d| !d.is_empty());
+    let short = match (path, save) {
+        (Some(p), true) => format!("Save {p}?"),
+        (Some(p), false) => format!("Change {p}?"),
+        (None, _) => "Change a setting?".to_owned(),
+    };
+    let req = UiRequest {
+        id: id.to_owned(),
+        kind: UiKind::Select,
+        title: headline.to_owned(),
+        message: detail.clone(),
+        options: opts.clone(),
+        allow_other: false,
+        allow_chat: false,
+        initial: None,
+        plan: None,
+        call_id,
+        context: None,
+        step: None,
+    };
+    let needs = NeedsYou {
+        kind: NeedsKind::Approval,
+        request_id: Some(id.to_owned()),
+        since: now,
+        title: short,
+        question: headline.to_owned(),
+        detail,
+        options: opts,
+        multi: false,
+        allow_other: false,
+        allow_chat: false,
+        command: None,
+        answerable: true,
+        // omp asks, not the agent: no "Agent said" (an empty context shows none, see Confirm above).
+        context: Some(String::new()),
+        step: None,
+        browser: false,
+    };
+    Some((req, needs))
 }
 
 fn frame_has_marker(frame: &UiRequestFrame) -> bool {
@@ -675,5 +780,87 @@ mod tests {
         assert_eq!(n.options[2].tone, OptionTone::Danger);
         assert_eq!(ui.current().unwrap().call_id.as_deref(), Some("call_1"));
         assert_eq!(ui.answer("1", &answer(&["Approve"], None)).unwrap()[0].value.as_deref(), Some("Approve"));
+    }
+
+    fn select(req_id: u64, title: &str, labels: &[&str]) -> UiRequestFrame {
+        UiRequestFrame::Select {
+            req_id,
+            title: title.into(),
+            options: labels.iter().map(|l| SelectItem::Label(l.to_string())).collect(),
+            initial_index: None,
+            selection_marker: None,
+            checked_indices: None,
+            markable_count: None,
+            help_text: None,
+            nav: None,
+        }
+    }
+
+    #[test]
+    fn an_approval_beside_grants_offers_approve_once_first() {
+        // omp's `approvalChoiceLabels` with a grant: the grant's own "Approve" remembers it, so the
+        // highlighted, reflexive choice is "Approve Once" (as omp's dialog has it).
+        let mut ui = UiState::default();
+        let labels = ["Approve", "Always Approve", "Approve Once", "Approve bash for this session", "Deny"];
+        ui.request(&select(1, "Allow tool: bash\nCommand: make", &labels), &no_call(), 0);
+        let n = ui.needs(true).unwrap();
+        let primary: Vec<&str> = n.options.iter().filter(|o| o.tone == OptionTone::Primary).map(|o| o.id.as_str()).collect();
+        assert_eq!(primary, ["Approve Once"]);
+        assert_eq!(n.options.iter().filter(|o| o.recommended).map(|o| o.id.as_str()).collect::<Vec<_>>(), ["Approve Once"]);
+    }
+
+    #[test]
+    fn cfg_settings_approval_maps_to_an_approval() {
+        // omp's `#promptCfgChange` as its collab mirroring (and the bridge, 2.3.0) offers it.
+        let mut ui = UiState::default();
+        let title = "⚙️ Your agent wants to change `task.perCallModel` for this session.\noff → on";
+        ui.request(&select(4, title, &[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY]), &no_call(), 7);
+        let n = ui.needs(true).unwrap();
+        assert_eq!(n.kind, NeedsKind::Approval);
+        assert_eq!(n.title, "Change task.perCallModel?");
+        assert_eq!(n.question, "⚙️ Your agent wants to change `task.perCallModel` for this session.");
+        assert_eq!(n.detail.as_deref(), Some("off → on"));
+        // omp asks, not the agent: no "Agent said" (the app would show an older assistant message).
+        assert_eq!(n.context.as_deref(), Some(""));
+        assert_eq!(n.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), [CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY]);
+        assert_eq!(n.options.iter().map(|o| o.tone).collect::<Vec<_>>(), [OptionTone::Neutral, OptionTone::Primary, OptionTone::Danger]);
+        assert_eq!(n.options.iter().filter(|o| o.recommended).map(|o| o.id.as_str()).collect::<Vec<_>>(), [CFG_APPROVE_ONCE]);
+        let req = ui.current().unwrap();
+        assert_eq!((req.kind, req.message.as_deref()), (UiKind::Select, Some("off → on")));
+        assert_eq!(ui.answer("4", &answer(&[CFG_APPROVE_ONCE], None)).unwrap()[0].value.as_deref(), Some(CFG_APPROVE_ONCE));
+        assert_eq!(ui.answer("4", &answer(&[CFG_DENY], None)).unwrap()[0].value.as_deref(), Some(CFG_DENY));
+        // A save, with omp's shadowing warning kept in the detail.
+        let mut ui = UiState::default();
+        let title = "💾 Your agent wants to save `retry.maxRetries` to your config.\n3 → 5\n⚠️ Overridden by your project settings: the saved value won't take effect here.";
+        ui.request(&select(5, title, &[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY]), &no_call(), 0);
+        let n = ui.needs(true).unwrap();
+        assert_eq!(n.title, "Save retry.maxRetries?");
+        assert_eq!(n.detail.as_deref(), Some("3 → 5\n⚠️ Overridden by your project settings: the saved value won't take effect here."));
+        // Other labels are no cfg approval.
+        let mut ui = UiState::default();
+        ui.request(&select(6, "Pick\nwhich", &["Allow once", "Deny"]), &no_call(), 0);
+        assert_eq!(ui.needs(true).unwrap().kind, NeedsKind::Ask);
+    }
+
+    #[test]
+    fn omps_confirmations_read_as_question_and_detail() {
+        // `showHookConfirm` (and the bridge's `confirm`) title the select `<title>\n<message>`.
+        let mut ui = UiState::default();
+        let title = "Coding-plan reserve reached\nopenai-codex has 4.0% remaining. Switch to anthropic? Choose No to keep using the current plan.";
+        ui.request(&select(8, title, &["Yes", "No"]), &no_call(), 0);
+        let n = ui.needs(true).unwrap();
+        assert_eq!((n.kind, n.title.as_str(), n.question.as_str()), (NeedsKind::Confirm, "Confirm", "Coding-plan reserve reached"));
+        assert_eq!(n.detail.as_deref(), Some("openai-codex has 4.0% remaining. Switch to anthropic? Choose No to keep using the current plan."));
+        assert!(n.options.iter().all(|o| !o.recommended), "nothing for decide for me");
+        assert_eq!(n.context.as_deref(), Some(""), "omp's confirmation carries no agent text");
+        let req = ui.current().unwrap();
+        assert_eq!((req.title.as_str(), req.message.is_some()), ("Coding-plan reserve reached", true));
+        assert_eq!(ui.answer("8", &answer(&["No"], None)).unwrap()[0].value.as_deref(), Some("No"));
+        // A one-line select keeps its title; an ask's question is never split.
+        let mut ui = UiState::default();
+        ui.request(&select(9, "Switch to model preset", &["fast", "deep"]), &no_call(), 0);
+        let n = ui.needs(true).unwrap();
+        assert_eq!((n.kind, n.question.as_str(), n.detail.is_none()), (NeedsKind::Ask, "Switch to model preset", true));
+        assert_eq!(n.context, None, "a select keeps the call's context (none here)");
     }
 }

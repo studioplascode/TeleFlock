@@ -93,6 +93,10 @@ pub struct CtlState {
     /// The extension holds a command context (tree/branch/new session work without a round-trip).
     #[serde(default)]
     pub attached: bool,
+    /// omp waits for the user and no dialog the bridge offered covers it (bridge ≥ 2.3.0,
+    /// `caps.userWaits`; architecture §3.5): the agent is Needs you, answered in the terminal.
+    #[serde(default, deserialize_with = "lenient")]
+    pub user_wait: Option<UserWaitInfo>,
 }
 
 impl Default for CtlState {
@@ -110,8 +114,22 @@ impl Default for CtlState {
             queue: empty_queue(),
             plan_review: None,
             attached: false,
+            user_wait: None,
         }
     }
+}
+
+/// A wait for the user no offered dialog covers (`state.userWait`, bridge ≥ 2.3.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserWaitInfo {
+    /// When the wait began (the omp process's clock, epoch ms).
+    #[serde(default)]
+    pub since: Millis,
+    /// What omp's TUI shows in the composer's place (the open dialog's rows, ANSI and borders
+    /// stripped); absent when nothing but the composer is there (an MCP sign-in, say).
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 /// An open interactive plan review (omp `plan_review_requested`).
@@ -150,6 +168,19 @@ pub struct PlanTier {
     pub model: String,
     #[serde(default)]
     pub thinking_level: Option<String>,
+}
+
+/// A pending `use_user_browser` call (`browser_request` event, bridge ≥ 2.3.0 with
+/// `caps.browser`): the agent asks to use the user's TeleFlock Browser (§3.33).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserReq {
+    pub id: String,
+    #[serde(default)]
+    pub reason: String,
+    /// When the bridge asked (hostd's clock when absent).
+    #[serde(default)]
+    pub at: Millis,
 }
 
 /// `getRoleModels` / `setRoleModels` result (bridge ≥ 2.1.0, `caps.roleModels`).
@@ -225,6 +256,30 @@ pub struct BridgeCaps {
     /// repeat and nothing else).
     #[serde(default)]
     pub restore_select: bool,
+    /// The TeleFlock Browser (2.3.0): `browserOverride` (omp's `browser.cdpUrl` as a runtime
+    /// override), `browserAnswer`, the `use_user_browser` tool and its `browser_request` /
+    /// `browser_request_end` / `browser_released` events (§3.33).
+    #[serde(default)]
+    pub browser: bool,
+    /// Refusal fallback (2.3.0, §3.22): `turn_error` also for a provider refusal omp ended the
+    /// turn on (omp drops a refused turn from the session's context before extensions hear
+    /// `agent_end`, so 2.1.0 never reported one), with the refusal, the model's name and when the
+    /// turn began; and `retryRefused`.
+    #[serde(default)]
+    pub refusals: bool,
+    /// omp's own dialogs (2.3.0): the `cfg://` settings approvals, the report_tool_issue consent,
+    /// the coding-plan reserve and startup worktree questions and the confirmations of commands
+    /// TeleFlock submits reach hostd as `ui-request`s, as the UI context's dialogs do.
+    #[serde(default)]
+    pub omp_dialogs: bool,
+    /// omp's waits for the user are counted (2.3.0): one no offered dialog covers is in
+    /// [`CtlState::user_wait`], so nothing waits in the terminal unseen.
+    #[serde(default)]
+    pub user_waits: bool,
+    /// omp's IRC bus is tapped (2.3.0): an `irc` event per delivery leg when it starts and when it
+    /// settled, for the session's agent chat log (`crate::agent_chat`).
+    #[serde(default)]
+    pub agent_chat: bool,
 }
 
 impl BridgeCaps {
@@ -251,6 +306,8 @@ pub struct BridgeSession {
     pub caps: BridgeCaps,
     /// Background jobs on the board card (the latest `jobs` event; `None` while there are none).
     pub jobs: Option<tf_proto::JobsSummary>,
+    /// The agent's pending `use_user_browser` call (`caps.browser`); it goes with the session.
+    pub browser_request: Option<BrowserReq>,
     /// The connection serving it (a reconnect is a new connection).
     #[serde(skip)]
     pub conn: u64,
@@ -347,6 +404,16 @@ pub enum BridgeEvent {
     /// A turn of the session's main agent or one of its subagents ended on an error omp gave up on
     /// (bridge ≥ 2.1.0, `caps.turnError`; docs/bridge-protocol.md "Resume").
     TurnError { session_id: String, error: TurnError },
+    /// The agent asks to use the user's TeleFlock Browser (`use_user_browser`, `caps.browser`);
+    /// kept in [`BridgeSession::browser_request`] until `BrowserRequestEnd`.
+    BrowserRequest { session_id: String, request: BrowserReq },
+    /// The tool call is over: answered, aborted, or the turn ended.
+    BrowserRequestEnd { session_id: String, id: String },
+    /// The bridge dropped its `browser.cdpUrl` override by itself (a turn-scoped one at the turn's
+    /// end): the attachment is over.
+    BrowserReleased { session_id: String, reason: String },
+    /// One delivery leg of omp's IRC bus started or settled (bridge ≥ 2.3.0, `caps.agentChat`).
+    Irc { session_id: String, leg: crate::agent_chat::IrcLeg },
 }
 
 impl BridgeEvent {
@@ -362,7 +429,11 @@ impl BridgeEvent {
             | Self::QueueUpdate { session_id, .. }
             | Self::BtwDelta { session_id, .. }
             | Self::Jobs { session_id }
-            | Self::TurnError { session_id, .. } => session_id,
+            | Self::TurnError { session_id, .. }
+            | Self::BrowserRequest { session_id, .. }
+            | Self::BrowserRequestEnd { session_id, .. }
+            | Self::BrowserReleased { session_id, .. }
+            | Self::Irc { session_id, .. } => session_id,
         }
     }
 }
@@ -396,6 +467,14 @@ pub struct TurnError {
     pub at: Millis,
     /// `failedTails`: the registry status (`idle`, `parked`, `retrying`, …).
     pub status: Option<String>,
+    /// A provider refusal (`caps.refusals`): omp's `stopDetails` type, category and explanation;
+    /// `kind` is `other` then.
+    pub refusal: Option<tf_proto::Refusal>,
+    /// The failed model's name in omp's model registry (`caps.refusals`).
+    pub model_name: Option<String>,
+    /// When the failed turn began: the time of the failing session's last user message
+    /// (`caps.refusals`; refusal fallback does one fallback per turn).
+    pub prompt_at: Option<Millis>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -408,6 +487,31 @@ pub struct FailedTails {
 #[derive(Deserialize)]
 struct Started {
     started: bool,
+}
+
+/// `retryRefused` result (2.3.0 `refusals`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RefusedRetry {
+    /// The session switched and went on with the refused turn. False: its last turn is not (or no
+    /// longer) a refusal omp ended it on, or it runs.
+    pub started: bool,
+    /// The session's model now (`provider/id`) and its name.
+    pub model: Option<String>,
+    pub model_name: Option<String>,
+    /// What it ran before the switch.
+    pub previous: Option<ModelChoice>,
+}
+
+/// A model and thinking level a session ran (`RefusedRetry::previous`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelChoice {
+    /// `provider/id`.
+    pub model: String,
+    pub name: Option<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub thinking: Option<ThinkingLevel>,
 }
 
 /// Typed bridge failure. Convert with `ApiError::from`.
@@ -1006,6 +1110,55 @@ impl BridgeHandle {
     pub async fn set_auto_resume(&self, session_id: &str, on: bool) -> Result<(), BridgeError> {
         self.unit(session_id, "setAutoResume", json!({ "on": on }), QUICK).await
     }
+
+    /// Refusal fallback (2.3.0 `refusals`): the main session, or subagent `agent_id` (resumed as a
+    /// job of its parent), whose last turn omp ended on a provider refusal switches to `model`
+    /// (`thinking`, else the refused turn's level) and goes on with that turn; `notice` reaches the
+    /// live feed first, as a warning notice.
+    pub async fn retry_refused(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        model: &str,
+        thinking: Option<ThinkingLevel>,
+        notice: Option<&str>,
+    ) -> Result<RefusedRetry, BridgeError> {
+        let params = json!({ "agentId": agent_id, "model": model, "thinking": thinking, "notice": notice });
+        self.typed(session_id, "retryRefused", params, TUI).await
+    }
+
+    /// Points the omp process's `browser.cdpUrl` at `cdp_url` as a runtime override, never written
+    /// to a config file (`caps.browser`, §3.33); `None` drops the override. A `turn` scope ends
+    /// with the agent's turn: the bridge drops it then and says so (`browser_released`).
+    pub async fn browser_override(&self, session_id: &str, cdp_url: Option<&str>, scope: Option<tf_proto::BrowserScope>) -> Result<(), BridgeError> {
+        self.unit(session_id, "browserOverride", json!({ "cdpUrl": cdp_url, "scope": scope }), QUICK).await
+    }
+
+    /// Answers the agent's `use_user_browser` request `id` (`caps.browser`).
+    pub async fn browser_answer(&self, session_id: &str, id: &str, answer: &BrowserVerdict) -> Result<(), BridgeError> {
+        let mut params = serde_json::to_value(answer).unwrap_or_else(|_| json!({}));
+        params["id"] = json!(id);
+        self.unit(session_id, "browserAnswer", params, QUICK).await
+    }
+}
+
+/// How a `use_user_browser` request ends (`browserAnswer`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserVerdict {
+    pub allow: bool,
+    /// Allowed: how long.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<tf_proto::BrowserScope>,
+    /// Allowed: the agent's `browser.cdpUrl` now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdp_url: Option<String>,
+    /// Not allowed because no TeleFlock app with a browser could answer (else the user said no).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
+    /// What the agent is told, in words, besides the outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 fn with_op(e: BridgeError, op: &str) -> BridgeError {
@@ -1386,6 +1539,7 @@ fn on_hello(shared: &Shared, conn_id: u64, h: Hello) {
         connected_at: now_ms(),
         caps: h.caps,
         jobs: None,
+        browser_request: None,
         conn: conn_id,
     };
     let event = {
@@ -1613,6 +1767,50 @@ fn on_event(shared: &Shared, conn_id: u64, msg: Value) {
             Ok(error) => Some(BridgeEvent::TurnError { session_id, error }),
             Err(e) => {
                 warn!("bridge: bad turn_error: {e}");
+                None
+            }
+        },
+        "browser_request" => match serde_json::from_value::<BrowserReq>(data) {
+            Ok(mut request) if !request.id.is_empty() => {
+                if request.at <= 0 {
+                    request.at = now_ms();
+                }
+                session.browser_request = Some(request.clone());
+                Some(BridgeEvent::BrowserRequest { session_id, request })
+            }
+            Ok(_) => {
+                warn!("bridge: browser_request without an id");
+                None
+            }
+            Err(e) => {
+                warn!("bridge: bad browser_request: {e}");
+                None
+            }
+        },
+        "browser_request_end" => match data.get("id").and_then(Value::as_str) {
+            Some(id) => {
+                if session.browser_request.as_ref().is_some_and(|r| r.id == id) {
+                    session.browser_request = None;
+                }
+                Some(BridgeEvent::BrowserRequestEnd { session_id, id: id.to_owned() })
+            }
+            None => {
+                warn!("bridge: browser_request_end without an id");
+                None
+            }
+        },
+        "browser_released" => {
+            let reason = data.get("reason").and_then(Value::as_str).unwrap_or("released").to_owned();
+            Some(BridgeEvent::BrowserReleased { session_id, reason })
+        }
+        "irc" => match serde_json::from_value::<crate::agent_chat::IrcLeg>(data) {
+            Ok(leg) if !leg.id.is_empty() && !leg.from.is_empty() && !leg.to.is_empty() => Some(BridgeEvent::Irc { session_id, leg }),
+            Ok(_) => {
+                warn!("bridge: irc leg without id, sender or recipient");
+                None
+            }
+            Err(e) => {
+                warn!("bridge: bad irc: {e}");
                 None
             }
         },

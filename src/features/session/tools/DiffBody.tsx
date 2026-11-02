@@ -4,8 +4,10 @@ import type { FileDiff } from "@/core/gen";
 import { cn } from "@/design";
 import { highlight, languageFor, TOKEN_CLASS } from "../lib/highlight";
 import { lruMemo } from "../lib/lru";
-import { Highlighted } from "../markdown/Markdown";
+import { Highlighted } from "../markdown/CodeBlock";
 import { useOpenOnFind } from "../find/reveal";
+import { FilePreview } from "./FilePreview";
+import { previewOf } from "./preview";
 
 interface DiffLine {
   kind: "add" | "del" | "ctx" | "hunk" | "meta";
@@ -116,11 +118,15 @@ const STATUS_ICON: Partial<Record<FileDiff["status"], typeof FileDiffIcon>> = { 
 export function FileDiffView({ file, defaultOpen = true, findRow }: { file: FileDiff; defaultOpen?: boolean; findRow?: string }) {
   const [open, setOpen] = useState(defaultOpen);
   const [all, setAll] = useState(false);
+  // A written SVG or Mermaid file opens as the picture; Markdown (and edits, which carry only a patch) as the diff.
+  const preview = previewOf(file);
+  const [mode, setMode] = useState<"diff" | "preview">(preview?.content !== undefined && preview.kind !== "markdown" ? "preview" : "diff");
   useOpenOnFind(
     findRow ?? "",
     () => {
       setOpen(true);
       setAll(true);
+      setMode("diff");
     },
     `${file.path}\n${file.patch}`,
   );
@@ -145,7 +151,23 @@ export function FileDiffView({ file, defaultOpen = true, findRow }: { file: File
         <DiffStatText added={file.added} removed={file.removed} />
         <ChevronDown className={cn("size-3.5 shrink-0 text-mute-2 transition-transform", !open && "-rotate-90")} />
       </button>
-      {open && lines.length > 0 && (
+      {open && preview && (
+        <div data-find-skip className="flex gap-1 px-3 pb-1 text-2xs font-bold">
+          {(["diff", "preview"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              aria-pressed={mode === m}
+              className={cn("focus-ring rounded-xs px-1.5 py-0.5 capitalize", mode === m ? "bg-ink/10 text-ink" : "text-mute hover:text-ink")}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
+      {open && preview && mode === "preview" && <FilePreview path={file.path} kind={preview.kind} content={preview.content} />}
+      {open && mode === "diff" && lines.length > 0 && (
         <div className="overflow-x-auto pb-1.5 font-mono text-[11px] leading-[1.65]">
           <table className="w-full border-collapse">
             <tbody>

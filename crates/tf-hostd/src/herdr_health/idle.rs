@@ -11,10 +11,27 @@ const SHELLS: &[&str] = &[
     "pwsh", "powershell", "powershell.exe", "pwsh.exe", "cmd.exe", "bash.exe", "zsh.exe", "fish.exe", "busybox",
 ];
 
-pub fn is_shell(process: &str) -> bool {
+/// Of [`SHELLS`], those that run background jobs inside their own process: nushell's `job spawn`,
+/// PowerShell's `Start-ThreadJob`, elvish's and xonsh's background functions run on the shell's
+/// threads, with no process of their own.
+const IN_PROCESS_JOBS: &[&str] = &["nu", "elvish", "xonsh", "pwsh", "powershell", "pwsh.exe", "powershell.exe"];
+
+/// `bash` of `-bash`, `/bin/bash`; `bash.exe` of `C:\…\bash.exe`.
+fn program(process: &str) -> &str {
     let name = process.trim().trim_start_matches('-');
-    let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+pub fn is_shell(process: &str) -> bool {
+    let name = program(process);
     SHELLS.iter().any(|s| s.eq_ignore_ascii_case(name))
+}
+
+/// A shell whose background jobs no process shows ([`IN_PROCESS_JOBS`]): at its prompt it may
+/// still be running one.
+pub fn runs_jobs_inside(process: &str) -> bool {
+    let name = program(process);
+    IN_PROCESS_JOBS.iter().any(|s| s.eq_ignore_ascii_case(name))
 }
 
 /// One herdr pane as the gate sees it.
@@ -85,14 +102,25 @@ pub fn cmp_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
 }
 
 /// An idle shell has children of its own: background jobs (`cmd &`, `nohup`) that a restart
-/// would end. Prompt helpers that live as long as the shell (powerlevel10k's gitstatusd) don't count.
+/// would end. Prompt helpers that live as long as the shell (powerlevel10k's gitstatusd) don't
+/// count, nor jobs that already exited (a shell like dash reaps them only at its next prompt); a
+/// child that can't be read does.
 pub fn has_background_jobs(shell_pid: u32) -> bool {
-    children(shell_pid).is_some_and(|kids| {
-        kids.iter().any(|c| {
-            let comm = std::fs::read_to_string(format!("/proc/{c}/comm")).unwrap_or_default();
-            !comm.trim().starts_with("gitstatusd")
-        })
-    })
+    background_jobs(shell_pid) == Some(true)
+}
+
+/// [`has_background_jobs`], `None` where the shell's children can't be read (not Linux, or not
+/// our process).
+pub fn background_jobs(shell_pid: u32) -> Option<bool> {
+    let kids = children(shell_pid)?;
+    Some(any_job(&kids, |c| std::fs::read_to_string(format!("/proc/{c}/stat")).ok()))
+}
+
+/// One of `kids` runs, by its `/proc/<pid>/stat` line (`stat`). A child whose line can't be read
+/// or parsed (another user's `sudo … &` under `/proc` mounted `hidepid=2`) may run anything: it
+/// counts.
+fn any_job(kids: &[u32], stat: impl Fn(u32) -> Option<String>) -> bool {
+    kids.iter().any(|&c| stat(c).as_deref().and_then(crate::state::procs::parse_stat).is_none_or(|s| !s.exited() && !s.comm.starts_with("gitstatusd")))
 }
 
 /// When the idle window ends.
@@ -192,7 +220,7 @@ pub fn blockers(agents: &[Agent], panes: &[PaneFacts], attached: usize, mode: He
     out
 }
 
-/// The herdr session or socket a herdr command line attaches a TUI window to.
+/// The herdr session or socket a herdr command line attaches a window to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Session(String),
@@ -203,14 +231,9 @@ fn session_name(name: &str) -> String {
     if name.is_empty() { "default".to_string() } else { name.to_string() }
 }
 
-/// What `args` (a herdr process's command line, program first) attaches to when it is a herdr TUI
-/// window: plain `herdr`, `herdr client`, `herdr session attach <name>`, each with an optional
-/// `--session`. Every other command (the server, the CLI, `terminal session`, `update`, …) is
-/// `None`. Without `--session`, herdr takes `HERDR_SOCKET_PATH`, then `HERDR_SESSION`.
-pub fn tui_target(args: &[String], env_session: Option<&str>, env_socket: Option<&str>) -> Option<Target> {
-    if args.get(1).map(String::as_str) == Some("session") && args.get(2).map(String::as_str) == Some("attach") {
-        return (args.len() == 4).then(|| Target::Session(session_name(&args[3])));
-    }
+/// A herdr command line (program first) as its `--session` and its other arguments; `None` when
+/// `--session` lacks its value.
+fn split_session(args: &[String]) -> Option<(Option<String>, Vec<&str>)> {
     let mut session = None;
     let mut rest: Vec<&str> = Vec::new();
     let mut i = 1;
@@ -228,21 +251,44 @@ pub fn tui_target(args: &[String], env_session: Option<&str>, env_socket: Option
         }
         i += 1;
     }
-    if !(rest.is_empty() || rest == ["client"]) {
-        return None;
-    }
-    Some(match (session, env_socket.filter(|s| !s.is_empty()), env_session) {
+    Some((session, rest))
+}
+
+/// Where a herdr command with `--session` `session` attaches: that session, else herdr takes
+/// `HERDR_SOCKET_PATH`, then `HERDR_SESSION`.
+fn target_of(session: Option<String>, env_session: Option<&str>, env_socket: Option<&str>) -> Target {
+    match (session, env_socket.filter(|s| !s.is_empty()), env_session) {
         (Some(s), _, _) => Target::Session(session_name(&s)),
         (None, Some(sock), _) => Target::Socket(sock.to_string()),
         (None, None, Some(s)) => Target::Session(session_name(s)),
         (None, None, None) => Target::Session("default".into()),
-    })
+    }
 }
 
-/// herdr TUI windows attached to `session`'s server (processes on this host; Linux). `None` where
-/// that cannot be told.
+/// What `args` (a herdr process's command line, program first) attaches to when it is a herdr TUI
+/// window: plain `herdr`, `herdr client`, `herdr session attach <name>`, each with an optional
+/// `--session`. Every other command (the server, the CLI, `terminal session`, `update`, …) is
+/// `None`. Without `--session`, herdr takes `HERDR_SOCKET_PATH`, then `HERDR_SESSION`.
+pub fn tui_target(args: &[String], env_session: Option<&str>, env_socket: Option<&str>) -> Option<Target> {
+    if args.get(1).map(String::as_str) == Some("session") && args.get(2).map(String::as_str) == Some("attach") {
+        return (args.len() == 4).then(|| Target::Session(session_name(&args[3])));
+    }
+    let (session, rest) = split_session(args)?;
+    (rest.is_empty() || rest == ["client"]).then(|| target_of(session, env_session, env_socket))
+}
+
+/// What `args` attaches to when it is the bridge of a herdr window on another computer: `herdr
+/// remote-api-bridge` with an optional `--session`, which `herdr --remote` and saved machines run
+/// over SSH while their window is open; not the `--check` they probe with first.
+pub fn remote_target(args: &[String], env_session: Option<&str>, env_socket: Option<&str>) -> Option<Target> {
+    let (session, rest) = split_session(args)?;
+    (rest == ["remote-api-bridge"]).then(|| target_of(session, env_session, env_socket))
+}
+
+/// herdr processes on this host that `target` says attach to `session`'s server (Linux); `None`
+/// where that cannot be told.
 #[cfg(target_os = "linux")]
-pub fn tui_clients(session: &str, socket: &std::path::Path) -> Option<usize> {
+fn attached(session: &str, socket: &std::path::Path, target: impl Fn(&[String], Option<&str>, Option<&str>) -> Option<Target>) -> Option<usize> {
     let mut n = 0;
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
@@ -253,7 +299,7 @@ pub fn tui_clients(session: &str, socket: &std::path::Path) -> Option<usize> {
         }
         let env_session = tf_herdr::lifecycle::process_env(pid, "HERDR_SESSION");
         let env_socket = tf_herdr::lifecycle::process_env(pid, "HERDR_SOCKET_PATH");
-        match tui_target(&args, env_session.as_deref(), env_socket.as_deref()) {
+        match target(&args, env_session.as_deref(), env_socket.as_deref()) {
             Some(Target::Session(s)) if s == session => n += 1,
             Some(Target::Socket(p)) if std::path::Path::new(&p) == socket => n += 1,
             _ => {}
@@ -263,8 +309,20 @@ pub fn tui_clients(session: &str, socket: &std::path::Path) -> Option<usize> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn tui_clients(_session: &str, _socket: &std::path::Path) -> Option<usize> {
+fn attached(_session: &str, _socket: &std::path::Path, _target: impl Fn(&[String], Option<&str>, Option<&str>) -> Option<Target>) -> Option<usize> {
     None
+}
+
+/// herdr TUI windows attached to `session`'s server (processes on this host; Linux). `None` where
+/// that cannot be told.
+pub fn tui_clients(session: &str, socket: &std::path::Path) -> Option<usize> {
+    attached(session, socket, tui_target)
+}
+
+/// herdr windows that may show `session`: its TUI windows on this host and the bridges of herdr
+/// windows on other computers ([`remote_target`]); Linux. `None` where that cannot be told.
+pub fn windows(session: &str, socket: &std::path::Path) -> Option<usize> {
+    attached(session, socket, |args, env_session, env_socket| tui_target(args, env_session, env_socket).or_else(|| remote_target(args, env_session, env_socket)))
 }
 
 /// "a herdr window is open": a person looks at the session through herdr's own interface.
@@ -432,6 +490,34 @@ mod tests {
         assert_eq!(tui_blocker(0), None);
         assert_eq!(tui_blocker(1).as_deref(), Some("a herdr window is open"));
         assert_eq!(tui_blocker(3).as_deref(), Some("3 herdr windows are open"));
+    }
+
+    /// `herdr --remote` and saved machines on another computer reach this host's server through
+    /// `herdr --session <name> remote-api-bridge`, run over SSH while their window is open.
+    #[test]
+    fn windows_on_other_computers_come_through_the_api_bridge() {
+        let args = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let sess = |n: &str| Some(Target::Session(n.to_string()));
+        assert_eq!(remote_target(&args("/home/ada/.local/bin/herdr --session work remote-api-bridge"), None, None), sess("work"));
+        assert_eq!(remote_target(&args("herdr remote-api-bridge"), Some("lab"), None), sess("lab"));
+        // The probe before attaching is no window, nor is any other command.
+        for other in ["herdr --session work remote-api-bridge --check", "herdr --session work", "herdr --session work server", "herdr --session"] {
+            assert_eq!(remote_target(&args(other), None, None), None, "{other}");
+        }
+        // herdr's update gate still counts the TUI windows on this host only.
+        assert_eq!(tui_target(&args("herdr --session work remote-api-bridge"), None, None), None);
+    }
+
+    /// A child the host can't read (`sudo … &` under `/proc` mounted `hidepid=2`: listed among the
+    /// shell's children, its own entry hidden) may run anything: a restart or a close would end it.
+    #[test]
+    fn a_child_that_can_not_be_read_counts_as_a_job() {
+        let stat = |line: &'static str| move |_: u32| Some(line.to_string());
+        assert!(any_job(&[7], stat("7 (sleep) S 10 7 10 34817 10 0")));
+        assert!(!any_job(&[7], stat("7 (gitstatusd-linux) S 10 7 10 34817 10 0")), "a prompt helper");
+        assert!(!any_job(&[7], stat("7 (sleep) Z 10 7 10 34817 -1 0")), "exited, not reaped yet");
+        assert!(any_job(&[7], |_| None));
+        assert!(!any_job(&[], |_| None));
     }
 
     #[test]

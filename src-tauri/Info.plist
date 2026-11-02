@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundle's Info.plist by the Tauri bundler (and embedded in dev builds by
+     tauri-codegen). macOS asks for the microphone with this text, and refuses (or kills an app
+     without it) when it is missing. -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TeleFlock listens while you dictate to your agents and records your voice in browser recordings. With a speech model from Settings → Dictation, your speech is turned into text on this Mac.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>With dictation set to the system's speech recognition, macOS turns what you say into text for your agents.</string>
+</dict>
+</plist>

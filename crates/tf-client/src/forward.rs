@@ -326,6 +326,8 @@ fn allowed(r: &Relay, rule: &ForwardRule) -> bool {
         ForwardKind::Command | ForwardKind::Shell => rule.shell,
         ForwardKind::Tool => r.tool.as_ref().is_some_and(|t| rule.tools.contains(t)),
         ForwardKind::Port => rule.ports.iter().any(|p| Some(p.listen) == r.listen && Some(p.target) == r.target),
+        // Browser connections never run through a rule.
+        ForwardKind::Browser => false,
     }
 }
 
@@ -602,6 +604,9 @@ fn open(inner: &Arc<Inner>, from_host: &str, from_link: &Arc<Link>, sid: u64, ev
                 tool = Some(t);
                 argv.as_deref().unwrap_or_default().join(" ")
             }
+            // A host opens browser connections towards the app that lends its browser, never
+            // through a forward.
+            ForwardKind::Browser => break 'admit Err("this TeleFlock app does not lend its browser".into()),
             ForwardKind::Port => {
                 let Some(p) = port.and_then(|l| rule.ports.iter().find(|p| p.listen == l)) else {
                     break 'admit Err(format!("forward \"{name}\" does not forward port {}", port.unwrap_or_default()));
@@ -649,7 +654,7 @@ fn open(inner: &Arc<Inner>, from_host: &str, from_link: &Arc<Link>, sid: u64, ev
             ForwardKind::Command => (command, None, cwd, pty),
             ForwardKind::Shell => (None, None, cwd, pty),
             ForwardKind::Tool => (None, argv, cwd.filter(|_| rule.shell), pty),
-            ForwardKind::Port => (None, None, None, None),
+            ForwardKind::Port | ForwardKind::Browser => (None, None, None, None),
         };
         if to_link.fwd(to_sid, FwdEv::Open { kind, name: name.clone(), command, argv, pty, cwd, port: target }).is_err() {
             take_relays(&mut st, &[id]);

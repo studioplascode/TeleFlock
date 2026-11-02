@@ -42,7 +42,7 @@ const SESSIONS_MAX: usize = 500;
 /// Session files larger than this are not scanned for a message count.
 const SESSION_COUNT_MAX: u64 = 16 * 1024 * 1024;
 
-pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
+pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
         HostMethod::HostHealthReq(_) => to_value(health()),
         HostMethod::HostUsage(p) => crate::ops::usage::handle(ctx, p).await,
@@ -59,8 +59,11 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
         HostMethod::HostWrapped(p) => crate::ops::wrapped::handle(ctx, p).await,
         HostMethod::HostToolsUpdate(_) | HostMethod::HostToolsConfig(_) => crate::ops::tools::handle(ctx, req).await,
         HostMethod::HostAutoAnswerSet(p) => to_value(crate::autoanswer::set_default(ctx, p)?),
+        HostMethod::HostAutoAnswerReview(p) => to_value(crate::autoanswer::review(ctx, &client.info().device, p)?),
         HostMethod::HostAutoResume(_) => to_value(crate::recovery::config()?),
         HostMethod::HostAutoResumeSet(p) => to_value(crate::recovery::set_config(p.enabled, p.bring_back)?),
+        HostMethod::HostRefusalFallback(_) => to_value(crate::refusal::config()?),
+        HostMethod::HostRefusalFallbackSet(p) => to_value(crate::refusal::set_config(p.rules)?),
         HostMethod::HostHerdrRestart(_) | HostMethod::HostHerdrLoad(_) | HostMethod::HostHerdrConfig(_) => {
             crate::herdr_health::handle(ctx, req).await
         }
@@ -1229,7 +1232,13 @@ pub async fn probe_info(ctx: &Ctx) -> HostInfo {
         auto_answer: None,
         // Kept by the state store (`set_info`): the herdr server's health (`crate::herdr_health`).
         herdr_health: None,
+        // This daemon starts chat tasks (§3.31): where their folders are.
+        chats: Some(ctx.chats.path().display().to_string()),
+        // Kept by the state store (`set_info`): idle shells (`ops::cleanup::shells`).
+        idle_shells: None,
         pruned: Vec::new(),
+        // Kept by the state store (`set_info`): decide for me's review items.
+        decisions: Vec::new(),
     }
 }
 

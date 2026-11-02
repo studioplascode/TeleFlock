@@ -5,7 +5,7 @@
  */
 export type AiCompleteParams = { 
 /**
- * `branch` | `agentName` | `title` | `commit` | `pr` | `templateName`: logs and the demo only.
+ * `branch` | `agentName` | `agentRename` | `title` | `commit` | `pr` | `templateName` | `ramble`: logs and the demo only.
  */
 task: string, system: string, 
 /**

@@ -15,6 +15,8 @@ export type Route =
   | { name: "hosts" }
   /** Host-to-host forwarding: rules that let one host's agents and shells use another host (a device-level page, no host in the route). */
   | { name: "forward" }
+  /** This device's TeleFlock Browser (a device-level page, no host in the route). */
+  | { name: "browser" }
   | { name: "settings" }
   | { name: "more" }
   | { name: "design" }
@@ -48,6 +50,7 @@ const SIMPLE: Record<string, Route> = {
   wrapped: { name: "wrapped" },
   hosts: { name: "hosts" },
   forward: { name: "forward" },
+  browser: { name: "browser" },
   settings: { name: "settings" },
   more: { name: "more" },
   design: { name: "design" },

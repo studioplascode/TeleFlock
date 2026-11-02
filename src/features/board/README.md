@@ -25,7 +25,8 @@ export function BoardView(): JSX.Element;
 // is merged or closed), Review rows with Mark done + Review, ctx/subs/diff/Connect/model meta, swipe Stop turn on
 // running rows. Needs cards show the RepoTag under the agent pill.
 export function FlockHome(): JSX.Element;
-// src/features/inbox/InboxView.tsx — #/inbox (desktop + mobile): "Needs you" (today's needs cards, oldest first) then "Updates"
+// src/features/inbox/InboxView.tsx — #/inbox (desktop + mobile): "Needs you" (today's needs cards, oldest first), "Decided for you"
+// (autoAnswer/DecidedForYou.tsx, while decisions await review) then "Updates"
 // (unread notifications via notify/NotificationCenter `useUpdates`/`UpdatesList`, 20 then "N more in Activity →").
 // Each needs card (and the HUD) shows "Agent said" (`NeedsContext.tsx` `LastAssistantText`): the host's `needs.context`
 // when it sends one (asks, hosts ≥ 0.8.0; "" shows nothing; the session stays closed), else the end of the last
@@ -38,7 +39,7 @@ export function InboxView(): JSX.Element;
 export function AnswerNextHud(): JSX.Element | null;
 // src/features/activity/ActivityView.tsx — #/activity
 export function ActivityView(): JSX.Element;
-// src/features/activity/WhileAwayToast.tsx — reconnect digest (finished / needs / cost delta per host)
+// src/features/activity/WhileAwayToast.tsx — reconnect digest (finished / needs / decided for you / cost delta per host; awayDigest.ts)
 export function WhileAwayToast(): null;
 // src/features/usage/UsageView.tsx — #/usage: spend history and insights from omp's stats index (`host.usage`, see
 // src/features/usage/README.md) + "Subscriptions & limits"
@@ -69,6 +70,11 @@ export function resumeParked(key: string): Promise<string | null>; // agent.resu
 // also: setArchived (unarchiving a parked agent resumes it), answerAgent, stopAgent, openAgent, promptAgent,
 // openTerminal (parked: resume first, then the new pane), openAnswerHud, canReview, setMuted, useMuted
 
+// src/features/board/renameAgain.ts — "Name it again" (✨ in every agent menu: sidebar, board card ⋯/right-click, phone rows, session header ⋯ and sheet, palette)
+export function renameAgain(key: string): Promise<void>; // suggestAgentRename from what the agent does now → agent.renameHandle, then agent.rename (title only through omp's bridge or when idle, and only where the session has one); "Naming…" toast, Undo toast; a name or title given meanwhile stays (the answer is dropped with a toast); failures say why; never rejects
+export function useRenameAgain(key: string): { available: boolean; busy: boolean; run(): void }; // available: pane (not parked), online host, past the first prompt
+// also: agentRenameInput (what the model is told), planRename (only what differs; no first title: omp can't clear one, so Undo couldn't), undoRename (leaves parts renamed again since), canRetitle, canRenameAgain
+
 // src/features/board/Notices.tsx — the notices above the lanes, for the hosts in view, most urgent first
 // (notice.tsx `noticeRank`): host not online (snapshot strip, connAction verb) · omp without an account
 // (accounts/LinkAccountNudge) · low disk space (cleanup/LowDiskNotice: online host under 2 GiB free, or under 10 GiB
@@ -90,8 +96,8 @@ export function PhoneNotices(): JSX.Element; // phone: NoticeTray, the most urge
 // RecapLine (recap only: phone Review/Done rows, desktop session header, phone session under the chips), RecapText.
 // currentRecap(agent) / restingLine(agent): never for running or needs-you agents.
 
-// src/features/board/RepoTag.tsx — where an agent works, on every agent surface (cards, phone rows, Inbox/HUD header)
-export function RepoTag(props: { hostId: string; repo?: string; branch?: string; cwd?: string; sunset?: boolean; className?: string }): JSX.Element | null;
+// src/features/board/RepoTag.tsx — where an agent works, on every agent surface (cards, phone rows, Inbox/HUD header, Wall tiles)
+export function RepoTag(props: { hostId: string; repo?: string; branch?: string; cwd?: string; chat?: boolean; sunset?: boolean; className?: string }): JSX.Element | null;
 export function repoAccent(repo: string): string; // agentGlyphTheme(repo).from: the Repo grouping glyph's colour
 
 // src/features/board/worktreePr.tsx — merged/closed PR of a Review/Done card's linked worktree (lazy gh.prStatus)
@@ -121,6 +127,11 @@ on a soft tint of the repo's accent (`repoAccent`, so a repo has the same hue as
 filter icon); white on a dark tint on the sunset hero card. An agent outside a git repo gets a neutral folder chip
 (FolderOpen + cwd basename, `~` for the host's home). The branch follows as secondary mono text and truncates first.
 Static styles only: no animation, blur or layer.
+
+**Chats** (`Agent.chat`, features/chats): the "Chat" chip (`ChatTag` through `RepoTag chat`) stands in for the repo or
+folder chip and branch; no diff meter, no Review (`canReview` is false), no worktree removal (`agentWorktree` is null,
+`PrProbe` never asks gh), no Move; the ⋯/right-click menu and phone rows add "Delete chat…" (`deleteChatAgent`). With
+no repository they are not in the repo filter; Repo grouping shows them in one Chats column after the repositories.
 
 **Delete worktree** (Review and Done cards that ran in a linked worktree whose pull request is merged or closed): a
 danger button on the desktop card and "Delete worktree…" in the ⋯/right-click menu (on Review it takes the place of

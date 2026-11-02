@@ -1,10 +1,12 @@
 import { useAgent } from "@/core";
+import { isChat } from "@/core/chats";
 import { AgentGlyph, Elapsed, Shimmer, cn } from "@/design";
 import { HostTag } from "@/features/board/AgentCard";
 import { RepoTag } from "@/features/board/RepoTag";
 import { AgentSaid } from "@/features/session/ask/AgentSaid";
 import { clipContext, withoutQuestion } from "@/features/session/ask/askContext";
 import { NEEDS_WORD } from "@/features/shell/vocab";
+import { Ticks } from "@/features/shell/Ticks";
 import { askText } from "./askText";
 import { useLastAssistant } from "./useLastAssistant";
 
@@ -25,7 +27,7 @@ export function NeedsHeader({ agentKey, className }: { agentKey: string; classNa
           )}
         </div>
         <div className="mt-0.5 flex min-w-0 items-center gap-2">
-          <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} />
+          <RepoTag hostId={agent.hostId} repo={agent.repo} branch={agent.branch} cwd={agent.cwd} chat={isChat(agent)} />
           <HostTag hostId={agent.hostId} />
         </div>
       </div>
@@ -68,9 +70,21 @@ export function NeedsQuestion({ agentKey, className }: { agentKey: string; class
   const { headline, body } = askText({ title: n.title, message: n.question, command: n.command, approval: n.kind === "approval" });
   return (
     <div className={cn("flex flex-col gap-2", className)}>
-      {headline && <p className="font-display text-xl leading-snug font-bold text-ink max-md:text-lg">{headline}</p>}
-      {body && <p className="text-sm whitespace-pre-wrap text-ink-2">{body}</p>}
-      {n.detail && <p className="text-sm whitespace-pre-wrap text-ink-2">{n.detail}</p>}
+      {headline && (
+        <p className="font-display text-xl leading-snug font-bold text-ink max-md:text-lg">
+          <Ticks text={headline} className="text-[0.8em]" />
+        </p>
+      )}
+      {body && (
+        <p className="text-sm whitespace-pre-wrap text-ink-2">
+          <Ticks text={body} className="text-[0.88em]" />
+        </p>
+      )}
+      {n.detail && (
+        <p className="text-sm whitespace-pre-wrap text-ink-2">
+          <Ticks text={n.detail} className="text-[0.88em]" />
+        </p>
+      )}
       {n.command && <pre className="overflow-x-auto rounded-md well px-3 py-2 font-mono text-xs whitespace-pre-wrap text-ink">{n.command}</pre>}
       {!n.answerable && <p className="text-xs font-semibold text-warn">This prompt can only be answered in the terminal.</p>}
     </div>

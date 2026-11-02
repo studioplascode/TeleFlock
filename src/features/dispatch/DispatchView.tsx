@@ -1,7 +1,8 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Eraser, FolderGit2, FolderSearch, MoreHorizontal, Send, Server, Shuffle } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Eraser, FolderGit2, FolderSearch, MessagesSquare, MoreHorizontal, Send, Server, Shuffle } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type DraftImage, navigate, useHostIds, useHostStates, useHosts, useSettings, useUi } from "@/core";
+import { CHAT_REPO, isChatRepo } from "@/core/chats";
 import { pickHost, rankHosts } from "@/core/workload";
 import {
   Button,
@@ -26,7 +27,7 @@ import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
 import { canonicalRemote, findGroupRepo, groupHosts, groupRepos, localRepoIds, remoteKey } from "./auto";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
-import { BasePicker, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
+import { BasePicker, type ChatChoice, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
 import {
   type DispatchEntry,
   entryHost,
@@ -37,9 +38,9 @@ import {
   threadKey,
   useDispatch,
 } from "./store";
-import { dispatchDraftKey, dispatchOptions, dispatchTarget, dispatchedRepos, loadsOf, sendTask } from "./send";
+import { chatHostsOf, chatRefusal, dispatchDraftKey, dispatchOptions, dispatchTarget, dispatchedRepos, loadsOf, sendTask } from "./send";
 import { useAutoQuotas } from "./quota";
-import { recentRepos, resolveAgent, threadBase } from "./thread";
+import { CHAT_CHOICE, recentRepos, resolveAgent, threadBase } from "./thread";
 
 const EMPTY: DispatchEntry[] = [];
 const NO_HOSTS: string[] = [];
@@ -49,8 +50,10 @@ const COUNT_LABEL = { needs: "need you", running: "running", review: "to review"
 
 /**
  * `#/dispatch`: pick a repo, then every message creates a fresh worktree (`dispatch/<slug>`) with
- * an omp agent running it. The thread shows each message with its agent's live reply card. The
- * target is one host, or a host group in Auto mode (each task goes to its least busy host).
+ * an omp agent running it; or pick "No folder · chat" (`CHAT_REPO`), and every message starts a
+ * chat (an omp agent in a folder its host makes for it). The thread shows each message with its
+ * agent's live reply card. The target is one host, or a host group in Auto mode (each task goes to
+ * its least busy host).
  */
 export function DispatchView() {
   const mobile = useIsMobile();
@@ -69,6 +72,7 @@ export function DispatchView() {
   const { target, group: auto } = dispatchTarget(profiles, hostIds, lastHost);
   const members = useMemo(() => (auto ? groupHosts(profiles, auto).map((p) => p.id) : NO_HOSTS), [auto, profiles]);
   const repo = useDispatch((s) => (target ? (s.lastRepo[target] ?? null) : null));
+  const chat = isChatRepo(repo);
   const key = target && repo ? threadKey(target, repo) : null;
   const entries = useDispatch((s) => (key ? (s.threads[key] ?? EMPTY) : EMPTY));
 
@@ -97,8 +101,10 @@ export function DispatchView() {
     [auto, members, states, dispatched, remotes],
   );
   // A thread keeps the repo id it was started under (a host-local one until the remote was known).
-  const autoRepo = auto && repo ? findGroupRepo(pooled, repo) : undefined;
-  const candidates = useMemo(() => (autoRepo ? members.filter((h) => autoRepo.roots[h]) : NO_HOSTS), [autoRepo, members]);
+  const autoRepo = auto && repo && !chat ? findGroupRepo(pooled, repo) : undefined;
+  // Auto chats go to the group's hosts that start chats.
+  const chatHosts = useMemo(() => (auto ? chatHostsOf(states, members) : NO_HOSTS), [auto, states, members]);
+  const candidates = useMemo(() => (chat ? chatHosts : autoRepo ? members.filter((h) => autoRepo.roots[h]) : NO_HOSTS), [chat, chatHosts, autoRepo, members]);
   const repoChoices = useMemo<RepoChoice[]>(
     () =>
       auto
@@ -125,7 +131,7 @@ export function DispatchView() {
   );
   const preview = useMemo(() => (candidates.length ? pickHost(loadsOf(candidates, states, status, threads, quotas)) : null), [candidates, states, status, threads, quotas]);
   const workHost = hostId ?? preview?.hostId ?? candidates[0];
-  const workRepo = hostId ? repo : workHost ? autoRepo?.roots[workHost] : undefined;
+  const workRepo = chat ? undefined : hostId ? repo : workHost ? autoRepo?.roots[workHost] : undefined;
 
   // Base branch: remembered per thread, else the host's default base (`origin/<default>`). Auto
   // resolves it again on the host each send goes to (as does a send before the list is in).
@@ -168,7 +174,7 @@ export function DispatchView() {
     }
   }, [key, entries, states, resolved]);
 
-  const repoName = repo ? (auto ? autoRepo?.name : recents.find((r) => r.root === repo)?.name) ?? basename(repo) : null;
+  const repoName = chat ? CHAT_CHOICE : repo ? ((auto ? autoRepo?.name : recents.find((r) => r.root === repo)?.name) ?? basename(repo)) : null;
 
   const composer = useRef<DispatchComposerHandle>(null);
   const send = (prompt: string, images: readonly DraftImage[], videos: readonly string[]): boolean => {
@@ -218,6 +224,13 @@ export function DispatchView() {
     focusAfterPick.current = false;
     requestAnimationFrame(focusComposer);
   }, [repo, focusComposer]);
+  // "New chat" (`openChat`) asks for the task box from outside the view.
+  const focusRequest = useDispatch((s) => s.composerFocus);
+  useEffect(() => {
+    if (!focusRequest) return;
+    useDispatch.getState().consumeComposerFocus();
+    requestAnimationFrame(focusComposer);
+  }, [focusRequest, focusComposer]);
   const refocusAfterPick = useCallback(() => {
     focusAfterPick.current = false;
     focusComposer();
@@ -225,19 +238,26 @@ export function DispatchView() {
   const [browsing, setBrowsing] = useState(false);
 
   const autoOnline = candidates.some((h) => online[h]);
+  // Why the target can't start a chat (an older daemon, not known yet): the chip's choice says so.
+  const chatBlock = target ? chatRefusal({ profiles, status, states }, target) : null;
+  const chatChoice: ChatChoice = chatBlock ? { unavailable: chatBlock.title, hint: chatBlock.description } : {};
   const disabledReason = !target
     ? "Add a host first"
     : !repo
       ? "Pick a repository first"
       : auto
-        ? !autoRepo
-          ? `No host of ${auto} has ${repoName} now`
-          : autoOnline
-            ? null
-            : `No host of ${auto} with ${repoName} is online`
+        ? chat
+          ? (chatBlock?.title ?? (autoOnline ? null : `No host of ${auto} that starts chats is online`))
+          : !autoRepo
+            ? `No host of ${auto} has ${repoName} now`
+            : autoOnline
+              ? null
+              : `No host of ${auto} with ${repoName} is online`
         : hostId && !online[hostId]
           ? `${nameOf(hostId)} is offline`
-          : null;
+          : chat
+            ? (chatBlock?.title ?? null)
+            : null;
 
   const pickers = target && (
     <>
@@ -248,12 +268,15 @@ export function DispatchView() {
         browseHostId={hostId}
         repo={autoRepo?.id ?? repo}
         repos={repoChoices}
+        chat={chatChoice}
         emptyHint={auto ? `No repositories on ${auto}'s hosts yet. Pick a single host to browse for one; once it has a worktree or dispatch there, Auto offers it.` : undefined}
         onChange={pickRepo}
         onFocusAfterPick={refocusAfterPick}
         className={mobile ? "min-w-0 flex-1" : "max-w-[min(440px,50%)]"}
       />
-      {repo && <BasePicker value={base.shown} branches={branches.data} onChange={(b) => key && useDispatch.getState().setBase(key, b)} className={mobile ? "max-w-[32%]" : undefined} />}
+      {repo && !chat && (
+        <BasePicker value={base.shown} branches={branches.data} onChange={(b) => key && useDispatch.getState().setBase(key, b)} className={mobile ? "max-w-[32%]" : undefined} />
+      )}
     </>
   );
 
@@ -277,8 +300,10 @@ export function DispatchView() {
           danger
           onSelect={async () => {
             const ok = await confirmAction({
-              title: `Clear the ${repoName} thread?`,
-              body: "Only the messages here are removed. Agents and worktrees keep running; find them on the board.",
+              title: chat ? "Clear this chat thread?" : `Clear the ${repoName} thread?`,
+              body: chat
+                ? "Only the messages here are removed. The chats keep running; find them on the board."
+                : "Only the messages here are removed. Agents and worktrees keep running; find them on the board.",
               confirmLabel: "Clear thread",
               danger: true,
             });
@@ -290,6 +315,19 @@ export function DispatchView() {
       </DropdownMenuContent>
     </DropdownMenu>
   );
+
+  // The thread before its first message: what each message will do.
+  const threadEmpty = chat
+    ? {
+        icon: <MessagesSquare />,
+        title: "No chats here yet",
+        description: `Each message starts a chat${auto ? ` on the least busy host of ${auto} that starts chats` : hostId ? ` on ${nameOf(hostId)}` : ""}: an omp agent in a new folder of its own, no repository. Ask it anything; it has omp's tools.`,
+      }
+    : {
+        icon: auto ? <Shuffle /> : <Send />,
+        title: `Nothing dispatched to ${repoName ?? ""} yet`,
+        description: `Each message becomes a dispatch/<slug> branch from ${base.shown}, in its own worktree, with an omp agent working on it.${auto ? " Auto sends each one to the least busy host that has the repository." : ""}`,
+      };
 
   const thread = !target ? (
     <EmptyState
@@ -304,11 +342,11 @@ export function DispatchView() {
       className="flex-1"
       icon={auto ? <Shuffle /> : <Send />}
       title={auto ? `Fire tasks at ${auto}` : "Fire tasks at a repository"}
-      description={
+      description={`${
         auto
           ? `Pick a repository. Each message goes to the least busy online host of ${auto} that has it, in a fresh worktree with its own omp agent.`
           : "Pick a repository. Every message you send here gets a fresh worktree with its own omp agent — send as many as you like, they run side by side."
-      }
+      }${chatBlock ? "" : ` No repository needed? “${CHAT_CHOICE}” starts each message as an agent in a new folder of its own.`}`}
       action={
         <div className="flex max-w-md flex-wrap justify-center gap-2">
           {repoChoices.slice(0, 4).map((r) => (
@@ -324,34 +362,39 @@ export function DispatchView() {
               <RepoBrowser hostId={hostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={pickRepo} onFocusAfterPick={refocusAfterPick} />
             </>
           )}
+          {!chatBlock && (
+            <Button size="sm" icon={<MessagesSquare />} onClick={() => pickRepo(CHAT_REPO)}>
+              {CHAT_CHOICE}
+            </Button>
+          )}
         </div>
       }
     />
   ) : (
-    <Thread key={key} entries={entries} resolved={resolved} ctx={ctx} base={base.shown} repoName={repoName ?? ""} mobile={mobile} />
+    <Thread key={key} entries={entries} resolved={resolved} ctx={ctx} empty={threadEmpty} mobile={mobile} />
   );
 
   const composerEl = (
     <DispatchComposer
       ref={composer}
       hostId={workHost}
-      repo={workRepo}
+      repo={chat ? CHAT_REPO : workRepo}
       draftKey={dispatchDraftKey(target ?? "", repo ?? "")}
       uploadHost={hostId}
       options={options}
       onOptionsChange={useDispatch.getState().setOptions}
       onSend={send}
       disabledReason={disabledReason}
-      placeholder={repo ? `Describe a task for ${repoName}… (paste or drop images and videos)` : "Pick a repository to dispatch to"}
+      placeholder={chat ? "Ask anything: each message starts a new chat (paste or drop images and videos)" : repo ? `Describe a task for ${repoName}… (paste or drop images and videos)` : "Pick a repository to dispatch to"}
       mobile={mobile}
     />
   );
 
-  // The other launchers, for when Dispatch's one-message flow isn't what's needed.
+  // The other launchers, for when Dispatch's one-message flow isn't what's needed (a chat has no repository to branch).
   const link = "font-bold text-accent-hi rounded-[3px] hover:underline focus-ring";
   // Phone: wraps between the two offers (each stays whole) rather than truncating "Fan out" away.
   const offer = mobile ? "whitespace-nowrap" : undefined;
-  const alternatives = workHost && (
+  const alternatives = workHost && !chat && (
     <p className={cn("px-2 text-[11px] font-semibold text-mute-2", mobile ? "mt-1 leading-relaxed" : "mt-1.5 truncate")}>
       <span className={offer}>
         Need a specific branch or model?{" "}
@@ -374,9 +417,30 @@ export function DispatchView() {
     </p>
   );
 
+  const chatsDir = single?.info.chats;
   const hint =
     repo &&
-    (auto ? (
+    (chat ? (
+      auto ? (
+        <>
+          Each message → a chat on the least busy of <span className="font-semibold text-mute">{candidates.map(nameOf).join(", ") || "no host"}</span>
+          {preview && <> (next: {nameOf(preview.hostId)})</>} · an omp agent in a new folder of its own, no repository
+        </>
+      ) : (
+        hostId && (
+          <>
+            Each message → a chat on <span className="font-semibold text-mute">{nameOf(hostId)}</span> · an omp agent in a new folder
+            {chatsDir && (
+              <>
+                {" "}
+                under <span className="font-mono">{tildify(chatsDir, home)}</span>
+              </>
+            )}
+            , no repository
+          </>
+        )
+      )
+    ) : auto ? (
       <>
         Each message → the least busy of <span className="font-semibold text-mute">{candidates.map(nameOf).join(", ") || "no host"}</span>
         {preview && <> (next: {nameOf(preview.hostId)})</>} · from <span className="font-mono">{base.shown}</span> + an omp agent
@@ -388,6 +452,7 @@ export function DispatchView() {
         </>
       )
     ));
+  const about = (chat ? ACTIONS.newChat : ACTIONS.newTask).description;
 
   if (mobile) {
     return (
@@ -416,8 +481,8 @@ export function DispatchView() {
           </span>
           <span className="flex min-w-0 flex-col">
             <h1 className="font-display text-lg leading-tight font-bold tracking-[-0.01em] text-ink">Dispatch</h1>
-            <p className="max-w-[340px] truncate text-[11px] font-semibold text-mute-2" title={ACTIONS.newTask.description}>
-              {ACTIONS.newTask.description}
+            <p className="max-w-[340px] truncate text-[11px] font-semibold text-mute-2" title={about}>
+              {about}
             </p>
           </span>
         </span>
@@ -462,15 +527,14 @@ function Thread({
   entries,
   resolved,
   ctx,
-  base,
-  repoName,
+  empty,
   mobile,
 }: {
   entries: readonly DispatchEntry[];
   resolved: Readonly<Record<string, string>>;
   ctx: ThreadContext;
-  base: string;
-  repoName: string;
+  /** What the thread says before its first message. */
+  empty: { icon: ReactNode; title: string; description: string };
   mobile: boolean;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -520,12 +584,7 @@ function Thread({
       className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain", mobile ? "px-3 py-3" : "px-6 py-5")}
     >
       {count === 0 ? (
-        <EmptyState
-          className="h-full"
-          icon={ctx.auto ? <Shuffle /> : <Send />}
-          title={`Nothing dispatched to ${repoName} yet`}
-          description={`Each message becomes a dispatch/<slug> branch from ${base}, in its own worktree, with an omp agent working on it.${ctx.auto ? " Auto sends each one to the least busy host that has the repository." : ""}`}
-        />
+        <EmptyState className="h-full" icon={empty.icon} title={empty.title} description={empty.description} />
       ) : (
         <ThreadCtx.Provider value={ctx}>
           {entries.length > visible.length && (

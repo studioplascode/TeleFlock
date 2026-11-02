@@ -1,18 +1,22 @@
 import { FolderGit2, HardDrive, RotateCw, Server, Sparkles, Trash2, WifiOff } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { navigate, useCore, useHostIds, useHostState, useHosts } from "@/core";
-import type { CleanupRepo, CleanupWorktree } from "@/core/gen";
+import type { CleanupOwner, CleanupRepo, CleanupWorktree } from "@/core/gen";
 import { formatBytes } from "@/core/upload";
-import { Button, EmptyState, IconButton, PageHeader, Select, Skeleton, Spinner, Tile, cn, formatAge, useIsMobile, useNow } from "@/design";
+import { Button, EmptyState, IconButton, PageHeader, SegmentedControl, Select, Skeleton, Spinner, Tile, cn, formatAge, useIsMobile, useNow } from "@/design";
 import { OutdatedHost } from "@/features/automations/parts";
+import { ChatCleanup } from "@/features/chats/ChatCleanup";
 import { HostPicker } from "@/features/dispatch/RepoBar";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { tildify } from "@/features/workspace/shared/paths";
 import { removeMany, removeOne } from "./actions";
+import { AgentSection } from "./AgentSection";
 import { type BulkKind, STALE_DAYS, bulkSet, classify, sortForPage, totals } from "./classify";
+import { type AgentGroup, groupByOwner, ownerLabel } from "./groups";
 import { diskLevel } from "./disk";
+import { IdleShellsSection } from "./IdleShellsSection";
 import { StorageSection } from "./StorageSection";
-import { useCleanupPrefs } from "./store";
+import { type CleanupGrouping, useCleanupPrefs } from "./store";
 import { useCleanupReport, useCleanupStorage } from "./useCleanup";
 import { WorktreeRow } from "./WorktreeRow";
 
@@ -74,6 +78,7 @@ function BulkTile({ title, about, count, held, bytes, label, disabled, progress,
 function RepoSection({
   hostId,
   repo,
+  owners,
   home,
   now,
   staleDays,
@@ -82,6 +87,8 @@ function RepoSection({
 }: {
   hostId: string;
   repo: CleanupRepo;
+  /** The report's owners by key (hosts ≥ 0.9.0): rows name the agent they belong to. */
+  owners?: ReadonlyMap<string, CleanupOwner>;
   home?: string;
   now: number;
   staleDays: number;
@@ -109,19 +116,24 @@ function RepoSection({
       ) : (
         <Tile className="overflow-hidden p-0">
           <ol className="flex flex-col divide-y divide-line">
-            {sortForPage(repo.worktrees, now, staleDays).map((w) => (
-              <WorktreeRow
-                key={w.path}
-                hostId={hostId}
-                worktree={w}
-                verdict={classify(w, now, staleDays)}
-                home={home}
-                now={now}
-                removing={removing.has(w.path)}
-                liveAgent={!!w.lastAgent?.agentId && live.has(w.lastAgent.agentId)}
-                onDelete={() => onDelete(w)}
-              />
-            ))}
+            {sortForPage(repo.worktrees, now, staleDays).map((w) => {
+              const owner = w.owner && owners?.get(w.owner.key);
+              const named = owner ? owner.agentId : w.lastAgent?.agentId;
+              return (
+                <WorktreeRow
+                  key={w.path}
+                  hostId={hostId}
+                  worktree={w}
+                  verdict={classify(w, now, staleDays)}
+                  home={home}
+                  now={now}
+                  removing={removing.has(w.path)}
+                  liveAgent={!!named && live.has(named)}
+                  owner={owner}
+                  onDelete={() => onDelete(w)}
+                />
+              );
+            })}
           </ol>
         </Tile>
       )}
@@ -138,7 +150,7 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const hostIds = useHostIds();
   const status = useHosts((s) => s.status);
   const profiles = useHosts((s) => s.profiles);
-  const { lastHost, setLastHost, staleDays, setStaleDays } = useCleanupPrefs();
+  const { lastHost, setLastHost, staleDays, setStaleDays, groupBy, setGroupBy } = useCleanupPrefs();
   const hostId =
     routeHost && hostIds.includes(routeHost)
       ? routeHost
@@ -159,15 +171,23 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
   const q = useCleanupReport(hostId);
   const storage = useCleanupStorage(hostId);
   const now = useNow(60_000);
-  const [removing, setRemoving] = useState<{ hostId?: string; paths: Set<string>; bulk?: { which: BulkKind; done: number; of: number } }>({ paths: new Set() });
+  const [removing, setRemoving] = useState<{ hostId?: string; paths: Set<string>; bulk?: { which: BulkKind; group?: string | null; done: number; of: number } }>({
+    paths: new Set(),
+  });
   const busyPaths = removing.hostId === hostId ? removing.paths : new Set<string>();
   const bulkRun = removing.hostId === hostId ? removing.bulk : undefined;
+  // Groups the user opened or closed; the rest follow the page's size (open while it is small).
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
 
   const report = q.data;
   const t = totals(report, now, staleDays);
   const shipped = bulkSet(report, "shipped", now, staleDays);
   const stale = bulkSet(report, "stale", now, staleDays);
   const scanning = !!report?.scanning;
+  // Hosts ≥ 0.9.0 say who each worktree belongs to; older ones are listed by repository only.
+  const byAgent = groupBy === "agent" && report?.owners !== undefined;
+  const groups = byAgent ? groupByOwner(report, now, staleDays) : [];
+  const owners = report?.owners ? new Map(report.owners.map((o) => [o.key, o])) : undefined;
 
   const deleteOne = async (w: CleanupWorktree) => {
     if (!hostId) return;
@@ -186,8 +206,22 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
     if (out) q.reload();
   };
 
+  /** An agent group's "Delete merged, closed and stale". */
+  const cleanGroup = async (g: AgentGroup) => {
+    if (!hostId) return;
+    const set = g.cleanable;
+    const paths = new Set(set.items.map((w) => w.path));
+    const n = set.items.length;
+    const title = g.key === null ? `Delete ${n} worktree${n === 1 ? "" : "s"} no agent worked in?` : `Delete ${n} worktree${n === 1 ? "" : "s"} of ${ownerLabel(g.owner)}?`;
+    const out = await removeMany(hostId, "cleanable", set, home, (done) => setRemoving({ hostId, paths, bulk: { which: "cleanable", group: g.key, done, of: n } }), title);
+    setRemoving({ hostId, paths: new Set() });
+    if (out) q.reload();
+  };
+
   const hostPicker = hostId && hostIds.length > 1 ? <HostPicker target={hostId} hostIds={hostIds} groups={[]} onChange={pickHost} /> : null;
-  const progress = (which: BulkKind) => (bulkRun?.which === which ? `Removing ${bulkRun.done + 1 > bulkRun.of ? bulkRun.of : bulkRun.done + 1}/${bulkRun.of}…` : null);
+  const counter = (run: NonNullable<typeof bulkRun>) => `Removing ${Math.min(run.done + 1, run.of)}/${run.of}…`;
+  const progress = (which: BulkKind) => (bulkRun?.which === which ? counter(bulkRun) : null);
+  const groupProgress = (key: string | null) => (bulkRun?.which === "cleanable" && bulkRun.group === key ? counter(bulkRun) : null);
 
   let body;
   if (!hostId) {
@@ -291,7 +325,25 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
           ) : (
             report.scannedAt !== undefined && <span>scanned {formatAge(now - report.scannedAt)}</span>
           )}
+          {report.owners !== undefined && repos.length > 0 && (
+            <SegmentedControl<CleanupGrouping>
+              aria-label="Group worktrees by"
+              size="sm"
+              className="ml-auto max-md:ml-0"
+              value={groupBy}
+              onValueChange={setGroupBy}
+              options={[
+                { value: "agent", label: "By agent" },
+                { value: "repo", label: "By repository" },
+              ]}
+            />
+          )}
         </div>
+        {byAgent && (report.sessionsPending ?? 0) > 0 && (
+          <p className="px-1 text-2xs text-mute-2">
+            Still reading {report.sessionsPending} of omp's session files on {hostName}: some worktrees may find their agent on the next scan.
+          </p>
+        )}
         {report.ghError && (
           <Tile data-status="needs-you" className="flex items-start gap-3 p-4 text-xs text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--st-solid)_35%,transparent)] max-md:p-3.5">
             <Sparkles className="mt-0.5 size-4 shrink-0 st-text" aria-hidden />
@@ -310,9 +362,33 @@ export function CleanupView({ hostId: routeHost }: { hostId?: string }) {
               description="The repositories TeleFlock knows on this host (its workspaces, done agents and automations) have no linked worktrees."
             />
           </Tile>
+        ) : byAgent ? (
+          groups.map((g) => {
+            const key = g.key ?? "";
+            return (
+              <AgentSection
+                key={key}
+                hostId={hostId}
+                group={g}
+                home={home}
+                now={now}
+                staleDays={staleDays}
+                removing={busyPaths}
+                multiRepo={repos.length > 1}
+                open={toggled[key] ?? t.worktrees <= 24}
+                onToggle={() => setToggled((o) => ({ ...o, [key]: !(o[key] ?? t.worktrees <= 24) }))}
+                onDelete={(w) => void deleteOne(w)}
+                onClean={() => void cleanGroup(g)}
+                progress={groupProgress(g.key)}
+                disabled={scanning || !!bulkRun}
+              />
+            );
+          })
         ) : (
-          repos.map((r) => <RepoSection key={r.root} hostId={hostId} repo={r} home={home} now={now} staleDays={staleDays} removing={busyPaths} onDelete={(w) => void deleteOne(w)} />)
+          repos.map((r) => <RepoSection key={r.root} hostId={hostId} repo={r} owners={owners} home={home} now={now} staleDays={staleDays} removing={busyPaths} onDelete={(w) => void deleteOne(w)} />)
         )}
+        <ChatCleanup hostId={hostId} hostName={hostName} home={home} />
+        <IdleShellsSection hostId={hostId} />
         <StorageSection q={storage} hostName={hostName} home={home} />
       </>
     );

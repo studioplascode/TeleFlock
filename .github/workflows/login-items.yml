@@ -1,0 +1,146 @@
+# Manual check of the login item that brings tf-hostd back after a reboot ("Bring agents back after a
+# reboot", architecture §3.11 and §3.25) on real macOS and Windows runners: a launchd agent on the Mac
+# (automations/launchd.rs), a Task Scheduler task on Windows (automations/schtasks.rs). Neither had run
+# on a real OS before; the unit tests only render and plan them. Each job builds tf-hostd, puts it where
+# the app does (~/.teleflock/bin), starts the daemon with `tf-hostd attach` and then checks, with the
+# OS's own tools (launchctl, schtasks), that
+#   (a) the login item is installed by default,
+#   (b) it brings a killed daemon back within 60 s,
+#   (c) Windows: the launcher runs without a console window and the daemon from the real tf-hostd.exe,
+#   (d) switching "Bring agents back after a reboot" off removes it and its files,
+#   (e) switching it on installs it again (and it starts the daemon too),
+# and uploads its logs as an artifact whatever happens (f). What a run proves and cannot prove is in
+# scripts/ci/login-items-macos.sh and scripts/ci/login-items-windows.ps1; docs/build.md §8 tells how to
+# dispatch it and read the result.
+#
+# Runs only by hand: `gh workflow run login-items.yml --ref <branch> [-f ref=<branch, tag or commit>]`.
+# The runners are disposable VMs, so the checks use the real home (~/.teleflock), the one that installs
+# a login item; the scripts refuse to run anywhere else. Nothing here ever gets a secret or a write token.
+# Third-party actions are pinned by commit SHA.
+name: login-items
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or commit to build and check (empty: the ref this run was started on)'
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: login-items-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A release build, but quick: no LTO, a few codegen units. It is what users run (no debug assertions, and
+  # none of the big stack frames of a debug build on Windows' 1 MB main-thread stack) at a fraction of the
+  # release profile's build time.
+  CARGO_PROFILE_RELEASE_LTO: 'off'
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: '1'
+
+jobs:
+  macos:
+    name: macOS login item (launchd) on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both generations GitHub offers (macos-14 is being retired): launchd and background-item
+        # handling changed between them.
+        os: [macos-15, macos-26]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: What is checked
+        run: |
+          {
+            echo "Checking \`$(git rev-parse HEAD)\`: $(git log -1 --format=%s)"
+            echo
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: login-items-${{ matrix.os }}
+          workspaces: '. -> target'
+
+      - name: Build tf-hostd
+        run: |
+          cargo build --release --locked -p tf-hostd
+          file target/release/tf-hostd
+          target/release/tf-hostd --version
+
+      - name: Check the login item
+        env:
+          LOGIN_ITEMS_LOGS: ${{ runner.temp }}/login-items-logs
+        run: bash scripts/ci/login-items-macos.sh target/release/tf-hostd
+
+      - name: Upload the logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: login-items-${{ matrix.os }}
+          path: ${{ runner.temp }}/login-items-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows:
+    name: Windows login task (Task Scheduler)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: What is checked
+        shell: bash
+        run: |
+          {
+            echo "Checking \`$(git rev-parse HEAD)\`: $(git log -1 --format=%s)"
+            echo
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: login-items-windows
+          workspaces: '. -> target'
+
+      - name: Build tf-hostd
+        shell: bash
+        run: |
+          cargo build --release --locked -p tf-hostd
+          target/release/tf-hostd.exe --version
+
+      - name: Check the login task
+        shell: pwsh
+        env:
+          LOGIN_ITEMS_LOGS: ${{ runner.temp }}\login-items-logs
+        run: scripts/ci/login-items-windows.ps1 -Hostd target\release\tf-hostd.exe
+
+      - name: Upload the logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: login-items-windows
+          path: ${{ runner.temp }}\login-items-logs
+          if-no-files-found: warn
+          retention-days: 14

@@ -36,7 +36,7 @@ pub struct Core {
 }
 
 fn is_ui_intent(ev: &AppEvent) -> bool {
-    matches!(ev, AppEvent::OpenAgent { .. } | AppEvent::AnswerNext)
+    matches!(ev, AppEvent::OpenAgent { .. } | AppEvent::OpenPage { .. } | AppEvent::AnswerNext)
 }
 
 impl Core {

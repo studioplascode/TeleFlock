@@ -347,6 +347,25 @@ fn s03_edit_replayed_from_snapshot() {
     assert_eq!(files[0].path, "notes.txt");
 }
 
+/// An edit of omp's own file (`local://PLAN.md`, or the folder it resolves to) is an artifact, not a
+/// changed file of the repository; the same edit of a repository file still is one.
+#[test]
+fn s03_edits_of_session_internal_files_are_not_changed_files() {
+    let files_after_editing = |path: &str| {
+        let (at0, mut snap) = snapshot_from(&load("00-join"), false).unwrap();
+        let entries = load("03-edit-tool").into_iter().filter(|r| r.dir == "h2g" && r.frame["t"] == "entry").map(|r| r.frame["entry"].to_string());
+        let moved = entries.map(|e| e.replace("/tmp/tf-collab-work/notes.txt", path)).map(|e| serde_json::from_str::<Value>(&e).unwrap());
+        snap.entries.extend(moved);
+        let mut rep = Replica::new("x");
+        rep.apply(&GuestEvent::Snapshot(snap), at0);
+        rep.meta().files.clone()
+    };
+    assert!(files_after_editing("local://PLAN.md").is_empty());
+    assert!(files_after_editing("/root/.omp/agent/sessions/-tmp-tf-collab-work/2026-10-20T21-54-06_ab/local/PLAN.md").is_empty());
+    let kept = files_after_editing("/tmp/tf-collab-work/src/notes.txt");
+    assert_eq!(kept.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["src/notes.txt"]);
+}
+
 #[test]
 fn s04_todo() {
     let r = run("04-todo");
@@ -482,7 +501,14 @@ fn s07_task_subagent() {
     assert_eq!(subs.len(), 1, "{subs:?}");
     assert_eq!(subs[0].id, "ReplyOk");
     assert_eq!(subs[0].status, SubagentStatus::Done);
-    assert_eq!(subs[0].parent_id.as_deref(), Some("Main"));
+    // The main agent started it (roster `parentId: "Main"`): a top-level subagent has no parent.
+    // Its first bus frames arrive before omp's roster lists it; their `parentToolCallId` names the
+    // spawning tool call, which no meta may carry as its parent.
+    let metas = r.events().into_iter().filter_map(|e| match e { SessionEvent::Meta { meta } => Some(meta), _ => None }).collect::<Vec<_>>();
+    assert!(metas.iter().any(|m| !m.subagents.is_empty()));
+    for s in metas.iter().flat_map(|m| &m.subagents) {
+        assert_eq!(s.parent_id, None, "{s:?}");
+    }
     assert!(subs[0].tokens.unwrap() > 0);
     // omp's TUI row: `· 2.4%/272K` (contextTokens 6637 / contextWindow 272000).
     for sub in [&subs[0], &v.agents[0]] {
@@ -1518,6 +1544,64 @@ fn notes_and_recorded_calls_survive_a_rebuild() {
     assert!(note.merge(&RowNote { author: Some("laptop".into()), steering: true, thought_ms: Some(5) }));
     assert_eq!(note, RowNote { author: Some("pixel".into()), steering: true, thought_ms: Some(5) });
     assert!(!note.merge(&RowNote::default()));
+}
+
+/// A `present` call (bridge ≥ 2.3.0) carries the document it showed: live, rebuilt from the
+/// session's entries (a parked session, a subagent transcript), and never for a failed call.
+#[test]
+fn present_calls_carry_their_artifact_live_and_rebuilt() {
+    let (at0, snap) = snapshot_from(&load("00-join"), false).unwrap();
+    let t0 = at0 + 1000;
+    let ev = |event: serde_json::Value| GuestEvent::Frame(HostFrame::from_value(serde_json::json!({ "t": "event", "event": event })));
+    let args = serde_json::json!({ "path": "reports/q3.html", "title": "Q3 report" });
+    let details = serde_json::json!({ "title": "Q3 report", "kind": "html", "name": "presented/q3-report-v2.html",
+        "url": "local://presented/q3-report-v2.html", "slug": "q3-report", "version": 2, "size": 4812, "source": "reports/q3.html", "assets": 1 });
+    let content = serde_json::json!([{ "type": "text", "text": "Presented \"Q3 report\" as version 2: local://presented/q3-report-v2.html" }]);
+    let call = |id: &str| serde_json::json!({ "type": "toolCall", "id": id, "name": "present", "arguments": args });
+    let assistant = serde_json::json!({ "role": "assistant", "content": [call("c1"), call("c2")], "stopReason": "toolUse",
+        "model": "gpt-6-luna", "timestamp": t0, "completedAt": t0 + 10 });
+    let result = |id: &str, is_error: bool| serde_json::json!({ "role": "toolResult", "toolCallId": id, "toolName": "present", "isError": is_error,
+        "content": if is_error { serde_json::json!([{ "type": "text", "text": "reports/q3.html: no such file" }]) } else { content.clone() },
+        "details": if is_error { serde_json::Value::Null } else { details.clone() }, "timestamp": t0 + 50 });
+    let end = |id: &str, is_error: bool| ev(serde_json::json!({ "type": "tool_execution_end", "toolCallId": id, "toolName": "present", "isError": is_error,
+        "result": { "content": result(id, is_error)["content"], "details": result(id, is_error)["details"] } }));
+    let frames = [
+        ev(serde_json::json!({ "type": "agent_start" })),
+        ev(serde_json::json!({ "type": "turn_start" })),
+        ev(serde_json::json!({ "type": "message_end", "message": assistant })),
+        ev(serde_json::json!({ "type": "tool_execution_start", "toolCallId": "c1", "toolName": "present", "args": args })),
+        ev(serde_json::json!({ "type": "tool_execution_start", "toolCallId": "c2", "toolName": "present", "args": args })),
+        end("c1", false),
+        end("c2", true),
+        ev(serde_json::json!({ "type": "message_end", "message": result("c1", false) })),
+        ev(serde_json::json!({ "type": "message_end", "message": result("c2", true) })),
+    ];
+    let mut live = Replica::new("x");
+    live.apply(&GuestEvent::Snapshot(snap), at0);
+    for (i, frame) in frames.iter().enumerate() {
+        live.apply(frame, t0 + i as i64);
+    }
+    let tool = |r: &Replica, id: &str| match r.item(id) {
+        Some(TranscriptItem::Tool(t)) => t.clone(),
+        other => panic!("{id}: {other:?}"),
+    };
+    let shown = tool(&live, "t:c1");
+    assert_eq!(shown.title, "Q3 report");
+    let a = shown.artifact.clone().expect("a finished present call carries its artifact");
+    assert_eq!((a.kind, a.name.as_str(), a.version, a.assets), (PresentKind::Html, "presented/q3-report-v2.html", 2, 1));
+    assert_eq!(tool(&live, "t:c2").artifact, None, "a failed call shows no artifact");
+
+    // The same rows from the session file (parked sessions, subagent transcripts).
+    let line = |id: &str, message: &serde_json::Value| {
+        serde_json::json!({ "type": "message", "id": id, "timestamp": "2026-10-28T16:39:06.583Z", "message": message }).to_string()
+    };
+    let jsonl = [line("e1", &assistant), line("e2", &result("c1", false)), line("e3", &result("c2", true))].join("\n");
+    let page = super::transcript_page(&jsonl);
+    let rebuilt = page.items.iter().find_map(|i| match i {
+        TranscriptItem::Tool(t) if t.call_id == "c1" => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(rebuilt.and_then(|t| t.artifact), Some(a));
 }
 
 /// A prompt that starts a run is not a steer, however its row and the run's start interleave. A

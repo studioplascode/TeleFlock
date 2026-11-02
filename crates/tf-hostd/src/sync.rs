@@ -634,6 +634,7 @@ mod tests {
             tree: None,
             caps: caps(),
             started_at: None,
+            agent_chat: None,
         }
     }
 
@@ -660,6 +661,7 @@ mod tests {
             truncated: false,
             view: None,
             error: None,
+            artifact: None,
         })
     }
 

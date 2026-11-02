@@ -45,9 +45,11 @@ pub struct Ctx {
     pub sessions: crate::state::subs::SessionSubs, // session.open bookkeeping
     pub tools: crate::ops::tools::Tools,         // shared across herdr sessions: omp/herdr updater
     pub auto_answer: crate::autoanswer::AutoAnswers, // decide for me of this session (§3.23)
+    pub chats: crate::chats::ChatRoot,           // <home>/chats, resolved once (chat tasks, §3.31)
     pub cancel: CancellationToken,               // cancelled on shutdown
 }
 fn arc(&self) -> Arc<Ctx>                         // for spawned tasks
+fn daemon(&self) -> Option<Arc<Daemon>>           // the other sessions' contexts, state.json (chat.*)
 // every family:
 pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result<serde_json::Value, ApiError>
 ```
@@ -78,6 +80,8 @@ fn refresh_repo(&self, cwd: &str)            // re-read git info for a folder (a
 fn set_info(&self, info: HostInfo)            // keeps `info.tools` (owned by set_tools)
 fn set_tools(&self, tools: Option<ToolUpdates>)
 fn set_auto_answer(&self, aa: AutoAnswers)    // once per context: rebuilds call `aa.observe(agent, now, apps)`
+fn decisions_changed(&self)                   // publishes decide for me's unreviewed review items (HostInfo.decisions)
+fn set_chats(&self, root: ChatRoot)           // once per context: chat agents/workspaces marked, HostInfo.chats
 fn usage_today(&self) -> UsageTotals
 ```
 ### `OmpHandle` (`src/omp.rs`, `Clone`)
@@ -85,7 +89,7 @@ fn usage_today(&self) -> UsageTotals
 
 ### Launch recipe (`src/ops/agent.rs`, §3.7)
 ```rust
-pub enum LaunchPane { Target(StartTarget), New(String) }   // From<StartTarget>; New = a root pane hostd just created
+pub enum LaunchPane { Target(StartTarget), New(String), ChatTab { cwd: PathBuf, name: String } } // From<StartTarget>; New = a root pane hostd just created; ChatTab = a tab of the chats workspace
 pub enum SessionArg<'a> { Resume(&'a str) }                 // --resume=<file> (never --restore: crate::restart decides what goes on)
 pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentSpec, session: Option<SessionArg<'_>>) -> Result<Started, ApiError>
 ```
@@ -93,9 +97,14 @@ Passes `--config <home>/omp-overlay.yml` / `-e <home>/ext/teleflock-bridge.ts` o
 `spec.roleModels` / `spec.fallbackChains` (validated first) become the agent's own overlay
 `<home>/agent-config/<id>.yml`, passed as a second `--config` right after it; with `roleModels.default`
 the agent gets neither `--model` nor `--thinking` (`omp_args`).
-A busy shell (herdr `agent_pane_busy`) is waited for 45 s in a pane hostd made (`New`, `Workspace`, `Cwd`) and 2 s in
+A busy shell (herdr `agent_pane_busy`) is waited for 45 s in a pane hostd made (`New`, `Workspace`, `Cwd`, `ChatTab`) and 2 s in
 a pane the client picked (`StartTarget::Pane`), then fails as a retryable `busy`; the agent gets 90 s to become
 interactive and the first prompt/plan mode 90 s for the collab link.
+`StartTarget::Chat` is named first (`chats::chat_name`), gets a new folder `<home>/chats/<name>-<id>/` and becomes a
+`ChatTab`, as does a `Cwd` target in a chat folder (`chat_launch`): a new tab of the session's workspace labelled
+`Chats` (found through herdr's `workspace.list` + `pane.list` under one lock, else created) with
+`GIT_CEILING_DIRECTORIES=<home>/chats`. A chat launch that fails closes the pane it made and removes the folder it made
+while nothing is in it (`undo_chat_launch`).
 
 ## Behavior summary
 - **Board** (`state/`): herdr snapshot + coalesced events (re-snapshot debounced on structure changes),
@@ -113,6 +122,14 @@ interactive and the first prompt/plan mode 90 s for the collab link.
   the per-agent overlays from it (`prepare` before launch, `bind` after, `discard` on failure, `set`/`restore`
   for `agent.setRoleModels`, `forget` on resume, `sweep` from the prune pass for agents gone from the board).
   `agent.getRoleModels` / `agent.setRoleModels` go to the bridge (`caps.roleModels`), else `unsupported`.
+- **Chat tasks** (`chats.rs`, `ops/chat.rs`, §3.31): `ChatRoot` matches paths against `<home>/chats` as given and as
+  resolved once (no I/O per match); the store marks agents in a chat folder `chat` without repo/branch and skips
+  git for those folders. One chats folder serves every herdr session, a board only one: `chat.list` lists the
+  folders (bounded walk, never through symlinks) with the agent using each, but not the chats of another herdr
+  session (its board, or its Done and ended cards in `state.json`); `chat.delete` closes a live agent's pane
+  (`parked::close_pane`), forgets the agent everywhere (ledger, tickets, own settings, policy, card →
+  `HostInfo.pruned`; never omp's session file) and removes the folder only while nothing but omp's `.omp/` is in
+  it and no card of any herdr session uses it (`chats::remove_if_unused`: direct, non-symlinked children of the root).
 - **Flock Wrapped** (`ops/wrapped/`, §3.19): `host.wrapped {since, until?, hourOffset?, refresh?}` reads the
   week's agents, work, busy stretches, model speeds and subagents from `ops::usage::usage_report`, counts the
   automation runs, and (`code.rs`) gathers commits (`git log --all --no-merges`, your `user.email`, not
@@ -130,10 +147,12 @@ interactive and the first prompt/plan mode 90 s for the collab link.
 - **Decide for me** (`autoanswer/`, §3.23): `core.rs` is the pure state machine (policies: host default +
   own per agent; one countdown per agent with an answerable `ask` that has a ★ recommended option; clock
   stops while an app is connected under `onlyWhenNoApp` and for 60 s after the context starts; cancel,
-  postpone, sweep); `store.rs` keeps `<home>/auto-answer.json`; `mod.rs` holds `AutoAnswers` (per session,
-  `ctx.auto_answer`), the worker that answers at the deadline through the session's data path (as
-  `agent.answer`), records activity `answered` "Auto-answered ★ …" and notifies, the four methods and the
-  daemon-start hook that opens sessions with something to watch. Lock order: state store, then decide for me.
+  postpone, sweep, review items: `Decided`, 30 days / newest 200); `store.rs` keeps `<home>/auto-answer.json`;
+  `mod.rs` holds `AutoAnswers` (per session, `ctx.auto_answer`), the worker that answers at the deadline through
+  the session's data path (as `agent.answer`), records activity `answered` "Auto-answered ★ …", a review item
+  (`HostInfo.decisions` until `host.autoAnswerReview` marks it reviewed for every device and retracts its
+  notification everywhere, `Notifier::read_everywhere`) and notifies, the five methods and the daemon-start hook
+  that opens sessions with something to watch. Lock order: state store, then decide for me.
 - **Auto-resume tickets** (`recovery.rs`, §3.22): daemon-wide `recovery::get()`; tickets per herdr session and
   root omp session in `<home>/autoresume.json` with the host setting (`enabled`, `subscribe()`), kinds
   `usageLimit` / `rateLimit` / `restart`. `open` / `close` / `ticket` for detection; `attach` puts
@@ -151,6 +170,18 @@ interactive and the first prompt/plan mode 90 s for the collab link.
   transcripts; fixtures in `src/testdata/resume/`). `setAutoResume` pushed to every 2.1.0 bridge,
   `intervened` (prompt, Stop, model, new session, Mark done close the ticket), `agent.retry` (`retry` / `f5`:
   bridge 2.1.0 `retry`, else TUI `/retry`, else `/retry` injected while idle).
+- **Refusal fallback** (`refusal.rs`, §3.22): `refusal::get()` holds the host's rules in
+  `<home>/refusalfallback.json` (`host.refusalFallback|Set`, 0600, atomic, a damaged file fails closed with a
+  notice and a `.bad-<ms>` copy), `Refusals::pick` (category, refused model, never the same model; the loop guard:
+  one fallback per session, agent and `promptAt`). `refusal::start` reacts to the `turn_error`s that carry a
+  `refusal` from bridges with `caps.refusals` (2.3.0 in an omp that can go on; omp reports it only once it settled
+  the turn; other sessions' refusals are `state`'s alone), brings up the contexts
+  of the herdr sessions the host knows so it works with no app connected, and calls `retryRefused` (switch model,
+  transcript notice, go on without a prompt; a subagent is asked again twice while its status lags). It posts the
+  one Activity entry and notification (`state::on_signals` leaves the refusal signal's to it for such bridges);
+  `after: back` returns the main agent to its model once the continued turn ended and the board shows it idle.
+  `agent.refusalRetry` is the one-off "Retry with <model>" (`unsupported` + hint without `refusals`). Tests
+  `cargo test -p tf-hostd refusal`; lab `scripts/lab/refusal/`.
 - **Bring agents back** (`restart/`, §3.25): a per-session worker (`start_session`) keeps the agent ledger
   (`ledger.rs`, `<home>/ledger.json`: every live omp agent with its card record, pane, process and command
   line, own settings and policy copies, what it was doing, boot and herdr server). An entry whose omp is
@@ -181,9 +212,11 @@ interactive and the first prompt/plan mode 90 s for the collab link.
   `launch::after_timeout` renames an agent herdr's start timed out on. `herdr.rs` reports `--resume` with
   TeleFlock's flags to herdr (`pane.report_agent_session` `resume_argv`, herdr ≥ 0.9.4) and rebinds the
   agent's own settings to a restored pane. `restart::start` opens the ledger's herdr sessions at daemon
-  start; the systemd keepalive stays while the ledger has agents and the host setting "Bring agents
-  back after a reboot" is on (default; `autoresume.json` `bringBack`; real home only, else
-  `TF_HOSTD_KEEPALIVE=1`; `host.autoResume` reports `bootService`: systemd with root or lingering only).
+  start; the boot service (`automations/boot.rs`: a systemd timer on Linux, a launchd agent on macOS,
+  a Task Scheduler task on Windows, the last two after login) stays while the ledger has agents and the
+  host setting "Bring agents back after a reboot" is on (default; `autoresume.json` `bringBack`; real
+  home only, else `TF_HOSTD_KEEPALIVE=1`, which only the Linux timer honors; `host.autoResume` reports
+  `bootService` with its `kind`: systemd with root or lingering, launchd, Task Scheduler).
   Stores are fsynced (`paths::write_atomic`) and an unreadable `state.json` or `ledger.json` is set aside
   as `.bad-<ms>`, never overwritten; an unreadable `autoresume.json` is copied to `.bad-<ms>` and replaced
   at once, atomically (the primary is never moved away), by the fail-closed settings (auto-resume and
@@ -207,3 +240,4 @@ interactive and the first prompt/plan mode 90 s for the collab link.
 Lab e2e: `examples/e2e.rs` (see its header); decide for me: `examples/e2e_autoanswer.rs` (real omp in a lab; its mock model and omp settings in `src/autoanswer/testdata/`).
 Agent recovery: `cargo test -p tf-hostd restart recovery` (session facts, the decision table and note, the ledger, never-double-launch, names, start-timeout rename, herdr's argv rules, ticket policy); lab `examples/e2e_lifeboat.rs` (see its header).
 herdr lifecycle: `cargo test -p tf-hostd herdr_health` (state machine, idle gating, managed config, stale saved sessions).
+Chat tasks: `cargo test -p tf-hostd chat` (names, folders, path matching, what keeps a folder, removal safety, the chats workspace, launch mapping, `chat.delete`'s target, other herdr sessions' chats, the board marker).

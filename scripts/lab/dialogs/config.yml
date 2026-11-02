@@ -1,0 +1,28 @@
+# Dialogs lab omp settings (isolated agent dir; setup.sh copies this in): every role on the mock, no
+# tool approvals, no setup wizard, no update checks. `dev.autoqaConsent` stays unset, so the first
+# report_tool_issue asks for consent (setup.sh --fresh starts over); a granted consent pushes to the
+# mock, never to omp's collector.
+modelRoles:
+  default: mock/lab-1
+  smol: mock/lab-1
+  slow: mock/lab-1
+  vision: mock/lab-1
+  plan: mock/lab-1
+  commit: mock/lab-1
+  tiny: mock/lab-1
+  memory: mock/lab-1
+  task: mock/lab-1
+  advisor: mock/lab-1
+  widget: mock/lab-1
+  judge: mock/lab-1
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaPush:
+    endpoint: http://127.0.0.1:18796/qa

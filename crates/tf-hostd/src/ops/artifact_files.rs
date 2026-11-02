@@ -20,6 +20,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use base64::Engine as _;
 use tf_proto::{ApiError, ArtifactContent, ArtifactFile, ArtifactKind, ArtifactParams, LocalWriteParams, LocalWritten, Millis, SessionArtifacts};
 
 use crate::ops::fs::io_error;
@@ -33,13 +34,15 @@ const MAX_VISITS: usize = 20_000;
 const LOCAL_DEPTH: usize = 16;
 /// Nested subagents (`crate::artifacts` walks transcripts as deep).
 const AGENT_DEPTH: usize = 6;
-/// Bytes read for a `.md` file's title.
+/// Bytes read for a `.md` file's heading or an `.html` file's `<title>`.
 const TITLE_BYTES: u64 = 4096;
 /// Bytes that decide whether a file is text (omp's `LOCAL_TEXT_SNIFF_BYTES`).
 const SNIFF_BYTES: usize = 8 * 1024;
 const DEFAULT_READ: u64 = 1 << 20;
 const MIN_READ: u64 = 4 << 10;
 const MAX_READ: u64 = 4 << 20;
+/// `base64` reads (images, the files a presented page references): 8 MiB is 11 MiB on the wire.
+const MAX_DATA_READ: u64 = 8 << 20;
 const MAX_NAME: usize = 1024;
 /// omp `WINDOWS_LOCAL_ROOT_MAX_CHARS`.
 const WINDOWS_LOCAL_ROOT_MAX_CHARS: usize = 180;
@@ -100,8 +103,10 @@ pub async fn list(ctx: &Ctx, agent_id: &str) -> Result<SessionArtifacts, ApiErro
 
 pub async fn read(ctx: &Ctx, p: ArtifactParams) -> Result<ArtifactContent, ApiError> {
     let paths = session_paths(ctx, &p.agent_id)?.ok_or_else(|| ApiError::new("not_found", "this session has no artifacts yet"))?;
-    let max = p.max_bytes.unwrap_or(DEFAULT_READ).clamp(MIN_READ, MAX_READ);
-    tokio::task::spawn_blocking(move || read_artifact(&paths, p.kind, &p.name, max))
+    let how = if p.base64 == Some(true) { ReadAs::Base64 } else { ReadAs::Text };
+    let cap = if how == ReadAs::Base64 { MAX_DATA_READ } else { MAX_READ };
+    let max = p.max_bytes.unwrap_or(DEFAULT_READ).clamp(MIN_READ, cap);
+    tokio::task::spawn_blocking(move || read_artifact_as(&paths, p.kind, &p.name, max, how))
         .await
         .map_err(|e| ApiError::new("internal", format!("reading an artifact: {e}")))?
 }
@@ -214,8 +219,11 @@ pub(crate) fn list_paths(paths: &SessionPaths) -> SessionArtifacts {
     let truncated = files.len() > MAX_FILES || visits == 0;
     files.truncate(MAX_FILES);
     for f in &mut files {
+        let path = paths.root(f.kind).join(&f.name);
         if f.name.ends_with(".md") {
-            f.title = md_title(&paths.root(f.kind).join(&f.name));
+            f.title = md_title(&path);
+        } else if f.name.ends_with(".html") || f.name.ends_with(".htm") {
+            f.title = html_title(&path);
         }
     }
     SessionArtifacts {
@@ -317,6 +325,21 @@ fn md_title(path: &Path) -> Option<String> {
     None
 }
 
+/// The text of the first `<title>` in the first 4 KiB (a presented page's name), entities for
+/// `& < > " '` decoded, whitespace collapsed.
+fn html_title(path: &Path) -> Option<String> {
+    let mut buf = Vec::new();
+    File::open(path).ok()?.take(TITLE_BYTES).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let lower = text.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let raw = text[start..end].split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = raw.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+    (!title.is_empty()).then(|| crate::util::clip(&title, 120))
+}
+
 // ───────────────────────────── reading ─────────────────────────────
 
 /// Checks a requested name: relative, `/`-separated, no `.`/`..`, and of the shape its kind lists.
@@ -352,9 +375,24 @@ fn check_name(kind: ArtifactKind, name: &str) -> Result<PathBuf, ApiError> {
     Ok(rel)
 }
 
+/// What a read answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadAs {
+    /// UTF-8 `text`; binary files answer `binary` only.
+    Text,
+    /// The bytes as base64 `data`, whatever the file holds.
+    Base64,
+}
+
+/// Reads one artifact as text (blocking); the tests' shorthand for [`read_artifact_as`].
+#[cfg(test)]
+pub(crate) fn read_artifact(paths: &SessionPaths, kind: ArtifactKind, name: &str, max: u64) -> Result<ArtifactContent, ApiError> {
+    read_artifact_as(paths, kind, name, max, ReadAs::Text)
+}
+
 /// Reads one artifact (blocking): `name` resolved in its kind's root, refused when its real path
 /// (symlinks resolved) leaves that root.
-pub(crate) fn read_artifact(paths: &SessionPaths, kind: ArtifactKind, name: &str, max: u64) -> Result<ArtifactContent, ApiError> {
+pub(crate) fn read_artifact_as(paths: &SessionPaths, kind: ArtifactKind, name: &str, max: u64, how: ReadAs) -> Result<ArtifactContent, ApiError> {
     let rel = check_name(kind, name)?;
     let root = paths.root(kind);
     let target = root.join(&rel);
@@ -379,13 +417,16 @@ pub(crate) fn read_artifact(paths: &SessionPaths, kind: ArtifactKind, name: &str
     let truncated = (bytes.len() as u64) < size;
     let ext = real.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     let binary = ext.as_deref().is_some_and(|e| BINARY_EXTENSIONS.contains(&e)) || !looks_like_text(&bytes[..bytes.len().min(SNIFF_BYTES)]);
-    let text = (!binary).then(|| decode(bytes, truncated));
+    let (text, data) = match how {
+        ReadAs::Text => ((!binary).then(|| decode(bytes, truncated)), None),
+        ReadAs::Base64 => (None, Some(base64::engine::general_purpose::STANDARD.encode(&bytes))),
+    };
     let url = match kind {
         ArtifactKind::Local => Some(format!("local://{name}")),
         ArtifactKind::Agent => rel.file_stem().and_then(|s| s.to_str()).map(|id| format!("agent://{id}")),
         ArtifactKind::Handoff => None,
     };
-    Ok(ArtifactContent { kind, name: name.to_owned(), url, path: real.display().to_string(), size, mtime: mtime(&meta), text, truncated, binary })
+    Ok(ArtifactContent { kind, name: name.to_owned(), url, path: real.display().to_string(), size, mtime: mtime(&meta), text, data, truncated, binary })
 }
 
 /// No NUL bytes and valid UTF-8, allowing a character cut off at the end of the sample.
@@ -582,6 +623,44 @@ mod tests {
         assert!(r.truncated && !r.binary);
         assert_eq!(r.text.unwrap(), "a".repeat(MIN_READ as usize - 1));
         assert_eq!(r.size, text.len() as u64);
+    }
+
+    #[test]
+    fn base64_reads_answer_any_file_as_data() {
+        use base64::Engine as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = session(tmp.path());
+        let png = [0x89, b'P', b'N', b'G', 0, 1, 2, 0xff];
+        fs::create_dir_all(paths.local_root.join("presented/report-v1.files")).unwrap();
+        fs::write(paths.local_root.join("presented/report-v1.files/chart.png"), png).unwrap();
+        let r = read_artifact_as(&paths, ArtifactKind::Local, "presented/report-v1.files/chart.png", DEFAULT_READ, ReadAs::Base64).unwrap();
+        assert!(r.binary && r.text.is_none() && !r.truncated);
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(r.data.unwrap()).unwrap(), png);
+        // text files too, and a read past `max` says so
+        let text = "x".repeat(MIN_READ as usize + 10);
+        write(&paths.local_root.join("style.css"), &text, 0);
+        let r = read_artifact_as(&paths, ArtifactKind::Local, "style.css", MIN_READ, ReadAs::Base64).unwrap();
+        assert!(r.truncated && !r.binary && r.text.is_none());
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(r.data.unwrap()).unwrap().len(), MIN_READ as usize);
+        // the same scoping as text reads
+        write(&paths.dir.join("outside.png"), "x", 0);
+        let err = read_artifact_as(&paths, ArtifactKind::Local, "../outside.png", DEFAULT_READ, ReadAs::Base64).unwrap_err();
+        assert_eq!(err.code, "invalid_params");
+        // a text read never carries data
+        assert!(read_artifact(&paths, ArtifactKind::Local, "style.css", MAX_READ).unwrap().data.is_none());
+    }
+
+    #[test]
+    fn presented_pages_are_listed_with_their_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = session(tmp.path());
+        let page = "<!doctype html><html><head><meta charset=utf-8>\n<TITLE>\n  Q3 &amp; Q4\n  report </TITLE></head><body><title>not this</title></body></html>";
+        write(&paths.local_root.join("presented/q3-report-v1.html"), page, 0);
+        write(&paths.local_root.join("presented/bare-v1.html"), "<p>no title</p>", 0);
+        let list = list_paths(&paths);
+        let title = |name: &str| list.files.iter().find(|f| f.name == name).and_then(|f| f.title.clone());
+        assert_eq!(title("presented/q3-report-v1.html").as_deref(), Some("Q3 & Q4 report"));
+        assert_eq!(title("presented/bare-v1.html"), None);
     }
 
     #[test]

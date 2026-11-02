@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 import type {
   AgentTemplate,
   Column,
+  BrowserStatus,
   ConnStatus,
   ForwardList,
   HostProfile,
@@ -17,7 +18,7 @@ import type {
 } from "@/core/gen";
 import type { ApiError, SessionMeta } from "@/core/gen";
 import { onAgentMoved, onAgentsPruned, startAgentLifecycle } from "./agentLifecycle";
-import { activityWatchers, core, loadActivity, pushInternal, startCore } from "./client";
+import { core, loadActivity, pushInternal, startCore, watchActivity } from "./client";
 import { type IrcEntry, ircOf } from "./irc";
 import { resolveSuccessor } from "./store/lifecycle";
 import type { AgentView, BtwEntry, CoreState, HostActivityEvent, HostNotification, SessionStatus } from "./store/state";
@@ -405,7 +406,7 @@ function selectActivity(s: CoreState, hostId: string | undefined): HostActivityE
 }
 
 /**
- * Activity feed (newest first) of one host, or of every host. Loads `host.activity` on mount and
+ * Activity feed (newest first) of one host, or of every host. Loads `host.activity` on every mount and
  * refreshes when agents change lanes / notifications arrive while mounted.
  */
 export function useActivity(hostId?: string): HostActivityEvent[] {
@@ -413,18 +414,7 @@ export function useActivity(hostId?: string): HostActivityEvent[] {
   const status = useHosts((h) => h.status);
   const targets = hostId ? [hostId] : ids;
   const onlineKey = targets.filter((id) => status[id]?.phase === "online").join("|");
-  useEffect(() => {
-    const watchKey = hostId ?? "*";
-    activityWatchers.set(watchKey, (activityWatchers.get(watchKey) ?? 0) + 1);
-    for (const id of onlineKey ? onlineKey.split("|") : []) {
-      if (!coreStore.getState().activity[id]?.loaded) void loadActivity(id, false).catch(() => {});
-    }
-    return () => {
-      const n = (activityWatchers.get(watchKey) ?? 1) - 1;
-      if (n > 0) activityWatchers.set(watchKey, n);
-      else activityWatchers.delete(watchKey);
-    };
-  }, [hostId, onlineKey]);
+  useEffect(() => watchActivity(hostId ?? "*", onlineKey ? onlineKey.split("|") : []), [hostId, onlineKey]);
   // Per-host stable arrays are cached in the selector (single-entry memo per call site is enough
   // because the cache is keyed by the activity map identity).
   return useCore(useShallow((s) => selectActivity(s, hostId)));
@@ -560,4 +550,21 @@ export function useTunnels(): TunnelInfo[] {
 /** Forwarding rules, their status and active streams (`forward.list`, kept live by `AppEvent::Forwards`); null until known. */
 export function useForwards(): ForwardList | null {
   return useCore((s) => s.forwards);
+}
+
+/** This device's TeleFlock Browser (`browser.status`, kept live by `AppEvent::Browser`); null until known or on a core without it. */
+export function useBrowser(): BrowserStatus | null {
+  return useCore((s) => s.browser);
+}
+
+/** Non-reactive: the browser status now (the browser panel's controller runs outside React). */
+export function getBrowserStatus(): BrowserStatus | null {
+  return coreStore.getState().browser;
+}
+
+/** Calls `cb` with every new browser status (`AppEvent::Browser`, `browser.*` results). */
+export function onBrowserStatus(cb: (status: BrowserStatus | null) => void): () => void {
+  return coreStore.subscribe((s, prev) => {
+    if (s.browser !== prev.browser) cb(s.browser);
+  });
 }

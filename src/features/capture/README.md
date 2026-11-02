@@ -50,10 +50,11 @@ export function QuickCaptureSettings({ index });         // Settings → Quick c
   one for this capture; it becomes Dispatch's current one after a send), Shift+Enter is a newline,
   Ctrl/⌘+Enter opens it in Dispatch prefilled instead (the main window comes forward), Esc hides.
   Pasted or dropped screenshots come along (scaled > 3 MB, ≤ 8 images, the prompt cap). The typed
-  text survives hiding and restarts (`localStorage tf.capture.text`, this page only); images last
-  while the window does, so the page tells the shell (`capture_draft`) what it holds and the
-  updater doesn't restart the app while the box is focused, has text typed in it, or holds images
-  or a send in flight. "Dispatched to <repo>" shows, then the window hides itself after ~1 s
+  text and the images survive hiding, restarts and kills (text: `localStorage tf.capture.text`
+  mirrored to IndexedDB, `@/core/mirrored`; images: the draft-image store under `draftKey("capture")`;
+  this page only), and the page writes them out when the shell is about to end the process
+  (`answerFlushRequests`). It tells the shell (`capture_draft`) what it holds, and the updater
+  doesn't restart the app while the box is focused, shows a task, or has a send in flight. "Dispatched to <repo>" shows, then the window hides itself after ~1 s
   unless you typed again.
 - Next question: the oldest needs-you agent (Tab cycles, "n of N"). Single-choice asks, approvals
   and bare confirms answer with 1–9 while the box is empty (Alt+1–9 while it has text); multi-select,

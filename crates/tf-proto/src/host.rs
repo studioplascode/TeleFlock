@@ -29,6 +29,12 @@
 //!      every change; hostd answers each with `fwdOffered`. `fwd` messages carry the streams in
 //!      both directions. Without it neither side sends any of them (the app shows the rules as
 //!      `unsupported`).
+//!    * [`FEATURE_BROWSER`]: the client has a TeleFlock Browser (`crate::browser`; desktop apps
+//!      ≥ 0.9.0). It may call `agent.browserAttach`, whose connections arrive as `fwd` streams of
+//!      kind `browser` (also without [`FEATURE_FORWARD`]), and hostd sends it `browserDetached`
+//!      when an attachment it made ended on the host. Pending `use_user_browser` requests are on
+//!      the board (`Agent.browser`) for every client. An agent asking for a browser while no
+//!      client with the feature is connected is told at once that none is available.
 
 use crate::forward::{FwdEv, FwdOffer, FwdOfferState};
 use crate::model::{HostState, Notification, Pulse, StatePatch};
@@ -45,6 +51,8 @@ pub const FEATURE_SESSION_SYNC: &str = "sessionSync";
 pub const FEATURE_PRESENCE: &str = "presence";
 /// Wire feature: host-to-host forwarding offers and streams (`crate::forward`).
 pub const FEATURE_FORWARD: &str = "forward";
+/// Wire feature: the client has a TeleFlock Browser that agents may attach to (`crate::browser`).
+pub const FEATURE_BROWSER: &str = "browser";
 
 wire_struct! {
     pub struct ClientInfo {
@@ -56,7 +64,7 @@ wire_struct! {
         /// Device display name (shown as the author of prompts sent from it).
         pub device: String,
         /// Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`],
-        /// [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`]).
+        /// [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`], [`FEATURE_BROWSER`]).
         pub features: Option<Vec<String>>,
     }
 }
@@ -90,7 +98,7 @@ pub enum ClientMsg {
     /// ([`FEATURE_FORWARD`]) The rules this client relays for this host as their from-host; replaces
     /// the previous list (empty: none).
     FwdOffer { offers: Vec<FwdOffer> },
-    /// ([`FEATURE_FORWARD`]) An event of forwarding stream `sid`.
+    /// ([`FEATURE_FORWARD`], [`FEATURE_BROWSER`]) An event of forwarding stream `sid`.
     Fwd { sid: u64, ev: FwdEv },
     Bye,
 }
@@ -148,8 +156,12 @@ pub enum ServerMsg {
     Pong { ts: Millis },
     /// ([`FEATURE_FORWARD`]) What became of the client's last `fwdOffer`, per name.
     FwdOffered { states: Vec<FwdOfferState> },
-    /// ([`FEATURE_FORWARD`]) An event of forwarding stream `sid`.
+    /// ([`FEATURE_FORWARD`], [`FEATURE_BROWSER`]) An event of forwarding stream `sid`.
     Fwd { sid: u64, ev: FwdEv },
+    /// ([`FEATURE_BROWSER`]) This client's attachment of `agent_id` ended on the host (`reason`, in
+    /// words): its turn-scoped permission ran out, the agent's omp session ended, or another
+    /// device detached it.
+    BrowserDetached { agent_id: String, reason: String },
     /// Fatal protocol error; the daemon closes the connection after sending it.
     Error { error: ApiError },
 }

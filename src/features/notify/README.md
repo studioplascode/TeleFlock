@@ -90,6 +90,7 @@ before 0.7.0 (`unknown_method`). The demo app answers `app.presence` with `{}`.
 |---|---|
 | `usePresenceReporter.ts`, `presence.ts` | presence reporting and its pure tracker |
 | `useNotifyBridge.ts` | toasts, chimes, haptics; `alert` handling |
+| `openNotification.ts` | opening a notification (bell, Inbox, a toast's Open): the host page it names (`open:idleShells`, `open:decisions`), else its agent; one of the host's own (no agent, such as "Closed 3 idle shells") is read then, here and on the other devices (`app.notifyRead` with `agentId: ""`: every host-level one of that host), since no session view ever reads it |
 | `HostAlerts.tsx` | the "Alerts from your hosts" section |
 | `PushChannels.tsx`, `PushChannelForm.tsx` | channel list and add/edit form |
 | `alerts.ts` | labels and pure helpers (escalation delays, kinds, test toast, Auto device) |

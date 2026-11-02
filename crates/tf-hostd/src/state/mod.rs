@@ -134,6 +134,11 @@ struct Inner {
     life: parked::Lifecycle,
     /// omp session id → its newest idle recap ([`recaps`]); cards show the current ones.
     recaps: HashMap<String, tf_proto::model::IdleRecap>,
+    /// The chats folder (`crate::chats`, §3.31), once the session's context set it: agents and
+    /// workspaces in it are chats, without repository facts.
+    chats: Option<crate::chats::ChatRoot>,
+    /// agent id → whose TeleFlock Browser it drives now (`crate::browser`, §3.33).
+    browser_lent: HashMap<String, tf_proto::BrowserLent>,
 }
 
 struct Store {
@@ -187,6 +192,8 @@ impl StateHandle {
                     built_once: false,
                     life: parked::Lifecycle::default(),
                     recaps: HashMap::new(),
+                    chats: None,
+                    browser_lent: HashMap::new(),
                 }),
                 dirty: Notify::new(),
                 resnap: Notify::new(),
@@ -206,6 +213,15 @@ impl StateHandle {
     /// Hands the store the daemon's notification router (once, by the session's context).
     pub fn route_notifications(&self, notifier: crate::notify::Notifier) {
         let _ = self.inner.notifier.set(notifier);
+    }
+
+    /// Hands the store the chats folder (once, by the session's context): every agent built in a
+    /// chat folder is marked a chat with no repo or branch, workspaces there get no repo or
+    /// worktree, no git runs for those folders, and `HostInfo.chats` names it (§3.31).
+    pub fn set_chats(&self, root: crate::chats::ChatRoot) {
+        let mut m = self.lock();
+        m.published.info.chats = Some(root.path().display().to_string());
+        m.chats = Some(root);
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -334,14 +350,16 @@ impl StateHandle {
         self.inner.omp.usage_today()
     }
 
-    /// Replaces the host facts; `tools` stays as [`set_tools`](Self::set_tools) left it and
-    /// `pruned` as the prune loop left it.
+    /// Replaces the host facts; `tools` stays as [`set_tools`](Self::set_tools) left it,
+    /// `pruned` as the prune loop left it and `decisions` as decide for me published them.
     pub fn set_info(&self, mut info: HostInfo) {
         let mut m = self.lock();
         info.tools = m.published.info.tools.clone();
         info.pruned = m.published.info.pruned.clone();
         info.auto_answer = m.published.info.auto_answer.clone();
         info.herdr_health = m.published.info.herdr_health.clone();
+        info.idle_shells = m.published.info.idle_shells.clone();
+        info.decisions = m.published.info.decisions.clone();
         if m.published.info != info {
             m.published.info = info.clone();
             broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
@@ -368,6 +386,31 @@ impl StateHandle {
         }
     }
 
+    /// Publishes the idle shells and their settings (`HostInfo.idleShells`, `ops::cleanup::shells`).
+    pub fn set_idle_shells(&self, idle: Option<tf_proto::IdleShells>) {
+        let mut m = self.lock();
+        if m.published.info.idle_shells != idle {
+            m.published.info.idle_shells = idle;
+            let info = m.published.info.clone();
+            broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
+        }
+    }
+
+    /// Decide for me's review items changed: publishes the unreviewed ones (`HostInfo.decisions`,
+    /// in the snapshot of every app that connects). They are read under the store's lock (the
+    /// store, then decide for me: the rebuild's order), so changes made at the same time publish
+    /// in the order they happened.
+    pub fn decisions_changed(&self) {
+        let Some(aa) = self.inner.auto_answer.get() else { return };
+        let mut m = self.lock();
+        let decisions = aa.decisions();
+        if m.published.info.decisions != decisions {
+            m.published.info.decisions = decisions;
+            let info = m.published.info.clone();
+            broadcast_patch(&mut m, vec![StatePatch::Info { info }]);
+        }
+    }
+
     /// herdr's server went away (`crate::herdr_health`), and every pane process of the session
     /// with it: drops the herdr view so no card shows a dead agent running. Parked and ended
     /// cards stay; the next snapshot of a new server fills the board again.
@@ -386,6 +429,11 @@ impl StateHandle {
         self.lock().pane_procs.shells()
     }
 
+    /// Pane → the newest command seen running in front of its shell (`ops::cleanup::shells`).
+    pub fn pane_last_jobs(&self) -> HashMap<String, String> {
+        self.lock().pane_procs.last_jobs()
+    }
+
     fn set_health(&self, health: HostHealth) {
         let mut m = self.lock();
         m.health = Some(health.clone());
@@ -397,6 +445,39 @@ impl StateHandle {
 
     pub fn has_clients(&self) -> bool {
         self.lock().sinks.iter().any(|c| !c.is_closed())
+    }
+
+    /// Which device's TeleFlock Browser the agent drives now (`None`: none), for its card.
+    pub fn set_browser_lent(&self, agent_id: &str, lent: Option<tf_proto::BrowserLent>) {
+        {
+            let mut m = self.lock();
+            match lent {
+                Some(l) => m.browser_lent.insert(agent_id.to_string(), l),
+                None => m.browser_lent.remove(agent_id),
+            };
+        }
+        self.mark_dirty();
+    }
+
+    /// Whether a connected client of this session has the TeleFlock Browser (wire feature
+    /// `browser`): an agent's `use_user_browser` request can be answered.
+    pub fn has_browser_client(&self) -> bool {
+        self.lock().sinks.iter().any(|c| !c.is_closed() && c.features().browser)
+    }
+
+    /// The agent whose omp session is `session_id` (current mapping).
+    pub fn agent_of_session(&self, session_id: &str) -> Option<String> {
+        self.lock().omp_of.iter().find(|(_, s)| *s == session_id).map(|(a, _)| a.clone())
+    }
+
+    /// Tests elsewhere in the crate: herdr's `snap` (when given) on the board, rebuilt as the
+    /// session's loop does after a change.
+    #[cfg(test)]
+    pub(crate) fn rebuild_with(&self, snap: Option<tf_herdr::Snapshot>) {
+        if let Some(snap) = snap {
+            apply_snapshot(self, snap);
+        }
+        self.rebuild();
     }
 
     /// Archives / un-archives an agent (persisted, also keyed by its omp session).
@@ -625,7 +706,7 @@ impl StateHandle {
             // herdr `blocked` without a request TeleFlock can see: for linked omp agents give
             // the collab dialog (or herdr's catch-up after an answer) a moment to settle.
             let has_request = view.as_ref().is_some_and(|v| v.needs.is_some())
-                || bridge.as_ref().is_some_and(|b| b.state.plan_review.is_some());
+                || bridge.as_ref().is_some_and(|b| b.state.plan_review.is_some() || b.browser_request.is_some() || b.state.user_wait.is_some());
             let blocked_grace = linked && state == HerdrState::Blocked && !has_request && now - track.state_since < BLOCKED_GRACE_MS;
             if blocked_grace {
                 recheck = true;
@@ -644,7 +725,9 @@ impl StateHandle {
             let pre_needs_key = view
                 .as_ref()
                 .and_then(|v| v.needs.as_ref().map(build::needs_key))
+                .or_else(|| bridge.as_ref().and_then(|b| b.browser_request.as_ref().map(|r| format!("browser:{}", r.id))))
                 .or_else(|| bridge.as_ref().and_then(|b| b.state.plan_review.as_ref().map(|r| format!("plan:{}", r.review_id))))
+                .or_else(|| bridge.as_ref().and_then(|b| b.state.user_wait.as_ref().map(|w| format!("wait:{}", w.since))))
                 .or_else(|| (state == HerdrState::Blocked && !blocked_grace && provider_wait.is_none()).then(|| "blocked".to_string()));
             if pre_needs_key != track.needs_key {
                 track.needs_key = pre_needs_key;
@@ -668,6 +751,7 @@ impl StateHandle {
                 turn_started_at: track.working_since,
                 last_turn_ended_at: track.last_turn_ended_at,
                 blocked_grace,
+                browser_lent: m.browser_lent.get(&id),
             };
             let mut agent = build::build_agent(&inputs);
             agent.auto_answer = store.auto_answer.get().and_then(|aa| aa.observe(&agent, now, apps));
@@ -719,6 +803,10 @@ impl StateHandle {
         m.tracks.retain(|k, _| seen.contains(k));
         m.omp_of = omp_of;
         parked::merge_into(self, m, &persisted, &seen, &mut agents);
+        // Chats (§3.31), live or parked: marked, never with a repo or branch.
+        if let Some(chats) = &m.chats {
+            crate::chats::mark_agents(chats, &mut agents);
+        }
         recaps::attach(&mut agents, &m.recaps, &last_rows);
         crate::recovery::attach(&store.session, &mut agents);
 
@@ -750,7 +838,11 @@ impl StateHandle {
         let workspaces = if m.mirror.ok || m.mirror.gone || !m.mirror.workspaces.is_empty() {
             m.pane_procs.refresh();
             let repos = &m.repos;
-            build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, |cwd| repos.get(cwd).and_then(|e| e.info.as_ref()), &m.pane_procs)
+            let mut built = build::build_workspaces(&m.mirror.workspaces, &m.mirror.tabs, &m.mirror.panes, &agent_by_pane, |cwd| repos.get(cwd).and_then(|e| e.info.as_ref()), &m.pane_procs);
+            if let Some(chats) = &m.chats {
+                crate::chats::mark_workspaces(chats, &mut built);
+            }
+            built
         } else {
             m.published.workspaces.clone()
         };
@@ -886,9 +978,15 @@ impl StateHandle {
                 })
                 .collect()
         };
+        // A bridge with `refusals` (≥ 2.3.0) reports the refusal omp settled on (`turn_error`), and
+        // `crate::refusal` posts the one Activity entry and notification for it. The transcript's
+        // refusal signal also fires at the intermediate `agent_end`s while omp walks its own fallback
+        // chain, so for such bridges it posts nothing; older bridges keep today's behaviour.
+        let refusal_reported = self.inner.bridge.by_session(session_id).is_some_and(|b| b.caps.refusals);
         for (agent_id, name) in agents {
             for sig in signals {
                 match sig {
+                    Signal::TurnEnded { error: Some(_), refusal: Some(_), .. } if refusal_reported => {}
                     Signal::TurnEnded { error: Some(err), refusal: Some(refusal), .. } => {
                         let detail = refusal.explanation.clone().unwrap_or_else(|| err.clone());
                         self.push_activity(&agent_id, &name, ActivityKind::Error, build::refusal_title(refusal), Some(detail));
@@ -1009,7 +1107,11 @@ fn initial_info(session: &str, relay_port: u16, relay: bool) -> HostInfo {
         tools: None,
         auto_answer: None,
         herdr_health: None,
+        // `set_chats`, by the session's context.
+        chats: None,
+        idle_shells: None,
         pruned: Vec::new(),
+        decisions: Vec::new(),
     }
 }
 
@@ -1037,6 +1139,8 @@ pub async fn start(ctx: &Arc<Ctx>) {
             let mut m = h.lock();
             info.tools = m.published.info.tools.take();
             info.herdr_health = m.published.info.herdr_health.take();
+            info.idle_shells = m.published.info.idle_shells.take();
+            info.decisions = std::mem::take(&mut m.published.info.decisions);
             m.published.info = info;
         }
         Err(_) => warn!(session = %ctx.herdr_session, "host info probe timed out"),
@@ -1406,6 +1510,8 @@ async fn bridge_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<BridgeEvent>
             Err(broadcast::error::RecvError::Closed) => return,
         };
         let mapped = |sid: &str| h.lock().omp_of.values().any(|s| s == sid);
+        // The TeleFlock Browser's attachments and requests (§3.33).
+        ctx.browser.on_bridge_event(&ev);
         match &ev {
             BridgeEvent::PlanReviewRequested { session_id, review } if mapped(session_id) => {
                 if let Some(s) = ctx.omp.session(session_id) {
@@ -1453,13 +1559,19 @@ async fn bridge_consumer(ctx: Arc<Ctx>, mut rx: broadcast::Receiver<BridgeEvent>
                 }
                 ctx.omp.repoll();
             }
+            // The session's agent chat log (any context may fold a leg in: it merges by its id).
+            BridgeEvent::Irc { session_id, leg } => {
+                crate::agent_chat::on_leg(&ctx, session_id, leg.clone());
+                continue;
+            }
             _ => {}
         }
         h.mark_dirty();
     }
 }
 
-/// Folders the board shows repo facts for: agent cwds and workspace folders.
+/// Folders the board shows repo facts for: agent cwds and workspace folders, except the chats
+/// folder and what is in it (chats are never repositories, §3.31: no git runs there).
 fn wanted_cwds(m: &Inner) -> HashSet<String> {
     let mut cwds: HashSet<String> = HashSet::new();
     for a in &m.mirror.agents {
@@ -1472,6 +1584,9 @@ fn wanted_cwds(m: &Inner) -> HashSet<String> {
         cwds.insert(build::workspace_cwd(w, &tabs, &m.mirror.panes));
     }
     cwds.remove("");
+    if let Some(chats) = &m.chats {
+        cwds.retain(|c| !chats.holds(Path::new(c)));
+    }
     cwds
 }
 
@@ -1747,6 +1862,163 @@ mod tests {
             turn_started_at: None,
             last_turn_ended_at: None,
             blocked_grace: false,
+            browser_lent: None,
         })
+    }
+
+    /// Chats (§3.31) on the board: a live agent and a parked card in a chat folder are chats with
+    /// no repo or branch, also when the folder sits in a repository (a home folder that is one);
+    /// the workspace there has none either; no git runs for chat folders; other agents and
+    /// workspaces keep their facts; `HostInfo.chats` names the folder.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chats_are_marked_and_get_no_repo_facts() {
+        use tf_herdr::{AgentStatus, Snapshot, WorkspaceWorktree};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let root = crate::chats::ChatRoot::new(&home.join(".teleflock/chats"));
+        let chat = root.path().join("trip-abc123").display().to_string();
+        let app = home.join("src/app").display().to_string();
+        let persist = Persist::load(dir.path().join("state.json"));
+        let record = |id: &str, cwd: String| persist::ParkedRecord {
+            agent_id: id.into(),
+            name: id.into(),
+            kind: "omp".into(),
+            cwd: Some(cwd),
+            repo: Some("dotfiles".into()),
+            branch: Some("main".into()),
+            session_file: format!("/s/{id}.jsonl"),
+            ..Default::default()
+        };
+        persist.session("lab", |s| {
+            s.parked.insert("parked_chat".into(), record("parked_chat", format!("{chat}/notes")));
+            s.parked.insert("parked_app".into(), record("parked_app", app.clone()));
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let bridge = BridgeHandle::bind(crate::bridge::BridgeEndpoint::Unix(dir.path().join("bridge.sock")), "s".into()).unwrap();
+        let omp = OmpHandle::start(0, persist.clone(), cancel, bridge.clone()).await;
+        let h = StateHandle::new("lab", persist, omp, bridge);
+        h.set_chats(root.clone());
+
+        let pane = |ws: &str, cwd: &str| PaneInfo {
+            pane_id: format!("{ws}:p1"),
+            terminal_id: format!("term_{ws}"),
+            workspace_id: ws.into(),
+            tab_id: format!("{ws}:t1"),
+            cwd: Some(cwd.into()),
+            ..Default::default()
+        };
+        let agent = |p: &PaneInfo| AgentInfo {
+            pane_id: p.pane_id.clone(),
+            terminal_id: p.terminal_id.clone(),
+            workspace_id: p.workspace_id.clone(),
+            tab_id: p.tab_id.clone(),
+            agent: Some("omp".into()),
+            agent_status: AgentStatus::Idle,
+            cwd: p.cwd.clone(),
+            ..Default::default()
+        };
+        // herdr names the home repository's checkout as the chats workspace's folder.
+        let checkout = WorkspaceWorktree { checkout_path: home.display().to_string(), repo_root: home.display().to_string(), ..Default::default() };
+        let workspaces = vec![
+            WorkspaceInfo { workspace_id: "w1".into(), number: 1, label: "Chats".into(), worktree: Some(checkout), ..Default::default() },
+            WorkspaceInfo { workspace_id: "w2".into(), number: 2, label: "app".into(), ..Default::default() },
+        ];
+        let tabs = ["w1", "w2"].map(|ws| TabInfo { tab_id: format!("{ws}:t1"), workspace_id: ws.into(), number: 1, ..Default::default() }).to_vec();
+        let panes = vec![pane("w1", &chat), pane("w2", &app)];
+        let agents = panes.iter().map(agent).collect();
+        apply_snapshot(&h, Snapshot { workspaces, tabs, panes, agents, ..Default::default() });
+        {
+            let mut m = h.lock();
+            let wanted = wanted_cwds(&m);
+            assert!(wanted.contains(&app) && !wanted.contains(&chat), "no git for chat folders: {wanted:?}");
+            // What git would say: the home folder is a repository, and so is the app.
+            let repo = |name: &str| RepoInfo {
+                root: home.display().to_string(),
+                name: name.into(),
+                branch: Some("main".into()),
+                head: None,
+                dirty: None,
+                ahead: None,
+                behind: None,
+                remote_url: None,
+            };
+            for (cwd, name) in [(home.display().to_string(), "dotfiles"), (chat.clone(), "dotfiles"), (app.clone(), "app")] {
+                m.repos.insert(cwd, RepoEntry { info: Some(repo(name)), top: None, at: Some(Instant::now()) });
+            }
+        }
+        h.rebuild();
+
+        let facts = |id: &str| h.agent(id).map(|a| (a.chat, a.repo, a.branch));
+        assert_eq!(facts("term_w1"), Some((true, None, None)), "a live chat");
+        assert_eq!(facts("parked_chat"), Some((true, None, None)), "a parked chat: its record's folder");
+        assert_eq!(facts("term_w2"), Some((false, Some("app".into()), Some("main".into()))));
+        assert_eq!(facts("parked_app"), Some((false, Some("dotfiles".into()), Some("main".into()))), "other cards keep their record's facts");
+        let snap = h.snapshot();
+        let ws = |id: &str| snap.workspaces.iter().find(|w| w.id == id).map(|w| (w.repo.as_ref().map(|r| r.name.clone()), w.worktree.is_some()));
+        assert_eq!(ws("w1"), Some((None, false)));
+        assert_eq!(ws("w2"), Some((Some("app".into()), false)));
+        assert_eq!(snap.info.chats.as_deref(), root.path().to_str());
+    }
+
+    /// A bridge with `refusals` (≥ 2.3.0) reports the refusal omp settled on (`turn_error`), and
+    /// `crate::refusal` posts the one Activity entry and notification for it. The transcript's
+    /// refusal signal, which also fires at the intermediate `agent_end`s while omp walks its own
+    /// fallback chain, posts none for such sessions; older bridges keep today's entry and
+    /// notification, and every other failure is posted as before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_refusal_signal_posts_nothing_where_the_bridge_reports_the_settled_refusal() {
+        use crate::bridge::fake::FakeExt;
+        use tf_proto::host::ServerMsg;
+        use tf_proto::{ClientInfo, Refusal};
+
+        let dir = tempfile::tempdir().unwrap();
+        let persist = Persist::load(dir.path().join("state.json"));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let bridge = BridgeHandle::bind(crate::bridge::BridgeEndpoint::Unix(dir.path().join("bridge.sock")), "s".into()).unwrap();
+        let omp = OmpHandle::start(0, persist.clone(), cancel, bridge.clone()).await;
+        let h = StateHandle::new("lab", persist, omp, bridge.clone());
+        let app = ClientHandle::new("c1".into(), ClientInfo { app: "teleflock-desktop".into(), version: "0.9.0".into(), platform: "linux".into(), device: "Desk".into(), features: None });
+        h.attach_client(&app);
+
+        // Two omp sessions on the board: one on bridge 2.3.0 with `refusals`, one on 2.2.0 without.
+        let mut new = FakeExt::connect(&bridge).await;
+        new.hello_caps(1, "s-new", "2.3.0", Some(serde_json::json!({ "live": 1, "refusals": true }))).await;
+        let mut old = FakeExt::connect(&bridge).await;
+        old.hello_caps(2, "s-old", "2.2.0", Some(serde_json::json!({ "live": 1 }))).await;
+        {
+            let mut m = h.lock();
+            m.omp_of.insert("a-new".into(), "s-new".into());
+            m.omp_of.insert("a-old".into(), "s-old".into());
+        }
+
+        let refused = Signal::TurnEnded {
+            aborted: false,
+            error: Some("Refusal (cyber): Exploit development.".into()),
+            refusal: Some(Refusal { kind: "refusal".into(), category: Some("cyber".into()), explanation: Some("Exploit development.".into()) }),
+        };
+        let failed = Signal::TurnEnded { aborted: false, error: Some("529 overloaded".into()), refusal: None };
+        h.on_signals("s-new", &[refused.clone(), failed.clone()]);
+        h.on_signals("s-old", &[refused, failed]);
+
+        let titles = |agent: &str| h.activity_page(None, 10, Some(agent)).0.into_iter().rev().map(|e| e.title).collect::<Vec<_>>();
+        assert_eq!(titles("a-new"), ["Turn failed"], "the refusal is the bridge's to report");
+        assert_eq!(titles("a-old"), ["Refused · cyber", "Turn failed"], "an older bridge reports no settled refusal: the signal stays the source");
+        let mut lines = Vec::new();
+        app.take_batch(&mut lines);
+        let mut posted: Vec<(String, String)> = lines
+            .iter()
+            .filter_map(|l| if let ServerMsg::Notify { notification, .. } = serde_json::from_str(l).unwrap() { Some((notification.agent_id, notification.title)) } else { None })
+            .collect();
+        posted.sort();
+        assert_eq!(
+            posted,
+            [("a-new".into(), "a-new hit an error".into()), ("a-old".into(), "a-old hit an error".into()), ("a-old".into(), "a-old: Refused · cyber".into())],
+            "one notification per failure, none for the refusal on the new bridge"
+        );
     }
 }

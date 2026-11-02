@@ -37,7 +37,7 @@ describe("demo engine", () => {
     expect(r.state.status.forge?.phase).toBe("online");
     const c = columns(r.state, "forge");
     for (const col of ["running", "needs", "review", "done"] as Column[]) expect(c[col].length).toBeGreaterThan(0);
-    expect(c.needs.sort()).toEqual(["flags", "limits", "push"]);
+    expect(c.needs.sort()).toEqual(["cfg", "expenses", "flags", "limits", "push", "toolissue"]);
     expect(Object.values(r.state.agents).some((a) => a.kind !== "omp")).toBe(true);
   });
 
@@ -85,6 +85,29 @@ describe("demo engine", () => {
     expect(r.state.agents[agentKey("forge", "limits")]?.column).toBe("running");
   });
 
+  test("omp's own dialogs: the cfg approval and the tool-issue consent carry their words, and answer like other approvals", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const cfg = r.state.agents[agentKey("forge", "cfg")]?.needs;
+    expect(cfg).toMatchObject({
+      kind: "approval",
+      title: "Change task.perCallModel?",
+      question: "⚙️ Your agent wants to change `task.perCallModel` for this session.",
+      detail: '"off" → "on"',
+      answerable: true,
+      context: "",
+      options: [
+        { label: "Always for this session", tone: "neutral", recommended: false },
+        { label: "Allow once", tone: "primary", recommended: true },
+        { label: "Deny", tone: "danger", recommended: false },
+      ],
+    });
+    expect(r.state.agents[agentKey("forge", "toolissue")]?.needs).toMatchObject({ kind: "confirm", title: "Confirm", context: "", options: [{ label: "Yes", recommended: false }, { label: "No", recommended: false }] });
+    await r.call("forge", "agent.answer", { agentId: "cfg", requestId: cfg?.requestId, answer: { choices: ["Always for this session"], cancel: false, chat: false } });
+    r.clock.advance(300);
+    expect(r.state.agents[agentKey("forge", "cfg")]?.needs).toBeUndefined();
+  });
+
   test("session.open snapshot, then streaming appends while subscribed", async () => {
     const r = rig();
     r.clock.advance(2000);
@@ -115,9 +138,10 @@ describe("demo engine", () => {
       return s.sessions[agentKey("forge", "kanban")]?.btw[id]?.turns;
     };
     type History = { threads: { btwId: string; turns: { question: string; status: string }[] }[] };
-    // One conversation was asked earlier in omp's TUI.
+    // Kanban has a long history (the card collapses and dismisses them); the newest was asked earlier in omp's TUI.
     const before = await r.call<History>("forge", "agent.btwHistory", { agentId: "kanban" });
-    expect(before.threads).toHaveLength(1);
+    expect(before.threads.length).toBeGreaterThan(5);
+    expect(before.threads.at(-1)?.turns[0]?.question).toBe("Which file does this change start from?");
     const asked = await r.call<{ btwId: string; turn: number }>("forge", "agent.btw", { agentId: "kanban", question: "Where is the store?" });
     expect(asked.turn).toBe(0);
     // One side question at a time, like omp.
@@ -133,7 +157,7 @@ describe("demo engine", () => {
     expect(second).toMatchObject({ question: "And its tests?", done: true });
     expect(second?.text).toContain("⚠ cancelled");
     const after = await r.call<History>("forge", "agent.btwHistory", { agentId: "kanban" });
-    expect(after.threads.map((t) => t.turns.map((x) => x.status))).toEqual([["complete"], ["complete", "cancelled"]]);
+    expect(after.threads.slice(-2).map((t) => t.turns.map((x) => x.status))).toEqual([["complete"], ["complete", "cancelled"]]);
   });
 
   test("a steer is queued until the next step boundary, then lands as a steering row", async () => {

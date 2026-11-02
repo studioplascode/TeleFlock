@@ -399,6 +399,38 @@ impl Notifier {
         }
     }
 
+    /// Notifications of `session` that another act on a device made read (`by`): a decision of
+    /// decide for me reviewed (§3.23). Every presence app of the session marks them read and
+    /// retracts them (`notifyDone`, the acting one included: it did not read them as
+    /// notifications), their escalation stops and pushed copies are taken back. Unlike
+    /// [`notify_read`](Self::notify_read) it also names ids the ledger no longer holds (sent
+    /// before a restart): the apps may still list them.
+    pub fn read_everywhere(&self, session: &str, ids: Vec<String>, by: &str) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut retract = Vec::new();
+        {
+            let mut l = lock(&self.inner.ledger);
+            for id in &ids {
+                let Some(e) = l.entries.get_mut(id).filter(|e| e.session == session && e.read_by.is_none()) else { continue };
+                e.read_by = Some(by.to_string());
+                if !e.pushed.is_empty() && !e.resolved {
+                    retract.push(id.clone());
+                }
+            }
+        }
+        debug!(session, by, n = ids.len(), "notifications read by a review");
+        if let Some(line) = line_of(&ServerMsg::NotifyDone { ids, by: Some(by.to_string()) }) {
+            for c in self.clients_in(session).iter().filter(|c| c.features().presence) {
+                c.send_line(line.clone(), false);
+            }
+        }
+        for id in retract {
+            self.retract(&id, "read", Some(by.to_string()));
+        }
+    }
+
     // ───────────────────────────── push ─────────────────────────────
 
     /// Pushes entry `id` to every enabled channel whose `when` gives a reason (and takes its kind)

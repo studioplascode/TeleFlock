@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { core, getAgentViews, parseAgentKey, toApiError } from "@/core";
+import { core, getAgentViews, getTranscript, parseAgentKey, toApiError } from "@/core";
+import { lastRefusalRowId } from "@/core/refusal";
 import type { RetryResult } from "@/core/gen";
 import { toast } from "@/design";
 import { dontToast, nothingReason, retryToast } from "./words";
@@ -45,6 +46,12 @@ function answered(r: RetryResult, why: string): true {
 
 const agentOf = (key: string) => getAgentViews().find((a) => a.key === key);
 
+/** The session's last loaded turn ended on a provider refusal. */
+function endedRefused(key: string): boolean {
+  const rows = getTranscript(key).items;
+  return lastRefusalRowId(rows.length, (i) => rows[i]) !== undefined;
+}
+
 /**
  * omp's F5 for an agent (the Resume button, F5 / Alt+R in its session, `/retry`): `agent.retry`.
  * hostd resumes a waiting or manual auto-resume ticket whole (subagents first) when there is one.
@@ -54,7 +61,7 @@ export function retryTurn(key: string): Promise<boolean> {
   const { hostId, agentId } = parseAgentKey(key);
   return once(key, async () => {
     try {
-      return answered(await core.host(hostId).call("agent.retry", { agentId }), nothingReason(agentOf(key)));
+      return answered(await core.host(hostId).call("agent.retry", { agentId }), nothingReason(agentOf(key), endedRefused(key)));
     } catch (e) {
       if (toApiError(e).code !== "unknown_method") return failed("Couldn't resume", e);
     }

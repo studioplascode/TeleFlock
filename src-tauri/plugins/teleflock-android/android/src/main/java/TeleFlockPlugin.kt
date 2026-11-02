@@ -86,6 +86,15 @@ class UrlArgs {
 }
 
 @InvokeArg
+class PreviewArgs {
+    /** The tunnel's address on this device (`http://127.0.0.1:<port>/`). */
+    lateinit var url: String
+    var title: String = "Preview"
+    /** Second line under the title (`127.0.0.1:5173 → 127.0.0.1:49152`). */
+    var subtitle: String? = null
+}
+
+@InvokeArg
 class ShareImageArgs {
     /** File name the receiving app sees (`flock-wrapped-2026-10-26.png`). */
     lateinit var name: String
@@ -410,6 +419,26 @@ class TeleFlockPlugin(private val firstActivity: Activity) : Plugin(firstActivit
             invoke.resolve()
         } catch (e: ActivityNotFoundException) {
             invoke.reject("no app can open $url", "NO_HANDLER", e)
+        }
+    }
+
+    /**
+     * Shows a preview tunnel's page in [PreviewActivity], a window whose WebView has no IPC: in a
+     * frame of the app's page, the page could act as the app. Loopback pages only
+     * ([PreviewLinks.isLoopbackPage]); anything else is for the browser (`openUrl`).
+     */
+    @Command
+    fun openPreview(invoke: Invoke) {
+        val a = invoke.parseArgs(PreviewArgs::class.java)
+        if (!PreviewLinks.isLoopbackPage(a.url)) {
+            invoke.reject("not a preview address on this device: ${a.url}", "BAD_URL")
+            return
+        }
+        try {
+            activity.startActivity(PreviewActivity.intent(activity, a.url, a.title, a.subtitle))
+            invoke.resolve()
+        } catch (e: ActivityNotFoundException) {
+            invoke.reject("couldn't open the preview", "NO_HANDLER", e)
         }
     }
 

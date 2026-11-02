@@ -1,5 +1,6 @@
 //! TeleFlock host daemon (architecture §3). See README.md for the module contracts.
 
+pub mod agent_chat;
 pub mod agentcfg;
 pub mod artifacts;
 pub mod attach;
@@ -7,6 +8,8 @@ pub mod authflow;
 pub mod autoanswer;
 pub mod automations;
 pub mod bridge;
+pub mod browser;
+pub mod chats;
 pub mod clients;
 pub mod daemon;
 pub mod feed;
@@ -29,6 +32,7 @@ pub mod ops;
 pub mod originals;
 pub mod paths;
 pub mod recovery;
+pub mod refusal;
 pub mod restart;
 pub mod secure;
 pub mod settle;

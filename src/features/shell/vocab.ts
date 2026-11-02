@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Blocks, BrushCleaning, Cable, Clock3, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Orbit, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
+import { Activity, BarChart3, Blocks, BrushCleaning, Cable, Clock3, Globe, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Orbit, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
 import type { Agent, Column, NeedsKind } from "@/core/gen";
 import { formatAge, formatElapsed } from "@/design";
 
@@ -122,6 +122,7 @@ export interface ActionDef {
 export const ACTIONS = {
   // ── start work ──
   newTask: { label: "New task", shortcut: "D", description: "Type a task: it gets its own worktree and agent, named for you" },
+  newChat: { label: "New chat", description: "Ask an agent anything: no repository or folder needed" },
   newWorktree: { label: "New worktree", shortcut: "N", description: "Choose the branch, base and agent yourself" },
   newAgent: { label: "New agent", description: "Start omp in a checkout you already have" },
   fanOut: { label: "Fan out", description: "One task on 2–5 agents, each in its own worktree; keep the best" },
@@ -134,12 +135,16 @@ export const ACTIONS = {
   openSession: { label: "Open session", shortcut: "Enter", description: "Transcript, composer and controls" },
   terminal: { label: "Terminal", shortcut: "T", description: "The agent's real terminal in herdr" },
   terminalBeside: { label: "Terminal beside", shortcut: "Ctrl \\", description: "The agent's terminal next to its session" },
+  browserBeside: { label: "Browser beside", description: "Your browser next to this session" },
+  browserAttach: { label: "Let it use my browser", description: "It gets its own tabs in your browser, signed in as you, until you detach it" },
+  browserDetach: { label: "Stop letting it use my browser", description: "Detach it: it can't drive your browser any more; its tabs stay until you close them" },
   review: { label: "Review", description: "Diff, then commit, push, pull request and merge" },
   answer: { label: "Answer…", shortcut: "A", description: "Answer its question or approval" },
   answerNext: { label: "Answer next", shortcut: "Ctrl J", description: "Everything waiting on you, oldest first" },
   markDone: { label: "Mark done", description: "Move it to Done; its pane closes once idle (see Settings) and the session resumes when needed" },
   markDoneRemove: { label: "Mark done & remove worktree…", description: "Also deletes the checkout folder (asks first)" },
   deleteWorktree: { label: "Delete worktree…", description: "Its pull request is merged or closed: delete the checkout folder (asks first); the branch stays" },
+  deleteChat: { label: "Delete chat…", description: "End it and remove its folder (asks first); the conversation stays in Past sessions" },
   reopen: { label: "Reopen", description: "Move it back to Review" },
   resume: { label: "Resume", description: "Reopen the closed omp session in a new pane" },
   moveHost: { label: "Move to host…", description: "Continue this agent on another connected host: its branch, changes and session travel along" },
@@ -156,6 +161,7 @@ export const ACTIONS = {
   select: { label: "Select", shortcut: "X", description: "Add to the selection for bulk actions" },
   focusMode: { label: "Focus mode", shortcut: "F", description: "Just the transcript and the composer" },
   rename: { label: "Rename…", slash: "/rename", description: "Give the session a name" },
+  renameAgain: { label: "Name it again", description: "Let omp's tiny model rename it from what it's doing now (Undo restores both names)" },
 
   // ── session commands (omp) ──
   compact: { label: "Compact…", slash: "/compact", description: "Summarise older turns to free context" },
@@ -179,12 +185,13 @@ export interface ViewDef extends ActionDef {
  */
 export const VIEWS = {
   board: { label: "Board", shortcut: "Ctrl 1", description: "Every agent on every host, by state", icon: LayoutDashboard },
-  inbox: { label: "Inbox", shortcut: "Ctrl 2", description: "What needs you, then unread updates", icon: Inbox },
+  inbox: { label: "Inbox", shortcut: "Ctrl 2", description: "What needs you, what was decided for you, then unread updates", icon: Inbox },
   activity: { label: "Activity", shortcut: "Ctrl 3", description: "Everything that happened, newest first", icon: Activity },
   usage: { label: "Usage", shortcut: "Ctrl 4", description: "Spend, tokens and subscription limits", icon: BarChart3 },
   wrapped: { label: "Flock Wrapped", description: "Your flock's week on one card, to share as an image", icon: PartyPopper },
   hosts: { label: "Hosts", shortcut: "Ctrl 5", description: "Connections, health and setup", icon: Server },
   forward: { label: "Forwarding", description: "Let one host's agents and shells use another host: run commands there, call its tools, reach its ports", icon: Cable },
+  browser: { label: "Browser", description: "Your own browser, signed in as you: browse, and let an agent use it", icon: Globe },
   settings: { label: "Settings", shortcut: "Ctrl 6", description: "Notifications, motion, hints and AI naming", icon: Settings2 },
   dispatch: { label: "Dispatch", shortcut: "D", description: "Send tasks to a repository like messages", icon: Send },
   automations: { label: "Automations", shortcut: "Ctrl 7", description: "Agents a host starts on a schedule", icon: Clock3 },

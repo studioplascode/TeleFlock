@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Release: HTTPS everywhere, except loopback. Preview tunnels listen on 127.0.0.1:<port> and the
-     in-app preview iframe loads them over plain HTTP; nothing else may use cleartext.
+     preview window (the plugin's PreviewActivity) loads them over plain HTTP; nothing else may use
+     cleartext. PreviewLinks.kt keeps that window to these two names.
      Debug builds override this file from src/debug (dev server on the LAN). -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />

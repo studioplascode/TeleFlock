@@ -1,4 +1,4 @@
-import { Focus } from "lucide-react";
+import { Focus, MessagesSquare } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef } from "react";
 import { agentKey, useAgent, useUi } from "@/core";
@@ -7,6 +7,8 @@ import { usePaletteCommands } from "@/features/palette/registry";
 import { Inspector } from "./inspector/Inspector";
 import { MobileSession } from "./mobile/MobileSession";
 import { SessionPane } from "./SessionPane";
+import { openBoard } from "./irc/boardUi";
+import { useHasAgentChat } from "./irc/store";
 
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
@@ -55,9 +57,10 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
     return () => window.removeEventListener("keydown", onKey);
   }, [mobile]);
 
+  const hasChat = useHasAgentChat(key);
   const commands = useMemo(
-    () =>
-      mobile
+    () => [
+      ...(mobile
         ? []
         : [
             {
@@ -69,8 +72,22 @@ export function SessionView({ hostId, agentId }: { hostId: string; agentId: stri
               shortcut: "F",
               run: () => useUi.getState().setFocusMode(!useUi.getState().focusMode),
             },
-          ],
-    [mobile],
+          ]),
+      // The session's agent tree talks (or has subagents that can): its message board.
+      ...(hasChat
+        ? [
+            {
+              id: `session.agentChat`,
+              title: "Open agent message board",
+              group: "Session",
+              keywords: ["agent chat", "irc", "subagents", "messages", "orchestrator"],
+              icon: <MessagesSquare />,
+              run: () => openBoard(key, mobile),
+            },
+          ]
+        : []),
+    ],
+    [mobile, hasChat, key],
   );
   usePaletteCommands(commands);
 

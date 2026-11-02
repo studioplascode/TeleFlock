@@ -18,7 +18,12 @@ const VERBS: Record<string, true> = Object.fromEntries(
   ["add", "fix", "make", "update", "implement", "write", "create", "remove", "refactor", "find", "improve", "review", "bump", "investigate", "change", "move", "rename", "support", "use", "check", "map", "batch", "compress"].map((w) => [w, true]),
 );
 
-export function demoAiLatency(prompt: string): number {
+/** 600–1400 ms by prompt hash; a `ramble` by its model role's speed (tiny 400–700, smol 800–1300, default 1500–2300 ms). */
+export function demoAiLatency(prompt: string, task?: string, role?: string): number {
+  if (task === "ramble") {
+    const [base, span] = role === "default" ? [1500, 801] : role === "smol" ? [800, 501] : [400, 301];
+    return base + (hash(prompt) % span);
+  }
   return 600 + (hash(prompt) % 801);
 }
 
@@ -99,6 +104,38 @@ function pr(prompt: string): string {
   return `Title: ${title}\nBody:\n${body.join("\n")}`;
 }
 
+/** Spoken-prompt noise the demo model drops. */
+const FILLER_RE = /\b(?:u+m+|u+h+|e+r+m?|h+m+|you know|basically|sort of|kind of|i guess|okay so|ok so|right so|so yeah|yeah)\b,?\s*/gi;
+/** One word, then a spoken self-correction, then its replacement: only the replacement stays. */
+const CORRECTION_RE = /([\w./-]+),?\s+(?:no,? wait|no no|scratch that|sorry|i mean)\b,?\s+(?:i mean\s+)?([\w./-]+)/i;
+/** Where a new request starts. */
+const SENTENCE_RE = /\s+(?=(?:and also|and then|oh and|one more thing|and make sure)\b)|(?<!\band)\s+(?=(?:also|then|plus)\b)/i;
+
+/**
+ * The demo `ramble` model: the transcript with fillers dropped, one-word self-corrections applied, spoken paths and
+ * identifiers written out ("src slash net slash upload dot ts"), and capitalised sentences, split where a new
+ * request starts. Deterministic, so the previous rewrite is not needed for stability.
+ */
+function ramble(prompt: string): string {
+  let t = inner(prompt, "transcript")
+    .replace(/\s+/g, " ")
+    .replace(/\s*\bslash\b\s*/gi, "/")
+    .replace(/\s+dot\s+(?=[a-z]{1,4}\b)/gi, ".")
+    .trim();
+  for (let i = 0; i < 8 && CORRECTION_RE.test(t); i++) t = t.replace(CORRECTION_RE, "$2");
+  t = t
+    .replace(FILLER_RE, "")
+    .replace(/^so\s+/i, "")
+    .replace(/\b(\w+)(?:\s+\1\b)+/gi, "$1")
+    .trim();
+  return t
+    .split(SENTENCE_RE)
+    .map((s) => s.replace(/^(?:and|then|oh and)\s+/i, "").replace(/[\s,.]+$/, ""))
+    .filter(Boolean)
+    .map((s) => `${sentenceCase(s)}.`)
+    .join(" ");
+}
+
 function templateName(prompt: string): string {
   const model = (line(prompt, "Model") ?? "").split("/").pop()?.split(":")[0] ?? "";
   const thinking = (line(prompt, "Thinking") ?? "").toLowerCase();
@@ -112,14 +149,37 @@ function templateName(prompt: string): string {
   return [adj, who, role].filter(Boolean).join(" ");
 }
 
+/** Tool and path noise that is no name (the live line often reads `edit src/core/x.ts`). */
+const NOISE: Record<string, true> = Object.fromEntries(["edit", "read", "bash", "grep", "glob", "write", "src", "ts", "tsx", "js", "json", "md", "rs", "now", "running", "reading", "editing", "searching"].map((w) => [w, true]));
+
+/**
+ * `Name:` and `Title:` for what the agent does now: the title is the most settled signal (recap, task, last reply), the
+ * name its last two nouns; a signal that is all verbs and tool noise falls back to the live line.
+ */
+function agentRename(prompt: string): string {
+  const activity = prompt.includes("<activity>") ? inner(prompt, "activity") : "";
+  const reply = prompt.includes("<reply>") ? inner(prompt, "reply").replace(/^…/, "") : undefined;
+  const asked = prompt.includes("<task>") ? inner(prompt, "task") : undefined;
+  // a follow-up like "fine, skip it" says nothing new about the job: only a task that opens with a verb retitles
+  const task = asked && VERBS[salient(asked)[0] ?? ""] ? asked : undefined;
+  const current = inner(prompt, "current");
+  const title = titleOf(line(activity, "Recap") ?? task ?? line(current, "Title") ?? reply ?? line(activity, "Now") ?? "Helper");
+  const nouns = (text: string) => salient(text).filter((w) => !NOISE[w] && !VERBS[w]);
+  const words = nouns(title).length ? nouns(title) : nouns(line(activity, "Now") ?? "");
+  const name = words.slice(-2).join("-") || line(current, "Name") || "helper";
+  return `Name: ${name}\nTitle: ${title}`;
+}
+
 /** The demo model's answer for one `ai.complete` task. */
 export function demoAiComplete(task: string, prompt: string): Omit<AiCompleteResult, "ms"> {
   const text =
     task === "branch" ? branch(prompt)
     : task === "agentName" ? agentName(prompt)
+    : task === "agentRename" ? agentRename(prompt)
     : task === "commit" ? commit(prompt)
     : task === "pr" ? pr(prompt)
     : task === "templateName" ? templateName(prompt)
+    : task === "ramble" ? ramble(prompt)
     : titleOf(inner(prompt, "text"));
   return { text, model: MODEL };
 }

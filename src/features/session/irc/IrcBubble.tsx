@@ -22,13 +22,13 @@ function useIrcSelf(): string {
 }
 
 /** The session's subagent an IRC peer id names (omp ids are the subagent ids; names as fallback). */
-export function usePeerSub(agentKey: string, peer: string): Subagent | undefined {
+function usePeerSub(agentKey: string, peer: string): Subagent | undefined {
   const { meta } = useSession(agentKey);
   return meta?.subagents.find((s) => s.id === peer) ?? meta?.subagents.find((s) => s.name === peer);
 }
 
 /** Peer tint: the peer's glyph gradient at low alpha, so a conversation reads by colour. */
-export function peerTint(peer: string, strength = 1): CSSProperties {
+function peerTint(peer: string, strength = 1): CSSProperties {
   const t = agentGlyphTheme(peer);
   return {
     backgroundImage: `linear-gradient(135deg, color-mix(in oklab, ${t.from} ${Math.round(15 * strength)}%, color-mix(in srgb, var(--color-tile-1) 72%, transparent)), color-mix(in oklab, ${t.to} ${Math.round(9 * strength)}%, color-mix(in srgb, var(--color-tile-1) 72%, transparent)))`,
@@ -97,7 +97,7 @@ function Tags({ message, viaWait }: { message: IrcMessage; viaWait: boolean }) {
 }
 
 /** Peer name; opens the subagent viewer when the peer is one of this session's subagents. */
-export function PeerName({ peer, sub, onOpen, className }: { peer: string; sub?: Subagent; onOpen?: () => void; className?: string }) {
+function PeerName({ peer, sub, onOpen, className }: { peer: string; sub?: Subagent; onOpen?: () => void; className?: string }) {
   const label = peer === "all" ? "everyone" : (sub?.name ?? peer);
   if (!sub || !onOpen) return <b className={cn("font-extrabold text-ink", className)}>{label}</b>;
   return (

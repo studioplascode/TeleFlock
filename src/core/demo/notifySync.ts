@@ -13,9 +13,9 @@ const RING = 100;
 
 /**
  * The demo backend's copy of the core's notification sync (crates/tf-client `Inner::sync_needs`,
- * `mark_read`): needs-you notifications resolve when their request leaves host state, and
- * `app.notifyRead` marks notifications read. Both are reported as `notifyDone`. The demo has no
- * OS notifications to retract.
+ * `mark_read`, `on_remote_read`): needs-you notifications resolve when their request leaves host
+ * state, `app.notifyRead` marks notifications read, and so does the host reading them on every
+ * device. All are reported as `notifyDone`. The demo has no OS notifications to retract.
  */
 export class NotifySync {
   private readonly agents = new Map<string, Map<string, Agent>>();
@@ -58,6 +58,18 @@ export class NotifySync {
       ids.push(t.n.id);
     }
     if (ids.length) this.emit({ type: "notifyDone", hostId, ids, resolved: false });
+  }
+
+  /** The host read these on every device (its `notifyDone`, e.g. decisions reviewed): the unread ones turn read. */
+  remoteRead(hostId: string, ids: readonly string[]): void {
+    const wanted = new Set(ids);
+    const done: string[] = [];
+    for (const t of this.tracked) {
+      if (t.read || t.hostId !== hostId || !wanted.has(t.n.id)) continue;
+      t.read = true;
+      done.push(t.n.id);
+    }
+    if (done.length) this.emit({ type: "notifyDone", hostId, ids: done, resolved: false });
   }
 
   /** A host went away: its notifications can't need anyone any more. */

@@ -11,6 +11,7 @@ import {
   Rocket,
   SquarePen,
   SquarePlus,
+  Sparkles,
   SquareSlash,
   Target,
   X,
@@ -20,6 +21,7 @@ import type { ReactNode } from "react";
 import { agentKey, core, navigate, useUi } from "@/core";
 import { MOBILE_MAX_WIDTH, toast } from "@/design";
 import { openTerminal } from "@/features/board/agentActions";
+import { canRenameAgain, renameAgain } from "@/features/board/renameAgain";
 import { runSlash } from "@/features/session/composer/slash";
 import type { Agent } from "@/core/gen";
 import { errorHint, errorMessage } from "@/features/shell/errors";
@@ -151,6 +153,9 @@ export function sessionCommands(hostId: string, agent: Agent): SessionCommand[] 
       hint: agent.title || ACTIONS.rename.description,
       page: { kind: "text", title: "Rename", placeholder: agent.title || "New session title", submitLabel: "Rename", run: (title) => hostCall("Renamed", h.call("agent.rename", { agentId, title })) },
     },
+    ...(canRenameAgain(agent)
+      ? [{ id: "rename-again", title: ACTIONS.renameAgain.label, keywords: ["name", "rename", "ai", "tiny", "sparkle"], icon: <Sparkles />, hint: ACTIONS.renameAgain.description, run: () => renameAgain(agentKey(hostId, agent.id)) }]
+      : []),
     {
       id: "handoff",
       title: ACTIONS.handoff.label,

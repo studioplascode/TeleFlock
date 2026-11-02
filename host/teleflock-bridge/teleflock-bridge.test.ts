@@ -2,7 +2,7 @@
 // "Dialogs", "Subagents"): the ordered writer's flow control, source throttling, the dialog race,
 // the ask-dialog guest flow, the wrappers on omp's UI context, and the whole extension against a
 // fake hostd socket with a fake omp (`pi`, contexts, AgentSession, agent registry).
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -31,6 +31,16 @@ import teleflockBridge, {
 	fallbackNotice,
 	installNotifyWrapper,
 	notifyNotice,
+	dialogText,
+	installOmpDialogWrappers,
+	installUserWaitCounter,
+	type OmpDialogMethod,
+	type OmpDialogPolicy,
+	raceOmpDialog,
+	shownText,
+	typedInput,
+	installIrcTap,
+	type IrcLeg,
 } from "./teleflock-bridge";
 
 type Json = Record<string, unknown>;
@@ -697,6 +707,29 @@ describe("dialog wrappers on omp's UI context", () => {
 		const fresh = fakeTui();
 		expect(installDialogWrappers(fresh.runnerUi, token, wrap)).toBe(true);
 	});
+
+	test("an extension's secret input and a selector with disabled rows stay in the TUI, as omp's own do", async () => {
+		const tui = fakeTui();
+		const { hub, requests } = hubWithFrames();
+		const wrap = (name: Parameters<typeof raceMember>[1], original: (...a: unknown[]) => unknown) =>
+			function (this: unknown, ...args: unknown[]) {
+				return raceMember(hub, name, original, this, args, fallbackApproval) ?? original.apply(this, args);
+			};
+		installDialogWrappers(tui.runnerUi, {}, wrap);
+		// `ctx.ui.input(title, placeholder, {secret: true})`: the TUI masks it; hostd never sees it.
+		const key = tui.runnerUi.input("API key", "sk-…", { secret: true });
+		// hostd could pick a row omp disabled.
+		const pick = tui.runnerUi.select("Model", ["fast", "smart (no credentials)"], { disabledIndices: [1] });
+		expect(requests()).toEqual([]);
+		expect(tui.open.map(d => d.kind)).toEqual(["input", "select"]);
+		tui.open[0]!.answer("sk-secret");
+		tui.open[1]!.answer("fast");
+		expect([await key, await pick]).toEqual(["sk-secret", "fast"]);
+		// No disabled row, no secret: offered as before.
+		void tui.runnerUi.select("Model", ["fast", "smart"], { disabledIndices: [] });
+		void tui.runnerUi.input("Name", undefined, { secret: false });
+		expect(requests().map(r => r.kind)).toEqual(["select", "editor"]);
+	});
 });
 
 // ─── the whole extension against a fake hostd ─────────────────────────────────────────────────
@@ -708,11 +741,15 @@ interface Hostd {
 	lines: Json[];
 	send(obj: Json): void;
 	live(): Array<Json & { seq: number; f: Json }>;
+	/** The next line that arrives and matches `pred` (driven by the socket alone, no timer). */
+	next(pred: (line: Json) => boolean): Promise<Json>;
 	close(): void;
 }
 
 let cleanups: Array<() => void> = [];
 afterEach(() => {
+	// A test that ran on fake time and failed leaves it on.
+	jest.useRealTimers();
 	for (const c of cleanups.splice(0).reverse()) {
 		try {
 			c();
@@ -730,6 +767,7 @@ async function startHostd(): Promise<Hostd & { sock: string }> {
 	const secret = "ab".repeat(32);
 	fs.writeFileSync(path.join(dir, "bridge.secret"), secret);
 	const lines: Json[] = [];
+	const waiters = new Set<{ pred: (line: Json) => boolean; resolve: (line: Json) => void }>();
 	let conn: net.Socket | undefined;
 	const server = net.createServer(c => {
 		conn = c;
@@ -739,7 +777,13 @@ async function startHostd(): Promise<Hostd & { sock: string }> {
 			buf += chunk;
 			let i = buf.indexOf("\n");
 			while (i >= 0) {
-				lines.push(JSON.parse(buf.slice(0, i)) as Json);
+				const line = JSON.parse(buf.slice(0, i)) as Json;
+				lines.push(line);
+				for (const w of waiters) {
+					if (!w.pred(line)) continue;
+					waiters.delete(w);
+					w.resolve(line);
+				}
 				buf = buf.slice(i + 1);
 				i = buf.indexOf("\n");
 			}
@@ -757,6 +801,11 @@ async function startHostd(): Promise<Hostd & { sock: string }> {
 		lines,
 		send: obj => conn?.write(`${JSON.stringify(obj)}\n`),
 		live: () => lines.filter(l => l.t === "live" || l.t === "resync") as Array<Json & { seq: number; f: Json }>,
+		next: pred => {
+			const { promise, resolve } = Promise.withResolvers<Json>();
+			waiters.add({ pred, resolve });
+			return promise;
+		},
 		close: () => conn?.destroy(),
 	};
 }
@@ -883,13 +932,31 @@ interface Omp {
 }
 
 /** A fake omp main session (or a subagent's, with `sub`) and its `pi`; `onDisk: false`: omp has not
- *  written the session file yet. */
+ *  written the session file yet; `waits`: its AgentSession class has omp's `waitForUser`;
+ *  `manualTicks`: the bridge's tick runs only through `tick()`. */
 function fakeOmp(
-	opts: { sub?: string; registry?: ReturnType<typeof fakeRegistry>; lifecycle?: unknown; tui?: ReturnType<typeof fakeTui>; onDisk?: boolean } = {},
+	opts: {
+		sub?: string;
+		registry?: ReturnType<typeof fakeRegistry>;
+		lifecycle?: unknown;
+		tui?: ReturnType<typeof fakeTui>;
+		onDisk?: boolean;
+		irc?: object;
+		runtimeOptions?: Json[];
+		waits?: boolean;
+		manualTicks?: boolean;
+	} = {},
 ): Omp {
 	const sm = fakeSessionManager(opts.sub ? `sub-${opts.sub}` : "S1", `/tmp/${opts.sub ?? "S1"}.jsonl`);
 	sm.onDisk = opts.onDisk ?? true;
 	const session = fakeAgentSession(sm);
+	if (opts.waits) {
+		Object.setPrototypeOf(session, {
+			waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+				return dialog();
+			},
+		});
+	}
 	const registry = opts.registry ?? fakeRegistry();
 	const agentId = opts.sub ?? "Main";
 	registry.refs.set(agentId, {
@@ -918,6 +985,11 @@ function fakeOmp(
 			return opts.lifecycle;
 		}
 	};
+	// omp's Agent Hub runtime (`modes/agent-hub-runtime`), whose dependencies hold the IRC bus.
+	if (opts.irc) ns.createAgentHubRuntime = (options: Json) => {
+		opts.runtimeOptions?.push(options);
+		return { irc: opts.irc };
+	};
 	const base: Json = {
 		ui: tui.runnerUi,
 		mode: "tui",
@@ -930,7 +1002,7 @@ function fakeOmp(
 		getContextUsage: () => ({ tokens: 2720, contextWindow: 272000, percent: 1 }),
 		setInterval: (fn: () => void, ms: number) => {
 			intervals.push(fn);
-			return setInterval(fn, ms);
+			return opts.manualTicks ? undefined : setInterval(fn, ms);
 		},
 		clearTimer: (t: Timer) => clearInterval(t),
 		setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
@@ -988,7 +1060,7 @@ describe("extension against a fake hostd", () => {
 		const hostd = await startHostd();
 		const omp = await bridged(hostd);
 		const hello = hostd.lines.find(l => l.t === "hello")!;
-		expect(hello.bridgeVersion).toBe("2.2.0");
+		expect(hello.bridgeVersion).toBe("2.3.0");
 		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true });
 
 		const res = await request(hostd, "liveSubscribe");
@@ -1521,5 +1593,409 @@ describe("notices (caps.notices)", () => {
 			["config", "retry.fallbackChains: unknown model foo/bar"],
 		]);
 		expect(notices[2]!.key).toBe((keyed[0]!.event as Json).key);
+	});
+});
+
+// ─── 2.3.0: omp's own dialogs and waits (`caps.ompDialogs`, `caps.userWaits`) ─────────────────
+
+/** omp's ExtensionUiController, reduced to its dialog methods: the collab-aware ones run the hook
+ *  ones, as omp's `showCollabAwareSelector` runs `showHookSelector` for its local side. */
+function fakeController() {
+	const tui = fakeTui();
+	class Controller {
+		showHookSelector(title: string, options: unknown[], opts?: Json): Promise<unknown> {
+			return tui.target.select(title, options, opts);
+		}
+		showHookInput(title: string, placeholder?: string, opts?: Json): Promise<unknown> {
+			return tui.target.input(title, placeholder, opts);
+		}
+		showHookEditor(title: string, prefill?: string, opts?: Json): Promise<unknown> {
+			return tui.target.editor(title, prefill, opts);
+		}
+		showCollabAwareSelector(title: string, options: unknown[], opts?: Json): Promise<unknown> {
+			return this.showHookSelector(title, options, opts);
+		}
+		showCollabAwareEditor(title: string, prefill?: string, opts?: Json): Promise<unknown> {
+			return this.showHookEditor(title, prefill, opts);
+		}
+		setHookStatus(_key: string, _text: string | undefined): void {}
+	}
+	return { tui, Controller };
+}
+
+const ENDPOINT = "/run/teleflock/bridge.sock";
+
+/** The process slot (as the bridge copies share it). */
+const processSlot = () => ((globalThis as Record<symbol, unknown>)[SLOT] ??= { owners: {}, attachWaiters: [] }) as { owners: Record<string, Json>; ompController?: object };
+
+/** omp's controller wrappers (once per process), with a copy bridging ENDPOINT that races `hub`. */
+function wrapController(proto: object, hub: DialogHub, policy: OmpDialogPolicy) {
+	processSlot().owners[ENDPOINT] = {
+		version: "2.3.0",
+		stop() {},
+		ompDialog: (name: OmpDialogMethod, original: (...a: unknown[]) => unknown, self: unknown, args: unknown[]) => raceOmpDialog(hub, name, original, self, args, policy),
+	};
+	return installOmpDialogWrappers(proto);
+}
+
+const CFG = ["Always for this session", "Allow once", "Deny"];
+
+describe("omp's own dialogs", () => {
+	test("the cfg:// approval reaches hostd once with omp's text and choices; hostd's answer wins and closes omp's dialog", async () => {
+		const { tui, Controller } = fakeController();
+		const { hub, requests, ends } = hubWithFrames();
+		const always: OmpDialogPolicy = { waiting: () => true, commanding: () => true, unattended: () => true };
+		expect(wrapController(Controller.prototype, hub, always)).toBe(true);
+		const c = new Controller();
+		const title = "⚙️ Your agent wants to change `task.perCallModel` for this session.\noff → on";
+		const p = c.showCollabAwareSelector(title, CFG, { initialIndex: 1 });
+		// One offer: the hook selector the collab-aware one runs locally is not offered again.
+		expect(requests()).toHaveLength(1);
+		expect(requests()[0]).toMatchObject({ kind: "select", title, options: CFG, initialIndex: 1 });
+		expect(tui.open.map(d => d.kind)).toEqual(["select"]);
+		hub.answer(requests()[0]!.reqId, "Allow once");
+		expect(await p).toBe("Allow once");
+		expect(tui.open[0]!.aborted).toBe(true);
+		// Answered in the terminal instead: hostd's request ends.
+		const q = c.showCollabAwareSelector(title, CFG, { initialIndex: 1 });
+		tui.open[1]!.answer("Deny");
+		expect(await q).toBe("Deny");
+		expect(ends()).toContain(requests()[1]!.reqId);
+		expect(hub.size).toBe(0);
+	});
+
+	test("hook dialogs reach hostd while omp waits for the user; otherwise, and for secrets and disabled rows, the TUI alone", async () => {
+		const { tui, Controller } = fakeController();
+		const { hub, requests } = hubWithFrames();
+		let waiting = false;
+		wrapController(Controller.prototype, hub, { waiting: () => waiting, commanding: () => false, unattended: () => false });
+		const c = new Controller();
+		// The operator's own dialog (a /goal drop, say): the TUI's.
+		const own = c.showHookSelector("Drop goal?\nThis removes the goal record.", ["Yes", "No"]);
+		expect(requests()).toHaveLength(0);
+		tui.open[0]!.answer("No");
+		expect(await own).toBe("No");
+		// omp waits for the user (the coding-plan reserve question runs under waitForUser).
+		waiting = true;
+		const reserve = c.showHookSelector("Coding-plan reserve reached\nSwitch to anthropic?", ["Yes", "No"], {});
+		expect(requests()).toHaveLength(1);
+		hub.answer(requests()[0]!.reqId, "Yes");
+		expect(await reserve).toBe("Yes");
+		void c.showHookInput("API key", undefined, { secret: true });
+		void c.showHookSelector("Pick", ["A", "B"], { disabledIndices: [1] });
+		expect(requests()).toHaveLength(1);
+		const input = c.showHookInput("Describe what to detect and fix", "e.g.");
+		expect(requests()[1]).toMatchObject({ kind: "editor", title: "Describe what to detect and fix" });
+		hub.answer(requests()[1]!.reqId, "ts errors");
+		expect(await input).toBe("ts errors");
+	});
+
+	test("one set of wrappers per process: a later copy stacks none, the copy bridging now answers, a status write names omp's controller", async () => {
+		const { tui, Controller } = fakeController();
+		const always: OmpDialogPolicy = { waiting: () => true, commanding: () => true, unattended: () => true };
+		const first = hubWithFrames();
+		expect(wrapController(Controller.prototype, first.hub, always)).toBe(true);
+		const wrapped = Controller.prototype.showHookSelector;
+		// A newer copy takes the process over (an extension reload): nothing more on omp's methods.
+		const second = hubWithFrames();
+		expect(wrapController(Controller.prototype, second.hub, always)).toBe(true);
+		expect(Controller.prototype.showHookSelector).toBe(wrapped);
+		const c = new Controller();
+		const p = c.showHookSelector("Switch to anthropic?", ["Yes", "No"]);
+		expect([first.requests().length, second.requests().length]).toEqual([0, 1]);
+		second.hub.answer(second.requests()[0]!.reqId, "Yes");
+		expect(await p).toBe("Yes");
+		// No copy bridges any more (the session ended): omp's dialog alone.
+		delete processSlot().owners[ENDPOINT];
+		const q = c.showHookSelector("Switch to anthropic?", ["Yes", "No"]);
+		expect(second.requests()).toHaveLength(1);
+		tui.open.at(-1)!.answer("No");
+		expect(await q).toBe("No");
+		// A status write through the wrapper names omp's controller to every copy.
+		c.setHookStatus("teleflock-probe", undefined);
+		expect(processSlot().ompController).toBe(c);
+	});
+});
+
+describe("omp's waits for the user", () => {
+	test("waitForUser is counted once per process, settled or failed, with the same result", async () => {
+		class Session {
+			async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+				return await dialog();
+			}
+		}
+		const waits = { count: 0, since: 0, listeners: new Set<() => void>() };
+		let changes = 0;
+		waits.listeners.add(() => changes++);
+		expect(installUserWaitCounter(Session.prototype, () => waits)).toBe(true);
+		expect(installUserWaitCounter(Session.prototype, () => waits)).toBe(true);
+		const s = new Session();
+		const { promise, resolve } = Promise.withResolvers<string>();
+		const p = s.waitForUser(() => promise);
+		expect(waits.count).toBe(1);
+		expect(waits.since).toBeGreaterThan(0);
+		resolve("Allow once");
+		expect(await p).toBe("Allow once");
+		await tick();
+		expect([waits.count, changes]).toEqual([0, 2]);
+		await expect(s.waitForUser(() => Promise.reject(new Error("aborted")))).rejects.toThrow("aborted");
+		await tick();
+		expect(waits.count).toBe(0);
+	});
+
+	test("a wait goes to hostd 1.5 s after it began, or after the offered dialog that covered it ended", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd, { waits: true, manualTicks: true });
+		const waitShown = (l: Json) => l.event === "state" && (l.data as Json).userWait !== undefined;
+		const waitGone = (l: Json) => l.event === "state" && (l.data as Json).userWait === undefined;
+		// The bridge's grace timer runs on the clock (fake here); the socket to hostd stays real I/O,
+		// so every wait below is on a frame hostd receives, not on time.
+		jest.useFakeTimers();
+		const answer = Promise.withResolvers<string>();
+		const session: { waitForUser(dialog: () => Promise<string>): Promise<string> } = omp.session as never;
+		const waited = session.waitForUser(() => answer.promise);
+		const began = Date.now();
+		// A tick computes the state half a second in: the grace still counts from the wait's start.
+		jest.advanceTimersByTime(500);
+		omp.tick();
+		const shown = hostd.next(waitShown);
+		jest.advanceTimersByTime(1_100);
+		expect((await shown).data).toMatchObject({ userWait: { since: began } });
+		// An offered dialog covers the wait: it leaves hostd's state.
+		const gone = hostd.next(waitGone);
+		const picked = omp.tui.runnerUi.select("Pick", ["A", "B"], {});
+		omp.tick();
+		await gone;
+		jest.advanceTimersByTime(3_000);
+		// Answered in the TUI with the wait still open: 1.5 s from the dialog's end, not from the wait's start.
+		omp.tui.open[0]!.answer("A");
+		expect(await picked).toBe("A");
+		const again = hostd.next(waitShown);
+		jest.advanceTimersByTime(1_400);
+		omp.tick();
+		const pong = hostd.next(l => l.t === "res" && l.id === 9_001);
+		hostd.send({ t: "req", id: 9_001, op: "ping", params: {} });
+		await pong;
+		expect(hostd.lines.filter(waitShown)).toHaveLength(1);
+		jest.advanceTimersByTime(200);
+		expect((await again).data).toMatchObject({ userWait: { since: began } });
+		jest.useRealTimers();
+		answer.resolve("done");
+		await waited;
+	});
+
+	test("a session_shutdown takes the copy's wait listener with it", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd, { waits: true });
+		const waits = () => ((globalThis as Record<symbol, unknown>)[SLOT] as { userWaits?: { listeners: Set<unknown> } }).userWaits;
+		expect(waits()?.listeners.size).toBe(1);
+		omp.pi.fire("session_shutdown", { type: "session_shutdown" });
+		expect(waits()?.listeners.size).toBe(0);
+	});
+
+	test("only keystrokes count as typing, not terminal reports", () => {
+		for (const report of ["\x1b[12;40R", "\x1b[I", "\x1b[O", "\x1b[?62;4c", "\x1b[8;24;80t", "\x1b]11;rgb:0000/0000/0000\x1b\\"]) expect(typedInput(report)).toBe(false);
+		for (const key of ["a", "\r", "\x1b", "\x1b[A", "\x1b[97u"]) expect(typedInput(key)).toBe(true);
+	});
+
+	test("what the TUI shows in the composer's place: the dialog's rows without ANSI, borders or the composer", () => {
+		const editor = { render: () => ["╰─ a draft ─╯"] };
+		const dialog = {
+			render: () => ["╭────────╮", "\x1b[1m⚙️ Your agent wants to change `task.perCallModel` for this session.\x1b[0m", "off → on", "", "│ → Allow once │", "    Deny", "╰────────╯"],
+		};
+		expect(dialogText({ children: [dialog, editor] }, editor, 80)).toBe(
+			"⚙️ Your agent wants to change `task.perCallModel` for this session.\noff → on\n→ Allow once\n    Deny",
+		);
+		expect(dialogText({ children: [editor] }, editor, 80)).toBeUndefined();
+	});
+
+	test("an overlay on top (omp's interactive console) is what the TUI shows, rendered only at omp's own width", () => {
+		const editor = { render: () => ["╰─ a draft ─╯"] };
+		// omp's console (`ui.custom` with `overlay: true`): its render resizes its PTY to the width it gets.
+		const widths: number[] = [];
+		const pty = {
+			render: (width: number) => {
+				widths.push(width);
+				return ["╭──────╮", "│▶ Console read -r -p 'Word: ' w [running]│", "│Word: │", "│      │", "│esc force-kill · input forwarded to PTY│", "╰──────╯"];
+			},
+		};
+		const picker = { render: () => ["Hidden picker"] };
+		const mode = {
+			ui: {
+				terminal: { columns: 132, rows: 40 },
+				overlayStack: [
+					{ component: pty, options: { anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0 }, hidden: false },
+					{ component: picker, options: {}, hidden: true },
+					{ component: picker, options: { visible: () => false }, hidden: false },
+				],
+			},
+			editorContainer: { children: [editor] },
+			editor,
+		};
+		expect(shownText(mode)).toBe("▶ Console read -r -p 'Word: ' w [running]\nWord:\nesc force-kill · input forwarded to PTY");
+		expect(widths).toEqual([132]);
+		// pi-tui's overlay widths: 80 columns by default, numbers and percentages, minWidth, side margins.
+		const width = (options: Json, columns = 132) => {
+			const seen: number[] = [];
+			shownText({ ui: { terminal: { columns, rows: 40 }, overlayStack: [{ component: { render: (w: number) => (seen.push(w), ["x"]) }, options }] } });
+			return seen[0];
+		};
+		expect([width({}), width({ width: 60 }), width({ width: "50%" }), width({ width: 30, minWidth: 50 }), width({ width: "100%", margin: { left: 2, right: 4 } }), width({}, 60)]).toEqual([80, 60, 66, 50, 126, 60]);
+		// No overlay: what replaced the composer, as before; nothing but the composer: nothing.
+		const dialog = { render: () => ["Create a worktree for this session?", "→ Yes", "  No"] };
+		expect(shownText({ ...mode, ui: { terminal: { columns: 132, rows: 40 }, overlayStack: [] }, editorContainer: { children: [dialog] } })).toBe("Create a worktree for this session?\n→ Yes\n  No");
+		expect(shownText({ ...mode, ui: { terminal: { columns: 132, rows: 40 }, overlayStack: [] } })).toBeUndefined();
+	});
+
+	test("a console taller than the text keeps: its title and its bottom (the program's prompt, the footer)", () => {
+		// omp's console has 0.8 × terminal rows − 4 rows of output: 44 log lines on a 60-row terminal.
+		const log = Array.from({ length: 44 }, (_, i) => `│setup step ${i + 1} done│`);
+		const pty = { render: () => ["╭──────╮", "│▶ Console ./install.sh [running]│", ...log, "│Do you want to continue? [Y/n] │", "│esc force-kill · input forwarded to PTY│", "╰──────╯"] };
+		const shown = (component: object, columns = 132) => shownText({ ui: { terminal: { columns, rows: 60 }, overlayStack: [{ component, options: { width: "100%" } }] } })!;
+		const rows = shown(pty).split("\n");
+		expect(rows).toHaveLength(40);
+		expect(rows[0]).toBe("▶ Console ./install.sh [running]");
+		expect(rows.slice(-3)).toEqual(["setup step 44 done", "Do you want to continue? [Y/n]", "esc force-kill · input forwarded to PTY"]);
+		expect(rows).not.toContain("setup step 1 done");
+		// A wide console's rows run past the character limit too: its bottom stays.
+		const wide = { render: () => ["▶ Console ./build.sh [running]", ...Array.from({ length: 36 }, (_, i) => `${i} ${"x".repeat(196)}`), "Overwrite dist/? [y/N]", "esc force-kill"] };
+		const text = shown(wide, 220);
+		expect(text.length).toBeLessThanOrEqual(4_000);
+		expect(text.startsWith("▶ Console ./build.sh [running]\n")).toBe(true);
+		expect(text.endsWith("Overwrite dist/? [y/N]\nesc force-kill")).toBe(true);
+		// What replaced the composer keeps its top: a dialog's question comes first.
+		const tall = { render: () => ["Pick a model", ...Array.from({ length: 50 }, (_, i) => `  option ${i + 1}`)] };
+		const composer = dialogText({ children: [tall] }, undefined, 80)!.split("\n");
+		expect([composer.length, composer[0], composer.at(-1)]).toEqual([40, "Pick a model", "  option 39"]);
+	});
+});
+
+// ─── the agent chat (caps.agentChat) ──────────────────────────────────────────────────────────
+
+/** A fresh class shaped like omp's IRC bus (`irc/bus.ts` `IrcBus`): `send(msg, options)` stamps
+ *  omp's id and time, delivers after a tick and resolves with omp's receipt (`Nobody` is unknown,
+ *  `Boom` rejects). Its state is private, so a wrapper that loses `this` breaks it. */
+function ircBusClass() {
+	return class IrcBus {
+		#seq = 0;
+		sent: Array<[Json, unknown]> = [];
+		async send(msg: Json | undefined, options?: unknown): Promise<Json> {
+			this.sent.push([{ ...msg, id: `omp${++this.#seq}`, ts: Date.now() }, options]);
+			await tick();
+			const to = msg?.to;
+			if (to === "Boom") throw new Error("mailbox gone");
+			if (to === "Nobody") return { to, outcome: "failed", error: 'Unknown agent "Nobody"' };
+			return { to, outcome: to === "Orch.B" ? "woken" : "injected" };
+		}
+	};
+}
+
+describe("the agent chat (caps.agentChat)", () => {
+	test("installIrcTap reports every leg omp's IRC bus sends when it starts and once omp settled it; the send stays omp's", async () => {
+		const Bus = ircBusClass();
+		const legs: IrcLeg[] = [];
+		expect(installIrcTap(Bus.prototype, leg => legs.push(leg))).toBe(true);
+		const bus = new Bus();
+		const t0 = Date.now();
+		// Same arguments, same `this`, same receipt.
+		expect(await bus.send({ from: "Orch.A", to: "Orch.B", body: "Which port?" }, { suppressRelay: true })).toEqual({ to: "Orch.B", outcome: "woken" });
+		expect(bus.sent[0]![1]).toEqual({ suppressRelay: true });
+		const [start, end] = legs;
+		expect(legs).toHaveLength(2);
+		expect(start).toEqual({ id: start!.id, from: "Orch.A", to: "Orch.B", body: "Which port?", ts: start!.ts });
+		expect(start!.ts).toBeGreaterThanOrEqual(t0);
+		expect(end).toEqual({ ...start!, outcome: "woken" });
+
+		// omp's flags pass through: a broadcast's leg, a wake relay answering omp's message id, a progress note.
+		await Promise.all([
+			bus.send({ from: "Orch", to: "Orch.A", body: "Plan: A owns the API.", broadcast: true }),
+			bus.send({ from: "Orch.B", to: "Orch.A", body: "7420", replyTo: "omp1", wakeRelay: true }),
+			bus.send({ from: "Orch.A", to: "Orch", body: "halfway", progress: true }),
+		]);
+		const settled = (body: string) => legs.find(l => l.body === body && l.outcome)!;
+		const plan = settled("Plan: A owns the API.");
+		expect(plan).toEqual({ id: plan.id, from: "Orch", to: "Orch.A", body: "Plan: A owns the API.", ts: plan.ts, broadcast: true, outcome: "injected" });
+		expect(settled("7420")).toMatchObject({ from: "Orch.B", to: "Orch.A", replyTo: "omp1", wakeRelay: true, outcome: "injected" });
+		expect(settled("halfway")).toMatchObject({ from: "Orch.A", to: "Orch", progress: true, outcome: "injected" });
+
+		// Undeliverable: omp's failed receipt; a send that rejects still rejects for omp, reported as failed.
+		expect(await bus.send({ from: "Orch.A", to: "Nobody", body: "hello?" })).toEqual({ to: "Nobody", outcome: "failed", error: 'Unknown agent "Nobody"' });
+		await expect(bus.send({ from: "Orch.A", to: "Boom", body: "hello?" })).rejects.toThrow("mailbox gone");
+		expect(legs.filter(l => l.outcome === "failed").map(l => [l.to, l.error])).toEqual([
+			["Nobody", 'Unknown agent "Nobody"'],
+			["Boom", "mailbox gone"],
+		]);
+
+		// Every leg has its own id, `<process tag>.<n>` counting up; its settled report repeats it.
+		const starts = legs.filter(l => !l.outcome);
+		expect(starts).toHaveLength(6);
+		const tag = starts[0]!.id.split(".")[0];
+		expect(starts.map(l => l.id)).toEqual(starts.map((_, i) => `${tag}.${Number(starts[0]!.id.split(".")[1]) + i}`));
+		expect(new Set(legs.filter(l => l.outcome).map(l => l.id))).toEqual(new Set(starts.map(l => l.id)));
+
+		// No leg for what is not a message; omp still gets it. A huge body is clipped for hostd only.
+		legs.length = 0;
+		await bus.send({ from: "Orch.A", body: "no recipient" });
+		await bus.send(undefined);
+		expect(legs).toEqual([]);
+		expect(bus.sent).toHaveLength(8);
+		const big = "x".repeat(256 * 1024 + 10);
+		await bus.send({ from: "Orch.A", to: "Orch", body: big });
+		expect(legs[0]!.body).toBe(`${"x".repeat(256 * 1024)}\n\n…`);
+		expect(bus.sent.at(-1)![0].body).toBe(big);
+	});
+
+	test("one wrapper per process, whichever copy comes first; a report can never fail a send", async () => {
+		const Bus = ircBusClass();
+		expect(
+			installIrcTap(Bus.prototype, () => {
+				throw new Error("a copy's handler broke");
+			}),
+		).toBe(true);
+		const wrapped = Bus.prototype.send;
+		const second: IrcLeg[] = [];
+		expect(installIrcTap(Bus.prototype, leg => second.push(leg))).toBe(true);
+		expect(Bus.prototype.send).toBe(wrapped);
+		expect(await new Bus().send({ from: "Main", to: "Orch", body: "go" })).toEqual({ to: "Orch", outcome: "injected" });
+		expect(second).toEqual([]);
+		// Nothing to wrap, or a bus omp froze: no tap (the flag stays off).
+		expect(installIrcTap({}, () => {})).toBe(false);
+		expect(installIrcTap(Object.freeze(ircBusClass().prototype), () => {})).toBe(false);
+	});
+
+	test("the owner copy sends hostd every leg as an `irc` event and announces caps.agentChat; subagent copies add nothing", async () => {
+		const hostd = await startHostd();
+		const bus = new (ircBusClass())();
+		const runtimeOptions: Json[] = [];
+		const omp = await bridged(hostd, { irc: bus, runtimeOptions });
+		expect((hostd.lines.find(l => l.t === "hello")!.caps as Json).agentChat).toBe(true);
+		// A stand-in activity index: the runtime would build omp's own otherwise.
+		expect(runtimeOptions).toEqual([{ activity: {} }]);
+		// A copy in a subagent session finds the same bus: still one wrapper, one report per leg.
+		const sub = fakeOmp({ sub: "Orch", registry: omp.registry, irc: bus, runtimeOptions });
+		await teleflockBridge(sub.pi as never);
+		sub.pi.fire("session_start", { type: "session_start" });
+		await until(() => runtimeOptions.length === 2);
+		await bus.send({ from: "Orch", to: "Main", body: "Plan: A owns the API.", broadcast: true });
+		await bus.send({ from: "Orch", to: "Nobody", body: "anyone?" });
+		// Control frames are ordered: the ping's res comes after every event before it.
+		await request(hostd, "ping");
+		const irc = hostd.lines.filter(l => l.t === "event" && l.event === "irc");
+		expect(irc.map(l => [l.sessionId, (l.data as Json).to, (l.data as Json).outcome ?? null])).toEqual([
+			["S1", "Main", null],
+			["S1", "Main", "injected"],
+			["S1", "Nobody", null],
+			["S1", "Nobody", "failed"],
+		]);
+		expect(irc[1]!.data).toEqual({ ...(irc[0]!.data as Json), outcome: "injected" });
+		expect(irc[1]!.data).toMatchObject({ from: "Orch", body: "Plan: A owns the API.", broadcast: true });
+		expect(irc[3]!.data).toMatchObject({ error: 'Unknown agent "Nobody"' });
+		expect(hostd.lines.filter(l => l.t === "hello")).toHaveLength(1);
+	});
+
+	test("an omp whose IRC bus is not found announces no agentChat (hostd reads the transcripts instead)", async () => {
+		const hostd = await startHostd();
+		await bridged(hostd);
+		expect((hostd.lines.find(l => l.t === "hello")!.caps as Json).agentChat).toBe(false);
 	});
 });

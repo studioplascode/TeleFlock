@@ -18,6 +18,7 @@ import { NonOmpView } from "./NonOmpView";
 import { useResumeKeys } from "./resume/useResumeKeys";
 import { SubagentViewer } from "./subagents/SubagentViewer";
 import { Transcript, TRANSCRIPT_MAX_WIDTH, TranscriptSkeleton } from "./transcript/Transcript";
+import { SessionBrowserAsk } from "@/features/browser/RequestCard";
 
 function isEditable(t: EventTarget | null): boolean {
   return t instanceof HTMLElement && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT");
@@ -190,6 +191,8 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
           </motion.div>
         )}
       </AnimatePresence>
+      {/* An agent's request for the user's browser: hostd raises no dialog for it, so it has its own card. */}
+      <SessionBrowserAsk agentKey={agentKey} className="relative z-raised mx-auto w-full shrink-0" />
       {dock}
       {/* toasts keep clear of the composer (phone: the dock; desktop: when it runs under the toast stack) */}
       {composer && (

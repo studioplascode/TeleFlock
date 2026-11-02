@@ -11,10 +11,10 @@ deploy target (embedded into the app), then the packages, and copies them to `di
 
 ```bash
 scripts/build-windows.sh     # -> dist-release/TeleFlock_<version>_x64-setup.exe (+ .sig for the updater)
-scripts/build-android.sh     # -> dist-release/TeleFlock_<version>_universal.apk (signed)
+scripts/build-android.sh     # -> dist-release/TeleFlock_<version>_universal.apk (signed, arm64-v8a only)
 scripts/build-linux.sh       # -> dist-release/TeleFlock_<version>_amd64.{deb,AppImage} (+ .sig) and
                              #    teleflock-bin-<pkgver>-1-x86_64.pkg.tar.zst (Arch), §12
-scripts/build-hostd.sh       # only tf-hostd -> target/hostd-dist/<triple>/tf-hostd[.exe]
+scripts/build-hostd.sh       # only tf-hostd -> target/hostd-dist/<triple>/tf-hostd[.exe] (+ .zst)
 scripts/set-version.sh X.Y.Z && scripts/release.sh   # version bump → published GitHub release (§11)
 ```
 
@@ -30,9 +30,9 @@ export CARGO_TARGET_DIR=/root/TeleFlock/target/<YourAgentName>   # repo rule: pr
 bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
 #   -> $CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle/nsis/<productName>_<version>_x64-setup.exe
 
-# Android signed universal APK:
+# Android signed APK (arm64-v8a; the file name says universal, §6.3):
 export TELEFLOCK_KEYSTORE_PROPERTIES=/root/.teleflock-keys/keystore.properties
-bun tauri android build --apk
+bun tauri android build --apk --target aarch64
 #   -> src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
@@ -91,11 +91,12 @@ Why these versions:
 # Linux Tauri deps + Windows cross tools  [observed]
 sudo apt-get update
 sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-  libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config nsis lld llvm clang unzip 7zip
+  libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config nsis lld llvm clang unzip 7zip zstd \
+  libasound2-dev   # microphone capture (cpal → ALSA) for dictation and recordings, §10.5
 sudo ln -sf /usr/lib/llvm-19/bin/clang-cl /usr/local/bin/clang-cl   # Debian only ships clang-cl-19
 
-rustup target add x86_64-pc-windows-msvc \
-  aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+# APKs are arm64-v8a only since 0.9.0; the other three Android targets only for 4-ABI test builds.
+rustup target add x86_64-pc-windows-msvc aarch64-linux-android
 cargo install --locked cargo-xwin
 
 # JDK 17 (Temurin tarball; checksum from api.adoptium.net)  [observed]
@@ -238,13 +239,20 @@ If the properties file is missing, the release build still succeeds but produces
 . /root/.teleflock-android-env
 export CARGO_TARGET_DIR=/root/TeleFlock/target/<Agent>
 export TELEFLOCK_KEYSTORE_PROPERTIES=/root/.teleflock-keys/keystore.properties
-bun tauri android build --apk                       # all 4 ABIs, universal APK
-# faster single-ABI build for phones:  bun tauri android build --apk --target aarch64
-# AAB for Play:                        bun tauri android build --aab
+bun tauri android build --apk --target aarch64      # arm64-v8a only: what releases ship
+# without --target: all 4 ABIs (arm64-v8a, armeabi-v7a, x86, x86_64), as releases up to 0.8.1
+# AAB for Play:                        bun tauri android build --aab --target aarch64
 ```
 
+Releases ship arm64-v8a only (since 0.9.0): `scripts/build-android.sh` passes `--target aarch64`,
+and it and `scripts/release.sh` refuse an APK without `lib/arm64-v8a/libteleflock_lib.so` or with
+a library for another ABI. 32-bit-only (armeabi-v7a) and x86 devices can't install it. The Gradle
+template (`gen/android/buildSrc/…/RustPlugin.kt`) still defaults to all four ABIs when it is run
+without the CLI; with `--target` the CLI passes `-PabiList=arm64-v8a`, which becomes the universal
+flavor's `abiFilters`, so stale `jniLibs/<abi>` links of other ABIs are not packaged.
+
 Output paths:
-- APK: `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` `[observed]`
+- APK: `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` (also with one `--target`) `[observed]`
 - With `--split-per-abi`, the output goes to `…/apk/<abi>/release/` `[inferred]`.
 
 Verify:
@@ -273,24 +281,37 @@ cd src-tauri && CARGO_TARGET_DIR=/root/TeleFlock/target/<Agent> cargo check
 
 On the hello app this finished in 34 s `[observed]`. The Linux deps from §3 are enough for `cargo check`/`cargo build` of the desktop crate on Linux, which other agents use for fast iteration. Linux release packages are built in a container instead (§12).
 
-For the real app: `CARGO_TARGET_DIR=target/<Agent> cargo check -p teleflock` and `cargo test -p teleflock` (unit tests + the core bridge against the real engine). Windows-only code: `cargo xwin check -p teleflock --target x86_64-pc-windows-msvc`. `[observed]`
+For the real app: `CARGO_TARGET_DIR=target/<Agent> cargo check -p teleflock` and `cargo test -p teleflock` (unit tests + the core bridge against the real engine). Windows-only code: `cargo xwin check -p teleflock --target x86_64-pc-windows-msvc`. macOS code (type-checked only; the link happens in CI, §13): `CC_aarch64_apple_darwin=clang CFLAGS_aarch64_apple_darwin="-nostdlibinc -isystem /opt/zig/zig-x86_64-linux-0.15.2/lib/libc/include/any-macos-any" cargo check -p teleflock --target aarch64-apple-darwin` (zig's macOS libc headers for the C dependencies). Android code: `cargo check -p teleflock --target aarch64-linux-android` with the NDK's clang named in `CC_aarch64_linux_android`, `AR_aarch64_linux_android` (`llvm-ar`) and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` (`$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang`; `tauri android build` sets them itself). `[observed]`
 
 `Cargo.lock` pins `rust-ini` to **0.21.1**: 0.21.3 added fields to `ParseOption` that `tauri-plugin-deep-link` 2.6.2 does not set, which breaks its Linux build (`E0063`). Do not `cargo update` it past 0.21.1 until deep-link is fixed upstream. `[observed]`
 
-## 8. CI drafts (`.github/workflows/`)
+## 8. CI (`.github/workflows/`)
 
 All workflows assume this layout:
 - `package.json` and `bun.lock` at the repo root, built with bun.
 - `src-tauri/` at the repo root.
 - Cargo workspace root at `/root/TeleFlock/Cargo.toml`, so `target/` is at the repo root (rust-cache `workspaces: '. -> target'`).
 
+When they run: releases are built, verified and published from this box (`scripts/release.sh`,
+§11), so no workflow builds on a push to `main`. `windows.yml`, `android.yml` and `linux.yml` run
+by hand (`gh workflow run <file> --ref <branch>`) and on pull requests that change what their
+platform is built from: their `paths` filters leave out documentation (`docs/`, `*.md`), the other
+platforms' files (the split `platforms_of` in `scripts/release.sh` uses), scripts other than
+`build-hostd.sh` and the other workflows. `concurrency` cancels an older run of the same ref.
+`macos.yml` runs on `v*` tags (the one release asset CI builds) and by hand. Until 0.8.1 the three
+app workflows also ran on every push to `main` and on every tag: 72 runs from Oct 25 to Nov 1 (24
+per workflow, 27 of them on release tags, 12 cancelled by a newer push; 14–40 min wall clock per
+finished run, 1,563 min in total), none of them a release input. `login-items.yml` builds no package
+and runs only by hand (below).
+
 | Workflow | Runner | Produces | Notes |
 |---|---|---|---|
-| `hostd.yml` (reusable, also manual) | `ubuntu-latest` | artifact `tf-hostd-dist` = `target/hostd-dist/<triple>/tf-hostd[.exe]` | runs `scripts/build-hostd.sh` (installs zig, cargo-zigbuild, cargo-xwin). Every app workflow `needs:` it and downloads it to `target/hostd-dist` with `TF_HOSTD_DIST` set, so the app embeds the daemon. |
+| `hostd.yml` (reusable, also manual) | `ubuntu-latest` | artifact `tf-hostd-dist` = `target/hostd-dist/<triple>/tf-hostd[.exe]` + `.zst` | runs `scripts/build-hostd.sh` (installs zig, cargo-zigbuild, cargo-xwin; the musl pair and Windows build side by side, §10.1). rust-cache keeps both of its build dirs. Every app workflow `needs:` it and downloads it to `target/hostd-dist` with `TF_HOSTD_DIST` set, so the app embeds the daemon. |
 | `windows.yml` | `windows-latest` | `target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe` → artifact `teleflock-windows-nsis` | `bun tauri build --target x86_64-pc-windows-msvc --bundles nsis` with `bundle.createUpdaterArtifacts: false`; native MSVC, no xwin. Never gets the updater key, so the artifact has no `.sig` and can't be published as an update. Authenticode signing is not wired up yet (`bundle.windows.signCommand`). |
-| `android.yml` | `ubuntu-latest` | `src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk` → artifact `teleflock-android-apk` | Temurin 17, `sdkmanager` installs `ndk;29.0.14206865`, `platforms;android-37.0`, `build-tools;37.0.0`; uses the committed `gen/android` (runs `tauri android init --ci` only if missing); signs via `TELEFLOCK_KEYSTORE_PROPERTIES` (Gradle) or falls back to zipalign + apksigner. |
-| `linux.yml` | `ubuntu-22.04` | `target/release/bundle/{deb,appimage}/*` → artifact `teleflock-linux` | Same environment as the release container (§12): Tauri's apt deps, `bun tauri build --bundles deb,appimage` with `createUpdaterArtifacts: false` (`NO_STRIP=true`); prints `dpkg-deb --info/--contents`, the desktop entry and the glibc floor. No secrets, `permissions: contents: read`, third-party actions pinned by commit SHA. The Arch package is only built by `scripts/build-linux.sh`. |
-| `macos.yml` | `macos-latest` (build), `ubuntu-latest` (upload) | `TeleFlock_<v>_universal.dmg` + `.sha256` → artifact `teleflock-macos`; for a `v*` tag also attached to that tag's release | Runs on `v*` tag pushes and by hand. `build` (read-only token, actions pinned by SHA): `tf-hostd` for `aarch64-` and `x86_64-apple-darwin` (embedded for Local mode on the Mac), `bun tauri build --target universal-apple-darwin --bundles app,dmg` with `createUpdaterArtifacts: false`, checks the tag = app version, `lipo -archs`, `codesign --verify` (ad-hoc) and `CFBundleURLTypes`. `upload` (only for tags; `contents: write`; no checkout, only `actions/download-artifact` + the runner's `gh`): waits up to 60 min for the release, then `gh release upload` without `--clobber`, so existing assets are never replaced (§13). |
+| `android.yml` | `ubuntu-latest` | `src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk` → artifact `teleflock-android-apk` | Temurin 17, `sdkmanager` installs `ndk;29.0.14206865`, `platforms;android-37.0`, `build-tools;37.0.0`; uses the committed `gen/android` (runs `tauri android init --ci` only if missing); builds `--target aarch64` and checks arm64-v8a is the APK's only ABI; signs via `TELEFLOCK_KEYSTORE_PROPERTIES` (Gradle) or falls back to zipalign + apksigner, never in a pull request run (its code would hold the release key). |
+| `linux.yml` | `ubuntu-22.04` | `target/release/bundle/{deb,appimage}/*` → artifact `teleflock-linux` | Same environment as the release container (§12): Tauri's apt deps plus `libasound2-dev` (§10.5), `bun tauri build --bundles deb,appimage` with `createUpdaterArtifacts: false` (`NO_STRIP=true`); prints `dpkg-deb --info/--contents`, the desktop entry and the glibc floor. No secrets, `permissions: contents: read`, third-party actions pinned by commit SHA. The Arch package is only built by `scripts/build-linux.sh`. |
+| `macos.yml` | `macos-latest` (hostd-macos, build), `ubuntu-latest` (hostd, upload) | `TeleFlock_<v>_universal.dmg` + `.sha256` → artifact `teleflock-macos`; for a `v*` tag also attached to that tag's release | Runs on `v*` tag pushes and by hand. `hostd-macos` builds `tf-hostd` for `aarch64-` and `x86_64-apple-darwin` (embedded for Local mode on the Mac) with `scripts/build-hostd.sh` (one cargo run) while `hostd` builds the Linux/Windows ones. `build` (read-only token, actions pinned by SHA): both artifacts into `target/hostd-dist`, `bun tauri build --target universal-apple-darwin --bundles app,dmg` with `createUpdaterArtifacts: false`, checks the tag = app version, `lipo -archs`, `codesign --verify` (ad-hoc) and `CFBundleURLTypes`. `upload` (only for tags; `contents: write`; no checkout, only `actions/download-artifact` + the runner's `gh`): waits up to 60 min for the release, then `gh release upload` without `--clobber`, so existing assets are never replaced (§13). |
+| `login-items.yml` (manual only) | `macos-15` and `macos-26` (job `macos`), `windows-latest` (job `windows`) | the logs of each job → artifacts `login-items-macos-15`, `login-items-macos-26`, `login-items-windows` | Checks the boot service of tf-hostd ("Bring agents back after a reboot", architecture §3.11) on the real OS: a launchd agent on the Mac, a Task Scheduler task on Windows. Builds only tf-hostd (`cargo build --release --locked -p tf-hostd`, no LTO). Read-only token, actions pinned by SHA. |
 
 Android secrets, from the local keystore:
 - `ANDROID_KEY_BASE64`: `base64 -w0 /root/.teleflock-keys/teleflock-release.jks`
@@ -302,7 +323,37 @@ packages every installed app accepts. Releases are built and signed on this box 
 `scripts/release.sh` (§11). The macOS `.dmg` is the only release asset built in CI, and it is
 never signed with the updater key: macOS installs are updated by hand (§13).
 
-The workflows have not been run on GitHub yet. Validate them on the first push. `[inferred]`
+Caches: rust-cache restores a cache saved on the same ref or on `main`. With no runs on `main`
+any more, a pull request starts from the newest `main` cache there is; run a workflow by hand on
+`main` after a toolchain or dependency update to refresh it. Tag runs (`macos.yml`) save under
+their tag, which no later tag can read. `linux.yml`, `windows.yml` and `macos.yml` also keep the
+speech engine's archives (§10.5) with `actions/cache`: `target/native-cache/*.tar.bz2` and the VAD
+model, keyed by the target and the hash of `crates/tf-dictation/build.rs` (where the sherpa-onnx
+version and every sha256 are pinned, so a new pin gets a new key). Only the archives, not what they
+unpack to (Windows: 1 GB): build.rs checks an archive's sha256 before it extracts it but trusts an
+extracted directory, so a restored cache never hands the build an unchecked file. The step comes
+after rust-cache because post steps run in reverse order: it saves before rust-cache's cleanup
+deletes every file in `target/` that cargo didn't make. A miss downloads 21–123 MB from the
+sherpa-onnx release (each new tag of `macos.yml`, for the reason above).
+
+**Login items on real macOS and Windows** (`login-items.yml`, manual). The launchd agent and the Task Scheduler task that "Bring agents back after a reboot" installs (architecture §3.11) are unit-tested against recording stand-ins only (`automations/{launchd,schtasks}.rs`); this runs them against the real `launchctl` and `schtasks` on GitHub's disposable VMs. GitHub lists a workflow for dispatch once its file is on the default branch; `--ref` then names the branch whose copy of the file (and, without `-f ref=`, of the code) runs:
+
+```bash
+gh workflow run login-items.yml --ref <branch>     # -f ref=<branch|tag|commit>: build and check that instead of the --ref one
+gh run list --workflow login-items.yml --limit 1   # the run's id; then gh run watch <id>
+gh run view <id> --log-failed                      # every failed check, with its reason
+gh run download <id>                               # the logs: login-items-macos-15, login-items-macos-26, login-items-windows
+```
+
+Each job builds tf-hostd, copies it to `~/.teleflock/bin` (the real home: the only one that installs a login item; the scripts refuse a runner that is not GitHub-hosted, and a home that has files in it), seeds `ledger.json` with one agent a reboot ended (a fresh home has nothing to bring back and installs nothing), starts the daemon with `tf-hostd attach` as the app does (`scripts/ci/hostd-wire.py` is the client; `scripts/ci/login-items-{macos.sh,windows.ps1}` hold the checks) and then checks:
+
+- (a) the item is installed with no setting touched: `launchctl print gui/<uid>/dev.teleflock.hostd.<hash>` loaded, the plist as `launchd.rs` writes it; `schtasks /Query /TN "TeleFlock host service <hash>"` found, its XML a logon trigger of this user's SID (1 min delay, every 10 min), `InteractiveToken`, `LeastPrivilege`, running `tf-hostd-login.exe ensure`; `host.autoResume` reports `bootService` installed.
+- (b) the daemon is killed by PID (checked) and stays down; `launchctl kickstart -k` (and `bootout` + `bootstrap`, which is what a login does to a `RunAtLoad` agent) or `schtasks /Run` brings it back within 60 s and it answers a status call; a run of the item while the daemon lives (what it does every 10 minutes) starts no second one.
+- (c) Windows: `tf-hostd-login.exe` is `tf-hostd.exe` with only the subsystem byte changed to GUI, the daemon runs from the real `tf-hostd.exe`, and no `conhost.exe` starts for the launcher, the daemon or anything they start (a trace of every process start, with a control that shows it sees the console host of a console program).
+- (d) `host.autoResumeSet {bringBack: false}` (Settings → Auto-resume) removes the item and its files; (e) `{bringBack: true}` installs it again, and the new item starts the daemon too.
+- (f) the logs (`hostd.log`, the `launchctl` / `schtasks` output, plist or task XML, process traces, the Task Scheduler and launchd logs) are uploaded on every outcome. A failed check fails the job with its reason as an annotation, and the run's summary lists every check.
+
+Not proved: that the OS fires the item at a real login or boot (`RunAtLoad` is exercised through `bootstrap`; the logon trigger is read from the XML and the task started by hand), the approval prompt in System Settings → Login Items, antivirus on a PC that has one, other OS versions.
 
 ## 9. Throwaway proof app
 
@@ -324,12 +375,12 @@ It is safe to delete. Its build outputs live under `/root/TeleFlock/target/Toolc
 
 | Script | Steps | Output |
 |---|---|---|
-| `scripts/build-hostd.sh [triple…]` | installs zig 0.15.2 (`/opt/zig`, sha256-checked), `cargo-zigbuild`, `cargo-xwin` and rustup targets if missing; builds `tf-hostd` for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (zigbuild, checked static) and `x86_64-pc-windows-msvc` (xwin). Build dir `target/hostd-build`. | `target/hostd-dist/<triple>/tf-hostd[.exe]` |
+| `scripts/build-hostd.sh [triple…]` | installs zig 0.15.2 (`/opt/zig`, sha256-checked), `cargo-zigbuild`, `cargo-xwin` and rustup targets if missing; builds `tf-hostd` (`--locked`) for `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` in one `cargo zigbuild` (build dir `target/hostd-build`, checked static) and, side by side, `x86_64-pc-windows-msvc` with `cargo xwin` (build dir `target/hostd-build-xwin`): cargo locks a build dir for a whole invocation, so one dir per tool. `*-linux-gnu` / `*-apple-darwin` on request with plain cargo (`target/hostd-build-cargo`; `macos.yml`). A binary is copied only when it changed (tf-client's `build.rs` watches the dist dir by mtime, so an unchanged daemon doesn't rebuild the app) and compressed once, `zstd -19`, unless the `.zst` already holds it. Output lines are prefixed `[zigbuild]` / `[xwin]` / `[cargo]`. | `target/hostd-dist/<triple>/tf-hostd[.exe]` + `.zst` |
 | `scripts/build-windows.sh` | checks the updater signing key (§11.1) → `bun run build` → `build-hostd.sh` → `tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis` with `createUpdaterArtifacts: false` (frontend not rebuilt by tauri) → `tf_updater_sign` signs the installer | `dist-release/TeleFlock_<ver>_x64-setup.exe` + `.sig` + `.sha256` |
-| `scripts/build-android.sh [tauri args]` | `bun run build` → `build-hostd.sh` → `tauri android build --apk` → `apksigner verify` + `zipalign -c -P 16` | `dist-release/TeleFlock_<ver>_universal.apk` + `.sha256` |
+| `scripts/build-android.sh [tauri args]` | `bun run build` → `build-hostd.sh` → `tauri android build --apk --target aarch64` → `apksigner verify` + `zipalign -c -P 16` + arm64-v8a is the only ABI (§6.3) | `dist-release/TeleFlock_<ver>_universal.apk` + `.sha256` |
 | `scripts/build-linux.sh` | checks docker + the updater key → `bun run build` → `build-hostd.sh` → `tauri build --bundles deb,appimage` with `createUpdaterArtifacts: false` inside the Ubuntu 22.04 builder container (`packaging/linux/Dockerfile`; no key inside) → `tf_updater_sign` on the host for both packages → Arch package from `packaging/arch/PKGBUILD` via `makepkg` in `archlinux:base-devel`, installed with `pacman -U` in a fresh container + `ldd` + `namcap` (§12) | `dist-release/TeleFlock_<ver>_amd64.{deb,AppImage}` + `.sig` + `.sha256`, `teleflock-bin-<pkgver>-1-x86_64.pkg.tar.zst` + `.sha256`, `dist-release/aur/{PKGBUILD,.SRCINFO}` |
 
-Common env: `CARGO_TARGET_DIR` (defaults `target/release-windows`, `target/release-android`, `target/release-linux`), `SKIP_FRONTEND=1`, `SKIP_HOSTD=1`, `TF_HOSTD_DIST`. tf-client's `build.rs` embeds whatever is in `TF_HOSTD_DIST` (default `target/hostd-dist`), so build hostd **before** the app. `dist-release/` is a build output (not committed). Updater signing goes through `scripts/updater-key.sh` (sourced by the Windows and Linux scripts; the key only reaches `tauri signer sign`, §11.1).
+Common env: `CARGO_TARGET_DIR` (defaults `target/release-windows`, `target/release-android`, `target/release-linux`), `SKIP_FRONTEND=1`, `SKIP_HOSTD=1`, `TF_HOSTD_DIST`. tf-client's `build.rs` embeds whatever is in `TF_HOSTD_DIST` (default `target/hostd-dist`), so build hostd **before** the app. `dist-release/` is a build output (not committed); each platform script first removes that platform's `dist-release/.built-<platform>` (§11.2), so packages it replaces never pass for ones `release.sh` built. Updater signing goes through `scripts/updater-key.sh` (sourced by the Windows and Linux scripts; the key only reaches `tauri signer sign`, §11.1).
 
 Toolchain added for this (on top of §2) `[observed]`: zig 0.15.2 at `/opt/zig/zig-x86_64-linux-0.15.2`, `cargo-zigbuild` 0.23.4, rustup targets `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 
@@ -356,7 +407,61 @@ Build times on 15 cores: Windows app + NSIS 7m03s cold, 3m10s warm (incl. fronte
 
 ### 10.4 Not verifiable here (no Windows box, no Android device)
 
-Windows: tray icon animation/badge rendering (and the still comet in Calm), toast buttons + inline reply activation, Snap Layouts flyout on `#tf-max`, Mica, protocol activation via the installer's registration, single-instance forwarding, file drops onto the composer, Dispatch and terminal (`dragDropEnabled: false`), the WSL keepalive (`wsl.exe … sleep`) across reconnects, the link surviving sleep, `visibilityState`/`isVisible` after minimize and close-to-tray. Android: foreground service lifetime in Doze, notification actions/RemoteInput reaching Rust with the Activity destroyed, `POST_NOTIFICATIONS` prompt, the `RECORD_AUDIO` prompt and dictation (partial and final text, denied and blocked states, the settings link), SSH key import, the image key in the terminal's extra keys, haptics, deep link from a notification tap, `ACCESS_LOCAL_NETWORK` on API 37 (platform.md §5).
+Windows: tray icon animation/badge rendering (and the still comet in Calm), toast buttons + inline reply activation, Snap Layouts flyout on `#tf-max`, Mica, protocol activation via the installer's registration, single-instance forwarding, file drops onto the composer, Dispatch and terminal (`dragDropEnabled: false`), the WSL keepalive (`wsl.exe … sleep`) across reconnects, the link surviving sleep, `visibilityState`/`isVisible` after minimize and close-to-tray. Android: foreground service lifetime in Doze, notification actions/RemoteInput reaching Rust with the Activity destroyed, `POST_NOTIFICATIONS` prompt, the `RECORD_AUDIO` prompt and dictation (partial and final text, denied and blocked states, the settings link), SSH key import, the image key in the terminal's extra keys, haptics, deep link from a notification tap, `ACCESS_LOCAL_NETWORK` on API 37 (platform.md §5). On-device dictation (§10.5) with a real microphone: WASAPI on Windows, CoreAudio and the macOS microphone prompt, ALSA on a desktop (the lab plays WAV files as the microphone).
+
+### 10.5 The on-device speech engine (`crates/tf-dictation`)
+
+Dictation and the voice of recordings run on the device (docs/architecture.md §6.16): the desktop
+app links sherpa-onnx v2.0.1 with onnxruntime, as the prebuilt static libraries sherpa-onnx
+publishes on its GitHub release, each archive pinned by sha256 in `crates/tf-dictation/build.rs`.
+Models are not built in: the app downloads the one the user picks (Settings → Dictation).
+
+| Target | Archive (`sherpa-onnx-v2.0.1-…`) | Linked |
+|---|---|---|
+| `x86_64-unknown-linux-gnu` | `linux-x64-static-lib.tar.bz2` (22.7 MB) | statically, plus the system's `libstdc++`, `libm`, `libpthread`, `libdl` |
+| `x86_64-pc-windows-msvc` | `win-x64-static-MT-Release-lib.tar.bz2` (122.9 MB) | statically, built against the static CRT tauri-build links (libcmt + libvcruntime, dynamic UCRT): `teleflock.exe` still imports only system DLLs, no VC++ redistributable `[observed]` |
+| `aarch64-` / `x86_64-apple-darwin` | `osx-arm64-` / `osx-x64-static-lib.tar.bz2` (20.8 MB arm64) | statically, plus `libc++` and the CoreFoundation and Foundation frameworks (onnxruntime calls `CFString`, `CFTimeZone` and `NSLog`) |
+| `aarch64-unknown-linux-gnu` | `linux-aarch64-static-lib.tar.bz2` | pinned; no release builds it |
+| `aarch64-linux-android` | `android.tar.bz2` (shared libraries) | pinned, unused: the Android app keeps the system speech recognizer and tf-dictation is not in its dependency graph (`cargo tree`), so the APK is unchanged |
+
+- **Download and cache.** The build script fetches with `curl` (on the build host; Windows 10+ and
+  macOS ship it) into `$TF_NATIVE_CACHE`, default `<repo>/target/native-cache` (1.4 GB here with
+  three targets extracted), keyed by sha256: every target dir and the Linux build container (which
+  mounts the repo at the same path) share it, so only the first build per archive needs the network;
+  the container build ran with no network at all. CI keeps the archives with `actions/cache` (§8). A
+  hash mismatch fails the build. Concurrent builds (`release.sh` runs three) download and extract
+  under temporary names of their own (process id plus 64 random bits: the container's process ids
+  are its own) and rename after the check; a download that stalls (under 1 KB/s for a minute) is
+  retried like a failed one (`curl --retry 3`). What an interrupted build leaves under such a name
+  (a `.part-*` download, a `.tmp-*` extraction of up to 1 GB) is removed by the next build that
+  finds no other working in the cache: each build holds `<cache>/.lock` shared while it does (a
+  file lock: unlike process ids it holds across the container). The build script reruns when a
+  cache file it used is gone (`rerun-if-changed` on the extracted archive's `.complete` and on the
+  VAD model, whose times it sets back to 1970 so that writing them doesn't rerun it once more):
+  deleting the cache makes the next build fetch it again instead of failing the link (`cannot find
+  -lsherpa-onnx-c-api`, the libraries stay in the cache: `static:-bundle`).
+  `TF_DICTATION_LIB_DIR=<dir>` links already extracted libraries instead. The Silero voice activity
+  model (`silero_vad.onnx`, 630 KB, MIT, sha256-pinned) comes the same way and is embedded in the
+  binary.
+- **Linux.** Microphone capture is cpal on ALSA, so building needs `libasound2-dev` (§3; the builder
+  container and `linux.yml` install it) and the packages depend on `libasound2` and `libstdc++6`
+  (`.deb`, `bundle.linux.deb.depends`) or `alsa-lib` and `libstdc++` (Arch). The AppImage carries
+  neither: `libasound.so.2` and `libstdc++.so.6` come from the system (linuxdeploy leaves them out).
+  The binary's glibc floor stays 2.34. `[observed]` (container build, `ldd`, the AppDir)
+- **Windows cross build.** onnxruntime's objects ask the linker for `PathCch.lib`
+  (`/DEFAULTLIB`), which matches no file in the Windows SDK cargo-xwin unpacks on a case-sensitive
+  file system (it has `pathcch.lib` and `PATHCCH.lib`). For cross builds only, the build script
+  copies the SDK's file under the requested name into `OUT_DIR/winlibs` and puts that on the link
+  search path. Native Windows builds (`windows.yml`) don't need it. `[observed]` (`cargo xwin build -p
+  teleflock` links)
+- **macOS.** `src-tauri/Info.plist` (merged into the bundle's: `NSMicrophoneUsageDescription`,
+  `NSSpeechRecognitionUsageDescription`) and `src-tauri/Entitlements.plist`
+  (`com.apple.security.device.audio-input`, signed in through `tauri.macos.conf.json`): without them
+  macOS never grants the microphone. `macos.yml` needs nothing else (curl is preinstalled; the
+  archives are cached, §8); its run is the first full link of the engine for macOS.
+- **Tests and labs.** `cargo test -p tf-dictation` links and runs the engine (its version, the voice
+  activity detector on silence and on recorded sentences; recognizers need a downloaded model, so
+  only the lab decodes speech); `tf-devserver --features voice` is the lab build (architecture §5.3).
 
 ## 11. Releases and self-update
 
@@ -371,7 +476,7 @@ What a release must contain (exactly what `scripts/release.sh` uploads; the `.dm
 |---|---|
 | `TeleFlock_<ver>_x64-setup.exe` | Windows: downloaded by tauri-plugin-updater (URL from `latest.json`), run passively (`/P /UPDATE /R`), relaunches the app |
 | `TeleFlock_<ver>_x64-setup.exe.sig` | minisign signature (updater key); its content is `latest.json`'s `signature` |
-| `TeleFlock_<ver>_universal.apk` | Android: downloaded to the app cache, installed through the system installer |
+| `TeleFlock_<ver>_universal.apk` | Android: downloaded to the app cache, installed through the system installer. arm64-v8a only since 0.9.0 (§6.3); "universal" is a legacy name (the APK held four ABIs up to 0.8.1) that stays because installed apps look for exactly it (`src-tauri/src/update/release.rs`) |
 | `TeleFlock_<ver>_universal.apk.sha256` | Android: the APK must match it before install |
 | `TeleFlock_<ver>_amd64.AppImage` (+ `.sig`) | Linux AppImage: replaced in place by tauri-plugin-updater, then the app restarts |
 | `TeleFlock_<ver>_amd64.deb` (+ `.sig`) | Debian/Ubuntu: installed by tauri-plugin-updater with `pkexec dpkg -i` (password prompt), then the app restarts |
@@ -461,11 +566,43 @@ scripts/release.sh                # build Windows + Android + Linux, verify, wri
 gh run list --workflow macos.yml --limit 1
 ```
 
-`scripts/release.sh` options: `--skip-build` (reuse `dist-release/`), `--skip-windows` /
-`--skip-android` / `--skip-linux` (reuse those, build the rest), `--notes-file FILE` (default:
-GitHub's generated notes; the file's text also goes into `latest.json`), `--prerelease`, `--draft`,
-`--dry-run` (build + verify + `latest.json`, print the `gh` command). Releases are normal (not
-pre-releases) by default. The repo slug is `REPO` in the script and in
+How `scripts/release.sh` builds: two stages whose steps run side by side, first the frontend and
+`tf-hostd` (every platform embeds both), then Windows, Android and Linux (`build-<platform>.sh`
+with `SKIP_FRONTEND=1 SKIP_HOSTD=1`). Before the platforms start, `cargo fetch --locked` downloads
+and unpacks every crate: the Linux container mounts the cargo registry but not cargo's lock on it.
+Output lines carry the step's name (`[windows] …`); `dist-release/logs/<step>.log` keeps each
+step's full output. A failed platform stops the release after the others finished; the ones that
+succeeded are stamped (below) and the failed one's stamp was removed when its build started, so
+the next run (clean tree) rebuilds only the failed one. When the script exits it prints each
+step's wall-clock time and outcome (built and why, reused and from which commit, failed) and the
+total.
+
+Reuse instead of rebuilding: a platform is not built when `dist-release/` holds its packages from
+an earlier run on a clean tree of the same version (the platform's stamp, below) and
+`git diff --no-renames --name-only <commit> HEAD` names none of its inputs (`platforms_of` in the
+script): documentation (`docs/`, `*.md`), `.github/`, `.research/`, `drafts/`, `site/`, the lab, CI-check
+and site scripts, `set-version.sh`, `verify-updater-sig.ts` and `tauri.macos.conf.json` are inputs of
+no platform; `src-tauri/windows/`, `build-windows.sh` only of Windows; `src-tauri/gen/android/`,
+`src-tauri/plugins/teleflock-android/`, `build-android.sh` only of Android;
+`tauri.linux.conf.json`, `src-tauri/linux/`, `packaging/`, `build-linux.sh`, `LICENSE` only of
+Linux; `updater-key.sh` of Windows and Linux; every other path of all three. So a Linux-only fix
+after a release build rebuilds only Linux, a docs change nothing, and right after a full build a
+second run reuses everything. `--rebuild` builds every platform anyway; deleting
+`dist-release/.built-<platform>` rebuilds that one.
+
+The stamp, `dist-release/.built-<platform>`, is `<commit>[-dirty] <version>` followed by the
+`sha256sum` lines of the platform's files in `dist-release/` (packages, `.sig`, `.sha256`; for
+Linux also `aur/PKGBUILD` and `aur/.SRCINFO`); a platform whose files no longer match is rebuilt.
+It is removed before the platform's build starts, by `release.sh` and by `build-<platform>.sh`
+itself (also when run by hand), and written after a successful build only if `HEAD` has not moved
+and a clean tree is still clean: a build that read the tree while it changed may hold either
+version, so a release then stops and a dry run warns.
+
+`scripts/release.sh` options: `--rebuild`, `--skip-build` (build nothing, use `dist-release/`),
+`--skip-windows` / `--skip-android` / `--skip-linux` (don't build those), `--notes-file FILE`
+(default: GitHub's generated notes; the file's text also goes into `latest.json`), `--prerelease`,
+`--draft`, `--dry-run` (build + verify + `latest.json`, print the `gh` command). Releases are
+normal (not pre-releases) by default. The repo slug is `REPO` in the script and in
 `src-tauri/src/update/release.rs`.
 
 What it enforces before publishing:
@@ -474,16 +611,19 @@ What it enforces before publishing:
 - The three version files agree; the tree has no changes, untracked files included
   (`git status --porcelain`); `HEAD` is pushed; the release does not exist yet; a `v<ver>` tag
   already on origin must point at `HEAD` (annotated tags peeled), then it is reused
-  (`--verify-tag`), else `gh` tags `HEAD`.
-- Reused packages (`--skip-*`) must come from this commit: every build the script runs writes
-  `dist-release/.built-<windows|android|linux>` with the `HEAD` SHA (`<sha>-dirty` when the tree had
-  changes), and a release needs all three to equal `HEAD`. `--dry-run` only warns, so packages
-  built by the `build-*.sh` scripts directly (no stamp) can be dry-run but not published.
+  (`--verify-tag`), else `gh` tags `HEAD`. `Cargo.lock` is up to date (`cargo fetch --locked`,
+  `build-hostd.sh` builds `--locked`).
+- Every platform's packages are reusable as above: built by this script from `HEAD`, or from an
+  earlier clean commit of this version with none of the platform's inputs changed since, and
+  still the files its stamp lists. A build on a tree with changes stamps `<sha>-dirty`, which is
+  never reusable. `--dry-run` only warns, so packages built by the `build-*.sh` scripts directly
+  (they remove the stamp) can be dry-run but not published.
 - Checksums match; every `.sig` (installer, AppImage, `.deb`) verifies against its package with
   the public key in `tauri.conf.json` and is bound to `<ver>` (`scripts/verify-updater-sig.ts`:
   minisign Ed25519 over the BLAKE2b-512 prehash, the trusted comment's global signature, and its
-  `version:` field, as the plugin checks them); the APK verifies with `apksigner` and has exactly
-  one signer, the release certificate `0cf2f823…097fd9` pinned as `APK_CERT_SHA256` (§6.2).
+  `version:` field, as the plugin checks them); the APK verifies with `apksigner`, has exactly
+  one signer, the release certificate `0cf2f823…097fd9` pinned as `APK_CERT_SHA256` (§6.2), and
+  holds `lib/arm64-v8a/libteleflock_lib.so` and no library for another ABI.
 
 macOS: the `v<ver>` tag (created by `gh release create` or pushed beforehand) starts `macos.yml`;
 its upload job waits for the release and attaches `TeleFlock_<ver>_universal.dmg` + `.sha256`
@@ -503,7 +643,7 @@ installs over the previous APK.
 (`packaging/linux/Dockerfile`, image `teleflock-linux-builder:rust-<v>-bun-<v>`, same Rust and Bun
 as the host): a build on Debian 13 needed `GLIBC_2.39` and would not start on Ubuntu 24.04 or
 Debian 12. `target/release-linux` is only ever used by that container. Packages: `.deb` (package
-name `tele-flock`, depends `libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1`), AppImage
+name `tele-flock`, depends `libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1, libasound2, libstdc++6`), AppImage
 (bundles WebKitGTK; `NO_STRIP=true` because linuxdeploy's strip fails on `.relr.dyn`), and the Arch
 package from `packaging/arch/PKGBUILD` (`teleflock-bin`, repackages the `.deb`, so it is also a
 valid AUR `-bin` PKGBUILD; dependencies are namcap-clean except `libayatana-appindicator`, which the

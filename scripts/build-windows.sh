@@ -32,6 +32,9 @@ tf_updater_key_check
 command -v cargo-xwin >/dev/null || { log "cargo install cargo-xwin"; cargo install --locked cargo-xwin; }
 command -v makensis >/dev/null || { echo "makensis missing: apt-get install nsis (docs/build.md §3)" >&2; exit 1; }
 rustup target list --installed | grep -qx "$TRIPLE" || rustup target add "$TRIPLE"
+# From here on dist-release/'s Windows installer is being replaced: scripts/release.sh's stamp of
+# what it was built from no longer holds (docs/build.md §11.2).
+rm -f "$OUT/.built-windows"
 
 [ -d node_modules ] || { log "bun install"; bun install --frozen-lockfile; }
 if [ "${SKIP_FRONTEND:-0}" != 1 ]; then

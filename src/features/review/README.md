@@ -1,7 +1,9 @@
 # features/review (owner: FrontOps)
 
 Review and ship a worktree: route `#/review/:hostId/:workspaceId` (`ReviewView`), the diff viewer
-(`diff/`), the file tree and the ship panel (commit → push → PR → merge → done, `ShipPanel.tsx`).
+(`diff/`), the file tree and the ship panel (commit → push → PR → merge → done, `ShipPanel.tsx`). A chat's
+workspace (an agent in it is a chat, or its folder is under `HostInfo.chats`) gets a short "nothing to review"
+note instead, without any git or gh call.
 
 ## Public API (ship panel parts)
 
@@ -25,6 +27,19 @@ export const useFixRuns; export function fixKey(hostId, cwd); export function di
 // src/features/review/FixPanel.tsx
 export function FixActions(props: { hostId; cwd; workspace; pr; defaultBranch? }): JSX.Element | null; // inside the PR card
 ```
+
+## Markdown files: Diff | Rendered
+
+`.md`, `.markdown` and `.mdx` files carry a `Diff | Rendered` switch in their header (icons only on phones; one
+choice for every Markdown file, remembered on this device: `tf.review.markdown`, `diff/mdMode.ts`). Rendered replaces
+the hunks with the document in the transcript's own renderer (`features/session/markdown`, so Mermaid, math and code
+highlighting are the same): the working-tree text of an added or modified file (`fs.read` of `<repo root>/<path>`,
+`diff/useRenderedDocs.ts`, read only while Rendered is on, at most 40 files, files over 400 KB stay a diff with a
+note), the old text of a deleted file (the patch carries it whole; "Showing the deleted version"). For a modified file
+the document is cut into chunks at blank lines outside code fences (`diff/markdown.ts`): chunks that contain a line the
+diff adds or changes get the diff's green edge and tint, a note counts them; removed text shows only in Diff. Chunks are
+virtualized and measured rows like the rest of the viewer (only chunks in view render), so a long document stays fast.
+Tests: `bun test src/features/review/diff/markdown.test.ts`.
 
 ## Make it green, rebase and resolve
 

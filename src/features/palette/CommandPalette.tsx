@@ -14,6 +14,7 @@ import {
   Keyboard,
   Columns2,
   MessageSquareReply,
+  MessagesSquare,
   PanelLeft,
   Plug,
   PlugZap,
@@ -33,6 +34,7 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
+  isAndroid,
   Kbd,
   Spinner,
   spring,
@@ -54,6 +56,7 @@ import {
 } from "@/core";
 import type { MotionPref, ThinkingLevel } from "@/core/gen";
 import { archiveWithUndo, openAnswerHud, openTerminal, setArchived, setMuted, stopAgent } from "@/features/board/agentActions";
+import { openChat } from "@/features/dispatch/openChat";
 import { connect } from "@/features/hosts/ConnStatusCard";
 import { MOTION_COPY } from "@/features/settings/parts";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
@@ -62,6 +65,7 @@ import { toggleSidebar } from "@/features/shell/sidebarState";
 import { COLUMN_STATUS, PHASE_STATUS } from "@/features/shell/status";
 import { ACTIONS, type ActionDef, type ViewDef, VIEWS } from "@/features/shell/vocab";
 import { paneDetail, paneName } from "@/features/terminal/panes";
+import { openWhatsNew } from "@/features/updates/releaseNotes";
 import { rankItem } from "./fuzzy";
 import { type PaletteCommand, useContributed, useRecents } from "./registry";
 import { hostCall, type PalettePage, sessionCommands } from "./sessionCommands";
@@ -163,6 +167,7 @@ function useEntries(): Entry[] {
   });
   entries.push(
     action("act:new-task", ACTIONS.newTask, <Send />, ["task", "start", "branch", "dispatch", "send", "worktree", "quick"], () => navigate({ name: "dispatch" })),
+    action("act:new-chat", ACTIONS.newChat, <MessagesSquare />, ["chat", "ask", "question", "no folder", "no repo"], openChat),
     action("act:new-worktree", ACTIONS.newWorktree, <GitBranchPlus />, ["task", "start", "branch", "create", "git", "agent"], () => ui.openDialog({ kind: "newWorktree", hostId: defaultHost })),
     action("act:new-agent", ACTIONS.newAgent, <Bot />, ["start", "omp", "spawn"], () => ui.openDialog({ kind: "newAgent", hostId: defaultHost })),
     action("act:fan-out", ACTIONS.fanOut, <GitFork />, ["parallel", "compare", "many agents", "models", "worktrees"], () => ui.openDialog({ kind: "fanOut", hostId: defaultHost })),
@@ -173,6 +178,7 @@ function useEntries(): Entry[] {
     { id: "act:sidebar", title: "Toggle sidebar", group: "Actions", keywords: ["panel", "show", "hide"], icon: <PanelLeft />, shortcut: "Ctrl B", run: toggleSidebar },
     { id: "act:add-host", title: "Add a host…", group: "Actions", keywords: ["connect", "tailscale", "ssh", "wsl", "local"], icon: <Server />, hint: "Connect a machine over Tailscale SSH, locally or in WSL", run: () => ui.openDialog({ kind: "hostEditor" }) },
     { id: "act:shortcuts", title: "Keyboard shortcuts", group: "Actions", keywords: ["keys", "help", "?", "terms", "glossary"], icon: <Keyboard />, shortcut: "?", hint: "Every key, and what TeleFlock's words mean", run: () => ui.openDialog({ kind: "shortcuts" }) },
+    { id: "act:whats-new", title: "What's new", group: "Actions", keywords: ["changelog", "release notes", "version", "update", "changes"], icon: <Sparkles />, hint: "The release notes of this version", run: () => openWhatsNew() },
   );
   for (const m of ["system", "full", "reduced"] as const satisfies readonly MotionPref[]) {
     if (m === settings.motion) continue;
@@ -200,6 +206,7 @@ function useEntries(): Entry[] {
     { id: "wrapped", keys: ["wrapped", "week", "weekly", "digest", "recap", "summary", "share", "stats", "image"] },
     { id: "hosts", keys: ["machines", "connections"] },
     { id: "forward", keys: ["forwarding", "forward", "tf-forward", "relay", "shell", "ssh", "agent-browser", "browser", "cdp", "port", "tunnel", "tools", "another host", "headed"] },
+    ...(isAndroid ? [] : [{ id: "browser" as const, keys: ["browser", "web", "chrome", "chromium", "tabs", "sign in", "logins", "cookies", "use my browser", "agent browser", "cdp", "screencast"] }]),
     { id: "settings", keys: ["preferences", "options"] },
     { id: "automations", keys: ["schedule", "cron", "recurring", "timer", "nightly"] },
     { id: "omp", keys: ["omp config", "models", "roles", "model roles", "harness", "tools", "approval", "compaction"] },

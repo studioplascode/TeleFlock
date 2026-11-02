@@ -13,13 +13,14 @@ export type AutoResumeConfig = {
  */
 enabled: boolean, 
 /**
- * Bring agents back after a reboot: the host may install a boot-time service (systemd
- * timer) that starts tf-hostd while agents wait to come back (default on). Off: they
+ * Bring agents back after a reboot: the host may install a boot-time service that starts
+ * tf-hostd while agents wait to come back (default on): a systemd timer on Linux, a launchd
+ * agent on macOS and a Task Scheduler task on Windows (see `BootService.kind`). Off: they
  * come back only once tf-hostd runs again. Absent from older daemons.
  */
 bringBack?: boolean, 
 /**
- * Whether this host can start tf-hostd at boot (what "Bring agents back after a reboot"
+ * Whether this host can start tf-hostd by itself (what "Bring agents back after a reboot"
  * installs) and whether it does. Absent from older daemons.
  */
 bootService?: BootService, 

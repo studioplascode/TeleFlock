@@ -1,13 +1,16 @@
 //! `cleanup.*` (architecture §3.17): the Cleanup page. Linked worktrees with what deciding whether
-//! to delete them takes (`scan`), their removal checked again right before (`remove`), and omp's
-//! storage maintenance limited to what is not a session (`storage`). Sessions are never archived
+//! to delete them takes (`scan`), their removal checked again right before (`remove`), omp's
+//! storage maintenance limited to what is not a session (`storage`), and shells nobody uses
+//! (`shells`: listed, and closed by themselves unless switched off). Sessions are never archived
 //! or deleted here.
 
 pub mod remove;
 pub mod scan;
+pub mod shells;
 pub mod storage;
 
 mod prs;
+mod sessions;
 mod size;
 
 use serde_json::Value;
@@ -22,6 +25,8 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Resul
         HostMethod::CleanupRemove(p) => to_value(remove::remove(ctx, &p).await?),
         HostMethod::CleanupStorageReq(p) => to_value(storage::status(p.wait_ms).await),
         HostMethod::CleanupStorageRun(p) => to_value(storage::run(&p).await?),
+        HostMethod::CleanupIdleShellsSet(p) => to_value(shells::set(ctx, &p)?),
+        HostMethod::CleanupIdleShellsClose(p) => to_value(shells::close_asked(ctx, &p).await?),
         other => Err(ApiError::new(
             "unknown_method",
             format!("{} is not a cleanup method", other.name()),

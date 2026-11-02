@@ -125,8 +125,8 @@ export function toastAnchorsChanged(): void {
 /**
  * Toast host; mount once (DesignProvider does). Desktop: bottom-right, above a `[data-toast-anchor]` under
  * the stack and floating bars that publish `--tf-toast-lift`; swipe right.
- * Phone: one compact banner in the thumb zone, just above the tab bar / bottom controls (one line,
- * action on the right), with a "+N" mark when more are waiting (they show as it goes); at the top
+ * Phone: one compact banner in the thumb zone, just above the tab bar / bottom controls (title and text up to two
+ * lines each, action on the right), with a "+N" mark when more are waiting (they show as it goes); at the top
  * edge while a sheet is open (the sheet owns the bottom). Swipe down to dismiss.
  */
 export function Toaster() {
@@ -182,8 +182,8 @@ export function Toaster() {
               </span>
             )}
             <div className="min-w-0 flex-1">
-              <RadixToast.Title className={cn("font-extrabold text-ink", mobile ? "truncate text-[13.5px]" : "text-sm")}>{t.title}</RadixToast.Title>
-              {t.description && <RadixToast.Description className={cn("mt-0.5 text-xs text-mute", mobile && "truncate")}>{t.description}</RadixToast.Description>}
+              <RadixToast.Title className={cn("font-extrabold text-ink", mobile ? "line-clamp-2 text-[13.5px] leading-snug" : "text-sm")}>{t.title}</RadixToast.Title>
+              {t.description && <RadixToast.Description className={cn("mt-0.5 text-xs text-mute", mobile && "line-clamp-2")}>{t.description}</RadixToast.Description>}
               {!mobile && action}
             </div>
             {mobile && action}

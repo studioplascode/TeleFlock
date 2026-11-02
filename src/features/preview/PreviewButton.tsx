@@ -4,7 +4,7 @@ import { useState } from "react";
 import { core, useTunnels } from "@/core";
 import type { TunnelInfo } from "@/core/gen";
 import { BottomSheet, Button, Spinner, cn, popIn, useIsMobile } from "@/design";
-import { openExternal, openTunnel, tunnelKey, usePreviewStore } from "./store";
+import { openTunnel, previewWindows, showPreview, tunnelKey, usePreviewStore } from "./store";
 
 export interface PreviewButtonProps {
   hostId: string;
@@ -17,9 +17,10 @@ export interface PreviewButtonProps {
 }
 
 /**
- * "Open preview" for a dev server on the agent host: opens (or reuses) a tunnel, then launches the
- * default browser on desktop or an in-app preview sheet on mobile. Live tunnels glow, opening ones
- * spin, failed ones turn red and retry on click.
+ * "Open preview" for a dev server on the agent host: opens (or reuses) a tunnel, then shows it
+ * (`showPreview`: a window of its own in the Android app, an in-app sheet on a phone-sized layout,
+ * the default browser on the desktop). Live tunnels glow, opening ones spin, failed ones turn red
+ * and retry on click.
  */
 export function PreviewButton({ hostId, port, label, size = "sm", className }: PreviewButtonProps) {
   const mobile = useIsMobile();
@@ -31,9 +32,7 @@ export function PreviewButton({ hostId, port, label, size = "sm", className }: P
 
   const open = async () => {
     const tunnel = live ?? (await openTunnel(hostId, port));
-    if (!tunnel) return;
-    if (mobile) setSheet(tunnel);
-    else openExternal(tunnel);
+    if (tunnel) showPreview(tunnel, mobile, setSheet);
   };
 
   const title = live
@@ -62,7 +61,7 @@ export function PreviewButton({ hostId, port, label, size = "sm", className }: P
             </span>
           )
         }
-        trailing={!mobile && !failed ? <ExternalLink className="opacity-60" /> : failed ? <RotateCw className="opacity-80" /> : undefined}
+        trailing={!mobile && !previewWindows() && !failed ? <ExternalLink className="opacity-60" /> : failed ? <RotateCw className="opacity-80" /> : undefined}
         className={cn("max-w-full font-mono", className)}
         title={title}
       >
@@ -73,7 +72,11 @@ export function PreviewButton({ hostId, port, label, size = "sm", className }: P
   );
 }
 
-/** Mobile in-app preview: the tunnelled page in an iframe, with reload and "open in browser". */
+/**
+ * In-app preview on a phone-sized layout: the tunnelled page in an iframe, with reload and "open in
+ * browser". In the Android app only the demo's documents show here: a tunnel's page gets a window
+ * of its own there (`showPreview`), since every frame of the app's page gets the app's IPC.
+ */
 export function PreviewSheet({ tunnel, onClose }: { tunnel: TunnelInfo | null; onClose: () => void }) {
   const [nonce, setNonce] = useState(0);
   const [loaded, setLoaded] = useState(false);

@@ -7,12 +7,16 @@
 //! (postponing), so a changed policy applies at once and the time already counted stays counted.
 //! The clock stands still while the policy wants no app connected and one is (or tf-hostd started
 //! less than [`START_GRACE_MS`] ago), after a cancel, and once it fell due.
+//!
+//! Every answer it sent becomes a review item ([`Decided`]): kept with the session's data until
+//! someone marks it reviewed on any device, [`DECISION_KEEP_MS`] at most and the newest
+//! [`DECISIONS_MAX`] (reviewed ones make room first).
 
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use tf_proto::autoanswer::{AgentAutoAnswer, AutoAnswer, AutoAnswerCountdown, AutoAnswerSource, AutoAnswerStatus, AUTO_ANSWER_MAX_SECS};
+use tf_proto::autoanswer::{AgentAutoAnswer, AutoAnswer, AutoAnswerCountdown, AutoAnswerSource, AutoAnswerStatus, AutoDecision, AUTO_ANSWER_MAX_SECS};
 use tf_proto::model::{Agent, LinkState, NeedsKind};
 use tf_proto::{ApiError, Millis};
 
@@ -28,6 +32,10 @@ pub const STALE_MS: Millis = 10 * 60_000;
 /// An agent's own policy outlives its agent on the board this long (a launch binds it before
 /// herdr reports the agent).
 pub const SWEEP_GRACE_MS: Millis = 5 * 60_000;
+/// Review items kept per session: the newest (reviewed ones go first when there are more).
+pub const DECISIONS_MAX: usize = 200;
+/// A review item is kept this long after its answer, reviewed or not.
+pub const DECISION_KEEP_MS: Millis = 30 * 24 * 3600 * 1000;
 
 const MAX_MS: i64 = AUTO_ANSWER_MAX_SECS as i64 * 1000;
 
@@ -41,6 +49,8 @@ pub struct SessionData {
     pub agents: BTreeMap<String, OwnPolicy>,
     /// Agent id → the countdown on its pending question.
     pub pending: BTreeMap<String, Countdown>,
+    /// Questions decide for me answered, oldest first (review items, §3.23 "Review").
+    pub decisions: Vec<Decided>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +59,19 @@ pub struct OwnPolicy {
     pub policy: AutoAnswer,
     /// When it was set.
     pub at: Millis,
+}
+
+/// A question decide for me answered, and whether someone looked at it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Decided {
+    #[serde(flatten)]
+    pub decision: AutoDecision,
+    /// When it was marked reviewed, and on which device; `None` while it waits for a look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<Millis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_by: Option<String>,
 }
 
 /// The countdown on one agent's pending question.
@@ -191,9 +214,12 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn new(data: SessionData, now: Millis) -> Self {
+    pub fn new(mut data: SessionData, now: Millis) -> Self {
         let restored = data.pending.keys().cloned().collect();
-        Self { data, restored, started: now, changes: 0, saved: 0, clients: false }
+        // Review items past their time go at once (a daemon that was down for weeks), and are
+        // saved that way.
+        let expired = trim(&mut data.decisions, now);
+        Self { data, restored, started: now, changes: u64::from(expired), saved: 0, clients: false }
     }
 
     pub fn data(&self) -> &SessionData {
@@ -533,10 +559,65 @@ impl Core {
         self.touch(gone > 0);
         gone
     }
+
+    // ───────────────────────────── review items ─────────────────────────────
+
+    /// Records a question decide for me answered: a review item until someone looks at it.
+    pub fn decided(&mut self, d: AutoDecision, now: Millis) {
+        self.data.decisions.push(Decided { decision: d, reviewed_at: None, reviewed_by: None });
+        trim(&mut self.data.decisions, now);
+        self.touch(true);
+    }
+
+    /// The review items nobody marked reviewed yet, oldest first (`HostInfo.decisions`).
+    pub fn decisions(&self) -> Vec<AutoDecision> {
+        let mut out: Vec<AutoDecision> = self.data.decisions.iter().filter(|d| d.reviewed_at.is_none()).map(|d| d.decision.clone()).collect();
+        out.sort_by_key(|d| d.at);
+        out
+    }
+
+    /// `host.autoAnswerReview`: marks the items `ids` (with `all`: every one) reviewed on device
+    /// `by`. Returns those that were unreviewed until now: their ids and their notifications.
+    pub fn review(&mut self, ids: &[String], all: bool, now: Millis, by: &str) -> Vec<(String, Option<String>)> {
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut out = Vec::new();
+        for d in self.data.decisions.iter_mut().filter(|d| d.reviewed_at.is_none() && (all || wanted.contains(d.decision.id.as_str()))) {
+            d.reviewed_at = Some(now);
+            d.reviewed_by = Some(by.to_string());
+            out.push((d.decision.id.clone(), d.decision.notification_id.clone()));
+        }
+        self.touch(!out.is_empty());
+        out
+    }
+
+    /// Drops review items past [`DECISION_KEEP_MS`]; true when any went.
+    pub fn expire_decisions(&mut self, now: Millis) -> bool {
+        let gone = trim(&mut self.data.decisions, now);
+        self.touch(gone);
+        gone
+    }
 }
 
 fn off() -> ApiError {
     ApiError::new("not_found", "decide for me is off for this agent")
+}
+
+/// Keeps the review items younger than [`DECISION_KEEP_MS`] and at most [`DECISIONS_MAX`] of
+/// them: past the cap the oldest reviewed ones go first, then the oldest unreviewed. True when
+/// any went.
+fn trim(items: &mut Vec<Decided>, now: Millis) -> bool {
+    let before = items.len();
+    items.retain(|d| now - d.decision.at < DECISION_KEEP_MS);
+    let mut over = items.len().saturating_sub(DECISIONS_MAX);
+    if over > 0 {
+        items.retain(|d| {
+            let drop = over > 0 && d.reviewed_at.is_some();
+            over -= usize::from(drop);
+            !drop
+        });
+        items.drain(..over);
+    }
+    items.len() != before
 }
 
 /// The wait of a countdown under `p` (ms).
@@ -593,6 +674,32 @@ fn view(e: &Countdown, p: &AutoAnswer) -> AutoAnswerCountdown {
     AutoAnswerCountdown { request_id: e.request_id.clone(), status, deadline, remaining_ms, picks: e.labels.clone(), earlier: e.earlier }
 }
 
+/// A review item for tests: ★ "Use SQLite" of "Which database?", notification `n-<id>`.
+#[cfg(test)]
+pub(crate) fn sample_decision(id: &str, at: Millis) -> AutoDecision {
+    use tf_proto::autoanswer::AutoDecisionOption;
+    let opt = |label: &str, rec: bool| AutoDecisionOption { label: label.into(), recommended: rec, picked: rec };
+    AutoDecision {
+        id: id.into(),
+        agent_id: "a1".into(),
+        agent_name: "push".into(),
+        request_id: "7".into(),
+        title: "Question".into(),
+        question: "Which database?".into(),
+        options: vec![opt("Use SQLite", true), opt("Use Postgres", false)],
+        multi: false,
+        text: None,
+        earlier: false,
+        at,
+        waited_ms: 20 * 60_000,
+        source: AutoAnswerSource::Host,
+        session_id: Some("s-1".into()),
+        session_file: Some("/s/push.jsonl".into()),
+        cwd: Some("/w/push".into()),
+        notification_id: Some(format!("n-{id}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +737,7 @@ mod tests {
             answerable: true,
             context: None,
             step: None,
+            browser: false,
         }
     }
 
@@ -1018,5 +1126,62 @@ mod tests {
         assert!(c.permitted(&f, T0 + MIN, true));
         c.set_default(AutoAnswer { enabled: false, ..policy(1, false) }, T0 + MIN, true);
         assert!(!c.permitted(&f, T0 + MIN + 1, false), "turned off meanwhile");
+    }
+
+    #[test]
+    fn answers_are_review_items_until_someone_looks() {
+        let mut c = core_with(policy(20, false));
+        c.decided(sample_decision("d1", T0), T0);
+        c.decided(sample_decision("d2", T0 + MIN), T0 + MIN);
+        let ids = |c: &Core| c.decisions().into_iter().map(|d| d.id).collect::<Vec<_>>();
+        assert_eq!(ids(&c), ["d1", "d2"]);
+        // Saved with the session's data, and there after a restart.
+        let saved: SessionData = serde_json::from_str(&serde_json::to_string(&c.take_dirty().unwrap()).unwrap()).unwrap();
+        let mut c = Core::new(saved, T0 + 2 * MIN);
+        assert_eq!(ids(&c), ["d1", "d2"]);
+        assert!(!c.is_dirty());
+        // Reviewed on one device: gone for every device, with its notification named; reviewing it
+        // again (another device, a moment later) changes nothing.
+        assert_eq!(c.review(&["d1".into(), "nope".into()], false, T0 + 3 * MIN, "Desk"), [("d1".to_string(), Some("n-d1".to_string()))]);
+        assert!(c.is_dirty());
+        assert!(c.review(&["d1".into()], false, T0 + 4 * MIN, "Pixel").is_empty());
+        assert_eq!(ids(&c), ["d2"]);
+        let kept = &c.data().decisions[0];
+        assert_eq!((kept.reviewed_at, kept.reviewed_by.as_deref()), (Some(T0 + 3 * MIN), Some("Desk")));
+        // A reviewed item stays reviewed across a restart.
+        let mut c = Core::new(c.take_dirty().unwrap(), T0 + 5 * MIN);
+        assert_eq!(ids(&c), ["d2"]);
+        assert_eq!(c.review(&[], true, T0 + 6 * MIN, "Desk").len(), 1);
+        assert!(c.decisions().is_empty());
+    }
+
+    #[test]
+    fn review_items_are_capped_and_expire() {
+        let mut c = core_with(policy(20, false));
+        for i in 0..DECISIONS_MAX {
+            c.decided(sample_decision(&format!("d{i}"), T0 + i as i64), T0 + i as i64);
+        }
+        // Reviewed items make room for newer ones before any unreviewed one goes.
+        c.review(&["d5".into(), "d9".into()], false, T0 + 300, "Desk");
+        c.decided(sample_decision("new1", T0 + 400), T0 + 400);
+        c.decided(sample_decision("new2", T0 + 401), T0 + 401);
+        assert_eq!(c.data().decisions.len(), DECISIONS_MAX);
+        assert!(c.data().decisions.iter().all(|d| d.reviewed_at.is_none()));
+        assert_eq!(c.decisions()[0].id, "d0");
+        // Then the oldest unreviewed one goes.
+        c.decided(sample_decision("new3", T0 + 402), T0 + 402);
+        let list = c.decisions();
+        assert_eq!((list.len(), list[0].id.as_str(), list[DECISIONS_MAX - 1].id.as_str()), (DECISIONS_MAX, "d1", "new3"));
+        // Unreviewed or not, an item is kept 30 days.
+        let mut c = core_with(policy(20, false));
+        c.decided(sample_decision("old", T0), T0);
+        c.decided(sample_decision("young", T0 + DECISION_KEEP_MS / 2), T0 + DECISION_KEEP_MS / 2);
+        assert!(!c.expire_decisions(T0 + DECISION_KEEP_MS - 1));
+        assert!(c.expire_decisions(T0 + DECISION_KEEP_MS));
+        assert_eq!(c.decisions().into_iter().map(|d| d.id).collect::<Vec<_>>(), ["young"]);
+        // A daemon that was down past their time drops them at start, and saves that.
+        c.take_dirty();
+        let c = Core::new(c.data().clone(), T0 + 2 * DECISION_KEEP_MS);
+        assert!(c.decisions().is_empty() && c.is_dirty());
     }
 }

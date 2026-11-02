@@ -61,6 +61,9 @@ pub fn present(host: Option<&HostProfile>, n: &Notification, style: NotifyStyle)
     };
     let open_url = if host.is_some() && !n.agent_id.is_empty() {
         deeplink::agent_url(&host_id, &n.agent_id, Some(&n.id))
+    } else if host.is_some() && tf_proto::HostPage::of(n).is_some() {
+        // No agent, but a page to open (the idle-shells summary): the engine routes the tap.
+        deeplink::notification_url(&host_id, &n.id)
     } else {
         format!("{}://open", deeplink::SCHEME)
     };

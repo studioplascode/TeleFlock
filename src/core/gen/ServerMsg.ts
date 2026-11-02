@@ -22,4 +22,4 @@ seq?: number, } | { "t": "term", termId: string, ev: TermEvent, } | { "t": "noti
  * ([`FEATURE_PRESENCE`]) `true`: post it to the system now; `false`: another device is in
  * use, only list it (a `notifyAlert` may follow). Absent: decide locally, as before.
  */
-alert?: boolean, } | { "t": "notifyAlert", id: string, } | { "t": "notifyDone", ids: Array<string>, by?: string, } | { "t": "pong", ts: number, } | { "t": "fwdOffered", states: Array<FwdOfferState>, } | { "t": "fwd", sid: number, ev: FwdEv, } | { "t": "error", error: ApiError, };
+alert?: boolean, } | { "t": "notifyAlert", id: string, } | { "t": "notifyDone", ids: Array<string>, by?: string, } | { "t": "pong", ts: number, } | { "t": "fwdOffered", states: Array<FwdOfferState>, } | { "t": "fwd", sid: number, ev: FwdEv, } | { "t": "browserDetached", agentId: string, reason: string, } | { "t": "error", error: ApiError, };

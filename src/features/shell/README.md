@@ -66,10 +66,19 @@ the host editor (`useUi().dialog.kind === "hostEditor"`), the "make this host li
 ## Desktop sidebar
 Top to bottom: **＋ New task** (`D`, opens Dispatch) · launcher row (New worktree · New agent · Fan out ·
 Open folder · Past sessions; labelled from 240 px, wrapping onto a second or third row, icon-only below; drag the right edge to
-resize, double-click resets) · nav Board · Inbox · Activity · Usage · Automations · Wall · Ambient (Inbox badge = needs count, dot =
-unread updates) · HOSTS (header "Manage ›" → Hosts; each row: orb · colour swatch · name · latency, then
+resize, double-click resets) · nav Board · Inbox · Activity · Usage · Automations · Wall · Ambient (Inbox badge = needs plus
+decided-for-you count, sunset while something needs you, calm neutral with only decisions; dot = unread updates) · HOSTS (header "Manage ›" → Hosts; each row: orb · colour swatch · name · latency, then
 CPU sparkline + RAM bar, or the phase/reason and a Connect/Retry/Sign in/Verify button) · WORKSPACES tree
 (all remaining height) · footer ⚙ Settings + collapse. Labels, keys and tooltips come from `vocab.ts`.
+
+**WORKSPACES tree.** Repo → worktree/folder → its agents and shells. A worktree or folder with exactly one row (one agent,
+or one shell: `soleRow` in `sidebarTree.ts`) takes one line: that pane's row carries the worktree's name (branch, else
+label), the pane's own name muted after it (left out when the name already says it, `foldedPaneLabel`), the uncommitted count
+●N, and the pane's state; clicking opens the pane. Its right-click menu (long-press on touch) is the pane's own items
+(open, answer, beside, Mark done / Close shell…) followed by the worktree's `WorkspaceActionsMenu` items under a "Worktree · …" label (New agent here,
+New shell, Review, Remove worktree…, …); the pane's own open/close entries are not repeated (`leadingPanes`). Two or more
+rows keep the worktree row with its panes under it (the worktree row's click opens Review, as before). Rows truncate; the
+branch keeps its width before the pane name does.
 
 ## Keyboard (desktop, spec §6)
 `SHORTCUTS` in `keyboard.ts` feeds the `?` sheet and is built from `vocab.ts` (`ACTIONS`, `VIEWS`, `SEND_KEYS`);

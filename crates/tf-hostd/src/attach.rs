@@ -81,8 +81,12 @@ pub fn stop(paths: Paths, force: bool) -> anyhow::Result<i32> {
     })
 }
 
-/// `tf-hostd ensure` (the automations keepalive timer runs it): starts the daemon detached when
-/// it is not running, through the same transient-scope path as `attach`, then exits.
+/// `tf-hostd ensure` (the boot service runs it: a systemd timer, a launchd agent or a Task Scheduler
+/// task, `automations/boot.rs`): starts the daemon detached when it is not running, through the same
+/// transient-scope path as `attach`, then exits. It has no terminal, may have no stdio and a minimal
+/// environment; the daemon it starts gets null stdio and a session of its own (`setsid`, so launchd's
+/// process-group clean-up never reaches it; on Windows `DETACHED_PROCESS`, breaking away from the
+/// task's job where that allows it, else staying in the task's run, which never ends by time).
 pub fn ensure(paths: Paths, relay_port: u16) -> anyhow::Result<i32> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async move {
@@ -216,7 +220,9 @@ async fn start_and_connect(paths: &Paths, relay_port: u16) -> Result<(ipc::BoxRe
 /// Starts `tf-hostd daemon` detached, inside `scope` when given (Linux with systemd: outside the
 /// login session that runs this attach, so tearing that session down spares the daemon).
 fn spawn_daemon(paths: &Paths, relay_port: u16, scope: Option<&tf_herdr::durable::Scope>) -> std::io::Result<std::process::Child> {
-    let exe = std::env::current_exe()?;
+    // The Windows login task starts `ensure` from a windowless copy of the program (`automations::schtasks`):
+    // the daemon still runs from the real one.
+    let exe = crate::automations::schtasks::canonical(&std::env::current_exe()?);
     let mut cmd = match scope {
         Some(s) => s.command(&exe, "TeleFlock host daemon (tf-hostd)"),
         None => std::process::Command::new(&exe),

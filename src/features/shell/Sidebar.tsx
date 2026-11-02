@@ -10,17 +10,19 @@ import {
   GitBranch,
   GitBranchPlus,
   GitFork,
+  Globe,
   History,
   type LucideIcon,
   MessageSquareReply,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Sparkles,
   SquareTerminal,
   SquareX,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { type PointerEvent as ReactPointerEvent, useEffect, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useState } from "react";
 import {
   Badge,
   Button,
@@ -32,6 +34,7 @@ import {
   ContextMenuTrigger,
   CountBadge,
   IconButton,
+  isAndroid,
   Kbd,
   ScrollArea,
   Shimmer,
@@ -42,16 +45,35 @@ import {
   Tooltip,
   useMediaQuery,
 } from "@/design";
-import { navigate, type Route, useAgent, useAgentKeys, useHostIds, useHosts, useHostStale, useInbox, useNotifications, useRoute, useUi, useWorkspaces } from "@/core";
+import {
+  type AgentView,
+  navigate,
+  type Route,
+  useAgent,
+  useAgentKeys,
+  useHostIds,
+  useHosts,
+  useHostStale,
+  useInbox,
+  useNotifications,
+  useRoute,
+  useUi,
+  useWorkspaces,
+} from "@/core";
 import { routeKey } from "@/app/routes";
 import type { HerdrState, PaneInfo, Workspace } from "@/core/gen";
+import { useDecisions } from "@/features/autoAnswer/hooks";
+import { inboxBadge } from "@/features/autoAnswer/review";
 import { archiveWithUndo, openAnswerHud, setArchived } from "@/features/board/agentActions";
+import { useRenameAgain } from "@/features/board/renameAgain";
+import { useBrowserLendItem } from "@/features/browser/agentMenu";
 import { connAction } from "@/features/hosts/ConnStatusCard";
 import { hostAccent } from "@/features/hosts/kinds";
 import { openNewAgent } from "@/features/workspace/NewAgentDialog";
 import { closePane, WorkspaceActionsMenu } from "@/features/workspace/workspaceActions";
 import { paneDetail, paneName } from "@/features/terminal/panes";
 import { useHealthHistory } from "./healthHistory";
+import { foldedPaneLabel, soleRow } from "./sidebarTree";
 import { agentTier, COLUMN_STATUS, connSummary, PHASE_STATUS } from "./status";
 import { SIDEBAR_DEFAULT_W, SIDEBAR_LABELS_W, SIDEBAR_RAIL_QUERY, toggleSidebar, useSidebarPeek, useSidebarWidth } from "./sidebarState";
 import { ACTIONS, type ActionDef, agentStateId, STATE_SHORT, type ViewDef, VIEWS } from "./vocab";
@@ -76,10 +98,11 @@ function ActionTip({ def }: { def: ActionDef }) {
   );
 }
 
-/** Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer. */
-const NAV = ["board", "inbox", "activity", "usage", "wrapped", "automations", "wall", "ambient"] as const;
+/** Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer. The browser runs on a computer only. */
+const NAV = ["board", "inbox", "activity", "usage", "wrapped", "automations", "wall", "ambient", "browser"] as const;
 
-function NavItem({ id, collapsed, active, badge, unread }: { id: (typeof NAV)[number]; collapsed: boolean; active: boolean; badge?: number; unread?: number }) {
+/** `badge`: a count (sunset: something needs you; `calm`: only decided-for-you questions to review). */
+function NavItem({ id, collapsed, active, badge, calm = false, unread }: { id: (typeof NAV)[number]; collapsed: boolean; active: boolean; badge?: number; calm?: boolean; unread?: number }) {
   const def: ViewDef = VIEWS[id];
   const Icon = def.icon;
   const dot = !!unread && (
@@ -102,121 +125,206 @@ function NavItem({ id, collapsed, active, badge, unread }: { id: (typeof NAV)[nu
         <Icon className={cn("relative size-4 shrink-0", active && "text-accent-hi")} />
         {!collapsed && <span className="relative flex-1 truncate text-left">{def.label}</span>}
         {dot}
-        {badge !== undefined && badge > 0 && (collapsed ? <span className="absolute top-1 right-2 size-2 rounded-full bg-sun-2 shadow-glow-sun" /> : <CountBadge count={badge} className="relative" />)}
+        {badge !== undefined &&
+          badge > 0 &&
+          (collapsed ? (
+            <span className={cn("absolute top-1 right-2 size-2 rounded-full", calm ? "bg-ink/45" : "bg-sun-2 shadow-glow-sun")} />
+          ) : (
+            <CountBadge count={badge} className={cn("relative", calm && "bg-tile-5 text-ink shadow-[inset_0_0_0_1px_var(--color-line-2)]")} />
+          ))}
       </button>
     </Tooltip>
   );
 }
 
+/**
+ * A workspace's only row folded into its line: the pane's row carries the workspace's name (and its dirty count),
+ * and its right-click menu is the workspace's with the pane's own actions first.
+ */
+interface Fold {
+  hostId: string;
+  ws: Workspace;
+  /** The workspace's name in the tree: branch, else label. */
+  branch: string;
+  nested: boolean;
+  /** This workspace's review screen is open. */
+  reviewActive: boolean;
+}
+
+/** Left padding of a pane row: hung below its workspace row, or (folded) at the workspace row's own indent. */
+function rowIndent(depth: number, fold?: Fold): number {
+  return fold ? (fold.nested ? 22 : 8) : 8 + depth * 14;
+}
+
+/** The pane's own context menu; folded, the workspace menu with the pane's items on top (long-press on touch alike). */
+function PaneMenu({ fold, paneId, items, children }: { fold?: Fold; paneId: string; items: ReactNode; children: ReactNode }) {
+  if (fold)
+    return (
+      <WorkspaceActionsMenu hostId={fold.hostId} workspace={fold.ws} mode="context" leading={items} leadingPanes={[paneId]}>
+        {children}
+      </WorkspaceActionsMenu>
+    );
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent>{items}</ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+/** Name part of a folded row: the workspace's name, then the pane's own name unless that repeats it, then uncommitted files. */
+function FoldedName({ fold, paneLabel }: { fold: Fold; paneLabel: string }) {
+  const second = foldedPaneLabel(fold.branch, paneLabel);
+  const dirty = fold.ws.repo?.dirty ?? 0;
+  return (
+    <>
+      <span className={cn("min-w-0 truncate font-mono text-[11px]", !second && "flex-1")}>{fold.branch}</span>
+      {second && <span className="mr-auto min-w-0 max-w-[40%] shrink-10 truncate text-[10.5px] font-semibold text-mute-2">{second}</span>}
+      {dirty > 0 && (
+        <Tooltip content={`${dirty} uncommitted file${dirty === 1 ? "" : "s"}`}>
+          <span className="shrink-0 font-mono text-[10px] text-warn">●{dirty}</span>
+        </Tooltip>
+      )}
+    </>
+  );
+}
+
+function AgentMenuItems({ a, open }: { a: AgentView; open: () => void }) {
+  const { setSplit } = useUi();
+  const rename = useRenameAgain(a.key);
+  const browser = useBrowserLendItem(a);
+  return (
+    <>
+      <ContextMenuItem icon={<Bot />} shortcut={ACTIONS.openSession.shortcut} onSelect={open}>
+        {ACTIONS.openSession.label}
+      </ContextMenuItem>
+      {a.column === "needs" && (
+        <ContextMenuItem icon={<MessageSquareReply />} onSelect={() => openAnswerHud(a.key)}>
+          {ACTIONS.answer.label}
+        </ContextMenuItem>
+      )}
+      <ContextMenuItem icon={<SquareTerminal />} onSelect={() => navigate({ name: "terminal", hostId: a.hostId, agentId: a.id })}>
+        {ACTIONS.terminal.label}
+      </ContextMenuItem>
+      <ContextMenuItem icon={<Columns2 />} onSelect={() => setSplit({ kind: "session", key: a.key })}>
+        Open beside
+      </ContextMenuItem>
+      <ContextMenuItem icon={<Columns2 />} shortcut={ACTIONS.terminalBeside.shortcut} onSelect={() => setSplit({ kind: "terminal", hostId: a.hostId, agentId: a.id })}>
+        {ACTIONS.terminalBeside.label}
+      </ContextMenuItem>
+      {browser && (
+        <ContextMenuItem icon={<Globe />} title={browser.description} onSelect={browser.run}>
+          {browser.label}
+        </ContextMenuItem>
+      )}
+      {rename.available && (
+        <ContextMenuItem icon={<Sparkles />} disabled={rename.busy} title={ACTIONS.renameAgain.description} onSelect={rename.run}>
+          {rename.busy ? "Naming…" : ACTIONS.renameAgain.label}
+        </ContextMenuItem>
+      )}
+      <ContextMenuSeparator />
+      {a.archived ? (
+        <ContextMenuItem icon={<ArchiveRestore />} onSelect={() => void setArchived(a.key, false).catch(() => {})}>
+          {ACTIONS.reopen.label}
+        </ContextMenuItem>
+      ) : (
+        <ContextMenuItem icon={<Archive />} onSelect={() => void archiveWithUndo([a.key])}>
+          {ACTIONS.markDone.label}
+        </ContextMenuItem>
+      )}
+    </>
+  );
+}
+
 /** `index` is the row's place in its workspace: the only thing that moves it, so the only thing that makes it measure its layout. */
-function AgentRow({ agentKey: key, depth, index }: { agentKey: string; depth: number; index: number }) {
+function AgentRow({ agentKey: key, depth, index, fold }: { agentKey: string; depth: number; index: number; fold?: Fold }) {
   const a = useAgent(key);
   const route = useRoute();
-  const { setSplit } = useUi();
   if (!a) return null;
   const active = route.name === "agent" && route.hostId === a.hostId && route.agentId === a.id;
   const status = COLUMN_STATUS[a.column];
   const open = () => navigate({ name: "agent", hostId: a.hostId, agentId: a.id });
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <motion.button
-          layout="position"
-          layoutDependency={index}
-          type="button"
-          onClick={open}
-          aria-current={active ? "page" : undefined}
-          title={a.live.line ?? a.title}
-          className={cn(
-            "group relative flex h-7 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-xs font-semibold transition-colors focus-ring",
-            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "text-ink-2 hover:bg-ink/4",
-          )}
-          style={{ paddingLeft: 8 + depth * 14 }}
-        >
-          <StatusOrb status={status} activity={agentTier(a)} size={7} label={status === "needs-you" ? "Needs you" : null} />
-          <span className="min-w-0 flex-1 truncate">{a.name}</span>
-          {a.column === "running" && a.live.tool && <span className="max-w-16 truncate font-mono text-[10px] text-tool">{a.live.tool.name}</span>}
-          <Badge tone={status} className="h-4 px-1.5 text-[8.5px]">
-            {STATE_SHORT[agentStateId(a)]}
-          </Badge>
-        </motion.button>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem icon={<Bot />} shortcut={ACTIONS.openSession.shortcut} onSelect={open}>
-          {ACTIONS.openSession.label}
-        </ContextMenuItem>
-        {a.column === "needs" && (
-          <ContextMenuItem icon={<MessageSquareReply />} onSelect={() => openAnswerHud(a.key)}>
-            {ACTIONS.answer.label}
-          </ContextMenuItem>
+    <PaneMenu fold={fold} paneId={a.paneId} items={<AgentMenuItems a={a} open={open} />}>
+      <motion.button
+        layout="position"
+        layoutDependency={index}
+        type="button"
+        onClick={open}
+        aria-current={active ? "page" : undefined}
+        title={[fold && `${fold.branch} · ${fold.ws.cwd}`, a.name, a.live.line ?? a.title].filter(Boolean).join("\n")}
+        className={cn(
+          "group relative flex h-7 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-xs font-semibold transition-colors focus-ring",
+          active
+            ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]"
+            : fold?.reviewActive
+              ? "bg-ink/7 text-ink"
+              : "text-ink-2 hover:bg-ink/4",
         )}
-        <ContextMenuItem icon={<SquareTerminal />} onSelect={() => navigate({ name: "terminal", hostId: a.hostId, agentId: a.id })}>
-          {ACTIONS.terminal.label}
-        </ContextMenuItem>
-        <ContextMenuItem icon={<Columns2 />} onSelect={() => setSplit({ kind: "session", key: a.key })}>
-          Open beside
-        </ContextMenuItem>
-        <ContextMenuItem icon={<Columns2 />} shortcut={ACTIONS.terminalBeside.shortcut} onSelect={() => setSplit({ kind: "terminal", hostId: a.hostId, agentId: a.id })}>
-          {ACTIONS.terminalBeside.label}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        {a.archived ? (
-          <ContextMenuItem icon={<ArchiveRestore />} onSelect={() => void setArchived(a.key, false).catch(() => {})}>
-            {ACTIONS.reopen.label}
-          </ContextMenuItem>
-        ) : (
-          <ContextMenuItem icon={<Archive />} onSelect={() => void archiveWithUndo([a.key])}>
-            {ACTIONS.markDone.label}
-          </ContextMenuItem>
-        )}
-      </ContextMenuContent>
-    </ContextMenu>
+        style={{ paddingLeft: rowIndent(depth, fold) }}
+      >
+        <StatusOrb status={status} activity={agentTier(a)} size={7} label={status === "needs-you" ? "Needs you" : null} />
+        {fold ? <FoldedName fold={fold} paneLabel={a.name} /> : <span className="min-w-0 flex-1 truncate">{a.name}</span>}
+        {a.column === "running" && a.live.tool && <span className="max-w-16 truncate font-mono text-[10px] text-tool">{a.live.tool.name}</span>}
+        <Badge tone={status} className="h-4 shrink-0 px-1.5 text-[8.5px]">
+          {STATE_SHORT[agentStateId(a)]}
+        </Badge>
+      </motion.button>
+    </PaneMenu>
   );
 }
 
 /** Shell rows shown under a workspace before "N more". */
 const SHELLS_SHOWN = 3;
 
-/** A pane no agent owns (a shell, or whatever runs in it): opens its terminal; nothing is created. */
-function ShellRow({ hostId, pane, tabLabel, depth }: { hostId: string; pane: PaneInfo; tabLabel: string; depth: number }) {
-  const route = useRoute();
+function ShellMenuItems({ hostId, pane, open }: { hostId: string; pane: PaneInfo; open: () => void }) {
   const { setSplit } = useUi();
+  return (
+    <>
+      <ContextMenuItem icon={<SquareTerminal />} onSelect={open}>
+        Open terminal
+      </ContextMenuItem>
+      <ContextMenuItem icon={<Columns2 />} onSelect={() => setSplit({ kind: "terminal", hostId, paneId: pane.id })}>
+        Open beside
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem icon={<SquareX />} danger onSelect={() => void closePane(hostId, pane)}>
+        Close shell…
+      </ContextMenuItem>
+    </>
+  );
+}
+
+/** A pane no agent owns (a shell, or whatever runs in it): opens its terminal; nothing is created. */
+function ShellRow({ hostId, pane, tabLabel, depth, fold }: { hostId: string; pane: PaneInfo; tabLabel: string; depth: number; fold?: Fold }) {
+  const route = useRoute();
   const active = route.name === "terminal" && route.hostId === hostId && route.paneId === pane.id;
   const open = () => navigate({ name: "terminal", hostId, paneId: pane.id });
   const name = paneName(pane);
   const detail = paneDetail(pane);
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <button
-          type="button"
-          onClick={open}
-          aria-current={active ? "page" : undefined}
-          aria-label={`Shell ${name}`}
-          title={[name, `tab ${tabLabel}`, detail].filter(Boolean).join(" · ")}
-          className={cn(
-            "flex h-6 w-full items-center gap-2 rounded-sm pr-1.5 text-left text-[11px] font-semibold transition-colors focus-ring",
-            active ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]" : "text-mute hover:bg-ink/4 hover:text-ink-2",
-          )}
-          style={{ paddingLeft: 8 + depth * 14 }}
-        >
-          <SquareTerminal className={cn("size-3 shrink-0", active ? "text-accent-hi" : "text-mute-2")} />
-          <span className="min-w-0 flex-1 truncate font-mono">{name}</span>
-        </button>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem icon={<SquareTerminal />} onSelect={open}>
-          Open terminal
-        </ContextMenuItem>
-        <ContextMenuItem icon={<Columns2 />} onSelect={() => setSplit({ kind: "terminal", hostId, paneId: pane.id })}>
-          Open beside
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem icon={<SquareX />} danger onSelect={() => void closePane(hostId, pane)}>
-          Close shell…
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+    <PaneMenu fold={fold} paneId={pane.id} items={<ShellMenuItems hostId={hostId} pane={pane} open={open} />}>
+      <button
+        type="button"
+        onClick={open}
+        aria-current={active ? "page" : undefined}
+        aria-label={`Shell ${name}`}
+        title={[fold && `${fold.branch} · ${fold.ws.cwd}`, name, `tab ${tabLabel}`, detail].filter(Boolean).join(" · ")}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-sm pr-1.5 text-left font-semibold transition-colors focus-ring",
+          fold ? "h-7 text-xs" : "h-6 text-[11px]",
+          active
+            ? "bg-accent/14 text-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_35%,transparent)]"
+            : fold?.reviewActive
+              ? "bg-ink/7 text-ink"
+              : "text-mute hover:bg-ink/4 hover:text-ink-2",
+        )}
+        style={{ paddingLeft: rowIndent(depth, fold) }}
+      >
+        <SquareTerminal className={cn("size-3 shrink-0", active ? "text-accent-hi" : "text-mute-2")} />
+        {fold ? <FoldedName fold={fold} paneLabel={name} /> : <span className="min-w-0 flex-1 truncate font-mono">{name}</span>}
+      </button>
+    </PaneMenu>
   );
 }
 
@@ -229,6 +337,19 @@ function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; n
   const Icon = ws.worktree ? GitBranch : ws.repo ? FolderGit2 : FolderOpen;
   const dirty = ws.repo?.dirty ?? 0;
   const shells = ws.tabs.flatMap((t) => t.panes.filter((p) => !p.agentId).map((pane) => ({ pane, tabLabel: t.label })));
+  const sole = soleRow({ agents: keys, shells });
+  if (sole) {
+    const fold: Fold = { hostId, ws, branch, nested, reviewActive: active };
+    return (
+      <li>
+        {sole.kind === "agent" ? (
+          <AgentRow agentKey={sole.agent} depth={0} index={0} fold={fold} />
+        ) : (
+          <ShellRow hostId={hostId} pane={sole.shell.pane} tabLabel={sole.shell.tabLabel} depth={0} fold={fold} />
+        )}
+      </li>
+    );
+  }
   const shown = allShells ? shells : shells.slice(0, SHELLS_SHOWN);
   const depth = nested ? 2 : 1;
   return (
@@ -244,7 +365,7 @@ function WorkspaceRow({ hostId, ws, nested }: { hostId: string; ws: Workspace; n
             !ws.repo && "cursor-default",
           )}
           style={{ paddingLeft: nested ? 22 : 8 }}
-          title={`${ws.label} · ${ws.cwd}`}
+          title={`${branch} · ${ws.label} · ${ws.cwd}`}
         >
           <Icon className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{branch}</span>
@@ -324,7 +445,7 @@ function RepoTree({ hostId, group }: { hostId: string; group: RepoGroup }) {
   return (
     <li>
       <div className="group/repo flex h-7 items-center gap-1 rounded-sm pr-1 hover:bg-ink/3">
-        <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm pl-1 text-left text-xs font-extrabold text-ink focus-ring">
+        <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} title={group.root ? `${group.name} · ${group.root}` : group.name} className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm pl-1 text-left text-xs font-extrabold text-ink focus-ring">
           <motion.span animate={{ rotate: open ? 90 : 0 }} transition={spring.snappy} className="grid place-items-center">
             <ChevronRight className="size-3.5 text-mute-2" />
           </motion.span>
@@ -435,7 +556,7 @@ function HostRow({ id, collapsed }: { id: string; collapsed: boolean }) {
         onClick={() => setFilter(filterTo)}
         aria-pressed={selected}
         className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-md py-1.5 pr-1 pl-2.5 text-left focus-ring"
-        title={selected ? "Show all hosts" : `Show only ${profile.name}`}
+        title={`${profile.name} · ${selected ? "show all hosts" : "show only this host"}`}
       >
         <span className="flex w-full items-center gap-2 text-sm">
           {orb}
@@ -533,7 +654,7 @@ export function Sidebar() {
   const route = useRoute();
   const ids = useHostIds();
   const { filter, status } = useHosts();
-  const needs = useInbox().length;
+  const inbox = inboxBadge(useInbox().length, useDecisions().length);
   const unread = useNotifications((s) => s.unread);
   const onlineIds = ids.filter((id) => status[id]?.phase === "online" || status[id]?.phase === "reconnecting");
   const treeIds = filter === "all" ? ids : ids.filter((id) => id === filter);
@@ -581,7 +702,7 @@ export function Sidebar() {
       animate={{ width: collapsed ? COLLAPSED_W : width }}
       transition={dragging ? { duration: 0 } : spring.smooth}
       className={cn(
-        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-chrome/55",
+        "relative flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-chrome/55 [&_.touch-hit]:after:hidden",
         rail && "absolute inset-y-0 left-0",
         overlay && "bg-chrome/94 shadow-[var(--shadow-d3),1px_0_0_var(--color-line-2)]",
         dragging && "select-none",
@@ -590,7 +711,7 @@ export function Sidebar() {
     >
       {/* Everything above the footer scrolls as one column on short windows, so nothing gets clipped;
           the workspace tree takes all remaining height and keeps its own scroller with a usable minimum. */}
-      <div className="no-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+      <div className="no-scrollbar flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-contain">
       <div className={cn("flex flex-col gap-1.5 p-2", collapsed && "items-center")}>
         <Tooltip content={<ActionTip def={ACTIONS.newTask} />} shortcut={ACTIONS.newTask.shortcut} side="right">
           {collapsed ? (
@@ -619,13 +740,14 @@ export function Sidebar() {
       </div>
 
       <div className={cn("flex flex-col gap-0.5 border-t border-line p-2", collapsed && "items-center")}>
-        {NAV.map((id) => (
+        {NAV.filter((id) => id !== "browser" || !isAndroid).map((id) => (
           <NavItem
             key={id}
             id={id}
             collapsed={collapsed}
             active={route.name === id}
-            badge={id === "inbox" ? needs : undefined}
+            badge={id === "inbox" ? inbox.count : undefined}
+            calm={id === "inbox" && inbox.calm}
             unread={id === "inbox" ? unread : undefined}
           />
         ))}
@@ -673,7 +795,7 @@ export function Sidebar() {
       {collapsed ? (
         <div className="flex-1" />
       ) : (
-        <ScrollArea className="min-h-28 flex-1 border-t border-line" viewportClassName="px-2 py-2" fade>
+        <ScrollArea className="min-h-28 flex-1 border-t border-line" viewportClassName="px-2 py-2 overflow-x-hidden! [&>div]:block!" fade>
           <div className="flex items-center justify-between px-2 pb-1">
             <span className="kicker">Workspaces</span>
           </div>

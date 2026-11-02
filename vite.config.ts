@@ -96,8 +96,24 @@ function reactCompiler(): { preset: RolldownBabelPreset; guard: Plugin } {
 
 const compiler = reactCompiler();
 
+/**
+ * KaTeX's stylesheet lists every font three times (woff2, woff, ttf) and Vite would ship all of
+ * them (about 1 MB more in every desktop and Android package). Every webview TeleFlock runs in
+ * reads woff2, so the other two sources are dropped before Vite resolves the urls.
+ */
+function katexWoff2Only(): Plugin {
+  return {
+    name: "teleflock:katex-woff2-only",
+    enforce: "pre",
+    transform(code, id) {
+      if (!/katex[\\/]dist[\\/]katex(?:\.min)?\.css(?:\?|$)/.test(id)) return undefined;
+      return code.replace(/,\s*url\([^)]*\)\s*format\("(?:woff|truetype)"\)/g, "");
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), compiler.guard, babel({ presets: [compiler.preset] }), tailwindcss()],
+  plugins: [katexWoff2Only(), react(), compiler.guard, babel({ presets: [compiler.preset] }), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },

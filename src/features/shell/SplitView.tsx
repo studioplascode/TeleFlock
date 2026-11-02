@@ -1,15 +1,19 @@
-import { Maximize2, SquareTerminal, X } from "lucide-react";
+import { SquareTerminal } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { lazy, type PointerEvent as ReactPointerEvent, type ReactNode, Suspense, useRef, useState } from "react";
-import { cn, IconButton, Spinner, spring, StatusOrb, Tooltip } from "@/design";
+import { cn, Spinner, spring, StatusOrb } from "@/design";
 import { agentKey, navigate, parseAgentKey, type SplitState, useAgent, useHosts, useRoute, useUi } from "@/core";
 import { isBare } from "@/app/routes";
 import type { TermTarget } from "@/core/gen";
-import { HostBadge, useMultiHost } from "@/features/hosts/HostBadge";
+import { useMultiHost } from "@/features/hosts/HostBadge";
+import { SplitHeaderRow } from "./SplitHeaderRow";
 import { COLUMN_STATUS } from "./status";
 
 const TerminalPane = lazy(() => import("@/features/terminal/TerminalPane").then((m) => ({ default: m.TerminalPane })));
 const SessionPane = lazy(() => import("@/features/session/SessionPane").then((m) => ({ default: m.SessionPane })));
+const ArtifactSplit = lazy(() => import("@/features/session/artifacts/ArtifactPane").then((m) => ({ default: m.ArtifactSplit })));
+const BrowserSplit = lazy(() => import("@/features/browser/BrowserSplit").then((m) => ({ default: m.BrowserSplit })));
+const AgentChatSplit = lazy(() => import("@/features/session/irc/BoardFrames").then((m) => ({ default: m.AgentChatSplit })));
 
 const RATIO_KEY = "tf.splitRatio";
 const MIN = 0.28;
@@ -20,8 +24,9 @@ function readRatio(): number {
   return v >= MIN && v <= MAX ? v : 0.56;
 }
 
-function SplitHeader({ split }: { split: SplitState }) {
-  const { setSplit } = useUi();
+type TermOrSession = Extract<SplitState, { kind: "terminal" | "session" }>;
+
+function SplitHeader({ split }: { split: TermOrSession }) {
   const key = split.kind === "session" ? split.key : split.agentId ? agentKey(split.hostId, split.agentId) : "";
   const agent = useAgent(key);
   const hostName = useHosts((h) => (split.kind === "terminal" ? (h.profiles.find((p) => p.id === split.hostId)?.name ?? split.hostId) : ""));
@@ -30,32 +35,46 @@ function SplitHeader({ split }: { split: SplitState }) {
   // With several hosts the chip names the host (and opens its details), so the title doesn't.
   const title = split.kind === "session" ? (agent?.name ?? "Session") : agent ? `${agent.name} · terminal` : multiHost ? "Terminal" : `Terminal · ${hostName}`;
   const expand = () => {
-    setSplit(null);
+    useUi.getState().setSplit(null);
     if (split.kind === "session") {
       const { hostId, agentId } = parseAgentKey(split.key);
       navigate({ name: "agent", hostId, agentId });
     } else navigate({ name: "terminal", hostId: split.hostId, paneId: split.paneId, agentId: split.agentId });
   };
   return (
-    <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
-      {split.kind === "terminal" ? <SquareTerminal className="size-4 text-mute" /> : agent && <StatusOrb status={COLUMN_STATUS[agent.column]} size={8} label={null} />}
-      <span className="min-w-0 flex-1 truncate text-sm font-bold text-ink-2">{title}</span>
-      <HostBadge hostId={hostId} className="max-w-[40%]" />
-      <Tooltip content="Open full view">
-        <IconButton label="Open full view" size="sm" onClick={expand}>
-          <Maximize2 />
-        </IconButton>
-      </Tooltip>
-      <Tooltip content="Close split" shortcut="Ctrl \">
-        <IconButton label="Close split" size="sm" onClick={() => setSplit(null)}>
-          <X />
-        </IconButton>
-      </Tooltip>
-    </div>
+    <SplitHeaderRow
+      icon={split.kind === "terminal" ? <SquareTerminal className="size-4 text-mute" /> : agent && <StatusOrb status={COLUMN_STATUS[agent.column]} size={8} label={null} />}
+      title={title}
+      hostId={hostId}
+      onExpand={expand}
+    />
   );
 }
 
+/** Panels that draw their own header row (with `SplitHeaderRow`) from inside their body. */
+const selfHeaded = (split: SplitState): split is Exclude<SplitState, TermOrSession> => split.kind !== "terminal" && split.kind !== "session";
+
+function splitKey(split: SplitState): string {
+  switch (split.kind) {
+    case "session":
+      return split.key;
+    case "terminal":
+      return `${split.hostId}:${split.agentId ?? split.paneId}`;
+    case "artifact":
+      // One panel per session: switching documents (versions) keeps the panel and its header.
+      return `artifact:${split.key}`;
+    case "browser":
+      // One browser per device: opening it beside another session keeps the panel.
+      return "browser";
+    case "agentChat":
+      return `agentChat:${split.key}`;
+  }
+}
+
 function SplitBody({ split }: { split: SplitState }) {
+  if (split.kind === "artifact") return <ArtifactSplit split={split} />;
+  if (split.kind === "browser") return <BrowserSplit agentKey={split.key} />;
+  if (split.kind === "agentChat") return <AgentChatSplit agentKey={split.key} />;
   if (split.kind === "session") return <SessionPane agentKey={split.key} compact />;
   const target: TermTarget | null = split.paneId ? { kind: "pane", paneId: split.paneId } : split.agentId ? { kind: "agent", agentId: split.agentId } : null;
   if (!target) return <div className="grid h-full place-items-center p-6 text-sm text-mute">Pick an agent to open its terminal here.</div>;
@@ -63,8 +82,10 @@ function SplitBody({ split }: { split: SplitState }) {
 }
 
 /**
- * Split-view frame: the main view on the left, `useUi().split` (terminal or a second session) on
- * the right behind a draggable, keyboard-resizable divider. The ratio persists.
+ * Split-view frame: the main view on the left, `useUi().split` (a terminal, a second session, a
+ * session's document, the browser or a session's message board) on the right behind a draggable,
+ * keyboard-resizable divider. The ratio persists. Terminal and session panels get `SplitHeader`;
+ * the others draw their own header row with `SplitHeaderRow` (one mechanism for every side panel).
  */
 export function SplitFrame({ children }: { children: ReactNode }) {
   // Focus mode and bare screens (ambient mode) hide the split (it comes back with them).
@@ -135,12 +156,12 @@ export function SplitFrame({ children }: { children: ReactNode }) {
               />
             </div>
             <section className="glass m-2 ml-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tile" aria-label="Split view">
-              <SplitHeader split={split} />
+              {!selfHeaded(split) && <SplitHeader split={split} />}
               {/* Bounded box, like the full-bleed route stage: whatever renders here (session, terminal, fallback)
                   fills it exactly — h-full or flex-1 roots both resolve — and scrolls inside, never grows past it. */}
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden *:min-h-0 *:flex-1">
                 <Suspense fallback={<div className="grid h-full place-items-center"><Spinner size={20} /></div>}>
-                  <SplitBody key={split.kind === "session" ? split.key : `${split.hostId}:${split.agentId ?? split.paneId}`} split={split} />
+                  <SplitBody key={splitKey(split)} split={split} />
                 </Suspense>
               </div>
             </section>

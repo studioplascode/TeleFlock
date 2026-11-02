@@ -1,4 +1,4 @@
-import type { ActivityKind, AgentAutoAnswer, Answer, AutoAnswer, AutoAnswerCountdown, AutoAnswerSource, NotifyKind } from "@/core/gen";
+import type { ActivityKind, AgentAutoAnswer, Answer, AutoAnswer, AutoAnswerCountdown, AutoAnswerReviewed, AutoAnswerSource, AutoDecision, NotifyAction, NotifyKind, PastSession } from "@/core/gen";
 import { apiError } from "../errors";
 import type { AgentSim } from "./agent";
 import type { AgentDef } from "./data";
@@ -13,6 +13,11 @@ import { opt, read, say, type Step, think, todo } from "./scripts";
  * online demo host, so a policy that counts only with no app connected stands (`waitingForNoApp`).
  * Seeded on forge: push's ★ ntfy question 12:40 from its pick, and flags' first question (of three: its
  * ask has Back) waiting for no app.
+ *
+ * Review (§3.23 "Review"): every answer sent is a decision in `HostInfo.decisions` (oldest first)
+ * until someone marks it reviewed (`host.autoAnswerReview`), which also reads its "decided for you"
+ * notification on every device. Seeded on forge: pool's ★ pick, hero's earlier answer (Back reopened
+ * the question) and one of relay, which ended since (its past session is in `host.sessions`).
  */
 
 const MIN_SECS = 60;
@@ -26,7 +31,11 @@ const HOLD_MS = 10 * 60_000;
 export const AUTO_ANSWER_ON: AutoAnswer = { enabled: true, afterSecs: DEFAULT_SECS, onlyWhenNoApp: false };
 export const AUTO_ANSWER_OFF: AutoAnswer = { enabled: false, afterSecs: DEFAULT_SECS, onlyWhenNoApp: false };
 
-const METHODS: Record<string, true> = { "agent.setAutoAnswer": true, "agent.autoAnswerCancel": true, "agent.autoAnswerPostpone": true, "host.autoAnswerSet": true };
+const METHODS: Record<string, true> = { "agent.setAutoAnswer": true, "agent.autoAnswerCancel": true, "agent.autoAnswerPostpone": true, "host.autoAnswerSet": true, "host.autoAnswerReview": true };
+/** tf-hostd's cap on the ids one `host.autoAnswerReview` takes. */
+const REVIEW_MAX = 500;
+/** Opening the notification (or its Review button) leads to the decision in the Inbox (tf_proto `HostPage::Decisions`). */
+const REVIEW_ACTION: NotifyAction = { id: "open:decisions", label: "Review" };
 
 /** What the decide-for-me demo needs from its DemoHost (closures over the host's state). */
 export interface AutoAnswerHost {
@@ -40,9 +49,17 @@ export interface AutoAnswerHost {
   seedSim(def: AgentDef, workspaceId: string): AgentSim;
   /** `HostInfo.autoAnswer` changed. */
   setDefault(policy: AutoAnswer): void;
+  /** `HostInfo.decisions` changed (empty: absent). */
+  setDecisions(decisions: AutoDecision[]): void;
+  /** Past sessions (`host.sessions`): the ended agent's seeded decision names one. */
+  sessions(): PastSession[];
   changed(agentId: string): void;
   activity(agentId: string, kind: ActivityKind, title: string, detail?: string): void;
-  notify(agentId: string, kind: NotifyKind, title: string, body: string): void;
+  /** The id the next notification gets: a decision names its notification before it goes out. */
+  noteId(): string;
+  notify(agentId: string, kind: NotifyKind, title: string, body: string, opts?: { id?: string; actions?: NotifyAction[] }): void;
+  /** These notifications were read on every device (tf-hostd's `notifyDone` to every app). */
+  notificationsRead(ids: string[]): void;
 }
 
 /** The countdown on one agent's pending question. */
@@ -222,6 +239,9 @@ export class DemoAutoAnswer {
   private readonly pending = new Map<string, Countdown>();
   /** What each agent shows (`Agent.autoAnswer`), as compared JSON. */
   private readonly shown = new Map<string, string>();
+  /** Decisions nobody reviewed yet, oldest first (`HostInfo.decisions`); reviewed ones are gone. */
+  private decisions: AutoDecision[] = [];
+  private nextDecision = 1;
 
   constructor(private readonly host: AutoAnswerHost) {}
 
@@ -230,7 +250,7 @@ export class DemoAutoAnswer {
     return { ...(this.hostPolicy ??= this.host.initial()) };
   }
 
-  /** forge: push's question 12:40 from its pick (the host default), flags' waiting for no app connected. */
+  /** forge: push's question 12:40 from its pick (the host default), flags' waiting for no app connected; three decisions to review. */
   seed(): void {
     const now = this.host.now();
     const push = this.host.sims.get("push");
@@ -254,6 +274,73 @@ export class DemoAutoAnswer {
     const f = this.pending.get("flags");
     if (f) f.elapsedMs = FLAGS.since * 1000;
     this.observeAll(now);
+    this.seedDecisions(now);
+  }
+
+  /**
+   * forge's decisions to review, oldest first: relay's ★ pick (relay ended since: no card, its
+   * session is a past one), hero's earlier answer (Back had reopened its question; typed text with
+   * it), pool's ★ pick 9 minutes ago. Their notifications are long gone (ids nobody holds).
+   */
+  private seedDecisions(now: number): void {
+    const relay = this.host.sessions().find((s) => !s.live && s.title === "Spike: collab relay in Rust");
+    const seeded: AutoDecision[] = [];
+    const session = (agentId: string) => {
+      const a = this.host.sims.get(agentId)?.agent;
+      return a ? { sessionId: a.omp?.sessionId, sessionFile: a.omp?.sessionFile, cwd: a.cwd } : undefined;
+    };
+    if (relay) {
+      seeded.push({
+        ...this.decision("relay", "Which crate should the relay use for its WebSocket connections?", ["tokio-tungstenite", "axum's built-in WebSocket", "fastwebsockets"], [0], [0]),
+        at: relay.updatedAt - 6 * 60_000,
+        sessionId: relay.id,
+        sessionFile: relay.file,
+        cwd: relay.cwd,
+      });
+    }
+    const hero = session("hero");
+    if (hero) {
+      seeded.push({
+        ...this.decision("hero", "Where should the animated hero appear?", ["Landing page", "Pricing", "Docs home", "Changelog"], [0, 1], [0, 2]),
+        multi: true,
+        earlier: true,
+        text: "not below 600 px wide",
+        at: now - 61 * 60_000,
+        waitedMs: 10 * 60_000,
+        source: "agent",
+        ...hero,
+      });
+    }
+    const pool = session("pool");
+    if (pool) {
+      seeded.push({
+        ...this.decision("pool", "How many connections should each API instance keep in its pool?", ["20, set in config", "Size it from the CPU count", "Unbounded, with a wait queue"], [0], [0]),
+        at: now - 9 * 60_000,
+        ...pool,
+      });
+    }
+    this.decisions = seeded.sort((a, b) => a.at - b.at);
+    this.host.setDecisions([...this.decisions]);
+  }
+
+  /** A seeded decision's shape: options by label, `rec` the ★ ones, `sent` the picked ones; 20 min under the host default. */
+  private decision(agentId: string, question: string, labels: string[], rec: number[], sent: number[]): AutoDecision {
+    const n = this.nextDecision++;
+    return {
+      id: `d-${n}`,
+      agentId,
+      agentName: agentId,
+      requestId: `${agentId}-ask`,
+      title: "Question",
+      question,
+      options: labels.map((label, i) => ({ label, recommended: rec.includes(i), picked: sent.includes(i) })),
+      multi: false,
+      earlier: false,
+      at: this.host.now(),
+      waitedMs: DEFAULT_SECS * 1000,
+      source: "host",
+      notificationId: `n-decided-${n}`,
+    };
   }
 
   /** Starts, keeps or drops each omp agent's countdown, answers what fell due, refreshes `Agent.autoAnswer`. */
@@ -306,6 +393,13 @@ export class DemoAutoAnswer {
     if (p) this.own.set(newId, p);
   }
 
+  /** A deleted chat (`chat.delete`): its own policy and countdown go with it. */
+  forget(id: string): void {
+    this.own.delete(id);
+    this.pending.delete(id);
+    this.shown.delete(id);
+  }
+
   /** Handles the decide-for-me methods; `undefined` for any other method. */
   call(method: string, p: Record<string, unknown>): unknown {
     if (!METHODS[method]) return undefined;
@@ -317,6 +411,7 @@ export class DemoAutoAnswer {
       this.observeAll(now);
       return { ...policy };
     }
+    if (method === "host.autoAnswerReview") return this.review(p);
     const sim = this.ompAgent(p.agentId);
     const id = sim.agent.id;
     if (method === "agent.setAutoAnswer") {
@@ -406,7 +501,7 @@ export class DemoAutoAnswer {
       if (run && e.runningSince === undefined) e.runningSince = now;
       if (!run) this.stop(e, now);
       if (e.runningSince !== undefined && e.runningSince + this.left(e, eff.policy) <= now) {
-        this.fire(sim, e, eff.policy);
+        this.fire(sim, e, eff);
         e = undefined;
       }
     } else if (e) {
@@ -430,13 +525,61 @@ export class DemoAutoAnswer {
     return { ...base, status: "waitingForNoApp", remainingMs: Math.max(0, left) };
   }
 
-  /** The wait ran out: answer with the ★ option(s), or the question's earlier answer, like tf-hostd. */
-  private fire(sim: AgentSim, e: Countdown, p: AutoAnswer): void {
+  /**
+   * The wait ran out: answer with the ★ option(s), or the question's earlier answer, like tf-hostd.
+   * The answer becomes a decision to review, published before its notification goes out.
+   */
+  private fire(sim: AgentSim, e: Countdown, eff: { policy: AutoAnswer; source: AutoAnswerSource }): void {
     const id = sim.agent.id;
     this.pending.delete(id);
+    // the question as the board showed it, before the answer clears it
+    const needs = sim.agent.needs;
     if (!sim.answer(e.requestId, { choices: e.picks, text: e.text, cancel: false, chat: false }, "Decide for me", false)) return;
+    const now = this.host.now();
     const picks = answerText(e);
-    this.host.activity(id, "answered", `${e.earlier ? "Auto-sent" : "Auto-answered"} ${picks}`, `${clip(e.question, 200)} · nobody answered within ${waitText(p.afterSecs * 1000 + e.extraMs)}`);
-    this.host.notify(id, "info", `${sim.agent.name} · decided for you`, clip(`${picks} — ${e.question}`, 240));
+    const waitedMs = eff.policy.afterSecs * 1000 + e.extraMs;
+    this.host.activity(id, "answered", `${e.earlier ? "Auto-sent" : "Auto-answered"} ${picks}`, `${clip(e.question, 200)} · nobody answered within ${waitText(waitedMs)}`);
+    const noteId = this.host.noteId();
+    const a = sim.agent;
+    this.decisions.push({
+      id: `d-${this.nextDecision++}`,
+      agentId: id,
+      agentName: a.name,
+      requestId: e.requestId,
+      title: needs?.title ?? "",
+      question: e.question,
+      options: (needs?.options ?? []).map((o) => ({ label: o.label, recommended: o.recommended, picked: e.picks.includes(o.id) })),
+      multi: needs?.multi ?? false,
+      ...(e.text !== undefined ? { text: e.text } : {}),
+      earlier: e.earlier,
+      at: now,
+      waitedMs,
+      source: eff.source,
+      sessionId: a.omp?.sessionId,
+      sessionFile: a.omp?.sessionFile,
+      cwd: a.cwd,
+      notificationId: noteId,
+    });
+    this.host.setDecisions([...this.decisions]);
+    this.host.notify(id, "info", `${a.name} · decided for you`, clip(`${picks} — ${e.question}`, 240), { id: noteId, actions: [REVIEW_ACTION] });
+  }
+
+  /**
+   * `host.autoAnswerReview`: marks `ids` (or `all`) reviewed for every device; their notifications
+   * are read everywhere. Ids already reviewed, or unknown, are skipped (tf-hostd's `review_in`).
+   */
+  private review(p: Record<string, unknown>): AutoAnswerReviewed {
+    const ids = p.ids ?? [];
+    if (!Array.isArray(ids) || ids.some((x) => typeof x !== "string")) throw apiError("invalid_params", "ids must be a list of decision ids");
+    if (p.all !== undefined && typeof p.all !== "boolean") throw apiError("invalid_params", "all must be true or false");
+    if (ids.length === 0 && p.all !== true) throw apiError("invalid_params", "name the decisions to mark reviewed (ids), or all");
+    const wanted = new Set<unknown>(ids.slice(0, REVIEW_MAX));
+    const done = this.decisions.filter((d) => p.all === true || wanted.has(d.id));
+    if (done.length === 0) return { reviewed: [] };
+    this.decisions = this.decisions.filter((d) => !done.includes(d));
+    this.host.setDecisions([...this.decisions]);
+    const notes = done.flatMap((d) => (d.notificationId ? [d.notificationId] : []));
+    if (notes.length > 0) this.host.notificationsRead(notes);
+    return { reviewed: done.map((d) => d.id) };
   }
 }

@@ -14,10 +14,18 @@ use crate::accounts::{
     AuthSubmitParams, AuthWaitParams,
 };
 use crate::app::{DiagReport, HostProfile, HostSecrets, HostStatusEntry, Settings, TunnelInfo, UpdateCheckParams, UpdateStatus, WslDistro, AppCapabilities};
-use crate::autoanswer::{AutoAnswer, AutoAnswerPostponeParams, AutoAnswerRef, SetAutoAnswerParams};
+use crate::autoanswer::{AutoAnswer, AutoAnswerPostponeParams, AutoAnswerRef, AutoAnswerReviewParams, AutoAnswerReviewed, SetAutoAnswerParams};
 use crate::artifacts::{ArtifactContent, ArtifactParams, LocalWriteParams, LocalWritten, SessionArtifacts};
-use crate::autoresume::{AutoResumeConfig, AutoResumeSetParams, RetryParams, RetryResult};
-use crate::cleanup::{CleanupRemoveParams, CleanupReport, CleanupScanParams, CleanupStorage, CleanupStorageParams, CleanupStorageRunParams};
+use crate::autoresume::{AutoResumeConfig, AutoResumeSetParams, RefusalFallback, RefusalFallbackSetParams, RefusalRetryParams, RetryParams, RetryResult};
+use crate::chats::{ChatDeleteParams, ChatDeletion, ChatFolders};
+use crate::cleanup::{
+    CleanupRemoveParams, CleanupReport, CleanupScanParams, CleanupStorage, CleanupStorageParams, CleanupStorageRunParams, IdleShells,
+    IdleShellsCloseParams, IdleShellsCloseResult, IdleShellsSetParams,
+};
+use crate::dictation::{
+    DictationLanguageParams, DictationMicrophoneParams, DictationMicrophones, DictationModelRef, DictationSelectParams, DictationSessionRef,
+    DictationStartParams, DictationState,
+};
 use crate::find::{SearchPage, SearchPollParams, SearchRef, SearchStartParams, SessionFindParams, SessionFindResult, SessionReadParams, SessionRows};
 use crate::github::{GhAuthStartParams, GhAuthStatus, GitIdentity, GitIdentityParams};
 use crate::jobs::{JobCancelParams, JobsListParams, JobsView, Service, ServiceList, ServiceLogs, ServiceLogsParams, ServiceRef, ServicesListParams};
@@ -34,7 +42,7 @@ use crate::plugins::{
 use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates};
 use crate::moves::{MoveCheck, MoveCheckParams, MoveChunk, MoveFinishParams, MoveProbe, MoveProbeParams, MoveReadParams, MoveReceiveParams, MoveRef, MoveStartParams, MoveStatus};
 use crate::notify::{NotifyConfig, NotifyPolicy, NotifyTestParams, NotifyTestResult, PushChannelRef, PushChannelSave, UiPresence};
-use crate::session::{ChangedFile, HistoryPage, SessionSnapshot};
+use crate::session::{AgentChatLog, ChangedFile, HistoryPage, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
 use crate::upload::{UploadBeginParams, UploadBegun, UploadChunkParams, UploadFinishParams, UploadFinished, UploadProgress, UploadRef};
 use crate::usage::{UsageParams, UsageReport};
@@ -42,6 +50,15 @@ use crate::wrapped::{WrappedParams, WrappedReport};
 use crate::xray::ContextXray;
 use crate::herdr::{HerdrConfigParams, HerdrHealth, HerdrRestartParams};
 use crate::forward::{ForwardList, ForwardRemoveParams, ForwardSaveParams, ForwardStopParams};
+use crate::browser::{
+    BrowserAgentParams, BrowserAnswerHostParams, BrowserAnswerParams, BrowserAttachParams, BrowserAttached, BrowserClearParams, BrowserConfig,
+    BrowserConfigSetParams, BrowserLendParams, BrowserRevealParams, BrowserStageParams, BrowserStaged, BrowserStartParams, BrowserStatus,
+    BrowserTabParams,
+};
+use crate::recording::{
+    RecordingAppendParams, RecordingAppended, RecordingBundle, RecordingBytes, RecordingDetail, RecordingFrameParams, RecordingInfo, RecordingList,
+    RecordingReadParams, RecordingRef, RecordingReleaseParams, RecordingRenderParams, RecordingStartParams, RecordingUpdateParams,
+};
 use crate::{Empty, Millis};
 
 macro_rules! methods {
@@ -336,6 +353,10 @@ wire_struct! {
         pub subagent_id: String,
         pub action: SubagentAction,
         pub message: Option<String>,
+        /// Chat: one of a message the user sends every running subagent at once (the message
+        /// board's "All running subagents"): the agent chat log shows it as one message (hosts ≥
+        /// 0.9.0; older hosts ignore it).
+        pub broadcast: Option<bool>,
     }
 }
 
@@ -343,6 +364,18 @@ wire_struct! {
     pub struct SubagentRef {
         pub agent_id: String,
         pub subagent_id: String,
+    }
+}
+
+wire_struct! {
+    /// `session.agentChat`: the session's agent chat log (hosts ≥ 0.9.0, `SessionMeta::agent_chat`).
+    pub struct AgentChatParams {
+        pub agent_id: String,
+        /// The epoch the client's copy belongs to …
+        pub epoch: Option<String>,
+        /// … and the revision it has: only messages changed after it come back. Without both (or
+        /// with another epoch) the whole log does.
+        pub after: Option<u64>,
     }
 }
 
@@ -366,8 +399,14 @@ pub enum StartTarget {
     Workspace { workspace_id: String, split: Option<Split> },
     /// An existing idle shell pane.
     Pane { pane_id: String },
-    /// New workspace at `cwd`.
+    /// New workspace at `cwd`. A chat folder (under `HostInfo.chats`) opens as a new tab of the
+    /// host's workspace for chats instead (§3.31).
     Cwd { cwd: String, label: Option<String> },
+    /// A chat task (§3.31): no repository or folder of the user's. tf-hostd makes a new empty
+    /// folder for it (`<hostd home>/chats/<name>-<id>/`, named after the agent) and opens the agent
+    /// in a new tab of its workspace for chats. Hosts without chat tasks (`HostInfo.chats`
+    /// absent) refuse it with `invalid_params`.
+    Chat {},
 }
 
 wire_struct! {
@@ -1006,7 +1045,7 @@ wire_struct! {
 wire_struct! {
     /// One completion from omp's model role on the host (`omp --mode json`, no tools).
     pub struct AiCompleteParams {
-        /// `branch` | `agentName` | `title` | `commit` | `pr` | `templateName`: logs and the demo only.
+        /// `branch` | `agentName` | `agentRename` | `title` | `commit` | `pr` | `templateName` | `ramble`: logs and the demo only.
         pub task: String,
         pub system: String,
         /// Sent on omp's stdin.
@@ -1025,6 +1064,26 @@ wire_struct! {
         pub text: String,
         pub model: Option<String>,
         pub ms: u32,
+    }
+}
+
+wire_struct! {
+    /// Starts the warm omp worker an `ai.complete` with the same `system`, `role` and `cwd` would use, so
+    /// its first call finds startup done. Answers at once; hosts older than 0.9.0 answer `unknown_method`.
+    pub struct AiPrewarmParams {
+        /// As in [`AiCompleteParams`]: logs only.
+        pub task: String,
+        pub system: String,
+        /// omp model role (default `tiny`).
+        pub role: Option<String>,
+        pub cwd: Option<String>,
+    }
+}
+
+wire_struct! {
+    pub struct AiPrewarmResult {
+        /// A worker for these parameters is already idle (`false`: it is starting).
+        pub ready: bool,
     }
 }
 
@@ -1215,10 +1274,11 @@ wire_struct! {
     /// What keeps automations running on this host.
     pub struct AutomationScheduler {
         /// `systemd`: a systemd timer brings tf-hostd back after reboots and crashes (Linux with
-        /// systemd: root, or lingering users); `daemon`: runs while tf-hostd runs (it starts when
-        /// a TeleFlock app connects).
+        /// systemd: root, or lingering users); `launchd`: a launchd agent does (macOS), and
+        /// `taskScheduler`: a Task Scheduler task does (Windows), both once the user has logged
+        /// in; `daemon`: runs while tf-hostd runs (it starts when a TeleFlock app connects).
         pub kind: String,
-        /// The systemd timer is installed and active.
+        /// The timer, agent or task is installed and active.
         pub persistent: bool,
         /// What is missing and how to fix it (e.g. `loginctl enable-linger`).
         pub note: Option<String>,
@@ -1288,6 +1348,7 @@ methods!(HostMethod, "HostMethods", {
     "session.artifact" => SessionArtifactRead(ArtifactParams) -> ArtifactContent;
     "session.writeLocal" => SessionWriteLocal(LocalWriteParams) -> LocalWritten;
     "session.context" => SessionContextXray(AgentRef) -> ContextXray;
+    "session.agentChat" => SessionAgentChat(AgentChatParams) -> AgentChatLog;
 
     "agent.prompt" => AgentPrompt(PromptParams) -> Empty;
     "agent.abort" => AgentAbort(AgentRef) -> Empty;
@@ -1324,9 +1385,20 @@ methods!(HostMethod, "HostMethods", {
     "agent.retry" => AgentRetry(RetryParams) -> RetryResult;
     "agent.autoResumeNow" => AgentAutoResumeNow(AgentRef) -> RetryResult;
     "agent.autoResumeCancel" => AgentAutoResumeCancel(AgentRef) -> Empty;
+    // Refusal fallback (refusal.rs, §3.22): "Retry with <model>" after a provider refusal.
+    "agent.refusalRetry" => AgentRefusalRetry(RefusalRetryParams) -> RetryResult;
     "agent.setAutoAnswer" => AgentSetAutoAnswer(SetAutoAnswerParams) -> Empty;
     "agent.autoAnswerCancel" => AgentAutoAnswerCancel(AutoAnswerRef) -> Empty;
     "agent.autoAnswerPostpone" => AgentAutoAnswerPostpone(AutoAnswerPostponeParams) -> Empty;
+    // The TeleFlock Browser (browser.rs, §3.33): the calling app (wire feature `browser`) lends its
+    // browser to the agent; hosts before 0.9.0 answer `unknown_method`.
+    "agent.browserAttach" => AgentBrowserAttach(BrowserAttachParams) -> BrowserAttached;
+    "agent.browserDetach" => AgentBrowserDetach(AgentRef) -> Empty;
+    "agent.browserAnswer" => AgentBrowserAnswer(BrowserAnswerHostParams) -> Empty;
+
+    // Chat tasks (chats.rs, §3.31): the folders TeleFlock made for agents started without one.
+    "chat.list" => ChatListReq(Empty) -> ChatFolders;
+    "chat.delete" => ChatDelete(ChatDeleteParams) -> ChatDeletion;
 
     "workspace.create" => WorkspaceCreate(WorkspaceCreateParams) -> WorkspaceRef;
     "workspace.rename" => WorkspaceRename(WorkspaceRenameParams) -> Empty;
@@ -1380,7 +1452,12 @@ methods!(HostMethod, "HostMethods", {
     "host.toolsConfig" => HostToolsConfig(ToolsConfigParams) -> ToolUpdates;
     "host.autoResume" => HostAutoResume(Empty) -> AutoResumeConfig;
     "host.autoResumeSet" => HostAutoResumeSet(AutoResumeSetParams) -> AutoResumeConfig;
+    "host.refusalFallback" => HostRefusalFallback(Empty) -> RefusalFallback;
+    "host.refusalFallbackSet" => HostRefusalFallbackSet(RefusalFallbackSetParams) -> RefusalFallback;
     "host.autoAnswerSet" => HostAutoAnswerSet(AutoAnswer) -> AutoAnswer;
+    // Decide for me's review items (`HostInfo.decisions`, §3.23 "Review"): reviewed for every
+    // device of the session; hosts before 0.9.0 answer `unknown_method`.
+    "host.autoAnswerReview" => HostAutoAnswerReview(AutoAnswerReviewParams) -> AutoAnswerReviewed;
     // The herdr server's lifecycle (§3.29, tf-hostd `herdr_health`): start it now, load the
     // installed herdr now (live handoff, else stop + start), per-host settings.
     "host.herdrRestart" => HostHerdrRestart(HerdrRestartParams) -> HerdrHealth;
@@ -1402,6 +1479,9 @@ methods!(HostMethod, "HostMethods", {
     "cleanup.remove" => CleanupRemove(CleanupRemoveParams) -> Empty;
     "cleanup.storage" => CleanupStorageReq(CleanupStorageParams) -> CleanupStorage;
     "cleanup.storageRun" => CleanupStorageRun(CleanupStorageRunParams) -> CleanupStorage;
+    // Idle shells (cleanup.rs; `HostInfo.idleShells` lists them): the host's settings, closing some.
+    "cleanup.idleShellsSet" => CleanupIdleShellsSet(IdleShellsSetParams) -> IdleShells;
+    "cleanup.idleShellsClose" => CleanupIdleShellsClose(IdleShellsCloseParams) -> IdleShellsCloseResult;
 
     // Background jobs of an omp session (jobs.rs; bridge ≥ 2.1.0 with `caps.jobs`).
     "jobs.list" => JobsList(JobsListParams) -> JobsView;
@@ -1415,6 +1495,7 @@ methods!(HostMethod, "HostMethods", {
     "services.restart" => ServicesRestart(ServiceRef) -> Service;
 
     "ai.complete" => AiComplete(AiCompleteParams) -> AiCompleteResult;
+    "ai.prewarm" => AiPrewarm(AiPrewarmParams) -> AiPrewarmResult;
 
     "upload.begin" => UploadBegin(UploadBeginParams) -> UploadBegun;
     "upload.chunk" => UploadChunk(UploadChunkParams) -> UploadProgress;
@@ -1585,6 +1666,22 @@ methods!(AppMethod, "AppMethods", {
     "app.updateStatus" => AppUpdateStatus(Empty) -> UpdateStatus;
     "app.updateCheck" => AppUpdateCheck(UpdateCheckParams) -> UpdateStatus;
     "app.updateInstall" => AppUpdateInstall(Empty) -> UpdateStatus;
+    // On-device dictation (tf-client dictation.rs, feature `voice`): the desktop app and lab
+    // devservers; `unsupported` elsewhere (Android: its system speech recognizer).
+    "dictation.models" => DictationModels(Empty) -> DictationState;
+    "dictation.install" => DictationInstall(DictationModelRef) -> DictationState;
+    "dictation.cancelInstall" => DictationCancelInstall(DictationModelRef) -> DictationState;
+    "dictation.remove" => DictationRemove(DictationModelRef) -> DictationState;
+    "dictation.select" => DictationSelect(DictationSelectParams) -> DictationState;
+    "dictation.setLanguage" => DictationSetLanguage(DictationLanguageParams) -> DictationState;
+    "dictation.microphones" => DictationMicrophonesReq(Empty) -> DictationMicrophones;
+    "dictation.setMicrophone" => DictationSetMicrophone(DictationMicrophoneParams) -> DictationState;
+    // A live session: its events are `AppEvent::DictationSession`; one runs at a time (a start
+    // finishes the one running). Stop finishes the utterance being spoken, cancel drops it; both
+    // answer at once and are no-ops for a session that already ended.
+    "dictation.start" => DictationStart(DictationStartParams) -> Empty;
+    "dictation.stop" => DictationStop(DictationSessionRef) -> Empty;
+    "dictation.cancel" => DictationCancel(DictationSessionRef) -> Empty;
     "hosts.list" => HostsList(Empty) -> HostsListResult;
     "hosts.save" => HostsSave(HostSaveParams) -> HostProfile;
     "hosts.remove" => HostsRemove(HostRef) -> Empty;
@@ -1604,6 +1701,43 @@ methods!(AppMethod, "AppMethods", {
     "forward.save" => ForwardSave(ForwardSaveParams) -> ForwardList;
     "forward.remove" => ForwardRemove(ForwardRemoveParams) -> ForwardList;
     "forward.stop" => ForwardStop(ForwardStopParams) -> ForwardList;
+    // The TeleFlock Browser (browser.rs, §5.2): this device's browser, run by this app core.
+    "browser.status" => BrowserStatusReq(Empty) -> BrowserStatus;
+    "browser.start" => BrowserStart(BrowserStartParams) -> BrowserStatus;
+    "browser.stop" => BrowserStop(Empty) -> BrowserStatus;
+    "browser.attach" => BrowserAttach(BrowserAgentParams) -> BrowserStatus;
+    "browser.detach" => BrowserDetach(BrowserAgentParams) -> BrowserStatus;
+    "browser.answer" => BrowserAnswer(BrowserAnswerParams) -> BrowserStatus;
+    "browser.config" => BrowserConfigReq(Empty) -> BrowserConfig;
+    "browser.configSet" => BrowserConfigSet(BrowserConfigSetParams) -> BrowserConfig;
+    "browser.installEngine" => BrowserInstallEngine(Empty) -> BrowserStatus;
+    "browser.clearData" => BrowserClearData(BrowserClearParams) -> BrowserStatus;
+    "browser.stageFile" => BrowserStageFile(BrowserStageParams) -> BrowserStaged;
+    "browser.revealDownload" => BrowserRevealDownload(BrowserRevealParams) -> Empty;
+    // Shows the persistent profile's folder (`BrowserStatus::profile_dir`) in the file manager.
+    "browser.revealProfile" => BrowserRevealProfile(Empty) -> Empty;
+    // Tabs and their owners: the user takes an agent's tab over, hands it back, or lends one.
+    "browser.takeOver" => BrowserTakeOver(BrowserTabParams) -> BrowserStatus;
+    "browser.handBack" => BrowserHandBack(BrowserTabParams) -> BrowserStatus;
+    "browser.lendTab" => BrowserLendTab(BrowserLendParams) -> BrowserStatus;
+    // Session recording (recording.rs): this device records its own browser tabs, voice and the
+    // UI's event log, and keeps them in its data dir until the user sends one.
+    "recording.start" => RecordingStart(RecordingStartParams) -> RecordingInfo;
+    "recording.append" => RecordingAppend(RecordingAppendParams) -> RecordingAppended;
+    "recording.pause" => RecordingPause(RecordingRef) -> RecordingInfo;
+    "recording.resume" => RecordingResume(RecordingRef) -> RecordingInfo;
+    // State `processing`: the video and the transcription follow (AppEvent::Recordings).
+    "recording.stop" => RecordingStop(RecordingRef) -> RecordingInfo;
+    "recording.list" => RecordingListReq(Empty) -> RecordingList;
+    "recording.get" => RecordingGet(RecordingRef) -> RecordingDetail;
+    "recording.frame" => RecordingFrameReq(RecordingFrameParams) -> RecordingBytes;
+    "recording.read" => RecordingRead(RecordingReadParams) -> RecordingBytes;
+    "recording.update" => RecordingUpdate(RecordingUpdateParams) -> RecordingInfo;
+    "recording.render" => RecordingRender(RecordingRenderParams) -> RecordingBundle;
+    // The upload of a render ended: its folder goes.
+    "recording.release" => RecordingRelease(RecordingReleaseParams) -> Empty;
+    "recording.transcribe" => RecordingTranscribe(RecordingRef) -> RecordingInfo;
+    "recording.delete" => RecordingDelete(RecordingRef) -> RecordingList;
 });
 
 #[cfg(test)]

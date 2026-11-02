@@ -30,5 +30,13 @@
         <receiver
             android:name="dev.teleflock.android.ActionReceiver"
             android:exported="false" />
+        <!-- A preview tunnel's page in a window of its own (open_preview): a WebView without
+             Tauri's IPC, so the page can never act as the app. Takes the application's theme;
+             rotation and the keyboard don't recreate it (the page would reload). -->
+        <activity
+            android:name="dev.teleflock.android.PreviewActivity"
+            android:exported="false"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

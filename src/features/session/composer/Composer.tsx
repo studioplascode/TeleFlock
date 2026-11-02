@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useCore, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
 import { attachImages, dragHasFiles, IMAGES_TOO_LARGE, imageChars, isVideoFile, MAX_PROMPT_IMAGE_CHARS, mediaFiles } from "@/core/clipboardImages";
-import { attachVideos, detachDraftVideos, releaseVideos, removeDraftVideo, retryVideos, useDraftVideos, type VideoRef, whenUploaded, withVideoRefs } from "@/core/draftVideos";
+import { attachVideos, detachDraftVideos, releaseVideos, removeDraftVideo, retryVideos, uploadDraftVideos, useDraftVideos, type VideoRef, whenUploaded, withVideoRefs } from "@/core/draftVideos";
 import type { CommandInfo, ImageInput } from "@/core/gen";
 import { useHerdrDown, useHostName } from "@/features/hosts/HerdrControls";
 import { herdrNotRunning } from "@/features/hosts/herdrHealth";
@@ -17,7 +17,7 @@ import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
 import { useQueueChips, usePendingQueue, userRowsWithText } from "./queue";
 import { findCommand, isSlashDraft, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
-import { useDictation } from "./useDictation";
+import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { PasteChips, PasteMenu } from "./PasteChips";
 import { usePasteAttach } from "./usePasteAttach";
 import { VideoChips } from "./VideoChips";
@@ -186,7 +186,16 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                 : "This session can't take prompts right now"
             : null;
 
-  const dictation = useDictation((phrase) => setText((t) => (t && !t.endsWith(" ") ? `${t} ${phrase}` : t + phrase)));
+  // Dictation, tidied into a prompt by a model on the agent's host when Rambler is on (Settings → Dictation).
+  const ramble = useRamblerDictation({
+    hostId,
+    about: [agent?.repo && `Repository: ${agent.repo}`, agent?.title && `Agent task: ${agent.title}`].filter(Boolean).join("\n"),
+    text,
+    setText,
+    field: ta,
+    mobile,
+  });
+  const dictation = ramble.dictation;
 
   // Focus requests from elsewhere ("Prompt…" on a board card).
   useEffect(() => {
@@ -355,6 +364,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       uploadWait.current = true;
       setWaitingUploads(true);
       try {
+        // A recording waits for the send before it leaves the device.
+        uploadDraftVideos(sentVideos, hostId);
         refs = await whenUploaded(sentVideos);
       } catch (e) {
         const { title, hint } = errorText(e);
@@ -722,6 +733,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         )}
       </AnimatePresence>
 
+      {ramble.panel}
       {working && !disabledReason && <SteerHint doneRef={steerDone} />}
       <GlowBorder
         status="running"
@@ -815,10 +827,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
               <IconButton label="Attach images or videos" size={mobile ? "md" : "sm"} onClick={() => fileInput.current?.click()} disabled={!!disabledReason}>
                 <Paperclip />
               </IconButton>
-              {mobile && dictation.supported && (
+              {dictation.supported && (
                 <IconButton
                   label={dictation.listening ? "Stop dictation" : "Dictate"}
-                  size="md"
+                  size={mobile ? "md" : "sm"}
                   variant={dictation.listening ? "sunset" : "ghost"}
                   onClick={dictation.toggle}
                   disabled={!!disabledReason}

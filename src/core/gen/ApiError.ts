@@ -11,7 +11,8 @@
  * (a Host setup install), `deploy_failed` (the host can't run TeleFlock's setup: its shell
  * rejects the script, or a program it needs is missing; not retried), `port_in_use` /
  * `port_unavailable` (`tunnel.open { localPort }`),
- * `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed), `internal`.
+ * `auth_flow_gone` (an `auth.*` flow that finished long ago or never existed),
+ * `budget_exceeded` (`recording.start`: the recordings use their space), `internal`.
  */
 export type ApiError = { code: string, message: string, 
 /**

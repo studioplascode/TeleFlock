@@ -1,4 +1,4 @@
-import type { Answer, ChangedFile, NeedsOption, PlanReview, Subagent, ToolView, UiKind } from "@/core/gen";
+import type { Answer, ChangedFile, NeedsOption, PlanReview, PresentedArtifact, Subagent, ToolView, UiKind } from "@/core/gen";
 import { fileBody } from "./codegen";
 import type { Rng } from "./rng";
 
@@ -22,6 +22,8 @@ export interface ToolSpec {
   subagents?: SubagentSpec[];
   /** Produce no events while running (quiet detection). */
   silent?: boolean;
+  /** `present` (bridge ≥ 2.3.0): the document it showed the user, on the finished row (`ToolItem.artifact`). */
+  artifact?: PresentedArtifact;
 }
 
 export interface SubagentSpec {
@@ -34,6 +36,10 @@ export interface SubagentSpec {
   end?: "failed" | "aborted" | "parked";
   /** omp IRC with the parent while the task runs (ms after it starts). */
   irc?: IrcSpec[];
+  /** Its own subagents (omp names them `<name>.<child>`), each starting its `after` ms into this one's run. */
+  children?: SubagentSpec[];
+  /** A nested subagent's start, ms into its parent's run (default 0). */
+  after?: number;
 }
 
 /** A subagent → parent IRC message, optionally answered by the parent (`write agent://<name>`). */
@@ -42,6 +48,8 @@ export interface IrcSpec {
   text: string;
   /** omp's automatic relay of the subagent's final answer, not a hand-written message. */
   relay?: boolean;
+  /** Sent to every live agent (`agent://all`): the parent gets it as one of its legs. */
+  broadcast?: boolean;
   reply?: { after: number; text: string };
 }
 
@@ -51,6 +59,10 @@ export interface UiSpec {
   needs?: "ask" | "approval" | "planReview" | "confirm" | "input";
   title: string;
   message?: string;
+  /** `NeedsYou.detail`: a second line under the question (omp's own dialogs: the change an approval makes). */
+  detail?: string;
+  /** `NeedsYou.context` when set: `""` for omp's own approvals and confirms, which have nothing the agent wrote before them. */
+  context?: string;
   options: NeedsOption[];
   allowOther?: boolean;
   allowChat?: boolean;
@@ -281,7 +293,30 @@ export function poolTurn(): Step[] {
                 text: "Staging caps `max_connections` at **50**. Two pods × 32 would trip it. Bench 64 anyway?",
                 reply: { after: 3_200, text: "No, stop at 32. Prod has 100 shared by two pods, so 16 per pod is the realistic target." },
               },
+              {
+                at: 15_300,
+                broadcast: true,
+                text: "Staging is shared: **keep your connections ≤ 16** until my sweep is done (~12 s). A 64-connection run already tripped `max_connections`.",
+              },
               { at: 31_500, relay: true, text: "Done. size=8 → p99 41 ms, **size=16 → 18 ms**, size=32 → 17 ms. 16 is the knee." },
+            ],
+            // Its sweep runs one subagent per pool size: staging refuses the 64 run (a failed
+            // grandchild under a sweep that still finishes), then a summary charts the rest.
+            children: [
+              {
+                name: "Sweep",
+                description: "Run the size sweep, one benchmark per pool size",
+                after: 1_500,
+                ms: 26_000,
+                model: "luna",
+                lines: ["spawning one bench per size", "size=64 refused by staging", "size=16 and size=32 measured", "sweep done: 16 is the knee"],
+                children: [
+                  { name: "Size16", description: "Bench a 16-connection pool for 10 s", after: 1_000, ms: 14_000, model: "luna", lines: ["go test -bench 'Pool/16' -benchtime 10s", "p99 18ms at 1.2k RPS"] },
+                  { name: "Size32", description: "Bench a 32-connection pool for 10 s", after: 1_500, ms: 16_000, model: "luna", lines: ["go test -bench 'Pool/32' -benchtime 10s", "p99 17ms at 1.2k RPS"] },
+                  { name: "Size64", description: "Bench a 64-connection pool for 10 s", after: 2_000, ms: 7_000, model: "luna", end: "failed", lines: ["go test -bench 'Pool/64' -benchtime 10s", "staging refused: too many clients (max_connections 50)"] },
+                ],
+              },
+              { name: "Summary", description: "Chart p99 per pool size for the PR", after: 28_500, ms: 4_000, model: "luna", lines: ["plotting p99 per size", "chart written to bench/pool.svg"] },
             ],
           },
           {
@@ -744,16 +779,45 @@ function completionEstimate(spec: SubagentSpec, p: number): number | undefined {
   return Math.max(5, Math.min(95, Math.round(probe * 100 + bias)));
 }
 
+/** One subagent of a `task` call, its own subagents included (`taskSubs`). */
+export interface TaskSub {
+  spec: SubagentSpec;
+  id: string;
+  /** Its row's name: omp names a nested subagent `<parent>.<name>`. */
+  name: string;
+  /** When it starts, ms after the call's own subagents (which start together). */
+  at: number;
+  /** The subagent that spawned it. */
+  parent?: TaskSub;
+}
+
+/** A `task` call's subagents and theirs, parents first: `newId()` ids the call's own, a nested one is `<parent id>.<name>` (omp's naming). */
+export function taskSubs(specs: readonly SubagentSpec[], newId: () => string): TaskSub[] {
+  const out: TaskSub[] = [];
+  const add = (list: readonly SubagentSpec[], parent?: TaskSub) => {
+    for (const spec of list) {
+      const sub: TaskSub = parent
+        ? { spec, id: `${parent.id}.${spec.name}`, name: `${parent.name}.${spec.name}`, at: parent.at + (spec.after ?? 0), parent }
+        : { spec, id: newId(), name: spec.name, at: 0 };
+      out.push(sub);
+      if (spec.children) add(spec.children, sub);
+    }
+  };
+  add(specs);
+  return out;
+}
+
 /** Fixed subagent rows for task views, with live progress. */
-export function subagentRow(spec: SubagentSpec, id: string, startedAt: number, now: number): Subagent {
+export function subagentRow(sub: TaskSub, startedAt: number, now: number): Subagent {
+  const spec = sub.spec;
   const p = Math.min(1, (now - startedAt) / spec.ms);
   const done = p >= 1;
   const lineIdx = Math.min(spec.lines.length - 1, Math.floor(p * spec.lines.length));
   const window = SUB_WINDOW[spec.model ?? ""] ?? 200_000;
   const contextTokens = Math.floor(6_400 + p * 41_000);
   return {
-    id,
-    name: spec.name,
+    id: sub.id,
+    name: sub.name,
     description: spec.description,
     status: done ? (spec.end ?? "done") : "running",
     startedAt,
@@ -765,5 +829,6 @@ export function subagentRow(spec: SubagentSpec, id: string, startedAt: number, n
     toolCount: Math.floor(p * 14) + 1,
     tokens: Math.floor(p * 38_000),
     costUsd: Math.round(p * 0.42 * 100) / 100,
+    parentId: sub.parent?.id,
   };
 }

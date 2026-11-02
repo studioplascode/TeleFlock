@@ -40,7 +40,8 @@ pub struct SessionData {
     pub activity: VecDeque<ActivityEvent>,
     /// Agents marked done whose pane TeleFlock closed (agent id → record, architecture §3.5).
     pub parked: BTreeMap<String, ParkedRecord>,
-    /// Agents removed because their omp session file was deleted; newest first, capped.
+    /// Agents removed because their omp session file was deleted, and deleted chats
+    /// (`chat.delete`, §3.31); newest first, capped.
     pub pruned: Vec<PrunedAgent>,
 }
 

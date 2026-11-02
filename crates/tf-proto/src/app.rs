@@ -347,12 +347,36 @@ pub enum AppEvent {
     /// Forwarding rules, their status and active streams (`forward.list` returns the same): after
     /// every change; byte counters at most every ~2 s.
     Forwards { forwards: crate::forward::ForwardList },
+    /// The TeleFlock Browser: its state, the agents attached to it and their requests
+    /// (`browser.status` returns the same): after every change; attachment activity at most every
+    /// ~2 s.
+    Browser { status: crate::browser::BrowserStatus },
+    /// Session recordings on this device (`recording.list` returns the same): after every change
+    /// (start, pause, resume, stop, video written, transcription started, progressed at most
+    /// twice a second, and ended, update, render, delete, recovery at startup), not per append.
+    Recordings { recordings: crate::recording::RecordingList },
     Settings { settings: Settings },
     /// Activated a notification action outside the app UI (Android notification button,
     /// Windows toast). The frontend navigates to the agent.
     OpenAgent { host_id: String, agent_id: String },
+    /// Opened a notification that leads to a host's page instead of an agent (an action
+    /// `open:<page>`, `HostPage::of`): the frontend opens that page (`notificationId`: the
+    /// notification that was opened, e.g. to show its decision in the Inbox).
+    OpenPage {
+        host_id: String,
+        page: crate::model::HostPage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        notification_id: Option<String>,
+    },
     /// Tray / notification "Answer next": the frontend opens the Answer-next HUD.
     AnswerNext,
     /// Self-update progress (emitted by the app shell; `app.updateStatus` returns the same).
     Update { status: UpdateStatus },
+    /// On-device dictation models and choices changed: a download progressed (at most ~4 times a
+    /// second), finished or failed, a model was removed or chosen, the language or microphone
+    /// changed (`dictation.models` returns the same; part of the replay on cores that dictate).
+    Dictation { state: crate::dictation::DictationState },
+    /// An event of the live dictation session the page named `session` in `dictation.start`.
+    DictationSession { session: String, event: crate::dictation::DictationEvent },
 }

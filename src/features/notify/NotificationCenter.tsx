@@ -21,6 +21,7 @@ import type { Notification, NotifyAction, NotifyKind } from "@/core/gen";
 import { VIEWS } from "@/features/shell/vocab";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
+import { openNotification } from "./openNotification";
 
 export const KIND_STATUS: Record<NotifyKind, Status> = {
   needs: "needs-you",
@@ -36,7 +37,7 @@ const UPDATES_LIMIT = 20;
 /** Answer a pending request straight from a notification action. */
 export function runAnswer(n: Notification & { hostId: string }, action: NotifyAction): Promise<void> {
   if (!action.answer || !n.requestId) {
-    navigate({ name: "agent", hostId: n.hostId, agentId: n.agentId });
+    openNotification(n);
     return Promise.resolve();
   }
   haptic("success");
@@ -205,7 +206,7 @@ export function UpdatesList({ items, limit = UPDATES_LIMIT, onNavigate, classNam
               n={n}
               index={i}
               onOpen={() => {
-                navigate({ name: "agent", hostId: n.hostId, agentId: n.agentId });
+                openNotification(n);
                 onNavigate?.();
               }}
             />

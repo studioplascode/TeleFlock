@@ -1,13 +1,14 @@
-//! systemd keepalive: while at least one automation is enabled, or the agent ledger holds agents
-//! to bring back after a reboot (`crate::restart`, with auto-resume on), a timer runs
+//! systemd keepalive (Linux): while at least one automation is enabled, or the agent ledger holds
+//! agents to bring back after a reboot (`crate::restart`, with auto-resume on), a timer runs
 //! `tf-hostd ensure` (start the daemon if it is not running) at boot and every 10 minutes, so
 //! schedules fire and agents come back after reboots and crashes with no app connected.
 //!
 //! - root: system manager units in `/etc/systemd/system`;
 //! - other users: user units in `$XDG_CONFIG_HOME/systemd/user` (`~/.config/systemd/user`), only
 //!   with lingering (otherwise the user manager stops at logout and never starts at boot);
-//! - elsewhere (macOS, Windows, Linux without systemd): nothing to install; automations run
-//!   while tf-hostd runs.
+//! - Linux without systemd, and other OSes without a mechanism of their own: nothing to install;
+//!   automations run while tf-hostd runs. macOS and Windows have theirs (`launchd.rs`,
+//!   `schtasks.rs`; `boot.rs` picks the one for the OS).
 //!
 //! Units are named `teleflock-hostd-<hash of TF_HOSTD_HOME>.{service,timer}` so every hostd
 //! home (the real one, lab instances) owns its own pair. `ensure` starts the daemon in its own
@@ -20,6 +21,7 @@ use tracing::{info, warn};
 
 use tf_proto::{AutomationScheduler, BootService};
 
+use super::boot::{daemon_env, exe_path, write_if_changed};
 use crate::paths::Paths;
 
 const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -54,25 +56,32 @@ impl Target {
 /// root, or user units with lingering; `allowed`: the real home, or `TF_HOSTD_KEEPALIVE=1`) and
 /// whether the scheduler `status` says it is installed and active.
 pub fn boot_service(target: &Target, allowed: bool, status: &AutomationScheduler) -> BootService {
-    let unavailable = |note: String| BootService { available: false, installed: false, note: Some(note) };
+    let unavailable = |kind: Option<&str>, note: String| BootService { available: false, installed: false, note: Some(note), kind: kind.map(Into::into) };
     match target {
         Target::None if cfg!(target_os = "linux") => unavailable(
+            None,
             "Not available on this host: there is no systemd to install a boot service in, so agents come back after a reboot once TeleFlock or tf-hostd runs here again.".into(),
         ),
-        Target::None => unavailable(format!(
-            "Not available on this host: boot services are only installed with systemd on Linux (this host runs {}), so agents come back after a reboot once TeleFlock or tf-hostd runs here again.",
-            std::env::consts::OS
-        )),
-        Target::NeedsLinger { user, .. } => unavailable(format!(
-            "Not available yet: systemd stops {user}'s services at logout and does not start them at boot. Run `loginctl enable-linger {user}` on this host."
-        )),
+        Target::None => unavailable(
+            None,
+            format!(
+                "Not available on this host: boot services are only installed with systemd on Linux, a launchd agent on macOS and a Task Scheduler task on Windows (this host runs {}), so agents come back after a reboot once TeleFlock or tf-hostd runs here again.",
+                std::env::consts::OS
+            ),
+        ),
+        Target::NeedsLinger { user, .. } => unavailable(
+            Some("systemd"),
+            format!("Not available yet: systemd stops {user}'s services at logout and does not start them at boot. Run `loginctl enable-linger {user}` on this host."),
+        ),
         Target::System { .. } | Target::User { .. } if !allowed => unavailable(
+            Some("systemd"),
             "Not installed by this tf-hostd home: only the default home (~/.teleflock) installs a boot service (development homes opt in with TF_HOSTD_KEEPALIVE=1).".into(),
         ),
         Target::System { .. } | Target::User { .. } => BootService {
             available: true,
             installed: status.kind == "systemd" && status.persistent,
             note: status.note.clone().filter(|_| !(status.kind == "systemd" && status.persistent)),
+            kind: Some("systemd".into()),
         },
     }
 }
@@ -169,24 +178,6 @@ pub fn render(paths: &Paths, exe: &Path, relay_port: u16, env: &[(&str, String)]
     Units { stem, service, timer }
 }
 
-/// The running binary (without the ` (deleted)` suffix Linux adds after it was replaced).
-fn exe_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let s = exe.to_string_lossy();
-    Some(match s.strip_suffix(" (deleted)") {
-        Some(p) => PathBuf::from(p),
-        None => exe,
-    })
-}
-
-/// Variables the daemon inherits from its login session but a service manager lacks.
-fn daemon_env() -> Vec<(&'static str, String)> {
-    ["HOME", "PATH", "USER", "LANG"]
-        .into_iter()
-        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k, v)))
-        .collect()
-}
-
 async fn systemctl(target: &Target, args: &[&str]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("systemctl");
     if let Target::User { runtime_dir, .. } = target {
@@ -207,20 +198,6 @@ async fn systemctl(target: &Target, args: &[&str]) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(format!("systemctl {} failed: {}", args.join(" "), if stderr.is_empty() { stdout } else { stderr }))
     }
-}
-
-/// Writes `bytes` to `path` when it differs; true when written.
-fn write_if_changed(path: &Path, bytes: &str) -> std::io::Result<bool> {
-    if std::fs::read_to_string(path).is_ok_and(|cur| cur == bytes) {
-        return Ok(false);
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(true)
 }
 
 /// Disables and deletes this home's units in `dir` (also the `timers.target.wants` link
@@ -290,7 +267,7 @@ pub async fn reconcile(paths: &Paths, relay_port: u16, want: bool) -> Automation
     let service_path = dir.join(units.service_name());
     let timer_path = dir.join(units.timer_name());
     let timer = units.timer_name();
-    let changed = match (write_if_changed(&service_path, &units.service), write_if_changed(&timer_path, &units.timer)) {
+    let changed = match (write_if_changed(&service_path, units.service.as_bytes()), write_if_changed(&timer_path, units.timer.as_bytes())) {
         (Ok(a), Ok(b)) => a || b,
         (Err(e), _) | (_, Err(e)) => {
             warn!(dir = %dir.display(), "automations: cannot write systemd units: {e}");
@@ -403,7 +380,7 @@ mod tests {
         let linger = boot_service(&Target::NeedsLinger { user: "ada".into(), dir: PathBuf::new(), runtime_dir: PathBuf::new() }, true, &status("systemd", false, None));
         assert!(!linger.available && !linger.installed);
         assert!(linger.note.unwrap().contains("loginctl enable-linger ada"));
-        // macOS, Windows, Linux without systemd: not available, whatever the scheduler says.
+        // Linux without systemd: not available, whatever the scheduler says.
         let none = boot_service(&Target::None, true, &status("daemon", false, None));
         assert!(!none.available && !none.installed);
         assert!(none.note.unwrap().starts_with("Not available on this host"));

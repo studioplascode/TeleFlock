@@ -1,6 +1,7 @@
-import { ArchiveRestore, ArrowRightLeft, Bell, BellOff, CheckCheck, CheckSquare, ExternalLink, GitCompare, MessageSquare, MessageSquareReply, MoreHorizontal, Play, RotateCw, Square, SquareTerminal, Timer, TimerOff, Trash2, X } from "lucide-react";
+import { ArchiveRestore, ArrowRightLeft, Bell, BellOff, CheckCheck, CheckSquare, ExternalLink, GitCompare, MessageSquare, MessageSquareReply, MoreHorizontal, Play, RotateCw, Sparkles, Square, SquareTerminal, Timer, TimerOff, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { navigate, useAgent, useCore } from "@/core";
+import { isChat } from "@/core/chats";
 import type { Column } from "@/core/gen";
 import {
   ContextMenu,
@@ -19,6 +20,7 @@ import {
 } from "@/design";
 import { ACTIONS, isFresh } from "@/features/shell/vocab";
 import { archiveWithUndo, canReview, deleteWorktree, markDoneAndRemove, openAgent, openAnswerHud, openTerminal, promptAgent, resumeParked, setArchived, setMuted, stopAgent, useMuted } from "./agentActions";
+import { useRenameAgain } from "./renameAgain";
 import { cancelAutoResume, resumeNow } from "@/features/session/resume/actions";
 import { ticketActions } from "@/features/session/resume/words";
 import { useBoard } from "./boardStore";
@@ -27,6 +29,7 @@ import { openMoveDialog } from "@/features/move/store";
 import { shippedWords, useShippedPr } from "./worktreePr";
 import { openDecideDialog } from "@/features/autoAnswer/DecideDialog";
 import { useCanDecide } from "@/features/autoAnswer/hooks";
+import { deleteChatAgent } from "@/features/chats/actions";
 
 /* ───────────── the card menu (⋯ button and right-click) ───────────── */
 
@@ -38,6 +41,7 @@ interface Item {
   /** One line from ACTIONS, shown as the item's tooltip. */
   description?: string;
   danger?: boolean;
+  disabled?: boolean;
   run(): void;
 }
 
@@ -54,6 +58,7 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
   const shipped = useShippedPr(agentKey, lane === "review" || lane === "done");
   const canMove = useCanMove(agentKey);
   const canDecide = useCanDecide(agentKey);
+  const rename = useRenameAgain(agentKey);
   if (!agent) return [];
   const { openSession, terminal, answer, review, markDone, markDoneRemove, deleteWorktree: deleteWt, reopen, resume, stopTurn, mute, unmute, select } = ACTIONS;
   const items: Item[] = [];
@@ -99,7 +104,7 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
     // shipped: the same removal (it marks done too), named for what it is now
     const del = deleteItem(true);
     if (del) items.push(del);
-    else if (inWorktree) items.push({ id: "markDoneRemove", ...markDoneRemove, icon: <Trash2 />, danger: true, run: () => void markDoneAndRemove(agentKey) });
+    else if (inWorktree && !isChat(agent)) items.push({ id: "markDoneRemove", ...markDoneRemove, icon: <Trash2 />, danger: true, run: () => void markDoneAndRemove(agentKey) });
   }
   if (lane === "done") {
     items.push({ id: "reopen", ...reopen, icon: <ArchiveRestore />, run: () => void setArchived(agentKey, false).catch(() => {}) });
@@ -119,6 +124,8 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
       ),
       run: () => void stopAgent(agentKey),
     });
+  if (rename.available)
+    items.push({ id: "renameAgain", ...ACTIONS.renameAgain, label: rename.busy ? "Naming…" : ACTIONS.renameAgain.label, icon: <Sparkles />, disabled: rename.busy, run: rename.run });
   items.push(
     muted ? { id: "unmute", ...unmute, icon: <Bell />, run: () => void setMuted([agentKey], false) } : { id: "mute", ...mute, icon: <BellOff />, run: () => void setMuted([agentKey], true) },
     {
@@ -130,6 +137,8 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
       run: () => useBoard.getState().togglePick(agentKey),
     },
   );
+  // a chat (no repo, a folder TeleFlock made): ends it, forgets the card, removes the folder unless someone's files are in it
+  if (isChat(agent)) items.push({ id: "deleteChat", ...ACTIONS.deleteChat, icon: <Trash2 />, danger: true, run: () => void deleteChatAgent(agentKey) });
   return items;
 }
 
@@ -137,7 +146,7 @@ function useItems(agentKey: string, lane: Column, mobile: boolean): Item[] {
 function DropdownItems({ agentKey, lane, mobile }: { agentKey: string; lane: Column; mobile: boolean }) {
   const items = useItems(agentKey, lane, mobile);
   return items.map((it) => (
-    <DropdownMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
+    <DropdownMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} disabled={it.disabled} title={it.description} onSelect={it.run}>
       {it.label}
     </DropdownMenuItem>
   ));
@@ -146,7 +155,7 @@ function DropdownItems({ agentKey, lane, mobile }: { agentKey: string; lane: Col
 function ContextItems({ agentKey, lane }: { agentKey: string; lane: Column }) {
   const items = useItems(agentKey, lane, false);
   return items.map((it) => (
-    <ContextMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} title={it.description} onSelect={it.run}>
+    <ContextMenuItem key={it.id} icon={it.icon} shortcut={it.shortcut} danger={it.danger} disabled={it.disabled} title={it.description} onSelect={it.run}>
       {it.label}
     </ContextMenuItem>
   ));

@@ -1,0 +1,31 @@
+# Refusal fallback lab (setup.sh copies this into the lab's omp agent dir): one keyless Anthropic
+# Messages provider served by mock.ts (next to this file) on 127.0.0.1:18781. Opus refuses a turn
+# for `cyber`, Sonnet answers, Haiku refuses too (see mock.ts). The names are omp's, as the notice
+# shows them ("Opus 5.5 refused (cyber); switched to Sonnet 5.5 and continued").
+providers:
+  refusal-lab:
+    baseUrl: http://127.0.0.1:18781
+    api: anthropic-messages
+    auth: none
+    models:
+      - id: lab-opus-5-5
+        name: Claude Opus 5.5
+        reasoning: false
+        input: [text]
+        contextWindow: 200000
+        maxTokens: 32000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: lab-sonnet-5-5
+        name: Claude Sonnet 5.5
+        reasoning: false
+        input: [text]
+        contextWindow: 200000
+        maxTokens: 32000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: lab-haiku-5-5
+        name: Claude Haiku 5.5
+        reasoning: false
+        input: [text]
+        contextWindow: 200000
+        maxTokens: 32000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

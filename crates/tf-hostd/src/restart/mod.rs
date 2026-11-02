@@ -147,7 +147,7 @@ fn being_relaunched(file: &str) -> bool {
 }
 
 /// Opens the contexts of the herdr sessions the ledger has agents for (`daemon::async_main`), so
-/// a daemon started after a reboot (systemd's keepalive, `automations/systemd.rs`) starts herdr
+/// a daemon started after a reboot (the boot service, `automations/boot.rs`) starts herdr
 /// and brings them back with no app connected.
 pub fn start(daemon: &Arc<Daemon>) {
     let sessions = ledger::sessions(&daemon.paths.home);
@@ -1878,7 +1878,7 @@ impl Worker {
         }
     }
 
-    /// The keepalive (`automations/systemd.rs`) follows whether the ledger has agents.
+    /// The boot service (`automations/boot.rs`) follows whether the ledger has agents.
     fn sync_keepalive(&mut self) {
         let want = wants_keepalive(&self.ctx.paths.home);
         if self.keepalive == Some(want) {
@@ -2335,7 +2335,10 @@ async fn start_fresh(
         auto_answer: crate::autoanswer::own(ctx, agent_id).or_else(|| e.auto_answer.clone()),
     };
     let cwd = rec.cwd.clone().or_else(|| rec.workspace_cwd.clone()).ok_or_else(|| ApiError::new("not_found", format!("no folder is known for {}", rec.name)))?;
-    let open_ws = rec.workspace_id.clone().filter(|id| snap.workspaces.iter().any(|w| &w.id == id && Some(&w.cwd) == rec.workspace_cwd.as_ref()));
+    // A chat (§3.31) starts again at its folder in the chats workspace (`start_agent` maps the
+    // `Cwd`), never in a tab of its old workspace, which would open without the folder.
+    let chat = ctx.chats.in_chat(&crate::paths::expand_tilde(&cwd));
+    let open_ws = rec.workspace_id.clone().filter(|id| !chat && snap.workspaces.iter().any(|w| &w.id == id && Some(&w.cwd) == rec.workspace_cwd.as_ref()));
     {
         let mut b = ledger::open(book);
         if let Some(entry) = b.entries.get_mut(agent_id) {
@@ -2704,7 +2707,9 @@ pub fn intervened(ctx: &Ctx, agent_id: &str) {
     }
 }
 
-fn forget_agent(ctx: &Ctx, agent_id: &str) {
+/// Drops an agent's ledger entry (its card will not be brought back): also a deleted chat
+/// (`ops::chat`).
+pub(crate) fn forget_agent(ctx: &Ctx, agent_id: &str) {
     let book = ledger::book(&ctx.paths.home, &ctx.herdr_session);
     let mut b = ledger::open(&book);
     if b.entries.remove(agent_id).is_some() {

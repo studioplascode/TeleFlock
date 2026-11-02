@@ -6,8 +6,10 @@
 # only points at the new .dmg (src-tauri/src/update).
 # Layout: Cargo workspace root = repo root (target/ at repo root), Tauri app in src-tauri/, bun.
 #
-# Runs on a pushed v* tag (scripts/release.sh tags HEAD when it publishes the release): the build
-# job (read-only token) builds the tagged tree and stores the .dmg as an artifact; the upload job
+# Runs on a pushed v* tag (scripts/release.sh tags HEAD when it publishes the release): the
+# tf-hostd daemons it embeds build first, the Linux/Windows ones (hostd.yml) next to the macOS ones
+# (hostd-macos, aarch64 + x86_64 in one cargo run: they need a macOS SDK); the build job
+# (read-only token) then builds the tagged tree and stores the .dmg as an artifact; the upload job
 # (no third-party actions, no checkout) waits for the release of that tag and adds the .dmg +
 # .sha256 to it, refusing to replace existing assets. A manual run builds without uploading.
 # Third-party actions are pinned by commit SHA.
@@ -29,8 +31,39 @@ jobs:
   hostd:
     uses: ./.github/workflows/hostd.yml
 
+  hostd-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: hostd-macos
+          workspaces: '. -> target/hostd-build-cargo'
+
+      - name: Build tf-hostd for macOS hosts (Local mode on this Mac)
+        run: |
+          scripts/build-hostd.sh aarch64-apple-darwin x86_64-apple-darwin
+          file target/hostd-dist/*-apple-darwin/tf-hostd
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tf-hostd-dist-macos
+          path: target/hostd-dist/
+          if-no-files-found: error
+
   build:
-    needs: hostd
+    needs: [hostd, hostd-macos]
     runs-on: macos-latest
     timeout-minutes: 90
     permissions:
@@ -53,6 +86,11 @@ jobs:
           name: tf-hostd-dist
           path: target/hostd-dist
 
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: tf-hostd-dist-macos
+          path: target/hostd-dist
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: latest
@@ -66,16 +104,18 @@ jobs:
         with:
           workspaces: '. -> target'
 
-      - name: Build tf-hostd for macOS hosts (Local mode on this Mac)
-        # The Linux/Windows daemons come from hostd.yml; the macOS ones need a macOS SDK, so they
-        # are built here and embedded into this app only (tf-client build.rs).
-        run: |
-          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked -p tf-hostd --target "$triple"
-            mkdir -p "target/hostd-dist/$triple"
-            cp "target/$triple/release/tf-hostd" "target/hostd-dist/$triple/tf-hostd"
-          done
-          file target/hostd-dist/*-apple-darwin/tf-hostd
+      - name: Cache the speech engine's archives (crates/tf-dictation/build.rs)
+        # The sha256-pinned sherpa-onnx archives (arm64 and x64) and VAD model, not what they
+        # unpack to: build.rs checks an archive's sha256 before it extracts it, but trusts an
+        # extracted directory. Keyed by build.rs, where the sherpa-onnx version and every sha256
+        # are pinned. After rust-cache: post steps run in reverse, so this saves before
+        # rust-cache's cleanup deletes the files in target/ that cargo didn't make.
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            target/native-cache/*.tar.bz2
+            target/native-cache/*-silero_vad.onnx
+          key: sherpa-onnx-universal-apple-darwin-${{ hashFiles('crates/tf-dictation/build.rs') }}
 
       - name: Install frontend deps
         run: bun install --frozen-lockfile

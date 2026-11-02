@@ -72,6 +72,11 @@ const SHELLS: Record<string, Record<string, { tab: string; program?: string; sub
     w2: [{ tab: "logs", program: "tail" }],
     w10: [{ tab: "ops", program: "htop" }, { tab: "ops", sub: "terraform" }],
     w12: [{ tab: "main", program: "python3" }],
+    w14: [{ tab: "main", program: "bun" }],
+    // idle shells (`./idleShells`)
+    w15: [{ tab: "main" }],
+    w16: [{ tab: "main" }],
+    w17: [{ tab: "main" }],
   },
   studio: {
     w1: [{ tab: "dev", program: "bun" }, { tab: "dev", program: "vim", sub: "docs" }],

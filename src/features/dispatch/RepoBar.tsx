@@ -1,6 +1,7 @@
-import { Check, ChevronDown, FolderGit2, FolderSearch, GitBranch, Server, Shuffle } from "lucide-react";
+import { Check, ChevronDown, FolderGit2, FolderSearch, GitBranch, MessagesSquare, Server, Shuffle } from "lucide-react";
 import { useRef, useState } from "react";
 import { useHosts } from "@/core";
+import { CHAT_REPO, isChatRepo } from "@/core/chats";
 import type { BranchList } from "@/core/gen";
 import { describeLoad, type HostLoad } from "@/core/workload";
 import {
@@ -19,6 +20,7 @@ import { PHASE_LABEL, PHASE_STATUS } from "@/features/shell/status";
 import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
 import { FolderBrowser, type FolderPick } from "@/features/worktree/FolderBrowser";
 import { autoTarget, groupOf } from "./auto";
+import { CHAT_CHOICE } from "./thread";
 
 const chip =
   "inline-flex h-8 min-w-0 items-center gap-1.5 rounded-full bg-ink/[0.04] px-3 text-xs font-bold text-ink-2 shadow-hairline pressable focus-ring hover:bg-ink/8 hover:text-ink data-[state=open]:bg-ink/10 data-[state=open]:text-ink disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5 [&_svg]:shrink-0";
@@ -98,15 +100,23 @@ export interface RepoChoice {
   detail: string;
 }
 
+/** The repo chip's "No folder · chat" choice: `unavailable` = why the target can't start chats (shown, disabled), `hint` its tooltip. */
+export interface ChatChoice {
+  unavailable?: string;
+  hint?: string;
+}
+
 /**
- * Repo chip: recent repositories, plus "Browse…" (folder browser in repo mode on `browseHostId`;
- * hidden without one). `onFocusAfterPick` runs once the menu / browser has closed after a pick
- * (instead of focus returning to the chip, where a typed `n` would open the New worktree wizard).
+ * Repo chip: "No folder · chat" (`chat`, picks `CHAT_REPO`), recent repositories, plus "Browse…"
+ * (folder browser in repo mode on `browseHostId`; hidden without one). `onFocusAfterPick` runs once
+ * the menu / browser has closed after a pick (instead of focus returning to the chip, where a typed
+ * `n` would open the New worktree wizard).
  */
 export function RepoPicker({
   browseHostId,
   repo,
   repos,
+  chat,
   emptyHint,
   onChange,
   onFocusAfterPick,
@@ -115,6 +125,7 @@ export function RepoPicker({
   browseHostId: string | null;
   repo: string | null;
   repos: readonly RepoChoice[];
+  chat?: ChatChoice;
   /** Shown when there is nothing to pick and no Browse… */
   emptyHint?: string;
   onChange(id: string): void;
@@ -124,13 +135,18 @@ export function RepoPicker({
   const mobile = useIsMobile();
   const [browsing, setBrowsing] = useState(false);
   const picked = useRef(false);
+  const chatting = isChatRepo(repo);
   const current = repos.find((r) => r.id === repo);
+  const pick = (id: string) => {
+    picked.current = true;
+    onChange(id);
+  };
   return (
     <>
       <DropdownMenu>
         <DropdownMenuTrigger className={cn(chip, repo ? "" : "bg-accent/18 text-accent-ink shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_40%,transparent)]", className)} aria-label="Repository">
-          <FolderGit2 className={repo ? "text-accent-hi" : undefined} />
-          <span className="min-w-0 truncate">{repo ? (current?.name ?? repo.split(/[\\/]/).pop()) : "Pick a repository"}</span>
+          {chatting ? <MessagesSquare className="text-accent-hi" /> : <FolderGit2 className={repo ? "text-accent-hi" : undefined} />}
+          <span className="min-w-0 truncate">{chatting ? CHAT_CHOICE : repo ? (current?.name ?? repo.split(/[\\/]/).pop()) : "Pick a repository"}</span>
           {current && !mobile && <span className="min-w-0 truncate font-mono text-2xs font-medium text-mute-2 max-lg:hidden">{current.detail}</span>}
           <ChevronDown className="text-mute" />
         </DropdownMenuTrigger>
@@ -144,16 +160,19 @@ export function RepoPicker({
             onFocusAfterPick?.();
           }}
         >
+          {chat && (
+            <DropdownMenuItem icon={<MessagesSquare />} disabled={!!chat.unavailable} title={chat.hint} onSelect={() => pick(CHAT_REPO)}>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate">{CHAT_CHOICE}</span>
+                <span className="truncate text-2xs font-medium text-mute-2">{chat.unavailable ?? "An agent in its own new folder · no repository"}</span>
+              </span>
+              {chatting && <Check className="size-4 shrink-0 text-accent-hi" />}
+            </DropdownMenuItem>
+          )}
+          {chat && (repos.length > 0 || emptyHint || browseHostId) && <DropdownMenuSeparator />}
           {repos.length > 0 && <DropdownMenuLabel>Recent repositories</DropdownMenuLabel>}
           {repos.map((r) => (
-            <DropdownMenuItem
-              key={r.id}
-              icon={<FolderGit2 />}
-              onSelect={() => {
-                picked.current = true;
-                onChange(r.id);
-              }}
-            >
+            <DropdownMenuItem key={r.id} icon={<FolderGit2 />} onSelect={() => pick(r.id)}>
               <span className="flex min-w-0 flex-1 flex-col">
                 <span className="truncate">{r.name}</span>
                 <span className="truncate font-mono text-2xs font-medium text-mute-2">{r.detail}</span>
@@ -170,7 +189,7 @@ export function RepoPicker({
           )}
         </DropdownMenuContent>
       </DropdownMenu>
-      {browseHostId && <RepoBrowser hostId={browseHostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={onChange} onFocusAfterPick={onFocusAfterPick} />}
+      {browseHostId && <RepoBrowser hostId={browseHostId} repo={chatting ? null : repo} open={browsing} onOpenChange={setBrowsing} onPick={onChange} onFocusAfterPick={onFocusAfterPick} />}
     </>
   );
 }

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { drafts, getHostStates, navigate, parseAgentKey, useHosts } from "@/core";
 import { attachImages, fitImages } from "@/core/clipboardImages";
 import { type DraftImage, getDraftImages, hydrateDraftImages, updateDraftImages } from "@/core/draftImages";
+import { attachVideoSource, getDraftVideos, hydrateDraftVideos, moveDraftVideos } from "@/core/draftVideos";
 import type { HostProfile, HostState } from "@/core/gen";
 import { isAndroid, isTauri, toast } from "@/design";
 import { canonicalRemote, groupHosts } from "@/features/dispatch/auto";
@@ -83,7 +84,10 @@ function hostsLoaded(): Promise<void> {
 
 let seq = 0;
 
-/** Adds `task` to draft `key` (text appended, images scaled and capped) and remembers what it added. */
+/**
+ * Adds `task` to draft `key` (text appended, images scaled and capped, videos that upload
+ * themselves once the task is sent) and remembers what it added.
+ */
 async function applyTo(key: string, task: PrefilledTask, id: string): Promise<AppliedPrefill> {
   const before = drafts.get(key);
   const after = mergeDraftText(before, task.text);
@@ -92,7 +96,15 @@ async function applyTo(key: string, task: PrefilledTask, id: string): Promise<Ap
   const had = getDraftImages(key);
   const { skipped } = task.images.length ? await attachImages(key, imageFilesOf(task.images)) : { skipped: undefined };
   const images = getDraftImages(key).filter((img) => !had.includes(img));
-  const applied: AppliedPrefill = { id, key, source: task.source, before, after, images, ...(skipped ? { skipped } : {}), at: Date.now() };
+  await hydrateDraftVideos(key);
+  const hadVideos = getDraftVideos(key).map((v) => v.id);
+  let videoSkipped: string | undefined;
+  for (const v of task.videos ?? []) videoSkipped = attachVideoSource(key, null, v, v.video).skipped ?? videoSkipped;
+  if (videoSkipped) toast({ title: "The recording was left out", description: videoSkipped, status: "error" });
+  const videos = getDraftVideos(key)
+    .map((v) => v.id)
+    .filter((v) => !hadVideos.includes(v));
+  const applied: AppliedPrefill = { id, key, source: task.source, before, after, images, ...(videos.length ? { videos } : {}), ...(skipped ? { skipped } : {}), at: Date.now() };
   usePrefill.setState({ applied, waiting: null });
   return applied;
 }
@@ -153,6 +165,7 @@ export function moveToAgent(agentKey: string): void {
 
   const to = composerDraftKey(agentKey);
   drafts.set(to, mergeDraftText(drafts.get(to), text));
+  if (a.videos?.length) moveDraftVideos(a.key, to, a.videos);
   let skipped: string | undefined;
   if (moving.length) {
     updateDraftImages(to, (list) => {

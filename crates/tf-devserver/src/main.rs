@@ -81,6 +81,15 @@ async fn main() -> std::io::Result<()> {
     .await;
     // WS clients use `subscribe_with_replay`; don't retain an unread receiver.
     drop(startup_events);
+    // The TeleFlock Browser's DevTools take WebSockets from the served page (and the pages of
+    // --allow-origin) besides the app's own origins.
+    let mut origins = vec![format!("http://{addr}")];
+    if addr.ip().is_loopback() {
+        let port = addr.port();
+        origins.extend([format!("http://localhost:{port}"), format!("http://127.0.0.1:{port}"), format!("http://[::1]:{port}")]);
+    }
+    origins.extend(args.allow_origins.iter().cloned());
+    engine.allow_browser_origins(origins);
     log::info!("tf-devserver data {}", args.data_dir.display());
     let tok = access.token();
     println!("tf-devserver on http://{addr}/?token={tok} (ws://{addr}/ws?token={tok})");
@@ -88,7 +97,18 @@ async fn main() -> std::io::Result<()> {
     tokio::select! {
         r = serve(listener, app) => r?,
         _ = tokio::signal::ctrl_c() => log::info!("shutting down"),
+        _ = terminated() => log::info!("terminated; shutting down"),
     }
     engine.shutdown().await;
     Ok(())
+}
+
+/// SIGTERM (Unix): shut down like on Ctrl+C, so the browser stops with the server.
+async fn terminated() {
+    #[cfg(unix)]
+    if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        s.recv().await;
+        return;
+    }
+    std::future::pending::<()>().await
 }

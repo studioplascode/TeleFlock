@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { type AgentView, getAgentViews, getHostStates, selectAgentKeys, useCore, useHostStates, useHosts, useSettings } from "@/core";
+import { isChatRepo } from "@/core/chats";
 import { answerAgent, openAnswerHud } from "@/features/board/agentActions";
 import { dispatchOptions, hostName, repoNameOf, sendTask } from "@/features/dispatch/send";
 import { useDispatch } from "@/features/dispatch/store";
@@ -95,7 +96,9 @@ async function handle(port: MainPort, msg: Exclude<ToMain, { kind: "hello" | "by
       }
       // The next capture (and Dispatch) start where this one went.
       d.select(msg.target, msg.repo);
-      done(true, `Dispatched to ${repoNameOf(world, msg.target, msg.repo)}`, `A fresh worktree and agent on ${hostName(profiles, sent.hostId)}`);
+      const where = hostName(profiles, sent.hostId);
+      if (isChatRepo(msg.repo)) done(true, "Chat started", `A new chat with its own folder on ${where}`);
+      else done(true, `Dispatched to ${repoNameOf(world, msg.target, msg.repo)}`, `A fresh worktree and agent on ${where}`);
       return;
     }
     case "edit":

@@ -9,10 +9,61 @@ Embeds `tf_client::Engine` (AppCore) and wires it to the webview and the OS.
 | `invoke("core_call", …)` | `{ hostId: string \| null, method: string, params?: unknown }` | method result; rejects with a tf-proto `ApiError`. `app.update*` are answered by the shell (below), everything else by the engine |
 | `invoke("core_term_input", …)` | `{ hostId, termId, data: string }` | `void` (fast path, never waits for the host) |
 | `invoke("core_events", …)` | `{ channel: Channel<AppEvent[]> }` | `void`. Replays current state first (Profiles, Settings, Tunnels, HostStatus + HostSnapshot per host), then streams live events, in order, in batches (a live event with whatever queued behind it; one webview eval per batch). Call once per page load; a reload drops older subscriptions. |
+| `invoke("doc_stage", …)` | `{ html: string }` | `string`: the URL to frame the document from (`tfdoc://localhost/<token>`; Windows, Android `http://tfdoc.localhost/<token>`). Rejects (message string) for a document over 96 MiB. See "Presented documents" |
+| `invoke("doc_release", …)` | `{ url: string }` | `void`; an unknown URL is no error |
+| `invoke("doc_open", …)` | `{ name: string, base64: string }` | `void` once the file is written and handed to the OS; rejects with a message string (Android: `"unsupported"`) |
 
-UI intents arrive on the same channel: `{type:"openAgent", hostId, agentId}` (toast / notification /
+UI intents arrive on the `core_events` channel: `{type:"openAgent", hostId, agentId}` (toast / notification /
 deep link) and `{type:"answerNext"}` (tray menu, `teleflock://answer-next`). Intents raised while no
 page is subscribed (cold start from a notification) are delivered right after the next replay.
+
+## Presented documents (`src/docs.rs`)
+
+An agent-presented HTML page (docs/architecture.md §3.32) is framed from the `tfdoc` URI scheme,
+not as an `srcdoc` frame, which would inherit the app's CSP (no inline scripts).
+- `doc_stage` keeps the document in memory under a 128-bit token (32 hex digits: two SipHash
+  values under the process's random `RandomState` keys) and answers its URL: `tfdoc://localhost/<token>`
+  on macOS and Linux, `http://tfdoc.localhost/<token>` on Windows and Android (Tauri's form for
+  custom schemes there; `useHttpsScheme` is off). At most 12 documents, 96 MiB together: staging
+  past either limit evicts the oldest, and a document over 96 MiB on its own is refused. Both
+  CSPs in `tauri.conf.json` allow these URLs in `frame-src` (not on Android, below).
+- The protocol (asynchronous, every webview) answers `GET /<token>` with the document and
+  `Content-Type: text/html; charset=utf-8`, `Content-Security-Policy:` the artifact policy
+  (`default-src 'none'`; scripts, styles, images, fonts, media and workers inline or `data:`/`blob:`
+  only; frames, connections, objects, forms, `<base>` and manifests `'none'`) plus
+  `sandbox allow-scripts`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: no-referrer`; an unknown token answers 404, another method 405 (plain text).
+  The copy into the response is made on the blocking pool, not on the webview thread.
+- `doc_release` drops a document the page no longer shows.
+- `doc_open` (desktop) decodes the bytes (64 MiB at most) and writes them to
+  `<temp>/teleflock-docs-<uid>/<random>/<name>` on Unix (`/tmp` is shared on Linux: one folder per
+  account, so another account's folder is never in the way) and `%TEMP%\teleflock-docs\<random>\<name>`
+  on Windows (folders 0700, file 0600 on Unix), after deleting the folders there older than 24 h,
+  then opens the file the way `open_external` opens a URL (`platform::open_default`: ShellExecute,
+  `open`, `xdg-open`). The folder must be this user's own and not a symlink; otherwise nothing is
+  written or pruned. The name keeps only `[A-Za-z0-9._ -]` (each run of other characters becomes
+  one `_`), of a path its last segment, at most 100 characters with the extension, never empty,
+  never starting with a dot, never a Windows device name (`con.html` → `_con.html`). An extension
+  outside what the app writes (an `.html` page with the artifact policy first, Markdown, images,
+  JSON, text) and sources that open in an editor gets `.txt` appended, and so does a name without
+  one: a presented `.bat`, `.js` (Windows Script Host), `.py`, `.command` or `.desktop` opens as
+  text instead of running, `.svg`/`.xml` (scripts a browser would run) and `.csv`/`.tsv` (formulas a
+  spreadsheet would evaluate) too. The app names the file by what it shows (`docFileName` in
+  `src/features/session/artifacts/load.ts`).
+
+App commands need no capability entry: the app defines no ACL manifest of its own, so Tauri
+checks them only for remote origins, and the page is local.
+
+## Frames of presented documents (`src/frames.rs`, desktop)
+
+CSP covers neither WebRTC nor resource hints. The `tf-frames` plugin (no commands) runs a script in
+every frame of every webview before the frame's own scripts (wry: WebView2's document-created
+scripts, WebKit user scripts in all frames); in a frame of an opaque origin (every frame of a
+presented page, and every frame such a page makes) it removes `RTCPeerConnection` and its kin. On
+Linux, `frames::harden` also turns WebKitGTK's WebRTC off (its default) and its `LinkPreconnect`
+feature off in the main window (`webkit_settings_set_feature_enabled`, looked up with `dlsym`:
+WebKitGTK 2.42+; an older one keeps preconnecting and logs a warning). `cargo test -p teleflock
+--lib frames` checks the switch exists, and under a display (`xvfb-run`) that it turns off.
 
 ## Quick capture (`src/capture.rs`, desktop)
 
@@ -31,7 +82,7 @@ resets the engine's page state for the `main` webview only.
 |---|---|---|
 | `invoke("capture_status")` | – | `{ platform, shortcut, defaultShortcut, state: "registered" \| "off" \| "taken" \| "invalid" \| "unsupported" \| "failed", reason?, command? }`; changes are emitted as `capture-status` |
 | `invoke("capture_open")` / `invoke("capture_hide")` | – | `void`; the page gets `tf-capture://shown` / `tf-capture://hidden` |
-| `invoke("capture_draft", { typing, unsaved })` | bools | `void`; what the box holds (text typed; pasted images or a send in flight), reported on every change: the updater counts it as the user at work |
+| `invoke("capture_draft", { typing, unsaved })` | bools | `void`; what the box holds (`typing`: a task, text or images, both kept across restarts; `unsaved`: a send in flight), reported on every change: the updater counts it as the user at work |
 | `invoke("capture_resize", { height })` | logical px | `void` (clamped 150–640, width fixed) |
 | `invoke("capture_show_main")` | – | `void`; main window to the front ("Open in Dispatch", "Answer in TeleFlock") |
 
@@ -80,9 +131,10 @@ install; `unsupportedReason` says why and Settings shows it.
   Install) downloads and installs at once. An automatic one (`Origin::Automatic`) downloads in
   the background, verifies it and parks the package in memory as `phase: "ready"` (the UI toasts
   "Update ready · Restart now" once per version and Settings shows the same button). While the user
-  is in front it stays there: the main window shown, not minimized and focused, **or Quick capture
-  in use** (`capture::usage` → `apply::capture_in_front`: focused; shown with text typed; or, shown
-  or not, holding pasted images or a send waiting for the main window, which a restart would lose).
+  is in front it stays there: the main window shown, not minimized and focused, **Quick capture
+  in use** (`capture::usage` → `apply::capture_in_front`: focused; shown with a task in it; or,
+  shown or not, a send waiting for the main window, which a restart would lose), or a page with a
+  video upload in flight (`drafts_busy`, below).
   Once the user has been away for `AWAY_GRACE` (20 s, so an alt-tab doesn't count) *without a
   break* and `settings.autoUpdate` is still on, it installs and restarts. Every departure
   (`WindowEvent::Focused(false)` of `main` or `capture`, close-to-tray, capture hidden or emptied →
@@ -110,6 +162,14 @@ install; `unsupportedReason` says why and Settings shows it.
   `on_before_exit`, as `RunEvent::Exit` won't fire. Linux replaces the AppImage in place or runs
   `pkexec dpkg -i` for the `.deb`; then `request_restart()` exits through `RunEvent::Exit` and
   starts the new version.
+- Unsent drafts (`src/drafts.rs`, unit-tested, and `apply::install_and_restart`): before anything
+  that ends the process (the Linux restart, right after the install; the Windows installer, right
+  before it starts; the tray's Quit, where the AppImage installs; the Android installer) the shell
+  emits `tf-drafts://flush` with a request id to the pages that called `invoke("drafts_listen")`
+  and waits until each called `invoke("drafts_flushed", { id })`, 3 s at most. A page answers once
+  every draft is in IndexedDB (`src/core/draftFlush.ts`); a page that starts loading stops
+  counting. `invoke("drafts_busy", { busy })`: the page holds an upload a restart would lose; the
+  automatic install waits like for a user in front (its end restarts the 20 s grace).
 - macOS (`manual: true`): discovery looks for the release's `TeleFlock_<v>_universal.dmg` (built
   by `macos.yml`, never signed with the updater key); automatic checks never install, the UI
   shows one "vX is available" toast per new version and Settings a **Download** button, both calling
@@ -145,6 +205,7 @@ Android only (Kotlin plugin `src-tauri/plugins/teleflock-android`, capability `t
 | `invoke("plugin:teleflock-android\|cancel_dictation", { session })` | same | `void`; drops the phrase being spoken |
 | `invoke("plugin:teleflock-android\|take_shares")` | – | `{ shares: { id, text?, subject?, images: { mime, data (base64), name? }[], skipped? }[] }`: what was shared to TeleFlock since the last call (≤ 4 kept); a `share` plugin event (`addPluginListener`) announces new ones |
 | `invoke("plugin:teleflock-android\|share_image", { name, data, text? })` | `name`: file name; `data`: PNG, base64; `text`: caption | `void` once the system share sheet opened (the PNG goes to `<cache>/shared/`, offered read-only through the app's FileProvider); rejects `SHARE_FAILED`. Flock Wrapped's **Share…**: the WebView has no downloads or Web Share |
+| `invoke("plugin:teleflock-android\|open_preview", { url, title?, subtitle? })` | `url`: a preview tunnel's page, `http(s)://127.0.0.1\|localhost[:port]/…`; `title`, `subtitle`: the window's two lines | `void` once the preview window opened; rejects `BAD_URL` for any other address. `showPreview` (`src/features/preview/store.ts`) sends every live tunnel there in the Android app, on any layout; only the demo host's `blob:` documents stay in the sheet |
 
 Dictation (`Dictation.kt`, used by `src/features/session/composer/useDictation.ts` instead of the
 Web Speech API, which Android's WebView lacks): `android.speech.SpeechRecognizer` (free-form, the
@@ -158,6 +219,23 @@ stops it, a destroyed activity cancels it. The plugin manifest declares `RECORD_
 `android.speech.RecognitionService`, without which API 30+ hides the recognizer. The composer asks
 for the permission when the mic is tapped; after a denial it explains, and once Android blocks the
 prompt it offers **Open settings**. No recognizer installed: the mic is hidden.
+
+Preview window (`PreviewActivity.kt`, `PreviewLinks.kt`): on Android every frame of the app's page
+gets Tauri's IPC and calls in the name of the top page (docs/architecture.md §8, "Framed content"),
+so a tunnel's page opens in an activity of its own (not exported; the application's theme; rotation
+doesn't reload it) whose WebView is a plain one: no `ipc` bridge object, no document-start
+scripts, no request interception. Loopback pages (`127.0.0.1`, `localhost`, the hosts the network
+security config lets through in clear text) and their `blob:` documents stay in it; other http(s)
+links open in the browser when tapped (`hasGesture`), a page redirecting by itself goes nowhere;
+other schemes (`intent:`, `file:`, `content:`, `javascript:` …) go nowhere. Downloads and **Open in
+browser** hand the http(s) address to the browser; camera, microphone and location requests are
+denied; an upload field opens the system file picker; back steps through the page's history, then
+closes the window. A renderer crash closes the window. JVM unit tests:
+`./gradlew --offline :tauri-plugin-teleflock-android:testDebugUnitTest` in `gen/android`.
+`tauri.android.conf.json` narrows both CSPs' `frame-src` to `blob:` (the demo host's previews), so
+the Android page can't frame anything fetched; the CSPs are maps of directives so that this patch
+(JSON Merge Patch over `tauri.conf.json`) replaces only `frame-src`. `cargo test -p teleflock --lib
+csp` reads the merged config the way Tauri does and checks both.
 
 Driven from Rust only (`run_mobile_plugin`, not in the webview ACL): `installApk { path, openSettings }`
 → `{ status: "started" | "needsPermission" }`. First checks the archive with
@@ -174,6 +252,18 @@ button has `id="tf-max"` for the Windows 11 Snap Layouts overlay of `tauri-plugi
 Linux uses the same undecorated window (opaque: `tauri.linux.conf.json`); macOS keeps native
 traffic lights over the bar (`tauri.macos.conf.json`, `titleBarStyle: Overlay`) and TitleBar
 drops its own buttons there.
+
+### What's new after an update (frontend: `src/features/updates/{releaseNotes.ts,WhatsNew.tsx}`)
+
+The shell does not take part. On every platform (desktop, Android, browser, devserver, demo) the
+webview compares its own version (`__APP_VERSION__`) with the last one this device showed
+(`localStorage` `tf.whatsNew`: `{ seen, failedStarts }`) and, when newer, reads the release notes
+itself from `GET https://api.github.com/repos/studioplascode/TeleFlock/releases?per_page=30`
+(the endpoint `release.rs` uses; hence `https://api.github.com` in `connect-src` of both CSPs in
+`tauri.conf.json`). Apps up to 0.8.x never wrote the record, so with no record the check (run once
+the host profiles have loaded) tells an update from a fresh install by whether a real, non-demo host
+is configured: yes → the running version's notes are shown; no → the version is recorded silently.
+See `docs/architecture.md` §6.12 for the behaviour.
 
 ## Deep links (`teleflock://`)
 
@@ -261,13 +351,31 @@ comet stays still there), window close hides to the tray, focus → `engine.resu
 and an update check if due; macOS also reopens the hidden window from the Dock
 (`RunEvent::Reopen`). `open_external` uses `xdg-open` / `open`.
 
+## Dictation on desktops
+
+The shell builds tf-client with `voice` on Windows, macOS and Linux (`Cargo.toml`), so `dictation.*` and its
+events go through `core_call` / `core_events` like every app method (docs/architecture.md §6.16); the speech
+engine is linked into the binary (docs/build.md §10.5), the models are downloaded in Settings → Dictation. The
+page's `useDictation` uses it once a speech model is chosen, else the webview's Web Speech API where it has one.
+Microphone access:
+- macOS: `Info.plist` (merged into the bundle's by the bundler) holds `NSMicrophoneUsageDescription` (and
+  `NSSpeechRecognitionUsageDescription` for the webview's speech recognition); `Entitlements.plist`
+  (`bundle.macOS.entitlements` in `tauri.macos.conf.json`) grants `com.apple.security.device.audio-input`,
+  without which the hardened runtime withholds the microphone without asking. A refusal says where to allow it
+  (System Settings → Privacy & Security → Microphone).
+- Windows: a refusal points at Settings → Privacy & security → Microphone → Let desktop apps access your microphone.
+- Linux: ALSA (`libasound2`, a package dependency).
+
+The Android app keeps `Dictation.kt` (above): tf-dictation is not built for it.
+
 ## Layout
 
 - `src/lib.rs` builder, plugins, run loop · `core.rs` commands + event fan-out · `platform.rs`
-  `tf_client::Platform` impl · `present.rs` notification presentation + `ToastEvent` ·
+  `tf_client::Platform` impl + `open_default` · `present.rs` notification presentation +
+  `ToastEvent` · `docs.rs` presented documents (`tfdoc:` protocol, `doc_*` commands) ·
   `deeplink.rs` · `tray.rs` + `badge.rs` (desktop) · `toast.rs` + `toastxml.rs` (Windows) ·
   `xdg_notify.rs` (Linux) · `mac_notify.rs` + `mac_model.rs` (macOS) · `idle.rs` (system
-  presence) · `update/` self-update.
+  presence) · `update/` self-update · `csp.rs` (test only: the page's CSP per platform).
 - `plugins/teleflock-android/` Kotlin plugin crate (`dev.teleflock.android`).
 - `gen/android/` generated by `tauri android init`, plus the release signing block, the theme and
   `MainActivity` (lifecycle reports to Rust, see "App closed from recents").

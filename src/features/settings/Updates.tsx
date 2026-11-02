@@ -1,4 +1,4 @@
-import { Download, RefreshCw, RefreshCwOff } from "lucide-react";
+import { Download, RefreshCw, RefreshCwOff, Sparkles } from "lucide-react";
 import { useEffect } from "react";
 import { Button, formatAge, Switch, toast, useNow } from "@/design";
 import { core, useSettings } from "@/core";
@@ -6,6 +6,7 @@ import type { UpdateStatus } from "@/core/gen";
 import { errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
 import { installLine, useUpdateStatus, watchUpdates } from "@/features/updates/updates";
+import { APP_VERSION, openWhatsNew } from "@/features/updates/releaseNotes";
 import { Row, Section } from "./parts";
 
 function statusLine(s: UpdateStatus, now: number): string {
@@ -28,14 +29,28 @@ function statusLine(s: UpdateStatus, now: number): string {
   }
 }
 
-/** Settings → Updates (Tauri app only): version, status, manual check / install, auto toggle. */
+/** Settings → Updates: version, status, manual check / install, auto toggle (Tauri app only), and What's new (everywhere). */
 export function Updates({ index }: { index: number }) {
   const status = useUpdateStatus((s) => s.status);
   const autoUpdate = useSettings((s) => s.autoUpdate);
   const saveSettings = useSettings((s) => s.update);
   const now = useNow(30_000);
   useEffect(watchUpdates, []);
-  if (core.backend !== "tauri" || !status) return null;
+  const whatsNew = (
+    <Row label="What's new" description={`The release notes of v${status?.current ?? APP_VERSION}, from TeleFlock's GitHub releases.`}>
+      <Button size="sm" variant="secondary" icon={<Sparkles />} onClick={() => void openWhatsNew(status?.current ?? APP_VERSION)}>
+        Show
+      </Button>
+    </Row>
+  );
+  if (core.backend !== "tauri") {
+    return (
+      <Section index={index} icon={<RefreshCw />} title="Updates" description="Release notes come from TeleFlock's GitHub releases.">
+        {whatsNew}
+      </Section>
+    );
+  }
+  if (!status) return null;
 
   const busy = status.phase === "checking" || status.phase === "downloading" || status.phase === "installing";
   const canInstall = status.phase === "available" || status.phase === "needsPermission" || status.phase === "ready";
@@ -102,6 +117,7 @@ export function Updates({ index }: { index: number }) {
           label="Automatic updates"
         />
       </Row>
+      {whatsNew}
     </Section>
   );
 }

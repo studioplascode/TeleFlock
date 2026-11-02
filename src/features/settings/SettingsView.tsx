@@ -15,9 +15,14 @@ import { OMP_PAGES, VIEWS } from "@/features/shell/vocab";
 import { QuickCaptureSettings } from "@/features/capture/QuickCaptureSettings";
 import { HostAlerts } from "@/features/notify/HostAlerts";
 import { AutoAnswerSettings } from "@/features/autoAnswer/HostDefaults";
+import { RefusalFallbackSettings } from "@/features/refusal/RefusalSettings";
+import { RecordingsSettings } from "@/features/recording/RecordingsSettings";
+import { BrowserSettings } from "@/features/browser/BrowserSettings";
+import { DictationSettings } from "@/features/dictation/DictationSettings";
 import { Appearance } from "./Appearance";
 import { MutedAgents } from "./MutedAgents";
 import { AutoResumeSettings } from "./AutoResume";
+import { IdleShellsSettings } from "./IdleShells";
 import { CommitInput, Row, Section, THINKING, useModels } from "./parts";
 import { PresenceRows } from "./PresenceRows";
 import { Templates } from "./Templates";
@@ -166,6 +171,8 @@ export function SettingsView() {
           </Row>
         </Section>
 
+        <DictationSettings index={1} />
+
         <Section
           index={1}
           icon={<Bell />}
@@ -289,7 +296,11 @@ export function SettingsView() {
 
         <AutoResumeSettings index={3} />
 
+        <RefusalFallbackSettings index={3} />
+
         <AutoAnswerSettings index={3} />
+
+        <IdleShellsSettings index={3} />
 
         <Section index={3} icon={<SquareTerminal />} title="Terminal">
           <Row label="Font size" description={<span className="font-mono" style={{ fontSize: settings.terminalFontSize }}>~/teleflock $ herdr agent list</span>}>
@@ -306,6 +317,10 @@ export function SettingsView() {
             <span className="w-10 text-right font-mono text-sm tabular text-ink-2">{settings.terminalFontSize}px</span>
           </Row>
         </Section>
+
+        {!isAndroid && <BrowserSettings index={3} />}
+
+        {!isAndroid && <RecordingsSettings index={3} />}
 
         <Section index={4} icon={<MonitorSmartphone />} title="This device">
           <Row label="Device name" description="Shown to other clients as the author of prompts you send." htmlFor="tf-device-name" wide>

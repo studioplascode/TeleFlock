@@ -66,6 +66,29 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Creates `dir` (and its parents) for this user only (0700 on Unix), and tightens it when it
+/// exists already.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// `OpenOptions` whose new files only this user can read (0600 on Unix; a file that exists keeps
+/// its mode).
+pub fn private_options() -> std::fs::OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut opts = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts
+}
+
 /// Write JSON atomically.
 pub async fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), ApiError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| ApiError::new("internal", e.to_string()))?;

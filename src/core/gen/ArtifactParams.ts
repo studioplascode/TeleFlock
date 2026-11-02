@@ -8,6 +8,11 @@ import type { ArtifactKind } from "./ArtifactKind";
  */
 export type ArtifactParams = { agentId: string, kind: ArtifactKind, name: string, 
 /**
- * Text bytes to return (default 1 MiB, 4 MiB at most).
+ * Bytes to return (default 1 MiB; text 4 MiB at most, `base64` 8 MiB).
  */
-maxBytes?: number, };
+maxBytes?: number, 
+/**
+ * Answer the file's bytes as base64 `data` instead of `text`, binary files included
+ * (images and the files a presented page references). Hosts before 0.9.0 ignore it.
+ */
+base64?: boolean, };

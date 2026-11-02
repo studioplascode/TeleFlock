@@ -26,6 +26,7 @@ const McpView = lazy(() => import("@/features/mcp/McpView").then((m) => ({ defau
 const PluginsView = lazy(() => import("@/features/plugins/PluginsView").then((m) => ({ default: m.PluginsView })));
 const AccountsView = lazy(() => import("@/features/accounts/AccountsView").then((m) => ({ default: m.AccountsView })));
 const ForwardView = lazy(() => import("@/features/forward/ForwardView").then((m) => ({ default: m.ForwardView })));
+const BrowserView = lazy(() => import("@/features/browser/BrowserView").then((m) => ({ default: m.BrowserView })));
 const CleanupView = lazy(() => import("@/features/cleanup/CleanupView").then((m) => ({ default: m.CleanupView })));
 const WallView = lazy(() => import("@/features/wall/WallView").then((m) => ({ default: m.WallView })));
 const AmbientView = lazy(() => import("@/features/ambient/AmbientView").then((m) => ({ default: m.AmbientView })));
@@ -47,7 +48,7 @@ export function routeKey(r: Route): string {
 
 /** Screens that own their full height (no page scroll / pull-to-refresh). The phone board scrolls. */
 export function isFullBleed(r: Route, mobile: boolean): boolean {
-  return r.name === "agent" || r.name === "dispatch" || r.name === "terminal" || r.name === "review" || ((r.name === "board" || r.name === "wall") && !mobile) || r.name === "design" || r.name === "ambient";
+  return r.name === "agent" || r.name === "dispatch" || r.name === "terminal" || r.name === "review" || ((r.name === "board" || r.name === "wall") && !mobile) || r.name === "design" || r.name === "ambient" || r.name === "browser";
 }
 
 /** Screens that take the whole window under the title bar: the sidebar, the split and the phone's bottom nav step aside. */
@@ -97,6 +98,8 @@ export function RouteView({ route, mobile }: { route: Route; mobile: boolean }) 
       return <CleanupView hostId={route.hostId} />;
     case "forward":
       return <ForwardView />;
+    case "browser":
+      return <BrowserView />;
     case "wall":
       return <WallView />;
     case "ambient":

@@ -1,12 +1,13 @@
-import { ArrowLeft, Check, MessageCircle, PenLine, Send, SquareTerminal } from "lucide-react";
+import { ArrowLeft, Check, MessageCircle, Mic, MicOff, PenLine, Send, SquareTerminal } from "lucide-react";
 import { motion } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import { answerDraftKey, drafts, parseAgentKey, useAgent, useCore, useDraft } from "@/core";
 import type { Answer, NeedsKind, NeedsOption, UiRequest } from "@/core/gen";
 import { cn, Elapsed, Spinner } from "@/design";
+import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { AskCountdown } from "@/features/autoAnswer/AskCountdown";
 import { OptionTile, SkipButton, isTyping, optionFrame } from "@/features/inbox/AnswerParts";
-import { CONFIRM_OPTIONS, optionAnswer, otherAnswer } from "@/features/inbox/answers";
+import { CONFIRM_OPTIONS, optionAnswer, otherAnswer, skipOffered } from "@/features/inbox/answers";
 import { askText } from "@/features/inbox/askText";
 import { haptic } from "@/features/shell/haptics";
 import { NEEDS_WORD } from "@/features/shell/vocab";
@@ -14,6 +15,10 @@ import { hostCall, usePending } from "../api";
 import { Markdown } from "../markdown/Markdown";
 import { AgentSaid } from "./AgentSaid";
 import { contextFromRows, withoutQuestion } from "./askContext";
+import { Ticks } from "@/features/shell/Ticks";
+
+/** `inline code` on the sunset card: monospace on a darker wash of the card, in its own text colour, sized to the line. */
+const SUNSET_CODE = "bg-black/20 text-[0.88em] text-on-sun";
 
 export interface AskCardProps {
   agentKey: string;
@@ -228,8 +233,14 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
       </div>
 
       {said && <AgentSaid text={said} variant="ask" lines={compact ? 3 : 4} className={compact ? "mt-2.5" : "mt-3"} />}
-      <h3 className={cn("relative mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "mt-2 text-lg leading-[1.2]" : "mt-2.5 text-[25px] leading-[1.15] short:text-[21px]")}>{headline}</h3>
-      {body && <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-on-sun/90">{body}</div>}
+      <h3 className={cn("relative mb-1 font-display font-bold tracking-[-0.03em] text-balance", compact ? "mt-2 text-lg leading-[1.2]" : "mt-2.5 text-[25px] leading-[1.15] short:text-[21px]")}>
+        <Ticks text={headline} className={SUNSET_CODE} />
+      </h3>
+      {body && (
+        <div className="relative mb-2 text-[13px] leading-[1.5] whitespace-pre-wrap text-on-sun/90">
+          <Ticks text={body} className={SUNSET_CODE} />
+        </div>
+      )}
       {needs?.command && (
         <div className={cn("relative overflow-hidden rounded-md bg-[rgb(30_4_18/0.42)] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]", compact ? "my-2" : "my-2.5")}>
           <div className="flex items-center gap-1.5 border-b border-white/10 px-3 py-1 text-[10px] font-extrabold tracking-[0.08em] uppercase opacity-75">
@@ -304,26 +315,17 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
                 }}
               />
             ) : (
-              <div className={optionFrame("sun", { on: true })}>
-                <PenLine className="mt-0.5 size-4 shrink-0" />
-                <input
-                  ref={otherRef}
-                  value={other}
-                  onChange={(e) => setOther(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      void submit();
-                    } else if (e.key === "Escape") {
-                      e.stopPropagation();
-                      setOther(null);
-                    }
-                  }}
-                  aria-label="Other answer"
-                  placeholder={multi ? "Your own answer (replaces the ticks)" : "Type your own answer"}
-                  className="w-full border-0 border-b border-dashed border-[#8a5a6a] bg-transparent py-0.5 text-[13px] font-semibold outline-none placeholder:text-[#8a5a6a]"
-                />
-              </div>
+              <OtherField
+                hostId={hostId}
+                about={agent?.title ? `Agent task: ${agent.title}` : undefined}
+                value={other}
+                onChange={setOther}
+                setDraft={setOtherText}
+                onSubmit={() => void submit()}
+                inputRef={otherRef}
+                multi={multi}
+                compact={compact}
+              />
             ))}
         </div>
       )}
@@ -355,7 +357,7 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
               Chat about this
             </button>
           )}
-          {request.kind !== "planReview" && (request.options.length > 0 || editor) ? (
+          {skipOffered(kindKey) && (request.options.length > 0 || editor) ? (
             <SkipButton sunset className="ml-auto" disabled={busy || done} onClick={() => void answer({ cancel: true }, "Skipped")} />
           ) : null}
           {done && (
@@ -366,5 +368,60 @@ export function AskCard({ agentKey, request, compact = false, hotkeys = false, o
         </div>
       )}
     </motion.section>
+  );
+}
+
+interface OtherFieldProps {
+  hostId: string;
+  about: string | undefined;
+  value: string;
+  onChange(v: string | null): void;
+  /** The draft's own setter: a dictation fill must not clear the ticks or close the field. */
+  setDraft(update: (text: string) => string): void;
+  onSubmit(): void;
+  inputRef: RefObject<HTMLInputElement | null>;
+  multi: boolean;
+  compact: boolean;
+}
+
+/** The "Other…" free-text answer, with a mic: dictation (tidied by Rambler when it is on) lands in this field. */
+function OtherField({ hostId, about, value, onChange, setDraft, onSubmit, inputRef, multi, compact }: OtherFieldProps) {
+  const ramble = useRamblerDictation({ hostId, ...(about ? { about } : {}), text: value, setText: setDraft, field: inputRef, mobile: compact, tone: "sun" });
+  const dictation = ramble.dictation;
+  return (
+    <div className={cn("flex min-w-0 flex-col", ramble.panel && "col-span-full")}>
+      {ramble.panel}
+      <div className={optionFrame("sun", { on: true })}>
+        <PenLine className="mt-0.5 size-4 shrink-0" />
+        <input
+          ref={inputRef}
+          value={dictation.listening && dictation.interim ? `${value}${value && !value.endsWith(" ") ? " " : ""}${dictation.interim}` : value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              onSubmit();
+            } else if (e.key === "Escape") {
+              e.stopPropagation();
+              onChange(null);
+            }
+          }}
+          aria-label="Other answer"
+          placeholder={multi ? "Your own answer (replaces the ticks)" : "Type your own answer"}
+          className="w-full border-0 border-b border-dashed border-[#8a5a6a] bg-transparent py-0.5 text-[13px] font-semibold outline-none placeholder:text-[#8a5a6a]"
+        />
+        {dictation.supported && (
+          <button
+            type="button"
+            aria-label={dictation.listening ? "Stop dictation" : "Dictate"}
+            onClick={dictation.toggle}
+            className={cn("pressable focus-ring relative grid shrink-0 place-items-center rounded-full bg-black/15 hover:bg-black/25 touch-hit", compact ? "size-8" : "size-6", dictation.listening && "tf-loop animate-breathe [--tf-breath:1.1s]")}
+          >
+            {dictation.listening ? <MicOff className="size-3.5" /> : <Mic className="size-3.5" />}
+          </button>
+        )}
+        {dictation.error && <span className="sr-only">{dictation.error}</span>}
+      </div>
+    </div>
   );
 }

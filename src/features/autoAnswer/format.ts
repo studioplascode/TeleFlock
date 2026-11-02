@@ -78,6 +78,15 @@ export function hostDecides(info: Pick<HostInfo, "autoAnswer"> | undefined): boo
 }
 
 /**
+ * "Decide for me…" is offered for an omp agent on a host with decide for me, unless its current
+ * request is anything but an ask: an approval, confirm, blocked wait, plan review or input has no
+ * ★ option to pick on its own (no needs at all: still offered).
+ */
+export function canDecideFor(agent: Pick<Agent, "kind" | "needs"> | undefined, info: Pick<HostInfo, "autoAnswer"> | undefined): boolean {
+  return agent?.kind === "omp" && hostDecides(info) && (agent.needs === undefined || agent.needs.kind === "ask");
+}
+
+/**
  * What a launch spec (`AgentSpec`, `AutomationDraft`) carries: the agent's own policy, or nothing
  * for the host default and for hosts without decide for me.
  */

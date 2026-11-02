@@ -145,6 +145,14 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
   (worktree reopened via herdr `worktree.open`). Other per-agent methods on a parked card fail with
   `parked` ("Resume it first"); `session.open` gives a read-only transcript snapshot (older rows
   through `session.history`, `session.find` over the file).
+- **chat.\*** (`chat.rs`, chat tasks, architecture §3.31): `chat.list` lists the folders in `<home>/chats`
+  (newest first) with the agent on the board in each (live first) and what keeps each one, but not the chats
+  of another herdr session (`Ctx::daemon`: the other contexts' boards, `state.json`'s Done and ended cards);
+  `chat.delete {agentId | folder, dryRun?}` ends a chat (its pane closed as Mark done closes it, the
+  agent forgotten everywhere and listed in `HostInfo.pruned`; omp's session file stays) and removes its
+  folder while nothing but omp's `.omp/` is in it and no card of any herdr session uses it.
+  `agent.start` with `StartTarget::Chat` (`agent.rs`) makes the folder and opens the agent in a new tab of
+  the session's `Chats` workspace.
 - **host.setupApply** is one of two config-mutating paths (the other: `omp.settingsSet`, below), and only for explicit fix ids:
   `install-herdr-integration` (herdr `integration.install omp`), `enable-global-sharing`
   (`omp config set collab.autoStart control` + `collab.relayUrl ws://127.0.0.1:<port>`),
@@ -177,15 +185,25 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
   `redacted` keys are absent). Real-omp test (temp `PI_CODING_AGENT_DIR`, or
   `TF_LAB_OMP_AGENT_DIR`; scans `/proc/*/cmdline` during the credential write):
   `cargo test -p tf-hostd omp_config -- --ignored --nocapture`.
-- **ai.complete** (`ai.rs`): `omp --mode json --no-session --no-tools --no-extensions --no-skills
-  --no-rules --no-lsp --no-title --model @<role> --system-prompt <system>`, prompt on stdin,
-  `NO_COLOR=1`, cwd = `cwd` if it is a dir, else home. Line breaks in `system` become spaces
-  (Windows refuses CR/LF in arguments to `omp.cmd`). Answer = last assistant message of
-  `agent_end` (`text` parts joined, thinking ignored; assistant `message_end` if the stream ends
-  first); the child is killed as soon as it is in. Role default `tiny` (`^[a-z][a-z0-9-]{0,31}$`),
-  one retry with `smol` after a failed attempt when ≥ 1.5 s remain. `timeoutMs` default 20 000,
-  clamped 2 000–60 000, semaphore queue included → `timeout` (retryable). 3 omp processes per
-  daemon. Prompt and system text are never logged or returned; logs: task, role, model, ms, outcome.
+- **ai.complete / ai.prewarm** (`ai.rs`, `ai_pool.rs`): a call runs on an `omp --mode rpc
+  --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title --model @<role>
+  --system-prompt <system>` worker, one per (role, system prompt, cwd): the prompt goes in as an
+  RPC `prompt` (a fresh context for every call: `new_session` right after each call, in the
+  background), the answer is taken from `agent_end`. A call finding no idle worker starts one; it
+  is *kept* afterwards only if the key was prewarmed or called before within 2 min, so a one-off
+  call leaves no process behind. `ai.prewarm {task, system, role?, cwd?}` starts a worker without
+  a call and marks the key wanted (answers `{ready}` at once); a kept worker that was cut short
+  (timeout, cancel) is replaced. At most 2 idle or starting workers
+  (≈ 200 MB each, least recently used out), idle ones reaped after 2 min, a worker retired after
+  40 calls. A worker that cannot be used (omp without RPC, exit, rejected prompt, prompt > 256 KiB)
+  falls back to `omp --mode json …` (prompt on stdin, killed as soon as `agent_end` is in), which also
+  yields omp's error text. `NO_COLOR=1`, cwd = `cwd` if it is a dir, else home. Line breaks in
+  `system` become spaces (Windows refuses CR/LF in arguments to `omp.cmd`). Answer = last assistant
+  message of `agent_end` (`text` parts joined, thinking ignored; assistant `message_end` if the stream
+  ends first). Role default `tiny` (`^[a-z][a-z0-9-]{0,31}$`), one retry with `smol` after a failed
+  attempt when ≥ 1.5 s remain. `timeoutMs` default 20 000, clamped 2 000–60 000, semaphore queue
+  included → `timeout` (retryable). 3 concurrent calls per daemon. Prompt and system text are never
+  logged or returned; logs: task, role, model, ms, outcome.
 - **host.herdrRestart / host.herdrLoad / host.herdrConfig** (`crate::herdr_health`, architecture §3.29):
   routed from `host.rs`; start a down herdr now (`force`: replace a running or unresponsive one), load the
   installed herdr now (live handoff, else stop + start), per-host `autoRestart` / `idleUpdate` /

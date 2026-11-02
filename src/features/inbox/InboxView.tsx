@@ -1,13 +1,16 @@
 import { motion } from "motion/react";
-import { type ReactNode, useRef } from "react";
+import { useRef } from "react";
 import { useInbox, useUi } from "@/core";
 import { AnimatePresence, Button, CardFlight, EmptyState, FlightGroup, Kbd, PageHeader, StatusOrb, cn, fadeRise, useInView, useIsMobile } from "@/design";
+import { DecidedSection } from "@/features/autoAnswer/DecidedForYou";
+import { useDecisions } from "@/features/autoAnswer/hooks";
 import { openAgent, openAnswerHud, openTerminal } from "@/features/board/agentActions";
 import { QuickAnswer } from "@/features/board/QuickAnswer";
 import { UpdatesActions, UpdatesList, useUpdates } from "@/features/notify/NotificationCenter";
 import { MobileHeader } from "@/features/shell/MobileHeader";
 import { ACTIONS, LANE_TITLE } from "@/features/shell/vocab";
 import { LastAssistantText, NeedsHeader, NeedsQuestion } from "./NeedsContext";
+import { SectionHeader } from "./SectionHeader";
 
 function InboxItem({ agentKey, index, mobile }: { agentKey: string; index: number; mobile: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -42,23 +45,21 @@ function InboxItem({ agentKey, index, mobile }: { agentKey: string; index: numbe
   );
 }
 
-function SectionHeader({ title, meta, actions }: { title: string; meta?: ReactNode; actions?: ReactNode }) {
-  return (
-    <div className="flex min-h-8 items-center gap-2.5 px-1">
-      <h2 className="font-display text-lg font-bold text-ink">{title}</h2>
-      {meta && <span className="text-xs font-bold text-mute">{meta}</span>}
-      {actions && <div className="ml-auto flex items-center gap-1.5">{actions}</div>}
-    </div>
-  );
-}
-
-/** Inbox: everything waiting on you (oldest first, full question context), then unread updates. */
+/**
+ * Inbox: everything waiting on you (oldest first, full question context), then what decide for me
+ * answered for you that nobody reviewed yet, then unread updates.
+ */
 export function InboxView() {
   const keys = useInbox();
+  const decided = useDecisions().length;
   const updates = useUpdates();
   const mobile = useIsMobile();
   const setAnswerNext = useUi((s) => s.setAnswerNext);
-  const subtitle = `${keys.length > 0 ? `${keys.length} waiting` : "Nothing waiting"} · ${updates.length > 0 ? `${updates.length} update${updates.length === 1 ? "" : "s"}` : "no updates"}`;
+  const subtitle = [
+    keys.length > 0 ? `${keys.length} waiting` : "Nothing waiting",
+    ...(decided > 0 ? [`${decided} decided for you`] : []),
+    updates.length > 0 ? `${updates.length} update${updates.length === 1 ? "" : "s"}` : "no updates",
+  ].join(" · ");
 
   const body = (
     <div className={cn("flex flex-col", mobile ? "gap-6" : "gap-8")}>
@@ -87,6 +88,8 @@ export function InboxView() {
         )}
       </section>
 
+      <DecidedSection mobile={mobile} />
+
       <section aria-label="Updates" className="flex flex-col gap-2">
         <SectionHeader title="Updates" meta={updates.length > 0 ? `${updates.length} unread · newest first` : undefined} actions={<UpdatesActions />} />
         <UpdatesList items={updates} className={cn("card-surface rounded-xl", mobile ? "p-1.5" : "p-2")} />
@@ -108,7 +111,7 @@ export function InboxView() {
         title="Inbox"
         meta={
           <>
-            <StatusOrb status={keys.length > 0 ? "needs-you" : "done"} size={7} label={null} />
+            <StatusOrb status={keys.length > 0 ? "needs-you" : decided > 0 ? "review" : "done"} size={7} label={null} />
             {subtitle}
           </>
         }

@@ -35,12 +35,14 @@ export class DemoJobs {
       this.started = now;
     }
     const view = this.view(new Set());
-    const running = view.jobs.filter((j) => j.status === "running");
+    // Like the bridge: the card counts background commands, not subagents (`task` jobs).
+    const commands = view.jobs.filter((j) => j.kind !== "task");
+    const running = commands.filter((j) => j.status === "running");
     const live = running.find((j) => j.widget?.state === "live");
     const summary: JobsSummary | undefined =
-      view.jobs.length === 0 && !view.waiting
+      commands.length === 0 && !view.waiting
         ? undefined
-        : { running: running.length, recent: view.jobs.length - running.length, waiting: view.waiting, ...(live?.widget?.glance ? { glance: live.widget.glance, glanceJob: live.label } : {}) };
+        : { running: running.length, recent: commands.length - running.length, waiting: view.waiting, ...(live?.widget?.glance ? { glance: live.widget.glance, glanceJob: live.label } : {}) };
     const key = JSON.stringify(summary ?? null);
     if (key === this.last) return;
     this.last = key;

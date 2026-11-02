@@ -1,7 +1,7 @@
 "$schema" = "schemas/schema.json"
 
 [default]
-description = "Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images and items shared to TeleFlock."
+description = "Webview access to haptics, the notification permission flow, battery-optimisation status, dictation (microphone permission flow, system speech recognizer), the share sheet for images, items shared to TeleFlock and the preview window for tunnels."
 permissions = [
   "allow-haptic",
   "allow-notification-permission",
@@ -16,4 +16,5 @@ permissions = [
   "allow-cancel-dictation",
   "allow-share-image",
   "allow-take-shares",
+  "allow-open-preview",
 ]

@@ -67,11 +67,14 @@ export {
   useSuccessor,
   useTunnels,
   useForwards,
+  useBrowser,
+  getBrowserStatus,
+  onBrowserStatus,
   useWorkspaces,
 } from "./hooks";
 export type { AgentFilter, HostsView, NotificationsView, SessionView, SettingsView } from "./hooks";
-export { ircOf, ircThreads, ircUnread } from "./irc";
-export type { IrcEntry, IrcThread } from "./irc";
+export { ircOf } from "./irc";
+export type { IrcEntry } from "./irc";
 export {
   describePace,
   formatPct,
@@ -106,20 +109,26 @@ export type { Route, RouteName } from "./nav";
 export { useUi } from "./ui";
 export type { UiDialog, SplitState, UiState } from "./ui";
 export { usePrefs } from "./prefs";
-export type { Prefs } from "./prefs";
+export type { Prefs, RamblerRole } from "./prefs";
 export {
   aiNamingEnabled,
+  prewarmRamble,
   suggestAgentName,
+  suggestAgentRename,
   suggestBranch,
   suggestCommitMessage,
   suggestPullRequest,
+  suggestRamble,
   suggestTemplateName,
   suggestTitle,
   useAiNaming,
   useAiSuggestion,
 } from "./ai";
-export type { AiCallOptions, AiTask } from "./ai";
-export { DRAFT_LIMITS, draftKey, draftKeyParts, drafts, flushDrafts, pruneDrafts, useDraft, useDraftState, useDrafts } from "./drafts";
+export type { AgentRenameInput, AiCallOptions, AiFailure, AiOutcome, AiTask, RambleInput } from "./ai";
+export { createRambler } from "./rambler";
+export type { RambleOptions, RambleResult, RambleState, Rambler } from "./rambler";
+export { DRAFT_LIMITS, draftKey, draftKeyParts, drafts, flushDrafts, pruneDrafts, startDrafts, useDraft, useDraftState, useDrafts } from "./drafts";
+export { answerFlushRequests, flushAll, trackDraftWork } from "./draftFlush";
 export type { DraftEntry, DraftLimits, DraftSetter } from "./drafts";
 export { useDraftImages } from "./draftImages";
 export type { DraftImage } from "./draftImages";

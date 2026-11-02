@@ -23,6 +23,7 @@ use tf_proto::{ApiError, Empty, HostMethod};
 
 use crate::agentcfg::{AgentOmp, Store};
 use crate::bridge::BridgeError;
+use crate::chats::ChatRoot;
 use crate::clients::ClientHandle;
 use crate::inject::{self, When};
 use crate::omp::{MetaOverlay, OmpSession};
@@ -64,6 +65,14 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::SessionArtifactRead(p) => to_value(super::artifact_files::read(ctx, p).await?),
         M::SessionWriteLocal(p) => to_value(super::artifact_files::write_local(ctx, p).await?),
         M::SessionContextXray(p) => to_value(super::xray::get(ctx, &p.agent_id).await?),
+        M::SessionAgentChat(p) => match parked_record(ctx, &p.agent_id) {
+            Some(rec) => to_value(crate::agent_chat::fetch_parked(rec.session_id, rec.session_file, p).await?),
+            None => {
+                let sid = session_id(ctx, &p.agent_id)?;
+                let agent_id = p.agent_id.clone();
+                to_value(crate::agent_chat::fetch(ctx, &agent_id, &sid, p).await?)
+            }
+        },
 
         M::AgentPrompt(p) => unit(prompt(ctx, p, client).await),
         M::AgentAbort(p) => unit(abort(ctx, &p.agent_id).await),
@@ -103,6 +112,10 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentAutoResumeNow(p) => to_value(crate::recovery::resume_now(ctx, &p.agent_id).await?),
         M::AgentAutoResumeCancel(p) => unit(crate::recovery::cancel(ctx, &p.agent_id)),
         M::AgentRetry(p) => to_value(crate::limit_resume::retry(ctx, &p.agent_id, p.subagent_id.as_deref()).await?),
+        M::AgentRefusalRetry(p) => to_value(crate::refusal::retry(ctx, p).await?),
+        M::AgentBrowserAttach(p) => to_value(ctx.browser.attach(client, p).await?),
+        M::AgentBrowserDetach(p) => unit(ctx.browser.detach(client, &p.agent_id).await),
+        M::AgentBrowserAnswer(p) => unit(ctx.browser.answer(client, p).await),
         other => Err(ApiError::new("unknown_method", format!("`{}` is not an agent method", other.name()))),
     }
 }
@@ -165,12 +178,17 @@ fn not_shared() -> ApiError {
 /// switch the board's mapping (herdr / collab) can still name the old session while the bridge
 /// already said hello for the new one: then the agent's omp process names the current session.
 pub(crate) fn bridge_sid(ctx: &Ctx, agent_id: &str) -> Option<String> {
-    let sid = ctx.state.omp_session_of(agent_id)?;
-    if ctx.bridge.is_connected(&sid) {
+    bridge_session(&ctx.state, &ctx.bridge, agent_id)
+}
+
+/// [`bridge_sid`] from the board and the bridge alone (`crate::browser` holds those, not a `Ctx`).
+pub(crate) fn bridge_session(state: &crate::state::StateHandle, bridge: &crate::bridge::BridgeHandle, agent_id: &str) -> Option<String> {
+    let sid = state.omp_session_of(agent_id)?;
+    if bridge.is_connected(&sid) {
         return Some(sid);
     }
-    let pid = ctx.state.agent(agent_id)?.omp?.pid?;
-    ctx.bridge.by_pid(pid).map(|s| s.session_id)
+    let pid = state.agent(agent_id)?.omp?.pid?;
+    bridge.by_pid(pid).map(|s| s.session_id)
 }
 
 fn bridge_err(e: BridgeError) -> ApiError {
@@ -194,6 +212,7 @@ pub fn push_meta_overlay(ctx: &Ctx, session_id: &str) {
             queue: Some(b.state.queue.clone()),
             goal: Some(b.state.goal.clone()),
             data_plane: None,
+            agent_chat: None,
         },
         None => MetaOverlay::default(),
     };
@@ -219,6 +238,7 @@ fn session_open(ctx: &Ctx, p: SessionOpenParams, client: &ClientHandle) -> Resul
     let sid = session_id(ctx, &p.agent_id)?;
     let s = ctx.omp.session(&sid).ok_or_else(not_shared)?;
     push_meta_overlay(ctx, &sid);
+    crate::agent_chat::open(ctx, &p.agent_id, &sid);
     let limit = p.limit.map(|l| l.clamp(1, 2000) as usize).unwrap_or(DEFAULT_LIMIT);
     let mut snap = s.subscribe(client, &p.agent_id, limit, p.have.as_ref());
     if snap.ui.is_none() {
@@ -416,6 +436,10 @@ async fn answer(ctx: &Ctx, p: AnswerParams) -> Result<(), ApiError> {
     let a = omp_agent(ctx, &p.agent_id)?;
     let needs = a.needs.clone();
     let sid = session_id(ctx, &p.agent_id)?;
+    // The agent asks to use the user's browser (§3.33): a deny works from any app.
+    if let Some(req) = ctx.bridge.by_session(&sid).and_then(|b| b.browser_request).filter(|r| r.id == p.request_id) {
+        return ctx.browser.answer_choice(&p.agent_id, &sid, &req.id, &req.reason, &p.answer).await;
+    }
     // Plan reviews are answered through the bridge.
     if let Some(review) = ctx.bridge.by_session(&sid).and_then(|b| b.state.plan_review) {
         if review.review_id == p.request_id {
@@ -470,7 +494,15 @@ async fn subagent(ctx: &Ctx, p: SubagentCmdParams) -> Result<(), ApiError> {
     if p.action == SubagentAction::Chat && p.message.as_deref().is_none_or(|m| m.trim().is_empty()) {
         return Err(ApiError::new("invalid_params", "chat needs a message"));
     }
-    s.agent_cmd(kind, &p.subagent_id, p.message).await
+    let chat = (p.action == SubagentAction::Chat).then(|| p.message.clone().unwrap_or_default());
+    let sent = crate::util::now_ms();
+    let res = s.agent_cmd(kind, &p.subagent_id, p.message).await;
+    // What the user sent a subagent shows in the session's agent chat (the message board).
+    if let Some(text) = chat {
+        let error = res.as_ref().err().map(|e| e.message.clone());
+        crate::agent_chat::on_user_chat(ctx, &s.session_id, &p.subagent_id, text.trim(), p.broadcast.unwrap_or(false), error.as_deref(), sent);
+    }
+    res
 }
 
 // ───────────────────────────── bridge-first ─────────────────────────────
@@ -488,7 +520,7 @@ fn level_str(l: ThinkingLevel) -> &'static str {
     }
 }
 
-fn check_model(model: &str) -> Result<(), ApiError> {
+pub(crate) fn check_model(model: &str) -> Result<(), ApiError> {
     let ok = model.split_once('/').is_some_and(|(p, id)| !p.is_empty() && !id.is_empty())
         && !model.chars().any(|c| c.is_whitespace());
     if ok { Ok(()) } else { Err(ApiError::new("invalid_params", format!("model must be `provider/id`, got `{model}`"))) }
@@ -981,9 +1013,9 @@ pub(crate) async fn resume_parked(
     Ok(started)
 }
 
-/// Where a parked agent reopens: a new tab in its old workspace when that is still open at the
-/// same folder; its linked worktree through herdr `worktree.open` (grouped under its repo);
-/// else a new workspace at its folder.
+/// Where a parked agent reopens: a chat at its folder in the chats workspace (§3.31); else a new
+/// tab in its old workspace when that is still open at the same folder; its linked worktree
+/// through herdr `worktree.open` (grouped under its repo); else a new workspace at its folder.
 async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<LaunchPane, ApiError> {
     let cwd = rec
         .cwd
@@ -991,6 +1023,11 @@ async fn reopen_target(ctx: &Ctx, rec: &ParkedRecord) -> Result<LaunchPane, ApiE
         .or_else(|| rec.workspace_cwd.clone())
         .ok_or_else(|| ApiError::new("not_found", format!("no folder is known for {}", rec.name)))?;
     let path = crate::paths::expand_tilde(&cwd);
+    // A chat's folder is made again if it went (`start_agent`); never its old workspace's tab,
+    // which would open without the folder, nor a workspace of its own.
+    if let Some(chat) = chat_reopen(&ctx.chats, &path) {
+        return Ok(chat);
+    }
     if !path.is_dir() {
         return Err(ApiError::new("not_found", format!("{} no longer exists", path.display())).with_hint(
             "Its folder or worktree was removed. Recreate it, or resume the session from Sessions in another folder.",
@@ -1065,7 +1102,10 @@ async fn parked_snapshot(ctx: &Ctx, rec: ParkedRecord, limit: Option<u32>) -> Re
         }
         Err(e) => return Err(e),
     };
-    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta: parked::parked_meta(&rec), items, has_more, cursor, ui: None, sync: None })
+    let mut meta = parked::parked_meta(&rec);
+    // The message board reads a parked agent's chat from its files (`session.agentChat`).
+    meta.agent_chat = Some(crate::agent_chat::parked_info(rec.session_id.as_deref(), &rec.session_file));
+    Ok(SessionSnapshot { agent_id: rec.agent_id.clone(), meta, items, has_more, cursor, ui: None, sync: None })
 }
 
 /// The user rows of the prompts an ended card's agent was given before omp saved its session.
@@ -1210,10 +1250,13 @@ const LINK_WAIT: Duration = Duration::from_secs(90);
 #[derive(Debug)]
 pub enum LaunchPane {
     /// A client's target: `StartTarget::Pane` is an existing pane the client picked (a busy shell
-    /// fails fast); `Workspace` / `Cwd` make a new pane.
+    /// fails fast); `Workspace` / `Cwd` make a new pane; `Chat` becomes a [`ChatTab`](Self::ChatTab).
     Target(StartTarget),
     /// The root pane of a workspace or worktree hostd just created (its shell may still be starting).
     New(String),
+    /// A new tab of the herdr session's workspace for chats (§3.31) at a chat folder (or a folder
+    /// in one), labelled with the agent's name: a new chat, or a `Cwd` target in a chat folder.
+    ChatTab { cwd: PathBuf, name: String },
 }
 
 impl From<StartTarget> for LaunchPane {
@@ -1230,6 +1273,42 @@ impl LaunchPane {
             _ => NEW_PANE_SHELL_WAIT,
         }
     }
+
+    /// The folder of a `Cwd` target in a chat folder: a chat opens as a tab of the chats workspace,
+    /// never as a workspace of its own (Past sessions, restarts, a parked chat's resume).
+    fn chat_cwd(&self, chats: &ChatRoot) -> Option<PathBuf> {
+        let Self::Target(StartTarget::Cwd { cwd, .. }) = self else { return None };
+        let path = crate::paths::expand_tilde(cwd);
+        chats.in_chat(&path).then_some(path)
+    }
+}
+
+/// Where a launch goes once chats are told apart (§3.31). `StartTarget::Chat` is named first
+/// ([`crate::chats::chat_name`] among `taken`) and gets a new folder from `make_folder`; a `Cwd`
+/// target in a chat folder opens there, named `spec.name`, else after its folder. Both become a
+/// [`LaunchPane::ChatTab`]; anything else stays. Also returns the folder this launch made: it goes
+/// again when the launch fails.
+fn chat_launch(
+    chats: &ChatRoot,
+    target: LaunchPane,
+    spec: &AgentSpec,
+    taken: impl FnOnce() -> Vec<String>,
+    make_folder: impl FnOnce(&str) -> std::io::Result<PathBuf>,
+) -> Result<(LaunchPane, Option<PathBuf>), ApiError> {
+    if matches!(target, LaunchPane::Target(StartTarget::Chat {})) {
+        let name = crate::chats::chat_name(spec.name.as_deref(), spec.prompt.as_deref(), &taken());
+        let cwd = make_folder(&name).map_err(|e| ApiError::new("io_error", format!("making the chat's folder in {}: {e}", chats.path().display())))?;
+        return Ok((LaunchPane::ChatTab { cwd: cwd.clone(), name }, Some(cwd)));
+    }
+    let Some(cwd) = target.chat_cwd(chats) else { return Ok((target, None)) };
+    let name = spec.name.clone().unwrap_or_else(|| derive_handle(&cwd.display().to_string(), &taken()));
+    Ok((LaunchPane::ChatTab { cwd, name }, None))
+}
+
+/// A parked chat's launch target (§3.31): its folder as a `Cwd`, which [`start_agent`] opens in
+/// the chats workspace, making the folder again if it went. `None`: no chat.
+fn chat_reopen(chats: &ChatRoot, cwd: &Path) -> Option<LaunchPane> {
+    chats.in_chat(cwd).then(|| LaunchPane::Target(StartTarget::Cwd { cwd: cwd.display().to_string(), label: None }))
 }
 
 /// Maps a failed herdr `agent_start`: a shell still busy once [`LaunchPane::shell_wait`] is over
@@ -1274,12 +1353,23 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
     if let Some(p) = spec.auto_answer.as_ref().filter(|_| kind == "omp") {
         p.validate()?;
     }
-    let (pane_id, workspace_id, cwd) = resolve_pane(ctx, &target).await?;
+    // Chats (§3.31) are named before their pane exists: their tab, and a new chat's folder, carry
+    // the name. `made`: the folder this launch made, gone again if the launch fails.
+    let names = || ctx.state.snapshot().agents.into_iter().map(|a| a.name).collect::<Vec<String>>();
+    let (target, made) = chat_launch(&ctx.chats, target, spec, names, |name| crate::chats::make_folder(ctx.chats.path(), name, crate::chats::random_id))?;
+    let (pane_id, workspace_id, cwd) = match resolve_pane(ctx, &target).await {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            if let Some(folder) = &made {
+                discard_folder(ctx, folder).await;
+            }
+            return Err(e);
+        }
+    };
 
-    let taken: Vec<String> = ctx.state.snapshot().agents.into_iter().map(|a| a.name).collect();
-    let name = match &spec.name {
-        Some(n) => n.clone(),
-        None => derive_handle(cwd.as_deref().unwrap_or(&kind), &taken),
+    let name = match (&target, &spec.name) {
+        (LaunchPane::ChatTab { name, .. }, _) | (_, Some(name)) => name.clone(),
+        _ => derive_handle(cwd.as_deref().unwrap_or(&kind), &names()),
     };
 
     let store = Store::new(&ctx.paths);
@@ -1295,7 +1385,13 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
             warn!(path = %ctx.paths.ext.display(), "bridge extension missing; controls fall back to injection");
         }
         if let Some(o) = &own {
-            launch = store.prepare(o, &name).map_err(|e| ApiError::new("io_error", format!("writing the agent's omp settings: {e}")))?;
+            launch = match store.prepare(o, &name) {
+                Ok(l) => l,
+                Err(e) => {
+                    undo_chat_launch(ctx, &target, &pane_id, made.as_deref(), false).await;
+                    return Err(ApiError::new("io_error", format!("writing the agent's omp settings: {e}")));
+                }
+            };
         }
         let agent_overlay = launch.as_ref().map(|l| l.path.display().to_string());
         args = omp_args(spec, overlay.as_deref(), agent_overlay.as_deref(), ext.as_deref(), session);
@@ -1328,6 +1424,7 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
                     if let Some(l) = launch {
                         store.discard(l);
                     }
+                    undo_chat_launch(ctx, &target, &pane_id, made.as_deref(), e.is(tf_herdr::code::TIMEOUT)).await;
                     return Err(launch_err(e, &target));
                 }
             }
@@ -1531,6 +1628,12 @@ async fn resolve_pane(ctx: &Ctx, target: &LaunchPane) -> Result<(String, String,
             let (pane, workspace, cwd) = open_workspace(ctx, cwd, label.clone()).await?;
             Ok((pane, workspace, Some(cwd)))
         }
+        LaunchPane::ChatTab { cwd, name } => {
+            let (pane, workspace) = open_chat_tab(ctx, cwd, name).await?;
+            Ok((pane, workspace, Some(cwd.display().to_string())))
+        }
+        // `chat_launch` turns it into a `ChatTab` first.
+        LaunchPane::Target(StartTarget::Chat {}) => Err(ApiError::new("internal", "a chat launch without its folder")),
     }
 }
 
@@ -1546,6 +1649,90 @@ pub(crate) async fn open_workspace(ctx: &Ctx, cwd: &str, label: Option<String>) 
         .await
         .map_err(herdr_err)?;
     Ok((created.root_pane.pane_id, created.workspace.workspace_id, path.display().to_string()))
+}
+
+/// One chat tab opens at a time, so chats started together share one workspace for chats.
+static CHAT_TABS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A new (unfocused) tab labelled `name` at chat folder `cwd` in the herdr session's workspace for
+/// chats (§3.31), or, with none yet, a new such workspace (labelled `Chats`) at it: `(pane,
+/// workspace)`. herdr itself says which workspace that is (the board lags right after a create).
+/// The pane gets `GIT_CEILING_DIRECTORIES=<chats folder>`. A chat folder that went is made again
+/// (`chats::ensure_folder`).
+async fn open_chat_tab(ctx: &Ctx, cwd: &Path, name: &str) -> Result<(String, String), ApiError> {
+    crate::chats::ensure_folder(&ctx.chats, cwd).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ApiError::new("not_found", e.to_string()),
+        _ => ApiError::new("io_error", format!("making the chat's folder {} again: {e}", cwd.display())),
+    })?;
+    let env = crate::chats::pane_env(&ctx.chats);
+    let at = Some(cwd.display().to_string());
+    let _one = CHAT_TABS.lock().await;
+    let (workspaces, panes) = tokio::try_join!(ctx.herdr.workspace_list(), ctx.herdr.pane_list(None)).map_err(herdr_err)?;
+    let opened = match crate::chats::chats_workspace(&ctx.chats, &workspaces, &panes) {
+        Some(workspace_id) => {
+            let tab = TabCreate { workspace_id: Some(workspace_id.clone()), cwd: at, label: Some(name.to_string()), env, focus: false };
+            (ctx.herdr.tab_create(&tab).await.map_err(herdr_err)?.root_pane.pane_id, workspace_id)
+        }
+        None => {
+            let ws = WorkspaceCreate { cwd: at, label: Some(crate::chats::WORKSPACE_LABEL.to_string()), env, focus: false };
+            let created = ctx.herdr.workspace_create(&ws).await.map_err(herdr_err)?;
+            // Its first tab carries the chat's name too, like every later one.
+            if let Err(e) = ctx.herdr.tab_rename(&created.tab.tab_id, name).await {
+                warn!(tab = %created.tab.tab_id, "labelling the first chat tab: {e}");
+            }
+            (created.root_pane.pane_id, created.workspace.workspace_id)
+        }
+    };
+    ctx.state.refresh();
+    Ok(opened)
+}
+
+/// A chat launch that failed leaves nothing behind (§3.31): the pane hostd made for it closes (its
+/// tab with it, and the chats workspace when it holds nothing else), then a folder this launch made
+/// goes while nothing is in it (`chats::remove_if_unused`). After herdr's start timed out, both
+/// stay while an agent runs in the pane: it may still come up. herdr unable to say keeps both.
+async fn undo_chat_launch(ctx: &Ctx, target: &LaunchPane, pane_id: &str, made: Option<&Path>, timed_out: bool) {
+    if !matches!(target, LaunchPane::ChatTab { .. }) {
+        return;
+    }
+    let pane = match ctx.herdr.pane_get(pane_id).await {
+        Ok(p) => Some(p),
+        Err(e) if e.is_not_found() => None,
+        Err(e) => {
+            warn!(pane = pane_id, "a chat that did not start keeps its pane and folder: herdr cannot say what runs there ({e})");
+            return;
+        }
+    };
+    if let Some(p) = &pane {
+        if timed_out && p.agent.is_some() {
+            info!(pane = pane_id, "chat start timed out with an agent running in its pane; keeping the pane and its folder");
+            return;
+        }
+        let alone = ctx.herdr.workspace_get(&p.workspace_id).await.is_ok_and(|w| w.pane_count == 1 && w.tab_count == 1);
+        let closed = if alone { ctx.herdr.workspace_close(&p.workspace_id, false).await } else { ctx.herdr.pane_close(&p.pane_id).await };
+        match closed {
+            Ok(()) => ctx.state.refresh(),
+            Err(e) if e.is_not_found() => {}
+            Err(e) => {
+                warn!(pane = pane_id, "closing the pane of a chat that did not start: {e}");
+                return;
+            }
+        }
+    }
+    if let Some(folder) = made {
+        discard_folder(ctx, folder).await;
+    }
+}
+
+/// Removes the folder a failed chat launch made, while nothing is in it.
+async fn discard_folder(ctx: &Ctx, folder: &Path) {
+    let (chats, path) = (ctx.chats.clone(), folder.to_path_buf());
+    match tokio::task::spawn_blocking(move || crate::chats::remove_if_unused(&chats, &path)).await {
+        Ok(Ok((_, true))) => info!(folder = %folder.display(), "removed the folder of a chat that did not start"),
+        Ok(Ok((contents, false))) => info!(folder = %folder.display(), kept = contents.kept_count, "kept the folder of a chat that did not start"),
+        Ok(Err(e)) => warn!(folder = %folder.display(), "removing the folder of a chat that did not start: {e}"),
+        Err(e) => warn!(folder = %folder.display(), "removing the folder of a chat that did not start: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -1712,6 +1899,7 @@ mod tests {
         // Panes hostd makes or just made: a long wait, then the shell's startup files are the suspect.
         for created in [
             LaunchPane::New("w3:p1".into()),
+            LaunchPane::ChatTab { cwd: "/h/.teleflock/chats/trip-abc123".into(), name: "trip".into() },
             StartTarget::Cwd { cwd: "/tmp".into(), label: None }.into(),
             StartTarget::Workspace { workspace_id: "w1".into(), split: Some(Split::Tab) }.into(),
             StartTarget::Workspace { workspace_id: "w1".into(), split: None }.into(),
@@ -1727,5 +1915,60 @@ mod tests {
         assert_eq!(e.code, "herdr_error");
         let e = launch_err(tf_herdr::HerdrError::new(tf_herdr::code::TIMEOUT, "agent a did not become interactive in time"), &picked);
         assert_eq!((e.code.as_str(), e.retryable), ("timeout", true));
+    }
+
+    #[test]
+    fn chats_launch_in_a_tab_of_the_chats_workspace() {
+        let td = tempfile::tempdir().unwrap();
+        let chats = ChatRoot::new(&td.path().join("chats"));
+        let folder = chats.path().join("trip-abc123");
+        let named = |name: Option<&str>, prompt: Option<&str>| AgentSpec { name: name.map(str::to_string), ..spec(prompt, 0, false) };
+        let taken = || vec!["trip".to_string()];
+        let make = |name: &str| crate::chats::make_folder(chats.path(), name, || "abc123".into());
+        let tab = |t: &LaunchPane| match t {
+            LaunchPane::ChatTab { cwd, name } => Some((cwd.clone(), name.clone())),
+            _ => None,
+        };
+
+        // A new chat is named first (a taken name gets a number), then its folder is made.
+        let (t, made) = chat_launch(&chats, StartTarget::Chat {}.into(), &named(None, Some("Plan the trip")), taken, make).unwrap();
+        let planned = chats.path().join("plan-the-trip-abc123");
+        assert_eq!(tab(&t), Some((planned.clone(), "plan-the-trip".into())));
+        assert_eq!(made.as_deref(), Some(planned.as_path()));
+        assert!(planned.is_dir());
+        let (t, _) = chat_launch(&chats, StartTarget::Chat {}.into(), &named(Some("trip"), None), taken, make).unwrap();
+        assert_eq!(tab(&t).map(|(_, n)| n).as_deref(), Some("trip-2"));
+        // A folder that cannot be made fails the start.
+        let e = chat_launch(&chats, StartTarget::Chat {}.into(), &named(None, None), taken, |_| Err(std::io::Error::other("disk full"))).unwrap_err();
+        assert_eq!(e.code, "io_error");
+
+        // A `Cwd` in a chat folder (Past sessions, a restart, a parked chat's resume) opens its tab
+        // there, named as asked, else after the folder; nothing is made.
+        for cwd in [folder.clone(), folder.join("notes")] {
+            let target = StartTarget::Cwd { cwd: cwd.display().to_string(), label: Some("x".into()) }.into();
+            let (t, made) = chat_launch(&chats, target, &named(Some("trip"), None), taken, make).unwrap();
+            assert_eq!((tab(&t), made), (Some((cwd.clone(), "trip".into())), None));
+        }
+        let target = StartTarget::Cwd { cwd: folder.display().to_string(), label: None }.into();
+        let (t, _) = chat_launch(&chats, target, &named(None, None), taken, make).unwrap();
+        assert_eq!(tab(&t).map(|(_, n)| n).as_deref(), Some("trip-abc123"));
+        // Anything else stays as it was.
+        for other in [
+            StartTarget::Cwd { cwd: td.path().display().to_string(), label: None },
+            StartTarget::Cwd { cwd: chats.path().display().to_string(), label: None },
+            StartTarget::Pane { pane_id: "w1:p1".into() },
+            StartTarget::Workspace { workspace_id: "w1".into(), split: Some(Split::Tab) },
+        ] {
+            let (t, made) = chat_launch(&chats, other.into(), &named(None, None), taken, make).unwrap();
+            assert!(matches!(t, LaunchPane::Target(_)) && made.is_none(), "{t:?}");
+        }
+
+        // A parked chat reopens through a `Cwd` at its folder, which becomes its tab; a record
+        // outside the chats folder does not.
+        let reopened = chat_reopen(&chats, &folder).unwrap();
+        assert!(matches!(&reopened, LaunchPane::Target(StartTarget::Cwd { cwd, .. }) if Path::new(cwd) == folder.as_path()));
+        let (t, _) = chat_launch(&chats, reopened, &named(Some("trip"), None), taken, make).unwrap();
+        assert_eq!(tab(&t), Some((folder.clone(), "trip".into())));
+        assert!(chat_reopen(&chats, td.path()).is_none());
     }
 }

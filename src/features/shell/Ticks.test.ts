@@ -20,6 +20,10 @@ describe("splitTicks", () => {
     expect(splitTicks("an empty `` pair, then `x`")).toEqual([plain("an empty `` pair, then "), code("x")]);
   });
 
+  test("omp's cfg approval question: the setting key is code, the emoji and the rest stay", () => {
+    expect(splitTicks("⚙️ Your agent wants to change `task.perCallModel` for this session.")).toEqual([plain("⚙️ Your agent wants to change "), code("task.perCallModel"), plain(" for this session.")]);
+  });
+
   test("omp's own setting descriptions: flags and keys come out as code, nothing is lost", () => {
     const loop = OMP_SETTINGS_FIXTURE.find((s) => s.id === "loop.conditionTimeoutMs")?.description ?? "";
     expect(splitTicks(loop).filter((p) => p.code).map((p) => p.text)).toEqual(["/loop --while", "--until"]);

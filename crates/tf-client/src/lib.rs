@@ -2,14 +2,17 @@
 //!
 //! See `README.md` for the public API.
 
+mod browser;
 mod conn;
 mod deploy;
 mod diag;
+mod dictation;
 mod engine;
 mod forward;
 mod link;
 mod platform;
 mod presence;
+mod recording;
 mod secrets;
 mod session_cache;
 mod sessions;

@@ -1,0 +1,43 @@
+[package]
+name = "tf-dictation"
+description = "On-device speech recognition for TeleFlock: model catalog and verified downloads, microphone capture, voice activity segmentation, sherpa-onnx offline recognizers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+build = "build.rs"
+# Dependents' build scripts get `DEP_TF_DICTATION_ENGINE_LIB_DIR` (the engine's library directory).
+links = "tf-dictation-engine"
+
+[features]
+default = ["engine"]
+# The speech engine: sherpa-onnx + onnxruntime, prebuilt and sha256-pinned (build.rs). Without it
+# the catalog, model store, capture and segmentation still build; recognition reports `NoEngine`.
+engine = []
+
+[dependencies]
+tf-proto = { path = "../tf-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+sha2 = "0.10"
+hound = "3.5"
+tokio = { version = "1", features = ["sync", "time", "fs", "io-util", "rt"] }
+# Model downloads: rustls on ring with the webpki roots, as the app's updater (no platform verifier,
+# which needs JNI setup on Android). All already in the app's build.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# Microphone capture (ALSA, CoreAudio, WASAPI). Desktop only: the Android app keeps the system
+# speech recognizer and doesn't build this crate.
+cpal = "0.18"
+
+[build-dependencies]
+sha2 = "0.10"
+tar = "0.4"
+bzip2 = "0.6"
+
+[dev-dependencies]
+tempfile = "3"

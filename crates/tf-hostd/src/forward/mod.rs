@@ -185,6 +185,11 @@ fn frame_len(data: &str) -> Option<u64> {
     Some(b64_len(data)).filter(|n| *n <= FWD_CHUNK as u64)
 }
 
+/// [`Local::name`] of an agent's browser connections: never a forward's name (those have no `:`).
+fn browser_key(agent_id: &str) -> String {
+    format!("browser:{agent_id}")
+}
+
 fn valid_offer(o: &FwdOffer) -> bool {
     valid_name(&o.name) && o.tools.iter().all(|t| valid_tool(t)) && o.ports.iter().all(|p| p.listen != 0 && p.target != 0)
 }
@@ -539,12 +544,17 @@ impl Forwarder {
         };
         let open = FwdEv::Open { kind: ForwardKind::Port, name, command: None, argv: None, pty: None, cwd: None, port: Some(port) };
         client.send(ServerMsg::Fwd { sid, ev: open });
-        let (fwd, c) = (self.clone(), client.clone());
-        let send: exec::Send = Arc::new(move |ev| fwd.lock().local.contains_key(&sid) && c.send(ServerMsg::Fwd { sid, ev }));
+        self.pump_tcp(client, sid, port, tcp, exec::Stream { send: Arc::new(|_| false), rx, window, inflight });
+    }
+
+    /// Runs a connection this host accepted as stream `sid` towards `client`: data flows once the
+    /// other side opened it (`opened`), until either end closes. `s.send` is replaced here.
+    fn pump_tcp(&self, client: ClientHandle, sid: u64, port: u16, tcp: tokio::net::TcpStream, mut s: exec::Stream) {
+        let fwd = self.clone();
+        s.send = Arc::new(move |ev| fwd.lock().local.contains_key(&sid) && client.send(ServerMsg::Fwd { sid, ev }));
         let fwd = self.clone();
         tokio::spawn(async move {
-            let mut s = exec::Stream { send, rx, window, inflight };
-            // Data flows once the to-host connected.
+            // Data flows once the to-host (or the app's browser) connected.
             let opened = loop {
                 match s.rx.recv().await {
                     Some(FwdEv::Opened { .. }) => break true,
@@ -563,12 +573,63 @@ impl Forwarder {
         });
     }
 
+    // ───────────────────────────── the TeleFlock Browser (§3.33) ─────────────────────────────
+
+    /// A connection to an agent's browser port (`crate::browser`): one stream of kind `browser`
+    /// to the app that lent its browser, whose DevTools proxy serves it. Linux: only this user's
+    /// processes may connect.
+    pub(crate) fn open_browser(&self, client: &ClientHandle, agent_id: &str, port: u16, tcp: tokio::net::TcpStream) {
+        #[cfg(target_os = "linux")]
+        if !self.same_user(port, &tcp) {
+            return;
+        }
+        let _ = tcp.set_nodelay(true);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let window = Arc::new(Window::default());
+        let inflight = Arc::new(Inflight::default());
+        let key = browser_key(agent_id);
+        let sid = {
+            let mut st = self.lock();
+            if st.closed {
+                return;
+            }
+            if st.local.values().filter(|l| l.name == key).count() >= FWD_STREAMS {
+                warn!(port, agent = %agent_id, "browser connection closed: {FWD_STREAMS} are open");
+                return;
+            }
+            let sid = Self::next_sid(&mut st);
+            st.local.insert(sid, Local { client: client.id().to_string(), name: key, tx, window: Some(window.clone()), inflight: inflight.clone() });
+            sid
+        };
+        debug!(port, sid, agent = %agent_id, "browser connection");
+        let open = FwdEv::Open { kind: ForwardKind::Browser, name: agent_id.to_string(), command: None, argv: None, pty: None, cwd: None, port: Some(port) };
+        client.send(ServerMsg::Fwd { sid, ev: open });
+        self.pump_tcp(client.clone(), sid, port, tcp, exec::Stream { send: Arc::new(|_| false), rx, window, inflight });
+    }
+
+    /// Ends the browser connections of `agent_id` that `client` serves (its attachment ended):
+    /// the agent's connections close and the app learns why.
+    pub(crate) fn close_browser(&self, client: &ClientHandle, agent_id: &str, why: &str) {
+        let key = browser_key(agent_id);
+        let mut st = self.lock();
+        let sids: Vec<u64> = st.local.iter().filter(|(_, l)| l.name == key && l.client == client.id()).map(|(s, _)| *s).collect();
+        for sid in sids {
+            if let Some(l) = st.local.remove(&sid) {
+                let _ = l.tx.send(FwdEv::Close { error: None });
+                if let Some(w) = l.window {
+                    w.close();
+                }
+                client.send(ServerMsg::Fwd { sid, ev: FwdEv::Close { error: Some(why.to_string()) } });
+            }
+        }
+    }
+
     /// Validates a `tf-forward` open against the winning offer and opens it towards the app.
     fn open_cli(&self, open: FwdEv) -> Result<(u64, ClientHandle, mpsc::UnboundedReceiver<FwdEv>, Arc<Inflight>), String> {
         let FwdEv::Open { kind, name, command, argv, pty, cwd, .. } = open else {
             return Err("expected a stream to open".into());
         };
-        if kind == ForwardKind::Port {
+        if matches!(kind, ForwardKind::Port | ForwardKind::Browser) {
             return Err("tf-forward runs commands, shells and tools; ports are forwarded by listening".into());
         }
         let mut st = self.lock();

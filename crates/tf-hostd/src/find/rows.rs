@@ -212,6 +212,7 @@ mod tests {
             truncated: false,
             view,
             error: None,
+            artifact: None,
         })
     }
 
