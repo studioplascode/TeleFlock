@@ -20,10 +20,13 @@
 #   (b)     the daemon is killed by PID (checked) and stays down; `schtasks /Run` brings it back within
 #           60 s and it answers a status call.
 #   (c)     the launcher tf-hostd-login.exe is tf-hostd.exe with one header byte changed to the GUI
-#           subsystem; while the task runs, no conhost.exe starts for the launcher or for the daemon it
-#           starts (a trace of every process start, parent and child), and the daemon runs from the real
-#           tf-hostd.exe. A throwaway task that runs a console program (ping.exe) is the control: it
-#           shows conhost.exe does appear for one, so the trace could have caught it.
+#           subsystem; while the task runs, no WINDOW appears for the launcher, the daemon it starts or
+#           anything they start: a sampler polls the desktop's top-level windows every ~2 ms (owner and
+#           chain of parents of each), and the daemon runs from the real tf-hostd.exe. Windows starts a
+#           windowless conhost.exe even for a console program run with CREATE_NO_WINDOW (git.exe, gh.exe
+#           and schtasks.exe of the daemon), so a console host is no evidence of a window: it is
+#           reported, never failed. A throwaway task that runs a console program (ping.exe) is the
+#           control: the sampler must see its visible console window, else the check says it is weak.
 #   (d)     host.autoResumeSet {bringBack:false} (Settings -> Auto-resume) deletes the task and its files.
 #   (e)     host.autoResumeSet {bringBack:true} creates it again, and the new task starts the daemon too.
 #   (f)     logs: everything in $LOGIN_ITEMS_LOGS (default $RUNNER_TEMP\login-items-logs), whatever happens.
@@ -55,6 +58,8 @@ $script:TaskPrefix = 'TeleFlock host service '
 $script:ControlTask = 'TeleFlock CI console control'
 $script:TraceId = 'TfLoginItemsProcessStart'
 $script:ConsoleHosts = @('conhost.exe', 'OpenConsole.exe', 'WindowsTerminal.exe')
+# The window classes of a console: classic conhost, Windows Terminal, a pseudo console.
+$script:ConsoleClasses = @('ConsoleWindowClass', 'CASCADIA_HOSTING_WINDOW_CLASS', 'PseudoConsoleWindow')
 
 $script:Results = New-Object 'System.Collections.Generic.List[object]'
 $script:Facts = New-Object 'System.Collections.Generic.List[string]'
@@ -391,11 +396,6 @@ function Get-FileSha256([string]$Path) {
 
 # -- a trace of every process start -----------------------------------------------------------------
 $script:TraceOn = $false
-# What the control (Invoke-ConsoleControl) found out on this runner: a console host started for a
-# console program that Task Scheduler ran (TraceTrusted: the trace can see one), and as a child of that
-# program (ConsoleParentIsClient: a console host can be told apart by its parent, as on Windows 10 and later).
-$script:TraceTrusted = $false
-$script:ConsoleParentIsClient = $false
 # Without a trace: the processes seen by polling the process table (pid -> @{ Name; Pid; ParentPid }).
 $script:Sampling = $false
 $script:Sampled = @{}
@@ -448,31 +448,367 @@ function Get-Descendants($Events, [int[]]$Roots) {
     return [int[]]@($set)
 }
 
-# What one run of the task shows (c): the launcher ran, it started the daemon, and no console host was
-# started for the launcher, the daemon or anything they started. `Strict`: a console host cannot be told
-# apart by its parent on this runner, so any that starts after the launcher counts. `Sampled`: Events
-# come from polling, which may have missed the short-lived launcher (that is no problem then).
-function Test-LaunchTrace($Events, [int]$DaemonPid, [bool]$Strict, [bool]$Sampled) {
+# What one run of the task shows (c), apart from windows: the launcher ran, and it started the daemon.
+# Every event counts, not only those after the launcher's: WMI hands them over out of order (in the run of
+# 2026-11-02 the daemon's start came before the launcher's). `Sampled`: Events come from polling, which may
+# have missed the short-lived launcher (no problem then).
+function Test-LaunchTrace($Events, [int]$DaemonPid, [bool]$Sampled) {
     $problems = New-Object 'System.Collections.Generic.List[string]'
     $all = @($Events)
-    $first = -1
-    for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i].Name -ieq $script:LauncherName) { $first = $i; break } }
-    if ($first -lt 0 -and -not $Sampled) {
+    $launcherPids = @($all | Where-Object { $_.Name -ieq $script:LauncherName } | ForEach-Object { $_.Pid })
+    if ($launcherPids.Count -eq 0 -and -not $Sampled) {
         $problems.Add("no start of $($script:LauncherName) in the trace: the task did not run the launcher")
         return $problems.ToArray()
     }
-    $after = if ($first -ge 0) { @($all[$first..($all.Count - 1)]) } else { $all }
-    $launcherPids = @($after | Where-Object { $_.Name -ieq $script:LauncherName } | ForEach-Object { $_.Pid })
-    $mine = @(Get-Descendants $after (@($launcherPids) + @($DaemonPid)))
-    $daemonStart = @($after | Where-Object { $_.Pid -eq $DaemonPid } | Select-Object -First 1)
+    $daemonStart = @($all | Where-Object { $_.Pid -eq $DaemonPid } | Select-Object -First 1)
     if ($daemonStart.Count -eq 1 -and $launcherPids.Count -gt 0 -and ($launcherPids -notcontains $daemonStart[0].ParentPid)) {
         $problems.Add("the daemon (pid $DaemonPid) was started by pid $($daemonStart[0].ParentPid), not by the launcher ($($launcherPids -join ', '))")
     }
-    foreach ($c in @($after | Where-Object { $script:ConsoleHosts -contains $_.Name })) {
-        if ($mine -contains $c.ParentPid) {
-            $problems.Add("$($c.Name) (pid $($c.Pid)) was started for pid $($c.ParentPid), a process of the launcher or the daemon: a console window")
-        } elseif ($Strict -and -not $Sampled) {
-            $problems.Add("$($c.Name) (pid $($c.Pid), parent pid $($c.ParentPid)) was started while the launcher and the daemon started, and on this runner a console host cannot be told from theirs by its parent")
+    return $problems.ToArray()
+}
+
+# The console hosts started for processes of the launcher/daemon tree, as one line (empty: none). Windows
+# starts one for every console program, also for one run with CREATE_NO_WINDOW (it then has no window),
+# so this informs and never fails: the windows below decide.
+function Get-ConsoleHostFacts($Events, [int]$DaemonPid) {
+    $all = @($Events)
+    $launcherPids = @($all | Where-Object { $_.Name -ieq $script:LauncherName } | ForEach-Object { $_.Pid })
+    $mine = @(Get-Descendants $all (@($launcherPids) + @($DaemonPid)))
+    $parts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($c in @($all | Where-Object { $script:ConsoleHosts -contains $_.Name -and $mine -contains $_.ParentPid })) {
+        $client = @($all | Where-Object { $_.Pid -eq $c.ParentPid } | Select-Object -First 1)
+        $parts.Add("$($c.Name)($($c.Pid)) for $(if ($client.Count -eq 1) { $client[0].Name } else { 'pid' })($($c.ParentPid))")
+    }
+    return ($parts -join ', ')
+}
+
+# -- windows: what a user would have seen appear ------------------------------------------------------
+$script:WindowSampler = $null
+# The control found that the sampler sees the visible console window of a console program Task Scheduler ran.
+$script:SamplerSeesWindows = $false
+$script:PingSeen = $false
+
+# Polls the top-level windows of the desktop this script runs on (EnumWindows) every ~2 ms on a thread of
+# its own and remembers each window it sees: class, title, whether it was ever visible, and its owner with
+# the chain of parents, read from a snapshot of the process table right when the window is first seen (a
+# console host of a child that lives for 30 ms is gone by the time anybody asks later). A WMI event
+# arrives too late for that. Plain C# 5, so Windows PowerShell 5.1 compiles it too.
+$script:WindowSamplerSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public sealed class TfWindowRecord
+{
+    public long Hwnd;
+    public uint Pid;
+    public string ClassName = "";
+    public string Title = "";
+    public string Owner = "";
+    public string Chain = "";
+    public bool Baseline;
+    public bool VisibleAtStart;
+    public bool EverVisible;
+    public long FirstMs;
+    public long LastMs;
+
+    public TfWindowRecord Copy() { return (TfWindowRecord)MemberwiseClone(); }
+}
+
+public sealed class TfWindowSampler
+{
+    private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+
+    private sealed class ProcInfo
+    {
+        public string Name;
+        public uint Parent;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry
+    {
+        public uint Size;
+        public uint Usage;
+        public uint ProcessId;
+        public IntPtr DefaultHeapId;
+        public uint ModuleId;
+        public uint Threads;
+        public uint ParentProcessId;
+        public int PriorityClassBase;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string ExeFile;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int max);
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint ms);
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private readonly object sync = new object();
+    private readonly Dictionary<ulong, TfWindowRecord> records = new Dictionary<ulong, TfWindowRecord>();
+    private readonly List<TfWindowRecord> order = new List<TfWindowRecord>();
+    private Dictionary<uint, ProcInfo> procs;
+    private DateTime started;
+    private bool baseline;
+    private bool timerRaised;
+    private volatile bool stopping;
+    private Thread worker;
+
+    // One pass over the windows that exist now (they are the baseline: not what the run opened), then the thread.
+    public void Start()
+    {
+        started = DateTime.UtcNow;
+        baseline = true;
+        Pass();
+        baseline = false;
+        try { timeBeginPeriod(1); timerRaised = true; } catch (Exception) { timerRaised = false; }
+        worker = new Thread(Run);
+        worker.IsBackground = true;
+        worker.Name = "tf-window-sampler";
+        worker.Start();
+    }
+
+    public TfWindowRecord[] Snapshot()
+    {
+        lock (sync)
+        {
+            TfWindowRecord[] copy = new TfWindowRecord[order.Count];
+            for (int i = 0; i < copy.Length; i++) { copy[i] = order[i].Copy(); }
+            return copy;
+        }
+    }
+
+    public TfWindowRecord[] Stop()
+    {
+        stopping = true;
+        Thread t = worker;
+        if (t != null) { t.Join(3000); }
+        if (timerRaised)
+        {
+            try { timeEndPeriod(1); } catch (Exception) { }
+            timerRaised = false;
+        }
+        return Snapshot();
+    }
+
+    private void Run()
+    {
+        while (!stopping)
+        {
+            try { Pass(); }
+            catch (Exception) { }
+            Thread.Sleep(2);
+        }
+    }
+
+    private void Pass()
+    {
+        procs = null;
+        long now = (long)(DateTime.UtcNow - started).TotalMilliseconds;
+        // An exception must never unwind through EnumWindows' native frames (it would end the process).
+        EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
+        {
+            try { Visit(hWnd, now); }
+            catch (Exception) { }
+            return true;
+        }, IntPtr.Zero);
+        procs = null;
+    }
+
+    private void Visit(IntPtr hWnd, long now)
+    {
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        bool visible = IsWindowVisible(hWnd);
+        ulong key = (((ulong)unchecked((uint)hWnd.ToInt64())) << 32) | pid;
+        lock (sync)
+        {
+            TfWindowRecord known;
+            if (records.TryGetValue(key, out known))
+            {
+                known.LastMs = now;
+                if (visible && !known.EverVisible)
+                {
+                    known.EverVisible = true;
+                    if (known.Title.Length == 0) { known.Title = TextOf(hWnd); }
+                }
+                return;
+            }
+            if (order.Count >= 5000) { return; }
+        }
+        TfWindowRecord r = new TfWindowRecord();
+        r.Hwnd = hWnd.ToInt64();
+        r.Pid = pid;
+        r.Baseline = baseline;
+        r.VisibleAtStart = baseline && visible;
+        r.EverVisible = visible;
+        r.FirstMs = now;
+        r.LastMs = now;
+        r.ClassName = ClassOf(hWnd);
+        if (visible) { r.Title = TextOf(hWnd); }
+        Describe(r);
+        lock (sync)
+        {
+            if (!records.ContainsKey(key)) { records[key] = r; order.Add(r); }
+        }
+    }
+
+    // The owner of the window and its parents, as the process table says right now.
+    private void Describe(TfWindowRecord r)
+    {
+        if (procs == null) { procs = Processes(); }
+        StringBuilder chain = new StringBuilder();
+        Dictionary<uint, bool> seen = new Dictionary<uint, bool>();
+        uint pid = r.Pid;
+        for (int depth = 0; depth < 8; depth++)
+        {
+            ProcInfo p;
+            if (seen.ContainsKey(pid) || !procs.TryGetValue(pid, out p)) { break; }
+            seen[pid] = true;
+            if (depth == 0) { r.Owner = p.Name; } else { chain.Append(" < "); }
+            chain.Append(p.Name).Append('(').Append(pid).Append(')');
+            pid = p.Parent;
+        }
+        r.Chain = chain.ToString();
+    }
+
+    private static Dictionary<uint, ProcInfo> Processes()
+    {
+        Dictionary<uint, ProcInfo> map = new Dictionary<uint, ProcInfo>();
+        IntPtr snap = CreateToolhelp32Snapshot(2, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) { return map; }
+        try
+        {
+            ProcessEntry e = new ProcessEntry();
+            e.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+            if (Process32FirstW(snap, ref e))
+            {
+                do
+                {
+                    ProcInfo p = new ProcInfo();
+                    p.Name = e.ExeFile;
+                    p.Parent = e.ParentProcessId;
+                    map[e.ProcessId] = p;
+                }
+                while (Process32NextW(snap, ref e));
+            }
+        }
+        finally { CloseHandle(snap); }
+        return map;
+    }
+
+    private static string ClassOf(IntPtr hWnd)
+    {
+        StringBuilder sb = new StringBuilder(256);
+        int n = GetClassNameW(hWnd, sb, sb.Capacity);
+        return n > 0 ? sb.ToString() : "";
+    }
+
+    private static string TextOf(IntPtr hWnd)
+    {
+        StringBuilder sb = new StringBuilder(512);
+        int n = GetWindowTextW(hWnd, sb, sb.Capacity);
+        return n > 0 ? sb.ToString() : "";
+    }
+}
+'@
+
+function Initialize-WindowSampler {
+    if ('TfWindowSampler' -as [type]) { return $true }
+    try {
+        Add-Type -TypeDefinition $script:WindowSamplerSource -Language CSharp -ErrorAction Stop
+        return $true
+    } catch {
+        Add-Fact "the window sampler cannot be compiled on this runner: $($_.Exception.Message)"
+        return $false
+    }
+}
+# True when the sampler runs (its baseline pass is done), false (with a fact saying why) when it cannot.
+function Start-WindowSampler {
+    $null = Stop-WindowSampler
+    if (-not (Initialize-WindowSampler)) { return $false }
+    try {
+        $sampler = New-Object TfWindowSampler
+        $sampler.Start()
+        $script:WindowSampler = $sampler
+        return $true
+    } catch {
+        Add-Fact "the window sampler cannot start: $($_.Exception.Message)"
+        return $false
+    }
+}
+function Get-SampledWindows {
+    if ($null -eq $script:WindowSampler) { return @() }
+    return @($script:WindowSampler.Snapshot())
+}
+# Stops the sampler (when there is one) and returns everything it saw.
+function Stop-WindowSampler {
+    if ($null -eq $script:WindowSampler) { return @() }
+    $sampler = $script:WindowSampler
+    $script:WindowSampler = $null
+    try { return @($sampler.Stop()) } catch {
+        Add-Fact "the window sampler did not stop cleanly: $($_.Exception.Message)"
+        return @()
+    }
+}
+function Save-WindowLog([string]$Name, $Windows) {
+    $lines = @(@($Windows) | Where-Object { $null -ne $_ } | Sort-Object FirstMs | ForEach-Object {
+        '{0,6}-{1,-6} ms {2,-5} {3,-7} 0x{4:x} pid {5,-6} {6,-30} {7} | {8}' -f $_.FirstMs, $_.LastMs, $(if ($_.Baseline) { 'start' } else { 'new' }), $(if ($_.EverVisible) { 'visible' } else { 'hidden' }), $_.Hwnd, $_.Pid, $_.ClassName, $_.Chain, $_.Title
+    })
+    Save-Text $Name ($lines -join "`n")
+}
+
+# A console window: a console's class, or a window of a console host.
+function Test-ConsoleWindowRecord($W) {
+    return (($script:ConsoleClasses -contains $W.ClassName) -or ($script:ConsoleHosts -contains $W.Owner))
+}
+# The windows that were on screen at some point of the run and were not when the sampler began: what a
+# user would have seen appear. (Hidden ones, such as the window of a CREATE_NO_WINDOW console, are not.)
+function Get-ShownWindows($Windows) {
+    $shown = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($w in @($Windows)) {
+        if ($null -ne $w -and $w.EverVisible -and -not $w.VisibleAtStart) { $shown.Add($w) }
+    }
+    return $shown.ToArray()
+}
+function Format-WindowRecord($W) {
+    $owner = if ($W.Owner) { "$($W.Owner) pid $($W.Pid)" } else { "pid $($W.Pid)" }
+    $chain = if ($W.Chain) { $W.Chain } else { 'unknown' }
+    return "$($W.ClassName) window '$($W.Title)' of $owner (chain $chain), seen $($W.FirstMs)-$($W.LastMs) ms into the sample"
+}
+# What the sampler saw that must not be there (c): every window that appeared on screen and is a console
+# window (whoever owns it: nothing but this task ran a console program then, and a window of a console
+# handed to Windows Terminal belongs to the terminal) or belongs to the launcher/daemon tree. Empty: none.
+function Test-ConsoleWindows($Windows) {
+    $problems = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($w in @(Get-ShownWindows $Windows)) {
+        $ours = ($w.Chain -match 'tf-hostd(-login)?\.exe')
+        if ($ours) {
+            $problems.Add("$(Format-WindowRecord $w): a window of the launcher/daemon tree")
+        } elseif (Test-ConsoleWindowRecord $w) {
+            $problems.Add("$(Format-WindowRecord $w): a console window, and nothing but this task ran a console program then")
         }
     }
     return $problems.ToArray()
@@ -647,66 +983,54 @@ function Test-LauncherFile {
 }
 
 # -- (b), (c, the run), (e) -------------------------------------------------------------------------
-# A throwaway task that runs a console program: what Task Scheduler does to one. It tells whether the trace
-# below can see a console host at all, and how one relates to its program, so that "no console host for
-# the launcher" means something. It only informs: a runner where it does not work gets a warning, and
-# the checks of the launcher then say how weak their evidence is.
+# A throwaway task that runs a console program without CREATE_NO_WINDOW: what Task Scheduler does to a console
+# program, and what the launcher avoids. The window sampler must see the console window it opens, else "no
+# window for the launcher" proves nothing here and the checks of the launcher say they are weak. The
+# control only informs: a runner where it does not work gets a warning.
 function Invoke-ConsoleControl {
-    Write-Group '(c) control: a console program started by Task Scheduler gets a console host'
-    $script:TraceTrusted = $false
-    $script:ConsoleParentIsClient = $false
+    Write-Group '(c) control: a console program started by Task Scheduler opens a console window that the sampler sees'
+    $script:SamplerSeesWindows = $false
+    $script:PingSeen = $false
     $ping = Join-Path (Join-Path $(if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }) 'System32') 'ping.exe'
-    $created = Invoke-Schtasks @('/Create', '/TN', $script:ControlTask, '/TR', "$ping -n 8 127.0.0.1", '/SC', 'ONCE', '/ST', '23:59', '/F')
+    $created = Invoke-Schtasks @('/Create', '/TN', $script:ControlTask, '/TR', "$ping -n 10 127.0.0.1", '/SC', 'ONCE', '/ST', '23:59', '/F')
     if ($created.ExitCode -ne 0) {
-        Add-Fact "control task could not be created ($($created.Err.Trim() -replace '\s+', ' ')): the console check has no control"
+        Add-Warning 'console control' "the control task could not be created ($($created.Err.Trim() -replace '\s+', ' ')): the checks of the launcher cannot tell a console window from none"
         Write-EndGroup
         return
     }
-    $script:Sampled = @{}
-    $traced = Start-ProcessTrace
-    $script:Sampling = -not $traced
+    $sampling = Start-WindowSampler
     $ran = Invoke-Schtasks @('/Run', '/TN', $script:ControlTask)
-    $events = @()
-    if ($ran.ExitCode -eq 0) {
-        $sawPing = Wait-Until {
-            if ($script:Sampling) { Add-ProcessSample; return (@($script:Sampled.Values | Where-Object { $_.Name -ieq 'ping.exe' }).Count -gt 0) }
-            return (@(Read-ProcessTrace | Where-Object { $_.Name -ieq 'ping.exe' }).Count -gt 0)
+    if ($sampling -and $ran.ExitCode -eq 0) {
+        $null = Wait-Until {
+            if (@(Get-Process -Name ping -ErrorAction SilentlyContinue).Count -gt 0) { $script:PingSeen = $true }
+            return (@(@(Get-ShownWindows (Get-SampledWindows)) | Where-Object { Test-ConsoleWindowRecord $_ }).Count -gt 0)
         } 20 250
-        if ($sawPing) {
-            Start-Sleep -Seconds 3
-            if ($script:Sampling) { Add-ProcessSample }
-        }
-        $events = if ($script:Sampling) { @($script:Sampled.Values) } else { @(Read-ProcessTrace) }
+        Start-Sleep -Milliseconds 500
     }
-    Stop-ProcessTrace
-    $script:Sampling = $false
+    $windows = @(Stop-WindowSampler)
+    # Over: end it, and give its window time to go before the next sample begins.
+    $null = Invoke-Schtasks @('/End', '/TN', $script:ControlTask)
+    foreach ($p in @(Get-Process -Name ping -ErrorAction SilentlyContinue)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     $null = Invoke-Schtasks @('/Delete', '/TN', $script:ControlTask, '/F')
-    Save-ProcessTrace 'trace-control.txt' $events
-    $pings = @($events | Where-Object { $_.Name -ieq 'ping.exe' })
-    if ($pings.Count -eq 0) {
-        Add-Fact "control: ping.exe was not seen to start ($($ran.Out.Trim() -replace '\s+', ' ') $($ran.Err.Trim() -replace '\s+', ' ')): the console check has no control"
-        Write-EndGroup
-        return
-    }
-    $family = @(Get-Descendants $events @($pings | ForEach-Object { $_.Pid }))
-    $hostsSeen = @($events | Where-Object { $script:ConsoleHosts -contains $_.Name })
-    $ownHosts = @($hostsSeen | Where-Object { $family -contains $_.ParentPid })
-    if ($ownHosts.Count -gt 0) {
-        $script:TraceTrusted = $true
-        $script:ConsoleParentIsClient = $true
-        Add-Fact "control: ping.exe, a console program started by Task Scheduler, got $($ownHosts[0].Name) (pid $($ownHosts[0].Pid)) as a child: the trace sees a console host, and tells it by its parent"
-    } elseif ($hostsSeen.Count -gt 0) {
-        $script:TraceTrusted = $true
-        Add-Fact "control: ping.exe got $($hostsSeen[0].Name) (pid $($hostsSeen[0].Pid)) but as a child of pid $($hostsSeen[0].ParentPid), not of ping.exe: a console host is not told by its parent here, so any that starts counts"
+    Start-Sleep -Seconds 2
+    Save-WindowLog 'windows-control.txt' $windows
+    $shown = @(Get-ShownWindows $windows)
+    $consoleWindows = @($shown | Where-Object { Test-ConsoleWindowRecord $_ })
+    if (-not $sampling) {
+        Add-Warning 'console control' 'the window sampler did not start: the checks of the launcher cannot tell a console window from none'
+    } elseif ($consoleWindows.Count -gt 0) {
+        $script:SamplerSeesWindows = $true
+        Add-Fact "control: ping.exe, a console program started by Task Scheduler, opened $(Format-WindowRecord $consoleWindows[0]): the sampler sees the console window of a console program ($($shown.Count) windows shown during the control, $(@($windows).Count) seen)"
     } else {
-        Add-Warning 'console control' 'ping.exe ran from Task Scheduler and no console host was seen for it: on this runner the checks of the launcher cannot tell a console from none'
+        $why = if ($shown.Count -gt 0) { "only other windows appeared: $((@($shown | ForEach-Object { $_.ClassName } | Select-Object -Unique)) -join ', ')" } elseif ($script:PingSeen) { 'ping.exe ran and no window of it was seen' } else { "ping.exe was not seen to start (schtasks said: $($ran.Out.Trim() -replace '\s+', ' ') $($ran.Err.Trim() -replace '\s+', ' '))" }
+        Add-Warning 'console control' "no visible console window was seen for the control task ($why; this script runs in session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId)): the checks of the launcher cannot tell a console window from none here"
     }
     Write-EndGroup
 }
 
 # Kills the daemon by pid (checked), shows it stays down, runs the trigger (a scriptblock that returns
 # a schtasks result) and waits for a daemon with another pid that answers. `Trace`: also records what
-# starts while the task runs and checks that no console host does ((c)).
+# starts and which windows appear while the task runs, and checks that no window does ((c)).
 function Invoke-Revive([string]$Name, [scriptblock]$Trigger, [bool]$Trace) {
     $found = @(Get-DaemonProcesses)
     if ($found.Count -ne 1) {
@@ -732,17 +1056,20 @@ function Invoke-Revive([string]$Name, [scriptblock]$Trigger, [bool]$Trace) {
     }
     Add-Pass "${Name}: daemon pid $($script:OldPid) stopped and verified down"
     $traced = $false
+    $windowsSampled = $false
     $script:Sampled = @{}
     $script:Sampling = $false
     if ($Trace) {
         $traced = Start-ProcessTrace
         $script:Sampling = -not $traced
+        $windowsSampled = Start-WindowSampler
     }
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $fired = & $Trigger
     Write-Host "trigger: exit $($fired.ExitCode) $($fired.Out.Trim()) $($fired.Err.Trim())"
     if ($fired.ExitCode -ne 0) {
         if ($traced) { Stop-ProcessTrace }
+        $null = Stop-WindowSampler
         $script:Sampling = $false
         Save-TaskSnapshot "after-$(Get-Slug $Name)"
         Add-Fail $Name "the trigger failed: $($fired.Out.Trim()) $($fired.Err.Trim())"
@@ -755,16 +1082,20 @@ function Invoke-Revive([string]$Name, [scriptblock]$Trigger, [bool]$Trace) {
         return $false
     } $WaitSeconds 250
     $up = [int][Math]::Round($clock.Elapsed.TotalSeconds)
-    # A quiet moment: this script starts nothing now, so any console host that shows up is the launcher's or
-    # the daemon's. The trace is read before the status call below starts processes of its own.
+    # A quiet moment, long enough for what the daemon does as it starts (probes with git, gh and schtasks) to
+    # have run: this script starts nothing now, so any window that shows up is the launcher's or the daemon's.
+    # The trace and the windows are read before the status call below starts processes of its own.
     $events = @()
+    $windows = @()
     $fromTrace = $traced
     if ($Trace) {
-        if ($came) { Start-Sleep -Seconds 5 }
+        if ($came) { Start-Sleep -Seconds 8 }
         if ($script:Sampling) { Add-ProcessSample; $events = @($script:Sampled.Values) } else { $events = @(Read-ProcessTrace) }
         if ($traced) { Stop-ProcessTrace }
         $script:Sampling = $false
+        $windows = @(Stop-WindowSampler)
         Save-ProcessTrace "trace-$(Get-Slug $Name).txt" $events
+        Save-WindowLog "windows-$(Get-Slug $Name).txt" $windows
     }
     Save-TaskSnapshot "after-$(Get-Slug $Name)"
     if (-not $came) {
@@ -787,11 +1118,11 @@ function Invoke-Revive([string]$Name, [scriptblock]$Trigger, [bool]$Trace) {
         Test-RunFromRealProgram $Name $daemon[0]
     }
     Add-Fact "${Name}: task Status '$(Get-TaskField 'Status')', Last Result '$(Get-TaskField 'Last Result')' (Running and 267009 mean the daemon stayed in the task's job; Ready and 0, it broke away)"
-    if ($Trace) { Test-RunTrace $Name $events $script:NewPid $fromTrace }
+    if ($Trace) { Test-RunTrace $Name $events $script:NewPid $fromTrace $windows $windowsSampled }
     return $true
 }
 
-# (c) The daemon runs from the real tf-hostd.exe, not from the launcher's copy, and has no console.
+# (c) The daemon runs from the real tf-hostd.exe, not from the launcher's copy.
 function Test-RunFromRealProgram([string]$Name, $Daemon) {
     if (Test-SamePath $Daemon.Path $script:Bin) {
         Add-Pass "(c) the daemon the task started runs from $($script:Bin), not from $($script:LauncherName)"
@@ -799,30 +1130,35 @@ function Test-RunFromRealProgram([string]$Name, $Daemon) {
         Add-Fail '(c) the daemon runs from the real tf-hostd.exe' "it runs from '$($Daemon.Path)' (command line: $($Daemon.CommandLine)), expected '$($script:Bin)'"
     }
     $children = @(Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId = $($Daemon.Pid)" -ErrorAction SilentlyContinue)
-    $hostsNow = @($children | Where-Object { $script:ConsoleHosts -contains $_.Name })
-    if ($hostsNow.Count -eq 0) {
-        Add-Pass "(c) no console host is a child of the running daemon (its children now: $(if ($children.Count) { ($children | ForEach-Object { $_.Name }) -join ', ' } else { 'none' }))"
-    } else {
-        Add-Fail '(c) the daemon has no console' "$($hostsNow[0].Name) (pid $($hostsNow[0].ProcessId)) is a child of the daemon"
-    }
+    Add-Fact "${Name}: the daemon's children now: $(if ($children.Count) { ($children | ForEach-Object { "$($_.Name)($($_.ProcessId))" }) -join ', ' } else { 'none' })"
 }
 
-# (c) What starting the task did, from the trace (`FromTrace`) or from polling the process table.
-function Test-RunTrace([string]$Name, $Events, [int]$DaemonPid, [bool]$FromTrace) {
-    $problems = @(Test-LaunchTrace $Events $DaemonPid (-not $script:ConsoleParentIsClient) (-not $FromTrace))
+# (c) What starting the task did: the launcher started the daemon (`Events`, from the trace when `FromTrace`,
+# else from polling the process table), and no window appeared for either or for anything they started
+# (`Windows`, from the sampler when `WindowsSampled`). A weak pass says why it is weak, with a warning.
+function Test-RunTrace([string]$Name, $Events, [int]$DaemonPid, [bool]$FromTrace, $Windows, [bool]$WindowsSampled) {
+    $problems = @(Test-LaunchTrace $Events $DaemonPid (-not $FromTrace))
+    if ($WindowsSampled) { $problems += @(Test-ConsoleWindows $Windows) }
+    $hosts = Get-ConsoleHostFacts $Events $DaemonPid
+    if ($hosts) { Add-Fact "${Name}: console hosts started for processes of the launcher or the daemon, windowless (Windows starts one even for a program run with CREATE_NO_WINDOW): $hosts" }
+    $hidden = @(@($Windows) | Where-Object { $null -ne $_ -and (Test-ConsoleWindowRecord $_) -and -not $_.EverVisible -and -not $_.Baseline })
+    if ($hidden.Count -gt 0) { Add-Fact "${Name}: console windows that were never on screen: $(($hidden | ForEach-Object { "$($_.ClassName) of $($_.Owner)($($_.Pid))" }) -join ', ')" }
     if ($problems.Count -gt 0) {
         Add-Fail '(c) no console window for the launcher or the daemon' ($problems -join '; ')
         return
     }
     $seen = @($Events | Where-Object { $_.Name -ieq $script:LauncherName }).Count
-    if ($FromTrace -and $script:TraceTrusted -and $seen -gt 0) {
-        Add-Pass "(c) while the task ran, $($script:LauncherName) started the daemon (pid $DaemonPid) and no console host was started for either or for anything they started ($(@($Events).Count) process starts in the trace; the control showed it sees a console host for a console program)"
-    } elseif ($FromTrace -and $seen -gt 0) {
-        Add-Pass "(c) while the task ran, $($script:LauncherName) started the daemon (pid $DaemonPid) and no console host was started for either (weak: the control did not show that this trace sees a console host here)"
-        Add-Warning 'console check' 'no console host was seen for the launcher, but the control did not show that the trace sees one on this runner'
+    $shown = @(Get-ShownWindows $Windows)
+    $weak = New-Object 'System.Collections.Generic.List[string]'
+    if (-not $WindowsSampled) { $weak.Add('the window sampler did not run') }
+    elseif (-not $script:SamplerSeesWindows) { $weak.Add('the control did not show that the sampler sees the console window of a console program on this runner') }
+    if ($seen -eq 0) { $weak.Add($(if ($FromTrace) { "$($script:LauncherName) is not in the trace of process starts" } else { "no trace of process starts could be had, and polling did not see $($script:LauncherName)" })) }
+    $what = "while the task ran, $($script:LauncherName) started the daemon (pid $DaemonPid) and no window appeared for either or for anything they started ($(@($Windows).Count) windows sampled every ~2 ms, $($shown.Count) of them on screen, none a console or ours; $(@($Events).Count) process starts)"
+    if ($weak.Count -eq 0) {
+        Add-Pass "(c) $what; the control showed the sampler sees the console window of a console program started by Task Scheduler"
     } else {
-        Add-Pass "(c) while the task ran, no console host was started for the daemon (pid $DaemonPid) or its children; the polled process table $(if ($seen -gt 0) { 'saw' } else { 'did not see' }) the launcher (weak: it may start and end between two looks)"
-        Add-Warning 'console check' 'no trace of process starts could be had: the launcher was only looked for by polling'
+        Add-Pass "(c) $what (weak: $($weak -join '; '))"
+        Add-Warning 'console check' "$($weak -join '; '): the check that the launcher opens no console window is weak on this run"
     }
 }
 
@@ -933,6 +1269,7 @@ function Remove-Everything {
     Save-Text 'stop.txt' "exit $($stop.ExitCode)`n$($stop.Out)`n$($stop.Err)"
     foreach ($d in @(Get-DaemonProcesses)) { Stop-Process -Id $d.Pid -Force -ErrorAction SilentlyContinue }
     Stop-ProcessTrace
+    $null = Stop-WindowSampler
 }
 
 function Save-Logs {
