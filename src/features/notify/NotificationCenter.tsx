@@ -16,7 +16,7 @@ import {
   Tooltip,
   useNow,
 } from "@/design";
-import { agentKey, core, type HostNotification, markNotificationRead, navigate, useHosts, useInbox, useNotifications } from "@/core";
+import { agentKey, core, type HostNotification, markNotificationsRead, navigate, useHosts, useInbox, useNotifications } from "@/core";
 import type { Notification, NotifyAction, NotifyKind } from "@/core/gen";
 import { blockedAction } from "@/features/browser/actions";
 import { VIEWS } from "@/features/shell/vocab";
@@ -110,7 +110,7 @@ function Item({ n, index, onOpen }: { n: HostNotification; index: number; onOpen
           </div>
         </button>
         {unread ? (
-          <IconButton label="Mark read" size="sm" className="-mt-1 -mr-1" onClick={() => markNotificationRead(n.hostId, n.id)}>
+          <IconButton label="Mark read" size="sm" className="-mt-1 -mr-1" onClick={() => markNotificationsRead(n.hostId, [n.id])}>
             <Check />
           </IconButton>
         ) : (

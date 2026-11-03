@@ -54,6 +54,14 @@ holds one row per document, which opens the newest version.
   session, with the document in the viewer beside it on desktop or full screen on a phone (the
   transcript's card of the call names its title and kind when the session is loaded). A system
   notification reaches it through the core's `AppEvent` `openPresented`.
+- **Read** only once its document is shown: opening the document (`openDoc` / `switchDoc` in the
+  session's viewer, from the notification, the transcript's card or the Artifacts list) reads that
+  document's notifications, every version's (`presented.ts` `readPresentedNotifications`, here and on
+  the other devices through `app.notifyRead {ids}`). Viewing the agent's session doesn't: a notice
+  arriving while it is open, and opening it, read the agent's other notifications
+  (`markAgentNotificationsRead`) but leave these unread, since the document may never have been
+  looked at (one a subagent presented isn't in the transcript). "Mark read" and "mark all read"
+  read them as any other.
 - **Alerts** follow the host's routing like `finished` (no escalation). Settings → Notifications →
   "Presented documents" (`notifyPresented`, absent = on) switches the system notifications; push
   channels carry them with the "Presented documents" kind (on for new channels).
@@ -116,6 +124,7 @@ version now and then ("Put the latest test results in a report…"): each live `
 | `usePresenceReporter.ts`, `presence.ts` | presence reporting and its pure tracker |
 | `useNotifyBridge.ts` | toasts, chimes, haptics; `alert` handling |
 | `openNotification.ts` | opening a notification (bell, Inbox, a toast's Open): the host page it names (`open:idleShells`, `open:decisions`), the presented document it names in its agent's session (`open:presented/…`, `openPresented`), else its agent; one of the host's own (no agent, such as "Closed 3 idle shells") is read then, here and on the other devices (`app.notifyRead` with `agentId: ""`: every host-level one of that host), since no session view ever reads it |
+| `presented.ts` | the document a notification names (`notificationDocument`) and reading a document's notifications once it is shown (`readPresentedNotifications`) |
 | `HostAlerts.tsx` | the "Alerts from your hosts" section |
 | `PushChannels.tsx`, `PushChannelForm.tsx` | channel list and add/edit form |
 | `alerts.ts` | labels and pure helpers (escalation delays, kinds, test toast, Auto device) |

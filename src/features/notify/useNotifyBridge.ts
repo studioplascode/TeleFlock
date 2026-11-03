@@ -154,7 +154,7 @@ export function useNotifyBridge(): void {
         // Inside Tauri the OS notification plays the system sound; elsewhere TeleFlock chimes itself.
         if (core.backend !== "tauri" && s.notifySound && !inQuietHours(s)) playChime(n.kind);
         // Already looking at this agent: its session shows the ask or result in place, and a banner
-        // would only cover the header.
+        // would only cover the header. A document it presented stays unread until it is opened.
         const route = getRoute();
         if (route.name === "agent" && route.hostId === n.hostId && route.agentId === n.agentId) {
           if (inFront()) markAgentNotificationsRead(n.hostId, n.agentId);

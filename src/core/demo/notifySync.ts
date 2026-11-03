@@ -49,11 +49,12 @@ export class NotifySync {
     }
   }
 
-  /** `app.notifyRead`. */
-  read(hostId: string, agentId?: string): void {
+  /** `app.notifyRead` (tf-client `read_by`): the listed ones, else the host's or one agent's, where an agent's leaves its presented documents unread. */
+  read(hostId: string, agentId?: string, only?: readonly string[]): void {
     const ids: string[] = [];
     for (const t of this.tracked) {
       if (t.read || t.hostId !== hostId || (agentId !== undefined && t.n.agentId !== agentId)) continue;
+      if (only ? !only.includes(t.n.id) : agentId !== undefined && t.n.kind === "presented") continue;
       t.read = true;
       ids.push(t.n.id);
     }

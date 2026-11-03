@@ -30,8 +30,6 @@ interface SessionUiState {
   openDialog(key: string, d: SessionDialog): void;
   /** Show a panel (a collapsed card opens). */
   setTab(key: string, t: InspectorTab): void;
-  /** Forget the panel asked for (the one that was dismissed away). */
-  clearTab(key: string): void;
   setSheet(key: string, open: boolean): void;
   /** Focus the composer (now, or when it mounts) without touching its draft. */
   focusComposer(key: string): void;
@@ -58,11 +56,6 @@ export const useSessionUi = create<SessionUiState>()((set) => ({
     expandCard(t);
     set((s) => ({ tab: { ...s.tab, [key]: t } }));
   },
-  clearTab: (key) =>
-    set((s) => {
-      const { [key]: _gone, ...tab } = s.tab;
-      return { tab };
-    }),
   setSheet: (key, open) => set((s) => ({ sheet: { ...s.sheet, [key]: open } })),
   focusComposer: (key) => set((s) => ({ composerFocus: { ...s.composerFocus, [key]: (s.composerFocus[key] ?? 0) + 1 } })),
   consumeComposerFocus: (key) => set((s) => (s.composerFocus[key] ? { composerFocus: { ...s.composerFocus, [key]: undefined } } : s)),

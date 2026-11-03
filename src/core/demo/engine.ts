@@ -237,7 +237,8 @@ export class DemoEngine {
       case "app.notifyRead": {
         const hostId = String(p.hostId ?? "");
         if (!this.hosts.has(hostId)) throw apiError("not_found", `Unknown host ${hostId}`);
-        this.notes.read(hostId, typeof p.agentId === "string" ? p.agentId : undefined);
+        const ids = Array.isArray(p.ids) ? p.ids.filter((id): id is string => typeof id === "string") : undefined;
+        this.notes.read(hostId, typeof p.agentId === "string" ? p.agentId : undefined, ids);
         return {};
       }
       case "hosts.list":

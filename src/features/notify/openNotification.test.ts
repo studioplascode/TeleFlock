@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { core, getRoute, type HostNotification, useUi } from "@/core";
+import { core, getRoute, type HostNotification, markAgentNotificationsRead, useUi } from "@/core";
 import type { NotifyAction, PresentedArtifact } from "@/core/gen";
 import { coreStore } from "@/core/store/store";
-import { useFullscreenDoc } from "@/features/session/artifacts/viewer";
-import { notificationDocument, notificationPage, openNotification } from "./openNotification";
+import { openDoc, useFullscreenDoc } from "@/features/session/artifacts/viewer";
+import { notificationPage, openNotification } from "./openNotification";
+import { notificationDocument } from "./presented";
 
 const action = (id: string, answer?: NotifyAction["answer"]): NotifyAction => ({ id, label: "x", answer });
 
@@ -106,5 +107,45 @@ describe("a presented document's notification", () => {
       if (realWindow === undefined) Reflect.deleteProperty(globalThis, "window");
       else globalThis.window = realWindow;
     }
+  });
+
+  /** Records `core.app` calls while `run` runs, with a store holding `notes`. */
+  function withNotes(notes: HostNotification[], run: (told: unknown[]) => void): void {
+    const told: unknown[] = [];
+    const realApp = core.app;
+    core.app = ((method: string, params: unknown) => {
+      told.push([method, params]);
+      return Promise.resolve({});
+    }) as never;
+    coreStore.setState({ notifications: notes });
+    try {
+      run(told);
+    } finally {
+      core.app = realApp;
+      useUi.getState().setSplit(null);
+      coreStore.setState({ notifications: [] });
+    }
+  }
+  const note = (id: string, kind: HostNotification["kind"], name?: string): HostNotification => ({ ...presented(name ?? ""), id, kind, actions: name ? [{ id: `open:${name}`, label: "View" }] : [] });
+  const unread = () => coreStore.getState().notifications.filter((n) => !n.read).map((n) => n.id);
+
+  test("stays unread while its agent's session is open (a notice arriving there, or the session opening)", () => {
+    withNotes([note("f1", "finished"), note("p1", "presented", "presented/q3-revenue-report-v1.html")], (told) => {
+      markAgentNotificationsRead("forge", "docs");
+      expect(unread()).toEqual(["p1"]);
+      expect(told).toEqual([["app.notifyRead", { hostId: "forge", agentId: "docs" }]]);
+    });
+  });
+
+  test("is read once its document is opened, every version's, here and on the other devices", () => {
+    const notes = [note("p1", "presented", "presented/q3-revenue-report-v1.html"), note("p2", "presented", "presented/q3-revenue-report-v2.html"), note("p3", "presented", "presented/board-test-report-v1.md")];
+    withNotes(notes, (told) => {
+      openDoc({ agentKey: "forge::docs", kind: "local", name: "presented/q3-revenue-report-v1.html" }, false);
+      expect(unread()).toEqual(["p3"]);
+      expect(told).toEqual([["app.notifyRead", { hostId: "forge", ids: ["p1", "p2"] }]]);
+      // Another agent's document of the same name is not this one.
+      openDoc({ agentKey: "forge::ana", kind: "local", name: "presented/board-test-report-v1.md" }, false);
+      expect(unread()).toEqual(["p3"]);
+    });
   });
 });

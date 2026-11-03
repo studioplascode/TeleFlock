@@ -10,6 +10,7 @@ import type {
   ForwardList,
   HostProfile,
   HostState,
+  NotifyReadParams,
   Settings,
   TranscriptItem,
   TunnelInfo,
@@ -324,16 +325,16 @@ export interface NotificationsView {
 }
 
 /**
- * Marks the matching notifications read here, and through `app.notifyRead` on every other
- * surface (the core retracts their OS notifications) for each host in `hosts`.
+ * Marks the matching notifications read here, and through `app.notifyRead` (`reads`) on every
+ * other surface (the core retracts their OS notifications).
  */
-function readWhere(match: (n: HostNotification) => boolean, hosts: Iterable<[hostId: string, agentId?: string]>): void {
+function readWhere(match: (n: HostNotification) => boolean, reads: Iterable<NotifyReadParams>): void {
   const s = coreStore.getState();
   if (s.notifications.some((n) => !n.read && match(n))) {
     coreStore.setState({ notifications: s.notifications.map((n) => (n.read || !match(n) ? n : { ...n, read: true })) });
   }
-  for (const [hostId, agentId] of hosts) {
-    core.app("app.notifyRead", { hostId, agentId }).catch(() => {
+  for (const params of reads) {
+    core.app("app.notifyRead", params).catch(() => {
       // Best effort: the host may be gone, and this surface is already up to date.
     });
   }
@@ -341,7 +342,7 @@ function readWhere(match: (n: HostNotification) => boolean, hosts: Iterable<[hos
 
 function markRead(): void {
   const unread = coreStore.getState().notifications.filter((n) => !n.read);
-  readWhere(() => true, [...new Set(unread.map((n) => n.hostId))].map((h): [string] => [h]));
+  readWhere(() => true, [...new Set(unread.map((n) => n.hostId))].map((hostId) => ({ hostId })));
 }
 
 /** Clearing the list deals with everything in it: unread ones are marked read everywhere first. */
@@ -352,20 +353,18 @@ function clearNotifications(): void {
 
 /**
  * The user looked at an agent (opened its session): its notifications are read here and on every
- * other surface. Needs-you ones stay answerable until their request is resolved.
+ * other surface. Needs-you ones stay answerable until their request is resolved; a document it
+ * presented stays unread until the document is opened (a subagent's isn't even in the transcript):
+ * {@link markNotificationsRead}.
  */
 export function markAgentNotificationsRead(hostId: string, agentId: string): void {
-  readWhere((n) => n.hostId === hostId && n.agentId === agentId, [[hostId, agentId]]);
+  readWhere((n) => n.hostId === hostId && n.agentId === agentId && n.kind !== "presented", [{ hostId, agentId }]);
 }
 
-/**
- * One notification read on this surface only: the wire marks read per agent, so its OS
- * notification and other surfaces keep it until the agent's notifications are read.
- */
-export function markNotificationRead(hostId: string, id: string): void {
-  const s = coreStore.getState();
-  const hit = (n: HostNotification) => n.hostId === hostId && n.id === id && !n.read;
-  if (s.notifications.some(hit)) coreStore.setState({ notifications: s.notifications.map((n) => (hit(n) ? { ...n, read: true } : n)) });
+/** These notifications of a host read, here and on every other surface: the Inbox's Mark read, a presented document opened. */
+export function markNotificationsRead(hostId: string, ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  readWhere((n) => n.hostId === hostId && ids.includes(n.id), [{ hostId, ids: [...ids] }]);
 }
 
 let notifCache: NotificationsView | null = null;

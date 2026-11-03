@@ -2,12 +2,18 @@
 
 /**
  * `app.notifyRead`: the user acted on the host's (or one agent's) notifications in the
- * app (opened the agent, read the list). Unread ones become read (`AppEvent::NotifyDone`)
- * and their OS notifications are retracted, except needs-you ones whose request is still
- * pending: those stay until the request is resolved.
+ * app (opened the agent, read the list, opened a presented document). Unread ones become
+ * read (`AppEvent::NotifyDone`) and their OS notifications are retracted, except needs-you
+ * ones whose request is still pending: those stay until the request is resolved. Opening an
+ * agent (`agent_id` without `ids`) leaves its presented documents unread: one is read when
+ * its document is opened (`ids`), or with the host's whole list.
  */
 export type NotifyReadParams = { hostId: string, 
 /**
  * Only this agent's notifications (default: every notification of the host).
  */
-agentId?: string, };
+agentId?: string, 
+/**
+ * Only these notifications (the ones of a presented document the user opened).
+ */
+ids?: Array<string>, };

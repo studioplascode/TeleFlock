@@ -6,6 +6,7 @@ import { useIdleShellsPrefs } from "@/features/cleanup/idleShellsStore";
 import type { DocRef } from "@/features/session/artifacts/load";
 import { presentedDoc } from "@/features/session/artifacts/PresentedCard";
 import { openDoc } from "@/features/session/artifacts/viewer";
+import { notificationDocument } from "./presented";
 
 /** Action ids that name a host's page (tf_proto `HostPage::action_id`). */
 const PAGES: Record<string, HostPage | undefined> = { "open:idleShells": "idleShells", "open:decisions": "decisions" };
@@ -16,15 +17,6 @@ export function notificationPage(n: Pick<Notification, "actions">): HostPage | u
     const page = a.answer ? undefined : PAGES[a.id];
     if (page) return page;
   }
-  return undefined;
-}
-
-/**
- * The presented document a notification opens (tf_proto `Notification::presented`): the snapshot
- * (`presented/<slug>-v<n>.<ext>`) its first action without an answer names as `open:presented/…`.
- */
-export function notificationDocument(n: Pick<Notification, "actions">): string | undefined {
-  for (const a of n.actions) if (!a.answer && a.id.startsWith("open:presented/")) return a.id.slice("open:".length);
   return undefined;
 }
 

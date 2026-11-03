@@ -406,8 +406,8 @@ function btwRows(history: BtwThread[], live: Record<string, BtwEntry>): BtwRow[]
   return rows.reverse();
 }
 
-/** `always`: keep the card when every side question was dismissed (the phone's btw tab). */
-export function BtwPanel({ agentKey, always = false }: { agentKey: string; always?: boolean }) {
+/** The btw card: a side question's input, then the side questions with follow-ups; dismissing them, one or all, leaves the card and its input. */
+export function BtwPanel({ agentKey }: { agentKey: string }) {
   const { hostId, agentId } = parseAgentKey(agentKey);
   const { meta } = useSession(agentKey);
   const live = useBtw(agentKey);
@@ -437,18 +437,12 @@ export function BtwPanel({ agentKey, always = false }: { agentKey: string; alway
   const scope = sessionScope(hostId, agentId, sessionId);
   const marks = useInspectorCards((st) => marksOf(st.btw, scope));
   const mark = useInspectorCards((st) => st.markBtw);
-  const requested = useSessionUi((st) => st.tab[agentKey] === "btw");
   const rows = visibleBtw(all, marks);
   // omp answers one side question at a time.
   const running = all.some((r) => r.turns.some((t) => !t.done));
   const settled = rows.filter((r) => r.turns.every((t) => t.done)).map((r) => r.id);
   const collapsed = new Set(marks.collapsed);
   const allCollapsed = settled.length > 0 && settled.every((id) => collapsed.has(id));
-  const dismiss = (ids: string[]) => {
-    mark(scope, "dismissed", ids, true);
-    // The card goes away with the last one: drop the request that scrolled to it.
-    if (ids.length === rows.length) useSessionUi.getState().clearTab(agentKey);
-  };
   const ask = async () => {
     const question = q.trim();
     if (!question) return;
@@ -459,8 +453,6 @@ export function BtwPanel({ agentKey, always = false }: { agentKey: string; alway
       drafts.set(key, cur.startsWith(q) ? cur.slice(q.length).trimStart() : cur);
     }
   };
-  // Everything dismissed: only the input would be left, so the card steps aside until /btw (or its tab) asks for it.
-  if (!always && rows.length === 0 && marks.dismissed.length > 0 && !requested) return null;
   return (
     <Pane
       id="btw"
@@ -502,7 +494,7 @@ export function BtwPanel({ agentKey, always = false }: { agentKey: string; alway
               <Button size="sm" variant="ghost" disabled={settled.length === 0} onClick={() => mark(scope, "collapsed", settled, !allCollapsed)}>
                 {allCollapsed ? "Expand all" : "Collapse all"}
               </Button>
-              <Button size="sm" variant="ghost" icon={<X />} disabled={settled.length === 0} onClick={() => dismiss(settled)}>
+              <Button size="sm" variant="ghost" icon={<X />} disabled={settled.length === 0} onClick={() => mark(scope, "dismissed", settled, true)}>
                 Dismiss all
               </Button>
             </span>
@@ -517,7 +509,7 @@ export function BtwPanel({ agentKey, always = false }: { agentKey: string; alway
             canFollowUp={enabled && !running}
             collapsed={collapsed.has(row.id)}
             onCollapsed={(on) => mark(scope, "collapsed", [row.id], on)}
-            onDismiss={() => dismiss([row.id])}
+            onDismiss={() => mark(scope, "dismissed", [row.id], true)}
           />
         ))}
         {history.error && history.sessionId === sessionId && <div className="text-[11px] text-mute-2">Earlier side questions unavailable: {history.error}</div>}
@@ -764,7 +756,7 @@ export function InspectorTabs({ agentKey }: { agentKey: string }) {
       {tab === "chat" && <ChatPanel agentKey={agentKey} />}
       {tab === "files" && <FilesPanel agentKey={agentKey} />}
       {tab === "tree" && <TreePanel agentKey={agentKey} />}
-      {tab === "btw" && <BtwPanel agentKey={agentKey} always />}
+      {tab === "btw" && <BtwPanel agentKey={agentKey} />}
       {empty && (
         <EmptyState
           compact

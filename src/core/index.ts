@@ -41,7 +41,7 @@ export {
   getWorkspacesSnapshot,
   loadOlderActivity,
   markAgentNotificationsRead,
-  markNotificationRead,
+  markNotificationsRead,
   getTranscript,
   selectAgentKeys,
   useActivity,

@@ -59,7 +59,7 @@ Changed files `9 files +531 −63`, tree, btw, jobs, artifacts) in place of its 
 does no layout; the transcript's width does not change). `setTab` (a `/btw` or `/todos` request, a phone tab pick)
 opens a collapsed card. Side questions: each row collapses (question + turn count stay; Follow up and Cancel hide) and
 can be dismissed (×; not while answering); the card has Collapse all / Dismiss all from two side questions on, and
-hides itself when every one is dismissed (a `/btw` or the phone's btw tab brings it back with its input). Both marks
+stays with its input when every one is dismissed (fold it like any card to put it away). Both marks
 persist per session on this device in `tf.inspector` (`sessionScope`: host + omp session id, so a reopened pane keeps
 them; the newest 300 ids of the newest 40 sessions). Subagents (`subagents/SubagentList.tsx`, `subagents/grouping.ts`):
 a tree, each subagent's own subagents under it at any depth (`Subagent.parentId`, else the dotted id `A.B.C` → `A.B`;

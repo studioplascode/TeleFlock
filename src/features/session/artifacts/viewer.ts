@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { type SplitState, useUi } from "@/core";
+import { readPresentedNotifications } from "@/features/notify/presented";
 import type { DocRef } from "./load";
 
 /**
@@ -29,8 +30,12 @@ export function docOf(split: ArtifactSplit): DocRef {
   return { agentKey: split.key, kind: split.file, name: split.name, as: split.as, title: split.title, language: split.language };
 }
 
-/** Opens a document: in the panel beside the session on desktop, full screen on phones and in focus mode. */
+/**
+ * Opens a document: in the panel beside the session on desktop, full screen on phones and in focus mode. A presented
+ * one's notifications are read now: the session view leaves them unread.
+ */
 export function openDoc(doc: DocRef, mobile: boolean): void {
+  if (doc.kind === "local") readPresentedNotifications(doc.agentKey, doc.name);
   const ui = useUi.getState();
   if (mobile || ui.focusMode) showFullscreen(doc);
   else ui.setSplit(splitOf(doc));
@@ -38,6 +43,7 @@ export function openDoc(doc: DocRef, mobile: boolean): void {
 
 /** Shows another document (a version) where `from` is shown: the panel, or full screen. */
 export function switchDoc(from: "split" | "full", doc: DocRef): void {
+  if (doc.kind === "local") readPresentedNotifications(doc.agentKey, doc.name);
   if (from === "full") showFullscreen(doc);
   else useUi.getState().setSplit(splitOf(doc));
 }

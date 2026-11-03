@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0, 0.6.1 and 0.7.0 on 2026-10-29, 0.8.0, 0.8.1 and 0.9.0 on 2026-11-01, 0.9.1 on 2026-11-03 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0, 0.6.1 and 0.7.0 on 2026-10-29, 0.8.0, 0.8.1 and 0.9.0 on 2026-11-01, 0.9.1 and 0.9.2 on 2026-11-03 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,13 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension (since 0.6.0 also the data plane: live frames + the session file) · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.9.2 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| A presented document's notification stays unread until its document is shown: viewing the agent's session (a notice arriving while it is open, or opening it) reads the agent's other notifications only (`app.notifyRead {agentId}` skips `presented`, `read_by`); opening the document (`openDoc` / `switchDoc`: the notification, the transcript's card, the Artifacts list, a version switch) reads that document's notifications, every version's, on every device (`app.notifyRead {ids}`); a row's Mark read now reads on the other devices too | Inbox, bell, session viewer | same | `NotifyReadParams.ids`; `tf-client` `engine.rs` `read_by`; `src/core/hooks.ts` `markAgentNotificationsRead`, `markNotificationsRead`; `src/features/notify/presented.ts`, `src/features/session/artifacts/viewer.ts` (L) | ✅ tests (`tf-client` `a_presented_document_stays_unread_until_it_is_opened`; TS: the session view leaves it unread, opening the document reads every version's and not another agent's); ✅ demo at 1440×900 (three finished notices and one presented: viewing the session left only the presented one, opening its card read it) |
+| Dismiss all (and dismissing the last side question) keeps the btw card with its input; 0.9.0 and 0.9.1 hid it until `/btw` | session inspector | btw tab | `src/features/session/inspector/Inspector.tsx` `BtwPanel` (L) | ✅ demo at 1440×900 (nine side questions dismissed at once: the card and its input stay) |
 
 ## §0 What 0.9.1 changed
 

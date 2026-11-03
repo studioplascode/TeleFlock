@@ -650,6 +650,17 @@ fn tell_read(rt: &HostRt, ids: Vec<String>) {
     }
 }
 
+/// Which notifications an `app.notifyRead` reads: the listed ones (`ids`), else the host's or one
+/// agent's. Opening an agent leaves its presented documents unread: one is read when its document
+/// is opened (listed by id), or with the host's whole list.
+fn read_by(p: &tf_proto::NotifyReadParams, n: &Notification) -> bool {
+    let agent = p.agent_id.as_ref().is_none_or(|a| *a == n.agent_id);
+    match &p.ids {
+        Some(ids) => agent && ids.contains(&n.id),
+        None => agent && (p.agent_id.is_none() || n.kind != NotifyKind::Presented),
+    }
+}
+
 enum Request {
     Pending,
     /// The agent no longer waits on this request (answered, cancelled, replaced, stopped).
@@ -1363,7 +1374,7 @@ impl Engine {
             }
             AppMethod::AppNotifyRead(p) => {
                 let rt = i.host(&p.host_id).ok_or_else(|| not_found_host(&p.host_id))?;
-                i.mark_read(&rt, |n| p.agent_id.as_ref().is_none_or(|a| *a == n.agent_id));
+                i.mark_read(&rt, |n| read_by(&p, n));
                 to_value(&Empty {})
             }
             AppMethod::AppUpdateStatus(_) | AppMethod::AppUpdateCheck(_) | AppMethod::AppUpdateInstall(_) => {
@@ -2361,6 +2372,31 @@ mod tests {
         let evs: Vec<AppEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(evs.iter().any(|e| matches!(e, AppEvent::NotifyDone { ids, resolved: false, .. } if ids == &["nG"])));
         assert!(evs.iter().any(|e| matches!(e, AppEvent::OpenAgent { agent_id, .. } if agent_id == "a2")));
+    }
+
+    /// Opening an agent's session reads its notifications but not the documents it presented:
+    /// one of those is read when its document is opened (listed by id), or with the whole list.
+    #[tokio::test]
+    async fn a_presented_document_stays_unread_until_it_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _platform, rt, mut rx) = notify_host(dir.path()).await;
+        let i = &engine.inner;
+        let mut st = host_state();
+        st.agents = vec![agent("a2", tf_proto::Column::Running)];
+        i.apply_snapshot(&rt, 1, st);
+        i.on_notify(&rt, note("nF", NotifyKind::Finished, "a2", None), None);
+        i.on_notify(&rt, note("nP", NotifyKind::Presented, "a2", None), None);
+        i.on_notify(&rt, note("nQ", NotifyKind::Presented, "a2", None), None);
+
+        // The session is open: the finished one is read, the documents wait.
+        engine.call(None, "app.notifyRead", serde_json::json!({"hostId": "lab", "agentId": "a2"})).await.unwrap();
+        assert_eq!(done(&mut rx), [(ids(&["nF"]), false)]);
+        // One document opened: its notification alone.
+        engine.call(None, "app.notifyRead", serde_json::json!({"hostId": "lab", "agentId": "a2", "ids": ["nP"]})).await.unwrap();
+        assert_eq!(done(&mut rx), [(ids(&["nP"]), false)]);
+        // The whole list read: the rest.
+        engine.call(None, "app.notifyRead", serde_json::json!({"hostId": "lab"})).await.unwrap();
+        assert_eq!(done(&mut rx), [(ids(&["nQ"]), false)]);
     }
 
     /// Removing a host takes its notifications off every surface.
