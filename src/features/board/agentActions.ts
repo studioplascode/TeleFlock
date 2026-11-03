@@ -2,6 +2,7 @@ import { type AgentView, core, getAgentViews, getWorkspacesSnapshot, markResumin
 import { isChat } from "@/core/chats";
 import type { Answer, ApiError } from "@/core/gen";
 import { morphTo, toast } from "@/design";
+import { blockedAction } from "@/features/browser/actions";
 import { haptic } from "@/features/shell/haptics";
 import { confirmResumeMoved } from "@/features/move/resumeGuard";
 import { useSessionUi } from "@/features/session/state";
@@ -11,10 +12,10 @@ function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
 }
 
-/** Toast an ApiError (or anything thrown) with its hint. */
+/** Toast an ApiError (or anything thrown) with its hint (and, for a browser the organization's policy blocks, the way out). */
 export function reportError(title: string, err: unknown): void {
   const description = isApiError(err) ? [err.message, err.hint].filter(Boolean).join(" — ") : String(err);
-  toast({ title, description, status: "error" });
+  toast({ title, description, status: "error", action: blockedAction(err) });
 }
 
 /** What a toast calls an agent: its name on the board, not herdr's agent id (a terminal id, `term_65f3…`). */

@@ -52,8 +52,8 @@ use crate::herdr::{HerdrConfigParams, HerdrHealth, HerdrRestartParams};
 use crate::forward::{ForwardList, ForwardRemoveParams, ForwardSaveParams, ForwardStopParams};
 use crate::browser::{
     BrowserAgentParams, BrowserAnswerHostParams, BrowserAnswerParams, BrowserAttachParams, BrowserAttached, BrowserClearParams, BrowserConfig,
-    BrowserConfigSetParams, BrowserLendParams, BrowserRevealParams, BrowserStageParams, BrowserStaged, BrowserStartParams, BrowserStatus,
-    BrowserTabParams,
+    BrowserConfigSetParams, BrowserInstallParams, BrowserLendParams, BrowserRevealParams, BrowserStageParams, BrowserStaged, BrowserStartParams,
+    BrowserStatus, BrowserTabParams,
 };
 use crate::recording::{
     RecordingAppendParams, RecordingAppended, RecordingBundle, RecordingBytes, RecordingDetail, RecordingFrameParams, RecordingInfo, RecordingList,
@@ -1756,7 +1756,10 @@ methods!(AppMethod, "AppMethods", {
     "browser.answer" => BrowserAnswer(BrowserAnswerParams) -> BrowserStatus;
     "browser.config" => BrowserConfigReq(Empty) -> BrowserConfig;
     "browser.configSet" => BrowserConfigSet(BrowserConfigSetParams) -> BrowserConfig;
-    "browser.installEngine" => BrowserInstallEngine(Empty) -> BrowserStatus;
+    // TeleFlock's own browser (Chrome for Testing): progress in `BrowserStatus.install`; `start`
+    // chooses it and starts the browser once it is there. Cancel stops a download (nothing kept).
+    "browser.installEngine" => BrowserInstallEngine(BrowserInstallParams) -> BrowserStatus;
+    "browser.cancelInstall" => BrowserCancelInstall(Empty) -> BrowserStatus;
     "browser.clearData" => BrowserClearData(BrowserClearParams) -> BrowserStatus;
     "browser.stageFile" => BrowserStageFile(BrowserStageParams) -> BrowserStaged;
     "browser.revealDownload" => BrowserRevealDownload(BrowserRevealParams) -> Empty;

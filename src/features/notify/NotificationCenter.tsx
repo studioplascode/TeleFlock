@@ -18,6 +18,7 @@ import {
 } from "@/design";
 import { agentKey, core, type HostNotification, markNotificationRead, navigate, useHosts, useInbox, useNotifications } from "@/core";
 import type { Notification, NotifyAction, NotifyKind } from "@/core/gen";
+import { blockedAction } from "@/features/browser/actions";
 import { VIEWS } from "@/features/shell/vocab";
 import { errorHint, errorMessage } from "@/features/shell/errors";
 import { haptic } from "@/features/shell/haptics";
@@ -51,7 +52,7 @@ export function runAnswer(n: Notification & { hostId: string }, action: NotifyAc
       },
       (err: unknown) => {
         haptic("warning");
-        toast({ title: `Couldn't answer: ${errorMessage(err)}`, description: errorHint(err), status: "error" });
+        toast({ title: `Couldn't answer: ${errorMessage(err)}`, description: errorHint(err), status: "error", action: blockedAction(err) });
       },
     );
 }

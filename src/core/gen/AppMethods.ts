@@ -5,6 +5,7 @@ import type { BrowserAnswerParams } from "./BrowserAnswerParams";
 import type { BrowserClearParams } from "./BrowserClearParams";
 import type { BrowserConfig } from "./BrowserConfig";
 import type { BrowserConfigSetParams } from "./BrowserConfigSetParams";
+import type { BrowserInstallParams } from "./BrowserInstallParams";
 import type { BrowserLendParams } from "./BrowserLendParams";
 import type { BrowserRevealParams } from "./BrowserRevealParams";
 import type { BrowserStageParams } from "./BrowserStageParams";
@@ -104,7 +105,8 @@ export interface AppMethods {
   "browser.answer": { params: BrowserAnswerParams; result: BrowserStatus };
   "browser.config": { params: Empty; result: BrowserConfig };
   "browser.configSet": { params: BrowserConfigSetParams; result: BrowserConfig };
-  "browser.installEngine": { params: Empty; result: BrowserStatus };
+  "browser.installEngine": { params: BrowserInstallParams; result: BrowserStatus };
+  "browser.cancelInstall": { params: Empty; result: BrowserStatus };
   "browser.clearData": { params: BrowserClearParams; result: BrowserStatus };
   "browser.stageFile": { params: BrowserStageParams; result: BrowserStaged };
   "browser.revealDownload": { params: BrowserRevealParams; result: Empty };

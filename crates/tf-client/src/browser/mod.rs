@@ -4,7 +4,10 @@
 //! user's consent.
 //!
 //! * **Engine** (`discover`, `install`): a configured path, else Google Chrome, Chromium, Microsoft
-//!   Edge or Brave, else the Chrome for Testing the user let the app download.
+//!   Edge or Brave, else the Chrome for Testing the user let the app download (TeleFlock's own
+//!   browser). An engine the organization's policy refuses remote control (`RemoteDebuggingAllowed`)
+//!   is marked blocked here and passed over by Automatic; TeleFlock's own browser takes over when it
+//!   is downloaded, else it is offered ([`Fallback`]).
 //! * **Process** (`run`, `launch`): headless for the app's panel or in its own window, DevTools on
 //!   a free loopback port open to the app's own origins only; restarted after crashes, stopped on
 //!   `browser.stop` and when the app core shuts down. Android has no browser (`unavailable`).
@@ -32,14 +35,15 @@ mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tf_proto::{
-    AnswerParams, ApiError, AppEvent, AppMethod, BrowserAnswerParams, BrowserAttached, BrowserAttachment, BrowserClearWhat, BrowserConfig,
-    BrowserConfigSetParams, BrowserDownload, BrowserEngine, BrowserInstall, BrowserRequest, BrowserScope, BrowserStaged, BrowserState,
-    BrowserStatus, Empty, ForwardKind, FwdEv, HostState, Millis, Notification, NotifyKind,
+    AnswerParams, ApiError, AppEvent, AppMethod, BrowserAnswerParams, BrowserAttached, BrowserAttachment, BrowserBlocked, BrowserClearWhat,
+    BrowserConfig, BrowserConfigSetParams, BrowserDownload, BrowserEngine, BrowserFallback, BrowserInstall, BrowserRequest, BrowserScope,
+    BrowserStaged, BrowserState, BrowserStatus, Empty, ForwardKind, FwdEv, HostState, Millis, Notification, NotifyKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -61,18 +65,22 @@ const START_WAIT: Duration = Duration::from_secs(60);
 /// Proxy changes (tab owners, activity) reach the UI at most this often.
 const CHANGES_EVERY: Duration = Duration::from_millis(250);
 
-/// `<data_dir>/browser/config.json` (`browser.configSet`).
+/// `<data_dir>/browser/config.json` (`browser.configSet`; `blocked` is the app core's).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Config {
     engine_path: Option<String>,
     headed: bool,
     cap: u32,
+    /// Engines (paths) the organization's policy refused remote control when they were started
+    /// here, until one starts fine again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { engine_path: None, headed: false, cap: CAP_DEFAULT }
+        Config { engine_path: None, headed: false, cap: CAP_DEFAULT, blocked: Vec::new() }
     }
 }
 
@@ -114,10 +122,20 @@ pub(crate) struct Browser {
     st: Mutex<St>,
     /// One lifecycle change at a time: start, stop, clearing everything.
     ops: tokio::sync::Mutex<()>,
+    /// One write of `config.json` at a time (the supervisor writes it too: never under `ops`).
+    saving: tokio::sync::Mutex<()>,
     versions: Mutex<discover::Versions>,
     /// The status last sent: `AppEvent::Browser` goes out on changes only.
     sent: Mutex<Option<BrowserStatus>>,
     actor: OnceLock<mpsc::UnboundedSender<Cmd>>,
+}
+
+/// A Chrome for Testing download running now (`St::install` shows it).
+struct Downloading {
+    /// `browser.cancelInstall`.
+    cancel: Arc<AtomicBool>,
+    /// Choose it and start the browser once it is there (`browser.installEngine {start}`).
+    start: bool,
 }
 
 #[derive(Default)]
@@ -131,7 +149,10 @@ struct St {
     chosen: Option<BrowserEngine>,
     run: Run,
     message: Option<String>,
+    /// The last start found an engine blocked (until the next start or stop).
+    blocked: Option<BrowserBlocked>,
     install: Option<BrowserInstall>,
+    downloading: Option<Downloading>,
     agents: Agents,
     /// Pending requests on each live host's board.
     asks: HashMap<String, Vec<Ask>>,
@@ -158,13 +179,14 @@ impl Browser {
             dir,
             st: Mutex::new(St { config, ..St::default() }),
             ops: tokio::sync::Mutex::new(()),
+            saving: tokio::sync::Mutex::new(()),
             versions: Mutex::default(),
             sent: Mutex::new(None),
             actor: OnceLock::new(),
         };
         if available {
             let found = b.found();
-            b.st.lock().unwrap().engines = found.into_iter().map(|(n, p)| BrowserEngine { name: n.into(), path: p.to_string_lossy().into_owned(), version: None }).collect();
+            b.st.lock().unwrap().engines = found.into_iter().map(|(n, p)| discover::engine(n, &p, None)).collect();
         }
         b
     }
@@ -201,6 +223,28 @@ impl Browser {
         #[cfg(target_os = "android")]
         let cft = None;
         discover::found(&self.os, &|k| std::env::var_os(k), cft)
+    }
+
+    /// TeleFlock's own browser here: its program (where it is, or will be once downloaded) and
+    /// whether it is downloaded; `None`: no build for this computer.
+    fn own(&self) -> Option<(PathBuf, bool)> {
+        #[cfg(not(target_os = "android"))]
+        let own = install::program(&self.engine_dir()).map(|p| {
+            let there = p.is_file();
+            (p, there)
+        });
+        #[cfg(target_os = "android")]
+        let own = None;
+        own
+    }
+
+    /// TeleFlock's own browser as `browser.installEngine` downloads it.
+    fn download(&self) -> BrowserDownload {
+        #[cfg(not(target_os = "android"))]
+        let d = BrowserDownload { version: install::VERSION.into(), available: install::available(), installed: install::installed(&self.engine_dir()).is_some(), size: install::size() };
+        #[cfg(target_os = "android")]
+        let d = BrowserDownload { version: String::new(), available: false, installed: false, size: None };
+        d
     }
 
     fn cmd(&self, c: Cmd) -> Result<(), ApiError> {
@@ -243,23 +287,40 @@ fn no_engine_message() -> String {
     "No Chrome, Chromium, Edge or Brave on this computer: install one of them to use the TeleFlock Browser.".into()
 }
 
-/// The engine `browser.start` would run: the configured one, else the first found.
+/// `engine` with its `blocked` mark as this device has it.
+fn marked(mut engine: BrowserEngine, blocked: &[String]) -> BrowserEngine {
+    engine.blocked = blocked.contains(&engine.path);
+    engine
+}
+
+/// The engine Automatic picks among those found (in the order they are preferred): the first one
+/// the organization's policy did not block here, else (every one blocked: policies change) the
+/// first.
+fn automatic<'a, T>(found: &'a [T], path: impl Fn(&T) -> String, blocked: &[String]) -> Option<&'a T> {
+    found.iter().find(|e| !blocked.contains(&path(e))).or_else(|| found.first())
+}
+
+/// The engine `browser.start` would run: the configured one, else Automatic's.
 fn preferred(st: &St) -> Option<BrowserEngine> {
-    match &st.config.engine_path {
+    let blocked = &st.config.blocked;
+    let engine = match &st.config.engine_path {
         Some(p) => {
             let path = Path::new(p);
             if !discover::runnable(path) {
                 return None;
             }
             let known = st.engines.iter().chain(&st.chosen).find(|e| e.path == *p).cloned();
-            Some(known.unwrap_or_else(|| BrowserEngine {
+            known.unwrap_or_else(|| BrowserEngine {
                 name: path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone()),
                 path: p.clone(),
                 version: None,
-            }))
+                builtin: false,
+                blocked: false,
+            })
         }
-        None => st.engines.first().cloned(),
-    }
+        None => automatic(&st.engines, |e| e.path.clone(), blocked)?.clone(),
+    };
+    Some(marked(engine, blocked))
 }
 
 /// The status as `browser.status` and `AppEvent::Browser` carry it.
@@ -328,6 +389,7 @@ pub(crate) fn status(inner: &Inner) -> BrowserStatus {
             profile_dir: b.profile().to_string_lossy().into_owned(),
             download_dir: b.available.then(|| files::download_dir(&b.dir).to_string_lossy().into_owned()),
             message,
+            blocked: st.blocked.clone(),
             install: st.install.clone(),
             cap: st.config.cap,
             attachments,
@@ -362,12 +424,30 @@ pub(crate) fn emit(inner: &Inner) {
     }
 }
 
-/// Sets the process state (and its message).
+/// Sets the process state (and its message); a start or a stop forgets the last block.
 fn set_run(inner: &Inner, run: Run, message: Option<String>) {
     {
         let mut st = inner.browser.st.lock().unwrap();
+        if matches!(run, Run::Starting { .. } | Run::Off) {
+            st.blocked = None;
+        }
         st.run = run;
         st.message = message;
+    }
+    emit(inner);
+}
+
+/// A start failed: the browser stays down, saying why (and, when the organization's policy
+/// blocked it, what is left).
+fn start_failed(inner: &Inner, e: &StartError) {
+    {
+        let mut st = inner.browser.st.lock().unwrap();
+        st.run = Run::Error;
+        st.message = Some(e.message());
+        st.blocked = match e {
+            StartError::Blocked { blocked, .. } => Some(blocked.clone()),
+            StartError::Failed(_) => None,
+        };
     }
     emit(inner);
 }
@@ -376,12 +456,16 @@ fn proxy_of(inner: &Inner) -> Option<Arc<CdpProxy>> {
     inner.browser.st.lock().unwrap().proxy.clone()
 }
 
-/// The browser runs (`p`): the proxy serves agents from its DevTools port.
-fn running(inner: &Arc<Inner>, p: &launch::Proc, engine: BrowserEngine) {
+/// The browser runs (`p`): the proxy serves agents from its DevTools port. `switched`: it runs
+/// TeleFlock's own browser because the organization's policy blocked the engine it was to run
+/// (the notice and why, said once).
+fn running(inner: &Arc<Inner>, p: &launch::Proc, engine: BrowserEngine, switched: Option<(BrowserBlocked, String)>) {
     let (px, fresh) = {
         let mut st = inner.browser.st.lock().unwrap();
         st.run = Run::Running { headed: p.headed, port: p.port, ws_url: p.ws_url.clone(), engine };
-        st.message = None;
+        let (blocked, why) = switched.map_or((None, None), |(blocked, why)| (Some(blocked), Some(why)));
+        st.blocked = blocked;
+        st.message = why;
         match &st.proxy {
             Some(px) => (px.clone(), false),
             None => {
@@ -431,26 +515,195 @@ async fn refresh_engines(inner: &Arc<Inner>) {
     emit(inner);
 }
 
-/// The engine to launch: the configured one, else the first found.
+/// The engine to launch: the configured one, else Automatic's.
 async fn engine_to_run(inner: &Arc<Inner>) -> Result<BrowserEngine, String> {
     let b = &inner.browser;
     let found = b.found();
-    let configured = b.st.lock().unwrap().config.engine_path.clone();
-    let (name, path) = match configured {
+    let (configured, blocked) = {
+        let st = b.st.lock().unwrap();
+        (st.config.engine_path.clone(), st.config.blocked.clone())
+    };
+    let path = match configured {
         Some(p) => {
             let path = PathBuf::from(&p);
             if !discover::runnable(&path) {
                 return Err(format!("{p}, the browser chosen in Settings → Browser, is not there any more"));
             }
-            (discover::name_of(&path, &found), path)
+            path
         }
-        None => match found.first() {
-            Some((n, p)) => (Some(n.to_string()), p.clone()),
+        None => match automatic(&found, |(_, p)| p.to_string_lossy().into_owned(), &blocked) {
+            Some((_, p)) => p.clone(),
             None => return Err(no_engine_message()),
         },
     };
-    let mut e = discover::with_versions(&b.os, vec![(name, path)], &b.versions).await;
-    Ok(e.remove(0))
+    Ok(engine_at(inner, path, &found).await)
+}
+
+/// The engine at `path`: named as `found` names it (else by what it reports), with its version.
+async fn engine_at(inner: &Inner, path: PathBuf, found: &[(&'static str, PathBuf)]) -> BrowserEngine {
+    let b = &inner.browser;
+    let name = discover::name_of(&path, found);
+    discover::with_versions(&b.os, vec![(name, path)], &b.versions).await.remove(0)
+}
+
+// ───────────────────────────── the organization's policy ─────────────────────────────
+
+/// What a start does about an engine the organization's policy blocked.
+#[derive(Debug, PartialEq)]
+enum Fallback {
+    /// Run TeleFlock's own browser (this program) instead.
+    Switch(PathBuf),
+    /// Offer to download TeleFlock's own browser.
+    Offer,
+    /// Nothing is left: its own browser is blocked too, or has no build for this computer.
+    Nothing,
+}
+
+/// `engine` (a path) refused remote control. TeleFlock's own browser (`own`: its program and
+/// whether it is downloaded; `None`: no build here) takes over when it is downloaded, else it is
+/// offered; unless it is the engine that refused, or is blocked too (`blocked`: the paths marked on
+/// this device).
+fn fallback(engine: &str, own: Option<(&Path, bool)>, blocked: &[String]) -> Fallback {
+    let Some((program, there)) = own else { return Fallback::Nothing };
+    let p = program.to_string_lossy();
+    if p == engine || blocked.iter().any(|b| *b == p) {
+        Fallback::Nothing
+    } else if there {
+        Fallback::Switch(program.to_path_buf())
+    } else {
+        Fallback::Offer
+    }
+}
+
+/// `engine` refused remote control: it is marked blocked on this device (saved), and what is left
+/// is decided.
+async fn on_blocked(inner: &Inner, engine: &BrowserEngine) -> Fallback {
+    let b = &inner.browser;
+    let own = b.own();
+    let f = {
+        let mut st = b.st.lock().unwrap();
+        if !st.config.blocked.contains(&engine.path) {
+            st.config.blocked.push(engine.path.clone());
+        }
+        fallback(&engine.path, own.as_ref().map(|(p, there)| (p.as_path(), *there)), &st.config.blocked)
+    };
+    log::warn!("browser: the organization's policy blocks remote control of {} ({}); fallback: {f:?}", engine.name, engine.path);
+    save_config(inner).await;
+    f
+}
+
+/// `path` started: a block marked on it is lifted (the policy changed).
+async fn unblock(inner: &Inner, path: &str) {
+    let lifted = {
+        let mut st = inner.browser.st.lock().unwrap();
+        let before = st.config.blocked.len();
+        st.config.blocked.retain(|p| p != path);
+        st.config.blocked.len() != before
+    };
+    if lifted {
+        log::info!("browser: {path} started: the organization's policy no longer blocks it");
+        save_config(inner).await;
+    }
+}
+
+/// TeleFlock's own browser (`own`) started instead of `refused`: it is the chosen engine from now
+/// on (later starts go straight to it). Returns the notice the status shows once.
+async fn switched(inner: &Inner, refused: &BrowserEngine, own: &BrowserEngine) -> (BrowserBlocked, String) {
+    inner.browser.st.lock().unwrap().config.engine_path = Some(own.path.clone());
+    save_config(inner).await;
+    notice(inner, refused, BrowserFallback::Switched)
+}
+
+/// The start failed on the organization's policy; `refused` is the engine it was to run.
+fn blocked(inner: &Inner, refused: &BrowserEngine, fallback: BrowserFallback) -> StartError {
+    let (blocked, message) = notice(inner, refused, fallback);
+    StartError::Blocked { blocked, message }
+}
+
+/// What the status says about a block: the engine that refused, what is left, and the message.
+fn notice(inner: &Inner, refused: &BrowserEngine, fallback: BrowserFallback) -> (BrowserBlocked, String) {
+    let b = &inner.browser;
+    let download = (fallback == BrowserFallback::Offer).then(|| b.download());
+    let name = &refused.name;
+    let message = match fallback {
+        BrowserFallback::Switched => format!("{name} is blocked for remote control by your organization; TeleFlock uses its own browser."),
+        BrowserFallback::Offer => {
+            let size = download.as_ref().and_then(|d| d.size).map_or_else(|| "about 200 MB".to_string(), megabytes);
+            format!("{name} is blocked for remote control by your organization. TeleFlock can use its own browser instead (Chrome for Testing, {size}).")
+        }
+        BrowserFallback::Unavailable => {
+            let st = b.st.lock().unwrap();
+            let known: Vec<&BrowserEngine> = st.engines.iter().chain(&st.chosen).chain([refused]).collect();
+            let mut names: Vec<&str> = Vec::new();
+            for e in known.iter().filter(|e| e.path == refused.path || st.config.blocked.contains(&e.path)) {
+                if !names.contains(&e.name.as_str()) {
+                    names.push(&e.name);
+                }
+            }
+            let every = st.engines.iter().all(|e| st.config.blocked.contains(&e.path));
+            let it = "Your IT department can allow it with the RemoteDebuggingAllowed policy";
+            if every {
+                format!("This computer's policy blocks remote control of every browser TeleFlock can use ({}). {it}.", and_list(&names))
+            } else {
+                format!("This computer's policy blocks remote control of {}. {it}, or you can choose another browser in Settings → Browser.", and_list(&names))
+            }
+        }
+    };
+    let engine = BrowserEngine { blocked: true, ..refused.clone() };
+    (BrowserBlocked { engine, fallback, download, at: now_ms() }, message)
+}
+
+/// `192 MB` (binary megabytes, as the UI shows sizes).
+fn megabytes(bytes: u64) -> String {
+    format!("{} MB", (bytes as f64 / 1_048_576.0).round() as u64)
+}
+
+/// `A`, `A and B`, `A, B and C`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Writes `config.json` as the config is now (one write at a time); a failure is logged.
+async fn save_config(inner: &Inner) {
+    let b = &inner.browser;
+    let _w = b.saving.lock().await;
+    let c = b.st.lock().unwrap().config.clone();
+    if let Err(e) = write_json(&b.dir.join("config.json"), &c).await {
+        log::warn!("browser: {}", e.message);
+    }
+}
+
+/// Why a start failed.
+#[derive(Debug)]
+enum StartError {
+    /// The organization's policy blocks remote control of the engine (and of TeleFlock's own
+    /// browser when it was tried): what is left, and the message.
+    Blocked { blocked: BrowserBlocked, message: String },
+    /// Anything else: what happened.
+    Failed(String),
+}
+
+impl StartError {
+    /// What the status says (`BrowserStatus::message`).
+    fn message(&self) -> String {
+        match self {
+            StartError::Blocked { message, .. } => message.clone(),
+            StartError::Failed(e) => format!("The browser did not start: {e}"),
+        }
+    }
+
+    /// What a call that needs the browser answers: `browser_blocked` while TeleFlock's own browser
+    /// is on offer (`browser.installEngine {start: true}`), else `browser_failed`.
+    fn api_error(&self) -> ApiError {
+        match self {
+            StartError::Blocked { blocked, message } if blocked.fallback == BrowserFallback::Offer => ApiError::new("browser_blocked", message.clone()),
+            _ => ApiError::new("browser_failed", self.message()),
+        }
+    }
 }
 
 // ───────────────────────────── lifecycle ─────────────────────────────
@@ -468,7 +721,7 @@ async fn start_browser(inner: &Arc<Inner>, headed: Option<bool>) -> Result<(), A
     b.cmd(Cmd::Start { headed, reply })?;
     match tokio::time::timeout(START_WAIT, rx).await {
         Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => Err(ApiError::new("browser_failed", format!("The browser did not start: {e}"))),
+        Ok(Ok(Err(e))) => Err(e.api_error()),
         Ok(Err(_)) => Err(ApiError::new("internal", "the browser's supervisor went away")),
         Err(_) => Err(ApiError::new("timeout", "the browser did not start in time").retryable()),
     }
@@ -945,12 +1198,10 @@ fn open_stream(inner: &Arc<Inner>, host_id: &str, link: &Arc<Link>, sid: u64, ag
 async fn config(inner: &Arc<Inner>) -> BrowserConfig {
     refresh_engines(inner).await;
     let b = &inner.browser;
+    let download = b.download();
     let st = b.st.lock().unwrap();
-    #[cfg(not(target_os = "android"))]
-    let download = BrowserDownload { version: install::VERSION.into(), available: install::available(), installed: install::installed(&b.engine_dir()).is_some() };
-    #[cfg(target_os = "android")]
-    let download = BrowserDownload { version: String::new(), available: false, installed: false };
-    BrowserConfig { engine_path: st.config.engine_path.clone(), headed: st.config.headed, cap: st.config.cap, engines: st.engines.clone(), download }
+    let engines = st.engines.iter().map(|e| marked(e.clone(), &st.config.blocked)).collect();
+    BrowserConfig { engine_path: st.config.engine_path.clone(), headed: st.config.headed, cap: st.config.cap, engines, download }
 }
 
 async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<BrowserConfig, ApiError> {
@@ -964,28 +1215,43 @@ async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<Bro
     if !(1..=CAP_MAX).contains(&cap) {
         return Err(invalid(format!("cap: 1 to {CAP_MAX} agents")));
     }
-    let c = Config { engine_path, headed: p.headed.unwrap_or(false), cap };
+    let headed = p.headed.unwrap_or(false);
     {
-        let _ops = inner.browser.ops.lock().await;
-        write_json(&inner.browser.dir.join("config.json"), &c).await?;
-        inner.browser.st.lock().unwrap().config = c;
+        let b = &inner.browser;
+        let _ops = b.ops.lock().await;
+        let _w = b.saving.lock().await;
+        // The blocked marks are the app core's: they stay.
+        let blocked = b.st.lock().unwrap().config.blocked.clone();
+        let c = Config { engine_path, headed, cap, blocked };
+        write_json(&b.dir.join("config.json"), &c).await?;
+        let mut st = b.st.lock().unwrap();
+        st.config.engine_path = c.engine_path;
+        st.config.headed = c.headed;
+        st.config.cap = c.cap;
     }
     admit_waiting(inner);
     Ok(config(inner).await)
 }
 
+/// `browser.installEngine`: downloads TeleFlock's own browser (one download at a time; asking
+/// again while one runs only adds `start`). `start`: once it is there, it becomes the chosen
+/// engine and the browser starts with it.
 #[cfg(not(target_os = "android"))]
-fn install_engine(inner: &Arc<Inner>) -> Result<(), ApiError> {
+fn install_engine(inner: &Arc<Inner>, start: bool) -> Result<(), ApiError> {
     if !install::available() {
         return Err(ApiError::new("unsupported", "Chrome for Testing has no build for this computer"));
     }
-    {
+    let cancel = {
         let mut st = inner.browser.st.lock().unwrap();
-        if st.install.as_ref().is_some_and(|i| i.error.is_none()) {
+        if let Some(d) = st.downloading.as_mut() {
+            d.start |= start;
             return Ok(());
         }
+        let cancel = Arc::new(AtomicBool::new(false));
+        st.downloading = Some(Downloading { cancel: cancel.clone(), start });
         st.install = Some(BrowserInstall { version: install::VERSION.into(), progress: None, error: None });
-    }
+        cancel
+    };
     emit(inner);
     let inner = inner.clone();
     tokio::spawn(async move {
@@ -996,11 +1262,24 @@ fn install_engine(inner: &Arc<Inner>) -> Result<(), ApiError> {
             }
             emit(&inner);
         };
-        match install::install(&dir, progress).await {
+        let result = install::install(&dir, &cancel, progress).await;
+        let start = {
+            let mut st = inner.browser.st.lock().unwrap();
+            st.install = None;
+            st.downloading.take().is_some_and(|d| d.start)
+        };
+        let canceled = cancel.load(Ordering::Acquire);
+        match result {
             Ok(exe) => {
                 log::info!("browser: Chrome for Testing {} installed at {}", install::VERSION, exe.display());
-                inner.browser.st.lock().unwrap().install = None;
                 refresh_engines(&inner).await;
+                if start && !canceled {
+                    use_own(&inner, exe).await;
+                }
+            }
+            Err(_) if canceled => {
+                log::info!("browser: the Chrome for Testing download was canceled");
+                emit(&inner);
             }
             Err(e) => {
                 log::warn!("browser: Chrome for Testing download failed: {e}");
@@ -1013,8 +1292,26 @@ fn install_engine(inner: &Arc<Inner>) -> Result<(), ApiError> {
 }
 
 #[cfg(target_os = "android")]
-fn install_engine(_: &Arc<Inner>) -> Result<(), ApiError> {
+fn install_engine(_: &Arc<Inner>, _: bool) -> Result<(), ApiError> {
     Err(unsupported())
+}
+
+/// "Use TeleFlock's browser": its own browser (`exe`) becomes the chosen engine and the browser
+/// starts with it (when it is not running).
+async fn use_own(inner: &Arc<Inner>, exe: PathBuf) {
+    inner.browser.st.lock().unwrap().config.engine_path = Some(exe.to_string_lossy().into_owned());
+    save_config(inner).await;
+    let _ops = inner.browser.ops.lock().await;
+    if let Err(e) = start_browser(inner, None).await {
+        log::info!("browser: TeleFlock's own browser did not start: {}", e.message);
+    }
+}
+
+/// `browser.cancelInstall`: the download stops at its next piece; nothing of it is kept.
+fn cancel_install(inner: &Inner) {
+    if let Some(d) = &inner.browser.st.lock().unwrap().downloading {
+        d.cancel.store(true, Ordering::Release);
+    }
 }
 
 /// `browser.clearData`.
@@ -1074,7 +1371,8 @@ pub(crate) async fn call(inner: &Arc<Inner>, m: AppMethod) -> Result<Value, ApiE
         AppMethod::BrowserAnswer(p) => answer(inner, p).await?,
         AppMethod::BrowserConfigReq(_) => return to_value(&config(inner).await),
         AppMethod::BrowserConfigSet(p) => return to_value(&config_set(inner, p).await?),
-        AppMethod::BrowserInstallEngine(_) => install_engine(inner)?,
+        AppMethod::BrowserInstallEngine(p) => install_engine(inner, p.start)?,
+        AppMethod::BrowserCancelInstall(_) => cancel_install(inner),
         AppMethod::BrowserClearData(p) => clear(inner, p.what).await?,
         AppMethod::BrowserStageFile(p) => {
             let path = files::stage(&b.dir.join("staged"), &p.name, &p.data).await?;

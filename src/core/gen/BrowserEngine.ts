@@ -12,4 +12,13 @@ name: string, path: string,
 /**
  * `x.y.z.w`, when known.
  */
-version?: string, };
+version?: string, 
+/**
+ * TeleFlock's own browser: the Chrome for Testing it downloaded (`browser.installEngine`).
+ */
+builtin?: boolean, 
+/**
+ * The organization's policy blocked remote control of it the last time it was started here
+ * ([`BrowserBlocked`]): Automatic passes it over; choosing it tries it again.
+ */
+blocked?: boolean, };

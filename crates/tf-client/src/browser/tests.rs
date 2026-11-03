@@ -1,6 +1,7 @@
 //! The browser manager with a real Chromium: `TF_TEST_CHROME`, else a browser installed here,
 //! else a Chrome for Testing in Playwright's or Puppeteer's cache. Without one the tests say so
-//! and pass.
+//! and pass. With fake browsers (scripts): an engine the organization's policy blocks, and
+//! TeleFlock's own browser taking over.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,11 +9,12 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tf_proto::{ApiError, AppEvent, BrowserState, BrowserStatus, HostProfile, Notification};
+use tf_proto::{ApiError, AppEvent, BrowserConfig, BrowserFallback, BrowserState, BrowserStatus, HostProfile, Notification};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+use super::{Fallback, automatic, fallback};
 use crate::engine::{Engine, EngineConfig};
 
 struct NullPlatform;
@@ -276,4 +278,139 @@ async fn one_core_per_profile() {
     a.shutdown().await;
     b.shutdown().await;
     assert!(processes_of(&dir.path().join("browser/profile")).is_empty());
+}
+
+/// TeleFlock's own browser takes over a blocked engine when it is downloaded, is offered when it
+/// is not, and nothing is left when it is blocked too; Automatic passes over blocked engines.
+#[test]
+fn fallback_decision() {
+    let own = Path::new("/d/browser/engine/156.0.8078.80/chrome-linux64/chrome");
+    let own_path = own.to_string_lossy().into_owned();
+    let chrome = "/opt/google/chrome/chrome";
+    let marked = vec![chrome.to_string()];
+    assert_eq!(fallback(chrome, Some((own, true)), &marked), Fallback::Switch(own.to_path_buf()));
+    assert_eq!(fallback(chrome, Some((own, false)), &marked), Fallback::Offer);
+    let both = vec![chrome.to_string(), own_path.clone()];
+    assert_eq!(fallback(chrome, Some((own, true)), &both), Fallback::Nothing, "its own browser is blocked too");
+    assert_eq!(fallback(chrome, Some((own, false)), &both), Fallback::Nothing, "no download of a browser blocked here");
+    assert_eq!(fallback(&own_path, Some((own, true)), &[own_path.clone()]), Fallback::Nothing, "its own browser is the one that refused");
+    assert_eq!(fallback(chrome, None, &marked), Fallback::Nothing, "no build for this computer");
+    let found = ["/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge"];
+    let path = |p: &&str| p.to_string();
+    assert_eq!(automatic(&found, path, &[]), Some(&found[0]));
+    assert_eq!(automatic(&found, path, &marked), Some(&found[1]), "Automatic passes over a blocked engine");
+    assert_eq!(automatic(&found, path, &[found[0].into(), found[1].into()]), Some(&found[0]), "every one blocked: policies change");
+}
+
+/// A program at `path` running `body` (sh). It answers `--version` as `product`, and counts its
+/// runs in `<path>.runs` and keeps its last pid in `<path>.pid`.
+#[cfg(unix)]
+fn fake_browser(path: &Path, product: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let script = format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo '{product}'; exit 0; }}\necho run >> \"$0.runs\"\necho $$ > \"$0.pid\"\n{body}\n");
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// What Chrome and Edge do when the organization's policy disallows remote debugging: say so, and
+/// run on without a DevTools port.
+#[cfg(unix)]
+const REFUSES: &str = "printf '\\nDevTools remote debugging is disallowed by the system admin.\\n' >&2\nexec sleep 30";
+
+/// A browser that starts: its `DevToolsActivePort` names a port nothing listens on.
+#[cfg(unix)]
+fn opens_port() -> String {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    format!("for a in \"$@\"; do case \"$a\" in --user-data-dir=*) dir=\"${{a#--user-data-dir=}}\";; esac; done\nprintf '{port}\\n/devtools/browser/fake\\n' > \"$dir/DevToolsActivePort\"\nexec sleep 60")
+}
+
+#[cfg(unix)]
+fn runs(path: &Path) -> usize {
+    std::fs::read_to_string(format!("{}.runs", path.display())).map(|s| s.lines().count()).unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn still_running(path: &Path) -> bool {
+    let pid: i32 = std::fs::read_to_string(format!("{}.pid", path.display())).unwrap().trim().parse().unwrap();
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The user's engine is blocked by the organization's policy. Before TeleFlock's own browser is
+/// downloaded, a start fails at once and offers it; "Use TeleFlock's browser" with it downloaded
+/// chooses it and starts it. A start of the blocked engine (chosen again: policies change) runs
+/// TeleFlock's own browser instead, chooses it and says why once; later starts go straight to it.
+/// Its own browser blocked too: nothing is left. The marks are kept on disk.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_blocked_engine_falls_back_to_own_browser() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(own) = super::install::program(&dir.path().join("browser/engine")) else {
+        eprintln!("browser::tests: no Chrome for Testing build for this computer; skipped");
+        return;
+    };
+    let own_path = own.to_string_lossy().into_owned();
+    let chrome = dir.path().join("bin/google-chrome");
+    let chrome_path = chrome.to_string_lossy().into_owned();
+    fake_browser(&chrome, "Google Chrome 156.0.7531.42", REFUSES);
+    let (e, _rx) = engine(dir.path()).await;
+    let choose = |path: &str| call(&e, "browser.configSet", json!({ "enginePath": path }));
+    choose(&chrome_path).await.unwrap();
+    let saved_blocks = || -> Value { serde_json::from_slice::<Value>(&std::fs::read(dir.path().join("browser/config.json")).unwrap()).unwrap()["blocked"].clone() };
+
+    // Not downloaded: the start fails at once (no 30 s wait), offering TeleFlock's own browser.
+    let t = tokio::time::Instant::now();
+    let err = call(&e, "browser.start", json!({})).await.unwrap_err();
+    assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
+    assert_eq!(err.code, "browser_blocked", "{err:?}");
+    assert!(!still_running(&chrome), "the blocked browser was stopped");
+    let s = status(&e).await;
+    assert_eq!(s.state, BrowserState::Error);
+    let b = s.blocked.expect("the block is in the status");
+    assert_eq!((b.fallback, b.engine.path.as_str(), b.engine.blocked), (BrowserFallback::Offer, chrome_path.as_str(), true));
+    assert!(b.download.is_some_and(|d| !d.installed && d.size.is_some()), "the offer says what it downloads");
+    assert_eq!(saved_blocks(), json!([chrome_path]));
+
+    // "Use TeleFlock's browser" (here already downloaded): chosen, started.
+    fake_browser(&own, "Google Chrome for Testing 156.0.8078.80", &opens_port());
+    call(&e, "browser.installEngine", json!({ "start": true })).await.unwrap();
+    let s = until(&e, "TeleFlock's own browser runs", |s| s.state == BrowserState::Running).await;
+    assert!(s.engine.as_ref().is_some_and(|x| x.path == own_path && x.builtin), "{s:?}");
+    let config: BrowserConfig = serde_json::from_value(call(&e, "browser.config", json!({})).await.unwrap()).unwrap();
+    assert_eq!(config.engine_path.as_deref(), Some(own_path.as_str()));
+    assert!(config.engines.iter().any(|x| x.path == own_path && x.builtin && !x.blocked), "{config:?}");
+    call(&e, "browser.stop", json!({})).await.unwrap();
+
+    // The user chooses the blocked engine again; the mark stays until it starts fine. A start runs
+    // TeleFlock's own browser instead, chosen from now on, and says why.
+    choose(&chrome_path).await.unwrap();
+    assert_eq!(saved_blocks(), json!([chrome_path]), "choosing an engine keeps the marks");
+    let s: BrowserStatus = serde_json::from_value(call(&e, "browser.start", json!({})).await.unwrap()).unwrap();
+    assert_eq!(s.state, BrowserState::Running);
+    assert_eq!(s.engine.as_ref().map(|x| x.path.as_str()), Some(own_path.as_str()));
+    assert_eq!(s.blocked.as_ref().map(|b| (b.fallback, b.engine.path.as_str())), Some((BrowserFallback::Switched, chrome_path.as_str())));
+    assert!(s.message.is_some(), "it says why");
+    let config: BrowserConfig = serde_json::from_value(call(&e, "browser.config", json!({})).await.unwrap()).unwrap();
+    assert_eq!(config.engine_path.as_deref(), Some(own_path.as_str()));
+    assert_eq!(runs(&chrome), 2);
+
+    // Later starts go straight to it, without a word.
+    call(&e, "browser.stop", json!({})).await.unwrap();
+    let s: BrowserStatus = serde_json::from_value(call(&e, "browser.start", json!({})).await.unwrap()).unwrap();
+    assert_eq!((s.state, s.blocked.is_none(), s.message.is_none()), (BrowserState::Running, true, true), "{s:?}");
+    assert_eq!(runs(&chrome), 2, "the blocked engine is not tried again");
+    call(&e, "browser.stop", json!({})).await.unwrap();
+    assert!(!still_running(&own), "stopped");
+
+    // TeleFlock's own browser is blocked too: nothing is left, and a start says so.
+    fake_browser(&own, "Google Chrome for Testing 156.0.8078.80", REFUSES);
+    choose(&chrome_path).await.unwrap();
+    let err = call(&e, "browser.start", json!({})).await.unwrap_err();
+    assert_eq!(err.code, "browser_failed", "{err:?}");
+    let s = status(&e).await;
+    assert_eq!((s.state, s.blocked.map(|b| b.fallback)), (BrowserState::Error, Some(BrowserFallback::Unavailable)));
+    assert_eq!(saved_blocks(), json!([chrome_path, own_path]));
+    assert!(!still_running(&own) && !still_running(&chrome));
+    e.shutdown().await;
 }

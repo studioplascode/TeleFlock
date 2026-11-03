@@ -1,10 +1,12 @@
-//! Chrome for Testing, downloaded with the user's consent (`browser.installEngine`) for a device
-//! without a Chromium-family browser: the build this app pins (version, SHA-256 and size per
-//! platform) from Google's Chrome for Testing bucket, checked, then unpacked to
-//! `<data_dir>/browser/engine/<version>/chrome-<platform>/`.
+//! Chrome for Testing, TeleFlock's own browser, downloaded with the user's consent
+//! (`browser.installEngine`; `browser.cancelInstall` stops it) for a device without a
+//! Chromium-family browser or whose organization blocks remote control of the one it has: the build
+//! this app pins (version, SHA-256 and size per platform) from Google's Chrome for Testing bucket,
+//! checked, then unpacked to `<data_dir>/browser/engine/<version>/chrome-<platform>/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -37,6 +39,11 @@ pub(super) fn available() -> bool {
     pin().is_some()
 }
 
+/// The download's size in bytes.
+pub(super) fn size() -> Option<u64> {
+    pin().map(|p| p.size)
+}
+
 /// The program inside an unpacked build, relative to the version directory.
 fn exe(platform: &str) -> PathBuf {
     let dir = PathBuf::from(format!("chrome-{platform}"));
@@ -47,10 +54,14 @@ fn exe(platform: &str) -> PathBuf {
     }
 }
 
+/// Where the pinned build's program is once it is unpacked under `engine_dir`.
+pub(super) fn program(engine_dir: &Path) -> Option<PathBuf> {
+    Some(engine_dir.join(VERSION).join(exe(pin()?.platform)))
+}
+
 /// The pinned build, when it is unpacked under `engine_dir`.
 pub(super) fn installed(engine_dir: &Path) -> Option<PathBuf> {
-    let exe = engine_dir.join(VERSION).join(exe(pin()?.platform));
-    exe.is_file().then_some(exe)
+    program(engine_dir).filter(|p| p.is_file())
 }
 
 /// rustls on ring with the webpki roots, like the app's updater.
@@ -85,9 +96,18 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Resolves once `cancel` is set (checked every 100 ms).
+async fn canceled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Downloads, checks and unpacks the pinned build; `progress` gets 0–100 (the download is 0–95,
-/// unpacking the rest). Returns the program's path. Earlier versions and leftovers go.
-pub(super) async fn install(engine_dir: &Path, mut progress: impl FnMut(u8)) -> Result<PathBuf, String> {
+/// unpacking the rest). Returns the program's path. Earlier versions and leftovers go. Setting
+/// `cancel` stops it (a stalled download too), and nothing of it is kept.
+pub(super) async fn install(engine_dir: &Path, cancel: &AtomicBool, mut progress: impl FnMut(u8)) -> Result<PathBuf, String> {
+    const CANCELED: &str = "the download was canceled";
     let pin = pin().ok_or("Chrome for Testing has no build for this device")?;
     if let Some(exe) = installed(engine_dir) {
         return Ok(exe);
@@ -97,7 +117,10 @@ pub(super) async fn install(engine_dir: &Path, mut progress: impl FnMut(u8)) -> 
     let zip = engine_dir.join(format!("chrome-{}-{VERSION}.zip", pin.platform));
     let part = zip.with_extension("part");
     let client = client()?;
-    let mut res = client.get(&url).send().await.map_err(describe)?;
+    let mut res = tokio::select! {
+        r = client.get(&url).send() => r.map_err(describe)?,
+        () = canceled(cancel) => return Err(CANCELED.into()),
+    };
     if !res.status().is_success() {
         return Err(format!("the download failed: {}", res.status()));
     }
@@ -105,7 +128,12 @@ pub(super) async fn install(engine_dir: &Path, mut progress: impl FnMut(u8)) -> 
     let (mut hasher, mut done, mut shown) = (Sha256::new(), 0u64, 0u8);
     progress(0);
     let written: Result<(), String> = async {
-        while let Some(chunk) = res.chunk().await.map_err(describe)? {
+        loop {
+            let chunk = tokio::select! {
+                c = res.chunk() => c.map_err(describe)?,
+                () = canceled(cancel) => return Err(CANCELED.into()),
+            };
+            let Some(chunk) = chunk else { break };
             done += chunk.len() as u64;
             if done > pin.size {
                 return Err("the download is larger than the pinned build".into());
@@ -132,6 +160,10 @@ pub(super) async fn install(engine_dir: &Path, mut progress: impl FnMut(u8)) -> 
         let _ = tokio::fs::remove_file(&part).await;
         return Err(e);
     }
+    if cancel.load(Ordering::Acquire) {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(CANCELED.into());
+    }
     tokio::fs::rename(&part, &zip).await.map_err(|e| format!("can't store the download: {e}"))?;
     let unpack = engine_dir.join(format!(".unpack-{VERSION}"));
     let (z, u) = (zip.clone(), unpack.clone());
@@ -147,6 +179,10 @@ pub(super) async fn install(engine_dir: &Path, mut progress: impl FnMut(u8)) -> 
     if let Err(e) = unpacked {
         let _ = tokio::fs::remove_dir_all(&unpack).await;
         return Err(e);
+    }
+    if cancel.load(Ordering::Acquire) {
+        let _ = tokio::fs::remove_dir_all(&unpack).await;
+        return Err(CANCELED.into());
     }
     let dest = engine_dir.join(VERSION);
     let _ = tokio::fs::remove_dir_all(&dest).await;

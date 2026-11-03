@@ -128,12 +128,12 @@ export class DemoBrowserAgents {
     return this.host.supported();
   }
 
-  /** `?demo` (the demo backend): quota and ci drive `device`'s browser, expenses asks for it. Returns the attachments made. */
-  seed(device: string): { agentId: string; port: number; since: number }[] {
+  /** `?demo` (the demo backend): quota and ci drive `device`'s browser (unless not `attach`: it couldn't start), expenses asks for it. Returns the attachments made. */
+  seed(device: string, attach = true): { agentId: string; port: number; since: number }[] {
     if (!this.host.supported()) return [];
     const now = this.host.now();
     const out: { agentId: string; port: number; since: number }[] = [];
-    for (const [agentId, ago] of [["quota", 1_260_000], ["ci", 610_000]] as const) {
+    for (const [agentId, ago] of attach ? ([["quota", 1_260_000], ["ci", 610_000]] as const) : []) {
       const sim = this.host.sims.get(agentId);
       if (!sim) continue;
       const port = this.nextPort++;

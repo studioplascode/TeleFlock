@@ -1,10 +1,11 @@
-import { Globe } from "lucide-react";
+import { Globe, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { core, useBrowser } from "@/core";
 import type { BrowserClearWhat, BrowserConfig, BrowserStatus } from "@/core/gen";
+import { formatBytes } from "@/core/upload";
 import { Button, cn, isAndroid, Select, Spinner, Switch } from "@/design";
 import { CommitInput, Row, Section } from "@/features/settings/parts";
-import { browserCall, clearBrowsingDataConfirmed, installEngine, revealProfile, startBrowser, stopBrowser } from "./actions";
+import { browserCall, cancelInstall, chooseOwnBrowser, clearBrowsingDataConfirmed, installEngine, ownBrowserLabel, revealProfile, startBrowser, stopBrowser } from "./actions";
 
 type ConfigPatch = Partial<Pick<BrowserConfig, "enginePath" | "headed" | "cap">>;
 
@@ -15,7 +16,8 @@ const CAPS = Array.from({ length: 16 }, (_, i) => ({ value: String(i + 1), label
 /**
  * The saved browser config. `configSet` replaces it (absent fields reset), so `save` always sends
  * all three fields with the one change merged in. Not pushed by events: refetched on mount, when a
- * download ends and when the running engine changes.
+ * download ends, when the running engine changes and when a start finds an engine blocked (the
+ * engines' marks, a switch to TeleFlock's own browser).
  */
 function useBrowserConfig(status: BrowserStatus) {
   const [config, setConfig] = useState<BrowserConfig | null>(null);
@@ -23,6 +25,7 @@ function useBrowserConfig(status: BrowserStatus) {
   const seq = useRef(0);
   const installing = !!status.install && !status.install.error;
   const enginePath = status.engine?.path;
+  const blockedAt = status.blocked?.at;
 
   const apply = useCallback((c: BrowserConfig) => {
     latest.current = c;
@@ -39,10 +42,10 @@ function useBrowserConfig(status: BrowserStatus) {
     }
   }, [apply]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `installing` / `enginePath` are the refetch triggers.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `installing` / `enginePath` / `blockedAt` are the refetch triggers.
   useEffect(() => {
     void refresh();
-  }, [refresh, installing, enginePath]);
+  }, [refresh, installing, enginePath, blockedAt]);
 
   const save = useCallback(
     async (patch: ConfigPatch): Promise<boolean> => {
@@ -116,7 +119,10 @@ function StateRow({ status, headedByDefault }: { status: BrowserStatus; headedBy
       setBusy(false);
     }
   };
-  const { state, engine } = status;
+  const { state, engine, blocked } = status;
+  // The organization's policy blocked the engine at the last start: what is left (the core's message).
+  const block = blocked && (state === "error" || (state === "running" && blocked.fallback === "switched")) ? blocked : undefined;
+  const installing = !!status.install && !status.install.error;
   const label =
     state === "off"
       ? "Off"
@@ -126,8 +132,18 @@ function StateRow({ status, headedByDefault }: { status: BrowserStatus; headedBy
           ? status.headed
             ? "Running in its own window"
             : "Running"
-          : `Stopped${status.message ? `: ${status.message}` : ""}`;
-  const description = engine ? `${engine.name}${engine.version ? ` ${engine.version}` : ""}` : "No browser engine found yet. Pick or download one below.";
+          : block
+            ? "Blocked by your organization"
+            : `Stopped${status.message ? `: ${status.message}` : ""}`;
+  const engineText = engine ? `${engine.builtin ? "TeleFlock's browser, Chrome for Testing" : engine.name}${engine.version ? ` ${engine.version}` : ""}` : "No browser engine found yet. Pick or download one below.";
+  const description = block ? (
+    <>
+      {state === "running" && <span className="block">{engineText}</span>}
+      <span className="block">{status.message}</span>
+    </>
+  ) : (
+    engineText
+  );
   return (
     <Row label={label} description={description}>
       {state === "starting" && <Spinner size={16} label="Starting" />}
@@ -148,7 +164,12 @@ function StateRow({ status, headedByDefault }: { status: BrowserStatus; headedBy
           Stop
         </Button>
       )}
-      {state === "error" && (
+      {state === "error" && block?.fallback === "offer" && !installing && (
+        <Button variant="primary" size="sm" loading={busy} onClick={() => void run(chooseOwnBrowser)}>
+          {ownBrowserLabel(block.download)}
+        </Button>
+      )}
+      {state === "error" && block?.fallback !== "offer" && (
         <Button variant="primary" size="sm" loading={busy} onClick={() => void run(() => startBrowser())}>
           Start it again
         </Button>
@@ -164,12 +185,23 @@ function EngineRow({ status, config, save }: { status: BrowserStatus; config: Br
   const [restarting, setRestarting] = useState(false);
   const custom = enginePath != null && !known;
   const picked = other || custom ? OTHER : enginePath == null ? AUTO : enginePath;
-  const effective = enginePath ?? engines[0]?.path;
-  const first = engines[0];
+  // As the core's Automatic picks: the first one found that the organization's policy didn't block.
+  const first = engines.find((e) => !e.blocked) ?? engines[0];
+  const effective = enginePath ?? first?.path;
+  const effectiveBlocked = engines.some((e) => e.path === effective && e.blocked) || (status.engine?.path === effective && status.engine?.blocked === true);
+  const someBlocked = engines.some((e) => e.blocked);
 
   const options = [
-    { value: AUTO, label: first ? `Automatic (${first.name})` : "Automatic", hint: first ? "The first one found" : "No engine found" },
-    ...engines.map((e) => ({ value: e.path, label: e.name, hint: e.version ?? e.path })),
+    {
+      value: AUTO,
+      label: first ? `Automatic (${first.builtin ? "TeleFlock's browser" : first.name})` : "Automatic",
+      hint: first ? (someBlocked ? "The first one found that isn't blocked" : "The first one found") : "No engine found",
+    },
+    ...engines.map((e) => ({
+      value: e.path,
+      label: e.builtin ? "TeleFlock's browser" : e.name,
+      hint: e.blocked ? "Blocked by your organization" : e.builtin ? `Chrome for Testing${e.version ? ` ${e.version}` : ""}` : (e.version ?? e.path),
+    })),
     { value: OTHER, label: "Other program…", hint: "Any Chromium-based browser" },
   ];
 
@@ -207,12 +239,13 @@ function EngineRow({ status, config, save }: { status: BrowserStatus; config: Br
         description={
           <>
             <span className="block">{differs ? "Applies when the browser restarts." : "Applies the next time the browser starts."}</span>
+            {effectiveBlocked && <span className="block">Your organization blocked remote control of it when it last started; starting it tries again.</span>}
             {effective ? (
               <span className="block truncate font-mono text-2xs text-mute-2" title={effective}>
                 {effective}
               </span>
             ) : (
-              <span className="block">No Chromium-based browser found on this computer. Download Chrome for Testing below or pick another program.</span>
+              <span className="block">No Chromium-based browser found on this computer. Download TeleFlock's browser below or pick another program.</span>
             )}
           </>
         }
@@ -246,12 +279,12 @@ function DownloadRow({ status, config }: { status: BrowserStatus; config: Browse
     }
   };
 
-  if (!download.available) return <Row label="Chrome for Testing" description="There is no Chrome for Testing build for this computer. Pick an installed browser above." children={null} />;
+  if (!download.available) return <Row label="TeleFlock's browser" description="There is no Chrome for Testing build for this computer. Pick an installed browser above." children={null} />;
   if (install && !install.error) {
     const pct = install.progress == null ? null : Math.max(0, Math.min(100, Math.round(install.progress)));
     return (
       <Row
-        label={`Downloading Chrome for Testing ${install.version}`}
+        label="Downloading TeleFlock's browser"
         description={
           <span className="mt-1.5 flex items-center gap-2">
             <span role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined} className="h-1.5 flex-1 overflow-hidden rounded-full bg-tile-4">
@@ -262,23 +295,29 @@ function DownloadRow({ status, config }: { status: BrowserStatus; config: Browse
         }
       >
         <Spinner size={16} label="Downloading" />
+        <Button size="sm" variant="ghost" icon={<X />} onClick={() => void cancelInstall()}>
+          Cancel
+        </Button>
       </Row>
     );
   }
   if (install?.error) {
     return (
-      <Row label={`Couldn't download Chrome for Testing ${install.version}`} description={install.error}>
+      <Row label="Couldn't download TeleFlock's browser" description={install.error}>
         <Button size="sm" loading={starting} onClick={() => void download_()}>
           Retry
         </Button>
       </Row>
     );
   }
-  if (download.installed) return <Row label={`Chrome for Testing ${download.version} is downloaded`} description="It is in the engine list above." children={null} />;
+  if (download.installed) return <Row label="TeleFlock's browser is downloaded" description={`Chrome for Testing ${download.version}, in the engine list above.`} children={null} />;
   return (
-    <Row label="Chrome for Testing" description={`A browser made for automation, kept by TeleFlock. About 200 MB, version ${download.version}. It appears in the engine list once downloaded.`}>
+    <Row
+      label="TeleFlock's browser"
+      description={`Chrome for Testing ${download.version}, a browser made for automation that TeleFlock keeps: for when your organization blocks remote control of your browser, or you have none. ${download.size != null ? formatBytes(download.size) : "About 200 MB"}; it appears in the engine list once downloaded.`}
+    >
       <Button size="sm" loading={starting} onClick={() => void download_()}>
-        Download Chrome for Testing
+        Download
       </Button>
     </Row>
   );

@@ -306,7 +306,8 @@ async fn two_agents_share_one_browser_without_seeing_each_other() {
     let sa = ca.session_of(&pa).await;
     let sb = cb.session_of(&pb).await;
     for _ in 0..100 {
-        if ca.eval(&sa, "document.title").await == json!("A") {
+        // Both pages, each loading at its own pace.
+        if ca.eval(&sa, "document.title").await == json!("A") && cb.eval(&sb, "document.title").await == json!("B") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

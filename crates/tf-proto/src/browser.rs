@@ -24,7 +24,8 @@ wire_enum! {
     /// * `off`: not running (start it with `browser.start`, or attach an agent).
     /// * `starting`: launching, or restarting after a crash.
     /// * `running`: DevTools answer at [`BrowserStatus::cdp_port`].
-    /// * `error`: it failed to start or kept crashing ([`BrowserStatus::message`]).
+    /// * `error`: it failed to start or kept crashing ([`BrowserStatus::message`]), or the
+    ///   organization's policy blocks it ([`BrowserStatus::blocked`]).
     /// * `unavailable`: no engine on this device (`browser.installEngine` downloads Chrome for
     ///   Testing on consent), or a device without the browser (Android).
     pub enum BrowserState { Off, Starting, Running, Error, Unavailable }
@@ -39,6 +40,41 @@ wire_struct! {
         pub path: String,
         /// `x.y.z.w`, when known.
         pub version: Option<String>,
+        /// TeleFlock's own browser: the Chrome for Testing it downloaded (`browser.installEngine`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub builtin: bool,
+        /// The organization's policy blocked remote control of it the last time it was started here
+        /// ([`BrowserBlocked`]): Automatic passes it over; choosing it tries it again.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub blocked: bool,
+    }
+}
+
+wire_enum! {
+    /// What TeleFlock does about an engine the organization's policy blocks ([`BrowserBlocked`]):
+    /// * `switched`: it runs its own browser (Chrome for Testing) instead, the chosen engine from
+    ///   now on.
+    /// * `offer`: its own browser is not downloaded yet; `browser.installEngine {start: true}`
+    ///   downloads it, chooses it and starts it.
+    /// * `unavailable`: nothing is left: its own browser is blocked too, or has no build for this
+    ///   computer.
+    pub enum BrowserFallback { Switched, Offer, Unavailable }
+}
+
+wire_struct! {
+    /// A start found the engine blocked for remote control by the organization's policy
+    /// (`RemoteDebuggingAllowed` false; for Chrome for Testing also `ChromeForTestingAllowed` false):
+    /// the browser said so on stderr (or exited with Chrome's "disallowed by policy" code) and was
+    /// stopped at once. Kept until the next start or stop.
+    pub struct BrowserBlocked {
+        /// The engine that refused.
+        pub engine: BrowserEngine,
+        pub fallback: BrowserFallback,
+        /// `offer`: TeleFlock's own browser, as it would be downloaded.
+        pub download: Option<BrowserDownload>,
+        pub at: Millis,
     }
 }
 
@@ -106,7 +142,7 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// A Chrome for Testing download (`browser.installEngine`).
+    /// A Chrome for Testing download (`browser.installEngine`; `browser.cancelInstall` stops it).
     pub struct BrowserInstall {
         pub version: String,
         /// 0–100 while downloading and unpacking; absent before the size is known.
@@ -135,8 +171,12 @@ wire_struct! {
         /// Where downloads go (`Browser.setDownloadBehavior` `allow` with this path);
         /// `browser.revealDownload` opens paths under it.
         pub download_dir: Option<String>,
-        /// Why it is `error` or `unavailable`, or what it is doing.
+        /// Why it is `error` or `unavailable`, or what it is doing; `running` after a
+        /// [`BrowserFallback::Switched`]: why it runs TeleFlock's own browser.
         pub message: Option<String>,
+        /// The last start found an engine blocked by the organization's policy, and what TeleFlock
+        /// did about it.
+        pub blocked: Option<BrowserBlocked>,
         /// A Chrome for Testing download in progress or failed.
         pub install: Option<BrowserInstall>,
         /// How many agents may be attached at once ([`BrowserConfig::cap`]).
@@ -153,6 +193,17 @@ wire_struct! {
         /// In its own window (sites that refuse embedded or automated browsers: some sign-ins,
         /// passkeys); absent: [`BrowserConfig::headed`].
         pub headed: Option<bool>,
+    }
+}
+
+wire_struct! {
+    /// `browser.installEngine`: downloads TeleFlock's own browser (Chrome for Testing).
+    pub struct BrowserInstallParams {
+        /// Once it is downloaded, choose it as the engine and start the browser with it ("Use
+        /// TeleFlock's browser").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        pub start: bool,
     }
 }
 
@@ -197,20 +248,23 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// Chrome for Testing as this app pins it (`browser.installEngine`).
+    /// Chrome for Testing as this app pins it: TeleFlock's own browser (`browser.installEngine`).
     pub struct BrowserDownload {
         pub version: String,
         /// A build exists for this device's OS and CPU.
         pub available: bool,
         /// Already downloaded into the app's data dir.
         pub installed: bool,
+        /// The download's size in bytes (`available`).
+        pub size: Option<u64>,
     }
 }
 
 wire_struct! {
     /// `browser.config` / `browser.configSet` result.
     pub struct BrowserConfig {
-        /// The engine the user chose; absent: the first one found.
+        /// The engine the user chose; absent: the first one found that the organization's policy
+        /// does not block.
         pub engine_path: Option<String>,
         /// Start in its own window when the app starts it (an attach, an allowed request,
         /// `browser.start` without `headed`).
@@ -341,13 +395,14 @@ mod tests {
     fn wire_shapes() {
         let s = BrowserStatus {
             state: BrowserState::Running,
-            engine: Some(BrowserEngine { name: "Chromium".into(), path: "/usr/bin/chromium".into(), version: None }),
+            engine: Some(BrowserEngine { name: "Chromium".into(), path: "/usr/bin/chromium".into(), version: None, builtin: false, blocked: false }),
             headed: false,
             cdp_port: Some(40123),
             ws_url: Some("ws://127.0.0.1:40123/devtools/browser/x".into()),
             profile_dir: "/d/browser/profile".into(),
             download_dir: None,
             message: None,
+            blocked: None,
             install: None,
             cap: 4,
             attachments: vec![BrowserAttachment {
@@ -369,6 +424,15 @@ mod tests {
         assert_eq!(v["attachments"][0]["scope"], "turn");
         assert_eq!(v["attachments"][0]["hostPort"], 9300);
         assert!(v.get("downloadDir").is_none(), "None fields are left out");
+        assert_eq!(v["engine"], serde_json::json!({ "name": "Chromium", "path": "/usr/bin/chromium" }), "false flags are left out");
+        let chrome = BrowserEngine { name: "Google Chrome".into(), path: "/opt/google/chrome/chrome".into(), version: None, builtin: false, blocked: true };
+        let download = BrowserDownload { version: "156.0.8078.80".into(), available: true, installed: false, size: Some(201_329_937) };
+        let blocked = BrowserBlocked { engine: chrome, fallback: BrowserFallback::Offer, download: Some(download), at: 7 };
+        let v = serde_json::to_value(&blocked).unwrap();
+        assert_eq!((v["fallback"].as_str(), v["engine"]["blocked"].as_bool(), v["download"]["size"].as_u64()), (Some("offer"), Some(true), Some(201_329_937)));
+        let i: BrowserInstallParams = serde_json::from_str("{}").unwrap();
+        assert!(!i.start, "a plain download");
+        assert!(serde_json::from_str::<BrowserInstallParams>(r#"{"start":true}"#).unwrap().start);
         let p: BrowserAttachParams = serde_json::from_str(r#"{"agentId":"a"}"#).unwrap();
         assert_eq!(p, BrowserAttachParams { agent_id: "a".into(), port: None, scope: None });
         let c: BrowserConfigSetParams = serde_json::from_str(r#"{"enginePath":null}"#).unwrap();

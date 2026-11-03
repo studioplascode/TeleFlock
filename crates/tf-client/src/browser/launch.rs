@@ -1,10 +1,11 @@
 //! Running the browser: its command line ([`args`]), its DevTools port (`DevToolsActivePort`,
-//! [`parse_active_port`]), its process ([`spawn`], [`stop`]), freeing the profile from a browser
-//! an earlier app run left behind ([`free_profile`]), and the restart schedule after crashes
-//! ([`Restarts`]).
+//! [`parse_active_port`]), its process ([`spawn`], [`stop`]), the organization's policy refusing
+//! it remote control ([`policy_refusal`]), freeing the profile from a browser an earlier app run
+//! left behind ([`free_profile`]), and the restart schedule after crashes ([`Restarts`]).
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,31 @@ const CLOSE_GRACE: Duration = Duration::from_secs(5);
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Lines of the browser's stderr kept for error messages.
 const TAIL_LINES: usize = 30;
+/// Chrome's exit code when the organization's policy disallows what it was started for
+/// (`CHROME_RESULT_CODE_ACTION_DISALLOWED_BY_POLICY`): Chrome for Testing with
+/// `ChromeForTestingAllowed` false ends with it at once.
+const EXIT_DISALLOWED_BY_POLICY: i32 = 30;
+
+/// Why [`spawn`] failed.
+#[derive(Debug, PartialEq)]
+pub(super) enum SpawnError {
+    /// The organization's policy refuses this browser remote control ([`policy_refusal`]): it was
+    /// stopped at once instead of waited for until [`START_TIMEOUT`].
+    Blocked,
+    /// Anything else: what happened, for the message.
+    Failed(String),
+}
+
+/// A line of the browser's stderr saying the organization's policy refuses it remote control.
+/// `DevTools remote debugging is disallowed by the system admin.` (`RemoteDebuggingAllowed` false;
+/// Chrome, Edge, Brave and Chromium print the same line, without a log prefix, and then run on
+/// without a DevTools port), or Chrome for Testing's log line `… Chrome for Testing is disallowed
+/// by the system admin.` (`ChromeForTestingAllowed` false; it then ends). Any case, anywhere in
+/// the line.
+pub(super) fn policy_refusal(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("remote debugging is disallowed") || l.contains("chrome for testing is disallowed")
+}
 
 /// The browser's command line.
 pub(super) struct Flags<'a> {
@@ -129,11 +155,13 @@ pub(super) fn describe_exit(st: &std::process::ExitStatus) -> String {
     }
 }
 
-/// Starts the browser and waits until it opened its DevTools port.
-pub(super) async fn spawn(exe: &Path, args: &[String], profile: &Path, headed: bool) -> Result<Proc, String> {
+/// Starts the browser and waits until it opened its DevTools port; stops it at once when it says
+/// the organization's policy refuses it remote control ([`SpawnError::Blocked`]).
+pub(super) async fn spawn(exe: &Path, args: &[String], profile: &Path, headed: bool) -> Result<Proc, SpawnError> {
+    let failed = SpawnError::Failed;
     let port_file = profile.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
-    std::fs::create_dir_all(profile).map_err(|e| format!("can't create the profile {}: {e}", profile.display()))?;
+    std::fs::create_dir_all(profile).map_err(|e| failed(format!("can't create the profile {}: {e}", profile.display())))?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     // Its own process group: stopping it reaches every process it started, and a terminal's
@@ -150,15 +178,24 @@ pub(super) async fn spawn(exe: &Path, args: &[String], profile: &Path, headed: b
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| format!("can't run {}: {e}", exe.display()))?;
+    let mut child = cmd.spawn().map_err(|e| failed(format!("can't run {}: {e}", exe.display())))?;
     let pid = child.id().unwrap_or_default();
     let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_LINES)));
+    let refused = Arc::new(AtomicBool::new(false));
     if let Some(err) = child.stderr.take() {
-        let tail = tail.clone();
+        let (tail, refused) = (tail.clone(), refused.clone());
         tokio::spawn(async move {
-            let mut lines = BufReader::new(err).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            // Bytes, not UTF-8 lines: a line in the system's code page must not end the reading
+            // (an unread pipe stalls the browser once it is full).
+            let mut err = BufReader::new(err);
+            let mut buf = Vec::new();
+            while err.read_until(b'\n', &mut buf).await.is_ok_and(|n| n > 0) {
+                let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
+                buf.clear();
                 log::debug!("browser {pid}: {line}");
+                if policy_refusal(&line) {
+                    refused.store(true, Ordering::Release);
+                }
                 let mut t = tail.lock().unwrap();
                 if t.len() == TAIL_LINES {
                     t.pop_front();
@@ -173,10 +210,21 @@ pub(super) async fn spawn(exe: &Path, args: &[String], profile: &Path, headed: b
             // Give the stderr reader a moment to take the last lines.
             tokio::time::sleep(Duration::from_millis(100)).await;
             let said = tail_text(&tail);
-            if said.contains("Opening in existing browser session") {
-                return Err("another browser process uses the TeleFlock profile".into());
+            if refused.load(Ordering::Acquire) || st.code() == Some(EXIT_DISALLOWED_BY_POLICY) {
+                log::warn!("browser {pid}: the organization's policy refuses it ({}){}", describe_exit(&st), if said.is_empty() { String::new() } else { format!(": {said}") });
+                return Err(SpawnError::Blocked);
             }
-            return Err(format!("it ended at once ({}){}", describe_exit(&st), if said.is_empty() { String::new() } else { format!(": {said}") }));
+            if said.contains("Opening in existing browser session") {
+                return Err(failed("another browser process uses the TeleFlock profile".into()));
+            }
+            return Err(failed(format!("it ended at once ({}){}", describe_exit(&st), if said.is_empty() { String::new() } else { format!(": {said}") })));
+        }
+        if refused.load(Ordering::Acquire) {
+            // It runs on without a DevTools port: nothing to wait for.
+            log::warn!("browser {pid}: the organization's policy disallows remote debugging; stopping it");
+            let mut p = Proc { child, pid, port: 0, ws_url: String::new(), headed, started: Instant::now(), tail };
+            kill(&mut p).await;
+            return Err(SpawnError::Blocked);
         }
         if let Some((port, path)) = std::fs::read_to_string(&port_file).ok().as_deref().and_then(parse_active_port) {
             log::info!("browser {pid}: DevTools on 127.0.0.1:{port} ({})", if headed { "own window" } else { "headless" });
@@ -186,7 +234,7 @@ pub(super) async fn spawn(exe: &Path, args: &[String], profile: &Path, headed: b
             let mut p = Proc { child, pid, port: 0, ws_url: String::new(), headed, started: Instant::now(), tail };
             let said = p.tail();
             kill(&mut p).await;
-            return Err(format!("it did not open its DevTools port within {} s{}", START_TIMEOUT.as_secs(), if said.is_empty() { String::new() } else { format!(": {said}") }));
+            return Err(failed(format!("it did not open its DevTools port within {} s{}", START_TIMEOUT.as_secs(), if said.is_empty() { String::new() } else { format!(": {said}") })));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -386,6 +434,57 @@ mod tests {
         assert_eq!(parse_active_port("70000\n/devtools/browser/abc\n"), None);
         assert_eq!(parse_active_port("41239\n/devtools/page/abc\n"), None);
         assert_eq!(parse_active_port("41239\n/devtools/browser/\n"), None);
+    }
+
+    #[test]
+    fn policy_lines() {
+        // Chrome and Edge alike (`browser_process_impl.cc` prints it after an empty line).
+        assert!(policy_refusal("DevTools remote debugging is disallowed by the system admin."));
+        assert!(policy_refusal("DEVTOOLS REMOTE DEBUGGING IS DISALLOWED BY THE SYSTEM ADMIN.\r"));
+        // Chrome for Testing with `ChromeForTestingAllowed` false (a log line).
+        assert!(policy_refusal("[4242:4243:1103/101500.123456:ERROR:chrome_browser_main.cc(1849)] Chrome for Testing is disallowed by the system admin."));
+        for other in [
+            "",
+            "DevTools listening on ws://127.0.0.1:41239/devtools/browser/0c1d6c5e",
+            "DevTools remote debugging requires a non-default data directory. Specify this using --user-data-dir.",
+            "Created TensorFlow Lite XNNPACK delegate for CPU.",
+        ] {
+            assert!(!policy_refusal(other), "{other}");
+        }
+    }
+
+    /// A program at `dir/name` that runs `body` (sh), writing its pid to `dir/name.pid` first.
+    #[cfg(unix)]
+    fn fake(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\necho $$ > '{}.pid'\n{body}\n", p.display())).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// The organization's policy line ends the start at once (it used to wait the whole 30 s for a
+    /// port the browser never opens) and the browser is stopped; Chrome for Testing that is not
+    /// allowed at all ends by itself, with the line or only with Chrome's policy exit code.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn policy_refusal_fails_fast() {
+        let td = tempfile::tempdir().unwrap();
+        let profile = td.path().join("profile");
+        let chrome = fake(td.path(), "chrome", "printf '\\nDevTools remote debugging is disallowed by the system admin.\\nCreated TensorFlow Lite XNNPACK delegate for CPU.\\n' >&2\nexec sleep 30");
+        let t = Instant::now();
+        assert_eq!(spawn(&chrome, &[], &profile, false).await.err(), Some(SpawnError::Blocked));
+        assert!(t.elapsed() < Duration::from_secs(3), "took {:?}", t.elapsed());
+        let pid: i32 = std::fs::read_to_string(td.path().join("chrome.pid")).unwrap().trim().parse().unwrap();
+        assert!(!alive(pid), "the refused browser was stopped");
+
+        let cft = fake(td.path(), "cft", "echo '[1:2:1103/101500.1:ERROR:chrome_browser_main.cc(1849)] Chrome for Testing is disallowed by the system admin.' >&2\nexit 30");
+        assert_eq!(spawn(&cft, &[], &profile, false).await.err(), Some(SpawnError::Blocked));
+        let silent = fake(td.path(), "silent", "exit 30");
+        assert_eq!(spawn(&silent, &[], &profile, false).await.err(), Some(SpawnError::Blocked));
+        // Any other early end is a plain failure.
+        let broken = fake(td.path(), "broken", "echo 'missing libnss3.so' >&2\nexit 127");
+        assert!(matches!(spawn(&broken, &[], &profile, false).await.err(), Some(SpawnError::Failed(e)) if e.contains("exit code 127") && e.contains("libnss3")));
     }
 
     #[test]

@@ -7,15 +7,27 @@
  * tells it no; an `agent.answer` of a request is answered here, as on a computer with the browser.
  * The cap queues allowed requests; detach, take over, hand back and lending change the tab owners
  * it reports; an "Allow once" attachment ends with the agent's turn. Engines, the Chrome for
- * Testing download, clearing data and the config are simulated: nothing touches this computer.
+ * Testing download (with Cancel), clearing data and the config are simulated: nothing touches
+ * this computer.
+ *
+ * Demo knob (the page's URL): `?demo&browser=blocked`: this computer's policy blocks remote control
+ * of its browsers (Google Chrome and Chromium; Chrome for Testing reads a policy of its own). It
+ * opens on the block the app found when it started the browser: TeleFlock's own browser is not
+ * downloaded, so it is offered; nothing is attached and expenses still asks. "Use TeleFlock's
+ * browser" downloads it, chooses it and starts it; once it is there, a start of a blocked engine
+ * runs it instead.
  */
-import type { AppEvent, BrowserConfig, BrowserEngine, BrowserInstall, BrowserRequest, BrowserScope, BrowserState, BrowserStatus, BrowserTabOwner } from "@/core/gen";
-import { apiError } from "../errors";
+import type { AppEvent, BrowserBlocked, BrowserConfig, BrowserDownload, BrowserEngine, BrowserFallback, BrowserInstall, BrowserRequest, BrowserScope, BrowserState, BrowserStatus, BrowserTabOwner } from "@/core/gen";
+import { apiError, type CoreError } from "../errors";
+import { formatBytes } from "../upload";
 import type { AgentSim } from "./agent";
 import { DEMO_BROWSER_TABS, DEMO_BROWSER_WS, openDemoAgentTab } from "./browserTabs";
 import type { DemoClock } from "./clock";
 import type { DemoHost } from "./host";
 import { hash } from "./rng";
+
+/** `?demo&browser=blocked`. */
+export type DemoBrowserKnob = "blocked" | null;
 
 export interface DemoBrowserEnv {
   clock: DemoClock;
@@ -23,9 +35,11 @@ export interface DemoBrowserEnv {
   hosts(): Iterable<DemoHost>;
   /** This device's name (Settings): hosts show it as whose browser an agent drives. */
   device(): string;
+  /** Demo knob (`?demo&browser=…`); read from the page URL when absent. */
+  knob?: DemoBrowserKnob;
 }
 
-type Run = "off" | "starting" | "running";
+type Run = "off" | "starting" | "running" | "error";
 
 interface Attached {
   hostId: string;
@@ -60,13 +74,16 @@ const CDP_PORT = 39_222;
 const CAP_DEFAULT = 4;
 const CAP_MAX = 16;
 const CFT_VERSION = "156.0.7531.40";
+const CFT_SIZE = 201_329_937;
 const FOUND: readonly BrowserEngine[] = [
   { name: "Google Chrome", path: "/usr/bin/google-chrome-stable", version: "156.0.7531.42" },
   { name: "Chromium", path: "/usr/bin/chromium", version: "155.0.7489.118" },
 ];
-const CFT: BrowserEngine = { name: "Chrome for Testing", path: `${DATA_DIR}/engine/chrome-linux64/chrome`, version: CFT_VERSION };
+const CFT: BrowserEngine = { name: "Chrome for Testing", path: `${DATA_DIR}/engine/chrome-linux64/chrome`, version: CFT_VERSION, builtin: true };
 /** Launching, as a real Chromium takes about this long. */
 const START_MS = 1200;
+/** A browser the organization's policy blocks says so about this soon; the core stops it at once. */
+const BLOCK_MS = 500;
 /** Agents' activity reaches the status at most this often (the core's ~2 s). */
 const DRIVE_MS = 2000;
 /** A working agent drives for two bursts of this length, then rests for one. */
@@ -90,6 +107,15 @@ function runnable(path: string): boolean {
   return FOUND.some((e) => e.path === path) || path === CFT.path || (/^(\/|[A-Za-z]:[\\/])/.test(path) && !/[\\/]$/.test(path));
 }
 
+function readKnob(): DemoBrowserKnob {
+  try {
+    const v = typeof location === "undefined" ? null : new URLSearchParams(location.search).get("browser");
+    return v === "blocked" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 export class DemoBrowser {
   private run: Run = "off";
   private headed = false;
@@ -98,6 +124,15 @@ export class DemoBrowser {
   private config: { enginePath?: string; headed: boolean; cap: number } = { headed: false, cap: CAP_DEFAULT };
   private cftInstalled = false;
   private install: BrowserInstall | undefined;
+  /** The running download's Cancel, and whether it starts the browser when done (`installEngine {start}`). */
+  private download: { cancel(): void; start: boolean } | null = null;
+  /** `?demo&browser=blocked`: this computer's policy blocks remote control of the browsers it has (not of Chrome for Testing). */
+  private readonly policy: boolean;
+  /** Engines a start found blocked here (paths); Automatic passes over them. */
+  private readonly blockedPaths = new Set<string>();
+  /** The last start found an engine blocked (until the next start or stop), and what the status says. */
+  private blocked: BrowserBlocked | undefined;
+  private message: string | undefined;
   private attached: Attached[] = [];
   /** Being attached (counted against the cap until the host answered). */
   private readonly attaching = new Set<string>();
@@ -114,6 +149,7 @@ export class DemoBrowser {
   private readonly stopDrive: () => void;
 
   constructor(private readonly env: DemoBrowserEnv) {
+    this.policy = (env.knob === undefined ? readKnob() : env.knob) === "blocked";
     this.stopDrive = env.clock.every(DRIVE_MS, () => this.drive());
   }
 
@@ -121,8 +157,17 @@ export class DemoBrowser {
     this.stopDrive();
   }
 
-  /** `?demo` with its hosts: it runs, quota and ci drive their tabs, expenses asks (`DemoBrowserAgents.seed`). */
+  /**
+   * `?demo` with its hosts: it runs, quota and ci drive their tabs, expenses asks (`DemoBrowserAgents.seed`).
+   * `?demo&browser=blocked`: the start the app made found Google Chrome blocked; nothing is attached, expenses asks.
+   */
   seed(): void {
+    if (this.policy) {
+      for (const h of this.env.hosts()) h.browser.seed(this.env.device(), false);
+      const engine = this.preferred();
+      if (engine) this.refused(engine);
+      return;
+    }
     this.run = "running";
     this.engine = this.preferred();
     for (const h of this.env.hosts()) {
@@ -139,14 +184,19 @@ export class DemoBrowser {
   // ---------------------------------------------------------------- status
 
   private engines(): BrowserEngine[] {
-    return this.cftInstalled ? [...FOUND, CFT] : [...FOUND];
+    return (this.cftInstalled ? [...FOUND, CFT] : [...FOUND]).map((e) => (this.blockedPaths.has(e.path) ? { ...e, blocked: true } : e));
   }
 
-  /** The engine `browser.start` would run: the configured one, else the first found. */
+  /** The engine `browser.start` would run: the configured one, else the first found that isn't blocked. */
   private preferred(): BrowserEngine | undefined {
     const path = this.config.enginePath;
-    if (!path) return this.engines()[0];
-    return this.engines().find((e) => e.path === path) ?? { name: path.split(/[\\/]/).pop() || path, path };
+    const engines = this.engines();
+    if (!path) return engines.find((e) => !e.blocked) ?? engines[0];
+    return engines.find((e) => e.path === path) ?? { name: path.split(/[\\/]/).pop() || path, path, ...(this.blockedPaths.has(path) ? { blocked: true } : {}) };
+  }
+
+  private ownDownload(): BrowserDownload {
+    return { version: CFT_VERSION, available: true, installed: this.cftInstalled, size: CFT_SIZE };
   }
 
   status(): BrowserStatus {
@@ -160,6 +210,8 @@ export class DemoBrowser {
       wsUrl: running ? DEMO_BROWSER_WS : undefined,
       profileDir: `${DATA_DIR}/profile`,
       downloadDir: DOWNLOAD_DIR,
+      message: this.message,
+      blocked: this.blocked,
       install: this.install,
       cap: this.config.cap,
       attachments: this.attached.map((a) => ({ hostId: a.hostId, agentId: a.agentId, agentName: a.name, since: a.since, hostPort: a.hostPort, scope: a.scope, connections: running ? 1 : 0, activeAt: a.activeAt })),
@@ -230,7 +282,10 @@ export class DemoBrowser {
       case "browser.configSet":
         return this.configSet(p);
       case "browser.installEngine":
-        this.installEngine();
+        this.installEngine(p.start === true);
+        break;
+      case "browser.cancelInstall":
+        this.download?.cancel();
         break;
       case "browser.clearData":
         await this.clear(p.what);
@@ -300,23 +355,62 @@ export class DemoBrowser {
   private async start(headed: boolean): Promise<void> {
     if (this.run === "running" && this.headed === headed) return;
     const gen = ++this.gen;
-    const engine = this.preferred();
     this.run = "starting";
     this.headed = headed;
+    this.blocked = undefined;
+    this.message = undefined;
     this.emit();
-    this.starting = new Promise<boolean>((resolve) =>
-      this.env.clock.after(START_MS, () => {
-        const current = gen === this.gen;
-        if (current) {
-          this.run = "running";
-          this.engine = engine;
-          this.starting = null;
-          this.emit();
-        }
-        resolve(current);
-      }),
-    );
-    if (!(await this.starting)) throw apiError("browser_failed", "The browser was stopped while it started");
+    const launched = this.launch(gen);
+    this.starting = launched.then((r) => r === "running");
+    const r = await launched;
+    if (gen === this.gen) this.starting = null;
+    if (r === "stopped") throw apiError("browser_failed", "The browser was stopped while it started");
+    if (r !== "running") throw r;
+  }
+
+  /**
+   * One start (tf-client `run::start`): the preferred engine. One the policy blocks says so a moment
+   * later and is marked; TeleFlock's own browser then runs instead when it is downloaded, chosen from
+   * now on, else the start fails with the offer.
+   */
+  private async launch(gen: number): Promise<"running" | "stopped" | CoreError> {
+    // After `ms`: whether this start is still the current one. Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+    const current = (ms: number) => new Promise<boolean>((resolve) => this.env.clock.after(ms, () => resolve(gen === this.gen)));
+    const engine = this.preferred();
+    const refusing = engine && this.policy && FOUND.some((e) => e.path === engine.path) ? engine : undefined;
+    // One wait for the refusal and TeleFlock's own browser starting right after (a demo clock fires timers, not what they lead to).
+    if (!(await current(refusing ? BLOCK_MS + (this.cftInstalled ? START_MS : 0) : START_MS))) return "stopped";
+    if (refusing && this.refused(refusing) === "offer") return apiError("browser_blocked", this.message ?? "");
+    this.run = "running";
+    this.engine = refusing ? CFT : engine;
+    if (refusing) {
+      this.config = { ...this.config, enginePath: CFT.path };
+      this.say(refusing, "switched");
+    }
+    this.emit();
+    return "running";
+  }
+
+  /**
+   * The policy blocked `engine` (tf-client `on_blocked`): it is marked, and TeleFlock's own browser
+   * takes over when it is downloaded; else it is offered and the browser stays down.
+   */
+  private refused(engine: BrowserEngine): BrowserFallback {
+    this.blockedPaths.add(engine.path);
+    if (this.cftInstalled) return "switched";
+    this.run = "error";
+    this.say(engine, "offer");
+    this.emit();
+    return "offer";
+  }
+
+  /** What the status says about a block (tf-client `notice`); this computer's policy leaves Chrome for Testing alone. */
+  private say(engine: BrowserEngine, fallback: "switched" | "offer"): void {
+    this.blocked = { engine: { ...engine, blocked: true }, fallback, download: fallback === "offer" ? this.ownDownload() : undefined, at: this.env.clock.now() };
+    this.message =
+      fallback === "switched"
+        ? `${engine.name} is blocked for remote control by your organization; TeleFlock uses its own browser.`
+        : `${engine.name} is blocked for remote control by your organization. TeleFlock can use its own browser instead (Chrome for Testing, ${formatBytes(CFT_SIZE)}).`;
   }
 
   private async ensureRunning(): Promise<void> {
@@ -332,11 +426,13 @@ export class DemoBrowser {
     for (const a of [...this.attached]) this.detach(a.hostId, a.agentId);
     this.run = "off";
     this.engine = undefined;
+    this.blocked = undefined;
+    this.message = undefined;
   }
 
   private async clear(what: unknown): Promise<void> {
     if (what !== "cookies" && what !== "cache" && what !== "everything") throw apiError("invalid_params", "what: cookies, cache or everything");
-    if (what !== "everything" || this.run === "off") return;
+    if (what !== "everything" || (this.run !== "running" && this.run !== "starting")) return;
     // The whole profile goes: the browser restarts with a new one (attachments stay).
     const headed = this.headed;
     this.gen++;
@@ -435,7 +531,7 @@ export class DemoBrowser {
 
   /** Allowed requests that fit under the cap now attach, oldest first. */
   private admitWaiting(): void {
-    while (this.waiting.length > 0 && this.run !== "off" && this.inUse() < this.config.cap) {
+    while (this.waiting.length > 0 && (this.run === "running" || this.run === "starting") && this.inUse() < this.config.cap) {
       const w = this.waiting.shift() as Waiting;
       void this.attach(w.hostId, w.agentId, w.scope, true).catch(() => this.emit());
     }
@@ -519,7 +615,7 @@ export class DemoBrowser {
   // ---------------------------------------------------------------- engines and config
 
   private configView(): BrowserConfig {
-    return { enginePath: this.config.enginePath, headed: this.config.headed, cap: this.config.cap, engines: this.engines(), download: { version: CFT_VERSION, available: true, installed: this.cftInstalled } };
+    return { enginePath: this.config.enginePath, headed: this.config.headed, cap: this.config.cap, engines: this.engines(), download: this.ownDownload() };
   }
 
   /** `browser.configSet` replaces the saved config: absent fields are the defaults. */
@@ -534,21 +630,47 @@ export class DemoBrowser {
     return this.configView();
   }
 
-  /** Chrome for Testing "downloads" in about six seconds, then joins the engines. */
-  private installEngine(): void {
-    if (this.install && !this.install.error) return;
+  /**
+   * Chrome for Testing "downloads" in about six seconds (Cancel stops it), then joins the engines.
+   * `start` ("Use TeleFlock's browser"): then it is the chosen engine and the browser starts with it.
+   */
+  private installEngine(start: boolean): void {
+    if (this.download) {
+      this.download.start ||= start;
+      return;
+    }
+    if (this.cftInstalled) {
+      if (start) this.useOwn();
+      return;
+    }
     this.install = { version: CFT_VERSION };
     let progress = 0;
     const stop = this.env.clock.every(INSTALL_TICK_MS, () => {
       progress = Math.min(100, progress + 7);
       if (progress < 100) {
         this.install = { version: CFT_VERSION, progress };
-      } else {
-        stop();
-        this.install = undefined;
-        this.cftInstalled = true;
+        this.emit();
+        return;
       }
+      const then = this.download?.start === true;
+      stop();
+      this.download = null;
+      this.install = undefined;
+      this.cftInstalled = true;
       this.emit();
+      if (then) this.useOwn();
     });
+    const cancel = () => {
+      stop();
+      this.download = null;
+      this.install = undefined;
+    };
+    this.download = { cancel, start };
+  }
+
+  /** TeleFlock's own browser becomes the chosen engine, and the browser starts with it (when it isn't running). */
+  private useOwn(): void {
+    this.config = { ...this.config, enginePath: CFT.path };
+    void this.start(this.config.headed).catch(() => this.emit());
   }
 }

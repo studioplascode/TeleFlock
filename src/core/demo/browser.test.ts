@@ -3,14 +3,15 @@ import type { AppEvent, BrowserConfig, BrowserStatus, SessionSnapshot, ToolItem 
 import { agentKey } from "../keys";
 import { reduceEvents } from "../store/reduce";
 import { type CoreEvent, type CoreState, initialCoreState } from "../store/state";
+import type { DemoBrowserKnob } from "./browser";
 import { type DemoBrowserTab, demoAgentTabs, resetDemoAgentTabs } from "./browserTabs";
 import { ManualClock } from "./clock";
 import { DemoEngine } from "./engine";
 
-/** Engine + manual clock + a store fed through the real reducer; calls get 2 s (a browser start takes 1.2). */
-function rig() {
+/** Engine + manual clock + a store fed through the real reducer; calls get 2 s (a browser start takes 1.2). `browser` plays `?demo&browser=…`. */
+function rig(browser: DemoBrowserKnob = null) {
   const clock = new ManualClock();
-  const engine = new DemoEngine({ mode: "backend", clock });
+  const engine = new DemoEngine({ mode: "backend", clock, browser });
   const events: AppEvent[] = [];
   let state: CoreState = initialCoreState("demo");
   engine.subscribe((e) => {
@@ -181,7 +182,7 @@ describe("demo browser", () => {
     config = await r.call<BrowserConfig>(null, "browser.configSet", { cap: 3 });
     expect(config).toMatchObject({ headed: false, cap: 3 });
     expect(config.enginePath).toBeUndefined();
-    expect(config.download).toEqual({ version: "156.0.7531.40", available: true, installed: false });
+    expect(config.download).toEqual({ version: "156.0.7531.40", available: true, installed: false, size: 201_329_937 });
     const p = r.engine.callApp("browser.installEngine", {}) as Promise<BrowserStatus>;
     expect((await p).install).toEqual({ version: "156.0.7531.40" });
     r.clock.advance(1200);
@@ -193,5 +194,52 @@ describe("demo browser", () => {
     config = await r.call<BrowserConfig>(null, "browser.config");
     expect(config.download.installed).toBe(true);
     expect(config.engines.map((e) => e.name)).toEqual(["Google Chrome", "Chromium", "Chrome for Testing"]);
+  });
+
+  test("browser=blocked: the policy blocks its browsers; Use TeleFlock's browser downloads it (Cancel stops that), chooses it and starts it; a blocked engine chosen again makes way for it", async () => {
+    const r = rig("blocked");
+    let s = await r.status();
+    expect(s).toMatchObject({ state: "error", attachments: [], blocked: { fallback: "offer", engine: { name: "Google Chrome", blocked: true }, download: { installed: false, size: 201_329_937 } } });
+    expect(s.wsUrl).toBeUndefined();
+    // expenses still asks; allowing it starts the browser, which the policy blocks too.
+    const requestId = s.requests[0]?.id as string;
+    await expect(r.call(null, "browser.answer", { requestId, allow: true })).rejects.toMatchObject({ code: "browser_blocked" });
+    s = await r.status();
+    expect(s).toMatchObject({ state: "error", blocked: { fallback: "offer", engine: { name: "Chromium" } } });
+    expect(s.requests.map((q) => q.id)).toEqual([requestId]);
+
+    s = await r.call(null, "browser.installEngine", { start: true });
+    expect(s.install).toEqual({ version: "156.0.7531.40" });
+    r.clock.advance(1200);
+    expect((await r.status()).install?.progress).toBeGreaterThan(0);
+    s = await r.call(null, "browser.cancelInstall");
+    expect(s).toMatchObject({ state: "error", blocked: { fallback: "offer" } });
+    expect(s.install).toBeUndefined();
+
+    await r.call(null, "browser.installEngine", { start: true });
+    r.clock.advance(8000);
+    // The start the download ended in goes on once the clock's timers ran.
+    await Promise.resolve();
+    s = await r.status();
+    expect(s).toMatchObject({ state: "running", wsUrl: "demo:browser", engine: { name: "Chrome for Testing", builtin: true } });
+    expect(s.blocked).toBeUndefined();
+    let config = await r.call<BrowserConfig>(null, "browser.config");
+    expect(config.enginePath).toBe(s.engine?.path);
+    expect(config.engines.map((e) => [e.name, e.blocked ?? false])).toEqual([
+      ["Google Chrome", true],
+      ["Chromium", true],
+      ["Chrome for Testing", false],
+    ]);
+    // Now the request can be allowed.
+    s = await r.call(null, "browser.answer", { requestId, allow: true });
+    expect(s.attachments.map((a) => a.agentId)).toEqual(["expenses"]);
+
+    await r.call(null, "browser.stop");
+    await r.call<BrowserConfig>(null, "browser.configSet", { enginePath: "/usr/bin/google-chrome-stable" });
+    s = await r.call(null, "browser.start");
+    expect(s).toMatchObject({ state: "running", engine: { builtin: true }, blocked: { fallback: "switched", engine: { name: "Google Chrome" } } });
+    expect(s.message).toBeDefined();
+    config = await r.call<BrowserConfig>(null, "browser.config");
+    expect(config.enginePath).toBe(s.engine?.path);
   });
 });

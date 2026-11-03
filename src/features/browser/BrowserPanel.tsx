@@ -1,10 +1,10 @@
-import { AppWindow, Download, Globe, Play, Plus, RotateCw, Settings2, TriangleAlert } from "lucide-react";
+import { AppWindow, Download, Globe, Play, Plus, RotateCw, Settings2, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { navigate, parseAgentKey, useAgent, useBrowser, useHosts } from "@/core";
 import type { BrowserStatus } from "@/core/gen";
 import { Button, cn, isAndroid, Spinner, toast, useNow } from "@/design";
 import { useMultiHost } from "@/features/hosts/HostBadge";
-import { browserCall, startBrowser } from "./actions";
+import { browserCall, cancelInstall, chooseOwnBrowser, ownBrowserLabel, startBrowser } from "./actions";
 import { AgentBar } from "./AgentBar";
 import { browserController, type Surface, useBrowserUi } from "./controller";
 import { Downloads } from "./Downloads";
@@ -128,6 +128,7 @@ function Running({ status, mode, agentKey, fullscreen, onFullscreen }: { status:
 
   return (
     <>
+      <SwitchedNote status={status} />
       {status.headed && (
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line bg-tile-2 px-3 text-[13px] text-ink-2">
           <AppWindow className="size-4 shrink-0 text-mute" />
@@ -160,21 +161,91 @@ function Running({ status, mode, agentKey, fullscreen, onFullscreen }: { status:
   );
 }
 
+/**
+ * Said once after the organization's policy blocked the engine and TeleFlock's own browser runs
+ * instead (the core's message), until dismissed; a later block says it again.
+ */
+let dismissedSwitch: number | null = null;
+
+function SwitchedNote({ status }: { status: BrowserStatus }) {
+  const [, rerender] = useState(0);
+  const blocked = status.blocked;
+  if (blocked?.fallback !== "switched" || dismissedSwitch === blocked.at) return null;
+  return (
+    <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-line bg-tile-2 px-3 py-1.5 text-[13px] text-ink-2">
+      <ShieldAlert className="size-4 shrink-0 text-mute" />
+      <span className="min-w-0 flex-1">{status.message ?? `${blocked.engine.name} is blocked for remote control by your organization; TeleFlock uses its own browser.`}</span>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => {
+          dismissedSwitch = blocked.at;
+          rerender((n) => n + 1);
+        }}
+      >
+        Got it
+      </Button>
+    </div>
+  );
+}
+
 function NotRunning({ status }: { status: BrowserStatus }) {
   const [busy, setBusy] = useState(false);
-  const start = (headed?: boolean) => {
+  const run = (f: () => Promise<unknown>) => {
     setBusy(true);
-    void startBrowser(headed).finally(() => setBusy(false));
+    void f().finally(() => setBusy(false));
   };
+  const start = (headed?: boolean) => run(() => startBrowser(headed));
   const install = status.install;
   if (status.state === "starting") return <Loading text={status.message ?? "Starting the browser…"} />;
   if (install && install.error == null) {
     return (
       <Notice
         icon={<Download />}
-        title={`Downloading Chrome for Testing ${install.version}`}
-        text={install.progress != null ? `${install.progress} %` : "Starting the download…"}
-        action={<progress max={100} value={install.progress ?? undefined} className="h-1.5 w-56 overflow-hidden rounded-full accent-[var(--color-accent)]" />}
+        title="Downloading TeleFlock's browser"
+        text={`Chrome for Testing ${install.version}${install.progress != null ? `: ${install.progress} %` : ": starting the download…"}`}
+        action={
+          <div className="flex flex-col items-center gap-3">
+            <progress max={100} value={install.progress ?? undefined} className="h-1.5 w-56 overflow-hidden rounded-full accent-[var(--color-accent)]" />
+            <Button size="sm" variant="ghost" icon={<X />} onClick={() => void cancelInstall()}>
+              Cancel
+            </Button>
+          </div>
+        }
+      />
+    );
+  }
+  const blocked = status.state === "error" ? status.blocked : undefined;
+  if (blocked?.fallback === "offer") {
+    return (
+      <Notice
+        icon={<ShieldAlert />}
+        title={`${blocked.engine.name} is blocked by your organization`}
+        text={`Your organization's policy doesn't allow other apps to control ${blocked.engine.name}, so TeleFlock can't run it. TeleFlock can use its own browser instead: Chrome for Testing.${install?.error ? ` The last download failed: ${install.error}` : ""}`}
+        action={
+          <Button size="sm" variant="primary" icon={<Download />} loading={busy} onClick={() => run(chooseOwnBrowser)}>
+            {ownBrowserLabel(blocked.download)}
+          </Button>
+        }
+      />
+    );
+  }
+  if (blocked) {
+    return (
+      <Notice
+        icon={<ShieldAlert />}
+        title="Blocked by your organization"
+        text={status.message ?? "This computer's policy blocks remote control of every browser TeleFlock can use."}
+        action={
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button size="sm" variant="secondary" icon={<RotateCw />} loading={busy} onClick={() => start()}>
+              Try again
+            </Button>
+            <Button size="sm" variant="ghost" icon={<Settings2 />} onClick={() => navigate({ name: "settings" })}>
+              Browser settings
+            </Button>
+          </div>
+        }
       />
     );
   }
@@ -205,7 +276,7 @@ function NotRunning({ status }: { status: BrowserStatus }) {
       text={
         failed
           ? (status.message ?? "It failed to start or kept crashing.")
-          : `A browser of your own inside TeleFlock: sign in to the sites you use, and let an agent use it when a task needs your logins. ${status.engine ? `It runs ${status.engine.name}` : "It runs your Chrome"} with its own profile, kept between restarts.`
+          : `A browser of your own inside TeleFlock: sign in to the sites you use, and let an agent use it when a task needs your logins. ${status.engine ? `It runs ${status.engine.builtin ? "TeleFlock's own browser" : status.engine.name}` : "It runs your Chrome"} with its own profile, kept between restarts.`
       }
       action={
         <div className="flex flex-wrap justify-center gap-2">

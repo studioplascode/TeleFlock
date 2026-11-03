@@ -1,6 +1,6 @@
 import type { AppEvent, DiagReport, ForwardSaveParams, HostProfile, HostSaveParams, HostStatusEntry, SecretStatus, Settings, TunnelInfo } from "@/core/gen";
 import { apiError } from "../errors";
-import { DemoBrowser } from "./browser";
+import { DemoBrowser, type DemoBrowserKnob } from "./browser";
 import { type DemoClock, realClock } from "./clock";
 import { DemoDictation } from "./dictation";
 import { DEMO_GROUP } from "./dispatchAuto";
@@ -21,6 +21,8 @@ export interface DemoEngineOptions {
   seed?: number;
   /** Start hosts immediately (default true). Tests may defer. */
   autoStart?: boolean;
+  /** The browser's demo knob (`?demo&browser=blocked`); read from the page URL when absent. */
+  browser?: DemoBrowserKnob;
 }
 
 const SETTINGS_KEY = "tf.demo.settings";
@@ -115,7 +117,8 @@ export class DemoEngine {
       hosts: () => this.profiles.map((p) => ({ id: p.id, name: p.name, online: this.hosts.get(p.id)?.status.phase === "online" })),
     });
     this.recordings = new DemoRecordings({ clock: this.clock, emit: (e) => this.emit(e) });
-    this.browser = opts.mode === "backend" ? new DemoBrowser({ clock: this.clock, emit: (e) => this.emit(e), hosts: () => this.hosts.values(), device: () => this.settings.deviceName }) : null;
+    this.browser =
+      opts.mode === "backend" ? new DemoBrowser({ clock: this.clock, emit: (e) => this.emit(e), hosts: () => this.hosts.values(), device: () => this.settings.deviceName, knob: opts.browser }) : null;
     this.dictation =
       opts.mode === "backend" ? new DemoDictation({ clock: this.clock, emit: (e) => this.emit(e), phone: typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent) }) : null;
     if (opts.mode === "backend" && !opts.empty) {

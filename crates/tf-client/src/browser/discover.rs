@@ -111,6 +111,12 @@ pub(super) fn name_of(path: &Path, found: &[(&'static str, PathBuf)]) -> Option<
     found.iter().find(|(_, p)| p == path).map(|(n, _)| n.to_string())
 }
 
+/// An engine as the wire shows it; the one named [`CFT`] (the download, as [`found`] names it) is
+/// TeleFlock's own browser.
+pub(super) fn engine(name: &str, path: &Path, version: Option<String>) -> BrowserEngine {
+    BrowserEngine { name: name.to_string(), path: path.to_string_lossy().into_owned(), version, builtin: name == CFT, blocked: false }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
@@ -191,8 +197,11 @@ pub(super) async fn with_versions(os: &str, engines: Vec<(Option<String>, PathBu
                 v
             }
         };
-        let name = name.or(product).unwrap_or_else(|| file_name(&path));
-        out.push(BrowserEngine { name, path: path.to_string_lossy().into_owned(), version });
+        match name {
+            Some(n) => out.push(engine(&n, &path, version)),
+            // Not one of the discovered engines, so never TeleFlock's own.
+            None => out.push(BrowserEngine { name: product.unwrap_or_else(|| file_name(&path)), path: path.to_string_lossy().into_owned(), version, builtin: false, blocked: false }),
+        }
     }
     out
 }

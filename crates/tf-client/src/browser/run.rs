@@ -2,24 +2,25 @@
 //! asked for (relaunching it to switch), stops it, starts it again after a crash on the
 //! [`Restarts`] schedule, and brings it back headless when the user closed its own window. It
 //! holds the profile lock (`<data_dir>/browser/profile.lock`) from a start until the stop: one
-//! app core per profile.
+//! app core per profile. An engine the organization's policy refuses remote control makes way
+//! for TeleFlock's own browser when that is downloaded ([`super::Fallback`]).
 
 use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use tf_proto::BrowserEngine;
+use tf_proto::{BrowserEngine, BrowserFallback};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use super::launch::{self, Proc, Restarts};
-use super::{Run, engine_to_run, running, set_run};
+use super::launch::{self, Proc, Restarts, SpawnError};
+use super::{Fallback, Run, StartError, blocked, engine_at, engine_to_run, on_blocked, running, set_run, start_failed, switched, unblock};
 use crate::engine::Inner;
 
 pub(super) enum Cmd {
     /// Start, or relaunch in the other mode; the reply says how it went.
-    Start { headed: bool, reply: oneshot::Sender<Result<(), String>> },
+    Start { headed: bool, reply: oneshot::Sender<Result<(), StartError>> },
     Stop { reply: oneshot::Sender<()> },
 }
 
@@ -82,7 +83,7 @@ pub(super) async fn actor(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Cm
                     }
                     Err(e) => {
                         lock = None;
-                        set_run(&inner, Run::Error, Some(format!("The browser did not start: {e}")));
+                        start_failed(&inner, &e);
                         let _ = reply.send(Err(e));
                     }
                 }
@@ -99,7 +100,7 @@ pub(super) async fn actor(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Cm
                         Ok(p) => proc = Some(p),
                         Err(e) => {
                             lock = None;
-                            set_run(&inner, Run::Error, Some(format!("The browser did not start: {e}")));
+                            start_failed(&inner, &e);
                         }
                     }
                     continue;
@@ -113,7 +114,12 @@ pub(super) async fn actor(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Cm
                 let (_, headed) = retry.take().expect("guarded");
                 match start(&inner, headed, &mut lock).await {
                     Ok(p) => proc = Some(p),
-                    Err(e) => retry = after_failure(&inner, &mut restarts, &mut lock, Duration::ZERO, headed, &e),
+                    // Waiting does not lift a policy.
+                    Err(e @ StartError::Blocked { .. }) => {
+                        lock = None;
+                        start_failed(&inner, &e);
+                    }
+                    Err(StartError::Failed(e)) => retry = after_failure(&inner, &mut restarts, &mut lock, Duration::ZERO, headed, &e),
                 }
             }
         }
@@ -135,26 +141,59 @@ fn after_failure(inner: &Inner, restarts: &mut Restarts, lock: &mut Option<File>
     }
 }
 
-/// Launches the browser: the profile lock, the engine, the profile freed from a browser an
-/// earlier run left behind, then the process; `running` on success.
-async fn start(inner: &Arc<Inner>, headed: bool, lock: &mut Option<File>) -> Result<Proc, String> {
+/// Launches the browser: the profile lock, the engine, then [`run_engine`]; `running` on success.
+/// An engine the organization's policy blocks is marked so, and TeleFlock's own browser runs
+/// instead when it is downloaded (and not blocked too): the chosen engine from then on.
+async fn start(inner: &Arc<Inner>, headed: bool, lock: &mut Option<File>) -> Result<Proc, StartError> {
     set_run(inner, Run::Starting { headed }, None);
     let b = &inner.browser;
     if lock.is_none() {
-        *lock = Some(profile_lock(&b.dir)?);
+        *lock = Some(profile_lock(&b.dir).map_err(StartError::Failed)?);
     }
-    let engine: BrowserEngine = engine_to_run(inner).await?;
+    let engine: BrowserEngine = engine_to_run(inner).await.map_err(StartError::Failed)?;
     let staged = b.dir.join("staged");
     let _ = tokio::fs::remove_dir_all(&staged).await;
     // The UI points the browser's downloads here (`Browser.setDownloadBehavior`).
     let _ = tokio::fs::create_dir_all(super::files::download_dir(&b.dir)).await;
+    match run_engine(inner, &engine, headed).await {
+        Ok(p) => {
+            running(inner, &p, engine, None);
+            return Ok(p);
+        }
+        Err(SpawnError::Failed(e)) => return Err(StartError::Failed(e)),
+        Err(SpawnError::Blocked) => {}
+    }
+    let own = match on_blocked(inner, &engine).await {
+        Fallback::Switch(path) => engine_at(inner, path, &b.found()).await,
+        Fallback::Offer => return Err(blocked(inner, &engine, BrowserFallback::Offer)),
+        Fallback::Nothing => return Err(blocked(inner, &engine, BrowserFallback::Unavailable)),
+    };
+    log::info!("browser: {} is blocked by the organization's policy; TeleFlock's own browser runs instead", engine.name);
+    match run_engine(inner, &own, headed).await {
+        Ok(p) => {
+            let notice = switched(inner, &engine, &own).await;
+            running(inner, &p, own, Some(notice));
+            Ok(p)
+        }
+        Err(SpawnError::Failed(e)) => Err(StartError::Failed(e)),
+        Err(SpawnError::Blocked) => {
+            on_blocked(inner, &own).await;
+            Err(blocked(inner, &engine, BrowserFallback::Unavailable))
+        }
+    }
+}
+
+/// One launch of `engine`: the profile freed from a browser an earlier run left behind, then the
+/// process. A block marked on it is lifted when it starts.
+async fn run_engine(inner: &Arc<Inner>, engine: &BrowserEngine, headed: bool) -> Result<Proc, SpawnError> {
+    let b = &inner.browser;
     let profile = b.profile();
     launch::free_profile(&profile).await;
     let origins = b.origins();
     let args = launch::args(&launch::Flags { profile: &profile, headed, origins: &origins, os: &b.os, root: launch::is_root() });
     log::info!("browser: starting {} {} ({})", engine.name, engine.version.as_deref().unwrap_or("?"), if headed { "own window" } else { "headless" });
     let p = launch::spawn(Path::new(&engine.path), &args, &profile, headed).await?;
-    running(inner, &p, engine);
+    unblock(inner, &engine.path).await;
     Ok(p)
 }
 

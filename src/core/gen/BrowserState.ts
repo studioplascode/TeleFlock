@@ -4,7 +4,8 @@
  * * `off`: not running (start it with `browser.start`, or attach an agent).
  * * `starting`: launching, or restarting after a crash.
  * * `running`: DevTools answer at [`BrowserStatus::cdp_port`].
- * * `error`: it failed to start or kept crashing ([`BrowserStatus::message`]).
+ * * `error`: it failed to start or kept crashing ([`BrowserStatus::message`]), or the
+ *   organization's policy blocks it ([`BrowserStatus::blocked`]).
  * * `unavailable`: no engine on this device (`browser.installEngine` downloads Chrome for
  *   Testing on consent), or a device without the browser (Android).
  */

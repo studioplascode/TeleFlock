@@ -1580,6 +1580,7 @@ impl Engine {
             | AppMethod::BrowserConfigReq(_)
             | AppMethod::BrowserConfigSet(_)
             | AppMethod::BrowserInstallEngine(_)
+            | AppMethod::BrowserCancelInstall(_)
             | AppMethod::BrowserClearData(_)
             | AppMethod::BrowserStageFile(_)
             | AppMethod::BrowserRevealDownload(_)

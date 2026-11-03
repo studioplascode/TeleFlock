@@ -7,7 +7,8 @@ import type { BrowserEngine } from "./BrowserEngine";
  */
 export type BrowserConfig = { 
 /**
- * The engine the user chose; absent: the first one found.
+ * The engine the user chose; absent: the first one found that the organization's policy
+ * does not block.
  */
 enginePath?: string, 
 /**

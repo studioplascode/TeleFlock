@@ -132,8 +132,12 @@ desktops, `tf-devserver` has its own `voice` feature (labs).
 ## TeleFlock Browser (`src/browser/`)
 App methods `browser.*` and `AppEvent::Browser` (`tf_proto::browser`; architecture §5.2). One Chromium per app
 core (desktops and tf-devserver; Android answers `unavailable`): the configured `enginePath`, else Chrome,
-Chromium, Edge or Brave found here, else the pinned Chrome for Testing `browser.installEngine` downloads into
-`data_dir/browser/engine` (size and SHA-256 checked). Profile `data_dir/browser/profile` (one app core per
+Chromium, Edge or Brave found here, else the pinned Chrome for Testing (TeleFlock's own browser)
+`browser.installEngine` downloads into `data_dir/browser/engine` (size and SHA-256 checked; `browser.cancelInstall`
+stops it; `{start: true}` then chooses it and starts it). An engine whose organization disallows remote debugging
+(`RemoteDebuggingAllowed`; its stderr line, or Chrome for Testing's policy exit) is stopped at once, marked blocked
+(`config.json` `blocked`, passed over by Automatic) and replaced by TeleFlock's own browser when that is downloaded,
+else it is offered (`BrowserStatus.blocked`, `browser_blocked`). Profile `data_dir/browser/profile` (one app core per
 profile: `profile.lock`), headless or in its own window, DevTools on `127.0.0.1` open to the app's origins and
 those of `allow_browser_origins`; restarted after crashes (1, 2, 4, 8, 16 s), stopped by `browser.stop` and
 `shutdown`. Agents attach (`browser.attach`, an allowed `use_user_browser` request; at most `cap`, default 4,
