@@ -1,6 +1,6 @@
 # TeleFlock feature coverage matrix
 
-Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0, 0.6.1 and 0.7.0 on 2026-10-29, 0.8.0, 0.8.1 and 0.9.0 on 2026-11-01, 0.9.1 and 0.9.2 on 2026-11-03 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
+Audit date 2026-10-21, updated for 0.4.0 on 2026-10-22 (§0), for 0.4.1 on 2026-10-23, 0.5.0 on 2026-10-26, 0.5.1, 0.5.2 and 0.5.3 on 2026-10-27, 0.6.0, 0.6.1 and 0.7.0 on 2026-10-29, 0.8.0, 0.8.1 and 0.9.0 on 2026-11-01, 0.9.1, 0.9.2 and 0.9.3 on 2026-11-03 (§0). Sources: `docs/spec.md` §2–§6, `docs/research/omp.md` §1 and §10–§12, `docs/research/herdr.md` §13.
 Each row traces the path **UI entry (desktop / mobile) → frontend call → host/app method → hostd path → status**.
 
 **Status key**
@@ -9,6 +9,12 @@ Each row traces the path **UI entry (desktop / mobile) → frontend call → hos
 - ❌ **missing**: there is no UI path.
 
 **hostd path legend**: C = collab guest · B = tf-bridge extension (since 0.6.0 also the data plane: live frames + the session file) · I = herdr keystroke injection (guarded by §3.6; idle-only except commands omp runs while streaming, such as `/collab`) · H = herdr API · G = git/gh/fs exec · L = local client (tf-client / Tauri).
+
+## §0 What 0.9.3 changed
+
+| Capability | Desktop | Mobile | Method / module | Status |
+|---|---|---|---|---|
+| `git.show` writes a blob down only for a preview loading it whole: a range ending within the first 8 MiB (a small blob whole, a preview's size check) and any range of a blob larger than the 1 GiB cache come from `git cat-file blob`, stopped once the range is read (what comes before is dropped, never held); a range past that of a blob that fits writes it once; a copy pushed out while being read is read from git. 0.9.1 and 0.9.2 wrote the whole blob for the size check, before Load anyway, and a blob over the cap was written, evicted and failed | Review | Review | hostd `ops/git.rs` `BlobCache::range`, `blob_range` (G) | ✅ tests (`show_never_writes_down_a_blob_the_cache_cannot_hold`: the size check and a range past 8 MiB of a blob over the cap write nothing; `show_writes_a_blob_down_once_only_to_load_it_whole`: the size check writes nothing, loading it in 2 MiB ranges writes one copy; eviction past the cap) |
 
 ## §0 What 0.9.2 changed
 

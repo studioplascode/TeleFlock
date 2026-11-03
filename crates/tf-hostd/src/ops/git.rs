@@ -1148,7 +1148,7 @@ pub(crate) fn new_file_patch(path: &str, text: Option<&str>) -> String {
 
 /// `git.show`: up to `maxBytes` bytes of the file `path` as revision `rev` has it, from `offset` on.
 /// The path stays inside the repository; git's `<rev>:<path>` reads the blob without filters. A
-/// blob larger than one answer is read through `blobs` (written once, every range read from it).
+/// range is read through `blobs`, which writes a blob down only for a preview loading it whole.
 pub async fn show(p: &GitShowParams, blobs: &BlobCache) -> Result<GitShowResult, ApiError> {
     let rev = show_rev(&p.rev)?;
     let path = repo_path(&p.path)?;
@@ -1173,11 +1173,7 @@ pub async fn show(p: &GitShowParams, blobs: &BlobCache) -> Result<GitShowResult,
     };
     let start = p.offset.unwrap_or(0).min(size);
     let len = (size - start).min(p.max_bytes.unwrap_or(SHOW_DEFAULT).clamp(1, SHOW_MAX));
-    let bytes = match len {
-        0 => Vec::new(),
-        _ if len == size => whole_blob(&root, &oid, size).await?,
-        _ => blobs.range(&root, &oid, size, start, len).await?,
-    };
+    let bytes = if len == 0 { Vec::new() } else { blobs.range(&root, &oid, size, start, len).await? };
     Ok(GitShowResult {
         size,
         base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -1239,15 +1235,22 @@ fn cat_blob(root: &Path, oid: &str) -> Result<(tokio::process::Child, tokio::pro
     Ok((child, out))
 }
 
-/// All `size` bytes of blob `oid` (one answer's worth at most).
-async fn whole_blob(root: &Path, oid: &str, size: u64) -> Result<Vec<u8>, ApiError> {
-    let (_child, out) = cat_blob(root, oid)?;
-    let mut buf = Vec::with_capacity(size as usize);
-    tokio::time::timeout(SLOW, out.take(size).read_to_end(&mut buf))
+/// `len` bytes from `start` of blob `oid`, straight from git: what comes before is read and
+/// dropped, and git is stopped (killed) once the range is read, so neither memory nor disk holds
+/// more than the range.
+async fn blob_range(root: &Path, oid: &str, start: u64, len: u64) -> Result<Vec<u8>, ApiError> {
+    let (_child, mut out) = cat_blob(root, oid)?;
+    let read = async {
+        tokio::io::copy(&mut (&mut out).take(start), &mut tokio::io::sink()).await?;
+        let mut buf = Vec::with_capacity(len as usize);
+        (&mut out).take(len).read_to_end(&mut buf).await?;
+        Ok::<_, io::Error>(buf)
+    };
+    let buf = tokio::time::timeout(SLOW, read)
         .await
         .map_err(|_| ApiError::new("timeout", "git cat-file timed out").retryable())?
         .map_err(|e| ApiError::new("git_error", format!("reading the blob: {e}")))?;
-    if (buf.len() as u64) < size {
+    if (buf.len() as u64) < len {
         return Err(ApiError::new("git_error", format!("git cat-file ended early reading {oid}")));
     }
     Ok(buf)
@@ -1267,9 +1270,11 @@ pub(crate) fn blob_cache(home: &Path) -> &'static BlobCache {
     BLOBS.get_or_init(|| BlobCache::new(home.join("cache").join("blobs"), BLOB_CAP, BLOB_IDLE))
 }
 
-/// Blobs `git.show` serves in ranges, each written once to a file named for the repository and the
-/// blob id git resolved (a ref that moved can never serve older bytes) and read by seek: reading a
-/// blob from git again per range would cost all of it up to the range, per range.
+/// Blobs a preview loads whole in ranges, each written once to a file named for the repository and
+/// the blob id git resolved (a ref that moved can never serve older bytes) and read by seek: reading
+/// a blob from git again per range would cost all of it up to the range, per range. A preview's
+/// first reads (its size check, before "Load anyway") never write a blob down, nor does a blob
+/// larger than the cache.
 pub struct BlobCache {
     dir: PathBuf,
     cap: u64,
@@ -1286,12 +1291,20 @@ impl BlobCache {
         Self { dir, cap, idle, fill: tokio::sync::Mutex::new(()), fills: std::sync::atomic::AtomicUsize::new(0) }
     }
 
-    /// `len` bytes from `start` of blob `oid` (`size` bytes) of the repository at `root`.
+    /// `len` bytes from `start` of blob `oid` (`size` bytes) of the repository at `root`. A copy
+    /// already written serves it by seek. Without one, a range that ends within the first
+    /// [`SHOW_MAX`] bytes (all a preview reads before its size check lets it load the rest) and any
+    /// range of a blob larger than the cache come straight from git ([`blob_range`]); a range past
+    /// them writes the blob down first.
     async fn range(&self, root: &Path, oid: &str, size: u64, start: u64, len: u64) -> Result<Vec<u8>, ApiError> {
         let file = self.dir.join(format!("{:08x}-{oid}", crate::paths::fnv1a(root.as_os_str().as_encoded_bytes())));
-        {
+        let written = |file: &Path| std::fs::metadata(file).is_ok_and(|m| m.len() == size);
+        if !written(&file) {
+            if start + len <= SHOW_MAX || size > self.cap {
+                return blob_range(root, oid, start, len).await;
+            }
             let _one = self.fill.lock().await;
-            if std::fs::metadata(&file).map(|m| m.len() != size).unwrap_or(true) {
+            if !written(&file) {
                 self.write(root, oid, &file).await?;
                 self.evict();
             }
@@ -1307,7 +1320,11 @@ impl BlobCache {
             f.take(len).read_to_end(&mut buf)?;
             Ok(buf)
         });
-        let buf = read.await.map_err(|e| ApiError::new("internal", e.to_string()))?.map_err(|e| crate::ops::fs::io_error(e, &file))?;
+        let buf = match read.await.map_err(|e| ApiError::new("internal", e.to_string()))? {
+            // Another preview's blob pushed it out of the cache meanwhile.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return blob_range(root, oid, start, len).await,
+            r => r.map_err(|e| crate::ops::fs::io_error(e, &file))?,
+        };
         if (buf.len() as u64) < len {
             return Err(ApiError::new("git_error", format!("the cached copy of {oid} is short")));
         }
@@ -1629,49 +1646,79 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
     }
 
+    /// A preview's first read (its size check) comes from git and writes nothing; loading the rest
+    /// writes the blob down once and reads every later range from that copy.
     #[tokio::test]
-    async fn show_writes_a_big_blob_once_and_reads_its_ranges_from_the_copy() {
+    async fn show_writes_a_blob_down_once_only_to_load_it_whole() {
         let td = fixture();
         let d = td.path();
-        let big: Vec<u8> = (0..SHOW_MAX + 5000).map(|i| (i % 253) as u8).collect();
+        let big: Vec<u8> = (0..SHOW_MAX + (3 << 20)).map(|i| (i % 253) as u8).collect();
         std::fs::write(d.join("clip.mp4"), &big).unwrap();
         sh(d, &["add", "clip.mp4"]);
         sh(d, &["commit", "-q", "-m", "clip"]);
         let dir = tempfile::tempdir().unwrap();
         let blobs = dir.path().join("blobs");
         let cache = BlobCache::new(blobs.clone(), BLOB_CAP, BLOB_IDLE);
-        let mut joined = Vec::new();
+        let fills = || cache.fills.load(std::sync::atomic::Ordering::Relaxed);
+        let first = super::show(&show_params(d, "HEAD", "clip.mp4", None, Some(1 << 20)), &cache).await.unwrap();
+        assert_eq!(first.size, big.len() as u64);
+        assert_eq!((fills(), cached(&blobs)), (0, Vec::<String>::new()), "the size check writes nothing down");
+        // Loading it whole in 2 MiB ranges, as the app does.
+        let mut joined = unbase(&first.base64);
         while joined.len() < big.len() {
-            let r = super::show(&show_params(d, "HEAD", "clip.mp4", Some(joined.len() as u64), Some(SHOW_MAX)), &cache).await.unwrap();
+            let r = super::show(&show_params(d, "HEAD", "clip.mp4", Some(joined.len() as u64), Some(2 << 20)), &cache).await.unwrap();
             joined.extend(unbase(&r.base64));
         }
         assert_eq!(joined, big);
-        assert_eq!(cache.fills.load(std::sync::atomic::Ordering::Relaxed), 1, "two ranges, one git cat-file");
+        assert_eq!(fills(), 1, "the ranges past the first ones share one copy");
         // A blob that fits one answer never reaches the cache.
         super::show(&show_params(d, "HEAD", "a.txt", None, None), &cache).await.unwrap();
-        assert_eq!(cache.fills.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(fills(), 1);
         assert_eq!(cached(&blobs).len(), 1, "no .part left: {:?}", cached(&blobs));
         // A new cache (a daemon start) leaves nothing of the last.
         BlobCache::new(blobs.clone(), BLOB_CAP, BLOB_IDLE);
         assert!(cached(&blobs).is_empty());
     }
 
+    /// A blob larger than the whole cache is never written down: its size check and any range of it
+    /// come straight from git.
+    #[tokio::test]
+    async fn show_never_writes_down_a_blob_the_cache_cannot_hold() {
+        let td = fixture();
+        let d = td.path();
+        let big: Vec<u8> = (0..SHOW_MAX + 5000).map(|i| (i % 251) as u8).collect();
+        std::fs::write(d.join("huge.mov"), &big).unwrap();
+        sh(d, &["add", "huge.mov"]);
+        sh(d, &["commit", "-q", "-m", "huge"]);
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("blobs");
+        let cache = BlobCache::new(blobs.clone(), 4096, BLOB_IDLE);
+        let probe = super::show(&show_params(d, "HEAD", "huge.mov", None, Some(1 << 20)), &cache).await.unwrap();
+        assert_eq!((probe.size, unbase(&probe.base64)), (big.len() as u64, big[..1 << 20].to_vec()));
+        let tail = super::show(&show_params(d, "HEAD", "huge.mov", Some(SHOW_MAX), Some(SHOW_MAX)), &cache).await.unwrap();
+        assert_eq!((unbase(&tail.base64), tail.truncated), (big[SHOW_MAX as usize..].to_vec(), false));
+        assert_eq!(cache.fills.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(cached(&blobs).is_empty(), "{:?}", cached(&blobs));
+    }
+
     #[tokio::test]
     async fn blob_cache_drops_the_least_recently_read_past_its_cap() {
         let td = fixture();
         let d = td.path();
-        std::fs::write(d.join("one.bin"), vec![1u8; 3000]).unwrap();
-        std::fs::write(d.join("two.bin"), vec![2u8; 3000]).unwrap();
+        let size = (SHOW_MAX + 1000) as usize;
+        std::fs::write(d.join("one.bin"), vec![1u8; size]).unwrap();
+        std::fs::write(d.join("two.bin"), vec![2u8; size]).unwrap();
         sh(d, &["add", "one.bin", "two.bin"]);
         sh(d, &["commit", "-q", "-m", "bins"]);
         let dir = tempfile::tempdir().unwrap();
         let blobs = dir.path().join("blobs");
-        let cache = BlobCache::new(blobs.clone(), 4000, BLOB_IDLE);
-        let one = super::show(&show_params(d, "HEAD", "one.bin", Some(1000), Some(1000)), &cache).await.unwrap();
+        // Room for one of them.
+        let cache = BlobCache::new(blobs.clone(), size as u64 + 1000, BLOB_IDLE);
+        let one = super::show(&show_params(d, "HEAD", "one.bin", Some(SHOW_MAX), Some(1000)), &cache).await.unwrap();
         assert_eq!(unbase(&one.base64), vec![1u8; 1000]);
-        let two = super::show(&show_params(d, "HEAD", "two.bin", Some(1000), Some(1000)), &cache).await.unwrap();
+        let two = super::show(&show_params(d, "HEAD", "two.bin", Some(SHOW_MAX), Some(1000)), &cache).await.unwrap();
         assert_eq!(unbase(&two.base64), vec![2u8; 1000]);
-        // 6000 bytes over a 4000-byte cap: the blob read longer ago went.
+        // Two copies over a cap that holds one: the blob read longer ago went.
         let oid = std::process::Command::new("git").args(["rev-parse", "HEAD:two.bin"]).current_dir(d).output().unwrap().stdout;
         let left = cached(&blobs);
         assert!(left.len() == 1 && left[0].ends_with(String::from_utf8_lossy(&oid).trim()), "{left:?}");

@@ -58,11 +58,14 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
   repository (absolute, `.`/`..`/empty components, backslashes and control characters are
   `invalid_params`); `rev` takes no option or `:`. One `git cat-file --batch-check` (stdin
   `<rev>` and `<rev>:<path>`) tells an unknown revision (`invalid_params`), a missing file
-  (`not_found`) and a folder or submodule (`invalid_params`). A blob that fits one answer is read
-  with `git cat-file blob <oid>` (no filters); a larger one is written once to
-  `<home>/cache/blobs/<repo hash>-<oid>` (owner-only, `.part` + rename, keyed by the blob id git
-  resolved, so a moved ref never serves older bytes) and every range is read from that copy by
-  seek. Copies unread for 10 min go, and the least recently read past 1 GiB in total; the daemon
+  (`not_found`) and a folder or submodule (`invalid_params`). A range that ends within the first
+  8 MiB (a whole small blob, and all a preview reads before its size check lets it load the rest)
+  comes straight from `git cat-file blob <oid>` (no filters), which is stopped once the range is
+  read; so does any range of a blob larger than the cache. A range past that, of a blob that fits,
+  writes the blob down once to `<home>/cache/blobs/<repo hash>-<oid>` (owner-only, `.part` +
+  rename, keyed by the blob id git resolved, so a moved ref never serves older bytes) and every
+  later range is read from that copy by seek. Copies unread for 10 min go, and the least recently
+  read past 1 GiB in total; one pushed out while being read is read from git instead; the daemon
   empties the folder when it starts.
 - **git.branches**: local + remote-tracking branches (newest first), `defaultBranch` (`main`) and
   `defaultBase` = what new worktrees fork from: `origin/<default>` when that ref exists, else the
