@@ -25,6 +25,7 @@ import { confirmAction } from "@/features/workspace/shared/overlays";
 import { basename, tildify } from "@/features/workspace/shared/paths";
 import { useHostQuery } from "@/features/workspace/shared/useHostQuery";
 import { canonicalRemote, findGroupRepo, groupHosts, groupRepos, localRepoIds, remoteKey } from "./auto";
+import type { FirstCommand } from "./commands";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
 import { BasePicker, type ChatChoice, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
@@ -177,12 +178,12 @@ export function DispatchView() {
   const repoName = chat ? CHAT_CHOICE : repo ? ((auto ? autoRepo?.name : recents.find((r) => r.root === repo)?.name) ?? basename(repo)) : null;
 
   const composer = useRef<DispatchComposerHandle>(null);
-  const send = (prompt: string, images: readonly DraftImage[], videos: readonly string[]): boolean => {
+  const send = (prompt: string, images: readonly DraftImage[], videos: readonly string[], command?: FirstCommand): boolean => {
     if (!target || !repo || !key) return false;
     // The view's branch list is the single host's (Auto's is the preview host's, the stand-in base).
     const sent = sendTask(
       { profiles, status, states, dispatch: useDispatch.getState(), quotas },
-      { target, repo, prompt, images, videos, options, branches: auto ? undefined : branches.data, baseHint: base },
+      { target, repo, prompt, images, videos, command, options, branches: auto ? undefined : branches.data, baseHint: base },
     );
     if (!sent.ok) toast({ title: sent.title, description: sent.description, status: "error" });
     return sent.ok;
@@ -385,7 +386,13 @@ export function DispatchView() {
       onOptionsChange={useDispatch.getState().setOptions}
       onSend={send}
       disabledReason={disabledReason}
-      placeholder={chat ? "Ask anything: each message starts a new chat (paste or drop images and videos)" : repo ? `Describe a task for ${repoName}… (paste or drop images and videos)` : "Pick a repository to dispatch to"}
+      placeholder={
+        chat
+          ? "Ask anything: each message starts a new chat (/ for commands; paste or drop images and videos)"
+          : repo
+            ? `Describe a task for ${repoName}… (/ for commands; paste or drop images and videos)`
+            : "Pick a repository to dispatch to"
+      }
       mobile={mobile}
     />
   );

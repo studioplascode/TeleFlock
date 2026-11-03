@@ -414,6 +414,36 @@ export function matchSubs(cmd: SlashCommand, query: string): OmpSubcommand[] {
   return (cmd.subs ?? []).filter((s) => s.name.startsWith(q) || (q.length > 1 && s.description.toLowerCase().includes(q)));
 }
 
+/** The `/` palette over a draft: commands while `/name` is typed, then a command's argument choices. */
+export type SlashPopup = { kind: "slash"; items: SlashCommand[] } | { kind: "sub"; cmd: SlashCommand; items: OmpSubcommand[] };
+
+/** Which commands and argument choices a palette offers (Dispatch: what a new agent can run). */
+export interface SlashOffer {
+  command(c: SlashCommand): boolean;
+  sub(c: SlashCommand, s: OmpSubcommand): boolean;
+}
+
+/**
+ * The palette for the draft `value` with the caret at `caret` (one line only): the matching
+ * commands while the caret is in `/name`, the command's argument choices once `/name ` is typed
+ * (`sel` -1: none picked yet, so Enter sends the command as typed), `popup` null when a command
+ * with choices has none matching. `undefined` when the caret is in neither: other popups may apply.
+ */
+export function slashPopupAt(value: string, caret: number, custom: readonly CommandInfo[] = [], offer?: SlashOffer): { popup: SlashPopup | null; sel: number } | undefined {
+  if (value.includes("\n")) return undefined;
+  const before = value.slice(0, caret);
+  const typed = /^\/(\S*)$/.exec(before);
+  if (typed) {
+    const items = matchCommands(typed[1] ?? "", custom);
+    return { popup: { kind: "slash", items: offer ? items.filter((c) => offer.command(c)) : items }, sel: 0 };
+  }
+  const sub = /^\/(\S+?)[\s:](\S*)$/.exec(before);
+  const cmd = sub ? findCommand(parseSlash(before)?.name ?? "", custom) : undefined;
+  if (!sub || !cmd?.subs) return undefined;
+  const items = matchSubs(cmd, sub[2] ?? "").filter((s) => !offer || offer.sub(cmd, s));
+  return { popup: items.length ? { kind: "sub", cmd, items } : null, sel: sub[2] ? 0 : -1 };
+}
+
 export const MODE_BADGE: Record<SlashMode, string | null> = {
   native: null,
   direct: "omp",

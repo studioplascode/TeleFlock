@@ -2,9 +2,11 @@
 
 The week of every host in view on one card, shared as an image: hours of unattended work, agents
 run, lines changed, pull requests merged, the longest overnight streak, the fastest model and the
-busiest subagent. A fun digest, not the Usage page. Route `#/wrapped` (`{ name: "wrapped" }`);
-sidebar item after Usage, phone More, palette view "Flock Wrapped". Host side:
-`host.wrapped` (architecture §3.19, `crates/tf-hostd/src/ops/wrapped/`).
+busiest subagent. A fun digest, not the Usage page. Route `#/wrapped` (`{ name: "wrapped" }`), a
+sub-page of Usage (`parentRoute` in `src/core/nav.ts`): opened from Usage (a header button on desktop,
+a row above Today on phones) or the palette view "Flock Wrapped". The sidebar keeps Usage lit while it
+is open and the phone keeps More lit; back returns to the page it was opened from, or to Usage when
+there is none. Host side: `host.wrapped` (architecture §3.19, `crates/tf-hostd/src/ops/wrapped/`).
 
 ## Files
 

@@ -114,7 +114,7 @@ const SENTENCE_RE = /\s+(?=(?:and also|and then|oh and|one more thing|and make s
 /**
  * The demo `ramble` model: the transcript with fillers dropped, one-word self-corrections applied, spoken paths and
  * identifiers written out ("src slash net slash upload dot ts"), and capitalised sentences, split where a new
- * request starts. Deterministic, so the previous rewrite is not needed for stability.
+ * request starts.
  */
 function ramble(prompt: string): string {
   let t = inner(prompt, "transcript")
@@ -153,17 +153,19 @@ function templateName(prompt: string): string {
 const NOISE: Record<string, true> = Object.fromEntries(["edit", "read", "bash", "grep", "glob", "write", "src", "ts", "tsx", "js", "json", "md", "rs", "now", "running", "reading", "editing", "searching"].map((w) => [w, true]));
 
 /**
- * `Name:` and `Title:` for what the agent does now: the title is the most settled signal (recap, task, last reply), the
- * name its last two nouns; a signal that is all verbs and tool noise falls back to the live line.
+ * `Name:` and `Title:` for the session's overall work: its goal, else the first prompt (the objective), else the newest
+ * prompt when it opens with a verb (a follow-up like "fine, skip it" says nothing about the work), else the recap, the
+ * current title or the last reply, up to a colon; the name is the title's last two nouns, or the live line's when the
+ * title has none.
  */
 function agentRename(prompt: string): string {
-  const activity = prompt.includes("<activity>") ? inner(prompt, "activity") : "";
-  const reply = prompt.includes("<reply>") ? inner(prompt, "reply").replace(/^…/, "") : undefined;
-  const asked = prompt.includes("<task>") ? inner(prompt, "task") : undefined;
-  // a follow-up like "fine, skip it" says nothing new about the job: only a task that opens with a verb retitles
-  const task = asked && VERBS[salient(asked)[0] ?? ""] ? asked : undefined;
-  const current = inner(prompt, "current");
-  const title = titleOf(line(activity, "Recap") ?? task ?? line(current, "Title") ?? reply ?? line(activity, "Now") ?? "Helper");
+  const tag = (name: string) => (prompt.includes(`<${name}>`) ? inner(prompt, name) : undefined);
+  const activity = tag("latest-activity") ?? "";
+  const current = tag("current") ?? "";
+  const latest = tag("latest-prompt");
+  const work = tag("goal") ?? tag("first-prompt") ?? (latest && VERBS[salient(latest)[0] ?? ""] ? latest : undefined);
+  const about = work ?? line(activity, "Recap") ?? line(current, "Title") ?? line(activity, "Last reply")?.replace(/^…/, "") ?? line(activity, "Now") ?? "Helper";
+  const title = titleOf(about.split(/[:;]\s/)[0] ?? about);
   const nouns = (text: string) => salient(text).filter((w) => !NOISE[w] && !VERBS[w]);
   const words = nouns(title).length ? nouns(title) : nouns(line(activity, "Now") ?? "");
   const name = words.slice(-2).join("-") || line(current, "Name") || "helper";

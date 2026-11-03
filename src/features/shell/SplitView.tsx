@@ -2,8 +2,7 @@ import { SquareTerminal } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { lazy, type PointerEvent as ReactPointerEvent, type ReactNode, Suspense, useRef, useState } from "react";
 import { cn, Spinner, spring, StatusOrb } from "@/design";
-import { agentKey, navigate, parseAgentKey, type SplitState, useAgent, useHosts, useRoute, useUi } from "@/core";
-import { isBare } from "@/app/routes";
+import { agentKey, navigate, parseAgentKey, type SplitState, useAgent, useHosts, useUi } from "@/core";
 import type { TermTarget } from "@/core/gen";
 import { useMultiHost } from "@/features/hosts/HostBadge";
 import { SplitHeaderRow } from "./SplitHeaderRow";
@@ -88,9 +87,8 @@ function SplitBody({ split }: { split: SplitState }) {
  * the others draw their own header row with `SplitHeaderRow` (one mechanism for every side panel).
  */
 export function SplitFrame({ children }: { children: ReactNode }) {
-  // Focus mode and bare screens (ambient mode) hide the split (it comes back with them).
-  const bare = isBare(useRoute());
-  const split = useUi((s) => (s.focusMode || bare ? null : s.split));
+  // Focus mode hides the split (it comes back with it).
+  const split = useUi((s) => (s.focusMode ? null : s.split));
   const [ratio, setRatio] = useState(readRatio);
   const [dragging, setDragging] = useState(false);
   const frame = useRef<HTMLDivElement>(null);

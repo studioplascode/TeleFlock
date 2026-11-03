@@ -8,6 +8,7 @@ pub fn default_settings(device_name: String) -> Settings {
         notify_needs: true,
         notify_finished: true,
         notify_errors: true,
+        notify_presented: None,
         notify_sound: true,
         quiet_start: None,
         quiet_end: None,
@@ -96,6 +97,7 @@ pub fn wants(s: &Settings, kind: NotifyKind) -> bool {
         NotifyKind::Needs => s.notify_needs,
         NotifyKind::Finished => s.notify_finished,
         NotifyKind::Error | NotifyKind::Quiet => s.notify_errors,
+        NotifyKind::Presented => s.notify_presented != Some(false),
         NotifyKind::Info => true,
     }
 }
@@ -191,5 +193,9 @@ mod tests {
         s.notify_finished = false;
         assert!(!wants(&s, NotifyKind::Finished));
         assert!(wants(&s, NotifyKind::Needs));
+        // Presented documents: on unless switched off (settings files before 0.9.1 lack the key).
+        assert!(wants(&s, NotifyKind::Presented));
+        s.notify_presented = Some(false);
+        assert!(!wants(&s, NotifyKind::Presented));
     }
 }

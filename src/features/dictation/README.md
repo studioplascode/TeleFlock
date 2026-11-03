@@ -25,10 +25,13 @@ On-device engine:
 Rambler (the logic in `@/core/rambler`, `rambler.test.ts`, and `@/core/ai`: `suggestRamble`, `ramblePrompt`,
 `parseRamble`):
 - `useRamblerDictation.tsx`: the hook every text box uses instead of `useDictation`. With Rambler off (Settings →
-  Dictation) it is the plain dictation; on, it routes utterances to a `Rambler` session, fills the box once when the
-  user stops (one undoable edit) and returns the `panel` to render above the box.
-- `RamblerCard.tsx`: the live card while dictating (cleaned prompt, raw transcript, "Tidying…") and the strip after the
-  fill (**Use raw transcript** / **Undo**); `tone="sun"` for the ask card's sunset background.
+  Dictation) it is the plain dictation; on, it routes utterances to a `Rambler` session, which sends nothing while
+  the person speaks (it only keeps the host's worker warm: `ai.prewarm` at the start, then every minute). When the
+  dictation ends (Stop, the engine ending it, the field closing) the session makes its one call over the whole
+  transcript, the box is filled once (one undoable edit), and the hook returns the `panel` to render above the box.
+- `RamblerCard.tsx`: the card while dictating (the transcript as heard, the words being heard in italics) and
+  tidying ("Tidying…"), and the strip after the fill (**Use raw transcript** / **Undo**, or why the words were kept
+  as dictated); `tone="sun"` for the ask card's sunset background.
 - `edit.ts`: `replaceRange` (an `insertText` edit on a focused box so Ctrl+Z works, else a draft write).
 
 Surfaces: session `Composer`, `DispatchComposer` (Rambler's context: the thread's repository, none for a chat),

@@ -82,11 +82,15 @@ pub struct NotifyStyle { pub sound: bool, pub silent: bool /* quiet hours */, pu
   for 30 s, is re-opened with what it holds (`reset` to the UI, a warning in the log); the next one
   waits 60 s, doubling up to 15 min while it keeps finding the same.
 * `notification_action`: `action_id` with an `answer` → `agent.answer`; `reply` text → free-text
-  answer if the pending request accepts it, else `agent.prompt`; otherwise emits `OpenAgent`.
-  Reconnects (≤ 30 s) when the host is offline.
+  answer if the pending request accepts it, else `agent.prompt`; otherwise emits `OpenPage` (an
+  `open:<page>` action), `OpenPresented` (an `open:presented/…` action: the agent's session with
+  that document) or `OpenAgent`. Reconnects (≤ 30 s) when the host is offline.
 * Notifications: every hostd `notify` is emitted as `AppEvent::Notify`; the OS gets it when the kind
-  is enabled (`needs`→notifyNeeds, `finished`→notifyFinished, `error`/`quiet`→notifyErrors); during
-  quiet hours `style.silent = true`, `style.sound = false`.
+  is enabled (`needs`→notifyNeeds, `finished`→notifyFinished, `error`/`quiet`→notifyErrors,
+  `presented`→notifyPresented, absent = on); during quiet hours `style.silent = true`,
+  `style.sound = false`. A `notify` with an id already held (hostd merged a newer version of a
+  presented document into it) changes it in place: emitted with `alert: false`, not posted again.
+  The hello asks for `notifyKinds`: a kind this core does not know reads as `info`.
 * Deploy: `uname -sm` → triple; upload `<home>/bin/tf-hostd`, `<home>/ext/teleflock-bridge.ts`,
   `<home>/omp-overlay.yml` (+ `.sha256` stamps) when the version line or content differ. Remote uploads
   land in a temp file whose sha256 (`sha256sum`/`shasum -a 256`) must match before the `mv`, and an

@@ -1,4 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { extname, join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import babel, { type RolldownBabelPreset } from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
@@ -112,8 +114,36 @@ function katexWoff2Only(): Plugin {
   };
 }
 
+/**
+ * pdf.js (Review's PDF previews) reads CMaps, standard fonts, ICC profiles and its image decoders
+ * by file name from folders it is given (`PdfView.tsx`): they ship under `pdfjs/` beside the app,
+ * and the dev server serves them from node_modules. Only PDFs that need one read it. Its scripting
+ * engine (`quickjs-eval`) stays out: Review never runs a PDF's scripts.
+ */
+function pdfjsAssets(): Plugin {
+  const root = fileURLToPath(new URL("./node_modules/pdfjs-dist/", import.meta.url));
+  const files = () =>
+    ["cmaps", "standard_fonts", "wasm", "iccs"].flatMap((dir) => readdirSync(join(root, dir)).filter((name) => !name.startsWith("quickjs")).map((name) => `${dir}/${name}`));
+  const types: Record<string, string> = { ".js": "text/javascript", ".wasm": "application/wasm" };
+  return {
+    name: "teleflock:pdfjs-assets",
+    configureServer(server) {
+      const known = new Set(files());
+      server.middlewares.use("/pdfjs/", (req, res, next) => {
+        const rel = decodeURIComponent((req.url ?? "").split("?")[0]?.replace(/^\//, "") ?? "");
+        if (!known.has(rel)) return next();
+        res.setHeader("Content-Type", types[extname(rel)] ?? "application/octet-stream");
+        res.end(readFileSync(join(root, rel)));
+      });
+    },
+    generateBundle() {
+      for (const rel of files()) this.emitFile({ type: "asset", fileName: `pdfjs/${rel}`, source: readFileSync(join(root, rel)) });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [katexWoff2Only(), react(), compiler.guard, babel({ presets: [compiler.preset] }), tailwindcss()],
+  plugins: [katexWoff2Only(), pdfjsAssets(), react(), compiler.guard, babel({ presets: [compiler.preset] }), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },

@@ -26,6 +26,7 @@ pub mod agent;
 pub mod automation;
 pub mod chat;
 pub mod cleanup;
+pub mod digest;
 pub mod fs;
 pub mod gh;
 pub mod gh_auth;

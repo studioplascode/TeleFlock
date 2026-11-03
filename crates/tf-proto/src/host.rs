@@ -35,6 +35,10 @@
 //!      when an attachment it made ended on the host. Pending `use_user_browser` requests are on
 //!      the board (`Agent.browser`) for every client. An agent asking for a browser while no
 //!      client with the feature is connected is told at once that none is available.
+//!    * [`FEATURE_NOTIFY_KINDS`]: the client reads a notification kind it does not know as `info`
+//!      (`NotifyKind`'s deserializer; apps ≥ 0.9.1), so hostd sends it every kind. Without it a
+//!      client gets only the kinds every app can parse (`NotifyKind::known_to_every_app`): no
+//!      `presented` notification goes to it, since an older app drops a line it cannot parse.
 
 use crate::forward::{FwdEv, FwdOffer, FwdOfferState};
 use crate::model::{HostState, Notification, Pulse, StatePatch};
@@ -53,6 +57,8 @@ pub const FEATURE_PRESENCE: &str = "presence";
 pub const FEATURE_FORWARD: &str = "forward";
 /// Wire feature: the client has a TeleFlock Browser that agents may attach to (`crate::browser`).
 pub const FEATURE_BROWSER: &str = "browser";
+/// Wire feature: the client takes every notification kind, reading unknown ones as `info`.
+pub const FEATURE_NOTIFY_KINDS: &str = "notifyKinds";
 
 wire_struct! {
     pub struct ClientInfo {
@@ -64,7 +70,8 @@ wire_struct! {
         /// Device display name (shown as the author of prompts sent from it).
         pub device: String,
         /// Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`],
-        /// [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`], [`FEATURE_BROWSER`]).
+        /// [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`], [`FEATURE_BROWSER`],
+        /// [`FEATURE_NOTIFY_KINDS`]).
         pub features: Option<Vec<String>>,
     }
 }

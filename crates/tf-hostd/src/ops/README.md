@@ -40,7 +40,9 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
   `node_modules`, `target`, …); candidates cached 15 s per root; fzf-style ranking (segment and
   camel boundaries, consecutive runs, basename bonus). Paths are relative to `root`.
 - **fs.read**: default 512 KiB, max 8 MiB; text when UTF-8 without NULs, else base64; `mime` by
-  extension.
+  extension (media types answer base64 whatever their bytes). With `offset` (0.9.1) it reads from
+  that byte (clamped to the size), always as base64, and echoes the start in `offset`;
+  `truncated` = more follows. Older hosts ignore `offset` and read from the start.
 - **git.status**: porcelain v2 + numstat vs `HEAD` (untracked files get their line count),
   default branch (`origin/HEAD` → `init.defaultBranch` → main/master/trunk/develop, as a local
   branch or `origin/…`), `base` = merge-base of HEAD with the default branch's local *and*
@@ -50,6 +52,18 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
 - **git.diff**: working tree vs base (default: that merge-base) = committed + staged + unstaged +
   untracked (synthesized new-file hunks, ≤ 200 files). Patch capped at 2 MiB (`truncated`).
   A `base` branch name diffs against its merge-base with HEAD.
+- **git.show** (0.9.1; Review's old side of images, videos, PDFs): `{cwd, rev, path, offset?, maxBytes?}`
+  → `{size, base64, mime?, offset, truncated}`: up to `maxBytes` (default 512 KiB, max 8 MiB) of the
+  blob `rev` has at `path`, from `offset`. `path` is repository-relative and can't leave the
+  repository (absolute, `.`/`..`/empty components, backslashes and control characters are
+  `invalid_params`); `rev` takes no option or `:`. One `git cat-file --batch-check` (stdin
+  `<rev>` and `<rev>:<path>`) tells an unknown revision (`invalid_params`), a missing file
+  (`not_found`) and a folder or submodule (`invalid_params`). A blob that fits one answer is read
+  with `git cat-file blob <oid>` (no filters); a larger one is written once to
+  `<home>/cache/blobs/<repo hash>-<oid>` (owner-only, `.part` + rename, keyed by the blob id git
+  resolved, so a moved ref never serves older bytes) and every range is read from that copy by
+  seek. Copies unread for 10 min go, and the least recently read past 1 GiB in total; the daemon
+  empties the folder when it starts.
 - **git.branches**: local + remote-tracking branches (newest first), `defaultBranch` (`main`) and
   `defaultBase` = what new worktrees fork from: `origin/<default>` when that ref exists, else the
   local default's remote-tracking upstream (repos without `origin`), else the local branch.
@@ -115,12 +129,19 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
   cached per index stamp + view + window and versioned (`have` → `unchanged`); `live` = the
   state.json ledger's growth since the last sync. Without `view` (older apps): the legacy
   `today`/`days`/`models` (host-local days, zero-filled; `input` = input + cache read + cache write).
-- **host.limits** (`limits.rs`): `omp usage --json` (hostd cache 60 s, `refresh` 10 s; omp itself caches
+- **host.limits** (`limits.rs`): `omp usage --json` (hostd cache 5 min, `refresh` 10 s; omp itself caches
   each account ~5 min, so provider usage endpoints are not hit more often than omp's own TUI does) +
-  `omp usage --history --json --days 8` (10 min). Readings of each window's current period (omp history
-  + hostd's own polls, reset drops cut) ride along as `samples` for the client's pace math. Session →
-  account from `agent.db` read-only: `cache` `session:sticky:<provider>:<sessionId>` → `credentialId`
-  → `auth_credentials.identity_key` (never the `data` column). A failed refresh keeps the last snapshot
+  `omp usage --history --json --days 8` (10 min) + omp's cached reports read directly (`agent.db`
+  `cache` rows `usage_cache:report:…`, read-only, never a provider call): while an omp process works,
+  omp refreshes its account's window rows there from the provider's response headers about once a
+  minute. Every answer reads those rows and brings the snapshot's newer windows up to date; while an
+  omp session on this host runs a turn, `start` (daemon) reads them every 60 s. Readings of each
+  window's current period (omp history + hostd's own, reset drops cut, a full report followed within
+  2 min by a header reading left out: the usage endpoint can read a step above the headers) ride along
+  as `samples` (≤ 120: every reading of the last hour, older ones evenly spaced) for the client's pace,
+  which compares the newest reading with one 5 min older. Session → account from `agent.db`
+  read-only: `cache` `session:sticky:<provider>:<sessionId>` → `credentialId` →
+  `auth_credentials.identity_key` (never the `data` column). A failed refresh keeps the last snapshot
   and sets `error`.
 - **host.models**: `omp config get modelRoles --json` + headless `omp --mode rpc --no-ui
   --no-session` `get_available_models` (fallback `omp models --json`); cached 5 min.
@@ -139,6 +160,13 @@ crate::herdr_health::down_error(session) -> Option<ApiError> // `herdr_down` whi
   running per daemon. `search.read` maps a session file (inside omp's sessions folder only) to rows
   around a row id or time, paging both ways; the last 3 files stay mapped while unchanged. Parked
   agents' read-only `session.open` now pages (`hasMore`, `session.history` from the same file).
+- **session.digest** (`digest.rs`, "Name it again", architecture §3.8): what an omp session is about
+  as a whole, bounded for omp's tiny model: the user's prompts in order (the first and the newest
+  ≤ 4 000 chars, ≤ 40 between them ≤ 400 chars each, spread over the session, the shortest left out
+  first), the newest 3 compaction summaries, the todo list (≤ 12 phases of 20 items) and the
+  subagents in start order (the first 8 and the newest 32), with the totals. Read from the session's
+  replica (every row, its todo list and roster) under one lock on the blocking pool; a session
+  without one from its file (`crate::find::files`: the newest `todo` call, the `task` calls).
 - **agent.archive / agent.resume** (`agent.rs`, done-agent lifecycle, architecture §3.5/§3.7):
   `close: true` parks the agent after a 10 s undo window (closes its exclusive workspace, else its
   pane); un-archiving, prompting or `agent.resume` on a parked card relaunch `omp --resume=<file>`

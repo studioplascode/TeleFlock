@@ -334,6 +334,127 @@ async fn channel_tests_report_and_wait_between() {
     assert_eq!(alert_of(&drain(&phone)), [Some(false)]);
 }
 
+/// An app that reads every kind (0.9.1).
+fn app(id: &str, device: &str) -> ClientHandle {
+    let info = ClientInfo { app: "teleflock-desktop".into(), version: "0.9.1".into(), platform: "linux".into(), device: device.into(), features: None };
+    ClientHandle::with_features(id.into(), info, Features { presence: true, notify_kinds: true, ..Features::default() })
+}
+
+/// `agent` presented version `version` of `slug` at `at` (`n<id>`).
+fn presented(id: &str, agent: &str, slug: &str, version: u32, at: i64) -> Notification {
+    Notification {
+        id: id.into(),
+        at,
+        kind: NotifyKind::Presented,
+        agent_id: agent.into(),
+        title: format!("{agent} presented {slug}"),
+        body: format!("HTML page · version {version}"),
+        request_id: None,
+        actions: vec![tf_proto::NotifyAction::open_presented(&format!("presented/{slug}-v{version}.html"))],
+    }
+}
+
+/// What the app was sent: (id, body, alert) of each `notify`.
+fn notes_of(msgs: &[ServerMsg]) -> Vec<(String, String, Option<bool>)> {
+    msgs.iter().filter_map(|m| if let ServerMsg::Notify { notification, alert } = m { Some((notification.id.clone(), notification.body.clone(), *alert)) } else { None }).collect()
+}
+
+/// A presented document reaches only the apps that read every kind: an older app would drop the
+/// line, so the device chosen to alert would not. It never escalates.
+#[tokio::test(start_paused = true)]
+async fn presented_documents_go_to_apps_that_read_every_kind() {
+    let lab = lab(policy(60, EscalateTo::Phones)).await;
+    let (desk, old_phone) = (app("c1", "Desk"), client("c2", "Pixel", true));
+    for c in [&desk, &old_phone] {
+        lab.n.client_attached("lab", c);
+    }
+    lab.n.presence_changed(&desk, presence(PresenceState::Idle, DeviceKind::Desktop));
+    lab.n.presence_changed(&old_phone, presence(PresenceState::Idle, DeviceKind::Phone));
+    // Nobody at a device: the phones alert; the only phone is too old for the kind.
+    lab.n.post(&lab.state, "lab", &[desk.clone(), old_phone.clone()], presented("n1", "a1", "q3-report", 1, 1_000), Some("ana".into()));
+    let sent = drain(&desk);
+    assert_eq!(notes_of(&sent), [("n1".to_string(), "HTML page · version 1".to_string(), Some(true))], "no phone that reads it: every device that does");
+    let ServerMsg::Notify { notification, .. } = &sent[0] else { unreachable!() };
+    assert_eq!((notification.kind, notification.presented()), (NotifyKind::Presented, Some("presented/q3-report-v1.html")));
+    assert!(drain(&old_phone).is_empty());
+    // The older kinds still reach every app (and alert the phone).
+    lab.n.post(&lab.state, "lab", &[desk.clone(), old_phone.clone()], note("n2", NotifyKind::Finished), None);
+    assert_eq!((alert_of(&drain(&old_phone)), alert_of(&drain(&desk))), (vec![Some(true)], vec![Some(false)]));
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert!(drain(&desk).is_empty() && drain(&old_phone).is_empty(), "no escalation");
+}
+
+/// Presenting a document again soon, while its notification is unread, updates that one
+/// notification (same id, no new alert, no new push): one notification per document, which opens
+/// the newest version. A replayed call notifies nothing; once read, or later than the window, a
+/// new version is news again.
+#[tokio::test(start_paused = true)]
+async fn a_quick_new_version_updates_the_unread_notification() {
+    let lab = lab(policy(0, EscalateTo::Phones)).await;
+    let hook = lab
+        .n
+        .save_channel(PushChannelSave {
+            id: None,
+            kind: PushKind::Webhook,
+            name: "hook".into(),
+            enabled: true,
+            when: PushWhen::Always,
+            kinds: vec![NotifyKind::Presented],
+            private: false,
+            url: Some("http://127.0.0.1:18737/hook".into()),
+            token: None,
+            user: None,
+            secret: None,
+        })
+        .unwrap();
+    assert!(!hook.is_empty());
+    let desk = app("c1", "Desk");
+    lab.n.client_attached("lab", &desk);
+    lab.n.presence_changed(&desk, presence(PresenceState::Active, DeviceKind::Desktop));
+    let sinks = [desk.clone()];
+    let t0 = 1_000_000;
+    lab.n.post(&lab.state, "lab", &sinks, presented("n1", "a1", "q3-report", 1, t0), Some("ana".into()));
+    lab.n.post(&lab.state, "lab", &sinks, presented("n2", "a1", "q3-report", 2, t0 + 30_000), Some("ana".into()));
+    lab.n.post(&lab.state, "lab", &sinks, presented("n3", "a1", "q3-report", 3, t0 + 60_000), Some("ana".into()));
+    let sent = drain(&desk);
+    assert_eq!(
+        notes_of(&sent),
+        [
+            ("n1".to_string(), "HTML page · version 1".to_string(), Some(true)),
+            ("n1".to_string(), "HTML page · version 2".to_string(), Some(false)),
+            ("n1".to_string(), "HTML page · version 3".to_string(), Some(false)),
+        ],
+        "one notification, updated in place"
+    );
+    let ServerMsg::Notify { notification, .. } = &sent[2] else { unreachable!() };
+    assert_eq!(notification.presented(), Some("presented/q3-report-v3.html"), "it opens the newest version");
+    settle().await;
+    assert_eq!(taken(&lab).len(), 1, "pushed once");
+
+    // A resync replays the call of version 3: nothing new.
+    lab.n.post(&lab.state, "lab", &sinks, presented("n4", "a1", "q3-report", 3, t0 + 61_000), Some("ana".into()));
+    assert!(drain(&desk).is_empty());
+    // Another document, or the same one by another agent, is a notification of its own.
+    lab.n.post(&lab.state, "lab", &sinks, presented("n5", "a1", "release-notes", 1, t0 + 62_000), Some("ana".into()));
+    lab.n.post(&lab.state, "lab", &sinks, presented("n6", "a2", "q3-report", 1, t0 + 63_000), Some("bob".into()));
+    assert_eq!(notes_of(&drain(&desk)).into_iter().map(|(id, _, alert)| (id, alert)).collect::<Vec<_>>(), [("n5".to_string(), Some(true)), ("n6".to_string(), Some(true))]);
+
+    // Read on the desk: the next version is news again.
+    lab.n.notify_read(&desk, vec!["n1".into()]);
+    lab.n.post(&lab.state, "lab", &sinks, presented("n7", "a1", "q3-report", 4, t0 + 90_000), Some("ana".into()));
+    assert_eq!(notes_of(&drain(&desk)), [("n7".to_string(), "HTML page · version 4".to_string(), Some(true))]);
+    // Unread but older than the window: news again too.
+    lab.n.post(&lab.state, "lab", &sinks, presented("n8", "a1", "q3-report", 5, t0 + 90_000 + PRESENTED_MERGE_MS + 1), Some("ana".into()));
+    assert_eq!(notes_of(&drain(&desk)), [("n8".to_string(), "HTML page · version 5".to_string(), Some(true))]);
+    settle().await;
+    // n5 to n8 pushed, and reading n1 (pushed once, updated twice) told the webhook it is done;
+    // the updates themselves pushed nothing.
+    let mut pushed: Vec<(String, String)> = taken(&lab).into_iter().map(|(_, _, body)| (body["event"].as_str().unwrap_or_default().to_owned(), body["id"].as_str().unwrap_or_default().to_owned())).collect();
+    pushed.sort();
+    let ev = |event: &str, id: &str| (event.to_owned(), id.to_owned());
+    assert_eq!(pushed, [ev("done", "n1"), ev("notification", "n5"), ev("notification", "n6"), ev("notification", "n7"), ev("notification", "n8")]);
+}
+
 fn agent(column: &str, needs_request: Option<&str>) -> tf_proto::Agent {
     let mut v = serde_json::json!({
         "id": "a1", "name": "fix", "kind": "omp", "paneId": "p", "tabId": "t", "workspaceId": "w", "state": "idle", "stateSince": 0,

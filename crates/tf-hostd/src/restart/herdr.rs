@@ -83,6 +83,7 @@ pub fn resume_argv(paths: &Paths, agent_overlay: Option<&Path>, file: &str) -> V
         thinking: None,
         plan: false,
         prompt: None,
+        command: None,
         images: Vec::new(),
         role_models: Default::default(),
         fallback_chains: Default::default(),

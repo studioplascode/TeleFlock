@@ -1307,6 +1307,12 @@ fn queued_prompts_until_they_land() {
     // Sent while idle: starts a turn, never queued.
     assert!(!rep.expect_queued("hello", false, at0 + 4000));
     assert!(rep.meta().queue.steering.is_empty());
+    // A dequeue that found nothing left in omp's queue: what is still listed reached the turn.
+    rep.apply(&state(true, 0), at0 + 5000);
+    assert!(rep.expect_queued("already taken", false, at0 + 5000));
+    assert!(rep.clear_queued());
+    assert_eq!(queue(&rep), (vec![], vec![]));
+    assert!(!rep.clear_queued());
 }
 
 #[test]
@@ -1547,7 +1553,8 @@ fn notes_and_recorded_calls_survive_a_rebuild() {
 }
 
 /// A `present` call (bridge ≥ 2.3.0) carries the document it showed: live, rebuilt from the
-/// session's entries (a parked session, a subagent transcript), and never for a failed call.
+/// session's entries (a parked session, a subagent transcript), and never for a failed call. Only
+/// a live call signals it (tf-hostd notifies about it): once, never from a snapshot.
 #[test]
 fn present_calls_carry_their_artifact_live_and_rebuilt() {
     let (at0, snap) = snapshot_from(&load("00-join"), false).unwrap();
@@ -1577,10 +1584,13 @@ fn present_calls_carry_their_artifact_live_and_rebuilt() {
         ev(serde_json::json!({ "type": "message_end", "message": result("c2", true) })),
     ];
     let mut live = Replica::new("x");
-    live.apply(&GuestEvent::Snapshot(snap), at0);
+    live.apply(&GuestEvent::Snapshot(snap.clone()), at0);
+    let mut signals = Vec::new();
     for (i, frame) in frames.iter().enumerate() {
-        live.apply(frame, t0 + i as i64);
+        signals.extend(live.apply(frame, t0 + i as i64).signals);
     }
+    let presented = |signals: &[Signal]| signals.iter().filter_map(|s| if let Signal::Presented { artifact } = s { Some(artifact.name.clone()) } else { None }).collect::<Vec<_>>();
+    assert_eq!(presented(&signals), ["presented/q3-report-v2.html"], "the end event signals it, its result message not again; the failed call nothing");
     let tool = |r: &Replica, id: &str| match r.item(id) {
         Some(TranscriptItem::Tool(t)) => t.clone(),
         other => panic!("{id}: {other:?}"),
@@ -1590,6 +1600,25 @@ fn present_calls_carry_their_artifact_live_and_rebuilt() {
     let a = shown.artifact.clone().expect("a finished present call carries its artifact");
     assert_eq!((a.kind, a.name.as_str(), a.version, a.assets), (PresentKind::Html, "presented/q3-report-v2.html", 2, 1));
     assert_eq!(tool(&live, "t:c2").artifact, None, "a failed call shows no artifact");
+
+    // From the session file: a snapshot holding the calls (a resync, a tf-hostd restart) shows the
+    // card and signals nothing; entries that follow it live (a bridge-served session's file
+    // follow) signal it once.
+    let entry = |id: &str, message: &serde_json::Value| serde_json::json!({ "type": "message", "id": id, "timestamp": "2026-10-28T16:39:06.583Z", "message": message });
+    let entries = [entry("e1", &assistant), entry("e2", &result("c1", false)), entry("e3", &result("c2", true))];
+    let mut restarted = Replica::new("x");
+    let mut held = snap.clone();
+    held.entries.extend(entries.iter().cloned());
+    let up = restarted.apply(&GuestEvent::Snapshot(held), t0 + 100);
+    assert_eq!(tool(&restarted, "t:c1").artifact.as_ref(), Some(&a));
+    assert!(presented(&up.signals).is_empty(), "{:?}", up.signals);
+    let mut followed = Replica::new("x");
+    followed.apply(&GuestEvent::Snapshot(snap), at0);
+    let mut signals = Vec::new();
+    for e in entries.iter().chain(entries.iter()) {
+        signals.extend(followed.apply(&GuestEvent::Frame(HostFrame::Entry { entry: e.clone() }), t0 + 200).signals);
+    }
+    assert_eq!(presented(&signals), ["presented/q3-report-v2.html"], "an entry seen again settles the row only");
 
     // The same rows from the session file (parked sessions, subagent transcripts).
     let line = |id: &str, message: &serde_json::Value| {

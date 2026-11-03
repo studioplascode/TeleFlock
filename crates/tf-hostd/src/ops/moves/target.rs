@@ -655,6 +655,7 @@ async fn spec_for(ctx: &Ctx, src: &MoveCheck) -> AgentSpec {
         model,
         plan: false,
         prompt: None,
+        command: None,
         images: Vec::new(),
         role_models: src.role_models.clone(),
         fallback_chains: src.fallback_chains.clone(),

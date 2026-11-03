@@ -174,7 +174,7 @@ fn user_name() -> String {
     raw.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
-fn fnv1a(bytes: &[u8]) -> u32 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in bytes {
         h ^= u32::from(*b);

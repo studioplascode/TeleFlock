@@ -2,7 +2,7 @@ import { AlertOctagon, RotateCcw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Component, type ErrorInfo, type ReactNode, Suspense, useEffect, useState } from "react";
 import { Button, LogoMark, spring, tween } from "@/design";
-import { navigate, type Route, useRoute } from "@/core";
+import { navigate, parentRoute, type Route, useRoute } from "@/core";
 import { isFullBleed, prefetchViews, RouteView, routeKey } from "@/app/routes";
 import { PullToRefresh } from "./PullToRefresh";
 
@@ -69,14 +69,14 @@ const TAB_INDEX: Partial<Record<Route["name"], number>> = Object.fromEntries(MOB
 
 /** Slide direction for the transition from `prev` to `next`: 1 forward (from the right), -1 back. */
 function direction(prev: Route, next: Route): number {
-  // Tabs sit at depth 0 (a terminal bound to an agent/pane is pushed on top); everything else is depth 1.
+  // Tabs sit at depth 0 (a terminal bound to an agent/pane is pushed on top), a page opened from another one
+  // (`parentRoute`: Flock Wrapped in Usage) at depth 2, everything else at depth 1.
   const tab = (r: Route) => (r.name === "terminal" && (r.agentId || r.paneId) ? undefined : TAB_INDEX[r.name]);
+  const depth = (r: Route) => (tab(r) !== undefined ? 0 : parentRoute(r) ? 2 : 1);
   const tp = tab(prev);
   const tn = tab(next);
-  if (tp === undefined && tn === undefined) return 1;
-  if (tp === undefined) return -1;
-  if (tn === undefined) return 1;
-  return Math.sign(tn - tp) || 1;
+  if (tp !== undefined && tn !== undefined) return Math.sign(tn - tp) || 1;
+  return Math.sign(depth(next) - depth(prev)) || 1;
 }
 
 /**

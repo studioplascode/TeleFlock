@@ -1,4 +1,4 @@
-import type { PresentedArtifact } from "@/core/gen";
+import type { PresentKind, PresentedArtifact } from "@/core/gen";
 import { written } from "./richContent";
 import { DATA_FOLDER_PNG } from "./screenshots";
 import { bash, say, type Step, think } from "./scripts";
@@ -491,10 +491,43 @@ function presentStep(doc: PresentedDoc): Step {
 
 /** The files the snapshot `name` stands for in the session's `local://` root: itself, then the files it references. */
 export function presentedFiles(name: string): { name: string; body: string | Uint8Array }[] {
+  const report = /^presented\/board-test-report-v(\d+)\.md$/.exec(name);
+  if (report) return [{ name, body: boardReport(Number(report[1])) }];
   const doc = PRESENTED.find((d) => snapshotOf(d).name === name);
   if (!doc) return [];
   const dir = `${name.slice(0, name.lastIndexOf("."))}.files`;
   return [{ name, body: doc.text }, ...Object.entries(doc.assets).map(([path, body]) => ({ name: `${dir}/${path}`, body }))];
+}
+
+/** How a notification names a presented document's kind (tf-hostd's `presented_notification`). */
+export const PRESENT_KIND_WORD: Record<PresentKind, string> = {
+  html: "HTML page",
+  markdown: "Markdown",
+  svg: "SVG",
+  image: "Image",
+  code: "Code",
+  csv: "Table",
+  json: "JSON",
+  text: "Text",
+};
+
+// ── board test report: presented live, now and then ──
+
+/** Version `version` of the board's test report: each run a little longer and still green. */
+function boardReport(version: number): string {
+  const tests = 40 + 3 * (version - 1);
+  const rows = ["Keyboard moves", "Card flights", "a11y announcements", "Reduced motion", "Persistence"].map((area, i) => `| ${area} | ${8 + ((i + version) % 3)} | ✓ |`);
+  return `# Board test report\n\n**Run ${version}:** ${tests} tests, all passing, in ${(6.1 + version * 0.2).toFixed(1)} s.\n\n| Area | Tests | Status |\n|---|---|---|\n${rows.join("\n")}\n\n${version > 1 ? `Since run ${version - 1}: three more keyboard edge cases (Shift+J at a lane's end, an empty lane, a collapsed lane).\n` : "Every lane change animates; reduced motion cross-fades instead.\n"}`;
+}
+
+/** A running agent writes the board's test results up and presents them (`present`, version `version`): the live call the demo notifies about. */
+export function boardReportSteps(version: number): Step[] {
+  const doc: PresentedDoc = { title: "Board test report", kind: "markdown", version, source: "docs/board-test-report.md", text: boardReport(version), assets: {} };
+  return [
+    written(doc.source, doc.text, "markdown"),
+    presentStep(doc),
+    say(version > 1 ? `Version ${version} of the test report is in the card above, with the latest run.` : "The test report is in the card above: every area, all green."),
+  ];
 }
 
 /** An edit call that adds `added` at the end of `path` (`before`: the file so far), as omp's replica shows it. */

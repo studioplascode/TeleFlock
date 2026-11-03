@@ -375,10 +375,16 @@ impl Inner {
     /// Notification policy: always forward to the UI; reach the OS per settings, per-agent
     /// mute and quiet hours. A host that routes by presence says whether this device alerts
     /// (`alert: false`: another device is in use; it may escalate here later, `notifyAlert`); a
-    /// device that does not share its presence alerts for everything, like older apps.
+    /// device that does not share its presence alerts for everything, like older apps. A
+    /// notification this app already has, sent again with new text (the host merged a newer
+    /// version of a presented document into it), changes in place without alerting again.
     pub fn on_notify(&self, rt: &HostRt, mut n: Notification, alert: Option<bool>) {
         // A browser request on a core without the browser: Deny only, in the OS and in the app.
         crate::browser::notification_for_device(self, &rt.id, &mut n);
+        if rt.update_notification(&n) {
+            self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n, alert: Some(false) });
+            return;
+        }
         let alert = alert.filter(|_| presence::sharing(&self.settings()));
         self.send(AppEvent::Notify { host_id: rt.id.clone(), notification: n.clone(), alert });
         // tf-hostd publishes the state carrying the request before notifying about it.
@@ -665,10 +671,14 @@ fn request_state(s: &HostState, n: &Notification) -> Request {
 }
 
 /// What opening a notification shows: the host's page it names (`HostPage::of`, with the
-/// notification's id so the page can show what it is about), else its agent.
+/// notification's id so the page can show what it is about), the presented document it names in
+/// its agent's session (`Notification::presented`), else its agent.
 fn open_event(host_id: &str, n: &Notification) -> AppEvent {
-    match tf_proto::HostPage::of(n) {
-        Some(page) => AppEvent::OpenPage { host_id: host_id.to_string(), page, notification_id: Some(n.id.clone()) },
+    if let Some(page) = tf_proto::HostPage::of(n) {
+        return AppEvent::OpenPage { host_id: host_id.to_string(), page, notification_id: Some(n.id.clone()) };
+    }
+    match n.presented().filter(|_| !n.agent_id.is_empty()) {
+        Some(name) => AppEvent::OpenPresented { host_id: host_id.to_string(), agent_id: n.agent_id.clone(), name: name.to_string() },
         None => AppEvent::OpenAgent { host_id: host_id.to_string(), agent_id: n.agent_id.clone() },
     }
 }
@@ -685,7 +695,7 @@ fn request_pending(rt: &HostRt, n: &Notification) -> Option<bool> {
 /// Free text can answer this notification's pending request (else replies become prompts).
 fn reply_allowed(rt: &HostRt, n: &Notification) -> bool {
     match n.kind {
-        NotifyKind::Finished | NotifyKind::Error | NotifyKind::Quiet => true,
+        NotifyKind::Finished | NotifyKind::Error | NotifyKind::Quiet | NotifyKind::Presented => true,
         NotifyKind::Info => false,
         NotifyKind::Needs => pending_needs(rt, n).is_some_and(|needs| text_answerable(&needs)),
     }
@@ -1664,7 +1674,8 @@ mod tests {
     }
 
     /// Opening a notification shows the host page its `open:<page>` action names (the idle-shells
-    /// summary), else its agent; an answer action never names a page.
+    /// summary), the presented document its `open:presented/…` action names in its agent's
+    /// session, else its agent; an answer action never names a page or a document.
     #[test]
     fn open_routes_to_the_named_page() {
         let action = |id: &str, answer: Option<Answer>| tf_proto::NotifyAction { id: id.into(), label: "x".into(), answer };
@@ -1686,6 +1697,13 @@ mod tests {
         assert_eq!(open_event("lab", &n("a1", vec![])), AppEvent::OpenAgent { host_id: "lab".into(), agent_id: "a1".into() });
         let answer = Answer { choices: vec!["y".into()], text: None, cancel: false, chat: false, back: false };
         assert_eq!(open_event("lab", &n("a1", vec![action("open:idleShells", Some(answer)), action("open:other", None)])), AppEvent::OpenAgent { host_id: "lab".into(), agent_id: "a1".into() });
+        // A document the agent presented: its session, showing that version.
+        let presented = n("a1", vec![tf_proto::NotifyAction::open_presented("presented/q3-report-v2.html")]);
+        assert_eq!(
+            open_event("lab", &presented),
+            AppEvent::OpenPresented { host_id: "lab".into(), agent_id: "a1".into(), name: "presented/q3-report-v2.html".into() }
+        );
+        assert_eq!(open_event("lab", &n("", vec![action("open:presented/x-v1.md", None)])), AppEvent::OpenAgent { host_id: "lab".into(), agent_id: String::new() }, "no agent, no session");
     }
 
     #[test]
@@ -2145,6 +2163,39 @@ mod tests {
         assert_eq!(os.len(), 1);
         assert_eq!(os[0].1.agent_id, "a2");
         assert!(rt.find_notification("n-a1").is_some(), "muted notifications stay actionable");
+    }
+
+    /// A newer version of a presented document that the host merged into a notification this app
+    /// has: the same id again changes it in place, quietly (no second OS notification, the UI told
+    /// not to alert), and opening it shows the newer version.
+    #[tokio::test]
+    async fn an_updated_notification_changes_in_place_without_alerting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, platform, rt, mut rx) = notify_host(dir.path()).await;
+        let presented = |version: u32| Notification {
+            id: "n1".into(),
+            at: i64::from(version),
+            kind: NotifyKind::Presented,
+            agent_id: "a1".into(),
+            title: "ana presented Q3 report".into(),
+            body: format!("HTML page · version {version}"),
+            request_id: None,
+            actions: vec![tf_proto::NotifyAction::open_presented(&format!("presented/q3-report-v{version}.html"))],
+        };
+        engine.inner.on_notify(&rt, presented(1), Some(true));
+        engine.inner.on_notify(&rt, presented(2), Some(true));
+        let told: Vec<(String, Option<bool>)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|e| match e {
+                AppEvent::Notify { notification, alert, .. } => Some((notification.body, alert)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, [("HTML page · version 1".to_string(), Some(true)), ("HTML page · version 2".to_string(), Some(false))]);
+        assert_eq!(platform.notified.lock().unwrap().len(), 1, "posted to the OS once");
+        assert_eq!(rt.view.lock().unwrap().notifications.iter().filter(|t| t.n.id == "n1").count(), 1);
+        engine.notification_action("lab", "n1", None, None).await.unwrap();
+        let opened = std::iter::from_fn(|| rx.try_recv().ok()).find(|e| matches!(e, AppEvent::OpenPresented { .. }));
+        assert_eq!(opened, Some(AppEvent::OpenPresented { host_id: "lab".into(), agent_id: "a1".into(), name: "presented/q3-report-v2.html".into() }));
     }
 
     fn asking(id: &str, request: &str) -> tf_proto::Agent {

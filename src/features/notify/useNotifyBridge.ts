@@ -7,7 +7,7 @@ import { haptic } from "@/features/shell/haptics";
 import { useLastTerminal } from "@/features/terminal/lastTerminal";
 import { inQuietHours, playChime } from "./chime";
 import { KIND_STATUS, runAnswer } from "./NotificationCenter";
-import { openHostPage, openNotification } from "./openNotification";
+import { openHostPage, openNotification, openPresented } from "./openNotification";
 
 /** Needs-you toasts linger longer than the 5s default, but not forever: the inbox and bell keep them. */
 const NEEDS_TOAST_MS = 12_000;
@@ -72,7 +72,9 @@ function followMoved(from: string, to: string): void {
  * - viewing an agent's session (app in front) marks its notifications read everywhere;
  * - `openAgent` (tray, OS notification click, deep link) → navigate to the agent;
  * - `openPage` (an OS notification that names a host's page) → `openHostPage`: a "decided for
- *   you" one lands on its decision in the Inbox (`notificationId`).
+ *   you" one lands on its decision in the Inbox (`notificationId`);
+ * - `openPresented` (an OS notification about a document an agent presented) → `openPresented`:
+ *   the agent's session with that document in the viewer.
  */
 export function useNotifyBridge(): void {
   const setAnswerNext = useUi((s) => s.setAnswerNext);
@@ -118,6 +120,10 @@ export function useNotifyBridge(): void {
           openHostPage(e.hostId, e.page, e.notificationId);
           return;
         }
+        if (e.type === "openPresented") {
+          openPresented(e.hostId, e.agentId, e.name);
+          return;
+        }
         if (e.type === "notifyDone") {
           for (const id of e.ids) {
             const open = openToasts.get(`${e.hostId}/${id}`);
@@ -143,7 +149,7 @@ export function useNotifyBridge(): void {
         }
         if (isMuted(key)) return;
         if (n.kind === "needs") haptic("warning");
-        else if (n.kind === "finished") haptic("success");
+        else if (n.kind === "finished" || n.kind === "presented") haptic("success");
         const s = useSettings.getState();
         // Inside Tauri the OS notification plays the system sound; elsewhere TeleFlock chimes itself.
         if (core.backend !== "tauri" && s.notifySound && !inQuietHours(s)) playChime(n.kind);

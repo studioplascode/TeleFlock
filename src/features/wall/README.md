@@ -4,7 +4,7 @@ The wall (`#/wall`, desktop): live transcripts of 4 or 9 agents side by side for
 view stops at two panes; the wall is the screen you leave open on the second monitor.
 
 ```ts
-// @/features/wall/WallView — route screen (lazy). Phones get a "needs a bigger screen" page pointing to Ambient.
+// @/features/wall/WallView — route screen (lazy). Phones get a "needs a bigger screen" page.
 export function WallView(): JSX.Element;
 ```
 

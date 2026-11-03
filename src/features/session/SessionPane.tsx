@@ -7,6 +7,7 @@ import { ConnStatusCard } from "@/features/hosts/ConnStatusCard";
 import { PHASE_LABEL, PHASE_STATUS, phaseBusy } from "@/features/shell/status";
 import { hostCall } from "./api";
 import { AskCard } from "./ask/AskCard";
+import { terminalWait, TerminalWaitCard } from "./ask/TerminalWait";
 import { Composer } from "./composer/Composer";
 import { SessionCtx } from "./context";
 import { SessionFindBar, useFindHotkey } from "./find/SessionFind";
@@ -162,13 +163,13 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
         )}
         {ready && <SessionFindBar agentKey={agentKey} mobile={mobile} />}
       </div>
-      <AnimatePresence mode="popLayout" onExitComplete={mobile ? undefined : toastAnchorsChanged}>
+      <AnimatePresence mode="popLayout" onExitComplete={toastAnchorsChanged}>
         {ui && (
           <motion.div
             key={ui.id}
-            // desktop toasts keep clear of the question too, not only of the composer under it
-            data-toast-anchor={mobile ? undefined : ""}
-            onAnimationComplete={mobile ? undefined : toastAnchorsChanged}
+            // toasts keep clear of the question too, not only of the composer under it
+            data-toast-anchor=""
+            onAnimationComplete={toastAnchorsChanged}
             initial={{ opacity: 0, y: 40, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: spring.bouncy }}
             exit={{ opacity: 0, y: 24, scale: 0.97, transition: { duration: 0.2 } }}
@@ -191,6 +192,7 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
           </motion.div>
         )}
       </AnimatePresence>
+      <TerminalWaitDock agentKey={agentKey} mobile={mobile} dialogOpen={ui != null} />
       {/* An agent's request for the user's browser: hostd raises no dialog for it, so it has its own card. */}
       <SessionBrowserAsk agentKey={agentKey} className="relative z-raised mx-auto w-full shrink-0" />
       {dock}
@@ -207,5 +209,34 @@ function SessionBody({ agentKey, hotkeys, mobile, compact, focus, ready, dock, c
       <SessionDialogs agentKey={agentKey} />
       <SubagentViewer agentKey={agentKey} />
     </>
+  );
+}
+
+/**
+ * A wait only the agent's terminal can answer, while no dialog of it is open here: its card where the
+ * ask card goes (the board and Inbox offer the same Answer in terminal). Subscribes to the agent on its
+ * own, so the session body does not render again with every live update.
+ */
+function TerminalWaitDock({ agentKey, mobile, dialogOpen }: { agentKey: string; mobile: boolean; dialogOpen: boolean }) {
+  const wait = terminalWait(useAgent(agentKey)?.needs, dialogOpen);
+  return (
+    <AnimatePresence onExitComplete={toastAnchorsChanged}>
+      {wait && (
+        <motion.div
+          key={`${wait.kind}:${wait.since}`}
+          data-toast-anchor=""
+          onAnimationComplete={toastAnchorsChanged}
+          initial={{ opacity: 0, y: 24 }}
+          animate={{ opacity: 1, y: 0, transition: spring.snappy }}
+          exit={{ opacity: 0, y: 16, transition: { duration: 0.15 } }}
+          className={cn("relative z-raised mx-auto flex max-h-[62%] w-full flex-col", mobile ? "shrink-0" : "min-h-0 shrink")}
+          style={{ maxWidth: TRANSCRIPT_MAX_WIDTH }}
+        >
+          <div className={cn("min-h-0 overflow-y-auto", mobile ? "rounded-[22px]" : "rounded-tile")}>
+            <TerminalWaitCard agentKey={agentKey} needs={wait} mobile={mobile} />
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

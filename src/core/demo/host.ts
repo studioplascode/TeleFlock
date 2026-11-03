@@ -40,7 +40,7 @@ import type {
 } from "@/core/gen";
 import { apiError } from "../errors";
 import { ircOf } from "../irc";
-import { OMP_COMMAND_NAMES, ompCommandName } from "../ompCommands";
+import { OMP_COMMAND_NAMES, ompCommand, ompCommandName } from "../ompCommands";
 import { AgentSim, type SimHost } from "./agent";
 import { demoAiComplete, demoAiLatency } from "./ai";
 import { DemoAutomations } from "./automations";
@@ -50,6 +50,7 @@ import { DemoGithub } from "./github";
 import type { DemoClock } from "./clock";
 import { fileBody, fileDiff } from "./codegen";
 import { demoDoc } from "./docs";
+import { demoMediaPath, demoMediaRead } from "./media";
 import { DemoOmpSettings } from "./ompSettings";
 import { type AgentOmp, agentOmpOf, selectorParts } from "./roleModels";
 import { DemoMcp } from "./mcp";
@@ -59,7 +60,7 @@ import { DemoCleanup } from "./cleanup";
 import { DemoIdleShells } from "./idleShells";
 import { CHATS, chatLabel, chatSeed, chatTargetRefused, DemoChats } from "./chats";
 import { DemoNotify } from "./notify";
-import { demoFirstPrompt } from "./dispatchAuto";
+import { demoFirstPrompt, demoLaunchCommand } from "./dispatchAuto";
 import {
   AGENTS,
   type AgentDef,
@@ -90,6 +91,7 @@ import {
   quotaTurn,
   renderTurn,
 } from "./scripts";
+import { boardReportSteps } from "./presented";
 import { historyFor, longHistory } from "./seeds";
 import { demoProgram, seedDemoShells, withPaneProcesses } from "./shells";
 import { DemoParking } from "./parking";
@@ -108,6 +110,7 @@ import { DemoJobs } from "./jobs";
 import { demoUsageReport } from "./usage";
 import { demoWrapped } from "./wrapped";
 import { demoInsight } from "./insight";
+import { demoDigest } from "./digest";
 import { type DemoPr, demoPrView, greenTurn, rebaseTarget, rebaseTurn } from "./fixes";
 import { DEMO_VERSION } from "./version";
 
@@ -556,7 +559,8 @@ export class DemoHost implements SimHost {
       if (def.column === "running") sim.agent.stateSince = now - def.since * 1000;
     }
     if (this.variant === "forge") {
-      this.sims.get("kanban")?.resume(kanbanTurn(), 2500);
+      // kanban ends its turn presenting the board's test report (a `presented` notification); the director asks for a new version now and then
+      this.sims.get("kanban")?.resume([...kanbanTurn(), ...boardReportSteps(1)], 2500);
       this.sims.get("pool")?.resume(poolTurn(), 4000);
       this.sims.get("ci")?.resume(ciTurn(), 75_000);
       // quota waits out a 429: it is already in omp's retry wait when the demo opens, and has been quiet for 3 minutes
@@ -1166,6 +1170,12 @@ export class DemoHost implements SimHost {
       return demoInsight(method, p, sim.agent, this.now(), HOME, sim.items);
     }
     if (method === "session.agentChat") return this.agentChat.page(this.ompSim(p.agentId), p);
+    if (method === "session.digest") {
+      // studio-pc plays a tf-hostd before 0.9.1: Name it again names its agents from their latest task
+      if (this.variant !== "forge") throw apiError("unknown_method", `unknown method \`${method}\``);
+      const sim = this.ompSim(p.agentId);
+      return demoDigest(sim.items, sim.meta());
+    }
     if (method.startsWith("jobs.") || method.startsWith("services.")) return this.jobsSim().call(method, p);
     if (method.startsWith("cleanup.idleShells")) return this.idleShells.call(method, p);
     if (method.startsWith("cleanup."))
@@ -1399,13 +1409,15 @@ export class DemoHost implements SimHost {
       case "fs.search":
         return this.fsSearch(this.str(p, "root"), this.str(p, "query"), typeof p.limit === "number" ? p.limit : 50);
       case "fs.read":
-        return this.fsRead(this.str(p, "path"));
+        return this.fsRead(this.str(p, "path"), p);
       case "git.status":
         return this.gitStatus(this.str(p, "cwd"));
       case "git.branches":
         return this.gitBranches(this.str(p, "cwd"));
       case "git.diff":
         return this.gitDiff(this.str(p, "cwd"), typeof p.path === "string" ? p.path : undefined);
+      case "git.show":
+        return this.gitShow(p);
       case "git.commit":
         return this.gitCommit(this.str(p, "cwd"), this.str(p, "message"));
       case "git.push":
@@ -1681,6 +1693,8 @@ export class DemoHost implements SimHost {
         const objective = sub === "set" ? rest.join(" ") : arg;
         sim.goal = { objective, status: "active", tokensUsed: 0 };
         this.control(sim, `Goal: ${objective}`);
+        // Goal mode works toward it right away.
+        if (!sim.busy) sim.startTurn(objective);
         break;
       }
       case "new":
@@ -1699,6 +1713,8 @@ export class DemoHost implements SimHost {
         break;
       default:
         this.control(sim, `Ran ${command}`);
+        // A builtin whose arguments are a task (`/vibe build it`, `/loop 3 fix the tests`) starts on it.
+        if (arg && ompCommand(name)?.task && !sim.busy) sim.startTurn(arg);
     }
     return {};
   }
@@ -1819,8 +1835,14 @@ export class DemoHost implements SimHost {
     const model = main ? modelByRef(main.model)?.label : typeof spec.model === "string" ? modelByRef(spec.model)?.label : undefined;
     const thinking = main ? main.thinking : (spec.thinking as AgentDef["thinking"]);
     const prompt = demoFirstPrompt(spec);
+    // A launch's command (`AgentSpec.command`, a Dispatch message that is one).
+    const command = demoLaunchCommand(spec);
+    // Its title: the first prompt, or the task a command's arguments give (what omp's first message would be).
+    const verb = command ? ompCommandName(command) : "";
+    const builtin = ompCommand(verb);
+    const told = prompt ?? (command && (!builtin || builtin.task) ? command.slice(1 + verb.length).replace(/^:/, "").trim() : undefined);
     // A just-started session: zero turns until its first prompt runs (the UI shows "Ready" / "Starting").
-    const def: AgentDef = { id: name, kind, workspace: wsId, title: prompt?.slice(0, 80) ?? name, column: "review", model: model ?? "opus-5", thinking: thinking ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [], fresh: true };
+    const def: AgentDef = { id: name, kind, workspace: wsId, title: told ? told.slice(0, 80) : name, column: "review", model: model ?? "opus-5", thinking: thinking ?? "high", since: 0, age: 0, ctxPct: 2, cost: 0, files: [], todos: [], fresh: true };
     const sim = this.addAgent(def, wsId, pane);
     this.decide.bind(sim, autoAnswer);
     if (own && (Object.keys(own.roles).length > 0 || Object.keys(own.chains).length > 0)) this.agentOmp.set(sim.agent.id, own);
@@ -1835,7 +1857,14 @@ export class DemoHost implements SimHost {
         sim.agent.omp = { ...sim.agent.omp, link: "live", linkReason: undefined, linkVia: "bridge", linkSince: this.env.clock.now() };
         sim.refreshDerived();
         this.agentChanged(sim.agent.id);
-        if (prompt) sim.startTurn(prompt);
+        if (command) {
+          // As hostd runs it: typed into omp's composer the way `agent.slash` does; a refusal is an activity.
+          try {
+            this.slash({ agentId: sim.agent.id, command });
+          } catch (e) {
+            this.activity(sim.agent.id, "error", `${command.split(/\s/, 1)[0]} didn't run`, e instanceof Error ? e.message : String(e));
+          }
+        } else if (prompt) sim.startTurn(prompt);
       });
     }
     this.activity(name, "started", `${name} started`, prompt);
@@ -1894,6 +1923,8 @@ export class DemoHost implements SimHost {
     const target = (p.target ?? {}) as Record<string, unknown>;
     const spec = (p.spec ?? {}) as Record<string, unknown>;
     const own = agentOmpOf(spec);
+    // Checked before any pane is made, as hostd checks it.
+    demoLaunchCommand(spec);
     let wsId: string;
     let pane: string;
     if (target.kind === "workspace") {
@@ -2295,8 +2326,15 @@ export class DemoHost implements SimHost {
     return { files: ranked.slice(0, limit).map(([f]) => f), truncated: ranked.length > limit };
   }
 
-  private fsRead(path: string): unknown {
+  private fsRead(path: string, p: Record<string, unknown>): unknown {
     const abs = this.resolve(path);
+    // Review's binary files: the working tree's bytes, in ranges as hostd reads them.
+    const media = demoMediaPath(abs);
+    if (media) {
+      const read = demoMediaRead(media, "after", typeof p.offset === "number" ? p.offset : undefined, typeof p.maxBytes === "number" ? p.maxBytes : undefined);
+      if (!read) throw apiError("not_found", `No such file: ${abs}`);
+      return read.then((r) => ({ path: abs, ...r }));
+    }
     // The Markdown documents the demo's diffs change: the working-tree version.
     const doc = demoDoc(abs.slice(abs.indexOf("/docs/") + 1))?.after;
     if (doc !== undefined && abs.includes("/docs/")) return { path: abs, size: doc.length, text: doc, truncated: false };
@@ -2363,6 +2401,18 @@ export class DemoHost implements SimHost {
     const files = [...this.sims.values()].filter((s) => s.agent.workspaceId === m.ws.id).flatMap((s) => s.branchFiles()).filter((f) => !path || f.path === path);
     const patch = files.map((f) => fileDiff(f).patch).join("\n");
     return { base: `origin/main (${new Rng(hash(`${m.path}base`)).hex(7)})`, patch, files, truncated: false };
+  }
+
+  /** `git.show`: a binary file's base version (Review's "Before"); studio-pc plays a tf-hostd before 0.9.1. */
+  private gitShow(p: Record<string, unknown>): unknown {
+    if (this.variant !== "forge") throw apiError("unknown_method", "unknown method `git.show`");
+    this.wsForCwd(this.str(p, "cwd"));
+    const rev = this.str(p, "rev");
+    const path = this.str(p, "path");
+    if (path.includes("\\") || path.split("/").some((c) => c === "" || c === "." || c === "..")) throw apiError("invalid_params", `\`${path}\` is not a path inside the repository`);
+    const read = demoMediaRead(path, "before", typeof p.offset === "number" ? p.offset : 0, typeof p.maxBytes === "number" ? p.maxBytes : undefined);
+    if (!read) throw apiError("not_found", `\`${path}\` is not in \`${rev}\``);
+    return read;
   }
 
   private gitCommit(cwd: string, message: string): unknown {
@@ -2512,6 +2562,7 @@ export class DemoHost implements SimHost {
         prompt: sim ? (text) => (sim.busy ? (sim.agent.state === "working" ? sim.steer(text) : undefined) : sim.startTurn(text)) : undefined,
         abort: sim ? () => sim.abort("Interrupted (Esc)") : undefined,
         render: sim ? (rows) => sim.renderTui(rows) : undefined,
+        dialogKey: sim ? (data) => sim.terminalKey(data) : undefined,
         program: agentId ? undefined : demoProgram(wsm, paneId, () => this.dirtyWs.add(wsm.ws.id)),
         after: (ms, cb) => {
           this.env.clock.after(ms, cb);

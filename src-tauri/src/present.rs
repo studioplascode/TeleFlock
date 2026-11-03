@@ -55,7 +55,8 @@ pub fn present(host: Option<&HostProfile>, n: &Notification, style: NotifyStyle)
     let host_id = host.map(|h| h.id.clone()).unwrap_or_default();
     let category = match n.kind {
         NotifyKind::Needs => Category::Needs,
-        NotifyKind::Finished => Category::Finished,
+        // A presented document alerts like a finished turn (Android's "Agent updates" channel).
+        NotifyKind::Finished | NotifyKind::Presented => Category::Finished,
         NotifyKind::Error => Category::Error,
         NotifyKind::Quiet | NotifyKind::Info => Category::Info,
     };

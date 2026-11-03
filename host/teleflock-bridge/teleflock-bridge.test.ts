@@ -898,6 +898,17 @@ function fakeAgentSession(sm: SM) {
 		async abort() {
 			this.aborted++;
 		},
+		/** omp's `steeringMode` of this session, and every `setSteeringMode(mode, persist)` call. */
+		steeringMode: "one-at-a-time",
+		steeringModes: [] as Array<[string, unknown]>,
+		setSteeringMode(mode: string, persist?: boolean) {
+			this.steeringModes.push([mode, persist]);
+			this.steeringMode = mode;
+		},
+		queued: { steering: [] as string[], followUp: [] as string[] },
+		getQueuedMessages() {
+			return { steering: [...this.queued.steering], followUp: [...this.queued.followUp], liveSteered: 0 };
+		},
 	};
 }
 
@@ -945,6 +956,8 @@ function fakeOmp(
 		runtimeOptions?: Json[];
 		waits?: boolean;
 		manualTicks?: boolean;
+		/** omp's `cfgSteeringMode` handle (a root export here). */
+		steering?: object;
 	} = {},
 ): Omp {
 	const sm = fakeSessionManager(opts.sub ? `sub-${opts.sub}` : "S1", `/tmp/${opts.sub ?? "S1"}.jsonl`);
@@ -980,6 +993,7 @@ function fakeOmp(
 		}
 	};
 	const ns: Json = { VERSION: "18.13.2", AgentRegistry };
+	if (opts.steering) ns.cfgSteeringMode = opts.steering;
 	if (opts.lifecycle) ns.AgentLifecycleManager = class {
 		static global() {
 			return opts.lifecycle;
@@ -1060,7 +1074,7 @@ describe("extension against a fake hostd", () => {
 		const hostd = await startHostd();
 		const omp = await bridged(hostd);
 		const hello = hostd.lines.find(l => l.t === "hello")!;
-		expect(hello.bridgeVersion).toBe("2.3.0");
+		expect(hello.bridgeVersion).toBe("2.4.0");
 		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true });
 
 		const res = await request(hostd, "liveSubscribe");
@@ -1317,6 +1331,8 @@ describe("extension against a fake hostd", () => {
 		omp2.registry.refs.set("0-X", { id: "0-X", kind: "sub", status: "running", session: sub });
 		expect((await request(hostd, "agentCmd", { cmd: "chat", agentId: "0-X", text: " go on " })).ok).toBe(true);
 		expect(sub.prompts).toEqual([["go on", { streamingBehavior: "steer" }]]);
+		// A subagent hostd chats with takes queued steers together too (2.4.0).
+		expect(sub.steeringModes).toEqual([["all", false]]);
 		expect((await request(hostd, "agentCmd", { cmd: "kill", agentId: "0-X" })).ok).toBe(true);
 		expect(sub.aborted).toBe(1);
 		expect(calls).toEqual([
@@ -1343,6 +1359,76 @@ describe("extension against a fake hostd", () => {
 		expect(after[0]!.t).toBe("resync");
 		expect(after[0]!.sessionId).toBe("S2");
 		expect(after.map(l => (l.f as Json | undefined)?.event).filter(Boolean).map(e => (e as Json).type)).toEqual(["turn_end"]);
+	});
+});
+
+describe("queued steers land together (2.4.0)", () => {
+	/** omp's `cfgSteeringMode` handle; `user`: what the user's omp config sets, if anything. */
+	function steeringSetting(user?: "all" | "one-at-a-time") {
+		return {
+			user,
+			get(_scope: object) {
+				return this.user ?? "one-at-a-time";
+			},
+			isConfigured(_scope: object) {
+				return this.user !== undefined;
+			},
+		};
+	}
+
+	test("the main session takes every queued steer at the next boundary, for this process only", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd, { steering: steeringSetting() });
+		await until(() => omp.session.steeringMode === "all");
+		expect(omp.session.steeringModes).toEqual([["all", false]]);
+		// omp set its configured mode again (a config reload): the next steer brings "all" back.
+		omp.session.steeringMode = "one-at-a-time";
+		omp.session.isStreaming = true;
+		await request(hostd, "prompt", { text: "and this too" });
+		expect(omp.session.steeringMode).toBe("all");
+		// A follow-up leaves the steering mode alone.
+		omp.session.steeringMode = "one-at-a-time";
+		await request(hostd, "prompt", { text: "later", delivery: "followUp" });
+		expect(omp.session.steeringMode).toBe("one-at-a-time");
+		expect(omp.session.steeringModes).toEqual([
+			["all", false],
+			["all", false],
+		]);
+	});
+
+	test("a steeringMode the user set wins, also over the mode the bridge set before", async () => {
+		const hostd = await startHostd();
+		const user = steeringSetting("one-at-a-time");
+		const omp = await bridged(hostd, { steering: user });
+		omp.session.isStreaming = true;
+		await request(hostd, "prompt", { text: "one" });
+		expect(omp.session.steeringModes).toEqual([]);
+		// The user took it out of omp's config: steers land together; set again, theirs is back.
+		user.user = undefined;
+		await request(hostd, "prompt", { text: "two" });
+		expect(omp.session.steeringMode).toBe("all");
+		user.user = "one-at-a-time";
+		await request(hostd, "prompt", { text: "three" });
+		await request(hostd, "prompt", { text: "four" });
+		expect(omp.session.steeringModes).toEqual([
+			["all", false],
+			["one-at-a-time", false],
+		]);
+	});
+
+	test("the queue is omp's own, and its changes reach hostd at once", async () => {
+		const hostd = await startHostd();
+		const omp = await bridged(hostd, { manualTicks: true });
+		omp.session.queued.steering.push("first", "second\nline");
+		const queued = hostd.next(l => l.t === "event" && l.event === "queue_update");
+		omp.session.emit({ type: "queue_update", steering: ["first", "second\nline"], followUp: [], liveSteered: 0 });
+		expect((await queued).data).toEqual({ steering: ["first", "second\nline"], followUp: [] });
+		// The model took both at the next boundary.
+		omp.session.queued.steering.length = 0;
+		const taken = hostd.next(l => l.t === "event" && l.event === "queue_update");
+		omp.session.emit({ type: "queue_update", steering: [], followUp: [], liveSteered: 0 });
+		expect((await taken).data).toEqual({ steering: [], followUp: [] });
+		expect((await request(hostd, "getQueue")).result).toEqual({ steering: [], followUp: [] });
 	});
 });
 

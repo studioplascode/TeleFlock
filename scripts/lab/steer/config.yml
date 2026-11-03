@@ -1,0 +1,25 @@
+# Steer lab omp settings (isolated agent dir; setup.sh copies this in; drive.ts adds `steeringMode`
+# no approvals, no setup wizard, no update checks.
+modelRoles:
+  default: steerlab/lab-1
+  smol: steerlab/lab-1
+  slow: steerlab/lab-1
+  vision: steerlab/lab-1
+  plan: steerlab/lab-1
+  commit: steerlab/lab-1
+  tiny: steerlab/lab-1
+  memory: steerlab/lab-1
+  task: steerlab/lab-1
+  advisor: steerlab/lab-1
+  widget: steerlab/lab-1
+  judge: steerlab/lab-1
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

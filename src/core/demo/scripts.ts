@@ -76,6 +76,14 @@ export interface UiSpec {
    * the second on); this spec's own kind, message and options are unused. `then` runs after the last.
    */
   questions?: AskQuestionSpec[];
+  /**
+   * A prompt only the agent's terminal answers (omp's own dialog on a bridge older than 2.3.0, as tf-hostd
+   * infers it): Needs you `blocked` with `message` and `detail`, not answerable in the app and no session
+   * dialog; the tool row runs meanwhile. The agent's terminal shows omp's dialog: `message`, the `shows` line
+   * and `options` with `options[initial]` highlighted; there ↑/↓ move, Enter answers with the highlighted
+   * option, Esc cancels. `needs` stays the answer's kind (an approval: allowed or denied).
+   */
+  terminal?: { initial: number; shows: string };
 }
 
 /** One question of a multi-question ask. */
@@ -760,6 +768,7 @@ export const DIRECTOR_PROMPTS: string[] = [
   "Why does the lane order reset after a reconnect?",
   "Polish the empty states and run the tests",
   "Commit this and get it ready for a PR",
+  "Put the latest test results in a report I can look at",
 ];
 
 /** Context window of the demo subagent models (luna matches the 272K omp reports for gpt-6-luna). */

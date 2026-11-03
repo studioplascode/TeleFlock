@@ -17,6 +17,14 @@ kind: string, model?: string, thinking?: ThinkingLevel, plan: boolean,
  */
 prompt?: string, 
 /**
+ * A slash command run once the agent is ready, after plan mode and before `prompt` (hosts
+ * ≥ 0.9.1; older ones ignore the field, so apps send none to them): one line, typed into
+ * omp's composer as `agent.slash` does, a builtin or a skill, prompt-template or extension
+ * command the new session lists (`/plan add a settings page`, `/skill:review`). A Dispatch
+ * message that is a command starts its agent this way.
+ */
+command?: string, 
+/**
  * Images sent with the initial prompt (an image-only first message is allowed).
  */
 images?: Array<ImageInput>, 

@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Blocks, BrushCleaning, Cable, Clock3, Globe, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, Orbit, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
+import { Activity, BarChart3, Blocks, BrushCleaning, Cable, Clock3, Globe, Grid3x3, Inbox, KeyRound, LayoutDashboard, type LucideIcon, PartyPopper, Puzzle, Send, Server, Settings2, SlidersHorizontal } from "lucide-react";
 import type { Agent, Column, NeedsKind } from "@/core/gen";
 import { formatAge, formatElapsed } from "@/design";
 
@@ -180,8 +180,8 @@ export interface ViewDef extends ActionDef {
 }
 
 /**
- * Views reachable from the nav (desktop sidebar / phone tabs, More), the palette, Settings and the host
- * cards: one label, icon and description per page, wherever it is offered.
+ * Views reachable from the nav (desktop sidebar / phone tabs, More), the palette, Settings, the host
+ * cards and Usage (Flock Wrapped): one label, icon and description per page, wherever it is offered.
  */
 export const VIEWS = {
   board: { label: "Board", shortcut: "Ctrl 1", description: "Every agent on every host, by state", icon: LayoutDashboard },
@@ -201,7 +201,6 @@ export const VIEWS = {
   accounts: { label: "Accounts", description: "Subscription logins omp uses, per host: link, unlink, pick the default", icon: KeyRound },
   cleanup: { label: "Cleanup", description: "Worktrees per host, by pull request, age and size: delete merged or stale ones; omp's storage", icon: BrushCleaning },
   wall: { label: "Wall", description: "Live transcripts side by side, 2×2 or 3×3, answered in place: for a big monitor", icon: Grid3x3 },
-  ambient: { label: "Ambient", description: "One orb per agent for a tablet or second screen: glows when one needs you, chimes if you like", icon: Orbit },
 } as const satisfies Record<string, ViewDef>;
 
 /** omp's own per-host pages (the omp area), in the order every entry point lists them. */

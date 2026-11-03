@@ -1114,6 +1114,48 @@ async fn a_turn_omp_ended_without_the_feed_saying_so_is_reloaded() {
     lab.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_steer_omp_takes_before_the_prompt_answers_is_not_left_queued() {
+    // omp can take a steer at once (it cuts a running tool batch short), so the steer's row can
+    // reach hostd ahead of the prompt's answer. Listed only after that answer, the steer stayed
+    // in `meta.queue` until omp went idle: a chip of a delivered message nothing could pull back.
+    let lab = Lab::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = session_file(dir.path(), "s1", "hi");
+    let mut ext = bridge_serves(&lab, "s1", &file, 1).await;
+    until("the bridge serves the session", || lab.session("s1").is_some_and(|s| link_of(&s) == LIVE)).await;
+    let s = lab.session("s1").unwrap();
+    ext.send(json!({ "t": "live", "seq": 2, "f": { "t": "event", "event": { "type": "agent_start" } } })).await;
+    until("the turn runs", || s.is_streaming()).await;
+    let queued = |s: &OmpSession| s.lock().replica.meta().queue.steering.clone();
+    let call = tokio::spawn({
+        let s = s.clone();
+        async move { s.prompt_queued("land it now", vec![], Delivery::Auto).await }
+    });
+    let req = ext.recv_req().await;
+    assert_eq!(req["op"], "prompt");
+    assert_eq!(queued(&s), ["land it now"], "listed before it goes out");
+    let row = json!({ "role": "user", "content": [{ "type": "text", "text": "land it now" }], "steering": true, "timestamp": crate::util::now_ms() });
+    ext.send(json!({ "t": "live", "seq": 3, "f": { "t": "event", "event": { "type": "message_start", "message": row } } })).await;
+    ext.send(json!({ "t": "live", "seq": 4, "f": { "t": "event", "event": { "type": "message_end", "message": row } } })).await;
+    until("the steer's row lands", || rows(&s).iter().any(|i| matches!(i, TranscriptItem::User(u) if u.text == "land it now"))).await;
+    ext.ok(&req, json!({ "queued": true })).await;
+    call.await.unwrap().unwrap();
+    assert!(queued(&s).is_empty(), "the delivered steer is still queued: {:?}", queued(&s));
+
+    // A send that fails is unlisted again.
+    let call = tokio::spawn({
+        let s = s.clone();
+        async move { s.prompt_queued("never sent", vec![], Delivery::Auto).await }
+    });
+    let req = ext.recv_req().await;
+    assert_eq!(queued(&s), ["never sent"]);
+    ext.send(json!({ "t": "res", "id": req["id"], "ok": false, "error": { "code": "omp_error", "message": "boom" } })).await;
+    assert!(call.await.unwrap().is_err());
+    assert!(queued(&s).is_empty(), "{:?}", queued(&s));
+    lab.stop().await;
+}
+
 // ───────────────────────────── an ask's explanation and Back ─────────────────────────────
 
 const EXPLANATION: &str = "**SQLite** keeps it in one file; Postgres needs a server.\n\nBoth work with Drizzle.";

@@ -1,250 +1,197 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import type { AiOutcome, RambleInput } from "./ai";
-import { RAMBLE_MAX_CHARS } from "./ai";
+import { aiTesting, RAMBLE_MAX_CHARS, suggestRamble } from "./ai";
+import { apiError } from "./errors";
+import type { AiCompleteParams, AiCompleteResult } from "./gen";
 import { createRambler } from "./rambler";
+
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  aiTesting.setComplete(null);
+  aiTesting.reset();
+});
 
 /** A rewrite the test answers by hand: `calls` are the inputs seen, `answer(i, …)` resolves call i. */
 function manual() {
   const calls: RambleInput[] = [];
   const answers: ((o: AiOutcome<string>) => void)[] = [];
-  let running = 0;
-  let overlap = false;
   const rewrite = (input: RambleInput) => {
     calls.push(input);
-    if (++running > 1) overlap = true;
-    return new Promise<AiOutcome<string>>((resolve) =>
-      answers.push((o) => {
-        running--;
-        resolve(o);
-      }),
-    );
+    return new Promise<AiOutcome<string>>((resolve) => answers.push(resolve));
   };
   const ok = (value: string): AiOutcome<string> => ({ ok: true, value });
-  return { calls, rewrite, answer: (i: number, o: AiOutcome<string>) => answers[i]?.(o), ok, overlapped: () => overlap };
+  return { calls, rewrite, answer: (i: number, o: AiOutcome<string>) => answers[i]?.(o), ok };
 }
 
-const tick = () => new Promise<void>((r) => setTimeout(r, 0));
-const fail = (why: "unavailable" | "failed" | "timeout" | "junk", message = "no"): AiOutcome<string> => ({ ok: false, failure: { why, message } });
+/** The rewrite the app uses (`suggestRamble`), down to the host's `ai.complete`: every call reaching the host is recorded. */
+function host(reply: () => Promise<Omit<AiCompleteResult, "model">>) {
+  const calls: AiCompleteParams[] = [];
+  aiTesting.setComplete(async (_h, p) => {
+    calls.push(p);
+    return reply();
+  });
+  return { calls, rewrite: (input: RambleInput) => suggestRamble("h", input, { role: "tiny" }) };
+}
 
-describe("coalescing", () => {
-  test("never two calls at once: utterances during a call wait, then one call carries the newest transcript and the previous rewrite", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
+describe("one call, once the dictation ends", () => {
+  test("no ai.complete while dictating; exactly one after the stop, over the whole transcript", async () => {
+    const h = host(async () => ({ text: "Fix the login bug in auth.ts and add a test.", ms: 5 }));
+    const r = createRambler({ rewrite: h.rewrite, about: "Repository: teleflock" });
     r.push("fix the login");
+    vi.advanceTimersByTime(60_000);
     r.push("bug in auth dot ts");
     r.push("and add a test");
-    expect(m.calls.map((c) => c.transcript)).toEqual(["fix the login"]);
-    m.answer(0, m.ok("Fix the login."));
-    await tick();
-    expect(m.calls.map((c) => c.transcript)).toEqual(["fix the login", "fix the login bug in auth dot ts and add a test"]);
-    expect(m.calls[1]?.previous).toBe("Fix the login.");
-    m.answer(1, m.ok("Fix the login bug in auth.ts and add a test."));
-    await tick();
-    expect(m.calls).toHaveLength(2);
-    expect(m.overlapped()).toBe(false);
-    expect(r.state()).toMatchObject({ clean: "Fix the login bug in auth.ts and add a test.", upToDate: true, thinking: false });
-  });
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(h.calls).toHaveLength(0);
+    expect(r.state()).toEqual({ raw: "fix the login bug in auth dot ts and add a test", thinking: false, error: null });
 
-  test("the first call carries no previous rewrite and the context", () => {
-    const m = manual();
-    createRambler({ rewrite: m.rewrite, about: "repo teleflock" }).push("hello");
-    expect(m.calls[0]).toEqual({ transcript: "hello", about: "repo teleflock" });
-  });
-
-  test("live calls are paced: a quick answer does not start the next call before the gap", async () => {
-    const m = manual();
-    let t = 1_000;
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 40, now: () => t });
-    r.push("one");
-    r.push("two");
-    m.answer(0, m.ok("One."));
-    await tick();
-    expect(m.calls).toHaveLength(1);
-    t += 40;
-    await new Promise((res) => setTimeout(res, 60));
-    expect(m.calls.map((c) => c.transcript)).toEqual(["one", "one two"]);
-  });
-
-  test("live calls are capped; the final call after finish() still happens", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0, maxLiveCalls: 2 });
-    for (let i = 0; i < 4; i++) {
-      r.push(`part${i}`);
-      m.answer(i, m.ok(`clean${i}`));
-      await tick();
-    }
-    expect(m.calls).toHaveLength(2);
     const done = r.finish();
-    await tick();
-    expect(m.calls).toHaveLength(3);
-    m.answer(2, m.ok("final"));
-    expect((await done).text).toBe("final");
-  });
-});
-
-describe("finish", () => {
-  test("waits for the call in flight, then makes one final call for what was said meanwhile", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
-    r.push("add a cache");
-    r.push("keyed by user id");
-    const done = r.finish();
-    m.answer(0, m.ok("Add a cache."));
-    await tick();
-    expect(m.calls.map((c) => c.transcript)).toEqual(["add a cache", "add a cache keyed by user id"]);
-    m.answer(1, m.ok("Add a cache keyed by user id."));
-    expect(await done).toEqual({ text: "Add a cache keyed by user id.", raw: "add a cache keyed by user id", cleaned: true, error: null });
-  });
-
-  test("a rewrite that already covers everything resolves at once, without another call", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
-    r.push("rename foo to bar");
-    m.answer(0, m.ok("Rename foo to bar."));
-    await tick();
-    expect((await r.finish()).text).toBe("Rename foo to bar.");
-    expect(m.calls).toHaveLength(1);
-  });
-
-  test("nothing said: empty result, no call", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite });
-    expect(await r.finish()).toEqual({ text: "", raw: "", cleaned: false, error: null });
-    expect(m.calls).toHaveLength(0);
-  });
-
-  test("the final call is not paced", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 60_000 });
-    r.push("one");
-    m.answer(0, m.ok("One."));
-    await tick();
-    r.push("two");
-    const done = r.finish();
-    expect(m.calls).toHaveLength(2);
-    m.answer(1, m.ok("One. Two."));
-    expect((await done).text).toBe("One. Two.");
-  });
-
-  test("a model that is too slow falls back to the raw transcript", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, finalTimeoutMs: 20 });
-    r.push("slow one");
-    const res = await r.finish();
-    expect(res).toMatchObject({ text: "slow one", cleaned: false, error: "The model took too long" });
-    m.answer(0, m.ok("late"));
-    await tick();
-    expect(r.state().clean).toBe("");
-  });
-});
-
-describe("failures fall back to the raw words", () => {
-  test("a failed final call: raw transcript, the reason, no retry", async () => {
-    const m = manual();
-    // no live call: the one after finish() is the final call
-    const r = createRambler({ rewrite: m.rewrite, maxLiveCalls: 0 });
-    r.push("do the thing");
-    const done = r.finish();
-    m.answer(0, fail("timeout", "omp's tiny model didn't answer in time"));
-    expect(await done).toEqual({ text: "do the thing", raw: "do the thing", cleaned: false, error: "omp's tiny model didn't answer in time" });
-    expect(m.calls).toHaveLength(1);
-  });
-
-  test("a live call that fails after the user stopped is no final failure: the final call still runs", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
-    r.push("add a cache");
-    r.push("keyed by user id");
-    const done = r.finish();
-    // the call on the earlier part, started before finish(), times out
-    m.answer(0, fail("timeout", "slow"));
-    await tick();
-    expect(m.calls.map((c) => c.transcript)).toEqual(["add a cache", "add a cache keyed by user id"]);
-    m.answer(1, m.ok("Add a cache keyed by user id."));
-    expect(await done).toEqual({ text: "Add a cache keyed by user id.", raw: "add a cache keyed by user id", cleaned: true, error: null });
-  });
-
-  test("an unavailable host stops the session's calls at once", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
-    r.push("a");
-    m.answer(0, fail("unavailable", "omp has no tiny role"));
-    await tick();
-    r.push("b");
-    await tick();
-    expect(m.calls).toHaveLength(1);
-    expect(r.state()).toMatchObject({ raw: "a b", thinking: false, error: "omp has no tiny role" });
-    expect((await r.finish()).text).toBe("a b");
-  });
-
-  test("one transient failure is retried with the newest transcript; a second in a row stops asking", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
-    r.push("a");
-    m.answer(0, fail("junk"));
-    await tick();
-    expect(m.calls.map((c) => c.transcript)).toEqual(["a", "a"]);
-    m.answer(1, fail("failed"));
-    await tick();
-    r.push("b");
-    await tick();
-    expect(m.calls).toHaveLength(2);
+    expect(r.state().thinking).toBe(true);
+    expect(await done).toEqual({ text: "Fix the login bug in auth.ts and add a test.", raw: "fix the login bug in auth dot ts and add a test", cleaned: true, error: null });
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]?.prompt).toContain("<transcript>\nfix the login bug in auth dot ts and add a test\n</transcript>");
+    expect(h.calls[0]?.prompt).toContain("<context>\nRepository: teleflock\n</context>");
     expect(r.state().thinking).toBe(false);
   });
 
-  test("a rewrite after a failure clears the error", async () => {
+  test("the call carries the transcript and the context, nothing else", () => {
     const m = manual();
-    const r = createRambler({ rewrite: m.rewrite, minGapMs: 0 });
-    r.push("a");
-    m.answer(0, fail("junk", "odd answer"));
-    await tick();
-    expect(r.state().error).toBe("odd answer");
-    m.answer(1, m.ok("A."));
-    await tick();
-    expect(r.state()).toMatchObject({ error: null, clean: "A." });
+    const r = createRambler({ rewrite: m.rewrite, about: "repo teleflock" });
+    r.push(" hello ");
+    r.push("");
+    r.push("world");
+    void r.finish();
+    expect(m.calls).toEqual([{ transcript: "hello world", about: "repo teleflock" }]);
+    const bare = manual();
+    const s = createRambler({ rewrite: bare.rewrite });
+    s.push("hi");
+    void s.finish();
+    expect(bare.calls).toEqual([{ transcript: "hi" }]);
   });
 
-  test("a rejected call is a failure, not an unhandled error", async () => {
-    const r = createRambler({ rewrite: () => Promise.reject(new Error("link down")), minGapMs: 0 });
-    r.push("x");
-    const res = await r.finish();
-    expect(res).toMatchObject({ text: "x", cleaned: false, error: "link down" });
-  });
-
-  test("a transcript beyond the limit is never sent and stays as dictated", async () => {
+  test("a second finish() is the same answer, not a second call; words after the stop are not added", async () => {
     const m = manual();
     const r = createRambler({ rewrite: m.rewrite });
-    r.push("x".repeat(RAMBLE_MAX_CHARS + 1));
-    expect(m.calls).toHaveLength(0);
-    const res = await r.finish();
-    expect(res.cleaned).toBe(false);
-    expect(res.error).toContain("Too long");
+    r.push("rename foo to bar");
+    const first = r.finish();
+    r.push("and baz");
+    expect(r.finish()).toBe(first);
+    m.answer(0, m.ok("Rename foo to bar."));
+    expect(await first).toMatchObject({ text: "Rename foo to bar.", raw: "rename foo to bar" });
+    expect(m.calls).toHaveLength(1);
+  });
+
+  test("nothing said: no call, an empty result", async () => {
+    const h = host(async () => ({ text: "x", ms: 1 }));
+    const r = createRambler({ rewrite: h.rewrite });
+    expect(await r.finish()).toEqual({ text: "", raw: "", cleaned: false, error: null });
+    expect(h.calls).toHaveLength(0);
   });
 });
 
 describe("cancel", () => {
-  test("drops late answers and releases a pending finish with the raw words", async () => {
+  test("cancelled before the stop: no call, ever", async () => {
+    const h = host(async () => ({ text: "Hello.", ms: 1 }));
+    const r = createRambler({ rewrite: h.rewrite });
+    r.push("hello");
+    r.cancel();
+    r.push("more");
+    expect(await r.finish()).toEqual({ text: "hello", raw: "hello", cleaned: false, error: null });
+    vi.advanceTimersByTime(60_000);
+    expect(h.calls).toHaveLength(0);
+  });
+
+  test("cancelled while tidying: the pending finish gets the raw words and the late answer is dropped", async () => {
     const m = manual();
     const r = createRambler({ rewrite: m.rewrite });
     r.push("hello");
     const done = r.finish();
     r.cancel();
-    expect((await done).text).toBe("hello");
+    expect(await done).toEqual({ text: "hello", raw: "hello", cleaned: false, error: null });
     m.answer(0, m.ok("Hello."));
-    await tick();
-    expect(r.state().clean).toBe("");
+    expect(await r.finish()).toMatchObject({ text: "hello", cleaned: false });
+    expect(r.state().thinking).toBe(false);
+  });
+});
+
+describe("failures fall back to the raw words", () => {
+  test("a failed call: the raw transcript and the host's reason, no retry", async () => {
+    const h = host(async () => {
+      throw apiError("ai_failed", "omp exited with status 1");
+    });
+    const r = createRambler({ rewrite: h.rewrite });
+    r.push("do the thing");
+    expect(await r.finish()).toEqual({ text: "do the thing", raw: "do the thing", cleaned: false, error: "omp exited with status 1" });
+    expect(h.calls).toHaveLength(1);
   });
 
-  test("subscribers hear every change until they unsubscribe", async () => {
-    const m = manual();
-    const r = createRambler({ rewrite: m.rewrite });
-    let n = 0;
-    const off = r.subscribe(() => n++);
-    r.push("a");
-    const seen = n;
-    expect(seen).toBeGreaterThan(0);
-    off();
-    r.push("b");
-    expect(n).toBe(seen);
+  test("an unusable answer: the raw transcript and why", async () => {
+    const h = host(async () => ({ text: "Let me look at the repository structure first.", ms: 1 }));
+    const r = createRambler({ rewrite: h.rewrite });
+    r.push("um add a retry to the uploader");
+    expect(await r.finish()).toEqual({ text: "um add a retry to the uploader", raw: "um add a retry to the uploader", cleaned: false, error: "The model's answer wasn't a usable rewrite" });
   });
+
+  test("a rejected call is a failure, not an unhandled error", async () => {
+    const r = createRambler({ rewrite: () => Promise.reject(new Error("link down")) });
+    r.push("x");
+    expect(await r.finish()).toMatchObject({ text: "x", cleaned: false, error: "link down" });
+  });
+
+  test("a model that is too slow: the raw transcript; its late answer changes nothing", async () => {
+    const m = manual();
+    const r = createRambler({ rewrite: m.rewrite, timeoutMs: 20 });
+    r.push("slow one");
+    const done = r.finish();
+    vi.advanceTimersByTime(20);
+    expect(await done).toEqual({ text: "slow one", raw: "slow one", cleaned: false, error: "The model took too long" });
+    expect(r.state().thinking).toBe(false);
+    m.answer(0, m.ok("late"));
+    expect(await r.finish()).toMatchObject({ text: "slow one", cleaned: false });
+  });
+
+  test("a transcript beyond the limit says so while dictating and is never sent", async () => {
+    const h = host(async () => ({ text: "x", ms: 1 }));
+    const r = createRambler({ rewrite: h.rewrite });
+    r.push("x".repeat(RAMBLE_MAX_CHARS + 1));
+    expect(r.state().error).toContain("Too long");
+    const res = await r.finish();
+    expect(res).toMatchObject({ cleaned: false, error: expect.stringContaining("Too long") });
+    expect(res.text).toHaveLength(RAMBLE_MAX_CHARS + 1);
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
+test("the host's worker is warmed when the session starts and while it lasts; never after the stop or a cancel", () => {
+  const m = manual();
+  let warmed = 0;
+  const r = createRambler({ rewrite: m.rewrite, warm: () => warmed++, warmEveryMs: 10 });
+  expect(warmed).toBe(1);
+  r.push("a");
+  vi.advanceTimersByTime(35);
+  expect(warmed).toBe(4);
+  expect(m.calls).toHaveLength(0);
+  void r.finish();
+  vi.advanceTimersByTime(100);
+  expect(warmed).toBe(4);
+
+  let again = 0;
+  const s = createRambler({ rewrite: m.rewrite, warm: () => again++, warmEveryMs: 10 });
+  s.cancel();
+  vi.advanceTimersByTime(100);
+  expect(again).toBe(1);
+});
+
+test("subscribers hear every change until they unsubscribe", () => {
+  const m = manual();
+  const r = createRambler({ rewrite: m.rewrite });
+  let n = 0;
+  const off = r.subscribe(() => n++);
+  r.push("a");
+  const seen = n;
+  expect(seen).toBeGreaterThan(0);
+  off();
+  r.push("b");
+  expect(n).toBe(seen);
 });

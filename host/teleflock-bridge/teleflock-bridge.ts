@@ -79,8 +79,12 @@ import type {
  *         - `agentChat`: omp's IRC bus is tapped (one wrapper per process around `IrcBus.send`): every
  *           agent-to-agent message of the session's tree goes out as `irc` events, one per delivery
  *           leg when it starts and again with omp's receipt when it settled (the agent chat log).
+ *  2.4.0: (no flag) every steer queued while the agent works lands with the others at the next
+ *         boundary: the session's steering mode is "all" (runtime only, never saved) unless the user
+ *         set omp's `steeringMode`. The queue comes from the AgentSession (`getQueuedMessages`), not
+ *         the TUI band, and a change goes to hostd at once.
  */
-const BRIDGE_VERSION = "2.3.0";
+const BRIDGE_VERSION = "2.4.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -2337,6 +2341,9 @@ interface AgentSessionLike {
 	activeToolExecutionUpdates?(): readonly Json[];
 	prompt?(text: string, options?: Json): Promise<unknown>;
 	abort?(options?: Json): Promise<void>;
+	/** 2.4.0: the chip texts of omp's queued user messages (omp ≥ 18.12). */
+	getQueuedMessages?(): { steering: readonly unknown[]; followUp: readonly unknown[] };
+	readonly isCompacting?: boolean;
 }
 interface AgentRefLike {
 	id: string;
@@ -2373,6 +2380,8 @@ interface Internals {
 	browser?: BrowserSettings;
 	/** 2.3.0 `agentChat`: omp's IRC bus is tapped (installIrcTap). */
 	ircTap?: boolean;
+	/** 2.4.0: omp's `steeringMode` handle, telling whether the user set it (applySteeringMode). */
+	steering?: SteeringSetting;
 }
 
 const isSession = (s: unknown): s is AgentSessionLike => !!s && typeof s === "object" && "subscribe" in s && typeof s.subscribe === "function";
@@ -2607,6 +2616,54 @@ async function probeRoleSettings(ns: Record<string, unknown>, load: (mod: Promis
 		return undefined;
 	}
 	return { store, roles, chains };
+}
+
+// ─── 2.4.0: queued steers land together ────────────────────────────────────────────────────────
+// omp hands the model one queued steer per boundary by default (`steeringMode: one-at-a-time`), so
+// the model works on between two steers meant together. The sessions the bridge serves take every
+// queued steer at the next boundary ("all"), a runtime setting omp never saves, unless the user set
+// `steeringMode` in omp's config (or environment). Follow-ups keep omp's `followUpMode`.
+
+/** omp's `steeringMode` setting handle (`modes/settings` `cfgSteeringMode`), read against a session
+ *  (an AgentSession is a settings scope). */
+export interface SteeringSetting {
+	get(scope: object): unknown;
+	isConfigured(scope: object): boolean;
+}
+const isSteeringSetting = (v: unknown): v is SteeringSetting => isObj(v) && typeof v.get === "function" && typeof v.isConfigured === "function";
+
+/** The slice of omp's AgentSession its steering mode needs. */
+export interface SteeringSession {
+	readonly steeringMode?: unknown;
+	setSteeringMode?(mode: "all" | "one-at-a-time", persist?: boolean): void;
+}
+
+/**
+ * Sets `session` to take every queued steer at the next boundary (`setSteeringMode("all", false)`:
+ * this process only, never written to omp's config) while the user's config does not set
+ * `steeringMode`; once it does, a session this switched (`switched`) gets the user's mode back.
+ * Without `setting` (an omp whose settings module did not load) the user's choice cannot be told
+ * and the mode is "all".
+ */
+export function applySteeringMode(session: unknown, setting: SteeringSetting | undefined, switched: WeakSet<object>): void {
+	if (!isObj(session) || typeof session.setSteeringMode !== "function") return;
+	const s = session as Json & SteeringSession & { setSteeringMode(mode: "all" | "one-at-a-time", persist?: boolean): void };
+	if (setting?.isConfigured(s)) {
+		if (!switched.delete(s)) return;
+		const mine = setting.get(s);
+		if (mine === "all" || mine === "one-at-a-time") s.setSteeringMode(mine, false);
+		return;
+	}
+	if (s.steeringMode !== "all") s.setSteeringMode("all", false);
+	switched.add(s);
+}
+
+/** omp's `steeringMode` handle: a root export of that name, else `modes/settings` (the handle reads
+ *  the session's own settings, so any module instance will do). */
+async function probeSteeringSetting(ns: Record<string, unknown>, load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<SteeringSetting | undefined> {
+	if (isSteeringSetting(ns.cfgSteeringMode)) return ns.cfgSteeringMode;
+	const handle: unknown = (await load(import("@oh-my-pi/pi-coding-agent/modes/settings")))?.cfgSteeringMode;
+	return isSteeringSetting(handle) ? handle : undefined;
 }
 
 // ─── 2.1.0: context breakdown (`caps.context`) ─────────────────────────────────────────────────
@@ -5048,6 +5105,7 @@ function bridge(pi: ExtensionAPI) {
 		internals.resume = await probeResume(ns, load);
 		internals.browser = await probeBrowserSettings(ns, load);
 		internals.ircTap = await probeIrcTap(ns, load);
+		internals.steering = await probeSteeringSetting(ns, load);
 		await uiControllerReady;
 	})().catch((err: unknown) => bridgeLog(`omp internals: ${String(err)}`));
 
@@ -5166,7 +5224,8 @@ function bridge(pi: ExtensionAPI) {
 		return Object.values(tiers).some(t => t === "priority" || t === "ultrafast");
 	};
 
-	const readQueue = (): CtlState["queue"] => {
+	/** pi-tui's queue band: what the TUI shows queued ("Steering" / "After yield"). */
+	const readBand = (): CtlState["queue"] => {
 		const queue = { steering: [] as string[], followUp: [] as string[] };
 		const band = tuiRef ? walk(tuiRef, isQueueBand) : undefined;
 		if (!band?.render) return queue;
@@ -5182,6 +5241,24 @@ function bridge(pi: ExtensionAPI) {
 			if (item && group) group.push(item[1]);
 		}
 		return queue;
+	};
+
+	/** 2.4.0: what the main session has queued, from omp's own queue (`getQueuedMessages`: its user
+	 *  messages, a live-steered one until the transcript records it), current the moment omp takes
+	 *  them. The band lagged steers the agent took by itself before omp 18.13 refreshed it on every
+	 *  queue change, and collab-guest steers. While omp compacts, the band: it also lists what the
+	 *  TUI holds for after the compaction. Without the AgentSession, the band. */
+	const readQueue = (): CtlState["queue"] => {
+		const s = agentSession;
+		if (s?.getQueuedMessages && s.isCompacting !== true) {
+			try {
+				const { steering, followUp } = s.getQueuedMessages();
+				return { steering: steering.filter((t): t is string => typeof t === "string"), followUp: followUp.filter((t): t is string => typeof t === "string") };
+			} catch (err) {
+				bridgeLog(`queue: ${String(err)}`);
+			}
+		}
+		return readBand();
 	};
 
 	const readState = (ctx: ExtensionContext): CtlState => {
@@ -5254,6 +5331,18 @@ function bridge(pi: ExtensionAPI) {
 		};
 	};
 
+	/** Sessions this copy set to take queued steers together (applySteeringMode). */
+	const switchedSteering = new WeakSet<object>();
+	/** 2.4.0: `session` takes every queued steer at the next boundary (applySteeringMode): the main
+	 *  session once this copy said hello to hostd and before each steer, a subagent hostd chats with. */
+	const steerTogether = (session: unknown): void => {
+		try {
+			applySteeringMode(session, internals.steering, switchedSteering);
+		} catch (err) {
+			bridgeLog(`steering mode: ${String(err)}`);
+		}
+	};
+
 	const sendHello = (reason: "connect" | "switch", previous?: string): void => {
 		const ctx = ctxRef;
 		if (!ctx || !connected) return;
@@ -5270,6 +5359,7 @@ function bridge(pi: ExtensionAPI) {
 			lastQueueJson = JSON.stringify(hello.state.queue);
 			lastJobsJson = JOBS_NONE; // the new session's jobs (or this connection's) go out on the next tick
 			send(hello);
+			steerTogether(agentSession);
 			// A pending `use_user_browser` request belonged to the previous connection or session.
 			browserLink.hello();
 		} catch (err) {
@@ -5308,6 +5398,18 @@ function bridge(pi: ExtensionAPI) {
 		} catch (err) {
 			bridgeLog(`sync failed: ${String(err)}`);
 		}
+	};
+
+	/** A sync right after omp's queue changed (its `queue_update` event), once per burst: hostd hears
+	 *  that queued steers reached the model when omp takes them, not a tick later. */
+	let syncDue = false;
+	const syncSoon = (): void => {
+		if (syncDue) return;
+		syncDue = true;
+		queueMicrotask(() => {
+			syncDue = false;
+			safeSync();
+		});
 	};
 
 	// ─── data plane (protocol v2) ─────────────────────────────────────────────────────────────
@@ -5492,6 +5594,7 @@ function bridge(pi: ExtensionAPI) {
 			});
 			agentSession = s;
 			for (const notice of configNotices(s)) sendNotice(notice);
+			if (connected && helloSessionId) steerTogether(s);
 		} catch (err) {
 			bridgeLog(`session subscribe: ${String(err)}`);
 		}
@@ -5553,6 +5656,12 @@ function bridge(pi: ExtensionAPI) {
 			return;
 		}
 		if (STATE_TRIGGERS[type]) scheduleState();
+		if (type === "queue_update") {
+			// 2.4.0: omp's queue changed (a steer queued, taken by the model or pulled back).
+			scheduleState();
+			syncSoon();
+			return;
+		}
 		if (!WIRE_EVENTS[type]) return;
 		const msgKey = `m${msgSeq}`;
 		const toolKey = `t:${typeof ev.toolCallId === "string" ? ev.toolCallId : ""}`;
@@ -6303,8 +6412,8 @@ function bridge(pi: ExtensionAPI) {
 	const dequeueLast = async (ctx: ExtensionContext): Promise<{ text?: string }> => {
 		const ed = await findEditor(ctx);
 		if (typeof ed.onDequeue !== "function") fail("unsupported", "this omp has no dequeue action");
-		// The band lags collab-guest steers (omp refreshes it before queuing them), so ask the
-		// session too; a pop that finds nothing leaves the draft as is and is reported as empty.
+		// Nothing in omp's queue nor pending: a pop would find nothing. One that finds nothing leaves
+		// the draft as is and is reported as empty.
 		const queued = readQueue();
 		if (queued.steering.length + queued.followUp.length === 0 && !ctx.hasPendingMessages()) return {};
 		const draft = ed.getText();
@@ -6336,10 +6445,10 @@ function bridge(pi: ExtensionAPI) {
 		const attach = `/${ATTACH_COMMAND}`;
 		// While omp compacts, it queues a submitted command (shown under "Steering") until compaction ends.
 		const compacting = "omp is compacting the session; try again when it finishes";
-		if (readQueue().steering.includes(attach)) fail("busy", compacting);
+		if (readBand().steering.includes(attach)) fail("busy", compacting);
 		const got = new Promise<void>(resolve => slot.attachWaiters.push(resolve));
 		await submit(ctx, attach);
-		if (!slot.cmdCtx && readQueue().steering.includes(attach)) fail("busy", compacting);
+		if (!slot.cmdCtx && readBand().steering.includes(attach)) fail("busy", compacting);
 		let timer: Timer | undefined;
 		await Promise.race([
 			got,
@@ -6821,7 +6930,9 @@ function bridge(pi: ExtensionAPI) {
 	};
 
 	/** `prompt` (2.0.0): a user message with optional images. While idle it starts a turn whatever
-	 *  `delivery` says; while streaming `auto` and `steer` steer, `followUp` waits for the turn's end. */
+	 *  `delivery` says; while streaming `auto` and `steer` steer, `followUp` waits for the turn's end.
+	 *  2.4.0: a steer lands with every other queued one (the session's steering mode, checked again
+	 *  each time: a change of omp's config re-applies its own). */
 	const promptOp = (p: Params): { queued: boolean } => {
 		const text = str(p, "text") ?? "";
 		const raw = p.images;
@@ -6840,6 +6951,7 @@ function bridge(pi: ExtensionAPI) {
 			pi.sendUserMessage(content);
 			return { queued: false };
 		}
+		if (delivery !== "followUp") steerTogether(agentSession);
 		pi.sendUserMessage(content, { deliverAs: delivery === "followUp" ? "followUp" : "steer" });
 		return { queued: true };
 	};
@@ -6861,6 +6973,7 @@ function bridge(pi: ExtensionAPI) {
 				if (!text) return fail("invalid_params", `agent ${agentId}: empty chat message`);
 				const live: unknown = await manager.ensureLive(agentId);
 				if (!isSession(live) || typeof live.prompt !== "function") return fail("unsupported", `agent ${agentId} cannot take messages`);
+				steerTogether(live);
 				// The turn outlives this request: report only a failure that comes at once.
 				const run = live.prompt(text, { streamingBehavior: "steer" });
 				run.catch((err: unknown) => bridgeLog(`agent ${agentId}: ${String(err)}`));

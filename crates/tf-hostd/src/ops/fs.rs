@@ -357,23 +357,30 @@ fn subsequence(hay: &[char], q: &[char]) -> bool {
 pub async fn read(p: &FsReadParams) -> Result<FsReadResult, ApiError> {
     let path = resolve_path(&p.path)?;
     let cap = p.max_bytes.unwrap_or(READ_DEFAULT).clamp(1, READ_MAX);
-    tokio::task::spawn_blocking(move || read_blocking(&path, cap)).await.map_err(|e| ApiError::new("internal", e.to_string()))?
+    let offset = p.offset;
+    tokio::task::spawn_blocking(move || read_blocking(&path, cap, offset)).await.map_err(|e| ApiError::new("internal", e.to_string()))?
 }
 
-fn read_blocking(path: &Path, cap: u64) -> Result<FsReadResult, ApiError> {
-    use std::io::Read;
+/// Reads up to `cap` bytes; from `offset` on (clamped to the size) as base64 when a range was asked
+/// for: decoding a range as text could split a character at either end and lose its bytes.
+fn read_blocking(path: &Path, cap: u64, offset: Option<u64>) -> Result<FsReadResult, ApiError> {
+    use std::io::{Read, Seek, SeekFrom};
     let meta = std::fs::metadata(path).map_err(|e| io_error(e, path))?;
     if meta.is_dir() {
         return Err(ApiError::new("invalid_params", format!("{} is a directory", path.display())));
     }
     let size = meta.len();
-    let f = std::fs::File::open(path).map_err(|e| io_error(e, path))?;
-    let mut buf = Vec::with_capacity(size.min(cap) as usize);
+    let start = offset.unwrap_or(0).min(size);
+    let mut f = std::fs::File::open(path).map_err(|e| io_error(e, path))?;
+    if start > 0 {
+        f.seek(SeekFrom::Start(start)).map_err(|e| io_error(e, path))?;
+    }
+    let mut buf = Vec::with_capacity((size - start).min(cap) as usize);
     f.take(cap).read_to_end(&mut buf).map_err(|e| io_error(e, path))?;
-    let truncated = size > buf.len() as u64;
+    let truncated = size > start + buf.len() as u64;
     let mime = guess_mime(path);
     let binary_mime = mime.map(|m| !(m.starts_with("text/") || m.ends_with("json") || m.ends_with("xml") || m.ends_with("javascript") || m.ends_with("svg+xml") || m.ends_with("toml") || m.ends_with("yaml"))).unwrap_or(false);
-    let (text, base64) = if !binary_mime && !buf.iter().take(8192).any(|b| *b == 0) {
+    let (text, base64) = if offset.is_none() && !binary_mime && !buf.iter().take(8192).any(|b| *b == 0) {
         match decode_utf8_prefix(&buf, truncated) {
             Some(s) => (Some(s), None),
             None => (None, Some(base64::engine::general_purpose::STANDARD.encode(&buf))),
@@ -382,7 +389,7 @@ fn read_blocking(path: &Path, cap: u64) -> Result<FsReadResult, ApiError> {
         (None, Some(base64::engine::general_purpose::STANDARD.encode(&buf)))
     };
     let mime = mime.map(str::to_string).or_else(|| Some(if text.is_some() { "text/plain".into() } else { "application/octet-stream".into() }));
-    Ok(FsReadResult { path: path.display().to_string(), size, text, base64, mime, truncated })
+    Ok(FsReadResult { path: path.display().to_string(), size, text, base64, mime, truncated, offset: offset.map(|_| start) })
 }
 
 /// UTF-8 decode; when the buffer was cut, drop a split trailing sequence (≤ 3 bytes).
@@ -400,9 +407,11 @@ pub(crate) fn guess_mime(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "png" => "image/png",
+        "apng" => "image/apng",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
         "bmp" => "image/bmp",
         "ico" => "image/x-icon",
         "svg" => "image/svg+xml",
@@ -410,10 +419,16 @@ pub(crate) fn guess_mime(path: &Path) -> Option<&'static str> {
         "zip" => "application/zip",
         "gz" | "tgz" => "application/gzip",
         "wasm" => "application/wasm",
-        "mp4" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
         "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
         "json" | "jsonl" => "application/json",
         "xml" => "application/xml",
         "html" | "htm" => "text/html",
@@ -554,15 +569,48 @@ mod tests {
         assert_eq!(r.files, vec!["deep/er/needle.txt".to_string()]);
 
         let f = td.path().join("a.txt");
-        let t = read(&FsReadParams { path: f.display().to_string(), max_bytes: None }).await.unwrap();
+        let t = read(&FsReadParams { path: f.display().to_string(), max_bytes: None, offset: None }).await.unwrap();
         assert_eq!(t.text.as_deref(), Some("one\n2\nthree\nfour\nfive\n"));
         assert!(!t.truncated);
-        let cut = read(&FsReadParams { path: f.display().to_string(), max_bytes: Some(4) }).await.unwrap();
+        assert_eq!(t.offset, None, "a plain read names no offset");
+        let cut = read(&FsReadParams { path: f.display().to_string(), max_bytes: Some(4), offset: None }).await.unwrap();
         assert_eq!((cut.text.as_deref(), cut.truncated, cut.size), (Some("one\n"), true, 22));
         let bin = td.path().join("x.bin");
         std::fs::write(&bin, [0u8, 1, 2, 255]).unwrap();
-        let b = read(&FsReadParams { path: bin.display().to_string(), max_bytes: None }).await.unwrap();
+        let b = read(&FsReadParams { path: bin.display().to_string(), max_bytes: None, offset: None }).await.unwrap();
         assert_eq!(b.base64.as_deref(), Some("AAEC/w=="));
         assert_eq!(b.mime.as_deref(), Some("application/octet-stream"));
+    }
+
+    #[tokio::test]
+    async fn ranged_reads_join_into_the_file() {
+        let td = tempfile::tempdir().unwrap();
+        // Multi-byte characters straddle every 4-byte boundary: a range is never decoded as text.
+        let body = "héllo wörld ✓ ünïcode".repeat(3);
+        let f = td.path().join("t.txt");
+        std::fs::write(&f, &body).unwrap();
+        let path = f.display().to_string();
+        let mut joined = Vec::new();
+        let mut at = 0u64;
+        loop {
+            let r = read(&FsReadParams { path: path.clone(), max_bytes: Some(4), offset: Some(at) }).await.unwrap();
+            assert_eq!((r.offset, r.text.as_deref(), r.size), (Some(at), None, body.len() as u64));
+            let bytes = base64::engine::general_purpose::STANDARD.decode(r.base64.unwrap()).unwrap();
+            at += bytes.len() as u64;
+            joined.extend(bytes);
+            assert_eq!(r.truncated, at < r.size);
+            if !r.truncated {
+                break;
+            }
+        }
+        assert_eq!(joined, body.as_bytes());
+        // Past the end: nothing, and nothing more to come.
+        let end = read(&FsReadParams { path, max_bytes: Some(4), offset: Some(10_000) }).await.unwrap();
+        assert_eq!((end.offset, end.base64.as_deref(), end.truncated), (Some(body.len() as u64), Some(""), false));
+        // Media extensions answer bytes even when they happen to be valid UTF-8.
+        let clip = td.path().join("clip.mov");
+        std::fs::write(&clip, "plain").unwrap();
+        let c = read(&FsReadParams { path: clip.display().to_string(), max_bytes: None, offset: None }).await.unwrap();
+        assert_eq!((c.text, c.mime.as_deref()), (None, Some("video/quicktime")));
     }
 }

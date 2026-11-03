@@ -4,6 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import {
   calendar,
   type HostUsage,
+  navigate,
   rangeSince,
   refreshUsage,
   type TodaySpend,
@@ -17,8 +18,10 @@ import {
   useHosts,
   useTodaySpend,
 } from "@/core";
-import { AgentGlyph, cn, EmptyState, formatAge, formatCompact, formatUsd, IconButton, NumberTicker, PageHeader, SegmentedControl, Skeleton, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
+import { AgentGlyph, Button, cn, EmptyState, formatAge, formatCompact, formatUsd, IconButton, NumberTicker, PageHeader, SegmentedControl, Skeleton, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
 import { MobileHeader } from "@/features/shell/MobileHeader";
+import { LinkRow } from "@/features/shell/MoreView";
+import { VIEWS } from "@/features/shell/vocab";
 import { LimitsSection } from "./LimitsSection";
 import { activeDays, bars, daySeries, heatmap, hourProfile, mergeInsights, streaks } from "./usageData";
 import { Highlights, HoursTile, ModelsTile, ProjectsTile, RecordsTile, SessionsTile, SpendersTile, StreakTile, ToolsTile, usd } from "./UsageTiles";
@@ -296,16 +299,34 @@ export function UsageView() {
       </div>
     );
 
+  // Flock Wrapped opens from here: a header button on desktop, a row above Today on phones.
   if (mobile)
     return (
       <div className="flex min-h-full flex-col">
         <MobileHeader title="Usage" subtitle="Spend, tokens and limits" back />
-        <div className="px-3 pt-1 pb-5">{body}</div>
+        <div className="flex flex-col gap-5 px-3 pt-1 pb-5">
+          <Tile className="overflow-hidden">
+            <LinkRow id="wrapped" />
+          </Tile>
+          {body}
+        </div>
       </div>
     );
   return (
     <div className="@container mx-auto flex max-w-[1200px] flex-col gap-5 px-8 pt-7 pb-12">
-      <PageHeader kicker="Spend" title="Usage" description="Cost, tokens and insights from omp's own stats on the hosts in view, and how much of each subscription is left." actions={controls} />
+      <PageHeader
+        kicker="Spend"
+        title="Usage"
+        description="Cost, tokens and insights from omp's own stats on the hosts in view, and how much of each subscription is left."
+        actions={
+          <>
+            <Button size="sm" variant="secondary" icon={<VIEWS.wrapped.icon />} title={VIEWS.wrapped.description} onClick={() => navigate({ name: "wrapped" })}>
+              {VIEWS.wrapped.label}
+            </Button>
+            {controls}
+          </>
+        }
+      />
       {body}
     </div>
   );

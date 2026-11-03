@@ -139,7 +139,17 @@ export function reduceEvents(prev: CoreState, events: readonly CoreEvent[], now 
         break;
       }
       case "notify": {
-        if (s.notifications.some((n) => n.id === e.notification.id && n.hostId === e.hostId)) break;
+        const at = s.notifications.findIndex((n) => n.id === e.notification.id && n.hostId === e.hostId);
+        if (at >= 0) {
+          // The same id again: an escalation (same text), or the host updated it (a newer version of a
+          // presented document): it takes the new text and action and keeps whether it was read.
+          const cur = s.notifications[at] as HostNotification;
+          const next = e.notification;
+          if (cur.at === next.at && cur.title === next.title && cur.body === next.body && JSON.stringify(cur.actions) === JSON.stringify(next.actions)) break;
+          const d = draft();
+          d.notifications = d.notifications.map((n, i) => (i === at ? { ...cur, ...next } : n));
+          break;
+        }
         // a late notification about an agent whose session was deleted
         if (s.hosts[e.hostId]?.state.info.pruned?.some((p) => p.agentId === e.notification.agentId)) break;
         const d = draft();

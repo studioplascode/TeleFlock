@@ -2,24 +2,27 @@ import { ChevronLeft } from "lucide-react";
 import { motion } from "motion/react";
 import type { ReactNode } from "react";
 import { cn, IconButton, spring } from "@/design";
-import { navigate } from "@/core";
+import { getRoute, navigate, parentRoute } from "@/core";
 import { haptic } from "./haptics";
 
 export interface MobileHeaderProps {
   title: ReactNode;
   subtitle?: ReactNode;
-  /** Show a back chevron (history back, falling back to the board). */
+  /** Show a back chevron (history back, falling back to the page's parent or the board). */
   back?: boolean;
   /** Right-aligned buttons. */
   actions?: ReactNode;
   className?: string;
 }
 
-/** Go back in history when there is an in-app entry to return to, else land on the board. */
+/**
+ * Go back in history when there is an in-app entry to return to, else land on the page this one opens from
+ * (`parentRoute`: Flock Wrapped → Usage) or on the board.
+ */
 export function goBack(): void {
   haptic("tick");
   if (window.history.length > 1) window.history.back();
-  else navigate({ name: "board" }, { replace: true });
+  else navigate(parentRoute(getRoute()) ?? { name: "board" }, { replace: true });
 }
 
 /** Sticky top bar for mobile screens (dense tint, no backdrop blur: it sits over live scrolling content). The title springs in on mount. */

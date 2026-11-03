@@ -710,8 +710,54 @@ wire_struct! {
     }
 }
 
-wire_enum! {
-    pub enum NotifyKind { Needs, Finished, Error, Quiet, Info }
+/// What a notification is about. Apps read a kind they do not know as `info`
+/// ([`crate::host::FEATURE_NOTIFY_KINDS`], apps ≥ 0.9.1); an older app drops the whole message, so
+/// hostd sends it only the kinds [`NotifyKind::known_to_every_app`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum NotifyKind {
+    Needs,
+    Finished,
+    Error,
+    Quiet,
+    Info,
+    /// An agent (or one of its subagents) presented a document live (§3.32): a new title or a new
+    /// version. Its action ([`NotifyAction::open_presented`]) opens the document. Apps and hosts
+    /// ≥ 0.9.1.
+    Presented,
+}
+
+impl NotifyKind {
+    /// Kinds apps before 0.9.1 can parse: the others go only to apps with
+    /// [`crate::host::FEATURE_NOTIFY_KINDS`].
+    pub fn known_to_every_app(self) -> bool {
+        !matches!(self, NotifyKind::Presented)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NotifyKind {
+    /// A kind newer than this app is `info`: listed and opened like a host notice.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Kind;
+        impl serde::de::Visitor<'_> for Kind {
+            type Value = NotifyKind;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a notification kind")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<NotifyKind, E> {
+                Ok(match v {
+                    "needs" => NotifyKind::Needs,
+                    "finished" => NotifyKind::Finished,
+                    "error" => NotifyKind::Error,
+                    "quiet" => NotifyKind::Quiet,
+                    "presented" => NotifyKind::Presented,
+                    _ => NotifyKind::Info,
+                })
+            }
+        }
+        d.deserialize_str(Kind)
+    }
 }
 
 wire_struct! {
@@ -737,12 +783,22 @@ wire_struct! {
 wire_struct! {
     pub struct NotifyAction {
         /// Without an `answer`, `open:<page>` (`HostPage::action_id`) opens that page of the host,
-        /// on this button and on the notification itself (apps and hosts ≥ 0.9.0); any other id
-        /// opens the agent.
+        /// on this button and on the notification itself (apps and hosts ≥ 0.9.0);
+        /// `open:presented/<slug>-v<n>.<ext>` opens that presented document in the agent's session
+        /// ([`Notification::presented`], apps and hosts ≥ 0.9.1); any other id opens the agent.
         pub id: String,
         pub label: String,
         /// When set, choosing this action answers the pending request directly.
         pub answer: Option<Answer>,
+    }
+}
+
+impl NotifyAction {
+    /// The action of a `presented` notification: opens the snapshot `name`
+    /// (`presented/<slug>-v<n>.<ext>`, the `session.artifact` name, kind `local`) in the agent's
+    /// session.
+    pub fn open_presented(name: &str) -> NotifyAction {
+        NotifyAction { id: format!("open:{name}"), label: "View".into(), answer: None }
     }
 }
 
@@ -769,6 +825,14 @@ impl HostPage {
     /// The page a notification opens: its first action without an answer that names one.
     pub fn of(n: &Notification) -> Option<HostPage> {
         n.actions.iter().filter(|a| a.answer.is_none()).find_map(|a| [HostPage::IdleShells, HostPage::Decisions].into_iter().find(|p| p.action_id() == a.id))
+    }
+}
+
+impl Notification {
+    /// The presented snapshot the notification opens (`presented/<slug>-v<n>.<ext>`): its first
+    /// action without an answer whose id is `open:presented/…`.
+    pub fn presented(&self) -> Option<&str> {
+        self.actions.iter().filter(|a| a.answer.is_none()).find_map(|a| a.id.strip_prefix("open:").filter(|name| name.starts_with("presented/")))
     }
 }
 
@@ -803,5 +867,49 @@ wire_struct! {
         pub kind: ActivityKind,
         pub title: String,
         pub detail: Option<String>,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An app reads a kind newer than itself as `info` instead of dropping the notification.
+    #[test]
+    fn unknown_notification_kinds_read_as_info() {
+        let n: Notification = serde_json::from_value(serde_json::json!({
+            "id": "n1", "at": 1, "kind": "somethingNew", "agentId": "a1", "title": "t", "body": "b", "actions": []
+        }))
+        .unwrap();
+        assert_eq!(n.kind, NotifyKind::Info);
+        for k in [NotifyKind::Needs, NotifyKind::Finished, NotifyKind::Error, NotifyKind::Quiet, NotifyKind::Info, NotifyKind::Presented] {
+            let wire = serde_json::to_string(&k).unwrap();
+            assert_eq!(serde_json::from_str::<NotifyKind>(&wire).unwrap(), k, "{wire}");
+        }
+        assert_eq!(serde_json::to_string(&NotifyKind::Presented).unwrap(), "\"presented\"");
+        assert!(serde_json::from_str::<NotifyKind>("3").is_err());
+    }
+
+    #[test]
+    fn a_presented_notification_names_its_snapshot() {
+        let mut n = Notification {
+            id: "n1".into(),
+            at: 1,
+            kind: NotifyKind::Presented,
+            agent_id: "a1".into(),
+            title: "ana presented Q3 report".into(),
+            body: String::new(),
+            request_id: None,
+            actions: vec![NotifyAction::open_presented("presented/q3-report-v2.html")],
+        };
+        assert_eq!(n.actions[0].id, "open:presented/q3-report-v2.html");
+        assert_eq!(n.presented(), Some("presented/q3-report-v2.html"));
+        assert_eq!(HostPage::of(&n), None);
+        // Pages and answers name no document.
+        n.actions = vec![NotifyAction { id: HostPage::IdleShells.action_id().into(), label: "Review".into(), answer: None }];
+        assert_eq!(n.presented(), None);
+        let answer = Answer { choices: vec!["y".into()], text: None, cancel: false, chat: false, back: false };
+        n.actions = vec![NotifyAction { id: "open:presented/x-v1.md".into(), label: "x".into(), answer: Some(answer) }];
+        assert_eq!(n.presented(), None);
     }
 }

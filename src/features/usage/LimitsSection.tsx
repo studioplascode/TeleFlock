@@ -1,7 +1,7 @@
 import { AlertTriangle, Gauge, RefreshCw, TimerReset } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
-import { describePace, formatPct, formatSpan, type HostLimits, LIMITS_USAGE_EVERY_MS, navigate, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
+import { describePace, formatPct, formatSpan, type HostLimits, LIMITS_USAGE_EVERY_MS, navigate, paceBasis, projectWindow, refreshLimits, useAccountLimits, useHosts, type WindowPace } from "@/core";
 import type { LimitAccount, LimitWindow } from "@/core/gen";
 import { Chip, cn, EmptyState, formatAge, IconButton, Skeleton, spring, Tile, Tooltip, useIsMobile, useNow, useWindowActive } from "@/design";
 import { ExpiredLogin } from "@/features/accounts/ExpiredLogin";
@@ -79,7 +79,7 @@ function WindowRow({ w, pace, index }: { w: LimitWindow; pace: WindowPace; index
           </span>
         )}
         {ratePct != null && ratePct > 0 && (
-          <Tooltip content={`Utilization change over the last ${formatSpan(pace.basisMs)} (all agents on this account)`}>
+          <Tooltip content={`Pace of the last ${paceBasis(pace)} (all agents on this account)`}>
             <span className="tabular">{ratePct < 1 ? ratePct.toFixed(2) : ratePct.toFixed(1)}%/h</span>
           </Tooltip>
         )}
@@ -179,7 +179,7 @@ export function LimitsSection({ hostIds, className }: { hostIds: string[]; class
             <Gauge className="size-3.5" /> Subscriptions & limits
           </div>
           <p className="mt-0.5 text-xs font-semibold text-mute">
-            Quota windows of every account omp is logged in to{received > 0 ? ` · checked ${formatAge(now - received)}` : ""}. Pace = how fast each window filled recently, across all agents.
+            Quota windows of every account omp is logged in to{received > 0 ? ` · checked ${formatAge(now - received)}` : ""}. Pace = how fast each window filled in the last 5 minutes (further back when it barely moved), across all agents.
           </p>
         </div>
         <IconButton className="ml-auto" size="sm" label="Refresh limits (ask omp again now)" onClick={refresh}>

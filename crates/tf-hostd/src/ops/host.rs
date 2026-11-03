@@ -574,6 +574,7 @@ pub async fn resume(ctx: &Ctx, p: ResumeParams) -> Result<Started, ApiError> {
         thinking: None,
         plan: false,
         prompt: None,
+        command: None,
         images: Vec::new(),
         role_models: Default::default(),
         fallback_chains: Default::default(),

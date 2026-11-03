@@ -4,7 +4,8 @@
 //! * [`rows`]: what `session.find` searches in a transcript row.
 //! * [`scan`]: one session file searched line by line (`search.*`).
 //! * [`search`]: background searches, their caps, long polls and cancellation.
-//! * [`files`]: rows of a session file read from disk (preview, parked agents).
+//! * [`files`]: rows of a session file read from disk (preview, parked agents, `session.digest` of a
+//!   session tf-hostd holds no copy of).
 //!
 //! The method handlers are `ops/search.rs`.
 

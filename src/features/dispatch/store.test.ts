@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { CHAT_REPO, CHATS_NEED_UPDATE } from "@/core/chats";
-import type { Agent, AutoAnswer, HostState, WorktreeCreateParams } from "@/core/gen";
+import type { Agent, AutoAnswer, HostState, StartParams, WorktreeCreateParams } from "@/core/gen";
 import type * as StoreModule from "./store";
 import type { DispatchEntry } from "./store";
 import { baseSlug, uniqueSlug } from "./thread";
@@ -325,5 +325,97 @@ describe("chats", () => {
     expect([s.lastHost, s.lastRepo.hp]).toEqual(["hp", CHAT_REPO]);
     expect(s.threads[key]?.map((e) => [e.id, e.chat, e.branch])).toEqual([["chat-saved", true, ""]]);
     expect(s.composerFocus).toBe(0);
+  });
+});
+
+describe("a message that is a command", () => {
+  const options = { templateId: null, model: "default", thinking: "default" as const, plan: true };
+  type Call = { method: string; params: unknown };
+
+  /** Resolves once none of `ids` is in flight (other tests' sends settle too). */
+  const settle = async (ids: readonly string[]) => {
+    // Dynamic: the store must load after the localStorage stub (it hydrates at module load).
+    const { isInFlight, onDispatchSettled } = await import("./store");
+    const done = () => ids.every((id) => !isInFlight(id));
+    // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+    await new Promise<void>((resolve) => {
+      if (done()) {
+        resolve();
+        return;
+      }
+      const off = onDispatchSettled(() => {
+        if (!done()) return;
+        off();
+        resolve();
+      });
+    });
+  };
+
+  test("its agent runs it instead of getting it as its prompt, named after its task; a mode command leaves the Plan option off", async () => {
+    // Dynamic, as above: these load the store, which hydrates from localStorage at module load.
+    const { core } = await import("@/core");
+    const { dispatchTask, threadKey, useDispatch } = await import("./store");
+    const calls: Call[] = [];
+    const realHost = core.host;
+    core.host = (hostId) => ({
+      call: (method, params) => {
+        if (hostId === "hcmd") calls.push({ method, params });
+        return Promise.resolve({ path: "/w", branch: "b", workspaceId: "w", agentId: "a", paneId: "p" } as never);
+      },
+    });
+    try {
+      const send = (repo: string, line: string, replacesPlan: boolean) => dispatchTask({ hostId: "hcmd", repo, prompt: line, command: { line, replacesPlan }, options, taken: [], suggest: null });
+      const plan = send("/r/cmd", "/plan add a settings page", true);
+      const fast = send("/r/cmd", "/fast on", false);
+      const chat = send(CHAT_REPO, "/skill:review the auth module", false);
+      expect([plan.name, fast.name, chat.name]).toEqual(["settings-page", "fast-on", "auth-module"]);
+      // `/plan` picks the mode itself: its entry (and a retry) goes without the Plan option; the composer keeps it.
+      expect([plan.options.plan, fast.options.plan]).toEqual([false, true]);
+      expect(useDispatch.getState().options?.plan).toBe(true);
+      await settle([plan.id, fast.id, chat.id]);
+      const agentOf = (label: string) => (calls.find((c) => c.method === "worktree.create" && (c.params as WorktreeCreateParams).label === label)?.params as WorktreeCreateParams | undefined)?.agent;
+      expect(agentOf("settings-page")).toMatchObject({ command: "/plan add a settings page", plan: false });
+      expect(agentOf("settings-page")?.prompt).toBeUndefined();
+      expect(agentOf("fast-on")).toMatchObject({ command: "/fast on", plan: true });
+      const started = calls.find((c) => c.method === "agent.start")?.params as StartParams | undefined;
+      expect(started).toMatchObject({ target: { kind: "chat" }, spec: { name: "auth-module", command: "/skill:review the auth module" } });
+      expect(started?.spec.prompt).toBeUndefined();
+      // The thread shows each message as typed.
+      expect(useDispatch.getState().threads[threadKey("hcmd", "/r/cmd")]?.map((e) => [e.prompt, e.command])).toEqual([
+        ["/plan add a settings page", "/plan add a settings page"],
+        ["/fast on", "/fast on"],
+      ]);
+    } finally {
+      core.host = realHost;
+    }
+  });
+
+  test("omp's tiny model names a command after its task, and only a command that gives one", async () => {
+    // Dynamic, as above: the store and the prefs read localStorage at module load.
+    const { core } = await import("@/core");
+    const { aiTesting } = await import("@/core/ai");
+    const { dispatchTask, threadKey, useDispatch } = await import("./store");
+    const asked: string[] = [];
+    aiTesting.reset();
+    aiTesting.setComplete(async (_hostId, p) => {
+      asked.push(p.prompt);
+      return { text: "settings-page", ms: 1 };
+    });
+    const realHost = core.host;
+    core.host = () => ({ call: () => Promise.resolve({ path: "/w", branch: "b", workspaceId: "w" } as never) });
+    try {
+      const plan = dispatchTask({ hostId: "hai", repo: "/r/ai", prompt: "/plan add a settings page", command: { line: "/plan add a settings page", replacesPlan: true }, options, taken: [] });
+      const fast = dispatchTask({ hostId: "hai", repo: "/r/ai", prompt: "/fast on", command: { line: "/fast on", replacesPlan: false }, options, taken: [] });
+      expect([plan.phase, fast.phase]).toEqual(["naming", "queued"]);
+      await settle([plan.id, fast.id]);
+      expect(asked.length).toBe(1);
+      expect(asked[0]).toContain("add a settings page");
+      expect(asked[0]).not.toContain("/plan");
+      expect(useDispatch.getState().threads[threadKey("hai", "/r/ai")]?.find((e) => e.id === plan.id)).toMatchObject({ name: "settings-page", aiNamed: true });
+    } finally {
+      aiTesting.setComplete(null);
+      aiTesting.reset();
+      core.host = realHost;
+    }
   });
 });

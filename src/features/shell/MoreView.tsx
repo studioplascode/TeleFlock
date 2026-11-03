@@ -12,9 +12,10 @@ import { connSummary, PHASE_STATUS, phaseBusy } from "./status";
 import { VIEWS } from "./vocab";
 
 /** The pages More lists, in order. Label, icon and description come from `VIEWS`, like every other entry point. */
-const PAGES = ["usage", "wrapped", "activity", "automations", "ambient", "browser", "omp", "mcp", "plugins", "accounts", "cleanup", "forward", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
+const PAGES = ["usage", "activity", "automations", "browser", "omp", "mcp", "plugins", "accounts", "cleanup", "forward", "settings"] as const satisfies readonly (Route["name"] & keyof typeof VIEWS)[];
 
-function LinkRow({ id }: { id: (typeof PAGES)[number] }) {
+/** A phone row that opens a page, with its icon, label and description from `VIEWS`: More's list, Usage's Flock Wrapped. */
+export function LinkRow({ id }: { id: Route["name"] & keyof typeof VIEWS }) {
   const { icon: Icon, label, description } = VIEWS[id];
   return (
     <button

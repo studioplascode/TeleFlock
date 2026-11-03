@@ -29,6 +29,7 @@ export const KIND_STATUS: Record<NotifyKind, Status> = {
   error: "error",
   quiet: "idle",
   info: "done",
+  presented: "review",
 };
 
 /** Updates shown before the list hands over to Activity ("N more in Activity →"). */
@@ -56,7 +57,7 @@ export function runAnswer(n: Notification & { hostId: string }, action: NotifyAc
 }
 
 /**
- * Inbox "Updates": unread notifications, newest first (finished, errors, quiet, info, and any
+ * Inbox "Updates": unread notifications, newest first (finished, presented documents, errors, quiet, info, and any
  * needs-you ping whose agent no longer waits in "Needs you", which already shows the live ones).
  * `keep` holds ids that stay listed after they turn read (the bell, while it is open).
  */

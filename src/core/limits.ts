@@ -12,9 +12,14 @@ import { coreStore } from "./store/store";
 
 const HOUR = 3_600_000;
 const MIN = 60_000;
-/** Readings closer together than this can't give a pace (percent windows step by 1 %). */
-export const MIN_PACE_SPAN_MS = 10 * MIN;
-/** A snapshot older than this is flagged stale (omp refreshes ~every 5 min while in use). */
+const DAY = 24 * HOUR;
+/** The pace compares the newest reading with the newest one at least this much older. */
+export const PACE_SPAN_MS = 5 * MIN;
+/** omp reports quota windows in whole percent: one step of the used fraction. */
+const STEP = 0.01;
+/** Rounding slack when comparing used fractions. */
+const EPS = 1e-9;
+/** A snapshot older than this is flagged stale (omp refreshes the windows about once a minute while agents work). */
 export const STALE_MS = 15 * MIN;
 /** Pace below this (fraction per hour, i.e. 0.01 %/h) counts as no consumption. */
 const IDLE_RATE = 1e-4;
@@ -26,7 +31,7 @@ export type PaceOutcome =
   | "runsOut"
   /** The window resets before the current pace would fill it. */
   | "resetsFirst"
-  /** No consumption over the pace window. */
+  /** No consumption over the pace's basis. */
   | "idle"
   /** The reset time has passed since omp's last reading. */
   | "reset"
@@ -42,6 +47,8 @@ export interface WindowPace {
   ratePerHour?: number;
   /** Span of the readings the pace was measured over. */
   basisMs: number;
+  /** The pace looked further back than the last 5 minutes, or a level held since capped it ({@link paceFromSamples}). */
+  widened?: boolean;
   /** Until the window resets (absent = provider gave no reset time). */
   resetsInMs?: number;
   outcome: PaceOutcome;
@@ -53,29 +60,57 @@ export interface WindowPace {
   stale: boolean;
 }
 
-/** How far back the pace looks: a fifth of the window, 30 min … 24 h. */
+/**
+ * How far back the pace may look when the last 5 minutes moved less than two steps: a fifth of
+ * the window, 30 min … 24 h.
+ */
 export function paceLookbackMs(durationMs: number | undefined): number {
   const d = durationMs ?? 24 * HOUR;
   return Math.min(24 * HOUR, Math.max(30 * MIN, d / 5));
 }
 
 /**
- * Pace from readings: change of the used fraction per hour between the first reading inside the
- * look-back and the newest one. Negative changes (a reset slipped through) count as zero.
+ * Pace from readings (oldest first): used fraction per hour and the span it was measured over.
+ * Readings step by whole percent, so one step is ambiguous and a short span needs two:
+ * 1. the newest reading against the newest one at least {@link PACE_SPAN_MS} older (or the
+ *    nearest older one, however far back), when that moved two steps or more;
+ * 2. else back to the most recent reading two steps below the newest, within `lookbackMs`; else
+ *    the change over `lookbackMs` itself (none: idle);
+ * 3. a level held for t ≥ 5 min caps the pace at one step per t, so a burst that stopped fades.
+ * Drops (a reset slipped through) count as zero; no reading 5 min older yet gives no pace.
  */
-export function paceFromSamples(samples: LimitSample[], lookbackMs: number): { ratePerHour?: number; basisMs: number } {
+export function paceFromSamples(samples: LimitSample[], lookbackMs: number): { ratePerHour?: number; basisMs: number; widened: boolean } {
   const last = samples[samples.length - 1];
-  if (!last) return { basisMs: 0 };
-  const from = last.at - lookbackMs;
-  let first = samples.find((s) => s.at >= from) ?? last;
-  // Too few readings inside the look-back: widen to the oldest reading that gives a usable span.
-  if (last.at - first.at < MIN_PACE_SPAN_MS) {
-    const wider = [...samples].reverse().find((s) => last.at - s.at >= MIN_PACE_SPAN_MS);
-    if (wider) first = wider;
+  if (!last) return { basisMs: 0, widened: false };
+  const at = (i: number) => (samples[i] as LimitSample).at;
+  const used = (i: number) => (samples[i] as LimitSample).used;
+  let i = samples.length - 2;
+  while (i >= 0 && last.at - at(i) < PACE_SPAN_MS) i--;
+  if (i < 0) return { basisMs: last.at - at(0), widened: false };
+  let from = i;
+  let widened = false;
+  if (last.used - used(i) < 2 * STEP - EPS) {
+    widened = true;
+    const floor = last.at - lookbackMs;
+    let j = i;
+    while (j >= 0 && at(j) >= floor && used(j) > last.used - 2 * STEP + EPS) j--;
+    if (j >= 0 && at(j) >= floor) from = j;
+    else {
+      // The look-back's own change, from its oldest reading (or from `i` when even that is older).
+      while (from > 0 && at(from - 1) >= floor) from--;
+    }
   }
-  const span = last.at - first.at;
-  if (span < MIN_PACE_SPAN_MS) return { basisMs: span };
-  return { ratePerHour: Math.max(0, ((last.used - first.used) / span) * HOUR), basisMs: span };
+  let basisMs = last.at - at(from);
+  let ratePerHour = (Math.max(0, last.used - used(from)) / basisMs) * HOUR;
+  let level = samples.length - 1;
+  while (level > 0 && Math.abs(used(level - 1) - last.used) < STEP / 2) level--;
+  const held = last.at - at(level);
+  if (held >= PACE_SPAN_MS && ratePerHour > (STEP / held) * HOUR) {
+    ratePerHour = (STEP / held) * HOUR;
+    basisMs = held;
+    widened = true;
+  }
+  return { ratePerHour, basisMs, widened };
 }
 
 /** Readings of a window, with the window's current value appended when it's newer. */
@@ -96,16 +131,17 @@ export function projectWindow(w: LimitWindow, fetchedAt: number | undefined, now
   const base = { used, remaining, resetsInMs, stale };
   if (resetsInMs != null && resetsInMs <= 0) return { ...base, basisMs: 0, outcome: "reset" };
   if (used >= 1) return { ...base, basisMs: 0, outcome: "exhausted" };
-  const { ratePerHour, basisMs } = paceFromSamples(readings(w, fetchedAt), paceLookbackMs(w.durationMs));
+  const { ratePerHour, basisMs, widened } = paceFromSamples(readings(w, fetchedAt), paceLookbackMs(w.durationMs));
   if (ratePerHour == null) return { ...base, basisMs, outcome: "unknown" };
-  if (ratePerHour < IDLE_RATE) return { ...base, ratePerHour, basisMs, outcome: "idle", atReset: resetsInMs != null ? used : undefined };
+  const pace = { ...base, ratePerHour, basisMs, widened };
+  if (ratePerHour < IDLE_RATE) return { ...pace, outcome: "idle", atReset: resetsInMs != null ? used : undefined };
   // The reading is `now - fetchedAt` old: the pace has kept eating quota since.
   const since = fetchedAt != null ? Math.max(0, now - fetchedAt) : 0;
   const etaMs = Math.max(0, (remaining / ratePerHour) * HOUR - since);
   if (resetsInMs != null && etaMs >= resetsInMs) {
-    return { ...base, ratePerHour, basisMs, outcome: "resetsFirst", atReset: Math.min(1, used + (ratePerHour * (resetsInMs + since)) / HOUR) };
+    return { ...pace, outcome: "resetsFirst", atReset: Math.min(1, used + (ratePerHour * (resetsInMs + since)) / HOUR) };
   }
-  return { ...base, ratePerHour, basisMs, outcome: "runsOut", etaMs };
+  return { ...pace, outcome: "runsOut", etaMs };
 }
 
 /** Windows that meter a model: shared windows plus tier-scoped ones whose tier the model names. */
@@ -151,17 +187,36 @@ export function formatPct(fraction: number): string {
   return `${p > 0 && p < 10 ? p.toFixed(1).replace(/\.0$/, "") : Math.round(p)}%`;
 }
 
-/** One-line verdict of a pace: "Runs out in ~2h 10m", "Resets before you run out (~64% at reset)", … */
+/**
+ * What a pace speaks for, in words: "5 minutes" for the usual comparison (the newest reading
+ * against one 5–10 min older), else its real basis: "18 minutes", "hour", "3 hours", "2 days".
+ */
+export function paceBasis(p: Pick<WindowPace, "basisMs" | "widened">): string {
+  const ms = !p.widened && p.basisMs < 2 * PACE_SPAN_MS ? PACE_SPAN_MS : p.basisMs;
+  const m = Math.max(1, Math.round(ms / MIN));
+  if (m < 60) return m === 1 ? "minute" : `${m} minutes`;
+  const h = Math.round(ms / HOUR);
+  if (h < 48) return h === 1 ? "hour" : `${h} hours`;
+  const d = Math.round(ms / DAY);
+  return d === 1 ? "day" : `${d} days`;
+}
+
+/**
+ * One-line verdict of a pace: "At the last 5 minutes' pace you run out in ~40m (2h before it
+ * resets)", "At the last 2 hours' pace it resets before you run out (~64% used at reset)", …
+ */
 export function describePace(p: WindowPace): string {
+  const basis = paceBasis(p);
+  const atPace = `At the last ${basis}${basis.endsWith("s") ? "'" : "'s"} pace`;
   switch (p.outcome) {
     case "exhausted":
       return p.resetsInMs != null ? `Limit reached · resets in ${formatSpan(p.resetsInMs)}` : "Limit reached";
     case "runsOut":
-      return `At this pace you run out in ~${formatSpan(p.etaMs ?? 0)}${p.resetsInMs != null ? ` (${formatSpan(p.resetsInMs - (p.etaMs ?? 0))} before it resets)` : ""}`;
+      return `${atPace} you run out in ~${formatSpan(p.etaMs ?? 0)}${p.resetsInMs != null ? ` (${formatSpan(p.resetsInMs - (p.etaMs ?? 0))} before it resets)` : ""}`;
     case "resetsFirst":
-      return `Resets before you run out (~${formatPct(p.atReset ?? 0)} used at reset)`;
+      return `${atPace} it resets before you run out (~${formatPct(p.atReset ?? 0)} used at reset)`;
     case "idle":
-      return p.resetsInMs != null ? "No consumption lately · resets before you run out" : "No consumption lately";
+      return `No consumption in the last ${basis}${p.resetsInMs != null ? " · resets before you run out" : ""}`;
     case "reset":
       return "Window reset since the last reading";
     case "unknown":
@@ -171,9 +226,12 @@ export function describePace(p: WindowPace): string {
 
 // ───────────────────────────── poller ─────────────────────────────
 
-/** The board and a session's inspector re-ask this often: omp refreshes its own usage about every 5 min. */
+/** The board and a session's inspector re-ask this often (every answer carries each account's readings). */
 export const LIMITS_EVERY_MS = 5 * MIN;
-/** The Usage page, where the limits are the point, re-asks every minute (hostd caches 60 s). */
+/**
+ * The Usage page, where the limits are the point, re-asks every minute: hostd answers with omp's
+ * cached reports, which omp refreshes about once a minute while agents work.
+ */
 export const LIMITS_USAGE_EVERY_MS = MIN;
 
 export interface HostLimits {

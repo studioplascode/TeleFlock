@@ -1,6 +1,6 @@
-import { Focus, Grid2x2, Grid3x3, Orbit, RotateCcw } from "lucide-react";
+import { Focus, Grid2x2, Grid3x3, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { navigate, onAgentMoved, onAgentsPruned, useCore, useUi } from "@/core";
+import { onAgentMoved, onAgentsPruned, useCore, useUi } from "@/core";
 import { Button, EmptyState, Kbd, SegmentedControl, Switch, Tooltip, useIsMobile, useNow } from "@/design";
 import { isTyping } from "@/features/inbox/AnswerParts";
 import { usePaletteCommands } from "@/features/palette/registry";
@@ -122,7 +122,7 @@ function Wall() {
   );
 }
 
-/** Phones: a grid of transcripts doesn't fit; ambient mode does. */
+/** Phones: a grid of transcripts doesn't fit; Flock lists every agent. */
 function WallNarrow() {
   return (
     <div className="flex min-h-full flex-col">
@@ -131,12 +131,7 @@ function WallNarrow() {
         className="flex-1"
         icon={<Grid2x2 />}
         title="The wall needs a bigger screen"
-        description="It shows 4 or 9 live transcripts side by side. On a phone, ambient mode shows every agent as an orb instead."
-        action={
-          <Button icon={<Orbit />} onClick={() => navigate({ name: "ambient" })}>
-            {VIEWS.ambient.label}
-          </Button>
-        }
+        description="It shows 4 or 9 live transcripts side by side. On a phone, Flock shows every agent instead."
       />
     </div>
   );

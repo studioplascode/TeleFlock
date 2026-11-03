@@ -47,4 +47,39 @@ describe("queued message echo", () => {
     expect(reconcileQueue([p], empty, [], false, IDLE_GRACE_MS + 1).keep).toEqual([]);
     expect(reconcileQueue([{ ...p, sending: true }], empty, [], false, IDLE_GRACE_MS + 1).keep).toHaveLength(1);
   });
+
+  test("a delivered steer leaves the strip with its row, though the host still lists it", () => {
+    // The user's case: both steers landed, the host's queue (lagging the transcript) still listed
+    // them, and their chips stood there, while pulling one back found nothing.
+    const a = send("only play the city builder", { seen: true });
+    const b = send("don't build anything yet", { id: 2, seen: true });
+    const lagging = { steering: ["only play the city builder", "don't build anything yet"], followUp: [] };
+    const rows = [
+      { id: "u7", text: "only play the city builder" },
+      { id: "u8", text: "don't build anything yet" },
+    ];
+    const landed = reconcileQueue([a, b], lagging, rows, true, 10);
+    expect(landed.chips).toEqual([]);
+    expect(landed.keep).toEqual([
+      { ...a, landed: "u7" },
+      { ...b, landed: "u8" },
+    ]);
+    // Still lagging a second later: still hidden, and the rows count once.
+    expect(reconcileQueue(landed.keep, lagging, rows, true, 1010)).toEqual({ chips: [], keep: landed.keep });
+    // The host caught up: nothing is left.
+    expect(reconcileQueue(landed.keep, empty, rows, true, 2010)).toEqual({ chips: [], keep: [] });
+  });
+
+  test("a landed send hides only the oldest listing of its text, never a newer identical one", () => {
+    const old = send("continue", { seen: true, landed: "u1" });
+    const again = send("continue", { id: 2, sending: true, before: ["u1"] });
+    const both = { steering: ["continue", "continue"], followUp: [] };
+    const r = reconcileQueue([old, again], both, [{ id: "u1", text: "continue" }], true, 10);
+    expect(r.chips.map((c) => [c.text, c.pending])).toEqual([["continue", false]]);
+    expect(r.keep).toEqual([old, { ...again, seen: true }]);
+    // The host dropped the delivered one: the queued one keeps its chip, the landed send goes.
+    const one = reconcileQueue(r.keep, { steering: ["continue"], followUp: [] }, [{ id: "u1", text: "continue" }], true, 20);
+    expect(one.chips.map((c) => c.text)).toEqual(["continue"]);
+    expect(one.keep).toEqual([{ ...again, seen: true }]);
+  });
 });

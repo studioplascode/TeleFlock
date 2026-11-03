@@ -12,6 +12,15 @@
  */
 export type OmpCommandMode = "direct" | "report" | "terminal";
 
+/**
+ * Why a command (or one argument form of it) is no first message for a brand-new agent (Dispatch
+ * doesn't offer it): it works on what a session already has (`history`: its conversation, plan,
+ * goal, todos or jobs), leaves or replaces the session (`session`), acts on a turn in progress
+ * (`turn`), or changes omp on the host for every agent rather than this one's work (`host`).
+ * Forms whose output only omp's TUI shows (`report`, `terminal`) don't fit either.
+ */
+export type NotFirst = "history" | "session" | "turn" | "host";
+
 export interface OmpSubcommand {
   name: string;
   /** Argument hint after the subcommand, e.g. `<id>|all`. */
@@ -19,6 +28,8 @@ export interface OmpSubcommand {
   description: string;
   /** Overrides the command's mode for this subcommand. */
   mode?: OmpCommandMode;
+  /** Not a new agent's first message (`NotFirst`), where the command itself is. */
+  notFirst?: NotFirst;
 }
 
 export interface OmpCommand {
@@ -36,6 +47,12 @@ export interface OmpCommand {
   /** Destructive or disruptive: ask before running. */
   confirm?: string;
   subs?: OmpSubcommand[];
+  /** Its argument text is a task for the agent (`/plan add a settings page`); Dispatch names a new agent after it. */
+  task?: true;
+  /** Turns on one of omp's plan, vibe and goal modes, which exclude each other: a new agent it starts gets no Plan option. */
+  sessionMode?: true;
+  /** No first message for a brand-new agent (`NotFirst`). */
+  notFirst?: NotFirst;
   group: "Modes" | "Session" | "Context" | "Tools" | "Info" | "Setup" | "App";
 }
 
@@ -83,7 +100,7 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "status", description: "Show slow mode status", mode: "report" },
     ],
   },
-  { name: "plan", args: "[prompt]", description: "Toggle plan mode (plan before executing)", mode: "direct", group: "Modes" },
+  { name: "plan", args: "[prompt]", description: "Toggle plan mode (plan before executing)", mode: "direct", task: true, sessionMode: true, group: "Modes" },
   { name: "plan-review", description: "Re-open the review of the latest plan", mode: "terminal", group: "Modes" },
   {
     name: "goal",
@@ -91,20 +108,22 @@ export const OMP_COMMANDS: OmpCommand[] = [
     description: "Persistent autonomous objective",
     mode: "direct",
     bare: "terminal",
+    task: true,
+    sessionMode: true,
     group: "Modes",
     subs: [
       { name: "set", args: "<objective>", description: "Set or replace the goal" },
       { name: "show", description: "Show current goal details", mode: "report" },
-      { name: "pause", description: "Pause the current goal" },
-      { name: "resume", description: "Resume a paused goal" },
-      { name: "drop", description: "Drop the current goal" },
-      { name: "budget", args: "<N|off>", description: "Adjust the token budget" },
+      { name: "pause", description: "Pause the current goal", notFirst: "history" },
+      { name: "resume", description: "Resume a paused goal", notFirst: "history" },
+      { name: "drop", description: "Drop the current goal", notFirst: "history" },
+      { name: "budget", args: "<N|off>", description: "Adjust the token budget", notFirst: "history" },
     ],
   },
-  { name: "guided-goal", args: "[rough objective]", description: "Interview in chat, then set up goal mode", mode: "direct", group: "Modes" },
-  { name: "vibe", args: "[prompt]", description: "Toggle vibe mode (director with worker sessions)", mode: "direct", group: "Modes" },
-  { name: "loop", args: "[count|duration] [--while|--until '<cmd>'] [prompt]", description: "Re-submit a prompt after every yield", mode: "direct", group: "Modes" },
-  { name: "queue", args: "<message>", description: "Queue a message for after the agent yields", mode: "direct", needsArgs: true, group: "Modes" },
+  { name: "guided-goal", args: "[rough objective]", description: "Interview in chat, then set up goal mode", mode: "direct", task: true, sessionMode: true, group: "Modes" },
+  { name: "vibe", args: "[prompt]", description: "Toggle vibe mode (director with worker sessions)", mode: "direct", task: true, sessionMode: true, group: "Modes" },
+  { name: "loop", args: "[count|duration] [--while|--until '<cmd>'] [prompt]", description: "Re-submit a prompt after every yield", mode: "direct", task: true, group: "Modes" },
+  { name: "queue", args: "<message>", description: "Queue a message for after the agent yields", mode: "direct", needsArgs: true, notFirst: "turn", group: "Modes" },
   { name: "skillful", args: "[on|off|status]", description: "List available skills in the system prompt", mode: "direct", subs: ON_OFF_STATUS("the skills listing"), group: "Modes" },
   { name: "extended-context", args: "[on|off|status]", description: "Toggle extended context windows", mode: "direct", subs: ON_OFF_STATUS("extended context"), group: "Modes" },
   { name: "computer", args: "[on|off|status]", description: "Toggle native computer use for this session", mode: "direct", subs: ON_OFF_STATUS("computer use"), group: "Modes" },
@@ -128,12 +147,12 @@ export const OMP_COMMANDS: OmpCommand[] = [
     group: "Modes",
     subs: [
       { name: "list", description: "List saved presets", mode: "report" },
-      { name: "save", args: "<name>", description: "Save the current role models and thinking level" },
+      { name: "save", args: "<name>", description: "Save the current role models and thinking level", notFirst: "host" },
       { name: "switch", args: "<name>", description: "Apply a saved preset" },
-      { name: "delete", args: "<name>", description: "Delete a saved preset" },
+      { name: "delete", args: "<name>", description: "Delete a saved preset", notFirst: "host" },
     ],
   },
-  { name: "ratchet", args: "[flow and goal]", description: "Build an eval for an LLM flow, then hill-climb it", mode: "direct", group: "Modes" },
+  { name: "ratchet", args: "[flow and goal]", description: "Build an eval for an LLM flow, then hill-climb it", mode: "direct", task: true, group: "Modes" },
   {
     name: "advisor",
     args: "[on|off|status|dump [raw]|configure]",
@@ -148,16 +167,17 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "configure", description: "Open the advisor configuration editor", mode: "terminal" },
     ],
   },
-  { name: "force", aliases: ["force:"], args: "<tool> [prompt]", description: "Force the next turn to use a tool", mode: "direct", needsArgs: true, group: "Modes" },
+  { name: "force", aliases: ["force:"], args: "<tool> [prompt]", description: "Force the next turn to use a tool", mode: "direct", needsArgs: true, task: true, group: "Modes" },
 
   // ── session ──
-  { name: "new", description: "Start a new session", mode: "direct", group: "Session" },
-  { name: "resume", args: "[session id | @claude | @codex]", description: "Resume a different session in this omp", mode: "direct", bare: "terminal", group: "Session" },
+  { name: "new", description: "Start a new session", mode: "direct", notFirst: "session", group: "Session" },
+  { name: "resume", args: "[session id | @claude | @codex]", description: "Resume a different session in this omp", mode: "direct", bare: "terminal", notFirst: "session", group: "Session" },
   {
     name: "fork",
     args: "[pane|window|tab]",
     description: "Fork the session (in place, or in a new pane / window)",
     mode: "direct",
+    notFirst: "history",
     group: "Session",
     subs: [
       { name: "pane", description: "Open the fork in a new herdr pane" },
@@ -167,11 +187,11 @@ export const OMP_COMMANDS: OmpCommand[] = [
   },
   { name: "branch", aliases: ["rewind"], description: "Rewind to a previous message (keeps the old path)", mode: "terminal", group: "Session" },
   { name: "tree", description: "Navigate the session tree (switch branches)", mode: "terminal", group: "Session" },
-  { name: "rename", args: "[title]", description: "Rename the session (no title: generate one)", mode: "direct", group: "Session" },
-  { name: "pin", args: "[session id]", description: "Pin or unpin a session in the resume list", mode: "direct", group: "Session" },
+  { name: "rename", args: "[title]", description: "Rename the session (no title: generate one)", mode: "direct", notFirst: "history", group: "Session" },
+  { name: "pin", args: "[session id]", description: "Pin or unpin a session in the resume list", mode: "direct", notFirst: "host", group: "Session" },
   { name: "seance", args: "[id|path] [--model <sel>]", description: "Consult a saved session", mode: "direct", bare: "terminal", group: "Session" },
-  { name: "btw", args: "[question]", description: "Side question that doesn't touch the session", mode: "direct", bare: "terminal", group: "Session" },
-  { name: "tan", args: "<work>", description: "Run a background agent on tangential work", mode: "direct", needsArgs: true, group: "Session" },
+  { name: "btw", args: "[question]", description: "Side question that doesn't touch the session", mode: "direct", bare: "terminal", notFirst: "history", group: "Session" },
+  { name: "tan", args: "<work>", description: "Run a background agent on tangential work", mode: "direct", needsArgs: true, task: true, group: "Session" },
   { name: "export", args: "[--themes] [path]", description: "Export the session to HTML on the host", mode: "report", group: "Session" },
   {
     name: "dump",
@@ -200,7 +220,7 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "pin", args: "[account]", description: "Pin an OAuth account to this session's provider" },
     ],
   },
-  { name: "delete", description: "Delete the current session and start a new one", mode: "direct", confirm: "Delete this session permanently?", group: "Session" },
+  { name: "delete", description: "Delete the current session and start a new one", mode: "direct", confirm: "Delete this session permanently?", notFirst: "session", group: "Session" },
   {
     name: "collab",
     args: "[start|view|list|stop|status] [relayUrl]",
@@ -214,14 +234,15 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "stop", description: "Stop sharing (disconnects TeleFlock's live view)" },
     ],
   },
-  { name: "join", args: "<link>", description: "Join a shared collab session in this omp", mode: "direct", needsArgs: true, group: "Session" },
-  { name: "leave", description: "Leave the collab session", mode: "direct", group: "Session" },
+  { name: "join", args: "<link>", description: "Join a shared collab session in this omp", mode: "direct", needsArgs: true, notFirst: "session", group: "Session" },
+  { name: "leave", description: "Leave the collab session", mode: "direct", notFirst: "session", group: "Session" },
   {
     name: "todo",
     args: "[append|start|done|drop|rm|edit|copy|export|import|expand|collapse]",
     description: "View or modify the todo list",
     mode: "direct",
     bare: "report",
+    notFirst: "history",
     group: "Session",
     subs: [
       { name: "append", args: "[<phase>] <task…>", description: "Append a task (phase fuzzy-matched or created)" },
@@ -244,6 +265,7 @@ export const OMP_COMMANDS: OmpCommand[] = [
     args: "[soft|remote|snapcompact] [focus]",
     description: "Compact the session context",
     mode: "direct",
+    notFirst: "history",
     group: "Context",
     subs: [
       { name: "soft", args: "[focus]", description: "Soft compaction" },
@@ -251,12 +273,13 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "snapcompact", args: "[focus]", description: "Snapshot compaction" },
     ],
   },
-  { name: "handoff", args: "[focus]", description: "Summarize into a handoff document and compact (idle only)", mode: "direct", group: "Context" },
+  { name: "handoff", args: "[focus]", description: "Summarize into a handoff document and compact (idle only)", mode: "direct", notFirst: "history", group: "Context" },
   {
     name: "shake",
     args: "[elide|images|thinking]",
     description: "Drop heavy content from context",
     mode: "direct",
+    notFirst: "history",
     group: "Context",
     subs: [
       { name: "elide", description: "Strip tool results + large blocks (default)" },
@@ -264,9 +287,9 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "thinking", description: "Drop all thinking blocks" },
     ],
   },
-  { name: "clear", description: "Clear the conversation context in place", mode: "direct", confirm: "Clear the whole conversation context?", group: "Context" },
-  { name: "fresh", description: "Reset provider stream state (transcript kept)", mode: "direct", group: "Context" },
-  { name: "retry", description: "Retry the last failed turn", mode: "direct", group: "Context" },
+  { name: "clear", description: "Clear the conversation context in place", mode: "direct", confirm: "Clear the whole conversation context?", notFirst: "history", group: "Context" },
+  { name: "fresh", description: "Reset provider stream state (transcript kept)", mode: "direct", notFirst: "history", group: "Context" },
+  { name: "retry", description: "Retry the last failed turn", mode: "direct", notFirst: "history", group: "Context" },
   { name: "context", description: "Estimated context usage breakdown", mode: "report", group: "Context" },
   {
     name: "memory",
@@ -285,9 +308,9 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "mm", args: "<list|show|refresh|history|seed|delete|reload> [id]", description: "Mental models" },
     ],
   },
-  { name: "forget-approvals", description: "Forget every remembered file/folder approval", mode: "direct", group: "Context" },
-  { name: "move", args: "[<path>]", description: "Move this session to another directory", mode: "direct", bare: "terminal", group: "Context" },
-  { name: "wt", aliases: ["worktree"], args: "[<branch>]", description: "Move this session into a new worktree", mode: "direct", group: "Context" },
+  { name: "forget-approvals", description: "Forget every remembered file/folder approval", mode: "direct", notFirst: "host", group: "Context" },
+  { name: "move", args: "[<path>]", description: "Move this session to another directory", mode: "direct", bare: "terminal", notFirst: "session", group: "Context" },
+  { name: "wt", aliases: ["worktree"], args: "[<branch>]", description: "Move this session into a new worktree", mode: "direct", notFirst: "session", group: "Context" },
   { name: "add-dir", args: "<path>", description: "Add a workspace directory (multi-root)", mode: "direct", needsArgs: true, group: "Context" },
   { name: "remove-dir", args: "<path>", description: "Remove a workspace directory", mode: "direct", needsArgs: true, group: "Context" },
   { name: "dirs", description: "List this session's workspace directories", mode: "report", group: "Context" },
@@ -301,7 +324,7 @@ export const OMP_COMMANDS: OmpCommand[] = [
     group: "Tools",
     subs: [
       { name: "full", description: "Show full command lines" },
-      { name: "kill", args: "<id>|all", description: "Cancel a background job", mode: "direct" },
+      { name: "kill", args: "<id>|all", description: "Cancel a background job", mode: "direct", notFirst: "history" },
     ],
   },
   { name: "tools", description: "Tools visible to the agent", mode: "report", group: "Tools" },
@@ -365,8 +388,8 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "disposition", args: "<finding> <disposition> <rationale>", description: "Set a finding disposition" },
     ],
   },
-  { name: "cleanse", args: "[request] [--all]", description: "Detect and fix project diagnostics with subagents", mode: "direct", group: "Tools" },
-  { name: "omfg", args: "<complaint>", description: "Forge a rule from a complaint about recurring behavior", mode: "direct", needsArgs: true, group: "Tools" },
+  { name: "cleanse", args: "[request] [--all]", description: "Detect and fix project diagnostics with subagents", mode: "direct", task: true, group: "Tools" },
+  { name: "omfg", args: "<complaint>", description: "Forge a rule from a complaint about recurring behavior", mode: "direct", needsArgs: true, task: true, group: "Tools" },
   {
     name: "browser",
     args: "[headless|visible]",
@@ -423,7 +446,7 @@ export const OMP_COMMANDS: OmpCommand[] = [
       { name: "disable", args: "<plugin>", description: "Disable a plugin" },
     ],
   },
-  { name: "reload-plugins", description: "Reload skills, commands, hooks, tools, agents, MCP", mode: "direct", group: "Tools" },
+  { name: "reload-plugins", description: "Reload skills, commands, hooks, tools, agents, MCP", mode: "direct", notFirst: "host", group: "Tools" },
 
   // ── info and dashboards ──
   {
@@ -434,7 +457,7 @@ export const OMP_COMMANDS: OmpCommand[] = [
     group: "Info",
     subs: [
       { name: "show", description: "Provider usage and limits" },
-      { name: "reset", args: "[provider/credential-id|provider/active]", description: "Spend a saved rate-limit reset", mode: "direct" },
+      { name: "reset", args: "[provider/credential-id|provider/active]", description: "Spend a saved rate-limit reset", mode: "direct", notFirst: "host" },
     ],
   },
   {
@@ -461,18 +484,23 @@ export const OMP_COMMANDS: OmpCommand[] = [
   { name: "settings", description: "omp settings", mode: "terminal", group: "Setup" },
   { name: "setup", aliases: ["providers"], args: "[providers]", description: "Provider setup", mode: "terminal", group: "Setup" },
   { name: "login", args: "[provider|redirect URL]", description: "OAuth login (opens a browser on the host)", mode: "terminal", group: "Setup" },
-  { name: "logout", args: "[provider]", description: "OAuth logout", mode: "direct", bare: "terminal", group: "Setup" },
+  { name: "logout", args: "[provider]", description: "OAuth logout", mode: "direct", bare: "terminal", notFirst: "host", group: "Setup" },
 
   // ── app ──
   { name: "pause", description: "Freeze all agents until resumed in the terminal", mode: "terminal", group: "App" },
   { name: "live", description: "Realtime voice mode (host microphone)", mode: "terminal", group: "App" },
   { name: "record", description: "Record this screen to a replayable file", mode: "terminal", group: "App" },
-  { name: "restart", description: "Restart omp with the same flags, resuming this session", mode: "direct", confirm: "Restart omp in this pane?", group: "App" },
-  { name: "exit", aliases: ["quit", "q"], description: "Quit omp (the pane keeps its shell)", mode: "direct", confirm: "Quit omp in this pane?", group: "App" },
+  { name: "restart", description: "Restart omp with the same flags, resuming this session", mode: "direct", confirm: "Restart omp in this pane?", notFirst: "session", group: "App" },
+  { name: "exit", aliases: ["quit", "q"], description: "Quit omp (the pane keeps its shell)", mode: "direct", confirm: "Quit omp in this pane?", notFirst: "session", group: "App" },
 ];
 
 /** Every builtin name and alias (what hostd's `inject::CATALOG` accepts). */
 export const OMP_COMMAND_NAMES: ReadonlySet<string> = new Set(OMP_COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? []).map((a) => a.replace(/:$/, ""))]));
+
+/** The builtin a name or alias stands for (`rewind` → `branch`). */
+export function ompCommand(name: string): OmpCommand | undefined {
+  return OMP_COMMANDS.find((c) => c.name === name || c.aliases?.some((a) => a.replace(/:$/, "") === name));
+}
 
 /** `/name args` → name (omp splits at the first whitespace or `:`; `/skill:<name>` keeps its prefix). */
 export function ompCommandName(command: string): string {

@@ -106,6 +106,7 @@ fn private_text(kind: NotifyKind, agent: Option<&str>) -> (String, String) {
         NotifyKind::Finished => (format!("{who} finished"), "Ready for review.".into()),
         NotifyKind::Error => (format!("{who} hit an error"), "Open TeleFlock for details.".into()),
         NotifyKind::Quiet => (format!("{who} has been quiet"), "No activity while working.".into()),
+        NotifyKind::Presented => (format!("{who} presented a document"), "Open TeleFlock to view it.".into()),
         NotifyKind::Info => ("TeleFlock".into(), "Something happened on your host.".into()),
     }
 }
@@ -141,7 +142,7 @@ fn priority(kind: NotifyKind) -> (u8, i8) {
     match kind {
         NotifyKind::Needs => (4, 1),
         NotifyKind::Error => (4, 0),
-        NotifyKind::Finished | NotifyKind::Quiet => (3, 0),
+        NotifyKind::Finished | NotifyKind::Quiet | NotifyKind::Presented => (3, 0),
         NotifyKind::Info => (2, -1),
     }
 }
@@ -158,6 +159,7 @@ pub fn ntfy_publish(ch: &StoredChannel, origin: &Origin, m: &Message) -> Result<
         NotifyKind::Finished => "white_check_mark",
         NotifyKind::Error => "warning",
         NotifyKind::Quiet => "hourglass",
+        NotifyKind::Presented => "page_facing_up",
         NotifyKind::Info => "information_source",
     };
     let mut body = json!({
@@ -278,7 +280,8 @@ pub fn summary(items: &[Message], dropped: usize) -> Message {
         NotifyKind::Error => 1,
         NotifyKind::Quiet => 2,
         NotifyKind::Finished => 3,
-        NotifyKind::Info => 4,
+        NotifyKind::Presented => 4,
+        NotifyKind::Info => 5,
     };
     let kind = items.iter().map(|m| m.kind).min_by_key(|k| rank(*k)).unwrap_or(NotifyKind::Info);
     let total = items.len() + dropped;

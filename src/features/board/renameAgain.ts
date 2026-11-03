@@ -1,17 +1,21 @@
 import { create } from "zustand";
 import { type AgentRenameInput, type AgentView, core, getAgentViews, getTranscript, parseAgentKey, suggestAgentRename, useAgent, useHostStale } from "@/core";
-import type { Agent, TranscriptItem } from "@/core/gen";
+import type { Agent, SessionDigest, TranscriptItem } from "@/core/gen";
 import { dismissToast, toast } from "@/design";
 import { isFresh } from "@/features/shell/vocab";
 import { currentRecap } from "./recap";
 import { reportError } from "./agentActions";
 
 /*
- * "Name it again": every agent menu's ✨ action. omp's tiny model names the agent from what it does NOW
- * (its latest task, last reply, recent tool calls, liveness line, recap, with the current names so only what
- * no longer fits changes), through the same two renames the Rename dialog makes: the herdr handle
- * (`agent.renameHandle`) and the omp session title (`agent.rename`). Toast with Undo.
+ * "Name it again": every agent menu's ✨ action. omp's tiny model names the overall work of the agent's whole
+ * session (the host's digest of it: every prompt from the first, the goal, the todo list, compaction summaries,
+ * subagents; then its latest activity as minor context, with the current names so only what no longer fits
+ * changes), through the same two renames the Rename dialog makes: the herdr handle (`agent.renameHandle`) and the
+ * omp session title (`agent.rename`). Toast with Undo.
  */
+
+/** How long the host's digest may take before the model is asked without it. */
+const DIGEST_WAIT_MS = 5_000;
 
 /** Tool lines, newest last, kept for the prompt. */
 const TOOLS = 8;
@@ -26,11 +30,17 @@ function toolLine(it: Extract<TranscriptItem, { kind: "tool" }>): string {
 }
 
 /**
- * What the tiny model is told about an agent: the live facts of the agent, and, from its loaded transcript
- * (`rows`, oldest first; empty when its session was never opened), the latest task, the last reply and the last
- * tool calls. Nothing else of the transcript leaves the app.
+ * What the tiny model is told about an agent: its names and where it works, omp's goal, the host's digest of the
+ * whole session (`digest`; absent from hosts before 0.9.1 and for agents other than omp) and its latest activity:
+ * the liveness line, the idle recap and, from its loaded transcript (`rows`, oldest first; empty when its session
+ * was never opened), the last tool calls and reply. Without a digest the transcript's latest task stands in for the
+ * session's prompts.
  */
-export function agentRenameInput(agent: Pick<Agent, "name" | "title" | "branch" | "column" | "omp" | "live">, rows: readonly TranscriptItem[]): AgentRenameInput {
+export function agentRenameInput(
+  agent: Pick<Agent, "name" | "title" | "repo" | "branch" | "cwd" | "column" | "omp" | "live">,
+  rows: readonly TranscriptItem[],
+  digest?: SessionDigest | null,
+): AgentRenameInput {
   let task: string | undefined;
   let lastPrompt: string | undefined;
   let reply: string | undefined;
@@ -53,15 +63,20 @@ export function agentRenameInput(agent: Pick<Agent, "name" | "title" | "branch" 
   task ??= lastPrompt;
   const live = agent.live;
   const line = [live.tool && agent.column === "running" ? live.tool.label : undefined, live.line].filter((s, i, all): s is string => !!s?.trim() && all.indexOf(s) === i).join(" · ");
+  const goal = agent.omp?.goal?.objective.trim();
+  const recap = currentRecap(agent)?.text;
   return {
     name: agent.name,
     title: agent.title,
+    ...(agent.repo ? { repo: agent.repo } : {}),
     ...(agent.branch ? { branch: agent.branch } : {}),
-    ...(task ? { task } : {}),
+    ...(agent.cwd ? { cwd: agent.cwd } : {}),
+    ...(goal ? { goal } : {}),
+    ...(digest ? { digest } : task ? { task } : {}),
     ...(reply ? { reply } : {}),
     ...(tools.length ? { tools } : {}),
     ...(line ? { line } : {}),
-    ...(currentRecap(agent) ? { recap: currentRecap(agent)?.text } : {}),
+    ...(recap ? { recap } : {}),
   };
 }
 
@@ -100,6 +115,8 @@ export function canRenameAgain(agent: Pick<Agent, "paneId" | "parked" | "column"
 export interface Io {
   agents(): readonly AgentView[];
   transcript(key: string): readonly TranscriptItem[];
+  /** The host's digest of the agent's whole session (`session.digest`). */
+  digest(hostId: string, agentId: string): Promise<SessionDigest>;
   /** herdr agent name (`agent.renameHandle`). */
   renameHandle(hostId: string, agentId: string, name: string): Promise<unknown>;
   /** omp session title (`agent.rename`). */
@@ -110,6 +127,7 @@ export interface Io {
 const realIo: Io = {
   agents: getAgentViews,
   transcript: (key) => getTranscript(key).items,
+  digest: (hostId, agentId) => core.host(hostId).call("session.digest", { agentId }),
   renameHandle: (hostId, agentId, name) => core.host(hostId).call("agent.renameHandle", { agentId, name }),
   renameTitle: (hostId, agentId, title) => core.host(hostId).call("agent.rename", { agentId, title }),
   suggest: suggestAgentRename,
@@ -152,6 +170,22 @@ export async function undoRename(key: string, applied: RenameChange, io: Io = re
   if (back.name || back.title) toast({ title: `Restored ${back.name?.to ?? now.name}`, status: "done", duration: 2600 });
 }
 
+/**
+ * The host's digest of the agent's whole session, or null: a host before 0.9.1 (`unknown_method`), a session it
+ * can't read, no answer within `DIGEST_WAIT_MS`. The model is then told what the app has (the latest task).
+ */
+async function sessionDigest(io: Io, hostId: string, agentId: string): Promise<SessionDigest | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Executor form: tsconfig lib is ES2023, so Promise.withResolvers is not typed.
+    return await Promise.race([io.digest(hostId, agentId), new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), DIGEST_WAIT_MS)))]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const useRenaming = create<{ busy: Readonly<Record<string, true>> }>(() => ({ busy: {} }));
 
 function setBusy(key: string, on: boolean): void {
@@ -164,7 +198,7 @@ function setBusy(key: string, on: boolean): void {
 }
 
 /**
- * Ask the tiny model to name the agent again from what it does now and apply it, with an Undo toast. A model
+ * Ask the tiny model to name the agent again from its whole session and apply it, with an Undo toast. A model
  * that finds the names still fit changes nothing and says so; failures say why (AI naming off, no tiny role on
  * the host, host too old, no answer). Never rejects.
  */
@@ -173,13 +207,14 @@ export async function renameAgain(key: string, io: Io = realIo): Promise<void> {
   if (!agent || !canRenameAgain(agent) || useRenaming.getState().busy[key]) return;
   const { hostId, agentId } = parseAgentKey(key);
   setBusy(key, true);
-  const waiting = toast({ title: `Naming ${agent.name}…`, description: "omp's tiny model reads what it is doing now", status: "running", duration: Number.POSITIVE_INFINITY });
+  const waiting = toast({ title: `Naming ${agent.name}…`, description: "omp's tiny model reads the whole session", status: "running", duration: Number.POSITIVE_INFINITY });
   try {
     const taken = io
       .agents()
       .filter((a) => a.hostId === hostId && a.id !== agentId && !a.parked)
       .map((a) => a.name);
-    const out = await io.suggest(hostId, agentRenameInput(agent, io.transcript(key)), taken);
+    const digest = agent.omp ? await sessionDigest(io, hostId, agentId) : null;
+    const out = await io.suggest(hostId, agentRenameInput(agent, io.transcript(key), digest), taken);
     dismissToast(waiting);
     if (!out.ok) {
       toast({ title: out.failure.message, description: out.failure.hint, status: "error" });
@@ -195,7 +230,7 @@ export async function renameAgain(key: string, io: Io = realIo): Promise<void> {
     }
     const change = planRename(now, out.value, canRetitle(now));
     if (!change.name && !change.title) {
-      toast({ title: `${now.name} still fits`, description: "Its name and title already match what it's doing", status: "idle" });
+      toast({ title: `${now.name} still fits`, description: "Its name and title already name the session's work", status: "idle" });
       return;
     }
     const applied = await applyRename(io, hostId, agentId, change);

@@ -4,8 +4,9 @@ import type { Answer } from "./Answer";
 export type NotifyAction = { 
 /**
  * Without an `answer`, `open:<page>` (`HostPage::action_id`) opens that page of the host,
- * on this button and on the notification itself (apps and hosts ≥ 0.9.0); any other id
- * opens the agent.
+ * on this button and on the notification itself (apps and hosts ≥ 0.9.0);
+ * `open:presented/<slug>-v<n>.<ext>` opens that presented document in the agent's session
+ * ([`Notification::presented`], apps and hosts ≥ 0.9.1); any other id opens the agent.
  */
 id: string, label: string, 
 /**

@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Mic, MicOff, Paperclip, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { ArrowUp, Check, ClipboardList, Cpu, LayoutTemplate, Lock, Mic, MicOff, Paperclip, Slash, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, forwardRef, type KeyboardEvent, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { type DraftImage, useAiNaming, useAiSuggestion, useDraft, useDraftImages, useSettings } from "@/core";
 import { attachImages, dragHasFiles, isVideoFile, mediaFiles } from "@/core/clipboardImages";
@@ -17,11 +17,14 @@ import { ResponsiveDialog } from "@/features/workspace/shared/ResponsiveDialog";
 import { templateSummary } from "@/features/workspace/shared/templates";
 import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { PasteChips, PasteMenu } from "@/features/session/composer/PasteChips";
+import { isSlashDraft } from "@/features/session/composer/slash";
+import { useSlashPalette } from "@/features/session/composer/SlashPalette";
 import { usePasteAttach } from "@/features/session/composer/usePasteAttach";
 import { VideoChips } from "@/features/session/composer/VideoChips";
+import { type FirstCommand, firstCommand, NEW_AGENT_OFFER, useNewAgentCommands } from "./commands";
 import { MAX_TASK_IMAGES } from "./images";
 import { type DispatchOptions, suggestDispatchName } from "./store";
-import { prefetchKey, rambleAbout } from "./thread";
+import { commandTask, prefetchKey, rambleAbout } from "./thread";
 
 const DEFAULT = "default";
 const LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
@@ -42,8 +45,12 @@ export interface DispatchComposerProps {
   uploadHost: string | null;
   options: DispatchOptions;
   onOptionsChange(options: DispatchOptions): void;
-  /** Sends one task (text, images, videos (`@/core/draftVideos` ids), any mix); false = refused (the draft stays). The composer clears itself and keeps focus. */
-  onSend(prompt: string, images: readonly DraftImage[], videos: readonly string[]): boolean;
+  /**
+   * Sends one task (text, images, videos (`@/core/draftVideos` ids), any mix), or a command the new
+   * agent runs (`command`; the text as typed); false = refused (the draft stays). The composer clears
+   * itself and keeps focus.
+   */
+  onSend(prompt: string, images: readonly DraftImage[], videos: readonly string[], command?: FirstCommand): boolean;
   /** Why sending is impossible right now (no repo, host offline); disables the composer. */
   disabledReason?: string | null;
   placeholder: string;
@@ -55,7 +62,10 @@ export interface DispatchComposerProps {
  * everywhere. Clears and keeps focus after each send so tasks can be fired back to back. Images
  * and videos come in by the attach button, paste or drop and go with the task (a task of images or
  * videos alone is fine): images inline, videos uploaded to the host (their paths go with the first
- * prompt). The footer holds the per-dispatch options: template or model + thinking, and plan mode.
+ * prompt). `/` opens the session composer's command palette, narrowed to what a new agent can run;
+ * a message that is a command (no attachments) is run by its agent as such, and a line under the
+ * text says so, or why it can't be. The footer holds the per-dispatch options: template or model +
+ * thinking, and plan mode.
  */
 export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchComposerProps>(function DispatchComposer(
   { hostId, repo, draftKey, uploadHost, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
@@ -82,11 +92,21 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   const ramble = useRamblerDictation({ ...(hostId ? { hostId } : {}), ...(about ? { about } : {}), text, setText, field: ta, mobile });
   const dictation = ramble.dictation;
   const canSend = !disabled && (!!text.trim() || images.length > 0 || videos.length > 0);
+  // The `/` palette: omp's commands a new agent can run, and the folder's skills, prompt templates and extension commands.
+  const known = useNewAgentCommands(hostId, repo);
+  const palette = useSlashPalette({ custom: known.commands, setText, ta, mobile, offer: NEW_AGENT_OFFER, badge: (c) => (c.source === "omp" || c.source === "teleflock" ? null : c.source) });
+  // Judged on what was typed, as the session composer judges it; a message with attachments is a prompt.
+  const asCommand = isSlashDraft(text) && images.length === 0 && videos.length === 0;
+  const routed = asCommand ? firstCommand(expanded, known) : null;
+  const template = useSettings((s) => s.templates.find((t) => t.id === options.templateId));
 
   // Name the task ahead of the send (same call as the send's, cached by ai.ts): after a pause of
-  // ~1.2 s with a few words typed, so most sends skip the "Naming…" wait.
+  // ~1.2 s with a few words typed, so most sends skip the "Naming…" wait. A command is named after
+  // its task, if it gives one.
   const ai = useAiNaming(hostId);
-  const prefetch = ai && hostId && repo && !disabled ? prefetchKey(expanded) : null;
+  const task = routed?.ok ? commandTask(routed.command.line) : null;
+  const naming = asCommand ? (task?.task ? task.text : null) : expanded;
+  const prefetch = ai && hostId && repo && !disabled && naming ? prefetchKey(naming) : null;
   useAiSuggestion(hostId, prefetch, () => (hostId && repo && prefetch ? suggestDispatchName(hostId, repo, prefetch) : Promise.resolve(null)), { debounceMs: 1200 });
 
   const send = async () => {
@@ -104,7 +124,12 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
     }
     const sent = images;
     const sentVideos = videos.map((v) => v.id);
-    if (!onSend(prepared.text.trim(), sent, sentVideos)) return;
+    const command = asCommand ? firstCommand(prepared.text, known) : null;
+    if (command && !command.ok) {
+      toast({ title: command.title, description: command.description, status: "error" });
+      return;
+    }
+    if (!onSend(prepared.text.trim(), sent, sentVideos, command?.command)) return;
     clearText();
     paste.sent(prepared.carried);
     // Only what was sent: an image or video attached meanwhile stays.
@@ -147,7 +172,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing || paste.onKeyDown(e) || e.key !== "Enter") return;
+    if (e.nativeEvent.isComposing || paste.onKeyDown(e) || palette.onKeyDown(e) || e.key !== "Enter") return;
     if ((!mobile && !e.shiftKey && !e.altKey) || e.ctrlKey || e.metaKey) {
       e.preventDefault();
       void send();
@@ -166,6 +191,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
       onDragLeave={() => setDragging(false)}
       onDrop={onDrop}
     >
+      <AnimatePresence>{!paste.menu && palette.element}</AnimatePresence>
       <AnimatePresence>{paste.menu && <PasteMenu key="paste" paste={paste} mobile={mobile} />}</AnimatePresence>
       {images.length > 0 && (
         <div className="flex gap-2 overflow-x-auto px-3 pt-1 pb-2" aria-label="Attached images">
@@ -189,14 +215,38 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
       <VideoChips videos={videos} onRemove={(id) => removeDraftVideo(draftKey, id)} onRetry={(id) => retryVideos([id])} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 ? "pt-0" : "pt-1")} />
       <PasteChips paste={paste} mobile={mobile} className={cn("px-3 pb-2", images.length > 0 || videos.length > 0 ? "pt-0" : "pt-1")} />
       {ramble.panel}
+      {routed && !palette.open && (
+        <p role="status" className={cn("flex min-w-0 items-start gap-1.5 px-3 pb-2 text-2xs font-semibold", routed.ok ? "text-mute" : "text-error")}>
+          <Slash className="mt-px size-3 shrink-0" />
+          <span className={cn("min-w-0 [overflow-wrap:anywhere]", mobile && "line-clamp-3")}>
+            {routed.ok
+              ? [
+                  `Runs ${routed.command.line.split(/\s/, 1)[0]} in the new agent`,
+                  routed.command.replacesPlan && options.plan && "it picks the mode, so the Plan option is left off",
+                  template?.prompt.trim() && "the template's text isn't added to a command",
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : `${routed.title}. ${routed.description ?? ""}`}
+          </span>
+        </p>
+      )}
       <Textarea
         ref={ta}
         value={dictation.listening && dictation.interim ? `${text}${text && !text.endsWith(" ") ? " " : ""}${dictation.interim}` : text}
-        onChange={(e) => paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true)}
+        onChange={(e) => {
+          const r = paste.change(e.target.value, e.target.selectionStart ?? e.target.value.length, (e.nativeEvent as InputEvent).isComposing === true);
+          palette.update(r.text, r.caret);
+        }}
         onSelect={(e) => paste.onSelect(e.currentTarget)}
         onCopy={(e) => paste.onCopy(e)}
         onCut={(e) => paste.onCopy(e, true)}
-        onBlur={() => window.setTimeout(() => document.activeElement !== ta.current && paste.close(), 120)}
+        onBlur={() =>
+          window.setTimeout(() => {
+            palette.close();
+            if (document.activeElement !== ta.current) paste.close();
+          }, 120)
+        }
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         placeholder={placeholder}

@@ -68,7 +68,7 @@ const KIND_LABEL: Record<ActivityKind, string> = {
   shellClosed: "Closed",
 };
 
-const NOTIFY_STATUS: Record<NotifyKind, Status> = { needs: "needs-you", finished: "review", error: "error", quiet: "idle", info: "idle" };
+const NOTIFY_STATUS: Record<NotifyKind, Status> = { needs: "needs-you", finished: "review", error: "error", quiet: "idle", info: "idle", presented: "review" };
 
 /** Filter chips, in the board's words: finished turns are what the Review lane holds, asks are Needs you. */
 const GROUPS = [

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { TranscriptItem } from "@/core/gen";
 import { OMP_COMMAND_NAMES } from "@/core/ompCommands";
-import { findCommand, isSlashDraft, matchCommands, matchSubs, parseSlash, pickFromTranscript, SLASH_COMMANDS } from "./slash";
+import { findCommand, isSlashDraft, matchCommands, matchSubs, parseSlash, pickFromTranscript, SLASH_COMMANDS, slashPopupAt } from "./slash";
 
 describe("slash catalog", () => {
   test("covers exactly the builtins hostd accepts", async () => {
@@ -66,6 +66,23 @@ describe("slash catalog", () => {
   test("subcommands filter by prefix", () => {
     const jobs = SLASH_COMMANDS.find((c) => c.name === "jobs");
     expect(jobs && matchSubs(jobs, "k").map((s) => s.name)).toEqual(["kill"]);
+  });
+
+  test("the palette follows the draft: commands, then a command's argument choices", () => {
+    expect(slashPopupAt("/pl", 3)).toMatchObject({ popup: { kind: "slash" }, sel: 0 });
+    // Choices start unselected (Enter sends `/fast` as typed) until one is typed.
+    expect(slashPopupAt("/fast ", 6)).toMatchObject({ popup: { kind: "sub" }, sel: -1 });
+    expect(slashPopupAt("/fast o", 7)).toMatchObject({ popup: { kind: "sub", items: [{ name: "on" }, { name: "off" }] }, sel: 0 });
+    // No choice matches: nothing shows, and no other popup takes over.
+    expect(slashPopupAt("/fast zz", 8)).toEqual({ popup: null, sel: 0 });
+    // Past the first argument, on a second line, mid-text: other popups (files) may apply.
+    expect(slashPopupAt("/plan add @src", 14)).toBeUndefined();
+    expect(slashPopupAt("/pl\nmore", 3)).toBeUndefined();
+    expect(slashPopupAt("fix /pl", 7)).toBeUndefined();
+    // An offer narrows both lists.
+    const offer = { command: (c: { name: string }) => c.name === "fast", sub: (_: unknown, s: { name: string }) => s.name !== "status" };
+    expect(slashPopupAt("/", 1, [], offer)?.popup?.items.map((c) => c.name)).toEqual(["fast"]);
+    expect(slashPopupAt("/fast s", 7, [], offer)).toEqual({ popup: null, sel: 0 });
   });
 
   test("copy/open pick from the loaded transcript", () => {

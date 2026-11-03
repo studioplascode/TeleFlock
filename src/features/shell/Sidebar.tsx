@@ -48,6 +48,7 @@ import {
 import {
   type AgentView,
   navigate,
+  parentRoute,
   type Route,
   useAgent,
   useAgentKeys,
@@ -98,8 +99,11 @@ function ActionTip({ def }: { def: ActionDef }) {
   );
 }
 
-/** Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer. The browser runs on a computer only. */
-const NAV = ["board", "inbox", "activity", "usage", "wrapped", "automations", "wall", "ambient", "browser"] as const;
+/**
+ * Monitoring views in the nav; Hosts and Settings live in the HOSTS header and the footer, Flock Wrapped in Usage (which
+ * stays lit while it is open). The browser runs on a computer only.
+ */
+const NAV = ["board", "inbox", "activity", "usage", "automations", "wall", "browser"] as const;
 
 /** `badge`: a count (sunset: something needs you; `calm`: only decided-for-you questions to review). */
 function NavItem({ id, collapsed, active, badge, calm = false, unread }: { id: (typeof NAV)[number]; collapsed: boolean; active: boolean; badge?: number; calm?: boolean; unread?: number }) {
@@ -745,7 +749,7 @@ export function Sidebar() {
             key={id}
             id={id}
             collapsed={collapsed}
-            active={route.name === id}
+            active={route.name === id || parentRoute(route)?.name === id}
             badge={id === "inbox" ? inbox.count : undefined}
             calm={id === "inbox" && inbox.calm}
             unread={id === "inbox" ? unread : undefined}

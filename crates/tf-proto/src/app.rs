@@ -145,6 +145,9 @@ wire_struct! {
         pub notify_needs: bool,
         pub notify_finished: bool,
         pub notify_errors: bool,
+        /// OS notifications when an agent presents a document (`presented`, hosts ≥ 0.9.1).
+        /// Absent: on.
+        pub notify_presented: Option<bool>,
         pub notify_sound: bool,
         /// `HH:MM` local time; notifications are silent between start and end.
         pub quiet_start: Option<String>,
@@ -369,6 +372,10 @@ pub enum AppEvent {
         #[ts(optional)]
         notification_id: Option<String>,
     },
+    /// Opened a notification about a document an agent presented (an action `open:presented/…`,
+    /// `Notification::presented`): the frontend opens the agent's session and shows the document
+    /// (`name`: the snapshot's `session.artifact` name, kind `local`).
+    OpenPresented { host_id: String, agent_id: String, name: String },
     /// Tray / notification "Answer next": the frontend opens the Answer-next HUD.
     AnswerNext,
     /// Self-update progress (emitted by the app shell; `app.updateStatus` returns the same).

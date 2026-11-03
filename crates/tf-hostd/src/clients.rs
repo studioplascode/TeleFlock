@@ -21,7 +21,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use tf_proto::host::{ClientInfo, ClientMsg, ServerMsg, FEATURE_BROWSER, FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::host::{
+    ClientInfo, ClientMsg, ServerMsg, FEATURE_BROWSER, FEATURE_FORWARD, FEATURE_NOTIFY_KINDS, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD,
+};
 use tf_proto::{ApiError, PROTOCOL_VERSION};
 
 use crate::daemon::Daemon;
@@ -58,6 +60,8 @@ pub struct Features {
     pub forward: bool,
     /// The client lends agents its TeleFlock Browser ([`crate::browser`]).
     pub browser: bool,
+    /// The client takes every notification kind (`presented` and later ones; [`crate::notify`]).
+    pub notify_kinds: bool,
 }
 
 impl Features {
@@ -70,6 +74,7 @@ impl Features {
             presence: has(FEATURE_PRESENCE),
             forward: has(FEATURE_FORWARD),
             browser: has(FEATURE_BROWSER),
+            notify_kinds: has(FEATURE_NOTIFY_KINDS),
         }
     }
 
@@ -92,6 +97,9 @@ impl Features {
         }
         if self.browser {
             out.push(FEATURE_BROWSER.to_string());
+        }
+        if self.notify_kinds {
+            out.push(FEATURE_NOTIFY_KINDS.to_string());
         }
         Some(out)
     }
@@ -596,10 +604,10 @@ mod tests {
         // An old client asks for nothing and gets the welcome it always got.
         assert_eq!(Features::negotiate(None), Features::default());
         assert_eq!(Features::default().welcome(None), None);
-        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "browser".into(), "fromTheFuture".into()];
+        let all = vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "browser".into(), "notifyKinds".into(), "fromTheFuture".into()];
         let f = Features::negotiate(Some(&all));
-        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true, forward: true, browser: true });
-        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "browser".into()]));
+        assert_eq!(f, Features { zstd: true, session_sync: true, presence: true, forward: true, browser: true, notify_kinds: true });
+        assert_eq!(f.welcome(Some(&all)), Some(vec!["zstd".to_string(), "sessionSync".into(), "presence".into(), "forward".into(), "browser".into(), "notifyKinds".into()]));
         let unknown = vec!["fromTheFuture".to_string()];
         let f = Features::negotiate(Some(&unknown));
         assert_eq!((f, f.welcome(Some(&unknown))), (Features::default(), Some(vec![])));

@@ -84,3 +84,38 @@ describe("planSend: chats", () => {
     });
   });
 });
+
+describe("planSend: commands", () => {
+  const command = { line: "/plan add a settings page", replacesPlan: true };
+
+  test("a command goes only to a daemon that runs commands in new agents", () => {
+    const w = {
+      profiles: [profile("new"), profile("old"), profile("unknown")],
+      status: online("new", "old", "unknown"),
+      states: { new: state({ version: "0.9.1" }), old: state({ version: "0.9.0" }), unknown: state({ version: null }) },
+      dispatch: memory,
+    };
+    const req = { target: "new", repo: "/home/a/app", prompt: command.line, images: [], options, command };
+    expect(planSend(w, req)).toMatchObject({ ok: true, hostId: "new", args: { command, prompt: command.line } });
+    // Older daemons would drop the command and start the agent idle; an unknown one may be older.
+    expect(planSend(w, { ...req, target: "old" })).toMatchObject({ ok: false });
+    expect(planSend(w, { ...req, target: "unknown" })).toMatchObject({ ok: false });
+    // The same words as text go anywhere.
+    expect(planSend(w, { ...req, target: "old", command: undefined })).toMatchObject({ ok: true, hostId: "old" });
+    // Chats run commands the same way.
+    expect(planSend(w, { ...req, repo: CHAT_REPO })).toMatchObject({ ok: true, args: { command } });
+    expect(planSend(w, { ...req, repo: CHAT_REPO, target: "old" })).toMatchObject({ ok: false });
+  });
+
+  test("Auto sends a command to the least busy host of the group that runs it", () => {
+    const profiles = ["p1", "p2"].map((id) => profile(id, "pool"));
+    // p2 is idle but its daemon predates commands; p1 is busy.
+    const states = { p1: state({ version: "0.9.1", agents: running("p1", 2) }), p2: state({ version: "0.9.0" }) };
+    const w = { profiles, status: online("p1", "p2"), states, dispatch: memory };
+    const req = { target: "auto:pool", repo: CHAT_REPO, prompt: command.line, images: [], options };
+    expect(planSend(w, req)).toMatchObject({ ok: true, hostId: "p2" });
+    expect(planSend(w, { ...req, command })).toMatchObject({ ok: true, hostId: "p1", args: { command } });
+    expect(planSend({ ...w, states: { ...states, p1: state({ version: "0.9.0" }) } }, { ...req, command })).toMatchObject({ ok: false });
+    expect(planSend({ ...w, status: online("p2") }, { ...req, command })).toMatchObject({ ok: false });
+  });
+});

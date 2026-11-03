@@ -44,9 +44,10 @@ export function WhileAwayToast(): null;
 // src/features/usage/UsageView.tsx — #/usage: spend history and insights from omp's stats index (`host.usage`, see
 // src/features/usage/README.md) + "Subscriptions & limits"
 // (LimitsSection.tsx, `host.limits` via `useAccountLimits`): one tile per account (merged across hosts by
-// `LimitAccount.key`), each window's % left, reset countdown, %/h pace and "hit the limit in ~X" /
-// "resets before you run out"; striped bar = projected use at reset. `limitsUi.ts` (provider names,
-// tint) is shared with the inspector LimitsTile / header LimitsChip and the board Stats tile.
+// `LimitAccount.key`), each window's % left, reset countdown, %/h pace (the last 5 minutes, further back when they
+// moved less than 2 %) and "At the last 5 minutes' pace you run out in ~X" / "… it resets before you run out";
+// striped bar = projected use at reset. `limitsUi.ts` (provider names, tint) is shared with the inspector LimitsTile /
+// header LimitsChip and the board Stats tile.
 export function UsageView(): JSX.Element;
 // src/features/board/BentoRow.tsx — useTodayUsage(hostFilter): the Stats tile / strip / Flock home Today figure is
 // `useTodaySpend` (src/core/usage.ts), the same as the Usage page's Today tile: indexed hours since this device's
@@ -71,9 +72,9 @@ export function resumeParked(key: string): Promise<string | null>; // agent.resu
 // openTerminal (parked: resume first, then the new pane), openAnswerHud, canReview, setMuted, useMuted
 
 // src/features/board/renameAgain.ts — "Name it again" (✨ in every agent menu: sidebar, board card ⋯/right-click, phone rows, session header ⋯ and sheet, palette)
-export function renameAgain(key: string): Promise<void>; // suggestAgentRename from what the agent does now → agent.renameHandle, then agent.rename (title only through omp's bridge or when idle, and only where the session has one); "Naming…" toast, Undo toast; a name or title given meanwhile stays (the answer is dropped with a toast); failures say why; never rejects
+export function renameAgain(key: string): Promise<void>; // session.digest of the agent's whole session (omp agents; ≤ 5 s, else none) → suggestAgentRename for its overall work → agent.renameHandle, then agent.rename (title only through omp's bridge or when idle, and only where the session has one); "Naming…" toast, Undo toast; a name or title given meanwhile stays (the answer is dropped with a toast); failures say why; never rejects
 export function useRenameAgain(key: string): { available: boolean; busy: boolean; run(): void }; // available: pane (not parked), online host, past the first prompt
-// also: agentRenameInput (what the model is told), planRename (only what differs; no first title: omp can't clear one, so Undo couldn't), undoRename (leaves parts renamed again since), canRetitle, canRenameAgain
+// also: agentRenameInput (what the model is told: names, repository, branch, folder, goal, the host's digest, then the latest activity; without a digest, from a host before 0.9.1, the loaded transcript's latest task), planRename (only what differs; no first title: omp can't clear one, so Undo couldn't), undoRename (leaves parts renamed again since), canRetitle, canRenameAgain
 
 // src/features/board/Notices.tsx — the notices above the lanes, for the hosts in view, most urgent first
 // (notice.tsx `noticeRank`): host not online (snapshot strip, connAction verb) · omp without an account

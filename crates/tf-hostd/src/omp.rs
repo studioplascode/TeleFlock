@@ -132,6 +132,9 @@ pub struct OmpView {
     pub retry: Option<tf_proto::RetryWait>,
     /// The last run ended in a provider-side failure and nothing runs since (`Replica::tail_error`).
     pub tail_error: Option<String>,
+    /// A `write` of a `cfg://` URL running in the session: omp's settings approval, unless a
+    /// session grant answers it at once (`state::build::legacy_cfg_wait`).
+    pub cfg_write: Option<crate::state::build::CfgWrite>,
 }
 
 /// The session meta facts an agent card shows ([`MetaOverlay::board`]).
@@ -614,21 +617,44 @@ impl OmpSession {
         self.lock().replica.expect_originals(text, kept);
     }
 
-    /// Lists a prompt sent while omp streams in the queue until it lands (see
-    /// [`tf_collab::replica::Replica::expect_queued`]).
-    pub fn expect_queued(self: &Arc<Self>, text: &str, follow_up: bool) {
+    /// Lists a prompt about to be sent while omp streams in the queue until it lands (see
+    /// [`tf_collab::replica::Replica::expect_queued`]); whether it was listed. Called before the
+    /// send: omp can take a steer at once (it cuts a running tool batch short), so its row can
+    /// arrive ahead of the send's answer, and a prompt listed only then stayed until omp idled.
+    pub fn expect_queued(self: &Arc<Self>, text: &str, follow_up: bool) -> bool {
         let mut st = self.lock();
-        if st.replica.expect_queued(text, follow_up, crate::util::now_ms()) {
+        let listed = st.replica.expect_queued(text, follow_up, crate::util::now_ms());
+        if listed {
             emit_meta(self, &mut st);
         }
+        listed
     }
 
-    /// Unlists a queued prompt that was pulled back out of omp's queue.
+    /// Unlists a queued prompt that was pulled back out of omp's queue, or whose send failed.
     pub fn forget_queued(self: &Arc<Self>, text: &str) {
         let mut st = self.lock();
         if st.replica.forget_queued(text) {
             emit_meta(self, &mut st);
         }
+    }
+
+    /// Unlists every queued prompt: omp had nothing left to pull back, so they reached the turn.
+    pub fn clear_queued(self: &Arc<Self>) {
+        let mut st = self.lock();
+        if st.replica.clear_queued() {
+            emit_meta(self, &mut st);
+        }
+    }
+
+    /// [`Self::prompt`], listed in the queue while omp streams ([`Self::expect_queued`]): from
+    /// before it goes out, and unlisted again when the send fails.
+    pub async fn prompt_queued(self: &Arc<Self>, text: &str, images: Vec<ImageContent>, delivery: Delivery) -> Result<(), ApiError> {
+        let listed = self.expect_queued(text, delivery == Delivery::FollowUp);
+        let sent = self.prompt(text, images, delivery).await;
+        if sent.is_err() && listed {
+            self.forget_queued(text);
+        }
+        sent
     }
 
     pub fn view(&self, now: Millis) -> OmpView {
@@ -649,6 +675,7 @@ impl OmpSession {
             last_turn_row_at: st.replica.last_turn_row_at(),
             retry: st.replica.retry_wait(now).cloned(),
             tail_error: st.replica.tail_error().map(str::to_owned),
+            cfg_write: crate::state::build::cfg_write(st.replica.running_tools()),
         }
     }
 
@@ -2113,20 +2140,25 @@ async fn artifact_loop(weak: Weak<Inner>, session: Arc<OmpSession>) {
         }
         let Some((id, dir, mut ledger)) = tail.take() else { continue };
         let scanned = tokio::task::spawn_blocking(move || {
-            let calls = crate::artifacts::scan(&dir, &mut ledger);
-            (dir, ledger, calls)
+            let (calls, presented) = crate::artifacts::scan_live(&dir, &mut ledger);
+            (dir, ledger, calls, presented)
         })
         .await;
-        let calls = match scanned {
-            Ok((dir, ledger, calls)) => {
+        let (calls, presented) = match scanned {
+            Ok((dir, ledger, calls, presented)) => {
                 tail = Some((id, dir, ledger));
-                calls
+                (calls, presented)
             }
             Err(e) => {
                 warn!(session = %sid, "artifact scan: {e}");
                 continue;
             }
         };
+        if !presented.is_empty() {
+            debug!(session = %sid, n = presented.len(), "artifact scan: a subagent presented");
+            let signals = presented.into_iter().map(|artifact| Signal::Presented { artifact }).collect();
+            let _ = inner.updates.send(OmpUpdate::Signals { session_id: session.session_id.clone(), signals });
+        }
         let Some((_, _, ledger)) = tail.as_ref() else { continue };
         let now = now_ms();
         let (changed, replaying, usage) = {

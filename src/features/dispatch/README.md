@@ -1,7 +1,8 @@
 # features/dispatch (owner: Dispatch)
 
 Fire tasks at a repository like chat messages: every message creates a fresh worktree with an omp
-agent whose first prompt is the message. Or pick "No folder · chat" and every message starts a chat
+agent whose first prompt is the message, or which runs it when it is a slash command (`/plan add a settings
+page`, a skill, a prompt template). Or pick "No folder · chat" and every message starts a chat
 instead: an omp agent in a folder its host makes for it, no repository (architecture §3.31). Route
 `#/dispatch` (`{ name: "dispatch" }`); desktop sidebar item next to Board, phone bottom-nav tab,
 palette view "Dispatch", global key `D`; "New chat" (palette action, phone create sheet) opens it
@@ -18,7 +19,7 @@ export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (targe
 export function threadKey(target: string, repo: string): string;  // target = host id or "auto:<group>"; repo = root (host), repo id (Auto) or CHAT_REPO (a chat thread, `@/core/chats`)
 export function entryHost(key, entry): string;                    // the host an entry went to (entry.hostId, else the thread's host)
 export function entryRepo(key, entry): string;                    // that host's checkout root (entry.repo, else the thread's repo)
-export function dispatchTask(args: { key?; hostId; repo; prompt; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text; resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase); repo = CHAT_REPO: a chat (no branch, base or resolveBase; agent.start with the chat target)
+export function dispatchTask(args: { key?; hostId; repo; prompt; command?: FirstCommand; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text (a command: a task, `commandTask`); resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase); repo = CHAT_REPO: a chat (no branch, base or resolveBase; agent.start with the chat target); command: the agent runs it (AgentSpec.command) instead of getting prompt, the text as typed
 export function pendingByHost(threads, runningAgentIds, now): Record<string, number>; // dispatches on their way to each host (Auto's workload)
 export function suggestDispatchName(hostId, repo, prompt): Promise<string | null>; // the send's suggestBranch call (the composer prefetches through it); a chat asks outside any folder (no cwd)
 export function resumeInterruptedNaming(): void; // every `naming` entry cut short by a reload (any thread) goes ahead under the fallback name once its host answers; runs after hydration, call at startup
@@ -26,7 +27,7 @@ export function retryDispatch(args: { key; id; trust?: boolean; taken: Iterable<
 export function isInFlight(entryId: string): boolean;               // request queued / in flight in this tab
 export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create (a chat: agent.start) settles
 export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted and of deleted chats (HostInfo.pruned), and their images
-export interface DispatchEntry { id; prompt; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed?; chat? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live; chat: a chat (branch "", no base / repo)
+export interface DispatchEntry { id; prompt; command?; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed?; chat? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live; chat: a chat (branch "", no base / repo); command: the line its agent ran (a message that is a command; prompt = the text as typed)
 export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean; roleModels?; fallbackChains?; autoAnswer? } // the agent's own omp roles / chains and decide-for-me policy; absent (options saved before them) = none / the host default
 
 // src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
@@ -48,17 +49,25 @@ export function localRepoIds(repo): string[];                      // the "local
 export function findGroupRepo(repos, id): GroupRepo | undefined;   // by id, else by one of those local ids (threads keep the id they started under)
 
 // src/features/dispatch/send.ts — one send outside any view (the composer and Quick capture both use it)
-export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure; a chat (repo CHAT_REPO) only to a host whose daemon starts chats
+export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure; a chat (repo CHAT_REPO) only to a host whose daemon starts chats; req.command (a FirstCommand) only to a daemon that runs it (takesCommands)
 export function sendTask(world, req): { ok: true; hostId; entry } | { ok: false; title; description? }; // planSend + dispatchTask
 export function dispatchTarget(profiles, hostIds, lastHost): { target; group }; // last host or group, else the first host
 export function dispatchOptions(stored, settings): DispatchOptions;             // last used, else the Settings defaults
 export function dispatchDraftKey(target, repo): string;                         // the composer draft of a thread
-export function dispatchedRepos(threads); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats
+export function dispatchedRepos(threads); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); takesCommands(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats; takesCommands: hostd ≥ COMMANDS_MIN_HOSTD ("0.9.1"), the demo host
 export function chatHostsOf(states, ids): string[];                             // the hosts of ids whose daemon starts chats (HostInfo.chats)
 export function chatRefusal(world, target): { title; description? } | null;     // why target can't take a chat (daemon from before chats or not known yet; Auto: no host of the group starts chats), CHATS_NEED_UPDATE words
 
 // src/features/dispatch/openChat.ts — "New chat" (palette, phone create sheet)
 export function openChat(): void; // Dispatch on its current target (last host or group, else the first host) with "No folder · chat" picked and the task box focused
+
+// src/features/dispatch/commands.ts — a message that is a command (commands.test.ts)
+export interface FirstCommand { line: string; replacesPlan: boolean }  // the line its new agent runs (AgentSpec.command; TeleFlock's `/model <id>` goes as `/switch <id>`); replacesPlan: it turns on plan, vibe or goal mode (OmpCommand.sessionMode), so the agent starts without the Plan option
+export interface NewAgentCommands { commands: CommandInfo[]; skills: boolean; session: boolean } // what a new agent in the folder will have besides the builtins, as far as known
+export function useNewAgentCommands(hostId, repo): NewAgentCommands; // skills.list for the folder (a chat: user level; switched-off skills left out) + agent.commands of a live bridged session in the repository (a chat: of a chat)
+export function firstCommand(input, known): { ok: true; command: FirstCommand } | { ok: false; title; description? }; // recognised as the session composer recognises commands (findCommand); refused: one line only, unknown, a skill the folder's list lacks, needs arguments, no first message (whyNotFirst), TeleFlock controls of a running agent
+export function whyNotFirst(cmd: OmpCommand, args): string | null;  // OmpCommand/OmpSubcommand.notFirst (history | session | turn | host), or a form omp shows in its TUI only (report, terminal)
+export const NEW_AGENT_OFFER: SlashOffer;                            // the palette's filter: builtins with a form that fits (only the argument choices that fit), every skill, prompt template and extension command
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)
 export const BRANCH_PREFIX = "dispatch/";
@@ -67,6 +76,8 @@ export function baseSlug(prompt: string): string;                  // slugFromPr
 export function uniqueSlug(base: string, taken: ReadonlySet<string>): string; // -2, -3… vs names and dispatch/<name> branches; result ≤ 32 chars (herdr's agent-name limit)
 export function cleanSuggestion(s): string | null;                 // an AI slug as a dispatch name (≤ 28 chars, whole words), or null (unusable)
 export function nameDispatch(prompt, suggest?): Promise<{ slug; ai }>; // AI slug else prompt slug; the caller dedupes synchronously after the await
+export function commandTask(command): { text; task: boolean };     // what a command message is named after: its arguments' task ("/plan add a settings page" → "add a settings page", a leading choice like `/goal set` left out; builtins with OmpCommand.task, every custom command), else the command itself ("/fast on")
+export function commandSlug(command): string;                      // its name without AI: the task's slug, else the command's words ("fast-on", "review", "switch-openai-gpt-5")
 export function prefetchKey(draft: string): string | null;         // trimmed draft once it has 3+ words
 export function rambleAbout(repo): string | undefined;             // Rambler's context for a dictated task: "Repository: <name>"; none for a chat (CHAT_REPO) or no repo
 export function threadBase(list, stored, legacy): { shown; param?; untouched }; // see Behaviour → Base
@@ -185,7 +196,7 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   had no known remote (`local:<host>:<root>`) stays reachable once its remote is learned: it is
   matched by its local id (`findGroupRepo`), and picking the repo goes back to it.
 - A dispatch is one `worktree.create { cwd: root, branch: "dispatch/<slug>", base?, label: slug,
-  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt, images?, roleModels?, fallbackChains?, autoAnswer? } }`.
+  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt | command, images?, roleModels?, fallbackChains?, autoAnswer? } }`.
   The footer's More options chip (what is set, when anything is) opens "More agent options" (dialog, sheet on phones):
   the agent's own model roles and fallback chains (`features/agentRoles`) and decide for me (`features/autoAnswer`),
   kept with the options; picking a template keeps them. The policy goes only to a host with decide for me, checked
@@ -200,6 +211,32 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   so most sends skip the wait. Either way the slug is deduped against existing branches, live agent
   names and every live dispatch on the host (herdr agent names are unique per host, so other repos'
   pending dispatches count).
+- Commands: `/` opens the session composer's palette (`useSlashPalette`, `features/session/composer/SlashPalette.tsx`):
+  omp's builtins, the folder's skills (`skills.list` for the repository, user level for a chat; switched-off ones left
+  out) and the prompt templates and extension commands a live session there lists (`agent.commands` of a bridged agent
+  in the repository, a chat for a chat), with argument hints and argument choices; ↑↓, Tab or Enter picks, Esc closes.
+  A pick only completes the text (Enter then dispatches). It offers what makes sense as a brand-new agent's first
+  message (`NEW_AGENT_OFFER`), and only such argument choices: not what works on what a session already has
+  (`/compact`, `/retry`, `/fork`, `/btw`, `/todo`, `/goal pause`), leaves or replaces the session (`/new`, `/resume`,
+  `/exit`), acts on a running turn (`/queue`) or on omp for every agent (`/logout`, `/reload-plugins`), nor what omp
+  shows in its own TUI only (`/usage`, `/settings`, bare `/goal`, `/model roles`) or TeleFlock's controls of a running
+  agent (`/stop`, `/terminal`) — the catalog's `notFirst` and modes (`@/core/ompCommands`). A message is a command when
+  what was typed starts with `/` and it carries no images or videos, as in the session composer (a leading space makes
+  it text; a paste token doesn't count). A line above the text says "Runs /plan in the new agent" (plus that `/plan`,
+  `/vibe`, `/goal` or `/guided-goal` picks the mode, so the Plan option is left off, and that a template's text isn't
+  added to a command: its model, thinking and plan still apply), or why it can't run (`firstCommand`: unknown, a skill
+  the folder lacks, one line only, needs arguments, no first message), and the send refuses with the same words. The
+  agent's spec carries it as `command` (`AgentSpec.command`) instead of a prompt: its host runs it once the agent is idle and linked, as `agent.slash`
+  does (architecture §3.7), so `/plan add a settings page` starts it in plan mode on that task, and a skill or prompt
+  template expands as in omp. A command omp refuses shows on the agent as an error activity ("/x didn't run").
+  TeleFlock's `/model <id>` goes as `/switch <id>`. It is named after the task its arguments give (`commandTask`:
+  builtins whose arguments are one, such as `/plan`, `/vibe`, `/goal`, `/loop`, and every skill, prompt template and
+  extension command; a leading choice like `/goal set` left out), with AI naming as for any task, else after the
+  command itself without AI (`/fast on` → `fast-on`, `/skill:review` → `review`). Only tf-hostd 0.9.1 and newer runs
+  it (`takesCommands`; an older daemon would drop it and start the agent idle): a single such host refuses the send
+  (update it, or start the message with a space to send it as text), Auto leaves such hosts out. The thread shows
+  the message as typed with the command in mono; one that starts no turn (`/fast on`) stops showing "Starting agent"
+  once the agent's link has been up 10 s. The thread has no reply box: later messages to the agent go through its session.
 - Sends never wait for each other: up to 3 creates per thread run at once, more wait as "Queued".
   The composer clears and keeps focus. Enter dispatches on desktop (Shift+Enter newline); on phones
   Enter is a newline and the send button dispatches.

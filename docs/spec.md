@@ -178,6 +178,7 @@ Navigate to any agent, workspace or host; run any action (each with its one-line
 
 ### Review & ship (P1)
 - Worktree diff against base: file tree, unified or split view, syntax highlighting.
+- Binary files show as what they are: images (checkerboard, size, full-size lightbox), video and audio (native controls), PDFs (every page, on every platform); a modified file before and after (side by side on desktop, stacked on phones); anything else as its size.
 - Commit (message editor; ✨ draft with omp's tiny model, or ask the agent to write it), push, `gh pr create` (✨ title and description), PR checks, merge.
 - A ship stepper (Commit · Push · PR · Merge · Done) with the next step as a button, always visible; Review cards on the board show the same next step.
 - Mark done (or Mark done & remove worktree…) from the Done stage.
@@ -197,6 +198,8 @@ Spawn N worktree agents from one prompt with different models or approaches, the
 
 ### Dispatch
 Fire tasks at a repository like messages in a chat. Pick a host — or a host group as "Auto · <group>" — and a repo (recent repos from open workspaces, or browse) and a base branch (default: `origin/<default>`, fetched before forking); each message creates a `dispatch/<slug>` worktree with an omp agent whose first prompt is the message and its images (attach, paste or drop screenshots; image-only tasks are fine). In Auto, the repos are those of the group's hosts (matched by their origin remote) and each message goes to the least busy online host that has the repo (by running agents, dispatches on their way, CPU, memory and how much of the chosen model's subscription window is left there); the card says where it went and why. The slug comes from omp's tiny model (fetched while you type, so most sends don't wait), or from the message's lead sentence when AI naming is off, slow or answers like an agent instead of a name. Sends run independently, so many tasks go out back to back. The thread (per host or group + repo, kept across restarts; images kept on the device) shows each message with a live reply card: naming, launch steps, then status, streaming line, inline answers for Needs-you, Open session / Terminal / Review, and readable failures with fixes (trust the repo, retry). Per-dispatch options: template or model + thinking, plan mode, model roles and fallback chains for this agent, decide for me. Links under the composer open New worktree and Fan out with the repository filled in. Tasks also arrive prefilled from Quick capture and, on Android, from the share sheet.
+
+A message that is a slash command runs as one in its new agent instead of reaching the model as text: `/` opens the session composer's command palette (commands, argument hints and choices, the folder's skills, prompt templates and extension commands), narrowed to what makes sense for a brand-new agent; `/plan add a settings page` starts an agent in plan mode on that task, a skill or prompt template expands as in omp, and a command that needs a session's history, leaves the session or shows only in omp's terminal is not offered and says why. The agent is named after the task the command gives (or the command itself). Needs tf-hostd 0.9.1 on the host.
 
 ### AI assistance (P1)
 TeleFlock's AI provider is omp itself: `ai.complete` runs one `omp --mode json` completion on the host with the `tiny` model role (falling back to `smol`), without tools, session, extensions or title, and stops the process as soon as the answer is in. It names Dispatch worktrees, wizard branches and agents, fan-out runs and templates, suggests renames, and drafts commit messages and PR titles/descriptions. Results are marked ✨, always editable, cached for 10 minutes, and replaced by a name from the user's own words when AI naming is off (Settings), unavailable or slow. Prompts are never logged or stored.
@@ -231,9 +234,9 @@ A single-agent zen view: just the stream and the composer.
 - **Quick capture** (desktop): a small always-on-top box that sends a task, a screenshot or an answer from any app; opened from the tray, `teleflock://capture` or an optional global shortcut (off until set in Settings).
 - **Share to TeleFlock** (Android): text, links, screenshots and GitHub issues become Dispatch tasks.
 
-### Wall, Ambient and Flock Wrapped (P2)
-- **Wall** (desktop): 2×2 or 3×3 live transcripts that fill themselves with who needs you, then who runs, answerable from any tile. **Ambient mode**: one orb per agent for a spare screen.
-- **Flock Wrapped:** the week as one shareable card (unattended hours, agents run, lines changed, pull requests merged, longest overnight streak, fastest model).
+### Wall and Flock Wrapped (P2)
+- **Wall** (desktop): 2×2 or 3×3 live transcripts that fill themselves with who needs you, then who runs, answerable from any tile.
+- **Flock Wrapped:** the week as one shareable card (unattended hours, agents run, lines changed, pull requests merged, longest overnight streak, fastest model), opened from Usage.
 
 ## 6. Keyboard map (desktop)
 - `Ctrl+K` palette

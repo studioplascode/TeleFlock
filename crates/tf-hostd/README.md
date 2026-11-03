@@ -170,6 +170,11 @@ while nothing is in it (`undo_chat_launch`).
   transcripts; fixtures in `src/testdata/resume/`). `setAutoResume` pushed to every 2.1.0 bridge,
   `intervened` (prompt, Stop, model, new session, Mark done close the ticket), `agent.retry` (`retry` / `f5`:
   bridge 2.1.0 `retry`, else TUI `/retry`, else `/retry` injected while idle).
+- **Subscription limits** (`ops/limits.rs`, §3.4): `host.limits` = `omp usage --json` (5 min) + omp's cached
+  report rows (`agent.db` `usage_cache:report:…`, read-only, on every answer: omp refreshes them from response
+  headers about once a minute while it works); `limits::start` (daemon start) reads those rows every 60 s while
+  an omp session on this host runs a turn, so the client's 5-minute pace has a reading a minute with no app
+  connected. Each window's last hour of readings is sent whole.
 - **Refusal fallback** (`refusal.rs`, §3.22): `refusal::get()` holds the host's rules in
   `<home>/refusalfallback.json` (`host.refusalFallback|Set`, 0600, atomic, a damaged file fails closed with a
   notice and a `.bad-<ms>` copy), `Refusals::pick` (category, refused model, never the same model; the loop guard:
@@ -241,3 +246,4 @@ Lab e2e: `examples/e2e.rs` (see its header); decide for me: `examples/e2e_autoan
 Agent recovery: `cargo test -p tf-hostd restart recovery` (session facts, the decision table and note, the ledger, never-double-launch, names, start-timeout rename, herdr's argv rules, ticket policy); lab `examples/e2e_lifeboat.rs` (see its header).
 herdr lifecycle: `cargo test -p tf-hostd herdr_health` (state machine, idle gating, managed config, stale saved sessions).
 Chat tasks: `cargo test -p tf-hostd chat` (names, folders, path matching, what keeps a folder, removal safety, the chats workspace, launch mapping, `chat.delete`'s target, other herdr sessions' chats, the board marker).
+Subscription limits: `cargo test -p tf-hostd ops::limits` (parsing, omp's cached reports over the snapshot, recent readings kept whole, full reports giving way to header readings, session pins).

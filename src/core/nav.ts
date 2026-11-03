@@ -10,7 +10,7 @@ export type Route =
   | { name: "inbox" }
   | { name: "activity" }
   | { name: "usage" }
-  /** The week's digest of every host in view, shared as an image. */
+  /** The week's digest of every host in view, shared as an image; opened from Usage (`parentRoute`). */
   | { name: "wrapped" }
   | { name: "hosts" }
   /** Host-to-host forwarding: rules that let one host's agents and shells use another host (a device-level page, no host in the route). */
@@ -22,8 +22,6 @@ export type Route =
   | { name: "design" }
   /** Live transcripts of 4 or 9 agents in a grid (desktop; a big monitor). */
   | { name: "wall" }
-  /** One orb per agent for a tablet or second screen; the shell's chrome steps aside. */
-  | { name: "ambient" }
   /** Scheduled agent runs of one host (`hostId` absent: the first / last used host). */
   | { name: "automations"; hostId?: string }
   /** omp's own settings (models, roles, tools, …) of one host. */
@@ -41,6 +39,15 @@ export type Route =
 
 export type RouteName = Route["name"];
 
+/**
+ * The page a sub-page opens from (Flock Wrapped: Usage). The shell treats it as the sub-page's parent: back
+ * lands there when there is no page to go back to, the desktop sidebar lights its entry, and phones slide between
+ * the two as a push and a pop.
+ */
+export function parentRoute(route: Route): Route | undefined {
+  return route.name === "wrapped" ? { name: "usage" } : undefined;
+}
+
 const SIMPLE: Record<string, Route> = {
   board: { name: "board" },
   dispatch: { name: "dispatch" },
@@ -55,7 +62,6 @@ const SIMPLE: Record<string, Route> = {
   more: { name: "more" },
   design: { name: "design" },
   wall: { name: "wall" },
-  ambient: { name: "ambient" },
 };
 
 const enc = encodeURIComponent;

@@ -1,0 +1,25 @@
+# DispatchSlash lab omp settings (isolated agent dir; setup.sh copies this in):
+# no approvals, no setup wizard, no update checks.
+modelRoles:
+  default: slashlab/lab-1
+  smol: slashlab/lab-1
+  slow: slashlab/lab-1
+  vision: slashlab/lab-1
+  plan: slashlab/lab-1
+  commit: slashlab/lab-1
+  tiny: slashlab/lab-1
+  memory: slashlab/lab-1
+  task: slashlab/lab-1
+  advisor: slashlab/lab-1
+  widget: slashlab/lab-1
+  judge: slashlab/lab-1
+disabledProviders: [ollama, lm-studio, llama.cpp, apple, web]
+tools:
+  approvalMode: yolo
+setupVersion: 2
+startup:
+  setupWizard: false
+  checkUpdate: false
+  changelogMode: hidden
+dev:
+  autoqaConsent: denied

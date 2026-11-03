@@ -73,6 +73,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
                 to_value(crate::agent_chat::fetch(ctx, &agent_id, &sid, p).await?)
             }
         },
+        M::SessionDigestGet(p) => to_value(super::digest::get(ctx, &p.agent_id).await?),
 
         M::AgentPrompt(p) => unit(prompt(ctx, p, client).await),
         M::AgentAbort(p) => unit(abort(ctx, &p.agent_id).await),
@@ -353,22 +354,23 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
     if p.delivery == Delivery::FollowUp && streaming {
         // The bridge's data plane queues follow-ups with images; the v1 paths take text only.
         if let Some(s) = session.as_ref().filter(|s| s.follow_up_prompts()) {
-            s.prompt(&p.text, image_contents(p.images), Delivery::FollowUp).await?;
-            s.expect_queued(&p.text, true);
+            s.prompt_queued(&p.text, image_contents(p.images), Delivery::FollowUp).await?;
             ctx.state.mark_dirty();
             return Ok(());
         }
         if !p.images.is_empty() {
             return Err(ApiError::new("unsupported", "follow-ups cannot carry images; send it as a steer or after the turn"));
         }
-        if let Some(sid) = bridge_sid(ctx, &p.agent_id) {
-            ctx.bridge.follow_up(&sid, &p.text).await.map_err(bridge_err)?;
-        } else {
-            inject::follow_up(ctx, &p.agent_id, &p.text).await?;
+        // Listed before it goes out, as `prompt_queued` does.
+        let listed = session.as_ref().is_some_and(|s| s.expect_queued(&p.text, true));
+        let sent = match bridge_sid(ctx, &p.agent_id) {
+            Some(sid) => ctx.bridge.follow_up(&sid, &p.text).await.map(drop).map_err(bridge_err),
+            None => inject::follow_up(ctx, &p.agent_id, &p.text).await,
+        };
+        if let (Err(_), true, Some(s)) = (&sent, listed, &session) {
+            s.forget_queued(&p.text);
         }
-        if let Some(s) = &session {
-            s.expect_queued(&p.text, true);
-        }
+        sent?;
         ctx.state.mark_dirty();
         return Ok(());
     }
@@ -392,10 +394,9 @@ async fn prompt(ctx: &Ctx, p: PromptParams, client: &ClientHandle) -> Result<(),
             }
             let images = image_contents(images);
             let delivery = if p.delivery == Delivery::FollowUp { Delivery::Auto } else { p.delivery };
-            s.prompt(&p.text, images, delivery).await?;
-            // omp queues a prompt sent mid-turn as a steer; its TUI band (what the bridge reads)
-            // may not show it yet, so list it ourselves until it lands.
-            s.expect_queued(&p.text, false);
+            // omp queues a prompt sent mid-turn as a steer: listed until its row lands, as omp's
+            // queue (what the bridge reads) may not hold it yet.
+            s.prompt_queued(&p.text, images, delivery).await?;
             ctx.state.mark_dirty();
             Ok(())
         }
@@ -801,14 +802,18 @@ async fn commands(ctx: &Ctx, agent_id: &str) -> Result<CommandList, ApiError> {
 }
 
 /// Pulls the last queued message back out of the queue so the client can edit or drop it.
-/// The queue chips update through the bridge's `queue_update` event (and the prompts we listed
-/// ourselves drop the pulled-back text).
+/// The queue chips update through the bridge's `queue_update` event, and the prompts we listed
+/// ourselves drop the pulled-back text; when omp had nothing left to pull back, they all go:
+/// they reached the turn already.
 async fn dequeue(ctx: &Ctx, agent_id: &str) -> Result<Dequeued, ApiError> {
     omp_agent(ctx, agent_id)?;
     let sid = bridge_sid(ctx, agent_id).ok_or_else(|| needs_bridge("Pulling back queued messages"))?;
     let out = ctx.bridge.dequeue(&sid).await.map_err(bridge_err)?;
-    if let (Some(text), Some(s)) = (&out.text, ctx.omp.session(&sid)) {
-        s.forget_queued(text);
+    if let Some(s) = ctx.omp.session(&sid) {
+        match &out.text {
+            Some(text) => s.forget_queued(text),
+            None => s.clear_queued(),
+        }
         ctx.state.mark_dirty();
     }
     Ok(out)
@@ -993,6 +998,7 @@ pub(crate) async fn resume_parked(
         thinking: rec.thinking,
         plan: false,
         prompt,
+        command: None,
         images,
         role_models: own.role_models,
         fallback_chains: own.fallback_chains,
@@ -1334,7 +1340,8 @@ fn launch_err(e: tf_herdr::HerdrError, target: &LaunchPane) -> ApiError {
 /// The §3.7 launch recipe: resolves (or creates) the pane, then
 /// `herdr agent start <name> --kind omp --pane <pane> -- --config <overlay> [--config <agent overlay>] -e <ext> …`
 /// once its shell is at a prompt (`LaunchPane::shell_wait`), giving the agent `INTERACTIVE_TIMEOUT`
-/// to come up. Plan mode and the initial prompt are applied once the agent is idle and linked.
+/// to come up. Plan mode, the launch's command and the initial prompt are applied once the agent
+/// is idle and linked.
 pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentSpec, session: Option<SessionArg<'_>>) -> Result<Started, ApiError> {
     let target: LaunchPane = target.into();
     if let Some(name) = &spec.name {
@@ -1352,6 +1359,13 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
     }
     if let Some(p) = spec.auto_answer.as_ref().filter(|_| kind == "omp") {
         p.validate()?;
+    }
+    let command = spec.command.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    if let Some(c) = command {
+        if kind != "omp" {
+            return Err(ApiError::new("invalid_params", "command: only omp agents run slash commands"));
+        }
+        check_command(c)?;
     }
     // Chats (§3.31) are named before their pane exists: their tab, and a new chat's folder, carry
     // the name. `made`: the folder this launch made, gone again if the launch fails.
@@ -1449,10 +1463,11 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
         let ctx = ctx.arc();
         let agent_id = agent_id.clone();
         let plan = spec.plan;
+        let command = command.map(str::to_string);
         let prompt = spec.prompt.clone();
         let images = spec.images.clone();
         tokio::spawn(async move {
-            if let Err(e) = after_launch(&ctx, &agent_id, plan, prompt, images).await {
+            if let Err(e) = after_launch(&ctx, &agent_id, plan, command, prompt, images).await {
                 warn!(agent = %agent_id, "post-launch setup failed: {e}");
                 ctx.state.record_activity(&agent_id, ActivityKind::Error, "Initial setup failed".into(), Some(e.to_string()));
             }
@@ -1516,9 +1531,41 @@ fn records_first_prompt(kind: &str, session: Option<SessionArg<'_>>) -> bool {
     kind == "omp" && session.is_none()
 }
 
-/// Plan mode, a prompt or images to hand over once the agent is up.
+/// Plan mode, a command, a prompt or images to hand over once the agent is up.
 fn needs_after_launch(spec: &AgentSpec) -> bool {
-    spec.plan || spec.prompt.as_deref().is_some_and(|p| !p.trim().is_empty()) || !spec.images.is_empty()
+    let given = |t: &Option<String>| t.as_deref().is_some_and(|t| !t.trim().is_empty());
+    spec.plan || given(&spec.command) || given(&spec.prompt) || !spec.images.is_empty()
+}
+
+/// A launch's `command` (`AgentSpec.command`) is one line that starts with `/`. Whether omp knows
+/// its name is checked once the session is up: a skill, prompt template or extension command is
+/// known only to the session itself (`slash`).
+fn check_command(command: &str) -> Result<(), ApiError> {
+    let cmd = command.trim();
+    if !cmd.starts_with('/') || cmd.len() < 2 {
+        return Err(ApiError::new("invalid_params", "command: slash commands start with `/` and a name"));
+    }
+    if cmd.contains(['\n', '\r']) {
+        return Err(ApiError::new("invalid_params", "command: slash commands are one line"));
+    }
+    Ok(())
+}
+
+/// Tries of a launch's command that omp refused as busy (`retryable`: its composer not shown
+/// yet, an injection's preflight), a second apart.
+const COMMAND_TRIES: u32 = 5;
+
+/// Runs a launch's command as `agent.slash` does (the bridge types it into omp's composer, else
+/// herdr injects a builtin). Once more after a second while omp is busy with its start.
+async fn launch_command(ctx: &Ctx, agent_id: &str, command: &str) -> Result<(), ApiError> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match slash(ctx, SlashParams { agent_id: agent_id.to_string(), command: command.to_string() }).await {
+            Err(e) if e.retryable && tries < COMMAND_TRIES => tokio::time::sleep(Duration::from_secs(1)).await,
+            done => return done,
+        }
+    }
 }
 
 /// Prompt images as collab image content (`agent.prompt` and the first prompt of a launch).
@@ -1526,10 +1573,12 @@ fn image_contents(images: Vec<ImageInput>) -> Vec<tf_collab::ImageContent> {
     images.into_iter().map(|i| tf_collab::ImageContent { kind: "image".into(), data: i.data, mime_type: i.mime }).collect()
 }
 
-/// Waits for idle + `link=live`, then applies plan mode and submits the initial prompt with its
-/// images. Without a live link the text still goes in through herdr, but images cannot (herdr
-/// only types text): that is reported as a failure instead of dropping them silently.
-async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option<String>, images: Vec<ImageInput>) -> Result<(), ApiError> {
+/// Waits for idle + `link=live`, then applies plan mode, runs the launch's command and submits the
+/// initial prompt with its images. A command that doesn't run is reported as an `error` activity
+/// ("/plan didn't run") and nothing more is handed over. Without a live link the text still goes
+/// in through herdr, but images cannot (herdr only types text): that is reported as a failure
+/// instead of dropping them silently.
+async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, command: Option<String>, prompt: Option<String>, images: Vec<ImageInput>) -> Result<(), ApiError> {
     let deadline = tokio::time::Instant::now() + LINK_WAIT;
     let mut live = false;
     let mut tick = 0u32;
@@ -1551,15 +1600,31 @@ async fn after_launch(ctx: &Arc<Ctx>, agent_id: &str, plan: bool, prompt: Option
         tick += 1;
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    if plan {
-        // Give the bridge a moment to say hello after the link is up.
-        for _ in 0..20 {
+    if plan || command.is_some() {
+        // Give the bridge a moment to say hello after the link is up (longer for a command: a
+        // skill, prompt-template or extension command is checked against the session's list).
+        let waits = if command.is_some() { 50 } else { 20 };
+        for _ in 0..waits {
             if bridge_sid(ctx, agent_id).is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+    if plan {
         set_plan(ctx, ToggleParams { agent_id: agent_id.to_string(), on: true }).await?;
+    }
+    if let Some(command) = command {
+        if let Err(e) = launch_command(ctx, agent_id, &command).await {
+            warn!(agent = %agent_id, %command, "the launch's command didn't run: {e}");
+            let name = command.split_whitespace().next().unwrap_or(&command);
+            let why = match &e.hint {
+                Some(hint) => format!("{} ({hint})", e.message),
+                None => e.message.clone(),
+            };
+            ctx.state.record_activity(agent_id, ActivityKind::Error, format!("{name} didn't run"), Some(why));
+            return Ok(());
+        }
     }
     let text = prompt.filter(|t| !t.trim().is_empty());
     if text.is_none() && images.is_empty() {
@@ -1803,6 +1868,7 @@ mod tests {
             thinking: None,
             plan,
             prompt: prompt.map(str::to_string),
+            command: None,
             images: (0..images).map(|i| ImageInput { mime: "image/png".into(), data: format!("AAA{i}") }).collect(),
             role_models: Default::default(),
             fallback_chains: Default::default(),
@@ -1862,6 +1928,19 @@ mod tests {
         // Image-only first prompts are delivered too.
         assert!(needs_after_launch(&spec(None, 1, false)));
         assert!(needs_after_launch(&spec(Some(""), 2, false)));
+        // A command alone (a Dispatch message that is one).
+        assert!(needs_after_launch(&AgentSpec { command: Some("/plan add a settings page".into()), ..spec(None, 0, false) }));
+        assert!(!needs_after_launch(&AgentSpec { command: Some(" ".into()), ..spec(None, 0, false) }));
+    }
+
+    #[test]
+    fn launch_commands_are_one_slash_line() {
+        for ok in ["/plan add a settings page", " /skill:review ", "/review 123", "/fast on"] {
+            assert!(check_command(ok).is_ok(), "{ok}");
+        }
+        for bad in ["plan add a settings page", "/", " / ", "/plan add\na settings page", "/plan add\ra settings page"] {
+            assert_eq!(check_command(bad).unwrap_err().code, "invalid_params", "{bad:?}");
+        }
     }
 
     #[test]

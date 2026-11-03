@@ -14,8 +14,10 @@ Embeds `tf_client::Engine` (AppCore) and wires it to the webview and the OS.
 | `invoke("doc_open", …)` | `{ name: string, base64: string }` | `void` once the file is written and handed to the OS; rejects with a message string (Android: `"unsupported"`) |
 
 UI intents arrive on the `core_events` channel: `{type:"openAgent", hostId, agentId}` (toast / notification /
-deep link) and `{type:"answerNext"}` (tray menu, `teleflock://answer-next`). Intents raised while no
-page is subscribed (cold start from a notification) are delivered right after the next replay.
+deep link), `{type:"openPage", hostId, page, notificationId?}` and `{type:"openPresented", hostId, agentId, name}`
+(a notification that names a host's page or a document an agent presented) and `{type:"answerNext"}` (tray
+menu, `teleflock://answer-next`). Intents raised while no page is subscribed (cold start from a notification)
+are delivered right after the next replay.
 
 ## Presented documents (`src/docs.rs`)
 

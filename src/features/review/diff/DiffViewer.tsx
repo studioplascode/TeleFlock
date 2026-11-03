@@ -7,6 +7,8 @@ import { FILE_STATUS, FileStatusIcon } from "../fileStatus";
 import { familyFor, TOKEN_CLASS, tokenize } from "./highlight";
 import type { MdMode } from "./mdMode";
 import { estimateChunkHeight, isMarkdownPath, type MdChunk, type RenderedDoc } from "./markdown";
+import { isBinaryLike, mediaByPath, mediaSides } from "./media";
+import { MediaRow, type MediaView } from "./MediaPreview";
 import { type DiffFile, type DiffLine, type Hunk, type Range, wordDiff } from "./parse";
 
 export type DiffLayout = "unified" | "split";
@@ -24,9 +26,18 @@ type Row =
   | { t: "mdnote"; file: DiffFile; msg: string }
   /** Rendered view: a run of whole Markdown blocks, measured (heights vary). */
   | { t: "md"; file: DiffFile; chunk: MdChunk }
+  /** A binary file: its image, video, audio or PDF (both versions of a modified one), else its size. Measured. */
+  | { t: "media"; file: DiffFile }
   | { t: "gap"; file: DiffFile };
 
 const H = { file: 44, hunk: 32, line: 20, empty: 52, mdnote: 32, gap: 12 } as const;
+
+/** A media row's height before it is measured: by kind, twice when a phone stacks both versions. */
+function estimateMedia(file: DiffFile, compact: boolean): number {
+  const kind = mediaByPath(file.path)?.kind;
+  const one = kind === "pdf" ? 800 : kind === "audio" ? 96 : kind ? 320 : 64;
+  return compact && kind ? one * mediaSides(file.status).length : one;
+}
 
 /** The rows of a Markdown file in Rendered view. */
 function renderedRows(file: DiffFile, doc: RenderedDoc): Row[] {
@@ -71,11 +82,13 @@ function buildRows(files: DiffFile[], layout: DiffLayout, collapsed: ReadonlySet
     if (!collapsed.has(file.path) && doc) {
       rows.push(...renderedRows(file, doc));
     } else if (!collapsed.has(file.path)) {
-      if (file.binary) rows.push({ t: "empty", file, msg: "Binary file — not shown" });
+      // A media file shows instead of its hunks (a PDF git diffs as text, an LFS pointer).
+      const media = isBinaryLike(file);
+      if (media) rows.push({ t: "media", file });
       else if (file.hunks.length === 0)
         rows.push({ t: "empty", file, msg: file.status === "renamed" ? "Renamed without changes" : file.status === "untracked" && file.added === 0 ? "Empty file" : "No textual changes in this diff" });
       let nextOld = 1;
-      for (const hunk of file.hunks) {
+      for (const hunk of media ? [] : file.hunks) {
         rows.push({ t: "hunk", file, hunk, hidden: hunk.oldLines === 0 && hunk.oldStart === 0 ? 0 : Math.max(0, hunk.oldStart - nextOld) });
         nextOld = hunk.oldStart + hunk.oldLines;
         for (const r of runs(hunk.lines)) {
@@ -118,6 +131,8 @@ export interface DiffViewerProps {
   files: DiffFile[];
   /** Offered on Markdown files' headers; Rendered replaces their hunks with the document. */
   markdown?: MarkdownView;
+  /** Binary files' previews (images, video, audio, PDF) and sizes. */
+  media: MediaView;
   layout: DiffLayout;
   wrap: boolean;
   collapsed: ReadonlySet<string>;
@@ -150,7 +165,7 @@ function syncHScroll(el: HTMLElement, frame: HTMLElement | null) {
  * Virtualized diff: only on-screen rows render (and get highlighted), fixed row heights without wrap
  * (zero measurement), measured rows with wrap. File headers stay pinned while their hunks scroll.
  */
-export function DiffViewer({ files, markdown, layout, wrap, collapsed, onToggle, viewed, onToggleViewed, onWrap, scrollTo, onTopFile, compact = false, busy = false, className }: DiffViewerProps) {
+export function DiffViewer({ files, markdown, media, layout, wrap, collapsed, onToggle, viewed, onToggleViewed, onWrap, scrollTo, onTopFile, compact = false, busy = false, className }: DiffViewerProps) {
   // TanStack Virtual mutates one virtualizer instance per scroll; compiler memoization would freeze it.
   "use no memo";
   const frameRef = useRef<HTMLDivElement>(null);
@@ -164,19 +179,22 @@ export function DiffViewer({ files, markdown, layout, wrap, collapsed, onToggle,
   }, [rows]);
   const maxLen = useMemo(() => files.reduce((m, f) => Math.max(m, f.maxLen), 0), [files]);
   const [viewW, setViewW] = useState(0);
+  const [viewH, setViewH] = useState(0);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: (i) => {
       const r = rows[i];
-      return r?.t === "md" ? estimateChunkHeight(r.chunk) : H[r?.t === "pair" ? "line" : (r?.t ?? "line")];
+      if (r?.t === "md") return estimateChunkHeight(r.chunk);
+      if (r?.t === "media") return estimateMedia(r.file, compact);
+      return H[r?.t === "pair" ? "line" : (r?.t ?? "line")];
     },
     overscan: 24,
     getItemKey: (i) => {
       const r = rows[i];
       if (!r) return i;
-      if (r.t === "file" || r.t === "gap" || r.t === "empty") return `${r.t}:${r.file.path}`;
+      if (r.t === "file" || r.t === "gap" || r.t === "empty" || r.t === "media") return `${r.t}:${r.file.path}`;
       if (r.t === "hunk") return `h:${r.file.path}:${r.hunk.header}:${r.hunk.oldStart}`;
       if (r.t === "md") return `md:${r.file.path}:${r.chunk.line}`;
       return `${r.file.path}:${i}`;
@@ -188,10 +206,12 @@ export function DiffViewer({ files, markdown, layout, wrap, collapsed, onToggle,
     if (!el) return;
     const ro = new ResizeObserver(() => {
       setViewW(el.clientWidth);
+      setViewH(el.clientHeight);
       syncHScroll(el, frameRef.current);
     });
     ro.observe(el);
     setViewW(el.clientWidth);
+    setViewH(el.clientHeight);
     const onScroll = () => syncHScroll(el, frameRef.current);
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => {
@@ -255,7 +275,9 @@ export function DiffViewer({ files, markdown, layout, wrap, collapsed, onToggle,
           {items.map((vi) => {
             const row = rows[vi.index];
             if (!row) return null;
-            const measured = wrap || row.t === "md";
+            const measured = wrap || row.t === "md" || row.t === "media";
+            // A media row reads its files from a screen above to two below the view.
+            const near = row.t === "media" && vi.end >= scrollTop - viewH && vi.start <= scrollTop + 2 * viewH;
             return (
               <div
                 key={vi.key}
@@ -267,7 +289,7 @@ export function DiffViewer({ files, markdown, layout, wrap, collapsed, onToggle,
                 {row.t === "file" ? (
                   <FileHeader file={row.file} collapsed={collapsed.has(row.file.path)} onToggle={onToggle} viewed={viewed?.has(row.file.path)} onToggleViewed={onToggleViewed} compact={compact} markdown={markdown} />
                 ) : (
-                  <RowView row={row} layout={layout} wrap={wrap} compact={compact} />
+                  <RowView row={row} layout={layout} wrap={wrap} compact={compact} media={media} near={near} />
                 )}
               </div>
             );
@@ -296,7 +318,7 @@ const UNIFIED_GUTTER = 108;
 const COMPACT_GUTTER = 58;
 const SPLIT_GUTTER = 50;
 
-const RowView = memo(function RowView({ row, layout, wrap, compact }: { row: Exclude<Row, { t: "file" }>; layout: DiffLayout; wrap: boolean; compact: boolean }) {
+const RowView = memo(function RowView({ row, layout, wrap, compact, media, near }: { row: Exclude<Row, { t: "file" }>; layout: DiffLayout; wrap: boolean; compact: boolean; media: MediaView; near: boolean }) {
   switch (row.t) {
     case "gap":
       return <div className="h-[12px]" aria-hidden />;
@@ -316,6 +338,8 @@ const RowView = memo(function RowView({ row, layout, wrap, compact }: { row: Exc
       );
     case "md":
       return <RenderedChunk chunk={row.chunk} />;
+    case "media":
+      return <MediaRow file={row.file} media={media} compact={compact} near={near} />;
     case "hunk":
       return <HunkHeader hunk={row.hunk} hidden={row.hidden} path={row.file.path} compact={compact} />;
     case "line":

@@ -9,8 +9,9 @@
 //!   (profiles, statuses, snapshots, settings, tunnels), then live `AppEvent`s, in order, as
 //!   batches (`AppEvent[]`): each send is a script evaluation in the webview.
 //!
-//! UI-intent events (`OpenAgent`, `AnswerNext`) that fire while no page is subscribed (cold start
-//! from a toast / deep link, webview reload) are held and delivered to the next subscriber.
+//! UI-intent events (`OpenAgent`, `OpenPage`, `OpenPresented`, `AnswerNext`) that fire while no
+//! page is subscribed (cold start from a toast / deep link, webview reload) are held and delivered
+//! to the next subscriber.
 
 use std::sync::{
     Mutex,
@@ -36,7 +37,7 @@ pub struct Core {
 }
 
 fn is_ui_intent(ev: &AppEvent) -> bool {
-    matches!(ev, AppEvent::OpenAgent { .. } | AppEvent::OpenPage { .. } | AppEvent::AnswerNext)
+    matches!(ev, AppEvent::OpenAgent { .. } | AppEvent::OpenPage { .. } | AppEvent::OpenPresented { .. } | AppEvent::AnswerNext)
 }
 
 impl Core {

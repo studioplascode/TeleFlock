@@ -215,7 +215,6 @@ function useEntries(): Entry[] {
     { id: "accounts", keys: ["accounts", "login", "sign in", "subscription", "provider", "claude", "chatgpt", "codex", "link account"] },
     { id: "cleanup", keys: ["janitor", "worktrees", "disk", "space", "prune", "merged", "stale", "gc", "storage", "delete worktrees", "free space"] },
     { id: "wall", keys: ["grid", "monitor", "big screen", "tiles", "2x2", "3x3", "split", "side by side", "transcripts"] },
-    { id: "ambient", keys: ["orbs", "tablet", "second screen", "display", "kiosk", "glance", "chime", "dashboard"] },
   ];
   for (const v of views) {
     const def: ViewDef = VIEWS[v.id];

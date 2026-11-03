@@ -1,7 +1,8 @@
 //! Reads an omp session's artifacts dir (`…/<ts>_<id>.jsonl` → `…/<ts>_<id>/`) for the spend
 //! collab never mirrors: subagent transcripts (the whole tree) and the advisor's
-//! `__advisor*.jsonl`. Parsing and totals live in [`tf_collab::ArtifactLedger`]; this module only
-//! finds the dir and feeds it the bytes appended since the last scan. Blocking I/O: call from
+//! `__advisor*.jsonl`, and for the documents subagents present (they notify like the main agent's,
+//! `notify/`). Parsing and totals live in [`tf_collab::ArtifactLedger`]; this module only finds
+//! the dir and feeds it the bytes appended since the last scan. Blocking I/O: call from
 //! `spawn_blocking`.
 
 use std::fs::File;
@@ -9,6 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use tf_collab::{ArtifactCall, ArtifactKind, ArtifactLedger};
+use tf_proto::PresentedArtifact;
 
 /// Nested subagents live a few levels down (`<Id>/<Id>.<Child>.jsonl`, …).
 const MAX_DEPTH: usize = 6;
@@ -56,6 +58,16 @@ pub fn scan(dir: &Path, ledger: &mut ArtifactLedger) -> Vec<ArtifactCall> {
         }
     }
     calls
+}
+
+/// [`scan`], plus the documents the transcripts' `present` calls showed since the previous scan.
+/// The first scan of a ledger (a fresh tf-hostd, a rewritten transcript read again) reads history:
+/// the documents in it were shown before and are not reported.
+pub fn scan_live(dir: &Path, ledger: &mut ArtifactLedger) -> (Vec<ArtifactCall>, Vec<PresentedArtifact>) {
+    let calls = scan(dir, ledger);
+    let presented = ledger.take_presented();
+    ledger.go_live();
+    (calls, presented)
 }
 
 fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<(String, PathBuf, u64)>) {
@@ -125,5 +137,37 @@ mod tests {
         scan(&dir, &mut ledger);
         assert!((ledger.subagents().usd - 0.125).abs() < 1e-9);
         assert!((ledger.advisor().usd - 0.5).abs() < 1e-9);
+    }
+
+    /// A subagent's `present` result is reported once, by the scan that reads it; what a fresh
+    /// tf-hostd (or a rewritten transcript) reads first is history and reports nothing.
+    #[test]
+    fn reports_what_subagents_present_from_the_second_scan_on() {
+        let present = |call: &str, version: u32| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "message", "id": call, "message": {"role": "toolResult", "toolCallId": call, "toolName": "present", "isError": false,
+                    "content": [{"type": "text", "text": "Presented"}],
+                    "details": {"title": "Q3 report", "kind": "html", "name": format!("presented/q3-report-v{version}.html"), "slug": "q3-report", "version": version, "size": 10, "assets": 0}}})
+            )
+        };
+        let names = |p: Vec<PresentedArtifact>| p.into_iter().map(|a| a.name).collect::<Vec<_>>();
+        let dir = tempfile::tempdir().unwrap();
+        let scout = dir.path().join("Scout.jsonl");
+        std::fs::write(&scout, format!("{HEADER}{}", present("c1", 1))).unwrap();
+        let mut ledger = ArtifactLedger::default();
+        assert!(scan_live(dir.path(), &mut ledger).1.is_empty(), "presented before tf-hostd started");
+        std::fs::OpenOptions::new().append(true).open(&scout).unwrap().write_all(present("c2", 2).as_bytes()).unwrap();
+        assert_eq!(names(scan_live(dir.path(), &mut ledger).1), ["presented/q3-report-v2.html"]);
+        assert!(scan_live(dir.path(), &mut ledger).1.is_empty(), "reported once");
+        // A subagent started later: its transcript is new from its first line.
+        std::fs::create_dir_all(dir.path().join("Scout")).unwrap();
+        std::fs::write(dir.path().join("Scout/Scout.Probe.jsonl"), format!("{HEADER}{}", present("c3", 3))).unwrap();
+        assert_eq!(names(scan_live(dir.path(), &mut ledger).1), ["presented/q3-report-v3.html"]);
+        // A rewritten transcript is read again from the start: history again.
+        std::fs::write(&scout, format!("{HEADER}{}", present("c4", 4))).unwrap();
+        assert!(scan_live(dir.path(), &mut ledger).1.is_empty());
+        // A restarted tf-hostd reads every transcript whole: nothing is new.
+        assert!(scan_live(dir.path(), &mut ArtifactLedger::default()).1.is_empty());
     }
 }

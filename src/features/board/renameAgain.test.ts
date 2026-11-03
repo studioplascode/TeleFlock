@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentView, AiOutcome } from "@/core";
-import type { Agent, TranscriptItem } from "@/core/gen";
+import { apiError } from "@/core/errors";
+import type { Agent, SessionDigest, TranscriptItem } from "@/core/gen";
 import { useToastStore } from "@/design";
 import { agentRenameInput, canRenameAgain, canRetitle, type Io, planRename, renameAgain, undoRename } from "./renameAgain";
 
@@ -68,6 +69,16 @@ describe("what the tiny model is told", () => {
   test("only a short prompt so far: it is the task", () => {
     expect(agentRenameInput(agent(), [user("fix it")]).task).toBe("fix it");
   });
+
+  test("with the host's digest the whole session stands in for the latest task; the goal and where it works come along", () => {
+    const digest: SessionDigest = { prompts: [{ n: 1, text: "Build Bloomworks M0, a city-builder slice on Windows" }], promptCount: 1, summaries: [], todos: [], subagents: [], subagentCount: 0 };
+    const omp = { bridge: true, link: "live", goal: { objective: " Ship Bloomworks M0 ", status: "active" } } as Agent["omp"];
+    const input = agentRenameInput(agent({ repo: "bloomworks", cwd: "/w/bloomworks", omp }), [user("Update hud.rs to show the population counter")], digest);
+    expect(input).toMatchObject({ repo: "bloomworks", cwd: "/w/bloomworks", goal: "Ship Bloomworks M0", digest });
+    expect(input.task).toBeUndefined();
+    // an older host gave none: the transcript's latest task, as before
+    expect(agentRenameInput(agent({ omp }), [user("Update hud.rs to show the population counter")], null).task).toBe("Update hud.rs to show the population counter");
+  });
 });
 
 describe("which parts change", () => {
@@ -103,17 +114,35 @@ describe("which parts change", () => {
   });
 });
 
+/** The host's digest of the agent's session in the rig. */
+const DIGEST: SessionDigest = {
+  prompts: [
+    { n: 1, text: "Fix the reconnect backoff so it caps at 30 seconds" },
+    { n: 2, text: "Now write the migration for the sessions table" },
+  ],
+  promptCount: 2,
+  summaries: [],
+  todos: [{ name: "Sessions", tasks: [{ content: "Migration", status: "inProgress" }] }],
+  subagents: [],
+  subagentCount: 0,
+};
+
 /** A host with one agent that renames like herdr/omp do: the list changes with every successful call. */
-function rig(answer: AiOutcome<{ name: string | null; title: string | null }>, over: Partial<AgentView> = {}) {
+function rig(answer: AiOutcome<{ name: string | null; title: string | null }>, over: Partial<AgentView> = {}, digest: () => Promise<SessionDigest> = async () => DIGEST) {
   let agents: AgentView[] = [agent(over), agent({ id: "docs", key: "h::docs", name: "docs" })];
   const calls: string[] = [];
-  const asked: { taken: readonly string[] }[] = [];
+  const digests: string[] = [];
+  const asked: { taken: readonly string[]; input: Parameters<Io["suggest"]>[1] }[] = [];
   const edit = (patch: Partial<AgentView>) => {
     agents = agents.map((a) => (a.key === KEY ? { ...a, ...patch } : a));
   };
   const io: Io = {
     agents: () => agents,
     transcript: () => [user("Now write the migration for the sessions table")],
+    digest: async (_h, agentId) => {
+      digests.push(agentId);
+      return digest();
+    },
     renameHandle: async (_h, _id, name) => {
       calls.push(`handle ${name}`);
       if (name === "clash") throw Object.assign(new Error("name taken"), { code: "herdr_error" });
@@ -123,12 +152,12 @@ function rig(answer: AiOutcome<{ name: string | null; title: string | null }>, o
       calls.push(`title ${title}`);
       edit({ title });
     },
-    suggest: async (_h, _input, taken) => {
-      asked.push({ taken });
+    suggest: async (_h, input, taken) => {
+      asked.push({ taken, input });
       return answer;
     },
   };
-  return { io, calls, asked, edit, now: () => agents.find((a) => a.key === KEY)! };
+  return { io, calls, digests, asked, edit, now: () => agents.find((a) => a.key === KEY)! };
 }
 
 const toasts = () => useToastStore.getState().toasts.filter((t) => t.open);
@@ -141,7 +170,9 @@ describe("Name it again", () => {
     const r = rig({ ok: true, value: { name: "sessions-migration", title: "Write the sessions migration" } });
     await renameAgain(KEY, r.io);
     expect(r.calls).toEqual(["handle sessions-migration", "title Write the sessions migration"]);
-    // the model is told the other agents' names, never its own
+    // the model is told the whole session the host digested, and the other agents' names, never its own
+    expect(r.digests).toEqual(["reconnect"]);
+    expect(r.asked[0]?.input.digest).toEqual(DIGEST);
     expect(r.asked[0]?.taken).toEqual(["docs"]);
     expect(last()).toMatchObject({ title: "✨ reconnect → sessions-migration", description: "Title: Write the sessions migration", status: "done", action: { label: "Undo" } });
     // the waiting toast is gone
@@ -150,6 +181,23 @@ describe("Name it again", () => {
     await undoRename(KEY, { name: { from: "reconnect", to: "sessions-migration" }, title: { from: "Fix reconnect backoff", to: "Write the sessions migration" } }, r.io);
     expect(r.calls.slice(2)).toEqual(["handle reconnect", "title Fix reconnect backoff"]);
     expect([r.now().name, r.now().title]).toEqual(["reconnect", "Fix reconnect backoff"]);
+  });
+
+  test("a host before 0.9.1 (no session.digest) still names it, from the latest task as before", async () => {
+    const r = rig({ ok: true, value: { name: "sessions-migration", title: "Write the sessions migration" } }, {}, async () => {
+      throw apiError("unknown_method", "unknown method `session.digest`");
+    });
+    await renameAgain(KEY, r.io);
+    expect(r.asked[0]?.input).toMatchObject({ name: "reconnect", task: "Now write the migration for the sessions table" });
+    expect(r.asked[0]?.input.digest).toBeUndefined();
+    expect(r.calls).toEqual(["handle sessions-migration", "title Write the sessions migration"]);
+  });
+
+  test("an agent other than omp has no session to digest: the host is not asked", async () => {
+    const r = rig({ ok: true, value: { name: "copy-tweaks", title: null } }, { kind: "claude", omp: undefined });
+    await renameAgain(KEY, r.io);
+    expect(r.digests).toEqual([]);
+    expect(r.calls).toEqual(["handle copy-tweaks"]);
   });
 
   test("a part the model found still fitting is left alone; both fitting says so and calls nothing", async () => {

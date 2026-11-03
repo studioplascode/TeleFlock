@@ -20,7 +20,7 @@ export function RamblerRows() {
     <>
       <Row
         label="Rambler: turn rambling into a prompt"
-        description="While you dictate, a model on the host rewrites everything you said into one clear prompt: no filler, no false starts, corrections applied, your language. It shows live above the box; when you stop it fills the box, with “Use raw transcript” and Undo. Your words go to that host's omp and its model provider."
+        description="When you stop dictating, a model on the host rewrites everything you said into one clear prompt: no filler, no false starts, corrections applied, your language. While you speak, your words show above the box as heard; the prompt then fills the box, with “Use raw transcript” and Undo. Your words go to that host's omp and its model provider."
       >
         <Switch checked={rambler} onCheckedChange={setRambler} label="Rambler" />
       </Row>

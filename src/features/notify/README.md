@@ -39,6 +39,28 @@ each host. Turning "Alert the device I'm using" off therefore needs no UI work h
 | `false` | the host routed it to another device in use | listed in the bell and inbox (the store does that), **no** toast, haptic or chime; open toasts of that agent stay |
 | `true` (same id again) | the host escalated it to this device | toast, haptic and chime now; it replaces that agent's open toast like any newer notification |
 
+## Presented documents (`presented`, apps and hosts ≥ 0.9.1)
+
+When an agent, or one of its subagents, presents a document live (the bridge's `present` tool, a new
+title or a new version), tf-hostd notifies its agent's apps: "ana presented Q3 report", "HTML page ·
+version 2", with the action `open:presented/<slug>-v<n>.<ext>` ("View" on system notifications).
+Replays never notify (opening a session, history, a tf-hostd restart, a resync). The same document
+presented again within 5 min while its notification is unread updates that notification: the host
+sends the same id again with `alert: false`, the store replaces its text and keeps whether it was
+read (`store/reduce.ts`), the core changes its copy without posting to the system again, so Updates
+holds one row per document, which opens the newest version.
+
+- **Opening** it (Inbox, bell, toast Open, system notification) runs `openPresented`: the agent's
+  session, with the document in the viewer beside it on desktop or full screen on a phone (the
+  transcript's card of the call names its title and kind when the session is loaded). A system
+  notification reaches it through the core's `AppEvent` `openPresented`.
+- **Alerts** follow the host's routing like `finished` (no escalation). Settings → Notifications →
+  "Presented documents" (`notifyPresented`, absent = on) switches the system notifications; push
+  channels carry them with the "Presented documents" kind (on for new channels).
+- **Compatibility.** Apps negotiate the `notifyKinds` wire feature: they read a kind they do not
+  know as `info`. An app without it (before 0.9.1) is not sent `presented` notifications; a host
+  before 0.9.1 sends none.
+
 ## Settings
 
 - **This device** (`settings/PresenceRows.tsx`, inside Notifications): "Alert the device I'm using"
@@ -82,7 +104,10 @@ A webhook with a signing secret sends `X-TeleFlock-Timestamp` and
 
 `core/demo/notify.ts` answers `notify.*` for the demo host `forge` (in memory: policy, one ntfy
 channel, devices "This device", "Pixel 9" and the older "old-laptop"); `studio-pc` plays a host
-before 0.7.0 (`unknown_method`). The demo app answers `app.presence` with `{}`.
+before 0.7.0 (`unknown_method`). The demo app answers `app.presence` with `{}`. The demo agent
+`kanban` ends its first turn presenting a board test report, and the director asks for a new
+version now and then ("Put the latest test results in a report…"): each live `present` posts a
+`presented` notification (`core/demo/agent.ts`).
 
 ## Files
 
@@ -90,7 +115,7 @@ before 0.7.0 (`unknown_method`). The demo app answers `app.presence` with `{}`.
 |---|---|
 | `usePresenceReporter.ts`, `presence.ts` | presence reporting and its pure tracker |
 | `useNotifyBridge.ts` | toasts, chimes, haptics; `alert` handling |
-| `openNotification.ts` | opening a notification (bell, Inbox, a toast's Open): the host page it names (`open:idleShells`, `open:decisions`), else its agent; one of the host's own (no agent, such as "Closed 3 idle shells") is read then, here and on the other devices (`app.notifyRead` with `agentId: ""`: every host-level one of that host), since no session view ever reads it |
+| `openNotification.ts` | opening a notification (bell, Inbox, a toast's Open): the host page it names (`open:idleShells`, `open:decisions`), the presented document it names in its agent's session (`open:presented/…`, `openPresented`), else its agent; one of the host's own (no agent, such as "Closed 3 idle shells") is read then, here and on the other devices (`app.notifyRead` with `agentId: ""`: every host-level one of that host), since no session view ever reads it |
 | `HostAlerts.tsx` | the "Alerts from your hosts" section |
 | `PushChannels.tsx`, `PushChannelForm.tsx` | channel list and add/edit form |
 | `alerts.ts` | labels and pure helpers (escalation delays, kinds, test toast, Auto device) |

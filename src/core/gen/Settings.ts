@@ -4,7 +4,12 @@ import type { DeviceKind } from "./DeviceKind";
 import type { MotionPref } from "./MotionPref";
 import type { ThinkingLevel } from "./ThinkingLevel";
 
-export type Settings = { motion: MotionPref, notifyNeeds: boolean, notifyFinished: boolean, notifyErrors: boolean, notifySound: boolean, 
+export type Settings = { motion: MotionPref, notifyNeeds: boolean, notifyFinished: boolean, notifyErrors: boolean, 
+/**
+ * OS notifications when an agent presents a document (`presented`, hosts ≥ 0.9.1).
+ * Absent: on.
+ */
+notifyPresented?: boolean, notifySound: boolean, 
 /**
  * `HH:MM` local time; notifications are silent between start and end.
  */

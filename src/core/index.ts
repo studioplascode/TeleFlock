@@ -81,6 +81,7 @@ export {
   formatSpan,
   LIMITS_EVERY_MS,
   LIMITS_USAGE_EVERY_MS,
+  paceBasis,
   projectWindow,
   refreshLimits,
   sessionLimits,
@@ -104,7 +105,7 @@ export {
   useTodaySpend,
 } from "./usage";
 export type { Calendar, HostUsage, TodayInput, TodaySpend, UsageRange } from "./usage";
-export { navigate, useRoute, getRoute, parseHash, routeToHash } from "./nav";
+export { navigate, useRoute, getRoute, parentRoute, parseHash, routeToHash } from "./nav";
 export type { Route, RouteName } from "./nav";
 export { useUi } from "./ui";
 export type { UiDialog, SplitState, UiState } from "./ui";

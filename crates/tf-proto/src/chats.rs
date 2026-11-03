@@ -99,6 +99,7 @@ mod tests {
                 thinking: None,
                 plan: false,
                 prompt: Some("Plan a weekend in Lisbon".into()),
+                command: None,
                 images: vec![],
                 role_models: Default::default(),
                 fallback_chains: Default::default(),

@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use base64::Engine as _;
 use serde_json::Value;
 use tf_proto::{
     ApiError, BranchInfo, BranchList, ChangedFile, CommandOutput, FileStatus, GitBadge,
-    GitCommitParams, GitCommitResult, GitDiffParams, GitDiffResult, GitStatusResult, HostMethod,
-    RepoInfo,
+    GitCommitParams, GitCommitResult, GitDiffParams, GitDiffResult, GitShowParams, GitShowResult,
+    GitStatusResult, HostMethod, RepoInfo,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::clients::ClientHandle;
 use crate::ops::{to_value, Ctx};
@@ -32,12 +33,16 @@ const UNTRACKED_TEXT_MAX: u64 = 1024 * 1024;
 const QUICK: Duration = Duration::from_secs(10);
 const SLOW: Duration = Duration::from_secs(60);
 const NETWORK: Duration = Duration::from_secs(180);
+/// Bytes one `git.show` answers by default and at most (as `fs.read`).
+const SHOW_DEFAULT: u64 = 512 * 1024;
+const SHOW_MAX: u64 = 8 * 1024 * 1024;
 
 pub async fn handle(ctx: &Ctx, req: HostMethod, _client: &ClientHandle) -> Result<Value, ApiError> {
     match req {
         HostMethod::GitStatus(p) => to_value(status(&crate::ops::fs::resolve_path(&p.cwd)?).await?),
         HostMethod::GitBranches(p) => to_value(branches(&crate::ops::fs::resolve_path(&p.cwd)?).await?),
         HostMethod::GitDiff(p) => to_value(diff(&p).await?),
+        HostMethod::GitShow(p) => to_value(show(&p, blob_cache(&ctx.paths.home)).await?),
         HostMethod::GitCommit(p) => {
             let res = commit(&p).await?;
             let cwd = crate::ops::fs::resolve_path(&p.cwd)?;
@@ -1141,6 +1146,240 @@ pub(crate) fn new_file_patch(path: &str, text: Option<&str>) -> String {
     s
 }
 
+/// `git.show`: up to `maxBytes` bytes of the file `path` as revision `rev` has it, from `offset` on.
+/// The path stays inside the repository; git's `<rev>:<path>` reads the blob without filters. A
+/// blob larger than one answer is read through `blobs` (written once, every range read from it).
+pub async fn show(p: &GitShowParams, blobs: &BlobCache) -> Result<GitShowResult, ApiError> {
+    let rev = show_rev(&p.rev)?;
+    let path = repo_path(&p.path)?;
+    let root = toplevel(&crate::ops::fs::resolve_path(&p.cwd)?).await?;
+    // One batch answers both: whether the revision exists, and what it holds at the path.
+    let probe = git_with_input(&root, &["cat-file", "--batch-check"], Some(format!("{rev}\n{rev}:{path}\n").as_bytes()), QUICK).await?;
+    if !probe.ok() {
+        return Err(git_failure(&probe, "cat-file"));
+    }
+    let answer = probe.stdout_str();
+    let mut lines = answer.lines();
+    let (Some(at_rev), Some(at_path)) = (lines.next(), lines.next()) else {
+        return Err(ApiError::new("git_error", "git cat-file --batch-check answered nothing"));
+    };
+    if batch_check(at_rev).is_none() {
+        return Err(ApiError::new("invalid_params", format!("unknown revision `{rev}`")));
+    }
+    let (oid, size) = match batch_check(at_path) {
+        None => return Err(ApiError::new("not_found", format!("`{path}` is not in `{rev}`"))),
+        Some((_, kind, _)) if kind != "blob" => return Err(ApiError::new("invalid_params", format!("`{path}` in `{rev}` is a {kind}, not a file"))),
+        Some((oid, _, size)) => (oid.to_string(), size),
+    };
+    let start = p.offset.unwrap_or(0).min(size);
+    let len = (size - start).min(p.max_bytes.unwrap_or(SHOW_DEFAULT).clamp(1, SHOW_MAX));
+    let bytes = match len {
+        0 => Vec::new(),
+        _ if len == size => whole_blob(&root, &oid, size).await?,
+        _ => blobs.range(&root, &oid, size, start, len).await?,
+    };
+    Ok(GitShowResult {
+        size,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        mime: crate::ops::fs::guess_mime(Path::new(path)).map(str::to_string),
+        offset: start,
+        truncated: start + len < size,
+    })
+}
+
+/// A revision `git.show` takes: no option (`-…`), no `rev:path` of its own, nothing that would
+/// break the batch line.
+fn show_rev(rev: &str) -> Result<&str, ApiError> {
+    let rev = rev.trim();
+    if rev.is_empty() || rev.len() > 256 || rev.starts_with('-') || rev.contains(':') || rev.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ApiError::new("invalid_params", format!("`{rev}` is not a revision")));
+    }
+    Ok(rev)
+}
+
+/// A repository-relative path that cannot leave the repository: `/`-separated, not absolute,
+/// no `.`, `..` or empty components, no backslashes or control characters.
+fn repo_path(path: &str) -> Result<&str, ApiError> {
+    let escapes = path.is_empty()
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|c| c.is_empty() || c == "." || c == "..");
+    if escapes {
+        return Err(ApiError::new("invalid_params", format!("`{path}` is not a path inside the repository")));
+    }
+    Ok(path)
+}
+
+/// One `git cat-file --batch-check` line: `(oid, type, size)`, `None` for `<name> missing` (or
+/// `ambiguous`).
+fn batch_check(line: &str) -> Option<(&str, &str, u64)> {
+    let mut parts = line.split(' ');
+    let (oid, kind, size) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((oid, kind, size.parse().ok()?))
+}
+
+/// `git cat-file blob <oid>` (no filters) with its output piped; killed when dropped.
+fn cat_blob(root: &Path, oid: &str) -> Result<(tokio::process::Child, tokio::process::ChildStdout), ApiError> {
+    let args = ["cat-file", "blob", oid];
+    let mut cmd = tokio::process::Command::new(git_bin()?);
+    cmd.args(hardened_args(&args)).current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    for (k, v) in GIT_ENV {
+        cmd.env(k, v);
+    }
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW: never flash a console window from the background daemon.
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|e| ApiError::new("git_error", format!("failed to run git: {e}")))?;
+    let out = child.stdout.take().ok_or_else(|| ApiError::new("internal", "git cat-file has no stdout"))?;
+    Ok((child, out))
+}
+
+/// All `size` bytes of blob `oid` (one answer's worth at most).
+async fn whole_blob(root: &Path, oid: &str, size: u64) -> Result<Vec<u8>, ApiError> {
+    let (_child, out) = cat_blob(root, oid)?;
+    let mut buf = Vec::with_capacity(size as usize);
+    tokio::time::timeout(SLOW, out.take(size).read_to_end(&mut buf))
+        .await
+        .map_err(|_| ApiError::new("timeout", "git cat-file timed out").retryable())?
+        .map_err(|e| ApiError::new("git_error", format!("reading the blob: {e}")))?;
+    if (buf.len() as u64) < size {
+        return Err(ApiError::new("git_error", format!("git cat-file ended early reading {oid}")));
+    }
+    Ok(buf)
+}
+
+// ───────────────────────────── git.show's blob cache ─────────────────────────────
+
+/// Total bytes of cached blobs; past it the least recently read go.
+const BLOB_CAP: u64 = 1 << 30;
+/// A cached blob nobody read for this long goes.
+const BLOB_IDLE: Duration = Duration::from_secs(10 * 60);
+static BLOBS: std::sync::OnceLock<BlobCache> = std::sync::OnceLock::new();
+
+/// The daemon's blob cache, `<home>/cache/blobs`; the first call (at daemon start) removes what an
+/// earlier run left there.
+pub(crate) fn blob_cache(home: &Path) -> &'static BlobCache {
+    BLOBS.get_or_init(|| BlobCache::new(home.join("cache").join("blobs"), BLOB_CAP, BLOB_IDLE))
+}
+
+/// Blobs `git.show` serves in ranges, each written once to a file named for the repository and the
+/// blob id git resolved (a ref that moved can never serve older bytes) and read by seek: reading a
+/// blob from git again per range would cost all of it up to the range, per range.
+pub struct BlobCache {
+    dir: PathBuf,
+    cap: u64,
+    idle: Duration,
+    /// One blob written at a time: two previews of one file share it.
+    fill: tokio::sync::Mutex<()>,
+    /// Blobs written so far.
+    fills: std::sync::atomic::AtomicUsize,
+}
+
+impl BlobCache {
+    fn new(dir: PathBuf, cap: u64, idle: Duration) -> Self {
+        let _ = std::fs::remove_dir_all(&dir);
+        Self { dir, cap, idle, fill: tokio::sync::Mutex::new(()), fills: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    /// `len` bytes from `start` of blob `oid` (`size` bytes) of the repository at `root`.
+    async fn range(&self, root: &Path, oid: &str, size: u64, start: u64, len: u64) -> Result<Vec<u8>, ApiError> {
+        let file = self.dir.join(format!("{:08x}-{oid}", crate::paths::fnv1a(root.as_os_str().as_encoded_bytes())));
+        {
+            let _one = self.fill.lock().await;
+            if std::fs::metadata(&file).map(|m| m.len() != size).unwrap_or(true) {
+                self.write(root, oid, &file).await?;
+                self.evict();
+            }
+        }
+        let path = file.clone();
+        let read = tokio::task::spawn_blocking(move || -> io::Result<Vec<u8>> {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+            // Read means used: its idle time starts again.
+            let _ = f.set_modified(std::time::SystemTime::now());
+            f.seek(SeekFrom::Start(start))?;
+            let mut buf = Vec::with_capacity(len as usize);
+            f.take(len).read_to_end(&mut buf)?;
+            Ok(buf)
+        });
+        let buf = read.await.map_err(|e| ApiError::new("internal", e.to_string()))?.map_err(|e| crate::ops::fs::io_error(e, &file))?;
+        if (buf.len() as u64) < len {
+            return Err(ApiError::new("git_error", format!("the cached copy of {oid} is short")));
+        }
+        Ok(buf)
+    }
+
+    /// git's bytes of `oid` into `file`, through `<file>.part` and a rename. Owner-only (0700 folder,
+    /// 0600 files): they are the repository's contents.
+    async fn write(&self, root: &Path, oid: &str, file: &Path) -> Result<(), ApiError> {
+        let part = file.with_extension("part");
+        let failed = |e: io::Error| ApiError::new("io_error", format!("caching blob {oid}: {e}"));
+        crate::paths::create_private_dir(&self.dir).map_err(failed)?;
+        let _ = std::fs::remove_file(&part);
+        let dst = crate::paths::create_private_new(&part).map_err(failed)?;
+        let (mut child, mut out) = cat_blob(root, oid)?;
+        let copy = async {
+            let mut dst = tokio::fs::File::from_std(dst);
+            tokio::io::copy(&mut out, &mut dst).await?;
+            dst.sync_all().await?;
+            child.wait().await
+        };
+        let status = match tokio::time::timeout(SLOW, copy).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(failed(e));
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(ApiError::new("timeout", "git cat-file timed out").retryable());
+            }
+        };
+        if !status.success() {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(ApiError::new("git_error", format!("git cat-file failed reading {oid}")));
+        }
+        tokio::fs::rename(&part, file).await.map_err(failed)?;
+        self.fills.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Removes blobs idle past `idle`, then the least recently read until the rest fit in `cap`.
+    fn evict(&self) {
+        let Ok(dir) = std::fs::read_dir(&self.dir) else { return };
+        let now = std::time::SystemTime::now();
+        let mut kept: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+        for entry in dir.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if path.extension().is_some_and(|e| e == "part") || !meta.is_file() {
+                continue;
+            }
+            let used = meta.modified().unwrap_or(now);
+            if now.duration_since(used).unwrap_or_default() > self.idle {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                kept.push((used, meta.len(), path));
+            }
+        }
+        kept.sort();
+        let mut total: u64 = kept.iter().map(|k| k.1).sum();
+        for (_, len, path) in kept {
+            if total <= self.cap {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total -= len;
+            }
+        }
+    }
+}
+
 pub async fn commit(p: &GitCommitParams) -> Result<GitCommitResult, ApiError> {
     if p.message.trim().is_empty() {
         return Err(ApiError::new("invalid_params", "commit message is empty"));
@@ -1370,6 +1609,147 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
             .unwrap();
         assert_eq!(only.files.len(), 1);
         assert!(only.patch.contains("+five") && !only.patch.contains("untracked"));
+    }
+
+    fn show_params(cwd: &Path, rev: &str, path: &str, offset: Option<u64>, max_bytes: Option<u64>) -> GitShowParams {
+        GitShowParams { cwd: cwd.display().to_string(), rev: rev.into(), path: path.into(), offset, max_bytes }
+    }
+
+    fn unbase(b64: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD.decode(b64).unwrap()
+    }
+
+    /// `git.show` with a cache of its own (the checks of answers, not of the cache).
+    async fn show(p: &GitShowParams) -> Result<GitShowResult, ApiError> {
+        let dir = tempfile::tempdir().unwrap();
+        super::show(p, &BlobCache::new(dir.path().join("blobs"), BLOB_CAP, BLOB_IDLE)).await
+    }
+
+    fn cached(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn show_writes_a_big_blob_once_and_reads_its_ranges_from_the_copy() {
+        let td = fixture();
+        let d = td.path();
+        let big: Vec<u8> = (0..SHOW_MAX + 5000).map(|i| (i % 253) as u8).collect();
+        std::fs::write(d.join("clip.mp4"), &big).unwrap();
+        sh(d, &["add", "clip.mp4"]);
+        sh(d, &["commit", "-q", "-m", "clip"]);
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("blobs");
+        let cache = BlobCache::new(blobs.clone(), BLOB_CAP, BLOB_IDLE);
+        let mut joined = Vec::new();
+        while joined.len() < big.len() {
+            let r = super::show(&show_params(d, "HEAD", "clip.mp4", Some(joined.len() as u64), Some(SHOW_MAX)), &cache).await.unwrap();
+            joined.extend(unbase(&r.base64));
+        }
+        assert_eq!(joined, big);
+        assert_eq!(cache.fills.load(std::sync::atomic::Ordering::Relaxed), 1, "two ranges, one git cat-file");
+        // A blob that fits one answer never reaches the cache.
+        super::show(&show_params(d, "HEAD", "a.txt", None, None), &cache).await.unwrap();
+        assert_eq!(cache.fills.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(cached(&blobs).len(), 1, "no .part left: {:?}", cached(&blobs));
+        // A new cache (a daemon start) leaves nothing of the last.
+        BlobCache::new(blobs.clone(), BLOB_CAP, BLOB_IDLE);
+        assert!(cached(&blobs).is_empty());
+    }
+
+    #[tokio::test]
+    async fn blob_cache_drops_the_least_recently_read_past_its_cap() {
+        let td = fixture();
+        let d = td.path();
+        std::fs::write(d.join("one.bin"), vec![1u8; 3000]).unwrap();
+        std::fs::write(d.join("two.bin"), vec![2u8; 3000]).unwrap();
+        sh(d, &["add", "one.bin", "two.bin"]);
+        sh(d, &["commit", "-q", "-m", "bins"]);
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("blobs");
+        let cache = BlobCache::new(blobs.clone(), 4000, BLOB_IDLE);
+        let one = super::show(&show_params(d, "HEAD", "one.bin", Some(1000), Some(1000)), &cache).await.unwrap();
+        assert_eq!(unbase(&one.base64), vec![1u8; 1000]);
+        let two = super::show(&show_params(d, "HEAD", "two.bin", Some(1000), Some(1000)), &cache).await.unwrap();
+        assert_eq!(unbase(&two.base64), vec![2u8; 1000]);
+        // 6000 bytes over a 4000-byte cap: the blob read longer ago went.
+        let oid = std::process::Command::new("git").args(["rev-parse", "HEAD:two.bin"]).current_dir(d).output().unwrap().stdout;
+        let left = cached(&blobs);
+        assert!(left.len() == 1 && left[0].ends_with(String::from_utf8_lossy(&oid).trim()), "{left:?}");
+        assert_eq!(cache.fills.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn show_reads_a_blob_as_the_revision_has_it() {
+        let td = fixture();
+        let d = td.path();
+        let pic: Vec<u8> = (0..3000u32).map(|i| (i * 7 % 256) as u8).collect();
+        std::fs::write(d.join("pic.png"), &pic).unwrap();
+        sh(d, &["add", "pic.png"]);
+        sh(d, &["commit", "-q", "-m", "pic"]);
+        std::fs::write(d.join("pic.png"), b"changed in the working tree").unwrap();
+        let whole = show(&show_params(d, "HEAD", "pic.png", None, None)).await.unwrap();
+        assert_eq!((whole.size, whole.offset, whole.truncated, whole.mime.as_deref()), (3000, 0, false, Some("image/png")));
+        assert_eq!(unbase(&whole.base64), pic, "the committed bytes, not the working tree's");
+        // Ranges join into the blob.
+        let mut joined = Vec::new();
+        loop {
+            let r = show(&show_params(d, "HEAD", "pic.png", Some(joined.len() as u64), Some(1024))).await.unwrap();
+            assert_eq!(r.offset, joined.len() as u64);
+            joined.extend(unbase(&r.base64));
+            assert_eq!(r.truncated, joined.len() < pic.len());
+            if !r.truncated {
+                break;
+            }
+        }
+        assert_eq!(joined, pic);
+        // The old side of a modified file (feat changed a.txt since main) and of a moved one.
+        assert_eq!(unbase(&show(&show_params(d, "main", "a.txt", None, None)).await.unwrap().base64), b"one\ntwo\nthree\n");
+        // The pic commit took the staged rename along: only the base still has old.txt.
+        assert_eq!(unbase(&show(&show_params(d, "main", "old.txt", None, None)).await.unwrap().base64), b"keep me\n");
+        assert_eq!(show(&show_params(d, "HEAD", "old.txt", None, None)).await.unwrap_err().code, "not_found");
+        // Past the end: nothing, and nothing more to come.
+        let end = show(&show_params(d, "HEAD", "pic.png", Some(99_999), Some(10))).await.unwrap();
+        assert_eq!((end.offset, end.base64.as_str(), end.truncated), (3000, "", false));
+    }
+
+    #[tokio::test]
+    async fn show_caps_each_answer() {
+        let td = fixture();
+        let d = td.path();
+        std::fs::write(d.join("big.bin"), vec![7u8; (SHOW_MAX + 1000) as usize]).unwrap();
+        sh(d, &["add", "big.bin"]);
+        sh(d, &["commit", "-q", "-m", "big"]);
+        let first = show(&show_params(d, "HEAD", "big.bin", None, Some(u64::MAX))).await.unwrap();
+        assert_eq!((first.size, unbase(&first.base64).len() as u64, first.truncated), (SHOW_MAX + 1000, SHOW_MAX, true));
+        let rest = show(&show_params(d, "HEAD", "big.bin", Some(SHOW_MAX), Some(u64::MAX))).await.unwrap();
+        assert_eq!((unbase(&rest.base64), rest.truncated), (vec![7u8; 1000], false));
+        let default = show(&show_params(d, "HEAD", "big.bin", None, None)).await.unwrap();
+        assert_eq!(unbase(&default.base64).len() as u64, SHOW_DEFAULT);
+    }
+
+    #[tokio::test]
+    async fn show_refuses_paths_outside_the_repository_and_unknown_revisions() {
+        let td = fixture();
+        let d = td.path();
+        for path in ["../secret.txt", "/etc/passwd", "a/../../x", "./a.txt", "a.txt/", "", "dir\\..\\a.txt", "a\nb"] {
+            let e = show(&show_params(d, "HEAD", path, None, None)).await.unwrap_err();
+            assert_eq!(e.code, "invalid_params", "{path:?}: {}", e.message);
+        }
+        for rev in ["", "-p", "--output=/tmp/x", "HEAD:a.txt", "HEAD a.txt"] {
+            assert_eq!(show(&show_params(d, rev, "a.txt", None, None)).await.unwrap_err().code, "invalid_params", "{rev:?}");
+        }
+        let e = show(&show_params(d, "nope", "a.txt", None, None)).await.unwrap_err();
+        assert_eq!((e.code.as_str(), e.message.as_str()), ("invalid_params", "unknown revision `nope`"));
+        assert_eq!(show(&show_params(d, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "a.txt", None, None)).await.unwrap_err().code, "invalid_params");
+        // A file the revision doesn't have, and a folder.
+        assert_eq!(show(&show_params(d, "main", "staged.txt", None, None)).await.unwrap_err().code, "not_found");
+        std::fs::create_dir_all(d.join("dir")).unwrap();
+        std::fs::write(d.join("dir/f"), "f").unwrap();
+        sh(d, &["add", "dir"]);
+        sh(d, &["commit", "-q", "-m", "dir"]);
+        assert_eq!(show(&show_params(d, "HEAD", "dir", None, None)).await.unwrap_err().code, "invalid_params");
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(show(&show_params(plain.path(), "HEAD", "a.txt", None, None)).await.unwrap_err().code, "not_found");
     }
 
     #[tokio::test]

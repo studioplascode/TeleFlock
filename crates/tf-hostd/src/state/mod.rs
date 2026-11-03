@@ -703,10 +703,15 @@ impl StateHandle {
                     unarchive.push(id.clone());
                 }
             }
+            // omp's settings approval on a bridge that cannot bring it here waits in the terminal
+            // unseen: a `cfg://` write that ran past the grace stands for it.
+            let (cfg_wait, cfg_recheck) = build::legacy_cfg_wait(view.as_ref(), bridge.as_ref(), now, BLOCKED_GRACE_MS);
+            recheck |= cfg_recheck;
             // herdr `blocked` without a request TeleFlock can see: for linked omp agents give
             // the collab dialog (or herdr's catch-up after an answer) a moment to settle.
             let has_request = view.as_ref().is_some_and(|v| v.needs.is_some())
-                || bridge.as_ref().is_some_and(|b| b.state.plan_review.is_some() || b.browser_request.is_some() || b.state.user_wait.is_some());
+                || bridge.as_ref().is_some_and(|b| b.state.plan_review.is_some() || b.browser_request.is_some() || b.state.user_wait.is_some())
+                || cfg_wait.is_some();
             let blocked_grace = linked && state == HerdrState::Blocked && !has_request && now - track.state_since < BLOCKED_GRACE_MS;
             if blocked_grace {
                 recheck = true;
@@ -728,6 +733,7 @@ impl StateHandle {
                 .or_else(|| bridge.as_ref().and_then(|b| b.browser_request.as_ref().map(|r| format!("browser:{}", r.id))))
                 .or_else(|| bridge.as_ref().and_then(|b| b.state.plan_review.as_ref().map(|r| format!("plan:{}", r.review_id))))
                 .or_else(|| bridge.as_ref().and_then(|b| b.state.user_wait.as_ref().map(|w| format!("wait:{}", w.since))))
+                .or_else(|| cfg_wait.map(|w| format!("cfg:{}", w.call_id)))
                 .or_else(|| (state == HerdrState::Blocked && !blocked_grace && provider_wait.is_none()).then(|| "blocked".to_string()));
             if pre_needs_key != track.needs_key {
                 track.needs_key = pre_needs_key;
@@ -752,6 +758,7 @@ impl StateHandle {
                 last_turn_ended_at: track.last_turn_ended_at,
                 blocked_grace,
                 browser_lent: m.browser_lent.get(&id),
+                cfg_wait,
             };
             let mut agent = build::build_agent(&inputs);
             agent.auto_answer = store.auto_answer.get().and_then(|aa| aa.observe(&agent, now, apps));
@@ -774,7 +781,9 @@ impl StateHandle {
                 && !track.quiet_notified
                 && !crate::ops::jobs::waiting(&agent)
                 // omp waits to retry a provider error: the card says so, quiet would be wrong.
-                && agent.omp.as_ref().is_none_or(|o| o.retry.is_none());
+                && agent.omp.as_ref().is_none_or(|o| o.retry.is_none())
+                // It waits for the user (a prompt in its terminal while herdr says `working`): not quiet.
+                && agent.column != Column::Needs;
             if quiet {
                 track.quiet_notified = true;
             }
@@ -1005,6 +1014,11 @@ impl StateHandle {
                     }
                     Signal::ToolError { tool, error } => {
                         self.push_activity(&agent_id, &name, ActivityKind::ToolError, format!("{tool} failed"), Some(error.clone()));
+                    }
+                    // A live `present` call of the agent or one of its subagents (§3.32).
+                    Signal::Presented { artifact } => {
+                        let mut m = self.lock();
+                        self.notify(&mut m, build::presented_notification(&agent_id, &name, artifact, now_ms()));
                     }
                     Signal::Compacted { tokens_before } => {
                         let detail = tokens_before.map(|t| format!("{t} tokens before"));
@@ -1863,6 +1877,7 @@ mod tests {
             last_turn_ended_at: None,
             blocked_grace: false,
             browser_lent: None,
+            cfg_wait: None,
         })
     }
 
@@ -2020,5 +2035,58 @@ mod tests {
             [("a-new".into(), "a-new hit an error".into()), ("a-old".into(), "a-old hit an error".into()), ("a-old".into(), "a-old: Refused · cyber".into())],
             "one notification per failure, none for the refusal on the new bridge"
         );
+    }
+
+    /// A live `present` call of an agent (or of one of its subagents: the same signal, from the
+    /// artifacts dir) notifies the agent's apps with the action that opens the document; the next
+    /// version soon after updates that notification instead of adding one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_presentation_notifies_with_the_action_that_opens_it() {
+        use tf_proto::host::ServerMsg;
+        use tf_proto::{ClientInfo, NotifyKind, PresentKind, PresentedArtifact};
+
+        let dir = tempfile::tempdir().unwrap();
+        let persist = Persist::load(dir.path().join("state.json"));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let bridge = BridgeHandle::bind(crate::bridge::BridgeEndpoint::Unix(dir.path().join("bridge.sock")), "s".into()).unwrap();
+        let omp = OmpHandle::start(0, persist.clone(), cancel, bridge.clone()).await;
+        let h = StateHandle::new("lab", persist, omp, bridge);
+        let http: crate::notify::push::Http = Arc::new(|_| Box::pin(async { Err("no channels".to_string()) }));
+        let file = crate::notify::store::NotifyFile::default();
+        h.route_notifications(crate::notify::Notifier::with(dir.path().join("notify.json"), file, http, "forge".into(), tokio_util::sync::CancellationToken::new()));
+        let info = ClientInfo { app: "teleflock-desktop".into(), version: "0.9.1".into(), platform: "linux".into(), device: "Desk".into(), features: None };
+        let app = ClientHandle::with_features("c1".into(), info, crate::clients::Features { presence: true, notify_kinds: true, ..Default::default() });
+        h.attach_client(&app);
+        h.lock().omp_of.insert("a1".into(), "s1".into());
+
+        let doc = |version: u32| PresentedArtifact {
+            title: "Q3 report".into(),
+            kind: PresentKind::Html,
+            name: format!("presented/q3-report-v{version}.html"),
+            url: format!("local://presented/q3-report-v{version}.html"),
+            slug: "q3-report".into(),
+            version,
+            size: 4812,
+            language: None,
+            source: Some("reports/q3.html".into()),
+            assets: 1,
+        };
+        h.on_signals("s1", &[Signal::Presented { artifact: doc(1) }]);
+        h.on_signals("s1", &[Signal::Presented { artifact: doc(2) }]);
+        h.on_signals("s-other", &[Signal::Presented { artifact: doc(3) }]);
+        let mut lines = Vec::new();
+        app.take_batch(&mut lines);
+        let notes: Vec<_> = lines
+            .iter()
+            .filter_map(|l| if let ServerMsg::Notify { notification, alert } = serde_json::from_str(l).unwrap() { Some((notification, alert)) } else { None })
+            .collect();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let (first, second) = (&notes[0].0, &notes[1].0);
+        assert_eq!((first.kind, first.agent_id.as_str(), first.title.as_str(), first.body.as_str()), (NotifyKind::Presented, "a1", "a1 presented Q3 report", "HTML page"));
+        assert_eq!((first.presented(), first.actions[0].label.as_str(), notes[0].1), (Some("presented/q3-report-v1.html"), "View", Some(true)));
+        assert_eq!(second.id, first.id, "the next version updates it");
+        assert_eq!((second.body.as_str(), second.presented(), notes[1].1), ("HTML page · version 2", Some("presented/q3-report-v2.html"), Some(false)));
     }
 }

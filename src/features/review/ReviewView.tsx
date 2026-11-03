@@ -22,7 +22,7 @@ import {
   WrapText,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { draftKey, navigate, useHostState, useUi, useWorkspaces } from "@/core";
+import { core, draftKey, navigate, useHostState, useUi, useWorkspaces } from "@/core";
 import { isChat } from "@/core/chats";
 import type { Agent } from "@/core/gen";
 import { BottomSheet, Button, Chip, EmptyState, IconButton, SegmentedControl, Shimmer, Skeleton, StatusOrb, Tooltip, cn, spring, useIsMobile } from "@/design";
@@ -34,6 +34,8 @@ import { useHostQuery } from "../workspace/shared/useHostQuery";
 import { WorkspaceActionsMenu } from "../workspace/workspaceActions";
 import { FanOutSiblings } from "./FanOutSiblings";
 import { DiffBar, type DiffLayout, DiffViewer, type MarkdownView } from "./diff/DiffViewer";
+import type { MediaView } from "./diff/MediaPreview";
+import { MediaLoader } from "./diff/mediaLoad";
 import { useMdMode } from "./diff/mdMode";
 import { useRenderedDocs } from "./diff/useRenderedDocs";
 import { type DiffFile, mergeFiles, parsePatch } from "./diff/parse";
@@ -67,8 +69,8 @@ function treeOrder(a: DiffFile, b: DiffFile): number {
   }
 }
 
-/** A file stays "viewed" only while its diff is unchanged (an agent edit un-views it). */
-const viewSig = (f: DiffFile) => `${f.added}:${f.removed}:${f.hunks.length}:${f.status}`;
+/** A file stays "viewed" only while its diff is unchanged (an agent edit un-views it; a binary file's blob id says it changed). */
+const viewSig = (f: DiffFile) => `${f.added}:${f.removed}:${f.hunks.length}:${f.status}:${f.oids?.new ?? ""}`;
 
 /** `origin/main (50fc366)` → ref + sha; a bare sha stays a sha. */
 function BaseRef({ base }: { base: string }) {
@@ -213,10 +215,20 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
   const setMdMode = useMdMode((st) => st.setMode);
   const docs = useRenderedDocs(hostId, status.data?.root ?? cwd, files, mdMode === "rendered");
   const markdown = useMemo<MarkdownView>(() => ({ mode: mdMode, onMode: setMdMode, docs }), [mdMode, setMdMode, docs]);
+  // Binary files: images, video, audio and PDFs, read while Review is open and kept until it closes.
+  const mediaLoader = useMemo(() => new MediaLoader(core.host(hostId)), [hostId]);
+  useEffect(() => {
+    mediaLoader.reopen();
+    return () => mediaLoader.close();
+  }, [mediaLoader]);
+  /** Counts the diff's reloads: an untracked file's bytes may have changed with any of them. */
+  const [epoch, setEpoch] = useState(0);
+  const media = useMemo<MediaView>(() => ({ loader: mediaLoader, root: status.data?.root, base: diff.data?.base, epoch }), [mediaLoader, status.data?.root, diff.data?.base, epoch]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [seeded, setSeeded] = useState<typeof files | null>(null);
   if (files !== seeded) {
     setSeeded(files);
+    setEpoch((n) => n + 1);
     setCollapsed((prev) => {
       const next = new Set([...prev].filter((p) => files.some((f) => f.path === p)));
       for (const f of files) if (NOISY.test(f.path) && !seeded?.some((s) => s.path === f.path)) next.add(f.path);
@@ -481,7 +493,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             }
           />
           <div className="min-h-0 flex-1 px-2">
-            <DiffViewer key={open.path} files={[open]} markdown={markdown} layout="unified" wrap={wrap} collapsed={collapsed} onToggle={toggle} onWrap={() => setWrap(true)} compact busy={refreshing} className="h-full" />
+            <DiffViewer key={open.path} files={[open]} markdown={markdown} media={media} layout="unified" wrap={wrap} collapsed={collapsed} onToggle={toggle} onWrap={() => setWrap(true)} compact busy={refreshing} className="h-full" />
           </div>
           <nav className="flex shrink-0 items-center gap-2 px-3 pt-1.5 pb-2" aria-label="File navigation">
             <IconButton label={prev ? `Previous: ${prev.path}` : "No previous file"} variant="secondary" disabled={!prev} onClick={() => prev && jump(prev.path)} className="size-10">
@@ -710,6 +722,7 @@ export function ReviewView({ hostId, workspaceId }: { hostId: string; workspaceI
             <DiffViewer
               files={files}
               markdown={markdown}
+              media={media}
               layout={effectiveLayout}
               wrap={effectiveWrap}
               collapsed={collapsed}

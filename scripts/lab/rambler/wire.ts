@@ -6,6 +6,7 @@
  * the mock provider (mock.ts) and measures the latency the stack adds on top of the model.
  *
  * Usage: scripts/lab/run rambler -- bun scripts/lab/rambler/wire.ts <tf-hostd> [relay-port] [runs]
+ * The client attaches to herdr session `tf-lab-$TF_LAB` (the lab's name, set by scripts/lab/run).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,16 +15,16 @@ const [hostd, relayPort = "47481", runsArg = "3"] = process.argv.slice(2);
 if (!hostd) throw new Error("usage: wire.ts <tf-hostd> [relay-port] [runs]");
 const runs = Number(runsArg);
 const repo = join(import.meta.dir, "../../..");
+const session = `tf-lab-${process.env.TF_LAB ?? "rambler"}`;
 
 // The real system prompt and prompt shape, taken from the app's source.
 const src = readFileSync(join(repo, "src/core/ai.ts"), "utf8");
 const system = /^  ramble:\n    "((?:[^"\\]|\\.)*)",$/m.exec(src)?.[1];
 if (!system) throw new Error("ramble system prompt not found in src/core/ai.ts");
 const SYSTEM: string = JSON.parse(`"${system}"`);
-const prompt = (transcript: string, previous?: string) =>
-	`<context>\nRepository: teleflock\n</context>\n\n${previous ? `<previous>\n${previous}\n</previous>\n\n` : ""}<transcript>\n${transcript}\n</transcript>\n\nRewritten prompt for the whole transcript above:`;
+const prompt = (transcript: string) => `<context>\nRepository: teleflock\n</context>\n\n<transcript>\n${transcript}\n</transcript>\n\nRewritten prompt for the whole transcript above:`;
 
-const child = Bun.spawn([hostd, "attach", "--session", "tf-lab-rambler", "--relay-port", relayPort], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+const child = Bun.spawn([hostd, "attach", "--session", session, "--relay-port", relayPort], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
 const pending = new Map<number, (m: any) => void>();
 let welcomed: (() => void) | undefined;
 const hello = new Promise<void>(r => (welcomed = r));
@@ -43,7 +44,7 @@ const hello = new Promise<void>(r => (welcomed = r));
 	}
 })();
 const send = (v: object) => { child.stdin.write(`${JSON.stringify(v)}\n`); child.stdin.flush(); };
-send({ t: "hello", protocol: 1, client: { app: "rambler-lab", version: "0", platform: "linux", device: "rambler" }, herdrSession: "tf-lab-rambler" });
+send({ t: "hello", protocol: 1, client: { app: "rambler-lab", version: "0", platform: "linux", device: "rambler" }, herdrSession: session });
 await Promise.race([hello, Bun.sleep(60_000).then(() => { throw new Error("no welcome from tf-hostd"); })]);
 
 let next = 1;
@@ -73,10 +74,10 @@ for (const [role, model] of [["tiny", "lab-tiny"], ["smol", "lab-smol"], ["defau
 	console.log(`     ${role}: wall ${walls.map(w => Math.round(w)).join(", ")} ms, hostd-reported ${last.ms} ms, model ${last.model}`);
 }
 
-// previous rewrite + long-ish transcript through the same path
+// a long-ish transcript through the same path
 const long = Array.from({ length: 60 }, (_, i) => `step ${i} touch file${i} dot ts`).join(". ");
-const r = await call({ task: "ramble", system: SYSTEM, prompt: prompt(long, "Add a retry."), role: "tiny", timeoutMs: 12_000 });
-check("a ~2 000 character transcript with a previous rewrite goes through", r.ok && r.result.text.includes("file59"), r.ok ? `${long.length} chars, ${Math.round(r.wall)} ms` : JSON.stringify(r.error));
+const r = await call({ task: "ramble", system: SYSTEM, prompt: prompt(long), role: "tiny", timeoutMs: 12_000 });
+check("a ~2 000 character transcript goes through", r.ok && r.result.text.includes("file59"), r.ok ? `${long.length} chars, ${Math.round(r.wall)} ms` : JSON.stringify(r.error));
 
 // an invalid role and an unknown one fail the way the app expects
 const bad = await call({ task: "ramble", system: SYSTEM, prompt: prompt(said), role: "Not A Role" });

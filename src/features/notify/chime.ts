@@ -17,10 +17,11 @@ export function inQuietHours(s: Pick<Settings, "quietStart" | "quietEnd">, now =
   return a < b ? t >= a && t < b : t >= a || t < b;
 }
 
-/** Two-note notes per kind: rising for "needs you", soft fall for finished, low for errors. */
+/** Two-note notes per kind: rising for "needs you", soft fall for finished, a soft rise for a presented document, low for errors. */
 const NOTES: Partial<Record<NotifyKind, readonly [number, number]>> = {
   needs: [659.25, 987.77],
   finished: [783.99, 587.33],
+  presented: [587.33, 783.99],
   error: [329.63, 261.63],
 };
 

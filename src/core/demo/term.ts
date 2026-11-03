@@ -25,6 +25,8 @@ export interface TermContext {
   abort?(): void;
   /** Agent terminal: current TUI render. */
   render?(rows: number): string;
+  /** Agent terminal: a key for omp's dialog on screen (Enter, Esc, ↑/↓); true when a dialog took it. */
+  dialogKey?(data: string): boolean;
   /** Shell terminal: a program in the foreground (its screen, until Ctrl+C returns to the prompt). */
   program?: { lines: string[]; exit(): void };
   after(ms: number, cb: () => void): void;
@@ -109,6 +111,8 @@ export class DemoTerm {
 
   input(data: string): void {
     if (this.closed || this.mode === "observe") return;
+    // omp's dialog on screen takes the keys first, as its TUI's selector does.
+    if (this.agentId && this.ctx.dialogKey?.(data)) return;
     // A bracketed paste (the terminal pastes uploaded files' paths this way): like herdr for a pane
     // that never turned bracketed paste on, the demo shell gets the bare text.
     const pasted = /^\x1b\[200~([\s\S]*)\x1b\[201~$/.exec(data);

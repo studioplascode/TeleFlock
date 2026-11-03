@@ -2,6 +2,14 @@
 
 export type FsReadResult = { path: string, size: number, text?: string, 
 /**
- * Base64 when the file is not UTF-8.
+ * Base64 when the file is not UTF-8, and for every ranged read.
  */
-base64?: string, mime?: string, truncated: boolean, };
+base64?: string, mime?: string, 
+/**
+ * More of the file follows what was read.
+ */
+truncated: boolean, 
+/**
+ * Where the read started, when the request named an `offset` (hosts ≥ 0.9.1).
+ */
+offset?: number, };

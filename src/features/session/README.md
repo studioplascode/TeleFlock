@@ -30,6 +30,21 @@ card, `←` its previous question (multi-question asks), `/` slash palette, `@` 
 bottom sheet (its Terminal item opens the full terminal view); a "Next waiting" chip docks above the composer while
 other agents need you. `F5` / `Alt+R` resume a failed or stopped turn (below).
 
+Command palette (`composer/SlashPalette.tsx` `useSlashPalette`, `composer/slash.ts`): `/` lists omp's builtins and the
+session's skills, prompt templates and extension commands (`agent.commands`) with argument hints and how each runs, then a
+command's argument choices once its name is typed (`slashPopupAt`); ↑↓ move, Tab or Enter picks, Esc closes; a pick that
+takes no arguments runs at once (`runSlash`). Dispatch's composer uses the same palette narrowed to what a new agent can
+run (`features/dispatch/commands.ts`), where a pick only completes the text. Tests: `bun test src/features/session/composer/slash.test.ts`.
+
+Queued strip (`composer/QueueStrip.tsx`, `composer/queue.ts`): steers and follow-ups sent while the agent works, the
+host's queue (`meta.queue` / `omp.queue`) plus this client's sends until the host lists them or their user rows land.
+With bridge 2.4.0 every queued steer reaches the model together at the next step boundary. A send whose row landed
+hides one host listing of its text while the host's queue still has it (`reconcileQueue`), so delivered messages
+leave the strip with their rows, together when they land together. omp pulls back only its last queued message (the
+last steer, else the last follow-up), so the pencil and × sit on that chip alone; a pull that finds nothing left
+(`agent.dequeue` → `{}`) says "Already delivered" and clears this client's settled sends (hostd drops its own list).
+Tests: `bun test src/features/session/composer/queue.test.ts`.
+
 Chats (`Agent.chat`, features/chats): the desktop header and the phone top bar's subtitle show the "Chat" chip
 (`ChatTag`) where repo · branch go; the ⋯ menu (dropdown and phone sheet) leaves out Move to host… and adds
 "Delete chat…" under End session; the inspector's Changed files lists them without Review links.
@@ -171,8 +186,13 @@ Find is open nothing is folded so every match can be reached. omp's "Retrying (n
 (`RetryStrip`, desktop and phone) the same wait reads "Rate limit · retrying in 4:54 (1/10)"; the auto-resume strip takes
 over once omp gave up.
 
-Toasts keep clear of the composer (`data-toast-anchor`; desktop only where it runs under the toast stack) and, on
-desktop, of an open ask card, which calls `toastAnchorsChanged()` once it has landed or gone.
+Toasts keep clear of the composer (`data-toast-anchor`; desktop only where it runs under the toast stack) and of an
+open ask card or terminal-wait card (phones too), which call `toastAnchorsChanged()` once they have landed or gone.
+
+A wait only the agent's terminal can answer (`needs.answerable` false, no dialog open in the session: an omp prompt the
+host can't bring here, herdr's `blocked`) shows where the ask card goes (`ask/TerminalWait.tsx`, `terminalWait`): its
+question and detail and **Answer in terminal** (desktop: the terminal beside the session; phone: the terminal view), as
+the board, Inbox and Answer-next HUD offer it. Before, the session showed nothing above "Answer above, or steer…".
 
 Decide for me on the ask card (`features/autoAnswer/AskCountdown`, hosts ≥ 0.7.0): while the card's question has a
 decide-for-me countdown (`Agent.autoAnswer`, same request), a strip above Chat about this / Skip says "auto-picks ★

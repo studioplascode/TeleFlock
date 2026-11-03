@@ -37,7 +37,7 @@ describe("demo engine", () => {
     expect(r.state.status.forge?.phase).toBe("online");
     const c = columns(r.state, "forge");
     for (const col of ["running", "needs", "review", "done"] as Column[]) expect(c[col].length).toBeGreaterThan(0);
-    expect(c.needs.sort()).toEqual(["cfg", "expenses", "flags", "limits", "push", "toolissue"]);
+    expect(c.needs.sort()).toEqual(["cfg", "expenses", "flags", "limits", "push", "revert", "toolissue"]);
     expect(Object.values(r.state.agents).some((a) => a.kind !== "omp")).toBe(true);
   });
 
@@ -53,6 +53,17 @@ describe("demo engine", () => {
     const notes = r.events.filter((e) => e.type === "notify").map((e) => (e.type === "notify" ? e.notification.kind : ""));
     expect(notes).toContain("finished");
     expect(notes).toContain("needs");
+  }, 30_000);
+
+  test("an agent presenting a document live posts a presented notification that opens it", async () => {
+    const r = rig();
+    for (let minute = 1; minute <= 3; minute++) r.clock.advance(60_000);
+    const notes = r.events.flatMap((e) => (e.type === "notify" && e.notification.kind === "presented" ? [e.notification] : []));
+    expect(notes[0]).toMatchObject({ agentId: "kanban", body: "Markdown", actions: [{ id: "open:presented/board-test-report-v1.md", label: "View" }] });
+    expect(notes[0]?.title.endsWith("presented Board test report")).toBe(true);
+    // The document it opens is in the session's artifacts, readable whole.
+    const doc = await r.call<{ text?: string }>("forge", "session.artifact", { agentId: "kanban", kind: "local", name: "presented/board-test-report-v1.md" });
+    expect(doc.text?.startsWith("# Board test report")).toBe(true);
   }, 30_000);
 
   test("answering an ask moves the agent to running and continues the turn", async () => {
@@ -106,6 +117,47 @@ describe("demo engine", () => {
     await r.call("forge", "agent.answer", { agentId: "cfg", requestId: cfg?.requestId, answer: { choices: ["Always for this session"], cancel: false, chat: false } });
     r.clock.advance(300);
     expect(r.state.agents[agentKey("forge", "cfg")]?.needs).toBeUndefined();
+  });
+
+  test("a prompt only the terminal answers: Needs you with no dialog in the app; Enter in the agent's terminal answers it", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const key = agentKey("forge", "revert");
+    expect(r.state.agents[key]?.column).toBe("needs");
+    expect(r.state.agents[key]?.needs).toMatchObject({
+      kind: "blocked",
+      answerable: false,
+      title: "Waiting in the terminal",
+      question: "⚙️ Your agent wants to change `task.perCallModel` for this session.",
+      options: [],
+      context: "",
+    });
+    expect(r.state.agents[key]?.needs?.requestId).toBeUndefined();
+    const snap = await r.call<SessionSnapshot>("forge", "session.open", { agentId: "revert" });
+    expect(snap.ui ?? null).toBeNull();
+    expect(snap.items.some((i) => i.kind === "tool" && i.tool === "write" && i.status === "running")).toBe(true);
+    const opened = await r.call<{ termId: string }>("forge", "term.open", { target: { kind: "agent", agentId: "revert" }, cols: 100, rows: 30, mode: "control", takeover: false });
+    const shown = () =>
+      r.events
+        .filter((e): e is Extract<AppEvent, { type: "term" }> => e.type === "term" && e.termId === opened.termId)
+        .map((e) => e.ev)
+        .filter((e): e is Extract<TermEvent, { k: "frame" }> => e.k === "frame")
+        .map((f) => atob(f.data))
+        .join("");
+    r.clock.advance(100);
+    expect(shown()).toContain("Always for this session");
+    expect(shown()).toContain("Allow once");
+    // Typing other keys leaves the prompt where it is; Enter takes the highlighted Allow once.
+    r.engine.termInput("forge", opened.termId, "x");
+    expect(r.state.agents[key]?.needs?.kind).toBe("blocked");
+    r.engine.termInput("forge", opened.termId, "\r");
+    r.clock.advance(300);
+    expect(r.state.agents[key]?.needs).toBeUndefined();
+    expect(r.state.agents[key]?.column).toBe("running");
+    r.clock.advance(20_000);
+    const after = await r.call<SessionSnapshot>("forge", "session.open", { agentId: "revert" });
+    expect(after.items.some((i) => i.kind === "tool" && i.tool === "write" && i.status === "ok")).toBe(true);
+    expect(after.items.some((i) => i.kind === "assistant" && i.text.includes("off again"))).toBe(true);
   });
 
   test("session.open snapshot, then streaming appends while subscribed", async () => {
@@ -337,6 +389,25 @@ describe("demo engine", () => {
     await expect(r.call("forge", "worktree.create", { cwd: "/home/demo/code/teleflock", branch: "feat/kanban-board", existing: true, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("already used by worktree") });
     await expect(r.call("forge", "workspace.close", { workspaceId: "w1", group: false })).rejects.toMatchObject({ message: expect.stringContaining("workspace_group_close_required") });
     await expect(r.call("forge", "worktree.remove", { workspaceId: "w4", force: false, trust: false })).rejects.toMatchObject({ message: expect.stringContaining("dirty_worktree_requires_force") });
+  });
+
+  test("a launch's command runs once omp is ready, as agent.slash runs it: /plan <task> plans the task", async () => {
+    const r = rig();
+    r.clock.advance(2000);
+    const res = await r.call<{ agent?: { agentId: string } }>("forge", "worktree.create", {
+      cwd: "/home/demo/code/teleflock",
+      branch: "dispatch/settings-page",
+      existing: false,
+      trust: false,
+      agent: { kind: "omp", name: "settings-page", plan: false, command: "/plan add a settings page" },
+    });
+    const key = agentKey("forge", res.agent?.agentId as string);
+    // Titled after the task the command gives, idle until omp is ready.
+    expect(r.state.agents[key]).toMatchObject({ state: "idle", turns: 0, title: "add a settings page" });
+    r.clock.advance(3000);
+    expect(r.state.agents[key]).toMatchObject({ column: "running", omp: { mode: "plan" } });
+    // Not a slash command: refused before anything starts.
+    await expect(r.call("forge", "agent.start", { target: { kind: "workspace", workspaceId: "w1" }, spec: { kind: "omp", plan: false, command: "plan it" } })).rejects.toMatchObject({ code: "invalid_params" });
   });
 
   test("a parked agent's merged PR: the card keeps its worktree, gh.prStatus says MERGED, worktree.remove {path} deletes it; foreign repos need trust", async () => {

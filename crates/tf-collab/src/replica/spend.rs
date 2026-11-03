@@ -29,10 +29,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
-use tf_proto::Millis;
+use tf_proto::{Millis, PresentedArtifact};
 
 use super::subagents::{self, Outcome, TailTurn};
-use super::util::{f, s, u};
+use super::util::{b, f, s, u};
 
 /// Replies that finished longer ago than this are history, not throughput.
 const PLAYBACK_MAX_AGE_MS: i64 = 60_000;
@@ -168,6 +168,10 @@ impl FileTail {
 pub struct ArtifactLedger {
     /// By path relative to the artifacts dir.
     files: BTreeMap<String, FileTail>,
+    /// Past its first scan ([`Self::go_live`]): what the transcripts gain from now on is new.
+    live: bool,
+    /// Documents the transcripts' `present` calls showed since the ledger went live.
+    presented: Vec<PresentedArtifact>,
 }
 
 impl ArtifactLedger {
@@ -204,6 +208,12 @@ impl ArtifactLedger {
                 tail.spend.add(&call.spend);
                 calls.push(call);
             }
+            if self.live
+                && let Some(m) = entry.get("message").filter(|m| s(m, "role") == Some("toolResult") && !b(m, "isError"))
+                && let Some(a) = super::tools::presented(s(m, "toolName").unwrap_or(""), m.get("details"))
+            {
+                self.presented.push(a);
+            }
             let (details, tool) = match s(&entry, "type") {
                 Some("custom_message") => (entry.get("details"), ""),
                 Some("message") => entry.get("message").map_or((None, ""), |m| (m.get("details"), s(m, "toolName").unwrap_or(""))),
@@ -215,6 +225,19 @@ impl ArtifactLedger {
             tail.turn.note(&entry);
         }
         calls
+    }
+
+    /// From now on, the documents a subagent (or advisor) presents are kept for
+    /// [`Self::take_presented`]. tf-hostd calls it after each scan, so what the transcripts held
+    /// before the ledger's first scan (a tf-hostd restart, a rewritten transcript read again from
+    /// the start) is never reported as presented now.
+    pub fn go_live(&mut self) {
+        self.live = true;
+    }
+
+    /// The documents presented since the last call, oldest first.
+    pub fn take_presented(&mut self) -> Vec<PresentedArtifact> {
+        std::mem::take(&mut self.presented)
     }
 
     /// How the subagents' runs ended, as the transcripts record it: each transcript's records in
@@ -366,6 +389,30 @@ mod tests {
         assert_eq!(live.subagents(), rebuilt.subagents());
         let sum: f64 = files.iter().flat_map(|(_, c)| c).sum();
         assert!((live.subagents().usd - sum).abs() < 1e-15);
+    }
+
+    /// A subagent's `present` results are the session's presented documents, but only those its
+    /// transcript gains once the ledger is live: what a restart reads again was shown before.
+    #[test]
+    fn presented_documents_count_from_the_first_scan_on() {
+        let present = |call: &str, version: u32, error: bool| {
+            line(json!({"type": "message", "id": call, "message": {"role": "toolResult", "toolCallId": call, "toolName": "present", "isError": error,
+                "content": [{"type": "text", "text": "Presented"}],
+                "details": {"title": "Q3 report", "kind": "html", "name": format!("presented/q3-report-v{version}.html"), "slug": "q3-report", "version": version, "size": 10, "assets": 0}}}))
+        };
+        let mut l = ArtifactLedger::default();
+        l.ingest("Scout.jsonl", &[line(json!({"type": "session", "id": "s"})), present("c1", 1, false)].concat());
+        assert!(l.take_presented().is_empty(), "read before the ledger went live: history");
+        l.go_live();
+        l.ingest("Scout.jsonl", &[present("c2", 2, false), present("c3", 3, true)].concat());
+        // A nested subagent's transcript that appears later is new from its first line.
+        l.ingest("Scout/Scout.Probe.jsonl", &[line(json!({"type": "session", "id": "p"})), present("c4", 3, false)].concat());
+        let shown: Vec<(String, u32)> = l.take_presented().into_iter().map(|a| (a.name, a.version)).collect();
+        assert_eq!(shown, [("presented/q3-report-v2.html".to_string(), 2), ("presented/q3-report-v3.html".to_string(), 3)], "a failed call shows nothing");
+        assert!(l.take_presented().is_empty());
+        // Another tool's result is no document.
+        l.ingest("Scout.jsonl", &line(json!({"type": "message", "message": {"role": "toolResult", "toolName": "write", "details": {"name": "presented/x-v1.md", "slug": "x", "version": 1}}})));
+        assert!(l.take_presented().is_empty());
     }
 
     #[test]

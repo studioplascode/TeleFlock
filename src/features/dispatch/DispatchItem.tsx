@@ -60,6 +60,12 @@ type Shown =
   | { k: "unconfirmed"; reason: "reload" | "lost" }
   | { k: "gone" };
 
+/**
+ * A command that starts no turn (`/fast on`) has run by now once the agent's link has been up this
+ * long: the card stops saying "Starting agent".
+ */
+const COMMAND_SETTLE_MS = 10_000;
+
 function shownOf(entry: DispatchEntry, agent: AgentView | undefined, now: number): Shown {
   const inFlight = isInFlight(entry.id);
   // `naming` shows as such even after a reload: the view resumes it under the fallback name.
@@ -68,8 +74,10 @@ function shownOf(entry: DispatchEntry, agent: AgentView | undefined, now: number
   if (entry.phase === "failed") return { k: "failed" };
   const since = entry.startedAt ?? entry.createdAt;
   if (agent) {
-    // herdr started omp; the prompt is submitted once omp is ready (first turn not begun yet).
-    const waiting = agent.turns === 0 && agent.state === "idle" && now - since < START_TIMEOUT_MS;
+    // herdr started omp; the prompt (or command) is handed over once omp is ready (first turn not begun yet).
+    const linked = agent.omp?.link === "live" ? agent.omp.linkSince : undefined;
+    const ran = entry.command !== undefined && linked !== undefined && now - linked > COMMAND_SETTLE_MS;
+    const waiting = agent.turns === 0 && agent.state === "idle" && now - since < START_TIMEOUT_MS && !ran;
     return waiting ? { k: "step", step: "starting" } : { k: "live", agent };
   }
   if (entry.phase === "started") return now - since < APPEAR_GRACE_MS ? { k: "step", step: "starting" } : { k: "gone" };
@@ -120,7 +128,7 @@ export const DispatchItem = memo(function DispatchItem({ entry, agentId, index }
               ctx.mobile ? "px-3.5 py-2 text-[14px] leading-[1.5]" : "px-4 py-2.5 text-[13.5px] leading-[1.55]",
             )}
           >
-            {entry.prompt}
+            {entry.command ? <CommandText text={entry.prompt.trim()} /> : entry.prompt}
           </div>
         )}
       </div>
@@ -128,6 +136,17 @@ export const DispatchItem = memo(function DispatchItem({ entry, agentId, index }
     </motion.li>
   );
 });
+
+/** A message that ran as a command in its agent: the command in mono, then its arguments. */
+function CommandText({ text }: { text: string }) {
+  const name = text.split(/\s/, 1)[0] ?? "";
+  return (
+    <>
+      <span className="font-mono font-bold text-accent-hi">{name}</span>
+      {text.slice(name.length)}
+    </>
+  );
+}
 
 /** A parked agent behind the entry (its pane closed when marked done): by id, else by omp session. */
 function parkedKeyOf(agents: Record<string, AgentView>, hostId: string, entry: DispatchEntry): string | undefined {

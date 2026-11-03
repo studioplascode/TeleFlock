@@ -2329,6 +2329,7 @@ async fn start_fresh(
         thinking: rec.thinking,
         plan: false,
         prompt: None,
+        command: None,
         images: Vec::new(),
         role_models: own.role_models,
         fallback_chains: own.fallback_chains,
@@ -2446,6 +2447,7 @@ async fn full_launch(ctx: &Ctx, book: &Arc<Mutex<Book>>, a: &Agent) -> Result<Ag
         thinking: e.record.thinking,
         plan: false,
         prompt: None,
+        command: None,
         images: Vec::new(),
         role_models: own.role_models,
         fallback_chains: own.fallback_chains,
@@ -2652,9 +2654,7 @@ async fn note(ctx: &Ctx, a: &Agent, sid: &str, text: &str, follows: bool, sent: 
             return s.prompt(text, Vec::new(), Delivery::Auto).await;
         }
         if s.follow_up_prompts() {
-            s.prompt(text, Vec::new(), Delivery::FollowUp).await?;
-            s.expect_queued(text, true);
-            return Ok(());
+            return s.prompt_queued(text, Vec::new(), Delivery::FollowUp).await;
         }
     }
     if ctx.bridge.by_session(sid).is_some() {

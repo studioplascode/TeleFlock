@@ -21,7 +21,7 @@ interface Stored extends Omit<PushChannel, "target" | "saved"> {
   secrets: Partial<Record<SecretField, string>>;
 }
 
-const KINDS: readonly NotifyKind[] = ["needs", "error", "quiet", "finished", "info"];
+const KINDS: readonly NotifyKind[] = ["needs", "error", "quiet", "finished", "presented", "info"];
 const ESCALATE_TO = ["phones", "all"];
 const WHEN = ["offline", "unseen", "always"];
 

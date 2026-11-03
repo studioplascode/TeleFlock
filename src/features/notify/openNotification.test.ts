@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { core, type HostNotification } from "@/core";
-import type { NotifyAction } from "@/core/gen";
+import { core, getRoute, type HostNotification, useUi } from "@/core";
+import type { NotifyAction, PresentedArtifact } from "@/core/gen";
 import { coreStore } from "@/core/store/store";
-import { notificationPage, openNotification } from "./openNotification";
+import { useFullscreenDoc } from "@/features/session/artifacts/viewer";
+import { notificationDocument, notificationPage, openNotification } from "./openNotification";
 
 const action = (id: string, answer?: NotifyAction["answer"]): NotifyAction => ({ id, label: "x", answer });
 
@@ -51,6 +52,59 @@ describe("openNotification", () => {
       if (realWindow === undefined) Reflect.deleteProperty(globalThis, "window");
       else globalThis.window = realWindow;
       coreStore.setState({ notifications: [] });
+    }
+  });
+});
+
+describe("a presented document's notification", () => {
+  const presented = (name: string): HostNotification => ({
+    id: "n1",
+    at: 1,
+    kind: "presented",
+    agentId: "docs",
+    title: "docs presented Q3 revenue report",
+    body: "HTML page · version 2",
+    actions: [{ id: `open:${name}`, label: "View" }],
+    hostId: "forge",
+    read: false,
+  });
+
+  test("names its snapshot; pages and answers do not", () => {
+    expect(notificationDocument(presented("presented/q3-revenue-report-v2.html"))).toBe("presented/q3-revenue-report-v2.html");
+    expect(notificationDocument({ actions: [action("open:idleShells")] })).toBeUndefined();
+    expect(notificationDocument({ actions: [action("open:presented/x-v1.md", { choices: ["y"], cancel: false, chat: false })] })).toBeUndefined();
+  });
+
+  test("opens the agent's session with that document: beside it on desktop, full screen on a phone", () => {
+    const realWindow = globalThis.window;
+    const realApp = core.app;
+    core.app = (() => Promise.resolve({})) as never;
+    const artifact: PresentedArtifact = { title: "Q3 revenue report", kind: "html", name: "presented/q3-revenue-report-v2.html", url: "local://presented/q3-revenue-report-v2.html", slug: "q3-revenue-report", version: 2, size: 9, assets: 3 };
+    try {
+      // Desktop, the session loaded: its card of the call says what the document is.
+      globalThis.window = { location: { hash: "" }, innerWidth: 1280 } as never;
+      const card = { kind: "tool", id: "t:c1", at: 1, callId: "c1", tool: "present", title: "Q3 revenue report", args: {}, status: "ok", truncated: false, artifact };
+      coreStore.setState({ sessions: { "forge::docs": { items: { "t:c1": card }, itemIds: ["t:c1"], hasMore: false } } as never });
+      openNotification(presented(artifact.name));
+      expect(getRoute()).toEqual({ name: "agent", hostId: "forge", agentId: "docs" });
+      expect(useUi.getState().split).toEqual({ kind: "artifact", key: "forge::docs", file: "local", name: artifact.name, as: "html", title: "Q3 revenue report", language: undefined });
+      expect(useFullscreenDoc.getState().doc).toBeNull();
+
+      // A phone, the session not loaded yet (a subagent presented it): full screen, by its name.
+      useUi.getState().setSplit(null);
+      coreStore.setState({ sessions: {} });
+      globalThis.window = { location: { hash: "" }, innerWidth: 412 } as never;
+      openNotification(presented("presented/board-test-report-v3.md"));
+      expect(getRoute()).toEqual({ name: "agent", hostId: "forge", agentId: "docs" });
+      expect(useFullscreenDoc.getState().doc).toEqual({ agentKey: "forge::docs", kind: "local", name: "presented/board-test-report-v3.md" });
+      expect(useUi.getState().split).toBeNull();
+    } finally {
+      core.app = realApp;
+      useFullscreenDoc.setState({ doc: null });
+      useUi.getState().setSplit(null);
+      coreStore.setState({ sessions: {} });
+      if (realWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+      else globalThis.window = realWindow;
     }
   });
 });

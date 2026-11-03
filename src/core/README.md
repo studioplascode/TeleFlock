@@ -61,7 +61,7 @@ transcript rows keep identity, so selectors re-render only what changed.
 | `useBtw(key)` | `Record<btwId, { turns: ({ question?, text, done } \| undefined)[] }>`: live `/btw` conversations (asked here or in omp's TUI), deltas accumulated per turn; turns never seen live are holes (fill them from `agent.btwHistory`) |
 | `useNotifications(sel?)` / `.getState()` | `{ items (Notification & {hostId, read, resolved?}), unread, markRead(), clear() }`; `markRead`/`clear` and `markAgentNotificationsRead(hostId, agentId)` also call `app.notifyRead` so the core retracts OS notifications; `markNotificationRead(hostId, id)` marks one item read on this surface only (the wire has no per-item read); `notifyDone` events mark items read / resolved |
 | `useActivity(hostId?)` | `(ActivityEvent & {hostId})[]` newest first; loads `host.activity` on every mount (`watchActivity`: an unwatched feed is not refreshed, so it may have missed entries), refreshes on lane changes/notifications while mounted. `loadOlderActivity(hostId)` pages |
-| `useAccountLimits(hostIds)` | `Record<hostId, { data?: AccountLimits, error?, loading, receivedAt? }>`; one shared `host.limits` poll per host (60 s) while anything is mounted; `refreshLimits(hostId)` forces one. Pure helpers in `limits.ts`: `projectWindow` (pace + `runsOut`/`resetsFirst`/`idle`/`exhausted`/`reset`/`unknown`), `tightestWindow`, `windowsForModel` (tier windows only for models naming the tier), `sessionLimits(data, sessionId, model, now)`, `describePace`, `formatSpan`, `formatPct` |
+| `useAccountLimits(hostIds, everyMs)` | `Record<hostId, { data?: AccountLimits, error?, loading, receivedAt? }>`; one shared `host.limits` poll per host while anything is mounted, at the shortest cadence asked (`LIMITS_EVERY_MS` 5 min, Usage's `LIMITS_USAGE_EVERY_MS` 1 min; `null` = don't poll); `refreshLimits(hostId)` forces one. Pure helpers in `limits.ts`: `projectWindow` (pace + `runsOut`/`resetsFirst`/`idle`/`exhausted`/`reset`/`unknown`), `paceFromSamples` (the newest reading against one 5 min older when that moved ≥ 2 %, else back to the reading 2 % below within a fifth of the window, 30 min … 24 h; a level held t ≥ 5 min caps it at 1 % per t), `paceBasis` ("5 minutes", or the real basis when it widened), `tightestWindow`, `windowsForModel` (tier windows only for models naming the tier), `sessionLimits(data, sessionId, model, now)`, `describePace` ("At the last 5 minutes' pace you run out in ~40m …"), `formatSpan`, `formatPct` |
 | `useSettings(sel?)` / `.getState()` | `Settings & { update(patch), setMuted(key, muted), saveTemplate(t), removeTemplate(id), loaded }` (optimistic, rolls back on error; `mutedAgents`/`templates` always present) |
 | `isMuted(key)` / `useIsMuted(key)` | agent muted in `settings.mutedAgents` → suppress needs-you toasts, sounds, OS notifications |
 | `useTunnels()` | `TunnelInfo[]` |
@@ -154,16 +154,20 @@ events / 15 s) and replays them on the first subscribe, so the initial frame is 
 type Route = { name: "board" } | { name: "agent"; hostId; agentId } | { name: "terminal"; hostId; paneId?; agentId? }
   | { name: "review"; hostId; workspaceId } | { name: "dispatch" | "inbox" | "activity" | "usage" | "hosts" | "settings" | "more" | "design" };
 navigate(route, { replace? }); useRoute(); getRoute(); routeToHash(route); parseHash(hash);
+parentRoute(route): Route | undefined; // the page a sub-page opens from (Flock Wrapped → Usage)
 ```
 
 Hashes: `#/board`, `#/dispatch`, `#/agent/:h/:a`, `#/terminal/:h`, `#/terminal/:h/p/:paneId`,
 `#/terminal/:h/a/:agentId`, `#/review/:h/:ws`, `#/inbox`, `#/activity`, `#/usage`, `#/hosts`,
-`#/settings`, `#/more`, `#/design`.
+`#/settings`, `#/more`, `#/design`. An unknown hash (an old link to a removed page) is the board.
+`parentRoute` tells the shell which page a sub-page belongs to: back lands there when there is no page to go
+back to, the desktop sidebar lights it, and phones slide between the two as a push and a pop.
 
 `useUi(sel?)` (zustand; `.getState()`): `dialog: UiDialog | null`, `openDialog`, `closeDialog`,
 `paletteOpen`/`setPalette`, `answerNextOpen`/`setAnswerNext` (AppEvent `answerNext` opens it),
 `split`/`setSplit`, `sidebarCollapsed`/`toggleSidebar` (persisted), `selectedKey`/`select`, `focusMode`/`setFocusMode`. Dialog kinds include `fanOut { hostId?, cwd?, prompt? }`.
-AppEvent `openAgent` navigates to the session.
+AppEvent `openAgent` navigates to the session; `openPresented` (a system notification about a presented
+document) is handled by `src/features/notify` (`openPresented`: the session with the document in the viewer).
 
 ## AI naming & drafting (`ai.ts`)
 
@@ -178,11 +182,11 @@ timeout, error or junk output. Show AI-made values with a small ✨ and "Named b
 | `suggestBranch(hostId, task, opts?)` | kebab slug, 2–5 words, ≤ 40 chars, starts with a letter, no prefix |
 | `suggestAgentName(hostId, task, taken, opts?)` | kebab, 1–3 words, ≤ 24 chars, unique vs `taken` (`-2`, `-3`, …) |
 | `suggestTitle(hostId, text, opts?)` | ≤ 6 words, sentence case, no quotes / trailing period |
-| `suggestAgentRename(hostId, { name, title?, branch?, task?, reply?, tools?, line?, recap? }, taken, opts?)` | `AiOutcome<{ name, title }>` (each `null` when the model gave none): the one helper that says why it failed (`AiFailure`), and it skips the cache and the unavailable memo (a click, not a background suggestion); "Name it again" in `features/board/renameAgain.ts` |
+| `suggestAgentRename(hostId, { name, title?, repo?, branch?, cwd?, goal?, digest?, task?, reply?, tools?, line?, recap? }, taken, opts?)` | `AiOutcome<{ name, title (≤ 8 words) }>` (each `null` when the model gave none) for the overall work of the agent's whole session: `agentRenamePrompt` gives the model the current names, the goal, the host's `session.digest` (the first prompt whole, the prompts since spread over the session, the newest, the todo list, compaction summaries, subagents) and only then the latest activity, in at most `RENAME_PROMPT_MAX` (12 000) chars; without a digest (hosts before 0.9.1) the transcript's latest `task` stands in. The one helper that says why it failed (`AiFailure`), and it skips the cache and the unavailable memo (a click, not a background suggestion); "Name it again" in `features/board/renameAgain.ts` |
 | `suggestCommitMessage(hostId, { files, patch?, hint? }, opts?)` | `{ subject (≤ 72 chars), body? }` |
 | `suggestPullRequest(hostId, { branch, base, commits, files, patch? }, opts?)` | `{ title (≤ 72 chars), body (markdown) }` |
 | `suggestTemplateName(hostId, { model?, thinking?, plan?, prompt? }, opts?)` | ≤ 4 words, sentence case |
-| `prewarmRamble(hostId, { role?, cwd? }?)` | fire and forget `ai.prewarm` with the Rambler system prompt: the host starts the omp worker the next `suggestRamble` call uses, when dictation starts; errors ignored, a host answering `unknown_method` is not asked again |
+| `prewarmRamble(hostId, { role?, cwd? }?)` | fire and forget `ai.prewarm` with the Rambler system prompt: the host starts the omp worker the next `suggestRamble` call uses, when dictation starts and every minute while it lasts (`createRambler`'s `warm`); errors ignored, a host answering `unknown_method` is not asked again |
 | `useAiSuggestion(hostId, key, run, { debounceMs? = 900 })` | `{ value, loading }` for the current `key` (null = nothing to suggest); `loading` from the first keystroke until the debounced run settles; results for an older key are dropped |
 
 `opts`: `{ timeoutMs?, cwd?, fresh? }` (`fresh`: a deliberate click: skip the cache and the unavailable memo; host budget; defaults 12 s for names, 25 s for commit/PR drafts, capped

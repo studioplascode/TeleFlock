@@ -1,6 +1,7 @@
 import type { ChangedFile, Column, ModelInfo, ModelRef, RoleBinding, ThinkingLevel, TodoPhase } from "@/core/gen";
 
 import { docFile } from "./docs";
+import { demoMediaFile } from "./media";
 
 export const HOME = "/home/demo";
 /** herdr's default linked-worktree directory. */
@@ -201,7 +202,12 @@ export const AGENTS: AgentDef[] = [
   {
     id: "kanban", kind: "omp", workspace: "w4", column: "running", model: "opus-5", thinking: "high", since: 724, age: 2400, ctxPct: 38, cost: 2.41,
     title: "Drag-and-drop kanban board with column persistence",
-    files: [f("src/features/board/BoardView.tsx", 188, 21), f("src/features/board/Lane.tsx", 96, 4, "added"), f("src/features/board/persist.ts", 54, 0, "added"), f("src/features/board/keyboard.ts", 41, 9), f("src/features/board/columns.test.ts", 33, 4), docFile("docs/board.md"), docFile("docs/keyboard-shortcuts.md"), docFile("docs/prototype-notes.md")],
+    files: [
+      f("src/features/board/BoardView.tsx", 188, 21), f("src/features/board/Lane.tsx", 96, 4, "added"), f("src/features/board/persist.ts", 54, 0, "added"), f("src/features/board/keyboard.ts", 41, 9), f("src/features/board/columns.test.ts", 33, 4),
+      docFile("docs/board.md"), docFile("docs/keyboard-shortcuts.md"), docFile("docs/prototype-notes.md"),
+      // Binary files: Review shows the images, video, sound and PDF, and the database's size.
+      ...["docs/board-preview.png", "public/og-image.png", "docs/prototype-board.png", "docs/board-tour.webm", "public/sounds/card-drop.wav", "docs/board-guide.pdf", "src/features/board/columns.sqlite"].map(demoMediaFile),
+    ],
     todos: [
       phase("Board", [["Lane layout + card component", "completed"], ["Drag between lanes with dnd-kit", "completed"], ["Persist column order per host", "completed"], ["Keyboard move (J/K + Shift)", "inProgress"]]),
       phase("Polish", [["Card flight animation", "pending"], ["a11y announcements", "pending"], ["Reduced-motion fallbacks", "pending"]]),

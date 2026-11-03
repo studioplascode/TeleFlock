@@ -7,6 +7,9 @@ import { opt, say, type Step, think, type UiSpec } from "./scripts";
  * the agent's, so no "Agent said" (`context: ""`), no Skip (Deny / No are the options) and no Decide for me.
  *   cfg: the approval of a settings change (kind approval, ⚙️ line with `inline code`, detail old → new)
  *   toolissue: the report_tool_issue consent (kind confirm, Yes / No, nothing recommended)
+ *   revert: the same approval for an agent whose omp loaded TeleFlock bridge 2.2.0 before the host updated: it
+ *     waits in omp's terminal, so tf-hostd reports the running `cfg://` write as Needs you `blocked`, answered
+ *     in the terminal (Enter there allows it once, Esc denies)
  */
 
 /** What the demo host gives these agents (closures over its state). */
@@ -46,6 +49,21 @@ const TOOL_ISSUE: AgentDef = {
   files: [],
 };
 
+const REVERT: AgentDef = {
+  id: "revert",
+  kind: "omp",
+  workspace: "w10",
+  column: "needs",
+  model: "opus-5",
+  thinking: "high",
+  since: 80,
+  age: 240,
+  ctxPct: 73,
+  cost: 3.12,
+  title: "Turn the per-call model settings back off",
+  files: [],
+};
+
 /** omp's approval of a `cfg` settings change: Always for this session / Allow once ★ / Deny. */
 const CFG_APPROVAL: UiSpec = {
   kind: "select",
@@ -66,6 +84,25 @@ const TOOL_ISSUE_CONFIRM: UiSpec = {
   detail: "Send the devs a spoiler? Tool name + what happened, never anything personal.",
   context: "",
   options: [opt("Yes"), opt("No")],
+};
+
+const REVERT_WRITE = { path: "cfg://task/perCallModel", content: "off" };
+
+/**
+ * omp's cfg approval on an agent whose bridge is older than 2.3.0: what tf-hostd reports while the write runs
+ * (`cfg_wait_needs`), and omp's dialog in the terminal (`"on" → "off"`, Allow once highlighted).
+ */
+const LEGACY_CFG_WAIT: UiSpec = {
+  kind: "select",
+  needs: "approval",
+  title: "Change task.perCallModel?",
+  message: "⚙️ Your agent wants to change `task.perCallModel` for this session.",
+  detail:
+    "New value: `off`\nomp asks in its terminal: this agent's omp runs TeleFlock bridge 2.2.0, which leaves omp's own prompts there. Mark the agent done, then Resume it, to answer them in TeleFlock.",
+  context: "",
+  options: [opt("Always for this session"), opt("Allow once", { tone: "primary", recommended: true }), opt("Deny", { tone: "danger" })],
+  tool: { tool: "write", title: "cfg://task/perCallModel", intent: "Reverting perCallModel to off", args: REVERT_WRITE, ms: 0 },
+  terminal: { initial: 1, shows: '"on" → "off"' },
 };
 
 const CFG_STEPS: Step[] = [
@@ -91,10 +128,36 @@ const TOOL_ISSUE_STEPS: Step[] = [
   },
 ];
 
-/** forge: two agents waiting on omp's own dialogs. */
+const REVERT_STEPS: Step[] = [
+  { t: "user", text: "Undo the settings now" },
+  think("Both task settings were turned on earlier this session; writing them back.", 900),
+  {
+    t: "ui",
+    ui: LEGACY_CFG_WAIT,
+    then: (a) =>
+      !a.cancel && a.choices.some((c) => /^(Allow|Always)/.test(c))
+        ? [
+            {
+              t: "tool",
+              spec: {
+                tool: "write",
+                title: "cfg://task/perCallModel",
+                intent: "Reverting perCallModel to off",
+                args: REVERT_WRITE,
+                ms: 400,
+                output: ['Set `task.perCallModel` = "off" for this session only (was "on"); NOT saved.'],
+              },
+            },
+            say("`task.perCallModel` is off again: subagent tasks inherit your model."),
+          ]
+        : [{ t: "notice", level: "warn", text: "Settings change denied: task.perCallModel", source: "omp" }, say("Left `task.perCallModel` on.")],
+  },
+];
+
+/** forge: three agents waiting on omp's own dialogs. */
 export function seedOmpPrompts(host: OmpPromptsHost): void {
   const now = host.now();
-  for (const [def, steps] of [[CFG, CFG_STEPS], [TOOL_ISSUE, TOOL_ISSUE_STEPS]] as const) {
+  for (const [def, steps] of [[CFG, CFG_STEPS], [TOOL_ISSUE, TOOL_ISSUE_STEPS], [REVERT, REVERT_STEPS]] as const) {
     const sim = host.seedSim(def, def.workspace);
     sim.seed(steps, now - def.age * 1000, now - def.since * 1000);
     if (sim.agent.needs) {

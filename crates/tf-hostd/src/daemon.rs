@@ -273,10 +273,13 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     let persist = crate::state::persist::Persist::load(paths.state_file.clone());
     persist.spawn_saver(shutdown.child_token());
     let (originals, notes, rows) = (crate::originals::dir(&paths.home), crate::notes::dir(&paths.home), crate::live_rows::dir(&paths.home));
+    let home = paths.home.clone();
     tokio::task::spawn_blocking(move || {
         crate::originals::prune(&originals);
         crate::notes::prune(&notes);
         crate::live_rows::prune(&rows);
+        // git.show's blob cache starts empty: what an earlier run left goes.
+        crate::ops::git::blob_cache(&home);
     });
     // The app uploaded this build's extension before starting it: bring a consented global copy
     // up to date before omp loads it again.
@@ -322,6 +325,8 @@ async fn async_main(paths: Paths, relay_port: u16, bound: crate::ipc::Bound) -> 
     crate::recovery::start(&daemon);
     // Limit stops reported by 2.1.0 bridges, their `context` guard (§3.22).
     crate::limit_resume::start(&daemon);
+    // Subscription limits: omp's cached reports read once a minute while an omp session works, so the pace is current (§3.4).
+    crate::ops::limits::start(&daemon);
     // Refusal fallback: a refused turn goes on on another model with no app connected (§3.22).
     crate::refusal::start(&daemon);
     // Decide for me answers with no app connected: watch the sessions that have it on.

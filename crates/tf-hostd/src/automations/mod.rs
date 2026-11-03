@@ -462,6 +462,7 @@ impl Automations {
             thinking: def.thinking,
             plan: def.plan,
             prompt: Some(def.prompt.clone()).filter(|p| !p.trim().is_empty()),
+            command: None,
             images: vec![],
             role_models: def.role_models.clone(),
             fallback_chains: def.fallback_chains.clone(),
@@ -655,6 +656,7 @@ mod tests {
             last_turn_ended_at: None,
             blocked_grace: false,
             browser_lent: None,
+            cfg_wait: None,
         });
         a.id = id.into();
         a.name = "auto-nightly".into();

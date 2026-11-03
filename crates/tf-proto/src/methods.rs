@@ -42,7 +42,7 @@ use crate::plugins::{
 use crate::model::{ActivityEvent, Answer, HostHealth, HostState, SetupStatus, ThinkingLevel, ToolUpdates};
 use crate::moves::{MoveCheck, MoveCheckParams, MoveChunk, MoveFinishParams, MoveProbe, MoveProbeParams, MoveReadParams, MoveReceiveParams, MoveRef, MoveStartParams, MoveStatus};
 use crate::notify::{NotifyConfig, NotifyPolicy, NotifyTestParams, NotifyTestResult, PushChannelRef, PushChannelSave, UiPresence};
-use crate::session::{AgentChatLog, ChangedFile, HistoryPage, SessionSnapshot};
+use crate::session::{AgentChatLog, ChangedFile, HistoryPage, SessionDigest, SessionSnapshot};
 use crate::term::{ScrollDirection, Split, TermMode};
 use crate::upload::{UploadBeginParams, UploadBegun, UploadChunkParams, UploadFinishParams, UploadFinished, UploadProgress, UploadRef};
 use crate::usage::{UsageParams, UsageReport};
@@ -420,6 +420,12 @@ wire_struct! {
         pub plan: bool,
         /// Initial prompt, submitted once the agent is ready.
         pub prompt: Option<String>,
+        /// A slash command run once the agent is ready, after plan mode and before `prompt` (hosts
+        /// ≥ 0.9.1; older ones ignore the field, so apps send none to them): one line, typed into
+        /// omp's composer as `agent.slash` does, a builtin or a skill, prompt-template or extension
+        /// command the new session lists (`/plan add a settings page`, `/skill:review`). A Dispatch
+        /// message that is a command starts its agent this way.
+        pub command: Option<String>,
         /// Images sent with the initial prompt (an image-only first message is allowed).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[ts(as = "Option<Vec<ImageInput>>", optional)]
@@ -673,6 +679,9 @@ wire_struct! {
     pub struct FsReadParams {
         pub path: String,
         pub max_bytes: Option<u64>,
+        /// Read from this byte on, always as base64 (ranged reads of large files). Hosts ≥ 0.9.1
+        /// echo it in `FsReadResult.offset`; older ones ignore it and read from the start.
+        pub offset: Option<u64>,
     }
 }
 
@@ -681,10 +690,13 @@ wire_struct! {
         pub path: String,
         pub size: u64,
         pub text: Option<String>,
-        /// Base64 when the file is not UTF-8.
+        /// Base64 when the file is not UTF-8, and for every ranged read.
         pub base64: Option<String>,
         pub mime: Option<String>,
+        /// More of the file follows what was read.
         pub truncated: bool,
+        /// Where the read started, when the request named an `offset` (hosts ≥ 0.9.1).
+        pub offset: Option<u64>,
     }
 }
 
@@ -742,6 +754,35 @@ wire_struct! {
         pub base: String,
         pub patch: String,
         pub files: Vec<ChangedFile>,
+        pub truncated: bool,
+    }
+}
+
+wire_struct! {
+    /// One file as a revision has it (Review's old side of a binary file): bytes of a blob, read
+    /// in ranges like `fs.read`.
+    pub struct GitShowParams {
+        pub cwd: String,
+        /// The commit or tree the file is read from (a sha, `HEAD`, a branch).
+        pub rev: String,
+        /// Repository-relative, `/`-separated; must stay inside the repository.
+        pub path: String,
+        pub offset: Option<u64>,
+        /// Default 512 KiB, at most 8 MiB.
+        pub max_bytes: Option<u64>,
+    }
+}
+
+wire_struct! {
+    pub struct GitShowResult {
+        /// The blob's size in bytes.
+        pub size: u64,
+        /// Up to `maxBytes` bytes from `offset`.
+        pub base64: String,
+        /// From the path's extension.
+        pub mime: Option<String>,
+        pub offset: u64,
+        /// More of the blob follows what was read.
         pub truncated: bool,
     }
 }
@@ -915,8 +956,9 @@ wire_struct! {
         /// `percent` | `tokens` | `requests` | `credits` | `usd` | `minutes` | `bytes` | `unknown`.
         pub unit: String,
         pub notes: Vec<String>,
-        /// Readings in the current window period (oldest first, ≤ 120): omp's hourly usage
-        /// history plus hostd's own polls. Drives the pace projection.
+        /// Readings in the current window period (oldest first, ≤ 120: every reading of the last
+        /// hour, older ones evenly spaced): omp's hourly usage history plus hostd's own readings of
+        /// omp's reports (about one a minute while agents work). Drives the pace projection.
         pub samples: Vec<LimitSample>,
     }
 }
@@ -1349,6 +1391,7 @@ methods!(HostMethod, "HostMethods", {
     "session.writeLocal" => SessionWriteLocal(LocalWriteParams) -> LocalWritten;
     "session.context" => SessionContextXray(AgentRef) -> ContextXray;
     "session.agentChat" => SessionAgentChat(AgentChatParams) -> AgentChatLog;
+    "session.digest" => SessionDigestGet(AgentRef) -> SessionDigest;
 
     "agent.prompt" => AgentPrompt(PromptParams) -> Empty;
     "agent.abort" => AgentAbort(AgentRef) -> Empty;
@@ -1417,6 +1460,9 @@ methods!(HostMethod, "HostMethods", {
     "git.status" => GitStatus(CwdParams) -> GitStatusResult;
     "git.branches" => GitBranches(CwdParams) -> BranchList;
     "git.diff" => GitDiff(GitDiffParams) -> GitDiffResult;
+    // A blob's bytes at a revision, in ranges (Review's old side of images, videos, PDFs); hosts
+    // before 0.9.1 answer `unknown_method`.
+    "git.show" => GitShow(GitShowParams) -> GitShowResult;
     "git.commit" => GitCommit(GitCommitParams) -> GitCommitResult;
     "git.push" => GitPush(CwdParams) -> CommandOutput;
     "gh.prStatus" => GhPrStatus(CwdParams) -> PrStatusResult;

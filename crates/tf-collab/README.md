@@ -133,6 +133,7 @@ impl Replica {
     pub fn snapshot(&self, limit: usize) -> SessionSnapshot;        // newest `limit` rows; cursor = oldest row id
     pub fn history(&self, cursor: Option<&str>, limit: usize) -> Option<HistoryPage>;  // None: no row `cursor`
     pub fn item(&self, id: &str) -> Option<&TranscriptItem>;
+    pub fn rows(&self) -> impl Iterator<Item = &TranscriptItem>;      // every row, oldest first, uncopied (tf-hostd's session.digest)
     pub fn meta(&self) -> &SessionMeta;                              // model, thinking, context, cost, todos, subagents, caps, tps (last turn avg)
     pub fn state(&self) -> &SessionState;  pub fn header(&self) -> Option<&SessionHeader>;
     pub fn liveness(&self, now: Millis) -> Liveness;                 // streaming, thinking, tool, live tps (3 s), line

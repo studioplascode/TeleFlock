@@ -7,7 +7,7 @@ import { RamblerCard, RamblerResult } from "./RamblerCard";
 export interface RamblerDictationOptions {
   /** The host whose model tidies the dictation: the composer's agent, Dispatch's target. Unset: any online host. */
   hostId?: string;
-  /** Where the prompt goes, in a few words (repository, agent title): sent with every call so names are spelled right. */
+  /** Where the prompt goes, in a few words (repository, agent title): sent with the call so names are spelled right. */
   about?: string;
   /** The box's current text. */
   text: string;
@@ -22,7 +22,7 @@ export interface RamblerDictationOptions {
 export interface RamblerDictation {
   /** Use in place of `useDictation`: with Rambler on, `interim` stays empty (the card shows it) and nothing is written until the user stops. */
   dictation: Dictation;
-  /** The Rambler card while dictating, the "Use raw transcript / Undo" strip after the fill, else null: render it above the box. */
+  /** The Rambler card while dictating and tidying, the "Use raw transcript / Undo" strip after the fill, else null: render it above the box. */
   panel: ReactNode;
 }
 
@@ -41,7 +41,7 @@ interface Fill {
   role: string;
 }
 
-const NONE: RambleState = { raw: "", clean: "", upToDate: true, thinking: false, error: null, ended: false };
+const NONE: RambleState = { raw: "", thinking: false, error: null };
 const noSubscribe = () => () => {};
 
 /** The first online host, for a composer without a host of its own. */
@@ -51,9 +51,10 @@ function useAnyOnlineHost(): string | undefined {
 
 /**
  * Dictation for a text box, with Rambler (Settings → Dictation) when it is on: the finished utterances go to a
- * `Rambler` session instead of the box, the card above shows the live rewrite, and when the user stops, the final
- * rewrite is filled in as one edit (Ctrl+Z undoes it) with "Use raw transcript" and Undo. Rambler off, or no host
- * to ask: the plain behaviour, each phrase appended as it is recognised.
+ * `Rambler` session instead of the box and the card above shows them as they are heard, with no model call. When the
+ * dictation ends (Stop, the engine ending it, the field closing), one call tidies the whole transcript ("Tidying…")
+ * and the result is filled in as one edit (Ctrl+Z undoes it) with "Use raw transcript" and Undo. Rambler off, or no
+ * host to ask: the plain behaviour, each phrase appended as it is recognised.
  */
 export function useRamblerDictation(o: RamblerDictationOptions): RamblerDictation {
   const enabled = usePrefs((s) => s.rambler);
@@ -121,9 +122,12 @@ export function useRamblerDictation(o: RamblerDictationOptions): RamblerDictatio
     if (finishing) return;
     if (!dictation.listening && enabled && host && dictation.supported) {
       const id = host;
-      // The host starts omp now, while the person speaks: the first rewrite then finds it ready.
-      prewarmRamble(id, { role });
-      const next = createRambler({ rewrite: (input) => suggestRamble(id, input, { role }), ...(latest.current.about ? { about: latest.current.about } : {}) });
+      const next = createRambler({
+        rewrite: (input) => suggestRamble(id, input, { role }),
+        // The host starts omp now and keeps it while the person speaks: the call after the stop costs the model's time only.
+        warm: () => prewarmRamble(id, { role }),
+        ...(latest.current.about ? { about: latest.current.about } : {}),
+      });
       live.current?.cancel();
       live.current = next;
       setSession(next);
@@ -150,7 +154,7 @@ export function useRamblerDictation(o: RamblerDictationOptions): RamblerDictatio
 
   const panel: ReactNode =
     session && (dictation.listening || finishing) ? (
-      <RamblerCard state={state} interim={dictation.interim} listening={dictation.listening} finishing={finishing} role={role} mobile={o.mobile} tone={o.tone} />
+      <RamblerCard state={state} interim={dictation.interim} listening={dictation.listening} mobile={o.mobile} tone={o.tone} />
     ) : shownFill ? (
       <RamblerResult
         cleaned={shownFill.cleaned}

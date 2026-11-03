@@ -1,6 +1,6 @@
 import { Gauge } from "lucide-react";
 import type { ReactNode } from "react";
-import { describePace, formatPct, formatSpan, LIMITS_EVERY_MS, parseAgentKey, type SessionLimits, sessionLimits, tightestWindow, useAccountLimits, useAgent, type WindowPace } from "@/core";
+import { describePace, formatPct, formatSpan, LIMITS_EVERY_MS, paceBasis, parseAgentKey, type SessionLimits, sessionLimits, tightestWindow, useAccountLimits, useAgent, type WindowPace } from "@/core";
 import type { LimitWindow } from "@/core/gen";
 import { cn, formatAge, type Status, Tooltip, useNow, useWindowActive } from "@/design";
 import { PROVIDER_NAMES, paceStatus } from "@/features/usage/limitsUi";
@@ -37,9 +37,9 @@ function estimateText(v: SessionLimitsView, tps: number | undefined): string {
   ];
   if (pace.ratePerHour != null)
     lines.push(
-      `Pace: ${(pace.ratePerHour * 100).toFixed(1)}%/h, the window's utilization change over the last ${formatSpan(pace.basisMs)} across every agent on this account${tps != null ? ` (this session: ${Math.round(tps)} tok/s now)` : ""}. Assumes that pace holds.`,
+      `Pace: ${(pace.ratePerHour * 100).toFixed(1)}%/h, the window's utilization change over the last ${paceBasis(pace)} across every agent on this account${tps != null ? ` (this session: ${Math.round(tps)} tok/s now)` : ""}. Assumes that pace holds.`,
     );
-  else lines.push("Pace: not enough readings yet (needs ≥ 10 min of history).");
+  else lines.push("Pace: not enough readings yet (needs two readings 5 min apart).");
   if (limits.fetchedAt != null) lines.push(`omp read ${formatAge(v.now - limits.fetchedAt)}${limits.stale ? " — stale" : ""}.`);
   return lines.join(" ");
 }

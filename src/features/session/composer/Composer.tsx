@@ -1,4 +1,4 @@
-import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff, Paperclip, Pencil, Slash, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff, Paperclip, Square, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useCore, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
@@ -9,14 +9,15 @@ import { useHerdrDown, useHostName } from "@/features/hosts/HerdrControls";
 import { herdrNotRunning } from "@/features/hosts/herdrHealth";
 import { PHASE_TEXT } from "@/features/shell/status";
 import { openTerminal } from "@/features/board/agentActions";
-import type { OmpSubcommand } from "@/core/ompCommands";
 import { cn, formatUsd, GlowBorder, IconButton, Kbd, Lightbox, LightboxTrigger, Spinner, spring, Textarea, toast } from "@/design";
 import { useFirstUse } from "@/features/shell/hints";
 import { errorText, hostCall, usePending } from "../api";
 import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
-import { useQueueChips, usePendingQueue, userRowsWithText } from "./queue";
-import { findCommand, isSlashDraft, MODE_BADGE, matchCommands, matchSubs, parseSlash, runSlash, type SlashCommand, type SlashContext } from "./slash";
+import { usePendingQueue, userRowsWithText } from "./queue";
+import { QueueStrip } from "./QueueStrip";
+import { isSlashDraft, runSlash, type SlashContext } from "./slash";
+import { ComposerPopup, useSlashPalette } from "./SlashPalette";
 import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
 import { PasteChips, PasteMenu } from "./PasteChips";
 import { usePasteAttach } from "./usePasteAttach";
@@ -87,10 +88,8 @@ export interface ComposerProps {
   autoFocus?: boolean;
 }
 
-type Popup =
-  | { kind: "slash"; items: SlashCommand[] }
-  | { kind: "sub"; cmd: SlashCommand; items: OmpSubcommand[] }
-  | { kind: "mention"; query: string; start: number; items: string[]; loading: boolean };
+/** The `@` file search under the caret (the `/` palette is `useSlashPalette`'s). */
+type Popup = { kind: "mention"; query: string; start: number; items: string[]; loading: boolean };
 
 const MENTION_RE = /(^|\s)@([^\s@]*)$/;
 
@@ -232,24 +231,22 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     openTerminal: () =>
       agent?.parked ? openTerminal(agentKey, mobile) : mobile ? navigate({ name: "terminal", hostId, agentId }) : useUi.getState().setSplit({ kind: "terminal", hostId, agentId, paneId: agent?.paneId }),
   };
+  const palette = useSlashPalette({
+    custom,
+    setText,
+    ta,
+    mobile,
+    run: (command) => void run(runSlash(slashCtx, command)),
+    unavailable: (c) => c.mode === "native" && c.cap != null && meta != null && !meta.caps[c.cap],
+  });
 
   const updatePopup = (value: string, caret: number) => {
+    if (palette.update(value, caret)) {
+      searchSeq.current++;
+      setPopup(null);
+      return;
+    }
     const before = value.slice(0, caret);
-    const slash = /^\/(\S*)$/.exec(before);
-    if (slash && value.indexOf("\n") < 0) {
-      setPopup({ kind: "slash", items: matchCommands(slash[1] ?? "", custom) });
-      setSel(0);
-      return;
-    }
-    // `/name <partial>`: offer the command's subcommands / argument choices.
-    const sub = /^\/(\S+?)[\s:](\S*)$/.exec(before);
-    const subCmd = sub && value.indexOf("\n") < 0 ? findCommand(parseSlash(before)?.name ?? "", custom) : undefined;
-    if (sub && subCmd?.subs) {
-      const items = matchSubs(subCmd, sub[2] ?? "");
-      setPopup(items.length ? { kind: "sub", cmd: subCmd, items } : null);
-      setSel(sub[2] ? 0 : -1);
-      return;
-    }
     const mention = MENTION_RE.exec(before);
     if (mention && cwd) {
       const query = mention[2] ?? "";
@@ -272,39 +269,6 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
     }
     searchSeq.current++;
     setPopup(null);
-  };
-
-  const pickSlash = (c: SlashCommand) => {
-    if (c.instant && !c.subs) {
-      setText("");
-      setPopup(null);
-      void run(runSlash(slashCtx, `/${c.name}`));
-      return;
-    }
-    const v = `/${c.name} `;
-    setText(v);
-    setPopup(c.subs ? { kind: "sub", cmd: c, items: c.subs } : null);
-    setSel(-1);
-    requestAnimationFrame(() => {
-      ta.current?.focus();
-      ta.current?.setSelectionRange(v.length, v.length);
-    });
-  };
-
-  /** A subcommand without arguments runs right away; one with arguments is completed for typing. */
-  const pickSub = (cmd: SlashCommand, s: OmpSubcommand) => {
-    setPopup(null);
-    if (!s.args) {
-      setText("");
-      void run(runSlash(slashCtx, `/${cmd.name} ${s.name}`));
-      return;
-    }
-    const v = `/${cmd.name} ${s.name} `;
-    setText(v);
-    requestAnimationFrame(() => {
-      ta.current?.focus();
-      ta.current?.setSelectionRange(v.length, v.length);
-    });
   };
 
   const pickMention = (path: string) => {
@@ -434,6 +398,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
     if (paste.onKeyDown(e)) return;
+    if (palette.onKeyDown(e)) return;
     const items = popup?.items ?? [];
     if (popup && items.length > 0) {
       if (e.key === "ArrowDown") {
@@ -446,20 +411,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         setSel((s) => (s <= 0 ? items.length - 1 : s - 1));
         return;
       }
-      // Argument choices start unselected: Enter sends the command as typed (e.g. bare `/jobs`).
-      const choosing = popup.kind !== "sub" || sel >= 0;
-      if (e.key === "Tab" || (choosing && e.key === "Enter" && !e.shiftKey && !e.altKey)) {
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.altKey)) {
         e.preventDefault();
-        if (popup.kind === "slash") {
-          const c = popup.items[sel];
-          if (c) pickSlash(c);
-        } else if (popup.kind === "sub") {
-          const s = popup.items[Math.max(sel, 0)];
-          if (s) pickSub(popup.cmd, s);
-        } else {
-          const p = popup.items[sel];
-          if (p) pickMention(p);
-        }
+        const p = popup.items[sel];
+        if (p) pickMention(p);
         return;
       }
     }
@@ -524,28 +479,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           : mobile
             ? "Message omp · / commands"
             : "Message omp · / commands · @ files";
-  // Host queue plus this client's just-sent messages (until the host lists them or they land).
-  const queued = useQueueChips(agentKey, queue, working);
   // Holding Alt while the agent works previews follow-up mode on the send button and hints.
   const followMode = working && altHeld && caps?.followUp === true;
-  // omp's Alt+Up pops the last steer if any, else the last follow-up: highlight that chip.
-  const canDequeue = caps?.bridge === true && queued.length > 0;
-  const lastSteer = queued.findLastIndex((q) => q.kind === "steer");
-  const popIdx = lastSteer >= 0 ? lastSteer : queued.length - 1;
-  const dequeue = async (edit: boolean) => {
-    const r = await run(hostCall(hostId, "agent.dequeue", { agentId }, { failure: "Couldn't pull the message back" }));
-    if (!r.ok) return;
-    const t = r.value.text;
-    if (!t) {
-      toast({ title: "Already delivered", description: "The queue was empty by the time the request arrived.", status: "idle" });
-      return;
-    }
-    usePendingQueue.getState().forget(agentKey, t);
-    if (edit) {
-      setText((cur) => (cur.trim() ? `${t}\n\n${cur}` : t));
-      requestAnimationFrame(() => ta.current?.focus());
-    } else toast({ title: "Removed from the queue", description: t.length > 80 ? `${t.slice(0, 80)}…` : t, status: "done", duration: 2600 });
-  };
 
   return (
     <div
@@ -560,87 +495,20 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
       onDrop={onDrop}
     >
       <AnimatePresence>
-        {popup && !paste.menu && (popup.items.length > 0 || popup.kind === "mention") && (
-          <motion.div
-            key={popup.kind}
-            initial={{ opacity: 0, y: 8, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1, transition: spring.snappy }}
-            exit={{ opacity: 0, y: 4, transition: { duration: 0.12 } }}
-            className="absolute inset-x-0 bottom-full z-popover mb-2 overflow-hidden rounded-lg bg-[linear-gradient(180deg,var(--color-pop-1),var(--color-pop-2))] shadow-[var(--shadow-d3),inset_0_0_0_1px_color-mix(in_srgb,var(--color-ink)_9%,transparent)]"
-            role="listbox"
-            aria-label={popup.kind === "slash" ? "Commands" : popup.kind === "sub" ? `/${popup.cmd.name} arguments` : "Files"}
-          >
-            <div className="flex items-center gap-2 border-b border-line px-3 py-1.5 text-2xs font-bold text-mute-2">
-              {popup.kind === "mention" ? <AtSign className="size-3" /> : <Slash className="size-3" />}
-              {popup.kind === "slash" ? "Commands" : popup.kind === "sub" ? `/${popup.cmd.name} · pick an argument or keep typing` : cwd ? `Files in ${cwd}` : "Files"}
-              {popup.kind === "mention" && popup.loading && <Spinner size={11} className="ml-auto" />}
-              {!mobile && (
-                <span className="ml-auto flex items-center gap-1">
-                  <Kbd>↑↓</Kbd>
-                  <Kbd>Tab</Kbd>
-                  {popup.kind === "sub" && sel < 0 && <span className="ml-1 font-semibold">Enter sends as typed</span>}
-                </span>
-              )}
-            </div>
-            <div className="max-h-[300px] overflow-y-auto p-1">
-              {popup.kind === "slash" ? (
-                popup.items.map((c, i) => {
-                  const unavailable = c.mode === "native" && c.cap != null && meta != null && !meta.caps[c.cap];
-                  const badge = c.source === "omp" || c.source === "teleflock" ? MODE_BADGE[c.mode] : c.source;
-                  return (
-                    <button
-                      key={c.name}
-                      type="button"
-                      role="option"
-                      aria-selected={i === sel}
-                      onMouseEnter={() => setSel(i)}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => pickSlash(c)}
-                      title={c.mode === "terminal" ? "Opens omp's own UI in the agent's terminal" : c.mode === "report" ? "omp prints the result in its terminal; TeleFlock opens it for you" : undefined}
-                      className={cn("flex w-full items-baseline gap-2 rounded-sm px-2.5 py-1.5 text-left text-[12.5px]", i === sel ? "bg-accent/18 text-ink" : "text-ink-2", unavailable && "opacity-45")}
-                    >
-                      <span className="shrink-0 font-mono font-bold whitespace-nowrap text-accent-hi">/{c.name}</span>
-                      {c.args && !mobile && <span className="truncate font-mono text-[11px] text-mute-2">{c.args}</span>}
-                      <span className="ml-auto truncate pl-3 text-xs text-mute">{c.description}</span>
-                      {badge && (
-                        <span
-                          className={cn(
-                            "shrink-0 rounded-full px-1.5 text-[9.5px] font-bold tracking-wider whitespace-nowrap uppercase",
-                            c.mode === "terminal" || c.mode === "report" ? "bg-accent/14 text-accent-hi" : "bg-ink/6 text-mute-2",
-                          )}
-                        >
-                          {badge}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })
-              ) : popup.kind === "sub" ? (
-                popup.items.map((s, i) => {
-                  const mode = popup.cmd.modeFor(s.name);
-                  const badge = MODE_BADGE[mode];
-                  return (
-                    <button
-                      key={s.name}
-                      type="button"
-                      role="option"
-                      aria-selected={i === sel}
-                      onMouseEnter={() => setSel(i)}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => pickSub(popup.cmd, s)}
-                      className={cn("flex w-full items-baseline gap-2 rounded-sm px-2.5 py-1.5 text-left text-[12.5px]", i === sel ? "bg-accent/18 text-ink" : "text-ink-2")}
-                    >
-                      <span className="font-mono font-bold text-accent-hi">{s.name}</span>
-                      {s.args && !mobile && <span className="truncate font-mono text-[11px] text-mute-2">{s.args}</span>}
-                      <span className="ml-auto truncate pl-3 text-xs text-mute">{s.description}</span>
-                      {badge && mode !== "direct" && <span className="shrink-0 rounded-full bg-accent/14 px-1.5 text-[9.5px] font-bold tracking-wider whitespace-nowrap text-accent-hi uppercase">{badge}</span>}
-                    </button>
-                  );
-                })
-              ) : popup.items.length === 0 ? (
-                !popup.loading && <div className="px-3 py-3 text-xs text-mute-2">No files match “{popup.query}”</div>
-              ) : (
-                popup.items.map((p, i) => (
+        {!paste.menu &&
+          (palette.element ??
+            (popup && (
+              <ComposerPopup
+                key="mention"
+                label="Files"
+                icon={<AtSign className="size-3" />}
+                title={cwd ? `Files in ${cwd}` : "Files"}
+                busy={popup.loading && <Spinner size={11} className="ml-auto" />}
+                mobile={mobile}
+              >
+                {popup.items.length === 0
+                  ? !popup.loading && <div className="px-3 py-3 text-xs text-mute-2">No files match “{popup.query}”</div>
+                  : popup.items.map((p, i) => (
                       <button
                         key={p}
                         type="button"
@@ -668,70 +536,27 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                           })()}
                         </span>
                       </button>
-                ))
-              )}
-            </div>
-          </motion.div>
-        )}
+                    ))}
+              </ComposerPopup>
+            )))}
       </AnimatePresence>
       <AnimatePresence>{paste.menu && <PasteMenu key="paste" paste={paste} mobile={mobile} />}</AnimatePresence>
 
-      <AnimatePresence initial={false}>
-        {queued.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mb-2 flex flex-wrap items-center gap-1.5 overflow-hidden px-1"
-            aria-label="Queued messages"
-          >
-            <span className="mr-0.5 text-[10px] font-extrabold tracking-[0.1em] text-mute-2 uppercase">Queued · {queued.length}</span>
-            <AnimatePresence initial={false} mode="popLayout">
-              {queued.map((q, i) => (
-                <motion.button
-                  layout
-                  key={q.id}
-                  type="button"
-                  initial={{ opacity: 0, scale: 0.8, y: 6 }}
-                  animate={{ opacity: 1, scale: 1, y: 0, transition: spring.bouncy }}
-                  exit={{ opacity: 0, scale: 0.85, y: -10, transition: { duration: 0.22 } }}
-                  title={`${q.sending ? "Sending… " : ""}${q.kind === "steer" ? "Steering: lands mid-turn" : "Follow-up: runs after this turn"}\n${q.text}\nClick to copy into the composer`}
-                  onClick={() => setText(q.text)}
-                  data-pending={q.pending || undefined}
-                  className={cn(
-                    "focus-ring flex max-w-[300px] items-center gap-1.5 rounded-full py-1 pr-2.5 pl-1 text-[11.5px] font-semibold shadow-hairline",
-                    q.kind === "steer" ? "bg-accent/14 text-accent-ink" : "bg-ink/5 text-ink-2",
-                    q.sending && "opacity-70",
-                    canDequeue && i === popIdx && "shadow-[inset_0_0_0_1px_var(--color-accent)]",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-extrabold tracking-wider uppercase",
-                      q.kind === "steer" ? "bg-accent/25 text-accent-hi" : "bg-ink/8 text-mute",
-                    )}
-                  >
-                    {q.kind === "steer" ? <CornerDownRight className="size-2.5" /> : <ListPlus className="size-2.5" />}
-                    {q.kind === "steer" ? "steer" : "follow-up"}
-                  </span>
-                  <span className="truncate">{q.text}</span>
-                  <span className="tf-loop size-1.5 shrink-0 animate-breathe rounded-full bg-current opacity-70" aria-hidden />
-                </motion.button>
-              ))}
-              {canDequeue && (
-                <motion.span key="dequeue" layout className="flex items-center gap-0.5">
-                  <IconButton label="Pull the highlighted message back into the composer to edit it" size="sm" disabled={sending} onClick={() => void dequeue(true)}>
-                    <Pencil />
-                  </IconButton>
-                  <IconButton label="Remove the highlighted message from the queue" size="sm" disabled={sending} onClick={() => void dequeue(false)}>
-                    <X />
-                  </IconButton>
-                </motion.span>
-              )}
-            </AnimatePresence>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <QueueStrip
+        hostId={hostId}
+        agentId={agentId}
+        agentKey={agentKey}
+        queue={queue}
+        working={working}
+        canPull={caps?.bridge === true}
+        busy={sending}
+        run={run}
+        onCopy={(t) => setText(t)}
+        onPulled={(t) => {
+          setText((cur) => (cur.trim() ? `${t}\n\n${cur}` : t));
+          requestAnimationFrame(() => ta.current?.focus());
+        }}
+      />
 
       {ramble.panel}
       {working && !disabledReason && <SteerHint doneRef={steerDone} />}
@@ -790,6 +615,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           onBlur={() =>
             window.setTimeout(() => {
               setPopup(null);
+              palette.close();
               // Clicked elsewhere: omp's menu keeps the paste inline, a chip's menu closes.
               if (document.activeElement !== ta.current) paste.close();
             }, 120)

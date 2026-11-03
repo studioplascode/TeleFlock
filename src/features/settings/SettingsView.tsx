@@ -189,6 +189,9 @@ export function SettingsView() {
           <Row label="Finished" description="An agent finished its turn and is ready for review.">
             <Switch checked={settings.notifyFinished} onCheckedChange={(notifyFinished) => update({ notifyFinished })} label="Notify when an agent finishes" />
           </Row>
+          <Row label="Presented documents" description="An agent showed you a report, a page or another document.">
+            <Switch checked={settings.notifyPresented !== false} onCheckedChange={(notifyPresented) => update({ notifyPresented })} label="Notify when an agent presents a document" />
+          </Row>
           <Row label="Errors and stalls" description="Errors, and agents that have gone quiet while working.">
             <Switch checked={settings.notifyErrors} onCheckedChange={(notifyErrors) => update({ notifyErrors })} label="Notify on errors" />
           </Row>

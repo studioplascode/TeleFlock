@@ -783,3 +783,48 @@ wire_struct! {
         pub cursor: Option<String>,
     }
 }
+
+wire_struct! {
+    /// One of the user's prompts in a [`SessionDigest`].
+    pub struct DigestPrompt {
+        /// Its place among the session's prompts, from 1.
+        pub n: u32,
+        /// The prompt as sent; a longer one keeps its start and its end around ` … `.
+        pub text: String,
+    }
+}
+
+wire_struct! {
+    /// A subagent in a [`SessionDigest`].
+    pub struct DigestSubagent {
+        /// Its omp name, e.g. `RenderCore`.
+        pub name: String,
+        /// What it works on, in one line: omp's label for it, else the first line of its assignment.
+        pub task: Option<String>,
+        pub running: bool,
+    }
+}
+
+wire_struct! {
+    /// `session.digest` (hosts ≥ 0.9.1): what an omp session is about as a whole, bounded for a small
+    /// model; "Name it again" names the agent from it. Built from every row tf-hostd holds of the
+    /// session (all of it since it started), else from its session file.
+    pub struct SessionDigest {
+        /// The user's prompts in order, steers included (omp's own reminders and results are not
+        /// prompts): the first and the newest up to 4,000 chars each, the ones between up to 400
+        /// chars each and at most 40 of them, spread over the session when there are more (very
+        /// short ones such as "yes" are left out first).
+        pub prompts: Vec<DigestPrompt>,
+        /// How many prompts the session has.
+        pub prompt_count: u32,
+        /// omp's compaction summaries, oldest first: the newest 3, up to 2,000 chars each.
+        pub summaries: Vec<String>,
+        /// The todo list: up to 12 phases of up to 20 items, each item up to 120 chars.
+        pub todos: Vec<TodoPhase>,
+        /// The subagents it started, in the order they started: the first 8 and the newest 32 when
+        /// there are more.
+        pub subagents: Vec<DigestSubagent>,
+        /// How many subagents it started.
+        pub subagent_count: u32,
+    }
+}

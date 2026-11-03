@@ -57,9 +57,10 @@ export const PUSH_KIND_CHOICES: readonly { id: string; label: string; kinds: rea
   { id: "needs", label: "Needs you", kinds: ["needs"] },
   { id: "errors", label: "Errors and stalls", kinds: ["error", "quiet"] },
   { id: "finished", label: "Finished", kinds: ["finished"] },
+  { id: "presented", label: "Presented documents", kinds: ["presented"] },
   { id: "automations", label: "Automations", kinds: ["info"] },
 ];
-export const DEFAULT_PUSH_KINDS: readonly NotifyKind[] = ["needs", "error", "quiet", "finished"];
+export const DEFAULT_PUSH_KINDS: readonly NotifyKind[] = ["needs", "error", "quiet", "finished", "presented"];
 
 /** A choice is on when all its kinds are listed. */
 export function choiceOn(kinds: readonly NotifyKind[], choice: { kinds: readonly NotifyKind[] }): boolean {

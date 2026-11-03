@@ -10,7 +10,7 @@ use tf_proto::model::{
     Workspace, WorktreeInfo,
 };
 use tf_proto::session::{Capabilities, ChangedFile, PlanReview, Refusal, Subagent, SubagentStatus, TodoPhase, TodoStatus, UiKind, UiRequest};
-use tf_proto::Millis;
+use tf_proto::{Millis, PresentKind, PresentedArtifact};
 
 use crate::bridge::{BridgeCaps, BridgeSession, PlanReviewInfo};
 use crate::omp::{BoardMeta, LinkStatus, OmpView};
@@ -109,6 +109,9 @@ pub struct AgentInputs<'a> {
     pub blocked_grace: bool,
     /// Whose TeleFlock Browser the agent drives now (`crate::browser`, §3.33).
     pub browser_lent: Option<&'a tf_proto::BrowserLent>,
+    /// omp's settings approval waiting in its terminal on a bridge that cannot bring it here
+    /// ([`legacy_cfg_wait`]).
+    pub cfg_wait: Option<&'a CfgWrite>,
 }
 
 pub fn is_omp(a: &AgentInfo) -> bool {
@@ -323,7 +326,8 @@ pub fn provider_wait(state: HerdrState, omp: Option<&OmpView>, bridge: Option<&B
 
 /// Needs-you (§3.5): replica dialog, then the agent's request to use the user's browser, then
 /// bridge plan review, then a wait for the user no dialog covers (the bridge's `userWait`), then
-/// herdr `blocked` that no provider wait explains.
+/// omp's settings approval on a bridge that cannot show it ([`legacy_cfg_wait`]), then herdr
+/// `blocked` that no provider wait explains.
 fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWait>) -> Option<NeedsYou> {
     if let Some(mut n) = i.omp.and_then(|v| v.needs.clone()) {
         // The replica dates an ask by its first question (each question is a request of its own,
@@ -339,6 +343,9 @@ fn needs_for(i: &AgentInputs<'_>, state: HerdrState, provider: Option<ProviderWa
     }
     if let Some(wait) = i.bridge.and_then(|b| b.state.user_wait.as_ref()) {
         return Some(user_wait_needs(wait, i.needs_since));
+    }
+    if let Some(w) = i.cfg_wait {
+        return Some(cfg_wait_needs(w, i.bridge.map_or("", |b| b.bridge_version.as_str()), i.needs_since));
     }
     if state == HerdrState::Blocked && !i.blocked_grace && provider.is_none() {
         return Some(NeedsYou {
@@ -385,6 +392,99 @@ pub fn user_wait_needs(wait: &crate::bridge::UserWaitInfo, since: Millis) -> Nee
         command: None,
         answerable: false,
         // omp waits, not the agent asking: no "Agent said" (an empty context shows none).
+        context: Some(String::new()),
+        step: None,
+        browser: false,
+    }
+}
+
+/// omp's scheme for its settings (`cfg://task/perCallModel`).
+const CFG_SCHEME: &str = "cfg://";
+
+/// A `write` of a `cfg://` URL that runs (omp ≥ 18.12, `internal-urls/cfg-protocol.ts`): omp asks
+/// the user to approve it before the call returns, unless the session's "Always for this session"
+/// grant answers at once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CfgWrite {
+    pub call_id: String,
+    /// The setting as the call names it, segments joined by `.` (`task.perCallModel`).
+    pub path: String,
+    /// The value it writes, as the call passes it.
+    pub value: String,
+    /// `…/save`: persisted to the user's config.yml instead of this session only.
+    pub save: bool,
+    /// When the call started running.
+    pub since: Millis,
+}
+
+/// The oldest running `write` of a `cfg://` URL among `tools` (`Replica::running_tools`), read as
+/// omp's `parseCfgUrl` reads it: the scheme in any case, query and fragment ignored, `/` and `.`
+/// both separate segments, a trailing `save` segment persists. omp asks about concurrent writes one
+/// at a time, oldest first.
+pub fn cfg_write<'a>(mut tools: impl Iterator<Item = (&'a str, &'a tf_proto::model::ActiveTool, &'a serde_json::Value)>) -> Option<CfgWrite> {
+    tools.find_map(|(call_id, tool, args)| {
+        if tool.name != "write" {
+            return None;
+        }
+        let url = args.get("path")?.as_str()?.trim();
+        let rest = url.get(CFG_SCHEME.len()..).filter(|_| url.get(..CFG_SCHEME.len()).is_some_and(|s| s.eq_ignore_ascii_case(CFG_SCHEME)))?;
+        let rest = rest.split(['?', '#']).next().unwrap_or_default();
+        let mut segments: Vec<&str> = rest.split(['/', '.']).filter(|s| !s.is_empty()).collect();
+        let save = segments.len() > 1 && segments.last() == Some(&"save");
+        if save {
+            segments.pop();
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        let value = match args.get("content") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            None | Some(serde_json::Value::Null) => String::new(),
+            Some(v) => v.to_string(),
+        };
+        Some(CfgWrite { call_id: call_id.to_owned(), path: segments.join("."), value, save, since: tool.started_at })
+    })
+}
+
+/// omp's settings approval waits in its TUI unseen when the session's bridge brings none of omp's
+/// own dialogs and counts no waits (older than 2.3.0: an omp process that loaded its bridge before
+/// the host updated). A live session's `cfg://` write that has run for `grace` is that prompt
+/// (§3.5). Returns it once it counts, and whether to look again when the grace is over.
+pub fn legacy_cfg_wait<'a>(view: Option<&'a OmpView>, bridge: Option<&BridgeSession>, now: Millis, grace: Millis) -> (Option<&'a CfgWrite>, bool) {
+    let legacy = bridge.is_some_and(|b| b.caps.data_plane() && !b.caps.omp_dialogs && !b.caps.user_waits);
+    match view.filter(|v| legacy && v.link == tf_proto::model::LinkState::Live).and_then(|v| v.cfg_write.as_ref()) {
+        Some(w) if now - w.since >= grace => (Some(w), false),
+        Some(_) => (None, true),
+        None => (None, false),
+    }
+}
+
+/// omp's `cfg://` settings approval waiting in its TUI on a bridge that cannot bring it here
+/// ([`legacy_cfg_wait`]): Needs you, answered in the terminal. The question is omp's own headline,
+/// the detail the value the call writes and why the prompt is only in the terminal.
+pub fn cfg_wait_needs(w: &CfgWrite, bridge_version: &str, since: Millis) -> NeedsYou {
+    let question = if w.save {
+        format!("💾 Your agent wants to save `{}` to your config.", w.path)
+    } else {
+        format!("⚙️ Your agent wants to change `{}` for this session.", w.path)
+    };
+    let value = clip(w.value.trim(), 200);
+    let bridge = if bridge_version.is_empty() { "an older TeleFlock bridge".to_owned() } else { format!("TeleFlock bridge {bridge_version}") };
+    let why = format!("omp asks in its terminal: this agent's omp runs {bridge}, which leaves omp's own prompts there. Mark the agent done, then Resume it, to answer them in TeleFlock.");
+    NeedsYou {
+        kind: NeedsKind::Blocked,
+        request_id: None,
+        since: if w.since > 0 { w.since.min(since) } else { since },
+        title: "Waiting in the terminal".into(),
+        question,
+        detail: Some(if value.is_empty() { why } else { format!("New value: `{value}`\n{why}") }),
+        options: vec![],
+        multi: false,
+        allow_other: false,
+        allow_chat: false,
+        command: None,
+        answerable: false,
+        // omp asks, not the agent: no "Agent said" (an empty context shows none).
         context: Some(String::new()),
         step: None,
         browser: false,
@@ -716,6 +816,31 @@ pub fn refusal_notification(agent_id: &str, agent_name: &str, refusal: &Refusal,
     }
 }
 
+/// The agent (or one of its subagents) presented a document live (§3.32): `ana presented Q3
+/// report`, `HTML page · version 2`. Its action opens the document in the agent's session.
+pub fn presented_notification(agent_id: &str, agent_name: &str, a: &PresentedArtifact, at: Millis) -> Notification {
+    let what = match a.kind {
+        PresentKind::Html => "HTML page",
+        PresentKind::Markdown => "Markdown",
+        PresentKind::Svg => "SVG",
+        PresentKind::Image => "Image",
+        PresentKind::Code => "Code",
+        PresentKind::Csv => "Table",
+        PresentKind::Json => "JSON",
+        PresentKind::Text => "Text",
+    };
+    Notification {
+        id: new_id("n"),
+        at,
+        kind: NotifyKind::Presented,
+        agent_id: agent_id.to_string(),
+        title: clip(&format!("{agent_name} presented {}", a.title), 200),
+        body: if a.version > 1 { format!("{what} · version {}", a.version) } else { what.to_owned() },
+        request_id: None,
+        actions: vec![NotifyAction::open_presented(&a.name)],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +895,7 @@ mod tests {
             last_turn_ended_at: None,
             blocked_grace: false,
             browser_lent: None,
+            cfg_wait: None,
         }
     }
 
@@ -963,6 +1089,7 @@ mod tests {
             last_turn_row_at: None,
             retry: retrying.then_some(wait),
             tail_error: failed.then(|| "429 rate_limit_error".to_string()),
+            cfg_write: None,
         }
     }
 
@@ -1134,6 +1261,92 @@ mod tests {
         i.omp = Some(&view);
         i.bridge = Some(&b);
         assert_eq!(build_agent(&i).needs.map(|n| n.kind), Some(NeedsKind::Ask));
+    }
+
+    fn tool(name: &str, started_at: Millis) -> tf_proto::model::ActiveTool {
+        tf_proto::model::ActiveTool { name: name.into(), label: name.into(), started_at }
+    }
+
+    /// A `cfg://` write is read as omp reads the URL; the oldest one counts.
+    #[test]
+    fn a_running_cfg_write_is_read_as_omp_reads_its_url() {
+        let (write, bash) = (tool("write", 10), tool("bash", 5));
+        let args = |path: &str, content: serde_json::Value| serde_json::json!({ "path": path, "content": content });
+        let read = |path: &str, content: serde_json::Value| {
+            let a = args(path, content);
+            cfg_write([("c1", &write, &a)].into_iter()).map(|w| (w.path, w.value, w.save))
+        };
+        assert_eq!(read("cfg://task/perCallModel", "off".into()), Some(("task.perCallModel".into(), "off".into(), false)));
+        assert_eq!(read(" CFG://task.perCallModelAllow/save?x=1#y ", "[]".into()), Some(("task.perCallModelAllow".into(), "[]".into(), true)));
+        assert_eq!(read("cfg://advisor/enabled", true.into()), Some(("advisor.enabled".into(), "true".into(), false)));
+        // `save` alone names a setting; the root and other schemes are no settings change.
+        assert_eq!(read("cfg://save", "x".into()), Some(("save".into(), "x".into(), false)));
+        assert_eq!(read("cfg://", "x".into()), None);
+        assert_eq!(read("/tmp/cfg://task", "x".into()), None);
+        assert_eq!(read("xd://report_issue", "x".into()), None);
+        // Only `write` changes settings; the oldest running one is the one omp asks about first.
+        let first = args("cfg://task/perCallModel", "off".into());
+        let second = args("cfg://task/perCallModelAllow", "[]".into());
+        let later = tool("write", 20);
+        let w = cfg_write([("b", &bash, &first), ("c1", &write, &first), ("c2", &later, &second)].into_iter()).unwrap();
+        assert_eq!((w.call_id.as_str(), w.path.as_str(), w.since), ("c1", "task.perCallModel", 10));
+    }
+
+    /// omp's settings approval on a bridge older than 2.3.0 waits in the terminal while herdr says
+    /// `working`: Needs you once the write ran for the grace (before 0.9.1 the agent read Running),
+    /// answered in the terminal. A bridge that brings omp's dialogs (or counts waits) reports the
+    /// prompt itself.
+    #[test]
+    fn a_cfg_write_on_a_bridge_without_omp_dialogs_waits_in_the_terminal() {
+        let mut a = herdr_agent(AgentStatus::Working);
+        a.agent = Some("omp".into());
+        let mut view = omp_view(tf_proto::model::LinkState::Live, false, false, false);
+        view.cfg_write = Some(CfgWrite { call_id: "c1".into(), path: "task.perCallModel".into(), value: "off".into(), save: false, since: 1_000 });
+        let mut old = bridged(None);
+        old.caps.live = 1;
+        old.bridge_version = "2.2.0".into();
+
+        // Within the grace: not yet (a session grant answers at once), look again later.
+        assert_eq!(legacy_cfg_wait(Some(&view), Some(&old), 2_500, 2_000), (None, true));
+        let (wait, again) = legacy_cfg_wait(Some(&view), Some(&old), 3_000, 2_000);
+        assert!(wait.is_some() && !again);
+        let mut i = inputs(&a);
+        i.omp = Some(&view);
+        i.bridge = Some(&old);
+        i.needs_since = 3_000;
+        i.cfg_wait = wait;
+        let agent = build_agent(&i);
+        assert_eq!(agent.column, Column::Needs);
+        let n = agent.needs.unwrap();
+        assert_eq!((n.kind, n.answerable, n.request_id.as_deref(), n.since), (NeedsKind::Blocked, false, None, 1_000));
+        assert_eq!(n.title, "Waiting in the terminal");
+        assert_eq!(n.question, "⚙️ Your agent wants to change `task.perCallModel` for this session.");
+        let detail = n.detail.unwrap();
+        assert!(detail.starts_with("New value: `off`\n") && detail.contains("TeleFlock bridge 2.2.0"), "{detail}");
+        assert_eq!(n.context.as_deref(), Some(""));
+        // `/save` reads as omp's save prompt.
+        let save = CfgWrite { save: true, ..view.cfg_write.clone().unwrap() };
+        assert_eq!(cfg_wait_needs(&save, "2.2.0", 3_000).question, "💾 Your agent wants to save `task.perCallModel` to your config.");
+
+        // Bridges that bring the prompt (omp's dialogs) or count the wait (`userWait`), no bridge
+        // with a live data plane, or no live link: nothing is inferred.
+        for (omp_dialogs, user_waits, live) in [(true, true, 1), (true, false, 1), (false, true, 1), (false, false, 0)] {
+            let mut b = bridged(None);
+            b.caps.live = live;
+            b.caps.omp_dialogs = omp_dialogs;
+            b.caps.user_waits = user_waits;
+            assert_eq!(legacy_cfg_wait(Some(&view), Some(&b), 9_000, 2_000), (None, false), "dialogs {omp_dialogs} waits {user_waits} live {live}");
+        }
+        assert_eq!(legacy_cfg_wait(Some(&view), None, 9_000, 2_000), (None, false));
+        view.link = tf_proto::model::LinkState::NotShared;
+        assert_eq!(legacy_cfg_wait(Some(&view), Some(&old), 9_000, 2_000), (None, false));
+        // No write running: Running, as herdr says.
+        let idle = omp_view(tf_proto::model::LinkState::Live, false, false, false);
+        assert_eq!(legacy_cfg_wait(Some(&idle), Some(&old), 9_000, 2_000), (None, false));
+        let mut i = inputs(&a);
+        i.omp = Some(&idle);
+        i.bridge = Some(&old);
+        assert_eq!((build_agent(&i).column, build_agent(&i).needs.is_none()), (Column::Running, true));
     }
 
     /// A notification answers an approval for one call at most: its once choice and Deny, never a

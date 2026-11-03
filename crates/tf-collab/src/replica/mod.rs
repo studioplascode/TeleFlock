@@ -164,6 +164,10 @@ pub enum Signal {
     UiSettled { request_id: String },
     Notice { level: NoticeLevel, text: String },
     ToolError { tool: String, error: String },
+    /// A `present` call finished live with a document ([`ToolItem::artifact`]): never from a
+    /// snapshot, a rebuild or an entry that only settles a row its events finished. tf-hostd's
+    /// [`ArtifactLedger::take_presented`] reports the subagents' calls the same way.
+    Presented { artifact: tf_proto::PresentedArtifact },
     ModelChanged { model: ModelRef },
     ThinkingChanged { level: ThinkingLevel },
     Compacted { tokens_before: Option<u64> },
@@ -585,6 +589,17 @@ impl Replica {
         true
     }
 
+    /// Drops every queued prompt: omp had nothing left to pull back out of its queue, so what is
+    /// still listed already reached the turn. Returns whether meta changed.
+    pub fn clear_queued(&mut self) -> bool {
+        if self.queued_sent.is_empty() {
+            return false;
+        }
+        self.queued_sent.clear();
+        self.refresh_meta();
+        true
+    }
+
     // ── public reads ───────────────────────────────────────────────────
 
     /// Newest `limit` rows plus meta and the pending dialog.
@@ -619,6 +634,12 @@ impl Replica {
 
     pub fn item(&self, id: &str) -> Option<&TranscriptItem> {
         self.items.get(id)
+    }
+
+    /// Every row, oldest first, without copying them (tf-hostd's `session.digest` reads the whole
+    /// session under one lock).
+    pub fn rows(&self) -> impl Iterator<Item = &TranscriptItem> + '_ {
+        self.order.iter().filter_map(|id| self.items.get(id))
     }
 
     pub fn len(&self) -> usize {
@@ -800,6 +821,16 @@ impl Replica {
             tps_split: (total > 0.0).then_some(split),
             line: k.line,
         }
+    }
+
+    /// The tool calls running now, oldest first: call id, the live entry and the call's arguments
+    /// (`null` when the replica holds no row for it).
+    pub fn running_tools(&self) -> impl Iterator<Item = (&str, &ActiveTool, &Value)> + '_ {
+        static NO_ARGS: Value = Value::Null;
+        self.active_tools.iter().map(|(call, t)| match self.items.get(&tool_id(call)) {
+            Some(TranscriptItem::Tool(item)) => (call.as_str(), t, &item.args),
+            _ => (call.as_str(), t, &NO_ARGS),
+        })
     }
 
     /// Output tok/s per spender at `now`: the main agent's streamed deltas over the last 3 s
@@ -1807,6 +1838,12 @@ impl Replica {
             out.pulse(PulseKind::Tool, 1);
             if is_error && !already_final && self.emit && t.status == ToolStatus::Error {
                 out.signals.push(Signal::ToolError { tool: name.clone(), error: t.error.clone().unwrap_or_default() });
+            }
+            if !already_final
+                && self.emit
+                && let Some(artifact) = &t.artifact
+            {
+                out.signals.push(Signal::Presented { artifact: artifact.clone() });
             }
         }
         self.tools.entry(call_id.to_owned()).or_insert_with(|| ToolState::new(&name)).ended = true;

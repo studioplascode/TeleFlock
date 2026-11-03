@@ -7,8 +7,9 @@ import { discardVideos, getVideo, releaseVideos, retryVideos, uploadDraftVideos,
 import { classifyHerdrError, describeError, type HerdrFailure } from "@/features/workspace/shared/errors";
 import { hostTakesRoles, launchOverrides } from "@/features/agentRoles/roles";
 import { hostDecides, specAutoAnswer } from "@/features/autoAnswer/format";
+import type { FirstCommand } from "./commands";
 import { deleteEntryImages, loadEntryImages, saveEntryImages, sweepEntryImages } from "./images";
-import { BRANCH_PREFIX, type BranchSuggester, baseSlug, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
+import { BRANCH_PREFIX, type BranchSuggester, baseSlug, commandSlug, commandTask, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
 /*
  * Dispatch threads: every message fired at a repo becomes one `worktree.create` with an omp agent
@@ -92,6 +93,11 @@ export interface LastSeen {
 export interface DispatchEntry {
   id: string;
   prompt: string;
+  /**
+   * The message is a command its agent runs (`AgentSpec.command`), this line (`FirstCommand.line`),
+   * instead of getting the message as its prompt; `prompt` keeps the text as typed.
+   */
+  command?: string;
   createdAt: number;
   /** `dispatch/<slug>` (while `naming`: the fallback, the prompt's slug); empty for a chat. */
   branch: string;
@@ -361,8 +367,8 @@ async function specOf(e: DispatchEntry, hostId: string): Promise<AgentSpec> {
     model: e.options.model === DEFAULT ? undefined : e.options.model,
     thinking: e.options.thinking === DEFAULT ? undefined : e.options.thinking,
     plan: e.options.plan,
-    // A template's own instructions frame the task (as in Fan out).
-    prompt: template?.prompt.trim() ? (task ? `${template.prompt.trim()}\n\n${task}` : template.prompt.trim()) : task,
+    // A command runs as typed; a task gets a template's own instructions framing it (as in Fan out).
+    ...(e.command ? { command: e.command } : { prompt: template?.prompt.trim() ? (task ? `${template.prompt.trim()}\n\n${task}` : template.prompt.trim()) : task }),
     ...(images ? { images } : {}),
     ...launchOverrides(e.options.roleModels, e.options.fallbackChains, hostTakesRoles(getHostStates()[hostId]?.info)),
     ...specAutoAnswer(e.options.autoAnswer, hostDecides(getHostStates()[hostId]?.info)),
@@ -520,9 +526,15 @@ export function suggestDispatchName(hostId: string, repo: string, prompt: string
 const IMAGE_TASK = "image task";
 const VIDEO_TASK = "video task";
 
-/** The text a task is named after: its prompt, else what it carries. */
-function taskText(e: Pick<DispatchEntry, "prompt" | "videos">): string {
+/** The text a task is named after: a command's task (`commandTask`), else its prompt, else what it carries. */
+function taskText(e: Pick<DispatchEntry, "prompt" | "videos" | "command">): string {
+  if (e.command) return commandTask(e.command).text;
   return e.prompt.trim() ? e.prompt : e.videos?.length ? VIDEO_TASK : IMAGE_TASK;
+}
+
+/** Its name without AI naming: the slug of the text it is named after; a command without a task: the command's own words (`commandSlug`). */
+function fallbackSlug(e: Pick<DispatchEntry, "prompt" | "videos" | "command">): string {
+  return e.command ? commandSlug(e.command) : baseSlug(taskText(e));
 }
 
 /** A thread's base choice, resolved against the branches of the host a task actually goes to. */
@@ -543,7 +555,9 @@ export interface BaseChoice {
  * With a namer (default: omp's tiny model when AI naming is on and there is text; `null` = none)
  * the entry first goes through `naming`, holding the prompt's slug as its fallback name meanwhile.
  * `repo` = `CHAT_REPO`: a chat (`chat`), no branch, base or worktree: named the same way, then
- * `agent.start` with the chat target (`resolveBase` doesn't apply).
+ * `agent.start` with the chat target (`resolveBase` doesn't apply). With `command` the agent runs
+ * that instead of getting the prompt: named after the command's task (AI naming only for one),
+ * and without the Plan option when the command picks the session's mode.
  */
 export function dispatchTask(args: {
   key?: string;
@@ -559,6 +573,8 @@ export function dispatchTask(args: {
   options: DispatchOptions;
   taken: Iterable<string>;
   resolveBase?: BaseChoice;
+  /** The message is a command its agent runs; `prompt` is the text as typed. */
+  command?: FirstCommand;
   suggest?: BranchSuggester | null;
 }): DispatchEntry {
   const key = args.key ?? threadKey(args.hostId, args.repo);
@@ -569,23 +585,24 @@ export function dispatchTask(args: {
     const v = getVideo(upload);
     return v ? [{ name: v.name, size: v.size, ...(v.kind ? { kind: v.kind } : {}), ...(v.path && v.hostId === args.hostId ? { path: v.path, ...(v.ref ? { ref: v.ref } : {}) } : { upload }) }] : [];
   });
-  const text = taskText({ prompt: args.prompt, videos });
-  const name = uniqueSlug(baseSlug(text), reservedNames(args.hostId, taken));
+  const named = { prompt: args.prompt, videos, command: args.command?.line };
+  const name = uniqueSlug(fallbackSlug(named), reservedNames(args.hostId, taken));
   const suggest =
     args.suggest !== undefined
       ? args.suggest
-      : args.prompt.trim() && aiNamingEnabled(args.hostId)
+      : (named.command ? commandTask(named.command).task : !!args.prompt.trim()) && aiNamingEnabled(args.hostId)
         ? (prompt: string) => suggestDispatchName(args.hostId, args.repo, prompt)
         : null;
   const images = args.images ?? [];
   const entry: DispatchEntry = {
     id: `${Date.now().toString(36)}-${(seq++).toString(36)}`,
     prompt: args.prompt,
+    ...(named.command ? { command: named.command } : {}),
     createdAt: Date.now(),
     branch: chat ? "" : `${BRANCH_PREFIX}${name}`,
     name,
     ...(chat ? { chat: true } : { base: args.base, ...(args.baseLabel ? { baseLabel: args.baseLabel } : {}) }),
-    options: args.options,
+    options: args.command?.replacesPlan ? { ...args.options, plan: false } : args.options,
     phase: suggest ? "naming" : "queued",
     hostId: args.hostId,
     ...(chat ? {} : { repo: args.repo }),
@@ -623,7 +640,7 @@ async function nameThenRun(key: string, id: string, taken: readonly string[], su
   const phase = e.phase;
   const hostId = entryHost(key, e);
   inflight.add(id);
-  const naming = nameDispatch(taskText(e), suggest);
+  const naming = suggest ? nameDispatch(taskText(e), suggest) : Promise.resolve({ slug: fallbackSlug(e), ai: false });
   const [{ slug, ai }, list] = resolveBase ? await Promise.all([naming, branchList(hostId, entryRepo(key, e))]) : [await naming, undefined];
   // Dismissed (or the thread cleared) while naming: nothing reached the host.
   if (find(key, id)?.phase !== phase) {
@@ -671,7 +688,7 @@ async function resumeNaming(key: string, id: string): Promise<void> {
       const live = getAgentViews()
         .filter((a) => a.hostId === hostId)
         .map((a) => a.name);
-      const name = uniqueSlug(baseSlug(taskText(e)), reservedNames(hostId, [...taken, ...live], id));
+      const name = uniqueSlug(fallbackSlug(e), reservedNames(hostId, [...taken, ...live], id));
       store().patch(key, id, { name, ...(e.chat ? {} : { branch: `${BRANCH_PREFIX}${name}` }), aiNamed: false });
       void run(key, id);
       return;
@@ -762,7 +779,7 @@ export async function retryDispatch(args: {
 
   if (e.chat) {
     const reserved = reservedNames(hostId, args.taken, e.id);
-    const name = reserved.has(e.name) ? uniqueSlug(e.aiNamed ? e.name : baseSlug(taskText(e)), reserved) : e.name;
+    const name = reserved.has(e.name) ? uniqueSlug(e.aiNamed ? e.name : fallbackSlug(e), reserved) : e.name;
     store().patch(key, e.id, { name, error: undefined, agentId: undefined, paneId: undefined, workspaceId: undefined, startedAt: undefined, last: undefined });
     void run(key, e.id);
     return;
@@ -791,7 +808,7 @@ export async function retryDispatch(args: {
     const taken = reservedNames(hostId, args.taken, e.id);
     for (const b of branches.branches) taken.add(b.name);
     // An AI name stays the base (a left-over branch makes it `<name>-2`); else the prompt's slug.
-    const name = uniqueSlug(e.aiNamed ? e.name : baseSlug(taskText(e)), taken);
+    const name = uniqueSlug(e.aiNamed ? e.name : fallbackSlug(e), taken);
     store().patch(key, e.id, { name, branch: `${BRANCH_PREFIX}${name}`, agentId: undefined, paneId: undefined, workspaceId: undefined, path: undefined, startedAt: undefined, last: undefined });
     recreate = true;
   } catch (err) {

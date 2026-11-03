@@ -35,7 +35,8 @@ amount?: number, limit?: number,
  */
 unit: string, notes: Array<string>, 
 /**
- * Readings in the current window period (oldest first, ≤ 120): omp's hourly usage
- * history plus hostd's own polls. Drives the pace projection.
+ * Readings in the current window period (oldest first, ≤ 120: every reading of the last
+ * hour, older ones evenly spaced): omp's hourly usage history plus hostd's own readings of
+ * omp's reports (about one a minute while agents work). Drives the pace projection.
  */
 samples: Array<LimitSample>, };

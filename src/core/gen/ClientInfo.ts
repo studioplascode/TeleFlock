@@ -15,6 +15,7 @@ platform: string,
 device: string, 
 /**
  * Wire features this client speaks ([`FEATURE_ZSTD`], [`FEATURE_SESSION_SYNC`],
- * [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`], [`FEATURE_BROWSER`]).
+ * [`FEATURE_PRESENCE`], [`FEATURE_FORWARD`], [`FEATURE_BROWSER`],
+ * [`FEATURE_NOTIFY_KINDS`]).
  */
 features?: Array<string>, };

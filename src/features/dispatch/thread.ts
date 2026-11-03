@@ -1,5 +1,6 @@
 import { isChat, isChatRepo } from "@/core/chats";
 import type { Agent, BranchList, HostState, Workspace } from "@/core/gen";
+import { ompCommand, ompCommandName } from "@/core/ompCommands";
 import { basename } from "@/features/workspace/shared/paths";
 import { slugFromPrompt, slugify } from "@/features/workspace/shared/slug";
 import type { DispatchEntry } from "./store";
@@ -33,6 +34,31 @@ export function uniqueSlug(base: string, taken: ReadonlySet<string>): string {
     const n = `${base.slice(0, MAX_AGENT_NAME - suffix.length).replace(/-+$/, "")}${suffix}`;
     if (free(n)) return n;
   }
+}
+
+/**
+ * What a message that is a command (`DispatchEntry.command`) names its dispatch after: the task its
+ * arguments give the agent (`/plan add a settings page` → "add a settings page", a leading
+ * argument choice such as `/goal set …` left out; builtins whose arguments are a task, and every
+ * skill, prompt template and extension command), named like a task's text (`task`); else the
+ * command as typed (`/skill:review` → "review", `/fast on` → "fast on"), named as it reads.
+ */
+export function commandTask(command: string): { text: string; task: boolean } {
+  const body = command.trim();
+  const name = ompCommandName(body);
+  const args = body.slice(1 + name.length).replace(/^:/, "").trim();
+  const builtin = ompCommand(name);
+  const first = args.split(/\s+/, 1)[0] ?? "";
+  const rest = builtin?.subs?.some((s) => s.name === first) ? args.slice(first.length).trim() : args;
+  if (/[a-z]/i.test(rest) && (!builtin || builtin.task)) return { text: rest, task: true };
+  return { text: `${name.replace(/^skill:/, "")} ${args}`.trim(), task: false };
+}
+
+/** A command message's name without AI naming: its task's slug, else the command's own words (`fast-on`). */
+export function commandSlug(command: string): string {
+  const { text, task } = commandTask(command);
+  const words = task ? "" : slugify(text, 24);
+  return /^[a-z]/.test(words) ? words : baseSlug(text);
 }
 
 /** Asks omp's tiny model for a branch slug; null = no usable answer (use the prompt's slug). */

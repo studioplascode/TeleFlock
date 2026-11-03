@@ -4,7 +4,7 @@ import { CHAT_REPO } from "@/core/chats";
 import type { Agent, Workspace } from "@/core/gen";
 import { usePrefs } from "@/core/prefs";
 import type { DispatchEntry } from "./store";
-import { baseSlug, cleanSuggestion, nameDispatch, prefetchKey, rambleAbout, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
+import { baseSlug, cleanSuggestion, commandSlug, commandTask, nameDispatch, prefetchKey, rambleAbout, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
 /** The 0.4.1 task Dispatch named `need-inspect-repository`, as typed (one line, inline points)… */
 const FAILING_INLINE =
@@ -62,6 +62,22 @@ describe("dispatch naming", () => {
     expect(baseSlug("Implement the following features:\n- dark mode\n- export")).toBe("dark-mode-features");
     expect(baseSlug("Could you add dark mode to settings when you're done, thanks")).toBe("dark-mode-settings");
     expect(baseSlug("Bump to 1.2.3 and tag it")).toBe("bump-1-2-3-tag");
+  });
+
+  test("a command is named after the task its arguments give, else after itself", () => {
+    expect(commandTask("/plan add a settings page")).toEqual({ text: "add a settings page", task: true });
+    // A leading argument choice is no part of the task.
+    expect(commandTask("/goal set ship the release")).toEqual({ text: "ship the release", task: true });
+    // A skill's or a prompt template's arguments are its task.
+    expect(commandTask("/skill:review the auth module")).toEqual({ text: "the auth module", task: true });
+    expect(commandSlug("/plan add a settings page")).toBe("settings-page");
+    // No task in the arguments (a choice, a model, a number) or none at all: the command's own words.
+    expect(commandSlug("/fast on")).toBe("fast-on");
+    expect(commandSlug("/switch openai/gpt-5")).toBe("switch-openai-gpt-5");
+    expect(commandSlug("/review 123")).toBe("review-123");
+    expect(commandSlug("/loop 3")).toBe("loop-3");
+    expect(commandSlug("/skill:review")).toBe("review");
+    expect(commandSlug("/plan")).toBe("plan");
   });
 
   test("the failing task never becomes need-inspect-repository", async () => {

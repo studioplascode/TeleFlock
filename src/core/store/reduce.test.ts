@@ -267,6 +267,22 @@ describe("notifications & misc", () => {
     expect(state.notifications.every((x) => !x.read && x.hostId === "h")).toBe(true);
   });
 
+  test("the same id with new text updates it in place (a newer version of a presented document)", () => {
+    const v = (version: number) => ({ id: "n1", at: version, kind: "presented" as const, agentId: "a", title: "a presented Q3 report", body: `HTML page · version ${version}`, actions: [{ id: `open:presented/q3-report-v${version}.html`, label: "View" }] });
+    const { state } = reduceEvents(base(), [
+      { type: "notify", hostId: "h", notification: v(1) },
+      { type: "notify", hostId: "h", notification: { ...v(1), id: "n0", at: 0 } },
+      { type: "notify", hostId: "h", notification: v(2), alert: false },
+    ]);
+    expect(state.notifications.map((x) => [x.id, x.body, x.actions[0]?.id, x.read])).toEqual([
+      ["n0", "HTML page · version 1", "open:presented/q3-report-v1.html", false],
+      ["n1", "HTML page · version 2", "open:presented/q3-report-v2.html", false],
+    ]);
+    // Read stays read.
+    const read = reduceEvents(state, [{ type: "notifyDone", hostId: "h", ids: ["n1"], resolved: false }, { type: "notify", hostId: "h", notification: v(3), alert: false }]).state;
+    expect(read.notifications.find((x) => x.id === "n1")).toMatchObject({ body: "HTML page · version 3", read: true });
+  });
+
   test("notifyDone marks read, resolved only when the request was handled, per host", () => {
     const n = (id: string) => ({ id, at: 1, kind: "needs" as const, agentId: "a", title: "t", body: "b", actions: [] });
     const { state } = reduceEvents(base(), [

@@ -5,7 +5,11 @@
 //! * **Routing.** The state store hands each notification to [`Notifier::post`] instead of
 //!   broadcasting it: every app still gets it (the in-app list stays complete), but presence apps
 //!   are told whether to alert (`notify.alert`): the device in use, else the phones ([`route`]).
-//!   Older apps alert by themselves, as before.
+//!   Older apps alert by themselves, as before. A kind older apps cannot parse (`presented`) goes
+//!   only to apps that negotiated `notifyKinds`.
+//! * **Presented documents.** An agent presenting a document live notifies once per version; a
+//!   newer version of a document whose notification is still unread, soon after it, updates that
+//!   notification in place (same id, no new alert) instead of posting another.
 //! * **Escalation.** A needs-you, error or stall notification that nobody read within the policy's
 //!   delay, and whose cause is still there (the request pending, the agent still erred or quiet),
 //!   alerts the escalation devices (`notifyAlert`) and the push channels that want unseen ones.
@@ -35,8 +39,8 @@ use tracing::{debug, info, warn};
 
 use tf_proto::host::ServerMsg;
 use tf_proto::{
-    Agent, ApiError, Column, NotifyConfig, NotifyKind, NotifyPolicy, NotifyTestParams, NotifyTestResult, Notification, Presence, PushChannelSave,
-    PushKind, PushResult, PushWhen,
+    Agent, ApiError, Column, Millis, NotifyConfig, NotifyKind, NotifyPolicy, NotifyTestParams, NotifyTestResult, Notification, Presence,
+    PushChannelSave, PushKind, PushResult, PushWhen,
 };
 
 use crate::clients::{line_of, ClientHandle};
@@ -58,6 +62,9 @@ const TEST_EVERY: Duration = Duration::from_secs(3);
 const WATCH_EVERY: Duration = Duration::from_secs(5);
 /// Pushed notifications are followed this long at most.
 const WATCH_FOR: Duration = Duration::from_secs(24 * 3600);
+/// A newer version of a presented document within this long of its still unread notification
+/// updates that notification instead of posting another.
+const PRESENTED_MERGE_MS: Millis = 5 * 60_000;
 
 /// The daemon's notification router (one per daemon, cheap to clone).
 #[derive(Clone)]
@@ -167,7 +174,7 @@ pub fn still_relevant(agent: Option<&Agent>, n: &Notification) -> bool {
         NotifyKind::Error => a.column != Column::Running,
         NotifyKind::Quiet => a.column == Column::Running,
         NotifyKind::Finished => matches!(a.column, Column::Review | Column::Done),
-        NotifyKind::Info => true,
+        NotifyKind::Info | NotifyKind::Presented => true,
     }
 }
 
@@ -238,8 +245,58 @@ impl Notifier {
     /// Routes a notification of `session` to its apps (`sinks`: the store's clients, which all got
     /// the snapshot already). Called with the store's lock held: sends and spawns, never waits.
     pub fn post(&self, state: &StateHandle, session: &str, sinks: &[ClientHandle], n: Notification, agent_name: Option<String>) {
+        // An app older than the kind would drop the message, and the device it was to alert with it.
+        let capable: Vec<ClientHandle>;
+        let sinks = if n.kind.known_to_every_app() {
+            sinks
+        } else {
+            capable = sinks.iter().filter(|c| c.features().notify_kinds).cloned().collect();
+            &capable[..]
+        };
+        if n.kind == NotifyKind::Presented && self.merge_presented(session, sinks, &n) {
+            return;
+        }
         let escalatable = route::escalates(n.kind);
         self.post_with(state, session, sinks, n, agent_name, escalatable, false);
+    }
+
+    /// A presented document already notified about (`true`: nothing to post). The same snapshot
+    /// again (a resync replayed its call) is dropped. A newer version of a document whose
+    /// notification of this agent is unread and at most [`PRESENTED_MERGE_MS`] old updates that
+    /// notification on the apps: the same id with the new text and action, `alert: false` (no
+    /// toast, sound or system notification again, no push), so it opens the newest version.
+    fn merge_presented(&self, session: &str, sinks: &[ClientHandle], n: &Notification) -> bool {
+        let Some(name) = n.presented() else { return false };
+        let updated = {
+            let mut l = lock(&self.inner.ledger);
+            let of_agent = |e: &Entry| e.session == session && e.n.agent_id == n.agent_id && e.n.kind == NotifyKind::Presented && !e.test;
+            if l.entries.values().any(|e| of_agent(e) && e.n.presented() == Some(name)) {
+                debug!(session, agent = %n.agent_id, name, "notify: presented again (a replayed call), skipped");
+                return true;
+            }
+            let slug = presented_slug(name);
+            let Some(e) = l
+                .entries
+                .values_mut()
+                .filter(|e| of_agent(e) && e.read_by.is_none() && !e.resolved && n.at - e.n.at <= PRESENTED_MERGE_MS)
+                .filter(|e| e.n.presented().map(presented_slug) == Some(slug))
+                .max_by_key(|e| e.n.at)
+            else {
+                return false;
+            };
+            e.n = Notification { id: e.n.id.clone(), ..n.clone() };
+            let updated = e.n.clone();
+            l.order.retain(|id| *id != updated.id);
+            l.order.push_back(updated.id.clone());
+            updated
+        };
+        if let Some(line) = line_of(&ServerMsg::Notify { notification: updated.clone(), alert: Some(false) }) {
+            for c in sinks {
+                c.send_line(line.clone(), false);
+            }
+        }
+        info!(session, agent = %n.agent_id, id = %updated.id, apps = sinks.len(), "notify: {} (updated)", updated.title);
+        true
     }
 
     /// Returns the names of the devices that alert at once.
@@ -751,6 +808,14 @@ impl Notifier {
 enum Single<'a> {
     One(&'a Message, &'a str),
     Many(&'a [Message], usize),
+}
+
+/// The document of a presented snapshot name (`presented/q3-report-v2.html` → `q3-report`): its
+/// versions share it.
+fn presented_slug(name: &str) -> &str {
+    let file = name.strip_prefix("presented/").unwrap_or(name);
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    stem.rsplit_once("-v").map_or(stem, |(slug, _)| slug)
 }
 
 #[cfg(test)]

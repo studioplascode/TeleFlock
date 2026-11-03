@@ -185,6 +185,16 @@ impl HostRt {
         v.notifications.push_back(t);
     }
 
+    /// The host sent a notification it sent before, with new text (a newer version of a presented
+    /// document): the remembered one takes it and keeps its state (read, posted). Whether it was
+    /// known.
+    pub fn update_notification(&self, n: &Notification) -> bool {
+        let mut v = self.view.lock().unwrap();
+        let Some(t) = v.notifications.iter_mut().find(|t| t.n.id == n.id) else { return false };
+        t.n = n.clone();
+        true
+    }
+
     /// Notification `id` was posted to the OS after the fact (an escalation): it replaces the OS
     /// notification of its agent, like a fresh one.
     pub fn mark_posted(&self, id: &str) {

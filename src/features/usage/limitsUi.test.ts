@@ -22,7 +22,19 @@ describe("paceAlert", () => {
     expect(a?.status).toBe("needs-you");
     expect(a?.status).toBe(paceStatus(w, pace));
     expect(a?.short).toBe("runs out in ~3d at this pace");
-    expect(a?.full).toBe("At this pace you run out in ~3d 18h (2d 6h before it resets)");
+    expect(a?.full).toBe("At the last 10 hours' pace you run out in ~3d 18h (2d 6h before it resets)");
+  });
+
+  test("a burst after a quiet day raises the alert at the last 5 minutes' pace", () => {
+    // Flat at 30 % for a day, then 1 % a minute for 10 minutes: 60 % left lasts about an hour.
+    const quiet = Array.from({ length: 24 }, (_, h) => ({ at: NOW - (24 - h) * HOUR, used: 0.3 }));
+    const burst = Array.from({ length: 10 }, (_, m) => ({ at: NOW - (10 - m) * MIN, used: (30 + m) / 100 }));
+    const w = win({ used: 0.4, samples: [...quiet, ...burst] });
+    const pace = projectWindow(w, NOW, NOW);
+    expect(pace.etaMs ?? Number.NaN).toBeCloseTo(HOUR, -3);
+    const a = paceAlert(w, pace);
+    expect(a?.status).toBe("needs-you");
+    expect(a?.full).toMatch(/^At the last 5 minutes' pace you run out in ~1h /);
   });
 
   test("a used-up window says so, with its reset", () => {

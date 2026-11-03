@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "TeleFlock",
   "mainBinaryName": "teleflock",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "identifier": "dev.teleflock.app",
   "build": {
     "frontendDist": "../dist",
@@ -34,6 +34,7 @@
         "img-src": "'self' asset: http://asset.localhost data: blob:",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
+        "media-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost ws://127.0.0.1:* https://api.github.com",
         "frame-src": "http://127.0.0.1:* http://localhost:* blob: tfdoc: http://tfdoc.localhost"
       },
@@ -42,6 +43,7 @@
         "img-src": "'self' asset: http://asset.localhost data: blob:",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
+        "media-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost ws://127.0.0.1:1420 ws://localhost:1421 http://127.0.0.1:1420 ws://127.0.0.1:* https://api.github.com",
         "frame-src": "http://127.0.0.1:* http://localhost:* blob: tfdoc: http://tfdoc.localhost"
       }

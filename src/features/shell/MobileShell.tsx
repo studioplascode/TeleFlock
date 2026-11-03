@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect } from "react";
 import { cn, spring, toast } from "@/design";
 import { navigate, type Route, useHosts, useInbox, useNotifications, useRoute, useUi } from "@/core";
-import { isBare } from "@/app/routes";
 import { useDecisions } from "@/features/autoAnswer/hooks";
 import { inboxBadge } from "@/features/autoAnswer/review";
 import { terminalRouteKey, terminalTabTarget, useLastTerminal } from "@/features/terminal/lastTerminal";
@@ -31,7 +30,7 @@ function tabFor(r: Route): Tab {
       return "inbox";
     case "terminal":
       return "terminal";
-    // everything reached from More keeps More lit (the omp area's pages, automations, …)
+    // everything reached from More keeps More lit (the omp area's pages, automations, Usage and its Flock Wrapped, …)
     case "more":
     case "hosts":
     case "forward":
@@ -46,7 +45,6 @@ function tabFor(r: Route): Tab {
     case "accounts":
     case "cleanup":
     case "wall":
-    case "ambient":
       return "more";
     default:
       return "board";
@@ -209,7 +207,7 @@ export function MobileShell() {
     route.name === "more" ||
     (route.name === "terminal" && !route.agentId && !route.paneId) ||
     terminalRoot;
-  const nav = !focus && !keyboard && route.name !== "agent" && !isBare(route);
+  const nav = !focus && !keyboard && route.name !== "agent";
   return (
     <div className="flex h-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--kb-inset,0px)] pl-[env(safe-area-inset-left)]">
       <main className="relative min-h-0 flex-1">

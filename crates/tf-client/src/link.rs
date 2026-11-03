@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_compression::tokio::bufread::ZstdDecoder;
 use async_compression::tokio::write::ZstdEncoder;
 use serde_json::Value;
-use tf_proto::host::{FEATURE_BROWSER, FEATURE_FORWARD, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
+use tf_proto::host::{FEATURE_BROWSER, FEATURE_FORWARD, FEATURE_NOTIFY_KINDS, FEATURE_PRESENCE, FEATURE_SESSION_SYNC, FEATURE_ZSTD};
 use tf_proto::{ApiError, ClientMsg, FwdEv, FwdOffer, HostState, Millis, Presence, ServerMsg, StatePatch};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadBuf};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -87,9 +87,16 @@ const ZSTD_WINDOW_LOG: u32 = 17;
 /// Largest window the inbound zstd stream may use (8 MiB).
 const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 
-/// Wire features this client asks hostd for in `hello` (`tf_proto::host`, point 7).
+/// Wire features this client asks hostd for in `hello` (`tf_proto::host`, point 7). `notifyKinds`:
+/// this core reads a notification kind it does not know as `info` (`NotifyKind`'s deserializer).
 pub fn requested_features() -> Vec<String> {
-    vec![FEATURE_ZSTD.to_string(), FEATURE_SESSION_SYNC.to_string(), FEATURE_PRESENCE.to_string(), FEATURE_FORWARD.to_string()]
+    vec![
+        FEATURE_ZSTD.to_string(),
+        FEATURE_SESSION_SYNC.to_string(),
+        FEATURE_PRESENCE.to_string(),
+        FEATURE_FORWARD.to_string(),
+        FEATURE_NOTIFY_KINDS.to_string(),
+    ]
 }
 
 /// [`requested_features`], plus `browser` from an app core that has the TeleFlock Browser.

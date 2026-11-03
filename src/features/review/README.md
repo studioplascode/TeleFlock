@@ -41,6 +41,36 @@ diff adds or changes get the diff's green edge and tint, a note counts them; rem
 virtualized and measured rows like the rest of the viewer (only chunks in view render), so a long document stays fast.
 Tests: `bun test src/features/review/diff/markdown.test.ts`.
 
+## Binary files: images, video, audio, PDF
+
+A binary file's row shows the file instead of hunks (`diff/MediaPreview.tsx`): images (png, jpg, gif, webp, avif, bmp,
+ico, an svg git calls binary) on a transparency checkerboard, fit to the width (small ones enlarged by a whole factor,
+crisp), pixel size and file size under them, a click opens the lightbox (zoom, pan); video (mp4, m4v, webm, mov, ogv)
+and audio (mp3, wav, ogg, oga, opus, m4a, flac, aac) with native controls, never autoplaying; PDFs drawn by pdf.js
+(`diff/PdfView.tsx`, legacy build, loaded with the first PDF, its worker bundled; CMaps, standard fonts, ICC profiles and
+image decoders under `pdfjs/`, `vite.config.ts` `pdfjsAssets`) in a scrolling frame whose pages are drawn near the view
+and dropped far from it, a page opening full size in the lightbox. A format a webview can't play says so with the size.
+Anything else binary is one "Binary file · 1.2 MB" line; a file named nothing media is told apart by its first bytes
+(`sniffMedia`). Which files (`isBinaryLike`): those git calls binary, and media files whatever git calls them (a PDF of
+uncompressed streams diffs as text, a Git LFS file as its pointer), except an SVG with lines, which stays a text diff.
+
+- **Versions** (`mediaSides`): a modified file shows Before (the diff's base) and After (the working tree) side by side,
+  stacked on phones; a deleted one its base version; an added, untracked or renamed one the working tree's.
+- **Bytes** (`diff/mediaLoad.ts`, one loader per Review): the working tree through `fs.read` of `<repo root>/<path>`,
+  the base through `git.show {cwd, rev, path}` at the base's sha; read only while the row is expanded and within a screen
+  above to two below the view, three files at a time, in ranges (`readMedia`: a first read of 1 MiB, then 2 MiB each).
+  Kept as object URLs until Review closes (`close()` revokes them; past 192 MiB the least recently shown go first). A
+  working-tree file is read again when its blob id in the patch changes, and when an untracked file's diff reloads; bytes
+  that did not change keep their URL, so a playing video goes on.
+- **Sizes** (`sizeVerdict`): up to 32 MiB at once; larger: "Too large to preview (48 MB)" with **Load anyway** up to
+  256 MiB.
+- **Older hosts** (tf-hostd before 0.9.1): `git.show` answers `unknown_method`, so only the working tree's version shows,
+  with a note to update TeleFlock on the host; `fs.read` there reads from the start only, so files over 8 MB are not shown.
+- Demo: the kanban agent's worktree has an untracked PNG with transparency, a modified PNG, a deleted one, a WebM video, a
+  WAV sound, a two-page PDF and a SQLite file (`src/core/demo/media.ts`).
+
+Tests: `bun test src/features/review/diff/media.test.ts src/features/review/diff/mediaLoad.test.ts`.
+
 ## Make it green, rebase and resolve
 
 - Failing checks on the open pull request: **Make it green** next to "merge anyway". The worktree's

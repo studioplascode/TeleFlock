@@ -17,7 +17,11 @@ export function PullToRefresh(props: { onRefresh?: () => Promise<unknown>; child
 
 // @/features/shell/MobileHeader
 export function MobileHeader(props: { title: ReactNode; subtitle?: ReactNode; back?: boolean; actions?: ReactNode }): JSX.Element;
-// sticky, safe-area aware top bar for mobile screens (back = history back with a spring).
+// sticky, safe-area aware top bar for mobile screens (back = `goBack`, also the edge swipe's: history back, else the
+// page's parent (`parentRoute` from `@/core`: Flock Wrapped → Usage) or the board).
+
+// @/features/shell/MoreView
+export function LinkRow(props: { id: keyof typeof VIEWS }): JSX.Element; // a phone row opening a page (icon, label, description from VIEWS): More's list, Usage's Flock Wrapped
 
 // @/features/palette/registry
 export interface PaletteCommand { id: string; title: string; group?: string; keywords?: string[]; icon?: ReactNode; shortcut?: string; hint?: string; run(): void | Promise<unknown> }
@@ -28,8 +32,8 @@ export function openSheet(sheet: { title: ReactNode; description?: ReactNode; co
 export function closeSheet(): void;
 
 // @/features/shell/vocab — one word per lane, state and action; `VIEWS`: label, shortcut, description and icon of
-// every page, read by each way to it (sidebar, More, palette, Settings, host cards, the omp area strip); `OMP_PAGES`:
-// the omp area's pages (omp settings, MCP servers, Skills & plugins, Accounts) in order.
+// every page, read by each way to it (sidebar, More, palette, Settings, host cards, the omp area strip, Usage's
+// Flock Wrapped entry); `OMP_PAGES`: the omp area's pages (omp settings, MCP servers, Skills & plugins, Accounts) in order.
 
 // @/features/shell/Ticks
 export function Ticks(props: { text: string; className?: string }): JSX.Element; // `backticked` spans as inline code (hostd's commands, omp's setting descriptions)
@@ -43,14 +47,15 @@ export function OmpAreaFrame(props: { current: OmpAreaPage; hostId?: string; mob
 
 ## Layout contract
 - Routes are FrontCore's (`navigate`/`useRoute`); `src/app/routes.tsx` maps them to screens.
-- Full-bleed screens (session, terminal, review, desktop board and wall, ambient) get an `h-full` box and manage their own scroll.
-- Bare screens (`isBare`: ambient mode) also take the sidebar's and split's room on desktop and the bottom nav's on
-  phones; the title bar stays. Focus mode (the session's and the wall's `F`) hides the sidebar and split the same way.
+- Full-bleed screens (session, terminal, review, desktop board and wall, browser) get an `h-full` box and manage their own scroll.
+- Focus mode (the session's and the wall's `F`) hides the sidebar and split on desktop; the title bar stays.
 - Every other screen is wrapped in the shell's scroll container (phones: `PullToRefresh`, default `refreshAll`;
   desktop: a stable scrollbar gutter, so a page that scrolls sits exactly where one that doesn't would).
   Don't add your own outer scroller or pull-to-refresh; render `MobileHeader` yourself on phones.
 - The phone bottom nav is in-flow below the view (never overlaps content). Pushed screens keep their parent tab
-  lit: everything opened from More (Hosts, Settings, Usage, Activity, Automations, Ambient and the omp area) lights More.
+  lit: everything opened from More (Hosts, Settings, Usage and its Flock Wrapped, Activity, Automations and the omp
+  area) lights More. A sub-page (`parentRoute`: Flock Wrapped in Usage) lights its parent in the desktop sidebar, and
+  phones slide to it as a push and back from it as a pop.
 - `prefetchViews` (`src/app/routes.tsx`) warms the screens a tap away once the first one is up, one per idle
   period: session, board / Flock, inbox, Dispatch, terminal, then the omp area (MCP servers, Skills & plugins, Accounts, omp settings).
 - Toasts keep clear of `[data-toast-anchor]` elements (`src/design/ui/Toast.tsx`): on phones anything along the
@@ -66,8 +71,9 @@ the host editor (`useUi().dialog.kind === "hostEditor"`), the "make this host li
 ## Desktop sidebar
 Top to bottom: **＋ New task** (`D`, opens Dispatch) · launcher row (New worktree · New agent · Fan out ·
 Open folder · Past sessions; labelled from 240 px, wrapping onto a second or third row, icon-only below; drag the right edge to
-resize, double-click resets) · nav Board · Inbox · Activity · Usage · Automations · Wall · Ambient (Inbox badge = needs plus
-decided-for-you count, sunset while something needs you, calm neutral with only decisions; dot = unread updates) · HOSTS (header "Manage ›" → Hosts; each row: orb · colour swatch · name · latency, then
+resize, double-click resets) · nav Board · Inbox (badge = needs plus decided-for-you count, sunset while something needs
+you, calm neutral with only decisions; dot = unread updates) · Activity · Usage (Flock Wrapped opens from it) · Automations ·
+Wall · Browser (not on Android) · HOSTS (header "Manage ›" → Hosts; each row: orb · colour swatch · name · latency, then
 CPU sparkline + RAM bar, or the phase/reason and a Connect/Retry/Sign in/Verify button) · WORKSPACES tree
 (all remaining height) · footer ⚙ Settings + collapse. Labels, keys and tooltips come from `vocab.ts`.
 

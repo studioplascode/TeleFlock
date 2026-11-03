@@ -8,6 +8,7 @@ import type {
   HistoryPage,
   NeedsOption,
   NeedsYou,
+  NotifyAction,
   NotifyKind,
   PulseKind,
   SessionEvent,
@@ -31,8 +32,9 @@ import { apiError } from "../errors";
 import { chatTurn } from "./chats";
 import { fileDiff } from "./codegen";
 import { MODELS, type AgentDef } from "./data";
+import { boardReportSteps, PRESENT_KIND_WORD } from "./presented";
 import type { Rng } from "./rng";
-import { replyTurn, type Step, subagentRow, type TaskSub, taskSubs, type ToolSpec, type UiSpec } from "./scripts";
+import { replyTurn, type Step, subagentRow, type TaskSub, taskSubs, think, type ToolSpec, type UiSpec } from "./scripts";
 
 /** What an agent simulation needs from its host. */
 export interface SimHost {
@@ -43,7 +45,7 @@ export interface SimHost {
   agentChanged(agentId: string): void;
   metaChanged(agentId: string): void;
   pulse(agentId: string, kind: PulseKind, n: number): void;
-  notify(agentId: string, kind: NotifyKind, title: string, body: string, ui?: UiRequest): void;
+  notify(agentId: string, kind: NotifyKind, title: string, body: string, ui?: UiRequest, actions?: NotifyAction[]): void;
   activity(agentId: string, kind: ActivityKind, title: string, detail?: string): void;
   usage(tokensIn: number, tokensOut: number, usd: number): void;
   /** Mirror text into terminals attached to this agent (omp-like TUI). */
@@ -290,7 +292,8 @@ export class AgentSim {
       items: this.items.slice(start),
       hasMore: start > 0,
       cursor: start > 0 ? String(start) : undefined,
-      ui: this.pending?.request,
+      // a prompt only the terminal answers has no dialog in the app
+      ui: this.pending?.spec.terminal ? undefined : this.pending?.request,
     };
   }
 
@@ -487,7 +490,9 @@ export class AgentSim {
       opts.steps ??
       (this.agent.chat
         ? chatTurn(text, this.host.rng)
-        : replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan", title: this.agent.title, branch: this.agent.branch, changed: this.files }));
+        : /\breport\b/i.test(text) && this.mode !== "plan"
+          ? [think("Writing the latest results up as a report you can open.", 2400), ...boardReportSteps(this.nextReportVersion())]
+          : replyTurn(text, { repo, files, rng: this.host.rng, plan: this.mode === "plan", title: this.agent.title, branch: this.agent.branch, changed: this.files }));
     this.cur = null;
     this.setState("working");
     // A new turn makes the idle recap out of date (the host stops sending it).
@@ -595,7 +600,8 @@ export class AgentSim {
         title: t.title,
         intent: t.intent,
         args: t.args,
-        status: spec.needs === "approval" ? "pending" : "running",
+        // a gated call waits to start; a call omp asks about in its terminal runs meanwhile
+        status: spec.needs === "approval" && !spec.terminal ? "pending" : "running",
         truncated: false,
         view: t.tool === "ask" ? { type: "ask", questions } : undefined,
       };
@@ -650,38 +656,57 @@ export class AgentSim {
       step,
     };
     this.pending = { ...p, request };
-    const needs: NeedsYou = {
-      kind: spec.needs ?? (kind === "planReview" ? "planReview" : kind === "confirm" ? "confirm" : kind === "editor" || kind === "input" ? "input" : "ask"),
-      requestId: reqId,
-      since: first ? at : (this.agent.needs?.since ?? at),
-      title: spec.title,
-      question: message ?? spec.title,
-      detail: spec.detail ?? spec.plan?.content.split("\n")[0],
-      options,
-      multi: kind === "multiSelect",
-      allowOther,
-      allowChat: spec.allowChat ?? false,
-      command: spec.command,
-      answerable: true,
-      context: p.context,
-      step,
-    };
+    // A prompt only the terminal answers: Needs you `blocked`, nothing to answer in the app (tf-hostd's
+    // wait it infers for omp's own dialog on an older bridge), the call running while omp asks.
+    const terminal = spec.terminal !== undefined;
+    if (terminal) this.terminalPick = spec.terminal?.initial ?? 0;
+    const needs: NeedsYou = terminal
+      ? {
+          kind: "blocked",
+          since: first ? at : (this.agent.needs?.since ?? at),
+          title: "Waiting in the terminal",
+          question: message ?? spec.title,
+          detail: spec.detail,
+          options: [],
+          multi: false,
+          allowOther: false,
+          allowChat: false,
+          answerable: false,
+          context: "",
+        }
+      : {
+          kind: spec.needs ?? (kind === "planReview" ? "planReview" : kind === "confirm" ? "confirm" : kind === "editor" || kind === "input" ? "input" : "ask"),
+          requestId: reqId,
+          since: first ? at : (this.agent.needs?.since ?? at),
+          title: spec.title,
+          question: message ?? spec.title,
+          detail: spec.detail ?? spec.plan?.content.split("\n")[0],
+          options,
+          multi: kind === "multiSelect",
+          allowOther,
+          allowChat: spec.allowChat ?? false,
+          command: spec.command,
+          answerable: true,
+          context: p.context,
+          step,
+        };
     const a = this.agent;
     a.state = "blocked";
     if (first) a.stateSince = at;
     a.column = "needs";
     a.needs = needs;
-    a.live = { ...a.live, streaming: false, thinking: false, tool: undefined, tps: undefined, tpsSplit: undefined, line: message?.split("\n")[0] ?? spec.title };
+    const tool = terminal && spec.tool ? { name: spec.tool.tool, label: `${spec.tool.tool} ${spec.tool.title}`, startedAt: at } : undefined;
+    a.live = { ...a.live, streaming: false, thinking: false, tool, tps: undefined, tpsSplit: undefined, line: message?.split("\n")[0] ?? spec.title };
     if (!live) return;
-    this.host.session(a.id, { k: "ui", request });
+    if (!terminal) this.host.session(a.id, { k: "ui", request });
     if (first) this.host.pulse(a.id, "state", 1);
     this.host.agentChanged(a.id);
     this.host.metaChanged(a.id);
     if (first) {
-      this.host.notify(a.id, "needs", `${a.name} needs you`, needs.question, request);
-      this.host.activity(a.id, "asked", `${a.name} asked: ${needs.title}`, needs.question);
+      this.host.notify(a.id, "needs", `${a.name} needs you`, needs.question, terminal ? undefined : request);
+      if (!terminal) this.host.activity(a.id, "asked", `${a.name} asked: ${needs.title}`, needs.question);
     }
-    this.termLine(`\r\n\x1b[38;5;208m◆ ${needs.title}${step ? ` ${step.index + 1}/${step.total}` : ""}\x1b[0m ${needs.question.split("\n")[0]}\r\n`);
+    this.termLine(terminal ? `\r\n${this.terminalDialog()}\r\n` : `\r\n\x1b[38;5;208m◆ ${needs.title}${step ? ` ${step.index + 1}/${step.total}` : ""}\x1b[0m ${needs.question.split("\n")[0]}\r\n`);
   }
 
   /**
@@ -744,6 +769,42 @@ export class AgentSim {
     this.cur = null;
     this.setState("working");
     this.host.metaChanged(this.agent.id);
+    return true;
+  }
+
+  /** The highlighted option of a pending prompt only the terminal answers (`UiSpec.terminal`). */
+  private terminalPick = 0;
+
+  /** omp's dialog of a pending prompt only the terminal answers, as its TUI draws it; "" when none is pending. */
+  private terminalDialog(): string {
+    const p = this.pending;
+    if (!p?.spec.terminal) return "";
+    const rows = [`\x1b[38;5;208m╭─ ${p.request.message ?? p.request.title}\x1b[0m`, `│ ${p.spec.terminal.shows}`];
+    p.spec.options.forEach((o, i) => rows.push(i === this.terminalPick ? `│ \x1b[1;36m❯ ${o.label}\x1b[0m` : `│   ${o.label}`));
+    rows.push("│ \x1b[2m↑/↓ navigate  ⏎ select  ⎋ cancel\x1b[0m", "╰─");
+    return rows.join("\r\n");
+  }
+
+  /**
+   * A key typed into the agent's terminal while a prompt only the terminal answers is pending: ↑/↓ move
+   * the highlight, Enter answers with the highlighted option, Esc cancels it (omp denies a dismissed
+   * approval). False when no such prompt is pending (the terminal handles the key itself).
+   */
+  terminalKey(data: string): boolean {
+    const p = this.pending;
+    if (!p?.spec.terminal) return false;
+    const n = p.spec.options.length;
+    // xterm sends ↑/↓ as CSI or, in application cursor mode, SS3
+    const up = data === "\x1b[A" || data === "\x1bOA";
+    if (up || data === "\x1b[B" || data === "\x1bOB") {
+      this.terminalPick = (this.terminalPick + (up ? n - 1 : 1)) % n;
+      this.termLine(`\r\n${this.terminalDialog()}\r\n`);
+    } else if (data === "\r" || data === "\n") {
+      const o = p.spec.options[this.terminalPick];
+      if (o) this.answer(p.request.id, { choices: [o.id], cancel: false, chat: false, back: false });
+    } else if (data === "\x1b") {
+      this.answer(p.request.id, { choices: [], cancel: true, chat: false, back: false });
+    }
     return true;
   }
 
@@ -1130,6 +1191,12 @@ export class AgentSim {
     for (const f of spec.files ?? []) this.addFile(f);
     const status: ToolStatus = spec.error ? "error" : "ok";
     this.put(this.finishedTool(c.itemId, c.start, spec, c.output.replace(/\n$/, ""), status, now));
+    // A document presented live (tf-hostd's `presented` notification; seeded history never notifies).
+    const doc = status === "ok" ? spec.artifact : undefined;
+    if (doc) {
+      const body = doc.version > 1 ? `${PRESENT_KIND_WORD[doc.kind]} · version ${doc.version}` : PRESENT_KIND_WORD[doc.kind];
+      this.host.notify(this.agent.id, "presented", `${this.agent.name} presented ${doc.title}`, body, undefined, [{ id: `open:${doc.name}`, label: "View" }]);
+    }
     this.inputTokens(1500 + this.host.rng.int(0, 5000));
     this.advise(now);
     if (spec.files?.length) this.host.metaChanged(this.agent.id);
@@ -1185,6 +1252,13 @@ export class AgentSim {
         if (delivered) sent.set(`${key}✓`, "");
       }),
     );
+  }
+
+  /** The next version of this agent's board test report (`presented/board-test-report-v<n>.md`): one past the newest its transcript shows. */
+  private nextReportVersion(): number {
+    let newest = 0;
+    for (const item of this.byId.values()) if (item.kind === "tool" && item.artifact?.slug === "board-test-report") newest = Math.max(newest, item.artifact.version);
+    return newest + 1;
   }
 
   private finishedTool(id: string, start: number, spec: ToolSpec, output: string, status: ToolStatus, end: number): TranscriptItem {
@@ -1299,7 +1373,7 @@ export class AgentSim {
     this.host.termWrite(this.agent.id, text);
   }
 
-  /** Recent transcript rendered as terminal text (initial frame of an agent terminal). */
+  /** Recent transcript rendered as terminal text (initial frame of an agent terminal), under it omp's dialog of a prompt only the terminal answers. */
   renderTui(rows: number): string {
     const out: string[] = [];
     for (const it of this.items.slice(-30)) {
@@ -1312,6 +1386,9 @@ export class AgentSim {
         if (it.view?.type === "task") for (const s of it.view.agents) out.push(`  ${s.status === "running" ? "\x1b[36m◆" : "\x1b[32m✓"}\x1b[0m ${s.name}${s.completionPct != null ? ` · \x1b[36m${s.completionPct}%\x1b[0m` : ""}${s.context ? `\x1b[2m · ${s.context.pct.toFixed(1)}%/${Math.round(s.context.window / 1000)}K\x1b[0m` : ""}`);
       } else if (it.kind === "notice") out.push(`\x1b[33m! ${it.text}\x1b[0m`);
     }
+    // omp's dialog sits at the bottom, where its composer goes
+    const dialog = this.terminalDialog();
+    if (dialog) out.push(...dialog.split("\r\n"));
     const lines = out.join("\n").split("\n").slice(-(rows - 3));
     return lines.join("\r\n");
   }

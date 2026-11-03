@@ -1,12 +1,15 @@
 //! `host.limits`: subscription / account usage limits exactly as omp knows them.
 //!
 //! omp fetches per-account quota reports (Claude 5 h / 7 d windows, Codex weekly, …) from each
-//! provider's usage endpoint, caches them ~5 min per account in `<agent dir>/agent.db` and
-//! refreshes the window rows from live response headers. `omp usage --json` prints that
-//! snapshot (without tokens); `omp usage --history --json` prints the hourly `usage_history`
-//! rows omp records whenever a fresh report lands. hostd only runs those two commands — no
-//! provider calls, no credentials — and adds its own per-poll readings so the client can
-//! estimate the pace of each window.
+//! provider's usage endpoint and caches them ~5 min per account in `<agent dir>/agent.db`
+//! (`cache` rows `usage_cache:report:…`); while an omp process works it also refreshes the window
+//! rows of its account from the provider's response headers, at most once a minute.
+//! `omp usage --json` prints those reports (without tokens); `omp usage --history --json` prints
+//! the hourly `usage_history` rows omp records whenever a fresh report lands. hostd runs those two
+//! commands and reads the cached report rows itself — no provider calls, no credentials — and
+//! keeps its own readings so the client can estimate the pace of each window from its newest
+//! readings: every answer reads the rows again, and while an omp session on this host runs a
+//! turn, [`start`] reads them once a minute.
 //!
 //! The session → account mapping reads omp's persisted session pin (`cache` row
 //! `session:sticky:<provider>:<session id>` → credential id) and that credential's
@@ -14,20 +17,22 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tf_proto::{AccountLimits, ApiError, LimitAccount, LimitSample, LimitSession, LimitStatus, LimitWindow, Millis};
 
+use crate::daemon::Daemon;
 use crate::ops::git::run_cmd;
 use crate::ops::host::{omp_agent_dir, omp_bin, open_ro};
 use crate::ops::Ctx;
 use crate::util::now_ms;
 
 /// hostd's own cache of `omp usage --json`: omp itself serves a per-account cache of ~5 min, so
-/// re-running it sooner (0.7 s CPU, ~200 MB) mostly re-reads the same report. `refresh: true`
-/// asks again after [`REFRESH_MIN`].
+/// re-running it sooner (0.7 s CPU, ~200 MB) mostly re-reads the same report; window rows omp
+/// refreshed since come from its cache rows ([`cached_reports`]). `refresh: true` asks again after
+/// [`REFRESH_MIN`].
 const TTL: Duration = Duration::from_secs(300);
 /// Minimum spacing of explicit refreshes.
 const REFRESH_MIN: Duration = Duration::from_secs(10);
@@ -37,8 +42,18 @@ const HISTORY_DAYS: &str = "8";
 /// One `omp usage` run. Public for the app's request timeouts (tf-client `timeout_for`): requests
 /// that read a fresh report (`accounts.unlink`) must outlast it.
 pub const OMP_USAGE_TIMEOUT: Duration = Duration::from_secs(45);
+/// How often [`start`] reads omp's cached reports while an omp session runs a turn.
+const SAMPLE_EVERY: Duration = Duration::from_secs(60);
 /// Samples sent per window.
 const MAX_SAMPLES: usize = 120;
+/// Readings this recent are all sent: the client's pace compares the newest reading with one 5 min older.
+const RECENT_MS: Millis = HOUR_MS;
+/// Older readings keep at least this many of [`MAX_SAMPLES`].
+const OLDER_MIN: usize = 30;
+/// A full report followed this soon by a reading from response headers is left out of the samples:
+/// the usage endpoint can read a step above the headers of the same moment, and mixing the two
+/// would read as consumption.
+const HEADERS_SUPERSEDE_MS: Millis = 2 * 60_000;
 /// Own readings kept per window.
 const RING_SPAN_MS: Millis = 8 * 86_400_000;
 const RING_CAP: usize = 4000;
@@ -61,6 +76,9 @@ pub(crate) struct Ident {
 pub(crate) struct Parsed {
     pub account: LimitAccount,
     pub ident: Ident,
+    /// omp last refreshed the windows from response headers (`metadata.headersUpdatedAt` is the
+    /// report's `fetchedAt`), not from a full report.
+    pub headers: bool,
 }
 
 /// One `usage_history` row (`omp usage --history --json`).
@@ -80,6 +98,8 @@ struct Reading {
     at: Millis,
     used: f64,
     resets_at: Option<Millis>,
+    /// From response headers ([`Parsed::headers`]).
+    headers: bool,
 }
 
 #[derive(Default)]
@@ -123,6 +143,11 @@ pub(crate) async fn limits_with_idents(ctx: &Ctx, refresh: bool) -> Result<(Acco
 /// [`limits_with_idents`] for the given `(omp session id, provider)` pairs, without a [`Ctx`]: the
 /// auto-resume checks run with no app connected (`crate::limit_resume`). Shares the cache.
 pub(crate) async fn limits_for(live: Vec<(String, String)>, refresh: bool) -> Result<(AccountLimits, Vec<Ident>), ApiError> {
+    let db = omp_agent_dir().join("agent.db");
+    let cached = {
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || cached_reports(&db)).await.unwrap_or_default()
+    };
     let (fetched_at, accounts, error) = {
         let mut c = CACHE.lock().await;
         let max_age = if refresh { REFRESH_MIN } else { TTL };
@@ -130,6 +155,8 @@ pub(crate) async fn limits_for(live: Vec<(String, String)>, refresh: bool) -> Re
             refresh_cache(&mut c).await;
         }
         let now = now_ms();
+        note_readings(&mut c.ring, &cached, now);
+        overlay(&mut c.accounts, &cached);
         let history = c.history.as_ref().map(|(_, h)| h.as_slice()).unwrap_or(&[]);
         let accounts: Vec<Parsed> = c
             .accounts
@@ -145,13 +172,40 @@ pub(crate) async fn limits_for(live: Vec<(String, String)>, refresh: bool) -> Re
             .collect();
         (c.fetched.map(|(_, at)| at).unwrap_or(now), accounts, c.error.clone())
     };
-    let db = omp_agent_dir().join("agent.db");
     let pairs: Vec<(String, Ident)> = accounts.iter().map(|p| (p.account.key.clone(), p.ident.clone())).collect();
     let sessions = tokio::task::spawn_blocking(move || session_accounts(&db, &live, &pairs))
         .await
         .map_err(|e| ApiError::new("internal", e.to_string()))?;
     let idents = accounts.iter().map(|p| p.ident.clone()).collect();
     Ok((AccountLimits { fetched_at, accounts: accounts.into_iter().map(|p| p.account).collect(), sessions, error }, idents))
+}
+
+/// While an omp session on this host runs a turn (and once more after the last one ends), reads
+/// omp's cached reports into the readings every [`SAMPLE_EVERY`], so the pace has a reading about
+/// every minute while agents work, with no app asking (`daemon::async_main`).
+pub fn start(daemon: &Arc<Daemon>) {
+    let weak = Arc::downgrade(daemon);
+    let shutdown = daemon.shutdown.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SAMPLE_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut was_busy = false;
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tick.tick() => {}
+            }
+            let Some(d) = weak.upgrade() else { return };
+            let busy = d.omp.sessions().iter().any(|s| s.is_streaming());
+            drop(d);
+            if busy || was_busy {
+                let db = omp_agent_dir().join("agent.db");
+                let cached = tokio::task::spawn_blocking(move || cached_reports(&db)).await.unwrap_or_default();
+                note_readings(&mut CACHE.lock().await.ring, &cached, now_ms());
+            }
+            was_busy = busy;
+        }
+    });
 }
 
 async fn refresh_cache(c: &mut Cache) {
@@ -167,13 +221,7 @@ async fn refresh_cache(c: &mut Cache) {
     });
     match usage.and_then(|v| parse_usage(&v)) {
         Ok(accounts) => {
-            for p in &accounts {
-                let Some(at) = p.account.fetched_at else { continue };
-                for w in &p.account.windows {
-                    let Some(used) = w.used else { continue };
-                    push_reading(c.ring.entry(ring_key(&p.account.key, &w.id)).or_default(), Reading { at, used, resets_at: w.resets_at }, now);
-                }
-            }
+            note_readings(&mut c.ring, &accounts, now);
             c.accounts = accounts;
             c.error = None;
         }
@@ -210,6 +258,51 @@ fn push_reading(ring: &mut VecDeque<Reading>, r: Reading, now: Millis) {
     ring.push_back(r);
     while ring.front().is_some_and(|f| f.at < now - RING_SPAN_MS) || ring.len() > RING_CAP {
         ring.pop_front();
+    }
+}
+
+/// One reading per window of each report, at the report's `fetchedAt`.
+fn note_readings(ring: &mut HashMap<String, VecDeque<Reading>>, accounts: &[Parsed], now: Millis) {
+    for p in accounts {
+        let Some(at) = p.account.fetched_at else { continue };
+        for w in &p.account.windows {
+            let Some(used) = w.used else { continue };
+            push_reading(ring.entry(ring_key(&p.account.key, &w.id)).or_default(), Reading { at, used, resets_at: w.resets_at, headers: p.headers }, now);
+        }
+    }
+}
+
+/// omp's cached account reports (`cache` rows `usage_cache:report:…` of `agent.db`, read-only): what
+/// `omp usage --json` prints without fetching, including the window rows omp refreshed from
+/// response headers since. Rows past omp's retention and accounts without an identity (their key
+/// depends on the report's position) are left out.
+fn cached_reports(db: &Path) -> Vec<Parsed> {
+    let Some(conn) = open_ro(db).ok().flatten() else { return vec![] };
+    let rows: Vec<String> = match conn.prepare(
+        "SELECT value FROM cache WHERE key >= 'usage_cache:report:' AND key < 'usage_cache:report;' AND expires_at > CAST(strftime('%s','now') AS INTEGER)",
+    ) {
+        Ok(mut stmt) => stmt.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default(),
+        Err(_) => return vec![],
+    };
+    let reports: Vec<Value> = rows
+        .iter()
+        .filter_map(|raw| serde_json::from_str::<Value>(raw).ok().and_then(|mut v| v.get_mut("value").map(Value::take)))
+        .filter(Value::is_object)
+        .collect();
+    parse_usage(&serde_json::json!({ "reports": reports }))
+        .map(|accounts| accounts.into_iter().filter(|p| !p.account.windows.is_empty() && !p.account.key.contains("|#")).collect())
+        .unwrap_or_default()
+}
+
+/// Brings the accounts of the `omp usage --json` snapshot up to omp's newer cached reports (window
+/// rows omp refreshed from response headers since).
+fn overlay(accounts: &mut [Parsed], cached: &[Parsed]) {
+    for p in accounts.iter_mut().filter(|p| !p.account.windows.is_empty()) {
+        if let Some(q) = cached.iter().find(|q| q.account.key == p.account.key && q.account.fetched_at > p.account.fetched_at) {
+            p.account.windows = q.account.windows.clone();
+            p.account.fetched_at = q.account.fetched_at;
+            p.headers = q.headers;
+        }
     }
 }
 
@@ -325,6 +418,8 @@ pub(crate) fn parse_usage(v: &Value) -> Result<Vec<Parsed>, String> {
         let ident = ident_of(&meta);
         let key = account_key(&provider, &ident, i);
         let windows: Vec<LimitWindow> = r.get("limits").and_then(Value::as_array).map(|a| a.iter().filter_map(parse_window).collect()).unwrap_or_default();
+        let fetched_at = ms_at(r, "fetchedAt");
+        let headers = fetched_at.is_some() && ms_at(&meta, "headersUpdatedAt") == fetched_at;
         let credits = r.get("resetCredits");
         let resets_available = credits
             .and_then(|c| num_at(c, "redeemableCount").or_else(|| num_at(c, "availableCount")))
@@ -333,7 +428,7 @@ pub(crate) fn parse_usage(v: &Value) -> Result<Vec<Parsed>, String> {
             label: label_of(&ident, &provider),
             org: str_at(&meta, "orgName").filter(|o| !o.ends_with("'s Organization")),
             plan: str_at(&meta, "planType").or_else(|| str_at(&meta, "subscriptionType")).or_else(|| str_at(&meta, "plan")).or_else(|| str_at(&meta, "tier")),
-            fetched_at: ms_at(r, "fetchedAt"),
+            fetched_at,
             resets_available,
             notes: strings(r.get("notes")),
             error: windows.is_empty().then(|| "omp reported no limit windows for this account".to_string()),
@@ -345,11 +440,11 @@ pub(crate) fn parse_usage(v: &Value) -> Result<Vec<Parsed>, String> {
         // Routing copies of one upstream quota (several base URLs) share a key: keep the newest.
         if let Some(prev) = out.iter_mut().find(|p| p.account.key == account.key) {
             if account.fetched_at > prev.account.fetched_at {
-                *prev = Parsed { account, ident };
+                *prev = Parsed { account, ident, headers };
             }
             continue;
         }
-        out.push(Parsed { account, ident });
+        out.push(Parsed { account, ident, headers });
     }
     let missing = |v: &Value, key: &str, error: &dyn Fn(&Value) -> String, disabled: bool, out: &mut Vec<Parsed>| {
         for (i, a) in v.get(key).and_then(Value::as_array).into_iter().flatten().enumerate() {
@@ -374,6 +469,7 @@ pub(crate) fn parse_usage(v: &Value) -> Result<Vec<Parsed>, String> {
                     key,
                 },
                 ident,
+                headers: false,
             });
         }
     };
@@ -421,12 +517,12 @@ fn same_account(row: &HistoryRow, id: &Ident) -> bool {
     }
 }
 
-/// Readings of `w` in its current window period, oldest first, at most [`MAX_SAMPLES`].
+/// Readings of `w` in its current window period, oldest first, at most [`MAX_SAMPLES`] ([`downsample`]).
 fn window_samples(history: &[HistoryRow], ring: Option<&VecDeque<Reading>>, provider: &str, id: &Ident, w: &LimitWindow, now: Millis) -> Vec<LimitSample> {
     let mut all: Vec<Reading> = history
         .iter()
         .filter(|h| h.provider == provider && h.limit_id == w.id && same_account(h, id))
-        .filter_map(|h| Some(Reading { at: h.at, used: h.used?, resets_at: h.resets_at }))
+        .filter_map(|h| Some(Reading { at: h.at, used: h.used?, resets_at: h.resets_at, headers: false }))
         .chain(ring.into_iter().flatten().copied())
         .collect();
     all.sort_by_key(|r| r.at);
@@ -444,19 +540,39 @@ fn window_samples(history: &[HistoryRow], ring: Option<&VecDeque<Reading>>, prov
             _ => true,
         })
         .collect();
+    // A full report soon followed by a reading from response headers gives way to it.
+    let keep: Vec<bool> = (0..cur.len())
+        .map(|i| cur[i].headers || !cur[i + 1..].iter().take_while(|r| r.at - cur[i].at <= HEADERS_SUPERSEDE_MS).any(|r| r.headers))
+        .collect();
+    let mut keep = keep.into_iter();
+    cur.retain(|_| keep.next().unwrap_or(true));
     if let Some(cut) = (1..cur.len()).rev().find(|&i| cur[i].used + RESET_DROP < cur[i - 1].used) {
         cur.drain(..cut);
     }
     downsample(cur.into_iter().map(|r| LimitSample { at: r.at, used: r.used }).collect(), MAX_SAMPLES)
 }
 
-/// Keeps `max` evenly spaced samples, always including the first and the last.
+/// At most `max` samples: every one of the last [`RECENT_MS`] before the newest (thinned only past
+/// `max` − [`OLDER_MIN`]), older ones evenly spaced, keeping the first and the last of each part.
 fn downsample(v: Vec<LimitSample>, max: usize) -> Vec<LimitSample> {
-    if v.len() <= max || max < 2 {
+    if v.len() <= max {
         return v;
     }
-    let n = v.len();
-    (0..max).map(|i| v[i * (n - 1) / (max - 1)].clone()).collect()
+    let newest = v.last().map_or(0, |s| s.at);
+    let (older, recent) = v.split_at(v.partition_point(|s| s.at < newest - RECENT_MS));
+    let recent = evenly(recent, max.saturating_sub(older.len().min(OLDER_MIN)));
+    let older = evenly(older, max - recent.len());
+    [older, recent].concat()
+}
+
+/// `n` evenly spaced items of `v`, its first and last among them (just the last for `n` = 1).
+fn evenly(v: &[LimitSample], n: usize) -> Vec<LimitSample> {
+    match n {
+        _ if v.len() <= n => v.to_vec(),
+        0 => vec![],
+        1 => v[v.len() - 1..].to_vec(),
+        _ => (0..n).map(|i| v[i * (v.len() - 1) / (n - 1)].clone()).collect(),
+    }
 }
 
 // ───────────────────────────── sessions ─────────────────────────────
@@ -687,8 +803,8 @@ mod tests {
             HistoryRow { account_id: Some("other".into()), ..row(now - HOUR_MS, 0.8, Some(resets)) },
         ];
         let mut ring = VecDeque::new();
-        push_reading(&mut ring, Reading { at: now - 60_000, used: 0.45, resets_at: Some(resets) }, now);
-        push_reading(&mut ring, Reading { at: now - 120_000, used: 0.44, resets_at: Some(resets) }, now); // out of order: dropped
+        push_reading(&mut ring, Reading { at: now - 60_000, used: 0.45, resets_at: Some(resets), headers: false }, now);
+        push_reading(&mut ring, Reading { at: now - 120_000, used: 0.44, resets_at: Some(resets), headers: false }, now); // out of order: dropped
         let s = window_samples(&history, Some(&ring), "anthropic", &id, &w, now);
         assert_eq!(s.iter().map(|x| x.used).collect::<Vec<_>>(), vec![0.1, 0.3, 0.45]);
     }
@@ -704,12 +820,81 @@ mod tests {
     }
 
     #[test]
-    fn downsample_keeps_ends() {
-        let v: Vec<LimitSample> = (0..1000).map(|i| LimitSample { at: i, used: i as f64 }).collect();
-        let d = downsample(v, 120);
-        assert_eq!(d.len(), 120);
-        assert_eq!(d[0].at, 0);
-        assert_eq!(d[119].at, 999);
+    fn full_reports_give_way_to_header_readings() {
+        // omp's usage endpoint read 76 % where the response headers of the same minutes read 75 %.
+        let id = Ident { account_id: Some("acc".into()), ..Default::default() };
+        let now = 10 * HOUR_MS;
+        let w = window(None, Some(5 * HOUR_MS));
+        let mut ring = VecDeque::new();
+        for (m, used, headers) in [(10, 0.75, true), (9, 0.76, false), (8, 0.75, true), (3, 0.75, true), (1, 0.76, false)] {
+            push_reading(&mut ring, Reading { at: now - m * 60_000, used, resets_at: None, headers }, now);
+        }
+        let s = window_samples(&[], Some(&ring), "anthropic", &id, &w, now);
+        assert_eq!(s.iter().map(|x| x.used).collect::<Vec<_>>(), vec![0.75, 0.75, 0.75, 0.76], "the newest full report stays until headers follow it");
+    }
+
+    #[test]
+    fn recent_readings_survive_downsampling() {
+        // A reading a minute for a week: the last hour stays whole (the pace needs one 5 min old).
+        let v: Vec<LimitSample> = (0..7 * 24 * 60).map(|m| LimitSample { at: m * 60_000, used: m as f64 / 10_080.0 }).collect();
+        let newest = v[v.len() - 1].at;
+        let d = downsample(v, MAX_SAMPLES);
+        assert_eq!(d.len(), MAX_SAMPLES);
+        assert_eq!(d[0].at, 0, "the period's first reading stays");
+        let recent: Vec<Millis> = d.iter().filter(|s| s.at >= newest - RECENT_MS).map(|s| s.at).collect();
+        assert_eq!(recent, (0..=60).rev().map(|m| newest - m * 60_000).collect::<Vec<_>>());
+        assert!(d.windows(2).all(|p| p[0].at < p[1].at));
+        // More readings in the last hour than fit: thinned, older ones keep their share.
+        let dense: Vec<LimitSample> = (0..2_000).map(|i| LimitSample { at: i * 3_000, used: 0.0 }).collect();
+        let d = downsample(dense, MAX_SAMPLES);
+        assert_eq!(d.len(), MAX_SAMPLES);
+        assert_eq!(d[MAX_SAMPLES - 1].at, 1_999 * 3_000);
+        assert_eq!(d.iter().filter(|s| s.at >= 1_999 * 3_000 - RECENT_MS).count(), MAX_SAMPLES - OLDER_MIN);
+    }
+
+    #[test]
+    fn omps_cached_reports_bring_the_snapshot_up_to_date() {
+        let td = tempfile::tempdir().unwrap();
+        let db = td.path().join("agent.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL);").unwrap();
+        // omp refreshed Claude's windows from response headers a minute after `omp usage --json` ran.
+        let mut claude = usage_fixture()["reports"][1].clone();
+        let at = claude["fetchedAt"].as_i64().unwrap() + 60_000;
+        claude["fetchedAt"] = json!(at);
+        claude["metadata"]["headersUpdatedAt"] = json!(at);
+        claude["limits"][1]["amount"]["usedFraction"] = json!(0.96);
+        // An older Codex report, a row past omp's retention and a report without an identity.
+        let mut codex = usage_fixture()["reports"][0].clone();
+        codex["fetchedAt"] = json!(1);
+        let mut gone = claude.clone();
+        gone["metadata"]["email"] = json!("gone@example.com");
+        let mut anon = claude.clone();
+        anon["metadata"] = json!({});
+        let insert = |key: &str, report: &Value, expires: i64| {
+            conn.execute("INSERT INTO cache VALUES (?1, ?2, ?3)", rusqlite::params![key, json!({ "value": report, "expiresAt": 0 }).to_string(), expires]).unwrap();
+        };
+        insert("usage_cache:report:anthropic:default:oauth|email:work@example.com", &claude, 4_102_444_800);
+        insert("usage_cache:report:openai-codex:default:oauth|email:dev@example.com", &codex, 4_102_444_800);
+        insert("usage_cache:report:anthropic:default:oauth|email:gone@example.com", &gone, 1);
+        insert("usage_cache:report:anthropic:default:oauth|anonymous", &anon, 4_102_444_800);
+        insert("session:sticky:anthropic:s1", &json!({ "credentialId": 1 }), 4_102_444_800);
+        drop(conn);
+        let cached = cached_reports(&db);
+        let mut keys: Vec<&str> = cached.iter().map(|p| p.account.key.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["anthropic|email:work@example.com|org:org-a", "openai-codex|email:dev@example.com|org:acc-codex"]);
+
+        let mut accounts = parse_usage(&usage_fixture()).unwrap();
+        overlay(&mut accounts, &cached);
+        let claude = &accounts[1];
+        assert_eq!((claude.account.fetched_at, claude.account.windows[1].used, claude.headers), (Some(at), Some(0.96), true));
+        assert_eq!(accounts[0].account.fetched_at, Some(1_792_578_473_818), "an older cached report changes nothing");
+
+        let mut ring = HashMap::new();
+        note_readings(&mut ring, &cached, at);
+        let r = ring.get(&ring_key("anthropic|email:work@example.com|org:org-a", "anthropic:7d")).and_then(|r| r.back().copied());
+        assert_eq!(r.map(|r| (r.at, r.used, r.headers)), Some((at, 0.96, true)));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Transcript rows of an omp session file read from disk, without a replica: the Past sessions
-//! preview (`search.read`) and parked agents (their `session.find`), mapped exactly like a live
-//! replica rebuilds them (`tf_collab::replica::transcript_page`). The last few files read are
-//! kept while they are unchanged (path, size, mtime), so paging a preview re-reads nothing.
+//! preview (`search.read`), parked agents (their `session.find`) and the `session.digest` of a
+//! session tf-hostd holds no copy of, mapped exactly like a live replica rebuilds them
+//! (`tf_collab::replica::transcript_page`). The last few files read are kept while they are
+//! unchanged (path, size, mtime), so paging a preview re-reads nothing.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};

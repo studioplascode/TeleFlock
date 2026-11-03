@@ -17,7 +17,9 @@ Usage's Re-link, and the link-account nudge.
 | `providers.ts` | Short names, marks and blurbs for omp's provider ids (unknown ids: derived name, hashed color), `providerDetail` (only what the name doesn't say), paired logins (`alternateLogin` / `baseLogin`), picker sections, search, `byListOrder`, the login that links another account of a stored provider. Tests: `providers.test.ts` |
 
 Shared wording with Usage (`src/features/usage/limitsUi.ts`, tests `limitsUi.test.ts`): `paceAlert` (why a
-bar is red / orange: "limit reached", "runs out in ~4d at this pace", with `describePace`'s sentence),
+bar is red / orange: "limit reached", "runs out in ~4d at this pace", with `describePace`'s sentence as the
+tooltip, which names the pace's basis: "At the last 5 minutes' pace you run out in ~40m (…)", or the longer span
+it reached back to when those minutes moved less than 2 %; the pace is `src/core/limits.ts` `paceFromSamples`),
 `windowLabel` / `tierLabel` ("5 Hour" / "5 hours" / "5h" → "5 hours", "Opus only"), `formatPlan`
 ("max_20x" → "Max 20x"), `expiredLogin` (one sentence for omp's disable causes, raw reason as detail).
 

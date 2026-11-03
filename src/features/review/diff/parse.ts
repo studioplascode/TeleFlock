@@ -32,6 +32,8 @@ export interface DiffFile {
   hunks: Hunk[];
   /** Longest line in characters (drives horizontal scroll width without measuring). */
   maxLen: number;
+  /** The blob ids of the `index <old>..<new>` line (abbreviated; all zeros on a side the file lacks). */
+  oids?: { old: string; new: string };
 }
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
@@ -132,6 +134,10 @@ export function parsePatch(patch: string): DiffFile[] {
       file.path = line.slice(10);
       file.status = "renamed";
     } else if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) file.binary = true;
+    else if (line.startsWith("index ")) {
+      const ids = /^index ([0-9a-f]+)\.\.([0-9a-f]+)/.exec(line);
+      if (ids) file.oids = { old: ids[1] as string, new: ids[2] as string };
+    }
   }
   for (const f of files) if (f.oldPath && f.status === "modified") f.status = "renamed";
   return files;
