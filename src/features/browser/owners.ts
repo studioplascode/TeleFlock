@@ -1,7 +1,7 @@
 /**
- * Who a tab belongs to (the user, or an agent attached to the browser) and how the tab strip groups
- * and colours them. Pure: the core says which tabs are agents' (`BrowserStatus.tabs`), every other
- * tab is the user's.
+ * Who a tab belongs to (the user, or an agent attached to the browser), how the tab strip groups
+ * and colours them, and where the lock for agents is offered. Pure: the core says which tabs are
+ * agents' (`BrowserStatus.tabs`), every other tab is the user's.
  */
 import type { BrowserAttachment, BrowserStatus, BrowserTabOwner } from "@/core/gen";
 import type { Tab, TabsState } from "./tabs";
@@ -41,6 +41,17 @@ export function ownerOf(entries: readonly BrowserTabOwner[] | undefined, targetI
  */
 export function userDrives(owner: TabOwner): boolean {
   return owner.kind === "user" || owner.takenOver || owner.detached;
+}
+
+/**
+ * The toolbar's lock for agents on the shown tab (`browser.lockTab`): "lock" on a tab no agent
+ * opened (the user's, or one they lent) while agents may use it (the user's tabs are shared, or it
+ * is lent), "unlock" on a locked one; an agent's own tab has none.
+ */
+export function lockToggle(owner: TabOwner, locked: boolean, shareTabs: boolean): "lock" | "unlock" | null {
+  if (owner.kind === "agent" && !owner.lent) return null;
+  if (locked) return "unlock";
+  return shareTabs || owner.kind === "agent" ? "lock" : null;
 }
 
 /** The agent sent the browser something within this long: shown as driving. */

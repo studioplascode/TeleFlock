@@ -11,9 +11,10 @@
 //!   omp's `browser.cdpUrl`, never persisted). Each connection to that port is a forwarding stream
 //!   ([`crate::forward::FwdEv`], kind [`crate::forward::ForwardKind::Browser`], wire feature
 //!   [`crate::host::FEATURE_BROWSER`]) that tf-hostd opens towards the attaching app, whose DevTools
-//!   proxy serves it: the agent sees and drives only the tabs it opened there and the tabs the user
-//!   lent it ([`BrowserTabOwner`]), and browser-wide commands that would hurt the user or other
-//!   agents are refused.
+//!   proxy serves it: the agent sees and drives the tabs it opened there, the tabs the user lent it
+//!   ([`BrowserTabOwner`]) and, while [`BrowserConfig::share_tabs`] is on, the user's tabs (never
+//!   closing one), never another agent's; a tab the user locked ([`BrowserStatus::locked_tabs`])
+//!   stays on its page; browser-wide commands that would hurt the user or other agents are refused.
 //! * The bridge tool `use_user_browser` asks the user: the agent's board card carries the request
 //!   ([`AgentBrowser::request`]) and shows it as a needs-you question
 //!   ([`crate::model::NeedsYou::browser`]); `browser.answer` allows (attaches) or denies it.
@@ -122,7 +123,8 @@ wire_struct! {
 
 wire_struct! {
     /// A tab that is not plainly the user's: an agent opened it, or the user lent it to one. Tabs
-    /// missing from [`BrowserStatus::tabs`] are the user's, and no agent can see them.
+    /// missing from [`BrowserStatus::tabs`] are the user's: every attached agent can see and drive
+    /// them while [`BrowserStatus::share_tabs`] is on, no agent otherwise.
     pub struct BrowserTabOwner {
         /// DevTools target id of the tab's page.
         pub target_id: String,
@@ -181,9 +183,18 @@ wire_struct! {
         pub install: Option<BrowserInstall>,
         /// How many agents may be attached at once ([`BrowserConfig::cap`]).
         pub cap: u32,
+        /// Attached agents can use the user's tabs ([`BrowserConfig::share_tabs`]).
+        pub share_tabs: bool,
         pub attachments: Vec<BrowserAttachment>,
         pub requests: Vec<BrowserRequest>,
         pub tabs: Vec<BrowserTabOwner>,
+        /// Tabs the user locked to their page for agents (`browser.lockTab`), by the DevTools target
+        /// id of the tab's page: agents that may use one read it and click and type in it, but do
+        /// not navigate, reload or close it. Until unlocked or the tab closes (a browser restart
+        /// forgets them). Absent when none is locked, and from cores before 0.9.4.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<String>>", optional)]
+        pub locked_tabs: Vec<String>,
     }
 }
 
@@ -248,6 +259,17 @@ wire_struct! {
 }
 
 wire_struct! {
+    /// `browser.lockTab`: locks one of the tabs no agent opened (the user's own, or one they lent)
+    /// to its page for agents (`locked`), or unlocks it. Agents' tabs are not locked
+    /// (`invalid_params`).
+    pub struct BrowserLockParams {
+        /// DevTools target id of the tab's page ([`BrowserStatus::locked_tabs`]).
+        pub target_id: String,
+        pub locked: bool,
+    }
+}
+
+wire_struct! {
     /// Chrome for Testing as this app pins it: TeleFlock's own browser (`browser.installEngine`).
     pub struct BrowserDownload {
         pub version: String,
@@ -271,6 +293,10 @@ wire_struct! {
         pub headed: bool,
         /// Agents attached at once; more wait for a free slot (default 4).
         pub cap: u32,
+        /// Attached agents can see and drive the user's tabs (every tab no agent opened), besides
+        /// the tabs they open and the ones the user lends them; they never see each other's
+        /// (default true). Off: only their own and lent tabs.
+        pub share_tabs: bool,
         /// Engines found on this device, in the order they are preferred.
         pub engines: Vec<BrowserEngine>,
         pub download: BrowserDownload,
@@ -284,6 +310,8 @@ wire_struct! {
         pub headed: Option<bool>,
         /// 1–16.
         pub cap: Option<u32>,
+        /// Absent: true.
+        pub share_tabs: Option<bool>,
     }
 }
 
@@ -405,6 +433,7 @@ mod tests {
             blocked: None,
             install: None,
             cap: 4,
+            share_tabs: true,
             attachments: vec![BrowserAttachment {
                 host_id: "h".into(),
                 agent_id: "a".into(),
@@ -417,13 +446,22 @@ mod tests {
             }],
             requests: vec![],
             tabs: vec![],
+            locked_tabs: vec![],
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["state"], "running");
         assert_eq!(v["cdpPort"], 40123);
         assert_eq!(v["attachments"][0]["scope"], "turn");
         assert_eq!(v["attachments"][0]["hostPort"], 9300);
+        assert_eq!(v["shareTabs"], true);
         assert!(v.get("downloadDir").is_none(), "None fields are left out");
+        assert!(v.get("lockedTabs").is_none(), "no lock: left out, as older cores send it");
+        let locked = serde_json::to_value(BrowserStatus { locked_tabs: vec!["P1".into()], ..s.clone() }).unwrap();
+        assert_eq!(locked["lockedTabs"], serde_json::json!(["P1"]));
+        assert!(serde_json::from_value::<BrowserStatus>(v.clone()).unwrap().locked_tabs.is_empty(), "an older core's status reads as none locked");
+        let l: BrowserLockParams = serde_json::from_str(r#"{"targetId":"P1","locked":false}"#).unwrap();
+        assert_eq!(l, BrowserLockParams { target_id: "P1".into(), locked: false });
+        assert!(serde_json::from_str::<BrowserLockParams>(r#"{"targetId":"P1"}"#).is_err(), "locked is required");
         assert_eq!(v["engine"], serde_json::json!({ "name": "Chromium", "path": "/usr/bin/chromium" }), "false flags are left out");
         let chrome = BrowserEngine { name: "Google Chrome".into(), path: "/opt/google/chrome/chrome".into(), version: None, builtin: false, blocked: true };
         let download = BrowserDownload { version: "156.0.8078.80".into(), available: true, installed: false, size: Some(201_329_937) };
@@ -436,7 +474,9 @@ mod tests {
         let p: BrowserAttachParams = serde_json::from_str(r#"{"agentId":"a"}"#).unwrap();
         assert_eq!(p, BrowserAttachParams { agent_id: "a".into(), port: None, scope: None });
         let c: BrowserConfigSetParams = serde_json::from_str(r#"{"enginePath":null}"#).unwrap();
-        assert_eq!((c.engine_path, c.headed, c.cap), (None, None, None));
+        assert_eq!((c.engine_path, c.headed, c.cap, c.share_tabs), (None, None, None, None));
+        let c: BrowserConfigSetParams = serde_json::from_str(r#"{"shareTabs":false}"#).unwrap();
+        assert_eq!(c.share_tabs, Some(false));
         let w: BrowserClearParams = serde_json::from_str(r#"{"what":"everything"}"#).unwrap();
         assert_eq!(w.what, BrowserClearWhat::Everything);
         let b = AgentBrowser { request: Some(BrowserAsk { id: "r".into(), reason: "log in".into(), at: 5 }), attached: None };

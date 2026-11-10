@@ -149,6 +149,7 @@ function fakeTui() {
 		input: dialog("input", 2, undefined),
 		editor: dialog("editor", 2, undefined),
 		askDialog: dialog("askDialog", 1, undefined),
+		formDialog: dialog("formDialog", 1, undefined),
 		approve: dialog("approve", 1, "deny"),
 		setStatus: (_key: string, _text: string | undefined) => {},
 		notified: [] as unknown[][],
@@ -1074,8 +1075,8 @@ describe("extension against a fake hostd", () => {
 		const hostd = await startHostd();
 		const omp = await bridged(hostd);
 		const hello = hostd.lines.find(l => l.t === "hello")!;
-		expect(hello.bridgeVersion).toBe("2.4.0");
-		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true });
+		expect(hello.bridgeVersion).toBe("2.5.0");
+		expect(hello.caps).toMatchObject({ live: 1, dialogs: true, subagentCtl: false, prompt: true, shell: true });
 
 		const res = await request(hostd, "liveSubscribe");
 		expect(res.ok).toBe(true);

@@ -28,8 +28,16 @@ function pdfError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** The document from `blob`; mount it again (a `key`) for other bytes. */
-export function PdfView({ blob, caption, label }: { blob: Blob; caption: string; label: string }) {
+/** Review's frame: a fixed height, the same with or without a document in it. */
+const FRAME_H = "h-[min(70vh,760px)] max-md:h-[62vh]";
+/** `fill`: pages at most this wide (a full-screen viewer would otherwise draw them 1500 px wide). */
+const FILL_PAGE_MAX = 960;
+
+/**
+ * The document from `blob`; mount it again (a `key`) for other bytes. `fill`: it fills its parent
+ * (a bounded flex column, the session's document viewer) instead of Review's fixed height.
+ */
+export function PdfView({ blob, caption, label, fill = false }: { blob: Blob; caption: string; label: string; fill?: boolean }) {
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -61,8 +69,8 @@ export function PdfView({ blob, caption, label }: { blob: Blob; caption: string;
   }, [blob]);
   if (error) return <p className="rounded-md bg-well px-3 py-6 text-center text-xs text-mute">{error}</p>;
   return (
-    <figure className="flex flex-col gap-1.5">
-      {doc ? <Pages doc={doc} label={label} /> : <div className="h-[min(70vh,760px)] animate-pulse rounded-md bg-well max-md:h-[62vh]" aria-busy aria-label="Opening the PDF" />}
+    <figure className={cn("flex flex-col gap-1.5", fill && "min-h-0 flex-1")}>
+      {doc ? <Pages doc={doc} label={label} fill={fill} /> : <div className={cn("animate-pulse rounded-md bg-well", fill ? "min-h-0 flex-1" : FRAME_H)} aria-busy aria-label="Opening the PDF" />}
       <figcaption className="px-0.5 text-2xs text-mute tabular">
         {doc ? `${doc.numPages} ${doc.numPages === 1 ? "page" : "pages"} · ` : ""}
         {caption}
@@ -71,7 +79,7 @@ export function PdfView({ blob, caption, label }: { blob: Blob; caption: string;
   );
 }
 
-function Pages({ doc, label }: { doc: PDFDocumentProxy; label: string }) {
+function Pages({ doc, label, fill }: { doc: PDFDocumentProxy; label: string; fill: boolean }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [aspect, setAspect] = useState(LETTER);
@@ -82,12 +90,12 @@ function Pages({ doc, label }: { doc: PDFDocumentProxy; label: string }) {
     const el = frameRef.current;
     if (!el) return;
     // Pages fill the frame's width less its padding (24 px).
-    const fit = () => setWidth(Math.max(0, Math.floor(el.clientWidth - 24)));
+    const fit = () => setWidth(Math.max(0, Math.min(fill ? FILL_PAGE_MAX : Number.POSITIVE_INFINITY, Math.floor(el.clientWidth - 24))));
     fit();
     const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [fill]);
 
   useEffect(() => {
     let gone = false;
@@ -121,7 +129,7 @@ function Pages({ doc, label }: { doc: PDFDocumentProxy; label: string }) {
 
   return (
     <>
-      <div ref={frameRef} className="h-[min(70vh,760px)] overflow-auto overscroll-contain rounded-md bg-well p-3 max-md:h-[62vh]" tabIndex={0} aria-label={`${label}: ${doc.numPages} pages`}>
+      <div ref={frameRef} className={cn("overflow-auto overscroll-contain rounded-md bg-well p-3", fill ? "min-h-0 flex-1" : FRAME_H)} tabIndex={0} aria-label={`${label}: ${doc.numPages} pages`}>
         <div className="flex flex-col items-center gap-3">
           {width > 0 && Array.from({ length: doc.numPages }, (_, i) => <Page key={i} doc={doc} n={i + 1} width={width} fallback={aspect} root={frameRef} onOpen={(n) => void openPage(n)} />)}
         </div>

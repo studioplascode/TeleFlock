@@ -6,9 +6,10 @@
  * (`./browserAgents`). Allow attaches the agent (it opens a tab of its own a moment later), Deny
  * tells it no; an `agent.answer` of a request is answered here, as on a computer with the browser.
  * The cap queues allowed requests; detach, take over, hand back and lending change the tab owners
- * it reports; an "Allow once" attachment ends with the agent's turn. Engines, the Chrome for
- * Testing download (with Cancel), clearing data and the config are simulated: nothing touches
- * this computer.
+ * it reports; locking one of the user's tabs (or a lent one) for agents adds it to `lockedTabs`
+ * until it is unlocked or the browser stops or relaunches; an "Allow once" attachment ends with
+ * the agent's turn. Engines, the Chrome for Testing download (with Cancel), clearing data and the
+ * config are simulated: nothing touches this computer.
  *
  * Demo knob (the page's URL): `?demo&browser=blocked`: this computer's policy blocks remote control
  * of its browsers (Google Chrome and Chromium; Chrome for Testing reads a policy of its own). It
@@ -90,6 +91,8 @@ const DRIVE_MS = 2000;
 const BURST_MS = 12_000;
 /** A newly attached agent opens its first tab after this long. */
 const OPEN_TAB_MS = 2500;
+/** The user's window (`DEMO_BROWSER_TABS`): an agent's first tab opens there while the browser has its own window. */
+const USER_WINDOW = 1;
 const INSTALL_TICK_MS = 400;
 /** The page each agent opens first; others read the docs. */
 const FIRST_PAGE: Record<string, string> = { expenses: "https://mail.example.com/inbox" };
@@ -121,7 +124,7 @@ export class DemoBrowser {
   private headed = false;
   /** The engine it runs (`running`). */
   private engine: BrowserEngine | undefined;
-  private config: { enginePath?: string; headed: boolean; cap: number } = { headed: false, cap: CAP_DEFAULT };
+  private config: { enginePath?: string; headed: boolean; cap: number; shareTabs: boolean } = { headed: false, cap: CAP_DEFAULT, shareTabs: true };
   private cftInstalled = false;
   private install: BrowserInstall | undefined;
   /** The running download's Cancel, and whether it starts the browser when done (`installEngine {start}`). */
@@ -138,6 +141,8 @@ export class DemoBrowser {
   private readonly attaching = new Set<string>();
   private waiting: Waiting[] = [];
   private readonly owners = new Map<string, Owned>();
+  /** Tabs the user locked for agents (`browser.lockTab`): the proxy's locks. */
+  private readonly locked = new Set<string>();
   /** Every agent's last known name: a detached agent's tabs keep showing it. */
   private readonly names = new Map<string, string>();
   private starting: Promise<boolean> | null = null;
@@ -214,9 +219,11 @@ export class DemoBrowser {
       blocked: this.blocked,
       install: this.install,
       cap: this.config.cap,
+      shareTabs: this.config.shareTabs,
       attachments: this.attached.map((a) => ({ hostId: a.hostId, agentId: a.agentId, agentName: a.name, since: a.since, hostPort: a.hostPort, scope: a.scope, connections: running ? 1 : 0, activeAt: a.activeAt })),
       requests: this.requests(),
       tabs: this.tabs(),
+      lockedTabs: this.locked.size > 0 ? [...this.locked].sort() : undefined,
     };
   }
 
@@ -304,6 +311,9 @@ export class DemoBrowser {
       case "browser.lendTab":
         this.lend(str(p, "targetId"), str(p, "hostId"), str(p, "agentId"));
         break;
+      case "browser.lockTab":
+        this.lock(str(p, "targetId"), p.locked);
+        break;
       default:
         throw apiError("unknown_method", `Unknown app method ${method}`);
     }
@@ -357,6 +367,8 @@ export class DemoBrowser {
     const gen = ++this.gen;
     this.run = "starting";
     this.headed = headed;
+    // A new browser process: its tabs' locks are gone (tf-client's proxy forgets them).
+    this.locked.clear();
     this.blocked = undefined;
     this.message = undefined;
     this.emit();
@@ -423,6 +435,7 @@ export class DemoBrowser {
     this.gen++;
     this.starting = null;
     this.waiting = [];
+    this.locked.clear();
     for (const a of [...this.attached]) this.detach(a.hostId, a.agentId);
     this.run = "off";
     this.engine = undefined;
@@ -508,13 +521,16 @@ export class DemoBrowser {
     return false;
   }
 
-  /** The agent opens a tab of its own, in a window of its own (its browser tool's first `open`). */
+  /**
+   * The agent opens a tab of its own (its browser tool's first `open`): headless in a window of its
+   * own, in its own window (headed) as a tab of the user's window, in front.
+   */
   private openTabSoon(hostId: string, agentId: string): void {
     this.env.clock.after(OPEN_TAB_MS, () => {
       if (this.run !== "running" || !this.isAttached(hostId, agentId) || this.ownsTab(hostId, agentId)) return;
       const targetId = `demo-tab-${agentId}-${++this.tabSeq}`;
       this.owners.set(targetId, { hostId, agentId, lent: false, takenOver: false, activeAt: this.env.clock.now() });
-      openDemoAgentTab({ targetId, url: FIRST_PAGE[agentId] ?? "https://docs.example.com/guide", window: this.nextWindow++, owner: { hostId, agentId } });
+      openDemoAgentTab({ targetId, url: FIRST_PAGE[agentId] ?? "https://docs.example.com/guide", window: this.headed ? USER_WINDOW : this.nextWindow++, owner: { hostId, agentId } });
       this.emit();
     });
   }
@@ -612,10 +628,23 @@ export class DemoBrowser {
     this.owners.set(targetId, { hostId, agentId, lent: true, takenOver: false });
   }
 
+  /** A tab no agent opened (the user's, or one they lent) stays on its page for agents, or (`locked` false) no longer. */
+  private lock(targetId: string, locked: unknown): void {
+    this.mustRun();
+    if (typeof locked !== "boolean") throw apiError("invalid_params", "missing locked");
+    if (!locked) {
+      this.locked.delete(targetId);
+      return;
+    }
+    const o = this.owners.get(targetId);
+    if (o && !o.lent) throw apiError("invalid_params", "An agent opened this tab: only your own tabs, and the ones you lend, can be locked.");
+    this.locked.add(targetId);
+  }
+
   // ---------------------------------------------------------------- engines and config
 
   private configView(): BrowserConfig {
-    return { enginePath: this.config.enginePath, headed: this.config.headed, cap: this.config.cap, engines: this.engines(), download: this.ownDownload() };
+    return { enginePath: this.config.enginePath, headed: this.config.headed, cap: this.config.cap, shareTabs: this.config.shareTabs, engines: this.engines(), download: this.ownDownload() };
   }
 
   /** `browser.configSet` replaces the saved config: absent fields are the defaults. */
@@ -624,7 +653,7 @@ export class DemoBrowser {
     if (enginePath && !runnable(enginePath)) throw apiError("invalid_params", `${enginePath} is not a program on this computer`);
     const cap = typeof p.cap === "number" ? p.cap : CAP_DEFAULT;
     if (!Number.isInteger(cap) || cap < 1 || cap > CAP_MAX) throw apiError("invalid_params", `cap: 1 to ${CAP_MAX} agents`);
-    this.config = { enginePath, headed: p.headed === true, cap };
+    this.config = { enginePath, headed: p.headed === true, cap, shareTabs: p.shareTabs !== false };
     this.admitWaiting();
     this.emit();
     return this.configView();

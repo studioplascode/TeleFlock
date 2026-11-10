@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 /**
- * AskFlow lab mock model provider (`e2e_askflow.rs`) for omp 18.13.x: OpenAI chat-completions as
+ * AskFlow lab mock model provider (`e2e_askflow.rs`) for omp ≥ 18.18: OpenAI chat-completions as
  * omp's `openai-completions` client speaks it (POST /v1/chat/completions, `stream: true`, SSE
  * `chat.completion.chunk`s, a finish chunk, a usage chunk, `data: [DONE]`). Never calls anything.
  *
  * Stateless: a conversation whose first user message holds `ASKFLOW-LAB` gets one assistant message
- * that explains (Markdown text) and then calls omp's `ask` tool with three questions (a single
- * choice, a multi-select, a single choice); once the tool result is in the history it answers
- * `ASKFLOW-LAB done: <result>`. Every other request (titles, side calls) gets a short text.
+ * that explains (Markdown text) and then calls omp's `ask` tool with one HTML form of three fields
+ * (a radio group with a preselected option, checkboxes, a text input) under a short intro; once the
+ * tool result is in the history it answers `ASKFLOW-LAB done: <result>`. Every other request
+ * (titles, side calls) gets a short text.
  *
  * Port 127.0.0.1:18759 (`MOCK_PORT`). Log: `MOCK_LOG`, else `$HOME/askflow-mock.log`.
  */
@@ -31,28 +32,22 @@ const EXPLANATION = [
 	"Three things decide the setup, so I am asking them together.",
 ].join("\n");
 
-const QUESTIONS = [
-	{
-		id: "store",
-		question: "Which store should the lab app use?",
-		options: [
-			{ label: "SQLite", description: "One file, nothing to run" },
-			{ label: "Postgres", description: "A server to run" },
-		],
-		recommended: 0,
-	},
-	{
-		id: "features",
-		question: "Which features ship first?",
-		options: [{ label: "Auth" }, { label: "Search" }, { label: "Billing" }],
-		multi: true,
-	},
-	{
-		id: "deploy",
-		question: "Where does it deploy?",
-		options: [{ label: "Fly" }, { label: "Render" }],
-	},
-];
+/** omp's ask takes one HTML form (omp ≥ 18.18 `tools/ask.ts`). */
+const FORM = `<form>
+  <p>Three things decide the setup.</p>
+  <fieldset>
+    <legend>Which store should the lab app use?</legend>
+    <label><input type="radio" name="store" value="sqlite" checked> SQLite: one file, nothing to run</label>
+    <label><input type="radio" name="store" value="postgres"> Postgres: a server to run</label>
+  </fieldset>
+  <fieldset>
+    <legend>Which features ship first?</legend>
+    <label><input type="checkbox" name="features" value="auth"> Auth</label>
+    <label><input type="checkbox" name="features" value="search"> Search</label>
+    <label><input type="checkbox" name="features" value="billing"> Billing</label>
+  </fieldset>
+  <label>Where does it deploy? <input type="text" name="deploy" placeholder="host and region"></label>
+</form>`;
 
 type Json = Record<string, any>;
 
@@ -79,7 +74,7 @@ function decide(body: Json): Decision {
 	if (!prompt.includes("ASKFLOW-LAB") || !tools.includes("ask")) return { kind: "side", text: "Lab task" };
 	const askCall = messages.flatMap(msg => (msg.role === "assistant" && Array.isArray(msg.tool_calls) ? msg.tool_calls : [])).find((c: Json) => c?.function?.name === "ask");
 	if (!askCall) {
-		return { kind: "ask", text: EXPLANATION, call: { id: `call_ask_${Date.now().toString(36)}`, name: "ask", args: { questions: QUESTIONS } } };
+		return { kind: "ask", text: EXPLANATION, call: { id: `call_ask_${Date.now().toString(36)}`, name: "ask", args: { html: FORM } } };
 	}
 	const result = messages.find(msg => msg.role === "tool" && msg.tool_call_id === askCall.id);
 	return { kind: "done", text: `ASKFLOW-LAB done: ${textOf(result?.content).replace(/\s+/g, " ").trim()}` };

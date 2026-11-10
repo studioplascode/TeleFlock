@@ -83,8 +83,19 @@ import type {
  *         boundary: the session's steering mode is "all" (runtime only, never saved) unless the user
  *         set omp's `steeringMode`. The queue comes from the AgentSession (`getQueuedMessages`), not
  *         the TUI band, and a change goes to hostd at once.
+ *  2.5.0: (no flag) omp ≥ 18.18's ask tool asks with one HTML form (`formDialog`): the form reaches
+ *         hostd field by field like an ask's questions (`nav`, Back), each dialog with `about`, the
+ *         form's text before the field; a radio's checked option carries omp's ` (Recommended)`.
+ *         (no flag) `present` also shows Mermaid diagrams, PDFs, audio, video and any other file
+ *         (kinds `mermaid`, `pdf`, `audio`, `video`, `file`); binary snapshots up to 64 MiB.
+ *         (no flag) `use_user_browser` says to use the agent's own browser unless the task needs the
+ *         user's signed-in session, and its result that the user's own tabs may be shared.
+ *         - `shell`: `shell {text}` runs one of omp's quick commands (`!cmd`, `!!cmd`, `$ code`,
+ *           `$$ code`) through omp's TUI composer, and every run the user starts (from TeleFlock or
+ *           the TUI) goes out at once as a live `message_end` of omp's `bashExecution` /
+ *           `pythonExecution` message.
  */
-const BRIDGE_VERSION = "2.4.0";
+const BRIDGE_VERSION = "2.5.0";
 const PROTOCOL = 1;
 const RETRY_MS = 5_000;
 const TICK_MS = 1_000;
@@ -300,7 +311,9 @@ interface BridgeSlot {
 	 *  the asking session), `browserTurnEnded`: a subagent's copy says its session's turn ended (an
 	 *  "Allow once" it asked for ends with it), `ompDialog`: the process's wrappers on omp's
 	 *  ExtensionUiController hand it each dialog (installOmpDialogWrappers), and `irc`: the
-	 *  process's IRC tap (installIrcTap) hands it every leg omp's IRC bus sends. */
+	 *  process's IRC tap (installIrcTap) hands it every leg omp's IRC bus sends. 2.5.0 owners add
+	 *  `userRun`: the process's run tap (installUserRunTap) hands it each `!` / `$` run omp records,
+	 *  with the AgentSession it ran in. */
 	owners: Record<
 		string,
 		{
@@ -313,6 +326,7 @@ interface BridgeSlot {
 			browserTurnEnded?(session: string, idle?: Promise<unknown>): void;
 			ompDialog?(name: OmpDialogMethod, original: AnyFn, self: unknown, args: unknown[]): unknown;
 			irc?(leg: IrcLeg): void;
+			userRun?(message: Json, session: unknown): void;
 		}
 	>;
 	/** The session command context, stored by whichever copy's /teleflock-control handler omp ran. */
@@ -1234,6 +1248,7 @@ type WireSelectItem = string | { label: string; description?: string };
  *  previous question (from the second on), and the `answer` it already has (option labels as shown,
  *  the "Other" text). */
 export type AskNav = { index: number; total: number; back?: string; answer?: { choices: string[]; text?: string } };
+/** 2.5.0: `about` (TeleFlock's addition too): the text of an ask form that leads to the field, as Markdown. */
 export type DialogDraft =
 	| {
 			kind: "select";
@@ -1245,8 +1260,9 @@ export type DialogDraft =
 			markableCount?: number;
 			helpText?: string;
 			nav?: AskNav;
+			about?: string;
 	  }
-	| { kind: "editor"; title: string; prefill?: string; nav?: AskNav };
+	| { kind: "editor"; title: string; prefill?: string; nav?: AskNav; about?: string };
 export type DialogRequest = DialogDraft & { reqId: number };
 /** `answered` carries hostd's value (`undefined` is an explicit cancel); `unavailable` means no answer
  *  will come (the dialog was settled locally, aborted, or this bridge stood down). */
@@ -1582,19 +1598,21 @@ export async function runGuestAsk(hub: DialogHub, questions: AskQuestion[], sign
 	return { kind: "submit", results: answers as AskResultItem[] };
 }
 
-/** omp's ask dialog (`local`) against the guest flow above (omp's `showAskDialog`). */
-export async function raceAsk<T>(
-	hub: DialogHub,
-	questions: unknown,
+/**
+ * omp's dialog (`local`) against a guest flow of hostd dialogs (`remote`), as omp races its collab
+ * guests: the first to finish wins and aborts the other; a flow that gets no answer (`unavailable`)
+ * leaves the decision to omp's dialog.
+ */
+async function raceFlow<T, R>(
 	signal: AbortSignal | undefined,
 	local: (signal: AbortSignal) => T | Promise<T>,
-): Promise<T | AskResult | undefined> {
-	const normalized = normalizeAskQuestions(questions);
+	remote: (signal: AbortSignal) => Promise<R | "unavailable">,
+): Promise<T | R> {
 	const localAbort = new AbortController();
 	const remoteAbort = new AbortController();
-	type Winner = { source: "local" | "remote"; value: T | AskResult | undefined };
+	type Winner = { source: "local"; value: T } | { source: "remote"; value: R };
 	const localWinner = attempt(() => local(anySignal(signal, localAbort.signal))).then((value): Winner => ({ source: "local", value }));
-	const remoteWinner = runGuestAsk(hub, normalized, anySignal(signal, remoteAbort.signal)).then(
+	const remoteWinner = remote(anySignal(signal, remoteAbort.signal)).then(
 		(result): Winner | Promise<Winner> => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
 	);
 	localWinner.catch(() => {});
@@ -1609,6 +1627,340 @@ export async function raceAsk<T>(
 		remoteAbort.abort();
 		throw err;
 	}
+}
+
+/** omp's ask dialog (`local`) against the guest flow above (omp's `showAskDialog`). */
+export function raceAsk<T>(
+	hub: DialogHub,
+	questions: unknown,
+	signal: AbortSignal | undefined,
+	local: (signal: AbortSignal) => T | Promise<T>,
+): Promise<T | AskResult | undefined> {
+	const normalized = normalizeAskQuestions(questions);
+	return raceFlow(signal, local, s => runGuestAsk(hub, normalized, s));
+}
+
+// ─── 2.5.0: the ask tool's HTML form (omp ≥ 18.18, `formDialog`) ─────────────────────────────────
+// omp's ask tool asks with one HTML <form> (`tools/ask.ts`) through the UI context's `formDialog`,
+// which omp mirrors to its collab guests one field at a time (extension-ui-controller
+// `showFormDialog`). The bridge offers it to hostd the same way, shaped like the ask dialog's
+// questions above, so every TeleFlock surface answers a form as it answers an ask: each named field
+// in order; a choice is a select (radio; checkboxes a loop toggling one label per round, "Next →" once
+// it may end) with "Other (type your own)" and its "Custom answer:" editor where the form lets the
+// user type their own; a text field is an editor prefilled with its value, asked again with omp's
+// error while the answer is invalid. A form of several fields carries `nav` (Back, as an ask's
+// questions do), and every field `about`: the form's text before it (its intro, legends, notes,
+// lists, tables) as Markdown. A radio's checked option is the agent's recommendation (omp tells the
+// model to preselect it) and carries omp's ` (Recommended)` mark. The result is omp's `{data}`
+// (hidden fields included); a cancel ends the ask as omp's Esc does (`undefined`).
+
+/** A run of text in omp's parsed form (`@oh-my-pi/pi-tui/html-form/parse`). */
+export interface FormSpan {
+	text: string;
+	style?: string;
+}
+export interface FormOption {
+	value: string;
+	label: FormSpan[];
+	checked?: boolean;
+	disabled?: boolean;
+}
+export interface FormChoiceField {
+	kind: "choice";
+	name: string;
+	label: FormSpan[];
+	multi: boolean;
+	/** A `<select>` (omp offers no "Other" there). */
+	select?: boolean;
+	/** The user may type an answer of their own ("Other"). */
+	other?: boolean;
+	required?: boolean;
+	options: FormOption[];
+}
+export interface FormTextField {
+	kind: "text";
+	name: string;
+	label: FormSpan[];
+	type?: string;
+	multiline?: boolean;
+	value: string;
+	required?: boolean;
+}
+export type FormField = FormChoiceField | FormTextField;
+export type FormBlock =
+	| { kind: "text"; spans: FormSpan[]; heading?: boolean }
+	| { kind: "pre"; text: string }
+	| { kind: "list"; items: FormSpan[][]; ordered?: boolean }
+	| { kind: "table"; rows: FormSpan[][][]; headerRows?: number }
+	| { kind: "image"; src: string; alt: string }
+	| { kind: "svg"; markup: string; alt: string }
+	| { kind: "field"; field: FormField };
+/** omp's parsed form (`parseHtmlForm`): its sections in order, every control, the hidden inputs. */
+export interface FormSpec {
+	sections: Array<{ title: FormSpan[]; blocks: FormBlock[] }>;
+	fields: FormField[];
+	hidden: Array<[string, string]>;
+}
+/** omp's html-form functions (`@oh-my-pi/pi-tui/html-form/{parse,data}`), which define the form's answers. */
+export interface FormKit {
+	parse(html: string): FormSpec;
+	/** `fieldQuestions`: each field's question as omp shows it. */
+	questions(form: FormSpec): ReadonlyMap<FormField, string>;
+	/** `choiceValue`: what a choice submits for the ticked option indices and the "Other" text. */
+	choiceValue(field: FormChoiceField, checked: ReadonlySet<number>, other?: string): unknown;
+	/** `textValue`: what a text field submits (a number for number and range inputs). */
+	textValue(field: FormTextField, text: string): unknown;
+	/** `fieldError`: why the value is no answer, else `undefined`. */
+	fieldError(field: FormField, value: unknown): string | undefined;
+}
+export type FormResult = { data: Record<string, unknown> };
+
+/** omp's mark on a select's recommended option (`addRecommendedSuffix`); hostd shows it as ★. */
+const RECOMMENDED_SUFFIX = " (Recommended)";
+/** A field's `about` before hostd bounds it (hostd keeps the end, nearest the question). */
+const FORM_ABOUT_MAX = 16 * 1024;
+
+const spansText = (spans: readonly FormSpan[]): string => spans.map(s => s.text).join("");
+
+/** Form text as Markdown: bold, italics and code kept, line breaks as hard breaks. */
+function spansMarkdown(spans: readonly FormSpan[]): string {
+	return spans
+		.map(({ text, style }) => {
+			const core = text.trim();
+			if (!core || (style !== "strong" && style !== "em" && style !== "code")) return text;
+			const lead = text.slice(0, text.length - text.trimStart().length);
+			const trail = text.slice(text.trimEnd().length);
+			const mark = style === "strong" ? "**" : style === "em" ? "*" : core.includes("`") ? "``" : "`";
+			const pad = mark === "``" ? " " : "";
+			return `${lead}${mark}${pad}${core}${pad}${mark}${trail}`;
+		})
+		.join("")
+		.replace(/\n/g, "  \n");
+}
+
+/** A block of the form as Markdown, and as plain text (to tell it apart from a field's question). */
+function blockMarkdown(block: Exclude<FormBlock, { kind: "field" }>): { md: string; plain: string } {
+	switch (block.kind) {
+		case "text": {
+			const plain = spansText(block.spans).trim();
+			return { md: block.heading ? `**${spansMarkdown(block.spans).trim()}**` : spansMarkdown(block.spans).trim(), plain };
+		}
+		case "pre": {
+			const fence = block.text.includes("```") ? "~~~" : "```";
+			return { md: block.text.trim() ? `${fence}\n${block.text}\n${fence}` : "", plain: block.text.trim() };
+		}
+		case "list":
+			return {
+				md: block.items.map((item, i) => `${block.ordered ? `${i + 1}.` : "-"} ${spansMarkdown(item).trim()}`).join("\n"),
+				plain: block.items.map(spansText).join(" "),
+			};
+		case "table": {
+			const cell = (spans: FormSpan[]): string => spansMarkdown(spans).replace(/ {2}\n/g, " ").replace(/\|/g, "\\|").trim();
+			const rows = block.rows.map(row => row.map(cell));
+			const width = Math.max(0, ...rows.map(r => r.length));
+			if (width === 0) return { md: "", plain: "" };
+			const line = (r: string[]): string => `| ${Array.from({ length: width }, (_, i) => r[i] ?? "").join(" | ")} |`;
+			const [head = [], ...body] = rows;
+			return { md: [line(head), `|${" --- |".repeat(width)}`, ...body.map(line)].join("\n"), plain: "" };
+		}
+		case "image":
+		case "svg":
+			return { md: block.alt ? `*${block.alt}*` : "", plain: block.alt };
+	}
+}
+
+/**
+ * The form's text that leads to each named field, as Markdown: what came after the previous field
+ * (the form's intro for the first), its section's title when it is not the field's question, and
+ * for the last field what follows it. A block that only repeats the field's question is left out.
+ */
+export function formAbout(form: FormSpec, questions: ReadonlyMap<FormField, string>): Map<FormField, string> {
+	const out = new Map<FormField, string>();
+	const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
+	let pending: Array<{ md: string; plain: string }> = [];
+	let last: FormField | undefined;
+	for (const section of form.sections) {
+		const plainTitle = flat(spansText(section.title));
+		const title = plainTitle ? { md: `**${spansMarkdown(section.title).trim()}**`, plain: plainTitle } : undefined;
+		if (title) pending.push(title);
+		for (const block of section.blocks) {
+			if (block.kind !== "field") {
+				const b = blockMarkdown(block);
+				if (b.md) pending.push(b);
+				continue;
+			}
+			const field = block.field;
+			if (!field.name) continue;
+			const question = flat(questions.get(field) ?? field.name);
+			// Every field of a section reads under its title.
+			const chunks = title && !pending.includes(title) ? [title, ...pending] : pending;
+			const md = chunks
+				.filter(c => flat(c.plain) !== question)
+				.map(c => c.md)
+				.join("\n\n");
+			if (md) out.set(field, md.slice(-FORM_ABOUT_MAX));
+			pending = [];
+			last = field;
+		}
+	}
+	if (last && pending.length > 0) {
+		const tail = pending.map(c => c.md).join("\n\n");
+		const own = out.get(last);
+		out.set(last, (own ? `${own}\n\n${tail}` : tail).slice(-FORM_ABOUT_MAX));
+	}
+	return out;
+}
+
+/** A field's answer so far: the ticked options (indices into its options), the "Other" text, the typed text. */
+interface FormFieldState {
+	checked: Set<number>;
+	other?: string;
+	text?: string;
+}
+type FormFieldAnswer = { state: FormFieldState; value: unknown } | { back: FormFieldState } | "cancelled" | "unavailable";
+
+/** One field of an ask form as hostd's dialogs, from the answer it already has (Back reopens it so). */
+async function guestFormField(
+	hub: DialogHub,
+	kit: FormKit,
+	field: FormField,
+	question: string,
+	extra: { nav?: AskPlace; about?: string },
+	earlier: FormFieldState | undefined,
+	signal: AbortSignal,
+): Promise<FormFieldAnswer> {
+	const state: FormFieldState = { checked: new Set(earlier?.checked ?? []), other: earlier?.other, text: earlier?.text };
+	const place = extra.nav;
+	const canBack = place !== undefined && place.index > 0;
+	const isBack = (value: string): boolean => canBack && value === ASK_BACK;
+	const about = extra.about ? { about: extra.about } : {};
+	if (field.kind === "text") {
+		let prefill = state.text ?? field.value;
+		let error: string | undefined;
+		for (;;) {
+			const nav = place ? { nav: { index: place.index, total: place.total, ...(canBack ? { back: ASK_BACK } : {}), ...(state.text !== undefined ? { answer: { choices: [], text: state.text } } : {}) } } : {};
+			const draft: DialogDraft = { kind: "editor", title: error ? `${question} (${error})` : question, ...(prefill ? { prefill } : {}), ...nav, ...about };
+			const input = await requestString(hub, draft, signal);
+			if (input.kind !== "answered") return input.kind;
+			if (isBack(input.value)) return { back: { ...state, text: prefill } };
+			const typed = field.multiline ? input.value : input.value.replace(/[\r\n]+/g, " ");
+			const value = kit.textValue(field, typed);
+			error = kit.fieldError(field, value);
+			if (!error) return { state: { ...state, text: typed }, value };
+			prefill = typed;
+		}
+	}
+	const enabled = field.options.flatMap((o, i) => (o.disabled ? [] : [i]));
+	// The agent's picks (omp: preselect your recommendation): a radio group's or checkboxes' checked
+	// options, not a `<select>`'s (omp preselects its first option when the form names none). A
+	// single choice opens on its preselected option, a `<select>`'s too.
+	const marked = new Set(field.select ? [] : enabled.flatMap((i, at) => (field.options[i]!.checked ? [at] : [])));
+	const preselected = field.multi ? -1 : enabled.findIndex(i => field.options[i]!.checked);
+	const raw = enabled.map((i, at) => {
+		const o = field.options[i]!;
+		const label = sanitizeCR(spansText(o.label).replace(/\s+/g, " ").trim() || o.value);
+		return marked.has(at) ? `${label}${RECOMMENDED_SUFFIX}` : label;
+	});
+	const labels = displayLabels(raw, [ASK_OTHER, ASK_CHAT, ASK_NEXT, ASK_BACK]);
+	const optionOf = (value: string): number | undefined => {
+		const at = labels.indexOf(value);
+		return at >= 0 ? enabled[at] : undefined;
+	};
+	const customTitle = `${CUSTOM_ANSWER}${question}`.replace(/\s+/g, " ").trim();
+	const nav = (): { nav?: AskNav } => {
+		if (!place) return {};
+		const choices = labels.filter((_, at) => state.checked.has(enabled[at]!));
+		const answer = choices.length > 0 || state.other !== undefined ? { answer: { choices, ...(state.other !== undefined ? { text: state.other } : {}) } } : {};
+		return { nav: { index: place.index, total: place.total, ...(canBack ? { back: ASK_BACK } : {}), ...answer } };
+	};
+	const done = (): FormFieldAnswer => ({ state, value: kit.choiceValue(field, state.checked, state.other) });
+	/** The "Other" editor: the typed text, `retry` (cancelled or blank: the select again), or how the field ends. */
+	const other = async (): Promise<{ text: string } | "retry" | { end: FormFieldAnswer }> => {
+		const input = await requestString(hub, { kind: "editor", title: customTitle, ...(state.other !== undefined ? { prefill: state.other } : {}), ...nav(), ...about }, signal);
+		if (input.kind === "unavailable") return { end: "unavailable" };
+		if (input.kind === "cancelled") return "retry";
+		if (isBack(input.value)) return { end: { back: state } };
+		const text = input.value.replace(/[\r\n]+/g, " ");
+		return text.trim() ? { text } : "retry";
+	};
+	for (;;) {
+		const ticked = enabled.flatMap((i, at) => (state.checked.has(i) ? [at] : []));
+		const mayEnd = !field.required || state.checked.size > 0 || state.other !== undefined;
+		const options = [...labels, ...(field.other ? [ASK_OTHER] : []), ...(field.multi && mayEnd ? [ASK_NEXT] : [])];
+		const initialIndex = state.other !== undefined ? labels.length : Math.max(0, ticked[ticked.length - 1] ?? preselected);
+		const choice = await requestString(
+			hub,
+			field.multi
+				? { kind: "select", title: question, options, selectionMarker: "checkbox", checkedIndices: ticked, markableCount: labels.length, helpText: askHelpText("toggle", mayEnd ? "Next → continue  " : ""), ...nav(), ...about }
+				: { kind: "select", title: question, options, initialIndex, selectionMarker: "radio", markableCount: labels.length, helpText: askHelpText("select"), ...nav(), ...about },
+			signal,
+		);
+		if (choice.kind !== "answered") return choice.kind;
+		if (isBack(choice.value)) return { back: state };
+		if (field.multi && choice.value === ASK_NEXT) return done();
+		if (field.other && choice.value === ASK_OTHER) {
+			const typed = await other();
+			if (typed === "retry") continue;
+			if ("end" in typed) return typed.end;
+			// As the ask dialog's "Other": the typed text ends the question (with a multi-select's ticks).
+			if (!field.multi) state.checked.clear();
+			state.other = typed.text;
+			return done();
+		}
+		const picked = optionOf(choice.value);
+		if (picked === undefined) continue;
+		if (field.multi) {
+			if (!state.checked.delete(picked)) state.checked.add(picked);
+			continue;
+		}
+		state.checked = new Set([picked]);
+		state.other = undefined;
+		return done();
+	}
+}
+
+/** The guest side of an ask form, field by field, Back included; `unavailable` when no answer came,
+ *  `undefined` when it was cancelled. */
+export async function runGuestForm(hub: DialogHub, kit: FormKit, form: FormSpec, signal: AbortSignal): Promise<FormResult | "unavailable" | undefined> {
+	const questions = kit.questions(form);
+	const about = formAbout(form, questions);
+	// The fields omp asks (a choice with nothing to pick and nothing to type has no answer).
+	const asked = form.fields.filter(f => f.name && (f.kind === "text" || f.other === true || f.options.some(o => !o.disabled)));
+	const states = new Map<FormField, FormFieldState>();
+	const values = new Map<FormField, unknown>();
+	let index = 0;
+	while (index < asked.length) {
+		const field = asked[index]!;
+		const question = sanitizeCR(questions.get(field) ?? field.name).replace(/\s+/g, " ").trim() || field.name;
+		const nav = asked.length > 1 ? { index, total: asked.length } : undefined;
+		const answer = await guestFormField(hub, kit, field, question, { nav, about: about.get(field) }, states.get(field), signal);
+		if (answer === "unavailable") return "unavailable";
+		if (answer === "cancelled") return undefined;
+		if ("back" in answer) {
+			states.set(field, answer.back);
+			index = Math.max(0, index - 1);
+			continue;
+		}
+		states.set(field, answer.state);
+		values.set(field, answer.value);
+		index += 1;
+	}
+	// No prototype: a field named `__proto__` is a field like any other.
+	const data = Object.create(null) as Record<string, unknown>;
+	for (const [name, value] of form.hidden) data[name] = value;
+	for (const field of asked) {
+		const value = values.get(field);
+		if (value !== undefined) data[field.name] = value;
+	}
+	return { data };
+}
+
+/** omp's form dialog (`local`) against the guest flow above; `undefined` when the form has no field
+ *  hostd could answer (omp's dialog runs alone then). */
+export function raceForm<T>(hub: DialogHub, kit: FormKit, html: string, signal: AbortSignal | undefined, local: (signal: AbortSignal) => T | Promise<T>): Promise<T | FormResult | undefined> | undefined {
+	const form = kit.parse(html);
+	if (!form.fields.some(f => f.name)) return undefined;
+	return raceFlow(signal, local, s => runGuestForm(hub, kit, form, s));
 }
 
 /** omp's approval prompt (`ExtensionApprovalPrompt`) and answer, and its select-menu mapping
@@ -1650,7 +2002,7 @@ export const fallbackApproval: ApprovalLabels = {
 	},
 };
 
-export const DIALOG_MEMBERS = ["askDialog", "approve", "select", "editor", "confirm", "input"] as const;
+export const DIALOG_MEMBERS = ["askDialog", "formDialog", "approve", "select", "editor", "confirm", "input"] as const;
 export type DialogMember = (typeof DIALOG_MEMBERS)[number];
 type AnyFn = (this: unknown, ...args: unknown[]) => unknown;
 const DIALOG_WRAP = Symbol.for("teleflock.bridge.dialogWrap");
@@ -1813,9 +2165,10 @@ const keepsLocal = (opts: Json | undefined): boolean => opts?.secret === true ||
 
 /**
  * One wrapped dialog call: hostd's draft for `name` and the race (omp's collab mirroring for
- * select / editor / approve / ask, the same select / editor mapping for confirm and input, which
- * omp keeps local). `undefined` when the arguments are not what omp passes, or the dialog stays in
- * the TUI ({@link keepsLocal}): the caller runs the original alone.
+ * select / editor / approve / ask / form, the same select / editor mapping for confirm and input,
+ * which omp keeps local). `undefined` when the arguments are not what omp passes, the dialog stays in
+ * the TUI ({@link keepsLocal}), or a form comes without omp's form functions (`form`): the caller
+ * runs the original alone.
  */
 export function raceMember(
 	hub: DialogHub,
@@ -1824,6 +2177,7 @@ export function raceMember(
 	self: unknown,
 	args: unknown[],
 	approval: ApprovalLabels,
+	form?: FormKit,
 ): Promise<unknown> | undefined {
 	const optsAt = (i: number): Json | undefined => {
 		const arg = args[i];
@@ -1876,6 +2230,11 @@ export function raceMember(
 			const [questions] = args;
 			if (!Array.isArray(questions)) return undefined;
 			return raceAsk(hub, questions, signalAt(1), local(1));
+		}
+		case "formDialog": {
+			const [html] = args;
+			if (typeof html !== "string" || !form) return undefined;
+			return raceForm(hub, form, html, signalAt(1), local(1));
 		}
 	}
 }
@@ -2323,6 +2682,101 @@ async function probeIrcTap(ns: Record<string, unknown>, load: (mod: Promise<unkn
 	return isObj(proto) && installIrcTap(proto);
 }
 
+// ─── 2.5.0: omp's quick commands (`caps.shell`) ────────────────────────────────────────────────
+// In omp's TUI a line `!<cmd>` runs a shell command and adds its output to the context, `!!<cmd>`
+// runs it without, `$ <code>` runs Python in omp's eval kernel (unless the code reads as a shell
+// command) and `$$ <code>` without adding it (input-controller.ts). TeleFlock submits them through
+// omp's TUI composer (`shell`), so omp runs them exactly as if typed there, and the run tap sends
+// every run the user starts, from either side, to hostd as soon as omp records it.
+
+/** omp's shell-command look for a `$` line (input-controller.ts): such code goes to the model as text. */
+const SHELL_LIKE_START = /^(?:\.{0,2}\/|~\/|cd(?:\s|$)|sudo(?:\s|$)|git(?:\s|$)|bun(?:\s|$)|npm(?:\s|$)|pnpm(?:\s|$)|yarn(?:\s|$)|node(?:\s|$)|python\d*(?:\s|$)|cargo(?:\s|$)|go(?:\s|$)|make(?:\s|$)|docker(?:\s|$)|kubectl(?:\s|$))/;
+const SHELL_LIKE_OPERATOR = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/;
+const STATS_LINE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
+
+/** The quick command `text` is to omp's TUI (its text trimmed first, as omp does), else `undefined`
+ *  (an ordinary message). */
+export function quickCommand(text: string): { kind: "bash" | "python"; excluded: boolean; code: string } | undefined {
+	const t = text.trim();
+	if (t.startsWith("!")) {
+		const excluded = t.startsWith("!!");
+		const code = t.slice(excluded ? 2 : 1).trim();
+		return code ? { kind: "bash", excluded, code } : undefined;
+	}
+	if (!t.startsWith("$")) return undefined;
+	const prefix = t.startsWith("$$") ? 2 : 1;
+	if (!/[ \t\n\r]/.test(t.charAt(prefix))) return undefined;
+	const code = t.slice(prefix).trim();
+	if (!code) return undefined;
+	const first = code.split("\n", 1)[0]!.trimStart();
+	if (prefix === 1 && (SHELL_LIKE_START.test(first) || SHELL_LIKE_OPERATOR.test(first) || STATS_LINE.test(code))) return undefined;
+	return { kind: "python", excluded: prefix === 2, code };
+}
+
+const USER_RUN_WRAP = Symbol.for("teleflock.bridge.userRun");
+
+/** Hands a recorded run to the bridge copy of every hostd endpoint (`owners[…].userRun`, 2.5.0 owners). */
+function runToOwners(message: Json, session: unknown): void {
+	for (const owner of Object.values(bridgeSlot().owners)) {
+		try {
+			owner.userRun?.(message, session);
+		} catch {
+			// a copy's handler
+		}
+	}
+}
+
+/**
+ * Reports every run the user starts (omp's `executeBash` / `executePython` on `proto`, omp's
+ * AgentSession prototype: the `!` and `$` quick commands, typed in the TUI or submitted by TeleFlock)
+ * to `notify` the moment omp records it (the `onRecorded` option, after omp's own): omp appends the
+ * `bashExecution` / `pythonExecution` message to the session without an event, and while the agent
+ * works only once the turn ends. One wrapper per method and process, whichever copy comes first;
+ * same arguments otherwise, same result. Returns whether the tap runs.
+ */
+export function installUserRunTap(proto: object, notify: (message: Json, session: unknown) => void = runToOwners): boolean {
+	let tapped = false;
+	for (const name of ["executeBash", "executePython"]) {
+		const desc = Object.getOwnPropertyDescriptor(proto, name);
+		const original: unknown = desc?.value;
+		if (typeof original !== "function") continue;
+		if (USER_RUN_WRAP in original) {
+			tapped = true;
+			continue;
+		}
+		const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+			const session = this;
+			const options: Json = isObj(args[2]) ? args[2] : {};
+			const own = options.onRecorded;
+			const patched = [...args];
+			while (patched.length < 2) patched.push(undefined);
+			patched[2] = {
+				...options,
+				onRecorded(message: unknown): unknown {
+					try {
+						return typeof own === "function" ? (own as AnyFn).call(options, message) : undefined;
+					} finally {
+						try {
+							if (isObj(message)) notify(message, session);
+						} catch {
+							// never in omp's way
+						}
+					}
+				},
+			};
+			return (original as AnyFn).apply(this, patched);
+		};
+		Object.defineProperty(wrapper, USER_RUN_WRAP, { value: original });
+		try {
+			Object.defineProperty(proto, name, { value: wrapper, writable: true, configurable: true, enumerable: desc?.enumerable ?? false });
+			tapped = true;
+		} catch {
+			// a frozen prototype: the runs reach hostd through the session file
+		}
+	}
+	return tapped;
+}
+
 // ─── protocol v2: omp internals ────────────────────────────────────────────────────────────────
 // The data plane reads a few omp internals, each feature-detected: without one, the feature it
 // serves is off (`hello.caps`) or falls back to the public extension API.
@@ -2382,6 +2836,8 @@ interface Internals {
 	ircTap?: boolean;
 	/** 2.4.0: omp's `steeringMode` handle, telling whether the user set it (applySteeringMode). */
 	steering?: SteeringSetting;
+	/** 2.5.0: omp's html-form functions (omp ≥ 18.18): its ask tool's forms reach hostd. */
+	form?: FormKit;
 }
 
 const isSession = (s: unknown): s is AgentSessionLike => !!s && typeof s === "object" && "subscribe" in s && typeof s.subscribe === "function";
@@ -2664,6 +3120,28 @@ async function probeSteeringSetting(ns: Record<string, unknown>, load: (mod: Pro
 	if (isSteeringSetting(ns.cfgSteeringMode)) return ns.cfgSteeringMode;
 	const handle: unknown = (await load(import("@oh-my-pi/pi-coding-agent/modes/settings")))?.cfgSteeringMode;
 	return isSteeringSetting(handle) ? handle : undefined;
+}
+
+/** omp's html-form functions (`@oh-my-pi/pi-tui/html-form/{parse,data}`, omp ≥ 18.18), the ones its
+ *  ask tool reads and answers forms with; `undefined` on an older omp (its ask has no form) or when
+ *  they can't be imported (its forms stay in the TUI). */
+async function probeFormKit(load: (mod: Promise<unknown>) => Promise<Json | undefined>): Promise<FormKit | undefined> {
+	const [parseMod, dataMod] = await Promise.all([load(import("@oh-my-pi/pi-tui/html-form/parse")), load(import("@oh-my-pi/pi-tui/html-form/data"))]);
+	const { parseHtmlForm: parse } = parseMod ?? {};
+	const { fieldQuestions: questions, choiceValue, textValue, fieldError } = dataMod ?? {};
+	if (typeof parse !== "function" || typeof questions !== "function" || typeof choiceValue !== "function" || typeof textValue !== "function" || typeof fieldError !== "function") {
+		return undefined;
+	}
+	return {
+		parse: html => parse(html) as FormSpec,
+		questions: form => questions(form) as ReadonlyMap<FormField, string>,
+		choiceValue: (field, checked, other) => choiceValue(field, checked, other),
+		textValue: (field, text) => textValue(field, text),
+		fieldError: (field, value) => {
+			const error: unknown = fieldError(field, value);
+			return typeof error === "string" && error ? error : undefined;
+		},
+	};
 }
 
 // ─── 2.1.0: context breakdown (`caps.context`) ─────────────────────────────────────────────────
@@ -3890,13 +4368,15 @@ export function jobWire(
 // snapshot with hostd's `session.artifact` and types the call's row from `details`; nothing crosses
 // the socket for it, so the tool works the same whether or not hostd is connected.
 
-export type PresentKind = "html" | "markdown" | "svg" | "image" | "code" | "csv" | "json" | "text";
-export const PRESENT_KINDS: readonly PresentKind[] = ["html", "markdown", "svg", "image", "code", "csv", "json", "text"];
+export type PresentKind = "html" | "markdown" | "svg" | "mermaid" | "image" | "pdf" | "audio" | "video" | "code" | "csv" | "json" | "text" | "file";
+export const PRESENT_KINDS: readonly PresentKind[] = ["html", "markdown", "svg", "mermaid", "image", "pdf", "audio", "video", "code", "csv", "json", "text", "file"];
 export const PRESENT_DIR = "presented";
 /** Text documents: what hostd's `session.artifact` answers whole (4 MiB). */
 export const PRESENT_TEXT_MAX = 4 << 20;
-/** Images: what a base64 `session.artifact` read answers whole (8 MiB). */
-export const PRESENT_IMAGE_MAX = 8 << 20;
+/** Kinds whose snapshot is the file's bytes as they are (TeleFlock reads them in ranges, 2.5.0). */
+export type PresentBinaryKind = "image" | "pdf" | "audio" | "video" | "file";
+/** The largest file of each binary kind. */
+export const PRESENT_BINARY_MAX: Readonly<Record<PresentBinaryKind, number>> = { image: 16 << 20, pdf: 32 << 20, audio: 32 << 20, video: 64 << 20, file: 64 << 20 };
 /** Referenced files: each, all of them, and how many. */
 export const PRESENT_ASSET_MAX = 4 << 20;
 export const PRESENT_ASSETS_TOTAL = 16 << 20;
@@ -3908,7 +4388,19 @@ const PRESENT_CSS_DEPTH = 2;
 /** Skipped references named in the result text, and listed in its `details`, at most. */
 const PRESENT_SKIPPED_SHOWN = 10;
 const PRESENT_SKIPPED_DETAILS = 50;
-const PRESENT_IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"]);
+const PRESENT_IMAGE_EXTS = new Set(["png", "apng", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"]);
+const PRESENT_AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "opus", "m4a", "flac", "aac"]);
+const PRESENT_VIDEO_EXTS = new Set(["mp4", "m4v", "webm", "mov", "ogv"]);
+/** The extensions a binary kind's snapshot keeps (`file` keeps any safe one). */
+const PRESENT_BINARY_EXTS: Readonly<Record<Exclude<PresentBinaryKind, "file">, ReadonlySet<string>>> = {
+	image: PRESENT_IMAGE_EXTS,
+	pdf: new Set(["pdf"]),
+	audio: PRESENT_AUDIO_EXTS,
+	video: PRESENT_VIDEO_EXTS,
+};
+/** Mermaid's diagram keywords: inline content that opens with one is a diagram. */
+const MERMAID_START =
+	/^(?:(?:graph|flowchart)\s+(?:TB|TD|BT|RL|LR)\b|(?:sequenceDiagram|classDiagram(?:-v2)?|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment|sankey-beta|xychart-beta|block-beta|packet-beta|architecture-beta|kanban)\b)/;
 /** Code file extensions → the language TeleFlock highlights them as. */
 const PRESENT_CODE: Record<string, string> = {
 	ts: "typescript", tsx: "tsx", mts: "typescript", cts: "typescript", js: "javascript", jsx: "jsx", mjs: "javascript", cjs: "javascript",
@@ -4000,6 +4492,11 @@ export function presentKindForExt(ext: string): PresentKind | undefined {
 			return "markdown";
 		case "svg":
 			return "svg";
+		case "mmd":
+		case "mermaid":
+			return "mermaid";
+		case "pdf":
+			return "pdf";
 		case "csv":
 		case "tsv":
 			return "csv";
@@ -4011,15 +4508,19 @@ export function presentKindForExt(ext: string): PresentKind | undefined {
 			return "text";
 	}
 	if (PRESENT_IMAGE_EXTS.has(ext)) return "image";
+	if (PRESENT_AUDIO_EXTS.has(ext)) return "audio";
+	if (PRESENT_VIDEO_EXTS.has(ext)) return "video";
 	if (ownEntry(PRESENT_CODE, ext) !== undefined) return "code";
 	return undefined;
 }
 
-/** The kind of inline content passed without one: a page, a drawing, a JSON document, else Markdown. */
+/** The kind of inline content passed without one: a page, a drawing, a Mermaid diagram, a JSON
+ *  document, else Markdown. */
 export function sniffPresentKind(text: string): PresentKind {
 	const head = text.trimStart().slice(0, 512).toLowerCase();
 	if (head.startsWith("<!doctype html") || head.startsWith("<html")) return "html";
 	if (head.startsWith("<svg") || (head.startsWith("<?xml") && head.includes("<svg"))) return "svg";
+	if (MERMAID_START.test(text.trimStart())) return "mermaid";
 	if (head.startsWith("{") || head.startsWith("[")) {
 		try {
 			JSON.parse(text);
@@ -4031,8 +4532,11 @@ export function sniffPresentKind(text: string): PresentKind {
 	return "markdown";
 }
 
+const isBinaryKind = (kind: PresentKind): kind is PresentBinaryKind => kind === "image" || kind === "pdf" || kind === "audio" || kind === "video" || kind === "file";
+
 /** The snapshot's extension. */
 export function presentExt(kind: PresentKind, sourceExt: string, language?: string): string {
+	const safe = /^[a-z0-9]{1,10}$/.test(sourceExt);
 	switch (kind) {
 		case "html":
 			return "html";
@@ -4040,8 +4544,16 @@ export function presentExt(kind: PresentKind, sourceExt: string, language?: stri
 			return "md";
 		case "svg":
 			return "svg";
+		case "mermaid":
+			return "mmd";
+		case "pdf":
+			return "pdf";
 		case "image":
+		case "audio":
+		case "video":
 			return sourceExt;
+		case "file":
+			return safe ? sourceExt : "bin";
 		case "csv":
 			return sourceExt === "tsv" ? "tsv" : "csv";
 		case "json":
@@ -4049,7 +4561,7 @@ export function presentExt(kind: PresentKind, sourceExt: string, language?: stri
 		case "text":
 			return "txt";
 		case "code":
-			return /^[a-z0-9]{1,10}$/.test(sourceExt) ? sourceExt : (language && ownEntry(PRESENT_LANG_EXT, language)) || "txt";
+			return safe ? sourceExt : (language && ownEntry(PRESENT_LANG_EXT, language)) || "txt";
 	}
 }
 
@@ -4353,6 +4865,20 @@ function claimPresentVersion(dir: string, slug: string, ext: string, bytes: Uint
 	throw new PresentError(`no free version left for "${slug}"`);
 }
 
+/** What a kind is called in the tool's error texts. */
+const presentNoun = (kind: PresentKind): string =>
+	kind === "image" ? "an image" : kind === "pdf" ? "a PDF" : kind === "audio" ? "an audio file" : kind === "video" ? "a video" : kind === "file" ? "a file" : "a document";
+
+/** `bytes` as UTF-8 text without NUL bytes, else `undefined`. */
+function utf8Text(bytes: Uint8Array): string | undefined {
+	try {
+		const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return text.includes("\0") ? undefined : text;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Runs one `present` call: checks the arguments, snapshots the document as the title's next version
  * and copies the files it references. Throws {@link PresentError} with what the agent should fix.
@@ -4379,29 +4905,37 @@ export function presentArtifact(input: PresentInput, env: PresentEnv): { text: s
 		if (!st) throw new PresentError(`${p}: no such file.`);
 		if (!st.isFile()) throw new PresentError(`${p}: not a file.`);
 		sourceExt = path.extname(file).slice(1).toLowerCase();
-		kind ??= presentKindForExt(sourceExt) ?? "text";
-		const max = kind === "image" ? PRESENT_IMAGE_MAX : PRESENT_TEXT_MAX;
-		if (st.size > max) throw new PresentError(`${p} is ${presentMb(st.size)}; a presented ${kind === "image" ? "image" : "document"} can be at most ${presentMb(max)}.`);
-		if (kind === "image" && !PRESENT_IMAGE_EXTS.has(sourceExt)) throw new PresentError(`${p}: an image must be a ${[...PRESENT_IMAGE_EXTS].join(", ")} file.`);
+		// An extension of no kind presents as text when it reads as text, else as a file.
+		const known = kind ?? presentKindForExt(sourceExt);
+		const bound = known ?? "file";
+		const max = isBinaryKind(bound) ? PRESENT_BINARY_MAX[bound] : PRESENT_TEXT_MAX;
+		if (st.size > max) throw new PresentError(`${p} is ${presentMb(st.size)}; a presented ${presentNoun(bound).replace(/^an? /, "")} can be at most ${presentMb(max)}.`);
+		if (known && known !== "file" && isBinaryKind(known) && !PRESENT_BINARY_EXTS[known].has(sourceExt)) {
+			throw new PresentError(`${p}: ${presentNoun(known)} must be a ${[...PRESENT_BINARY_EXTS[known]].join(", ")} file.`);
+		}
 		bytes = fs.readFileSync(file);
+		kind = known ?? (bytes.length <= PRESENT_TEXT_MAX && utf8Text(bytes) !== undefined ? "text" : "file");
 		srcDir = path.dirname(file);
 	} else {
 		const text = content ?? "";
 		if (!text.trim()) throw new PresentError("`content` is empty.");
 		if (Buffer.byteLength(text, "utf8") > PRESENT_TEXT_MAX) throw new PresentError(`\`content\` is over ${presentMb(PRESENT_TEXT_MAX)}; save it to a file instead or shorten it.`);
 		kind ??= sniffPresentKind(text);
-		if (kind === "image") throw new PresentError("An image needs `path`: inline `content` is text (present an SVG as kind svg).");
+		if (isBinaryKind(kind)) {
+			throw new PresentError(`${presentNoun(kind).replace(/^./, c => c.toUpperCase())} needs \`path\`: inline \`content\` is text (present an SVG as kind svg, a Mermaid diagram as kind mermaid).`);
+		}
 		bytes = Buffer.from(text, "utf8");
 		srcDir = env.cwd;
 	}
+	if (kind === "pdf" && !bytes.subarray(0, 1024).includes("%PDF-")) throw new PresentError(`${p}: not a PDF (it has no %PDF- header).`);
 	let text: string | undefined;
-	if (kind !== "image") {
+	if (!isBinaryKind(kind)) {
 		try {
 			text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 		} catch {
-			throw new PresentError(`${p ?? "content"}: not UTF-8 text; present images with kind image, and other binary files can't be shown.`);
+			throw new PresentError(`${p ?? "content"}: not UTF-8 text; present it as kind file (or image, pdf, audio or video).`);
 		}
-		if (text.includes("\0")) throw new PresentError(`${p ?? "content"}: binary data (NUL bytes) can't be shown as ${kind}.`);
+		if (text.includes("\0")) throw new PresentError(`${p ?? "content"}: binary data (NUL bytes) can't be shown as ${kind}; present it as kind file.`);
 	}
 	if (kind === "code") language ??= ownEntry(PRESENT_CODE, sourceExt);
 	const ext = presentExt(kind, sourceExt, language);
@@ -4432,12 +4966,12 @@ export function presentArtifact(input: PresentInput, env: PresentEnv): { text: s
 }
 
 const PRESENT_DESCRIPTION = [
-	"Show the user a document in TeleFlock, the app they follow this session in: it appears as a card in the chat and opens in a viewer beside it (full screen on a phone).",
-	"Use it for what the user should read or look at, not for your own notes: a report or summary you built (prefer one self-contained HTML page with inline CSS and JS, or Markdown), a rendered page, a chart, a diagram (SVG), a screenshot or image, a table (CSV), data (JSON), or a code listing.",
-	"Present a file (`path`: relative to the working directory, absolute, or local://<name>) or inline `content`. `kind` is inferred from the extension (or the content) when omitted.",
+	"Show the user a document or file in TeleFlock, the app they follow this session in: it appears as a card in the chat and opens in a viewer beside it (full screen on a phone).",
+	"Use it for what the user should read, watch or look at, not for your own notes: a report or summary you built (prefer one self-contained HTML page with inline CSS and JS, or Markdown), a rendered page, a chart, a diagram (SVG or Mermaid), a screenshot or image, a PDF, an audio or video clip, a table (CSV), data (JSON), a code listing, or any other file for them to open or save (kind file).",
+	"Present a file (`path`: relative to the working directory, absolute, or local://<name>) or inline `content` (text only). `kind` is inferred from the extension (or the content) when omitted.",
 	"Presenting again with the same `title` adds a new version the user can switch to, so revise a report by presenting it again under its title.",
 	"HTML runs sandboxed without network access: inline scripts and styles work, but external URLs (CDNs, web fonts, remote images, fetch) do not load. Images and stylesheets in the page's folder, referenced by relative paths, are included.",
-	"Limits: 4 MB per document, 8 MB per image. Present what is worth the user's attention, not every file you touch.",
+	"Limits: 4 MB per text document, 16 MB per image, 32 MB per PDF or audio file, 64 MB per video or other file. Present what is worth the user's attention, not every file you touch.",
 ].join("\n");
 
 /** omp's handler context among a tool's `execute` arguments (its position changed across omp versions). */
@@ -4475,8 +5009,8 @@ export function registerPresentTool(pi: ExtensionAPI, linked: () => boolean): bo
 	const parameters = z.object({
 		title: z.string().describe("Short title shown to the user. Presenting the same title again adds a new version."),
 		path: z.string().optional().describe("File to show: relative to the working directory, absolute, or local://<name>. Omit when passing content."),
-		content: z.string().optional().describe("The document itself, inline (HTML, Markdown, SVG, code, CSV, JSON or text). Omit when passing path."),
-		kind: z.enum(PRESENT_KINDS).optional().describe("html, markdown, svg, image, code, csv, json or text. Inferred from the file extension or the content when omitted."),
+		content: z.string().optional().describe("The document itself, inline (HTML, Markdown, SVG, Mermaid, code, CSV, JSON or text). Omit when passing path."),
+		kind: z.enum(PRESENT_KINDS).optional().describe("html, markdown, svg, mermaid, image, pdf, audio, video, code, csv, json, text or file. Inferred from the file extension or the content when omitted."),
 		language: z.string().optional().describe("For kind code: the language to highlight (rust, python, …); inferred from the extension when omitted."),
 	});
 	const tool = {
@@ -4863,8 +5397,9 @@ export function browserToolText(o: BrowserOutcome): string {
 		const how = o.scope !== "turn" ? "for this session, until they detach it" : o.othersTurn ? "until the turn it was allowed for ends (another agent's)" : "until this turn ends";
 		return [
 			o.already ? `You can already use the user's TeleFlock Browser (${how}).` : `The user allowed you to use their TeleFlock Browser ${how}.`,
-			"Use your browser tool now: in eval, `const tab = await browser.open({ name: \"…\", url: \"…\" })` and the tab helpers. Leave out `app`, which would pick another browser.",
+			"Use your browser tool now: in eval, `const tab = await browser.open({ name: \"…\", url: \"…\" })` and the tab helpers. Leave out `app` (its path, cdp_url and relay pick another browser), except `app.target` below. TeleFlock gives you a tab of your own, listed first: open pages there.",
 			"It is the user's own browser profile: their logins and cookies are shared with you, and sites take what you do as the user's doing. The user sees your tabs in TeleFlock and can take one over or detach you at any time.",
+			"You may also see the user's own open tabs (`browser.targets()` lists them; `browser.open({ name: \"…\", app: { target: \"<URL or title>\" } })` works in one): when the task is about one of them, browse and work in it. Never close them. A tab the user locked stays on its page: TeleFlock refuses navigating it, and its error names your own tab to call `browser.open` again with, under a new name.",
 			"Without asking the user first, do not sign out (that signs them out everywhere), switch accounts, change account or security settings, or make payments, purchases or other irreversible changes. Stay on what the user asked for.",
 		].join("\n");
 	}
@@ -4881,9 +5416,9 @@ export const BROWSER_ONCE_ENDED =
 	"TeleFlock: the user's TeleFlock Browser was allowed for one turn only, and that turn has ended, so it is no longer connected to you: your tabs in it no longer respond to your browser tool. If you need it again, ask with use_user_browser.";
 
 const BROWSER_TOOL_DESCRIPTION = [
-	"Ask the user to let you use their TeleFlock Browser: their own browser in the TeleFlock app, where they are signed in to their accounts.",
-	"Use it only when the task needs their logins or their real browser session (a site or account you must be signed in to), and only for what they asked for; for public pages use your own browser.",
-	"Give a short, specific `reason`: the user sees it and answers Allow for this session, Allow once (until this turn ends) or Deny. Once allowed, your browser tool drives their browser.",
+	"Ask the user for their TeleFlock Browser: their own browser in the TeleFlock app, signed in to their accounts. It interrupts the user, who has to answer before you go on.",
+	"Your own browser tool needs no permission and is the one to use: public pages, documentation, search results, local dev servers (localhost), screenshots, UI tests. Ask for the user's browser only when the task cannot be done without their signed-in session (a site or account that needs their login, an internal site of their organization) or when the user tells you to use their browser. Never ask because a public page failed in your own browser: fix that there.",
+	"Give a short, specific `reason` naming the site or account: the user sees it and answers Allow for this session, Allow once (until this turn ends) or Deny. Once allowed, your browser tool drives their browser.",
 ].join("\n");
 
 /** Registers `use_user_browser` with omp (needs the extension API's `zod`; false without it). `ask`
@@ -4957,6 +5492,7 @@ function bridge(pi: ExtensionAPI) {
 		browserTurnEnded: (session, idle) => browserLink.turnEnded(idle, session),
 		ompDialog: (name, original, self, args) => ompDialog(name, original, self, args),
 		irc: leg => onIrcLeg(leg),
+		userRun: (message, session) => onUserRun(message, session),
 	};
 	let active = false; // between session_start and session_shutdown
 	let sock: net.Socket | undefined;
@@ -5031,6 +5567,8 @@ function bridge(pi: ExtensionAPI) {
 	/** UI contexts the controller probe ran on (one status write each). */
 	const probedUis = new WeakSet<object>();
 	let userWaitsReady = false;
+	/** 2.5.0: omp's runs of the user's `!` / `$` commands are tapped (installUserRunTap). */
+	let userRunsReady = false;
 	/** Commands this copy submitted through the composer that still run (`submit`). */
 	let commandRuns = 0;
 	/** When something offered to hostd last stopped covering an open wait: a dialog's request ended,
@@ -5106,6 +5644,7 @@ function bridge(pi: ExtensionAPI) {
 		internals.browser = await probeBrowserSettings(ns, load);
 		internals.ircTap = await probeIrcTap(ns, load);
 		internals.steering = await probeSteeringSetting(ns, load);
+		internals.form = await probeFormKit(load);
 		await uiControllerReady;
 	})().catch((err: unknown) => bridgeLog(`omp internals: ${String(err)}`));
 
@@ -5169,6 +5708,16 @@ function bridge(pi: ExtensionAPI) {
 	 *  copy is the process's bridge. */
 	const onIrcLeg = (leg: IrcLeg): void => {
 		if (ownsSlot()) emit("irc", leg);
+	};
+
+	/** 2.5.0 `caps.shell`: a `!` / `$` run omp recorded in the session this copy follows
+	 *  (installUserRunTap), on the live feed as omp's own message; the session file repeats it. */
+	const onUserRun = (message: Json, session: unknown): void => {
+		if (!ownsSlot() || !writer?.subscribed) return;
+		const sid = sessionId();
+		if (helloSessionId && sid !== helloSessionId) return;
+		if (session !== agentSession && !(isSession(session) && session.sessionManager?.getSessionId?.() === sid)) return;
+		feedLive({ t: "event", event: wireEvent({ type: "message_end", message }) });
 	};
 
 	const showStatus = (on: boolean): void => {
@@ -5326,7 +5875,8 @@ function bridge(pi: ExtensionAPI) {
 			// `userWaits` omp's waits for the user are counted (`state.userWait`); `browser` omp's browser
 			// settings can point it at the TeleFlock Browser (`browserOverride`, `use_user_browser`);
 			// `agentChat` omp's IRC bus is tapped (`irc` events).
-			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true, roleModels: internals.roles !== undefined, ...resumeCaps(ctx), notices: true, context: true, jobs: jobsReady(ctx), restore: restoreReady(ctx), restoreSelect: restoreSelectReady(ctx), ompDialogs: ompUiProto !== undefined && bridgeSlot().ompController !== undefined, userWaits: userWaitsReady, browser: internals.browser !== undefined, agentChat: internals.ircTap === true },
+			// 2.5.0: `shell` omp's quick commands (`!`, `!!`, `$`, `$$`) go through its TUI composer (`shell`).
+			caps: { live: 1, dialogs: dialogsReady, subagentCtl: internals.lifecycle !== undefined, prompt: true, roleModels: internals.roles !== undefined, ...resumeCaps(ctx), notices: true, context: true, jobs: jobsReady(ctx), restore: restoreReady(ctx), restoreSelect: restoreSelectReady(ctx), ompDialogs: ompUiProto !== undefined && bridgeSlot().ompController !== undefined, userWaits: userWaitsReady, browser: internals.browser !== undefined, agentChat: internals.ircTap === true, shell: ctx.mode === "tui" },
 			state: readState(ctx),
 		};
 	};
@@ -5828,7 +6378,7 @@ function bridge(pi: ExtensionAPI) {
 		function (this: unknown, ...args: unknown[]): unknown {
 			if (ownsSlot()) {
 				try {
-					const raced = raceMember(hub, name, original, this, args, internals.approval);
+					const raced = raceMember(hub, name, original, this, args, internals.approval, internals.form);
 					if (raced) return raced;
 				} catch (err) {
 					bridgeLog(`dialog ${name}: ${String(err)}`);
@@ -5852,6 +6402,7 @@ function bridge(pi: ExtensionAPI) {
 			if (isObj(controller) && isObj(controller.ctx)) watchTyping(controller.ctx.ui);
 		}
 		if (agentSession && !userWaitsReady) userWaitsReady = installUserWaitCounter(Object.getPrototypeOf(agentSession) as object);
+		if (agentSession && !userRunsReady) userRunsReady = installUserRunTap(Object.getPrototypeOf(agentSession) as object);
 	};
 
 	/** When omp's hook dialogs are TeleFlock's to answer too (raceOmpDialog). */
@@ -7858,6 +8409,17 @@ function bridge(pi: ExtensionAPI) {
 				if (!command.startsWith("/")) fail("invalid_params", "command must start with /");
 				if (/\r|\n/.test(command)) fail("invalid_params", "command must be a single line");
 				const { settled } = await submit(ctx, command);
+				return { settled };
+			}
+			case "shell": {
+				// 2.5.0 `caps.shell`: one of omp's quick commands, run by omp as if typed in its TUI.
+				requireTui(ctx);
+				const text = str(p, "text", true).trim();
+				const quick = quickCommand(text) ?? fail("invalid_params", "not one of omp's quick commands (!command, !!command, $ code, $$ code)");
+				const session: unknown = agentSession;
+				if (quick.kind === "bash" && isObj(session) && session.isBashRunning === true) fail("busy", "a shell command is already running");
+				if (quick.kind === "python" && isObj(session) && session.isEvalRunning === true) fail("busy", "a Python run is still going");
+				const { settled } = await submit(ctx, text);
 				return { settled };
 			}
 			case "abort":

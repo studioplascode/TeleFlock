@@ -11,27 +11,36 @@
  *   bun scripts/lab/browser/drive.ts <lab> [--keep]
  *     --keep   leave the devserver running at the end (skips the stop-on-exit check)
  *
- * The test site (served here): /set?k=&v= sets a persistent cookie k=v, /read?k= shows cookie k,
- * /popup has a link that opens /child in a new tab, /user is the user's own page; each page shows
- * its value in #value.
+ * The test site (served here): /set?k=&v= sets a persistent cookie k=v and a session cookie k_s=v
+ * (no Max-Age; only the first time per k, so a tab the browser restores cannot set them again),
+ * /read?k= shows cookie k, /popup has a link that opens /child in a new tab, /user is the user's
+ * own page; each page shows its value in #value.
  * 1. Engine: `browser.configSet {enginePath}` with setup's --chrome, else `browser.installEngine`
  *    (the pinned Chrome for Testing, checked and unpacked into <data>/browser/engine) unless an
  *    engine is found; then `browser.start`: running, DevTools on loopback, open to the
  *    devserver's origin and refused to another. The user opens their own tab over DevTools.
  * 2. (a) Attach on purpose: `browser.attach` an omp agent (scout); its card says so once the board
- *    caught up; its port answers /json/version and lists only its pages; the agent opens /set
- *    (cookie tf_a) and reads the page, and its DevTools see its tab, never the user's.
- * 3. (c) Persistence: `browser.stop` leaves no browser process; after `browser.start` the agent,
- *    attached again, reads cookie tf_a it set in (a). `browser.detach`: its tab stays, detached;
+ *    caught up; its port answers /json/version and lists its own page first, then the user's (the
+ *    user's tabs are shared by default); the agent opens /set (cookies tf_a, tf_a_s) and reads
+ *    the page, and its DevTools see its tab first and the user's /user tab too. It browses in the
+ *    user's tab (to /elsewhere and back); `browser.lockTab` locks the tab: its `Page.navigate`
+ *    and `Page.reload` there are refused with the lock's message (the site never asks for the
+ *    page) while its own tab navigates to /own; unlocked, it navigates the user's tab again.
+ * 3. (c) Persistence: `browser.stop` leaves no browser process; after `browser.start` the
+ *    browser restored the user's tab, not the agent's (closed before the stop); the agent,
+ *    attached again, reads cookie tf_a it set in (a), and the site gets the session cookie tf_a_s
+ *    too (the profile continues where it left off). `browser.detach`: its tab stays, detached;
  *    its port closes.
  * 4. (b) `use_user_browser` (agent asker, prompt `USE-BROWSER …`): the request shows in
  *    `browser.status`, as a needs-you card and a notification; Allow for this session → the agent
  *    reads the user's cookie tf_a; Deny → the declined text and no browser call; Allow once → the
  *    agent works (omp's `browser.cdpUrl` a session override) and the attachment ends with the turn;
  *    next turn omp's setting is back, the agent was told why, and its tab call fails.
- * 5. (d) Two agents at once (scout, asker): each drives its own tab and sees only its own pages,
- *    `Browser.close` is refused, a popup is its opener's, take over makes the agent's next call
- *    fail with "the user took over this tab", hand back lets it drive the tab again, a detach
+ * 5. (d) Two agents at once (scout, asker): each drives its own tab and sees its own pages and the
+ *    user's, never the other agent's; with `browser.configSet {shareTabs: false}` each sees only
+ *    its own pages (DevTools and /json/list), never the user's, and back on the user's tab is
+ *    back; `Browser.close` is refused, a popup is its opener's, take over makes the agent's next
+ *    call fail with "the user took over this tab", hand back lets it drive the tab again, a detach
  *    keeps its tabs (detached) and the other agent working.
  * 6. Cap 1: a third agent's allowed request waits, `browser.attach` answers `browser_busy` (and
  *    attaches with `overCap`), a detach admits the waiting one.
@@ -290,10 +299,14 @@ async function answered(agentId: string, since: Set<string>, secs = 150): Promis
 
 const turn = async (agentId: string, text: string) => answered(agentId, await send(agentId, text));
 
-/** The JSON an agent's eval printed after `tag` (quoted in its answer). */
+/** The JSON an agent's eval printed after `tag` (quoted in its answer); a line omp cut short is none. */
 function printed(answer: string, tag = "BRW-RESULT"): Json | undefined {
 	const m = new RegExp(`${tag} (\\{.*\\})`).exec(answer);
-	return m ? JSON.parse(m[1]!) : undefined;
+	try {
+		return m ? JSON.parse(m[1]!) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 const brief = (answer: string) => answer.replace(/\s+/g, " ").slice(0, 300);
@@ -358,6 +371,8 @@ const viewer = env.URL ? await Viewer.open(env.CHROME || started.engine?.path) :
 if (!viewer) say("no UI in this lab (setup without --ui or --vite): no screenshots");
 
 const seen: string[] = [];
+/** Keys /set already set (it sets each once: a restored tab must not set them again). */
+const setOnce = new Set<string>();
 const escape = (s: string) => s.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
 const site = Bun.serve({
 	hostname: "127.0.0.1",
@@ -368,10 +383,14 @@ const site = Bun.serve({
 		seen.push(`${url.pathname}${url.search} ${cookies}`);
 		const k = url.searchParams.get("k") ?? "tf";
 		const v = url.searchParams.get("v") ?? "";
-		const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8" };
+		const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
 		let body: string;
 		if (url.pathname === "/set") {
-			headers["set-cookie"] = `${k}=${encodeURIComponent(v)}; Max-Age=86400; Path=/; SameSite=Lax`;
+			if (!setOnce.has(k)) {
+				setOnce.add(k);
+				headers.append("set-cookie", `${k}=${encodeURIComponent(v)}; Max-Age=86400; Path=/; SameSite=Lax`);
+				headers.append("set-cookie", `${k}_s=${encodeURIComponent(v)}; Path=/; SameSite=Lax`);
+			}
 			body = `<title>set ${escape(k)}</title><p id="value">set:${escape(v)}</p>`;
 		} else if (url.pathname === "/read") {
 			const m = new RegExp(`(?:^|;\\s*)${k}=([^;]*)`).exec(cookies);
@@ -403,9 +422,9 @@ check("(a) the agent's port answers /json/version through tf-hostd", String(vers
 const a1 = await turn(scout, `BRW-EVAL\n${openAndRead("lab", `${siteUrl}/set?k=tf_a&v=scout-a`)}`);
 const r1 = printed(a1);
 check("(a) omp opened the page in the user's browser through the proxy and read it", r1?.value === "set:scout-a" && a1.includes(`on connected http://127.0.0.1:${att.hostPort}`), brief(a1));
-check("(a) the agent's DevTools see its tab, never the user's", r1?.pages?.some((u: string) => u.includes("/set?k=tf_a")) && !r1?.pages?.some((u: string) => u.includes("/user")), JSON.stringify(r1?.pages));
+check("(a) the agent's DevTools see its tab first, and the user's shared tab too", String(r1?.pages?.[0]).includes("/set?k=tf_a") && r1?.pages?.some((u: string) => u.includes("/user")), JSON.stringify(r1?.pages));
 const listed: Json[] = await (await fetch(`http://127.0.0.1:${att.hostPort}/json/list`)).json();
-check("(a) its /json/list has only its pages", listed.length > 0 && listed.every(t => !String(t.url).includes("/user")), listed.map(t => t.url).join(", "));
+check("(a) its /json/list: its page first, then the user's", String(listed[0]?.url).includes("/set?k=tf_a") && listed.some(t => String(t.url).includes("/user")), listed.map(t => t.url).join(", "));
 const userPages = await pages(user);
 check("(a) the user's DevTools see both tabs", userPages.some(t => t.targetId === userTab) && userPages.some(t => String(t.url).includes("/set?k=tf_a")), userPages.map(t => t.url).join(", "));
 const owned = await until("the agent's tab never showed as its own", 10, async () => {
@@ -414,6 +433,43 @@ const owned = await until("the agent's tab never showed as its own", 10, async (
 });
 const conn = owned.attachments?.find((a: Json) => a.agentId === scout);
 check("(a) status: the agent's tab and its connections", conn?.connections >= 1 && owned.tabs.some((t: Json) => t.agentName === "scout") && !owned.tabs.some((t: Json) => t.targetId === userTab), JSON.stringify(conn));
+// The user's tab is the agent's to browse in (to another page, back) while it is not locked.
+const browseUserTab = (v: string) => `BRW-EVAL
+const result = await browser.tab("lab").run(async ({ browser }) => {
+	const user = (await browser.pages()).find(p => p.url().includes("/user"));
+	await user.goto(${JSON.stringify(`${siteUrl}/elsewhere?v=${v}`)});
+	const there = user.url();
+	await user.goBack();
+	return { there, back: user.url() };
+});
+console.log("BRW-RESULT " + JSON.stringify(result));`;
+const browsed = await turn(scout, browseUserTab("agent"));
+const br = printed(browsed);
+check("(a) the agent navigates the user's tab and goes back in it", String(br?.there).includes("/elsewhere?v=agent") && String(br?.back).includes("/user?v=secret") && seen.some(l => l.startsWith("/elsewhere?v=agent")), br ? JSON.stringify(br) : brief(browsed));
+// The user locks it: the agent reads it but does not take it to another page; its own tab navigates.
+const locked = await call("browser.lockTab", { targetId: userTab, locked: true });
+check("(a) browser.lockTab: the user's tab is locked", locked.lockedTabs?.includes(userTab) === true, JSON.stringify(locked.lockedTabs));
+// Each refusal on a line of its own: omp cuts long lines of a tool's output.
+const nav = await turn(scout, `BRW-EVAL
+const result = await browser.tab("lab").run(async ({ page, browser }) => {
+	const user = (await browser.pages()).find(p => p.url().includes("/user"));
+	const refused = await user.goto(${JSON.stringify(`${siteUrl}/elsewhere?v=locked`)}).then(() => "navigated", e => String(e?.message ?? e));
+	const reload = await user.reload().then(() => "reloaded", e => String(e?.message ?? e));
+	const value = await user.$eval("#value", e => e.textContent);
+	await page.goto(${JSON.stringify(`${siteUrl}/own?v=moved`)});
+	return { refused, reload, value, own: page.url(), user: user.url() };
+});
+console.log("BRW-NAV " + JSON.stringify({ refused: result.refused }));
+console.log("BRW-RELOAD " + JSON.stringify({ reload: result.reload }));
+console.log("BRW-RESULT " + JSON.stringify({ value: result.value, own: result.own, user: result.user }));`);
+const [refusedNav, refusedReload, nr] = [printed(nav, "BRW-NAV")?.refused, printed(nav, "BRW-RELOAD")?.reload, printed(nav)];
+check("(a) locked: Page.navigate and Page.reload on the user's tab are refused, saying where to open pages", String(refusedNav).includes("TeleFlock refused `Page.navigate`: the user locked this tab to its page") && String(refusedNav).includes("app: { target:") && String(refusedReload).includes("TeleFlock refused `Page.reload`: the user locked this tab to its page"), refusedNav || refusedReload ? `${refusedNav} | ${refusedReload}` : brief(nav));
+check("(a) locked: it still reads the user's tab, which stays on its page, and its own tab navigates", nr?.value === "user:secret" && String(nr?.user).includes("/user?v=secret") && String(nr?.own).includes("/own?v=moved") && !seen.some(l => l.startsWith("/elsewhere?v=locked")), nr ? JSON.stringify(nr) : brief(nav));
+const unlocked = await call("browser.lockTab", { targetId: userTab, locked: false });
+check("(a) browser.lockTab: unlocked", !unlocked.lockedTabs?.includes(userTab), JSON.stringify(unlocked.lockedTabs));
+const rebrowsed = await turn(scout, browseUserTab("unlocked"));
+const ag = printed(rebrowsed);
+check("(a) unlocked: the agent navigates the user's tab again", String(ag?.there).includes("/elsewhere?v=unlocked") && String(ag?.back).includes("/user?v=secret") && seen.some(l => l.startsWith("/elsewhere?v=unlocked")), ag ? JSON.stringify(ag) : brief(rebrowsed));
 
 // ─── 3. (c) the cookie survives a restart ───────────────────────────────────────────────────────
 
@@ -424,11 +480,18 @@ check("(c) browser.stop leaves no browser process", browserProcesses().length ==
 const again = await call("browser.start", {}, 90_000);
 check("(c) browser.start again: running on a new port", again.state === "running" && again.cdpPort !== started.cdpPort, `${again.cdpPort}`);
 user = await Cdp.open(again.wsUrl, env.ORIGIN);
+// The agent's tab closed before the stop: the browser restored the user's tab, not the agent's.
+const restored = await until("the user's tab never came back", 20, async () => {
+	const p = await pages(user);
+	return p.some(t => String(t.url).includes("/user?v=secret")) ? p : undefined;
+}).catch(() => undefined);
+check("(c) the restarted browser restored the user's tab, not the agent's", !!restored && !restored.some(t => String(t.url).includes("/own?v=moved") || String(t.url).includes("/set?k=tf_a")), (restored ?? []).map(t => t.url).join(", "));
 att = (await call("browser.attach", { hostId: HOST, agentId: scout }, 60_000)).attachments?.find((a: Json) => a.agentId === scout);
 // omp keeps its tab "lab" bound to the endpoint of the browser that stopped: it releases it first.
 const a2 = await turn(scout, `BRW-EVAL\nawait browser.close({ name: "lab" }).catch(() => {});\n${openAndRead("lab", `${siteUrl}/read?k=tf_a`)}`);
 check("(c) the cookie the agent set in (a) survived browser.stop/start (persistent profile)", printed(a2)?.value === "cookie:scout-a", brief(a2));
 check("(c) the restarted browser sent it to the site", seen.some(l => l.startsWith("/read?k=tf_a") && l.includes("tf_a=scout-a")), seen.filter(l => l.startsWith("/read")).join(" | "));
+check("(c) the session cookie tf_a_s (no Max-Age) survived browser.stop/start too", seen.some(l => l.startsWith("/read?k=tf_a") && l.includes("tf_a_s=scout-a")), seen.filter(l => l.startsWith("/read")).join(" | "));
 const scoutTab = (await status()).tabs?.find((t: Json) => t.agentId === scout)?.targetId;
 await call("browser.detach", { hostId: HOST, agentId: scout }, 30_000);
 const afterDetach = await status();
@@ -491,14 +554,14 @@ const shut = await fetch(`http://127.0.0.1:${onceAtt?.hostPort}/json/version`).t
 check("(b) its host port is closed", !shut.startsWith("answered 200"), shut);
 const ab4 = await turn(asker, `BRW-EVAL\nconsole.log("BRW-CFG " + JSON.stringify({ cdpUrl: ${OMP_CDP_URL} }));\nBRW-EVAL\n${readTab("once")}`);
 check("(b) next turn omp's browser.cdpUrl is back (no override)", /browser\.cdpUrl: null .*source: default/.test(String(printed(ab4, "BRW-CFG")?.cdpUrl)), printed(ab4, "BRW-CFG")?.cdpUrl);
-check("(b) the agent read why before its next turn", ab4.includes("[context] TeleFlock: the user allowed you their TeleFlock Browser once"), brief(ab4));
+check("(b) the agent read why before its next turn", ab4.includes("[context] TeleFlock: the user's TeleFlock Browser was allowed for one turn only"), brief(ab4));
 check("(b) its browser call there fails at once", !printed(ab4) && /\[eval\][\s\S]*(Error|error)/.test(ab4.slice(ab4.lastIndexOf("[eval]"))), brief(ab4.slice(ab4.lastIndexOf("[eval]"))));
 
 // ─── 5. (d) two agents at once ──────────────────────────────────────────────────────────────────
 
 await call("browser.attach", { hostId: HOST, agentId: scout }, 60_000);
 await call("browser.attach", { hostId: HOST, agentId: asker }, 60_000);
-if (viewer) await viewer.show("#/browser", ["scout can control this browser", "asker can control this browser"]);
+if (viewer) await viewer.show("#/browser", ["scout can use your tabs", "asker can use your tabs"]);
 const drive = (who: string) => `await browser.close({ name: "mine" }).catch(() => {});
 const tab = await browser.open({ name: "mine", url: ${JSON.stringify(`${siteUrl}/popup?v=${who}`)} });
 const value = await tab.text("#value");
@@ -521,7 +584,7 @@ const busy = await until("the two agents never both drove", 60, async () => {
 }, 250);
 check("(d) both agents drive their own tabs at once", true, JSON.stringify(busy.attachments.map((a: Json) => [a.agentName, a.connections])));
 if (viewer) {
-	await viewer.show("#/browser", ["scout can control this browser", "asker can control this browser"], 20);
+	await viewer.show("#/browser", ["scout can use your tabs", "asker can use your tabs"], 20);
 	const dots = await viewer.eval<number>("document.querySelectorAll('.animate-ping').length");
 	say(`screenshot ${await viewer.shot("d-tabs-by-owner-driving")} (${dots} live dots)`);
 	check("(d) the strip shows both agents driving (live dots)", dots >= 2, `${dots}`);
@@ -529,7 +592,8 @@ if (viewer) {
 const [ads, ada] = await Promise.all([answered(scout, ds), answered(asker, da)]);
 const rs = printed(ads);
 const ra = printed(ada);
-check("(d) each sees only its own pages", rs?.pages?.length > 0 && ra?.pages?.length > 0 && rs.pages.every((u: string) => u.includes("v=scout")) && ra.pages.every((u: string) => u.includes("v=asker")), JSON.stringify({ scout: rs?.pages, asker: ra?.pages }));
+const sees = (r: Json | undefined, own: string, other: string) => r?.pages?.some((u: string) => u.includes(`/popup?v=${own}`)) && r.pages.some((u: string) => u.includes("/user")) && !r.pages.some((u: string) => u.includes(`/popup?v=${other}`));
+check("(d) each sees its own pages and the user's, never the other agent's", sees(rs, "scout", "asker") && sees(ra, "asker", "scout"), JSON.stringify({ scout: rs?.pages, asker: ra?.pages }));
 check("(d) Browser.close is refused to both", [rs?.refused, ra?.refused].every(r => String(r).includes("TeleFlock refused `Browser.close`")) && (await status()).state === "running", String(rs?.refused));
 const popup = await turn(scout, `BRW-EVAL
 const tab = browser.tab("mine");
@@ -553,7 +617,22 @@ const scoutMine = userView.find(t => String(t.url).includes("/popup?v=scout"))?.
 const childTab = userView.find(t => String(t.url).includes("/child?v=scout"))?.targetId;
 check("(d) status: the popup belongs to scout", tabs.some((t: Json) => t.targetId === childTab && t.agentId === scout), JSON.stringify(tabs.map((t: Json) => [t.agentName, t.targetId.slice(0, 6)])));
 const askerView = printed(await turn(asker, `BRW-EVAL\nconsole.log("BRW-RESULT " + JSON.stringify({ pages: await browser.tab("mine").run(${LIST_PAGES}) }));`));
-check("(d) the other agent does not see it", askerView?.pages?.length > 0 && !askerView.pages.some((u: string) => u.includes("v=scout")), JSON.stringify(askerView?.pages));
+check("(d) the other agent does not see it", askerView?.pages?.length > 0 && !askerView.pages.some((u: string) => u.includes("/popup?v=scout") || u.includes("/child?v=scout")), JSON.stringify(askerView?.pages));
+// Sharing off: the old isolation, each only its own pages; back on, the user's tab is back.
+const share = async (on: boolean) => {
+	const c = await call("browser.config", {});
+	await call("browser.configSet", { enginePath: c.enginePath, headed: c.headed, cap: c.cap, shareTabs: on });
+};
+const viewOf = async (who: string) => printed(await turn(who, `BRW-EVAL\nconsole.log("BRW-RESULT " + JSON.stringify({ pages: await browser.tab("mine").run(${LIST_PAGES}) }));`));
+await share(false);
+const [so, ao] = [await viewOf(scout), await viewOf(asker)];
+check("(d) sharing off: each sees only its own pages, never the user's or the other's", so?.pages?.length > 0 && ao?.pages?.length > 0 && !so.pages.some((u: string) => u.includes("/user") || u.includes("v=asker")) && !ao.pages.some((u: string) => u.includes("/user") || u.includes("v=scout")), JSON.stringify({ scout: so?.pages, asker: ao?.pages }));
+const scoutPort = (await status()).attachments?.find((a: Json) => a.agentId === scout)?.hostPort;
+const isoList: Json[] = await (await fetch(`http://127.0.0.1:${scoutPort}/json/list`)).json();
+check("(d) sharing off: its /json/list has only its pages", isoList.length > 0 && isoList.every(t => !String(t.url).includes("/user")), isoList.map(t => t.url).join(", "));
+await share(true);
+const sb = await viewOf(scout);
+check("(d) sharing on again: the user's tab is back", sb?.pages?.some((u: string) => u.includes("/user")), JSON.stringify(sb?.pages));
 await call("browser.takeOver", { targetId: scoutMine }, 30_000);
 const taken = await turn(scout, `BRW-EVAL\n${readTab("mine")}`);
 check("(d) take over: the agent's next call fails with \"the user took over this tab\"", taken.includes("the user took over this tab") && !printed(taken), brief(taken.slice(taken.indexOf("[eval]"))));
@@ -567,8 +646,8 @@ check("(d) detach: its tabs stay, detached", [scoutMine, childTab].every(id => l
 const still = await turn(asker, `BRW-EVAL\n${readTab("mine")}`);
 check("(d) the other agent keeps working", printed(still)?.value === "popup:asker", brief(still));
 if (viewer) {
-	await viewer.show("#/browser", ["asker can control this browser"], 30);
-	await until("the strip never showed scout detached", 20, async () => ((await viewer.eval<boolean>("!document.body.innerText.includes('scout can control this browser')")) ? true : undefined));
+	await viewer.show("#/browser", ["asker can use your tabs"], 30);
+	await until("the strip never showed scout detached", 20, async () => ((await viewer.eval<boolean>("!document.body.innerText.includes('scout can use your tabs')")) ? true : undefined));
 	say(`screenshot ${await viewer.shot("d-scout-detached")}`);
 }
 await call("browser.detach", { hostId: HOST, agentId: asker }, 30_000);

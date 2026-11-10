@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
 /**
- * AutoAnswer lab mock model provider for omp 18.13.3 (OpenAI chat-completions, the API omp's
+ * AutoAnswer lab mock model provider for omp ≥ 18.18 (OpenAI chat-completions, the API omp's
  * `openai-completions` client speaks: POST /v1/chat/completions with `stream: true`, SSE
  * `chat.completion.chunk`s, a finish chunk, a usage chunk, `data: [DONE]`). Never calls anything.
  *
  * Stateless: a conversation whose first user message holds `AUTOANSWER-LAB q=<question>` makes
- * the agent call omp's `ask` tool once with that question, two options and `recommended: 0`
- * ("Use SQLite"); once the tool result is in the history it answers `AUTOANSWER-LAB done: <result>`.
- * Every other request (titles, side calls) gets a short text.
+ * the agent call omp's `ask` tool once with one HTML form (omp 18.18 `tools/ask.ts`): that
+ * question as a radio group `db` of two options, "Use SQLite" preselected (`checked`, the ★ decide
+ * for me picks) and "Use Postgres"; once the tool result is in the history it answers
+ * `AUTOANSWER-LAB done: <result>` (omp's `User answers:` and `{"db":"sqlite"}`). Every other
+ * request (titles, side calls) gets a short text.
  *
  * Port 127.0.0.1:18758 (`MOCK_PORT`; `models.yml` next to this file points there). Log: `MOCK_LOG`, else
  * `$HOME/autoanswer-mock.log` (inside `scripts/lab/run`, the lab's home).
@@ -50,26 +52,17 @@ function decide(body: Json): Decision {
 	const question = m[1]!.trim();
 	const askCall = messages.flatMap(msg => (msg.role === "assistant" && Array.isArray(msg.tool_calls) ? msg.tool_calls : [])).find((c: Json) => c?.function?.name === "ask");
 	if (!askCall) {
-		return {
-			kind: "ask",
-			call: {
-				id: `call_ask_${Date.now().toString(36)}`,
-				name: "ask",
-				args: {
-					questions: [
-						{
-							id: "db",
-							question,
-							options: [
-								{ label: "Use SQLite", description: "One file, nothing to run" },
-								{ label: "Use Postgres", description: "A server to run" },
-							],
-							recommended: 0,
-						},
-					],
-				},
-			},
-		};
+		const legend = question.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+		const html = [
+			"<form>",
+			"  <fieldset>",
+			`    <legend>${legend}</legend>`,
+			'    <label><input type="radio" name="db" value="sqlite" checked> Use SQLite</label>',
+			'    <label><input type="radio" name="db" value="postgres"> Use Postgres</label>',
+			"  </fieldset>",
+			"</form>",
+		].join("\n");
+		return { kind: "ask", call: { id: `call_ask_${Date.now().toString(36)}`, name: "ask", args: { html } } };
 	}
 	const result = messages.find(msg => msg.role === "tool" && msg.tool_call_id === askCall.id);
 	return { kind: "done", text: `AUTOANSWER-LAB done: ${textOf(result?.content).replace(/\s+/g, " ").trim()}` };

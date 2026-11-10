@@ -662,6 +662,7 @@ mod tests {
             view: None,
             error: None,
             artifact: None,
+            user_run: None,
         })
     }
 

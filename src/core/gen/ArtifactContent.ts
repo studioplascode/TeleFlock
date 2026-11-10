@@ -14,7 +14,7 @@ path: string, size: number, mtime: number,
  */
 text?: string, 
 /**
- * `base64` reads: the bytes read, base64-encoded (all of them unless `truncated`).
+ * `base64` and ranged reads: the bytes read, base64-encoded (all of them unless `truncated`).
  */
 data?: string, 
 /**
@@ -24,4 +24,9 @@ truncated: boolean,
 /**
  * Not text: a known binary type, NUL bytes or invalid UTF-8 in its first 8 KiB.
  */
-binary: boolean, };
+binary: boolean, 
+/**
+ * Where the read started, when the request named an `offset` (hosts ≥ 0.9.4): the
+ * requested one, at most `size`.
+ */
+offset?: number, };

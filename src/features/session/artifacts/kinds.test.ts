@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ArtifactFile, PresentKind } from "@/core/gen";
 import { artifactRows } from "./artifacts";
-import { isPresentedAsset, kindForName, parseCsv, presentedAssetsDir, presentedName, presentedVersions } from "./kinds";
-import { type DocRef, docFileName, docKind, otherVersion } from "./load";
+import { isImageName, isPresentedAsset, kindForName, mimeFor, parseCsv, presentedAssetsDir, presentedName, presentedVersions } from "./kinds";
+import { type DocRef, docFileName, docKind, opensAsIs, otherVersion } from "./load";
 
 const file = (name: string, mtime: number, extra: Partial<ArtifactFile> = {}): ArtifactFile => ({ kind: "local", name, url: `local://${name}`, size: 10, mtime, ...extra });
 
@@ -15,6 +15,17 @@ describe("renderer selection", () => {
     // subagent outputs, handoffs and the plan under review are Markdown
     expect(docKind({ kind: "agent", name: "Explore.md" })).toBe("markdown");
     expect(docKind({ kind: "review", name: "" })).toBe("markdown");
+  });
+
+  test("PDFs, audio, video and diagrams by Review's map; archives and other binaries are files to save", () => {
+    const names = ["q3.pdf", "chimes.wav", "talk.OPUS", "clip.m4a", "demo.mp4", "demo.mov", "demo.webm", "spin.apng", "flow.mmd", "flow.mermaid", "pack.zip", "deck.pptx", "app.exe", "db.sqlite", "x.bin"];
+    expect(names.map(kindForName)).toEqual(["pdf", "audio", "audio", "audio", "video", "video", "video", "image", "mermaid", "mermaid", "file", "file", "file", "file", "file"]);
+    // the type the bytes get, by extension
+    expect(["q3.pdf", "chimes.wav", "demo.mov", "spin.apng", "font.woff2", "pack.zip", "x.bin"].map(mimeFor)).toEqual([
+      "application/pdf", "audio/wav", "video/quicktime", "image/apng", "font/woff2", "application/zip", "application/octet-stream",
+    ]);
+    // an SVG is a drawing, not an image to save as one
+    expect(["a.png", "a.apng", "a.avif", "a.svg", "a.pdf"].map(isImageName)).toEqual([true, true, true, false, false]);
   });
 
   test("Save and Open in browser: the extension follows what is shown, never one a default app runs outside the sandbox", () => {
@@ -38,6 +49,24 @@ describe("renderer selection", () => {
     expect(save("presented/sales-v1.tsv", "csv")).toBe("sales-v1.tsv");
     expect(open("presented/sales-v1.csv", "csv")).toBe("sales-v1.csv.txt");
     expect(docFileName({ name: "", title: "Auth: plan?" }, "markdown", "save")).toBe("Auth_ plan_.md");
+    // a PDF, audio and video keep their type; a diagram is its source to keep, a page that shows it to open
+    expect([save("presented/q3-pdf-v1.pdf", "pdf"), open("presented/q3-pdf-v1.pdf", "pdf")]).toEqual(["q3-pdf-v1.pdf", "q3-pdf-v1.pdf"]);
+    expect([save("presented/chimes-v1.wav", "audio"), save("presented/demo-v2.webm", "video"), save("presented/demo-v3.wav", "video")]).toEqual(["chimes-v1.wav", "demo-v2.webm", "demo-v3.bin"]);
+    expect([save("presented/flow-v1.mmd", "mermaid"), open("presented/flow-v1.mmd", "mermaid")]).toEqual(["flow-v1.mmd", "flow-v1.html"]);
+  });
+
+  test("a file handed over keeps the name the agent gave it, and opens only as a type that can't run", () => {
+    const handed = (name: string, source?: string) => docFileName({ name }, "file", "save", source);
+    expect(handed("presented/q3-board-pack-data-v1.zip", "~/finance/q3-report/q3-board-pack.zip")).toBe("q3-board-pack.zip");
+    // a source without an extension the bridge keeps (`.bin`), a Windows path, what a file system refuses
+    expect(handed("presented/build-v1.bin", "C:\\src\\Makefile")).toBe("Makefile");
+    expect(handed("presented/notes-v1.bin", "out/notes:draft?.ABC_DEF")).toBe("notes_draft_.ABC_DEF");
+    // no source (a file opened from the list, or a subagent's): the snapshot's own name
+    expect([handed("presented/q3-board-pack-data-v1.zip"), handed("presented/x-v2.bin", "")]).toEqual(["q3-board-pack-data-v1.zip", "x-v2.bin"]);
+    expect(docFileName({ name: "presented/q3-board-pack-data-v1.zip" }, "file", "open", "q3.zip")).toBe("q3.zip");
+    // Open in browser keeps these as they are (src-tauri `docs.rs` OPENABLE): viewers and players, never a page, a script or a program
+    expect(["q3.pdf", "chimes.wav", "clip.MOV", "shot.png", "main.rs", "notes.md", "data.json"].every(opensAsIs)).toBe(true);
+    expect(["report.html", "report.htm", "logo.svg", "setup.exe", "run.bat", "tool.js", "sheet.xlsx", "sales.csv", "pack.zip", "Makefile", "x.constructor"].some(opensAsIs)).toBe(false);
   });
 
   test("another version shows as itself: the kind and language carry over only with the same extension", () => {

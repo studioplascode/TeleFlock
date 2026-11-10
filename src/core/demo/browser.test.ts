@@ -150,6 +150,26 @@ describe("demo browser", () => {
     await expect(r.call(null, "browser.takeOver", { targetId: "demo-tab-start" })).rejects.toMatchObject({ code: "not_found" });
   });
 
+  test("lock one of the user's tabs or a lent one for agents, never an agent's own; unlock it; a stop forgets the locks", async () => {
+    const r = rig();
+    let s = await r.call(null, "browser.lockTab", { targetId: "demo-tab-mail", locked: true });
+    expect(s.lockedTabs).toEqual(["demo-tab-mail"]);
+    await expect(r.call(null, "browser.lockTab", { targetId: "demo-tab-quota", locked: true })).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(r.call(null, "browser.lockTab", { targetId: "demo-tab-mail" })).rejects.toMatchObject({ code: "invalid_params" });
+    await r.call(null, "browser.lendTab", { targetId: "demo-tab-start", hostId: "forge", agentId: "ci" });
+    s = await r.call(null, "browser.lockTab", { targetId: "demo-tab-start", locked: true });
+    expect(s.lockedTabs).toEqual(["demo-tab-mail", "demo-tab-start"]);
+    // Taken back, a lent tab stays locked; unlocking one leaves the other.
+    s = await r.call(null, "browser.takeOver", { targetId: "demo-tab-start" });
+    expect(s.lockedTabs).toEqual(["demo-tab-mail", "demo-tab-start"]);
+    s = await r.call(null, "browser.lockTab", { targetId: "demo-tab-mail", locked: false });
+    expect(s.lockedTabs).toEqual(["demo-tab-start"]);
+    expect(r.state.browser?.lockedTabs).toEqual(["demo-tab-start"]);
+    s = await r.call(null, "browser.stop");
+    expect(s.lockedTabs).toBeUndefined();
+    await expect(r.call(null, "browser.lockTab", { targetId: "demo-tab-mail", locked: true })).rejects.toMatchObject({ code: "not_running" });
+  });
+
   test("Let an agent use it from its menu, then stop: its host knows, and a claude agent can't", async () => {
     const r = rig();
     let s = await r.call(null, "browser.attach", { hostId: "forge", agentId: "kanban" });
@@ -173,14 +193,25 @@ describe("demo browser", () => {
     expect(s).toMatchObject({ state: "running", headed: true, wsUrl: "demo:browser", attachments: [] });
   });
 
+  test("in its own window an agent's first tab opens as a tab of the user's window (headless: a window of its own, as Allow once shows)", async () => {
+    const r = rig();
+    const opened: DemoBrowserTab[] = [];
+    demoAgentTabs((t) => opened.push(t));
+    await r.call(null, "browser.start", { headed: true });
+    await r.call(null, "browser.attach", { hostId: "forge", agentId: "kanban" });
+    r.clock.advance(3000);
+    expect(opened.map((t) => [t.owner?.agentId, t.window])).toEqual([["kanban", 1]]);
+  });
+
   test("settings: the config is replaced as a whole and checked; Chrome for Testing downloads with progress and joins the engines", async () => {
     const r = rig();
     await expect(r.call(null, "browser.configSet", { enginePath: "chrome", cap: 4 })).rejects.toMatchObject({ code: "invalid_params" });
     await expect(r.call(null, "browser.configSet", { cap: 0 })).rejects.toMatchObject({ code: "invalid_params" });
-    let config = await r.call<BrowserConfig>(null, "browser.configSet", { enginePath: "/opt/brave.com/brave/brave", headed: true, cap: 6 });
-    expect(config).toMatchObject({ enginePath: "/opt/brave.com/brave/brave", headed: true, cap: 6 });
+    let config = await r.call<BrowserConfig>(null, "browser.configSet", { enginePath: "/opt/brave.com/brave/brave", headed: true, cap: 6, shareTabs: false });
+    expect(config).toMatchObject({ enginePath: "/opt/brave.com/brave/brave", headed: true, cap: 6, shareTabs: false });
+    expect((await r.status()).shareTabs).toBe(false);
     config = await r.call<BrowserConfig>(null, "browser.configSet", { cap: 3 });
-    expect(config).toMatchObject({ headed: false, cap: 3 });
+    expect(config).toMatchObject({ headed: false, cap: 3, shareTabs: true });
     expect(config.enginePath).toBeUndefined();
     expect(config.download).toEqual({ version: "156.0.7531.40", available: true, installed: false, size: 201_329_937 });
     const p = r.engine.callApp("browser.installEngine", {}) as Promise<BrowserStatus>;

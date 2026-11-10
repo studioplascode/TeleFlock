@@ -6,8 +6,10 @@ import type { TranscriptItem } from "./gen";
  * conversation (notices, model/mode markers, compactions, inbound IRC), it is retryable when the
  * first assistant, thinking or user row is an assistant row that ended in an error or an abort (a
  * text row, or the error row of a message that failed without text), or when a tool call after
- * that row failed or was aborted (the run stopped in its tools: no assistant row after them).
- * `row(i)` reads the i-th of `count` rows, oldest first, so the store's ids need no array.
+ * that row failed or was aborted (the run stopped in its tools: no assistant row after them). A
+ * quick command the user ran (`!`, `$`: a tool row with `userRun`) ends the walk as a user row
+ * does: past it omp's retry has nothing to run. `row(i)` reads the i-th of `count` rows, oldest
+ * first, so the store's ids need no array.
  */
 export function lastTurnRetryable(count: number, row: (i: number) => TranscriptItem | undefined): boolean {
   let toolFailed = false;
@@ -21,6 +23,7 @@ export function lastTurnRetryable(count: number, row: (i: number) => TranscriptI
       case "irc":
         continue;
       case "tool":
+        if (it.userRun) return toolFailed;
         if (it.status === "error" || it.status === "aborted") toolFailed = true;
         continue;
       case "assistant":

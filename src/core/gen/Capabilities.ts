@@ -20,4 +20,9 @@ subagentRetry: boolean,
  * `agent.refusalRetry` works ("Retry with <model>" after a provider refusal) and the host's
  * refusal fallback rules apply to this session: TeleFlock's bridge ≥ 2.3.0 serves it.
  */
-refusalRetry: boolean, };
+refusalRetry: boolean, 
+/**
+ * `agent.shell` works: omp's quick commands (`!`, `!!`, `$`, `$$`) run in the session
+ * (TeleFlock's bridge ≥ 2.5.0 in omp's TUI).
+ */
+shell: boolean, };

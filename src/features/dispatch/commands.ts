@@ -118,16 +118,19 @@ export function firstCommand(input: string, known: NewAgentCommands): { ok: true
 
 /**
  * The live session a new agent shares its prompt templates and extension commands with: one in
- * the repository (any of its worktrees), a chat for a chat. The first by id, so it stays put.
+ * the repository (any of its worktrees) or the folder (an agent whose own folder or workspace's is
+ * it, for a folder that is no repository), a chat for a chat. The first by id, so it stays put.
  */
-function sessionIn(state: HostState | undefined, repo: string): string | undefined {
+export function sessionIn(state: Pick<HostState, "workspaces" | "agents"> | undefined, repo: string): string | undefined {
   if (!state) return undefined;
   const chat = isChatRepo(repo);
-  const roots = new Map(state.workspaces.map((w) => [w.id, w.repo?.root]));
+  const wss = new Map(state.workspaces.map((w) => [w.id, w]));
   let found: string | undefined;
   for (const a of state.agents) {
     if (a.omp?.link !== "live" || !a.omp.bridge || a.parked) continue;
-    if (chat ? !isChat(a) : isChat(a) || roots.get(a.workspaceId) !== repo) continue;
+    const ws = wss.get(a.workspaceId);
+    const here = ws?.repo?.root === repo || ws?.cwd === repo || a.cwd === repo;
+    if (chat ? !isChat(a) : isChat(a) || !here) continue;
     if (found === undefined || a.id < found) found = a.id;
   }
   return found;

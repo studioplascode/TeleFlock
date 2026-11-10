@@ -51,11 +51,15 @@ wire_struct! {
         pub agent_id: String,
         pub kind: ArtifactKind,
         pub name: String,
-        /// Bytes to return (default 1 MiB; text 4 MiB at most, `base64` 8 MiB).
+        /// Bytes to return (default 1 MiB; text 4 MiB at most, `base64` and ranged reads 8 MiB).
         pub max_bytes: Option<u64>,
         /// Answer the file's bytes as base64 `data` instead of `text`, binary files included
         /// (images and the files a presented page references). Hosts before 0.9.0 ignore it.
         pub base64: Option<bool>,
+        /// Read from this byte on, always as base64 `data` (ranged reads of media larger than one
+        /// read: the viewer reads 1 MiB, then 2 MiB at a time). Hosts ≥ 0.9.4 echo it in
+        /// `ArtifactContent.offset`; older ones ignore it and read from the start.
+        pub offset: Option<u64>,
     }
 }
 
@@ -71,19 +75,31 @@ wire_struct! {
         pub mtime: Millis,
         /// The file as UTF-8 text (absent for binary files and for `base64` reads).
         pub text: Option<String>,
-        /// `base64` reads: the bytes read, base64-encoded (all of them unless `truncated`).
+        /// `base64` and ranged reads: the bytes read, base64-encoded (all of them unless `truncated`).
         pub data: Option<String>,
         /// `text` / `data` end before the end of the file (`maxBytes`).
         pub truncated: bool,
         /// Not text: a known binary type, NUL bytes or invalid UTF-8 in its first 8 KiB.
         pub binary: bool,
+        /// Where the read started, when the request named an `offset` (hosts ≥ 0.9.4): the
+        /// requested one, at most `size`.
+        pub offset: Option<u64>,
     }
 }
 
 wire_enum! {
     /// How the app shows a presented artifact (the `kind` the agent passed to `present`, or the one
-    /// the bridge inferred from the file's extension).
-    pub enum PresentKind { Html, Markdown, Svg, Image, Code, Csv, Json, Text }
+    /// the bridge inferred from the file's extension). The snapshot keeps the source's extension
+    /// for `image`, `pdf`, `audio`, `video` and `file`, so the app picks the bytes' type by it.
+    /// * `html`: a page, sandboxed; `markdown`; `svg`: a drawing; `code`: highlighted source;
+    ///   `csv`: a table (also TSV); `json`; `text`.
+    /// * `image`: png, apng, jpg, jpeg, gif, webp, bmp, ico, avif.
+    /// * `pdf`: drawn page by page (pdf.js).
+    /// * `audio` (mp3, wav, ogg, oga, opus, m4a, flac, aac), `video` (mp4, m4v, webm, mov, ogv):
+    ///   the platform's player.
+    /// * `mermaid`: a Mermaid diagram's source (`.mmd`), drawn as the transcript draws one.
+    /// * `file`: any other file handed to the user: its name, size and type, to save.
+    pub enum PresentKind { Html, Markdown, Svg, Image, Code, Csv, Json, Text, Pdf, Audio, Video, Mermaid, File }
 }
 
 wire_struct! {

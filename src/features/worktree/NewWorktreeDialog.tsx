@@ -6,6 +6,7 @@ import type { WorktreeCreateParams, WorktreeCreated } from "@/core/gen";
 import { Button, Chip, EmptyState, Input, Kbd, SegmentedControl, Shimmer, StatusOrb, cn, spring, toast, useIsMobile } from "@/design";
 import { hostTakesRoles } from "@/features/agentRoles/roles";
 import { hostDecides } from "@/features/autoAnswer/format";
+import { branchNamesTaken } from "@/features/dispatch/thread";
 import { ACTIONS } from "@/features/shell/vocab";
 import { AiMark, within } from "../workspace/shared/ai";
 import { AgentFields, agentNameError, autoAgentName, initialAgentDraft, toAgentSpec, useAgentDraft, useModelCatalog } from "../workspace/shared/AgentFields";
@@ -89,10 +90,7 @@ function WorktreeWizard({ open, initialHostId, initialCwd, onClose }: WizardProp
   const repoName = basename(host?.workspaces.find((w) => w.repo?.root === repoRoot)?.repo?.root ?? repoRoot);
   const takenNames = useMemo(() => host?.agents.map((a) => a.name) ?? [], [host?.agents]);
   // every name git already has, local or as a remote-tracking branch's local name
-  const takenBranches = useMemo(
-    () => new Set((branches.data?.branches ?? []).flatMap((b) => (b.remote ? [b.name, b.name.replace(/^[^/]+\//, "")] : [b.name]))),
-    [branches.data],
-  );
+  const takenBranches = useMemo(() => new Set(branchNamesTaken(branches.data?.branches ?? [])), [branches.data]);
 
   // Auto naming: an empty new-branch name (switch on) and/or agent name come from the agent's task;
   // prefetched while the task is typed, resolved at the Create step (≤ NAMING_MS, then the fallback).

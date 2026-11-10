@@ -128,8 +128,9 @@ impl Cdp {
     }
 }
 
-/// An HTTP server that sets a persistent cookie on `/set` and records the `Cookie` header of
-/// every request.
+/// An HTTP server that sets a persistent cookie (`tf`) and a session cookie (`tfs`, no
+/// `Expires`/`Max-Age`: how many company sign-ins keep theirs) on the first `/set` only, and
+/// records the `Cookie` header of every request.
 async fn cookie_server() -> (u16, Arc<Mutex<Vec<String>>>) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
@@ -143,8 +144,14 @@ async fn cookie_server() -> (u16, Arc<Mutex<Vec<String>>>) {
                 let n = c.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
                 let cookie = req.lines().find_map(|l| l.strip_prefix("Cookie: ").or_else(|| l.strip_prefix("cookie: "))).unwrap_or("").to_string();
-                log.lock().unwrap().push(format!("{} {cookie}", req.split_whitespace().nth(1).unwrap_or("")));
-                let set = if req.starts_with("GET /set ") { "Set-Cookie: tf=persisted; Max-Age=86400; Path=/\r\n" } else { "" };
+                let first_set = {
+                    let mut log = log.lock().unwrap();
+                    let first = req.starts_with("GET /set ") && !log.iter().any(|r| r.starts_with("/set "));
+                    log.push(format!("{} {cookie}", req.split_whitespace().nth(1).unwrap_or("")));
+                    first
+                };
+                // A restored `/set` tab must not set them again: the restart has to keep them.
+                let set = if first_set { "Set-Cookie: tf=persisted; Max-Age=86400; Path=/\r\nSet-Cookie: tfs=session; Path=/\r\n" } else { "" };
                 let body = "ok";
                 let _ = c
                     .write_all(format!("HTTP/1.1 200 OK\r\n{set}Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
@@ -174,9 +181,9 @@ fn processes_of(profile: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Start, DevTools for the app's origins only, a page through CDP, a cookie that survives a
-/// restart (the persistent profile), a crash restarted with backoff, and nothing left running
-/// after the app core shut down.
+/// Start, DevTools for the app's origins only, a page through CDP, cookies that survive a restart
+/// (the persistent profile; a session cookie too: it continues where it left off), a crash
+/// restarted with backoff, and nothing left running after the app core shut down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_browser_lifecycle() {
     let Some(chrome) = test_chrome() else {
@@ -189,6 +196,8 @@ async fn real_browser_lifecycle() {
     let set = call(&e, "browser.configSet", json!({ "enginePath": chrome.to_string_lossy() })).await.unwrap();
     assert_eq!(set["enginePath"], json!(chrome.to_string_lossy()));
     assert_eq!(status(&e).await.state, BrowserState::Off);
+    let off = call(&e, "browser.lockTab", json!({ "targetId": "PAGE", "locked": true })).await.unwrap_err();
+    assert_eq!(off.code, "not_running", "{off:?}");
 
     let s: BrowserStatus = serde_json::from_value(call(&e, "browser.start", json!({})).await.unwrap()).unwrap();
     assert_eq!(s.state, BrowserState::Running, "{s:?}");
@@ -208,7 +217,7 @@ async fn real_browser_lifecycle() {
     let refused = Cdp::open(&ws_url, Some("http://evil.example")).await.err().expect("another origin is refused");
     assert!(refused.contains("403"), "{refused}");
 
-    // A page opened through CDP sets a persistent cookie.
+    // A page opened through CDP sets a persistent cookie and a session cookie.
     let (http, seen) = cookie_server().await;
     let mut cdp = Cdp::open(&ws_url, Some("tauri://localhost")).await.unwrap();
     let t = cdp.call("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{http}/set") })).await;
@@ -216,28 +225,39 @@ async fn real_browser_lifecycle() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let cookies = cdp.call("Storage.getCookies", json!({})).await;
-        if cookies["cookies"].as_array().unwrap().iter().any(|c| c["name"] == "tf") {
+        let all = cookies["cookies"].as_array().unwrap();
+        if all.iter().any(|c| c["name"] == "tf") && all.iter().any(|c| c["name"] == "tfs" && c["session"] == true) {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "no cookie: {cookies}");
+        assert!(tokio::time::Instant::now() < deadline, "no cookies: {cookies}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     drop(cdp);
+    let prefs: Value = serde_json::from_slice(&std::fs::read(profile.join("Default/Preferences")).unwrap()).unwrap();
+    assert_eq!(prefs["session"]["restore_on_startup"], json!(1), "the profile continues where it left off");
 
-    // Stop and start: the cookie is still there, and the page sends it.
+    // Stop and start: both cookies are still there, and the page sends them.
     let stopped: BrowserStatus = serde_json::from_value(call(&e, "browser.stop", json!({})).await.unwrap()).unwrap();
     assert_eq!(stopped.state, BrowserState::Off);
     assert!(processes_of(&profile).is_empty(), "{:?}", processes_of(&profile));
     let s: BrowserStatus = serde_json::from_value(call(&e, "browser.start", json!({})).await.unwrap()).unwrap();
     assert_eq!(s.state, BrowserState::Running);
     let mut cdp = Cdp::open(s.ws_url.as_ref().unwrap(), None).await.unwrap();
-    cdp.call("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{http}/echo") })).await;
+    let echo = cdp.call("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{http}/echo") })).await["targetId"].as_str().unwrap().to_string();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while !seen.lock().unwrap().iter().any(|r| r.starts_with("/echo") && r.contains("tf=persisted")) {
-        assert!(tokio::time::Instant::now() < deadline, "the cookie did not survive the restart: {:?}", seen.lock().unwrap());
+    while !seen.lock().unwrap().iter().any(|r| r.starts_with("/echo") && r.contains("tf=persisted") && r.contains("tfs=session")) {
+        assert!(tokio::time::Instant::now() < deadline, "the cookies did not survive the restart: {:?}", seen.lock().unwrap());
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     drop(cdp);
+
+    // The user locks their tab for agents, and unlocks it.
+    let lock = |on: bool| call(&e, "browser.lockTab", json!({ "targetId": echo, "locked": on }));
+    let locked: BrowserStatus = serde_json::from_value(lock(true).await.unwrap()).unwrap();
+    assert_eq!(locked.locked_tabs, [echo.as_str()]);
+    let unlocked: BrowserStatus = serde_json::from_value(lock(false).await.unwrap()).unwrap();
+    assert!(unlocked.locked_tabs.is_empty());
+    lock(true).await.unwrap();
 
     // A crash: started again on its own.
     #[cfg(unix)]
@@ -248,6 +268,7 @@ async fn real_browser_lifecycle() {
         let before = s.cdp_port;
         let back = until(&e, "restarted after the crash", |s| s.state == BrowserState::Running && s.cdp_port != before).await;
         assert!(back.ws_url.is_some());
+        assert!(back.locked_tabs.is_empty(), "a new browser process forgets the locks: {back:?}");
     }
 
     // Shutting the app core down stops it: nothing of it is left.
@@ -257,6 +278,49 @@ async fn real_browser_lifecycle() {
         assert!(tokio::time::Instant::now() < deadline, "left running: {:?}", processes_of(&profile));
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// In its own window, the user closes its last window: the browser comes back headless with the
+/// session cookie it had (Linux with a display; elsewhere closing the last window does not quit).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_cookie_survives_closing_its_window() {
+    let Some(chrome) = test_chrome() else {
+        eprintln!("browser::tests: no Chromium here (set TF_TEST_CHROME); skipped");
+        return;
+    };
+    if !cfg!(target_os = "linux") || std::env::var_os("DISPLAY").is_none() {
+        eprintln!("browser::tests: no display (set DISPLAY); a_session_cookie_survives_closing_its_window skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (e, _rx) = engine(dir.path()).await;
+    call(&e, "browser.configSet", json!({ "enginePath": chrome.to_string_lossy() })).await.unwrap();
+    let s: BrowserStatus = serde_json::from_value(call(&e, "browser.start", json!({ "headed": true })).await.unwrap()).unwrap();
+    assert!(s.state == BrowserState::Running && s.headed, "{s:?}");
+    let (http, seen) = cookie_server().await;
+    let mut cdp = Cdp::open(s.ws_url.as_ref().unwrap(), None).await.unwrap();
+    cdp.call("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{http}/set") })).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !cdp.call("Storage.getCookies", json!({})).await["cookies"].as_array().unwrap().iter().any(|c| c["name"] == "tfs") {
+        assert!(tokio::time::Instant::now() < deadline, "no session cookie");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // The user closes every tab: the window goes, the browser quits and comes back headless.
+    let targets = cdp.call("Target.getTargets", json!({})).await;
+    for t in targets["targetInfos"].as_array().unwrap().iter().filter(|t| t["type"] == "page") {
+        cdp.ws.send(Message::text(json!({ "id": 900, "method": "Target.closeTarget", "params": { "targetId": t["targetId"] } }).to_string())).await.unwrap();
+    }
+    drop(cdp);
+    let back = until(&e, "running headless again", |x| x.state == BrowserState::Running && !x.headed && x.cdp_port != s.cdp_port).await;
+    let mut cdp = Cdp::open(back.ws_url.as_ref().unwrap(), None).await.unwrap();
+    cdp.call("Target.createTarget", json!({ "url": format!("http://127.0.0.1:{http}/echo") })).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !seen.lock().unwrap().iter().any(|r| r.starts_with("/echo") && r.contains("tfs=session")) {
+        assert!(tokio::time::Instant::now() < deadline, "the session cookie did not survive: {:?}", seen.lock().unwrap());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    drop(cdp);
+    e.shutdown().await;
 }
 
 /// One app core per profile: a second core on the same data dir cannot start the browser while

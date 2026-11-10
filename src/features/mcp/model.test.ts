@@ -30,6 +30,8 @@ import {
   shadowedBy,
   shareList,
   splitArgs,
+  splitCommandLine,
+  startHint,
   typeValue,
   summarize,
   uniqueName,
@@ -69,6 +71,40 @@ describe("argument line", () => {
     expect(withConfigArg(["run", "x", "--config", "{}"], '{"a":1}')).toEqual(["run", "x", "--config", '{"a":1}']);
     expect(withConfigArg(["run", "x"], "{}")).toEqual(["run", "x", "--config", "{}"]);
     expect(withConfigArg(["run", "--config"], "{}")).toEqual(["run", "--config", "{}"]);
+  });
+});
+
+describe("a command line in Command", () => {
+  const form = (command: string, argsText = "") => ({ ...emptyForm("user"), name: "sentry", command, argsText });
+
+  test("splits into the program and its arguments, also for what goes out to the host", () => {
+    const f = splitCommandLine(form("npx @sentry/mcp-server@latest"));
+    expect([f.command, f.argsText]).toEqual(["npx", "@sentry/mcp-server@latest"]);
+    // Left unsplit in the field, the draft still starts npx, never a program named after the line.
+    expect(draftFromForm(form("npx -y @sentry/mcp-server@latest")).draft).toMatchObject({ command: "npx", args: ["-y", "@sentry/mcp-server@latest"] });
+  });
+
+  test("its words go before the arguments there, or replace them when a paste replaced the field", () => {
+    expect(splitCommandLine(form("npx -y", "pkg --verbose")).argsText).toBe("-y pkg --verbose");
+    expect(splitCommandLine(form("npx -y pkg", "old-pkg"), true).argsText).toBe("-y pkg");
+  });
+
+  test("a path stays whole unless quoted; one word or an unclosed quote stays as it is", () => {
+    for (const command of ["/opt/My Tools/server", String.raw`C:\Program Files\nodejs\npx.cmd`, "npx", `npx "unclosed`]) {
+      expect(splitCommandLine(form(command, "a")).command).toBe(command);
+    }
+    const quoted = splitCommandLine(form(String.raw`"C:\Program Files\nodejs\npx.cmd" -y pkg`));
+    expect([quoted.command, quoted.argsText]).toEqual([String.raw`C:\Program Files\nodejs\npx.cmd`, "-y pkg"]);
+  });
+
+  test("a start failure's hint names the program to fix", () => {
+    expect(startHint(`Executable not found in $PATH: "npx"`)).toContain("“npx”");
+    // A whole line in Command: the hint names its program, not the line.
+    const line = startHint("ENOENT: no such file or directory, posix_spawn 'npx @sentry/mcp-server@latest'");
+    expect(line).toContain("“npx”");
+    expect(line).not.toContain("“npx @sentry");
+    expect(startHint("ENOENT: no such file or directory, posix_spawn '/opt/tools/server'")).toContain("“/opt/tools/server”");
+    expect(startHint("MCP error -32000: Connection closed")).toBeUndefined();
   });
 });
 

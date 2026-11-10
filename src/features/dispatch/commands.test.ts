@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { CommandInfo } from "@/core/gen";
+import { CHAT_REPO } from "@/core/chats";
+import type { Agent, CommandInfo, Workspace } from "@/core/gen";
 import { slashPopupAt } from "@/features/session/composer/slash";
-import { firstCommand, NEW_AGENT_OFFER, type NewAgentCommands } from "./commands";
+import { firstCommand, NEW_AGENT_OFFER, type NewAgentCommands, sessionIn } from "./commands";
 
 const review: CommandInfo = { name: "review", description: "Review the current diff", source: "prompt" };
 const notes: CommandInfo = { name: "skill:release-notes", description: "Draft release notes", source: "skill" };
@@ -97,5 +98,28 @@ describe("the Dispatch palette", () => {
       const r = bare.ok ? bare : firstCommand(`/${name} ${args[name] ?? "add a settings page"}`, known);
       expect(r.ok ? null : name).toBeNull();
     }
+  });
+});
+
+describe("the session a new agent's commands come from", () => {
+  const ws = (id: string, cwd: string, root?: string): Workspace => ({ id, label: id, cwd, ...(root ? { repo: { root, name: "app" } } : {}), tabs: [], rollup: "idle", order: 0 });
+  const live = (p: Partial<Agent>) => ({ name: p.id, omp: { link: "live", bridge: true }, ...p }) as Agent;
+  const workspaces = [ws("w1", "/r/app", "/r/app"), ws("w2", "/wt/app/fix", "/r/app"), ws("w3", "/home/a/notes"), ws("w4", "/home/a"), ws("wc", "/home/a/.teleflock/chats")];
+
+  test("a live bridged session in the repository, the folder itself, or a chat", () => {
+    const agents = [
+      live({ id: "b-wt", workspaceId: "w2", cwd: "/wt/app/fix" }),
+      live({ id: "c-notes", workspaceId: "w3", cwd: "/home/a/notes" }),
+      // Its workspace is elsewhere, the agent in the folder.
+      live({ id: "a-notes", workspaceId: "w4", cwd: "/home/a/notes" }),
+      live({ id: "d-chat", workspaceId: "wc", cwd: "/home/a/.teleflock/chats/trip", chat: true }),
+      // Not bridged.
+      { ...live({ id: "a-app", workspaceId: "w1", cwd: "/r/app" }), omp: { link: "live", bridge: false } } as Agent,
+    ];
+    expect(sessionIn({ workspaces, agents }, "/r/app")).toBe("b-wt");
+    expect(sessionIn({ workspaces, agents }, "/home/a/notes")).toBe("a-notes");
+    expect(sessionIn({ workspaces, agents: agents.filter((a) => a.id !== "a-notes") }, "/home/a/notes")).toBe("c-notes");
+    expect(sessionIn({ workspaces, agents }, CHAT_REPO)).toBe("d-chat");
+    expect(sessionIn({ workspaces, agents }, "/home/a/scratch")).toBeUndefined();
   });
 });

@@ -213,15 +213,17 @@ mod file {
     /// Longest file name, extension included.
     const MAX_NAME: usize = 100;
     /// Extensions a file keeps: what the app's Open in browser writes (an HTML page with the
-    /// artifact policy first, Markdown, images, JSON, text) and source files whose default app shows
-    /// them rather than runs them. Any other extension, or none, gets `.txt` appended, so a
-    /// presented `.bat`, `.js` (Windows Script Host), `.py`, `.command` (macOS) or `.desktop` opens
-    /// as text instead of running, and so do `.svg` and `.xml` (a browser runs their scripts outside
-    /// the sandbox) and `.csv`/`.tsv` (a spreadsheet app evaluates their formulas).
+    /// artifact policy first, Markdown, images, PDFs, audio and video, JSON, text) and source files
+    /// whose default app shows them rather than runs them. Any other extension, or none, gets
+    /// `.txt` appended, so a presented `.bat`, `.js` (Windows Script Host), `.py`, `.command`
+    /// (macOS) or `.desktop` opens as text instead of running, and so do `.svg` and `.xml` (a
+    /// browser runs their scripts outside the sandbox) and `.csv`/`.tsv` (a spreadsheet app
+    /// evaluates their formulas).
     const OPENABLE: &[&str] = &[
-        "html", "htm", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif", "json", "txt",
-        "log", "rs", "go", "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "java", "kt", "swift", "zig", "ts", "tsx", "mts",
-        "cts", "css", "scss", "less", "sql", "yaml", "yml", "toml", "ini", "diff", "patch", "proto", "graphql",
+        "html", "htm", "md", "markdown", "png", "apng", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif", "pdf", "mp3",
+        "wav", "ogg", "oga", "opus", "m4a", "flac", "aac", "mp4", "m4v", "webm", "mov", "ogv", "json", "txt", "log", "rs",
+        "go", "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "java", "kt", "swift", "zig", "ts", "tsx", "mts", "cts", "css",
+        "scss", "less", "sql", "yaml", "yml", "toml", "ini", "diff", "patch", "proto", "graphql",
     ];
 
     pub fn open(name: &str, base64: &str) -> Result<(), String> {
@@ -402,6 +404,14 @@ mod file {
                 ("a_?b.md", "a__b.md"),
                 ("com10.txt", "com10.txt"),
                 ("console.html", "console.html"),
+                ("presented/q3-report-v2.pdf", "q3-report-v2.pdf"),
+                ("Launch Demo.MP4", "Launch Demo.MP4"),
+                ("presented/standup-v1.opus", "standup-v1.opus"),
+                ("spinner.apng", "spinner.apng"),
+                ("intro.mov", "intro.mov"),
+                ("chime.flac", "chime.flac"),
+                ("slides.pptx", "slides.pptx.txt"),
+                ("build.zip", "build.zip.txt"),
             ];
             for (name, expected) in cases {
                 assert_eq!(file_name(name), expected, "{name:?}");

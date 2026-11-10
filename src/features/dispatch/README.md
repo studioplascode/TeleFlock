@@ -1,8 +1,9 @@
 # features/dispatch (owner: Dispatch)
 
-Fire tasks at a repository like chat messages: every message creates a fresh worktree with an omp
-agent whose first prompt is the message, or which runs it when it is a slash command (`/plan add a settings
-page`, a skill, a prompt template). Or pick "No folder · chat" and every message starts a chat
+Fire tasks at a repository like chat messages: every message creates a fresh worktree (its branch
+named like its agent) with an omp agent whose first prompt is the message, or which runs it when it
+is a slash command (`/plan add a settings page`, a skill, a prompt template); "In this folder", each
+agent starts in the repository or folder itself instead, no worktree. Or pick "No folder · chat" and every message starts a chat
 instead: an omp agent in a folder its host makes for it, no repository (architecture §3.31). Route
 `#/dispatch` (`{ name: "dispatch" }`); desktop sidebar item next to Board, phone bottom-nav tab,
 palette view "Dispatch", global key `D`; "New chat" (palette action, phone create sheet) opens it
@@ -15,19 +16,21 @@ on the chat choice (`openChat`).
 export function DispatchView(): JSX.Element;
 
 // src/features/dispatch/store.ts — persisted threads (zustand persist, localStorage "tf.dispatch", v2)
-export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (target), lastRepo, bases, legacyBases, trusted, options, remotes, composerFocus, select, setBase, setOptions, trust, learnRemotes, add, patch, remove, clear, focusComposer, consumeComposerFocus }; composerFocus: a nonce asking the view to focus the task box (not persisted)
+export const useDispatch: UseBoundStore<…>;      // { threads, lastHost (target), lastRepo, bases, legacyBases, inPlace, folders, trusted, options, remotes, composerFocus, select(target, repo?, place?: PickedPlace), setInPlace, setBase, setOptions, trust, learnRemotes, add, patch, remove, clear, focusComposer, consumeComposerFocus }; inPlace: threads "In this folder"; folders: threads of a folder that is no repository root (always in place); place: a Browse… pick sets both; composerFocus: a nonce asking the view to focus the task box (not persisted)
 export function threadKey(target: string, repo: string): string;  // target = host id or "auto:<group>"; repo = root (host), repo id (Auto) or CHAT_REPO (a chat thread, `@/core/chats`)
 export function entryHost(key, entry): string;                    // the host an entry went to (entry.hostId, else the thread's host)
 export function entryRepo(key, entry): string;                    // that host's checkout root (entry.repo, else the thread's repo)
-export function dispatchTask(args: { key?; hostId; repo; prompt; command?: FirstCommand; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; suggest?: BranchSuggester | null }): DispatchEntry; // suggest: default = tiny model when AI naming is on and there is text (a command: a task, `commandTask`); resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase); repo = CHAT_REPO: a chat (no branch, base or resolveBase; agent.start with the chat target); command: the agent runs it (AgentSpec.command) instead of getting prompt, the text as typed
+export function inWorktree(entry): boolean;                       // the entry got a worktree of its own (not in place, not a chat)
+export interface PickedPlace { inPlace: boolean; folder: boolean } // how a thread picked in the browser runs its messages
+export function dispatchTask(args: { key?; hostId; repo; prompt; command?: FirstCommand; images?; base?; baseLabel?; placed?; options: DispatchOptions; taken: Iterable<string>; resolveBase?: BaseChoice; inPlace?: boolean; suggest?: BranchSuggester | null }): DispatchEntry; // branch = name (`<slug>`); suggest: default = tiny model when AI naming is on and there is text (a command: a task, `commandTask`); resolveBase { stored?, legacy }: fetch the host's branches, dedupe the name against them and resolve the base there (threadBase); inPlace: agent.start { target: { kind: "cwd", cwd: repo, label: name } } (no branch, base or resolveBase); repo = CHAT_REPO: a chat (no branch, base or resolveBase; agent.start with the chat target); command: the agent runs it (AgentSpec.command) instead of getting prompt, the text as typed
 export function pendingByHost(threads, runningAgentIds, now): Record<string, number>; // dispatches on their way to each host (Auto's workload)
 export function suggestDispatchName(hostId, repo, prompt): Promise<string | null>; // the send's suggestBranch call (the composer prefetches through it); a chat asks outside any folder (no cwd)
+export function retryDispatch(args: { key; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // on the entry's own host; checks before re-creating (a worktree by the branch the entry recorded, `dispatch/<name>` for old ones, never after `branch_exists`; a chat: links its chat agent, else starts it again; in place: links its agent in the folder, remembering the host's spelling as `path`, else starts it again, under the same name while its first start is unconfirmed); herdr refusing the name on such a retry leaves the entry unknown with `error.held` until its agent links
 export function resumeInterruptedNaming(): void; // every `naming` entry cut short by a reload (any thread) goes ahead under the fallback name once its host answers; runs after hydration, call at startup
-export function retryDispatch(args: { key; id; trust?: boolean; taken: Iterable<string>; host: { agents; workspaces } }): Promise<void>; // on the entry's own host; checks before re-creating (a chat: links its chat agent, else starts it again)
 export function isInFlight(entryId: string): boolean;               // request queued / in flight in this tab
-export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create (a chat: agent.start) settles
+export function onDispatchSettled(cb: () => void): () => void;      // after each worktree.create (in place or a chat: agent.start) settles
+export interface DispatchEntry { id; prompt; command?; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed?; chat?; inPlace? } // phase: naming | queued | creating | started | failed | unknown; branch: `<slug>` (entries from before 0.9.4: `dispatch/<slug>`, kept); sessionId: omp session captured while live; chat: a chat (branch "", no base / repo); inPlace: its agent runs in `repo` itself (branch "", no base); command: the line its agent ran (a message that is a command; prompt = the text as typed)
 export function pruneAgents(hostId: string, agentIds: readonly string[], sessionIds?: readonly string[]): void; // drop entries (any thread, Auto included) of agents whose omp session was deleted and of deleted chats (HostInfo.pruned), and their images
-export interface DispatchEntry { id; prompt; command?; createdAt; branch; name; aiNamed?; base?; baseLabel?; options; phase; startedAt?; workspaceId?; agentId?; paneId?; path?; error?; last?; sessionId?; images?; hostId?; repo?; placed?; chat? } // phase: naming | queued | creating | started | failed | unknown; sessionId: omp session captured while live; chat: a chat (branch "", no base / repo); command: the line its agent ran (a message that is a command; prompt = the text as typed)
 export interface DispatchOptions { templateId: string | null; model: string; thinking: ThinkingLevel | "default"; plan: boolean; roleModels?; fallbackChains?; autoAnswer? } // the agent's own omp roles / chains and decide-for-me policy; absent (options saved before them) = none / the host default
 
 // src/features/dispatch/images.ts — images of sent tasks (IndexedDB "tf.dispatch"/"images", keyed by entry id; memory fallback)
@@ -49,12 +52,14 @@ export function localRepoIds(repo): string[];                      // the "local
 export function findGroupRepo(repos, id): GroupRepo | undefined;   // by id, else by one of those local ids (threads keep the id they started under)
 
 // src/features/dispatch/send.ts — one send outside any view (the composer and Quick capture both use it)
-export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure; a chat (repo CHAT_REPO) only to a host whose daemon starts chats; req.command (a FirstCommand) only to a daemon that runs it (takesCommands)
+export function planSend(world: DispatchWorld, req: SendRequest): SendPlan;   // where it goes (single host / Auto pick), or the refusal's toast text; pure; the thread's launch mode (threadLaunch): in place, no base or branch names (Auto: the picked host's checkout); a chat (repo CHAT_REPO) only to a host whose daemon starts chats; req.command (a FirstCommand) only to a daemon that runs it (takesCommands)
 export function sendTask(world, req): { ok: true; hostId; entry } | { ok: false; title; description? }; // planSend + dispatchTask
 export function dispatchTarget(profiles, hostIds, lastHost): { target; group }; // last host or group, else the first host
 export function dispatchOptions(stored, settings): DispatchOptions;             // last used, else the Settings defaults
 export function dispatchDraftKey(target, repo): string;                         // the composer draft of a thread
-export function dispatchedRepos(threads); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); takesCommands(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats; takesCommands: hostd ≥ COMMANDS_MIN_HOSTD ("0.9.1"), the demo host
+export function dispatchedRepos(threads, folders); loadsOf(ids, states, status, threads, quotas?); takesImages(world, hostId); takesCommands(world, hostId); autoRepoOf(world, group, repo); repoNameOf(world, target, repo); // chats and folder threads count as no repository; autoRepoOf(…, CHAT_REPO): the group's hosts that start chats; takesCommands: hostd ≥ COMMANDS_MIN_HOSTD ("0.9.1"), the demo host
+export function threadLaunch(memory, key): { inPlace; folder };                 // how thread key's messages start their agent: in the folder itself (picked, or a folder that is no repository root), else a new worktree each
+export function dispatchBranches(threads, hostId, root): Set<string>;           // branches of Dispatch's worktrees of root on hostId (the base menu leaves them out)
 export function chatHostsOf(states, ids): string[];                             // the hosts of ids whose daemon starts chats (HostInfo.chats)
 export function chatRefusal(world, target): { title; description? } | null;     // why target can't take a chat (daemon from before chats or not known yet; Auto: no host of the group starts chats), CHATS_NEED_UPDATE words
 
@@ -64,26 +69,29 @@ export function openChat(): void; // Dispatch on its current target (last host o
 // src/features/dispatch/commands.ts — a message that is a command (commands.test.ts)
 export interface FirstCommand { line: string; replacesPlan: boolean }  // the line its new agent runs (AgentSpec.command; TeleFlock's `/model <id>` goes as `/switch <id>`); replacesPlan: it turns on plan, vibe or goal mode (OmpCommand.sessionMode), so the agent starts without the Plan option
 export interface NewAgentCommands { commands: CommandInfo[]; skills: boolean; session: boolean } // what a new agent in the folder will have besides the builtins, as far as known
-export function useNewAgentCommands(hostId, repo): NewAgentCommands; // skills.list for the folder (a chat: user level; switched-off skills left out) + agent.commands of a live bridged session in the repository (a chat: of a chat)
+export function useNewAgentCommands(hostId, repo): NewAgentCommands; // skills.list for the folder (a chat: user level; switched-off skills left out) + agent.commands of a live bridged session there (sessionIn)
+export function sessionIn(state, repo): string | undefined;          // that session: in the repository (any worktree), in the folder (the agent's own folder or its workspace's), a chat's for a chat; the first by id
 export function firstCommand(input, known): { ok: true; command: FirstCommand } | { ok: false; title; description? }; // recognised as the session composer recognises commands (findCommand); refused: one line only, unknown, a skill the folder's list lacks, needs arguments, no first message (whyNotFirst), TeleFlock controls of a running agent
 export function whyNotFirst(cmd: OmpCommand, args): string | null;  // OmpCommand/OmpSubcommand.notFirst (history | session | turn | host), or a form omp shows in its TUI only (report, terminal)
 export const NEW_AGENT_OFFER: SlashOffer;                            // the palette's filter: builtins with a form that fits (only the argument choices that fit), every skill, prompt template and extension command
 
 // src/features/dispatch/thread.ts — pure helpers (thread.test.ts)
-export const BRANCH_PREFIX = "dispatch/";
+export const LEGACY_BRANCH_PREFIX = "dispatch/";                    // Dispatch's branches before 0.9.4: their entries keep them; the base menu leaves them out
 export const CHAT_CHOICE = "No folder · chat";                      // the repo chip's chat choice (CHAT_REPO)
 export function baseSlug(prompt: string): string;                  // slugFromPrompt or "task": "Add offline caching to the client" → "offline-caching-client"; "Fix the following points and release 0.5.0 when you are done. - … - …" → "release-0-5-0-fixes"
-export function uniqueSlug(base: string, taken: ReadonlySet<string>): string; // -2, -3… vs names and dispatch/<name> branches; result ≤ 32 chars (herdr's agent-name limit)
+export function uniqueSlug(base: string, taken: ReadonlySet<string>): string; // -2, -3… vs names and branches (a worktree's branch is its name), past a taken branch under it as a folder (`release` beside `release/1.0`) and past the folder herdr checks a taken branch out under (`fix-ci` beside `fix/ci`); result ≤ 32 chars (herdr's agent-name limit)
+export function branchNamesTaken(branches): string[];               // what a new branch can't be called: every branch's name, a remote-tracking one's local name too (`origin/fix-ci` → `fix-ci`); every Dispatch naming and New worktree's auto name use it
 export function cleanSuggestion(s): string | null;                 // an AI slug as a dispatch name (≤ 28 chars, whole words), or null (unusable)
 export function nameDispatch(prompt, suggest?): Promise<{ slug; ai }>; // AI slug else prompt slug; the caller dedupes synchronously after the await
 export function commandTask(command): { text; task: boolean };     // what a command message is named after: its arguments' task ("/plan add a settings page" → "add a settings page", a leading choice like `/goal set` left out; builtins with OmpCommand.task, every custom command), else the command itself ("/fast on")
 export function commandSlug(command): string;                      // its name without AI: the task's slug, else the command's words ("fast-on", "review", "switch-openai-gpt-5")
 export function prefetchKey(draft: string): string | null;         // trimmed draft once it has 3+ words
-export function rambleAbout(repo): string | undefined;             // Rambler's context for a dictated task: "Repository: <name>"; none for a chat (CHAT_REPO) or no repo
 export function threadBase(list, stored, legacy): { shown; param?; untouched }; // see Behaviour → Base
+export function rambleAbout(repo, folder?): string | undefined;    // Rambler's context for a dictated task: "Repository: <name>" ("Folder: <name>" for a folder that is no repository); none for a chat (CHAT_REPO) or no repo
 export function recentRepos(state, dispatched): RecentRepo[];       // workspace repo roots (+ remoteUrl) + dispatched repos, most recent first
-export function resolveAgent(entry, agents, scope: { repo; workspaces }): Agent | undefined; // agentId → pane (same name) → name; always inside the entry's worktree; a chat entry: chat agents only (Agent.chat), and a worktree entry never takes one
 export function slimThreads(threads, maxEntries, maxPrompt): Record<string, DispatchEntry[]>; // persisted copy
+export function resolveAgent(entry, agents, scope: { repo; workspaces }): Agent | undefined; // agentId → pane (same name) → name; always inside the entry's worktree (its recorded branch, or path); in place: an agent whose own folder or workspace's is the entry's, as picked or as the host spelled it once linked (`path`), or the workspace its start opened, labelled with its name; never one in a worktree; a chat entry: chat agents only (Agent.chat), and a worktree entry never takes one
+export function recentFolders(threads, folders, hostId): { root; at }[];  // folders that are no repository root dispatched to on the host, most recent first (the repo chip's "Recent folders")
 ```
 
 Shared helpers used here: `@/core/clipboardImages` (`imageFiles(clipboardData | dataTransfer)` reads
@@ -93,14 +101,35 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
 
 ## Behaviour
 - Top bar: target chip (more than one host, or any host group): single hosts and every host group
-  as "Auto · <group>" with each member's current load; repo chip (recent repos of the host:
-  workspace repo roots, linked worktrees folded into their repo, plus repos dispatched to before;
-  "Browse…" opens the FolderBrowser in repo mode — single hosts only), base-branch chip. The last
-  target and the last repo per target are remembered. Picking a repo (chip menu, empty-state chips,
-  Browse…) puts focus in the task box. With no recent repos the empty state offers "Browse for a
-  repository…". Under the composer: "New worktree" / "Fan out" open those dialogs prefilled with the
+  as "Auto · <group>" with each member's current load; repo chip (where each message of the picked
+  repository runs, "New worktree" or "In this folder"; recent repos of the host: workspace repo
+  roots, linked worktrees folded into their repo, plus repos dispatched to before; recent folders
+  dispatched to; "Browse…" opens the FolderBrowser with the same choice on top, repo mode for new
+  worktrees and folder mode for "In this folder", single hosts only: Auto shows "Any folder…"
+  disabled, "Single hosts only: Auto needs a repository"), base-branch chip (new worktrees only;
+  its menu leaves out the branches of Dispatch's worktrees, `dispatchBranches`, and old
+  `dispatch/*` ones). The last target, the last repo per target and each thread's mode are
+  remembered. Picking a repo (chip menu, empty-state chips, Browse…) or a mode puts focus in the
+  task box. With no recent repos the empty state offers "Browse for a repository…". Under the
+  composer: "New worktree" / "Fan out" (not for a folder that is no repository) open those dialogs prefilled with the
   host, repo (and the current draft for Fan out). The composer block is a `data-toast-anchor`: toasts
   (a persistent needs-you one too) sit above it, never over the task box or its send button.
+- In this folder (`inPlace[threadKey]`, per thread; `folders[threadKey]` for a folder that is no
+  repository root, which always runs in place and has "New worktree" disabled with "Not a
+  repository root"): each message is `agent.start { target: { kind: "cwd", cwd: <root or folder>,
+  label: <name> }, spec }` with the same spec as a worktree's agent (AI naming, model, thinking,
+  plan, templates, images, videos, commands, agent options), named against the host's agents and
+  dispatches; hostd opens a herdr workspace there and starts the agent in it. No branch list, base
+  chip, trust or worktree. The chip reads "<name> · no worktree" with a folder icon; hint,
+  placeholder ("(no worktree)"), the header's line and the empty thread say so (agents sent there
+  share its files and see each other's changes). Picking a folder in Browse… with "In this folder"
+  makes that thread in place; a folder that is no repository root becomes a folder thread (single
+  host; listed under "Recent folders" once it has entries, and never offered to Auto). Auto in
+  place starts the agent in the picked host's own checkout of the repository. The card shows "In
+  <folder> · no worktree" where branch ← base go, "Naming the agent" / "Opening the folder" steps,
+  and "Review checkout" (its tooltip: the folder's whole diff, whoever made it) where a git
+  repository has one, never worktree removal. Quick capture sends in the thread's mode too
+  ("An agent in the folder itself on <host>, no worktree").
 - Chats (`CHAT_REPO` from `@/core/chats`, architecture §3.31): the repo chip's first item, "No folder ·
   chat" (also an empty-state button), is remembered as the target's last repo like any repo (thread
   and draft keys use `CHAT_REPO`). It is disabled, with the reason under it, when the target can't
@@ -114,7 +143,7 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   worktree's agent; a single host must start chats (else the toast says so), Auto picks the least
   busy online host of the group that starts chats (and takes images, with images), with the same
   workload and quota terms and `placed` line. Naming is a task's (AI slug or the prompt's), deduped
-  against the host's live agents and dispatches; no branch list, no `dispatch/` branch, no base (the
+  against the host's live agents and dispatches; no branch list, no branch, no base (the
   host still keeps the name unique: `-2` when an agent has it by then; the card shows the agent's).
   The entry (`chat: true`, `branch: ""`) shows a "Chat" chip (`features/chats/ChatTag`) where branch
   and base go, "Naming the chat" / "Starting chat" steps, Open session / Terminal, never Review. It
@@ -195,8 +224,9 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   repo, or none online → the composer says so and sends nothing. A thread started while the repo
   had no known remote (`local:<host>:<root>`) stays reachable once its remote is learned: it is
   matched by its local id (`findGroupRepo`), and picking the repo goes back to it.
-- A dispatch is one `worktree.create { cwd: root, branch: "dispatch/<slug>", base?, label: slug,
-  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt | command, images?, roleModels?, fallbackChains?, autoAnswer? } }`.
+- A dispatch is one `worktree.create { cwd: root, branch: "<slug>", base?, label: slug,
+  existing: false, trust, agent: { kind: "omp", name: slug, model, thinking, plan, prompt | command, images?, roleModels?, fallbackChains?, autoAnswer? } }`
+  (in place: `agent.start { target: { kind: "cwd", cwd: root, label: slug }, spec }` with that agent spec).
   The footer's More options chip (what is set, when anything is) opens "More agent options" (dialog, sheet on phones):
   the agent's own model roles and fallback chains (`features/agentRoles`) and decide for me (`features/autoAnswer`),
   kept with the options; picking a template keeps them. The policy goes only to a host with decide for me, checked
@@ -248,11 +278,18 @@ as the session composer does), `@/core/workload` (`hostLoad`, `rankHosts`, `pick
   A timeout / lost connection (`timeout`, `not_connected`, `disconnected`) or a reload mid-request
   leaves the entry "Unconfirmed" (amber notice, not a failure): the host may still be creating it,
   so the entry keeps looking for its agent. Every Retry checks first: a matching agent is linked;
-  an existing `dispatch/<name>` worktree gets the agent started in it (`agent.start`; "name taken"
-  means it is still starting, so it waits); only otherwise is the worktree created again, under a
-  fresh name if a leftover branch is in the way.
+  an existing worktree on the entry's recorded branch (`<name>`, or `dispatch/<name>` for entries
+  from before 0.9.4) gets the agent started in it (`agent.start`), unless the first create failed
+  with `branch_exists` (that branch is someone else's); only otherwise is the worktree created
+  again, under a fresh name past the branch list. In place there is no worktree to find: the agent
+  starts again in the folder, under the same name while the first start is unconfirmed, else a
+  free one. herdr refusing the name (or a busy pane) on such a start leaves the entry Unconfirmed,
+  with "The host already has an agent named …" (`error.held`) and what to do: the card picks the
+  agent up when it shows in its folder or worktree, else Dismiss and send again; Check & retry never
+  starts a second agent under the name.
 - Agents are linked only inside the entry's own worktree (same repo root and branch, or the
-  checkout path herdr reported), never to a same-named agent of another repo.
+  checkout path herdr reported), or in place inside its folder (as picked, or as the host spelled
+  it once linked, kept as `path`: a symlink, a typed path), never to a same-named agent of another repo.
   Entries whose agent is gone show the last seen lane ("Finished · closed"), no error.
 - Threads keep the newest 200 entries; the view renders the last 60 with "Show earlier" and scrolls
   to each new message (keyed on the newest entry). The thread menu removes failed entries or clears

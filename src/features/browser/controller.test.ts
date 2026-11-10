@@ -10,7 +10,7 @@ import { approxMeasure, defaultMemory, findHit, freshState, layoutPage, pageFor 
 import { type BrowserEvent, measureElements, observeBrowser } from "./observe";
 
 const MAIL = "https://mail.example.com/";
-const STATUS = { state: "running", headed: false, wsUrl: DEMO_BROWSER_WS, profileDir: "/tmp/profile", cap: 1, attachments: [], requests: [], tabs: [] } satisfies BrowserStatus;
+const STATUS = { state: "running", headed: false, wsUrl: DEMO_BROWSER_WS, profileDir: "/tmp/profile", cap: 1, shareTabs: true, attachments: [], requests: [], tabs: [] } satisfies BrowserStatus;
 
 /** Lets the fake browser's answers (microtasks) and what the controller does with them through. */
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));

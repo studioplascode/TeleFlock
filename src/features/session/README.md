@@ -25,7 +25,7 @@ export function Markdown(props: { text: string; streaming?: boolean; className?:
 ```
 
 Keyboard (session owns): `Esc` stop turn (when the composer is empty / not in a popup), `Enter` send (steer while
-the agent works), `Shift+Enter` newline, `Alt+Enter` queue follow-up (while it works), `1–9` answer the sticky ask
+the agent works; a quick command runs), `Shift+Enter` newline, `Alt+Enter` queue follow-up (while it works), `1–9` answer the sticky ask
 card, `←` its previous question (multi-question asks), `/` slash palette, `@` file mention. Phone: the ⋯ menu is a
 bottom sheet (its Terminal item opens the full terminal view); a "Next waiting" chip docks above the composer while
 other agents need you. `F5` / `Alt+R` resume a failed or stopped turn (below).
@@ -44,6 +44,19 @@ leave the strip with their rows, together when they land together. omp pulls bac
 last steer, else the last follow-up), so the pencil and × sit on that chip alone; a pull that finds nothing left
 (`agent.dequeue` → `{}`) says "Already delivered" and clears this client's settled sends (hostd drops its own list).
 Tests: `bun test src/features/session/composer/queue.test.ts`.
+
+Quick commands (`@/core/quickCommand`, `composer/quick.ts`, `composer/QuickCue.tsx`, `composer/RunStrip.tsx`;
+architecture §3.4): a draft without attachments that omp's composer would read as `!cmd`, `!!cmd`, `$ code` or
+`$$ code` (judged on what was typed, trimmed; a `$` line that reads like a shell command, such as `$ git status`, is
+a message, as in omp) shows a cue above the text (`!` badge, "Shell command · output goes to the agent" / "· output not
+added to the context", Python likewise), and Enter (or the send button, then a terminal icon) runs it with
+`agent.shell`, the paste tokens expanded: never a steer or a follow-up, also while the agent works. The draft clears once
+the host took it, an error toasts, and the "Running" strip shows the run until its row lands (`useRuns`; "Still
+running" when omp had not finished after 15 s). A session without `caps.shell` (an older bridge, no TUI) says so in the
+cue and on Enter, and sends nothing. Rows (`transcript/rows.tsx` `UserRunRow`): a tool row with `userRun` is the
+user's, right-aligned under "You ran" ("not in context" for `!!` / `$$`), its bash card labelled with the prefix and
+its output in ANSI colours; it is off the tool-call timeline and ends `lastTurnRetryable`'s walk like a user row. Tests:
+`bun test src/core/quickCommand.test.ts src/features/session/composer/quick.test.ts src/core/demo/quickRuns.test.ts`.
 
 Chats (`Agent.chat`, features/chats): the desktop header and the phone top bar's subtitle show the "Chat" chip
 (`ChatTag`) where repo · branch go; the ⋯ menu (dropdown and phone sheet) leaves out Move to host… and adds
@@ -243,7 +256,7 @@ hosts) there is no progress and no Back. Tests: `bun test src/features/session/a
 
 ## Artifacts and context X-ray (architecture §3.20)
 
-- `artifacts/`: `session.artifacts` per agent key (zustand list, refreshed when a turn ends, a subagent settles or a plan review opens; ≤ every 3 s), `artifactRows` (pending review pinned, then plans, reports & notes, subagent outputs, handoffs), the rail panel / phone "Docs" tab and the viewer (Markdown, Copy, Copy path, Mention into the composer draft).
+- `artifacts/`: `session.artifacts` per agent key (zustand list, refreshed when a turn ends, a subagent settles or a plan review opens; ≤ every 3 s), `artifactRows` (pending review pinned, then plans, reports & notes, subagent outputs, handoffs), the rail panel / phone "Docs" tab and the viewer (Markdown, Copy, Copy path, Mention into the composer draft). Presented documents by kind (`ArtifactView.tsx`): pages, Markdown, drawings, Mermaid (`MermaidFigure`), code, tables, JSON, text; images, PDFs (Review's `PdfView`), audio and video (Review's players) read in ranges with progress (`load.ts`, Review's `readMedia`); a file to save as a card with Save and Open (`useDocActions`, `readFile`). Tests: `bun test src/features/session/artifacts` (kinds, file names, what opens as it is, ranged and older-host reads, files).
 - `xray/`: the session dialog `context` (`/context`, the inspector's context meter): omp's `/context` breakdown from `session.context`, Compact with focus (`agent.compact`), Drop images (`agent.slash /shake images` when the answer allows it), jump to a tool row, and the totals + terminal fallback for `unsupported`.
 - Tests: `bun test src/features/session/xray` (rows, shares, bar, focus suggestion, the demo methods).
 

@@ -1,10 +1,11 @@
 import type { ArtifactFile, PresentKind } from "@/core/gen";
+import { type MediaKind, mediaByPath } from "@/features/review/diff/media";
 import { languageFor } from "../lib/highlight";
 
 /**
- * What a document is shown as, from what the agent said (`present`'s kind) or else its name, and
- * the names the bridge gives presented snapshots (`presented/<slug>-v<n>.<ext>`, the same rule as
- * tf-collab `presented_name`).
+ * What a document is shown as, from what the agent said (`present`'s kind) or else its name, the
+ * type its bytes get (by extension: Review's map, `media.ts`), and the names the bridge gives
+ * presented snapshots (`presented/<slug>-v<n>.<ext>`, the same rule as tf-collab `presented_name`).
  */
 
 export const KIND_LABEL: Record<PresentKind, string> = {
@@ -16,21 +17,20 @@ export const KIND_LABEL: Record<PresentKind, string> = {
   csv: "Table",
   json: "JSON",
   text: "Text",
+  pdf: "PDF",
+  audio: "Audio",
+  video: "Video",
+  mermaid: "Diagram",
+  file: "File",
 };
 
-const IMAGE_MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-  ico: "image/x-icon",
-  avif: "image/avif",
-};
+/** Kinds whose bytes the viewer reads (in ranges) and the webview shows: Review's media kinds. */
+export type MediaPresentKind = Extract<PresentKind, MediaKind>;
 
+export const isMediaKind = (kind: PresentKind): kind is MediaPresentKind => kind === "image" || kind === "pdf" || kind === "audio" || kind === "video";
+
+/** Types of the other files a page or Markdown document loads (media: `mediaByPath`). */
 const OTHER_MIME: Record<string, string> = {
-  svg: "image/svg+xml",
   css: "text/css",
   js: "text/javascript",
   mjs: "text/javascript",
@@ -38,6 +38,7 @@ const OTHER_MIME: Record<string, string> = {
   html: "text/html",
   htm: "text/html",
   md: "text/markdown",
+  mmd: "text/plain",
   csv: "text/csv",
   tsv: "text/tab-separated-values",
   txt: "text/plain",
@@ -45,13 +46,14 @@ const OTHER_MIME: Record<string, string> = {
   woff2: "font/woff2",
   ttf: "font/ttf",
   otf: "font/otf",
-  mp4: "video/mp4",
-  webm: "video/webm",
-  mp3: "audio/mpeg",
-  wav: "audio/wav",
-  ogg: "audio/ogg",
   vtt: "text/vtt",
+  zip: "application/zip",
 };
+
+/** Files that are no document to read (archives, office documents, databases, programs, fonts): a file to save. */
+const FILE_EXT = new Set(
+  "7z a apk avi bin bz2 class db deb dll dmg doc docx dylib epub exe gz iso jar mkv msi o odp ods odt otf parquet ppt pptx pyc rar rpm so sqlite tar tgz ttf wasm whl wmv woff woff2 xls xlsx xz zip zst".split(" "),
+);
 
 /** `presented/a.b/report.HTML` → `html`. */
 export function extOf(name: string): string {
@@ -61,13 +63,19 @@ export function extOf(name: string): string {
 }
 
 export function mimeFor(name: string): string {
-  const ext = extOf(name);
-  return IMAGE_MIME[ext] ?? OTHER_MIME[ext] ?? "application/octet-stream";
+  return mediaByPath(name)?.mime ?? OTHER_MIME[extOf(name)] ?? "application/octet-stream";
 }
 
-export const isImageName = (name: string): boolean => extOf(name) in IMAGE_MIME;
+/** A raster image's name (an SVG is a drawing, `svg`). */
+export function isImageName(name: string): boolean {
+  const type = mediaByPath(name);
+  return type?.kind === "image" && type.mime !== "image/svg+xml";
+}
 
-/** The kind a file shows as by its name (the bridge's `presentKindForExt`, code by what TeleFlock highlights). */
+/**
+ * The kind a file shows as by its name (the bridge's `presentKindForExt`): media by Review's map,
+ * archives and other binaries as a file, code by what TeleFlock highlights, else text.
+ */
 export function kindForName(name: string): PresentKind {
   const ext = extOf(name);
   switch (ext) {
@@ -90,8 +98,13 @@ export function kindForName(name: string): PresentKind {
     case "text":
     case "log":
       return "text";
+    case "mmd":
+    case "mermaid":
+      return "mermaid";
   }
-  if (ext in IMAGE_MIME) return "image";
+  const media = mediaByPath(name);
+  if (media) return media.kind;
+  if (FILE_EXT.has(ext)) return "file";
   return languageFor(name) ? "code" : "text";
 }
 

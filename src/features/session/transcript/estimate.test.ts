@@ -66,6 +66,13 @@ describe("estimateRowHeight", () => {
     const grown = { ...first, text: lines(30) } as TranscriptItem;
     expect(estimateRowHeight(grown, false)).toBeGreaterThan(estimateRowHeight(first, false));
   });
+
+  test("a quick command the user ran is its card under a one-line header", () => {
+    const view = { type: "bash", command: "git status", output: lines(4), background: false, timedOut: false } as const;
+    const model = estimateRowHeight(tool({ id: "m", tool: "bash", view }), false);
+    expect(estimateRowHeight(tool({ id: "x1", tool: "bash", view, userRun: { python: false, excluded: true } }), false)).toBe(model + 28);
+    expect(estimateRowHeight(tool({ id: "x1", tool: "bash", view, userRun: { python: false, excluded: true } }), true)).toBe(estimateRowHeight(tool({ id: "m", tool: "bash", view }), true) + 18);
+  });
 });
 
 describe("initialScrollOffset", () => {

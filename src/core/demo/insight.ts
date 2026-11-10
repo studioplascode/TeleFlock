@@ -15,7 +15,7 @@ interface Fixture {
   name: string;
   /** Last modified. */
   mtime: number;
-  /** UTF-8 text, or the bytes of a binary file (an image a presented document shows). */
+  /** UTF-8 text, or the bytes of a binary file (an image a presented document shows, a presented PDF, clip or file). */
   body: string | Uint8Array;
 }
 
@@ -25,6 +25,11 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(
 const saved = new Map<string, { name: string; text: string; at: number }[]>();
 /** hostd's cap (`ops/artifact_files.rs` MAX_LOCAL_WRITE). */
 const MAX_LOCAL_WRITE = 4 << 20;
+/** hostd's read sizes (`ops/artifact_files.rs`): the default, the least, text's and bytes' most. */
+const DEFAULT_READ = 1 << 20;
+const MIN_READ = 4 << 10;
+const MAX_TEXT_READ = 4 << 20;
+const MAX_DATA_READ = 8 << 20;
 
 function fixtures(agent: Agent, now: number, items: readonly TranscriptItem[]): Fixture[] {
   const topic = agent.title || agent.name;
@@ -184,9 +189,16 @@ export function demoInsight(method: string, p: Record<string, unknown>, agent: A
     const path = f.kind === "local" ? `${dir}/local/${f.name}` : `${dir}/${f.name}`;
     const bytes = bytesOf(f);
     const binary = isBinary(f.name, bytes);
-    // As tf-hostd: a `base64` read answers any file's bytes as `data`; a text read a text file's text, a binary file's nothing.
-    const read = p.base64 === true ? { data: base64Bytes(bytes) } : binary ? {} : { text: typeof f.body === "string" ? f.body : new TextDecoder().decode(bytes) };
-    return { kind: f.kind, name: f.name, url: urlOf(f), path, size: bytes.length, mtime: f.mtime, ...read, truncated: false, binary } satisfies ArtifactContent;
+    // As tf-hostd: `maxBytes` 1 MiB by default, 4 KiB to 4 MiB of text or 8 MiB of bytes; a ranged read from `offset` (at most the size), echoed.
+    const offset = typeof p.offset === "number" ? Math.min(Math.max(0, p.offset), bytes.length) : undefined;
+    const asData = offset !== undefined || p.base64 === true;
+    const max = Math.min(Math.max(typeof p.maxBytes === "number" ? p.maxBytes : DEFAULT_READ, MIN_READ), asData ? MAX_DATA_READ : MAX_TEXT_READ);
+    const start = offset ?? 0;
+    const part = bytes.subarray(start, start + max);
+    const truncated = start + part.length < bytes.length;
+    // A `base64` or ranged read answers any file's bytes as `data`; a text read a text file's text (a character the cut halves left out), a binary file's nothing.
+    const read = asData ? { data: base64Bytes(part), ...(offset !== undefined && { offset: start }) } : binary ? {} : { text: new TextDecoder().decode(part, { stream: truncated }) };
+    return { kind: f.kind, name: f.name, url: urlOf(f), path, size: bytes.length, mtime: f.mtime, ...read, truncated, binary } satisfies ArtifactContent;
   }
   if (agent.parked) throw apiError("parked", `${agent.name} is done and its pane is closed`, { hint: "Resume it first" });
   return xray(agent, now);

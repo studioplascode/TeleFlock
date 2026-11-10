@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::filter::TAKEN_OVER;
+use super::filter::{NOT_SHARED, TAKEN_OVER};
 use super::registry::Vis;
 use super::{AttachKey, CdpProxy};
 
@@ -177,10 +177,11 @@ fn key(agent: &str) -> AttachKey {
     AttachKey { host_id: "lab".into(), agent_id: agent.into() }
 }
 
-/// A proxy for a stand-in browser, agents `a` and `b` attached, its monitor in sync.
+/// A proxy for a stand-in browser, headless and not sharing the user's tabs, agents `a` and `b`
+/// attached, its monitor in sync.
 async fn setup() -> (Browser, Arc<CdpProxy>) {
     let browser = Browser::start().await;
-    let px = CdpProxy::new(browser.port);
+    let px = CdpProxy::new(browser.port, false, false);
     px.attach(&key("a"));
     px.attach(&key("b"));
     px.wait_synced(WAIT).await;
@@ -285,7 +286,7 @@ async fn closed_with(ws: &mut Ws) -> String {
 #[tokio::test]
 async fn json_endpoints_show_an_agent_its_own_tabs_through_the_address_it_used() {
     let browser = Browser::start().await;
-    let px = CdpProxy::new(browser.port);
+    let px = CdpProxy::new(browser.port, false, false);
     let (a, b) = (key("a"), key("b"));
     // Not attached: refused.
     assert_eq!(http(&px, &a, "GET", "/json/version", HOST).await.0, 403);
@@ -378,7 +379,7 @@ async fn json_close_and_activate_act_only_on_the_agents_own_tabs() {
 #[tokio::test]
 async fn an_agents_connection_gets_a_first_tab_and_ends_with_its_attachment_keeping_its_tabs() {
     let browser = Browser::start().await;
-    let px = CdpProxy::new(browser.port);
+    let px = CdpProxy::new(browser.port, false, false);
     let (a, b) = (key("a"), key("b"));
     px.attach(&a);
     px.attach(&b);
@@ -461,4 +462,107 @@ async fn a_page_connection_is_for_the_agents_own_pages_only_and_never_for_a_web_
     px.hand_back(&own).unwrap();
     let mut again = websocket(&px, &a, &path).await;
     ask(&mut again, 1, "Runtime.evaluate", json!({ "expression": "1" })).await;
+}
+
+#[tokio::test]
+async fn an_agents_first_tab_opens_in_the_users_window_in_its_own_window_and_in_a_window_of_its_own_headless() {
+    let browser = Browser::start().await;
+    // The browser runs in its own window: the first tab is a tab of the user's window, in the
+    // foreground (Chrome's default without `newWindow`).
+    let px = CdpProxy::new(browser.port, true, false);
+    let a = key("a");
+    px.attach(&a);
+    let mut ws = websocket(&px, &a, "/devtools/browser/whatever").await;
+    ask(&mut ws, 1, "Browser.getVersion", json!({})).await;
+    assert_eq!(browser.asked("Target.createTarget"), vec![json!({ "url": "about:blank" })]);
+    // `/json/new` opens one as Chrome's own does; the agent's own tabs open as it asks.
+    new_tab(&px, &a, "https://a.example/").await;
+    let made = ask(&mut ws, 2, "Target.createTarget", json!({ "url": "https://b.example/", "background": true })).await;
+    assert!(made["result"]["targetId"].is_string(), "{made}");
+    assert_eq!(
+        browser.asked("Target.createTarget")[1..],
+        [json!({ "url": "https://a.example/" }), json!({ "url": "https://b.example/", "background": true })]
+    );
+    // Relaunched headless (the user closed its window): the agent's first tab, and every tab it
+    // opens, gets a window of its own.
+    px.set_upstream(browser.port, false);
+    assert_eq!(closed_with(&mut ws).await, "the browser restarted");
+    let mut again = websocket(&px, &a, "/devtools/browser/whatever").await;
+    ask(&mut again, 1, "Browser.getVersion", json!({})).await;
+    let made = ask(&mut again, 2, "Target.createTarget", json!({ "url": "https://c.example/", "background": true })).await;
+    assert!(made["result"]["targetId"].is_string(), "{made}");
+    assert_eq!(
+        browser.asked("Target.createTarget")[3..],
+        [json!({ "url": "about:blank", "newWindow": true }), json!({ "url": "https://c.example/", "background": true, "newWindow": true })]
+    );
+}
+
+#[tokio::test]
+async fn shared_user_tabs_are_listed_after_the_agents_own_and_driven_until_sharing_ends() {
+    let browser = Browser::start().await;
+    let px = CdpProxy::new(browser.port, false, true);
+    let (a, b) = (key("a"), key("b"));
+    px.attach(&a);
+    px.attach(&b);
+    px.wait_synced(WAIT).await;
+    let (own, theirs) = (new_tab(&px, &a, "https://a.example/").await, new_tab(&px, &b, "https://b.example/").await);
+    // `/json/list`: its own pages first, then the user's; never the other agent's.
+    let (_, body) = http(&px, &a, "GET", "/json/list", HOST).await;
+    assert_eq!(page_ids(&body), [own.clone(), USER_PAGE.to_string()]);
+    let (_, body) = http(&px, &b, "GET", "/json/list", HOST).await;
+    assert_eq!(page_ids(&body), [theirs.clone(), USER_PAGE.to_string()]);
+    // It shows the user's tab and connects to its page; the other agent's stays out of reach.
+    assert_eq!(http(&px, &a, "GET", &format!("/json/activate/{USER_PAGE}"), HOST).await, (200, "Target activated".to_string()));
+    assert_eq!(http(&px, &a, "GET", &format!("/json/activate/{theirs}"), HOST).await.0, 404);
+    let path = format!("/devtools/page/{USER_PAGE}");
+    let mut ws = websocket(&px, &a, &path).await;
+    ask(&mut ws, 1, "Runtime.evaluate", json!({ "expression": "1" })).await;
+    // Sharing ends: its connection to the user's page closes saying why, and the page is gone
+    // from its view.
+    px.set_share(false);
+    assert_eq!(closed_with(&mut ws).await, NOT_SHARED);
+    let (_, body) = http(&px, &a, "GET", "/json/list", HOST).await;
+    assert_eq!(page_ids(&body), [own]);
+    assert_eq!(refused_upgrade(&px, &a, &path, None).await.0, 404);
+}
+
+#[tokio::test]
+async fn agents_do_not_close_the_users_tabs_and_their_own_close_before_a_stop() {
+    let browser = Browser::start().await;
+    let px = CdpProxy::new(browser.port, false, true);
+    let (a, b) = (key("a"), key("b"));
+    px.attach(&a);
+    px.attach(&b);
+    px.wait_synced(WAIT).await;
+    let (own, theirs) = (new_tab(&px, &a, "https://a.example/").await, new_tab(&px, &b, "https://b.example/").await);
+    // `/json/close` of the user's tab: refused, agents use it and the user closes it.
+    let (code, body) = http(&px, &a, "GET", &format!("/json/close/{USER_PAGE}"), HOST).await;
+    assert_eq!(code, 403, "{body}");
+    assert!(body.contains("this is one of the user's own tabs (https://mail.example/)") && body.ends_with("only the user closes it: leave it open"), "{body}");
+    // Locked: refused saying where to open pages instead. An agent's tab is not locked.
+    px.lock_tab(USER_PAGE, true).unwrap();
+    assert_eq!(px.lock_tab(&own, true).unwrap_err().code, "invalid_params");
+    assert_eq!(px.locked_tabs(), [USER_PAGE]);
+    let (code, body) = http(&px, &a, "GET", &format!("/json/close/{USER_PAGE}"), HOST).await;
+    assert_eq!(code, 403, "{body}");
+    assert!(body.contains("the user locked this tab to its page (https://mail.example/)") && body.ends_with("app: { target: \"https://a.example/\" }"), "{body}");
+    // Lent and locked: its borrower does not close it either (its own tab is named instead).
+    px.lend_tab(USER_PAGE, &b).unwrap();
+    let (code, body) = http(&px, &b, "GET", &format!("/json/close/{USER_PAGE}"), HOST).await;
+    assert_eq!(code, 403, "{body}");
+    assert!(body.contains("the user locked this tab to its page") && body.ends_with("app: { target: \"https://b.example/\" }"), "{body}");
+    px.lock_tab(USER_PAGE, false).unwrap();
+    assert!(px.locked_tabs().is_empty());
+    assert!(browser.asked("Target.closeTarget").is_empty());
+    // Before a stop or relaunch the agents' own tabs close; the user's (lent or not) stay.
+    px.close_agents_tabs().await;
+    let mut closed: Vec<String> = browser.asked("Target.closeTarget").iter().map(|p| p["targetId"].as_str().unwrap().to_string()).collect();
+    closed.sort();
+    let mut want = vec![own, theirs];
+    want.sort();
+    assert_eq!(closed, want);
+    // The browser stopping forgets its locks.
+    px.lock_tab(USER_PAGE, true).unwrap();
+    px.close_all();
+    assert!(px.locked_tabs().is_empty());
 }

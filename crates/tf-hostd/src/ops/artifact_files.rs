@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -41,7 +41,8 @@ const SNIFF_BYTES: usize = 8 * 1024;
 const DEFAULT_READ: u64 = 1 << 20;
 const MIN_READ: u64 = 4 << 10;
 const MAX_READ: u64 = 4 << 20;
-/// `base64` reads (images, the files a presented page references): 8 MiB is 11 MiB on the wire.
+/// `base64` and ranged reads (images, media, the files a presented page references): 8 MiB is
+/// 11 MiB on the wire.
 const MAX_DATA_READ: u64 = 8 << 20;
 const MAX_NAME: usize = 1024;
 /// omp `WINDOWS_LOCAL_ROOT_MAX_CHARS`.
@@ -103,12 +104,22 @@ pub async fn list(ctx: &Ctx, agent_id: &str) -> Result<SessionArtifacts, ApiErro
 
 pub async fn read(ctx: &Ctx, p: ArtifactParams) -> Result<ArtifactContent, ApiError> {
     let paths = session_paths(ctx, &p.agent_id)?.ok_or_else(|| ApiError::new("not_found", "this session has no artifacts yet"))?;
-    let how = if p.base64 == Some(true) { ReadAs::Base64 } else { ReadAs::Text };
-    let cap = if how == ReadAs::Base64 { MAX_DATA_READ } else { MAX_READ };
-    let max = p.max_bytes.unwrap_or(DEFAULT_READ).clamp(MIN_READ, cap);
+    let (how, max) = read_plan(&p);
     tokio::task::spawn_blocking(move || read_artifact_as(&paths, p.kind, &p.name, max, how))
         .await
         .map_err(|e| ApiError::new("internal", format!("reading an artifact: {e}")))?
+}
+
+/// What a request asks to read, and how many bytes at most: an `offset` is a range (base64,
+/// whatever `base64` says), else `base64` or text; `maxBytes` clamped to 4 KiB..its cap.
+fn read_plan(p: &ArtifactParams) -> (ReadAs, u64) {
+    let how = match (p.offset, p.base64) {
+        (Some(at), _) => ReadAs::Range(at),
+        (None, Some(true)) => ReadAs::Base64,
+        (None, _) => ReadAs::Text,
+    };
+    let cap = if how == ReadAs::Text { MAX_READ } else { MAX_DATA_READ };
+    (how, p.max_bytes.unwrap_or(DEFAULT_READ).clamp(MIN_READ, cap))
 }
 
 /// The artifacts of an omp agent's session, live or parked (`None`: omp names no session file yet).
@@ -382,6 +393,9 @@ pub(crate) enum ReadAs {
     Text,
     /// The bytes as base64 `data`, whatever the file holds.
     Base64,
+    /// The bytes from this offset on (at most the size) as base64 `data`, the offset echoed: one
+    /// range of a file larger than a read.
+    Range(u64),
 }
 
 /// Reads one artifact as text (blocking); the tests' shorthand for [`read_artifact_as`].
@@ -412,21 +426,38 @@ pub(crate) fn read_artifact_as(paths: &SessionPaths, kind: ArtifactKind, name: &
         return Err(ApiError::new("invalid_params", format!("`{}` is not a file", crate::util::clip(name, 80))));
     }
     let size = meta.len();
-    let mut bytes = Vec::with_capacity(size.min(max) as usize);
-    File::open(&real).and_then(|f| f.take(max).read_to_end(&mut bytes)).map_err(|e| crate::ops::fs::io_error(e, &real))?;
-    let truncated = (bytes.len() as u64) < size;
+    let start = if let ReadAs::Range(at) = how { at.min(size) } else { 0 };
+    let io = |e| crate::ops::fs::io_error(e, &real);
     let ext = real.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-    let binary = ext.as_deref().is_some_and(|e| BINARY_EXTENSIONS.contains(&e)) || !looks_like_text(&bytes[..bytes.len().min(SNIFF_BYTES)]);
+    let known_binary = ext.as_deref().is_some_and(|e| BINARY_EXTENSIONS.contains(&e));
+    let mut f = File::open(&real).map_err(io)?;
+    // A range further in says nothing about the file's start: that is sniffed on its own.
+    let head = if start > 0 && !known_binary {
+        let mut head = Vec::with_capacity(SNIFF_BYTES.min(size as usize));
+        (&mut f).take(SNIFF_BYTES as u64).read_to_end(&mut head).map_err(io)?;
+        Some(head)
+    } else {
+        None
+    };
+    if start > 0 {
+        f.seek(SeekFrom::Start(start)).map_err(io)?;
+    }
+    let mut bytes = Vec::with_capacity((size - start).min(max) as usize);
+    f.take(max).read_to_end(&mut bytes).map_err(io)?;
+    let truncated = start + (bytes.len() as u64) < size;
+    let sample = head.as_deref().unwrap_or(&bytes[..bytes.len().min(SNIFF_BYTES)]);
+    let binary = known_binary || !looks_like_text(sample);
     let (text, data) = match how {
         ReadAs::Text => ((!binary).then(|| decode(bytes, truncated)), None),
-        ReadAs::Base64 => (None, Some(base64::engine::general_purpose::STANDARD.encode(&bytes))),
+        ReadAs::Base64 | ReadAs::Range(_) => (None, Some(base64::engine::general_purpose::STANDARD.encode(&bytes))),
     };
     let url = match kind {
         ArtifactKind::Local => Some(format!("local://{name}")),
         ArtifactKind::Agent => rel.file_stem().and_then(|s| s.to_str()).map(|id| format!("agent://{id}")),
         ArtifactKind::Handoff => None,
     };
-    Ok(ArtifactContent { kind, name: name.to_owned(), url, path: real.display().to_string(), size, mtime: mtime(&meta), text, data, truncated, binary })
+    let offset = matches!(how, ReadAs::Range(_)).then_some(start);
+    Ok(ArtifactContent { kind, name: name.to_owned(), url, path: real.display().to_string(), size, mtime: mtime(&meta), text, data, truncated, binary, offset })
 }
 
 /// No NUL bytes and valid UTF-8, allowing a character cut off at the end of the sample.
@@ -648,6 +679,68 @@ mod tests {
         assert_eq!(err.code, "invalid_params");
         // a text read never carries data
         assert!(read_artifact(&paths, ArtifactKind::Local, "style.css", MAX_READ).unwrap().data.is_none());
+    }
+
+    #[test]
+    fn ranged_reads_answer_the_bytes_from_their_offset() {
+        use base64::Engine as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = session(tmp.path());
+        // A clip of 8 KiB + 7 bytes, read in ranges of 4 KiB until it is whole.
+        let body: Vec<u8> = (0..MIN_READ * 2 + 7).map(|i| (i % 251) as u8).collect();
+        fs::create_dir_all(paths.local_root.join("presented")).unwrap();
+        fs::write(paths.local_root.join("presented/demo-v1.mp4"), &body).unwrap();
+        let name = "presented/demo-v1.mp4";
+        let (mut joined, mut at) = (Vec::new(), 0);
+        loop {
+            let r = read_artifact_as(&paths, ArtifactKind::Local, name, MIN_READ, ReadAs::Range(at)).unwrap();
+            assert_eq!((r.offset, r.size, r.text.as_deref(), r.binary), (Some(at), body.len() as u64, None, true));
+            let bytes = base64::engine::general_purpose::STANDARD.decode(r.data.unwrap()).unwrap();
+            at += bytes.len() as u64;
+            joined.extend(bytes);
+            assert_eq!(r.truncated, at < body.len() as u64);
+            if !r.truncated {
+                break;
+            }
+        }
+        assert_eq!(joined, body);
+        // Past the end: nothing, and nothing more to come; the offset is the size.
+        let end = read_artifact_as(&paths, ArtifactKind::Local, name, MIN_READ, ReadAs::Range(1 << 40)).unwrap();
+        assert_eq!((end.offset, end.data.as_deref(), end.truncated), (Some(body.len() as u64), Some(""), false));
+        // Reads without a range name no offset (an app tells an older host by its absence).
+        assert_eq!(read_artifact_as(&paths, ArtifactKind::Local, name, MIN_READ, ReadAs::Base64).unwrap().offset, None);
+        assert_eq!(read_artifact(&paths, ArtifactKind::Local, name, MIN_READ).unwrap().offset, None);
+        // The same scoping as every read.
+        assert_eq!(read_artifact_as(&paths, ArtifactKind::Local, "../outside.mp4", MIN_READ, ReadAs::Range(0)).unwrap_err().code, "invalid_params");
+    }
+
+    #[test]
+    fn a_range_further_in_is_text_or_binary_by_the_start_of_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = session(tmp.path());
+        // Text in the first 8 KiB, NUL bytes after: text, whatever the range holds.
+        let mut log = "x".repeat(SNIFF_BYTES).into_bytes();
+        log.extend([0u8; 64]);
+        fs::write(paths.local_root.join("run.log"), &log).unwrap();
+        assert!(!read_artifact_as(&paths, ArtifactKind::Local, "run.log", MIN_READ, ReadAs::Range(SNIFF_BYTES as u64)).unwrap().binary);
+        // A NUL byte first, plain text in the range: binary.
+        let mut blob = vec![0u8];
+        blob.extend("y".repeat(SNIFF_BYTES * 2).into_bytes());
+        fs::write(paths.local_root.join("blob.dat"), &blob).unwrap();
+        assert!(read_artifact_as(&paths, ArtifactKind::Local, "blob.dat", MIN_READ, ReadAs::Range(SNIFF_BYTES as u64)).unwrap().binary);
+    }
+
+    #[test]
+    fn what_a_request_reads() {
+        let plan = |offset: Option<u64>, base64: Option<bool>, max_bytes: Option<u64>| {
+            read_plan(&ArtifactParams { agent_id: "a".into(), kind: ArtifactKind::Local, name: "x".into(), max_bytes, base64, offset })
+        };
+        assert_eq!(plan(None, None, None), (ReadAs::Text, DEFAULT_READ));
+        assert_eq!(plan(None, Some(false), Some(u64::MAX)), (ReadAs::Text, MAX_READ));
+        assert_eq!(plan(None, Some(true), Some(u64::MAX)), (ReadAs::Base64, MAX_DATA_READ));
+        // An offset is a range whatever `base64` says: 4 KiB to 8 MiB.
+        assert_eq!(plan(Some(5 << 20), None, Some(u64::MAX)), (ReadAs::Range(5 << 20), MAX_DATA_READ));
+        assert_eq!(plan(Some(0), Some(false), Some(1)), (ReadAs::Range(0), MIN_READ));
     }
 
     #[test]

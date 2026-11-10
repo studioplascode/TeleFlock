@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import type { McpServer, McpServerDraft, McpStatus, McpTestResult, McpTool, McpTransport } from "@/core/gen";
 import { Button, cn, Elapsed, EmptyState, IconButton, Input, Shimmer, Spinner } from "@/design";
 import { copyText } from "@/features/hosts/CopyCommand";
-import { definedIn, filterTools, plural, quoteArg, STATUS_META, type StatusTone, statusLabel } from "./model";
+import { definedIn, filterTools, plural, quoteArg, STATUS_META, type StatusTone, startHint, statusLabel } from "./model";
 
 const TONE: Record<StatusTone, string> = {
   ok: "bg-done/12 text-done shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-done)_30%,transparent)]",
@@ -111,12 +111,16 @@ export function OutdatedHost({ onRetry, what = "MCP servers" }: { onRetry(): voi
 
 /** Monospace error text with a copy button. */
 export function ErrorText({ text, className }: { text: string; className?: string }) {
+  const hint = startHint(text);
   return (
-    <div className={cn("flex items-start gap-2 rounded-md bg-error/[0.07] py-2 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_22%,transparent)]", className)}>
-      <code className="min-w-0 flex-1 py-0.5 font-mono text-2xs leading-relaxed break-words whitespace-pre-wrap text-error-ink select-text">{text}</code>
-      <IconButton size="sm" label="Copy the error" onClick={() => copyText(text, "Error")}>
-        <Copy />
-      </IconButton>
+    <div className={cn("flex flex-col gap-1", className)}>
+      <div className="flex items-start gap-2 rounded-md bg-error/[0.07] py-2 pr-1.5 pl-3 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-error)_22%,transparent)]">
+        <code className="min-w-0 flex-1 py-0.5 font-mono text-2xs leading-relaxed break-words whitespace-pre-wrap text-error-ink select-text">{text}</code>
+        <IconButton size="sm" label="Copy the error" onClick={() => copyText(text, "Error")}>
+          <Copy />
+        </IconButton>
+      </div>
+      {hint && <p className="px-1 text-2xs break-words text-mute">{hint}</p>}
     </div>
   );
 }

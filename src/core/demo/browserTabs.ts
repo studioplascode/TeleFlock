@@ -8,7 +8,7 @@ export interface DemoBrowserTab {
   /** CDP target id. */
   targetId: string;
   url: string;
-  /** Window the tab opens in: the user's tabs share window 1, each agent's tabs have their own (as the core places them). */
+  /** Window the tab opens in: the user's tabs share window 1; an agent's first tab gets a window of its own while the browser runs headless and opens in window 1 while it has its own window (as the core places them). */
   window: number;
   /** The agent the tab belongs to; absent: the user's. */
   owner?: { hostId: string; agentId: string };

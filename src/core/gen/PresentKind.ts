@@ -2,6 +2,15 @@
 
 /**
  * How the app shows a presented artifact (the `kind` the agent passed to `present`, or the one
- * the bridge inferred from the file's extension).
+ * the bridge inferred from the file's extension). The snapshot keeps the source's extension
+ * for `image`, `pdf`, `audio`, `video` and `file`, so the app picks the bytes' type by it.
+ * * `html`: a page, sandboxed; `markdown`; `svg`: a drawing; `code`: highlighted source;
+ *   `csv`: a table (also TSV); `json`; `text`.
+ * * `image`: png, apng, jpg, jpeg, gif, webp, bmp, ico, avif.
+ * * `pdf`: drawn page by page (pdf.js).
+ * * `audio` (mp3, wav, ogg, oga, opus, m4a, flac, aac), `video` (mp4, m4v, webm, mov, ogv):
+ *   the platform's player.
+ * * `mermaid`: a Mermaid diagram's source (`.mmd`), drawn as the transcript draws one.
+ * * `file`: any other file handed to the user: its name, size and type, to save.
  */
-export type PresentKind = "html" | "markdown" | "svg" | "image" | "code" | "csv" | "json" | "text";
+export type PresentKind = "html" | "markdown" | "svg" | "image" | "code" | "csv" | "json" | "text" | "pdf" | "audio" | "video" | "mermaid" | "file";

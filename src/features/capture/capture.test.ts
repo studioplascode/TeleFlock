@@ -95,7 +95,7 @@ describe("Quick capture's picture", () => {
       profiles,
       states,
       status: { h1: { phase: "online" }, h2: { phase: "offline" } } as never,
-      dispatch: { threads: {}, remotes: {}, bases: {}, legacyBases: {} },
+      dispatch: { threads: {}, remotes: {}, bases: {}, legacyBases: {}, inPlace: {}, folders: {} },
       loaded: true,
       lastHost: "h1",
       lastRepo: { h1: "/src/app" },
@@ -115,7 +115,7 @@ describe("Quick capture's picture", () => {
 
   test("threads dispatched to are offered, newest first", () => {
     const threads = { "h2\u0000/x/tf": [{ createdAt: 50 }], "h1\u0000/src/app": [{ createdAt: 10 }], "gone\u0000/y": [{ createdAt: 99 }] } as never;
-    const s = world({ dispatch: { threads, remotes: {}, bases: {}, legacyBases: {} } });
+    const s = world({ dispatch: { threads, remotes: {}, bases: {}, legacyBases: {}, inPlace: {}, folders: {} } });
     expect(s.recents.map((r) => `${r.target}:${r.repo}`)).toEqual(["h1:/src/app", "h2:/x/tf"]);
   });
 

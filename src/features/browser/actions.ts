@@ -7,6 +7,7 @@ import type { AppMethods, BrowserClearWhat, BrowserDownload, BrowserScope, Brows
 import { formatBytes } from "@/core/upload";
 import { type ToastInput, toast } from "@/design";
 import { confirmAction } from "@/features/workspace/shared/overlays";
+import { canUseText } from "./requests";
 
 type BrowserMethod = Extract<keyof AppMethods, `browser.${string}`>;
 
@@ -59,7 +60,7 @@ export function stopBrowser(): Promise<BrowserStatus | null> {
 export async function attachAgent(hostId: string, agentId: string, agentName: string): Promise<boolean> {
   try {
     await core.app("browser.attach", { hostId, agentId });
-    toast({ title: `${agentName} can use your browser`, description: "Until you detach it.", status: "done", duration: 2600 });
+    toast({ title: `${agentName} can use your browser`, description: `It ${canUseText(getBrowserStatus()?.shareTabs ?? true)} until you detach it.`, status: "done", duration: 2600 });
     return true;
   } catch (e) {
     const err = toApiError(e);
@@ -99,6 +100,11 @@ export function handBack(targetId: string): Promise<BrowserStatus | null> {
 
 export function lendTab(targetId: string, hostId: string, agentId: string, agentName: string): Promise<BrowserStatus | null> {
   return browserCall("browser.lendTab", { targetId, hostId, agentId }, `Couldn't let ${agentName} use this tab`);
+}
+
+/** Locks a tab no agent opened to its page for agents (they read it, click and type in it, but don't open other pages in it or close it), or unlocks it. */
+export function lockTab(targetId: string, locked: boolean): Promise<BrowserStatus | null> {
+  return browserCall("browser.lockTab", { targetId, locked }, locked ? "Couldn't lock the tab" : "Couldn't unlock the tab");
 }
 
 export function revealDownload(path: string): Promise<unknown> {

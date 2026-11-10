@@ -7,6 +7,7 @@ import type { BrowserConfig } from "./BrowserConfig";
 import type { BrowserConfigSetParams } from "./BrowserConfigSetParams";
 import type { BrowserInstallParams } from "./BrowserInstallParams";
 import type { BrowserLendParams } from "./BrowserLendParams";
+import type { BrowserLockParams } from "./BrowserLockParams";
 import type { BrowserRevealParams } from "./BrowserRevealParams";
 import type { BrowserStageParams } from "./BrowserStageParams";
 import type { BrowserStaged } from "./BrowserStaged";
@@ -114,6 +115,7 @@ export interface AppMethods {
   "browser.takeOver": { params: BrowserTabParams; result: BrowserStatus };
   "browser.handBack": { params: BrowserTabParams; result: BrowserStatus };
   "browser.lendTab": { params: BrowserLendParams; result: BrowserStatus };
+  "browser.lockTab": { params: BrowserLockParams; result: BrowserStatus };
   "recording.start": { params: RecordingStartParams; result: RecordingInfo };
   "recording.append": { params: RecordingAppendParams; result: RecordingAppended };
   "recording.pause": { params: RecordingRef; result: RecordingInfo };

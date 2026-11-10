@@ -1,4 +1,4 @@
-import { Globe, Hand, MoreHorizontal, Plus, Undo2, Unplug, X } from "lucide-react";
+import { Globe, Hand, LockKeyhole, MoreHorizontal, Plus, Undo2, Unplug, X } from "lucide-react";
 import { Fragment, type MouseEvent as ReactMouseEvent, useEffect, useRef } from "react";
 import { cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, IconButton, Spinner, Tooltip } from "@/design";
 import { detachAgent, handBack, takeOver } from "./actions";
@@ -9,6 +9,8 @@ import { type Tab, tabLabel } from "./tabs";
 interface TabStripProps {
   groups: TabGroup[];
   active: string | null;
+  /** Tabs the user locked for agents (a lock on each). */
+  locked: ReadonlySet<string>;
   /** Host display names (shown with several hosts). */
   hostName(hostId: string): string | null;
   compact: boolean;
@@ -16,10 +18,10 @@ interface TabStripProps {
 
 /**
  * The tabs, grouped by owner: the user's first, then each agent's in its colour with its name,
- * host and a live dot while it drives. A group's menu takes its tabs over, hands them back,
- * detaches the agent or closes its tabs.
+ * host and a live dot while it drives; a lock on the ones locked for agents. A group's menu takes
+ * its tabs over, hands them back, detaches the agent or closes its tabs.
  */
-export function TabStrip({ groups, active, hostName, compact }: TabStripProps) {
+export function TabStrip({ groups, active, locked, hostName, compact }: TabStripProps) {
   const ctl = browserController();
   const agents = groups.length > 1;
   return (
@@ -32,7 +34,7 @@ export function TabStrip({ groups, active, hostName, compact }: TabStripProps) {
           {i > 0 && <span aria-hidden className="w-1 shrink-0" />}
           {g.owner.kind === "agent" ? <AgentLabel group={g} hostName={g.hostId ? hostName(g.hostId) : null} compact={compact} /> : agents && <span className="kicker self-center pr-0.5 text-[10px] text-mute-2">You</span>}
           {g.tabs.map((t) => (
-            <TabButton key={t.id} tab={t} group={g} active={t.id === active} compact={compact} onSelect={() => ctl.activate(t.id)} onClose={() => ctl.closeTab(t.id)} />
+            <TabButton key={t.id} tab={t} group={g} active={t.id === active} locked={locked.has(t.id)} compact={compact} onSelect={() => ctl.activate(t.id)} onClose={() => ctl.closeTab(t.id)} />
           ))}
           {g.owner.kind === "user" && (
             <IconButton label="New tab (Ctrl+T)" size="sm" className="sticky right-0 mb-0.5 shrink-0 bg-tile-1" onClick={() => void ctl.newTab()}>
@@ -45,7 +47,7 @@ export function TabStrip({ groups, active, hostName, compact }: TabStripProps) {
   );
 }
 
-function TabButton({ tab, group, active, compact, onSelect, onClose }: { tab: Tab; group: TabGroup; active: boolean; compact: boolean; onSelect(): void; onClose(): void }) {
+function TabButton({ tab, group, active, locked, compact, onSelect, onClose }: { tab: Tab; group: TabGroup; active: boolean; locked: boolean; compact: boolean; onSelect(): void; onClose(): void }) {
   const ref = useRef<HTMLDivElement>(null);
   // The shown tab stays in view (an agent's tab shown from its banner may sit past the strip's edge).
   useEffect(() => {
@@ -54,7 +56,8 @@ function TabButton({ tab, group, active, compact, onSelect, onClose }: { tab: Ta
   const owner = group.owners[tab.id] ?? group.owner;
   const label = tabLabel(tab);
   const detached = owner.kind === "agent" && owner.detached;
-  const note = owner.kind !== "agent" ? "" : owner.detached ? `from ${owner.agentName} (detached)` : owner.takenOver ? "you took it over" : owner.lent ? `lent to ${owner.agentName}` : `the tab of ${owner.agentName}`;
+  const owned = owner.kind !== "agent" ? "" : owner.detached ? `from ${owner.agentName} (detached)` : owner.takenOver ? "you took it over" : owner.lent ? `lent to ${owner.agentName}` : `the tab of ${owner.agentName}`;
+  const note = [owned, locked ? "locked for agents" : ""].filter(Boolean).join(" · ");
   const onAux = (e: ReactMouseEvent) => {
     if (e.button === 1) {
       e.preventDefault();
@@ -75,6 +78,7 @@ function TabButton({ tab, group, active, compact, onSelect, onClose }: { tab: Ta
         {tab.loading ? <Spinner size={14} /> : tab.favicon ? <img src={tab.favicon} alt="" className="size-3.5 shrink-0 rounded-[3px]" draggable={false} /> : <Globe className="size-3.5 shrink-0 text-mute-2" />}
         <span className={cn("min-w-0 truncate @max-[80px]/tab:hidden", detached && "italic")}>{tab.crashed ? `Crashed · ${label}` : label}</span>
         {owner.kind === "agent" && owner.takenOver && <Hand aria-label="You took it over" className="size-3 shrink-0 text-accent-hi" />}
+        {locked && <LockKeyhole aria-label="Locked for agents" className="size-3 shrink-0 text-mute" />}
       </button>
       <button
         type="button"

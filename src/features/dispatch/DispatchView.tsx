@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { Eraser, FolderGit2, FolderSearch, MessagesSquare, MoreHorizontal, Send, Server, Shuffle } from "lucide-react";
+import { Eraser, FolderGit2, FolderOpen, FolderSearch, MessagesSquare, MoreHorizontal, Send, Server, Shuffle } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type DraftImage, navigate, useHostIds, useHostStates, useHosts, useSettings, useUi } from "@/core";
 import { CHAT_REPO, isChatRepo } from "@/core/chats";
@@ -28,31 +28,37 @@ import { canonicalRemote, findGroupRepo, groupHosts, groupRepos, localRepoIds, r
 import type { FirstCommand } from "./commands";
 import { DispatchComposer, type DispatchComposerHandle } from "./DispatchComposer";
 import { DispatchItem, type ThreadContext, ThreadCtx } from "./DispatchItem";
-import { BasePicker, type ChatChoice, type GroupChoice, HostPicker, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
+import { BasePicker, type BrowsePick, type ChatChoice, type GroupChoice, HostPicker, type LaunchChoice, RepoBrowser, type RepoChoice, RepoPicker } from "./RepoBar";
 import {
   type DispatchEntry,
   entryHost,
   entryRepo,
+  inWorktree,
   isInFlight,
   onDispatchSettled,
   retryDispatch,
   threadKey,
   useDispatch,
 } from "./store";
-import { chatHostsOf, chatRefusal, dispatchDraftKey, dispatchOptions, dispatchTarget, dispatchedRepos, loadsOf, sendTask } from "./send";
+import { chatHostsOf, chatRefusal, dispatchBranches, dispatchDraftKey, dispatchOptions, dispatchTarget, dispatchedRepos, loadsOf, sendTask, threadLaunch } from "./send";
 import { useAutoQuotas } from "./quota";
-import { CHAT_CHOICE, recentRepos, resolveAgent, threadBase } from "./thread";
+import { CHAT_CHOICE, recentFolders, recentRepos, resolveAgent, threadBase } from "./thread";
 
 const EMPTY: DispatchEntry[] = [];
 const NO_HOSTS: string[] = [];
 /** Entries rendered before "Show earlier". */
 const PAGE = 60;
 const COUNT_LABEL = { needs: "need you", running: "running", review: "to review" } as const;
+/** The header's line under "Dispatch" for a thread "In this folder". */
+const IN_PLACE_ABOUT = "Type a task: an agent works on it in this folder, named for you";
+/** Why Auto offers no folder that is no repository. */
+const AUTO_NO_FOLDERS = "Single hosts only: Auto needs a repository";
 
 /**
- * `#/dispatch`: pick a repo, then every message creates a fresh worktree (`dispatch/<slug>`) with
- * an omp agent running it; or pick "No folder · chat" (`CHAT_REPO`), and every message starts a
- * chat (an omp agent in a folder its host makes for it). The thread shows each message with its
+ * `#/dispatch`: pick a repo, then every message creates a fresh worktree (on a branch named like
+ * its agent) with an omp agent running it, or, "In this folder", starts its agent in the repository
+ * or folder itself, no worktree; or pick "No folder · chat" (`CHAT_REPO`), and every message starts
+ * a chat (an omp agent in a folder its host makes for it). The thread shows each message with its
  * agent's live reply card. The target is one host, or a host group in Auto mode (each task goes to
  * its least busy host).
  */
@@ -64,6 +70,7 @@ export function DispatchView() {
   const states = useHostStates();
   const threads = useDispatch((s) => s.threads);
   const remotes = useDispatch((s) => s.remotes);
+  const folders = useDispatch((s) => s.folders);
   const lastHost = useDispatch((s) => s.lastHost);
   const select = useDispatch((s) => s.select);
   const nameOf = useCallback((id: string) => profiles.find((p) => p.id === id)?.name ?? id, [profiles]);
@@ -76,6 +83,9 @@ export function DispatchView() {
   const chat = isChatRepo(repo);
   const key = target && repo ? threadKey(target, repo) : null;
   const entries = useDispatch((s) => (key ? (s.threads[key] ?? EMPTY) : EMPTY));
+  // How the thread's messages start their agent: a new worktree each, or in the folder itself (a folder that is no repository root always).
+  const inPlace = useDispatch((s) => !!key && !chat && threadLaunch(s, key).inPlace);
+  const folder = useDispatch((s) => !!key && !chat && threadLaunch(s, key).folder);
 
   // Clones are matched across hosts by their origin remote, learned from workspaces.
   useEffect(() => {
@@ -89,8 +99,8 @@ export function DispatchView() {
     useDispatch.getState().learnRemotes(found);
   }, [states]);
 
-  // Repos dispatched to, per host (single-host and Auto threads alike).
-  const dispatched = useMemo(() => dispatchedRepos(threads), [threads]);
+  // Repos dispatched to, per host (single-host and Auto threads alike; folders that are no repository apart).
+  const dispatched = useMemo(() => dispatchedRepos(threads, folders), [threads, folders]);
 
   // Single host: its recent repos. Auto: the union over the group, one row per repository.
   const hostId = auto ? null : (target ?? null);
@@ -113,6 +123,10 @@ export function DispatchView() {
         : recents.map((r) => ({ id: r.root, name: r.name, detail: tildify(r.root, home) })),
     [auto, pooled, members, nameOf, recents, home],
   );
+  const folderChoices = useMemo<RepoChoice[]>(
+    () => (hostId ? recentFolders(threads, folders, hostId).map((f) => ({ id: f.root, name: basename(f.root), detail: tildify(f.root, home) })) : []),
+    [hostId, threads, folders, home],
+  );
 
   // Composer options: last used, else the Settings defaults.
   const { templates, defaultModel, defaultThinking, defaultPlan } = useSettings();
@@ -134,20 +148,22 @@ export function DispatchView() {
   const workHost = hostId ?? preview?.hostId ?? candidates[0];
   const workRepo = chat ? undefined : hostId ? repo : workHost ? autoRepo?.roots[workHost] : undefined;
 
-  // Base branch: remembered per thread, else the host's default base (`origin/<default>`). Auto
-  // resolves it again on the host each send goes to (as does a send before the list is in).
-  const branches = useHostQuery(workHost, "git.branches", workRepo ? { cwd: workRepo } : null);
+  // Base branch (new worktrees only): remembered per thread, else the host's default base
+  // (`origin/<default>`). Auto resolves it again on the host each send goes to (as does a send
+  // before the list is in). The base menu leaves out Dispatch's own worktrees' branches.
+  const branches = useHostQuery(workHost, "git.branches", workRepo && !inPlace ? { cwd: workRepo } : null);
   const reloadBranches = branches.reload;
   useEffect(() => onDispatchSettled(reloadBranches), [reloadBranches]);
   const storedBase = useDispatch((s) => (key ? s.bases[key] : undefined));
   const legacyBase = useDispatch((s) => (key ? s.legacyBases[key] === true : false));
   const base = threadBase(branches.data, storedBase, legacyBase);
+  const ownBranches = useMemo(() => (workHost && workRepo && !inPlace ? dispatchBranches(threads, workHost, workRepo) : new Set<string>()), [threads, workHost, workRepo, inPlace]);
 
   const statesRef = useRef(states);
   statesRef.current = states;
 
   // Link entries to their agents on each entry's own host, only ever inside the entry's own
-  // worktree (the id can arrive after `worktree.create` returns; reloads and timeouts lose it).
+  // worktree or folder (the id can arrive after `worktree.create` returns; reloads and timeouts lose it).
   const { resolved, counts } = useMemo(() => {
     const ids: Record<string, string> = {};
     const c = { running: 0, needs: 0, review: 0 };
@@ -168,10 +184,18 @@ export function DispatchView() {
     for (const e of entries) {
       const a = resolved[e.id] ? states[entryHost(key, e)]?.agents.find((x) => x.id === resolved[e.id]) : undefined;
       if (!a || e.phase === "failed" || isInFlight(e.id)) continue;
-      // Interrupted by a reload, or unconfirmed after a timeout: the agent turned up after all.
+      // Interrupted by a reload, or unconfirmed after a timeout (or a held name): the agent turned up after all.
       const recovered = e.phase === "queued" || e.phase === "creating" || e.phase === "unknown";
-      if (e.agentId === a.id && e.paneId === a.paneId && e.workspaceId === a.workspaceId && !recovered) continue;
-      patch(key, e.id, { agentId: a.id, paneId: a.paneId, workspaceId: a.workspaceId, ...(recovered ? { phase: "started" as const, error: undefined, startedAt: e.startedAt ?? Date.now() } : {}) });
+      // In place: the host's own spelling of the folder (a symlink, a typed path), to find the agent again by it.
+      const path = e.inPlace && a.cwd ? a.cwd : e.path;
+      if (e.agentId === a.id && e.paneId === a.paneId && e.workspaceId === a.workspaceId && e.path === path && !recovered) continue;
+      patch(key, e.id, {
+        agentId: a.id,
+        paneId: a.paneId,
+        workspaceId: a.workspaceId,
+        ...(path !== e.path ? { path } : {}),
+        ...(recovered ? { phase: "started" as const, error: undefined, startedAt: e.startedAt ?? Date.now() } : {}),
+      });
     }
   }, [key, entries, states, resolved]);
 
@@ -220,6 +244,12 @@ export function DispatchView() {
     const ids = picked ? [id, ...localRepoIds(picked)] : [id];
     select(target, ids.find((x) => x === repo || (threads[threadKey(target, x)]?.length ?? 0) > 0) ?? id);
   };
+  // Browse…: the repository or folder, and how its messages run (a folder that is no repository root: in place).
+  const browsed = (p: BrowsePick) => {
+    if (!target) return;
+    focusAfterPick.current = true;
+    select(target, p.path, { inPlace: p.inPlace, folder: p.folder });
+  };
   useEffect(() => {
     if (!repo || !focusAfterPick.current) return;
     focusAfterPick.current = false;
@@ -260,6 +290,13 @@ export function DispatchView() {
             ? (chatBlock?.title ?? null)
             : null;
 
+  // Where the thread's messages run: the repo chip offers both for a repository, in place only for a folder that is none.
+  const place = repo && !chat && !auto ? tildify(repo, home) : null;
+  const launch: LaunchChoice | undefined =
+    key && !chat
+      ? { inPlace, folder, where: place ? `Agents work in ${place} itself` : "Agents work in each host's own checkout", onChange: (on) => useDispatch.getState().setInPlace(key, on) }
+      : undefined;
+
   const pickers = target && (
     <>
       {(hostIds.length > 1 || groups.length > 0) && (
@@ -269,14 +306,24 @@ export function DispatchView() {
         browseHostId={hostId}
         repo={autoRepo?.id ?? repo}
         repos={repoChoices}
+        folders={folderChoices}
         chat={chatChoice}
+        launch={launch}
+        folderRefusal={auto ? AUTO_NO_FOLDERS : undefined}
         emptyHint={auto ? `No repositories on ${auto}'s hosts yet. Pick a single host to browse for one; once it has a worktree or dispatch there, Auto offers it.` : undefined}
         onChange={pickRepo}
+        onBrowse={browsed}
         onFocusAfterPick={refocusAfterPick}
         className={mobile ? "min-w-0 flex-1" : "max-w-[min(440px,50%)]"}
       />
-      {repo && !chat && (
-        <BasePicker value={base.shown} branches={branches.data} onChange={(b) => key && useDispatch.getState().setBase(key, b)} className={mobile ? "max-w-[32%]" : undefined} />
+      {repo && !chat && !inPlace && (
+        <BasePicker
+          value={base.shown}
+          branches={branches.data}
+          own={ownBranches}
+          onChange={(b) => key && useDispatch.getState().setBase(key, b)}
+          className={mobile ? "max-w-[32%]" : undefined}
+        />
       )}
     </>
   );
@@ -304,7 +351,9 @@ export function DispatchView() {
               title: chat ? "Clear this chat thread?" : `Clear the ${repoName} thread?`,
               body: chat
                 ? "Only the messages here are removed. The chats keep running; find them on the board."
-                : "Only the messages here are removed. Agents and worktrees keep running; find them on the board.",
+                : entries.some(inWorktree)
+                  ? "Only the messages here are removed. Agents and worktrees keep running; find them on the board."
+                  : "Only the messages here are removed. The agents keep running; find them on the board.",
               confirmLabel: "Clear thread",
               danger: true,
             });
@@ -324,11 +373,17 @@ export function DispatchView() {
         title: "No chats here yet",
         description: `Each message starts a chat${auto ? ` on the least busy host of ${auto} that starts chats` : hostId ? ` on ${nameOf(hostId)}` : ""}: an omp agent in a new folder of its own, no repository. Ask it anything; it has omp's tools.`,
       }
-    : {
-        icon: auto ? <Shuffle /> : <Send />,
-        title: `Nothing dispatched to ${repoName ?? ""} yet`,
-        description: `Each message becomes a dispatch/<slug> branch from ${base.shown}, in its own worktree, with an omp agent working on it.${auto ? " Auto sends each one to the least busy host that has the repository." : ""}`,
-      };
+    : inPlace
+      ? {
+          icon: <FolderOpen />,
+          title: `Nothing dispatched to ${repoName ?? ""} yet`,
+          description: `Each message starts an omp agent right in ${place ?? `each host's checkout of ${repoName}`}, no worktree or branch${folder ? "" : ": agents sent here share its files and see each other's changes"}.${auto ? " Auto sends each one to the least busy host that has the repository." : ""}`,
+        }
+      : {
+          icon: auto ? <Shuffle /> : <Send />,
+          title: `Nothing dispatched to ${repoName ?? ""} yet`,
+          description: `Each message gets its own worktree on a new branch from ${base.shown}, named after the task, with an omp agent working on it.${auto ? " Auto sends each one to the least busy host that has the repository." : ""} To have agents work in the checkout itself, pick “In this folder” in the repository menu.`,
+        };
 
   const thread = !target ? (
     <EmptyState
@@ -346,7 +401,7 @@ export function DispatchView() {
       description={`${
         auto
           ? `Pick a repository. Each message goes to the least busy online host of ${auto} that has it, in a fresh worktree with its own omp agent.`
-          : "Pick a repository. Every message you send here gets a fresh worktree with its own omp agent — send as many as you like, they run side by side."
+          : "Pick a repository. Every message you send here gets a fresh worktree with its own omp agent — send as many as you like, they run side by side. Browse… also takes any folder, for agents that work right in it."
       }${chatBlock ? "" : ` No repository needed? “${CHAT_CHOICE}” starts each message as an agent in a new folder of its own.`}`}
       action={
         <div className="flex max-w-md flex-wrap justify-center gap-2">
@@ -360,7 +415,7 @@ export function DispatchView() {
               <Button size="sm" variant={repoChoices.length > 0 ? "ghost" : "primary"} icon={<FolderSearch />} onClick={() => setBrowsing(true)}>
                 {repoChoices.length > 0 ? "Browse…" : "Browse for a repository…"}
               </Button>
-              <RepoBrowser hostId={hostId} repo={repo} open={browsing} onOpenChange={setBrowsing} onPick={pickRepo} onFocusAfterPick={refocusAfterPick} />
+              <RepoBrowser hostId={hostId} repo={repo} inPlace={inPlace} folder={folder} open={browsing} onOpenChange={setBrowsing} onPick={browsed} onFocusAfterPick={refocusAfterPick} />
             </>
           )}
           {!chatBlock && (
@@ -380,6 +435,7 @@ export function DispatchView() {
       ref={composer}
       hostId={workHost}
       repo={chat ? CHAT_REPO : workRepo}
+      folder={folder}
       draftKey={dispatchDraftKey(target ?? "", repo ?? "")}
       uploadHost={hostId}
       options={options}
@@ -390,18 +446,18 @@ export function DispatchView() {
         chat
           ? "Ask anything: each message starts a new chat (/ for commands; paste or drop images and videos)"
           : repo
-            ? `Describe a task for ${repoName}… (/ for commands; paste or drop images and videos)`
+            ? `Describe a task for ${repoName}${inPlace ? " (no worktree)" : ""}… (/ for commands; paste or drop images and videos)`
             : "Pick a repository to dispatch to"
       }
       mobile={mobile}
     />
   );
 
-  // The other launchers, for when Dispatch's one-message flow isn't what's needed (a chat has no repository to branch).
+  // The other launchers, for when Dispatch's one-message flow isn't what's needed (a chat or a folder has no repository to branch).
   const link = "font-bold text-accent-hi rounded-[3px] hover:underline focus-ring";
   // Phone: wraps between the two offers (each stays whole) rather than truncating "Fan out" away.
   const offer = mobile ? "whitespace-nowrap" : undefined;
-  const alternatives = workHost && !chat && (
+  const alternatives = workHost && !chat && !folder && (
     <p className={cn("px-2 text-[11px] font-semibold text-mute-2", mobile ? "mt-1 leading-relaxed" : "mt-1.5 truncate")}>
       <span className={offer}>
         Need a specific branch or model?{" "}
@@ -447,6 +503,19 @@ export function DispatchView() {
           </>
         )
       )
+    ) : inPlace ? (
+      auto ? (
+        <>
+          Each message → the least busy of <span className="font-semibold text-mute">{candidates.map(nameOf).join(", ") || "no host"}</span>
+          {preview && <> (next: {nameOf(preview.hostId)})</>} · an omp agent in its own checkout, no worktree
+        </>
+      ) : (
+        home && (
+          <>
+            Each message → an omp agent in <span className="font-mono">{tildify(repo, home)}</span> itself · no worktree
+          </>
+        )
+      )
     ) : auto ? (
       <>
         Each message → the least busy of <span className="font-semibold text-mute">{candidates.map(nameOf).join(", ") || "no host"}</span>
@@ -459,7 +528,7 @@ export function DispatchView() {
         </>
       )
     ));
-  const about = (chat ? ACTIONS.newChat : ACTIONS.newTask).description;
+  const about = chat ? ACTIONS.newChat.description : inPlace ? IN_PLACE_ABOUT : ACTIONS.newTask.description;
 
   if (mobile) {
     return (

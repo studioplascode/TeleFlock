@@ -37,8 +37,10 @@ export interface DispatchComposerHandle {
 
 export interface DispatchComposerProps {
   hostId?: string;
-  /** The thread's repository: with AI naming on, the task's name is fetched while the user pauses typing. */
+  /** The thread's repository or folder: with AI naming on, the task's name is fetched while the user pauses typing. */
   repo?: string | null;
+  /** `repo` is a folder that is no repository (Rambler hears it as a folder). */
+  folder?: boolean;
   /** Draft key of the task text, images and videos (per target + repo), so an unsent task survives navigation (text and images: reloads too). */
   draftKey: string;
   /** The host videos upload to as soon as they are attached; null (Auto) = the host each task goes to, when it is sent. */
@@ -68,7 +70,7 @@ export interface DispatchComposerProps {
  * thinking, and plan mode.
  */
 export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchComposerProps>(function DispatchComposer(
-  { hostId, repo, draftKey, uploadHost, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
+  { hostId, repo, folder = false, draftKey, uploadHost, options, onOptionsChange, onSend, disabledReason, placeholder, mobile },
   ref,
 ) {
   const [text, setText, clearText] = useDraft(draftKey);
@@ -88,7 +90,7 @@ export const DispatchComposer = forwardRef<DispatchComposerHandle, DispatchCompo
   useImperativeHandle(ref, () => ({ focus: () => ta.current?.focus(), text: () => latest.current }), []);
   const disabled = !!disabledReason;
   // Dictation, tidied into a task by a model on the target host when Rambler is on (Settings → Dictation).
-  const about = rambleAbout(repo);
+  const about = rambleAbout(repo, folder);
   const ramble = useRamblerDictation({ ...(hostId ? { hostId } : {}), ...(about ? { about } : {}), text, setText, field: ta, mobile });
   const dictation = ramble.dictation;
   const canSend = !disabled && (!!text.trim() || images.length > 0 || videos.length > 0);

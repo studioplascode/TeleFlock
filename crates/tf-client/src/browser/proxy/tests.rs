@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::AttachKey;
-use super::filter::{Filter, HOLD_MAX, Out, Root, TAKEN_OVER, filter_includes, url_allowed};
+use super::filter::{Filter, HOLD_MAX, NOT_SHARED, Out, Root, TAKEN_OVER, url_allowed};
 use super::http::{host_ok, list_for, parse};
 use super::monitor::Monitor;
 use super::registry::{Registry, Vis};
@@ -85,6 +85,7 @@ fn answer(id: i64, result: Value, session: Option<&str>) -> Value {
 
 /// The browser as the monitor reported it: the user's tab, A's and B's tabs (each showing its
 /// page), a window toolbar, an extension's service worker, two connections' browser targets.
+/// The user's tabs are not shared (`shared()` shares them).
 fn world() -> Registry {
     let mut r = Registry::default();
     for (tab, page, url) in [(USER_TAB, USER_PAGE, "https://mail.example/"), (A_TAB, A_PAGE, "about:blank"), (B_TAB, B_PAGE, "about:blank")] {
@@ -103,6 +104,30 @@ fn world() -> Registry {
     r.opened(&who("a"), A_PAGE);
     r.opened(&who("b"), B_PAGE);
     r
+}
+
+/// `world()` with the user's tabs shared with agents.
+fn shared() -> Registry {
+    let mut r = world();
+    r.share = true;
+    r
+}
+
+/// Every target of `world()`, in the order Chrome lists and reports them.
+fn every_target() -> Vec<Value> {
+    vec![
+        info(USER_TAB, "tab", "https://mail.example/"),
+        info(USER_PAGE, "page", "https://mail.example/"),
+        info(A_TAB, "tab", "about:blank"),
+        info(A_PAGE, "page", "about:blank"),
+        info(B_TAB, "tab", "about:blank"),
+        info(B_PAGE, "page", "about:blank"),
+        info(UI_TAB, "tab", "chrome://webui-toolbar.top-chrome/"),
+        info(UI_PAGE, "browser_ui", "chrome://webui-toolbar.top-chrome/"),
+        info(WORKER, "service_worker", "chrome-extension://x/thunk.js"),
+        info(A_BROWSER, "browser", ""),
+        info(B_BROWSER, "browser", ""),
+    ]
 }
 
 /// Agent A's connection to the browser target, its own browser target known.
@@ -150,10 +175,14 @@ impl Conn {
         self.f.reconcile(&mut self.reg, self.t0)
     }
 
-    /// Puppeteer's start: discovery, then auto-attach of tabs waiting for the debugger; Chrome
-    /// attaches every tab there is (as recorded) and answers.
+    /// Puppeteer's start: discovery, then auto-attach of tabs waiting for the debugger. Chrome
+    /// reports every target there is before it answers the discovery, and attaches every tab
+    /// there is before it answers the auto-attach (as recorded).
     fn puppeteer_start(&mut self) -> Vec<Out> {
         let mut out = self.agent(cmd(1, "Target.setDiscoverTargets", json!({ "discover": true, "filter": [{}] }), None));
+        for i in every_target() {
+            out.extend(self.browser(json!({ "method": "Target.targetCreated", "params": { "targetInfo": i } })));
+        }
         out.extend(self.browser(answer(1, json!({}), None)));
         out.extend(self.agent(cmd(
             2,
@@ -203,20 +232,7 @@ fn get_targets_lists_only_the_agents_own() {
     let mut c = Conn::a();
     let out = c.agent(cmd(5, "Target.getTargets", json!({}), None));
     assert_eq!(browser_msgs(&out).len(), 1);
-    let all: Vec<Value> = vec![
-        info(USER_TAB, "tab", "https://mail.example/"),
-        info(USER_PAGE, "page", "https://mail.example/"),
-        info(A_TAB, "tab", "about:blank"),
-        info(A_PAGE, "page", "about:blank"),
-        info(B_TAB, "tab", "about:blank"),
-        info(B_PAGE, "page", "about:blank"),
-        info(UI_TAB, "tab", "chrome://webui-toolbar.top-chrome/"),
-        info(UI_PAGE, "browser_ui", "chrome://webui-toolbar.top-chrome/"),
-        info(WORKER, "service_worker", "chrome-extension://x/thunk.js"),
-        info(A_BROWSER, "browser", ""),
-        info(B_BROWSER, "browser", ""),
-    ];
-    let out = c.browser(answer(5, json!({ "targetInfos": all }), None));
+    let out = c.browser(answer(5, json!({ "targetInfos": every_target() }), None));
     let a = agent_msgs(&out);
     let mut want = vec![A_TAB.to_string(), A_PAGE.to_string(), A_BROWSER.to_string()];
     want.sort();
@@ -923,17 +939,6 @@ fn urls_agents_may_open() {
 }
 
 #[test]
-fn target_filters_follow_chrome() {
-    assert!(!filter_includes(None, "tab"));
-    assert!(filter_includes(None, "page"));
-    assert!(!filter_includes(None, "browser"));
-    let puppeteer = json!([{ "type": "page", "exclude": true }, {}]);
-    assert!(filter_includes(Some(&puppeteer), "tab"));
-    assert!(!filter_includes(Some(&puppeteer), "page"));
-    assert!(!filter_includes(Some(&json!([])), "page"));
-}
-
-#[test]
 fn http_requests_hosts_and_lists() {
     let (r, n) = parse(b"GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:9222\r\n\r\nrest").unwrap().unwrap();
     assert_eq!((r.method.as_str(), r.path.as_str(), r.host.as_deref(), n), ("GET", "/json/version", Some("127.0.0.1:9222"), 52));
@@ -953,16 +958,23 @@ fn http_requests_hosts_and_lists() {
         assert!(!host_ok(Some(no)), "{no}");
     }
     let entries = vec![
+        json!({ "id": USER_PAGE, "type": "page", "url": "https://mail.example/" }),
+        json!({ "id": B_PAGE, "type": "page", "url": "about:blank" }),
         json!({ "id": A_PAGE, "type": "page", "url": "about:blank", "webSocketDebuggerUrl": format!("ws://127.0.0.1:9333/devtools/page/{A_PAGE}"),
                 "devtoolsFrontendUrl": format!("https://chrome-devtools-frontend.appspot.com/serve_rev/@x/inspector.html?ws=127.0.0.1:9333/devtools/page/{A_PAGE}") }),
-        json!({ "id": USER_PAGE, "type": "page", "url": "https://mail.example/" }),
         json!({ "id": UI_PAGE, "type": "browser_ui", "url": "chrome://webui-toolbar.top-chrome/" }),
     ];
     let reg = world();
-    let list = list_for(entries, 9333, "127.0.0.1:41234", |id| reg.id_vis(&who("a"), id) == Vis::Mine);
+    let list = list_for(entries.clone(), 9333, "127.0.0.1:41234", |id| reg.id_vis(&who("a"), id).rank());
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["webSocketDebuggerUrl"], format!("ws://127.0.0.1:41234/devtools/page/{A_PAGE}"));
     assert!(list[0]["devtoolsFrontendUrl"].as_str().unwrap().contains("ws=127.0.0.1:41234/devtools/page/"));
+    // Shared: the user's page too, after the agent's own (whatever the browser's order).
+    let reg = shared();
+    let list = list_for(entries, 9333, "127.0.0.1:41234", |id| reg.id_vis(&who("a"), id).rank());
+    let listed: Vec<&str> = list.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(listed, [A_PAGE, USER_PAGE]);
+    assert_eq!(list[1]["webSocketDebuggerUrl"], format!("ws://127.0.0.1:41234/devtools/page/{USER_PAGE}"));
 }
 
 #[test]
@@ -1298,4 +1310,489 @@ fn a_tab_can_be_taken_over_and_handed_back_again_and_again() {
     assert_eq!(browser_msgs(&c.agent(eval(63, "PAGE3"))).len(), 1);
     assert_error(&c.agent(eval(64, "PAGE2")), 64, -32001, "Session with given id not found");
     assert_eq!(browser_msgs(&c.agent(cmd(65, "Target.setAutoAttach", json!({ "autoAttach": true, "flatten": true }), Some(tab_s)))).len(), 1);
+}
+
+// ───────────────────────────── the user's tabs shared; the browser's mode ─────────────────────────────
+
+/// What the agent heard, in order: `<method> <target>` for events, `answer <id>` for answers.
+fn heard(out: &[Out]) -> Vec<String> {
+    agent_msgs(out)
+        .iter()
+        .map(|m| match m["method"].as_str() {
+            Some(method) => format!("{method} {}", m["params"]["targetInfo"]["targetId"].as_str().or(m["params"]["targetId"].as_str()).unwrap_or_default()),
+            None => format!("answer {}", m["id"]),
+        })
+        .collect()
+}
+
+#[test]
+fn shared_user_tabs_reach_the_agent_after_its_own_and_other_agents_tabs_never() {
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    let out = c.puppeteer_start();
+    // Chrome reported (and attached) the user's tab first: the agent hears of its own first, then
+    // of the user's, then the answer (omp adopts the first page it finds shown).
+    let created = |id: &str| format!("Target.targetCreated {id}");
+    let attach = |id: &str| format!("Target.attachedToTarget {id}");
+    assert_eq!(
+        heard(&out),
+        vec![
+            created(A_TAB),
+            created(A_PAGE),
+            created(A_BROWSER),
+            created(USER_TAB),
+            created(USER_PAGE),
+            "answer 1".to_string(),
+            attach(A_TAB),
+            attach(USER_TAB),
+            "answer 2".to_string(),
+        ]
+    );
+    // B's tab, the window's toolbar and the extension's worker are released at once.
+    let released: Vec<String> = browser_msgs(&out)
+        .iter()
+        .filter(|m| m["method"] == "Target.detachFromTarget")
+        .map(|m| m["params"]["sessionId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(released, ["C7FCE88A7DCE271B43D6C0B3AE3D25C2", "8D7BB6A6384FE96F56262F8DCDC57284", "69F1B51E1592E2CDA8EC974544D605A8"]);
+    // Target lists: its own first, then the user's; never B's or the browser's UI.
+    c.agent(cmd(5, "Target.getTargets", json!({}), None));
+    let out = c.browser(answer(5, json!({ "targetInfos": every_target() }), None));
+    let listed: Vec<String> =
+        agent_msgs(&out)[0]["result"]["targetInfos"].as_array().unwrap().iter().map(|i| i["targetId"].as_str().unwrap().to_string()).collect();
+    assert_eq!(listed, [A_TAB, A_PAGE, A_BROWSER, USER_TAB, USER_PAGE]);
+    // It reads the user's tab and drives it like its own, but does not close it; B's do not exist
+    // for it.
+    for (i, method) in ["Target.attachToTarget", "Target.activateTarget", "Target.getTargetInfo"].iter().enumerate() {
+        let n = i as i64;
+        assert_eq!(browser_msgs(&c.agent(cmd(10 + n, method, json!({ "targetId": USER_PAGE, "flatten": true }), None))).len(), 1, "{method}");
+        assert_error(&c.agent(cmd(20 + n, method, json!({ "targetId": B_PAGE, "flatten": true }), None)), 20 + n, -32602, "No target with given id found");
+    }
+    assert_error(&c.agent(cmd(13, "Target.closeTarget", json!({ "targetId": USER_PAGE }), None)), 13, -32000, "this is one of the user's own tabs");
+    let eval = cmd(30, "Runtime.evaluate", json!({ "expression": "document.title" }), Some("788F13325609E54D0CB592A0737962DF"));
+    assert_eq!(browser_msgs(&c.agent(eval.clone())), vec![eval]);
+    assert!(c.reg.tabs().iter().all(|t| t.target_id != USER_PAGE), "the user's tab stays the user's");
+    // B uses the user's tab too, never A's.
+    let mut b = Conn::new(std::mem::take(&mut c.reg), "b", B_BROWSER);
+    assert_eq!(browser_msgs(&b.agent(cmd(1, "Target.attachToTarget", json!({ "targetId": USER_PAGE, "flatten": true }), None))).len(), 1);
+    assert_error(&b.agent(cmd(2, "Target.attachToTarget", json!({ "targetId": A_PAGE, "flatten": true }), None)), 2, -32602, "No target");
+}
+
+#[test]
+fn sharing_turned_off_ends_the_agents_sessions_on_the_users_tabs_and_on_again_brings_them_back() {
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    c.puppeteer_start();
+    let (tab_s, page_s) = ("788F13325609E54D0CB592A0737962DF", "USERPAGESESSION0000000000000000A");
+    // Puppeteer attaches the tab's page under the tab session.
+    assert_eq!(agent_msgs(&c.browser(attached(page_s, info(USER_PAGE, "page", "https://mail.example/"), false, Some(tab_s)))).len(), 1);
+    c.reg.share = false;
+    let out = c.reconcile();
+    assert_eq!(agent_msgs(&out), vec![detached(page_s, USER_PAGE, Some(tab_s)), detached(tab_s, USER_TAB, None)]);
+    let sent = browser_msgs(&out);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!((sent[0]["method"].as_str(), sent[0]["params"]["sessionId"].as_str()), (Some("Target.detachFromTarget"), Some(tab_s)));
+    assert_error(&c.agent(cmd(9, "Runtime.evaluate", json!({ "expression": "1" }), Some(page_s))), 9, -32001, "Session with given id not found");
+    assert_error(&c.agent(cmd(10, "Target.attachToTarget", json!({ "targetId": USER_PAGE, "flatten": true }), None)), 10, -32602, "No target");
+    assert!(c.reconcile().is_empty(), "told once");
+    // On again: its auto-attach shows the tab again.
+    c.reg.share = true;
+    let sent = browser_msgs(&c.reconcile());
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["method"], "Target.attachToTarget");
+    assert_eq!(sent[0]["params"], json!({ "targetId": USER_TAB, "flatten": true }));
+    assert!(sent[0].get("sessionId").is_none());
+    assert_eq!(agent_msgs(&c.browser(attached("AGAIN", info(USER_TAB, "tab", "https://mail.example/"), false, None))).len(), 1);
+    assert!(c.reconcile().is_empty(), "attached once");
+}
+
+#[test]
+fn a_tab_lent_while_shared_is_one_agents_until_the_user_takes_it_back() {
+    let mut b = Conn::new(shared(), "b", B_BROWSER);
+    b.puppeteer_start();
+    // Lent to A: B's sessions on it end.
+    b.reg.lend(USER_PAGE, &who("a")).unwrap();
+    assert_eq!((b.reg.id_vis(&who("a"), USER_PAGE), b.reg.id_vis(&who("b"), USER_PAGE)), (Vis::Mine, Vis::Foreign));
+    assert_eq!(agent_msgs(&b.reconcile()), vec![detached("788F13325609E54D0CB592A0737962DF", USER_TAB, None)]);
+    // Taken back: the user's again, shared with both; B's auto-attach shows it again.
+    b.reg.take_over(USER_PAGE).unwrap();
+    assert_eq!((b.reg.id_vis(&who("a"), USER_PAGE), b.reg.id_vis(&who("b"), USER_PAGE)), (Vis::Shared, Vis::Shared));
+    let sent = browser_msgs(&b.reconcile());
+    assert_eq!((sent.len(), sent[0]["method"].as_str(), sent[0]["params"]["targetId"].as_str()), (1, Some("Target.attachToTarget"), Some(USER_TAB)));
+    // An agent's own tab stays its own: B never sees it; the user takes it over and hands it back.
+    b.reg.take_over(A_PAGE).unwrap();
+    assert_eq!((b.reg.id_vis(&who("a"), A_PAGE), b.reg.id_vis(&who("b"), A_PAGE)), (Vis::TakenOver, Vis::Foreign));
+    b.reg.hand_back(A_PAGE).unwrap();
+    assert_eq!((b.reg.id_vis(&who("a"), A_PAGE), b.reg.id_vis(&who("b"), A_PAGE)), (Vis::Mine, Vis::Foreign));
+}
+
+#[test]
+fn a_users_new_tab_reaches_a_sharing_agent_through_its_own_auto_attach_once() {
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    c.puppeteer_start();
+    // The monitor learns of the user's new tab and its page before the agent's connection hears
+    // of it: the proxy attaches nothing itself, Chrome's auto-attach brings it.
+    let (tab, page) = ("NEWUSERTAB000000000000000000000A", "NEWUSERPAGE00000000000000000000A");
+    c.reg.target_seen(&info(tab, "tab", ""), true);
+    c.reg.tab_shows(tab, &info(page, "page", "https://news.example/"));
+    assert!(c.reconcile().is_empty());
+    // Chrome attaches it, paused: the proxy runs it (the user's new tab never waits for an
+    // agent), and the agent gets it running.
+    let out = c.browser(attached("NEWTABSESSION", info(tab, "tab", "https://news.example/"), true, None));
+    let a = agent_msgs(&out);
+    assert_eq!((a.len(), a[0]["params"]["waitingForDebugger"].as_bool()), (1, Some(false)));
+    let sent = browser_msgs(&out);
+    assert_eq!((sent.len(), sent[0]["method"].as_str(), sent[0]["sessionId"].as_str()), (1, Some("Runtime.runIfWaitingForDebugger"), Some("NEWTABSESSION")));
+    assert!(c.reconcile().is_empty());
+}
+
+#[test]
+fn a_tab_attached_through_a_tab_session_belongs_to_that_tab() {
+    // The agent attaches a page through its own page session: the new session is that page's.
+    fn nested(c: &mut Conn, page_s: &str, target: &str, sid: &str, url: &str) {
+        assert_eq!(browser_msgs(&c.agent(cmd(30, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }), Some(page_s)))).len(), 1);
+        assert_eq!(agent_msgs(&c.browser(attached(sid, info(target, "page", url), false, Some(page_s)))).len(), 1);
+        c.browser(answer(30, json!({ "sessionId": sid }), Some(page_s)));
+        let eval = cmd(31, "Runtime.evaluate", json!({ "expression": "1" }), Some(sid));
+        assert_eq!(browser_msgs(&c.agent(eval.clone())), vec![eval]);
+    }
+    let ends = |out: &[Out], sid: &str, target: &str, page_s: &str| {
+        assert!(agent_msgs(out).contains(&detached(sid, target, Some(page_s))), "{out:?}");
+        assert!(browser_msgs(out).iter().any(|m| m["method"] == "Target.detachFromTarget" && m["params"]["sessionId"] == sid && m["sessionId"] == page_s), "{out:?}");
+    };
+    // The user's shared page: when sharing ends, so does the session.
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    let (_, page_s, _) = a_with_page(&mut c);
+    nested(&mut c, page_s, USER_PAGE, "NESTED", "https://mail.example/");
+    c.reg.share = false;
+    ends(&c.reconcile(), "NESTED", USER_PAGE, page_s);
+    assert_error(&c.agent(cmd(32, "Runtime.evaluate", json!({ "expression": "1" }), Some("NESTED"))), 32, -32001, "Session with given id not found");
+    // Lent to another agent: it is B's alone.
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    let (_, page_s, _) = a_with_page(&mut c);
+    nested(&mut c, page_s, USER_PAGE, "NESTED", "https://mail.example/");
+    c.reg.lend(USER_PAGE, &who("b")).unwrap();
+    ends(&c.reconcile(), "NESTED", USER_PAGE, page_s);
+    // Its own second tab, taken over: frozen like any session there; its first tab goes on.
+    let mut c = Conn::a();
+    let (_, page_s, _) = a_with_page(&mut c);
+    let (tab2, page2, url2) = ("A2TAB000000000000000000000000000", "A2PAGE00000000000000000000000000", "https://two.example/");
+    c.reg.target_seen(&info(tab2, "tab", url2), false);
+    c.reg.tab_shows(tab2, &info(page2, "page", url2));
+    c.reg.opened(&who("a"), page2);
+    nested(&mut c, page_s, page2, "NESTED2", url2);
+    c.reg.take_over(page2).unwrap();
+    let out = c.reconcile();
+    assert!(browser_msgs(&out).iter().any(|m| m["method"] == "Target.detachFromTarget" && m["params"]["sessionId"] == "NESTED2"), "{out:?}");
+    assert_error(&c.agent(cmd(33, "Runtime.evaluate", json!({ "expression": "1" }), Some("NESTED2"))), 33, -32000, TAKEN_OVER);
+    assert_eq!(browser_msgs(&c.agent(cmd(34, "Runtime.evaluate", json!({ "expression": "1" }), Some(page_s)))).len(), 1);
+}
+
+#[test]
+fn a_page_connection_ends_a_tab_it_attached_once_it_may_not_use_it() {
+    let mut reg = shared();
+    let mut f = Filter::new(who("a"), 8, Root::Page(A_PAGE.into()));
+    assert!(f.start().is_empty());
+    let out = f.on_agent(&mut reg, &cmd(1, "Target.attachToTarget", json!({ "targetId": USER_PAGE, "flatten": true }), None).to_string(), 5);
+    assert_eq!(browser_msgs(&out).len(), 1);
+    let out = f.on_browser(&mut reg, &attached("NESTED", info(USER_PAGE, "page", "https://mail.example/"), false, None).to_string(), Instant::now());
+    assert_eq!(agent_msgs(&out).len(), 1);
+    reg.share = false;
+    let out = f.reconcile(&mut reg, Instant::now());
+    assert_eq!(agent_msgs(&out), vec![detached("NESTED", USER_PAGE, None)], "{out:?}");
+    assert!(!out.iter().any(|o| matches!(o, Out::Close(_))), "its own page stays: {out:?}");
+    assert_eq!(browser_msgs(&f.on_agent(&mut reg, &cmd(2, "Runtime.evaluate", json!({ "expression": "1" }), None).to_string(), 6)).len(), 1);
+}
+
+/// A sharing connection of A's after Puppeteer's start, its own tab showing its work, the pages
+/// of its tab and of the user's attached under their tab sessions: (the user's page session,
+/// its own page session).
+fn a_on_the_users_tab() -> (Conn, &'static str, &'static str) {
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    c.puppeteer_start();
+    c.reg.target_seen(&info(A_PAGE, "page", "https://a.example/work"), false);
+    let (user_s, own_s) = ("USERPAGESESSION0000000000000000A", "OWNPAGESESSION00000000000000000A");
+    c.browser(attached(user_s, info(USER_PAGE, "page", "https://mail.example/"), false, Some("788F13325609E54D0CB592A0737962DF")));
+    c.browser(attached(own_s, info(A_PAGE, "page", "https://a.example/work"), false, Some("1CF98BE4CA0A5A7A7E5CEF248DCB8E78")));
+    (c, user_s, own_s)
+}
+
+/// The commands that take a tab to another page, on session `s`.
+fn navigations(s: &str) -> [(Value, &'static str); 3] {
+    [
+        (cmd(0, "Page.navigate", json!({ "url": "https://elsewhere.example/" }), Some(s)), "Page.navigate"),
+        (cmd(0, "Page.reload", json!({}), Some(s)), "Page.reload"),
+        (cmd(0, "Page.navigateToHistoryEntry", json!({ "entryId": 3 }), Some(s)), "Page.navigateToHistoryEntry"),
+    ]
+}
+
+/// `m` with id `n`.
+fn numbered(mut m: Value, n: i64) -> Value {
+    m["id"] = json!(n);
+    m
+}
+
+#[test]
+fn the_users_tabs_are_browsed_but_not_closed() {
+    let (mut c, user_s, _) = a_on_the_users_tab();
+    // It reads, clicks, types and browses in the user's tab: to another page, again, back.
+    let reads = [
+        cmd(40, "Runtime.evaluate", json!({ "expression": "document.title" }), Some(user_s)),
+        cmd(41, "Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": 1, "y": 2 }), Some(user_s)),
+        cmd(42, "Input.insertText", json!({ "text": "hi" }), Some(user_s)),
+    ];
+    for (i, m) in reads.into_iter().chain(navigations(user_s).into_iter().map(|(m, _)| m)).enumerate() {
+        let m = numbered(m, 40 + i as i64);
+        assert_eq!(browser_msgs(&c.agent(m.clone())), vec![m]);
+    }
+    // Closing it is the user's: refused (the page or its tab), and no tab given instead.
+    let closes = [
+        ("Page.close", json!({}), Some(user_s)),
+        ("Target.closeTarget", json!({ "targetId": USER_PAGE }), None),
+        ("Target.closeTarget", json!({ "targetId": USER_TAB }), None),
+    ];
+    for (i, (method, params, session)) in closes.iter().enumerate() {
+        let n = 50 + i as i64;
+        let out = c.agent(cmd(n, method, params.clone(), *session));
+        assert_error(&out, n, -32000, &format!("TeleFlock refused `{method}`: this is one of the user's own tabs (https://mail.example/); agents can use it, but only the user closes it"));
+        assert!(!out.contains(&Out::FirstTab), "{out:?}");
+    }
+    let mut other = Conn::for_key(shared(), who("c"), B_BROWSER);
+    let out = other.agent(cmd(60, "Target.closeTarget", json!({ "targetId": USER_PAGE }), None));
+    assert_error(&out, 60, -32000, "only the user closes it");
+    assert!(!out.contains(&Out::FirstTab), "closing names no tab to open pages in: {out:?}");
+    // A lent tab is fully the agent's: it closes it too.
+    c.reg.lend(USER_PAGE, &who("a")).unwrap();
+    assert_eq!(browser_msgs(&c.agent(cmd(61, "Target.closeTarget", json!({ "targetId": USER_PAGE }), None))).len(), 1);
+}
+
+#[test]
+fn a_locked_tab_stays_on_its_page_until_the_user_unlocks_it() {
+    let (mut c, user_s, own_s) = a_on_the_users_tab();
+    c.reg.lock(USER_PAGE, true).unwrap();
+    // It still reads, clicks and types there; the tab stays the user's, shared.
+    for (i, (method, params)) in [
+        ("Runtime.evaluate", json!({ "expression": "document.title" })),
+        ("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": 1, "y": 2 })),
+        ("Input.insertText", json!({ "text": "hi" })),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(browser_msgs(&c.agent(cmd(40 + i as i64, method, params.clone(), Some(user_s)))).len(), 1, "{method}");
+    }
+    assert_eq!(c.reg.id_vis(&who("a"), USER_PAGE), Vis::Shared);
+    assert!(c.reg.tabs().iter().all(|t| t.target_id != USER_PAGE), "nobody's but the user's");
+    // It does not take it to another page or close it: it is told where to open pages instead.
+    let mut refused: Vec<(Value, &str)> = navigations(user_s).into();
+    refused.push((cmd(0, "Page.close", json!({}), Some(user_s)), "Page.close"));
+    refused.push((cmd(0, "Target.closeTarget", json!({ "targetId": USER_PAGE }), None), "Target.closeTarget"));
+    refused.push((cmd(0, "Target.closeTarget", json!({ "targetId": USER_TAB }), None), "Target.closeTarget"));
+    for (i, (m, method)) in refused.into_iter().enumerate() {
+        let n = 50 + i as i64;
+        let out = c.agent(numbered(m, n));
+        assert_error(&out, n, -32000, &format!("TeleFlock refused `{method}`: the user locked this tab to its page (https://mail.example/); agents can read it and click and type in it, but open other pages in their own tab"));
+        assert!(agent_msgs(&out)[0]["error"]["message"].as_str().unwrap().ends_with("app: { target: \"https://a.example/work\" }"), "{out:?}");
+        assert!(!out.contains(&Out::FirstTab), "it has a tab of its own");
+    }
+    // Its own tab goes where it likes.
+    assert_eq!(browser_msgs(&c.agent(cmd(60, "Page.navigate", json!({ "url": "https://example.com/" }), Some(own_s)))).len(), 1);
+    // Unlocked: it browses there again; closing stays the user's.
+    c.reg.lock(USER_PAGE, false).unwrap();
+    for (i, (m, method)) in navigations(user_s).into_iter().enumerate() {
+        let m = numbered(m, 70 + i as i64);
+        assert_eq!(browser_msgs(&c.agent(m.clone())), vec![m], "{method}");
+    }
+    assert_error(&c.agent(cmd(80, "Page.close", json!({}), Some(user_s))), 80, -32000, "only the user closes it");
+    // Locked again, an agent without a tab of its own is told to use a blank one, which it gets.
+    let mut reg = shared();
+    reg.lock(USER_PAGE, true).unwrap();
+    let mut other = Conn::for_key(reg, who("c"), B_BROWSER);
+    let out = other.agent(cmd(90, "Target.closeTarget", json!({ "targetId": USER_PAGE }), None));
+    assert_error(&out, 90, -32000, "the user locked this tab to its page (https://mail.example/)");
+    assert!(agent_msgs(&out)[0]["error"]["message"].as_str().unwrap().ends_with("app: { target: \"about:blank\" }"), "{out:?}");
+    assert!(out.contains(&Out::FirstTab), "{out:?}");
+}
+
+#[test]
+fn a_lent_tab_the_user_locked_stays_on_its_page_and_open() {
+    let mut c = Conn::a();
+    c.puppeteer_start();
+    c.reg.target_seen(&info(A_PAGE, "page", "https://a.example/work"), false);
+    c.reg.lend(USER_PAGE, &who("a")).unwrap();
+    c.reconcile();
+    c.browser(attached("LENTTAB", info(USER_TAB, "tab", "https://mail.example/"), false, None));
+    c.browser(attached("LENTPAGE", info(USER_PAGE, "page", "https://mail.example/"), false, Some("LENTTAB")));
+    // Lent and locked: the agent's to drive, not to take to another page or close.
+    c.reg.lock(USER_PAGE, true).unwrap();
+    assert_eq!(c.reg.id_vis(&who("a"), USER_PAGE), Vis::Mine, "still lent to it");
+    let mut refused: Vec<(Value, &str)> = navigations("LENTPAGE").into();
+    refused.push((cmd(0, "Page.close", json!({}), Some("LENTPAGE")), "Page.close"));
+    refused.push((cmd(0, "Target.closeTarget", json!({ "targetId": USER_TAB }), None), "Target.closeTarget"));
+    for (i, (m, method)) in refused.into_iter().enumerate() {
+        let n = 10 + i as i64;
+        let out = c.agent(numbered(m, n));
+        assert_error(&out, n, -32000, &format!("TeleFlock refused `{method}`: the user locked this tab to its page (https://mail.example/)"));
+        assert!(agent_msgs(&out)[0]["error"]["message"].as_str().unwrap().ends_with("app: { target: \"https://a.example/work\" }"), "its own tab, never the locked one: {out:?}");
+    }
+    assert_eq!(browser_msgs(&c.agent(cmd(20, "Runtime.evaluate", json!({ "expression": "1" }), Some("LENTPAGE")))).len(), 1);
+    // Unlocked: it navigates and closes it as its own.
+    c.reg.lock(USER_PAGE, false).unwrap();
+    assert_eq!(browser_msgs(&c.agent(cmd(21, "Page.navigate", json!({ "url": "https://elsewhere.example/" }), Some("LENTPAGE")))).len(), 1);
+    assert_eq!(browser_msgs(&c.agent(cmd(22, "Target.closeTarget", json!({ "targetId": USER_TAB }), None))).len(), 1);
+    // An agent whose only tab is a locked lent one has no tab to open pages in: it gets a blank one.
+    let mut reg = world();
+    reg.attach(&who("c"));
+    reg.lend(USER_PAGE, &who("c")).unwrap();
+    assert!(reg.has_live_tab(&who("c")));
+    reg.lock(USER_PAGE, true).unwrap();
+    assert!(!reg.has_live_tab(&who("c")), "a locked tab is no tab to open pages in");
+    let mut lent = Conn::for_key(reg, who("c"), B_BROWSER);
+    let out = lent.agent(cmd(30, "Target.closeTarget", json!({ "targetId": USER_PAGE }), None));
+    assert_error(&out, 30, -32000, "the user locked this tab to its page");
+    assert!(agent_msgs(&out)[0]["error"]["message"].as_str().unwrap().ends_with("app: { target: \"about:blank\" }"), "{out:?}");
+    assert!(out.contains(&Out::FirstTab), "{out:?}");
+}
+
+#[test]
+fn locks_are_for_tabs_no_agent_opened_and_go_with_the_tab() {
+    let mut reg = shared();
+    // An agent's own tab is not locked; a tab is locked by its page.
+    assert_eq!(reg.lock(A_PAGE, true).unwrap_err().code, "invalid_params");
+    assert_eq!(reg.lock(USER_TAB, true).unwrap_err().code, "not_found");
+    assert_eq!(reg.lock("NOSUCHPAGE", true).unwrap_err().code, "not_found");
+    assert!(reg.lock(USER_PAGE, false).is_ok(), "unlocking an unlocked tab");
+    reg.shown_changed = false;
+    reg.lock(USER_PAGE, true).unwrap();
+    assert!(reg.shown_changed, "the app hears of it");
+    assert_eq!(reg.locked_tabs(), [USER_PAGE]);
+    assert_eq!((reg.locked_url(&who("a"), USER_TAB), reg.locked_url(&who("b"), USER_PAGE)), (Some("https://mail.example/"), Some("https://mail.example/")));
+    // Sharing off: nobody may use it, nobody is told about the lock.
+    reg.share = false;
+    assert_eq!(reg.locked_url(&who("a"), USER_PAGE), None);
+    // Lent, it stays locked for its borrower; taken back, for everyone again.
+    reg.lend(USER_PAGE, &who("a")).unwrap();
+    assert_eq!((reg.locked_url(&who("a"), USER_PAGE), reg.locked_url(&who("b"), USER_PAGE)), (Some("https://mail.example/"), None));
+    reg.share = true;
+    reg.take_over(USER_PAGE).unwrap();
+    assert_eq!(reg.locked_url(&who("b"), USER_PAGE), Some("https://mail.example/"));
+    // A prerendered page activated in the tab takes the lock over.
+    let next = "PRERENDER0000000000000000000000LK";
+    let mut next_info = info(next, "page", "https://mail.example/next");
+    next_info["subtype"] = json!("prerender");
+    reg.target_seen(&next_info, true);
+    reg.tab_shows(USER_TAB, &next_info);
+    reg.target_seen(&info(next, "page", "https://mail.example/next"), false);
+    reg.target_gone(USER_PAGE);
+    assert_eq!(reg.locked_tabs(), [next]);
+    assert_eq!(reg.locked_url(&who("a"), USER_TAB), Some("https://mail.example/next"));
+    // A monitor that reconnects keeps it while the tab is there.
+    reg.resync();
+    reg.target_seen(&info(USER_TAB, "tab", "https://mail.example/next"), false);
+    reg.tab_shows(USER_TAB, &info(next, "page", "https://mail.example/next"));
+    reg.synced_now();
+    assert_eq!(reg.locked_tabs(), [next]);
+    // The tab closes: its lock goes, also when it closed while the monitor was away.
+    reg.target_gone(USER_TAB);
+    reg.target_gone(next);
+    assert!(reg.locked_tabs().is_empty());
+    let mut reg = shared();
+    reg.lock(USER_PAGE, true).unwrap();
+    reg.resync();
+    reg.synced_now();
+    assert!(reg.locked_tabs().is_empty());
+    // A new browser process forgets them.
+    let mut reg = shared();
+    reg.lock(USER_PAGE, true).unwrap();
+    reg.reset();
+    assert!(reg.locked_tabs().is_empty());
+}
+
+#[test]
+fn sharing_off_while_a_users_tab_waits_for_the_auto_attach_answer_drops_it_unheard() {
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    c.agent(cmd(2, "Target.setAutoAttach", json!({ "waitForDebuggerOnStart": false, "flatten": true, "autoAttach": true, "filter": [{ "type": "page", "exclude": true }, {}] }), None));
+    let out = c.browser(attached("USERTABSESSION", info(USER_TAB, "tab", "https://mail.example/"), false, None));
+    assert!(agent_msgs(&out).is_empty(), "the user's tab waits for the answer");
+    c.reg.share = false;
+    let out = c.reconcile();
+    assert!(agent_msgs(&out).is_empty(), "never heard of, never told it ended: {out:?}");
+    assert_eq!(agent_msgs(&c.browser(answer(2, json!({}), None))), vec![answer(2, json!({}), None)]);
+}
+
+#[test]
+fn a_users_tab_the_agent_attached_itself_is_not_attached_again_unasked() {
+    let mut c = Conn::new(shared(), "a", A_BROWSER);
+    c.puppeteer_start();
+    c.agent(cmd(40, "Target.attachToTarget", json!({ "targetId": USER_PAGE, "flatten": true }), None));
+    assert_eq!(agent_msgs(&c.browser(attached("MINE", info(USER_PAGE, "page", "https://mail.example/"), false, None))).len(), 1);
+    c.browser(answer(40, json!({ "sessionId": "MINE" }), None));
+    c.reg.share = false;
+    assert!(agent_msgs(&c.reconcile()).contains(&detached("MINE", USER_PAGE, None)));
+    // Shared again: its auto-attach gets the tab again; the page it attached itself stays for it
+    // to attach.
+    c.reg.share = true;
+    let again: Vec<Value> = browser_msgs(&c.reconcile()).into_iter().filter(|m| m["method"] == "Target.attachToTarget").collect();
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0]["params"]["targetId"], USER_TAB);
+}
+
+#[test]
+fn the_browsers_own_pages_devtools_extensions_and_files_are_never_shared() {
+    let mut reg = shared();
+    for (tab, page, url) in [
+        ("SETTINGSTAB", "SETTINGSPAGE", "chrome://settings/passwords"),
+        ("DEVTOOLSTAB", "DEVTOOLSPAGE", "devtools://devtools/bundled/devtools_app.html"),
+        ("FILETAB", "FILEPAGE", "file:///home/u/notes.txt"),
+        ("EXTTAB", "EXTPAGE", "chrome-extension://abc/options.html"),
+    ] {
+        reg.target_seen(&info(tab, "tab", url), false);
+        reg.target_seen(&info(page, "page", url), false);
+        reg.tab_shows(tab, &info(page, "page", url));
+        for id in [tab, page] {
+            assert_eq!(reg.id_vis(&who("a"), id), Vis::Foreign, "{url}");
+        }
+    }
+    // The tab goes on to a web page: shared from then on; back on a browser page: not.
+    reg.target_seen(&info("SETTINGSPAGE", "page", "https://example.com/"), false);
+    assert_eq!(reg.id_vis(&who("a"), "SETTINGSTAB"), Vis::Shared);
+    reg.target_seen(&info("SETTINGSPAGE", "page", "chrome://history/"), false);
+    assert_eq!(reg.id_vis(&who("a"), "SETTINGSTAB"), Vis::Foreign);
+    // Sharing off: the user's tabs exist for no agent.
+    reg.share = false;
+    assert_eq!(reg.id_vis(&who("a"), USER_PAGE), Vis::Foreign);
+}
+
+#[test]
+fn a_page_connection_to_a_shared_tab_closes_when_sharing_ends() {
+    let mut reg = shared();
+    let mut f = Filter::new(who("a"), 8, Root::Page(USER_PAGE.into()));
+    assert!(f.start().is_empty());
+    assert_eq!(browser_msgs(&f.on_agent(&mut reg, &cmd(1, "Runtime.evaluate", json!({ "expression": "1" }), None).to_string(), 5)).len(), 1);
+    reg.share = false;
+    assert_eq!(f.reconcile(&mut reg, Instant::now()), vec![Out::Close(NOT_SHARED.into())]);
+    assert_error(&f.on_agent(&mut reg, &cmd(2, "Page.reload", json!({}), None).to_string(), 6), 2, -32000, NOT_SHARED);
+}
+
+#[test]
+fn an_agents_new_tab_gets_a_window_of_its_own_headless_and_opens_where_it_asks_in_its_own_window() {
+    // Headless: a window of its own, whatever it asked; near a tab it may not see: that goes.
+    let mut c = Conn::a();
+    let sent = browser_msgs(&c.agent(cmd(20, "Target.createTarget", json!({ "url": "about:blank", "background": true, "nearTargetId": USER_PAGE }), None)));
+    assert_eq!(sent[0]["params"], json!({ "url": "about:blank", "background": true, "newWindow": true }));
+    // In its own window: as omp asks for the tabs it opens (in the background, near one of its own).
+    let mut reg = world();
+    reg.headed = true;
+    let mut c = Conn::new(reg, "a", A_BROWSER);
+    let asked = cmd(21, "Target.createTarget", json!({ "url": "about:blank", "background": true, "nearTargetId": A_PAGE }), None);
+    assert_eq!(browser_msgs(&c.agent(asked.clone())), vec![asked]);
+    let sent = browser_msgs(&c.agent(cmd(22, "Target.createTarget", json!({ "url": "https://example.com/", "nearTargetId": B_PAGE }), None)));
+    assert_eq!(sent[0]["params"], json!({ "url": "https://example.com/" }), "near another agent's tab: wherever the browser puts it");
+    // Near the user's tab: only while it is shared.
+    let near_user = cmd(23, "Target.createTarget", json!({ "url": "about:blank", "nearTargetId": USER_PAGE }), None);
+    assert_eq!(browser_msgs(&c.agent(near_user.clone()))[0]["params"], json!({ "url": "about:blank" }));
+    c.reg.share = true;
+    assert_eq!(browser_msgs(&c.agent(near_user.clone())), vec![near_user]);
+    // Its tabs open in the user's windows there: no window is the agent's to move.
+    c.agent(cmd(24, "Browser.getWindowForTarget", json!({ "targetId": A_PAGE }), None));
+    c.browser(answer(24, json!({ "windowId": 3, "bounds": { "left": 0, "top": 0, "width": 800, "height": 600, "windowState": "normal" } }), None));
+    assert_error(&c.agent(cmd(25, "Browser.setWindowBounds", json!({ "windowId": 3, "bounds": { "windowState": "minimized" } }), None)), 25, -32000, "Browser window not found");
 }

@@ -55,4 +55,15 @@ install?: BrowserInstall,
 /**
  * How many agents may be attached at once ([`BrowserConfig::cap`]).
  */
-cap: number, attachments: Array<BrowserAttachment>, requests: Array<BrowserRequest>, tabs: Array<BrowserTabOwner>, };
+cap: number, 
+/**
+ * Attached agents can use the user's tabs ([`BrowserConfig::share_tabs`]).
+ */
+shareTabs: boolean, attachments: Array<BrowserAttachment>, requests: Array<BrowserRequest>, tabs: Array<BrowserTabOwner>, 
+/**
+ * Tabs the user locked to their page for agents (`browser.lockTab`), by the DevTools target
+ * id of the tab's page: agents that may use one read it and click and type in it, but do
+ * not navigate, reload or close it. Until unlocked or the tab closes (a browser restart
+ * forgets them). Absent when none is locked, and from cores before 0.9.4.
+ */
+lockedTabs?: Array<string>, };

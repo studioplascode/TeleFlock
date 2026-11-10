@@ -12,10 +12,11 @@
 //!
 //! **Ids** are stable across snapshot and live frames: user (and inbound IRC) `u<ts>`,
 //! assistant/thinking blocks `a<ts>.<block>`, the error row of a message that failed without text
-//! `a<ts>.e`, tools `t:<toolCallId>`, model/thinking markers `m<entryId>`, compaction `c<entryId>`,
-//! notices `n<epoch>.<seq>` (a standing notice the bridge announces again on every resync, e.g. a
-//! config warning: `n:<key>`), retry streaks `r<epoch>.<seq>` (`epoch`: the replica's lifetime, so a
-//! later replica of the session never reuses them).
+//! `a<ts>.e`, tools `t:<toolCallId>`, the user's quick commands (`user_runs.rs`) `x<ts>`,
+//! model/thinking markers `m<entryId>`, compaction `c<entryId>`, notices `n<epoch>.<seq>` (a
+//! standing notice the bridge announces again on every resync, e.g. a config warning: `n:<key>`),
+//! retry streaks `r<epoch>.<seq>` (`epoch`: the replica's lifetime, so a later replica of the
+//! session never reuses them).
 //!
 //! **Rows end as the session file has them.** A row's final content depends only on the session's
 //! entries (collab's, or omp's session file that tf-hostd reads for bridge-served sessions) and on
@@ -39,6 +40,7 @@ mod spend;
 mod tools;
 mod subagents;
 mod ui;
+mod user_runs;
 mod util;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1123,6 +1125,11 @@ impl Replica {
                             self.tool_result(msg, true, out);
                         }
                     }
+                    Some(role) if user_runs::is_user_run(role) => {
+                        if ty == "message_start" || fin {
+                            self.user_run(msg, out);
+                        }
+                    }
                     Some(_) => {
                         if ty == "message_start" || fin {
                             self.user_message(msg, None, out);
@@ -1609,6 +1616,13 @@ impl Replica {
         }
     }
 
+    /// A quick command the user ran (`!`, `!!`, `$`, `$$`): omp's `bashExecution` /
+    /// `pythonExecution` message, live or as its entry (`user_runs.rs`).
+    fn user_run(&mut self, msg: &Value, out: &mut Update) {
+        let row = user_runs::row(msg, ts(msg).unwrap_or(self.now));
+        self.upsert(TranscriptItem::Tool(row), out);
+    }
+
     /// The echo of a prompt whose originals tf-hostd kept: link those its images don't already show.
     fn link_kept_originals(&mut self, id: &str, text: &str, images: &[ImageRef], out: &mut Update) {
         let Some(i) = self.expected_originals.iter().position(|(t, kept)| t == text && kept.len() == images.len()) else { return };
@@ -1678,6 +1692,7 @@ impl Replica {
                     view: None,
                     error: None,
                     artifact: None,
+                    user_run: None,
                 };
                 self.upsert(TranscriptItem::Tool(item), out);
             }
@@ -1717,6 +1732,7 @@ impl Replica {
                     view: None,
                     error: None,
                     artifact: None,
+                    user_run: None,
                 }
             }
         }
@@ -1908,7 +1924,9 @@ impl Replica {
     /// Which tool call a ui-request belongs to (ask tool / approval); for an ask question, the index
     /// of its ★ recommended option: the call's `questions[].recommended`, which omp's ask dialog
     /// only shows as the initially selected row (`initialIndex`, also 0 without one); and what the
-    /// agent wrote before asking.
+    /// agent wrote before asking. omp ≥ 18.18 asks with one HTML form (`html`), and a running form
+    /// owns every dialog that is no approval: omp runs one ask at a time, and the bridge marks a
+    /// form's ★ in its labels (omp's ` (Recommended)`).
     fn call_for_request(&self, req: &UiRequestFrame) -> ui::RequestCall {
         let title = req.title();
         if let Some(rest) = title.strip_prefix("Allow tool: ") {
@@ -1929,8 +1947,12 @@ impl Replica {
             .take(40)
             .find_map(|id| match self.items.get(id) {
                 Some(TranscriptItem::Tool(t)) if t.tool == "ask" && matches!(t.status, ToolStatus::Pending | ToolStatus::Running) => {
-                    let question = arr(&t.args, "questions").iter().find(|qq| s(qq, "question") == Some(q))?;
-                    let recommended = question.get("recommended").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+                    let recommended = if t.args.get("html").is_some_and(Value::is_string) {
+                        None
+                    } else {
+                        let question = arr(&t.args, "questions").iter().find(|qq| s(qq, "question") == Some(q))?;
+                        question.get("recommended").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok())
+                    };
                     let context = ask_context::ask_context(&self.order, &self.items, &t.id);
                     Some(ui::RequestCall { call_id: Some(t.call_id.clone()), recommended, context: Some(context) })
                 }
@@ -1982,6 +2004,7 @@ impl Replica {
                             self.count_task_cost(&entry_id, msg);
                         }
                     }
+                    Some(role) if user_runs::is_user_run(role) => self.user_run(msg, out),
                     Some(_) => self.user_message(msg, None, out),
                     None => {}
                 }
@@ -2274,6 +2297,7 @@ impl Replica {
             retry: w,
             subagent_retry: false,
             refusal_retry: false,
+            shell: false,
         };
         // omp idle with nothing queued: what we listed was delivered, aborted or dropped.
         if self.ended || (!self.running && !st.is_streaming && st.queued_message_count == 0) {
@@ -2563,6 +2587,7 @@ fn empty_meta() -> SessionMeta {
             retry: false,
             subagent_retry: false,
             refusal_retry: false,
+            shell: false,
         },
         started_at: None,
         agent_chat: None,

@@ -41,6 +41,7 @@ import type {
 import { apiError } from "../errors";
 import { ircOf } from "../irc";
 import { OMP_COMMAND_NAMES, ompCommand, ompCommandName } from "../ompCommands";
+import { quickCommand } from "../quickCommand";
 import { AgentSim, type SimHost } from "./agent";
 import { demoAiComplete, demoAiLatency } from "./ai";
 import { DemoAutomations } from "./automations";
@@ -103,6 +104,7 @@ import { seedOmpPrompts } from "./ompPrompts";
 import { AUTO_ANSWER_OFF, AUTO_ANSWER_ON, DemoAutoAnswer } from "./autoAnswer";
 import { DemoSearch } from "./search";
 import { DemoTerm } from "./term";
+import { DemoQuickRuns, type ShellContext } from "./quickRuns";
 import { DemoHerdr } from "./herdrHealth";
 import { DemoTools } from "./tools";
 import { DemoUploads } from "./uploads";
@@ -395,6 +397,8 @@ export class DemoHost implements SimHost {
   private plugins?: DemoPlugins;
   /** The notification routing (`notify.*`, `./notify`); studio-pc plays a host older than 0.7.0. */
   private notifyRouting?: DemoNotify;
+  /** omp's quick commands of the agents (`agent.shell`, or typed in their terminals; `./quickRuns`). */
+  private quickRuns?: DemoQuickRuns;
   /** The Cleanup page (`cleanup.*`, `./cleanup`); studio-pc plays a host whose tf-hostd predates it. */
   private cleanup?: DemoCleanup;
   /** Idle shells (`HostInfo.idleShells`, `cleanup.idleShells*`, `./idleShells`); studio-pc plays a tf-hostd before 0.9.0. */
@@ -1309,6 +1313,8 @@ export class DemoHost implements SimHost {
       }
       case "agent.slash":
         return this.slash(p);
+      case "agent.shell":
+        return this.shell(p);
       case "agent.commands": {
         const sim = this.ompSim(p.agentId);
         if (!sim.caps.bridge) throw apiError("unsupported", "Listing custom commands needs the TeleFlock bridge extension in this omp session");
@@ -1717,6 +1723,27 @@ export class DemoHost implements SimHost {
         if (arg && ompCommand(name)?.task && !sim.busy) sim.startTurn(arg);
     }
     return {};
+  }
+
+  /** `agent.shell`: one of omp's quick commands, run in the agent's folder (`./quickRuns`). */
+  private shell(p: Record<string, unknown>, typed = false): Promise<unknown> {
+    const sim = this.ompSim(p.agentId);
+    const ctx = this.shellContext(this.wsModel(sim.agent.workspaceId), sim.agent.cwd);
+    return (this.quickRuns ??= new DemoQuickRuns(this.env.clock)).run(sim, this.str(p, "text"), ctx, typed);
+  }
+
+  /** A line typed in an agent's terminal: omp's TUI runs a quick command itself, anything else is a prompt (a steer while it works). */
+  private terminalLine(sim: AgentSim, text: string): void {
+    if (!quickCommand(text)) {
+      if (!sim.busy) sim.startTurn(text);
+      else if (sim.agent.state === "working") sim.steer(text);
+      return;
+    }
+    try {
+      void this.shell({ agentId: sim.agent.id, text }, true);
+    } catch (e) {
+      this.termWrite(sim.agent.id, `\r\n\x1b[33m${e instanceof Error ? e.message : String(e)}\x1b[0m\r\n`);
+    }
   }
 
   private subagentCmd(p: Record<string, unknown>): unknown {
@@ -2551,15 +2578,9 @@ export class DemoHost implements SimHost {
       grid.rows,
       {
         hostname: this.info.hostname,
-        cwd: wsm.path,
-        branch: wsm.ws.repo?.branch,
-        agents: () => [...this.sims.values()].map((s) => ({ name: s.agent.name, state: s.agent.state, pane: s.agent.paneId })),
+        ...this.shellContext(wsm),
         stopHerdr: () => this.herdr.stopServer(),
-        gitStatus: () => {
-          const files = this.wsFiles(wsm);
-          return files.length ? [`On branch ${wsm.ws.repo?.branch ?? "main"}`, "Changes not staged for commit:", ...files.map((f) => `  \x1b[31m${f.status === "added" ? "new file" : "modified"}:   ${f.path}\x1b[0m`)] : [`On branch ${wsm.ws.repo?.branch ?? "main"}`, "nothing to commit, working tree clean"];
-        },
-        prompt: sim ? (text) => (sim.busy ? (sim.agent.state === "working" ? sim.steer(text) : undefined) : sim.startTurn(text)) : undefined,
+        prompt: sim ? (text) => this.terminalLine(sim, text) : undefined,
         abort: sim ? () => sim.abort("Interrupted (Esc)") : undefined,
         render: sim ? (rows) => sim.renderTui(rows) : undefined,
         dialogKey: sim ? (data) => sim.terminalKey(data) : undefined,
@@ -2573,6 +2594,19 @@ export class DemoHost implements SimHost {
     this.terms.set(termId, term);
     this.env.clock.after(20, () => term.start());
     return { termId, paneId, title: term.title };
+  }
+
+  /** The demo shell's view of workspace `wsm` at `cwd`: its terminals, and its agents' `!` commands. */
+  private shellContext(wsm: WsModel, cwd = wsm.path): ShellContext {
+    return {
+      cwd,
+      branch: wsm.ws.repo?.branch,
+      agents: () => [...this.sims.values()].map((s) => ({ name: s.agent.name, state: s.agent.state, pane: s.agent.paneId })),
+      gitStatus: () => {
+        const files = this.wsFiles(wsm);
+        return files.length ? [`On branch ${wsm.ws.repo?.branch ?? "main"}`, "Changes not staged for commit:", ...files.map((f) => `  \x1b[31m${f.status === "added" ? "new file" : "modified"}:   ${f.path}\x1b[0m`)] : [`On branch ${wsm.ws.repo?.branch ?? "main"}`, "nothing to commit, working tree clean"];
+      },
+    };
   }
 
   termInput(termId: string, data: string): void {

@@ -1,4 +1,4 @@
-import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, CornerDownRight, FileText, ListPlus, Lock, Mic, MicOff, Paperclip, Square, SquareTerminal, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { type ClipboardEvent, type DragEvent, type KeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { core, drafts, getTranscript, markResuming, navigate, parseAgentKey, useAgent, useCore, useDraft, useDraftImages, useResuming, useSession, useUi } from "@/core";
@@ -16,6 +16,10 @@ import { composerDraftKey, useSessionUi } from "../state";
 import { todoCounts } from "../tools/TodoList";
 import { usePendingQueue, userRowsWithText } from "./queue";
 import { QueueStrip } from "./QueueStrip";
+import { quickCommand } from "@/core/quickCommand";
+import { quickUnavailable, runRowsOf, usePendingRuns } from "./quick";
+import { QuickCue } from "./QuickCue";
+import { RunStrip } from "./RunStrip";
 import { isSlashDraft, runSlash, type SlashContext } from "./slash";
 import { ComposerPopup, useSlashPalette } from "./SlashPalette";
 import { useRamblerDictation } from "@/features/dictation/useRamblerDictation";
@@ -140,6 +144,10 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
   /** The latest render's agent state, for a send that waited for its videos. */
   const live = useRef({ working, caps });
   live.current = { working, caps };
+  // omp's quick commands (`!ls`, `!!git status`, `$ print(1)`), judged on what was typed as slash
+  // commands are, never with attachments: they run in the session and go to the model only as output.
+  const quick = images.length === 0 && videos.length === 0 ? quickCommand(text) : null;
+  const quickBlocked = quick ? quickUnavailable(caps) : null;
   const [altHeld, setAltHeld] = useState(false);
 
   useEffect(() => {
@@ -305,6 +313,30 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
         setText("");
         paste.sent(prepared.carried);
       }
+      return;
+    }
+    if (quick) {
+      // Run in the session through omp's own composer: never a message, so never a steer or a follow-up.
+      const blocked = disabledReason ?? (agent?.parked ? "Resume the agent first: commands run in its live session." : null);
+      if (blocked || quickBlocked) {
+        toast(blocked ? { title: "Can't run it", description: blocked, status: "error" } : { title: quickBlocked?.title ?? "", description: quickBlocked?.hint, status: "error" });
+        return;
+      }
+      // What omp records follows the prefix, paste tokens expanded: the row the Running strip waits for.
+      const sent = quickCommand(body) ?? quick;
+      const runId = usePendingRuns.getState().add(agentKey, { ...sent, before: runRowsOf(getTranscript(agentKey).items, sent) });
+      const res = await run(hostCall(hostId, "agent.shell", { agentId, text: body }, { failure: sent.python ? "Python not run" : "Command not run" }));
+      if (!res.ok) {
+        usePendingRuns.getState().remove(agentKey, runId);
+        return;
+      }
+      usePendingRuns.getState().sent(agentKey, runId);
+      // Only what was sent: anything typed while it started stays in the draft.
+      const cur = drafts.get(draftKey);
+      drafts.set(draftKey, cur.startsWith(text) ? cur.slice(text.length).trimStart() : cur);
+      paste.sent(prepared.carried);
+      setPopup(null);
+      if (!res.value.settled) toast({ title: "Still running", description: "Its output joins the transcript when omp finishes it.", status: "running", duration: 3200 });
       return;
     }
     if (disabledReason) {
@@ -479,8 +511,8 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           : mobile
             ? "Message omp · / commands"
             : "Message omp · / commands · @ files";
-  // Holding Alt while the agent works previews follow-up mode on the send button and hints.
-  const followMode = working && altHeld && caps?.followUp === true;
+  // Holding Alt while the agent works previews follow-up mode on the send button and hints (a quick command has none).
+  const followMode = working && altHeld && caps?.followUp === true && !quick;
 
   return (
     <div
@@ -557,15 +589,17 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
           requestAnimationFrame(() => ta.current?.focus());
         }}
       />
+      <RunStrip agentKey={agentKey} />
 
       {ramble.panel}
-      {working && !disabledReason && <SteerHint doneRef={steerDone} />}
+      {working && !disabledReason && !quick && <SteerHint doneRef={steerDone} />}
       <GlowBorder
         status="running"
         active={working && !disabledReason}
         radius={22}
         className={cn("relative rounded-[22px] transition-shadow duration-300", dragging && "shadow-[0_0_0_2px_var(--color-accent),var(--shadow-glow-accent)]")}
       >
+        {quick && <QuickCue quick={quick} blocked={quickBlocked?.cue ?? null} className="px-4 pt-3 pb-0.5 max-md:px-3.5 max-md:pt-2.5" />}
         {images.length > 0 && (
           <div className="flex gap-2 overflow-x-auto px-3 pt-3 pb-1">
             {images.map((img, i) => (
@@ -676,7 +710,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
               ) : (
                 !mobile && (
                   <span className="flex min-w-0 items-center gap-2 truncate text-[11px] font-semibold text-mute-2">
-                    {working && hasContent && !text.startsWith("/") && (
+                    {working && hasContent && !text.startsWith("/") && !quick && (
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-[10px] font-extrabold tracking-wider uppercase transition-colors duration-200",
@@ -686,11 +720,11 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                         {followMode ? "follow-up · after this turn" : "steer · lands mid-turn"}
                       </span>
                     )}
-                    <span className={cn("flex items-center gap-1 transition-colors", working && !followMode && "text-accent-hi")}>
+                    <span className={cn("flex items-center gap-1 transition-colors", working && !followMode && !quick && "text-accent-hi")}>
                       <Kbd>Enter</Kbd>
-                      {working ? "steer" : "send"}
+                      {quick ? "run" : working ? "steer" : "send"}
                     </span>
-                    {working ? (
+                    {working && !quick ? (
                       <span className={cn("flex items-center gap-1 transition-colors", followMode && "text-ink")}>
                         <Kbd>Alt</Kbd>
                         <Kbd>Enter</Kbd>
@@ -719,7 +753,7 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                 </button>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                {working && hasContent && !disabledReason && caps?.followUp && !followMode && (
+                {working && hasContent && !disabledReason && caps?.followUp && !followMode && !quick && (
                   <IconButton label="Queue follow-up (Alt+Enter)" size={mobile ? "md" : "sm"} variant="secondary" onClick={() => void send(true)} disabled={sending || waitingUploads}>
                     <ListPlus />
                   </IconButton>
@@ -731,13 +765,19 @@ export function Composer({ agentKey, mobile = false, className, autoFocus = fals
                 )}
                 {(hasContent || !working) && !inline && (
                   <IconButton
-                    label={waitingUploads ? "Sending once the videos are uploaded" : followMode ? "Queue follow-up (Alt+Enter)" : `${working ? "Steer" : "Send"}${mobile ? "" : " (Enter)"}`}
+                    label={
+                      waitingUploads
+                        ? "Sending once the videos are uploaded"
+                        : followMode
+                          ? "Queue follow-up (Alt+Enter)"
+                          : `${quick ? (quick.python ? "Run Python" : "Run command") : working ? "Steer" : "Send"}${mobile ? "" : " (Enter)"}`
+                    }
                     size={mobile ? "lg" : "sm"}
                     variant="primary"
                     onClick={() => void send(followMode)}
                     disabled={!hasContent || sending || waitingUploads || (!!disabledReason && !text.trim().startsWith("/"))}
                   >
-                    {sending || waitingUploads ? <Spinner size={14} /> : followMode ? <ListPlus /> : working ? <CornerDownRight /> : <ArrowUp />}
+                    {sending || waitingUploads ? <Spinner size={14} /> : followMode ? <ListPlus /> : quick ? <SquareTerminal /> : working ? <CornerDownRight /> : <ArrowUp />}
                   </IconButton>
                 )}
               </span>

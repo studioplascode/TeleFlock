@@ -144,10 +144,21 @@ fn step(frame: &UiRequestFrame) -> Option<AskStep> {
     })
 }
 
+/// What a dialog's card shows as the agent's explanation: what it wrote before asking, then the
+/// text of its ask form that leads to this field (`about`, bridge ≥ 2.5.0), within the same bound.
+fn context_of(call: &RequestCall, frame: &UiRequestFrame) -> Option<String> {
+    match (call.context.as_deref(), frame.about()) {
+        (said, None) => said.map(str::to_owned),
+        (None | Some(""), Some(about)) => Some(super::ask_context::bound(about)),
+        (Some(said), Some(about)) => Some(super::ask_context::bound(&format!("{said}\n\n{about}"))),
+    }
+}
+
 fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, NeedsYou) {
     let id = frame.req_id().to_string();
     let call_id = call.call_id.clone();
     let step = step(frame);
+    let context = context_of(call, frame);
     match frame {
         UiRequestFrame::Editor { title, prefill, .. } => {
             let req = UiRequest {
@@ -161,7 +172,7 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 initial: prefill.clone(),
                 plan: None,
                 call_id,
-                context: call.context.clone(),
+                context: context.clone(),
                 step: step.clone(),
             };
             let question = title.strip_prefix(CUSTOM_ANSWER_PREFIX).unwrap_or(title).to_owned();
@@ -178,7 +189,7 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 allow_chat: false,
                 command: None,
                 answerable: true,
-                context: call.context.clone(),
+                context,
                 step,
                 browser: false,
             };
@@ -293,7 +304,7 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 initial: None,
                 plan: None,
                 call_id,
-                context: call.context.clone(),
+                context: context.clone(),
                 step: step.clone(),
             };
             // A plain Yes / No select is a confirmation (omp's `showHookConfirm`, the bridge's
@@ -314,7 +325,7 @@ fn map(frame: &UiRequestFrame, call: &RequestCall, now: Millis) -> (UiRequest, N
                 answerable: true,
                 // A confirmation is omp's (or an extension's), not the agent asking: no "Agent said"
                 // (the app would otherwise show the end of the last assistant message, maybe a turn old).
-                context: if confirm { Some(call.context.clone().unwrap_or_default()) } else { call.context.clone() },
+                context: if confirm { Some(context.unwrap_or_default()) } else { context },
                 step,
                 browser: false,
             };
@@ -559,6 +570,7 @@ mod tests {
             markable_count: None,
             help_text: None,
             nav: None,
+            about: None,
         }
     }
 
@@ -625,7 +637,7 @@ mod tests {
         ui.request(&ask(3, false, vec![], false), &no_call(), 0);
         assert_eq!(ui.answer("3", &answer(&[], Some("teal"))).unwrap()[0].value.as_deref(), Some(OTHER_LABEL));
         ui.end(3);
-        ui.request(&UiRequestFrame::Editor { req_id: 4, title: "Custom answer: Colors?".into(), prefill: None, nav: None }, &no_call(), 0);
+        ui.request(&UiRequestFrame::Editor { req_id: 4, title: "Custom answer: Colors?".into(), prefill: None, nav: None, about: None }, &no_call(), 0);
         assert_eq!(ui.take_replies(), vec![UiReply { req_id: 4, value: Some("teal".into()) }]);
         assert!(ui.current().is_none(), "driven editor stays hidden");
     }
@@ -714,7 +726,7 @@ mod tests {
         ui.request(&ask(6, true, vec![], false), &no_call(), 0);
         assert_eq!(ui.take_replies()[0].value.as_deref(), Some(OTHER_LABEL));
         ui.end(6);
-        ui.request(&UiRequestFrame::Editor { req_id: 7, title: "Custom answer: Colors?".into(), prefill: None, nav: None }, &no_call(), 0);
+        ui.request(&UiRequestFrame::Editor { req_id: 7, title: "Custom answer: Colors?".into(), prefill: None, nav: None, about: None }, &no_call(), 0);
         assert_eq!(ui.take_replies()[0].value.as_deref(), Some("teal"));
         assert!(ui.current().is_none());
         ui.end(7);
@@ -746,7 +758,7 @@ mod tests {
         assert_eq!(ui.needs(true).unwrap().since, 1_000, "the first question again, after Back");
         // Its "Other" editor too.
         ui.end(4);
-        ui.request(&UiRequestFrame::Editor { req_id: 5, title: "Custom answer: Colors?".into(), prefill: None, nav: None }, &call, 10_000);
+        ui.request(&UiRequestFrame::Editor { req_id: 5, title: "Custom answer: Colors?".into(), prefill: None, nav: None, about: None }, &call, 10_000);
         assert_eq!(ui.needs(true).unwrap().since, 1_000, "the Other editor");
         ui.end(5);
         // The next ask waits since its own first dialog; an approval since it came.
@@ -770,6 +782,7 @@ mod tests {
             markable_count: None,
             help_text: None,
             nav: None,
+            about: None,
         };
         ui.request(&f, &RequestCall { call_id: Some("call_1".into()), ..no_call() }, 10);
         let n = ui.needs(true).unwrap();
@@ -793,6 +806,7 @@ mod tests {
             markable_count: None,
             help_text: None,
             nav: None,
+            about: None,
         }
     }
 
@@ -862,5 +876,29 @@ mod tests {
         let n = ui.needs(true).unwrap();
         assert_eq!((n.kind, n.question.as_str(), n.detail.is_none()), (NeedsKind::Ask, "Switch to model preset", true));
         assert_eq!(n.context, None, "a select keeps the call's context (none here)");
+    }
+
+    #[test]
+    fn an_ask_forms_own_text_follows_what_the_agent_said() {
+        // Bridge ≥ 2.5.0: each field of omp's HTML-form ask carries the form's text before it.
+        let mut f = select(3, "Session store", &["SQLite", "Redis", OTHER_LABEL]);
+        let UiRequestFrame::Select { selection_marker, about, .. } = &mut f else { unreachable!() };
+        *selection_marker = Some("radio".into());
+        *about = Some("Sessions live in memory and are lost on restart.".into());
+        let said = RequestCall { call_id: Some("call_9".into()), recommended: None, context: Some("I looked at the session code.".into()) };
+        let mut ui = UiState::default();
+        ui.request(&f, &said, 0);
+        let n = ui.needs(true).unwrap();
+        assert_eq!(n.context.as_deref(), Some("I looked at the session code.\n\nSessions live in memory and are lost on restart."));
+        assert_eq!(ui.current().unwrap().context, n.context);
+        // Nothing written before the call: the form's text alone; no text either: the call's.
+        for context in [None, Some(String::new())] {
+            let mut ui = UiState::default();
+            ui.request(&f, &RequestCall { context, ..said.clone() }, 0);
+            assert_eq!(ui.needs(true).unwrap().context.as_deref(), Some("Sessions live in memory and are lost on restart."));
+        }
+        let mut ui = UiState::default();
+        ui.request(&select(4, "Session store", &["SQLite", "Redis"]), &said, 0);
+        assert_eq!(ui.needs(true).unwrap().context.as_deref(), Some("I looked at the session code."));
     }
 }

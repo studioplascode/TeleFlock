@@ -20,13 +20,15 @@ interface Metrics {
   /** Fixed parts of a user / assistant row around its text. */
   userChrome: number;
   assistantChrome: number;
+  /** The "You ran" line over a quick command the user ran. */
+  runChrome: number;
   /** A drawn Mermaid / SVG figure (header, padding and a typical diagram). */
   figure: number;
 }
 
-const WIDE: Metrics = { toolHead: 38, codeLine: 19.2, userChars: 88, textChars: 96, userChrome: 48, assistantChrome: 26, figure: 300 };
+const WIDE: Metrics = { toolHead: 38, codeLine: 19.2, userChars: 88, textChars: 96, userChrome: 48, assistantChrome: 26, runChrome: 28, figure: 300 };
 /** Phones: tighter cards, narrower text, no avatar column. */
-const DENSE: Metrics = { toolHead: 34, codeLine: 17.8, userChars: 46, textChars: 52, userChrome: 36, assistantChrome: 22, figure: 240 };
+const DENSE: Metrics = { toolHead: 34, codeLine: 17.8, userChars: 46, textChars: 52, userChrome: 36, assistantChrome: 22, runChrome: 18, figure: 240 };
 
 const TEXT_LINE = 21.5;
 /** Output panes (bash, ANSI) and diffs stop growing here (AnsiText maxHeight, DiffBody COLLAPSED_LINES). */
@@ -137,7 +139,7 @@ function rowHeight(item: TranscriptItem, m: Metrics): number {
       // the collapsed pill; while streaming, a tail of the thoughts under it
       return item.streaming ? 90 : 25;
     case "tool":
-      return toolHeight(item, m);
+      return (item.userRun ? m.runChrome : 0) + toolHeight(item, m);
     case "notice":
       return 28;
     case "mode":

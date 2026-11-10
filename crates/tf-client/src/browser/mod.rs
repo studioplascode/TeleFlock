@@ -14,8 +14,9 @@
 //! * **Agents** (`agents`, `streams`, `proxy`): `browser.attach` (or an allowed request) makes
 //!   the agent's host listen for it (`agent.browserAttach`); every connection the agent opens
 //!   there arrives as a `fwd` stream of kind `browser`, served by the DevTools proxy, which shows
-//!   the agent only its own tabs and the ones the user lent it. At most `cap` agents at once;
-//!   further allowed requests wait for a slot.
+//!   the agent its own tabs, the ones the user lent it and, while `shareTabs` is on, the user's
+//!   tabs (never another agent's; a tab the user locked with `browser.lockTab` stays on its page).
+//!   At most `cap` agents at once; further allowed requests wait for a slot.
 //! * **Requests**: agents' `use_user_browser` requests come from host state (`Agent.browser`);
 //!   `browser.answer` (or an `agent.answer` of such a request, routed here) allows or denies.
 //! * `AppEvent::Browser` carries the status after every change.
@@ -72,6 +73,8 @@ struct Config {
     engine_path: Option<String>,
     headed: bool,
     cap: u32,
+    /// Attached agents may use the user's tabs.
+    share_tabs: bool,
     /// Engines (paths) the organization's policy refused remote control when they were started
     /// here, until one starts fine again.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -80,7 +83,7 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { engine_path: None, headed: false, cap: CAP_DEFAULT, blocked: Vec::new() }
+        Config { engine_path: None, headed: false, cap: CAP_DEFAULT, share_tabs: true, blocked: Vec::new() }
     }
 }
 
@@ -392,9 +395,11 @@ pub(crate) fn status(inner: &Inner) -> BrowserStatus {
             blocked: st.blocked.clone(),
             install: st.install.clone(),
             cap: st.config.cap,
+            share_tabs: st.config.share_tabs,
             attachments,
             requests,
             tabs: Vec::new(),
+            locked_tabs: Vec::new(),
         };
         (status, st.proxy.clone(), st.agents.names.clone(), conns)
     };
@@ -409,6 +414,7 @@ pub(crate) fn status(inner: &Inner) -> BrowserStatus {
             let key = AttachKey { host_id: t.host_id.clone(), agent_id: t.agent_id.clone() };
             t.agent_name = names.get(&key).cloned().unwrap_or_else(|| t.agent_id.clone());
         }
+        s.locked_tabs = p.locked_tabs();
     }
     s
 }
@@ -469,7 +475,7 @@ fn running(inner: &Arc<Inner>, p: &launch::Proc, engine: BrowserEngine, switched
         match &st.proxy {
             Some(px) => (px.clone(), false),
             None => {
-                let px = CdpProxy::new(p.port);
+                let px = CdpProxy::new(p.port, p.headed, st.config.share_tabs);
                 st.proxy = Some(px.clone());
                 (px, true)
             }
@@ -488,8 +494,8 @@ fn running(inner: &Arc<Inner>, p: &launch::Proc, engine: BrowserEngine, switched
             }
         });
     } else {
-        // A new browser process: new DevTools port, new targets.
-        px.set_upstream(p.port);
+        // A new browser process: new DevTools port, new targets, maybe the other mode.
+        px.set_upstream(p.port, p.headed);
     }
     emit(inner);
 }
@@ -1201,7 +1207,14 @@ async fn config(inner: &Arc<Inner>) -> BrowserConfig {
     let download = b.download();
     let st = b.st.lock().unwrap();
     let engines = st.engines.iter().map(|e| marked(e.clone(), &st.config.blocked)).collect();
-    BrowserConfig { engine_path: st.config.engine_path.clone(), headed: st.config.headed, cap: st.config.cap, engines, download }
+    BrowserConfig {
+        engine_path: st.config.engine_path.clone(),
+        headed: st.config.headed,
+        cap: st.config.cap,
+        share_tabs: st.config.share_tabs,
+        engines,
+        download,
+    }
 }
 
 async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<BrowserConfig, ApiError> {
@@ -1216,18 +1229,28 @@ async fn config_set(inner: &Arc<Inner>, p: BrowserConfigSetParams) -> Result<Bro
         return Err(invalid(format!("cap: 1 to {CAP_MAX} agents")));
     }
     let headed = p.headed.unwrap_or(false);
+    let share_tabs = p.share_tabs.unwrap_or(true);
     {
         let b = &inner.browser;
         let _ops = b.ops.lock().await;
         let _w = b.saving.lock().await;
         // The blocked marks are the app core's: they stay.
         let blocked = b.st.lock().unwrap().config.blocked.clone();
-        let c = Config { engine_path, headed, cap, blocked };
+        let c = Config { engine_path, headed, cap, share_tabs, blocked };
         write_json(&b.dir.join("config.json"), &c).await?;
-        let mut st = b.st.lock().unwrap();
-        st.config.engine_path = c.engine_path;
-        st.config.headed = c.headed;
-        st.config.cap = c.cap;
+        let proxy = {
+            let mut st = b.st.lock().unwrap();
+            st.config.engine_path = c.engine_path;
+            st.config.headed = c.headed;
+            st.config.cap = c.cap;
+            st.config.share_tabs = c.share_tabs;
+            st.proxy.clone()
+        };
+        // Connected agents see the user's tabs appear, or lose them, at once; under `ops`, so
+        // saves that overlap leave the proxy as the last one saved says.
+        if let Some(px) = proxy {
+            px.set_share(share_tabs);
+        }
     }
     admit_waiting(inner);
     Ok(config(inner).await)
@@ -1398,6 +1421,7 @@ pub(crate) async fn call(inner: &Arc<Inner>, m: AppMethod) -> Result<Value, ApiE
             }
             running_proxy(inner)?.lend_tab(&p.target_id, &who)?;
         }
+        AppMethod::BrowserLockTab(p) => running_proxy(inner)?.lock_tab(&p.target_id, p.locked)?,
         other => return Err(ApiError::new("internal", format!("not a browser method: {:?}", other.name()))),
     }
     emit(inner);

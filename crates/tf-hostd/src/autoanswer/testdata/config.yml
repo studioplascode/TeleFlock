@@ -1,4 +1,4 @@
-# AutoAnswer lab settings (omp 18.13.3, isolated agent dir): every role points at the mock.
+# AutoAnswer lab settings (omp ≥ 18.18, isolated agent dir): every role points at the mock.
 modelRoles:
   default: mock/lab-1
   smol: mock/lab-1

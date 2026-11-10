@@ -178,76 +178,86 @@ export class DemoTerm {
   private run(cmd: string): void {
     if (this.busy) return;
     const [name, ...args] = cmd.split(/\s+/);
-    switch (name) {
-      case "":
-        this.out([]);
-        break;
-      case "help":
-        this.out([`${B}demo shell${X} — try: ls, pwd, git status, git log, herdr agent list, bun test, top, echo, date, whoami, clear, exit`]);
-        break;
-      case "pwd":
-        this.out([this.ctx.cwd]);
-        break;
-      case "whoami":
-        this.out(["demo"]);
-        break;
-      case "date":
-        this.out([new Date().toString()]);
-        break;
-      case "echo":
-        this.out([args.join(" ")]);
-        break;
-      case "clear":
-        this.frame(this.prompt(), true);
-        break;
-      case "ls":
-        this.out([`${C}src${X}  ${C}docs${X}  ${C}tests${X}  package.json  README.md  bun.lock  tsconfig.json`]);
-        break;
-      case "git":
-        if (args[0] === "status") this.out(this.ctx.gitStatus());
-        else if (args[0] === "log")
-          this.out([`${Y}4be91a7${X} (HEAD -> ${this.ctx.branch ?? "main"}) tighten edge cases`, `${Y}8c1d2e0${X} add lane persistence`, `${Y}31f0a9b${X} ${D}(origin/main)${X} merge #139 README`]);
-        else this.out([`${R}git: '${args[0] ?? ""}' is not available in the demo shell${X}`]);
-        break;
-      case "herdr":
-        if (args[0] === "agent" && args[1] === "list") {
-          const rows = this.ctx.agents();
-          this.out([`${D}NAME       STATE    PANE${X}`, ...rows.map((r) => `${r.name.padEnd(10)} ${colorState(r.state)}${" ".repeat(Math.max(1, 9 - r.state.length))}${r.pane}`)]);
-        } else if (args[0] === "server" && args[1] === "stop" && this.ctx.stopHerdr) {
-          this.ctx.stopHerdr();
-          this.out([`${D}herdr server stopped${X}`]);
-        } else this.out([`herdr 0.9.0 — try ${B}herdr agent list${X}`]);
-        break;
-      case "bun":
-        if (args[0] === "test") {
-          this.stream(
-            [
-              `bun test v1.4.3`,
-              ``,
-              `${G}✓${X} columns.test.ts ${D}(6)${X}`,
-              `${G}✓${X} persist.test.ts ${D}(9)${X}`,
-              `${G}✓${X} drag-drop.test.ts ${D}(12)${X}`,
-              `${G}✓${X} keyboard-move.test.ts ${D}(6)${X}`,
-              `${G}✓${X} lane-order.test.ts ${D}(4)${X}`,
-              ``,
-              `${G}${B}37 pass${X} ${D}· 0 fail · 1.71s${X}`,
-            ],
-            220,
-          );
-        } else if (args[0] === "run" && args[1] === "dev") {
-          this.stream([`$ vite`, ``, `  ${G}VITE v8.0.2${X}  ready in 412 ms`, ``, `  ➜  Local:   ${C}http://localhost:5173/${X}`], 300);
-        } else this.out([`bun 1.4.3 — try ${B}bun test${X} or ${B}bun run dev${X}`]);
-        break;
-      case "top":
-        this.out([`load average: 2.14, 1.87, 1.66 · 15 cores · 62 GB`, `  PID USER   %CPU %MEM COMMAND`, `41212 demo   38.2  1.4 omp`, `41388 demo   21.7  0.9 bun test`, `40021 demo    3.1  0.2 herdr`]);
-        break;
-      case "exit":
-        this.frame("logout\r\n");
-        this.close("shell exited");
-        break;
-      default:
-        this.out([`${R}${name}: command not found${X} ${D}(demo shell — type help)${X}`]);
+    if (name === "clear") {
+      this.frame(this.prompt(), true);
+    } else if (name === "exit") {
+      this.frame("logout\r\n");
+      this.close("shell exited");
+    } else if (name === "herdr" && args[0] === "server" && args[1] === "stop" && this.ctx.stopHerdr) {
+      this.ctx.stopHerdr();
+      this.out([`${D}herdr server stopped${X}`]);
+    } else {
+      const ran = cannedShell(cmd, this.ctx);
+      if (ran.everyMs) this.stream(ran.lines, ran.everyMs);
+      else this.out(ran.lines);
     }
+  }
+}
+
+/** What a command of the demo shell prints, its exit code, and how fast its lines come (`everyMs`: they stream). */
+export interface CannedRun {
+  lines: string[];
+  exitCode: number;
+  everyMs?: number;
+}
+
+/**
+ * The demo shell's canned commands (`help` lists them), for its terminals and for the `!` commands
+ * the demo's agents run (`agent.shell`). `clear`, `exit` and `herdr server stop` act on the terminal
+ * or the host: here they print nothing.
+ */
+export function cannedShell(cmd: string, ctx: Pick<TermContext, "cwd" | "branch" | "agents" | "gitStatus">): CannedRun {
+  const [name = "", ...args] = cmd.trim().split(/\s+/);
+  const ok = (lines: string[], everyMs?: number): CannedRun => ({ lines, exitCode: 0, everyMs });
+  switch (name) {
+    case "":
+    case "clear":
+    case "exit":
+      return ok([]);
+    case "help":
+      return ok([`${B}demo shell${X} — try: ls, pwd, git status, git log, herdr agent list, bun test, top, echo, date, whoami, clear, exit`]);
+    case "pwd":
+      return ok([ctx.cwd]);
+    case "whoami":
+      return ok(["demo"]);
+    case "date":
+      return ok([new Date().toString()]);
+    case "echo":
+      return ok([args.join(" ")]);
+    case "ls":
+      return ok([`${C}src${X}  ${C}docs${X}  ${C}tests${X}  package.json  README.md  bun.lock  tsconfig.json`]);
+    case "git":
+      if (args[0] === "status") return ok(ctx.gitStatus());
+      if (args[0] === "log") return ok([`${Y}4be91a7${X} (HEAD -> ${ctx.branch ?? "main"}) tighten edge cases`, `${Y}8c1d2e0${X} add lane persistence`, `${Y}31f0a9b${X} ${D}(origin/main)${X} merge #139 README`]);
+      return { lines: [`${R}git: '${args[0] ?? ""}' is not available in the demo shell${X}`], exitCode: 1 };
+    case "herdr":
+      if (args[0] === "agent" && args[1] === "list") {
+        return ok([`${D}NAME       STATE    PANE${X}`, ...ctx.agents().map((r) => `${r.name.padEnd(10)} ${colorState(r.state)}${" ".repeat(Math.max(1, 9 - r.state.length))}${r.pane}`)]);
+      }
+      return ok([`herdr 0.9.0 — try ${B}herdr agent list${X}`]);
+    case "bun":
+      if (args[0] === "test") {
+        return ok(
+          [
+            `bun test v1.4.3`,
+            ``,
+            `${G}✓${X} columns.test.ts ${D}(6)${X}`,
+            `${G}✓${X} persist.test.ts ${D}(9)${X}`,
+            `${G}✓${X} drag-drop.test.ts ${D}(12)${X}`,
+            `${G}✓${X} keyboard-move.test.ts ${D}(6)${X}`,
+            `${G}✓${X} lane-order.test.ts ${D}(4)${X}`,
+            ``,
+            `${G}${B}37 pass${X} ${D}· 0 fail · 1.71s${X}`,
+          ],
+          220,
+        );
+      }
+      if (args[0] === "run" && args[1] === "dev") return ok([`$ vite`, ``, `  ${G}VITE v8.0.2${X}  ready in 412 ms`, ``, `  ➜  Local:   ${C}http://localhost:5173/${X}`], 300);
+      return ok([`bun 1.4.3 — try ${B}bun test${X} or ${B}bun run dev${X}`]);
+    case "top":
+      return ok([`load average: 2.14, 1.87, 1.66 · 15 cores · 62 GB`, `  PID USER   %CPU %MEM COMMAND`, `41212 demo   38.2  1.4 omp`, `41388 demo   21.7  0.9 bun test`, `40021 demo    3.1  0.2 herdr`]);
+    default:
+      return { lines: [`${R}${name}: command not found${X} ${D}(demo shell — type help)${X}`], exitCode: 127 };
   }
 }
 

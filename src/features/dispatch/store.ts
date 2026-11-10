@@ -9,20 +9,22 @@ import { hostTakesRoles, launchOverrides } from "@/features/agentRoles/roles";
 import { hostDecides, specAutoAnswer } from "@/features/autoAnswer/format";
 import type { FirstCommand } from "./commands";
 import { deleteEntryImages, loadEntryImages, saveEntryImages, sweepEntryImages } from "./images";
-import { BRANCH_PREFIX, type BranchSuggester, baseSlug, commandSlug, commandTask, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
+import { type BranchSuggester, baseSlug, branchNamesTaken, commandSlug, commandTask, nameDispatch, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
 /*
  * Dispatch threads: every message fired at a repo becomes one `worktree.create` with an omp agent
- * spec; in a chat thread (`CHAT_REPO`, "No folder · chat") one `agent.start` with the chat target,
- * whose folder the host makes. Entries persist per target + repo (localStorage, capped) so the
- * thread survives reloads; the live state of each agent always comes from host state, `last` keeps
- * a summary for agents that have since been closed. A target is a host, or a host group in Auto
- * mode (`auto.ts`), where each entry records the host it went to.
+ * spec; in a thread "In this folder" (`inPlace`: a repository, or a folder that is none) one
+ * `agent.start` with the folder as its `cwd`, no worktree; in a chat thread (`CHAT_REPO`, "No
+ * folder · chat") one `agent.start` with the chat target, whose folder the host makes. Entries
+ * persist per target + repo (localStorage, capped) so the thread survives reloads; the live state
+ * of each agent always comes from host state, `last` keeps a summary for agents that have since
+ * been closed. A target is a host, or a host group in Auto mode (`auto.ts`), where each entry
+ * records the host it went to.
  */
 
 /** Entries kept per thread (oldest dropped first). */
 export const MAX_ENTRIES = 200;
-/** Worktree creations running at once per thread; the rest wait in "queued". */
+/** Creations (worktree.create, agent.start) running at once per thread; the rest wait in "queued". */
 export const MAX_CONCURRENT = 3;
 /**
  * Persisted budget (localStorage is ~5 MB per origin, shared with the rest of the app): prompts
@@ -35,6 +37,9 @@ const DEFAULT = "default";
 
 /** Errors after which the host may still be creating the worktree / agent (the answer got lost). */
 const UNCERTAIN_CODES: Record<string, true> = { timeout: true, not_connected: true, disconnected: true };
+
+/** herdr refusing an agent name that is in use (`agent_name_taken: agent name … is already used`; the demo: "… already taken"). */
+const NAME_TAKEN = /agent_name_taken|agent name .* already (taken|used)/i;
 
 /** Per-dispatch agent options (`"default"` = the host's default for model / thinking). */
 export interface DispatchOptions {
@@ -51,14 +56,14 @@ export interface DispatchOptions {
 }
 
 /**
- * `naming` (omp's tiny model is naming the branch; skipped when AI naming is off) → `uploading`
+ * `naming` (omp's tiny model is naming the task; skipped when AI naming is off) → `uploading`
  * (only with videos still on their way to the host) → `queued` → `creating` (worktree.create in
- * flight; a chat: agent.start) → `started` (herdr answered; the agent's own progress comes from
- * host state), `failed` (herdr refused, or a video didn't upload), or `unknown` (the request timed
- * out or the connection dropped: the host may still be creating it, so the entry keeps looking for
- * its agent). A `queued`/`creating` entry that is no longer in flight was interrupted by a reload; a
- * `naming` one never reached the host and resumes under its fallback name; an `uploading` one fails
- * (the page that could read the video is gone).
+ * flight; in place or a chat: agent.start) → `started` (herdr answered; the agent's own progress
+ * comes from host state), `failed` (herdr refused, or a video didn't upload), or `unknown` (the
+ * request timed out or the connection dropped: the host may still be creating it, so the entry
+ * keeps looking for its agent). A `queued`/`creating` entry that is no longer in flight was
+ * interrupted by a reload; a `naming` one never reached the host and resumes under its fallback
+ * name; an `uploading` one fails (the page that could read the video is gone).
  */
 export type DispatchPhase = "naming" | "uploading" | "queued" | "creating" | "started" | "failed" | "unknown";
 
@@ -80,6 +85,13 @@ export interface DispatchError {
   title: string;
   hint?: string;
   kind: HerdrFailure["kind"];
+  /** herdr refused the agent's name on a retry: an agent of that name is on the host, maybe this entry's own, still coming up. */
+  held?: boolean;
+}
+
+/** A retry's start refused because an agent called `name` is on the host already (`DispatchError.held`). */
+function nameHeld(name: string): DispatchError {
+  return { title: `The host already has an agent named ${name}`, kind: "other", held: true };
 }
 
 /** Last state seen in host state, shown once the agent is gone (archived and closed, pane killed…). */
@@ -99,7 +111,10 @@ export interface DispatchEntry {
    */
   command?: string;
   createdAt: number;
-  /** `dispatch/<slug>` (while `naming`: the fallback, the prompt's slug); empty for a chat. */
+  /**
+   * The worktree's branch, `<slug>` like its name (while `naming`: the fallback, the prompt's slug;
+   * entries from before: `dispatch/<slug>`, kept); empty in place and for a chat.
+   */
   branch: string;
   /** Agent name and workspace label (`<slug>`). */
   name: string;
@@ -127,12 +142,14 @@ export interface DispatchEntry {
   videos?: DispatchVideo[];
   /** The host it went to; absent (entries before 0.5) = the thread's host. */
   hostId?: string;
-  /** That host's checkout root of the repository; absent = the thread's repo (a chat has none). */
+  /** That host's checkout root of the repository (in place: the folder it runs in); absent = the thread's repo (a chat has none). */
   repo?: string;
   /** Auto mode: why that host was picked ("least busy · 1 running · CPU 12%"). */
   placed?: string;
   /** A chat (a `CHAT_REPO` thread): an omp agent in a folder its host makes for it; no repository, branch or base. */
   chat?: boolean;
+  /** Sent "In this folder": its agent runs in `repo` itself (a workspace opened there, no worktree), no branch or base. */
+  inPlace?: boolean;
 }
 
 /** Persisted thread key: one thread per target (host id or `auto:<group>`) + repo (root, or Auto's repo id). */
@@ -145,9 +162,21 @@ export function entryHost(key: string, e: Pick<DispatchEntry, "hostId">): string
   return e.hostId ?? key.split("\u0000")[0] ?? "";
 }
 
-/** The checkout root an entry of thread `key` was created from. */
+/** The checkout root (in place: the folder) an entry of thread `key` was created in. */
 export function entryRepo(key: string, e: Pick<DispatchEntry, "repo">): string {
   return e.repo ?? key.split("\u0000")[1] ?? "";
+}
+
+/** The entry's agent got a worktree of its own (not in place, not a chat). */
+export function inWorktree(e: Pick<DispatchEntry, "chat" | "inPlace">): boolean {
+  return !e.chat && !e.inPlace;
+}
+
+/** How a thread picked in the browser runs its messages: in the folder itself, and whether that is a folder and no repository root. */
+export interface PickedPlace {
+  inPlace: boolean;
+  /** No repository root (a plain folder, or one inside a repository): its messages always run in place. */
+  folder: boolean;
 }
 
 interface DispatchState {
@@ -159,6 +188,10 @@ interface DispatchState {
   bases: Record<string, string>;
   /** Bases remembered before 0.5 (when the default was the local default branch): that name counts as the default. */
   legacyBases: Record<string, true>;
+  /** Threads whose messages start their agent in the folder itself ("In this folder"); absent = a new worktree each ("New worktree"). */
+  inPlace: Record<string, true>;
+  /** Threads of a folder that is no repository root (single hosts only): their messages always run in place. */
+  folders: Record<string, true>;
   /** Repositories trusted (`--trust-repository`), per host + checkout root. */
   trusted: Record<string, true>;
   /** Composer options of the last dispatch (null = Settings defaults). */
@@ -167,7 +200,9 @@ interface DispatchState {
   remotes: Record<string, string>;
   /** Task box focus requests (a nonce, 0 = none; `openChat`), consumed by the Dispatch view. Not persisted. */
   composerFocus: number;
-  select(target: string, repo?: string | null): void;
+  /** The target, and its repo (`place`: picked in the browser, so how its thread runs too). */
+  select(target: string, repo?: string | null, place?: PickedPlace): void;
+  setInPlace(key: string, on: boolean): void;
   setBase(key: string, base: string | null): void;
   setOptions(options: DispatchOptions): void;
   trust(key: string): void;
@@ -180,7 +215,16 @@ interface DispatchState {
   consumeComposerFocus(): void;
 }
 
-type Persisted = Pick<DispatchState, "threads" | "lastHost" | "lastRepo" | "bases" | "legacyBases" | "trusted" | "options" | "remotes">;
+type Persisted = Pick<DispatchState, "threads" | "lastHost" | "lastRepo" | "bases" | "legacyBases" | "inPlace" | "folders" | "trusted" | "options" | "remotes">;
+
+/** `record` with `key` set, or left out. */
+function flag(record: Record<string, true>, key: string, on: boolean): Record<string, true> {
+  if (on === (record[key] === true)) return record;
+  const out = { ...record };
+  if (on) out[key] = true;
+  else delete out[key];
+  return out;
+}
 
 let warnedQuota = false;
 
@@ -217,18 +261,23 @@ export const useDispatch = create<DispatchState>()(
       lastRepo: {},
       bases: {},
       legacyBases: {},
+      inPlace: {},
+      folders: {},
       trusted: {},
       options: null,
       remotes: {},
       composerFocus: 0,
-      select: (target, repo) =>
+      select: (target, repo, place) =>
         set((s) => {
           if (repo === undefined) return { lastHost: target };
           const lastRepo = { ...s.lastRepo };
           if (repo) lastRepo[target] = repo;
           else delete lastRepo[target];
-          return { lastHost: target, lastRepo };
+          if (!repo || !place) return { lastHost: target, lastRepo };
+          const key = threadKey(target, repo);
+          return { lastHost: target, lastRepo, inPlace: flag(s.inPlace, key, place.inPlace), folders: flag(s.folders, key, place.folder) };
         }),
+      setInPlace: (key, on) => set((s) => ({ inPlace: flag(s.inPlace, key, on) })),
       setBase: (key, base) =>
         set((s) => {
           const bases = { ...s.bases };
@@ -277,6 +326,8 @@ export const useDispatch = create<DispatchState>()(
         lastRepo: s.lastRepo,
         bases: s.bases,
         legacyBases: s.legacyBases,
+        inPlace: s.inPlace,
+        folders: s.folders,
         trusted: s.trusted,
         options: s.options,
         remotes: s.remotes,
@@ -414,7 +465,12 @@ function settled(id: string): void {
 
 const find = (key: string, id: string) => useDispatch.getState().threads[key]?.find((x) => x.id === id);
 
-async function run(key: string, id: string): Promise<void> {
+/**
+ * Sends entry `id` of thread `key` (after its videos uploaded). `adopt`: a retry after a start whose
+ * answer got lost; herdr refusing an in-place entry's name then means the first start's agent may
+ * be coming up under it, so the entry stays unconfirmed (`DispatchError.held`) instead of failing.
+ */
+async function run(key: string, id: string, adopt = false): Promise<void> {
   const store = useDispatch.getState;
   inflight.add(id);
   let release: (() => void) | undefined;
@@ -441,6 +497,20 @@ async function run(key: string, id: string): Promise<void> {
       return;
     }
     const repo = entryRepo(key, e);
+    if (e.inPlace) {
+      // A workspace of its own in the folder itself, no worktree; herdr keeps agent names unique.
+      const target: StartTarget = { kind: "cwd", cwd: repo, label: e.name };
+      try {
+        const started = await core.host(hostId).call("agent.start", { target, spec: await specOf(e, hostId) });
+        store().patch(key, id, { phase: "started", startedAt: Date.now(), agentId: started.agentId, paneId: started.paneId, workspaceId: started.workspaceId });
+      } catch (err) {
+        // A retry of a start whose answer got lost: the agent holding the name may be that start's,
+        // still coming up, or another's. Unconfirmed until it links (the thread promotes it then).
+        if (!adopt || !NAME_TAKEN.test(toApiError(err).message)) throw err;
+        store().patch(key, id, { phase: "unknown", error: nameHeld(e.name) });
+      }
+      return;
+    }
     const created = await core.host(hostId).call("worktree.create", {
       cwd: repo,
       branch: e.branch,
@@ -466,7 +536,7 @@ async function run(key: string, id: string): Promise<void> {
   }
 }
 
-/** Called after every finished send (worktree.create, a chat's agent.start; e.g. to refresh the branch list). */
+/** Called after every finished send (worktree.create, an in-place or a chat's agent.start; e.g. to refresh the branch list). */
 export function onDispatchSettled(cb: () => void): () => void {
   subscribers.add(cb);
   return () => subscribers.delete(cb);
@@ -514,9 +584,9 @@ let seq = 0;
 export const NAMING_TIMEOUT_MS = 10_000;
 
 /**
- * The tiny model's branch slug for a task sent to `repo` (a chat, `CHAT_REPO`, is named outside any
- * folder). The composer prefetches through this same call while the user types, so most sends find
- * the answer in ai.ts's cache.
+ * The tiny model's slug for a task sent to `repo` (a repository or a folder; a chat, `CHAT_REPO`, is
+ * named outside any folder). The composer prefetches through this same call while the user types,
+ * so most sends find the answer in ai.ts's cache.
  */
 export function suggestDispatchName(hostId: string, repo: string, prompt: string): Promise<string | null> {
   return suggestBranch(hostId, prompt, { timeoutMs: NAMING_TIMEOUT_MS, ...(isChatRepo(repo) ? {} : { cwd: repo }) });
@@ -547,17 +617,19 @@ export interface BaseChoice {
 
 /**
  * Fire one task: append an entry to thread `key` (default: the host + repo thread) and create its
- * worktree + agent on `hostId` in the background. `taken` = names that are not free (existing
- * branches, live agent names); the host's own dispatches are added here, so rapid sends (to any
- * repo) never collide with each other. With `resolveBase` (Auto, or a send before the view had the
- * host's branch list) the host's branches are fetched first: the name is deduped against them and
- * the base is resolved there (`threadBase`); `base`/`baseLabel` then only stand in until it is.
- * With a namer (default: omp's tiny model when AI naming is on and there is text; `null` = none)
- * the entry first goes through `naming`, holding the prompt's slug as its fallback name meanwhile.
- * `repo` = `CHAT_REPO`: a chat (`chat`), no branch, base or worktree: named the same way, then
- * `agent.start` with the chat target (`resolveBase` doesn't apply). With `command` the agent runs
- * that instead of getting the prompt: named after the command's task (AI naming only for one),
- * and without the Plan option when the command picks the session's mode.
+ * worktree + agent on `hostId` in the background, its branch named like the agent (`<slug>`).
+ * `taken` = names that are not free (existing branches, live agent names); the host's own
+ * dispatches are added here, so rapid sends (to any repo) never collide with each other. With
+ * `resolveBase` (Auto, or a send before the view had the host's branch list) the host's branches
+ * are fetched first: the name is deduped against them and the base is resolved there
+ * (`threadBase`); `base`/`baseLabel` then only stand in until it is. With a namer (default: omp's
+ * tiny model when AI naming is on and there is text; `null` = none) the entry first goes through
+ * `naming`, holding the prompt's slug as its fallback name meanwhile. `inPlace`: its agent starts
+ * in `repo` itself ("In this folder"), no branch, base or worktree: named the same way, then
+ * `agent.start` with `repo` as its cwd. `repo` = `CHAT_REPO`: a chat (`chat`), no branch, base or
+ * worktree either: `agent.start` with the chat target. Neither takes `resolveBase`. With `command`
+ * the agent runs that instead of getting the prompt: named after the command's task (AI naming
+ * only for one), and without the Plan option when the command picks the session's mode.
  */
 export function dispatchTask(args: {
   key?: string;
@@ -573,12 +645,15 @@ export function dispatchTask(args: {
   options: DispatchOptions;
   taken: Iterable<string>;
   resolveBase?: BaseChoice;
+  /** Its agent starts in `repo` itself, no worktree ("In this folder"). */
+  inPlace?: boolean;
   /** The message is a command its agent runs; `prompt` is the text as typed. */
   command?: FirstCommand;
   suggest?: BranchSuggester | null;
 }): DispatchEntry {
   const key = args.key ?? threadKey(args.hostId, args.repo);
   const chat = isChatRepo(args.repo);
+  const inPlace = !chat && args.inPlace === true;
   const s = useDispatch.getState();
   const taken = [...args.taken];
   const videos = (args.videos ?? []).flatMap((upload): DispatchVideo[] => {
@@ -599,9 +674,9 @@ export function dispatchTask(args: {
     prompt: args.prompt,
     ...(named.command ? { command: named.command } : {}),
     createdAt: Date.now(),
-    branch: chat ? "" : `${BRANCH_PREFIX}${name}`,
+    branch: chat || inPlace ? "" : name,
     name,
-    ...(chat ? { chat: true } : { base: args.base, ...(args.baseLabel ? { baseLabel: args.baseLabel } : {}) }),
+    ...(chat ? { chat: true } : inPlace ? { inPlace: true } : { base: args.base, ...(args.baseLabel ? { baseLabel: args.baseLabel } : {}) }),
     options: args.command?.replacesPlan ? { ...args.options, plan: false } : args.options,
     phase: suggest ? "naming" : "queued",
     hostId: args.hostId,
@@ -618,7 +693,7 @@ export function dispatchTask(args: {
   releaseVideos((args.videos ?? []).filter((id) => !uploading.includes(id)));
   s.add(key, entry);
   s.setOptions(args.options);
-  const resolveBase = chat ? undefined : args.resolveBase;
+  const resolveBase = chat || inPlace ? undefined : args.resolveBase;
   void (suggest || resolveBase ? nameThenRun(key, entry.id, taken, suggest, resolveBase) : run(key, entry.id));
   return entry;
 }
@@ -649,9 +724,9 @@ async function nameThenRun(key: string, id: string, taken: readonly string[], su
   }
   // Dedupe and claim the name in one synchronous step: identical sends share one AI answer and
   // resume in the same tick, so each must see the name the previous one just took.
-  const name = uniqueSlug(slug, reservedNames(hostId, [...taken, ...(list?.branches.map((b) => b.name) ?? [])], id));
+  const name = uniqueSlug(slug, reservedNames(hostId, [...taken, ...(list ? branchNamesTaken(list.branches) : [])], id));
   const base = resolveBase ? threadBase(list, resolveBase.stored, resolveBase.legacy) : undefined;
-  store().patch(key, id, { name, ...(e.chat ? {} : { branch: `${BRANCH_PREFIX}${name}` }), aiNamed: ai, ...(base ? { base: base.param, baseLabel: base.shown } : {}) });
+  store().patch(key, id, { name, ...(inWorktree(e) ? { branch: name } : {}), aiNamed: ai, ...(base ? { base: base.param, baseLabel: base.shown } : {}) });
   void run(key, id);
 }
 
@@ -661,8 +736,9 @@ const RESUME_RETRY_MAX_MS = 60_000;
 
 /**
  * A `naming` entry whose answer was lost to a reload: nothing reached the host yet, so it goes
- * ahead under the prompt's slug once the host answers, deduped against its branches (a chat: the
- * agents in its state), its live agents and the host's other dispatches (as `retryDispatch` does).
+ * ahead under the prompt's slug once the host answers, deduped against its branches (in place or
+ * a chat: the agents in its state), its live agents and the host's other dispatches (as
+ * `retryDispatch` does).
  */
 async function resumeNaming(key: string, id: string): Promise<void> {
   const store = useDispatch.getState;
@@ -680,16 +756,16 @@ async function resumeNaming(key: string, id: string): Promise<void> {
     }
     const hostId = entryHost(key, first);
     try {
-      const taken = first.chat
-        ? (await core.host(hostId).call("state.get", {})).agents.map((a) => a.name)
-        : (await core.host(hostId).call("git.branches", { cwd: entryRepo(key, first) })).branches.map((b) => b.name);
+      const taken = inWorktree(first)
+        ? branchNamesTaken((await core.host(hostId).call("git.branches", { cwd: entryRepo(key, first) })).branches)
+        : (await core.host(hostId).call("state.get", {})).agents.map((a) => a.name);
       const e = pending();
       if (!e) break;
       const live = getAgentViews()
         .filter((a) => a.hostId === hostId)
         .map((a) => a.name);
       const name = uniqueSlug(fallbackSlug(e), reservedNames(hostId, [...taken, ...live], id));
-      store().patch(key, id, { name, ...(e.chat ? {} : { branch: `${BRANCH_PREFIX}${name}` }), aiNamed: false });
+      store().patch(key, id, { name, ...(inWorktree(e) ? { branch: name } : {}), aiNamed: false });
       void run(key, id);
       return;
     } catch {
@@ -748,12 +824,16 @@ const stripRef = (b: string | undefined) => b?.replace(/^refs\/heads\//, "");
  * Run a failed, interrupted or unconfirmed entry of thread `key` again on its own host,
  * optionally trusting the repository first. The first attempt may have got further than it
  * reported (a timeout while the host kept going), so this checks before creating anything:
- * 1. its agent is in host state → link it;
- * 2. its worktree exists → start the agent there (if herdr says the name is taken, the agent is
- *    still starting: wait for it);
+ * 1. its agent is in host state → link it (in place: remembering the host's spelling of its folder);
+ * 2. its worktree exists (by the branch it recorded, `dispatch/<name>` for entries from before; not
+ *    after `branch_exists`, which named someone else's branch) → start the agent there (herdr
+ *    refusing the name or a busy pane leaves it unconfirmed: the agent may be coming up);
  * 3. otherwise create it again, under a fresh name if the old branch is left over.
- * A chat has no worktree to find: unless its chat agent is there (1), it starts again, under its
- * name while no other agent or dispatch holds it, else a fresh one.
+ * A chat and an in-place entry have no worktree to find: unless their agent is there (1), they
+ * start again, under their name while no other agent or dispatch holds it, else a fresh one. An
+ * in-place entry whose start went unconfirmed always keeps its name: should that start have
+ * brought its agent up after all, herdr refuses a second one under it, and the entry stays
+ * unconfirmed with the name held (`DispatchError.held`) until that agent links, never a duplicate.
  * `taken` and `host` describe the entry's host.
  */
 export async function retryDispatch(args: {
@@ -769,19 +849,22 @@ export async function retryDispatch(args: {
   if (!e || inflight.has(e.id)) return;
   const hostId = entryHost(key, e);
   const repo = entryRepo(key, e);
-  if (args.trust && !e.chat) store().trust(threadKey(hostId, repo));
+  if (args.trust && inWorktree(e)) store().trust(threadKey(hostId, repo));
 
   const agent = resolveAgent({ ...e, phase: "started" }, args.host.agents, { repo, workspaces: args.host.workspaces });
   if (agent) {
-    store().patch(key, e.id, { phase: "started", error: undefined, startedAt: e.startedAt ?? Date.now(), agentId: agent.id, paneId: agent.paneId, workspaceId: agent.workspaceId });
+    // In place: the host's own spelling of the folder, to find the agent again by it.
+    const path = e.inPlace && agent.cwd ? { path: agent.cwd } : {};
+    store().patch(key, e.id, { phase: "started", error: undefined, startedAt: e.startedAt ?? Date.now(), agentId: agent.id, paneId: agent.paneId, workspaceId: agent.workspaceId, ...path });
     return;
   }
 
-  if (e.chat) {
+  if (!inWorktree(e)) {
     const reserved = reservedNames(hostId, args.taken, e.id);
-    const name = reserved.has(e.name) ? uniqueSlug(e.aiNamed ? e.name : fallbackSlug(e), reserved) : e.name;
+    const unconfirmed = e.inPlace === true && e.phase !== "failed";
+    const name = unconfirmed || !reserved.has(e.name) ? e.name : uniqueSlug(e.aiNamed ? e.name : fallbackSlug(e), reserved);
     store().patch(key, e.id, { name, error: undefined, agentId: undefined, paneId: undefined, workspaceId: undefined, startedAt: undefined, last: undefined });
-    void run(key, e.id);
+    void run(key, e.id, unconfirmed);
     return;
   }
 
@@ -791,7 +874,8 @@ export async function retryDispatch(args: {
     store().patch(key, e.id, { phase: "queued", error: undefined });
     const host = core.host(hostId);
     const [worktrees, branches] = await Promise.all([host.call("worktree.list", { cwd: repo }), host.call("git.branches", { cwd: repo })]);
-    const wt = worktrees.worktrees.find((w) => !w.primary && stripRef(w.branch) === e.branch);
+    // A first create that found the branch taken was refused for someone else's branch: no worktree of it is this entry's.
+    const wt = e.error?.kind === "branchExists" ? undefined : worktrees.worktrees.find((w) => !w.primary && stripRef(w.branch) === e.branch);
     if (wt) {
       store().patch(key, e.id, { phase: "creating", path: wt.path });
       const target: StartTarget = wt.workspaceId ? { kind: "workspace", workspaceId: wt.workspaceId, split: null } : { kind: "cwd", cwd: wt.path, label: e.name };
@@ -799,17 +883,20 @@ export async function retryDispatch(args: {
         const started = await host.call("agent.start", { target, spec: await specOf(e, hostId) });
         store().patch(key, e.id, { phase: "started", startedAt: Date.now(), agentId: started.agentId, paneId: started.paneId, workspaceId: started.workspaceId });
       } catch (err) {
-        // The first attempt's agent is still coming up under this name: wait for it.
-        if (/already taken|already exists|busy/i.test(toApiError(err).message)) store().patch(key, e.id, { phase: "started", startedAt: Date.now(), workspaceId: wt.workspaceId });
+        // The first attempt's agent may be coming up under this name or in this worktree: unconfirmed
+        // until it links (the thread promotes it then); Check & retry and Dismiss stay.
+        const msg = toApiError(err).message;
+        if (NAME_TAKEN.test(msg)) store().patch(key, e.id, { phase: "unknown", workspaceId: wt.workspaceId, error: nameHeld(e.name) });
+        else if (/already exists|busy/i.test(msg)) store().patch(key, e.id, { ...failurePatch(err), phase: "unknown", workspaceId: wt.workspaceId });
         else throw err;
       }
       return;
     }
     const taken = reservedNames(hostId, args.taken, e.id);
-    for (const b of branches.branches) taken.add(b.name);
+    for (const n of branchNamesTaken(branches.branches)) taken.add(n);
     // An AI name stays the base (a left-over branch makes it `<name>-2`); else the prompt's slug.
     const name = uniqueSlug(e.aiNamed ? e.name : fallbackSlug(e), taken);
-    store().patch(key, e.id, { name, branch: `${BRANCH_PREFIX}${name}`, agentId: undefined, paneId: undefined, workspaceId: undefined, path: undefined, startedAt: undefined, last: undefined });
+    store().patch(key, e.id, { name, branch: name, agentId: undefined, paneId: undefined, workspaceId: undefined, path: undefined, startedAt: undefined, last: undefined });
     recreate = true;
   } catch (err) {
     store().patch(key, e.id, failurePatch(err));

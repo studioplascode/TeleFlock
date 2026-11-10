@@ -6,7 +6,7 @@ import { threadKey } from "./store";
 
 const CHATS = "/home/a/.teleflock/chats";
 const options = { templateId: null, model: "default", thinking: "default" as const, plan: false };
-const memory = { threads: {}, remotes: {}, bases: {}, legacyBases: {} };
+const memory = { threads: {}, remotes: {}, bases: {}, legacyBases: {}, inPlace: {}, folders: {} };
 const img = { mime: "image/png", data: "iVBORw0KGgo=", preview: "data:image/png;base64,iVBORw0KGgo=" };
 
 const profile = (id: string, group?: string): HostProfile => ({ id, name: id.toUpperCase(), kind: "tailscaleSsh", herdrSession: "default", autoConnect: true, ...(group ? { group } : {}) });
@@ -117,5 +117,43 @@ describe("planSend: commands", () => {
     expect(planSend(w, { ...req, command })).toMatchObject({ ok: true, hostId: "p1", args: { command } });
     expect(planSend({ ...w, states: { ...states, p1: state({ version: "0.9.0" }) } }, { ...req, command })).toMatchObject({ ok: false });
     expect(planSend({ ...w, status: online("p2") }, { ...req, command })).toMatchObject({ ok: false });
+  });
+});
+
+describe("planSend: in this folder", () => {
+  const branches = { branches: [{ name: "main", current: true, remote: false }, { name: "origin/fix-ci", current: false, remote: true }], defaultBranch: "main", defaultBase: "origin/main" };
+
+  test("a thread in place starts its agent in the repository or folder itself: no base, no branch names, deduped against the host's agents", () => {
+    const w = (inPlace: Record<string, true>, folders: Record<string, true> = {}) => ({
+      profiles: [profile("h")],
+      status: online("h"),
+      states: { h: state({ agents: running("h", 1) }) },
+      dispatch: { ...memory, inPlace, folders },
+    });
+    const req = { target: "h", repo: "/home/a/app", prompt: "Fix the README typos", images: [], options, branches, baseHint: { shown: "origin/main" } };
+    const key = threadKey("h", "/home/a/app");
+    const plan = planSend(w({ [key]: true }), req);
+    if (!plan.ok) throw new Error(plan.title);
+    expect(plan.args).toMatchObject({ key, hostId: "h", repo: "/home/a/app", inPlace: true, taken: ["h-agent-0"] });
+    expect([plan.args.base, plan.args.baseLabel, plan.args.resolveBase]).toEqual([undefined, undefined, undefined]);
+    // New worktrees, the default: from the base, named past the repository's branches too.
+    const worktree = planSend(w({}), req);
+    if (!worktree.ok) throw new Error(worktree.title);
+    expect(worktree.args.inPlace).toBeUndefined();
+    // New worktrees, named past the repository's branches, a remote-only one's local name included.
+    expect(worktree.args).toMatchObject({ baseLabel: "origin/main", taken: ["main", "origin/fix-ci", "fix-ci", "h-agent-0"] });
+    // A folder that is no repository: always in place.
+    const notes = threadKey("h", "/home/a/notes");
+    expect(planSend(w({}, { [notes]: true }), { ...req, repo: "/home/a/notes" })).toMatchObject({ ok: true, args: { key: notes, repo: "/home/a/notes", inPlace: true } });
+  });
+
+  test("Auto in place: the least busy host's own checkout of the repository", () => {
+    const profiles = ["p1", "p2"].map((id) => profile(id, "pool"));
+    const ws = (root: string) => ({ id: "w1", label: "app", cwd: root, repo: { root, name: "app" }, tabs: [], rollup: "idle", order: 0 });
+    const states = { p1: { ...state({ agents: running("p1", 2) }), workspaces: [ws("/home/a/app")] }, p2: { ...state(), workspaces: [ws("/srv/app")] } } as unknown as Record<string, HostState>;
+    const remotes = { "p1\u0000/home/a/app": "github.com/acme/app", "p2\u0000/srv/app": "github.com/acme/app" };
+    const key = threadKey("auto:pool", "github.com/acme/app");
+    const plan = planSend({ profiles, status: online("p1", "p2"), states, dispatch: { ...memory, remotes, inPlace: { [key]: true } } }, { target: "auto:pool", repo: "github.com/acme/app", prompt: "Fix the README typos", images: [], options });
+    expect(plan).toMatchObject({ ok: true, hostId: "p2", args: { key, hostId: "p2", repo: "/srv/app", inPlace: true } });
   });
 });

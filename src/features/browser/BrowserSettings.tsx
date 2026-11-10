@@ -7,7 +7,7 @@ import { Button, cn, isAndroid, Select, Spinner, Switch } from "@/design";
 import { CommitInput, Row, Section } from "@/features/settings/parts";
 import { browserCall, cancelInstall, chooseOwnBrowser, clearBrowsingDataConfirmed, installEngine, ownBrowserLabel, revealProfile, startBrowser, stopBrowser } from "./actions";
 
-type ConfigPatch = Partial<Pick<BrowserConfig, "enginePath" | "headed" | "cap">>;
+type ConfigPatch = Partial<Pick<BrowserConfig, "enginePath" | "headed" | "cap" | "shareTabs">>;
 
 const AUTO = "__auto";
 const OTHER = "__other";
@@ -15,7 +15,7 @@ const CAPS = Array.from({ length: 16 }, (_, i) => ({ value: String(i + 1), label
 
 /**
  * The saved browser config. `configSet` replaces it (absent fields reset), so `save` always sends
- * all three fields with the one change merged in. Not pushed by events: refetched on mount, when a
+ * every field with the one change merged in. Not pushed by events: refetched on mount, when a
  * download ends, when the running engine changes and when a start finds an engine blocked (the
  * engines' marks, a switch to TeleFlock's own browser).
  */
@@ -51,8 +51,8 @@ function useBrowserConfig(status: BrowserStatus) {
     async (patch: ConfigPatch): Promise<boolean> => {
       const cur = latest.current;
       if (!cur) return false;
-      const next = { enginePath: cur.enginePath, headed: cur.headed, cap: cur.cap, ...patch };
-      const saved = await browserCall("browser.configSet", { enginePath: next.enginePath, headed: next.headed, cap: next.cap }, "Couldn't save the browser settings");
+      const next = { enginePath: cur.enginePath, headed: cur.headed, cap: cur.cap, shareTabs: cur.shareTabs, ...patch };
+      const saved = await browserCall("browser.configSet", { enginePath: next.enginePath, headed: next.headed, cap: next.cap, shareTabs: next.shareTabs }, "Couldn't save the browser settings");
       if (!saved) return false;
       seq.current++;
       apply(saved);
@@ -64,7 +64,7 @@ function useBrowserConfig(status: BrowserStatus) {
   return { config, save };
 }
 
-/** Settings → Browser: the TeleFlock Browser's engine, profile, window and agent limit. Desktop only. */
+/** Settings → Browser: the TeleFlock Browser's engine, profile, window, what agents may use and how many. Desktop only. */
 export function BrowserSettings({ index }: { index: number }) {
   const status = useBrowser();
   if (isAndroid) return null;
@@ -98,6 +98,9 @@ function BrowserRows({ status }: { status: BrowserStatus }) {
         <>
           <Row label="Open in its own window" htmlFor="tf-browser-headed" description="Start the browser in a window of its own instead of only inside TeleFlock. Some sign-ins and passkeys need it. Applies the next time the app starts it.">
             <Switch id="tf-browser-headed" label="Open in its own window" checked={config.headed} onCheckedChange={(headed) => void save({ headed })} />
+          </Row>
+          <Row label="Agents can use your tabs" htmlFor="tf-browser-share-tabs" description="Besides the tabs they open and the ones you lend them, agents you let use the browser can see your open tabs and browse in them, but not close them. To keep a tab on its page, lock it for agents in the browser's toolbar.">
+            <Switch id="tf-browser-share-tabs" label="Agents can use your tabs" checked={config.shareTabs} onCheckedChange={(shareTabs) => void save({ shareTabs })} />
           </Row>
           <Row label="Agents at once" htmlFor="tf-browser-cap" description="How many agents can use the browser together. More wait until one is detached, or until you allow them anyway.">
             <Select id="tf-browser-cap" className="w-24" value={String(config.cap)} onValueChange={(v) => void save({ cap: Number(v) })} options={CAPS} />

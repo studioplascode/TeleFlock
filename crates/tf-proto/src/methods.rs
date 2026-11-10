@@ -52,8 +52,8 @@ use crate::herdr::{HerdrConfigParams, HerdrHealth, HerdrRestartParams};
 use crate::forward::{ForwardList, ForwardRemoveParams, ForwardSaveParams, ForwardStopParams};
 use crate::browser::{
     BrowserAgentParams, BrowserAnswerHostParams, BrowserAnswerParams, BrowserAttachParams, BrowserAttached, BrowserClearParams, BrowserConfig,
-    BrowserConfigSetParams, BrowserInstallParams, BrowserLendParams, BrowserRevealParams, BrowserStageParams, BrowserStaged, BrowserStartParams,
-    BrowserStatus, BrowserTabParams,
+    BrowserConfigSetParams, BrowserInstallParams, BrowserLendParams, BrowserLockParams, BrowserRevealParams, BrowserStageParams, BrowserStaged,
+    BrowserStartParams, BrowserStatus, BrowserTabParams,
 };
 use crate::recording::{
     RecordingAppendParams, RecordingAppended, RecordingBundle, RecordingBytes, RecordingDetail, RecordingFrameParams, RecordingInfo, RecordingList,
@@ -334,6 +334,26 @@ wire_struct! {
         pub agent_id: String,
         /// Full slash command with arguments, e.g. `/switch openai/gpt-5.5:high`.
         pub command: String,
+    }
+}
+
+wire_struct! {
+    /// `agent.shell`: one of omp's quick commands, run as if typed into omp's own composer: `!cmd`
+    /// runs a shell command in the session's directory and adds its output to the agent's context,
+    /// `!!cmd` keeps the output out of it; `$ code` / `$$ code` do the same with Python in omp's eval
+    /// kernel. Needs `Capabilities.shell` (TeleFlock's bridge ≥ 2.5.0 in omp's TUI); the run lands in
+    /// the transcript as a tool row with `userRun`.
+    pub struct ShellParams {
+        pub agent_id: String,
+        /// The command as typed (trimmed), prefix included, e.g. `!!git status`.
+        pub text: String,
+    }
+}
+
+wire_struct! {
+    pub struct ShellResult {
+        /// omp finished the run within 15 s; false: it still runs, its row lands when it ends.
+        pub settled: bool,
     }
 }
 
@@ -1415,6 +1435,7 @@ methods!(HostMethod, "HostMethods", {
     "agent.btwCancel" => AgentBtwCancel(BtwRef) -> Empty;
     "agent.btwHistory" => AgentBtwHistory(AgentRef) -> BtwHistory;
     "agent.slash" => AgentSlash(SlashParams) -> Empty;
+    "agent.shell" => AgentShell(ShellParams) -> ShellResult;
     "agent.commands" => AgentCommands(AgentRef) -> CommandList;
     "agent.dequeue" => AgentDequeue(AgentRef) -> Dequeued;
     "agent.keys" => AgentKeys(KeysParams) -> Empty;
@@ -1769,10 +1790,12 @@ methods!(AppMethod, "AppMethods", {
     "browser.revealDownload" => BrowserRevealDownload(BrowserRevealParams) -> Empty;
     // Shows the persistent profile's folder (`BrowserStatus::profile_dir`) in the file manager.
     "browser.revealProfile" => BrowserRevealProfile(Empty) -> Empty;
-    // Tabs and their owners: the user takes an agent's tab over, hands it back, or lends one.
+    // Tabs and their owners: the user takes an agent's tab over, hands it back, or lends one; a
+    // tab no agent opened can be locked to its page for agents (`BrowserStatus::locked_tabs`).
     "browser.takeOver" => BrowserTakeOver(BrowserTabParams) -> BrowserStatus;
     "browser.handBack" => BrowserHandBack(BrowserTabParams) -> BrowserStatus;
     "browser.lendTab" => BrowserLendTab(BrowserLendParams) -> BrowserStatus;
+    "browser.lockTab" => BrowserLockTab(BrowserLockParams) -> BrowserStatus;
     // Session recording (recording.rs): this device records its own browser tabs, voice and the
     // UI's event log, and keeps them in its data dir until the user sends one.
     "recording.start" => RecordingStart(RecordingStartParams) -> RecordingInfo;

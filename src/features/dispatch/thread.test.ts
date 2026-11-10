@@ -4,7 +4,7 @@ import { CHAT_REPO } from "@/core/chats";
 import type { Agent, Workspace } from "@/core/gen";
 import { usePrefs } from "@/core/prefs";
 import type { DispatchEntry } from "./store";
-import { baseSlug, cleanSuggestion, commandSlug, commandTask, nameDispatch, prefetchKey, rambleAbout, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
+import { baseSlug, branchNamesTaken, cleanSuggestion, commandSlug, commandTask, nameDispatch, prefetchKey, rambleAbout, recentFolders, recentRepos, resolveAgent, slimThreads, threadBase, uniqueSlug } from "./thread";
 
 /** The 0.4.1 task Dispatch named `need-inspect-repository`, as typed (one line, inline points)… */
 const FAILING_INLINE =
@@ -39,7 +39,7 @@ const entry = (p: Partial<DispatchEntry>): DispatchEntry => ({
   id: "e1",
   prompt: "x",
   createdAt: 1,
-  branch: "dispatch/x",
+  branch: "x",
   name: "x",
   options: { templateId: null, model: "default", thinking: "default", plan: false },
   phase: "started",
@@ -124,10 +124,35 @@ describe("dispatch naming", () => {
     });
   });
 
-  test("dedupes against agent names and dispatch branches", () => {
+  test("dedupes against agent names and branches, the branch being the name", () => {
     expect(uniqueSlug("fix-ci", new Set())).toBe("fix-ci");
     expect(uniqueSlug("fix-ci", new Set(["fix-ci"]))).toBe("fix-ci-2");
-    expect(uniqueSlug("fix-ci", new Set(["dispatch/fix-ci", "fix-ci-2"]))).toBe("fix-ci-3");
+    expect(uniqueSlug("fix-ci", new Set(["fix-ci", "fix-ci-2"]))).toBe("fix-ci-3");
+    // A branch from before (`dispatch/fix-ci`) leaves the name free.
+    expect(uniqueSlug("fix-ci", new Set(["dispatch/fix-ci"]))).toBe("fix-ci");
+    // git keeps no `release` beside `release/1.0` (nor `dispatch` beside `dispatch/old-task`).
+    expect(uniqueSlug("release", new Set(["release/1.0"]))).toBe("release-2");
+    expect(uniqueSlug("dispatch", new Set(["dispatch/old-task"]))).toBe("dispatch-2");
+    expect(uniqueSlug("release", new Set(["releases/1.0"]))).toBe("release");
+  });
+
+  test("a branch only the remote has takes its local name too", () => {
+    const branches = [
+      { name: "main", remote: false },
+      { name: "origin/fix-ci", remote: true },
+      { name: "upstream/feat/x", remote: true },
+    ];
+    expect(branchNamesTaken(branches)).toEqual(["main", "origin/fix-ci", "fix-ci", "upstream/feat/x", "feat/x"]);
+    expect(uniqueSlug("fix-ci", new Set(branchNamesTaken(branches)))).toBe("fix-ci-2");
+    // `feat/x` is a folder of branches: `feat` is taken.
+    expect(uniqueSlug("feat", new Set(branchNamesTaken(branches)))).toBe("feat-2");
+  });
+
+  test("a name whose checkout folder a branch already has is taken (herdr checks `fix/ci` out as `fix-ci`)", () => {
+    expect(uniqueSlug("fix-ci", new Set(["fix/ci"]))).toBe("fix-ci-2");
+    expect(uniqueSlug("dispatch-x", new Set(["dispatch/x"]))).toBe("dispatch-x-2");
+    expect(uniqueSlug("fix-ci", new Set(["fix/ci", "fix-ci-2"]))).toBe("fix-ci-3");
+    expect(uniqueSlug("fix-ci", new Set(["fix/cid"]))).toBe("fix-ci");
   });
 
   test("names stay within herdr's 32-char agent-name limit, suffix included", () => {
@@ -187,27 +212,35 @@ describe("resolveAgent", () => {
     rollup: "idle",
     order: 0,
   });
-  const scope = { repo: "/r/app", workspaces: [wt("w4", "/r/app", "dispatch/fix-ci"), wt("w5", "/r/app", "dispatch/other"), wt("w7", "/r/api", "dispatch/fix-ci", "/wt/api-fix-ci")] };
+  const scope = { repo: "/r/app", workspaces: [wt("w4", "/r/app", "fix-ci"), wt("w5", "/r/app", "other"), wt("w7", "/r/api", "fix-ci", "/wt/api-fix-ci"), wt("w8", "/r/app", "dispatch/old-task")] };
 
   test("id, then pane with the same name, then name in the entry's worktree", () => {
     const agents = [agent({ id: "t9", name: "fix-ci", paneId: "w4:p1", workspaceId: "w4" }), agent({ id: "t2", name: "other", paneId: "w5:p1", workspaceId: "w5" })];
-    const e = { name: "fix-ci", branch: "dispatch/fix-ci" };
+    const e = { name: "fix-ci", branch: "fix-ci" };
     expect(resolveAgent(entry({ ...e, agentId: "t9", workspaceId: "w4" }), agents, scope)?.id).toBe("t9");
     expect(resolveAgent(entry({ ...e, paneId: "w4:p1" }), agents, scope)?.id).toBe("t9");
     expect(resolveAgent(entry({ ...e, phase: "creating" }), agents, scope)?.id).toBe("t9");
-    expect(resolveAgent(entry({ ...e, phase: "unknown", path: "/wt/dispatch/fix-ci", branch: "dispatch/renamed" }), agents, scope)?.id).toBe("t9");
+    expect(resolveAgent(entry({ ...e, phase: "unknown", path: "/wt/fix-ci", branch: "renamed" }), agents, scope)?.id).toBe("t9");
+  });
+
+  test("an entry from before keeps its dispatch/ branch, and its worktree still links", () => {
+    const agents = [agent({ id: "old", name: "old-task", paneId: "w8:p1", workspaceId: "w8" })];
+    expect(resolveAgent(entry({ name: "old-task", branch: "dispatch/old-task", phase: "unknown" }), agents, scope)?.id).toBe("old");
+    expect(resolveAgent(entry({ name: "old-task", branch: "dispatch/old-task", agentId: "old" }), agents, scope)?.id).toBe("old");
+    // The name alone is no branch of that worktree.
+    expect(resolveAgent(entry({ name: "old-task", branch: "old-task", phase: "unknown" }), agents, scope)).toBeUndefined();
   });
 
   test("reused pane / workspace ids don't link a stale entry to a new agent", () => {
     const agents = [agent({ id: "fresh", name: "new-task", paneId: "w4:p1", workspaceId: "w4" })];
-    expect(resolveAgent(entry({ name: "old-task", branch: "dispatch/old-task", agentId: "old-task", paneId: "w4:p1", workspaceId: "w4" }), agents, scope)).toBeUndefined();
+    expect(resolveAgent(entry({ name: "old-task", branch: "old-task", agentId: "old-task", paneId: "w4:p1", workspaceId: "w4" }), agents, scope)).toBeUndefined();
     expect(resolveAgent(entry({ name: "new-task", phase: "failed", paneId: "w4:p1" }), agents, scope)).toBeUndefined();
   });
 
   test("a same-named agent of another repo never matches", () => {
     const agents = [agent({ id: "api", name: "fix-ci", paneId: "w7:p1", workspaceId: "w7" })];
-    expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", phase: "creating" }), agents, scope)).toBeUndefined();
-    expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", agentId: "api" }), agents, scope)).toBeUndefined();
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "fix-ci", phase: "creating" }), agents, scope)).toBeUndefined();
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "fix-ci", agentId: "api" }), agents, scope)).toBeUndefined();
   });
 
   test("a chat entry links its chat agent, never a same-named worktree agent, and the other way round", () => {
@@ -222,18 +255,65 @@ describe("resolveAgent", () => {
     expect(resolveAgent(chat({ phase: "creating" }), [worktreeAgent], scope)).toBeUndefined();
     expect(resolveAgent(chat({ agentId: "wt" }), [worktreeAgent], scope)).toBeUndefined();
     // A worktree entry never takes a chat agent, not even one sitting in its own checkout.
-    const inCheckout = { ...chatAgent, workspaceId: "w4", cwd: "/wt/dispatch/fix-ci" };
-    expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", phase: "creating" }), [inCheckout], scope)).toBeUndefined();
-    expect(resolveAgent(entry({ name: "fix-ci", branch: "dispatch/fix-ci", agentId: "ch" }), [inCheckout], scope)).toBeUndefined();
+    const inCheckout = { ...chatAgent, workspaceId: "w4", cwd: "/wt/fix-ci" };
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "fix-ci", phase: "creating" }), [inCheckout], scope)).toBeUndefined();
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "fix-ci", agentId: "ch" }), [inCheckout], scope)).toBeUndefined();
+  });
+
+  test("an in-place entry links an agent in its folder itself, never one in a worktree of it, nor the other way round", () => {
+    const primary: Workspace = { id: "w1", label: "app", cwd: "/r/app", repo: { root: "/r/app", name: "app", branch: "main" }, tabs: [], rollup: "idle", order: 0 };
+    // The workspace its start opened in the repository's own checkout.
+    const opened: Workspace = { ...primary, id: "w9", label: "fix-ci" };
+    const here = { repo: "/r/app", workspaces: [...scope.workspaces, primary, opened] };
+    const inFolder = agent({ id: "ip", name: "fix-ci", paneId: "w9:p1", workspaceId: "w9", cwd: "/r/app" });
+    const inWorktree = agent({ id: "wt", name: "fix-ci", paneId: "w4:p1", workspaceId: "w4", cwd: "/wt/fix-ci" });
+    const inPlace = (p: Partial<DispatchEntry>) => entry({ name: "fix-ci", branch: "", inPlace: true, ...p });
+    expect(resolveAgent(inPlace({ agentId: "ip" }), [inWorktree, inFolder], here)?.id).toBe("ip");
+    expect(resolveAgent(inPlace({ phase: "unknown" }), [inWorktree, inFolder], here)?.id).toBe("ip");
+    expect(resolveAgent(inPlace({ phase: "unknown" }), [inWorktree], here)).toBeUndefined();
+    expect(resolveAgent(inPlace({ agentId: "wt" }), [inWorktree], here)).toBeUndefined();
+    expect(resolveAgent(entry({ name: "fix-ci", branch: "fix-ci", phase: "unknown" }), [inFolder], here)).toBeUndefined();
+    // The host spelling the folder another way (a symlink): the workspace its start opened, labelled with its name, is it.
+    const real = { repo: "/r/app", workspaces: [{ ...opened, cwd: "/data/r/app" }] };
+    const resolved = { ...inFolder, cwd: "/data/r/app" };
+    expect(resolveAgent(inPlace({ agentId: "ip", workspaceId: "w9" }), [resolved], real)?.id).toBe("ip");
+    expect(resolveAgent(inPlace({ agentId: "ip" }), [resolved], real)).toBeUndefined();
+    // Once linked, the entry remembers the host's spelling (`path`): resumed in another workspace, the agent is still found.
+    const resumed = { ...inFolder, id: "ip2", paneId: "w12:p1", workspaceId: "w12", cwd: "/data/r/app" };
+    const later = { repo: "/r/app", workspaces: [{ ...primary, id: "w12", label: "app", cwd: "/data/r/app" }] };
+    expect(resolveAgent(inPlace({ phase: "unknown", path: "/data/r/app" }), [resumed], later)?.id).toBe("ip2");
+    expect(resolveAgent(inPlace({ phase: "unknown" }), [resumed], later)).toBeUndefined();
+    // A folder that is no repository.
+    const notes: Workspace = { id: "w3", label: "tidy-notes", cwd: "/home/a/notes", tabs: [], rollup: "idle", order: 0 };
+    const tidy = agent({ id: "n1", name: "tidy-notes", paneId: "w3:p1", workspaceId: "w3", cwd: "/home/a/notes" });
+    expect(resolveAgent(inPlace({ name: "tidy-notes", phase: "unknown" }), [tidy], { repo: "/home/a/notes", workspaces: [notes] })?.id).toBe("n1");
   });
 });
 
 describe("rambleAbout", () => {
-  test("Rambler hears the repository's name; a chat has no repository to name", () => {
+  test("Rambler hears the repository's name, or the folder's; a chat has no repository to name", () => {
     expect(rambleAbout("/home/u/src/teleflock/")).toBe("Repository: teleflock");
     expect(rambleAbout("github.com/acme/api")).toBe("Repository: api");
+    expect(rambleAbout("/home/u/notes", true)).toBe("Folder: notes");
     expect(rambleAbout(CHAT_REPO)).toBeUndefined();
     expect(rambleAbout(null)).toBeUndefined();
+  });
+});
+
+describe("recentFolders", () => {
+  test("the host's threads of folders that are no repository, with entries, most recent first", () => {
+    const threads = {
+      "h\u0000/home/a/notes": [entry({ id: "1", createdAt: 10, inPlace: true }), entry({ id: "2", createdAt: 40, inPlace: true })],
+      "h\u0000/home/a/scratch": [entry({ id: "3", createdAt: 30, inPlace: true })],
+      "h\u0000/home/a/empty": [],
+      "h\u0000/r/app": [entry({ id: "4", createdAt: 99, inPlace: true })],
+      "other\u0000/home/a/notes": [entry({ id: "5", createdAt: 70, inPlace: true })],
+    };
+    const folders = { "h\u0000/home/a/notes": true, "h\u0000/home/a/scratch": true, "h\u0000/home/a/empty": true, "other\u0000/home/a/notes": true } as const;
+    expect(recentFolders(threads, folders, "h")).toEqual([
+      { root: "/home/a/notes", at: 40 },
+      { root: "/home/a/scratch", at: 30 },
+    ]);
   });
 });
 

@@ -396,7 +396,7 @@ describe("demo engine", () => {
     r.clock.advance(2000);
     const res = await r.call<{ agent?: { agentId: string } }>("forge", "worktree.create", {
       cwd: "/home/demo/code/teleflock",
-      branch: "dispatch/settings-page",
+      branch: "settings-page",
       existing: false,
       trust: false,
       agent: { kind: "omp", name: "settings-page", plan: false, command: "/plan add a settings page" },

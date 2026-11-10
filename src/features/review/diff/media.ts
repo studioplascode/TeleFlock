@@ -1,7 +1,8 @@
 /**
  * Binary files in Review: which ones the webview shows (images, video, audio, PDF), which versions
  * of a file a preview shows, and how much of a file is read and how. Pure; the loader
- * (`mediaLoad.ts`) and the views (`MediaPreview.tsx`, `PdfView.tsx`) live next to it.
+ * (`mediaLoad.ts`) and the views (`MediaPreview.tsx`, `PdfView.tsx`) live next to it. The session's
+ * document viewer (`features/session/artifacts`) types and reads presented files the same way.
  */
 import type { FileStatus } from "@/core/gen";
 import type { DiffFile } from "./parse";
@@ -151,8 +152,7 @@ export type ReadOutcome =
 
 /**
  * Reads a file for its preview: a first read tells its size (and, for a name that says nothing,
- * what it is), then ranges until it is whole. A host that reads from the start only gets one read
- * of the whole file. `onProgress(received, size)` after each range.
+ * what it is), then the rest (`readRest`). `onProgress(received, size)` after each range.
  */
 export async function readMedia(read: RangeReader, path: string, opts: { forced: boolean; onProgress?: (received: number, size: number) => void; alive?: () => boolean }): Promise<ReadOutcome> {
   const named = mediaByPath(path);
@@ -162,10 +162,17 @@ export async function readMedia(read: RangeReader, path: string, opts: { forced:
   if (!type || first.size === 0) return { state: "binary", size: first.size };
   const verdict = sizeVerdict(first.size, opts.forced, rangeless);
   if (verdict !== "read") return { state: "tooLarge", size: first.size, verdict, rangeless };
-  if (rangeless) {
-    const whole = first.truncated ? await read(0, first.size) : first;
-    return { state: "ready", parts: [whole.bytes], size: whole.bytes.length, type };
-  }
+  const parts = await readRest(read, first, opts);
+  return { state: "ready", parts, size: parts.reduce((n, p) => n + p.length, 0), type };
+}
+
+/**
+ * A file whole, from its first read (at 0): ranges of `CHUNK` until it is whole, or fewer once
+ * `alive()` is false; a host that reads from the start only gets one read of all of it (callers
+ * keep such a file to `RANGELESS_MAX`). `onProgress(received, size)` before each further range.
+ */
+export async function readRest(read: RangeReader, first: ReadRange, opts: { onProgress?: (received: number, size: number) => void; alive?: () => boolean }): Promise<Uint8Array<ArrayBuffer>[]> {
+  if (first.offset === undefined) return [first.truncated ? (await read(0, first.size)).bytes : first.bytes];
   const parts = [first.bytes];
   let received = first.bytes.length;
   let more = first.truncated;
@@ -177,7 +184,7 @@ export async function readMedia(read: RangeReader, path: string, opts: { forced:
     received += r.bytes.length;
     more = r.truncated;
   }
-  return { state: "ready", parts, size: received, type };
+  return parts;
 }
 
 /** Same bytes in both: a re-read that changed nothing keeps what is on screen (a playing video goes on). */

@@ -57,12 +57,14 @@ function CaptureFeed({ port, hello }: { port: MainPort; hello: number }) {
   const remotes = useDispatch((s) => s.remotes);
   const bases = useDispatch((s) => s.bases);
   const legacyBases = useDispatch((s) => s.legacyBases);
+  const inPlace = useDispatch((s) => s.inPlace);
+  const folders = useDispatch((s) => s.folders);
   const lastHost = useDispatch((s) => s.lastHost);
   const lastRepo = useDispatch((s) => s.lastRepo);
   const inbox = useInboxViews();
   const snapshot = useMemo(
-    () => buildSnapshot({ profiles, status, states, dispatch: { threads, remotes, bases, legacyBases }, loaded, lastHost, lastRepo, inbox }),
-    [profiles, status, states, threads, remotes, bases, legacyBases, loaded, lastHost, lastRepo, inbox],
+    () => buildSnapshot({ profiles, status, states, dispatch: { threads, remotes, bases, legacyBases, inPlace, folders }, loaded, lastHost, lastRepo, inbox }),
+    [profiles, status, states, threads, remotes, bases, legacyBases, inPlace, folders, loaded, lastHost, lastRepo, inbox],
   );
   const last = useRef({ hello: -1, json: "" });
   useEffect(() => {
@@ -98,7 +100,7 @@ async function handle(port: MainPort, msg: Exclude<ToMain, { kind: "hello" | "by
       d.select(msg.target, msg.repo);
       const where = hostName(profiles, sent.hostId);
       if (isChatRepo(msg.repo)) done(true, "Chat started", `A new chat with its own folder on ${where}`);
-      else done(true, `Dispatched to ${repoNameOf(world, msg.target, msg.repo)}`, `A fresh worktree and agent on ${where}`);
+      else done(true, `Dispatched to ${repoNameOf(world, msg.target, msg.repo)}`, sent.entry.inPlace ? `An agent in the folder itself on ${where}, no worktree` : `A fresh worktree and agent on ${where}`);
       return;
     }
     case "edit":

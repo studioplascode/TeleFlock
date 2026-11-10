@@ -190,6 +190,8 @@ import type { SetRoleModelsParams } from "./SetRoleModelsParams";
 import type { SetThinkingParams } from "./SetThinkingParams";
 import type { SetupApplyParams } from "./SetupApplyParams";
 import type { SetupStatus } from "./SetupStatus";
+import type { ShellParams } from "./ShellParams";
+import type { ShellResult } from "./ShellResult";
 import type { SkillEnableParams } from "./SkillEnableParams";
 import type { SkillInstallParams } from "./SkillInstallParams";
 import type { SkillList } from "./SkillList";
@@ -280,6 +282,7 @@ export interface HostMethods {
   "agent.btwCancel": { params: BtwRef; result: Empty };
   "agent.btwHistory": { params: AgentRef; result: BtwHistory };
   "agent.slash": { params: SlashParams; result: Empty };
+  "agent.shell": { params: ShellParams; result: ShellResult };
   "agent.commands": { params: AgentRef; result: CommandList };
   "agent.dequeue": { params: AgentRef; result: Dequeued };
   "agent.keys": { params: KeysParams; result: Empty };

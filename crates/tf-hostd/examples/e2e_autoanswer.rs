@@ -1,6 +1,7 @@
 //! Lab end-to-end run of decide for me (architecture §3.23): speaks the client protocol through
-//! `tf-hostd attach` against a real herdr lab session and real omp, whose model is a local mock
-//! that makes the agent call omp's `ask` tool with a ★ recommended option ("Use SQLite").
+//! `tf-hostd attach` against a real herdr lab session and real omp (≥ 18.18), whose model is a
+//! local mock that makes the agent call omp's `ask` tool with a one-field HTML form whose
+//! preselected option is the ★ ("Use SQLite").
 //!
 //! Run it in a lab (AGENTS.md); the mock model and the lab's omp settings are in
 //! `crates/tf-hostd/src/autoanswer/testdata/`:
@@ -258,15 +259,25 @@ fn start(c: &mut Client, a: &Args, tag: &str, policy: Option<Value>) -> String {
     id
 }
 
-/// The transcript's ask result and the agent's last reply.
-fn outcome(c: &mut Client, id: &str) -> (String, String) {
+/// The transcript's ask row (`Null` when there is none) and the agent's last reply.
+fn outcome(c: &mut Client, id: &str) -> (Value, String) {
     let snap = c.call("session.open", json!({"agentId": id})).expect("session.open");
     let items = snap["items"].as_array().cloned().unwrap_or_default();
-    // The ask row as a whole: omp's result text ("User selected: …") is in its output or view.
-    let ask = items.iter().rev().find(|i| i["kind"] == "tool" && i["tool"] == "ask").map(|i| i.to_string()).unwrap_or_default();
+    let ask = items.iter().rev().find(|i| i["kind"] == "tool" && i["tool"] == "ask").cloned().unwrap_or(Value::Null);
     let last = items.iter().rev().find(|i| i["kind"] == "assistant").map(|i| i["text"].as_str().unwrap_or("").to_string()).unwrap_or_default();
     let _ = c.call("session.close", json!({"agentId": id}));
     (ask, last)
+}
+
+/// The answers the ask row's card shows (omp's `details.answers`): `(question, answer)` pairs.
+fn answers(ask: &Value) -> Vec<(String, String)> {
+    ask["view"]["questions"].as_array().into_iter().flatten().map(|q| (q["question"].as_str().unwrap_or("").to_string(), q["answer"].as_str().unwrap_or("").to_string())).collect()
+}
+
+/// Whether the reply carries what omp's form ask returns once "Use SQLite" is picked: `User
+/// answers:` and the form's data, `{"db":"sqlite"}` (omp pretty-prints it; the mock folds lines).
+fn picked_sqlite(reply: &str) -> bool {
+    reply.split_whitespace().collect::<String>().contains(r#"Useranswers:{"db":"sqlite"}"#)
 }
 
 fn activity(c: &mut Client, id: &str) -> Vec<String> {
@@ -363,8 +374,9 @@ fn main() {
     assert!(act.is_some_and(|l| l.contains("★ Use SQLite")));
     c.wait_agent("always's turn ends", &always, 60, |x| x["column"] == "review");
     let (ask, last) = outcome(&mut c, &always);
-    println!("  always transcript: ask → {ask:?}; reply → {last:?}");
-    assert!(ask.contains("User selected: Use SQLite") && last.contains("User selected: Use SQLite"));
+    println!("  always transcript: ask → {:?}; reply → {last:?}", answers(&ask));
+    assert_eq!(answers(&ask), [("Which database should lab agent always use?".to_string(), "Use SQLite".to_string())]);
+    assert!(picked_sqlite(&last), "omp's result reached the model: {last}");
 
     // Stay connected past `only`'s wait: it must still stand still.
     let waited = Instant::now();
@@ -415,8 +427,8 @@ fn main() {
     phone.close();
     c.wait_agent("only's turn ends", &only, 60, |x| x["column"] == "review");
     let (ask, last) = outcome(&mut c, &only);
-    println!("  only transcript: ask → {ask:?}; reply → {last:?}");
-    assert!(ask.contains("User selected: Use SQLite"));
+    println!("  only transcript: ask → {:?}; reply → {last:?}", answers(&ask));
+    assert!(answers(&ask).iter().map(|(_, a)| a.as_str()).eq(["Use SQLite"]) && picked_sqlite(&last));
     let cd = countdown(&c.agent(&cancelled)).expect("cancelled still pending");
     println!("  cancelled after the same time: needs={} countdown={cd}", c.agent(&cancelled)["needs"]["kind"]);
     assert!(cd["status"] == "cancelled" && auto_answered(&mut c, &cancelled).is_none());

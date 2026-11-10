@@ -61,8 +61,9 @@ export function QuickCaptureSettings({ index });         // Settings → Quick c
   typed answers and terminal-only dialogs offer **Answer in TeleFlock** (the Answer-next HUD on that
   agent, main window in front).
 - Sends go through Dispatch's own logic (`features/dispatch/send.ts`: Auto placement, the images
-  check against hostd 0.5, base and name resolved on the host), with the last Dispatch options. A
-  refusal shows in the box (e.g. "H2 is offline"); nothing is sent then.
+  check against hostd 0.5, base and name resolved on the host, the thread's launch mode: a new
+  worktree, or in the folder itself), with the last Dispatch options. A refusal shows in the box
+  (e.g. "H2 is offline"); nothing is sent then.
 - Messages: Tauri webview events addressed to one window (`emitTo`), `tf-capture://to-main` /
   `tf-capture://to-capture`; in a browser tab (dev, headless checks) a same-origin BroadcastChannel
   (`tf-capture`). The main window posts the snapshot only while the box shows (hello / bye), and

@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { Check, GitBranch, ImageOff, Play, RotateCcw, Server, ShieldCheck, SquareTerminal, X } from "lucide-react";
+import { Check, FolderOpen, GitBranch, ImageOff, Play, RotateCcw, Server, ShieldCheck, SquareTerminal, X } from "lucide-react";
 import { createContext, memo, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { type AgentView, agentKey, navigate, useAgent, useCore, useResuming } from "@/core";
 import { type DraftVideo, useVideoUploads } from "@/core/draftVideos";
@@ -18,7 +18,7 @@ import { AiMark } from "@/features/workspace/shared/ai";
 import { tildify } from "@/features/workspace/shared/paths";
 import { VideoChips } from "@/features/session/composer/VideoChips";
 import { useEntryImages } from "./images";
-import { type DispatchEntry, type DispatchVideo, entryHost, isInFlight, useDispatch } from "./store";
+import { type DispatchEntry, type DispatchVideo, entryHost, entryRepo, inWorktree, isInFlight, useDispatch } from "./store";
 import { APPEAR_GRACE_MS, START_TIMEOUT_MS } from "./thread";
 
 /** Thread-wide handlers and facts the items need (kept out of props so items stay memoised). */
@@ -46,8 +46,12 @@ const dayFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeri
 type Step = "naming" | "uploading" | "queued" | "creating" | "starting";
 
 const STEP_LABEL: Record<Step, string> = { naming: "Naming the branch", uploading: "Uploading videos", queued: "Queued", creating: "Creating worktree", starting: "Starting agent" };
+/** In place: no branch or worktree; its host opens a workspace in the folder and starts it there. */
+const IN_PLACE_STEP_LABEL: Record<Step, string> = { ...STEP_LABEL, naming: "Naming the agent", creating: "Opening the folder" };
 /** A chat's steps: no branch or worktree; its host makes its folder and starts it. */
 const CHAT_STEP_LABEL: Record<Step, string> = { ...STEP_LABEL, naming: "Naming the chat", creating: "Starting chat" };
+/** Review of an agent working in the folder itself: the checkout's whole diff, whoever made it. */
+const SHARED_REVIEW = "Diff of the folder's own checkout: every change made there, by this agent or anyone else working in it; then commit, push, pull request";
 const SEGMENTS = ["creating", "starting", "running"] as const;
 const STEP_INDEX: Record<Step, number> = { naming: -1, uploading: -1, queued: -1, creating: 0, starting: 1 };
 
@@ -302,11 +306,20 @@ function Reply({ entry, agentId, ctx }: { entry: DispatchEntry; agentId?: string
         <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-2xs text-mute-2">
           {entry.chat ? (
             <ChatTag hostId={hostId} folder={agent?.cwd} />
+          ) : entry.inPlace ? (
+            <>
+              <FolderOpen className="size-3 shrink-0" />
+              <span className="min-w-0 truncate">
+                <span className="font-sans font-semibold">In </span>
+                {tildify(entryRepo(ctx.threadKey, entry), ctx.homes[hostId])}
+                <span className="font-sans font-semibold opacity-70"> · no worktree</span>
+              </span>
+            </>
           ) : (
             <>
               <GitBranch className="size-3 shrink-0" />
               <span className="min-w-0 truncate" title={entry.path ? tildify(entry.path, ctx.homes[hostId]) : undefined}>
-                {entry.phase === "naming" ? "dispatch/…" : entry.branch}
+                {entry.phase === "naming" ? "…" : entry.branch}
                 {(entry.base ?? entry.baseLabel) && <span className="opacity-70"> ← {entry.base ?? entry.baseLabel}</span>}
               </span>
             </>
@@ -368,9 +381,13 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
           {shown.reason === "reload" ? "The app reloaded before herdr answered." : (entry.error?.title ?? "Lost contact with the host.")}
         </p>
         <p className="mt-0.5 text-2xs text-mute [overflow-wrap:anywhere]">
-          {entry.chat
-            ? "The host may still be starting the chat; this card picks its agent up as soon as it appears. Check & retry looks for it before starting a new one."
-            : "The host may still be creating the worktree and agent; this card picks the agent up as soon as it appears. Check & retry looks for them before creating anything new."}
+          {entry.error?.held
+            ? `If it is this task's agent, still starting, this card picks it up as soon as it shows ${entry.inPlace ? "in the folder" : "in its worktree"}. If it isn't, Dismiss this and send the task again: Check & retry never starts a second agent under the name.`
+            : entry.chat
+              ? "The host may still be starting the chat; this card picks its agent up as soon as it appears. Check & retry looks for it before starting a new one."
+              : entry.inPlace
+                ? "The host may still be starting the agent in the folder; this card picks it up as soon as it appears. Check & retry looks for it first and never starts a second one."
+                : "The host may still be creating the worktree and agent; this card picks the agent up as soon as it appears. Check & retry looks for them before creating anything new."}
         </p>
         <Actions>
           <button type="button" className={primary} onClick={() => ctx.retry(entry.id, false)} disabled={!online}>
@@ -385,7 +402,7 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
   }
 
   if (shown.k === "failed") {
-    const untrusted = !entry.chat && entry.error?.kind === "untrusted";
+    const untrusted = inWorktree(entry) && entry.error?.kind === "untrusted";
     return (
       <>
         <p className="mt-2 text-xs font-semibold text-error [overflow-wrap:anywhere]">{entry.error?.title}</p>
@@ -409,7 +426,10 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
     );
   }
 
-  if (shown.k === "step") return shown.step === "uploading" ? <Uploading videos={entry.videos ?? []} /> : <Progress step={shown.step} chat={!!entry.chat} />;
+  if (shown.k === "step") {
+    if (shown.step === "uploading") return <Uploading videos={entry.videos ?? []} />;
+    return <Progress step={shown.step} labels={entry.chat ? CHAT_STEP_LABEL : entry.inPlace ? IN_PLACE_STEP_LABEL : STEP_LABEL} />;
+  }
 
   if (shown.k === "gone" && parkedKey && online) return <Parked parkedKey={parkedKey} />;
 
@@ -437,10 +457,10 @@ function Body({ shown, entry, agentKey: key, parkedKey, ctx, online }: { shown: 
         <button
           type="button"
           className={ghost}
-          title={ACTIONS.review.description}
+          title={entry.inPlace ? SHARED_REVIEW : ACTIONS.review.description}
           onClick={() => navigate({ name: "review", hostId: agent.hostId, workspaceId: agent.workspaceId })}
         >
-          {ACTIONS.review.label}
+          {entry.inPlace ? "Review checkout" : ACTIONS.review.label}
         </button>
       )}
     </>
@@ -512,9 +532,8 @@ function Parked({ parkedKey }: { parkedKey: string }) {
   );
 }
 
-/** Queued → Creating worktree (a chat: Starting chat) → Starting agent → Running, as three filling segments. */
-function Progress({ step, chat }: { step: Step; chat: boolean }) {
-  const labels = chat ? CHAT_STEP_LABEL : STEP_LABEL;
+/** Queued → Creating worktree (in place: Opening the folder; a chat: Starting chat) → Starting agent → Running, as three filling segments. */
+function Progress({ step, labels }: { step: Step; labels: Record<Step, string> }) {
   const at = STEP_INDEX[step];
   return (
     <div className="mt-2 flex items-center gap-3" role="status">

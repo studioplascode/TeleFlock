@@ -9,6 +9,7 @@ const think = (): TranscriptItem => ({ kind: "thinking", id: "th", at: 2, text: 
 const notice = (): TranscriptItem => ({ kind: "notice", id: "n", at: 4, level: "warn", text: "Interrupted by user" });
 const mode = (): TranscriptItem => ({ kind: "mode", id: "m", at: 4, text: "Model switched" });
 const compaction = (): TranscriptItem => ({ kind: "compaction", id: "c", at: 4, summary: "…" });
+const ran = (status: string): TranscriptItem => ({ ...tool(status), id: `x-${status}`, userRun: { python: false, excluded: false } }) as TranscriptItem;
 const retryable = (rows: TranscriptItem[]) => lastTurnRetryable(rows.length, (i) => rows[i]);
 
 describe("lastTurnRetryable", () => {
@@ -40,5 +41,13 @@ describe("lastTurnRetryable", () => {
   test("a thinking or user row at the end tells nothing (a new prompt, or a quiet abort)", () => {
     expect(retryable([user(), say({ stopReason: "aborted" }), user()])).toBe(false);
     expect(retryable([user(), think(), notice()])).toBe(false);
+  });
+
+  test("a quick command the user ran ends the walk: omp has nothing to retry past it, and its failure is not the turn's", () => {
+    expect(retryable([user(), say({ stopReason: "aborted" }), ran("ok")])).toBe(false);
+    expect(retryable([user(), say(), ran("error")])).toBe(false);
+    expect(retryable([user(), say(), ran("aborted"), notice()])).toBe(false);
+    // One the user ran while the turn's tools were still going: the turn still stopped in them.
+    expect(retryable([user(), ran("ok"), tool("aborted")])).toBe(true);
   });
 });

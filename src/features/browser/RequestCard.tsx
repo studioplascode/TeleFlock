@@ -3,7 +3,7 @@ import { useState } from "react";
 import { core, toApiError, useAgent, useBrowser, useHosts } from "@/core";
 import { Button, cn, isAndroid, toast } from "@/design";
 import { answerRequest, type RequestChoice } from "./actions";
-import { agentRequestView, type RequestAgent, type RequestView, waitingText } from "./requests";
+import { agentRequestView, allowingText, type RequestAgent, type RequestView, waitingText } from "./requests";
 
 /** This device can host the browser (a computer with TeleFlock; not a phone). */
 export function canHostBrowser(): boolean {
@@ -91,7 +91,7 @@ export function RequestCard({ view, hostName, compact = false }: { view: Request
                 ? isAndroid
                   ? "Allow it from TeleFlock on a computer: the browser runs there."
                   : "This TeleFlock can't run the browser: allow it from TeleFlock 0.9 or later on a computer."
-                : "It gets its own tabs in your browser, signed in as you. It can't see your tabs unless you lend one."}
+                : allowingText(view.shareTabs)}
           </p>
           <RequestButtons view={view} className="mt-3" />
         </div>

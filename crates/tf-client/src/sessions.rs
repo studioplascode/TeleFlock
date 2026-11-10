@@ -1169,6 +1169,7 @@ fn offline_caps() -> Capabilities {
         retry: false,
         subagent_retry: false,
         refusal_retry: false,
+        shell: false,
     }
 }
 
@@ -1438,6 +1439,7 @@ pub(crate) mod tests {
             view: None,
             error: None,
             artifact: None,
+            user_run: None,
         })
     }
 

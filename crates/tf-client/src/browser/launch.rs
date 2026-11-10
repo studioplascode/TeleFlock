@@ -1,7 +1,8 @@
-//! Running the browser: its command line ([`args`]), its DevTools port (`DevToolsActivePort`,
-//! [`parse_active_port`]), its process ([`spawn`], [`stop`]), the organization's policy refusing
-//! it remote control ([`policy_refusal`]), freeing the profile from a browser an earlier app run
-//! left behind ([`free_profile`]), and the restart schedule after crashes ([`Restarts`]).
+//! Running the browser: its command line ([`args`]), its profile restoring the last session
+//! ([`restore_last_session`]), its DevTools port (`DevToolsActivePort`, [`parse_active_port`]), its
+//! process ([`spawn`], [`stop`]), the organization's policy refusing it remote control
+//! ([`policy_refusal`]), freeing the profile from a browser an earlier app run left behind
+//! ([`free_profile`]), and the restart schedule after crashes ([`Restarts`]).
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -9,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::cdp;
@@ -73,6 +75,11 @@ pub(super) fn args(f: &Flags) -> Vec<String> {
         "--no-default-browser-check".into(),
         "--disable-search-engine-choice-screen".into(),
         "--hide-crash-restore-bubble".into(),
+        // The last session comes back, its tabs and its session cookies (Chrome's own switch for
+        // relaunching itself). The profile's preference says the same ([`restore_last_session`]),
+        // but Windows outside a domain and macOS reset that preference when another program set
+        // it (a tracked preference); the switch holds everywhere, headless too.
+        "--restore-last-session".into(),
         // Agents' tabs run in windows nobody looks at (and headless, nobody looks at any).
         "--disable-background-timer-throttling".into(),
         "--disable-backgrounding-occluded-windows".into(),
@@ -100,6 +107,41 @@ pub(super) fn parse_active_port(text: &str) -> Option<(u16, String)> {
     let port = lines.next()?.trim().parse::<u16>().ok().filter(|p| *p != 0)?;
     let path = lines.next()?.trim();
     (path.starts_with("/devtools/browser/") && path.len() > "/devtools/browser/".len()).then(|| (port, path.to_string()))
+}
+
+/// Chrome's "Continue where you left off" (`session.restore_on_startup`).
+const RESTORE_LAST: i64 = 1;
+
+/// Sets the profile to continue where it left off (`session.restore_on_startup`, merged into
+/// `<profile>/Default/Preferences`, written atomically and readable by this user only; there is
+/// none before the first start). With it a restart keeps the tabs and the session cookies (sites
+/// that keep a sign-in only while the browser runs, many company sign-ins among them), as Chrome
+/// does for its own users: switching between headless and its own window, the user closing its
+/// window, the app restarting, another engine taking over. Called before each start, once the
+/// last browser on the profile exited (it writes the file when it quits). A file that is not
+/// JSON is replaced (the browser would set it aside and start afresh too).
+pub(super) fn restore_last_session(profile: &Path) -> std::io::Result<()> {
+    let file = profile.join("Default").join("Preferences");
+    let mut prefs: Map<String, Value> = match std::fs::read(&file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            log::warn!("browser: {} is not JSON ({e}); writing a new one", file.display());
+            Map::new()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(e) => return Err(e),
+    };
+    let session = prefs.entry("session").or_insert_with(|| json!({}));
+    if session.get("restore_on_startup").and_then(Value::as_i64) == Some(RESTORE_LAST) {
+        return Ok(());
+    }
+    match session.as_object_mut() {
+        Some(s) => {
+            s.insert("restore_on_startup".into(), json!(RESTORE_LAST));
+        }
+        None => *session = json!({ "restore_on_startup": RESTORE_LAST }),
+    }
+    std::fs::create_dir_all(profile.join("Default"))?;
+    crate::util::write_private(&file, &serde_json::to_vec(&prefs).map_err(std::io::Error::other)?)
 }
 
 /// A running browser.
@@ -240,8 +282,9 @@ pub(super) async fn spawn(exe: &Path, args: &[String], profile: &Path, headed: b
     }
 }
 
-/// Stops the browser: `Browser.close` (a clean exit: no "restore pages?" next time), then
-/// SIGTERM, then a kill; then whatever is left of its process group.
+/// Stops the browser: `Browser.close` (a clean exit: no "restore pages?" next time; the next
+/// start restores its session), then SIGTERM, then a kill; then whatever is left of its process
+/// group.
 pub(super) async fn stop(mut p: Proc) {
     if cdp::close_browser(&p.ws_url).await.is_ok() && tokio::time::timeout(CLOSE_GRACE, p.child.wait()).await.is_ok() {
         reap_group(p.pid);
@@ -416,11 +459,46 @@ mod tests {
         let headed = args(&Flags { headed: true, ..base });
         assert!(!headed.iter().any(|x| x.starts_with("--headless") || x.starts_with("--window-size")), "{headed:?}");
         assert!(headed.iter().any(|x| x == "--password-store=basic"), "the same secrets store in both modes");
+        assert_eq!(a.iter().chain(&headed).filter(|x| *x == "--restore-last-session").count(), 2, "both modes restore the last session");
         let mac = args(&Flags { os: "macos", ..base });
         assert!(mac.iter().any(|x| x == "--use-mock-keychain") && !mac.iter().any(|x| x.starts_with("--password-store")));
         let win = args(&Flags { os: "windows", ..base });
         assert!(!win.iter().any(|x| x.starts_with("--password-store") || x == "--use-mock-keychain"));
         assert!(args(&Flags { root: true, ..base }).iter().any(|x| x == "--no-sandbox"));
+    }
+
+    /// The profile continues where it left off: the preference is merged into what the browser
+    /// wrote, created on the first start, and a file that is not JSON is replaced.
+    #[test]
+    fn profile_restores_the_last_session() {
+        let td = tempfile::tempdir().unwrap();
+        let profile = td.path().join("profile");
+        let prefs = profile.join("Default/Preferences");
+        let read = || serde_json::from_slice::<Value>(&std::fs::read(&prefs).unwrap()).unwrap();
+        restore_last_session(&profile).unwrap();
+        assert_eq!(read(), json!({ "session": { "restore_on_startup": 1 } }), "the first start");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&prefs).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // What the browser wrote stays; the user's choice of pages to open is replaced by restore.
+        let written = json!({ "browser": { "window_placement": { "maximized": true } }, "session": { "restore_on_startup": 5, "startup_urls": ["https://example.com/"] } });
+        std::fs::write(&prefs, written.to_string()).unwrap();
+        restore_last_session(&profile).unwrap();
+        let v = read();
+        assert_eq!(v["browser"], written["browser"]);
+        assert_eq!(v["session"], json!({ "restore_on_startup": 1, "startup_urls": ["https://example.com/"] }));
+        // Already so: the file is left alone.
+        let before = std::fs::metadata(&prefs).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        restore_last_session(&profile).unwrap();
+        assert_eq!(std::fs::metadata(&prefs).unwrap().modified().unwrap(), before);
+        for broken in ["{\"session\": ", "[1, 2]", "{\"session\": 7}"] {
+            std::fs::write(&prefs, broken).unwrap();
+            restore_last_session(&profile).unwrap();
+            assert_eq!(read()["session"], json!({ "restore_on_startup": 1 }), "{broken}");
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ export function soleRow<A, S>({ agents, shells }: WorkspaceRows<A, S>): { kind: 
 
 /**
  * The pane's name as the muted second part of a folded row, or undefined when the workspace name already says
- * it (an agent called `fix-login` in the worktree `dispatch/fix-login`).
+ * it (an agent called `fix-login` in the worktree `fix-login`, or `feat/fix-login`).
  */
 export function foldedPaneLabel(identity: string, paneName: string): string | undefined {
   const name = paneName.trim();

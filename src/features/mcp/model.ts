@@ -160,6 +160,38 @@ export function setArgAt(line: string, index: number, value: string): string {
   return joinArgs(next);
 }
 
+/**
+ * A whole command line in Command (`npx -y @sentry/mcp-server@latest`) split into the program and
+ * its arguments: omp starts Command as one program, so the line fails with ENOENT. The words after
+ * the program go before the arguments already there, or replace them (`replaceArgs`: a pasted line
+ * that replaced the whole field). Unchanged when Command is one word, doesn't split (an unclosed
+ * quote) or starts with a path (`/opt/My Tools/x`, `C:\Program Files\…`: it may hold spaces); a
+ * quoted path splits (`"C:\Program Files\nodejs\npx.cmd" -y pkg`).
+ */
+export function splitCommandLine(f: McpForm, replaceArgs = false): McpForm {
+  const line = f.command.trim();
+  if (!/\s/.test(line)) return f;
+  if (!/^["']/.test(line) && /[\\/]/.test(line.split(/\s/, 1)[0] ?? "")) return f;
+  const words = splitArgs(line);
+  if (words.error || words.args.length < 2) return f;
+  const rest = replaceArgs ? { args: [] as string[] } : splitArgs(f.argsText);
+  if (rest.error) return f;
+  return { ...f, command: words.args[0] as string, argsText: joinArgs([...words.args.slice(1), ...rest.args]) };
+}
+
+/** What to do when omp couldn't start a local server's program: its error text (Bun's) says why. */
+export function startHint(error: string): string | undefined {
+  const missing = /Executable not found in \$PATH: "([^"]+)"/.exec(error)?.[1];
+  const program = missing ?? /ENOENT: no such file or directory, posix_spawn '([^']+)'/.exec(error)?.[1];
+  if (!program) return undefined;
+  const first = program.split(/\s/, 1)[0] ?? "";
+  if (first !== program && !/[\\/]/.test(first)) return `Command holds a whole command line: put “${first}” under Command and the rest under Arguments.`;
+  if (missing) {
+    return `“${missing}” is not on this host's PATH (TeleFlock uses your login shell's). Install it on the host, or enter its full path under Command: “command -v ${missing}” in a terminal there shows it.`;
+  }
+  return `“${program}” couldn't start: there is no such file on the host, or the interpreter its first line (#!) names is missing. Arguments go under Arguments; quote a path with spaces.`;
+}
+
 /** The arguments with the JSON after `--config` replaced (appended with `--config` when absent). */
 export function withConfigArg(args: readonly string[], json: string): string[] {
   const i = args.indexOf("--config");
@@ -726,9 +758,11 @@ export function draftFromForm(f: McpForm): { draft?: McpServerDraft; errors: For
   if (ne) errors.name = ne;
   let draft: McpServerDraft;
   if (f.transport === "stdio") {
-    const command = f.command.trim();
+    // A whole command line left in Command goes out as the program and its arguments.
+    const line = splitCommandLine(f);
+    const command = line.command.trim();
     if (!command) errors.command = "Enter the program omp starts (for example npx, uvx or a path)";
-    const { args, error } = splitArgs(f.argsText);
+    const { args, error } = splitArgs(line.argsText);
     if (error) errors.args = error;
     const env: McpKeyValue[] = [];
     for (const r of f.env) {

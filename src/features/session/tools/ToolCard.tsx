@@ -221,9 +221,17 @@ function summary(item: ToolItem): ReactNode {
   }
 }
 
+/** The card's label: the tool, or the prefix of a quick command the user ran (`!`, `!!`, `$`, `$$`). */
+function label(item: ToolItem): string {
+  const run = item.userRun;
+  if (!run) return item.tool;
+  const p = run.python ? "$" : "!";
+  return run.excluded ? p + p : p;
+}
+
 function headTitle(item: ToolItem): ReactNode {
   const v = item.view;
-  if (v?.type === "bash") return <Highlighted code={v.command.split("\n")[0] ?? ""} lang="sh" />;
+  if (v?.type === "bash") return <Highlighted code={v.command.split("\n")[0] ?? ""} lang={item.userRun?.python ? "python" : "sh"} />;
   if (v?.type === "task") return <span className="font-sans">{v.agents.length} subagent{v.agents.length === 1 ? "" : "s"}</span>;
   return item.title;
 }
@@ -305,7 +313,7 @@ function ToolCallCard({ item }: { item: ToolItem }) {
         <span className={cn("grid size-[22px] shrink-0 place-items-center rounded-[8px] transition-colors duration-500", live ? "st-soft" : failed ? "bg-error/14 text-error" : TONE[kind])}>
           <Icon className="size-3" />
         </span>
-        <span data-find-skip className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{item.tool}</span>
+        <span data-find-skip className="shrink-0 font-mono text-[11.5px] font-semibold text-tool">{label(item)}</span>
         <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-2" title={typeof item.title === "string" ? item.title : undefined}>
           {live && type === "generic" ? <Shimmer>{item.title}</Shimmer> : headTitle(item)}
         </span>
@@ -351,7 +359,7 @@ function ToolBody({ item }: { item: ToolItem }) {
               )}
               {v.command.includes("\n") && (
                 <pre className="whitespace-pre-wrap">
-                  <Highlighted code={v.command} lang="sh" />
+                  <Highlighted code={v.command} lang={item.userRun?.python ? "python" : "sh"} />
                 </pre>
               )}
             </div>

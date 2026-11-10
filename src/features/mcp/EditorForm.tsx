@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import type { McpRegistryEntry, McpRegistryInput } from "@/core/gen";
 import { Button, cn, Field, IconButton, Input, SegmentedControl, Select, Switch } from "@/design";
 import { tildify } from "@/features/workspace/shared/paths";
-import { dropScheme, type FormErrors, hasAdvanced, joinArgs, type KvRow, kvRow, looksSecret, type McpForm, nameAdvice, NAME_MAX, splitArgs, typeValue } from "./model";
+import { dropScheme, type FormErrors, hasAdvanced, type KvRow, kvRow, looksSecret, type McpForm, nameAdvice, NAME_MAX, splitCommandLine, typeValue } from "./model";
 import type { McpTemplateInput } from "./templates";
 
 /** A password field with a show / hide toggle. A stored secret reads "Unchanged" until something is typed. */
@@ -291,13 +291,23 @@ export function EditorForm({ form: f, onChange, errors, scopeChoice, savedIn, ho
                   value={f.command}
                   onChange={(e) => patch({ command: e.target.value })}
                   onPaste={(e) => {
-                    // A pasted command line splits into the program and its arguments.
+                    // A pasted command line splits into the program and its arguments; one that
+                    // replaces the whole field replaces the arguments too.
                     const text = e.clipboardData.getData("text").trim();
-                    if (f.command.trim() || f.argsText.trim() || !/\s/.test(text)) return;
-                    const { args, error } = splitArgs(text);
-                    if (error || args.length < 2) return;
+                    if (!/\s/.test(text)) return;
+                    const el = e.currentTarget;
+                    const start = el.selectionStart ?? el.value.length;
+                    const end = el.selectionEnd ?? start;
+                    const whole = !el.value.slice(0, start).trim() && !el.value.slice(end).trim();
+                    const next = splitCommandLine({ ...f, command: el.value.slice(0, start) + text + el.value.slice(end) }, whole);
+                    if (/\s/.test(next.command.trim())) return;
                     e.preventDefault();
-                    patch({ command: args[0] ?? "", argsText: joinArgs(args.slice(1)) });
+                    patch({ command: next.command, argsText: next.argsText });
+                  }}
+                  onBlur={() => {
+                    // A typed command line too, once the field is left.
+                    const next = splitCommandLine(f);
+                    if (next !== f) patch({ command: next.command, argsText: next.argsText });
                   }}
                   placeholder="npx"
                   invalid={!!errors.command}

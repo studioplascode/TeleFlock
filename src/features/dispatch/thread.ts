@@ -1,12 +1,16 @@
 import { isChat, isChatRepo } from "@/core/chats";
-import type { Agent, BranchList, HostState, Workspace } from "@/core/gen";
+import type { Agent, BranchInfo, BranchList, HostState, Workspace } from "@/core/gen";
 import { ompCommand, ompCommandName } from "@/core/ompCommands";
-import { basename } from "@/features/workspace/shared/paths";
+import { basename, branchSlug } from "@/features/workspace/shared/paths";
 import { slugFromPrompt, slugify } from "@/features/workspace/shared/slug";
 import type { DispatchEntry } from "./store";
 
-/** Dispatch branches are `dispatch/<name>`; the agent and its workspace are called `<name>`. */
-export const BRANCH_PREFIX = "dispatch/";
+/**
+ * A Dispatch worktree's branch is its name, `<name>` (the agent and its workspace are called `<name>` too).
+ * Branches were `dispatch/<name>` before: their entries keep the branch they were created with, so
+ * those worktrees still link and retry, and the base menu leaves such branches out.
+ */
+export const LEGACY_BRANCH_PREFIX = "dispatch/";
 
 /** The repo chip's choice for chats (`CHAT_REPO`): each message starts an omp agent in a folder of its own, no repository. */
 export const CHAT_CHOICE = "No folder · chat";
@@ -22,11 +26,19 @@ export function baseSlug(prompt: string): string {
 export const MAX_AGENT_NAME = 32;
 
 /**
- * `slug`, else `slug-2`, `slug-3`… — free as an agent name and as `dispatch/<name>`, and never
- * longer than herdr's agent-name limit (the base gives way to the suffix).
+ * `slug`, else `slug-2`, `slug-3`… — free as an agent name and as a branch (a worktree's branch is
+ * its name): not in `taken`, no taken branch under it as a folder (git can't have `release` beside
+ * `release/1.0`), and not the folder herdr checks a taken branch out under (`fix/ci` → `fix-ci`).
+ * Never longer than herdr's agent-name limit (the base gives way to the suffix).
  */
 export function uniqueSlug(base: string, taken: ReadonlySet<string>): string {
-  const free = (n: string) => !taken.has(n) && !taken.has(`${BRANCH_PREFIX}${n}`);
+  const blocked = new Set<string>();
+  for (const t of taken) {
+    blocked.add(t);
+    blocked.add(branchSlug(t));
+    for (let i = t.indexOf("/"); i > 0; i = t.indexOf("/", i + 1)) blocked.add(t.slice(0, i));
+  }
+  const free = (n: string) => !blocked.has(n) && !blocked.has(branchSlug(n));
   const first = base.slice(0, MAX_AGENT_NAME).replace(/-+$/, "");
   if (free(first)) return first;
   for (let i = 2; ; i++) {
@@ -34,6 +46,14 @@ export function uniqueSlug(base: string, taken: ReadonlySet<string>): string {
     const n = `${base.slice(0, MAX_AGENT_NAME - suffix.length).replace(/-+$/, "")}${suffix}`;
     if (free(n)) return n;
   }
+}
+
+/**
+ * The names a new branch can't take in a repository: every branch's, and each remote-tracking
+ * one's local name too (`origin/fix-ci` → `fix-ci`: a local `fix-ci` would push into it).
+ */
+export function branchNamesTaken(branches: readonly Pick<BranchInfo, "name" | "remote">[]): string[] {
+  return branches.flatMap((b) => (b.remote ? [b.name, b.name.replace(/^[^/]+\//, "")] : [b.name]));
 }
 
 /**
@@ -69,7 +89,7 @@ const MAX_AI_SLUG = 28;
 
 /**
  * A suggested slug as a dispatch name: kebab `[a-z0-9-]`, ≤ 28 chars (cut at a word boundary),
- * starts with a letter, no `dispatch/`. Unusable → null.
+ * starts with a letter; a leading `dispatch/` (`LEGACY_BRANCH_PREFIX`) is dropped. Unusable → null.
  */
 export function cleanSuggestion(s: string | null | undefined): string | null {
   if (!s) return null;
@@ -110,10 +130,13 @@ export function prefetchKey(draft: string): string | null {
   return t.split(/\s+/).filter((w) => /[a-z0-9]/i.test(w)).length >= PREFETCH_MIN_WORDS ? t : null;
 }
 
-/** What Rambler is told a dictated task is about: the thread's repository by name; nothing for a chat, which has none. */
-export function rambleAbout(repo: string | null | undefined): string | undefined {
+/**
+ * What Rambler is told a dictated task is about: the thread's repository by name (`folder`: a folder
+ * that is no repository); nothing for a chat, which has none.
+ */
+export function rambleAbout(repo: string | null | undefined, folder = false): string | undefined {
   if (!repo || isChatRepo(repo)) return undefined;
-  return `Repository: ${repo.split("/").filter(Boolean).pop() ?? repo}`;
+  return `${folder ? "Folder" : "Repository"}: ${repo.split("/").filter(Boolean).pop() ?? repo}`;
 }
 
 /** The newest `maxEntries` entries across all threads, prompts clipped to `maxPrompt` characters (persisted copy). */
@@ -187,7 +210,21 @@ export function recentRepos(state: Pick<HostState, "workspaces" | "agents"> | un
   return [...byRoot.values()].sort((a, b) => b.at - a.at || a.name.localeCompare(b.name));
 }
 
-/** Where an entry's agent must live: the thread's repo root, and the host's workspaces to check against. */
+/**
+ * Folders that are no repository root (`folders`, the threads picked as such) dispatched to on
+ * `hostId`, most recently first: their thread has entries.
+ */
+export function recentFolders(threads: Readonly<Record<string, readonly DispatchEntry[]>>, folders: Readonly<Record<string, true>>, hostId: string): { root: string; at: number }[] {
+  const prefix = `${hostId}\u0000`;
+  const out: { root: string; at: number }[] = [];
+  for (const key of Object.keys(folders)) {
+    const list = key.startsWith(prefix) ? threads[key] : undefined;
+    if (list?.length) out.push({ root: key.slice(prefix.length), at: list.reduce((m, e) => Math.max(m, e.createdAt), 0) });
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+
+/** Where an entry's agent must live: the entry's repo root (in place: its folder), and the host's workspaces to check against. */
 export interface AgentScope {
   repo: string;
   workspaces: readonly Workspace[];
@@ -196,7 +233,7 @@ export interface AgentScope {
 /**
  * The agent runs in the entry's worktree: its checkout path is the one herdr reported, or its
  * workspace belongs to the thread's repo (linked worktrees report the main repo root) and is on
- * the entry's `dispatch/…` branch.
+ * the entry's branch (`<name>`, or `dispatch/<name>` from before).
  */
 function inEntryWorktree(a: Agent, e: DispatchEntry, scope: AgentScope): boolean {
   const ws = scope.workspaces.find((w) => w.id === a.workspaceId);
@@ -206,15 +243,28 @@ function inEntryWorktree(a: Agent, e: DispatchEntry, scope: AgentScope): boolean
 }
 
 /**
+ * The agent works in an in-place entry's folder itself: its own folder or its workspace's is the
+ * entry's, as picked or as the host spelled it once linked (`path`: through a symlink, say), or it
+ * runs in the workspace the entry's start opened (the one herdr reported, labelled with its name).
+ */
+function inEntryFolder(a: Agent, e: DispatchEntry, scope: AgentScope): boolean {
+  const ws = scope.workspaces.find((w) => w.id === a.workspaceId);
+  if (!ws) return false;
+  const at = (dir: string | undefined) => dir !== undefined && (a.cwd === dir || ws.cwd === dir);
+  return at(scope.repo) || at(e.path) || (ws.id === e.workspaceId && ws.label === e.name);
+}
+
+/**
  * The live agent behind an entry, always inside the entry's own worktree (agent names are unique
  * per host but get reused across repos; pane and workspace ids get reused after herdr restarts and
  * demo reloads): the id herdr reported, else its pane (the id can arrive later), else — for
  * entries whose answer never arrived (reload, timeout) — the agent with the entry's name. A chat
  * entry (`chat`) has no worktree: it links chat agents only (`Agent.chat`), and a worktree entry
- * never links one.
+ * never links one. An in-place entry (`inPlace`) links an agent working in its folder itself,
+ * never one in a linked worktree of it.
  */
 export function resolveAgent(e: DispatchEntry, agents: readonly Agent[], scope: AgentScope): Agent | undefined {
-  const mine = e.chat ? isChat : (a: Agent) => !isChat(a) && inEntryWorktree(a, e, scope);
+  const mine = e.chat ? isChat : e.inPlace ? (a: Agent) => inEntryFolder(a, e, scope) : (a: Agent) => !isChat(a) && inEntryWorktree(a, e, scope);
   if (e.agentId) {
     const byId = agents.find((a) => a.id === e.agentId && mine(a));
     if (byId) return byId;

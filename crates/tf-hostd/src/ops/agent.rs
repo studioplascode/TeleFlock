@@ -97,6 +97,7 @@ pub async fn handle(ctx: &Ctx, req: HostMethod, client: &ClientHandle) -> Result
         M::AgentBtwCancel(p) => unit(btw_cancel(ctx, p).await),
         M::AgentBtwHistory(p) => to_value(btw_history(ctx, &p.agent_id).await?),
         M::AgentSlash(p) => unit(slash(ctx, p).await),
+        M::AgentShell(p) => to_value(shell(ctx, p).await?),
         M::AgentCommands(p) => to_value(commands(ctx, &p.agent_id).await?),
         M::AgentDequeue(p) => to_value(dequeue(ctx, &p.agent_id).await?),
         M::AgentKeys(p) => unit(keys(ctx, p).await),
@@ -794,6 +795,50 @@ async fn slash(ctx: &Ctx, p: SlashParams) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// omp's quick commands (`agent.shell`): `!cmd`, `!!cmd`, `$ code` or `$$ code`, run through the
+/// bridge's `shell` op as if typed into omp's composer.
+async fn shell(ctx: &Ctx, p: ShellParams) -> Result<ShellResult, ApiError> {
+    let text = quick_command(&p.text).ok_or_else(|| {
+        ApiError::new("invalid_params", "a quick command is `!` or `!!` and a command, or `$` or `$$`, a space and Python code")
+    })?;
+    let a = omp_agent(ctx, &p.agent_id)?;
+    let sid = bridge_sid(ctx, &p.agent_id).ok_or_else(|| needs_bridge("Running omp's `!` and `$` commands"))?;
+    run_shell(&ctx.bridge, &sid, &a.name, text).await
+}
+
+/// The command of `text` as omp's composer reads it: trimmed, `!` or `!!` and something after it,
+/// or `$` or `$$`, whitespace and something after that. The bridge applies the rest of omp's
+/// rules (a `$` line that looks like a shell command is a message).
+fn quick_command(text: &str) -> Option<&str> {
+    let t = text.trim();
+    let body = match t.strip_prefix('!') {
+        Some(rest) => rest.strip_prefix('!').unwrap_or(rest),
+        None => {
+            let rest = t.strip_prefix("$$").or_else(|| t.strip_prefix('$'))?;
+            if !rest.starts_with([' ', '\t', '\n', '\r']) {
+                return None;
+            }
+            rest
+        }
+    };
+    (!body.trim().is_empty()).then_some(t)
+}
+
+/// `agent.shell` on the session's bridge (`name`: the agent's, for the errors): its `shell` op
+/// when it serves omp's quick commands (`caps.shell`), else why it can't.
+pub(crate) async fn run_shell(bridge: &crate::bridge::BridgeHandle, sid: &str, name: &str, text: &str) -> Result<ShellResult, ApiError> {
+    let session = bridge.by_session(sid).ok_or_else(|| ApiError::from(BridgeError::NotConnected { session_id: sid.to_owned() }))?;
+    if !session.caps.shell {
+        return Err(if session.tui {
+            ApiError::new("unsupported", format!("{name} runs a TeleFlock bridge older than 2.5.0, without omp's `!` and `$` commands"))
+                .with_hint("Restart the agent to update its bridge")
+        } else {
+            ApiError::new("unsupported", format!("{name}'s omp runs without its terminal UI, where omp runs `!` and `$` commands"))
+        });
+    }
+    bridge.shell(sid, text).await.map_err(bridge_err)
+}
+
 /// Extension, prompt-template and skill commands of the session (builtins live in the client).
 async fn commands(ctx: &Ctx, agent_id: &str) -> Result<CommandList, ApiError> {
     omp_agent(ctx, agent_id)?;
@@ -1402,7 +1447,7 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
             launch = match store.prepare(o, &name) {
                 Ok(l) => l,
                 Err(e) => {
-                    undo_chat_launch(ctx, &target, &pane_id, made.as_deref(), false).await;
+                    undo_launch(ctx, &target, &pane_id, made.as_deref(), false).await;
                     return Err(ApiError::new("io_error", format!("writing the agent's omp settings: {e}")));
                 }
             };
@@ -1438,7 +1483,7 @@ pub async fn start_agent(ctx: &Ctx, target: impl Into<LaunchPane>, spec: &AgentS
                     if let Some(l) = launch {
                         store.discard(l);
                     }
-                    undo_chat_launch(ctx, &target, &pane_id, made.as_deref(), e.is(tf_herdr::code::TIMEOUT)).await;
+                    undo_launch(ctx, &target, &pane_id, made.as_deref(), e.is(tf_herdr::code::TIMEOUT)).await;
                     return Err(launch_err(e, &target));
                 }
             }
@@ -1752,25 +1797,31 @@ async fn open_chat_tab(ctx: &Ctx, cwd: &Path, name: &str) -> Result<(String, Str
     Ok(opened)
 }
 
-/// A chat launch that failed leaves nothing behind (§3.31): the pane hostd made for it closes (its
-/// tab with it, and the chats workspace when it holds nothing else), then a folder this launch made
-/// goes while nothing is in it (`chats::remove_if_unused`). After herdr's start timed out, both
-/// stay while an agent runs in the pane: it may still come up. herdr unable to say keeps both.
-async fn undo_chat_launch(ctx: &Ctx, target: &LaunchPane, pane_id: &str, made: Option<&Path>, timed_out: bool) {
-    if !matches!(target, LaunchPane::ChatTab { .. }) {
-        return;
-    }
+/// A launch that failed leaves nothing behind it made: the pane hostd opened for it closes, with
+/// its workspace when it holds nothing else: a chat's tab (§3.31; the chats workspace goes when it
+/// is empty then), a folder's new workspace (`StartTarget::Cwd`: Dispatch "In this folder", New
+/// agent's folder), whose retry would otherwise leave an empty shell beside the agent; then a
+/// folder a chat launch made goes while nothing is in it (`chats::remove_if_unused`). A pane the
+/// caller named, or a tab or split of a workspace of theirs, stays. After herdr's start timed out,
+/// everything stays while an agent runs in the pane: it may still come up. herdr unable to say
+/// keeps everything.
+async fn undo_launch(ctx: &Ctx, target: &LaunchPane, pane_id: &str, made: Option<&Path>, timed_out: bool) {
+    let what = match target {
+        LaunchPane::ChatTab { .. } => "a chat",
+        LaunchPane::Target(StartTarget::Cwd { .. }) => "an agent's new workspace",
+        _ => return,
+    };
     let pane = match ctx.herdr.pane_get(pane_id).await {
         Ok(p) => Some(p),
         Err(e) if e.is_not_found() => None,
         Err(e) => {
-            warn!(pane = pane_id, "a chat that did not start keeps its pane and folder: herdr cannot say what runs there ({e})");
+            warn!(pane = pane_id, "{what} that did not start keeps its pane (and folder): herdr cannot say what runs there ({e})");
             return;
         }
     };
     if let Some(p) = &pane {
         if timed_out && p.agent.is_some() {
-            info!(pane = pane_id, "chat start timed out with an agent running in its pane; keeping the pane and its folder");
+            info!(pane = pane_id, "{what}: the start timed out with an agent running in its pane; keeping it");
             return;
         }
         let alone = ctx.herdr.workspace_get(&p.workspace_id).await.is_ok_and(|w| w.pane_count == 1 && w.tab_count == 1);
@@ -1779,7 +1830,7 @@ async fn undo_chat_launch(ctx: &Ctx, target: &LaunchPane, pane_id: &str, made: O
             Ok(()) => ctx.state.refresh(),
             Err(e) if e.is_not_found() => {}
             Err(e) => {
-                warn!(pane = pane_id, "closing the pane of a chat that did not start: {e}");
+                warn!(pane = pane_id, "closing the pane of {what} that did not start: {e}");
                 return;
             }
         }
@@ -2049,5 +2100,71 @@ mod tests {
         let (t, _) = chat_launch(&chats, reopened, &named(Some("trip"), None), taken, make).unwrap();
         assert_eq!(tab(&t), Some((folder.clone(), "trip".into())));
         assert!(chat_reopen(&chats, td.path()).is_none());
+    }
+
+    #[test]
+    fn quick_commands_as_omps_composer_reads_them() {
+        assert_eq!(quick_command("  !!git status \n"), Some("!!git status"));
+        assert_eq!(quick_command("!ls"), Some("!ls"));
+        assert_eq!(quick_command("! ls -la"), Some("! ls -la"));
+        assert_eq!(quick_command("$ print(1)"), Some("$ print(1)"));
+        assert_eq!(quick_command("$$\nprint(1)"), Some("$$\nprint(1)"));
+        // Nothing after the prefix, `$` without whitespace after it, anything else: not one.
+        for text in ["!", " !! ", "$", "$$ ", "$x", "$$x", "$$$ x", "ls", "", "/plan"] {
+            assert_eq!(quick_command(text), None, "{text:?}");
+        }
+    }
+
+    /// `agent.shell` reaches the bridge's `shell` op with the command as typed (trimmed) and
+    /// answers what it settled; a bridge without `caps.shell` gets nothing, and the app learns why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quick_commands_go_to_the_bridges_shell_op() {
+        use crate::bridge::fake::{handle, FakeExt};
+        use serde_json::json;
+
+        let (h, dir) = handle();
+        let mut ext = FakeExt::connect(&h).await;
+        ext.hello_caps(7, "s1", "2.5.0", Some(json!({ "live": 1, "shell": true }))).await;
+        let h2 = h.clone();
+        let call = tokio::spawn(async move { run_shell(&h2, "s1", "lab", "!!git status").await });
+        let req = ext.recv_req().await;
+        assert_eq!((req["op"].as_str(), &req["params"]), (Some("shell"), &json!({ "text": "!!git status" })));
+        ext.ok(&req, json!({ "settled": false })).await;
+        assert_eq!(call.await.unwrap().unwrap(), ShellResult { settled: false });
+
+        // One run at a time: omp's refusal is a busy the app may retry.
+        let h2 = h.clone();
+        let call = tokio::spawn(async move { run_shell(&h2, "s1", "lab", "$ print(1)").await });
+        let req = ext.recv_req().await;
+        assert_eq!(req["params"], json!({ "text": "$ print(1)" }));
+        ext.send(json!({ "t": "res", "id": req["id"], "ok": false, "error": { "code": "busy", "message": "A bash command is already running" } })).await;
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!((err.code.as_str(), err.message.as_str(), err.retryable), ("busy", "A bash command is already running", true));
+
+        // A bridge before 2.5.0: unsupported, restarting the agent loads the current one.
+        let mut old = FakeExt::connect(&h).await;
+        old.hello_caps(8, "s2", "2.4.0", Some(json!({ "live": 1 }))).await;
+        let err = run_shell(&h, "s2", "lab", "!ls").await.unwrap_err();
+        assert_eq!(err.code, "unsupported");
+        assert!(err.message.contains("older than 2.5.0") && err.hint.as_deref() == Some("Restart the agent to update its bridge"), "{err:?}");
+
+        // omp without its TUI (the bridge announces `shell` only in TUI sessions): no restart helps.
+        let mut headless = FakeExt::connect(&h).await;
+        headless
+            .send(json!({
+                "t": "hello", "v": 2, "reason": "connect", "pid": 9, "sessionId": "s3", "sessionFile": "/tmp/s3.jsonl", "cwd": "/w",
+                "ompVersion": "18.18.6", "bridgeVersion": "2.5.0", "tui": false, "caps": { "live": 1 },
+                "state": { "fast": false, "mode": "normal", "idle": true, "queue": { "steering": [], "followUp": [] }, "attached": false }
+            }))
+            .await;
+        assert_eq!(headless.recv().await["t"], "welcome");
+        let err = run_shell(&h, "s3", "lab", "!ls").await.unwrap_err();
+        assert_eq!((err.code.as_str(), err.hint.as_deref()), ("unsupported", None));
+        assert!(err.message.contains("without its terminal UI"), "{err:?}");
+
+        // No bridge for the session at all.
+        assert_eq!(run_shell(&h, "s9", "lab", "!ls").await.unwrap_err().code, "not_connected");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

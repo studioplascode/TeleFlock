@@ -156,7 +156,7 @@ export function buildSnapshot(i: CaptureInputs): CaptureSnapshot {
     add(t, r, list.reduce((m, e) => Math.max(m, e.createdAt), 0));
   }
   if (target && !groupOf(target)) {
-    const done = dispatchedRepos(i.dispatch.threads);
+    const done = dispatchedRepos(i.dispatch.threads, i.dispatch.folders);
     for (const r of recentRepos(i.states[target], done[target] ?? {})) add(target, r.root, r.at);
   }
   if (target && repo) add(target, repo, Number.POSITIVE_INFINITY);

@@ -280,6 +280,11 @@ pub struct BridgeCaps {
     /// settled, for the session's agent chat log (`crate::agent_chat`).
     #[serde(default)]
     pub agent_chat: bool,
+    /// omp's quick commands (2.5.0, TUI sessions only): the `shell` op submits `!cmd`, `!!cmd`,
+    /// `$ code` or `$$ code` through omp's composer, and every run omp records reaches the live
+    /// feed as a `message_end` of its `bashExecution` / `pythonExecution` message.
+    #[serde(default)]
+    pub shell: bool,
 }
 
 impl BridgeCaps {
@@ -1088,6 +1093,13 @@ impl BridgeHandle {
     pub async fn slash(&self, session_id: &str, command: &str) -> Result<(), BridgeError> {
         self.unit(session_id, "slash", json!({ "command": command }), TUI)
             .await
+    }
+
+    /// Runs one of omp's quick commands (2.5.0 `shell`, `caps.shell`): `text` as typed (trimmed,
+    /// `!`, `!!`, `$` or `$$` first) goes through the TUI composer as if typed + Enter. `settled`
+    /// false: omp still runs it after the bridge's 15 s.
+    pub async fn shell(&self, session_id: &str, text: &str) -> Result<tf_proto::ShellResult, BridgeError> {
+        self.typed(session_id, "shell", json!({ "text": text }), TUI).await
     }
 
     pub async fn abort(&self, session_id: &str) -> Result<(), BridgeError> {

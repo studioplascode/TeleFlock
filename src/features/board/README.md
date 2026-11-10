@@ -109,7 +109,7 @@ export function PrProbe(props: { agentKey: string }): JSX.Element | null; // inv
 export function rememberShip(hostId: string, workspaceId: string, memo: { stage: number; blocked: boolean; next: string; pr?: number }): void;
 
 // src/features/board/firstSteps.ts — First steps checklist (demo: 6 steps; fresh real host: setup → first agent → first answer),
-// ticked by state changes (activity "You answered…", steer queue, Review/palette opened, dispatch/ worktrees), persisted in tf.firstSteps.
+// ticked by state changes (activity "You answered…", steer queue, Review/palette opened, a Dispatch task started on a demo host), persisted in tf.firstSteps.
 ```
 
 Everything is re-exported from `src/features/board/index.ts`.

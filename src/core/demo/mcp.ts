@@ -983,7 +983,8 @@ export class DemoMcp {
     if (server.transport === "stdio") {
       const command = (server.command ?? "").trim();
       const base = command.split("/").pop() ?? command;
-      if (base === "uvx" || base === "uv") return { status: "failed", error: `spawn ${base} ENOENT: ${base} is not installed on this host (no such file in PATH)`, tools: [], ms: 240 };
+      // omp's own words (Bun's spawn): a program found nowhere on PATH, or one it couldn't start.
+      if (base === "uvx" || base === "uv") return { status: "failed", error: `Executable not found in $PATH: "${base}"`, tools: [], ms: 240 };
       if (base === "bun" && server.args.join(" ") === "run scripts/docs-mcp.ts") return { status: "connected", tools: TOOLS.docs, serverInfo: { name: "teleflock-docs", version: "0.1.0" }, ms: 380 };
       if (base === "npx" || base === "bunx") {
         const args = server.args.filter((a) => a !== "-y" && a !== "--yes");
@@ -998,7 +999,7 @@ export class DemoMcp {
         if (pkg === "@modelcontextprotocol/server-sequential-thinking" && starts === 1) return { status: "pending", tools: [], ms: 2400 };
         return { status: "connected", tools: known.tools, serverInfo: known.info, ms: 1700 + (hashOf(id) % 600) };
       }
-      return { status: "failed", error: `spawn ${command || "''"} ENOENT`, tools: [], ms: 120 };
+      return { status: "failed", error: /[\\/]/.test(command) ? `ENOENT: no such file or directory, posix_spawn '${command}'` : `Executable not found in $PATH: "${command}"`, tools: [], ms: 120 };
     }
     let u: URL;
     try {

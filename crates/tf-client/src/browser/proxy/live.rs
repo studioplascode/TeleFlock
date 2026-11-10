@@ -1,7 +1,7 @@
-//! The proxy against a real headless Chromium (`TF_TEST_CHROME`, else Chrome for Testing under
-//! `target/`, Playwright's or Puppeteer's cache, or a system Chromium; skipped with a message
-//! when there is none): two agents, each through its own proxied connections with Puppeteer's
-//! auto-attach, and the user on the browser's own port.
+//! The proxy against a real Chromium (`TF_TEST_CHROME`, else Chrome for Testing under `target/`,
+//! Playwright's or Puppeteer's cache, or a system Chromium; skipped with a message when there is
+//! none): two agents, each through its own proxied connections with Puppeteer's auto-attach, and
+//! the user on the browser's own port; headless, and in its own window where there is a display.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,12 +59,14 @@ struct Chrome {
     _dir: tempfile::TempDir,
 }
 
-/// Headless, with a throwaway profile and HOME (nothing of the user's is touched).
-async fn launch(bin: &Path) -> Chrome {
+/// Headless or in its own window (`headed`), with a throwaway profile and HOME (nothing of the
+/// user's is touched).
+async fn launch(bin: &Path, headed: bool) -> Chrome {
     let dir = tempfile::tempdir().unwrap();
+    let mode: &[&str] = if headed { &[] } else { &["--headless=new"] };
     let child = tokio::process::Command::new(bin)
+        .args(mode)
         .args([
-            "--headless=new",
             "--no-sandbox",
             "--remote-debugging-port=0",
             "--remote-debugging-address=127.0.0.1",
@@ -269,8 +271,8 @@ async fn two_agents_share_one_browser_without_seeing_each_other() {
         return;
     };
     eprintln!("live proxy test with {}", bin.display());
-    let chrome = launch(&bin).await;
-    let px = CdpProxy::new(chrome.port);
+    let chrome = launch(&bin, false).await;
+    let px = CdpProxy::new(chrome.port, false, false);
     let (a, b) = (key("a"), key("b"));
 
     // Not attached: refused.
@@ -435,4 +437,104 @@ async fn two_agents_share_one_browser_without_seeing_each_other() {
     assert_eq!(code, 403);
     // B carries on.
     assert_eq!(cb.eval(&sb, "document.title").await, json!("B"));
+}
+
+/// The pages a client was attached to, in the order it met them.
+fn pages_met(c: &Client) -> Vec<String> {
+    c.events()
+        .iter()
+        .filter(|e| e["method"] == "Target.attachedToTarget" && e["params"]["targetInfo"]["type"] == "page")
+        .map(|e| e["params"]["targetInfo"]["targetId"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_use_the_users_tabs_after_their_own_while_they_are_shared() {
+    let Some(bin) = find_chrome() else {
+        eprintln!("skipping agents_use_the_users_tabs_after_their_own_while_they_are_shared: no Chromium found (set TF_TEST_CHROME)");
+        return;
+    };
+    let chrome = launch(&bin, false).await;
+    let px = CdpProxy::new(chrome.port, false, true);
+    let (a, b) = (key("a"), key("b"));
+    px.attach(&a);
+    px.attach(&b);
+    let user = Client::user(&chrome).await;
+    let mail = user.ok("Target.createTarget", json!({ "url": "data:text/html,<title>mail</title>inbox" }), None).await["targetId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // B connects first: its tab never reaches A.
+    let cb = Client::agent(&px, &b).await;
+    let pb = owned(&px, &b)[0].clone();
+    // A connects the way Puppeteer does: it meets its own first tab first, then the user's.
+    let ca = Client::agent(&px, &a).await;
+    let pa = owned(&px, &a)[0].clone();
+    let sm = ca.session_of(&mail).await;
+    let met = pages_met(&ca);
+    assert_eq!(met.first(), Some(&pa), "its own tab first: {met:?}");
+    assert!(met.contains(&mail) && !met.contains(&pb), "{met:?}");
+    let mut title = Value::Null;
+    for _ in 0..100 {
+        title = ca.eval(&sm, "document.title").await;
+        if title == json!("mail") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(title, json!("mail"), "A reads the user's tab");
+    let listed = ca.ok("Target.getTargets", json!({}), None).await;
+    let pages: Vec<&str> = listed["targetInfos"].as_array().unwrap().iter().filter(|t| t["type"] == "page").map(|t| t["targetId"].as_str().unwrap()).collect();
+    assert_eq!(pages.first(), Some(&pa.as_str()), "{pages:?}");
+    assert!(pages.contains(&mail.as_str()) && !pages.contains(&pb.as_str()), "{pages:?}");
+    assert!(ca.err("Target.attachToTarget", json!({ "targetId": pb, "flatten": true }), None).await.contains("No target"));
+    // B uses the user's tab too.
+    let smb = cb.session_of(&mail).await;
+    assert_eq!(cb.eval(&smb, "document.title").await, json!("mail"));
+    // Sharing ends: A's sessions on the user's tab end, and the tab is out of its reach.
+    px.set_share(false);
+    ca.event("the user's page let go", |e| e["method"] == "Target.detachedFromTarget" && e["params"]["sessionId"] == json!(sm)).await;
+    assert!(ca.err("Runtime.evaluate", json!({ "expression": "1" }), Some(&sm)).await.contains("Session with given id not found"));
+    assert!(ca.err("Target.attachToTarget", json!({ "targetId": mail, "flatten": true }), None).await.contains("No target"));
+    let sa = ca.session_of(&pa).await;
+    assert_eq!(ca.eval(&sa, "1 + 1").await, json!(2), "its own tab carries on");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_its_own_window_an_agents_first_tab_opens_in_the_users_window_in_front() {
+    let Some(bin) = find_chrome() else {
+        eprintln!("skipping in_its_own_window_an_agents_first_tab_opens_in_the_users_window_in_front: no Chromium found (set TF_TEST_CHROME)");
+        return;
+    };
+    if cfg!(target_os = "linux") && std::env::var_os("DISPLAY").is_none() {
+        eprintln!("skipping in_its_own_window_an_agents_first_tab_opens_in_the_users_window_in_front: no display (set DISPLAY)");
+        return;
+    }
+    let chrome = launch(&bin, true).await;
+    let px = CdpProxy::new(chrome.port, true, true);
+    let a = key("a");
+    px.attach(&a);
+    let user = Client::user(&chrome).await;
+    let targets = user.ok("Target.getTargets", json!({}), None).await;
+    let start = targets["targetInfos"].as_array().unwrap().iter().find(|t| t["type"] == "page").expect("the window's tab")["targetId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let window_of = |id: String| {
+        let user = &user;
+        async move { user.ok("Browser.getWindowForTarget", json!({ "targetId": id }), None).await["windowId"].clone() }
+    };
+    let shown = |id: String| {
+        let user = &user;
+        async move {
+            let s = user.ok("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None).await["sessionId"].as_str().unwrap().to_string();
+            user.eval(&s, "document.visibilityState").await
+        }
+    };
+    let window = window_of(start.clone()).await;
+    let _ca = Client::agent(&px, &a).await;
+    let first = owned(&px, &a)[0].clone();
+    assert_eq!(window_of(first.clone()).await, window, "a tab of the user's window, not a window of its own");
+    assert_eq!(shown(first.clone()).await, json!("visible"), "in the foreground");
+    assert_eq!(shown(start.clone()).await, json!("hidden"), "the user's tab behind it");
 }

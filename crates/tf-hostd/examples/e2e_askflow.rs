@@ -1,8 +1,8 @@
 //! Lab end-to-end run of an ask's explanation and Back between its questions (architecture §3.5
 //! "Needs-you"): speaks the client protocol through `tf-hostd attach` against a real herdr lab
-//! session and real omp with TeleFlock's bridge, whose model is a local mock
-//! (`e2e_askflow_mock.ts`, next to this file) that explains and then calls omp's `ask` tool with
-//! three questions (a single choice, a multi-select, a single choice).
+//! session and real omp (≥ 18.18) with TeleFlock's bridge, whose model is a local mock
+//! (`e2e_askflow_mock.ts`, next to this file) that explains and then calls omp's `ask` tool with one
+//! HTML form: a short intro, a radio group with a preselected option, checkboxes and a text input.
 //!
 //! Run it in a lab (AGENTS.md); it writes the lab's omp settings (every role on the mock) itself:
 //!
@@ -14,12 +14,13 @@
 //! scripts/lab/stop askflow --purge
 //! ```
 //!
-//! Steps: the agent asks → its board card and its session's dialog carry the explanation and
-//! question 1 of 3 → Postgres → Auth + Search → Back from question 3: question 2 comes back with
-//! its ticks → Back: question 1 comes back on Postgres → SQLite → Search alone → a typed answer
-//! for question 3 → omp's ask result, which the agent echoes, holds the final answers. Every question,
-//! Back included, keeps the waiting time of the first (`needs.since`). `--keep`
-//! leaves the agent waiting on its first question (for a look in the app) instead.
+//! Steps: the agent asks → its board card and its session's dialog carry the explanation (with the
+//! form's intro on its first field), question 1 of 3 and the preselected option as ★ → Postgres →
+//! Auth + Search → Back from question 3 (the text field): question 2 comes back with its ticks →
+//! Back: question 1 comes back on Postgres → SQLite → Search alone → a typed answer for question 3
+//! → omp's ask result, which the agent echoes, holds the final answers. Every question, Back
+//! included, keeps the waiting time of the first (`needs.since`). `--keep` leaves the agent waiting
+//! on its first question (for a look in the app) instead.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -31,6 +32,8 @@ use serde_json::{Value, json};
 
 /// What the mock agent writes before asking (`e2e_askflow_mock.ts`).
 const EXPLANATION: &str = "I compared the two stores for the **lab app**:\n\n- *SQLite* keeps everything in one file and needs nothing running.\n- *Postgres* scales further, but needs a server.\n\nThree things decide the setup, so I am asking them together.";
+/// The form's own intro, which its first field carries after the explanation.
+const INTRO: &str = "Three things decide the setup.";
 
 struct Args {
     hostd: String,
@@ -190,25 +193,40 @@ impl Client {
     }
 }
 
-/// Waits for the agent's question `index` (0-based), a request other than `after`.
+/// Waits for the agent's question `index` (0-based), a request other than `after`: a choice (`ask`)
+/// or the form's text field (`input`).
 fn question(c: &mut Client, id: &str, index: u64, after: &str) -> Value {
     let needs = c.wait_agent(&format!("question {}", index + 1), id, 120, |x| {
-        x["needs"]["kind"] == "ask" && x["needs"]["step"]["index"] == index && x["needs"]["requestId"] != after
+        matches!(x["needs"]["kind"].as_str(), Some("ask" | "input")) && x["needs"]["step"]["index"] == index && x["needs"]["requestId"] != after
     })["needs"]
         .clone();
     println!(
-        "  question {} of {}: {:?} (request {}, back: {}, has: {} {})",
+        "  question {} of {} ({}): {:?} (request {}, back: {}, has: {} {})",
         index + 1,
         needs["step"]["total"],
+        needs["kind"].as_str().unwrap_or(""),
         needs["question"].as_str().unwrap_or(""),
         needs["requestId"].as_str().unwrap_or(""),
         needs["step"]["canBack"],
         needs["step"]["choices"],
         needs["step"]["text"],
     );
-    assert_eq!(needs["context"], EXPLANATION, "every question carries the explanation");
+    // The form's intro leads to its first field; every field carries the explanation.
+    let context = if index == 0 { format!("{EXPLANATION}\n\n{INTRO}") } else { EXPLANATION.to_owned() };
+    assert_eq!(needs["context"], context, "the question carries the explanation and the form's text before it");
     assert_eq!((needs["step"]["total"].as_u64(), needs["step"]["canBack"].as_bool()), (Some(3), Some(index > 0)));
     needs
+}
+
+/// The id of the option of `needs` whose label starts with `label`.
+fn option(needs: &Value, label: &str) -> String {
+    let options = needs["options"].as_array().expect("options");
+    options
+        .iter()
+        .find(|o| o["label"].as_str().is_some_and(|l| l.starts_with(label)))
+        .and_then(|o| o["id"].as_str())
+        .unwrap_or_else(|| panic!("no option {label:?} in {options:?}"))
+        .to_owned()
 }
 
 /// `needs` waits since `since`: the time the ask's first question came.
@@ -259,7 +277,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(work);
     std::fs::create_dir_all(work).unwrap();
 
-    println!("== 1. the agent explains, then asks three questions");
+    println!("== 1. the agent explains, then asks with a form of three fields");
     let mut c = Client::attach(&a);
     let spec = json!({"kind": "omp", "model": "mock/lab-1", "plan": false, "prompt": "ASKFLOW-LAB: set up the lab app"});
     let started = c.call("agent.start", json!({"target": {"kind": "cwd", "cwd": a.work, "label": "askflow"}, "spec": spec})).expect("agent.start");
@@ -268,10 +286,15 @@ fn main() {
     // One ask is one wait: every question (Back included) keeps the time the first came.
     let asked = q1["since"].clone();
     assert_eq!(q1["step"]["choices"], Value::Null, "nothing answered yet");
+    assert_eq!(q1["question"], "Which store should the lab app use?");
+    // The preselected option is the agent's recommendation: ★, read without omp's mark.
+    let recommended: Vec<&str> = q1["options"].as_array().unwrap().iter().filter(|o| o["recommended"] == true).filter_map(|o| o["label"].as_str()).collect();
+    assert_eq!(recommended, ["SQLite: one file, nothing to run"]);
+    assert_eq!(q1["allowOther"], true, "a radio group lets the user type their own");
     let snap = c.call("session.open", json!({"agentId": id})).expect("session.open");
     let ui = &snap["ui"];
     println!("  session dialog: {:?}, step {}, context {} bytes", ui["title"].as_str().unwrap_or(""), ui["step"], ui["context"].as_str().map_or(0, str::len));
-    assert_eq!((&ui["id"], &ui["context"], &ui["step"]), (&q1["requestId"], &json!(EXPLANATION), &q1["step"]), "the session's dialog matches the board");
+    assert_eq!((&ui["id"], &ui["context"], &ui["step"]), (&q1["requestId"], &q1["context"], &q1["step"]), "the session's dialog matches the board");
     let _ = c.call("session.close", json!({"agentId": id}));
     if a.keep {
         println!("== --keep: the agent waits on its first question");
@@ -280,21 +303,23 @@ fn main() {
     }
 
     println!("== 2. forward, Back twice, forward with other answers");
-    let r1 = answer(&mut c, &id, &q1, json!({"choices": ["Postgres"]}));
+    let postgres = option(&q1, "Postgres");
+    let r1 = answer(&mut c, &id, &q1, json!({"choices": [postgres]}));
     let q2 = same_wait(question(&mut c, &id, 1, &r1), &asked);
     assert_eq!(q2["multi"], true);
     let r2 = answer(&mut c, &id, &q2, json!({"choices": ["Auth", "Search"]}));
     let q3 = same_wait(question(&mut c, &id, 2, &r2), &asked);
+    assert_eq!((q3["kind"].as_str(), q3["question"].as_str()), (Some("input"), Some("Where does it deploy?")));
     let r3 = answer(&mut c, &id, &q3, json!({"back": true}));
     let q2 = same_wait(question(&mut c, &id, 1, &r3), &asked);
     assert_eq!(q2["step"]["choices"], json!(["Auth", "Search"]), "question 2 comes back with its ticks");
     let r2 = answer(&mut c, &id, &q2, json!({"back": true}));
     let q1 = same_wait(question(&mut c, &id, 0, &r2), &asked);
-    assert_eq!(q1["step"]["choices"], json!(["Postgres"]), "question 1 comes back on its answer");
+    assert_eq!(q1["step"]["choices"], json!([postgres]), "question 1 comes back on its answer");
     let err = c.call("agent.answer", json!({"agentId": id, "requestId": q1["requestId"], "answer": {"choices": [], "cancel": false, "chat": false, "back": true}})).expect_err("no Back on question 1");
     println!("  Back on question 1: {}", err["code"]);
     assert_eq!(err["code"], "invalid_params");
-    let r1 = answer(&mut c, &id, &q1, json!({"choices": ["SQLite"]}));
+    let r1 = answer(&mut c, &id, &q1, json!({"choices": [option(&q1, "SQLite")]}));
     let q2 = same_wait(question(&mut c, &id, 1, &r1), &asked);
     assert_eq!(q2["step"]["choices"], json!(["Auth", "Search"]));
     let r2 = answer(&mut c, &id, &q2, json!({"choices": ["Search"]}));
@@ -313,8 +338,19 @@ fn main() {
         ask = items.iter().rev().find(|i| i["kind"] == "tool" && i["tool"] == "ask").cloned().unwrap_or(Value::Null);
         let _ = c.call("session.close", json!({"agentId": id}));
     }
-    println!("  ask row: status {} output {:?}", ask["status"], ask["output"]);
-    assert_eq!(ask["output"], "User answers:\nstore: SQLite\nfeatures: [Search]\ndeploy: \"Fly.io, region fra\"", "the agent got the final answers");
+    println!("  ask row: status {} output {:?} view {}", ask["status"], ask["output"], ask["view"]);
+    // omp's form answers: the submitted values (option values, the typed text), as JSON.
+    assert_eq!(
+        ask["output"],
+        "User answers:\n{\n  \"store\": \"sqlite\",\n  \"features\": [\n    \"search\"\n  ],\n  \"deploy\": \"Fly.io, region fra\"\n}",
+        "the agent got the final answers"
+    );
+    let shown: Vec<(&str, &str)> = ask["view"]["questions"].as_array().into_iter().flatten().filter_map(|q| Some((q["question"].as_str()?, q["answer"].as_str()?))).collect();
+    assert_eq!(
+        shown,
+        [("Which store should the lab app use?", "SQLite: one file, nothing to run"), ("Which features ship first?", "Search"), ("Where does it deploy?", "Fly.io, region fra")],
+        "the transcript's ask card shows each question with its answer"
+    );
     let done = c.wait_agent("the turn ends", &id, 120, |x| x["needs"].is_null() && x["column"] == "review");
     println!("  turn ended: column {}", done["column"]);
     c.close();

@@ -1340,6 +1340,29 @@ export class AgentSim {
     else this.put({ kind: "notice", id: this.id(), at: now, level, text, source: "teleflock" });
   }
 
+  /**
+   * A quick command the user ran (`agent.shell`, or typed in omp's terminal) ended: omp's record of it,
+   * a tool row with `userRun`, and its output in the attached terminals as omp's TUI shows it.
+   */
+  ran(run: { python: boolean; excluded: boolean; body: string; output: string; exitCode: number }): void {
+    const at = this.host.now();
+    const id = this.id();
+    this.put({
+      kind: "tool",
+      id,
+      at,
+      callId: id,
+      tool: run.python ? "python" : "bash",
+      title: run.body.split("\n")[0] ?? "",
+      args: null,
+      status: run.exitCode === 0 ? "ok" : "error",
+      truncated: false,
+      view: { type: "bash", command: run.body, output: run.output, exitCode: run.exitCode, background: false, timedOut: false },
+      userRun: { python: run.python, excluded: run.excluded },
+    });
+    this.termLine(`\r\n\x1b[2m${run.python ? ">>>" : "$"} ${run.body.replace(/\n/g, "\r\n")}\x1b[0m\r\n${run.output.replace(/\n/g, "\r\n")}`);
+  }
+
   compact(instructions?: string): void {
     const now = this.host.now();
     const before = this.ctxTokens;
@@ -1433,6 +1456,7 @@ function capsFor(live: boolean, readOnly: boolean): Capabilities {
     retry: on,
     subagentRetry: on,
     refusalRetry: on,
+    shell: on,
   };
 }
 

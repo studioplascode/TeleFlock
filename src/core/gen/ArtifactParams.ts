@@ -8,11 +8,17 @@ import type { ArtifactKind } from "./ArtifactKind";
  */
 export type ArtifactParams = { agentId: string, kind: ArtifactKind, name: string, 
 /**
- * Bytes to return (default 1 MiB; text 4 MiB at most, `base64` 8 MiB).
+ * Bytes to return (default 1 MiB; text 4 MiB at most, `base64` and ranged reads 8 MiB).
  */
 maxBytes?: number, 
 /**
  * Answer the file's bytes as base64 `data` instead of `text`, binary files included
  * (images and the files a presented page references). Hosts before 0.9.0 ignore it.
  */
-base64?: boolean, };
+base64?: boolean, 
+/**
+ * Read from this byte on, always as base64 `data` (ranged reads of media larger than one
+ * read: the viewer reads 1 MiB, then 2 MiB at a time). Hosts ≥ 0.9.4 echo it in
+ * `ArtifactContent.offset`; older ones ignore it and read from the start.
+ */
+offset?: number, };

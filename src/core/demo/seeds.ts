@@ -1,7 +1,7 @@
 import type { Subagent } from "@/core/gen";
 import { fileDiff } from "./codegen";
 import type { AgentDef } from "./data";
-import { migrationNotesSteps, q3ReportSteps } from "./presented";
+import { docsMediaSteps, migrationNotesSteps, q3ReportSteps } from "./presented";
 import { richContentSteps } from "./richContent";
 import { bash, edit, grep, QUOTA_ERROR, read, say, type Step, think, todo } from "./scripts";
 
@@ -160,6 +160,7 @@ export function historyFor(def: AgentDef): Step[] {
         ...migrationNotesSteps(),
         say("README, the architecture overview and the migration notes are merged in #139."),
         ...q3ReportSteps(),
+        ...docsMediaSteps(),
       );
       break;
     case "flaky":

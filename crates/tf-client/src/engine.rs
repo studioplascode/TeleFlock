@@ -1598,7 +1598,8 @@ impl Engine {
             | AppMethod::BrowserRevealProfile(_)
             | AppMethod::BrowserTakeOver(_)
             | AppMethod::BrowserHandBack(_)
-            | AppMethod::BrowserLendTab(_)) => crate::browser::call(i, m).await,
+            | AppMethod::BrowserLendTab(_)
+            | AppMethod::BrowserLockTab(_)) => crate::browser::call(i, m).await,
             m @ (AppMethod::RecordingStart(_)
             | AppMethod::RecordingAppend(_)
             | AppMethod::RecordingPause(_)

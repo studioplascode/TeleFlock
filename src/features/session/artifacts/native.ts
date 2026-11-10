@@ -29,8 +29,8 @@ function base64Of(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-/** Writes `data` (text, or base64 bytes) to a temporary file named `name` and opens it with the system's handler. */
-export function openInBrowser(name: string, data: { text: string } | { base64: string }): Promise<void> {
-  const base64 = "text" in data ? base64Of(new TextEncoder().encode(data.text)) : data.base64;
-  return invoke("doc_open", { name, base64 });
+/** Writes `data` (text, or a file's bytes) to a temporary file named `name` and opens it with the system's handler. */
+export async function openInBrowser(name: string, data: { text: string } | { blob: Blob }): Promise<void> {
+  const bytes = "text" in data ? new TextEncoder().encode(data.text) : new Uint8Array(await data.blob.arrayBuffer());
+  await invoke("doc_open", { name, base64: base64Of(bytes) });
 }

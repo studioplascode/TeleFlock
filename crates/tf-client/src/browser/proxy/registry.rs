@@ -1,12 +1,19 @@
 //! What the proxy knows about the browser: its targets as the proxy's own DevTools connection
-//! (`monitor`) reports them, which tab shows which page, and which pages agents own.
+//! (`monitor`) reports them, which tab shows which page, which pages agents own, which tabs the
+//! user locked, and how the browser runs (`headed`) and whether agents may use the user's tabs
+//! (`share`).
 //!
 //! Ownership is per page (the DevTools target of a tab's top-level document, the id the UI and
 //! `BrowserTabOwner` use). A page is an agent's when the agent opened it (`Target.createTarget`,
 //! `/json/new`), when one of its pages opened it (`openerId`: popups and `window.open`), or when
-//! the user lent it. Every other page is the user's and does not exist for agents. Chrome's tab
-//! targets (`type: "tab"`, the parents of pages since Chrome 112) belong to the owner of the page
-//! they show.
+//! the user lent it. Every other page is the user's: with `share` on, every attached agent sees and
+//! drives the user's web pages ([`Vis::Shared`], listed after its own); with it off they do not
+//! exist for agents. Another agent's pages never exist for an agent. Chrome's tab targets (`type:
+//! "tab"`, the parents of pages since Chrome 112) belong to the owner of the page they show.
+//!
+//! Locks are per page too: a tab no agent opened (the user's, or one they lent) that the user
+//! locked stays on its page for agents ([`Registry::locked_url`]) until it is unlocked or closed;
+//! a prerendered page activated in it takes the lock over, a new browser process forgets them.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,6 +21,7 @@ use serde_json::Value;
 use tf_proto::{ApiError, BrowserTabOwner, Millis};
 
 use super::AttachKey;
+use super::filter::url_allowed;
 
 /// An agent's activity (`active_at`) is recorded at most this often, per agent and per tab.
 pub(super) const ACTIVE_EVERY: Millis = 2_000;
@@ -42,7 +50,11 @@ pub(super) struct Owned {
 pub(super) enum Vis {
     /// The agent's (it opened it, or the user lent it): it sees and drives it.
     Mine,
-    /// The user's or another agent's: it does not exist for the agent.
+    /// The user's, while the user lets agents use their tabs (`Registry::share`): every attached
+    /// agent sees and drives it, after its own.
+    Shared,
+    /// Another agent's, or the user's (sharing off, or a page of the browser itself): it does not
+    /// exist for the agent.
     Foreign,
     /// The agent's, but the user took it over until they hand it back.
     TakenOver,
@@ -52,8 +64,30 @@ pub(super) enum Vis {
     Unknown,
 }
 
+impl Vis {
+    /// The agent sees and drives it.
+    pub fn visible(self) -> bool {
+        matches!(self, Vis::Mine | Vis::Shared)
+    }
+
+    /// Where it goes in what the agent is shown (its own first, then the user's): `None` when it
+    /// is not shown.
+    pub fn rank(self) -> Option<u8> {
+        match self {
+            Vis::Mine => Some(0),
+            Vis::Shared => Some(1),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Registry {
+    /// The browser runs in its own window: agents' tabs open as tabs of the user's windows (else
+    /// headless: in windows of their own).
+    pub headed: bool,
+    /// Agents see and drive the user's pages besides their own (`BrowserConfig::share_tabs`).
+    pub share: bool,
     /// Every target the monitor reported, by id.
     targets: HashMap<String, Target>,
     /// The target each tab shows (its page), and back.
@@ -64,6 +98,8 @@ pub(super) struct Registry {
     standby: HashMap<String, String>,
     /// Agents' pages, by page target id.
     owned: HashMap<String, Owned>,
+    /// Pages of tabs the user locked to their page for agents (`browser.lockTab`).
+    locked: HashSet<String>,
     /// Browser contexts agents created (`Target.createBrowserContext`).
     contexts: HashMap<String, AttachKey>,
     /// Windows of agents' tabs (`Browser.getWindowForTarget`).
@@ -79,7 +115,7 @@ pub(super) struct Registry {
     seq: u64,
     /// The monitor has reported every target that existed when it connected.
     pub synced: bool,
-    /// `tabs()` or `active_at` changed (the app shows them).
+    /// `tabs()`, `locked_tabs()` or `active_at` changed (the app shows them).
     pub shown_changed: bool,
     /// Anything changed: connections look again at what they hold back.
     pub changed: bool,
@@ -155,6 +191,9 @@ impl Registry {
         if self.owned.remove(id).is_some() {
             self.shown();
         }
+        if self.locked.remove(id) {
+            self.shown();
+        }
         self.changed = true;
     }
 
@@ -181,23 +220,28 @@ impl Registry {
                 self.owned.insert(id.to_string(), o);
                 self.shown();
             }
+            if self.locked.remove(&old) {
+                self.locked.insert(id.to_string());
+                self.shown();
+            }
         }
         self.changed = true;
     }
 
-    /// A new browser process (or none): its targets, owners, contexts and windows are gone.
+    /// A new browser process (or none): its targets, owners, locks, contexts and windows are gone.
     /// Attachments and agents' activity stay.
     pub fn reset(&mut self) {
         self.resync();
         self.owned.clear();
+        self.locked.clear();
         self.contexts.clear();
         self.windows.clear();
         self.creating.clear();
         self.shown();
     }
 
-    /// The monitor (re)connects to the same browser: it reports every target again; owners
-    /// stay until `synced_now` drops those of targets that went meanwhile.
+    /// The monitor (re)connects to the same browser: it reports every target again; owners and
+    /// locks stay until `synced_now` drops those of targets that went meanwhile.
     pub fn resync(&mut self) {
         self.targets.clear();
         self.tab_child.clear();
@@ -207,13 +251,14 @@ impl Registry {
         self.changed = true;
     }
 
-    /// The monitor reported every target there is: owners of pages that are gone go.
+    /// The monitor reported every target there is: owners and locks of pages that are gone go.
     pub fn synced_now(&mut self) {
         self.synced = true;
-        let before = self.owned.len();
+        let before = (self.owned.len(), self.locked.len());
         let targets = &self.targets;
         self.owned.retain(|id, _| targets.contains_key(id));
-        if self.owned.len() != before {
+        self.locked.retain(|id| targets.contains_key(id));
+        if (self.owned.len(), self.locked.len()) != before {
             self.shown();
         }
         self.changed = true;
@@ -222,13 +267,13 @@ impl Registry {
     // ───────────────────────────── decisions ─────────────────────────────
 
     /// What the target described by `info` (a `TargetInfo`) is to `who`. Only tabs and pages can
-    /// be an agent's here; the browser target, workers, frames and browser UI are decided by the
-    /// connection that attached them.
+    /// be an agent's or shared here; the browser target, workers, frames and browser UI are
+    /// decided by the connection that attached them.
     pub fn vis(&self, who: &AttachKey, info: &Value) -> Vis {
         let Some(id) = s(info, "targetId") else { return Vis::Foreign };
         match s(info, "type") {
             Some("tab") => self.tab_vis(who, id),
-            Some("page") => self.page_vis(who, id, s(info, "openerId")),
+            Some("page") => self.page_vis(who, id, s(info, "openerId"), s(info, "url")),
             _ => Vis::Foreign,
         }
     }
@@ -242,22 +287,22 @@ impl Registry {
     fn raw_id_vis(&self, who: &AttachKey, id: &str) -> Vis {
         match self.targets.get(id).map(|t| t.kind.as_str()) {
             Some("tab") => self.tab_vis(who, id),
-            Some("page") | None => self.page_vis(who, id, None),
+            Some("page") | None => self.page_vis(who, id, None, None),
             Some(_) => Vis::Foreign,
         }
     }
 
     /// How `who` lost the tab or page `top` it holds a session on: `TakenOver` (the user has it
     /// until hand back) or `Foreign` (it is not the agent's any more: a lent tab the user took
-    /// back). Only a definite answer counts: nothing is decided while the monitor (re)reports
-    /// the targets or before it knows which page a tab shows.
+    /// back, a shared tab once sharing is off). Only a definite answer counts: nothing is decided
+    /// while the monitor (re)reports the targets or before it knows which page a tab shows.
     pub fn lost(&self, who: &AttachKey, top: &str) -> Option<Vis> {
         if !self.synced || !self.targets.contains_key(top) {
             return None;
         }
         match self.raw_id_vis(who, top) {
             v @ (Vis::Foreign | Vis::TakenOver) => Some(v),
-            Vis::Mine | Vis::Unknown => None,
+            Vis::Mine | Vis::Shared | Vis::Unknown => None,
         }
     }
 
@@ -269,7 +314,7 @@ impl Registry {
     fn tab_vis(&self, who: &AttachKey, tab: &str) -> Vis {
         match self.tab_child.get(tab) {
             Some(child) => match self.targets.get(child).map(|t| t.kind.as_str()) {
-                Some("page") | None => self.page_vis(who, child, None),
+                Some("page") | None => self.page_vis(who, child, None, None),
                 // Browser UI (the toolbar and omnibox of a window) is nobody's.
                 Some(_) => Vis::Foreign,
             },
@@ -277,7 +322,9 @@ impl Registry {
         }
     }
 
-    fn page_vis(&self, who: &AttachKey, page: &str, opener: Option<&str>) -> Vis {
+    /// `url`: the page's address as the caller's `TargetInfo` says it (else as the monitor last
+    /// heard).
+    fn page_vis(&self, who: &AttachKey, page: &str, opener: Option<&str>, url: Option<&str>) -> Vis {
         if let Some(o) = self.owned.get(page) {
             return o.vis_for(who);
         }
@@ -291,7 +338,17 @@ impl Registry {
         let popup = known.is_none() && opener.and_then(|o| self.owned.get(o)).is_some_and(|o| !o.taken_over);
         // A page newer than a `Target.createTarget` on its way may be its answer.
         let created = self.creating.values().flatten().min().is_some_and(|start| known.is_none_or(|t| t.seq > *start));
-        if popup || created { Vis::Unknown } else { Vis::Foreign }
+        if popup || created {
+            return Vis::Unknown;
+        }
+        // The user's: shared while sharing is on, as long as it shows a web page (never the
+        // browser's own pages, DevTools, an extension's or a file of the device).
+        match url.or_else(|| known.and_then(|t| s(&t.info, "url"))) {
+            Some(u) if self.share && url_allowed(u) => Vis::Shared,
+            // Nobody described it yet: the monitor will.
+            None if self.share => Vis::Unknown,
+            _ => Vis::Foreign,
+        }
     }
 
     /// The page a tab or page target stands for.
@@ -309,19 +366,54 @@ impl Registry {
         self.targets.get(id).map(|t| &t.info)
     }
 
-    /// The pages lent to `who` that it may drive now.
-    pub fn lent_to(&self, who: &AttachKey) -> Vec<String> {
-        let mut v: Vec<String> =
-            self.owned.iter().filter(|(_, o)| o.lent && !o.taken_over && o.who == *who).map(|(id, _)| id.clone()).collect();
-        v.sort();
-        v
+    /// `who` has a page it can drive and open pages in (its own or lent to it, not taken over,
+    /// not locked): an agent connecting without one gets a blank tab, as does one refused a
+    /// locked tab.
+    pub fn has_live_tab(&self, who: &AttachKey) -> bool {
+        self.owned.iter().any(|(id, o)| {
+            o.who == *who && !o.taken_over && !self.locked.contains(id) && (!self.synced || self.targets.contains_key(id))
+        })
     }
 
-    /// `who` has a page it can drive (an agent connecting without one gets a blank tab).
-    pub fn has_live_tab(&self, who: &AttachKey) -> bool {
+    /// The address `id` (a tab or page) shows when it is one of the user's tabs `who` may use
+    /// (shared, not lent to it): the agent reads it, clicks and types and browses in it, but does
+    /// not close it.
+    pub fn user_tab_url(&self, who: &AttachKey, id: &str) -> Option<&str> {
+        if self.id_vis(who, id) != Vis::Shared {
+            return None;
+        }
+        self.targets.get(self.page_of(id)).and_then(|t| s(&t.info, "url"))
+    }
+
+    /// The address `id` (a tab or page) shows when the user locked it to its page and `who` may
+    /// use it (shared, or lent to it): the agent reads it and clicks and types in it, but does
+    /// not navigate, reload or close it. Empty while the browser has not described it (again).
+    pub fn locked_url(&self, who: &AttachKey, id: &str) -> Option<&str> {
+        let page = self.page_of(id);
+        if !self.locked.contains(page) || !self.id_vis(who, id).visible() {
+            return None;
+        }
+        Some(self.targets.get(page).and_then(|t| s(&t.info, "url")).unwrap_or_default())
+    }
+
+    /// The address of the newest tab `who` can drive of its own (opened, or lent to it) and open
+    /// pages in (not locked), when it has one: where it opens pages instead of in a locked tab.
+    pub fn newest_own(&self, who: &AttachKey) -> Option<&str> {
         self.owned
             .iter()
-            .any(|(id, o)| o.who == *who && !o.taken_over && (!self.synced || self.targets.contains_key(id)))
+            .filter(|(id, o)| o.who == *who && !o.taken_over && !self.locked.contains(*id))
+            .filter_map(|(id, _)| self.targets.get(id))
+            .max_by_key(|t| t.seq)
+            .and_then(|t| s(&t.info, "url"))
+    }
+
+    /// The live tabs agents opened, but the ones lent to them and the ones the user took over
+    /// (the user's to keep): what closes before a clean stop.
+    pub fn agents_tabs(&self) -> Vec<String> {
+        let mut v: Vec<String> =
+            self.owned.iter().filter(|(id, o)| !o.lent && !o.taken_over && self.targets.contains_key(*id)).map(|(id, _)| id.clone()).collect();
+        v.sort();
+        v
     }
 
     // ───────────────────────────── owners ─────────────────────────────
@@ -468,6 +560,34 @@ impl Registry {
         self.owned.insert(page.to_string(), Owned { who: who.clone(), lent: true, taken_over: false, active_at: None });
         self.shown();
         Ok(())
+    }
+
+    /// `browser.lockTab`: a tab no agent opened (the user's, or one they lent) stays on its page
+    /// for agents, or (`on` false) no longer. An agent's own tab is not locked.
+    pub fn lock(&mut self, page: &str, on: bool) -> Result<(), ApiError> {
+        if !on {
+            if self.locked.remove(page) {
+                self.shown();
+            }
+            return Ok(());
+        }
+        if self.owned.get(page).is_some_and(|o| !o.lent) {
+            return Err(ApiError::new("invalid_params", "An agent opened this tab: only your own tabs, and the ones you lend, can be locked."));
+        }
+        if self.synced && self.targets.get(page).is_none_or(|t| t.kind != "page") {
+            return Err(ApiError::new("not_found", format!("No tab {page}.")));
+        }
+        if self.locked.insert(page.to_string()) {
+            self.shown();
+        }
+        Ok(())
+    }
+
+    /// The pages of the tabs the user locked (`BrowserStatus::locked_tabs`), sorted.
+    pub fn locked_tabs(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.locked.iter().cloned().collect();
+        v.sort();
+        v
     }
 
     /// Agents' tabs for `BrowserStatus::tabs` (names are the caller's), in a stable order.

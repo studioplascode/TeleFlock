@@ -213,6 +213,7 @@ mod tests {
             view,
             error: None,
             artifact: None,
+            user_run: None,
         })
     }
 

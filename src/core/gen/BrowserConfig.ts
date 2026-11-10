@@ -21,6 +21,12 @@ headed: boolean,
  */
 cap: number, 
 /**
+ * Attached agents can see and drive the user's tabs (every tab no agent opened), besides
+ * the tabs they open and the ones the user lends them; they never see each other's
+ * (default true). Off: only their own and lent tabs.
+ */
+shareTabs: boolean, 
+/**
  * Engines found on this device, in the order they are preferred.
  */
 engines: Array<BrowserEngine>, download: BrowserDownload, };

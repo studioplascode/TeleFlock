@@ -1,13 +1,13 @@
-import { ArrowLeft, ArrowRight, AppWindow, Globe, Hand, Lock, Maximize2, Minimize2, MoreHorizontal, PanelRightOpen, Plus, RotateCcw, RotateCw, Settings2, Square, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowLeft, ArrowRight, AppWindow, Globe, Hand, Lock, LockKeyhole, LockKeyholeOpen, Maximize2, Minimize2, MoreHorizontal, PanelRightOpen, Plus, RotateCcw, RotateCw, Settings2, Square, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { navigate } from "@/core";
 import type { BrowserAttachment } from "@/core/gen";
 import { Button, cn, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, IconButton, Tooltip } from "@/design";
-import { handBack, lendTab, startBrowser, stopBrowser, takeOver } from "./actions";
+import { handBack, lendTab, lockTab, startBrowser, stopBrowser, takeOver } from "./actions";
 import { browserController, useBrowserUi } from "./controller";
 import { addressToUrl, nextZoom } from "./input";
 import { useToolbarItems } from "./observe";
-import type { TabOwner } from "./owners";
+import { lockToggle, type TabOwner } from "./owners";
 import type { Tab } from "./tabs";
 
 interface ToolbarProps {
@@ -19,12 +19,16 @@ interface ToolbarProps {
   compact: boolean;
   /** Agents attached now (Let <agent> use this tab). */
   attachments: BrowserAttachment[];
+  /** Every attached agent can use the user's tabs already: lending makes one the agent's alone. */
+  shareTabs: boolean;
+  /** The user locked the shown tab for agents (`BrowserStatus.lockedTabs`). */
+  locked: boolean;
   fullscreen: boolean;
   onFullscreen(): void;
 }
 
-/** Back, Forward, Reload/Stop, the address bar, zoom, the owner's controls, other features' items and the menu. */
-export function Toolbar({ tab, owner, drives, headed, compact, attachments, fullscreen, onFullscreen }: ToolbarProps) {
+/** Back, Forward, Reload/Stop, the address bar, zoom, the lock for agents, the owner's controls, other features' items and the menu. */
+export function Toolbar({ tab, owner, drives, headed, compact, attachments, shareTabs, locked, fullscreen, onFullscreen }: ToolbarProps) {
   const ctl = browserController();
   const zoom = useBrowserUi((s) => (tab ? (s.zoom[tab.id] ?? 1) : 1));
   const items = useToolbarItems((s) => s.items);
@@ -54,6 +58,7 @@ export function Toolbar({ tab, owner, drives, headed, compact, attachments, full
           </button>
         </Tooltip>
       )}
+      <LockControl tab={tab} owner={owner} locked={locked} shareTabs={shareTabs} compact={compact} />
       <OwnerControls tab={tab} owner={owner} compact={compact} />
       {items.map(({ id: key, component: Item }) => (
         <Item key={key} tabId={id} compact={compact} />
@@ -87,7 +92,7 @@ export function Toolbar({ tab, owner, drives, headed, compact, attachments, full
           {id && owner.kind === "user" && attachments.length > 0 && (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuLabel>Let an agent use this tab</DropdownMenuLabel>
+              <DropdownMenuLabel>{shareTabs ? "Lend this tab to one agent" : "Let an agent use this tab"}</DropdownMenuLabel>
               {attachments.map((a) => (
                 <DropdownMenuItem key={`${a.hostId}::${a.agentId}`} icon={<Hand />} onSelect={() => void lendTab(id, a.hostId, a.agentId, a.agentName)}>
                   {a.agentName}
@@ -114,6 +119,35 @@ export function Toolbar({ tab, owner, drives, headed, compact, attachments, full
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+  );
+}
+
+/**
+ * The shown tab is one no agent opened (the user's, or one they lent) that agents may use: lock it
+ * to its page for them ("Lock for agents"), or unlock it.
+ */
+function LockControl({ tab, owner, locked, shareTabs, compact }: { tab: Tab | null; owner: TabOwner; locked: boolean; shareTabs: boolean; compact: boolean }) {
+  const toggle = tab ? lockToggle(owner, locked, shareTabs) : null;
+  if (!tab || !toggle) return null;
+  const label = toggle === "unlock" ? "Unlock for agents" : "Lock for agents";
+  const tip =
+    toggle === "unlock"
+      ? "Locked to its page: agents can read this tab, click and type in it, but not open other pages in it or close it. Unlock to let them browse in it."
+      : "Keep this tab on its page: agents can still read it, click and type in it, but not open other pages in it or close it.";
+  return (
+    <Tooltip content={tip}>
+      <Button
+        size="sm"
+        variant={locked ? "secondary" : "ghost"}
+        icon={locked ? <LockKeyhole /> : <LockKeyholeOpen />}
+        aria-pressed={locked}
+        aria-label={compact ? label : undefined}
+        onClick={() => void lockTab(tab.id, !locked)}
+        className={cn("shrink-0", compact && "w-8 px-0")}
+      >
+        {compact ? null : label}
+      </Button>
+    </Tooltip>
   );
 }
 

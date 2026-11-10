@@ -1,8 +1,9 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { getAgentViews, getRoute, getWorkspacesSnapshot, useActivity, useHostState, useHosts, useUi } from "@/core";
+import { getAgentViews, getRoute, useActivity, useHostState, useHosts, useUi } from "@/core";
 import type { HostActivityEvent } from "@/core";
+import { entryHost, useDispatch } from "@/features/dispatch/store";
 import { setupGap } from "./setupGap";
 
 /*
@@ -99,7 +100,10 @@ function checkDemo(): void {
   const route = getRoute();
   const reconnect = agents.find((a) => a.name === "reconnect");
   if (route.name === "review" && reconnect && route.hostId === reconnect.hostId && route.workspaceId === reconnect.workspaceId) fs.tick("reviewReconnect");
-  if (getWorkspacesSnapshot().some((w) => demoIds.has(w.hostId) && w.ws.worktree?.branch?.startsWith("dispatch/"))) fs.tick("dispatch");
+  // A task Dispatch got started on a demo host since the checklist appeared (a worktree, in place or a chat).
+  const since = fs.since ?? 0;
+  const dispatched = Object.entries(useDispatch.getState().threads).some(([k, list]) => list.some((e) => e.phase === "started" && e.createdAt >= since && demoIds.has(entryHost(k, e))));
+  if (dispatched) fs.tick("dispatch");
 }
 
 /** Start watching for step completions (idempotent; keeps running off the board until the checklist retires). */

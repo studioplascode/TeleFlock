@@ -6,7 +6,7 @@ import { attachAgent, detachAgent } from "./actions";
 import { browserController } from "./controller";
 import { isDriving, type TabGroup } from "./owners";
 import { RequestButtons } from "./RequestCard";
-import { type RequestView, requestViews, waitingText } from "./requests";
+import { canUseText, type RequestView, requestViews, waitingText } from "./requests";
 
 interface AgentBarProps {
   status: BrowserStatus;
@@ -19,9 +19,9 @@ interface AgentBarProps {
 }
 
 /**
- * Above the page: who can control this browser (each attached agent with Detach and a live
- * "driving now"), the agents asking for it, the ones waiting at the cap, and, beside a session,
- * "Let <agent> use my browser".
+ * Above the page: who can control this browser and which tabs (each attached agent with Detach
+ * and a live "driving now"), the agents asking for it, the ones waiting at the cap, and, beside a
+ * session, "Let <agent> use my browser".
  */
 export function AgentBar({ status, groups, now, hostName, beside, compact }: AgentBarProps) {
   const [open, setOpen] = useState(false);
@@ -46,14 +46,14 @@ export function AgentBar({ status, groups, now, hostName, beside, compact }: Age
             ))}
           </span>
           <span className="min-w-0 flex-1 truncate text-ink-2">
-            <b className="text-ink">{attachments.length} agents</b> can control this browser
+            <b className="text-ink">{attachments.length} agents</b> {canUseText(status.shareTabs, true)}
             {attachments.some((a) => isDriving(a.activeAt, now)) ? " · driving now" : ""}
           </span>
           <ChevronDown className={cn("size-4 text-mute transition-transform", open && "rotate-180")} />
         </button>
       )}
       {shown.map((a) => (
-        <AttachmentRow key={`${a.hostId}::${a.agentId}`} attachment={a} color={colorOf(a)} hostName={hostName(a.hostId)} now={now} groups={groups} compact={compact} />
+        <AttachmentRow key={`${a.hostId}::${a.agentId}`} attachment={a} color={colorOf(a)} hostName={hostName(a.hostId)} now={now} groups={groups} shareTabs={status.shareTabs} compact={compact} />
       ))}
       {beside && !besideAttached && !besideAsks && (
         <div className="flex h-10 items-center gap-2 px-3">
@@ -68,8 +68,8 @@ export function AgentBar({ status, groups, now, hostName, beside, compact }: Age
   );
 }
 
-/** "<agent> on <host> can control this browser", with its live state, Show its tabs and Detach. */
-function AttachmentRow({ attachment: a, color, hostName, now, groups, compact }: { attachment: BrowserAttachment; color?: string; hostName: string | null; now: number; groups: TabGroup[]; compact: boolean }) {
+/** "<agent> on <host> can use your tabs", with its live state, Watch and Detach. */
+function AttachmentRow({ attachment: a, color, hostName, now, groups, shareTabs, compact }: { attachment: BrowserAttachment; color?: string; hostName: string | null; now: number; groups: TabGroup[]; shareTabs: boolean; compact: boolean }) {
   const driving = isDriving(a.activeAt, now);
   const group = groups.find((g) => g.key === `${a.hostId}::${a.agentId}`);
   const firstTab = group?.tabs[0]?.id;
@@ -82,7 +82,7 @@ function AttachmentRow({ attachment: a, color, hostName, now, groups, compact }:
       <span className="min-w-0 flex-1 text-ink-2">
         <span className="line-clamp-2">
           <b className="text-ink">{a.agentName}</b>
-          {hostName ? ` on ${hostName}` : ""} can control this browser
+          {hostName ? ` on ${hostName}` : ""} {canUseText(shareTabs)}
           {a.scope === "turn" ? " until its turn ends" : ""}
         </span>
         <span className={cn("text-xs", driving ? "font-semibold text-ink" : "text-mute")}>{driving ? "Driving now" : a.connections > 0 ? "Connected" : "Not connected yet"}</span>

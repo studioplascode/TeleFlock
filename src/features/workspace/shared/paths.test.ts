@@ -16,7 +16,7 @@ describe("clipName", () => {
 
 describe("agent names stay within herdr's 32 chars", () => {
   test("agentNameFromBranch clips at a word boundary", () => {
-    expect(agentNameFromBranch("dispatch/implement-websocket-reconnection-backoff")).toBe("implement-websocket-reconnection");
+    expect(agentNameFromBranch("feat/implement-websocket-reconnection-backoff")).toBe("implement-websocket-reconnection");
   });
 
   test("uniqueAgentName makes room for the suffix", () => {

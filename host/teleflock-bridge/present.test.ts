@@ -13,6 +13,7 @@ import {
 	markupAssetRefs,
 	nextPresentVersion,
 	normalizeAssetRef,
+	PRESENT_BINARY_MAX,
 	PRESENT_TEXT_MAX,
 	type PresentDetails,
 	presentArtifact,
@@ -83,12 +84,18 @@ describe("names and kinds", () => {
 		expect(["html", "htm", "md", "mdx", "svg", "png", "jpeg", "csv", "tsv", "json", "log", "rs", "jsonl", "weird"].map(presentKindForExt)).toEqual([
 			"html", "html", "markdown", "markdown", "svg", "image", "image", "csv", "csv", "json", "text", "code", "code", undefined,
 		]);
+		expect(["mmd", "mermaid", "pdf", "apng", "mp3", "flac", "m4a", "mp4", "webm", "mov", "zip"].map(presentKindForExt)).toEqual([
+			"mermaid", "mermaid", "pdf", "image", "audio", "audio", "audio", "video", "video", "video", undefined,
+		]);
 		expect(sniffPresentKind("  <!DOCTYPE html><p>x")).toBe("html");
 		expect(sniffPresentKind("<html><body>")).toBe("html");
 		expect(sniffPresentKind('<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"/>')).toBe("svg");
 		expect(sniffPresentKind('{"a": [1, 2]}')).toBe("json");
 		expect(sniffPresentKind("[link](x) and more")).toBe("markdown");
 		expect(sniffPresentKind("# Findings\n\n- one")).toBe("markdown");
+		expect(sniffPresentKind("flowchart LR\n  A --> B")).toBe("mermaid");
+		expect(sniffPresentKind("  sequenceDiagram\n  A->>B: hi")).toBe("mermaid");
+		expect(sniffPresentKind("graph theory notes")).toBe("markdown");
 	});
 
 	test("versions count every extension and the files dir", () => {
@@ -249,10 +256,51 @@ describe("presentArtifact", () => {
 		expect(presentArtifact({ title: "Notes", path: "NOTES" }, env).details).toMatchObject({ kind: "text", name: "presented/notes-v1.txt" });
 	});
 
+	test("binary files: PDFs, audio, video and any other file keep their bytes and extension", () => {
+		const { cwd, localRoot, env } = workspace();
+		const pdf = Buffer.from("%PDF-1.7\n%\xe2\xe3\n1 0 obj<<>>endobj\n", "latin1");
+		put(path.join(cwd, "out/report.pdf"), pdf);
+		const doc = presentArtifact({ title: "Report", path: "out/report.pdf" }, env).details;
+		expect(doc).toMatchObject({ kind: "pdf", name: "presented/report-v1.pdf", size: pdf.length, assets: 0 });
+		expect(fs.readFileSync(path.join(localRoot, doc.name))).toEqual(pdf);
+		put(path.join(cwd, "clip.webm"), new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0, 0xff]));
+		expect(presentArtifact({ title: "Clip", path: "clip.webm" }, env).details).toMatchObject({ kind: "video", name: "presented/clip-v1.webm" });
+		put(path.join(cwd, "voice.m4a"), new Uint8Array([0, 0, 0, 0x20, 0x66, 0x74, 0x79, 0x70]));
+		expect(presentArtifact({ title: "Voice", path: "voice.m4a" }, env).details).toMatchObject({ kind: "audio", name: "presented/voice-v1.m4a" });
+		// No kind of their own: binary bytes are a file to open or save, text stays text.
+		put(path.join(cwd, "dist/app.zip"), new Uint8Array([0x50, 0x4b, 3, 4, 0, 0xff]));
+		expect(presentArtifact({ title: "Build", path: "dist/app.zip" }, env).details).toMatchObject({ kind: "file", name: "presented/build-v1.zip", source: "dist/app.zip" });
+		put(path.join(cwd, "blob"), new Uint8Array([0xff, 0xfe, 0, 1]));
+		expect(presentArtifact({ title: "Blob", path: "blob" }, env).details).toMatchObject({ kind: "file", name: "presented/blob-v1.bin" });
+		expect(presentArtifact({ title: "Notes as file", path: "report/js/app.js", kind: "file" }, env).details).toMatchObject({ kind: "file", name: "presented/notes-as-file-v1.js" });
+		// A Mermaid file renders as a diagram.
+		put(path.join(cwd, "docs/flow.mmd"), "graph TD\n  A-->B");
+		expect(presentArtifact({ title: "Flow", path: "docs/flow.mmd" }, env).details).toMatchObject({ kind: "mermaid", name: "presented/flow-v1.mmd" });
+		expect(presentArtifact({ title: "Inline flow", content: "flowchart LR\n  A --> B" }, env).details).toMatchObject({ kind: "mermaid", name: "presented/inline-flow-v1.mmd" });
+	});
+
+	test("each binary kind has its own size bound", () => {
+		const { cwd, env } = workspace();
+		const sized = (name: string, size: number) => {
+			const file = path.join(cwd, name);
+			fs.writeFileSync(file, "");
+			fs.truncateSync(file, size);
+		};
+		sized("big.png", PRESENT_BINARY_MAX.image + 1);
+		sized("ok.png", PRESENT_BINARY_MAX.image);
+		sized("big.mp4", PRESENT_BINARY_MAX.video + 1);
+		sized("big.zip", PRESENT_BINARY_MAX.file + 1);
+		expect(() => presentArtifact({ title: "Big", path: "big.png" }, env)).toThrow("a presented image can be at most 16 MB");
+		expect(presentArtifact({ title: "Ok", path: "ok.png" }, env).details).toMatchObject({ kind: "image", size: PRESENT_BINARY_MAX.image });
+		expect(() => presentArtifact({ title: "Big", path: "big.mp4" }, env)).toThrow("a presented video can be at most 64 MB");
+		expect(() => presentArtifact({ title: "Big", path: "big.zip" }, env)).toThrow("a presented file can be at most 64 MB");
+	});
+
 	test("arguments the agent has to fix", () => {
 		const { cwd, env } = workspace();
 		put(path.join(cwd, "bin.dat"), new Uint8Array([0xff, 0xfe, 0, 1]));
 		put(path.join(cwd, "notes.txt"), "x");
+		put(path.join(cwd, "fake.pdf"), "just text");
 		const big = path.join(cwd, "big.html");
 		fs.writeFileSync(big, "");
 		fs.truncateSync(big, PRESENT_TEXT_MAX + 1);
@@ -265,10 +313,13 @@ describe("presentArtifact", () => {
 			[{ title: "T", path: "nope.html" }, "nope.html: no such file"],
 			[{ title: "T", path: "report" }, "report: not a file"],
 			[{ title: "T", path: "big.html" }, "at most 4 MB"],
-			[{ title: "T", path: "bin.dat" }, "not UTF-8 text"],
+			[{ title: "T", path: "bin.dat", kind: "text" }, "not UTF-8 text"],
 			[{ title: "T", path: "notes.txt", kind: "image" }, "an image must be a png"],
+			[{ title: "T", path: "notes.txt", kind: "video" }, "a video must be a mp4"],
+			[{ title: "T", path: "fake.pdf" }, "not a PDF"],
 			[{ title: "T", content: "abc", kind: "image" }, "An image needs `path`"],
-			[{ title: "T", content: "abc", kind: "pdf" }, "`kind` must be one of"],
+			[{ title: "T", content: "abc", kind: "pdf" }, "A PDF needs `path`"],
+			[{ title: "T", content: "abc", kind: "docx" }, "`kind` must be one of"],
 			[{ title: "T", content: "  " }, "`content` is empty"],
 			[{ title: "T", path: "local://../escape.md" }, "not a file in the session's local:// root"],
 		];
@@ -361,7 +412,7 @@ describe("registration", () => {
 		const shape = (tool.parameters as { shape: Record<string, Record<string, unknown>> }).shape;
 		expect(Object.keys(shape)).toEqual(["title", "path", "content", "kind", "language"]);
 		expect(shape.title?.optional_).toBeUndefined();
-		expect(shape.kind?.values).toEqual(["html", "markdown", "svg", "image", "code", "csv", "json", "text"]);
+		expect(shape.kind?.values).toEqual(["html", "markdown", "svg", "mermaid", "image", "pdf", "audio", "video", "code", "csv", "json", "text", "file"]);
 		const artifacts = path.join(root, "sessions/2026_S1");
 		const ctx = { cwd, sessionManager: { getArtifactsDir: () => artifacts, getSessionId: () => "S1" } };
 		const execute = tool.execute as (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details: PresentDetails }>;

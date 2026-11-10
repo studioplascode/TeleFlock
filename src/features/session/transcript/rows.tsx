@@ -1,7 +1,7 @@
 import { AlertTriangle, Brain, ChevronDown, CircleAlert, CornerDownRight, Info, Layers, Repeat2, Sparkles } from "lucide-react";
 import { memo, useContext, useState } from "react";
 import { ircOf, useAgent, useCore, useSessionItem, useSettings } from "@/core";
-import type { AssistantItem, CompactionItem, ImageRef, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem } from "@/core/gen";
+import type { AssistantItem, CompactionItem, ImageRef, ModeItem, NoticeItem, ThinkingItem, ToolItem, TranscriptItem, UserItem, UserRun } from "@/core/gen";
 import { cn, Elapsed, formatCompact, formatElapsed, formatUsd, Lightbox, LightboxTrigger, LogoMark, Shimmer, Tooltip, useNow } from "@/design";
 import { useHerdrFreeze } from "@/features/hosts/HerdrControls";
 import { SessionCtx } from "../context";
@@ -19,8 +19,8 @@ export function ircThreadKey(item: TranscriptItem | undefined): string | null {
   return m ? `${m.direction}:${m.peer}` : null;
 }
 
-/** A tool call on the gutter timeline (IRC sends render as chat bubbles instead). */
-export const isRailTool = (item: TranscriptItem | undefined) => item?.kind === "tool" && item.view?.type !== "irc";
+/** A tool call on the gutter timeline (IRC sends render as chat bubbles, the user's own commands as theirs). */
+export const isRailTool = (item: TranscriptItem | undefined) => item?.kind === "tool" && item.view?.type !== "irc" && !item.userRun;
 
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 const clock = (at: number) => timeFmt.format(at);
@@ -71,7 +71,7 @@ export const ItemRow = memo(function ItemRow({
 }) {
   const irc = ircOf(item);
   if (irc) return <IrcBubble entry={irc} withPrev={ircPrev} withNext={ircNext} />;
-  if (rail && item.kind === "tool") return <ToolRow item={item} up={up} down={down} />;
+  if (rail && item.kind === "tool" && !item.userRun) return <ToolRow item={item} up={up} down={down} />;
   return <ItemView item={item} />;
 });
 
@@ -106,7 +106,9 @@ function ItemView({ item }: { item: TranscriptItem }) {
     case "thinking":
       return <ThinkingRow item={item} />;
     case "tool":
-      return (
+      return item.userRun ? (
+        <UserRunRow item={item} run={item.userRun} />
+      ) : (
         <div className="pl-[var(--tf-gutter,38px)]">
           <ToolCard item={item} />
         </div>
@@ -165,6 +167,30 @@ function UserRow({ item }: { item: UserItem }) {
       >
         {item.text}
         {item.images.length > 0 && <UserImages images={item.images} />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A quick command the user ran in omp's composer (`!`, `!!`, `$`, `$$`, typed there or sent from
+ * here): on the user's side, its card under "You ran"; `!!` / `$$` say their output stayed out of
+ * the agent's context.
+ */
+function UserRunRow({ item, run }: { item: ToolItem; run: UserRun }) {
+  return (
+    <div className="flex flex-col items-end gap-1 pt-2 max-md:gap-0.5 max-md:pt-0.5">
+      <div data-find-skip className="flex items-center gap-2 pr-1 text-[11px] font-bold text-mute-2">
+        {run.excluded && (
+          <span className="rounded-full bg-ink/6 px-2 py-0.5 text-[10px] tracking-wider text-mute uppercase" title="omp kept its output out of the agent's context">
+            not in context
+          </span>
+        )}
+        <span>You ran</span>
+        <span className="font-semibold tabular">{clock(item.at)}</span>
+      </div>
+      <div className="w-full max-w-[min(720px,88%)] max-md:max-w-[92%]">
+        <ToolCard item={item} />
       </div>
     </div>
   );

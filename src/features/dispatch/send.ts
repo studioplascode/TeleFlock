@@ -8,12 +8,13 @@ import { basename } from "@/features/workspace/shared/paths";
 import { autoTarget, findGroupRepo, groupHosts, groupOf, groupRepos } from "./auto";
 import type { FirstCommand } from "./commands";
 import { type DispatchEntry, type DispatchOptions, dispatchTask, entryHost, entryRepo, pendingByHost, threadKey } from "./store";
-import { CHAT_CHOICE, recentRepos, threadBase } from "./thread";
+import { branchNamesTaken, CHAT_CHOICE, recentRepos, threadBase } from "./thread";
 
 /*
  * One Dispatch send, outside any view: where the task goes (a single host, or the least busy host
  * of an Auto group that has the repo, or, for a chat (`CHAT_REPO`), that starts chats), whether that
- * host can take it, and the `dispatchTask` call. The Dispatch composer and Quick capture
+ * host can take it, how it starts (the thread's launch mode: a new worktree, or in the folder
+ * itself), and the `dispatchTask` call. The Dispatch composer and Quick capture
  * (`features/capture`) both send through `sendTask`.
  */
 
@@ -28,6 +29,19 @@ export interface DispatchMemory {
   remotes: Readonly<Record<string, string>>;
   bases: Readonly<Record<string, string>>;
   legacyBases: Readonly<Record<string, true>>;
+  /** Threads "In this folder" (their messages start the agent in the folder itself). */
+  inPlace: Readonly<Record<string, true>>;
+  /** Threads of a folder that is no repository root: always in place. */
+  folders: Readonly<Record<string, true>>;
+}
+
+/**
+ * How thread `key`'s messages start their agent: in the folder itself (`inPlace`: picked "In this
+ * folder", or a folder that is no repository root, `folder`), else in a new worktree each.
+ */
+export function threadLaunch(m: Pick<DispatchMemory, "inPlace" | "folders">, key: string): { inPlace: boolean; folder: boolean } {
+  const folder = m.folders[key] === true;
+  return { inPlace: folder || m.inPlace[key] === true, folder };
 }
 
 /** Everything a send looks at: hosts, their state and the Dispatch memory. */
@@ -68,16 +82,29 @@ export function dispatchTarget(profiles: readonly HostProfile[], hostIds: readon
   return { target: lastHost && hostIds.includes(lastHost) ? lastHost : hostIds[0], group: null };
 }
 
-/** When each host last got a dispatch to each of its repos: `{ [hostId]: { [root]: at } }` (chats have none). */
-export function dispatchedRepos(threads: Readonly<Record<string, DispatchEntry[]>>): Record<string, Record<string, number>> {
+/**
+ * When each host last got a dispatch to each of its repos: `{ [hostId]: { [root]: at } }` (chats
+ * have none, nor have the threads of a folder that is no repository root, `folders`).
+ */
+export function dispatchedRepos(threads: Readonly<Record<string, DispatchEntry[]>>, folders: Readonly<Record<string, true>>): Record<string, Record<string, number>> {
   const out: Record<string, Record<string, number>> = {};
   for (const [k, list] of Object.entries(threads)) {
+    if (folders[k]) continue;
     for (const e of list) {
       if (e.chat) continue;
       const per = (out[entryHost(k, e)] ??= {});
       const root = entryRepo(k, e);
       per[root] = Math.max(per[root] ?? 0, e.createdAt);
     }
+  }
+  return out;
+}
+
+/** The branches of Dispatch's worktrees of `root` on `hostId`, from any thread (the base menu leaves them out). */
+export function dispatchBranches(threads: Readonly<Record<string, DispatchEntry[]>>, hostId: string, root: string): Set<string> {
+  const out = new Set<string>();
+  for (const [k, list] of Object.entries(threads)) {
+    for (const e of list) if (e.branch && entryHost(k, e) === hostId && entryRepo(k, e) === root) out.add(e.branch);
   }
   return out;
 }
@@ -153,7 +180,7 @@ export function chatRefusal(w: Pick<DispatchWorld, "profiles" | "status" | "stat
 export function autoRepoOf(w: DispatchWorld, group: string, repo: string): { name: string; roots: Record<string, string>; candidates: string[] } | null {
   const members = groupHosts(w.profiles, group).map((p) => p.id);
   if (isChatRepo(repo)) return { name: CHAT_CHOICE, roots: {}, candidates: chatHostsOf(w.states, members) };
-  const done = dispatchedRepos(w.dispatch.threads);
+  const done = dispatchedRepos(w.dispatch.threads, w.dispatch.folders);
   const pooled = groupRepos(
     members.map((h) => ({ hostId: h, recents: recentRepos(w.states[h], done[h] ?? {}) })),
     w.dispatch.remotes,
@@ -208,8 +235,10 @@ export type SendPlan =
 /**
  * Where and how a task would be sent, or why it can't be (the text of the toast to show). Pure:
  * every input comes from `w`, so a send outside the Dispatch view decides exactly like the view.
- * A chat goes to a host whose daemon starts chats: Auto picks among the group's online ones. A
- * message that is a command goes to a daemon that runs it (`takesCommands`).
+ * The thread's launch mode (`threadLaunch`) says whether it gets a worktree or starts in the folder
+ * itself (Auto: the picked host's checkout). A chat goes to a host whose daemon starts chats: Auto
+ * picks among the group's online ones. A message that is a command goes to a daemon that runs it
+ * (`takesCommands`).
  */
 export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
   const { target, repo, images, command } = req;
@@ -217,6 +246,7 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
   const nameOf = (id: string) => hostName(w.profiles, id);
   if (imageChars(images) > MAX_PROMPT_IMAGE_CHARS) return { ok: false, title: "The images are too large", description: `${IMAGES_TOO_LARGE} Remove some.` };
   const chat = isChatRepo(repo);
+  const inPlace = !chat && threadLaunch(w.dispatch, key).inPlace;
   const refused = chat ? chatRefusal(w, target) : null;
   if (refused) return { ok: false, ...refused };
   const group = groupOf(target);
@@ -276,8 +306,10 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
     };
   }
   const agents = (w.states[to]?.agents ?? []).map((a) => a.name);
-  // A chat has no branch list or base: its name is deduped against the host's agents (and dispatches).
-  if (chat) return { ok: true, hostId: to, args: { key, hostId: to, repo, prompt: req.prompt, command, images, videos: req.videos, placed, options: req.options, taken: agents } };
+  // A chat or a task in the folder itself has no branch list or base: its name is deduped against the host's agents (and dispatches).
+  if (chat || inPlace) {
+    return { ok: true, hostId: to, args: { key, hostId: to, repo: root, prompt: req.prompt, command, images, videos: req.videos, placed, options: req.options, taken: agents, ...(inPlace ? { inPlace } : {}) } };
+  }
   const stored = w.dispatch.bases[key];
   const legacy = w.dispatch.legacyBases[key] === true;
   const list = group ? undefined : req.branches;
@@ -297,14 +329,14 @@ export function planSend(w: DispatchWorld, req: SendRequest): SendPlan {
       baseLabel: base.shown,
       placed,
       options: req.options,
-      taken: list ? [...list.branches.map((b) => b.name), ...agents] : agents,
+      taken: list ? [...branchNamesTaken(list.branches), ...agents] : agents,
       // Without the host's own branch list, the name and the base are settled on the host itself.
       resolveBase: list ? undefined : { stored, legacy },
     },
   };
 }
 
-/** `planSend`, then the send itself: the entry joins the thread and its worktree (a chat: its agent) is created in the background. */
+/** `planSend`, then the send itself: the entry joins the thread and its worktree (in place, or a chat: its agent) is created in the background. */
 export function sendTask(w: DispatchWorld, req: SendRequest): (SendPlan & { ok: false }) | { ok: true; hostId: string; entry: DispatchEntry } {
   const plan = planSend(w, req);
   if (!plan.ok) return plan;

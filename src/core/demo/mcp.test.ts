@@ -51,7 +51,6 @@ describe("demo mcp", () => {
     expect(byName(list, "filesystem").tools.length).toBe(14);
     expect(byName(list, "github")).toMatchObject({ status: "needsAuth", signedIn: false });
     expect(byName(list, "postgres").status).toBe("failed");
-    expect(byName(list, "postgres").error).toContain("spawn uvx ENOENT");
     expect(byName(list, "sentry")).toMatchObject({ status: "connected", signedIn: true });
     expect(byName(list, "sequential-thinking").status).toBe("pending");
     // omp's own context7 wins over Cursor's.

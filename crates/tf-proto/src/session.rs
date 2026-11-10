@@ -130,6 +130,10 @@ wire_struct! {
         /// refusal fallback rules apply to this session: TeleFlock's bridge ≥ 2.3.0 serves it.
         #[serde(default)]
         pub refusal_retry: bool,
+        /// `agent.shell` works: omp's quick commands (`!`, `!!`, `$`, `$$`) run in the session
+        /// (TeleFlock's bridge ≥ 2.5.0 in omp's TUI).
+        #[serde(default)]
+        pub shell: bool,
     }
 }
 
@@ -520,6 +524,23 @@ wire_struct! {
         /// A finished `present` call (bridge ≥ 2.3.0): the document the agent showed the user.
         /// Apps before 0.9.0 ignore it and show the call as a generic tool row.
         pub artifact: Option<crate::artifacts::PresentedArtifact>,
+        /// Not a call of the model's: a quick command the user ran in omp's composer, typed there or
+        /// sent with `agent.shell` (hosts ≥ 0.9.4). `tool` is `bash` or `python`, `view` a
+        /// [`BashView`] of the command or code with its output, `status` `aborted` when omp
+        /// cancelled it and `error` for a non-zero exit code. Apps before 0.9.4 ignore it and show
+        /// the row as a call of the model's.
+        pub user_run: Option<UserRun>,
+    }
+}
+
+wire_struct! {
+    /// omp's record of a quick command the user ran (its `bashExecution` / `pythonExecution`
+    /// message), on [`ToolItem::user_run`].
+    pub struct UserRun {
+        /// `$` / `$$`: Python in omp's eval kernel; else a shell command (`!` / `!!`).
+        pub python: bool,
+        /// `!!` / `$$`: omp kept the output out of the agent's context.
+        pub excluded: bool,
     }
 }
 

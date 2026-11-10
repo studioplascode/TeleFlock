@@ -7,4 +7,8 @@ export type BrowserConfigSetParams = { enginePath?: string, headed?: boolean,
 /**
  * 1–16.
  */
-cap?: number, };
+cap?: number, 
+/**
+ * Absent: true.
+ */
+shareTabs?: boolean, };

@@ -1,10 +1,11 @@
 //! The HTTP side of an agent's connection, as Chrome's DevTools server answers it: `/json/version`
 //! (its `webSocketDebuggerUrl` built from the request's `Host`, so a plain port relay works),
-//! `/json/list` with the agent's pages only, `/json/new` (an agent's tab), `/json/close/<id>` and
-//! `/json/activate/<id>` on its pages only, `/json/protocol`, and the WebSocket upgrade to
-//! `/devtools/browser/…` (the agent's filtered view of the browser) or `/devtools/page/<id>` (one
-//! of its pages). Like Chrome, requests with a `Host` that is not an IP address or `localhost`
-//! (DNS rebinding) and WebSocket upgrades that carry an `Origin` (web pages) are refused.
+//! `/json/list` with the pages the agent may use (its own first, then the user's while they are
+//! shared), `/json/new` (an agent's tab), `/json/close/<id>` and `/json/activate/<id>` on those
+//! pages only, `/json/protocol`, and the WebSocket upgrade to `/devtools/browser/…` (the agent's
+//! filtered view of the browser) or `/devtools/page/<id>` (one of those pages). Like Chrome,
+//! requests with a `Host` that is not an IP address or `localhost` (DNS rebinding) and WebSocket
+//! upgrades that carry an `Origin` (web pages) are refused.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -210,7 +211,7 @@ async fn upgrade<IO>(
     let root = if path == "/devtools/browser" || path.starts_with("/devtools/browser/") {
         Root::Browser
     } else if let Some(id) = path.strip_prefix("/devtools/page/")
-        && px.with_reg(|r| r.id_vis(&who, id) == Vis::Mine)
+        && px.with_reg(|r| r.id_vis(&who, id).visible())
     {
         Root::Page(id.to_string())
     } else {
@@ -292,8 +293,25 @@ async fn json_command(px: &Arc<CdpProxy>, who: &AttachKey, req: &Request) -> (u1
             if vis == Vis::TakenOver {
                 return (403, super::filter::TAKEN_OVER.into());
             }
-            if arg.is_empty() || vis != Vis::Mine {
+            if arg.is_empty() || !vis.visible() {
                 return (404, format!("No such target id: {arg}"));
+            }
+            // A tab the user locked stays open (with where to open pages instead); the user's own
+            // tab (shared, not lent) is not the agent's to close either.
+            if cmd == "close"
+                && let Some((refusal, first_tab)) = px.with_reg(|r| match r.locked_url(who, arg) {
+                    Some(url) => {
+                        let own = r.newest_own(who);
+                        Some((super::filter::locked_refused("/json/close", url, own), own.is_none()))
+                    }
+                    None => r.user_tab_url(who, arg).map(|url| (super::filter::user_tab_close_refused("/json/close", url), false)),
+                })
+            {
+                if first_tab {
+                    let (px, who) = (px.clone(), who.clone());
+                    tokio::spawn(async move { px.first_tab(&who).await });
+                }
+                return (403, refusal);
             }
             let method = if cmd == "close" { "Target.closeTarget" } else { "Target.activateTarget" };
             match px.call(method, json!({ "targetId": arg })).await {
@@ -321,14 +339,19 @@ fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
 
-/// The browser's own `/json/list` entries of `who`'s pages, their URLs pointing at `host`.
-pub(super) fn list_for(entries: Vec<Value>, port: u16, host: &str, mine: impl Fn(&str) -> bool) -> Vec<Value> {
+/// The browser's own `/json/list` entries of the pages `who` may use, ordered by `rank` (`None`:
+/// not shown; the browser's order within a rank), their URLs pointing at `host`.
+pub(super) fn list_for(entries: Vec<Value>, port: u16, host: &str, rank: impl Fn(&str) -> Option<u8>) -> Vec<Value> {
     let ours = format!("127.0.0.1:{port}");
-    entries
+    let mut shown: Vec<(u8, Value)> = entries
         .into_iter()
         .filter(|e| e.get("type").and_then(Value::as_str) == Some("page"))
-        .filter(|e| e.get("id").and_then(Value::as_str).is_some_and(&mine))
-        .map(|mut e| {
+        .filter_map(|e| Some((rank(e.get("id").and_then(Value::as_str)?)?, e)))
+        .collect();
+    shown.sort_by_key(|(r, _)| *r);
+    shown
+        .into_iter()
+        .map(|(_, mut e)| {
             let id = e.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
             e["webSocketDebuggerUrl"] = json!(format!("ws://{host}/devtools/page/{id}"));
             if let Some(f) = e.get("devtoolsFrontendUrl").and_then(Value::as_str) {

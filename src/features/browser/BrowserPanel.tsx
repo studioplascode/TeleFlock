@@ -77,6 +77,8 @@ function Running({ status, mode, agentKey, fullscreen, onFullscreen }: { status:
   const active = tabs.active ? tabs.byId[tabs.active] : undefined;
   const owner = ownerOf(status.tabs, active?.id ?? "");
   const drives = !!active && userDrives(owner);
+  // Tabs the user locked for agents (absent while none is, and from cores before 0.9.4).
+  const locked = new Set(status.lockedTabs ?? []);
   const dialog = active ? dialogs[active.id] : undefined;
   const zoom = useBrowserUi((s) => (active ? (s.zoom[active.id] ?? 1) : 1));
   const stale = useBrowserUi((s) => !!active && s.staleFrame === active.id);
@@ -138,8 +140,8 @@ function Running({ status, mode, agentKey, fullscreen, onFullscreen }: { status:
           </Button>
         </div>
       )}
-      <TabStrip groups={groups} active={tabs.active} hostName={hostName} compact={compact} />
-      <Toolbar tab={active ?? null} owner={owner} drives={drives} headed={status.headed} compact={compact} attachments={status.attachments} fullscreen={fullscreen} onFullscreen={onFullscreen} />
+      <TabStrip groups={groups} active={tabs.active} locked={locked} hostName={hostName} compact={compact} />
+      <Toolbar tab={active ?? null} owner={owner} drives={drives} headed={status.headed} compact={compact} attachments={status.attachments} shareTabs={status.shareTabs} locked={!!active && locked.has(active.id)} fullscreen={fullscreen} onFullscreen={onFullscreen} />
       <AgentBar status={status} groups={groups} now={now} hostName={hostName} beside={beside} compact={compact} />
       <div className="relative flex min-h-0 flex-1">
         {phase !== "open" ? (

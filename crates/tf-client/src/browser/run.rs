@@ -51,6 +51,9 @@ pub(super) async fn actor(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Cm
         match ev {
             Ev::Cmd(None) => {
                 if let Some(p) = proc.take() {
+                    if let Some(px) = super::proxy_of(&inner) {
+                        px.close_agents_tabs().await;
+                    }
                     launch::stop(p).await;
                 }
                 return;
@@ -59,6 +62,10 @@ pub(super) async fn actor(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Cm
                 retry = None;
                 if let Some(p) = proc.take() {
                     log::info!("browser {}: stopping", p.pid);
+                    // The agents' own tabs close first: the next start restores the user's session.
+                    if let Some(px) = super::proxy_of(&inner) {
+                        px.close_agents_tabs().await;
+                    }
                     launch::stop(p).await;
                 }
                 lock = None;
@@ -74,6 +81,9 @@ pub(super) async fn actor(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Cm
                 }
                 if let Some(p) = proc.take() {
                     log::info!("browser {}: relaunching {}", p.pid, if headed { "in its own window" } else { "headless" });
+                    if let Some(px) = super::proxy_of(&inner) {
+                        px.close_agents_tabs().await;
+                    }
                     launch::stop(p).await;
                 }
                 match start(&inner, headed, &mut lock).await {
@@ -183,12 +193,15 @@ async fn start(inner: &Arc<Inner>, headed: bool, lock: &mut Option<File>) -> Res
     }
 }
 
-/// One launch of `engine`: the profile freed from a browser an earlier run left behind, then the
-/// process. A block marked on it is lifted when it starts.
+/// One launch of `engine`: the profile freed from a browser an earlier run left behind and set to
+/// restore its last session, then the process. A block marked on it is lifted when it starts.
 async fn run_engine(inner: &Arc<Inner>, engine: &BrowserEngine, headed: bool) -> Result<Proc, SpawnError> {
     let b = &inner.browser;
     let profile = b.profile();
     launch::free_profile(&profile).await;
+    if let Err(e) = launch::restore_last_session(&profile) {
+        log::warn!("browser: can't set {} to restore its last session: {e}", profile.display());
+    }
     let origins = b.origins();
     let args = launch::args(&launch::Flags { profile: &profile, headed, origins: &origins, os: &b.os, root: launch::is_root() });
     log::info!("browser: starting {} {} ({})", engine.name, engine.version.as_deref().unwrap_or("?"), if headed { "own window" } else { "headless" });

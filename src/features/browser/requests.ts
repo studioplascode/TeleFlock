@@ -25,6 +25,8 @@ export interface RequestView {
   cap: number;
   /** The scope it was allowed with (waiting). */
   scope?: BrowserScope;
+  /** Allowed, it can use the user's tabs too (`BrowserStatus.shareTabs`). */
+  shareTabs: boolean;
 }
 
 function fromStatus(r: BrowserRequest, status: BrowserStatus): RequestView {
@@ -39,6 +41,7 @@ function fromStatus(r: BrowserRequest, status: BrowserStatus): RequestView {
     using: status.attachments.length,
     cap: status.cap,
     scope: r.scope,
+    shareTabs: status.shareTabs,
   };
 }
 
@@ -73,6 +76,7 @@ export function agentRequestView(agent: RequestAgent, status: BrowserStatus | nu
     phase: canHost ? "ask" : "elsewhere",
     using: status?.attachments.length ?? 0,
     cap: status?.cap ?? 0,
+    shareTabs: status?.shareTabs ?? true,
   };
 }
 
@@ -86,4 +90,17 @@ export function waitingText(using: number, cap: number): string {
 export function requestLine(v: Pick<RequestView, "agentName" | "reason">): string {
   const reason = v.reason.trim();
   return reason ? `${v.agentName} wants to use your browser: ${reason}` : `${v.agentName} wants to use your browser`;
+}
+
+/** What attached agents may use, after their name or number (`BrowserStatus.shareTabs`). */
+export function canUseText(shareTabs: boolean, many = false): string {
+  if (shareTabs) return "can use your tabs";
+  return many ? "can use only the tabs they open or you lend them" : "can use only the tabs it opens or you lend it";
+}
+
+/** What allowing a request gives the agent, on its card. */
+export function allowingText(shareTabs: boolean): string {
+  return shareTabs
+    ? "It can use your tabs and open its own, signed in as you. It never sees other agents' tabs."
+    : "It can use only the tabs it opens and the ones you lend it, signed in as you.";
 }

@@ -17,7 +17,7 @@ describe("soleRow", () => {
 
 describe("foldedPaneLabel", () => {
   test("a name the worktree already carries is not repeated", () => {
-    expect(foldedPaneLabel("dispatch/fix-login", "fix-login")).toBeUndefined();
+    expect(foldedPaneLabel("feat/fix-login", "fix-login")).toBeUndefined();
     expect(foldedPaneLabel("ci-main-prs-green", "CI-main-prs-green")).toBeUndefined();
   });
 

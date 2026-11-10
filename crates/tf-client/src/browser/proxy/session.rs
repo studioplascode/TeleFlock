@@ -105,6 +105,11 @@ pub(super) async fn run<IO>(
                     closing = Some(reason);
                     false
                 }
+                Out::FirstTab => {
+                    let (px, who) = (px.clone(), who.clone());
+                    tokio::spawn(async move { px.first_tab(&who).await });
+                    true
+                }
             };
             if !sent {
                 break;

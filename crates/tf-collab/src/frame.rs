@@ -197,6 +197,9 @@ fn lenient_nav<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<AskNav>,
     Ok(raw.and_then(|v| serde_json::from_value(v).map_err(|e| log::warn!("collab: ignoring an unreadable ask nav: {e}")).ok()))
 }
 
+/// A dialog of TeleFlock's bridge (`ui-request`): omp's collab request plus the bridge's additions,
+/// `nav` (≥ 2.2.0) and `about` (≥ 2.5.0: the text of an ask form that leads to this field, as
+/// Markdown). omp's collab mirroring has neither.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UiRequestFrame {
@@ -217,6 +220,8 @@ pub enum UiRequestFrame {
         help_text: Option<String>,
         #[serde(default, deserialize_with = "lenient_nav", skip_serializing_if = "Option::is_none")]
         nav: Option<AskNav>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<String>,
     },
     Editor {
         req_id: u64,
@@ -225,6 +230,8 @@ pub enum UiRequestFrame {
         prefill: Option<String>,
         #[serde(default, deserialize_with = "lenient_nav", skip_serializing_if = "Option::is_none")]
         nav: Option<AskNav>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<String>,
     },
 }
 
@@ -242,6 +249,12 @@ impl UiRequestFrame {
     pub fn nav(&self) -> Option<&AskNav> {
         match self {
             Self::Select { nav, .. } | Self::Editor { nav, .. } => nav.as_ref(),
+        }
+    }
+    /// The ask form's text before this field (bridge ≥ 2.5.0), when it has any.
+    pub fn about(&self) -> Option<&str> {
+        match self {
+            Self::Select { about, .. } | Self::Editor { about, .. } => about.as_deref().filter(|a| !a.trim().is_empty()),
         }
     }
 }
@@ -522,22 +535,23 @@ mod tests {
         assert!(HostFrame::parse(b"not json").is_err());
     }
 
-    /// TeleFlock's bridge (≥ 2.2.0) adds `nav` to the ask dialog's requests; one this build can't
-    /// read is dropped, never the dialog.
+    /// TeleFlock's bridge adds `nav` (≥ 2.2.0) and `about` (≥ 2.5.0) to the ask dialog's requests;
+    /// a `nav` this build can't read is dropped, never the dialog.
     #[test]
     fn ask_nav_parses_and_a_bad_one_is_dropped() {
         let f = HostFrame::parse(
             br#"{"t":"ui-request","request":{"reqId":5,"kind":"select","title":"Q2","options":["A","B"],
-                "nav":{"index":1,"total":3,"back":"\u0000back","answer":{"choices":["B"],"text":"mine"}}}}"#,
+                "nav":{"index":1,"total":3,"back":"\u0000back","answer":{"choices":["B"],"text":"mine"}},"about":"**Store**\n\nSessions live in memory."}}"#,
         )
         .unwrap();
         let HostFrame::UiRequest { request } = f else { panic!("not a ui-request: {f:?}") };
         let nav = request.nav().unwrap();
         assert_eq!((nav.index, nav.total, nav.back.as_deref()), (1, 3, Some("\0back")));
         assert_eq!(nav.answer, Some(AskNavAnswer { choices: vec!["B".into()], text: Some("mine".into()) }));
-        let f = HostFrame::parse(br#"{"t":"ui-request","request":{"reqId":6,"kind":"editor","title":"Custom answer: Q","nav":{"index":"one"}}}"#).unwrap();
+        assert_eq!(request.about(), Some("**Store**\n\nSessions live in memory."));
+        let f = HostFrame::parse(br#"{"t":"ui-request","request":{"reqId":6,"kind":"editor","title":"Custom answer: Q","nav":{"index":"one"},"about":" \n"}}"#).unwrap();
         let HostFrame::UiRequest { request } = f else { panic!("the dialog was dropped: {f:?}") };
-        assert_eq!((request.req_id(), request.nav()), (6, None));
+        assert_eq!((request.req_id(), request.nav(), request.about()), (6, None, None));
     }
 
     /// omp 18.12 restores a resumed session's subagents with file times (`mtimeMs`), which are

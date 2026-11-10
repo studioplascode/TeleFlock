@@ -625,6 +625,8 @@ pub fn capabilities(live: bool, bridge: bool, data_plane: Option<BridgeCaps>) ->
         subagent_retry: live && data_plane.is_some_and(|c| c.resume_tree),
         // Refusal fallback (§3.22): `turn_error` for refusals and `retryRefused` (bridge 2.3.0).
         refusal_retry: live && data_plane.is_some_and(|c| c.refusals),
+        // omp's quick commands (`agent.shell`): the bridge's `shell` op (2.5.0, TUI sessions).
+        shell: live && data_plane.is_some_and(|c| c.shell),
     }
 }
 
@@ -828,6 +830,11 @@ pub fn presented_notification(agent_id: &str, agent_name: &str, a: &PresentedArt
         PresentKind::Csv => "Table",
         PresentKind::Json => "JSON",
         PresentKind::Text => "Text",
+        PresentKind::Pdf => "PDF",
+        PresentKind::Audio => "Audio",
+        PresentKind::Video => "Video",
+        PresentKind::Mermaid => "Diagram",
+        PresentKind::File => "File",
     };
     Notification {
         id: new_id("n"),

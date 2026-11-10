@@ -1,12 +1,15 @@
 import type { PresentKind, PresentedArtifact } from "@/core/gen";
+import { CARD_FLIGHT_WEBM, CHIMES_WAV, Q3_BOARD_PACK_ZIP, Q3_REPORT_PDF } from "./presentedMedia";
 import { written } from "./richContent";
 import { DATA_FOLDER_PNG } from "./screenshots";
 import { bash, say, type Step, think } from "./scripts";
 
 /*
- * The docs session's presented artifacts (the bridge's `present` tool, bridge ≥ 2.3.0,
- * docs/bridge-protocol.md "Bridge 2.3.0"): migration notes (Markdown) and a Q3 revenue report (HTML),
- * two versions each. One table drives both sides: the transcript's finished `present` rows
+ * The docs session's presented artifacts (the bridge's `present` tool, bridge ≥ 2.3.0; PDFs,
+ * audio, video, Mermaid and files ≥ 2.5.0, docs/bridge-protocol.md "Presented artifacts"):
+ * migration notes (Markdown) and a Q3 revenue report (HTML), two versions each, then the board pack
+ * (the report as a PDF, the data as a ZIP, the pipeline as a Mermaid diagram), the notification
+ * chimes (WAV) and a card's flight (WebM). One table drives both sides: the transcript's finished `present` rows
  * (`ToolItem.artifact`, the bridge's result text) and the snapshots the bridge writes into the
  * session's `local://` root, `presented/<slug>-v<n>.<ext>` with the files a document references
  * copied to `presented/<slug>-v<n>.files/`, which ./insight lists and reads for the rows a session
@@ -15,11 +18,15 @@ import { bash, say, type Step, think } from "./scripts";
 
 interface PresentedDoc {
   title: string;
-  kind: "html" | "markdown";
+  kind: PresentKind;
   version: number;
-  /** The file the agent presented: `args.path` as it named it (the bridge resolves it against its working directory, `~` to its home). */
-  source: string;
-  text: string;
+  /**
+   * The file the agent presented: `args.path` as it named it (the bridge resolves it against its
+   * working directory, `~` to its home); absent for inline `content`.
+   */
+  source?: string;
+  /** The snapshot: the document's text, or the file's bytes. */
+  body: string | Uint8Array;
   /** The files the document loads, by their path relative to it (what the bridge copies): text, or an image's bytes. */
   assets: Record<string, string | Uint8Array>;
 }
@@ -455,38 +462,69 @@ const REGION_TOTALS = [
 const pivot = (by: string, order: string) =>
   `cd ~/finance && duckdb -c "PIVOT read_csv(['q2-revenue.csv', 'q3-revenue.csv']) ON quarter USING (sum(amount_usd) // 1000)::INT AS k, count(DISTINCT customer) AS n GROUP BY ${by} ORDER BY ${order}"`;
 
+// ── the board pack: the report as a PDF, the data behind it, the pipeline ──
+
+/** How the finance export becomes the board pack (inline content: the bridge snapshots it as `.mmd`). */
+const PIPELINE = `flowchart TB
+  q3[(Q3 export)] --> pivot[DuckDB pivot]
+  q2[(Q2 export)] --> pivot
+  pivot --> page[One-page report]
+  kit[Report kit] --> page
+  pivot --> tables[Tables as CSV]
+  page --> pdf[Report as PDF]
+  tables --> zip[ZIP with a README]
+  pdf --> pack{{Board pack}}
+  zip --> pack
+`;
+
 // ── the table ──
 
-const NOTES_1: PresentedDoc = { title: "Migration notes", kind: "markdown", version: 1, source: "docs/migration-notes.md", text: NOTES, assets: { "architecture.svg": ARCHITECTURE_SVG } };
-const NOTES_2: PresentedDoc = { ...NOTES_1, version: 2, text: NOTES + ROLLBACK, assets: { ...NOTES_1.assets, "data-folder.png": DATA_FOLDER_BYTES } };
+const NOTES_PATH = "docs/migration-notes.md";
+const REPORT_PATH = "~/finance/q3-report/index.html";
+const NOTES_1: PresentedDoc = { title: "Migration notes", kind: "markdown", version: 1, source: NOTES_PATH, body: NOTES, assets: { "architecture.svg": ARCHITECTURE_SVG } };
+const NOTES_2: PresentedDoc = { ...NOTES_1, version: 2, body: NOTES + ROLLBACK, assets: { ...NOTES_1.assets, "data-folder.png": DATA_FOLDER_BYTES } };
+const REPORT_PAGE_1 = reportPage(false);
+const REPORT_PAGE_2 = reportPage(true);
 const REPORT_1: PresentedDoc = {
   title: "Q3 revenue report",
   kind: "html",
   version: 1,
-  source: "~/finance/q3-report/index.html",
-  text: reportPage(false),
+  source: REPORT_PATH,
+  body: REPORT_PAGE_1,
   assets: { "report.css": REPORT_CSS, "logo.svg": LOGO_SVG, "grid.svg": GRID_SVG },
 };
-const REPORT_2: PresentedDoc = { ...REPORT_1, version: 2, text: reportPage(true) };
-const PRESENTED = [NOTES_1, NOTES_2, REPORT_1, REPORT_2];
+const REPORT_2: PresentedDoc = { ...REPORT_1, version: 2, body: REPORT_PAGE_2 };
+const REPORT_PDF: PresentedDoc = { title: "Q3 report (PDF)", kind: "pdf", version: 1, source: "~/finance/q3-report/q3-report.pdf", body: Q3_REPORT_PDF, assets: {} };
+const BOARD_PACK: PresentedDoc = { title: "Q3 board pack data", kind: "file", version: 1, source: "~/finance/q3-report/q3-board-pack.zip", body: Q3_BOARD_PACK_ZIP, assets: {} };
+const PIPELINE_DOC: PresentedDoc = { title: "Board pack pipeline", kind: "mermaid", version: 1, body: PIPELINE, assets: {} };
+const CHIMES: PresentedDoc = { title: "Notification chimes", kind: "audio", version: 1, source: "docs/media/notification-chimes.wav", body: CHIMES_WAV, assets: {} };
+const CARD_FLIGHT: PresentedDoc = { title: "Card flight", kind: "video", version: 1, source: "docs/media/card-flight.webm", body: CARD_FLIGHT_WEBM, assets: {} };
+const PRESENTED = [NOTES_1, NOTES_2, REPORT_1, REPORT_2, REPORT_PDF, BOARD_PACK, PIPELINE_DOC, CHIMES, CARD_FLIGHT];
+
+/** The kinds whose snapshot has an extension of its own; the others keep the source's (a file without a usable one: `bin`). */
+const KIND_EXT: Partial<Record<PresentKind, string>> = { html: "html", markdown: "md", mermaid: "mmd", pdf: "pdf" };
 
 /** Where the bridge snapshots `doc`: `presented/<slug>-v<n>.<ext>`, the slug its `presentSlug` of these ASCII titles. */
 function snapshotOf(doc: PresentedDoc): { slug: string; name: string } {
   const slug = doc.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  return { slug, name: `presented/${slug}-v${doc.version}.${doc.kind === "html" ? "html" : "md"}` };
+  const ext = KIND_EXT[doc.kind] ?? /\.([a-z0-9]{1,10})$/.exec(doc.source?.toLowerCase() ?? "")?.[1] ?? "bin";
+  return { slug, name: `presented/${slug}-v${doc.version}.${ext}` };
 }
 
 const utf8 = new TextEncoder();
+const byteLength = (body: string | Uint8Array) => (typeof body === "string" ? utf8.encode(body).length : body.length);
 
 /** A finished `present` call as hostd's replica types it: the bridge's result text and `details`. */
 function presentStep(doc: PresentedDoc): Step {
   const { slug, name } = snapshotOf(doc);
   const assets = Object.values(doc.assets);
-  const assetBytes = assets.reduce((n, body) => n + (typeof body === "string" ? utf8.encode(body).length : body.length), 0);
-  const artifact: PresentedArtifact = { title: doc.title, kind: doc.kind, name, url: `local://${name}`, slug, version: doc.version, size: utf8.encode(doc.text).length, source: doc.source, assets: assets.length };
+  const assetBytes = assets.reduce((n, body) => n + byteLength(body), 0);
+  const artifact: PresentedArtifact = { title: doc.title, kind: doc.kind, name, url: `local://${name}`, slug, version: doc.version, size: byteLength(doc.body), source: doc.source, assets: assets.length };
   const output = [`Presented "${doc.title}" (${doc.kind}, version ${doc.version}) to the user: ${artifact.url}`];
   if (assets.length) output.push(`Included ${assets.length} referenced file${assets.length === 1 ? "" : "s"} (${Math.ceil(assetBytes / 1024)} KB).`);
-  return { t: "tool", spec: { tool: "present", title: doc.title, args: { title: doc.title, path: doc.source }, ms: 240, output, artifact } };
+  // A file by its path, or text passed inline with its kind.
+  const args = doc.source !== undefined ? { title: doc.title, path: doc.source } : { title: doc.title, content: doc.body, kind: doc.kind };
+  return { t: "tool", spec: { tool: "present", title: doc.title, args, ms: 240, output, artifact } };
 }
 
 /** The files the snapshot `name` stands for in the session's `local://` root: itself, then the files it references. */
@@ -496,7 +534,7 @@ export function presentedFiles(name: string): { name: string; body: string | Uin
   const doc = PRESENTED.find((d) => snapshotOf(d).name === name);
   if (!doc) return [];
   const dir = `${name.slice(0, name.lastIndexOf("."))}.files`;
-  return [{ name, body: doc.text }, ...Object.entries(doc.assets).map(([path, body]) => ({ name: `${dir}/${path}`, body }))];
+  return [{ name, body: doc.body }, ...Object.entries(doc.assets).map(([path, body]) => ({ name: `${dir}/${path}`, body }))];
 }
 
 /** How a notification names a presented document's kind (tf-hostd's `presented_notification`). */
@@ -509,6 +547,11 @@ export const PRESENT_KIND_WORD: Record<PresentKind, string> = {
   csv: "Table",
   json: "JSON",
   text: "Text",
+  pdf: "PDF",
+  audio: "Audio",
+  video: "Video",
+  mermaid: "Diagram",
+  file: "File",
 };
 
 // ── board test report: presented live, now and then ──
@@ -522,10 +565,11 @@ function boardReport(version: number): string {
 
 /** A running agent writes the board's test results up and presents them (`present`, version `version`): the live call the demo notifies about. */
 export function boardReportSteps(version: number): Step[] {
-  const doc: PresentedDoc = { title: "Board test report", kind: "markdown", version, source: "docs/board-test-report.md", text: boardReport(version), assets: {} };
+  const source = "docs/board-test-report.md";
+  const text = boardReport(version);
   return [
-    written(doc.source, doc.text, "markdown"),
-    presentStep(doc),
+    written(source, text, "markdown"),
+    presentStep({ title: "Board test report", kind: "markdown", version, source, body: text, assets: {} }),
     say(version > 1 ? `Version ${version} of the test report is in the card above, with the latest run.` : "The test report is in the card above: every area, all green."),
   ];
 }
@@ -543,7 +587,7 @@ export function migrationNotesSteps(): Step[] {
   return [
     { t: "user", text: "Before the PR goes up, write migration notes for the session cache change and show them to me here." },
     think("Migration notes: what changes, the field mapping, how to run it, and the read path as a flowchart so the version check is obvious. The architecture drawing goes next to the notes so it travels with them.", 4200),
-    written(NOTES_1.source, NOTES_1.text, "markdown"),
+    written(NOTES_PATH, NOTES, "markdown"),
     written("docs/architecture.svg", ARCHITECTURE_SVG, "xml"),
     presentStep(NOTES_1),
     say("The migration notes are in the card above: what changes, the field mapping, how to run the migration, and the read path as a diagram."),
@@ -558,13 +602,17 @@ export function migrationNotesSteps(): Step[] {
         view: { type: "image", image: { mime: "image/png", data: DATA_FOLDER_PNG, width: 440, height: 200 }, alt: "Settings → About with the data folder", url: "http://localhost:1420/settings/about" },
       },
     },
-    appended(NOTES_2.source, NOTES, ROLLBACK, "markdown"),
+    appended(NOTES_PATH, NOTES, ROLLBACK, "markdown"),
     presentStep(NOTES_2),
     say("Version 2 adds **Rollback**, with a screenshot of where Settings shows the data folder: quit TeleFlock everywhere, install the previous build, then put `cache.v1.json` back. Anything written since the upgrade comes back from the hosts on the next connection."),
   ];
 }
 
-/** The docs session turns the finance export into a one-page report, then breaks it down by region. */
+/**
+ * The docs session turns the finance export into a one-page report, breaks it down by region, then
+ * hands over the board pack: the report as a PDF, the data behind it as a ZIP, the pipeline as a
+ * Mermaid diagram.
+ */
 export function q3ReportSteps(): Step[] {
   return [
     { t: "user", text: "Unrelated: finance put the Q3 export in ~/finance/q3-revenue.csv, next to Q2's. Turn it into a one-page report I can show on Thursday." },
@@ -575,14 +623,43 @@ export function q3ReportSteps(): Step[] {
     ),
     bash(pivot("plan", "Q3_k"), PLAN_TOTALS, 1900),
     think("One self-contained page: KPI tiles, the plans as a bar chart the page draws on a canvas itself, and the table. The report kit has the stylesheet and the logo; copied next to the page, they are presented with it.", 5200),
-    written(REPORT_1.source, REPORT_1.text, "html"),
+    written(REPORT_PATH, REPORT_PAGE_1, "html"),
     bash("cp ~/finance/report-kit/{report.css,logo.svg,grid.svg} ~/finance/q3-report/", [], 300),
     presentStep(REPORT_1),
     say("The report is in the card above: $4.82M in Q3, up 18.0% on Q2. Business is the largest plan and Enterprise grew fastest (+23.0%). The page draws its chart itself, so it needs no network."),
     { t: "user", text: "Can you break it down by region? And put Q2 next to Q3 in the chart." },
     bash(pivot("region", "Q3_k DESC"), REGION_TOTALS, 1700),
-    written(REPORT_2.source, REPORT_2.text, "html"),
+    written(REPORT_PATH, REPORT_PAGE_2, "html"),
     presentStep(REPORT_2),
     say("Version 2 adds the regional breakdown and puts Q2 next to Q3 in the chart. APAC grew fastest (+36.2%) since the Singapore region opened in July; the Americas are still 54% of revenue."),
+    { t: "user", text: "The board pack wants it as a PDF, with the numbers behind it so finance can check them. And draw how it all fits together, for the wiki." },
+    bash("cd ~/finance/q3-report && chromium --headless --no-pdf-header-footer --print-to-pdf=q3-report.pdf report-print.html", [`${Q3_REPORT_PDF.length} bytes written to file q3-report.pdf`], 3100),
+    presentStep(REPORT_PDF),
+    bash(
+      "cd ~/finance/q3-report && zip -0 q3-board-pack.zip q3-revenue-by-plan.csv q3-revenue-by-region.csv README.txt",
+      ["  adding: q3-revenue-by-plan.csv (stored 0%)", "  adding: q3-revenue-by-region.csv (stored 0%)", "  adding: README.txt (stored 0%)"],
+      700,
+    ),
+    presentStep(BOARD_PACK),
+    presentStep(PIPELINE_DOC),
+    say("The board pack is in the cards above: the report as a two-page PDF (the summary and chart, then both tables), the numbers as **q3-board-pack.zip** (the tables by plan and by region as CSV, with a README), and the way from the export to the pack as a diagram for the wiki."),
+  ];
+}
+
+/** Back to the docs: the notifications page gets TeleFlock's four chimes as a file anyone can play, the board page a card's flight as a clip. */
+export function docsMediaSteps(): Step[] {
+  const seconds = ((CHIMES_WAV.length - 44) / 2 / 16_000).toFixed(1);
+  const kb = (bytes: Uint8Array) => Math.round(bytes.length / 1024);
+  return [
+    { t: "user", text: "Last ones for the docs: the notifications page should let people hear the chimes, and the board page could show a card moving lanes. Make both and show me." },
+    bash(
+      "bun scripts/render-chimes.ts --out docs/media/notification-chimes.wav",
+      ["needs you · finished · presented · error", `4 chimes, ${seconds} s, 16 kHz mono: docs/media/notification-chimes.wav (${kb(CHIMES_WAV)} KB)`],
+      1400,
+    ),
+    presentStep(CHIMES),
+    bash("bun scripts/record-board.ts --flight --size 256x144 --out docs/media/card-flight.webm", [`2.5 s, 256×144, 12 fps, VP8: docs/media/card-flight.webm (${kb(CARD_FLIGHT_WEBM)} KB)`], 2600),
+    presentStep(CARD_FLIGHT),
+    say("Both are in the cards above. The chimes play in order: **needs you** (rising), **finished** (falling), **a presented document** (a soft rise) and **an error** (low). The clip is a card flying from the first lane to the last, 2.5 s, small enough to sit in the docs as it is."),
   ];
 }

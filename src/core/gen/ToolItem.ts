@@ -2,6 +2,7 @@
 import type { PresentedArtifact } from "./PresentedArtifact";
 import type { ToolStatus } from "./ToolStatus";
 import type { ToolView } from "./ToolView";
+import type { UserRun } from "./UserRun";
 
 export type ToolItem = { id: string, at: number, callId: string, 
 /**
@@ -24,4 +25,12 @@ output?: string, truncated: boolean, view?: ToolView, error?: string,
  * A finished `present` call (bridge ≥ 2.3.0): the document the agent showed the user.
  * Apps before 0.9.0 ignore it and show the call as a generic tool row.
  */
-artifact?: PresentedArtifact, };
+artifact?: PresentedArtifact, 
+/**
+ * Not a call of the model's: a quick command the user ran in omp's composer, typed there or
+ * sent with `agent.shell` (hosts ≥ 0.9.4). `tool` is `bash` or `python`, `view` a
+ * [`BashView`] of the command or code with its output, `status` `aborted` when omp
+ * cancelled it and `error` for a non-zero exit code. Apps before 0.9.4 ignore it and show
+ * the row as a call of the model's.
+ */
+userRun?: UserRun, };

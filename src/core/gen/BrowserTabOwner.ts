@@ -2,7 +2,8 @@
 
 /**
  * A tab that is not plainly the user's: an agent opened it, or the user lent it to one. Tabs
- * missing from [`BrowserStatus::tabs`] are the user's, and no agent can see them.
+ * missing from [`BrowserStatus::tabs`] are the user's: every attached agent can see and drive
+ * them while [`BrowserStatus::share_tabs`] is on, no agent otherwise.
  */
 export type BrowserTabOwner = { 
 /**

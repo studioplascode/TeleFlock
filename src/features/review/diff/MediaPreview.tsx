@@ -191,8 +191,11 @@ function ImagePane({ url, name, caption }: { url: string; name: string; caption:
   );
 }
 
-/** Native controls, never autoplaying. */
-function VideoPane({ url, caption }: { url: string; caption: string }) {
+/**
+ * Native controls, never autoplaying. `maxH`: the class that caps its height (Review's rows: within
+ * the view; the session's document viewer passes its own).
+ */
+export function VideoPane({ url, caption, maxH = MEDIA_MAX_H }: { url: string; caption: string; maxH?: string }) {
   const [meta, setMeta] = useState<{ w: number; h: number; d: number } | null>(null);
   const [failed, setFailed] = useState(false);
   if (failed) return <Note>This video doesn't play here: its format isn't supported on this device · {caption}</Note>;
@@ -205,7 +208,7 @@ function VideoPane({ url, caption }: { url: string; caption: string }) {
         playsInline
         onLoadedMetadata={(e) => setMeta({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight, d: e.currentTarget.duration })}
         onError={() => setFailed(true)}
-        className={cn("block w-auto max-w-full self-start rounded-md bg-black", MEDIA_MAX_H)}
+        className={cn("block w-auto max-w-full self-start rounded-md bg-black", maxH)}
       />
       <Caption>
         {meta ? [meta.w > 0 ? `${meta.w} × ${meta.h}` : "", formatDuration(meta.d)].filter(Boolean).join(" · ") + " · " : ""}
@@ -215,7 +218,7 @@ function VideoPane({ url, caption }: { url: string; caption: string }) {
   );
 }
 
-function AudioPane({ url, caption }: { url: string; caption: string }) {
+export function AudioPane({ url, caption }: { url: string; caption: string }) {
   const [duration, setDuration] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
   if (failed) return <Note>This audio doesn't play here: its format isn't supported on this device · {caption}</Note>;

@@ -4,6 +4,7 @@
 //! read (selector in `path`), grep, glob, find, todo, task, ask, web_search, eval (browser
 //! screenshots arrive as image blocks); the TeleFlock bridge's `present` (≥ 2.3.0).
 
+use serde::Deserialize as _;
 use serde_json::Value;
 use tf_proto::{
     AskQuestion, AskView, BashView, ContextUsage, DiffView, FileDiff, FileStatus, ImageView, PresentKind, PresentedArtifact, ReadView,
@@ -90,12 +91,59 @@ pub(crate) fn title(name: &str, args: &Value) -> String {
                 Some(format!("{} agent{}: {}", tasks.len(), if tasks.len() == 1 { "" } else { "s" }, clip(&names.join(", "), 100)))
             }
         }
-        "ask" => arr(args, "questions").first().and_then(|q| non_empty(q, "question")).map(|q| clip(q, 120)),
+        "ask" => arr(args, "questions")
+            .first()
+            .and_then(|q| non_empty(q, "question"))
+            .map(|q| clip(q, 120))
+            .or_else(|| non_empty(args, "html").and_then(form_title)),
         "present" => non_empty(args, "title").map(|t| clip(first_line(t), 120)),
         "eval" => non_empty(args, "title").map(str::to_owned).or_else(|| non_empty(args, "code").map(|c| clip(first_line(c), 120))),
         _ => None,
     };
     t.or_else(|| first_string_arg(args)).unwrap_or_else(|| name.to_owned())
+}
+
+/// omp ≥ 18.18 asks with one HTML `<form>` (`ask {html}`): its title is the text of the form's
+/// first legend, heading, label or paragraph, without markup.
+fn form_title(html: &str) -> Option<String> {
+    const TAGS: [&str; 9] = ["legend", "h1", "h2", "h3", "h4", "h5", "h6", "label", "p"];
+    // ASCII lowercasing keeps every byte offset, so offsets in `lower` are offsets in `html`.
+    let lower = html.to_ascii_lowercase();
+    let (start, tag) = TAGS.iter().filter_map(|t| open_tag(&lower, t).map(|at| (at, *t))).min()?;
+    let body = start + lower[start..].find('>')? + 1;
+    let end = lower[body..].find(&format!("</{tag}")).map_or(lower.len(), |e| body + e);
+    let text = plain_text(&html[body..end]);
+    (!text.is_empty()).then(|| clip(&text, 120))
+}
+
+/// Where `<tag` opens an element of exactly that name (`<p>`, not `<pre>`), in lowercased HTML.
+fn open_tag(lower: &str, tag: &str) -> Option<usize> {
+    let needle = format!("<{tag}");
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(&needle) {
+        let at = from + i;
+        match lower.as_bytes().get(at + needle.len()) {
+            Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r') => return Some(at),
+            _ => from = at + needle.len(),
+        }
+    }
+    None
+}
+
+/// HTML text with its tags dropped, the common entities decoded and whitespace collapsed.
+fn plain_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    let text = text.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'").replace("&amp;", "&");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Liveness label, e.g. `bun test src/board` or `edit src/App.tsx`.
@@ -163,17 +211,8 @@ pub(crate) fn presented(name: &str, details: Option<&Value>) -> Option<Presented
     if Some(slug) != s(d, "slug") || Some(u64::from(version)) != u(d, "version") {
         return None;
     }
-    let kind = match s(d, "kind")? {
-        "html" => PresentKind::Html,
-        "markdown" => PresentKind::Markdown,
-        "svg" => PresentKind::Svg,
-        "image" => PresentKind::Image,
-        "code" => PresentKind::Code,
-        "csv" => PresentKind::Csv,
-        "json" => PresentKind::Json,
-        "text" => PresentKind::Text,
-        _ => return None,
-    };
+    // The bridge's kinds are the protocol's wire names (tf-proto `PresentKind`); any other is no artifact.
+    let kind = PresentKind::deserialize(d.get("kind")?).ok()?;
     Some(PresentedArtifact {
         title: non_empty(d, "title").map(|t| clip(first_line(t), 200)).unwrap_or_else(|| slug.to_owned()),
         kind,
@@ -333,6 +372,23 @@ pub(crate) fn view(name: &str, args: &Value, result: Option<&Value>, is_error: O
                 return None;
             }
             Some(ToolView::Task(TaskView { agents: progress.iter().map(progress_agent).collect() }))
+        }
+        "ask" if args.get("html").is_some_and(Value::is_string) => {
+            // omp ≥ 18.18's form ask: its result's `details.answers` (omp's `formAnswers`), each
+            // field's question and its answer as omp shows it (option labels, the typed text).
+            let answers = details.map(|d| arr(d, "answers")).unwrap_or(&[]);
+            if answers.is_empty() {
+                return None;
+            }
+            let questions = answers
+                .iter()
+                .map(|a| AskQuestion {
+                    question: non_empty(a, "question").or_else(|| s(a, "name")).unwrap_or("").to_owned(),
+                    options: Vec::new(),
+                    answer: non_empty(a, "answer").map(str::to_owned),
+                })
+                .collect();
+            Some(ToolView::Ask(AskView { questions }))
         }
         "ask" => {
             let qs = arr(args, "questions");
@@ -573,6 +629,27 @@ mod tests {
     }
 
     #[test]
+    fn html_form_asks() {
+        // omp ≥ 18.18's ask: one HTML form, titled by its first legend/heading/label/paragraph.
+        let html = "<form>\n  <pre>x</pre><P class=\"intro\">Sessions <b>live</b> in memory &amp; are lost on restart.</P>\n  <fieldset><legend>Session store</legend></fieldset></form>";
+        assert_eq!(title("ask", &json!({ "html": html })), "Sessions live in memory & are lost on restart.");
+        assert_eq!(title("ask", &json!({ "html": "<form><fieldset><legend>Store</legend><label><input type=\"radio\" name=\"s\"> SQLite</label></fieldset></form>" })), "Store");
+        assert_eq!(form_title("<form><input name=\"x\"></form>"), None);
+        // Its answers once omp returns them; nothing to show before that.
+        let args = json!({ "html": html });
+        assert_eq!(view("ask", &args, None, None), None);
+        let result = json!({ "content": [{ "type": "text", "text": "User answers:\n{}" }], "details": { "answers": [
+            { "name": "store", "question": "Session store", "answer": "SQLite: one file, no new service" },
+            { "name": "ttl_days", "question": "Session lifetime (days)", "answer": "" },
+        ] } });
+        let Some(ToolView::Ask(v)) = view("ask", &args, Some(&result), Some(false)) else { panic!("no ask view") };
+        assert_eq!(v.questions.iter().map(|q| (q.question.as_str(), q.answer.as_deref())).collect::<Vec<_>>(), [
+            ("Session store", Some("SQLite: one file, no new service")),
+            ("Session lifetime (days)", None),
+        ]);
+    }
+
+    #[test]
     fn presented_artifacts() {
         let d = json!({ "title": "Q3 report\nsecond line", "kind": "html", "name": "presented/q3-report-v2.html", "url": "ignored",
             "slug": "q3-report", "version": 2, "size": 4812, "source": "reports/q3.html", "assets": 3 });
@@ -592,7 +669,24 @@ mod tests {
             x[k] = v;
             presented("present", Some(&x))
         };
-        assert_eq!(with("kind", json!("pdf")), None, "unknown kind");
+        // Every kind the protocol names, binary ones with the source's extension (a file without one: `bin`).
+        for (kind, file, want) in [
+            ("pdf", "presented/q3-report-v2.pdf", PresentKind::Pdf),
+            ("audio", "presented/q3-report-v2.opus", PresentKind::Audio),
+            ("video", "presented/q3-report-v2.webm", PresentKind::Video),
+            ("mermaid", "presented/q3-report-v2.mmd", PresentKind::Mermaid),
+            ("file", "presented/q3-report-v2.bin", PresentKind::File),
+            ("image", "presented/q3-report-v2.apng", PresentKind::Image),
+        ] {
+            let mut x = d.clone();
+            x["kind"] = json!(kind);
+            x["name"] = json!(file);
+            let a = presented("present", Some(&x)).unwrap_or_else(|| panic!("{kind}"));
+            assert_eq!((a.kind, a.name.as_str(), a.url), (want, file, format!("local://{file}")));
+        }
+        for kind in [json!("docx"), json!("PDF"), json!("Html"), json!(""), json!(3), json!(null)] {
+            assert_eq!(with("kind", kind.clone()), None, "unknown kind {kind}");
+        }
         assert_eq!(with("version", json!(3)), None, "version differs from the name");
         assert_eq!(with("slug", json!("other")), None, "slug differs from the name");
         for name in ["q3-report-v2.html", "presented/../q3-report-v2.html", "presented/x/q3-report-v2.html", "presented/Q3-report-v2.html", "presented/q3-report-v0.html", "presented/q3-report-v2", "presented/q3-report-v2x.html"] {

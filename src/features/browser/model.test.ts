@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { BrowserStatus, BrowserTabOwner } from "@/core/gen";
 import type { TargetInfo } from "./cdp/protocol";
 import { addressToUrl, containRect, keyEventParams, type KeyLike, nextZoom, routeKey, toPagePoint, virtualKeyCode, wheelDelta } from "./input";
-import { groupTabActions, groupTabs, ownerColors, ownerOf, userDrives } from "./owners";
-import { agentRequestView, requestViews, waitingText } from "./requests";
+import { groupTabActions, groupTabs, lockToggle, ownerColors, ownerOf, userDrives } from "./owners";
+import { agentRequestView, allowingText, canUseText, requestViews, waitingText } from "./requests";
 import { cycleTab, EMPTY_TABS, popClosed, reduceTabs, type TabsState, tabLabel } from "./tabs";
 
 const key = (over: Partial<KeyLike> = {}): KeyLike => ({ key: "a", code: "KeyA", keyCode: 65, location: 0, repeat: false, isComposing: false, altGraph: false, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...over });
@@ -133,10 +133,20 @@ describe("ownership", () => {
     const [, g] = groupTabs(tabs, status([entry("a", "x"), entry("b", "x", { takenOver: true }), entry("l", "x", { lent: true })]), 0);
     expect(g && groupTabActions(g)).toEqual({ takeOver: ["a"], handBack: ["b"], giveBack: ["l"], close: ["a", "b"] });
   });
+
+  test("the lock for agents: offered on the user's tabs while shared and on lent ones, never on an agent's own; unlock on a locked one", () => {
+    const owners = [entry("x1", "x"), entry("l1", "x", { lent: true }), entry("t1", "x", { takenOver: true })];
+    const locked = ["u1", "l1"];
+    const toggle = (id: string, shareTabs: boolean) => lockToggle(ownerOf(owners, id), locked.includes(id), shareTabs);
+    expect(["u1", "u2", "l1", "x1", "t1"].map((id) => toggle(id, true))).toEqual(["unlock", "lock", "unlock", null, null]);
+    // Not shared, agents never see the user's own tabs: nothing to lock there, but a lent tab or a locked one has it.
+    expect(["u1", "u2", "l1"].map((id) => toggle(id, false))).toEqual(["unlock", null, "unlock"]);
+    expect(lockToggle(ownerOf(owners, "l1"), false, false)).toBe("lock");
+  });
 });
 
 describe("request cards", () => {
-  const base: BrowserStatus = { state: "running", headed: false, profileDir: "/p", cap: 2, attachments: [], requests: [], tabs: [] };
+  const base: BrowserStatus = { state: "running", headed: false, profileDir: "/p", cap: 2, shareTabs: true, attachments: [], requests: [], tabs: [] };
   const att = (agentId: string) => ({ hostId: "h", agentId, agentName: agentId, since: 0, hostPort: 1, scope: "session" as const, connections: 1 });
 
   test("asking, waiting at the cap, and answering from a device without the browser", () => {
@@ -148,9 +158,9 @@ describe("request cards", () => {
         { id: "r1", hostId: "h", agentId: "d", agentName: "d", reason: "sign in", at: 1, waiting: false },
       ],
     };
-    expect(requestViews(status).map((v) => [v.requestId, v.phase, v.using, v.cap, v.scope ?? null])).toEqual([
-      ["r1", "ask", 2, 2, null],
-      ["r2", "waiting", 2, 2, "turn"],
+    expect(requestViews(status).map((v) => [v.requestId, v.phase, v.using, v.cap, v.scope ?? null, v.shareTabs])).toEqual([
+      ["r1", "ask", 2, 2, null, true],
+      ["r2", "waiting", 2, 2, "turn", true],
     ]);
     expect(waitingText(2, 2)).toBe("Waiting for the browser: 2 agents use it");
     const agent = { id: "d", name: "d", hostId: "h", needs: undefined, browser: { request: { id: "r1", reason: "sign in", at: 1 } } };
@@ -158,5 +168,15 @@ describe("request cards", () => {
     // A phone (or a core without the browser) only denies, from the agent's own card.
     expect(agentRequestView(agent, status, false)).toMatchObject({ requestId: "r1", phase: "elsewhere", reason: "sign in" });
     expect(agentRequestView({ ...agent, browser: undefined }, null, false)).toBeNull();
+  });
+
+  test("what allowing gives an agent: the user's tabs while they are shared, else only its own and lent ones", () => {
+    const off: BrowserStatus = { ...base, shareTabs: false, requests: [{ id: "r1", hostId: "h", agentId: "d", agentName: "d", reason: "sign in", at: 1, waiting: false }] };
+    expect(requestViews(off)[0]?.shareTabs).toBe(false);
+    expect(allowingText(true)).toBe("It can use your tabs and open its own, signed in as you. It never sees other agents' tabs.");
+    expect(allowingText(false)).toBe("It can use only the tabs it opens and the ones you lend it, signed in as you.");
+    expect(canUseText(true)).toBe("can use your tabs");
+    expect(canUseText(false)).toBe("can use only the tabs it opens or you lend it");
+    expect(canUseText(false, true)).toBe("can use only the tabs they open or you lend them");
   });
 });
